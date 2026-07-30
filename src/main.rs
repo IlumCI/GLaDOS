@@ -207,10 +207,25 @@ fn install_paging(boot: &BootInfo) {
         mem::frame::EarlyFrames::new(boot.mmap, boot.mmap_size, boot.desc_size)
     };
 
-    let top = mem::frame::max_physical_address(boot.mmap, boot.mmap_size, boot.desc_size);
-    // Always cover the low 4 GiB: the MMIO hole lives there, and on this
-    // machine so does the Intel iGPU's framebuffer aperture.
-    let limit = top.max(boot.fb_end).max(4 * mem::GIB);
+    let top = mem::frame::max_ram_address(boot.mmap, boot.mmap_size, boot.desc_size);
+
+    // Belt and braces. The allowlist in max_ram_address should already keep
+    // this sane, but a firmware map we have not seen must not be able to turn
+    // into a multi-terabyte map build. 64 GiB is comfortably above this
+    // board's 64 GiB maximum populated DRAM.
+    const MAP_CEILING: u64 = 64 * mem::GIB;
+
+    // Always cover the low 4 GiB: the legacy MMIO hole lives there, and so does
+    // the framebuffer aperture on both QEMU and the Intel iGPU. Fold fb_end in
+    // last so the aperture is covered even if it somehow sits above the clamp.
+    let limit = top.max(4 * mem::GIB).min(MAP_CEILING).max(boot.fb_end);
+
+    kprintln!(
+        "[boot] mapping to {:#x} (ram top {:#x}, fb end {:#x})",
+        limit,
+        top,
+        boot.fb_end
+    );
 
     match mem::paging::build_identity_map(&mut frames, limit) {
         Some(pml4) => {
@@ -292,7 +307,6 @@ fn banner(boot: &BootInfo) {
     boot.fb.rect(w * 3, y, w, 40, palette::LTBLUE);
 
     console::set_color(LTGRAY_IDX);
-    kprintln!("\nhalted.");
 }
 
 const LTGRAY_IDX: u8 = 7;

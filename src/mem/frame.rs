@@ -87,17 +87,47 @@ impl EarlyFrames {
     }
 }
 
-/// Highest physical address the memory map mentions, ignoring type.
+/// Highest physical address backed by actual memory.
 ///
-/// MMIO windows count: the framebuffer lives in one, and an aperture we fail to
-/// map is a screen we cannot draw on.
-pub fn max_physical_address(mmap: *const u8, mmap_size: usize, desc_size: usize) -> u64 {
+/// Deliberately excludes `MappedIo`/`MappedIoPortSpace`/`PalCode`. Including
+/// them looks reasonable and is a trap: q35 (and real firmware) put a 64-bit
+/// PCI window hundreds of gigabytes above RAM, so taking the max over every
+/// descriptor produces a "top of memory" far beyond anything worth mapping --
+/// past 512 GiB it no longer fits in a single PDPT and the map build fails
+/// outright.
+///
+/// Apertures we genuinely need, above all the framebuffer, are mapped by
+/// address explicitly rather than by sweeping everything in between.
+pub fn max_ram_address(mmap: *const u8, mmap_size: usize, desc_size: usize) -> u64 {
+    // An allowlist, not a blocklist. Excluding the obvious MMIO types is not
+    // enough: OVMF hands back descriptors for reserved space all the way to the
+    // top of the physical address range -- measured here, `Reserved` ran to
+    // 0x100_0000_0000, a clean 1 TiB. Taking a max over "everything that is not
+    // MMIO" therefore still produced a 1 TiB map limit, which does not fit in a
+    // single PDPT, so the whole build failed.
+    //
+    // Only these types describe memory worth mapping.
+    const USABLE: [u32; 9] = [
+        1,  // LoaderCode -- us
+        2,  // LoaderData -- us, and the memory map buffer
+        3,  // BootServicesCode
+        4,  // BootServicesData
+        5,  // RuntimeServicesCode
+        6,  // RuntimeServicesData
+        7,  // Conventional
+        9,  // AcpiReclaim
+        10, // AcpiNvs
+    ];
+
     let mut max = 0u64;
     if desc_size == 0 {
         return 0;
     }
     for i in 0..(mmap_size / desc_size) {
         let d = unsafe { &*(mmap.add(i * desc_size) as *const MemoryDescriptor) };
+        if !USABLE.contains(&d.ty) {
+            continue;
+        }
         let end = d.phys_start + d.num_pages * PAGE_SIZE;
         if end > max {
             max = end;

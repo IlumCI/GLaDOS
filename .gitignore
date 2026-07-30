@@ -1,5 +1,6 @@
 /target
 /esp
+/.qemu
 /tools
 *.log
 *.fd
