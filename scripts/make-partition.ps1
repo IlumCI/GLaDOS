@@ -68,8 +68,22 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
     Write-Error "This must run from an elevated PowerShell."
 }
 
+# The hard floor is where a base snapshot plus any usable history stops fitting
+# at all, not where it stops being generous.
+#
+# Sizing, from what the store actually writes: a full snapshot of GLaDOS's used
+# memory is tens of megabytes, and each checkpoint stores only the chunks that
+# changed -- single-digit megabytes during ordinary work. So even 1 GB holds a
+# base image and something like a hundred checkpoints. An earlier version of
+# this script refused anything under 4 GB, which was an estimate made before
+# that arithmetic and turned out to be simply wrong.
+if ($SizeGB -lt 1) {
+    Write-Error "Below 1 GB there is no room for a base snapshot plus meaningful history. Refusing."
+}
 if ($SizeGB -lt 4) {
-    Write-Error "Below 4 GB the checkpoint history is too short for rollback to be a real safety net. Refusing."
+    Write-Warning "At $SizeGB GB expect roughly a few hundred checkpoints rather than thousands."
+    Write-Warning "Workable, but the partition cannot be grown later -- free space from a further"
+    Write-Warning "shrink lands on the wrong side of it."
 }
 
 # --- identify the disk by serial, and confirm it is the Windows disk ---
