@@ -324,6 +324,18 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             kprintln!("  resetting...");
             crate::cpu::reboot();
         }
+        "tensor" => {
+            let ok = crate::ai::selftest();
+            if ok {
+                console::set_color(LTGREEN);
+                kprintln!("  all tensor selftests passed");
+            } else {
+                console::set_color(LTRED);
+                kprintln!("  TENSOR SELFTESTS FAILED");
+            }
+            console::set_color(WHITE);
+        }
+        "bench" => crate::ai::bench(),
         "video" => {
             kprintln!(
                 "  {}x{}  stride {}  {:?}",

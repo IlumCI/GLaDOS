@@ -1,6 +1,22 @@
 [build]
 target = "x86_64-unknown-uefi"
 
+# The UEFI targets default to `+soft-float` with SSE disabled, because firmware
+# makes no promise about FP state. That would make every f32 a library call and
+# put the SIMD intrinsics out of reach entirely.
+#
+# We turn hardware SSE2 back on -- the x86_64 UEFI ABI requires SSE to be
+# enabled anyway, and `enable_simd()` sets CR4.OSFXSR itself rather than
+# trusting that.
+#
+# AVX is deliberately NOT enabled here. Globally enabling it would let the
+# compiler emit AVX anywhere, including in early boot before we have set
+# CR4.OSXSAVE and XCR0 -- and every one of those instructions would #UD. AVX is
+# opted into per function with #[target_feature], guarded by runtime detection.
+rustflags = [
+    "-C", "target-feature=+sse,+sse2,-soft-float",
+]
+
 # rust-std for x86_64-unknown-uefi is a tier-2 precompiled component, so we get
 # core/alloc/compiler_builtins without -Z build-std. If that ever stops being
 # true, add:
