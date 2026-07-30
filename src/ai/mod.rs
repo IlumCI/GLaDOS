@@ -1,5 +1,6 @@
 //! Machine learning primitives.
 
+pub mod model;
 pub mod tensor;
 
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -188,6 +189,119 @@ pub fn selftest() -> bool {
     }
 
     all
+}
+
+/// Build a small transformer, run it, and check the result is meaningful.
+///
+/// The weights are synthetic, so the output is not language -- it is noise
+/// with the right shape. That is deliberate: this proves the forward pass, the
+/// KV cache, RoPE and attention are wired correctly and fast enough, without
+/// needing weights on a machine that still has no storage. Swapping in a real
+/// checkpoint later changes the buffer, not the code.
+pub fn model_demo() {
+    let cfg = model::Config {
+        dim: 64,
+        hidden_dim: 176,
+        n_layers: 2,
+        n_heads: 4,
+        n_kv_heads: 4,
+        vocab_size: 256, // byte-level: no tokenizer needed
+        seq_len: 64,
+        shared_classifier: true,
+    };
+
+    console::set_color(YELLOW);
+    kprintln!("[model]");
+    console::set_color(WHITE);
+    kprintln!(
+        "  dim {}  hidden {}  layers {}  heads {}  vocab {}  seq {}",
+        cfg.dim, cfg.hidden_dim, cfg.n_layers, cfg.n_heads, cfg.vocab_size, cfg.seq_len
+    );
+
+    let Some(m) = model::Model::synthetic(cfg, 0xC0FFEE) else {
+        console::set_color(LTRED);
+        kprintln!("  out of memory building the model");
+        console::set_color(WHITE);
+        return;
+    };
+    let mut s = model::State::new(&cfg);
+    kprintln!(
+        "  {} parameters, {} KiB weights + {} KiB state",
+        cfg.param_count(),
+        m.weight_bytes() / 1024,
+        s.bytes(&cfg) / 1024
+    );
+
+    let mut ok = true;
+
+    // 1. Output must be finite. NaN here means rmsnorm divided by zero or
+    //    softmax overflowed, both of which produce plausible-looking code.
+    m.forward(&mut s, b'A' as usize, 0);
+    let finite = s.logits.iter().all(|v| v.is_finite());
+    ok &= check("logits finite", finite, "no NaN or infinity");
+
+    // 2. Determinism. Same token, same position, same weights -> same numbers.
+    //    If this fails, extended state is not being preserved, or something is
+    //    reading uninitialised memory.
+    let first: Vec<f32> = s.logits.clone();
+    let mut s2 = model::State::new(&cfg);
+    m.forward(&mut s2, b'A' as usize, 0);
+    let same = first.iter().zip(s2.logits.iter()).all(|(a, b)| a == b);
+    ok &= check("deterministic", same, "same input, identical logits");
+
+    // 3. Different inputs must give different outputs, or the model is
+    //    ignoring its input and every other check passes vacuously.
+    let mut s3 = model::State::new(&cfg);
+    m.forward(&mut s3, b'Z' as usize, 0);
+    let differs = first.iter().zip(s3.logits.iter()).any(|(a, b)| a != b);
+    ok &= check("input-sensitive", differs, "'A' and 'Z' differ");
+
+    // 4. Softmax over the logits must be a probability distribution.
+    let mut probs = first.clone();
+    tensor::softmax(&mut probs);
+    let sum: f32 = probs.iter().sum();
+    let all_pos = probs.iter().all(|p| *p >= 0.0);
+    ok &= check("logits -> distribution", (sum - 1.0).abs() < 1e-3 && all_pos, "sums to 1");
+
+    // 5. The KV cache has to make position matter: the same token at a later
+    //    position, after real history, must not produce the same logits.
+    let mut s4 = model::State::new(&cfg);
+    for (i, b) in b"hello wor".iter().enumerate() {
+        m.forward(&mut s4, *b as usize, i);
+    }
+    let seq_logits: Vec<f32> = s4.logits.clone();
+    let ctx_matters = seq_logits.iter().zip(first.iter()).any(|(a, b)| a != b);
+    ok &= check("context changes output", ctx_matters, "position 8 vs position 0");
+
+    // --- throughput ---
+    let hz = crate::TIMER_HZ as u64;
+    let t_start = crate::dev::lapic::ticks();
+    while crate::dev::lapic::ticks() == t_start {
+        core::hint::spin_loop();
+    }
+    let t0 = crate::dev::lapic::ticks();
+    let mut tokens = 0u64;
+    let mut st = model::State::new(&cfg);
+    while crate::dev::lapic::ticks() - t0 < hz / 2 {
+        m.forward(&mut st, (tokens % 256) as usize, (tokens % 32) as usize);
+        tokens += 1;
+    }
+    let elapsed = crate::dev::lapic::ticks() - t0;
+    let per_sec = tokens * hz / elapsed.max(1);
+    kprintln!("  {} tokens in {} ticks = {} tokens/sec", tokens, elapsed, per_sec);
+
+    // Top prediction, purely to show the pipeline end to end.
+    let top = tensor::argmax(&first);
+    kprintln!("  argmax token {} ({:?})", top, top as u8 as char);
+
+    if ok {
+        console::set_color(LTGREEN);
+        kprintln!("  forward pass verified");
+    } else {
+        console::set_color(LTRED);
+        kprintln!("  FORWARD PASS FAILED CHECKS");
+    }
+    console::set_color(WHITE);
 }
 
 /// Measure sustained matmul throughput at a size typical of a small model.

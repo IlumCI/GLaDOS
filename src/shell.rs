@@ -346,6 +346,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             console::set_color(WHITE);
         }
         "bench" => crate::ai::bench(),
+        "model" => crate::ai::model_demo(),
         "video" => {
             kprintln!(
                 "  {}x{}  stride {}  {:?}",

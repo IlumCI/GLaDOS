@@ -1,5 +1,13 @@
 [toolchain]
-channel = "nightly"
+# Pinned, not floating.
+#
+# .cargo/config.toml disables `soft-float` with `-C target-feature`, which rustc
+# warns "will become a hard error in a future release". The proper fix is the
+# custom target in x86_64-glados.json, which needs -Zbuild-std, which needs a
+# host linker this machine does not have. Until that is resolved, pinning means
+# a routine `rustup update` cannot break the build -- which otherwise would have
+# happened without warning, most likely mid-debugging.
+channel = "nightly-2026-07-30"
 targets = ["x86_64-unknown-uefi"]
 components = ["rust-src"]
 profile = "minimal"
