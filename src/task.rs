@@ -37,8 +37,8 @@ const STACK_SIZE: usize = 64 * 1024;
 // r12-r15, which is what the six pushes below cover.
 core::arch::global_asm!(
     r#"
-    .globl sanctum_switch_context
-sanctum_switch_context:
+    .globl glados_switch_context
+glados_switch_context:
     push rbp
     push rbx
     push r12
@@ -58,7 +58,7 @@ sanctum_switch_context:
 );
 
 extern "sysv64" {
-    fn sanctum_switch_context(save_rsp: *mut u64, new_rsp: u64);
+    fn glados_switch_context(save_rsp: *mut u64, new_rsp: u64);
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -118,7 +118,7 @@ pub fn spawn(name: &'static str, entry: fn()) -> Option<usize> {
 
     let top = stack as usize + STACK_SIZE;
 
-    // Fabricate what `sanctum_switch_context` expects to pop, so the first
+    // Fabricate what `glados_switch_context` expects to pop, so the first
     // switch into this task lands on `trampoline`:
     //
     //   [rsp+ 0] r15   [rsp+ 8] r14   [rsp+16] r13
@@ -225,7 +225,7 @@ fn schedule() {
         tasks[next].switches += 1;
         let save = &mut tasks[cur].rsp as *mut u64;
         let load = tasks[next].rsp;
-        sanctum_switch_context(save, load);
+        glados_switch_context(save, load);
     }
     // Execution resumes here when someone switches back to `cur`.
 }

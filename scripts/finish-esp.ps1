@@ -38,7 +38,7 @@ $ErrorActionPreference = 'Stop'
 
 function Invoke-Diskpart {
     param([string[]]$Commands)
-    $file = Join-Path $env:TEMP ("sanctum-dp-{0}.txt" -f [guid]::NewGuid().ToString('N'))
+    $file = Join-Path $env:TEMP ("glados-dp-{0}.txt" -f [guid]::NewGuid().ToString('N'))
     Set-Content -Path $file -Value ($Commands -join "`r`n") -Encoding ASCII
     try { return (& diskpart.exe /s $file | Out-String) }
     finally { if (Test-Path $file) { Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue } }
@@ -139,7 +139,7 @@ if ($vol -and $vol.FileSystem -match 'FAT') {
     Set-PartLetter -Disk $diskNumber -Part $espIndex -Letter $EspLetter
 
     # `echo Y|` covers builds whose format.com still prompts despite /Y.
-    $fmt = & cmd.exe /c "echo Y| format ${EspLetter}: /FS:FAT32 /Q /V:SANCTUM /Y 2>&1"
+    $fmt = & cmd.exe /c "echo Y| format ${EspLetter}: /FS:FAT32 /Q /V:GLADOS /Y 2>&1"
     Write-Host ($fmt | Out-String)
     Start-Sleep -Seconds 2
 

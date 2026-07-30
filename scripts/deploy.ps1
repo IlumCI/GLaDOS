@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Copy sanctum to a real EFI System Partition for bare-metal boot.
+    Copy glados to a real EFI System Partition for bare-metal boot.
 
 .DESCRIPTION
     Writes only EFI\BOOT\BOOTX64.EFI on the target volume. It creates no
@@ -61,7 +61,7 @@ try {
     Pop-Location
 }
 
-$efi = Join-Path $root "target\x86_64-unknown-uefi\$profileDir\sanctum.efi"
+$efi = Join-Path $root "target\x86_64-unknown-uefi\$profileDir\glados.efi"
 if (-not (Test-Path $efi)) { Write-Error "missing build artifact: $efi" }
 
 $bootDir = Join-Path "$EspDrive\" 'EFI\BOOT'

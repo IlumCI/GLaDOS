@@ -16,8 +16,11 @@ use crate::{kprint, kprintln, serial_println};
 use alloc::string::String;
 use alloc::vec::Vec;
 
-const PROMPT: &str = "sanctum> ";
-const PROMPT_LEN: usize = 9;
+const PROMPT: &str = "glados> ";
+/// Derived, not written out. Hardcoding this was fine until the prompt changed
+/// length during the rename, at which point every cursor position in the line
+/// editor was off by one.
+const PROMPT_LEN: usize = PROMPT.len();
 const HISTORY_MAX: usize = 64;
 
 fn prompt() {
@@ -306,6 +309,15 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             let f = crate::cpu::cpuid(1, 0);
             kprintln!("  family  {:#x}  apic id {}", f[0], f[1] >> 24);
             kprintln!("  lapic   {}", lapic::id());
+            let s = crate::cpu::detected();
+            kprintln!(
+                "  simd    sse={} sse2={} sse4.1={} avx={} avx2={} fma={} f16c={} avx512f={}",
+                s.sse as u8, s.sse2 as u8, s.sse41 as u8, s.avx as u8,
+                s.avx2 as u8, s.fma as u8, s.f16c as u8, s.avx512f as u8
+            );
+            console::set_color(if s.avx_enabled { LTGREEN } else { LTRED });
+            kprintln!("  avx state enabled by the OS: {}", s.avx_enabled);
+            console::set_color(WHITE);
         }
         "reboot" => {
             console::set_color(YELLOW);

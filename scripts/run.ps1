@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Build sanctum and boot it in QEMU under OVMF.
+    Build glados and boot it in QEMU under OVMF.
 
 .DESCRIPTION
     This is where development happens. QEMU boots in about a second, gives us a
@@ -122,7 +122,7 @@ try {
     Pop-Location
 }
 
-$efi = Join-Path $root "target\x86_64-unknown-uefi\$profileDir\sanctum.efi"
+$efi = Join-Path $root "target\x86_64-unknown-uefi\$profileDir\glados.efi"
 if (-not (Test-Path $efi)) { Write-Error "missing build artifact: $efi" }
 
 # --- stage an ESP tree ---

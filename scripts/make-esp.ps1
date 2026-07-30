@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Create an EFI System Partition on the sanctum USB SSD.
+    Create an EFI System Partition on the glados USB SSD.
 
 .DESCRIPTION
     Shrinks the existing NTFS volume and creates two new partitions:
@@ -32,7 +32,7 @@
 #>
 param(
     [switch]$Execute,
-    # The sanctum USB SSD, as surveyed. Override only if you know why.
+    # The glados USB SSD, as surveyed. Override only if you know why.
     [string]$SerialNumber = '3212271080340376147',
     [int]$EspSizeMB = 1024,
     [int]$ReservedSizeMB = 32768,
@@ -43,7 +43,7 @@ $ErrorActionPreference = 'Stop'
 
 function Invoke-Diskpart {
     param([string[]]$Commands)
-    $file = Join-Path $env:TEMP ("sanctum-dp-{0}.txt" -f [guid]::NewGuid().ToString('N'))
+    $file = Join-Path $env:TEMP ("glados-dp-{0}.txt" -f [guid]::NewGuid().ToString('N'))
     Set-Content -Path $file -Value ($Commands -join "`r`n") -Encoding ASCII
     try {
         $out = & diskpart.exe /s $file
@@ -133,7 +133,7 @@ Write-Host ''
 Write-Host ("shrink         : volume $dataLetter by {0:N1} GB, from {1:N1} GB" -f `
     ($shrinkMB/1024), ($dataWmi.Size/1GB))
 Write-Host "create         : $EspSizeMB MB FAT32 EFI System Partition, letter $EspLetter"
-Write-Host "create         : $ReservedSizeMB MB unformatted, reserved for the sanctum filesystem"
+Write-Host "create         : $ReservedSizeMB MB unformatted, reserved for the glados filesystem"
 Write-Host ''
 
 # --- cross-check: make diskpart agree this is the same disk ---
@@ -166,7 +166,7 @@ $script = @(
     "select volume $dataVolume",
     "shrink desired=$shrinkMB minimum=$shrinkMB",
     "create partition efi size=$EspSizeMB",
-    "format fs=fat32 quick label=SANCTUM",
+    "format fs=fat32 quick label=GLADOS",
     "assign letter=$EspLetter",
     "create partition primary size=$ReservedSizeMB",
     "list partition"

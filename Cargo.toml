@@ -1,5 +1,5 @@
 [package]
-name = "sanctum"
+name = "glados"
 version = "0.1.0"
 edition = "2021"
 description = "A from-scratch ring-0 operating system for the MSI MS-16R8"
@@ -13,7 +13,7 @@ description = "A from-scratch ring-0 operating system for the MSI MS-16R8"
 [dependencies]
 
 [[bin]]
-name = "sanctum"
+name = "glados"
 path = "src/main.rs"
 test = false
 bench = false

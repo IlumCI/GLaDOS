@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "sanctum"
+name = "glados"
 version = "0.1.0"

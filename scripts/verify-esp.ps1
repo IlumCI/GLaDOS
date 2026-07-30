@@ -12,7 +12,7 @@
 
     Check 3 is the one that matters. It does not use a synthetic FAT image --
     it reads the real partition table, the real ESP, and the real file, through
-    a real UEFI implementation's USB stack. If sanctum's banner appears on the
+    a real UEFI implementation's USB stack. If glados's banner appears on the
     serial log, the on-disk layout is genuinely bootable, and any remaining
     failure on the GF63 is that laptop's firmware declining to enumerate this
     particular USB bridge rather than anything wrong with the disk.
@@ -51,7 +51,7 @@ $diskNumber = [int]$target.Index
 Write-Host ""
 Write-Host "=== 1. ESP partition type ===" -ForegroundColor Cyan
 
-$dpFile = Join-Path $env:TEMP ("sanctum-verify-{0}.txt" -f [guid]::NewGuid().ToString('N'))
+$dpFile = Join-Path $env:TEMP ("glados-verify-{0}.txt" -f [guid]::NewGuid().ToString('N'))
 Set-Content -Path $dpFile -Encoding ASCII -Value @(
     "select disk $diskNumber",
     "select volume $espLetter",
@@ -158,7 +158,7 @@ if (Test-Path $log) {
         Write-Host "Any failure on the GF63 from here is that firmware not enumerating" -ForegroundColor Green
         Write-Host "this USB bridge, not a problem with the disk." -ForegroundColor Green
     } else {
-        Write-Warning "sanctum did not start. The layout, not the laptop, is the problem."
+        Write-Warning "glados did not start. The layout, not the laptop, is the problem."
         Write-Host "Look above for what OVMF did instead -- it usually says." -ForegroundColor Yellow
     }
 } else {

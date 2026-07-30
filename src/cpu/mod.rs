@@ -104,6 +104,115 @@ pub fn cpuid(leaf: u32, sub: u32) -> [u32; 4] {
     [eax, ebx_slot as u32, ecx, edx]
 }
 
+/// Cached so the shell can report what was actually enabled at boot, not just
+/// what CPUID advertises.
+static FEATURES: crate::sync::Racy<Features> = crate::sync::Racy::new(Features::none());
+
+pub fn detected() -> Features {
+    unsafe { *FEATURES.get() }
+}
+
+#[derive(Clone, Copy, Default, Debug)]
+pub struct Features {
+    pub sse: bool,
+    pub sse2: bool,
+    pub sse41: bool,
+    pub avx: bool,
+    pub avx2: bool,
+    pub fma: bool,
+    pub f16c: bool,
+    pub avx512f: bool,
+    pub xsave: bool,
+    /// True once the OS has actually enabled the state, not merely detected it.
+    pub avx_enabled: bool,
+}
+
+impl Features {
+    const fn none() -> Self {
+        Self {
+            sse: false,
+            sse2: false,
+            sse41: false,
+            avx: false,
+            avx2: false,
+            fma: false,
+            f16c: false,
+            avx512f: false,
+            xsave: false,
+            avx_enabled: false,
+        }
+    }
+}
+
+pub fn features() -> Features {
+    let f1 = cpuid(1, 0);
+    let f7 = cpuid(7, 0);
+    Features {
+        sse: f1[3] & (1 << 25) != 0,
+        sse2: f1[3] & (1 << 26) != 0,
+        sse41: f1[2] & (1 << 19) != 0,
+        avx: f1[2] & (1 << 28) != 0,
+        fma: f1[2] & (1 << 12) != 0,
+        f16c: f1[2] & (1 << 29) != 0,
+        xsave: f1[2] & (1 << 26) != 0,
+        avx2: f7[1] & (1 << 5) != 0,
+        avx512f: f7[1] & (1 << 16) != 0,
+        avx_enabled: false,
+    }
+}
+
+#[inline]
+unsafe fn read_cr4_raw() -> u64 {
+    read_cr4()
+}
+
+#[inline]
+unsafe fn write_cr4(value: u64) {
+    unsafe { asm!("mov cr4, {}", in(reg) value, options(nostack, preserves_flags)) };
+}
+
+#[inline]
+unsafe fn xsetbv(index: u32, value: u64) {
+    unsafe {
+        asm!("xsetbv",
+             in("ecx") index,
+             in("eax") value as u32,
+             in("edx") (value >> 32) as u32,
+             options(nostack, preserves_flags));
+    }
+}
+
+/// Turn on SSE and, if the CPU has it, AVX.
+///
+/// Detection is not enough. The CPU refuses to execute AVX instructions until
+/// the OS declares it will save the wider register state: that means setting
+/// `CR4.OSXSAVE`, then setting the x87, SSE and AVX bits in `XCR0` via
+/// `xsetbv`. Skip it and every `vmulps` raises #UD, which looks like the
+/// compiler emitting garbage rather than like a missing OS handshake.
+///
+/// UEFI leaves SSE enabled -- the x86_64 UEFI ABI requires it -- but we set
+/// the bits regardless rather than inherit an assumption.
+pub fn enable_simd() -> Features {
+    let mut f = features();
+    unsafe {
+        // CR4.OSFXSR (bit 9): fxsave/fxrstor, and enables SSE.
+        // CR4.OSXMMEXCPT (bit 10): unmasked SIMD FP exceptions go to #XM.
+        let mut cr4 = read_cr4_raw() | (1 << 9) | (1 << 10);
+
+        if f.xsave && f.avx {
+            cr4 |= 1 << 18; // CR4.OSXSAVE
+            write_cr4(cr4);
+            // XCR0: bit 0 x87 (mandatory), bit 1 SSE, bit 2 AVX (ymm high halves).
+            xsetbv(0, 0b111);
+            f.avx_enabled = true;
+        } else {
+            write_cr4(cr4);
+        }
+        *FEATURES.get() = f;
+    }
+    f
+}
+
 /// Reset the machine.
 ///
 /// Tries the keyboard controller's reset line first, which is the historical

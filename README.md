@@ -1,4 +1,4 @@
-# sanctum
+# glados
 
 A from-scratch, non-Unix, ring-0 operating system for one specific laptop:
 an **MSI Thin GF63 12UC**, board **MS-16R8**.
@@ -32,14 +32,14 @@ is no separation between using the machine and programming it — which is the
 whole reason TempleOS was productive for one person.
 
 ```
-sanctum> 2+3*4
+glados> 2+3*4
   14
-sanctum> x=7
-sanctum> x*6
+glados> x=7
+glados> x*6
   42
-sanctum> s=0 i=1 while(i<5){s=s+i i=i+1} s
+glados> s=0 i=1 while(i<5){s=s+i i=i+1} s
   10
-sanctum> hex(peek32(0xfec00000))
+glados> hex(peek32(0xfec00000))
 ```
 
 Integers are 64-bit; strings concatenate with `+`. Builtins cover printing,

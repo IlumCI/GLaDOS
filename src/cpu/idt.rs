@@ -216,7 +216,7 @@ pub fn init() {
         };
         asm!("lidt [{}]", in(reg) &ptr, options(readonly, nostack, preserves_flags));
     }
-    serial_println!("sanctum: idt installed");
+    serial_println!("glados: idt installed");
 }
 
 /// Point a vector at a handler after `init` has already run.

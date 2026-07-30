@@ -44,7 +44,7 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 
 function Invoke-Diskpart {
     param([string[]]$Commands)
-    $file = Join-Path $env:TEMP ("sanctum-dp-{0}.txt" -f [guid]::NewGuid().ToString('N'))
+    $file = Join-Path $env:TEMP ("glados-dp-{0}.txt" -f [guid]::NewGuid().ToString('N'))
     Set-Content -Path $file -Value ($Commands -join "`r`n") -Encoding ASCII
     try { return (& diskpart.exe /s $file | Out-String) }
     finally { if (Test-Path $file) { Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue } }
@@ -108,7 +108,7 @@ function Test-Offset {
     param([int64]$Offset)
 
     $pattern = New-Object byte[] $block
-    $tag = [Text.Encoding]::ASCII.GetBytes("SANCTUM-$Offset-")
+    $tag = [Text.Encoding]::ASCII.GetBytes("GLADOS-$Offset-")
     for ($i = 0; $i -lt $block; $i++) { $pattern[$i] = $tag[$i % $tag.Length] }
 
     $decoy = New-Object byte[] $block

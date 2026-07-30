@@ -90,7 +90,7 @@ foreach ($off in $offsets) {
     # A pattern that encodes its own offset, so a device that wraps writes
     # around to a lower address is caught as well as one that drops them.
     $pattern = New-Object byte[] $blockSize
-    $tag = [Text.Encoding]::ASCII.GetBytes("SANCTUM-PROBE-$off-")
+    $tag = [Text.Encoding]::ASCII.GetBytes("GLADOS-PROBE-$off-")
     for ($i = 0; $i -lt $blockSize; $i++) { $pattern[$i] = $tag[$i % $tag.Length] }
 
     $fs = [System.IO.File]::Open($path, 'Open', 'ReadWrite', 'ReadWrite')

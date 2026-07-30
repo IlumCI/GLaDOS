@@ -1,4 +1,4 @@
-//! sanctum -- a from-scratch ring-0 operating system for the MSI MS-16R8.
+//! glados -- a from-scratch ring-0 operating system for the MSI MS-16R8.
 //!
 //! There is no bootloader stage. UEFI has already put us in long mode, at
 //! CPL 0, with an identity map, so this UEFI application simply *is* the
@@ -62,7 +62,7 @@ pub struct BootInfo {
 #[no_mangle]
 pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     serial::init();
-    serial_println!("\n\nsanctum: entered efi_main");
+    serial_println!("\n\nglados: entered efi_main");
 
     let st = unsafe { &mut *st };
     let bs = unsafe { &mut *st.boot_services };
@@ -71,7 +71,7 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     // to return, so if we leave it armed the firmware resets the machine
     // mid-boot and it looks like a kernel hang.
     (bs.set_watchdog_timer)(0, 0, 0, ptr::null_mut());
-    serial_println!("sanctum: watchdog disarmed");
+    serial_println!("glados: watchdog disarmed");
 
     // --- Graphics Output Protocol ---
     let mut gop_ptr: *mut c_void = ptr::null_mut();
@@ -81,8 +81,8 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
         &mut gop_ptr,
     );
     if is_error(s) || gop_ptr.is_null() {
-        con_out(st, "sanctum: no Graphics Output Protocol\r\n");
-        serial_println!("sanctum: locate_protocol(GOP) failed: {:#x}", s);
+        con_out(st, "glados: no Graphics Output Protocol\r\n");
+        serial_println!("glados: locate_protocol(GOP) failed: {:#x}", s);
         halt();
     }
 
@@ -97,8 +97,8 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
         // BltOnly means there is no linear framebuffer at all and the only
         // draw call lives in boot services, which we are about to leave.
         other => {
-            con_out(st, "sanctum: unsupported GOP pixel format\r\n");
-            serial_println!("sanctum: pixel_format {} unsupported", other);
+            con_out(st, "glados: unsupported GOP pixel format\r\n");
+            serial_println!("glados: pixel_format {} unsupported", other);
             halt();
         }
     };
@@ -117,7 +117,7 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     let fb_end = mode.frame_buffer_base + mode.frame_buffer_size as u64;
 
     serial_println!(
-        "sanctum: fb base={:#x} {}x{} stride={} format={:?}",
+        "glados: fb base={:#x} {}x{} stride={} format={:?}",
         mode.frame_buffer_base,
         info.horizontal_resolution,
         info.vertical_resolution,
@@ -127,7 +127,7 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
 
     // --- ACPI RSDP, while the configuration table still exists ---
     let rsdp = find_rsdp(st);
-    serial_println!("sanctum: rsdp={:?}", rsdp);
+    serial_println!("glados: rsdp={:?}", rsdp);
 
     // --- Memory map, then leave the firmware behind ---
     let mut map_size: usize = 0;
@@ -149,7 +149,7 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
 
     let mut buf: *mut u8 = ptr::null_mut();
     if is_error((bs.allocate_pool)(MemoryType::LoaderData, map_size, &mut buf)) {
-        con_out(st, "sanctum: allocate_pool for memory map failed\r\n");
+        con_out(st, "glados: allocate_pool for memory map failed\r\n");
         halt();
     }
 
@@ -166,7 +166,7 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
             &mut desc_ver,
         );
         if is_error(s) {
-            con_out(st, "sanctum: get_memory_map failed\r\n");
+            con_out(st, "glados: get_memory_map failed\r\n");
             halt();
         }
 
@@ -176,7 +176,7 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
 
         attempts += 1;
         if attempts > 8 {
-            con_out(st, "sanctum: exit_boot_services kept failing\r\n");
+            con_out(st, "glados: exit_boot_services kept failing\r\n");
             halt();
         }
     };
@@ -185,7 +185,7 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     // Past this line the firmware is gone. No boot services, no con_out,
     // no protocols. Serial and the framebuffer are all we have.
     // ---------------------------------------------------------------
-    serial_println!("sanctum: exited boot services after {} retries", attempts);
+    serial_println!("glados: exited boot services after {} retries", attempts);
 
     let boot = BootInfo {
         fb,
@@ -205,6 +205,20 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     cpu::gdt::init();
     cpu::idt::init();
     kprintln!("[boot] gdt + idt installed");
+
+    // Before any floating point runs. Detection alone is not enough: AVX
+    // instructions fault with #UD until the OS sets CR4.OSXSAVE and declares
+    // the wider register state in XCR0.
+    let simd = cpu::enable_simd();
+    kprintln!(
+        "[boot] simd  sse2={} sse4.1={} avx={} avx2={} fma={}  avx enabled={}",
+        simd.sse2 as u8,
+        simd.sse41 as u8,
+        simd.avx as u8,
+        simd.avx2 as u8,
+        simd.fma as u8,
+        simd.avx_enabled as u8
+    );
 
     // One allocator for the whole early bring-up: page tables first, then the
     // heap. Sharing it means the heap can never be handed frames that paging
@@ -541,7 +555,7 @@ fn selftest() {
 
 fn banner(boot: &BootInfo, acpi: &Option<acpi::Acpi>) {
     console::set_color(LTCYAN);
-    kprintln!("sanctum");
+    kprintln!("glados");
     console::set_color(WHITE);
     kprintln!("a ring-0 kernel for MSI MS-16R8\n");
 
