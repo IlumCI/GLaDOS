@@ -24,6 +24,7 @@ mod lang;
 mod mem;
 mod serial;
 mod shell;
+mod store;
 mod sync;
 mod task;
 mod uefi;

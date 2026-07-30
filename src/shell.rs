@@ -374,6 +374,56 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
                 }
             });
         }
+        "disk" => {
+            if !crate::dev::nvme::present() {
+                console::set_color(LTRED);
+                kprintln!("  no NVMe controller initialised -- run 'nvme' first");
+                console::set_color(WHITE);
+                return;
+            }
+            match crate::store::block::scan() {
+                Ok(layout) => {
+                    let bs = crate::store::block::block_size() as u64;
+                    let total = crate::store::block::block_count();
+                    console::set_color(YELLOW);
+                    kprintln!("[disk]  scheme {:?}", layout.scheme);
+                    console::set_color(WHITE);
+                    kprintln!("  {} blocks x {} B = {} MiB total", total, bs, total * bs / (1024 * 1024));
+                    if layout.partitions.is_empty() {
+                        kprintln!("  no partitions");
+                    }
+                    for p in &layout.partitions {
+                        kprintln!(
+                            "  {}: lba {:>12}..{:<12} {:>8} MiB  {}",
+                            p.index,
+                            p.start_lba,
+                            p.end_lba(),
+                            p.block_count * bs / (1024 * 1024),
+                            p.kind()
+                        );
+                    }
+                    let used = layout.highest_used_lba();
+                    let free = total.saturating_sub(used);
+                    console::set_color(LTCYAN);
+                    kprintln!(
+                        "  highest claimed lba {}, {} MiB beyond it",
+                        used,
+                        free * bs / (1024 * 1024)
+                    );
+                    console::set_color(WHITE);
+                    // The whole point of this command: say plainly what would
+                    // be destroyed, before anything can write.
+                    console::set_color(LTRED);
+                    kprintln!("  every range above is IN USE -- writing to it destroys data");
+                    console::set_color(WHITE);
+                }
+                Err(e) => {
+                    console::set_color(LTRED);
+                    kprintln!("  scan failed: {:?}", e);
+                    console::set_color(WHITE);
+                }
+            }
+        }
         "cpu" => {
             let max_ext = crate::cpu::cpuid(0x8000_0000, 0)[0];
             if max_ext >= 0x8000_0004 {
