@@ -90,6 +90,54 @@ pub fn scan(ecam: u64, max_bus: u16, mut f: impl FnMut(Device)) {
     }
 }
 
+#[inline]
+unsafe fn read32(base: u64, off: u64) -> u32 {
+    unsafe { read_volatile((base + off) as *const u32) }
+}
+
+#[inline]
+unsafe fn write32(base: u64, off: u64, v: u32) {
+    unsafe { core::ptr::write_volatile((base + off) as *mut u32, v) }
+}
+
+/// Read a Base Address Register, resolving 64-bit BARs from their two halves.
+///
+/// Bit 0 selects I/O vs memory space; bits 2:1 encode the type, where `0b10`
+/// means the BAR is 64 bits wide and consumes the following slot as its high
+/// half. Reading only the low half of a 64-bit BAR yields an address that is
+/// plausible and wrong, which on this machine matters: the framebuffer BAR
+/// sits at 0x40_0000_0000.
+pub fn bar(io_base_ecam: u64, d: &Device, index: usize) -> Option<u64> {
+    if index >= 6 {
+        return None;
+    }
+    let cfg = cfg_addr(io_base_ecam, d.bus, d.dev, d.func);
+    let off = 0x10 + index as u64 * 4;
+    let lo = unsafe { read32(cfg, off) };
+    if lo & 1 != 0 {
+        return None; // I/O space, not memory-mapped
+    }
+    let kind = (lo >> 1) & 0b11;
+    let base = (lo & 0xFFFF_FFF0) as u64;
+    if kind == 0b10 {
+        let hi = unsafe { read32(cfg, off + 4) } as u64;
+        Some((hi << 32) | base)
+    } else {
+        Some(base)
+    }
+}
+
+/// Set the bus-master and memory-space enable bits in the command register.
+///
+/// Without bus-master a device cannot DMA, so an NVMe controller will accept
+/// commands and never write a completion -- it looks exactly like a hung
+/// controller.
+pub fn enable_bus_master(io_base_ecam: u64, d: &Device) {
+    let cfg = cfg_addr(io_base_ecam, d.bus, d.dev, d.func);
+    let cmd = unsafe { read32(cfg, 0x04) };
+    unsafe { write32(cfg, 0x04, cmd | (1 << 1) | (1 << 2)) };
+}
+
 /// Plain-English class name. Not exhaustive -- just what turns up in a laptop.
 pub fn class_name(class: u8, subclass: u8) -> &'static str {
     match (class, subclass) {

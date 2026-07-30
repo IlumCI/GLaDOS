@@ -294,6 +294,86 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
                 console::set_color(WHITE);
             }
         },
+        "nvme" => {
+            let Some(ecam) = acpi.as_ref().and_then(|a| a.mcfg) else {
+                console::set_color(LTRED);
+                kprintln!("  no MCFG, so no ECAM base");
+                console::set_color(WHITE);
+                return;
+            };
+            if !crate::dev::nvme::present() {
+                kprintln!("  probing...");
+                match crate::dev::nvme::init(ecam) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        console::set_color(LTRED);
+                        kprintln!("  init failed: {:?}", e);
+                        console::set_color(WHITE);
+                        return;
+                    }
+                }
+            }
+            crate::dev::nvme::with(|n| {
+                // A nested fn, not a closure: closure lifetime elision cannot
+                // tie the returned &str back to the input slice.
+                fn trim(b: &[u8]) -> &str {
+                    let mut end = b.len();
+                    while end > 0 && (b[end - 1] == b' ' || b[end - 1] == 0) {
+                        end -= 1;
+                    }
+                    core::str::from_utf8(&b[..end]).unwrap_or("?")
+                }
+                console::set_color(YELLOW);
+                kprintln!("[nvme]");
+                console::set_color(WHITE);
+                kprintln!("  model   {}", trim(&n.model));
+                kprintln!("  serial  {}", trim(&n.serial));
+                kprintln!(
+                    "  ns {}  {} blocks x {} B = {} MiB",
+                    n.nsid,
+                    n.block_count,
+                    n.block_size,
+                    n.capacity_bytes() / (1024 * 1024)
+                );
+                console::set_color(if crate::dev::nvme::writes_unlocked() { LTRED } else { LTGREEN });
+                kprintln!(
+                    "  writes  {}",
+                    if crate::dev::nvme::writes_unlocked() { "UNLOCKED" } else { "locked (read-only)" }
+                );
+                console::set_color(WHITE);
+
+                // A page-aligned DMA buffer, not a stack array. An unaligned
+                // buffer can straddle a page boundary, and the tail of the
+                // transfer then never arrives.
+                let Some(dma) = crate::dev::nvme::alloc_dma(4096) else {
+                    kprintln!("  could not allocate a DMA buffer");
+                    return;
+                };
+                match n.read(0, 1, dma) {
+                    Ok(()) => {
+                        let buf = unsafe { core::slice::from_raw_parts(dma, 512) };
+                        kprint!("  lba0   ");
+                        for b in buf.iter().take(16) {
+                            kprint!("{:02x} ", b);
+                        }
+                        kprintln!();
+                        let sig = u16::from_le_bytes([buf[510], buf[511]]);
+                        if sig == 0xAA55 {
+                            console::set_color(LTGREEN);
+                            kprintln!("  boot signature 0xAA55 present -- a real partition table");
+                        } else {
+                            kprintln!("  no 0xAA55 signature (sig {:#06x})", sig);
+                        }
+                        console::set_color(WHITE);
+                    }
+                    Err(e) => {
+                        console::set_color(LTRED);
+                        kprintln!("  read failed: status {:#x}", e);
+                        console::set_color(WHITE);
+                    }
+                }
+            });
+        }
         "cpu" => {
             let max_ext = crate::cpu::cpuid(0x8000_0000, 0)[0];
             if max_ext >= 0x8000_0004 {

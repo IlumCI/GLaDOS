@@ -3,6 +3,7 @@
 pub mod ioapic;
 pub mod kbd;
 pub mod lapic;
+pub mod nvme;
 pub mod pci;
 pub mod pic;
 

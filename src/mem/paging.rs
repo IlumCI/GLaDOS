@@ -135,6 +135,94 @@ pub fn build_identity_map(
     Some(pml4_phys)
 }
 
+/// Add a mapping after boot, creating page tables as needed.
+///
+/// The boot-time map covers RAM plus the low 4 GiB plus the framebuffer, which
+/// is everything known at the time. It is not enough: PCI BARs can be anywhere
+/// in the 64-bit address space, and both machines this runs on put them far
+/// outside that range -- QEMU's NVMe controller at 768 GiB, this laptop's
+/// framebuffer at 256 GiB. Touching an unmapped BAR faults on the very first
+/// register read, which is exactly how this function came to exist.
+///
+/// New page tables come from the heap. That works only because the address
+/// space is identity-mapped, so a heap pointer is also its own physical
+/// address; the allocation is page-aligned for the same reason.
+///
+/// Device memory is always mapped uncacheable -- see `addr_is_ram` for why a
+/// write-back mapping over registers produces plausible garbage.
+pub fn map_range(phys_start: u64, len: u64, uncached: bool) -> bool {
+    if len == 0 {
+        return true;
+    }
+    let pml4_phys = crate::cpu::read_cr3() & ADDR_MASK;
+    let start = phys_start & !(LARGE_PAGE_SIZE - 1);
+    let end = (phys_start + len).div_ceil(LARGE_PAGE_SIZE) * LARGE_PAGE_SIZE;
+
+    let mut addr = start;
+    while addr < end {
+        if !map_one_large(pml4_phys, addr, uncached) {
+            return false;
+        }
+        addr += LARGE_PAGE_SIZE;
+    }
+
+    // Reloading CR3 flushes the TLB. Heavy-handed compared to `invlpg` per
+    // page, but this runs once per device, not in any hot path.
+    unsafe { crate::cpu::write_cr3(pml4_phys) };
+    true
+}
+
+fn alloc_table() -> Option<u64> {
+    use alloc::alloc::{alloc_zeroed, Layout};
+    let layout = Layout::from_size_align(4096, 4096).ok()?;
+    let p = unsafe { alloc_zeroed(layout) };
+    if p.is_null() {
+        None
+    } else {
+        Some(p as u64)
+    }
+}
+
+fn map_one_large(pml4_phys: u64, addr: u64, uncached: bool) -> bool {
+    let i4 = ((addr >> 39) & 511) as usize;
+    let i3 = ((addr >> 30) & 511) as usize;
+    let i2 = ((addr >> 21) & 511) as usize;
+
+    unsafe {
+        let pml4 = table(pml4_phys);
+        let pdpt_phys = if pml4[i4] & PRESENT == 0 {
+            let Some(p) = alloc_table() else { return false };
+            pml4[i4] = p | PRESENT | WRITABLE;
+            p
+        } else {
+            pml4[i4] & ADDR_MASK
+        };
+
+        let pdpt = table(pdpt_phys);
+        let pd_phys = if pdpt[i3] & PRESENT == 0 {
+            let Some(p) = alloc_table() else { return false };
+            pdpt[i3] = p | PRESENT | WRITABLE;
+            p
+        } else {
+            // A 1 GiB page here would have to be split before we could map a
+            // 2 MiB entry inside it. We never create those, so treat it as a
+            // failure rather than silently corrupting the mapping.
+            if pdpt[i3] & HUGE != 0 {
+                return false;
+            }
+            pdpt[i3] & ADDR_MASK
+        };
+
+        let pd = table(pd_phys);
+        let mut flags = PRESENT | WRITABLE | HUGE;
+        if uncached {
+            flags |= WRITE_THROUGH | CACHE_DISABLE;
+        }
+        pd[i2] = addr | flags;
+    }
+    true
+}
+
 /// Install the map. Everything currently executing -- code, stack, framebuffer
 /// -- must already be covered by it, or this instruction is the last one.
 ///
