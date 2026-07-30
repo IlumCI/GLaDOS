@@ -17,13 +17,40 @@ not write is the Rust `core` library.
 | M2 | Framebuffer console, GDT+TSS, IDT with fault reporting | done |
 | M3 | Physical frame allocator, kernel heap | done |
 | M4 | ACPI, LAPIC/IOAPIC, APIC timer, i8042 keyboard, tasking, shell | done |
-| M5 | Tokenizer, parser, single-pass JIT, REPL | not started |
+| M5 | Tokenizer, parser, REPL | interpreter done; JIT pending |
 | M6 | NVMe driver, own filesystem | not started |
 | M7 | 640×480 16-colour aesthetic layer, hypertext documents | not started |
 
 All of the above is verified running under QEMU, not merely compiling. The
 shell accepts `help`, `mem`, `uptime`, `acpi`, `tasks`, `video`, `echo`,
 `clear` and `fault`.
+
+### The language
+
+Anything typed at the prompt that is not a command is evaluated as code. There
+is no separation between using the machine and programming it — which is the
+whole reason TempleOS was productive for one person.
+
+```
+sanctum> 2+3*4
+  14
+sanctum> x=7
+sanctum> x*6
+  42
+sanctum> s=0 i=1 while(i<5){s=s+i i=i+1} s
+  10
+sanctum> hex(peek32(0xfec00000))
+```
+
+Integers are 64-bit; strings concatenate with `+`. Builtins cover printing,
+framebuffer drawing (`pixel`, `rect`, `text`), timing (`ticks`, `hz`), and —
+because everything runs at ring 0 — raw hardware access via `peek8/16/32/64`,
+`poke8/32/64`, `inb`/`outb`/`inl`/`outl`. A bad `peek` faults and the M2
+reporter names the address, which is the intended debugging loop rather than an
+accident.
+
+An evaluation-step budget stops `while(1){}` from wedging the shell, since
+there is no Ctrl-C to rescue you.
 
 ### Verified numbers
 

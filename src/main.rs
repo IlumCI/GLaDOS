@@ -19,6 +19,7 @@ mod acpi;
 mod cpu;
 mod dev;
 mod gfx;
+mod lang;
 mod mem;
 mod serial;
 mod shell;

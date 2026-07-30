@@ -9,6 +9,7 @@ use crate::acpi::Acpi;
 use crate::cpu::idt;
 use crate::dev::{kbd, lapic};
 use crate::gfx::console::{self, LTCYAN, LTGRAY, LTGREEN, LTRED, WHITE, YELLOW};
+use crate::lang;
 use crate::mem;
 use crate::BootInfo;
 use crate::{kprint, kprintln};
@@ -22,17 +23,18 @@ fn prompt() {
 
 pub fn run(boot: &BootInfo, acpi: &Option<Acpi>) -> ! {
     console::set_color(LTCYAN);
-    kprintln!("\ninteractive. type 'help'.");
+    kprintln!("\ninteractive. type 'help', or just type code.");
     console::set_color(WHITE);
 
     let mut line = String::new();
+    let mut interp = lang::Interp::new();
     prompt();
 
     loop {
         match kbd::pop() {
             Some(b'\n') => {
                 kprintln!();
-                execute(line.trim(), boot, acpi);
+                execute(line.trim(), boot, acpi, &mut interp);
                 line.clear();
                 prompt();
             }
@@ -56,7 +58,7 @@ pub fn run(boot: &BootInfo, acpi: &Option<Acpi>) -> ! {
     }
 }
 
-fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>) {
+fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::Interp) {
     let mut parts = line.splitn(2, ' ');
     let cmd = parts.next().unwrap_or("");
     let rest = parts.next().unwrap_or("").trim();
@@ -75,7 +77,15 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>) {
             kprintln!("  video         framebuffer geometry");
             kprintln!("  echo <text>   print text");
             kprintln!("  clear         clear the screen");
+            kprintln!("  words         list language builtins");
+            kprintln!("  vars          list variables you have defined");
             kprintln!("  fault         deliberately dereference null");
+            console::set_color(YELLOW);
+            kprintln!("\nanything else is evaluated as code");
+            console::set_color(WHITE);
+            kprintln!("  x = 6*7               println(\"hi\", x)");
+            kprintln!("  i=0 while(i<8){{ rect(i*40,300,32,32,i+1) i=i+1 }}");
+            kprintln!("  hex(peek32(0xfec00000))");
         }
         "mem" => {
             let (used, total) = mem::heap::HEAP.stats();
@@ -147,10 +157,48 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>) {
             console::set_color(LTGRAY);
             idt::trigger_page_fault();
         }
-        other => {
-            console::set_color(LTRED);
-            kprintln!("  unknown command: {}", other);
+        "words" => {
+            console::set_color(YELLOW);
+            kprintln!("builtins");
             console::set_color(WHITE);
+            let mut col = 0;
+            for w in lang::eval::BUILTINS {
+                kprint!("  {:<10}", w);
+                col += 1;
+                if col % 5 == 0 {
+                    kprintln!();
+                }
+            }
+            if col % 5 != 0 {
+                kprintln!();
+            }
+        }
+        "vars" => {
+            if interp.var_count() == 0 {
+                kprintln!("  none yet");
+            } else {
+                for (k, v) in interp.vars() {
+                    kprintln!("  {} = {}", k, v.render());
+                }
+            }
+        }
+        _ => {
+            // Not a command, so it is code. This is the point of the whole
+            // exercise: there is no boundary between using the machine and
+            // programming it.
+            match lang::eval_line(interp, line) {
+                Ok(lang::Value::Nil) => {}
+                Ok(v) => {
+                    console::set_color(LTCYAN);
+                    kprintln!("  {}", v.render());
+                    console::set_color(WHITE);
+                }
+                Err(e) => {
+                    console::set_color(LTRED);
+                    kprintln!("  {}", e);
+                    console::set_color(WHITE);
+                }
+            }
         }
     }
 }
