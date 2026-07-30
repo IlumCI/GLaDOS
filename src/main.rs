@@ -48,6 +48,11 @@ pub struct BootInfo {
     pub mmap_size: usize,
     /// Firmware-reported stride. **Never** use `size_of::<MemoryDescriptor>()`.
     pub desc_size: usize,
+    /// The framebuffer aperture. On this laptop it is a 64-bit BAR at
+    /// 0x40_0000_0000 -- 256 GiB, far above the 18 GiB of RAM -- so the map
+    /// limit has to be widened to reach it, and it must not be treated as
+    /// device memory for caching purposes.
+    pub fb_start: u64,
     /// One past the last byte of the framebuffer aperture. Our page tables have
     /// to cover this or the first write after `activate` faults.
     pub fb_end: u64,
@@ -107,6 +112,7 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
         )
     };
 
+    let fb_start = mode.frame_buffer_base;
     let fb_end = mode.frame_buffer_base + mode.frame_buffer_size as u64;
 
     serial_println!(
@@ -186,6 +192,7 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
         mmap: buf,
         mmap_size: final_size,
         desc_size,
+        fb_start,
         fb_end,
     };
 
@@ -296,14 +303,27 @@ fn init_interrupts(acpi: &Option<acpi::Acpi>) {
         );
     }
 
-    let hz = dev::lapic::calibrate();
+    // The 8254 PIT is the traditional reference but is not guaranteed present
+    // on modern chipsets. The ACPI PM timer is: fixed at 3.579545 MHz, and its
+    // port comes straight out of the FADT.
+    let mut hz = dev::lapic::calibrate();
+    let mut source = "PIT";
+    if hz == 0 {
+        console::set_color(YELLOW);
+        kprintln!("  PIT did not answer");
+        console::set_color(LTGRAY_IDX);
+        if let Some(port) = a.pm_timer {
+            hz = dev::lapic::calibrate_pm(port as u16);
+            source = "ACPI PM timer";
+        }
+    }
     if hz == 0 {
         console::set_color(LTRED);
-        kprintln!("  timer calibration FAILED -- no PIT response");
+        kprintln!("  timer calibration FAILED -- neither the PIT nor the PM timer responded");
         console::set_color(LTGRAY_IDX);
         return;
     }
-    kprintln!("  apic timer {} Hz measured against the PIT", hz);
+    kprintln!("  apic timer {} Hz measured against the {}", hz, source);
 
     if dev::lapic::start_timer(TIMER_HZ) {
         cpu::enable_interrupts();
@@ -418,7 +438,15 @@ fn install_paging(boot: &BootInfo, frames: &mut mem::frame::EarlyFrames) {
         boot.fb_end
     );
 
-    match mem::paging::build_identity_map(frames, limit) {
+    match mem::paging::build_identity_map(
+        frames,
+        limit,
+        boot.mmap,
+        boot.mmap_size,
+        boot.desc_size,
+        boot.fb_start,
+        boot.fb_end,
+    ) {
         Some(pml4) => {
             unsafe { mem::paging::activate(pml4) };
             // Reaching this line means the map covered our code, our stack and

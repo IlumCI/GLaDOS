@@ -13,7 +13,7 @@
 //! IRQ0 and cannot be polled this way.
 
 use super::{VECTOR_SPURIOUS, VECTOR_TIMER};
-use crate::cpu::port::{inb, outb};
+use crate::cpu::port::{inb, inl, outb};
 use crate::cpu::{self, idt};
 use crate::sync::Racy;
 use core::ptr::{read_volatile, write_volatile};
@@ -148,10 +148,17 @@ pub fn calibrate() -> u64 {
         outb(PIT_GATE, gate | 1);
 
         // Bit 5 of port 0x61 is channel 2's OUT line, high at terminal count.
+        //
+        // The guard is deliberately small. Each `inb` of a legacy port goes out
+        // over LPC/eSPI and costs on the order of a microsecond on real
+        // hardware, so a 100-million iteration guard is not a safety net, it is
+        // a hundred-second hang that looks exactly like a lock-up. Two million
+        // is a couple of seconds -- long enough for any PIT that is going to
+        // answer, short enough to fall through to the PM timer.
         let mut guard: u64 = 0;
         while inb(PIT_GATE) & 0x20 == 0 {
             guard += 1;
-            if guard > 100_000_000 {
+            if guard > 2_000_000 {
                 write(REG_TIMER_INIT, 0);
                 outb(PIT_GATE, original);
                 return 0;
@@ -165,6 +172,53 @@ pub fn calibrate() -> u64 {
 
         let elapsed = (u32::MAX - remaining) as u64;
         let hz = elapsed * SAMPLE_HZ;
+        *TIMER_HZ.get() = hz;
+        hz
+    }
+}
+
+/// Calibrate against the ACPI power-management timer instead of the PIT.
+///
+/// The PM timer runs at a fixed 3.579545 MHz -- it is architecturally defined,
+/// unlike the APIC timer's own frequency -- and unlike the 8254 it is still
+/// genuinely present on modern chipsets. The FADT gives us its I/O port; on
+/// this laptop that is 0x1808, where QEMU reports 0x608.
+///
+/// Only the low 24 bits are used. The counter may be 24 or 32 bits wide
+/// depending on the FADT flags, and masking to 24 is correct for both as long
+/// as the sample is far shorter than a 24-bit wrap (about 4.6 seconds).
+pub fn calibrate_pm(port: u16) -> u64 {
+    const PM_HZ: u64 = 3_579_545;
+    const MASK: u32 = 0x00FF_FFFF;
+    const SAMPLE_HZ: u64 = 100; // 10 ms
+    let want = (PM_HZ / SAMPLE_HZ) as u32;
+
+    unsafe {
+        write(REG_TIMER_DIV, DIV_16);
+        write(REG_LVT_TIMER, LVT_MASKED);
+
+        let start = inl(port) & MASK;
+        write(REG_TIMER_INIT, u32::MAX);
+
+        let mut guard: u64 = 0;
+        loop {
+            let elapsed = (inl(port).wrapping_sub(start)) & MASK;
+            if elapsed >= want {
+                break;
+            }
+            guard += 1;
+            if guard > 20_000_000 {
+                write(REG_TIMER_INIT, 0);
+                return 0; // The port is not a live counter.
+            }
+            core::hint::spin_loop();
+        }
+
+        let remaining = read(REG_TIMER_CUR);
+        write(REG_TIMER_INIT, 0);
+
+        let elapsed_apic = (u32::MAX - remaining) as u64;
+        let hz = elapsed_apic * SAMPLE_HZ;
         *TIMER_HZ.get() = hz;
         hz
     }
