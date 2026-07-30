@@ -64,7 +64,19 @@ pub fn run(boot: &BootInfo, acpi: &Option<Acpi>) -> ! {
     prompt();
 
     loop {
-        let Some(key) = kbd::pop() else {
+        let key = if let Some(k) = kbd::pop() {
+            k
+        } else if let Some(b) = crate::serial::read_byte() {
+            // A terminal speaks a slightly different dialect than the i8042
+            // driver: Enter arrives as CR, and Backspace as DEL. Translate here
+            // rather than in `read_byte`, because the keyboard's own DELETE key
+            // is a different key that happens to share the 0x7F code.
+            match b {
+                b'\r' => b'\n',
+                0x7F => 8,
+                other => other,
+            }
+        } else {
             // Nothing queued: idle until the next interrupt rather than
             // spinning. The timer alone wakes us 100 times a second.
             unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };
@@ -86,6 +98,9 @@ pub fn run(boot: &BootInfo, acpi: &Option<Acpi>) -> ! {
                         history.remove(0);
                     }
                 }
+                // Re-arm pacing per command, so a skip requested during one
+                // command's output does not silently disable it forever.
+                console::resume_pacing();
                 execute(trimmed, boot, acpi, &mut interp);
 
                 line.clear();
@@ -402,8 +417,33 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
     let cmd = parts.next().unwrap_or("");
     let rest = parts.next().unwrap_or("").trim();
 
+    // sysbox first: it owns a whole vocabulary of short names, and claiming
+    // them here keeps that list in one place instead of spreading twenty more
+    // arms across this match.
+    if crate::sysbox::dispatch(cmd, rest) {
+        return;
+    }
+
     match cmd {
         "" => {}
+        "typewriter" => {
+            match rest.parse::<u64>() {
+                Ok(us) => {
+                    console::set_pace(us);
+                    if us == 0 {
+                        kprintln!("  pacing off");
+                    } else {
+                        kprintln!("  {} us per character", us);
+                    }
+                }
+                Err(_) => {
+                    kprintln!("  {} us per character", console::pace_us());
+                    kprintln!("  'typewriter <us>' to change, 'typewriter 0' for instant");
+                    kprintln!("  any keypress skips pacing for the rest of a command");
+                }
+            }
+        }
+        "refresh" => console::redraw(),
         "help" => {
             console::set_color(YELLOW);
             kprintln!("commands");
@@ -422,6 +462,11 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             kprintln!("  words         list language builtins");
             kprintln!("  vars          list variables you have defined");
             kprintln!("  fault         deliberately dereference null");
+            kprintln!("  typewriter    output pacing, in us per character");
+            kprintln!("  refresh       repaint the console");
+            console::set_color(YELLOW);
+            kprintln!("\nsysbox owns the namespace -- type 'sysbox' for its applets");
+            console::set_color(WHITE);
             console::set_color(YELLOW);
             kprintln!("\nanything else is evaluated as code");
             console::set_color(WHITE);

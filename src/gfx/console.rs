@@ -1,14 +1,26 @@
 //! Scrolling text console on the linear framebuffer.
 //!
-//! Keeps a shadow character grid in RAM and re-renders on scroll. The
-//! alternative -- blitting the framebuffer up a row -- means *reading* video
-//! memory, which is painfully slow over the uncached MMIO aperture on real
-//! hardware. Re-rendering from RAM only touches the framebuffer with writes.
+//! Keeps a shadow character grid in RAM, which is what makes redrawing a cell
+//! possible without reading back what is on screen.
+//!
+//! Scrolling used to re-render every cell from that grid, on the reasoning that
+//! blitting the framebuffer up a row means *reading* video memory, which is
+//! ruinous across an uncached MMIO aperture. That reasoning was sound when it
+//! was written and stopped being true two milestones later: making all non-RAM
+//! uncacheable (to fix the IOAPIC reporting 120 redirection entries) forced an
+//! explicit write-back carve-out for the framebuffer in `build_identity_map`,
+//! and nothing came back here to say so. The cost was roughly two million
+//! serialised volatile stores per newline -- visible, at about ten lines a
+//! second on a 1920x1080 panel. `Framebuffer::scroll_up` now does it as one
+//! memmove.
+//!
+//! Pacing is therefore now deliberate rather than accidental: see `set_pace`.
 
 use super::font;
 use super::{Color, Framebuffer};
 use crate::sync::Racy;
 use core::fmt;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// Console colours, indexed by the 4-bit attribute stored per cell.
 pub const PALETTE: [Color; 16] = [
@@ -121,7 +133,12 @@ impl Console {
         }
     }
 
-    fn redraw_all(&self) {
+    /// Repaint every cell from the shadow grid.
+    ///
+    /// No longer on the scroll path, but the language's `rect` builtin draws
+    /// straight to the framebuffer and will happily scribble over text, so
+    /// there has to be a way back.
+    pub fn redraw_all(&self) {
         for r in 0..self.rows {
             for c in 0..self.cols {
                 self.draw_cell(r, c);
@@ -138,7 +155,13 @@ impl Console {
         }
         self.row = self.rows - 1;
         self.col = 0;
-        self.redraw_all();
+
+        // Shift pixels instead of re-rendering the grid. The region handed to
+        // scroll_up is the console's own area, not the whole panel: 1080 is not
+        // a multiple of the 16-pixel cell height, and the 8-pixel remainder at
+        // the bottom would otherwise be dragged up into the last text row.
+        let cell_h = font::GLYPH_H * self.scale;
+        self.fb.scroll_up(self.rows as u32 * cell_h, cell_h, self.bg);
     }
 
     fn newline(&mut self) {
@@ -203,9 +226,17 @@ impl Console {
         self.cols
     }
 
+    /// Bulk output. This is the path `kprintln!` takes, and the only one that
+    /// is paced -- `put_char` stays immediate because the shell's line editor
+    /// uses it to echo keystrokes and reposition the cursor, and pacing those
+    /// would just feel like input lag.
     pub fn write_bytes(&mut self, s: &[u8]) {
+        let pace = pace_us();
         for &b in s {
             self.put_char(b);
+            if pace != 0 && !skip_requested() {
+                crate::time::delay_us(pace);
+            }
         }
     }
 }
@@ -235,6 +266,57 @@ pub fn with<F: FnOnce(&mut Console)>(f: F) {
     if let Some(c) = unsafe { CONSOLE.get().as_mut() } {
         f(c);
     }
+}
+
+// --- pacing -------------------------------------------------------------
+//
+// With the scroll fixed, output is far faster than anyone can read. The old
+// pace was an artefact of a bug; this makes the same feel a choice, and a
+// tunable one. Kept as a global rather than a `Console` field so that
+// `write_bytes` can read it without the caller having to thread it through.
+
+/// Microseconds per character. Roughly reproduces the pace the broken scroll
+/// used to impose, which is the point -- it looked right.
+const DEFAULT_PACE_US: u64 = 1200;
+
+static PACE_US: AtomicU64 = AtomicU64::new(DEFAULT_PACE_US);
+static SKIP: AtomicBool = AtomicBool::new(false);
+
+pub fn pace_us() -> u64 {
+    PACE_US.load(Ordering::Relaxed)
+}
+
+/// 0 disables pacing entirely.
+pub fn set_pace(us: u64) {
+    PACE_US.store(us, Ordering::Relaxed);
+}
+
+/// Re-arm pacing. The shell calls this before each command, so a skip only
+/// ever applies to the output it was asked to skip.
+pub fn resume_pacing() {
+    SKIP.store(false, Ordering::Relaxed);
+}
+
+/// Has the operator asked to stop waiting?
+///
+/// A paced `tree` of a few hundred entries would otherwise hold the console
+/// hostage for a minute with no way out, which is the failure mode that makes
+/// deliberately slow output intolerable rather than charming. Any keystroke
+/// drops the pacing for the remainder of the current command; the keystroke
+/// itself stays in the buffer and is read as normal input afterwards.
+fn skip_requested() -> bool {
+    if SKIP.load(Ordering::Relaxed) {
+        return true;
+    }
+    if crate::dev::kbd::has_input() {
+        SKIP.store(true, Ordering::Relaxed);
+        return true;
+    }
+    false
+}
+
+pub fn redraw() {
+    with(|c| c.redraw_all());
 }
 
 pub fn set_color(fg: u8) {

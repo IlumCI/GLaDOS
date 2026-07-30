@@ -11,6 +11,7 @@
 
 use core::arch::asm;
 use core::fmt;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 const COM1: u16 = 0x3F8;
 
@@ -30,6 +31,15 @@ unsafe fn inb(port: u16) -> u8 {
     val
 }
 
+/// Set once `init` has confirmed a UART actually answers at 0x3F8.
+///
+/// Writes to an absent port are harmless, so output never needed this. Input
+/// does, and urgently: reads from an absent port return 0xFF, so the "data
+/// ready" bit of a UART that is not there is permanently set, and a polled
+/// reader would take 0xFF for a keystroke forever. On the GF63 -- which has no
+/// serial port -- that would wedge the shell.
+static PRESENT: AtomicBool = AtomicBool::new(false);
+
 /// Configure COM1 for 115200 8N1.
 pub fn init() {
     unsafe {
@@ -40,6 +50,36 @@ pub fn init() {
         outb(COM1 + 3, 0x03); // DLAB off, 8 bits, no parity, 1 stop
         outb(COM1 + 2, 0xC7); // enable + clear FIFOs, 14-byte trigger
         outb(COM1 + 4, 0x0B); // DTR, RTS, OUT2
+
+        // Presence check via the scratch register, which exists on a 16550 and
+        // nowhere on an empty bus. An absent port reads back 0xFF.
+        outb(COM1 + 7, 0xA5);
+        let present = inb(COM1 + 7) == 0xA5;
+        outb(COM1 + 7, 0x00);
+        PRESENT.store(present, Ordering::Relaxed);
+    }
+}
+
+pub fn is_present() -> bool {
+    PRESENT.load(Ordering::Relaxed)
+}
+
+/// Non-blocking read of one byte, or `None` if nothing is waiting.
+///
+/// This makes the serial port an input as well as an output, which is what
+/// lets the whole system be driven headlessly under QEMU -- no framebuffer, no
+/// emulated keystrokes, just a pipe. Everything the shell can do becomes
+/// scriptable and therefore testable.
+pub fn read_byte() -> Option<u8> {
+    if !is_present() {
+        return None;
+    }
+    unsafe {
+        // Line Status Register bit 0: data ready.
+        if inb(COM1 + 5) & 0x01 == 0 {
+            return None;
+        }
+        Some(inb(COM1))
     }
 }
 

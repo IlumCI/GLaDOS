@@ -148,12 +148,67 @@ impl Framebuffer {
 
     pub fn fill(&self, c: Color) {
         let raw = self.encode(c);
-        for y in 0..self.height {
-            let row = (y as usize) * (self.stride as usize);
-            for x in 0..self.width {
-                unsafe { write_volatile(self.base.add(row + x as usize), raw) }
+        if raw == 0 {
+            // The overwhelmingly common case, since the console background is
+            // black. `write_bytes` lowers to memset, which is an opaque call
+            // the optimiser cannot discard -- so it needs none of the volatile
+            // treatment below, and moves the whole screen in one pass.
+            let span = (self.height as usize) * (self.stride as usize);
+            unsafe { core::ptr::write_bytes(self.base, 0, span) };
+            return;
+        }
+        self.fill_rows(0, self.height, raw);
+    }
+
+    /// Paint `count` scan lines, starting at `y`, in an already-encoded colour.
+    fn fill_rows(&self, y: u32, count: u32, raw: u32) {
+        let end = y.saturating_add(count).min(self.height);
+        for row in y..end {
+            let off = (row as usize) * (self.stride as usize);
+            for x in 0..self.width as usize {
+                unsafe { write_volatile(self.base.add(off + x), raw) }
             }
         }
+    }
+
+    /// Shift the top `region_h` scan lines up by `pixels`, clearing what is
+    /// exposed at the bottom.
+    ///
+    /// The bulk move is `copy_within`, which lowers to memmove. That matters
+    /// for more than speed: memmove is an opaque call, so the optimiser will
+    /// not delete it the way it would delete a plain loop of non-volatile
+    /// stores into memory nothing appears to read. Only the newly exposed
+    /// strip is painted pixel by pixel, and that is one text row rather than a
+    /// screenful.
+    ///
+    /// This *reads* video memory, which was once the reason the console
+    /// re-rendered from its character grid instead of scrolling -- reads across
+    /// an uncached MMIO aperture are ruinous. That is no longer the situation:
+    /// `build_identity_map` gives the framebuffer aperture a write-back
+    /// mapping, so these are ordinary cached reads of stolen DRAM.
+    ///
+    /// `region_h` exists because the panel height is rarely a whole number of
+    /// text rows -- 1080 is not divisible by 16 -- and scrolling the leftover
+    /// strip at the bottom would drag it up into the last row.
+    pub fn scroll_up(&self, region_h: u32, pixels: u32, bg: Color) {
+        let region_h = region_h.min(self.height);
+        if pixels == 0 || region_h == 0 {
+            return;
+        }
+        let raw = self.encode(bg);
+        if pixels >= region_h {
+            self.fill_rows(0, region_h, raw);
+            return;
+        }
+
+        let stride = self.stride as usize;
+        let shift = (pixels as usize) * stride;
+        let span = (region_h as usize) * stride;
+        unsafe {
+            let buf = core::slice::from_raw_parts_mut(self.base, span);
+            buf.copy_within(shift..span, 0);
+        }
+        self.fill_rows(region_h - pixels, pixels, raw);
     }
 
     pub fn rect(&self, x: u32, y: u32, w: u32, h: u32, c: Color) {

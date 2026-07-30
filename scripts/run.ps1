@@ -82,6 +82,12 @@ if (-not $Ovmf -and -not $combined) {
     Write-Error "No UEFI firmware found in $share. Pass -Ovmf <path to edk2-x86_64-code.fd>."
 }
 
+# Scratch state for the guest: NVRAM, staged firmware, the NVMe image. Created
+# unconditionally -- it used to live inside the `if ($Ovmf)` branch below, which
+# left it undefined on the legacy combined-OVMF path.
+$qemuDir = Join-Path $root '.qemu'
+New-Item -ItemType Directory -Force -Path $qemuDir | Out-Null
+
 # Private, writable NVRAM. Never write the template in Program Files, and never
 # share one vars file between runs you want to be reproducible.
 $varsFile = $null
@@ -89,8 +95,6 @@ if ($Ovmf) {
     if (-not $varsTemplate) {
         Write-Error "Found $Ovmf but no matching vars image (edk2-i386-vars.fd) in $share."
     }
-    $qemuDir = Join-Path $root '.qemu'
-    New-Item -ItemType Directory -Force -Path $qemuDir | Out-Null
     $varsFile = Join-Path $qemuDir 'vars.fd'
     if (-not (Test-Path $varsFile)) {
         Copy-Item $varsTemplate $varsFile
@@ -155,8 +159,23 @@ if ($combined) {
     )
 }
 
+# A scratch NVMe namespace, so the store half of the system is exercisable here
+# rather than only on the laptop. The image has no partition table, which is the
+# case find_store_region falls back to -- unclaimed space on an unpartitioned
+# disk. The GF63 takes the other path, a partition tagged with our type GUID, so
+# neither branch gets to go untested.
+$nvmeImg = Join-Path $qemuDir 'nvme.img'
+if (-not (Test-Path $nvmeImg)) {
+    $fs = [System.IO.File]::Create($nvmeImg)
+    $fs.SetLength(64MB)   # sparse: costs no disk until written
+    $fs.Close()
+    Write-Host "created $nvmeImg (64 MiB)"
+}
+
 $qemuArgs += @(
     '-drive', "format=raw,file=fat:rw:$esp",
+    '-drive', "file=$nvmeImg,if=none,id=nvm0,format=raw",
+    '-device', 'nvme,serial=GLADOSQEMU0001,drive=nvm0',
     '-serial', 'stdio',
     '-net', 'none',
     # Stop on triple fault instead of rebooting forever. Without this, an early

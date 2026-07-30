@@ -27,7 +27,9 @@ mod serial;
 mod shell;
 mod store;
 mod sync;
+mod sysbox;
 mod task;
+mod time;
 mod uefi;
 
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -257,13 +259,23 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     // tool that only runs after a successful restore is useless on the day the
     // restore is what is broken.
     let damaged = init_storage(&acpi);
-    match recovery::maybe_enter(damaged) {
-        recovery::Outcome::Continue => {}
+    let restore = match recovery::maybe_enter(damaged) {
+        recovery::Outcome::Continue => true,
         recovery::Outcome::SkipRestore => {
             console::set_color(YELLOW);
             kprintln!("[boot] persistent state will not be restored this boot");
             console::set_color(LTGRAY_IDX);
+            false
         }
+    };
+
+    // The namespace exists whether or not there is a disk; a store only lets it
+    // outlive a reboot. Restoring is skipped when the recovery console said so,
+    // because "the last snapshot is what broke it" has to be a recoverable
+    // situation.
+    sysbox::init();
+    if restore {
+        sysbox::restore_latest();
     }
 
     shell::run(&boot, &acpi);
@@ -427,6 +439,15 @@ fn init_interrupts(acpi: &Option<acpi::Acpi>) {
     if dev::lapic::start_timer(TIMER_HZ) {
         cpu::enable_interrupts();
         kprintln!("  timer running at {} Hz, interrupts enabled", TIMER_HZ);
+
+        // Needs the timer already ticking and interrupts on, so it cannot move
+        // any earlier than this.
+        time::calibrate();
+        if time::is_calibrated() {
+            kprintln!("  tsc {} MHz", time::tsc_mhz());
+        } else {
+            kprintln!("  tsc not calibrated -- console pacing disabled");
+        }
     } else {
         console::set_color(LTRED);
         kprintln!("  could not program the timer");
@@ -622,6 +643,11 @@ fn selftest() {
     }
 
     console::set_color(LTGREEN);
+    kprintln!("\n[selftest] sysbox namespace:");
+    console::set_color(LTGRAY_IDX);
+    sysbox::selftest();
+
+    console::set_color(LTGREEN);
     kprintln!("\n[selftest] int3 should report and resume:");
     console::set_color(LTGRAY_IDX);
     unsafe {
@@ -705,6 +731,10 @@ fn banner(boot: &BootInfo, acpi: &Option<acpi::Acpi>) {
     }
 
     kprintln!("\n  boot services released, running on our own.");
+    kprintln!(
+        "  serial in   {}",
+        if serial::is_present() { "COM1 answers -- shell reads it" } else { "no UART" }
+    );
 
     // Pixel-format check. If Rgbx/Bgrx were misdetected, red and blue swap and
     // the bars below read blue-green-red instead. Faster to see than to reason
