@@ -171,6 +171,208 @@ pub fn run(boot: &BootInfo, acpi: &Option<Acpi>) -> ! {
     }
 }
 
+fn store_cmd(rest: &str) {
+    use crate::store::{self, cas, sha256};
+
+    match rest {
+        "" | "status" => {
+            console::set_color(YELLOW);
+            kprintln!("[store]");
+            console::set_color(WHITE);
+            let sha_ok = sha256::selftest();
+            console::set_color(if sha_ok { LTGREEN } else { LTRED });
+            kprintln!("  sha-256 vectors: {}", if sha_ok { "pass" } else { "FAIL" });
+            console::set_color(WHITE);
+            if !store::mounted() {
+                kprintln!("  not mounted. 'store init' to format free space.");
+                return;
+            }
+            store::with(|s| {
+                kprintln!(
+                    "  region lba {}..{}  seq {}  checkpoints {}",
+                    s.sb.region_start,
+                    s.sb.region_start + s.sb.region_blocks,
+                    s.sb.seq,
+                    s.sb.checkpoints
+                );
+                kprintln!(
+                    "  next free lba {}  ({} blocks left)",
+                    s.sb.alloc_next,
+                    s.free_blocks()
+                );
+                if s.sb.root.is_none() {
+                    kprintln!("  no checkpoints yet");
+                } else {
+                    let h = sha256::short_hex(&s.sb.root.hash);
+                    kprintln!(
+                        "  root {}  at lba {} ({} B)",
+                        core::str::from_utf8(&h).unwrap_or("?"),
+                        s.sb.root.lba,
+                        s.sb.root.len
+                    );
+                }
+            });
+        }
+
+        "init" => match store::init() {
+            Ok((start, blocks)) => {
+                console::set_color(LTGREEN);
+                kprintln!("  formatted lba {}..{} ({} blocks)", start, start + blocks, blocks);
+                console::set_color(LTRED);
+                kprintln!("  NVMe writes are now UNLOCKED for this session");
+                console::set_color(WHITE);
+            }
+            Err(e) => {
+                console::set_color(LTRED);
+                match e {
+                    store::InitError::NoRoom => {
+                        kprintln!("  no unclaimed space on this disk -- refusing to write");
+                        kprintln!("  (expected on a disk fully allocated to Windows)");
+                    }
+                    other => kprintln!("  init failed: {:?}", other),
+                }
+                console::set_color(WHITE);
+            }
+        },
+
+        "test" => {
+            if !store::mounted() {
+                console::set_color(LTRED);
+                kprintln!("  not mounted -- run 'store init' first");
+                console::set_color(WHITE);
+                return;
+            }
+            let ok = store::with(|s| {
+                let mut entries: alloc::vec::Vec<cas::Entry> = alloc::vec::Vec::new();
+                let payloads: [&[u8]; 3] = [
+                    b"the first blob",
+                    b"a second, longer blob that spans more of a block",
+                    b"third",
+                ];
+                for (i, p) in payloads.iter().enumerate() {
+                    match s.put(p) {
+                        Ok(c) => {
+                            let mut name = [0u8; cas::NAME_LEN];
+                            name[0] = b'b';
+                            name[1] = b'0' + i as u8;
+                            entries.push(cas::Entry { name, chunk: c });
+                        }
+                        Err(e) => {
+                            kprintln!("  put failed: {:?}", e);
+                            return false;
+                        }
+                    }
+                }
+                // Read back and verify content addressing before committing.
+                for (i, e) in entries.iter().enumerate() {
+                    match s.get(&e.chunk) {
+                        Ok(d) => {
+                            if d.as_slice() != payloads[i] {
+                                kprintln!("  blob {} round-trip MISMATCH", i);
+                                return false;
+                            }
+                        }
+                        Err(err) => {
+                            kprintln!("  get failed: {:?}", err);
+                            return false;
+                        }
+                    }
+                }
+                match s.commit(&entries) {
+                    Ok(r) => {
+                        let h = sha256::short_hex(&r.hash);
+                        kprintln!(
+                            "  committed {} entries, root {}",
+                            entries.len(),
+                            core::str::from_utf8(&h).unwrap_or("?")
+                        );
+                        true
+                    }
+                    Err(e) => {
+                        kprintln!("  commit failed: {:?}", e);
+                        false
+                    }
+                }
+            })
+            .unwrap_or(false);
+
+            console::set_color(if ok { LTGREEN } else { LTRED });
+            kprintln!("  {}", if ok { "put / get / commit verified" } else { "STORE TEST FAILED" });
+            console::set_color(WHITE);
+        }
+
+        "log" => {
+            if !store::mounted() {
+                kprintln!("  not mounted");
+                return;
+            }
+            store::with(|s| {
+                let mut r = s.sb.root;
+                let mut n = 0;
+                console::set_color(YELLOW);
+                kprintln!("  seq   root              entries");
+                console::set_color(WHITE);
+                while !r.is_none() && n < 32 {
+                    match s.read_manifest(&r) {
+                        Ok(m) => {
+                            let h = sha256::short_hex(&r.hash);
+                            kprintln!(
+                                "  {:<5} {}  {}",
+                                m.seq,
+                                core::str::from_utf8(&h).unwrap_or("?"),
+                                m.entries.len()
+                            );
+                            r = m.prev;
+                        }
+                        Err(e) => {
+                            console::set_color(LTRED);
+                            kprintln!("  chain broken: {:?}", e);
+                            console::set_color(WHITE);
+                            break;
+                        }
+                    }
+                    n += 1;
+                }
+                if n == 0 {
+                    kprintln!("  (no checkpoints)");
+                }
+            });
+        }
+
+        "rollback" => {
+            if !store::mounted() {
+                kprintln!("  not mounted");
+                return;
+            }
+            store::with(|s| match s.read_manifest(&s.sb.root) {
+                Ok(m) => {
+                    if m.prev.is_none() {
+                        kprintln!("  already at the first checkpoint");
+                        return;
+                    }
+                    match s.rollback_to(m.prev) {
+                        Ok(()) => {
+                            console::set_color(LTGREEN);
+                            kprintln!("  rolled back to seq {}", s.sb.seq);
+                            console::set_color(WHITE);
+                            kprintln!("  nothing was erased; roll forward is still possible");
+                        }
+                        Err(e) => kprintln!("  rollback failed: {:?}", e),
+                    }
+                }
+                Err(e) => kprintln!("  cannot read current manifest: {:?}", e),
+            });
+        }
+
+        other => {
+            console::set_color(LTRED);
+            kprintln!("  unknown: store {}", other);
+            console::set_color(WHITE);
+            kprintln!("  store [status|init|test|log|rollback]");
+        }
+    }
+}
+
 fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::Interp) {
     let mut parts = line.splitn(2, ' ');
     let cmd = parts.next().unwrap_or("");
@@ -424,6 +626,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
                 }
             }
         }
+        "store" => store_cmd(rest),
         "cpu" => {
             let max_ext = crate::cpu::cpuid(0x8000_0000, 0)[0];
             if max_ext >= 0x8000_0004 {
