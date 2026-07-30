@@ -44,6 +44,23 @@ function Invoke-Diskpart {
     finally { if (Test-Path $file) { Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue } }
 }
 
+# GPT partition type GUIDs.
+$GUID_BASIC = 'ebd0a0a2-b9e5-4433-87c0-68b6b72699c7'
+$GUID_ESP   = 'c12a7328-f81f-11d2-ba4b-00a0c93ec93b'
+
+function Set-PartType {
+    param([int]$Disk, [int]$Part, [string]$Guid)
+    Invoke-Diskpart @("select disk $Disk", "select partition $Part", "set id=$Guid") | Out-Null
+    Start-Sleep -Seconds 1
+}
+
+function Set-PartLetter {
+    param([int]$Disk, [int]$Part, [string]$Letter)
+    # Errors here are expected and harmless when the letter is already assigned.
+    Invoke-Diskpart @("select disk $Disk", "select partition $Part", "assign letter=$Letter") | Out-Null
+    Start-Sleep -Seconds 1
+}
+
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = New-Object Security.Principal.WindowsPrincipal($identity)
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -107,15 +124,44 @@ $vol = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='${EspLetter}:'" -Err
 if ($vol -and $vol.FileSystem -match 'FAT') {
     Write-Host "already FAT ($($vol.FileSystem)); leaving it alone." -ForegroundColor Green
 } else {
+    # Windows will not write a filesystem to a partition typed as an EFI System
+    # Partition. format.com reports "Invalid media or Track 0 bad - disk
+    # unusable", which reads like failing hardware and is actually a protection
+    # policy; diskpart's own format fails on the same partition for the same
+    # reason, with an equally unhelpful message.
+    #
+    # So: retype to Basic Data, format as ordinary FAT32, retype back. Only the
+    # GPT type field changes -- the filesystem written is byte-identical, and
+    # firmware locates the ESP by exactly that field, so the end result is a
+    # perfectly ordinary ESP.
+    Write-Host "retyping to Basic Data so Windows will format it ..." -ForegroundColor Yellow
+    Set-PartType -Disk $diskNumber -Part $espIndex -Guid $GUID_BASIC
+    Set-PartLetter -Disk $diskNumber -Part $espIndex -Letter $EspLetter
+
     # `echo Y|` covers builds whose format.com still prompts despite /Y.
     $fmt = & cmd.exe /c "echo Y| format ${EspLetter}: /FS:FAT32 /Q /V:SANCTUM /Y 2>&1"
     Write-Host ($fmt | Out-String)
     Start-Sleep -Seconds 2
+
     $vol = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='${EspLetter}:'" -ErrorAction SilentlyContinue
     if (-not $vol -or $vol.FileSystem -notmatch 'FAT') {
-        Write-Error "Format did not produce a FAT filesystem on ${EspLetter}:."
+        Write-Warning "Format failed even as Basic Data. Restoring the ESP type before giving up."
+        Set-PartType -Disk $diskNumber -Part $espIndex -Guid $GUID_ESP
+        Write-Error "Could not create a FAT filesystem on ${EspLetter}:."
     }
     Write-Host "formatted: $($vol.FileSystem)" -ForegroundColor Green
+
+    Write-Host "restoring the EFI System Partition type ..." -ForegroundColor Yellow
+    Set-PartType -Disk $diskNumber -Part $espIndex -Guid $GUID_ESP
+    Set-PartLetter -Disk $diskNumber -Part $espIndex -Letter $EspLetter
+
+    $check = Get-CimInstance Win32_DiskPartition |
+        Where-Object { $_.DiskIndex -eq $diskNumber -and $_.Type -match 'System' }
+    if ($check) {
+        Write-Host "ESP type restored." -ForegroundColor Green
+    } else {
+        Write-Warning "The partition is no longer typed as System. Firmware finds the ESP by that type."
+    }
 }
 
 # --- 4. reserved partition from whatever is left ---
