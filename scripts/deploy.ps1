@@ -54,9 +54,19 @@ if ($vol) {
 
 Push-Location $root
 try {
+    # cargo writes progress ("Compiling glados ...") to stderr, and under
+    # $ErrorActionPreference = 'Stop' PowerShell turns native stderr into a
+    # terminating error. That made this script abort on any build that was not
+    # already cached -- it only ever appeared to work because the build was
+    # usually up to date. Relax the preference around cargo and judge it by its
+    # exit code, which is the only thing that actually means failure.
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
     if ($Release) { cargo build --release; $profileDir = 'release' }
     else          { cargo build;           $profileDir = 'debug'   }
-    if ($LASTEXITCODE -ne 0) { Write-Error "cargo build failed" }
+    $code = $LASTEXITCODE
+    $ErrorActionPreference = $prev
+    if ($code -ne 0) { Write-Error "cargo build failed (exit $code)" }
 } finally {
     Pop-Location
 }

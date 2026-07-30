@@ -110,6 +110,10 @@ if ($Ovmf) {
 # --- build ---
 Push-Location $root
 try {
+    # See deploy.ps1: cargo's progress output goes to stderr, which under
+    # 'Stop' becomes a terminating error on any non-cached build.
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
     if ($Release) {
         cargo build --release
         $profileDir = 'release'
@@ -117,7 +121,9 @@ try {
         cargo build
         $profileDir = 'debug'
     }
-    if ($LASTEXITCODE -ne 0) { Write-Error "cargo build failed" }
+    $code = $LASTEXITCODE
+    $ErrorActionPreference = $prev
+    if ($code -ne 0) { Write-Error "cargo build failed (exit $code)" }
 } finally {
     Pop-Location
 }
