@@ -38,13 +38,18 @@ if ($EspDrive -ieq $env:SystemDrive) {
     Write-Error "Refusing to deploy to the system drive ($EspDrive)."
 }
 
-$vol = Get-Volume -DriveLetter $EspDrive.Substring(0,1) -ErrorAction SilentlyContinue
+# Win32_LogicalDisk, not Get-Volume: the Storage cmdlets query the
+# root\Microsoft\Windows\Storage namespace, which does not answer on this
+# trimmed IoT Enterprise LTSC image. CIMv2 works.
+$vol = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$EspDrive'" -ErrorAction SilentlyContinue
 if ($vol) {
-    Write-Host ("target : {0}  fs={1}  size={2:N1} GB  free={3:N1} GB" -f `
-        $EspDrive, $vol.FileSystem, ($vol.Size/1GB), ($vol.SizeRemaining/1GB))
+    Write-Host ("target : {0}  fs={1}  size={2:N2} GB  free={3:N2} GB" -f `
+        $EspDrive, $vol.FileSystem, ($vol.Size/1GB), ($vol.FreeSpace/1GB))
     if ($vol.FileSystem -and $vol.FileSystem -notmatch 'FAT') {
         Write-Warning "$EspDrive is $($vol.FileSystem), not FAT. UEFI only boots FAT12/16/32."
     }
+} else {
+    Write-Warning "Could not read volume info for $EspDrive. Continuing anyway."
 }
 
 Push-Location $root
