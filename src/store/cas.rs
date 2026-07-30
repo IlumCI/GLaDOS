@@ -185,10 +185,7 @@ pub struct Store {
 impl Store {
     /// Format a region. Refuses to touch anything a partition claims.
     pub fn format(region_start: u64, region_blocks: u64) -> Result<Self, Error> {
-        let layout = block::scan().map_err(Error::Io)?;
-        if layout.overlaps(region_start, region_blocks).is_some() {
-            return Err(Error::Unsafe);
-        }
+        verify_region_safe(region_start, region_blocks)?;
         if region_blocks < 8 {
             return Err(Error::Full);
         }
@@ -351,6 +348,62 @@ impl Store {
         self.sb = sb;
         Ok(())
     }
+}
+
+/// Confirm a region is one we are allowed to write to.
+///
+/// Two acceptable cases: it overlaps no partition at all, or it lies entirely
+/// inside a partition tagged as ours. Everything else is refused, including
+/// spilling past the end of our own partition into a neighbour.
+///
+/// Kept separate from `format` because unlocking writes on an already-mounted
+/// store has to make exactly the same check, and a safety test that exists in
+/// two copies eventually exists in two versions.
+pub fn verify_region_safe(region_start: u64, region_blocks: u64) -> Result<(), Error> {
+    let layout = block::scan().map_err(Error::Io)?;
+    if let Some(p) = layout.overlaps(region_start, region_blocks) {
+        if p.type_guid != GLADOS_TYPE_GUID
+            || region_start < p.start_lba
+            || region_start + region_blocks > p.end_lba()
+        {
+            return Err(Error::Unsafe);
+        }
+    }
+    Ok(())
+}
+
+/// GPT type GUID for a GLaDOS store partition, in on-disk mixed-endian form.
+///
+/// Text form: b7e1f4a2-9c3d-4e58-a061-2f8d7c4b93e5
+///
+/// Tagging the partition means the store is found by *identity* rather than by
+/// inferring which space looks unused. That matters on a disk that is fully
+/// allocated: the space freed by shrinking C: lands between C: and the
+/// recovery partition, not at the end of the disk, so "unclaimed tail" finds
+/// nothing. It is also simply safer -- an explicit tag cannot be confused with
+/// a region some vendor tool quietly uses without declaring a partition.
+pub const GLADOS_TYPE_GUID: [u8; 16] = [
+    0xa2, 0xf4, 0xe1, 0xb7, 0x3d, 0x9c, 0x58, 0x4e, 0xa0, 0x61, 0x2f, 0x8d, 0x7c, 0x4b, 0x93, 0xe5,
+];
+
+/// Where the checkpoint store lives.
+///
+/// A partition tagged as ours is preferred and is the real answer on hardware.
+/// The unclaimed-tail fallback exists so a bare QEMU image works without
+/// anyone having to build a partition table first.
+pub fn find_store_region(min_blocks: u64) -> Option<(u64, u64)> {
+    if let Ok(layout) = block::scan() {
+        if let Some(p) = layout
+            .partitions
+            .iter()
+            .find(|p| p.type_guid == GLADOS_TYPE_GUID)
+        {
+            if p.block_count >= min_blocks {
+                return Some((p.start_lba, p.block_count));
+            }
+        }
+    }
+    find_free_region(min_blocks)
 }
 
 /// Choose a region beyond every partition.

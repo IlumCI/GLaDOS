@@ -139,6 +139,7 @@ const GUID_LINUX_FS: [u8; 16] = [
 
 fn gpt_type_name(g: &[u8; 16]) -> &'static str {
     match *g {
+        super::cas::GLADOS_TYPE_GUID => "GLaDOS store",
         GUID_ESP => "EFI System",
         GUID_MS_BASIC => "Microsoft basic data",
         GUID_MS_RESERVED => "Microsoft reserved",

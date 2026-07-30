@@ -1,4 +1,4 @@
-//! glados -- a from-scratch ring-0 operating system for the MSI MS-16R8.
+﻿//! glados -- a from-scratch ring-0 operating system for the MSI MS-16R8.
 //!
 //! There is no bootloader stage. UEFI has already put us in long mode, at
 //! CPL 0, with an identity map, so this UEFI application simply *is* the
@@ -300,10 +300,11 @@ fn init_storage(acpi: &Option<acpi::Acpi>) -> bool {
         }
     }
 
-    // The store lives at a deterministic location -- the same one
-    // find_free_region would choose -- so mounting needs nothing recorded
-    // anywhere else. Read-only: mounting never writes.
-    match store::cas::find_free_region(store::MIN_REGION_BLOCKS) {
+    // The store's location is derived, not remembered: a partition tagged with
+    // the GLaDOS type GUID if one exists, otherwise unclaimed space. So
+    // mounting needs nothing recorded anywhere else. Read-only -- mounting
+    // never writes.
+    match store::cas::find_store_region(store::MIN_REGION_BLOCKS) {
         Some((start, _)) => match store::mount(start) {
             Ok(()) => {
                 let mut bad = false;

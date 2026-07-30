@@ -235,10 +235,34 @@ fn store_cmd(rest: &str) {
             }
         },
 
+        "unlock" => match store::unlock() {
+            Ok((start, blocks)) => {
+                console::set_color(LTRED);
+                kprintln!("  writes UNLOCKED for lba {}..{}", start, start + blocks);
+                console::set_color(WHITE);
+                kprintln!("  region re-checked against the partition table first");
+            }
+            Err(e) => {
+                console::set_color(LTRED);
+                match e {
+                    cas::Error::Unsafe => kprintln!("  region overlaps a partition that is not ours -- refusing"),
+                    cas::Error::NotFormatted => kprintln!("  no store mounted"),
+                    other => kprintln!("  {:?}", other),
+                }
+                console::set_color(WHITE);
+            }
+        },
+
         "test" => {
             if !store::mounted() {
                 console::set_color(LTRED);
                 kprintln!("  not mounted -- run 'store init' first");
+                console::set_color(WHITE);
+                return;
+            }
+            if !crate::dev::nvme::writes_unlocked() {
+                console::set_color(LTRED);
+                kprintln!("  writes are locked -- run 'store unlock' first");
                 console::set_color(WHITE);
                 return;
             }
@@ -368,7 +392,7 @@ fn store_cmd(rest: &str) {
             console::set_color(LTRED);
             kprintln!("  unknown: store {}", other);
             console::set_color(WHITE);
-            kprintln!("  store [status|init|test|log|rollback]");
+            kprintln!("  store [status|init|unlock|test|log|rollback]");
         }
     }
 }
