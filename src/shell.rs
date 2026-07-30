@@ -627,6 +627,11 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             }
         }
         "store" => store_cmd(rest),
+        "recovery" => {
+            // Available from the shell too, but the boot-time path is the one
+            // that matters -- this is a convenience, not the design.
+            let _ = crate::recovery::console();
+        }
         "cpu" => {
             let max_ext = crate::cpu::cpuid(0x8000_0000, 0)[0];
             if max_ext >= 0x8000_0004 {

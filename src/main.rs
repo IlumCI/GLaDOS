@@ -22,6 +22,7 @@ mod dev;
 mod gfx;
 mod lang;
 mod mem;
+mod recovery;
 mod serial;
 mod shell;
 mod store;
@@ -251,7 +252,81 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     task::enable();
     kprintln!("  preemption enabled at {} Hz", TIMER_HZ);
 
+    // Storage comes up before anything is restored, and the recovery console
+    // gets its chance before that too. Ordering is the whole point: a repair
+    // tool that only runs after a successful restore is useless on the day the
+    // restore is what is broken.
+    let damaged = init_storage(&acpi);
+    match recovery::maybe_enter(damaged) {
+        recovery::Outcome::Continue => {}
+        recovery::Outcome::SkipRestore => {
+            console::set_color(YELLOW);
+            kprintln!("[boot] persistent state will not be restored this boot");
+            console::set_color(LTGRAY_IDX);
+        }
+    }
+
     shell::run(&boot, &acpi);
+}
+
+/// Bring up NVMe and attach to an existing checkpoint store, if there is one.
+///
+/// Returns true if the store exists but does not verify, which is the
+/// condition that forces the recovery console open without being asked.
+fn init_storage(acpi: &Option<acpi::Acpi>) -> bool {
+    console::set_color(YELLOW);
+    kprintln!("\n[storage]");
+    console::set_color(LTGRAY_IDX);
+
+    let Some(ecam) = acpi.as_ref().and_then(|a| a.mcfg) else {
+        kprintln!("  no ECAM, so no PCIe enumeration");
+        return false;
+    };
+
+    match dev::nvme::init(ecam) {
+        Ok(()) => {
+            dev::nvme::with(|n| {
+                kprintln!(
+                    "  nvme {} blocks x {} B = {} MiB",
+                    n.block_count,
+                    n.block_size,
+                    n.capacity_bytes() / (1024 * 1024)
+                );
+            });
+        }
+        Err(e) => {
+            kprintln!("  no NVMe controller ({:?})", e);
+            return false;
+        }
+    }
+
+    // The store lives at a deterministic location -- the same one
+    // find_free_region would choose -- so mounting needs nothing recorded
+    // anywhere else. Read-only: mounting never writes.
+    match store::cas::find_free_region(store::MIN_REGION_BLOCKS) {
+        Some((start, _)) => match store::mount(start) {
+            Ok(()) => {
+                let mut bad = false;
+                store::with(|s| {
+                    kprintln!("  store at lba {}, seq {}, {} commits", start, s.sb.seq, s.sb.checkpoints);
+                    // Cheap integrity probe: the root manifest must be
+                    // readable and must match its own hash.
+                    if !s.sb.root.is_none() && s.read_manifest(&s.sb.root).is_err() {
+                        bad = true;
+                    }
+                });
+                bad
+            }
+            Err(_) => {
+                kprintln!("  no store here yet ('store init' to create one)");
+                false
+            }
+        },
+        None => {
+            kprintln!("  no unclaimed space for a store on this disk");
+            false
+        }
+    }
 }
 
 static CLOCK_ITERS: AtomicU64 = AtomicU64::new(0);
