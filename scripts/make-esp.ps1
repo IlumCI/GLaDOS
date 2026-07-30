@@ -94,14 +94,25 @@ if ($parts[0].Type -notmatch 'GPT') {
     Write-Error "Disk $diskNumber partition type is '$($parts[0].Type)', not GPT. An ESP needs GPT."
 }
 
-# WMI numbers partitions from 0; diskpart numbers them from 1.
+# The volume to shrink is identified by DRIVE LETTER, never by a partition
+# index derived from WMI.
+#
+# Those two providers do not enumerate the same set of partitions. Win32_-
+# DiskPartition does not report Microsoft Reserved partitions; diskpart does.
+# On this disk WMI reports one partition while diskpart reports two, so
+# "WMI partition 0" is diskpart's partition 2, and converting between them by
+# adding one selects the 15 MB Reserved partition instead of the 976 GB data
+# volume. `select volume D` has no such ambiguity.
 $dataWmi = $parts | Sort-Object Size -Descending | Select-Object -First 1
-$dataIndex = [int]($dataWmi.Name -replace '.*Partition\s*#','') + 1
 
 $letterMap = Get-CimInstance Win32_LogicalDiskToPartition | Where-Object {
     $_.Antecedent.DeviceID -eq $dataWmi.DeviceID
 }
-$dataLetter = if ($letterMap) { $letterMap.Dependent.DeviceID } else { '(none)' }
+if (-not $letterMap) {
+    Write-Error "The data partition on disk $diskNumber has no drive letter, so it cannot be selected unambiguously. Assign one and retry."
+}
+$dataLetter = $letterMap.Dependent.DeviceID   # e.g. 'D:'
+$dataVolume = $dataLetter.TrimEnd(':')        # e.g. 'D'
 
 # --- pick a free drive letter for the ESP ---
 if (-not $EspLetter) {
@@ -119,7 +130,7 @@ Write-Host "serial         : $($target.SerialNumber.Trim())"
 Write-Host "interface      : $($target.InterfaceType)"
 Write-Host ("size           : {0:N2} GB" -f ($target.Size/1GB))
 Write-Host ''
-Write-Host ("shrink         : partition $dataIndex ($dataLetter) by {0:N1} GB, from {1:N1} GB" -f `
+Write-Host ("shrink         : volume $dataLetter by {0:N1} GB, from {1:N1} GB" -f `
     ($shrinkMB/1024), ($dataWmi.Size/1GB))
 Write-Host "create         : $EspSizeMB MB FAT32 EFI System Partition, letter $EspLetter"
 Write-Host "create         : $ReservedSizeMB MB unformatted, reserved for the sanctum filesystem"
@@ -137,11 +148,22 @@ if ($detail -notmatch [regex]::Escape($modelToken)) {
 if ($detail -match 'Boot Disk\s*:\s*Yes' -or $detail -match 'Pagefile Disk\s*:\s*Yes') {
     Write-Error "diskpart reports disk $diskNumber as a boot or pagefile disk. Refusing."
 }
-Write-Host "diskpart agrees this is $modelToken and it is not the boot disk." -ForegroundColor Green
+if ($detail -notmatch "(?m)^\s*Volume\s+\d+\s+$dataVolume\s") {
+    Write-Error "diskpart does not show volume $dataLetter on disk $diskNumber. Refusing."
+}
+Write-Host "diskpart agrees this is $modelToken, holds $dataLetter, and is not the boot disk." -ForegroundColor Green
+
+# Informational: show where the two providers disagree, so the mismatch that
+# motivated selecting by letter is visible rather than merely commented.
+$dpCount = ([regex]::Matches($detail, "(?m)^\s*Partition\s+\d+\s")).Count
+if ($dpCount -ne $parts.Count) {
+    Write-Host ("note: diskpart sees {0} partitions, WMI sees {1}. Selecting by drive letter, not index." -f `
+        $dpCount, $parts.Count) -ForegroundColor Yellow
+}
 
 $script = @(
     "select disk $diskNumber",
-    "select partition $dataIndex",
+    "select volume $dataVolume",
     "shrink desired=$shrinkMB minimum=$shrinkMB",
     "create partition efi size=$EspSizeMB",
     "format fs=fat32 quick label=SANCTUM",
