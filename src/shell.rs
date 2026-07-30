@@ -444,6 +444,18 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             }
         }
         "refresh" => console::redraw(),
+        "act" => {
+            // Read-only unless explicitly told otherwise, and "trusted" has to
+            // be typed in full. The distinction is enforced in the grammar, not
+            // after the fact: with ReadOnly the mutating applets are not
+            // reachable outputs at all.
+            let (trust, task) = match rest.strip_prefix("trusted ") {
+                Some(t) => (crate::ai::harness::Trust::Full, t.trim()),
+                None => (crate::ai::harness::Trust::ReadOnly, rest),
+            };
+            let task = if task.is_empty() { "look at the files" } else { task };
+            crate::ai::harness::report(task, trust, 1.0);
+        }
         "gen" => {
             // `gen -t 0 once upon a time` -- flags first, everything after is
             // the prompt verbatim, so it can contain spaces without quoting.

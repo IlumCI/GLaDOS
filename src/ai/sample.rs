@@ -54,6 +54,50 @@ pub fn sample(logits: &mut [f32], temperature: f32, topp: f32, rng: &mut Rng) ->
     }
 }
 
+/// Sample restricted to `allowed`, which holds token ids.
+///
+/// Deliberately not implemented by masking the disallowed entries of `logits`
+/// to negative infinity. That is the usual trick, and it leans on softmax
+/// behaving at extreme inputs -- but `tensor::expf` is our own approximation,
+/// not libm, and its behaviour far outside the useful range is not something
+/// correctness should rest on. Gathering the candidates and normalising over
+/// just those is both exactly right and cheaper, since the candidate set is
+/// typically a handful of tokens out of thousands.
+///
+/// Returns `None` only when `allowed` is empty, which means the caller's
+/// grammar has no way forward and must fail rather than sample freely.
+pub fn sample_among(
+    logits: &[f32],
+    allowed: &[u32],
+    temperature: f32,
+    topp: f32,
+    rng: &mut Rng,
+) -> Option<usize> {
+    if allowed.is_empty() {
+        return None;
+    }
+    if temperature <= 0.0 {
+        let mut best = allowed[0] as usize;
+        for &i in allowed {
+            if logits[i as usize] > logits[best] {
+                best = i as usize;
+            }
+        }
+        return Some(best);
+    }
+
+    let mut probs: Vec<f32> =
+        allowed.iter().map(|&i| logits[i as usize] / temperature).collect();
+    tensor::softmax(&mut probs);
+
+    let pick = if topp <= 0.0 || topp >= 1.0 {
+        multinomial(&probs, rng.next_f32())
+    } else {
+        nucleus(&probs, topp, rng.next_f32())
+    };
+    Some(allowed[pick] as usize)
+}
+
 fn multinomial(probs: &[f32], coin: f32) -> usize {
     let mut cdf = 0.0;
     for (i, p) in probs.iter().enumerate() {

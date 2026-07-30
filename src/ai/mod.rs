@@ -1,5 +1,7 @@
 //! Machine learning primitives.
 
+pub mod constrain;
+pub mod harness;
 pub mod model;
 pub mod sample;
 pub mod tensor;
@@ -451,8 +453,14 @@ pub fn init(model_blob: Option<Blob>, tok_blob: Option<Blob>) {
     unsafe { *ENGINE.get() = Some(Engine { model: m, tok, state, rng: sample::Rng::new(seed) }) };
 
     console::set_color(LTGREEN);
-    kprintln!("  ready -- 'gen <prompt>' to generate");
+    kprintln!("  ready -- 'gen <prompt>' to generate, 'act <task>' to choose an applet");
     console::set_color(LTGRAY);
+
+    kprintln!();
+    console::set_color(LTGREEN);
+    kprintln!("[selftest] constrained decoding:");
+    console::set_color(LTGRAY);
+    harness::selftest();
 }
 
 /// Write raw token bytes to the console.
