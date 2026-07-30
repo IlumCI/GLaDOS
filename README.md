@@ -84,6 +84,33 @@ Surveyed from the running Windows install, not assumed.
 | Keyboard | **i8042** (`ACPI\MSI0007`) — ports `0x60`/`0x64`. Most 2022 laptops route the internal keyboard over USB-HID, which would mean an xHCI + HID stack before you could type one character. This one does not |
 | Storage | Boots from a USB SSD. UEFI's own drivers load us *before* `ExitBootServices`, so no USB driver is needed to boot. Persistence in M6 targets the internal NVMe (~600 lines) rather than USB Mass Storage (several times that) |
 
+## The boot disk is counterfeit
+
+The USB SSD advertises **976.56 GB** and actually holds **14.67 GB**. It was
+sold with a generic `VendorCo ProductCode` bridge, and the controller accepts
+writes past the real end of flash, discards them, and returns garbage on read.
+
+This was not obvious. It presented as a series of unrelated Windows failures —
+`diskpart` refusing to format, then `format.com` reporting *"Invalid media or
+Track 0 bad - disk unusable"* — because every failing write happened to be at
+the 966 GB mark, where the original shrink-based layout put the ESP.
+`scripts/probe-media.ps1` settled it by writing a self-identifying pattern and
+reading it back; `scripts/find-capacity.ps1` binary-searched the boundary in
+15 probes.
+
+Consequences baked into `scripts/build-layout.ps1`:
+
+- **MBR, not GPT.** GPT keeps a backup header and partition array in the last
+  sectors of the *reported* size — 976 GB, inside flash that does not exist.
+  The disk would be permanently missing half its partition table. MBR keeps
+  everything in LBA 0.
+- **ESP first, at 1 MB**, in the most thoroughly verified region.
+- Everything above the layout is left unpartitioned so Windows never offers
+  the fictional capacity to anything.
+
+Do not put anything you care about on this device. It is acceptable as a boot
+target only because the entire payload is a 77 KB file reproducible from git.
+
 ## Two bugs worth remembering
 
 **`extern "C"` on this target is Microsoft x64, not System V.**
