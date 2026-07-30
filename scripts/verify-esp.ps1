@@ -62,12 +62,20 @@ $detail = (& diskpart.exe /s $dpFile | Out-String)
 if (Test-Path $dpFile) { Remove-Item -LiteralPath $dpFile -Force -ErrorAction SilentlyContinue }
 Write-Host $detail
 
-# c12a7328-f81f-11d2-ba4b-00a0c93ec93b is the EFI System Partition type GUID.
-$espOk = $detail -match 'c12a7328-f81f-11d2-ba4b-00a0c93ec93b'
-if ($espOk) {
-    Write-Host "ESP type GUID present." -ForegroundColor Green
+# An ESP is marked one of two ways depending on the partitioning scheme:
+#   GPT: type GUID c12a7328-f81f-11d2-ba4b-00a0c93ec93b
+#   MBR: partition type byte 0xEF
+# This disk uses MBR, because a GPT backup header would land in the counterfeit
+# region past 14.67 GB. Accept either.
+$espGpt = $detail -match 'c12a7328-f81f-11d2-ba4b-00a0c93ec93b'
+$espMbr = $detail -match '(?im)^\s*Type\s*:\s*EF\s*$'
+if ($espGpt) {
+    Write-Host "GPT EFI System Partition type GUID present." -ForegroundColor Green
+} elseif ($espMbr) {
+    Write-Host "MBR partition type 0xEF (EFI System) present." -ForegroundColor Green
 } else {
-    Write-Warning "Did not see the ESP type GUID. Firmware locates the ESP by this GUID, so this matters."
+    Write-Warning "Neither the GPT ESP GUID nor MBR type 0xEF was found."
+    Write-Warning "Some firmware still boots any FAT partition on removable media, so this is not fatal -- check 3 is the real test."
 }
 
 $vol = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$EspDrive'" -ErrorAction SilentlyContinue
