@@ -213,6 +213,63 @@ pub fn enable_simd() -> Features {
     f
 }
 
+/// Bytes needed to hold this CPU's extended state.
+///
+/// Queried, never hardcoded. `XSAVE` writes as much as `XCR0` enables, so a
+/// buffer sized for `fxsave` (512 B) overflows by ~320 bytes the moment AVX is
+/// on -- straight into whatever the heap placed next. That corruption surfaces
+/// far from its cause, which is the worst possible property for a bug in the
+/// scheduler.
+///
+/// CPUID.0DH:ECX reports the maximum for every feature the CPU supports,
+/// which is an upper bound on what our XCR0 can ever ask for.
+pub fn xsave_area_size() -> usize {
+    let f = detected();
+    if !f.avx_enabled {
+        return 512; // fxsave region
+    }
+    let r = cpuid(0x0D, 0);
+    let max = r[2] as usize;
+    // Floor at 1 KiB: a CPU reporting something implausibly small should not
+    // be able to talk us into a too-small buffer.
+    if max < 1024 {
+        1024
+    } else {
+        max
+    }
+}
+
+/// The state components we manage: x87, SSE, and AVX's upper halves.
+const XSTATE_MASK: u32 = 0b111;
+
+/// # Safety
+/// `area` must be writable, at least `xsave_area_size()` bytes, and 64-byte
+/// aligned.
+pub unsafe fn xsave_to(area: *mut u8) {
+    unsafe {
+        if detected().avx_enabled {
+            asm!("xsave [{}]", in(reg) area, in("eax") XSTATE_MASK, in("edx") 0u32, options(nostack));
+        } else {
+            asm!("fxsave [{}]", in(reg) area, options(nostack));
+        }
+    }
+}
+
+/// # Safety
+/// `area` must hold a state image previously written by `xsave_to`, or be
+/// zeroed. A zeroed image has `XSTATE_BV = 0`, which `XRSTOR` reads as
+/// "set every component to its initial state" -- exactly what a new task
+/// wants. Garbage in the header raises #GP instead.
+pub unsafe fn xrstor_from(area: *const u8) {
+    unsafe {
+        if detected().avx_enabled {
+            asm!("xrstor [{}]", in(reg) area, in("eax") XSTATE_MASK, in("edx") 0u32, options(nostack));
+        } else {
+            asm!("fxrstor [{}]", in(reg) area, options(nostack));
+        }
+    }
+}
+
 /// Reset the machine.
 ///
 /// Tries the keyboard controller's reset line first, which is the historical

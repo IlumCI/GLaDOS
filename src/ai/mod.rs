@@ -2,6 +2,51 @@
 
 pub mod tensor;
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
+static FPU_CHECKS: AtomicU64 = AtomicU64::new(0);
+static FPU_ERRORS: AtomicU64 = AtomicU64::new(0);
+
+pub fn fpu_checks() -> u64 {
+    FPU_CHECKS.load(Ordering::Relaxed)
+}
+
+pub fn fpu_errors() -> u64 {
+    FPU_ERRORS.load(Ordering::Relaxed)
+}
+
+/// Hold a caller-specific pattern in YMM registers across a spin, then verify
+/// it survived. Returns false if the registers were clobbered.
+///
+/// Called continuously by the clock task with one pattern while the shell runs
+/// tensor work with entirely different values in the same registers. With
+/// extended state saved on context switch this never fails; without it, the
+/// error count climbs the moment both tasks touch floating point.
+pub fn fpu_guard(tag: f32) -> bool {
+    let f = crate::cpu::detected();
+    if !f.avx_enabled {
+        return true;
+    }
+    let mut input = [0.0f32; 32];
+    for (i, v) in input.iter_mut().enumerate() {
+        *v = tag + i as f32 * 0.25;
+    }
+    let mut output = [0.0f32; 32];
+    // The spin has to dominate this task's runtime, or almost no timer
+    // interrupt lands inside the window where the values live in registers,
+    // and the check silently proves nothing.
+    unsafe { tensor::ymm_roundtrip(&input, &mut output, 300_000) };
+
+    FPU_CHECKS.fetch_add(1, Ordering::Relaxed);
+    for i in 0..32 {
+        if output[i] != input[i] {
+            FPU_ERRORS.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+    }
+    true
+}
+
 use crate::gfx::console::{self, LTGREEN, LTRED, WHITE, YELLOW};
 use crate::kprintln;
 use alloc::vec;

@@ -74,6 +74,16 @@ pub struct Task {
     pub name: &'static str,
     pub entry: Option<fn()>,
     pub switches: u64,
+    /// XSAVE/FXSAVE image for this task's x87, SSE and AVX state.
+    ///
+    /// Necessary because preemption breaks the assumption the rest of the
+    /// switch rests on. `switch_context` is `extern "sysv64"`, so it preserves
+    /// exactly SysV's callee-saved registers -- correct when `yield_now()`
+    /// calls it, because the compiler has already spilled live caller-saved
+    /// registers around the call. But the timer ISR arrives asynchronously:
+    /// the interrupted code called nothing, spilled nothing, and expects every
+    /// register back. XMM and YMM are caller-saved, so nobody was holding them.
+    pub fpu: *mut u8,
 }
 
 const EMPTY: Task = Task {
@@ -82,7 +92,30 @@ const EMPTY: Task = Task {
     name: "",
     entry: None,
     switches: 0,
+    fpu: core::ptr::null_mut(),
 };
+
+/// Allocate a zeroed, 64-byte aligned extended-state image.
+///
+/// Zeroing is not tidiness. `XRSTOR` validates the header, so uninitialised
+/// heap raises #GP -- and a zeroed image means `XSTATE_BV = 0`, which XRSTOR
+/// reads as "set every component to its initial state". That is precisely
+/// what a task that has never run should get.
+fn alloc_fpu_area() -> *mut u8 {
+    let size = crate::cpu::xsave_area_size();
+    let Ok(layout) = Layout::from_size_align(size, 64) else {
+        return core::ptr::null_mut();
+    };
+    let p = unsafe { alloc(layout) };
+    if !p.is_null() {
+        unsafe { core::ptr::write_bytes(p, 0, size) };
+    }
+    p
+}
+
+pub fn fpu_area_bytes() -> usize {
+    crate::cpu::xsave_area_size()
+}
 
 static TASKS: Racy<[Task; MAX_TASKS]> = Racy::new([EMPTY; MAX_TASKS]);
 static CURRENT: AtomicUsize = AtomicUsize::new(0);
@@ -95,9 +128,17 @@ static ENABLED: AtomicUsize = AtomicUsize::new(0);
 /// Its `rsp` is left at zero: it is filled in by the first switch *away* from
 /// it, which is exactly when its stack pointer first becomes meaningful.
 pub fn init(name: &'static str) {
+    let fpu = alloc_fpu_area();
     unsafe {
         let tasks = TASKS.get();
-        tasks[0] = Task { rsp: 0, state: State::Ready, name, entry: None, switches: 0 };
+        tasks[0] = Task {
+            rsp: 0,
+            state: State::Ready,
+            name,
+            entry: None,
+            switches: 0,
+            fpu,
+        };
     }
     COUNT.store(1, Ordering::Release);
     CURRENT.store(0, Ordering::Release);
@@ -144,6 +185,7 @@ pub fn spawn(name: &'static str, entry: fn()) -> Option<usize> {
             name,
             entry: Some(entry),
             switches: 0,
+            fpu: alloc_fpu_area(),
         };
     }
 
@@ -217,17 +259,44 @@ fn schedule() {
         return;
     }
 
-    CURRENT.store(next, Ordering::Release);
     SWITCHES.fetch_add(1, Ordering::Relaxed);
 
     unsafe {
         let tasks = TASKS.get();
         tasks[next].switches += 1;
+
+        let out_fpu = tasks[cur].fpu;
+        let in_fpu = tasks[next].fpu;
         let save = &mut tasks[cur].rsp as *mut u64;
         let load = tasks[next].rsp;
+
+        // Save the outgoing task's extended state, load the incoming task's,
+        // and only then switch stacks.
+        //
+        // The ordering is deliberate. The obvious alternative -- switch first,
+        // restore our own state after `glados_switch_context` returns -- means
+        // the restore runs when we are the *outgoing* task again, so it has to
+        // use the index captured before the switch rather than CURRENT. That is
+        // a silent wrong-task bug waiting for whoever later "simplifies" it.
+        // Doing both halves before the switch leaves no code after it to get
+        // wrong.
+        //
+        // Nothing between the xrstor and the switch may touch FP state.
+        // `glados_switch_context` is pure integer assembly and the store below
+        // is an atomic integer write.
+        if !out_fpu.is_null() {
+            crate::cpu::xsave_to(out_fpu);
+        }
+        if !in_fpu.is_null() {
+            crate::cpu::xrstor_from(in_fpu);
+        }
+
+        CURRENT.store(next, Ordering::Release);
         glados_switch_context(save, load);
     }
-    // Execution resumes here when someone switches back to `cur`.
+    // Execution resumes here when someone switches back to `cur`. Our extended
+    // state was already restored by whoever switched to us, so there is
+    // deliberately nothing to do here.
 }
 
 /// Called from the timer interrupt, after EOI.

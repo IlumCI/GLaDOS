@@ -255,6 +255,16 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             // Only advances while the clock task is actually on the CPU, so a
             // rising number here is proof of preemption rather than of a timer.
             kprintln!("  clock task iterations: {}", crate::clock_iterations());
+            kprintln!(
+                "  fpu state per task: {} B ({})",
+                crate::task::fpu_area_bytes(),
+                if crate::cpu::detected().avx_enabled { "xsave" } else { "fxsave" }
+            );
+            let checks = crate::ai::fpu_checks();
+            let errs = crate::ai::fpu_errors();
+            console::set_color(if errs == 0 { LTGREEN } else { LTRED });
+            kprintln!("  ymm survived {} preemption checks, {} corrupted", checks, errs);
+            console::set_color(WHITE);
         }
         "pci" => match acpi.as_ref().and_then(|a| a.mcfg) {
             Some(ecam) => {

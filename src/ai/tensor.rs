@@ -30,6 +30,46 @@ unsafe fn hsum256(v: __m256) -> f32 {
     _mm_cvtss_f32(s)
 }
 
+/// Load 32 floats into ymm0-ymm3, spin, then write them back.
+///
+/// A regression detector for extended-state handling in the scheduler, not a
+/// useful computation. The values sit in AVX registers across a loop long
+/// enough for a timer interrupt to land inside it. If a task switch fails to
+/// save and restore YMM state, another task's floating point work clobbers
+/// these registers and the values that come back are not the ones that went in.
+///
+/// It specifically exercises the *upper* halves of the YMM registers, which is
+/// what `fxsave` alone would silently lose while appearing to work.
+///
+/// # Safety
+/// Requires AVX, and that the OS has enabled AVX state in XCR0.
+#[target_feature(enable = "avx")]
+pub unsafe fn ymm_roundtrip(input: &[f32; 32], output: &mut [f32; 32], spin: u64) {
+    unsafe {
+        core::arch::asm!(
+            "vmovups ymm0, [{i}]",
+            "vmovups ymm1, [{i} + 32]",
+            "vmovups ymm2, [{i} + 64]",
+            "vmovups ymm3, [{i} + 96]",
+            "2:",
+            "dec {c}",
+            "jnz 2b",
+            "vmovups [{o}], ymm0",
+            "vmovups [{o} + 32], ymm1",
+            "vmovups [{o} + 64], ymm2",
+            "vmovups [{o} + 96], ymm3",
+            i = in(reg) input.as_ptr(),
+            o = in(reg) output.as_mut_ptr(),
+            c = inout(reg) spin => _,
+            out("ymm0") _,
+            out("ymm1") _,
+            out("ymm2") _,
+            out("ymm3") _,
+            options(nostack),
+        );
+    }
+}
+
 // --- matmul -------------------------------------------------------------
 
 /// `out[i] = dot(w[i], x)` for a (d, n) matrix. The hot loop of the whole model.

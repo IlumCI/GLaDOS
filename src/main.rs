@@ -270,6 +270,12 @@ fn clock_task() {
     loop {
         CLOCK_ITERS.fetch_add(1, Ordering::Relaxed);
 
+        // Continuously verify that this task's AVX registers survive being
+        // preempted while the shell runs entirely different floating point
+        // work. Counts failures rather than reporting them, so `tasks` shows
+        // an ongoing verdict instead of a one-off test result.
+        ai::fpu_guard(1000.0);
+
         let tenths = dev::lapic::ticks() * 10 / TIMER_HZ as u64;
         if tenths != last {
             last = tenths;
