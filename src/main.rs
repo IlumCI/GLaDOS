@@ -13,12 +13,20 @@
 // epilogue, which no stable ABI provides.
 #![feature(abi_x86_interrupt)]
 
+extern crate alloc;
+
+mod acpi;
 mod cpu;
+mod dev;
 mod gfx;
 mod mem;
 mod serial;
+mod shell;
 mod sync;
+mod task;
 mod uefi;
+
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use core::ffi::c_void;
 use core::panic::PanicInfo;
@@ -182,6 +190,7 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     };
 
     console::init(boot.fb, 2, palette::BLACK);
+    gfx::set_primary(boot.fb);
 
     // Replace the firmware's descriptor tables with ours. Until the IDT is in,
     // any fault is a triple fault: an instant reboot with no diagnostic.
@@ -189,12 +198,198 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     cpu::idt::init();
     kprintln!("[boot] gdt + idt installed");
 
-    install_paging(&boot);
+    // One allocator for the whole early bring-up: page tables first, then the
+    // heap. Sharing it means the heap can never be handed frames that paging
+    // already took.
+    let mut frames = unsafe {
+        mem::frame::EarlyFrames::new(boot.mmap, boot.mmap_size, boot.desc_size)
+    };
 
-    banner(&boot);
+    install_paging(&boot, &mut frames);
+    init_heap(&mut frames);
+
+    let acpi = unsafe { acpi::parse(boot.rsdp) };
+
+    banner(&boot, &acpi);
+    init_interrupts(&acpi);
+    init_keyboard(&acpi);
     selftest();
 
-    halt();
+    // Adopt the current thread of execution as task 0, then give it company.
+    task::init("shell");
+    console::set_color(YELLOW);
+    kprintln!("\n[tasks]");
+    console::set_color(LTGRAY_IDX);
+    match task::spawn("clock", clock_task) {
+        Some(i) => kprintln!("  spawned '{}' as task {}", "clock", i),
+        None => kprintln!("  could not spawn the clock task"),
+    }
+    task::enable();
+    kprintln!("  preemption enabled at {} Hz", TIMER_HZ);
+
+    shell::run(&boot, &acpi);
+}
+
+static CLOCK_ITERS: AtomicU64 = AtomicU64::new(0);
+
+pub fn clock_iterations() -> u64 {
+    CLOCK_ITERS.load(Ordering::Relaxed)
+}
+
+/// A second task, deliberately CPU-bound.
+///
+/// It never yields, never sleeps and never blocks -- so if the shell stays
+/// responsive while this runs, that is preemption doing it and nothing else.
+/// The iteration counter is the headless proof: it can only advance while this
+/// task holds the CPU.
+fn clock_task() {
+    let mut last = u64::MAX;
+    loop {
+        CLOCK_ITERS.fetch_add(1, Ordering::Relaxed);
+
+        let tenths = dev::lapic::ticks() * 10 / TIMER_HZ as u64;
+        if tenths != last {
+            last = tenths;
+            if let Some(fb) = gfx::primary() {
+                let text = alloc::format!(
+                    " up {}.{}s  switches {} ",
+                    tenths / 10,
+                    tenths % 10,
+                    task::total_switches()
+                );
+                let width = text.len() as u32 * gfx::font::GLYPH_W * 2;
+                let x = fb.width().saturating_sub(width + 8);
+                fb.draw_text(x, 4, &text, palette::YELLOW, palette::BLUE, 2);
+            }
+        }
+        core::hint::spin_loop();
+    }
+}
+
+/// Silence the PIC, bring up the local APIC, and start the periodic timer.
+fn init_interrupts(acpi: &Option<acpi::Acpi>) {
+    console::set_color(YELLOW);
+    kprintln!("\n[apic]");
+    console::set_color(LTGRAY_IDX);
+
+    let Some(a) = acpi else {
+        console::set_color(LTRED);
+        kprintln!("  no ACPI -- cannot locate the APIC, staying on polling only");
+        console::set_color(LTGRAY_IDX);
+        return;
+    };
+
+    // Order matters: silence the PIC before enabling anything that could
+    // deliver, or a stray legacy IRQ arrives on an exception vector.
+    dev::pic::disable();
+    kprintln!("  8259 remapped to 0x30 and fully masked");
+
+    dev::lapic::init(a.lapic_addr);
+    kprintln!("  lapic enabled, id {}", dev::lapic::id());
+
+    if let Some(io) = a.primary_ioapic() {
+        dev::ioapic::mask_all(&io);
+        kprintln!(
+            "  ioapic {} masked, {} redirection entries",
+            io.id,
+            dev::ioapic::max_redirection_entries(&io)
+        );
+    }
+
+    let hz = dev::lapic::calibrate();
+    if hz == 0 {
+        console::set_color(LTRED);
+        kprintln!("  timer calibration FAILED -- no PIT response");
+        console::set_color(LTGRAY_IDX);
+        return;
+    }
+    kprintln!("  apic timer {} Hz measured against the PIT", hz);
+
+    if dev::lapic::start_timer(TIMER_HZ) {
+        cpu::enable_interrupts();
+        kprintln!("  timer running at {} Hz, interrupts enabled", TIMER_HZ);
+    } else {
+        console::set_color(LTRED);
+        kprintln!("  could not program the timer");
+        console::set_color(LTGRAY_IDX);
+    }
+}
+
+/// Scheduler tick rate. 100 Hz is a 10 ms quantum -- responsive enough for a
+/// shell without spending the machine's time in the timer handler.
+pub const TIMER_HZ: u32 = 100;
+
+/// Bring up the i8042 and route its IRQ.
+fn init_keyboard(acpi: &Option<acpi::Acpi>) {
+    console::set_color(YELLOW);
+    kprintln!("\n[i8042]");
+    console::set_color(LTGRAY_IDX);
+
+    let Some(a) = acpi else {
+        console::set_color(LTRED);
+        kprintln!("  no ACPI -- cannot route IRQ 1");
+        console::set_color(LTGRAY_IDX);
+        return;
+    };
+
+    let report = dev::kbd::init(a, dev::lapic::id());
+
+    match report.self_test {
+        // 0x55 is the controller's pass code.
+        Some(0x55) => kprintln!("  controller self-test passed (0x55)"),
+        Some(other) => {
+            console::set_color(LTRED);
+            kprintln!("  controller self-test returned {:#04x}, expected 0x55", other);
+            console::set_color(LTGRAY_IDX);
+        }
+        None => {
+            console::set_color(LTRED);
+            kprintln!("  controller did not answer -- no i8042 present?");
+            console::set_color(LTGRAY_IDX);
+        }
+    }
+
+    match report.config {
+        Some(c) => kprintln!(
+            "  config {:#04x}  irq1={}  translate={}",
+            c,
+            c & 1,
+            (c >> 6) & 1
+        ),
+        None => kprintln!("  config unreadable"),
+    }
+
+    match report.routed_gsi {
+        Some(gsi) => kprintln!("  irq1 routed via gsi {} to vector {:#04x}", gsi, dev::VECTOR_KEYBOARD),
+        None => {
+            console::set_color(LTRED);
+            kprintln!("  FAILED to route irq1 through the ioapic");
+            console::set_color(LTGRAY_IDX);
+        }
+    }
+}
+
+/// 4 MiB of kernel heap. Ample for M4-M5 and small enough that a leak shows up
+/// as an out-of-memory rather than hiding until the machine wedges.
+const HEAP_PAGES: usize = 1024;
+
+fn init_heap(frames: &mut mem::frame::EarlyFrames) {
+    match frames.alloc_contiguous(HEAP_PAGES) {
+        Some(base) => {
+            let size = HEAP_PAGES * mem::PAGE_SIZE as usize;
+            unsafe { mem::heap::HEAP.add_region(base as usize, size) };
+            kprintln!(
+                "[boot] heap {} KiB at {:#x}",
+                size / 1024,
+                base
+            );
+        }
+        None => {
+            console::set_color(LTRED);
+            kprintln!("[boot] heap allocation FAILED -- no contiguous region");
+            console::set_color(LTGRAY_IDX);
+        }
+    }
 }
 
 /// Build and install our own identity map, replacing the firmware's.
@@ -202,11 +397,7 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
 /// Failure here is survivable: UEFI's page tables are still loaded and still
 /// correct, so we report and carry on rather than halting. Everything through
 /// M4 works fine on the firmware's map -- we just do not own it.
-fn install_paging(boot: &BootInfo) {
-    let mut frames = unsafe {
-        mem::frame::EarlyFrames::new(boot.mmap, boot.mmap_size, boot.desc_size)
-    };
-
+fn install_paging(boot: &BootInfo, frames: &mut mem::frame::EarlyFrames) {
     let top = mem::frame::max_ram_address(boot.mmap, boot.mmap_size, boot.desc_size);
 
     // Belt and braces. The allowlist in max_ram_address should already keep
@@ -227,7 +418,7 @@ fn install_paging(boot: &BootInfo) {
         boot.fb_end
     );
 
-    match mem::paging::build_identity_map(&mut frames, limit) {
+    match mem::paging::build_identity_map(frames, limit) {
         Some(pml4) => {
             unsafe { mem::paging::activate(pml4) };
             // Reaching this line means the map covered our code, our stack and
@@ -250,6 +441,60 @@ fn install_paging(boot: &BootInfo) {
 /// Prove the exception path works while we are still expecting it to.
 fn selftest() {
     console::set_color(LTGREEN);
+    kprintln!("\n[selftest] heap:");
+    console::set_color(LTGRAY_IDX);
+    {
+        use alloc::format;
+        use alloc::vec::Vec;
+
+        // Pushing past capacity repeatedly forces grow-realloc-free cycles,
+        // which is what actually exercises split and coalesce.
+        let mut v: Vec<u64> = Vec::new();
+        for i in 0..256u64 {
+            v.push(i * i);
+        }
+        let s = format!("  vec len {}  v[255]={}  v[16]={}", v.len(), v[255], v[16]);
+        kprintln!("{}", s);
+        let (used, total) = mem::heap::HEAP.stats();
+        kprintln!("  in use {} B of {} B", used, total);
+    }
+    // Everything above is dropped. If alloc and dealloc round sizes the same
+    // way, this is exactly zero; any other number is a per-allocation leak.
+    let (used, _) = mem::heap::HEAP.stats();
+    if used == 0 {
+        console::set_color(LTGREEN);
+        kprintln!("  after drop: 0 B in use -- alloc/dealloc are exact inverses");
+    } else {
+        console::set_color(LTRED);
+        kprintln!("  after drop: {} B LEAKED", used);
+    }
+
+    // The timer is the first thing in this kernel that runs without being
+    // called. If ticks advance, the LAPIC, the IDT vector, the EOI path and
+    // the calibration are all correct at once.
+    console::set_color(LTGREEN);
+    kprintln!("\n[selftest] timer:");
+    console::set_color(LTGRAY_IDX);
+    let start = dev::lapic::ticks();
+    let want = start + TIMER_HZ as u64 / 2; // half a second
+    let mut spins: u64 = 0;
+    while dev::lapic::ticks() < want {
+        spins += 1;
+        if spins > 200_000_000 {
+            break; // timer is dead; do not hang the boot waiting for it
+        }
+        core::hint::spin_loop();
+    }
+    let elapsed = dev::lapic::ticks() - start;
+    if elapsed >= TIMER_HZ as u64 / 2 {
+        console::set_color(LTGREEN);
+        kprintln!("  {} ticks in ~0.5 s -- interrupts are firing", elapsed);
+    } else {
+        console::set_color(LTRED);
+        kprintln!("  only {} ticks -- timer is not delivering", elapsed);
+    }
+
+    console::set_color(LTGREEN);
     kprintln!("\n[selftest] int3 should report and resume:");
     console::set_color(LTGRAY_IDX);
     unsafe {
@@ -260,15 +505,12 @@ fn selftest() {
     kprintln!("[selftest] survived int3 -- idt is live.");
     console::set_color(LTGRAY_IDX);
 
-    // Fatal, and meant to be. If the next thing on screen is a #PF report
-    // naming cr2 = 0, the single most important piece of debugging
-    // infrastructure in this kernel is working.
-    cpu::idt::trigger_page_fault();
-
-    kprintln!("[selftest] UNREACHABLE -- the null read did not fault!");
+    // The deliberate null dereference now lives behind the shell's `fault`
+    // command. It is fatal by design, so running it during boot would mean the
+    // shell never starts.
 }
 
-fn banner(boot: &BootInfo) {
+fn banner(boot: &BootInfo, acpi: &Option<acpi::Acpi>) {
     console::set_color(LTCYAN);
     kprintln!("sanctum");
     console::set_color(WHITE);
@@ -292,6 +534,48 @@ fn banner(boot: &BootInfo) {
         usable / (1024 * 1024),
         regions
     );
+
+    let (used, total) = mem::heap::HEAP.stats();
+    kprintln!("  heap        {} KiB free of {} KiB", (total - used) / 1024, total / 1024);
+
+    console::set_color(YELLOW);
+    kprintln!("\n[acpi]");
+    console::set_color(WHITE);
+    match acpi {
+        Some(a) => {
+            kprintln!("  revision    {}   cpus {}", a.revision, a.cpus);
+            kprintln!("  lapic       {:#x}", a.lapic_addr);
+            for i in 0..a.ioapic_count {
+                let io = a.ioapics[i];
+                kprintln!(
+                    "  ioapic {}    {:#x}  gsi base {}",
+                    io.id,
+                    io.addr,
+                    io.gsi_base
+                );
+            }
+            kprintln!("  overrides   {}", a.override_count);
+            let (kbd_gsi, _) = a.gsi_for_irq(1);
+            kprintln!("  irq1 -> gsi {}   <-- keyboard", kbd_gsi);
+            match a.hpet {
+                Some(h) => kprintln!("  hpet        {:#x}", h),
+                None => kprintln!("  hpet        absent"),
+            }
+            match a.mcfg {
+                Some(m) => kprintln!("  pcie ecam   {:#x}", m),
+                None => kprintln!("  pcie ecam   absent"),
+            }
+            match a.pm_timer {
+                Some(t) => kprintln!("  pm timer    port {:#x}", t),
+                None => kprintln!("  pm timer    absent"),
+            }
+        }
+        None => {
+            console::set_color(LTRED);
+            kprintln!("  ACPI PARSE FAILED");
+            console::set_color(WHITE);
+        }
+    }
 
     kprintln!("\n  boot services released, running on our own.");
 

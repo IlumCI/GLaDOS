@@ -219,6 +219,19 @@ pub fn init() {
     serial_println!("sanctum: idt installed");
 }
 
+/// Point a vector at a handler after `init` has already run.
+///
+/// Safe to do with the IDT live: the CPU re-reads the table on every
+/// interrupt, so there is nothing cached to invalidate.
+///
+/// # Safety
+/// `handler` must be an `extern "x86-interrupt"` function with the signature
+/// the CPU will actually use for this vector -- in particular, one that takes
+/// an error code if and only if the vector pushes one.
+pub unsafe fn set_handler(vector: u8, handler: *const (), ist: u8) {
+    unsafe { IDT.get()[vector as usize].set(handler as u64, ist) };
+}
+
 /// Deliberately trigger a page fault at address 0.
 ///
 /// This exists to be run on purpose. Testing the fault reporter *before* you

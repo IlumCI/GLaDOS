@@ -45,6 +45,30 @@ pub fn read_cr4() -> u64 {
     v
 }
 
+/// # Safety
+/// `msr` must be a model-specific register this CPU implements; reading an
+/// unimplemented one raises #GP.
+#[inline]
+pub unsafe fn rdmsr(msr: u32) -> u64 {
+    let lo: u32;
+    let hi: u32;
+    unsafe {
+        asm!("rdmsr", in("ecx") msr, out("eax") lo, out("edx") hi,
+             options(nomem, nostack, preserves_flags));
+    }
+    ((hi as u64) << 32) | (lo as u64)
+}
+
+/// # Safety
+/// Writing a reserved bit, or a value the CPU rejects, raises #GP.
+#[inline]
+pub unsafe fn wrmsr(msr: u32, value: u64) {
+    unsafe {
+        asm!("wrmsr", in("ecx") msr, in("eax") value as u32, in("edx") (value >> 32) as u32,
+             options(nomem, nostack, preserves_flags));
+    }
+}
+
 #[inline]
 pub fn disable_interrupts() {
     unsafe { asm!("cli", options(nomem, nostack)) };

@@ -8,6 +8,20 @@
 pub mod console;
 pub mod font;
 
+use crate::sync::Racy;
+
+/// The framebuffer, reachable from anywhere -- background tasks draw straight
+/// to it rather than going through the console.
+static PRIMARY: Racy<Option<Framebuffer>> = Racy::new(None);
+
+pub fn set_primary(fb: Framebuffer) {
+    unsafe { *PRIMARY.get() = Some(fb) };
+}
+
+pub fn primary() -> Option<Framebuffer> {
+    unsafe { *PRIMARY.get() }
+}
+
 use core::ptr::write_volatile;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -147,6 +161,31 @@ impl Framebuffer {
         for dy in 0..h {
             for dx in 0..w {
                 self.put(x + dx, y + dy, raw);
+            }
+        }
+    }
+
+    /// Draw a string at a pixel position, bypassing the console entirely.
+    ///
+    /// Used by background tasks that want a fixed spot on screen without
+    /// fighting the shell for the cursor.
+    pub fn draw_text(&self, x: u32, y: u32, s: &str, fg: Color, bg: Color, scale: u32) {
+        let fg_raw = self.encode(fg);
+        let bg_raw = self.encode(bg);
+        let scale = scale.max(1);
+
+        for (i, ch) in s.bytes().enumerate() {
+            let glyph = font::glyph(ch);
+            let ox = x + i as u32 * font::GLYPH_W * scale;
+            for (gy, bits) in glyph.iter().enumerate() {
+                for gx in 0..font::GLYPH_W {
+                    let raw = if bits & (0x80 >> gx) != 0 { fg_raw } else { bg_raw };
+                    for dy in 0..scale {
+                        for dx in 0..scale {
+                            self.put(ox + gx * scale + dx, y + gy as u32 * scale + dy, raw);
+                        }
+                    }
+                }
             }
         }
     }

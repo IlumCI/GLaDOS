@@ -47,6 +47,45 @@ impl EarlyFrames {
         self.allocated
     }
 
+    /// Take `pages` physically contiguous zeroed frames from a single region.
+    ///
+    /// The heap needs one unbroken span; the bump cursor alone would happily
+    /// straddle a region boundary and hand back two disjoint runs that look
+    /// contiguous. So this skips forward to a region with room for the whole
+    /// request rather than stitching.
+    pub fn alloc_contiguous(&mut self, pages: usize) -> Option<u64> {
+        let want = pages as u64 * PAGE_SIZE;
+        loop {
+            if self.idx >= self.count() {
+                return None;
+            }
+
+            let d = self.desc(self.idx);
+            let region_end = d.phys_start + d.num_pages * PAGE_SIZE;
+            let usable_start = d.phys_start.max(MIN_PHYS);
+
+            if !d.is_conventional() || usable_start >= region_end {
+                self.idx += 1;
+                self.cursor = 0;
+                continue;
+            }
+            if self.cursor < usable_start {
+                self.cursor = usable_start;
+            }
+            if self.cursor + want > region_end {
+                self.idx += 1;
+                self.cursor = 0;
+                continue;
+            }
+
+            let base = self.cursor;
+            self.cursor += want;
+            self.allocated += pages;
+            unsafe { core::ptr::write_bytes(base as *mut u8, 0, want as usize) };
+            return Some(base);
+        }
+    }
+
     /// Take one zeroed 4 KiB frame. Returns its physical address, which is also
     /// its virtual address while we are identity-mapped.
     pub fn alloc(&mut self) -> Option<u64> {

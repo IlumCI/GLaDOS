@@ -12,14 +12,28 @@ not write is the Rust `core` library.
 
 | Milestone | What it does | Status |
 |---|---|---|
-| M0 | Toolchain, QEMU+OVMF loop, ESP staging | done (QEMU install pending) |
+| M0 | Toolchain, QEMU+OVMF loop, ESP staging | done |
 | M1 | UEFI entry, GOP framebuffer, ExitBootServices, own PML4 | done |
 | M2 | Framebuffer console, GDT+TSS, IDT with fault reporting | done |
-| M3 | Physical frame allocator, kernel heap | frame allocator done; heap pending |
-| M4 | ACPI, LAPIC/IOAPIC, APIC timer, i8042 keyboard, tasking | not started |
+| M3 | Physical frame allocator, kernel heap | done |
+| M4 | ACPI, LAPIC/IOAPIC, APIC timer, i8042 keyboard, tasking, shell | done |
 | M5 | Tokenizer, parser, single-pass JIT, REPL | not started |
 | M6 | NVMe driver, own filesystem | not started |
 | M7 | 640×480 16-colour aesthetic layer, hypertext documents | not started |
+
+All of the above is verified running under QEMU, not merely compiling. The
+shell accepts `help`, `mem`, `uptime`, `acpi`, `tasks`, `video`, `echo`,
+`clear` and `fault`.
+
+### Verified numbers
+
+- Heap returns to **exactly 0 bytes used** after a 256-element `Vec` and a
+  `String` are dropped, so `alloc` and `dealloc` are exact inverses.
+- APIC timer measured at **63,067,500 Hz** against the PIT — QEMU's 1.009 GHz
+  bus clock over the divide-by-16 — giving 50 ticks in half a second at 100 Hz.
+- `cpus 4` counted correctly under `-smp 4`, exercising the MADT entry walk.
+- Two tasks round-robin fairly at **819 and 820 resumes**, with the shell
+  responsive while a never-yielding task burns 10.5 M iterations.
 
 ## Build and run
 
@@ -69,6 +83,24 @@ Surveyed from the running Windows install, not assumed.
 | Display | Intel UHD via GOP. The RTX 3050 is mux-less and irrelevant — the iGPU owns the panel |
 | Keyboard | **i8042** (`ACPI\MSI0007`) — ports `0x60`/`0x64`. Most 2022 laptops route the internal keyboard over USB-HID, which would mean an xHCI + HID stack before you could type one character. This one does not |
 | Storage | Boots from a USB SSD. UEFI's own drivers load us *before* `ExitBootServices`, so no USB driver is needed to boot. Persistence in M6 targets the internal NVMe (~600 lines) rather than USB Mass Storage (several times that) |
+
+## Two bugs worth remembering
+
+**`extern "C"` on this target is Microsoft x64, not System V.**
+`x86_64-unknown-uefi` is a Windows-ABI target. The context switch assembly read
+its arguments from `rdi`/`rsi`, but the compiler was passing them in
+`rcx`/`rdx`. The garbage in `rdi` became a stack pointer that happened to land
+in the framebuffer aperture, so the task's saved frame was written into video
+memory and `ret` popped a black pixel into `rip`. The context switch is now
+pinned to `extern "sysv64"` explicitly rather than inheriting a target default.
+
+**Do not take the max over every UEFI memory descriptor.** OVMF describes
+`Reserved` space to `0x100_0000_0000` — a clean 1 TiB. Using that as a map
+limit exceeds what one PDPT covers, so the identity map silently failed to
+build and we fell back to firmware page tables, which map page 0 — which in
+turn made the null-dereference self-test pass without faulting. A masked
+failure disabling the test meant to catch it. `max_ram_address` now uses an
+allowlist of genuinely-RAM types plus a hard clamp.
 
 ## Known gaps
 
