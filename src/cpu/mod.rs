@@ -79,6 +79,58 @@ pub fn enable_interrupts() {
     unsafe { asm!("sti", options(nomem, nostack)) };
 }
 
+/// Raw CPUID.
+///
+/// The `xchg` dance around `rbx` is not optional: LLVM reserves that register
+/// internally, so `out("ebx")` is rejected outright. We stash it, run cpuid,
+/// then swap the result out and the original back.
+pub fn cpuid(leaf: u32, sub: u32) -> [u32; 4] {
+    let eax: u32;
+    let ebx_slot: u64;
+    let ecx: u32;
+    let edx: u32;
+    unsafe {
+        asm!(
+            "mov {tmp}, rbx",
+            "cpuid",
+            "xchg {tmp}, rbx",
+            tmp = out(reg) ebx_slot,
+            inout("eax") leaf => eax,
+            inout("ecx") sub => ecx,
+            out("edx") edx,
+            options(nostack, preserves_flags),
+        );
+    }
+    [eax, ebx_slot as u32, ecx, edx]
+}
+
+/// Reset the machine.
+///
+/// Tries the keyboard controller's reset line first, which is the historical
+/// and most widely implemented method, then falls back to deliberately
+/// triple-faulting by loading a zero-length IDT and raising an interrupt. The
+/// CPU cannot find a handler, cannot find a double-fault handler either, and
+/// resets. Inelegant, universally effective.
+pub fn reboot() -> ! {
+    unsafe {
+        for _ in 0..16 {
+            let mut spins = 0;
+            while port::inb(0x64) & 0x02 != 0 {
+                spins += 1;
+                if spins > 100_000 {
+                    break;
+                }
+            }
+            port::outb(0x64, 0xFE);
+        }
+
+        let null_idt = gdt::DescriptorTablePointer { limit: 0, base: 0 };
+        asm!("lidt [{}]", in(reg) &null_idt, options(readonly, nostack));
+        asm!("int3", options(nomem, nostack));
+    }
+    halt()
+}
+
 /// Park the core. `cli` before `hlt` so no interrupt can wake us into a
 /// half-initialised state.
 pub fn halt() -> ! {

@@ -167,14 +167,45 @@ pub fn has_input() -> bool {
     TAIL.load(Ordering::Relaxed) != HEAD.load(Ordering::Acquire)
 }
 
+/// Keys with no ASCII representation are delivered as bytes above 0x7F, so the
+/// ring buffer stays a simple byte queue rather than growing an event type.
+pub const KEY_UP: u8 = 0x80;
+pub const KEY_DOWN: u8 = 0x81;
+pub const KEY_LEFT: u8 = 0x82;
+pub const KEY_RIGHT: u8 = 0x83;
+pub const KEY_HOME: u8 = 0x84;
+pub const KEY_END: u8 = 0x85;
+pub const KEY_DELETE: u8 = 0x86;
+
 fn decode(scancode: u8) {
-    // E0 prefixes a two-byte sequence (arrows, right-hand modifiers). We note
-    // it and skip the pair; nothing here needs them yet.
+    // E0 introduces a two-byte sequence: arrows, navigation keys, and the
+    // right-hand modifiers.
     if scancode == SC_EXTENDED {
         EXTENDED.store(true, Ordering::Relaxed);
         return;
     }
     if EXTENDED.swap(false, Ordering::Relaxed) {
+        let released = scancode & SC_RELEASE != 0;
+        if released {
+            return;
+        }
+        let key = match scancode {
+            0x48 => KEY_UP,
+            0x50 => KEY_DOWN,
+            0x4B => KEY_LEFT,
+            0x4D => KEY_RIGHT,
+            0x47 => KEY_HOME,
+            0x4F => KEY_END,
+            0x53 => KEY_DELETE,
+            // Right ctrl (0x1D) and right alt (0x38) arrive here too; treat
+            // them as their left-hand equivalents rather than as characters.
+            0x1D => {
+                CTRL.store(true, Ordering::Relaxed);
+                return;
+            }
+            _ => return,
+        };
+        push(key);
         return;
     }
 

@@ -186,6 +186,23 @@ impl Console {
         self.col += 1;
     }
 
+    /// Move the cursor within the current row without disturbing what is drawn.
+    ///
+    /// Backspace erases, which is right for typing but wrong for a line editor
+    /// that needs to reposition and redraw. This is the primitive that makes
+    /// arrow keys possible.
+    pub fn set_col(&mut self, col: usize) {
+        self.col = col.min(self.cols.saturating_sub(1));
+    }
+
+    pub fn col(&self) -> usize {
+        self.col
+    }
+
+    pub fn cols(&self) -> usize {
+        self.cols
+    }
+
     pub fn write_bytes(&mut self, s: &[u8]) {
         for &b in s {
             self.put_char(b);
@@ -222,6 +239,16 @@ pub fn with<F: FnOnce(&mut Console)>(f: F) {
 
 pub fn set_color(fg: u8) {
     with(|c| c.set_color(fg));
+}
+
+pub fn set_col(col: usize) {
+    with(|c| c.set_col(col));
+}
+
+pub fn cols() -> usize {
+    let mut n = 80;
+    with(|c| n = c.cols());
+    n
 }
 
 #[doc(hidden)]

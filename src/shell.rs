@@ -12,13 +12,37 @@ use crate::gfx::console::{self, LTCYAN, LTGRAY, LTGREEN, LTRED, WHITE, YELLOW};
 use crate::lang;
 use crate::mem;
 use crate::BootInfo;
-use crate::{kprint, kprintln};
+use crate::{kprint, kprintln, serial_println};
 use alloc::string::String;
+use alloc::vec::Vec;
+
+const PROMPT: &str = "sanctum> ";
+const PROMPT_LEN: usize = 9;
+const HISTORY_MAX: usize = 64;
 
 fn prompt() {
     console::set_color(LTGREEN);
-    kprint!("\nsanctum> ");
+    kprint!("\n{}", PROMPT);
     console::set_color(WHITE);
+}
+
+/// Repaint the edited line and place the cursor.
+///
+/// Deliberately console-only rather than `kprint!`: echoing every keystroke and
+/// every redraw to the serial port would bury the log in partial lines. The
+/// finished line is written to serial once, when Enter is pressed.
+///
+/// Assumes the line fits on one row. Longer input wraps and the cursor
+/// arithmetic stops being right -- a limitation, not a crash.
+fn redraw(line: &str, cursor: usize, prev_len: usize) {
+    console::with(|c| {
+        c.set_col(PROMPT_LEN);
+        c.write_bytes(line.as_bytes());
+        for _ in line.len()..prev_len {
+            c.put_char(b' ');
+        }
+        c.set_col(PROMPT_LEN + cursor);
+    });
 }
 
 pub fn run(boot: &BootInfo, acpi: &Option<Acpi>) -> ! {
@@ -26,34 +50,120 @@ pub fn run(boot: &BootInfo, acpi: &Option<Acpi>) -> ! {
     kprintln!("\ninteractive. type 'help', or just type code.");
     console::set_color(WHITE);
 
-    let mut line = String::new();
     let mut interp = lang::Interp::new();
+    let mut history: Vec<String> = Vec::new();
+    let mut line = String::new();
+    let mut cursor = 0usize;
+    // Equal to history.len() means "editing a fresh line", not browsing.
+    let mut hist = 0usize;
+    let mut stash = String::new();
+
     prompt();
 
     loop {
-        match kbd::pop() {
-            Some(b'\n') => {
+        let Some(key) = kbd::pop() else {
+            // Nothing queued: idle until the next interrupt rather than
+            // spinning. The timer alone wakes us 100 times a second.
+            unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };
+            continue;
+        };
+
+        let prev = line.len();
+        match key {
+            b'\n' => {
+                console::with(|c| c.set_col(PROMPT_LEN + line.len()));
                 kprintln!();
-                execute(line.trim(), boot, acpi, &mut interp);
+                // The one place the typed line reaches the serial log.
+                serial_println!("{}{}", PROMPT, line);
+
+                let trimmed = line.trim();
+                if !trimmed.is_empty() && history.last().map(|h| h.as_str()) != Some(trimmed) {
+                    history.push(String::from(trimmed));
+                    if history.len() > HISTORY_MAX {
+                        history.remove(0);
+                    }
+                }
+                execute(trimmed, boot, acpi, &mut interp);
+
                 line.clear();
+                cursor = 0;
+                hist = history.len();
+                stash.clear();
                 prompt();
             }
-            Some(8) => {
-                // Only echo the erase if there was something to erase.
-                if line.pop().is_some() {
-                    kprint!("\u{8}");
+
+            8 => {
+                if cursor > 0 {
+                    cursor -= 1;
+                    line.remove(cursor);
+                    redraw(&line, cursor, prev);
                 }
             }
-            Some(ch) if (0x20..0x7F).contains(&ch) => {
-                line.push(ch as char);
-                kprint!("{}", ch as char);
+            kbd::KEY_DELETE => {
+                if cursor < line.len() {
+                    line.remove(cursor);
+                    redraw(&line, cursor, prev);
+                }
             }
-            Some(_) => {}
-            None => {
-                // Nothing queued: idle until the next interrupt rather than
-                // spinning. The timer alone wakes us 100 times a second.
-                unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };
+
+            kbd::KEY_LEFT => {
+                if cursor > 0 {
+                    cursor -= 1;
+                    console::set_col(PROMPT_LEN + cursor);
+                }
             }
+            kbd::KEY_RIGHT => {
+                if cursor < line.len() {
+                    cursor += 1;
+                    console::set_col(PROMPT_LEN + cursor);
+                }
+            }
+            // Ctrl-A / Ctrl-E, for the same reason every other shell has them.
+            kbd::KEY_HOME | 0x01 => {
+                cursor = 0;
+                console::set_col(PROMPT_LEN);
+            }
+            kbd::KEY_END | 0x05 => {
+                cursor = line.len();
+                console::set_col(PROMPT_LEN + cursor);
+            }
+            // Ctrl-U: scrap the line.
+            0x15 => {
+                line.clear();
+                cursor = 0;
+                redraw(&line, cursor, prev);
+            }
+
+            kbd::KEY_UP => {
+                if hist > 0 {
+                    if hist == history.len() {
+                        stash = line.clone();
+                    }
+                    hist -= 1;
+                    line = history[hist].clone();
+                    cursor = line.len();
+                    redraw(&line, cursor, prev);
+                }
+            }
+            kbd::KEY_DOWN => {
+                if hist < history.len() {
+                    hist += 1;
+                    line = if hist == history.len() {
+                        stash.clone()
+                    } else {
+                        history[hist].clone()
+                    };
+                    cursor = line.len();
+                    redraw(&line, cursor, prev);
+                }
+            }
+
+            ch if (0x20..0x7F).contains(&ch) => {
+                line.insert(cursor, ch as char);
+                cursor += 1;
+                redraw(&line, cursor, prev);
+            }
+            _ => {}
         }
     }
 }
@@ -74,6 +184,9 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             kprintln!("  uptime        ticks since boot");
             kprintln!("  acpi          parsed firmware tables");
             kprintln!("  tasks         scheduler state");
+            kprintln!("  pci           enumerate PCIe devices");
+            kprintln!("  cpu           processor identification");
+            kprintln!("  reboot        reset the machine");
             kprintln!("  video         framebuffer geometry");
             kprintln!("  echo <text>   print text");
             kprintln!("  clear         clear the screen");
@@ -139,6 +252,65 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             // Only advances while the clock task is actually on the CPU, so a
             // rising number here is proof of preemption rather than of a timer.
             kprintln!("  clock task iterations: {}", crate::clock_iterations());
+        }
+        "pci" => match acpi.as_ref().and_then(|a| a.mcfg) {
+            Some(ecam) => {
+                console::set_color(YELLOW);
+                kprintln!("  bb:dd.f  vendor device  class");
+                console::set_color(WHITE);
+                let mut n = 0usize;
+                crate::dev::pci::scan(ecam, 255, |d| {
+                    n += 1;
+                    let vname = crate::dev::pci::vendor_name(d.vendor);
+                    kprintln!(
+                        "  {:02x}:{:02x}.{}  {:04x} {:04x}  {} {}",
+                        d.bus,
+                        d.dev,
+                        d.func,
+                        d.vendor,
+                        d.device,
+                        crate::dev::pci::class_name(d.class, d.subclass),
+                        vname
+                    );
+                });
+                kprintln!("  {} functions found via ecam at {:#x}", n, ecam);
+            }
+            None => {
+                console::set_color(LTRED);
+                kprintln!("  no MCFG table, so no ECAM base to scan");
+                console::set_color(WHITE);
+            }
+        },
+        "cpu" => {
+            let max_ext = crate::cpu::cpuid(0x8000_0000, 0)[0];
+            if max_ext >= 0x8000_0004 {
+                // The brand string is 48 bytes spread across three leaves,
+                // each returning it in eax/ebx/ecx/edx little-endian.
+                let mut brand = [0u8; 48];
+                for (i, leaf) in [0x8000_0002u32, 0x8000_0003, 0x8000_0004].iter().enumerate() {
+                    let r = crate::cpu::cpuid(*leaf, 0);
+                    for (j, v) in r.iter().enumerate() {
+                        brand[i * 16 + j * 4..i * 16 + j * 4 + 4]
+                            .copy_from_slice(&v.to_le_bytes());
+                    }
+                }
+                let s = core::str::from_utf8(&brand).unwrap_or("?");
+                kprintln!("  {}", s.trim_end_matches('\0').trim());
+            }
+            let v = crate::cpu::cpuid(0, 0);
+            let mut vend = [0u8; 12];
+            vend[0..4].copy_from_slice(&v[1].to_le_bytes());
+            vend[4..8].copy_from_slice(&v[3].to_le_bytes());
+            vend[8..12].copy_from_slice(&v[2].to_le_bytes());
+            kprintln!("  vendor  {}", core::str::from_utf8(&vend).unwrap_or("?"));
+            let f = crate::cpu::cpuid(1, 0);
+            kprintln!("  family  {:#x}  apic id {}", f[0], f[1] >> 24);
+            kprintln!("  lapic   {}", lapic::id());
+        }
+        "reboot" => {
+            console::set_color(YELLOW);
+            kprintln!("  resetting...");
+            crate::cpu::reboot();
         }
         "video" => {
             kprintln!(
