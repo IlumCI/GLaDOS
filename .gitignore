@@ -4,3 +4,7 @@
 /tools
 *.log
 *.fd
+
+# Model weights: fetched, not authored. See scripts/fetch-model.ps1
+esp/GLADOS/
+

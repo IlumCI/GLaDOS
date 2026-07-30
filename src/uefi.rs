@@ -47,6 +47,22 @@ pub const GRAPHICS_OUTPUT_PROTOCOL_GUID: Guid = Guid {
     d4: [0x96, 0xfb, 0x7a, 0xde, 0xd0, 0x80, 0x51, 0x6a],
 };
 
+/// EFI_LOADED_IMAGE_PROTOCOL_GUID -- 5b1b31a1-9562-11d2-8e3f-00a0c969723b
+pub const LOADED_IMAGE_PROTOCOL_GUID: Guid = Guid {
+    d1: 0x5b1b31a1,
+    d2: 0x9562,
+    d3: 0x11d2,
+    d4: [0x8e, 0x3f, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b],
+};
+
+/// EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID -- 964e5b22-6459-11d2-8e39-00a0c969723b
+pub const SIMPLE_FILE_SYSTEM_PROTOCOL_GUID: Guid = Guid {
+    d1: 0x964e5b22,
+    d2: 0x6459,
+    d3: 0x11d2,
+    d4: [0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b],
+};
+
 /// EFI_ACPI_20_TABLE_GUID -- 8868e871-e4f1-11d3-bc22-0080c73c8881 (RSDP, ACPI 2.0+)
 pub const ACPI_20_TABLE_GUID: Guid = Guid {
     d1: 0x8868e871,
@@ -212,7 +228,10 @@ pub struct BootServices {
     pub install_protocol_interface: usize,
     pub reinstall_protocol_interface: usize,
     pub uninstall_protocol_interface: usize,
-    pub handle_protocol: usize,
+    /// Typed rather than left as `usize` because the file loader calls it.
+    /// Same width either way, so the struct layout is unchanged.
+    pub handle_protocol:
+        extern "efiapi" fn(Handle, *const Guid, *mut *mut c_void) -> Status,
     pub reserved: usize,
     pub register_protocol_notify: usize,
     pub locate_handle: usize,
@@ -316,4 +335,158 @@ pub struct GraphicsOutputProtocol {
     pub set_mode: extern "efiapi" fn(*mut Self, u32) -> Status,
     pub blt: usize,
     pub mode: *mut GraphicsOutputMode,
+}
+
+// --- file access --------------------------------------------------------
+//
+// The firmware has a working FAT driver and we boot off a FAT partition, so
+// there is a filesystem available for exactly as long as boot services are.
+// Reading what we need before `ExitBootServices` is much less work than
+// implementing FAT, and it is how every other kernel gets its initrd.
+//
+// Everything read this way must be allocated as `LoaderData`: that type is
+// ours, it survives ExitBootServices, `is_ram_type` maps it write-back, and
+// `is_usable_after_exit` deliberately excludes it so the frame allocator will
+// never hand a model's weights out as free pages.
+
+/// Only the leading fields are declared. The protocol continues past
+/// `device_handle`, but nothing here reads further and the struct is only ever
+/// used behind a pointer, so the tail can stay undescribed.
+#[repr(C)]
+pub struct LoadedImageProtocol {
+    pub revision: u32,
+    pub parent_handle: Handle,
+    pub system_table: *mut SystemTable,
+    pub device_handle: Handle,
+}
+
+#[repr(C)]
+pub struct SimpleFileSystemProtocol {
+    pub revision: u64,
+    pub open_volume:
+        extern "efiapi" fn(*mut SimpleFileSystemProtocol, *mut *mut FileProtocol) -> Status,
+}
+
+#[repr(C)]
+pub struct FileProtocol {
+    pub revision: u64,
+    pub open: extern "efiapi" fn(
+        *mut FileProtocol,
+        *mut *mut FileProtocol,
+        *const u16,
+        u64,
+        u64,
+    ) -> Status,
+    pub close: extern "efiapi" fn(*mut FileProtocol) -> Status,
+    pub delete: usize,
+    pub read: extern "efiapi" fn(*mut FileProtocol, *mut usize, *mut u8) -> Status,
+    pub write: usize,
+    pub get_position: extern "efiapi" fn(*mut FileProtocol, *mut u64) -> Status,
+    pub set_position: extern "efiapi" fn(*mut FileProtocol, u64) -> Status,
+    pub get_info: usize,
+    pub set_info: usize,
+    pub flush: usize,
+}
+
+pub const FILE_MODE_READ: u64 = 0x0000_0000_0000_0001;
+
+/// Seeking here and asking where you landed is the documented way to get a
+/// file's size without the variable-length buffer dance `GetInfo` requires.
+const POSITION_END_OF_FILE: u64 = 0xFFFF_FFFF_FFFF_FFFF;
+
+/// A buffer that outlives boot services.
+#[derive(Clone, Copy)]
+pub struct Blob {
+    pub ptr: *mut u8,
+    pub len: usize,
+}
+
+impl Blob {
+    /// # Safety
+    /// Only valid for blobs produced by `read_file`, whose pool allocation is
+    /// never freed and stays identity-mapped for the life of the system.
+    pub fn as_slice(&self) -> &'static [u8] {
+        unsafe { core::slice::from_raw_parts(self.ptr, self.len) }
+    }
+}
+
+/// Read a whole file from the volume this image was loaded from.
+///
+/// `path` is an absolute path on that volume using backslashes, e.g.
+/// `\GLADOS\stories260K.bin`. ASCII only -- it is widened to UCS-2 by zero
+/// extension, which is correct for ASCII and wrong for anything else.
+///
+/// Returns `None` for every failure, including "not there". A missing model is
+/// a normal condition, not an error: the system has to boot without one.
+pub fn read_file(bs: &BootServices, image: Handle, path: &str) -> Option<Blob> {
+    // image handle -> the device it was loaded from
+    let mut iface: *mut c_void = core::ptr::null_mut();
+    if is_error((bs.handle_protocol)(image, &LOADED_IMAGE_PROTOCOL_GUID, &mut iface)) {
+        return None;
+    }
+    let device = unsafe { (*(iface as *mut LoadedImageProtocol)).device_handle };
+
+    // that device -> its filesystem -> the root directory
+    let mut iface: *mut c_void = core::ptr::null_mut();
+    if is_error((bs.handle_protocol)(device, &SIMPLE_FILE_SYSTEM_PROTOCOL_GUID, &mut iface)) {
+        return None;
+    }
+    let sfs = iface as *mut SimpleFileSystemProtocol;
+    let mut root: *mut FileProtocol = core::ptr::null_mut();
+    if is_error(unsafe { ((*sfs).open_volume)(sfs, &mut root) }) || root.is_null() {
+        return None;
+    }
+
+    // UCS-2, null terminated. Bounded so a long path truncates rather than
+    // writing past the array.
+    let mut wide = [0u16; 128];
+    if path.len() >= wide.len() {
+        unsafe { ((*root).close)(root) };
+        return None;
+    }
+    for (i, b) in path.bytes().enumerate() {
+        wide[i] = b as u16;
+    }
+
+    let mut file: *mut FileProtocol = core::ptr::null_mut();
+    let opened = unsafe { ((*root).open)(root, &mut file, wide.as_ptr(), FILE_MODE_READ, 0) };
+    unsafe { ((*root).close)(root) };
+    if is_error(opened) || file.is_null() {
+        return None;
+    }
+
+    let mut size: u64 = 0;
+    let sized = unsafe {
+        !is_error(((*file).set_position)(file, POSITION_END_OF_FILE))
+            && !is_error(((*file).get_position)(file, &mut size))
+            && !is_error(((*file).set_position)(file, 0))
+    };
+    if !sized || size == 0 {
+        unsafe { ((*file).close)(file) };
+        return None;
+    }
+
+    let mut buf: *mut u8 = core::ptr::null_mut();
+    if is_error((bs.allocate_pool)(MemoryType::LoaderData, size as usize, &mut buf)) {
+        unsafe { ((*file).close)(file) };
+        return None;
+    }
+
+    // Read() is permitted to return fewer bytes than asked for, so this loops.
+    // A short read that returns zero would otherwise spin here forever.
+    let total = size as usize;
+    let mut done = 0usize;
+    while done < total {
+        let mut want = total - done;
+        let st = unsafe { ((*file).read)(file, &mut want, buf.add(done)) };
+        if is_error(st) || want == 0 {
+            unsafe { ((*file).close)(file) };
+            let _ = (bs.free_pool)(buf);
+            return None;
+        }
+        done += want;
+    }
+    unsafe { ((*file).close)(file) };
+
+    Some(Blob { ptr: buf, len: done })
 }

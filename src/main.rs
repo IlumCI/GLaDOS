@@ -62,7 +62,17 @@ pub struct BootInfo {
     /// One past the last byte of the framebuffer aperture. Our page tables have
     /// to cover this or the first write after `activate` faults.
     pub fb_end: u64,
+    /// A llama2.c checkpoint, read off the boot volume before the firmware's
+    /// filesystem went away. `None` is normal -- the system boots without one.
+    pub model: Option<Blob>,
+    /// The matching tokenizer.
+    pub tokenizer: Option<Blob>,
 }
+
+/// Where the weights live on the boot volume. Backslashes: this is a UEFI path
+/// on the ESP, not a namespace path.
+pub const MODEL_PATH: &str = "\\GLADOS\\model.bin";
+pub const TOKENIZER_PATH: &str = "\\GLADOS\\tokenizer.bin";
 
 #[no_mangle]
 pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
@@ -134,6 +144,23 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     let rsdp = find_rsdp(st);
     serial_println!("glados: rsdp={:?}", rsdp);
 
+    // --- Anything that needs a filesystem, while there still is one ---
+    //
+    // This has to happen before the memory map is sized: allocate_pool for a
+    // 1 MiB model perturbs the map, and ExitBootServices rejects a stale key.
+    // Loading afterwards would mean re-reading the map, which is exactly the
+    // retry loop below and not worth entangling.
+    let model = uefi::read_file(bs, image, MODEL_PATH);
+    let tokenizer = uefi::read_file(bs, image, TOKENIZER_PATH);
+    match &model {
+        Some(b) => serial_println!("glados: model {} bytes from {}", b.len, MODEL_PATH),
+        None => serial_println!("glados: no model at {}", MODEL_PATH),
+    }
+    match &tokenizer {
+        Some(b) => serial_println!("glados: tokenizer {} bytes from {}", b.len, TOKENIZER_PATH),
+        None => serial_println!("glados: no tokenizer at {}", TOKENIZER_PATH),
+    }
+
     // --- Memory map, then leave the firmware behind ---
     let mut map_size: usize = 0;
     let mut map_key: usize = 0;
@@ -200,6 +227,8 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
         desc_size,
         fb_start,
         fb_end,
+        model,
+        tokenizer,
     };
 
     console::init(boot.fb, 2, palette::BLACK);
@@ -277,6 +306,10 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     if restore {
         sysbox::restore_latest();
     }
+
+    // After storage, so a future version can pull weights out of the store
+    // rather than off the ESP.
+    ai::init(boot.model, boot.tokenizer);
 
     shell::run(&boot, &acpi);
 }
@@ -509,9 +542,12 @@ fn init_keyboard(acpi: &Option<acpi::Acpi>) {
     }
 }
 
-/// 4 MiB of kernel heap. Ample for M4-M5 and small enough that a leak shows up
-/// as an out-of-memory rather than hiding until the machine wedges.
-const HEAP_PAGES: usize = 1024;
+/// 16 MiB of kernel heap.
+///
+/// Was 4 MiB, which was ample until a model had to fit in it. stories260K needs
+/// about 1 MiB for weights and 700 KiB of KV cache and scratch; the headroom is
+/// for the next model up, and for the namespace, which lives entirely in RAM.
+const HEAP_PAGES: usize = 4096;
 
 fn init_heap(frames: &mut mem::frame::EarlyFrames) {
     match frames.alloc_contiguous(HEAP_PAGES) {

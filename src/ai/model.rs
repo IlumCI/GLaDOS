@@ -84,7 +84,18 @@ struct Offsets {
     wcls: usize,
 }
 
-fn offsets(cfg: &Config) -> Offsets {
+/// `legacy_rope_tables` describes the *file* layout, not ours.
+///
+/// llama2.c's exporter writes two precomputed RoPE tables -- `seq_len *
+/// head_size / 2` floats each -- between `rms_final` and the classifier.
+/// run.c skips over them because the angles are recomputed per position, but
+/// they are still in the bytes, and `wcls` sits after them. A model built in
+/// memory has no such gap, so the flag has to distinguish the two.
+///
+/// It only changes anything for an untied classifier. Every model here so far
+/// ties its output weights to the embedding, which is why getting this wrong
+/// would have gone unnoticed until the first model that does not.
+fn offsets(cfg: &Config, legacy_rope_tables: bool) -> Offsets {
     let (d, h, l, kv, v) = (
         cfg.dim,
         cfg.hidden_dim,
@@ -116,6 +127,9 @@ fn offsets(cfg: &Config) -> Offsets {
     p += l * h * d;
     o.rms_final = p;
     p += d;
+    if legacy_rope_tables {
+        p += cfg.seq_len * cfg.head_size();
+    }
     o.wcls = if cfg.shared_classifier { o.token_embedding } else { p };
     o
 }
@@ -164,6 +178,19 @@ impl State {
     }
 }
 
+/// Size of the llama2.c legacy header: seven i32.
+pub const HEADER_BYTES: usize = 28;
+
+#[derive(Debug, Clone, Copy)]
+pub enum LoadError {
+    TooShort,
+    BadHeader,
+    /// The header describes more weights than the file contains, which usually
+    /// means a truncated download rather than a format mismatch.
+    Truncated { want: usize, have: usize },
+    OutOfMemory,
+}
+
 pub struct Model {
     pub cfg: Config,
     w: Vec<f32>,
@@ -194,8 +221,71 @@ impl Model {
             w.push((r as f32 / 8_388_608.0 - 1.0) * 0.04);
         }
 
-        let o = offsets(&cfg);
+        let o = offsets(&cfg, false);
         Some(Self { cfg, w, o })
+    }
+
+    /// Load a llama2.c checkpoint.
+    ///
+    /// The legacy format is a 28-byte header of seven little-endian i32 --
+    /// dim, hidden_dim, n_layers, n_heads, n_kv_heads, vocab_size, seq_len --
+    /// followed by every tensor as f32 in the order `offsets` describes. A
+    /// *negative* vocab_size is the flag for an untied classifier; the
+    /// magnitude is the real size.
+    pub fn from_bytes(data: &[u8]) -> Result<Self, LoadError> {
+        if data.len() < HEADER_BYTES {
+            return Err(LoadError::TooShort);
+        }
+        let i32_at = |i: usize| {
+            let o = i * 4;
+            i32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]])
+        };
+        let (dim, hidden_dim, n_layers) = (i32_at(0), i32_at(1), i32_at(2));
+        let (n_heads, n_kv_heads, raw_vocab, seq_len) =
+            (i32_at(3), i32_at(4), i32_at(5), i32_at(6));
+
+        if dim <= 0
+            || hidden_dim <= 0
+            || n_layers <= 0
+            || n_heads <= 0
+            || n_kv_heads <= 0
+            || seq_len <= 0
+            || raw_vocab == 0
+        {
+            return Err(LoadError::BadHeader);
+        }
+
+        let cfg = Config {
+            dim: dim as usize,
+            hidden_dim: hidden_dim as usize,
+            n_layers: n_layers as usize,
+            n_heads: n_heads as usize,
+            n_kv_heads: n_kv_heads as usize,
+            vocab_size: raw_vocab.unsigned_abs() as usize,
+            seq_len: seq_len as usize,
+            shared_classifier: raw_vocab > 0,
+        };
+
+        // Both are assumed by head_size() and kv_mul(), which divide.
+        if cfg.dim % cfg.n_heads != 0 || cfg.n_heads % cfg.n_kv_heads != 0 {
+            return Err(LoadError::BadHeader);
+        }
+
+        let have = (data.len() - HEADER_BYTES) / 4;
+        let want = cfg.param_count() + cfg.seq_len * cfg.head_size();
+        if have < want {
+            return Err(LoadError::Truncated { want, have });
+        }
+
+        let mut w = Vec::new();
+        w.try_reserve_exact(have).map_err(|_| LoadError::OutOfMemory)?;
+        for i in 0..have {
+            let o = HEADER_BYTES + i * 4;
+            w.push(f32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]));
+        }
+
+        let o = offsets(&cfg, true);
+        Ok(Self { cfg, w, o })
     }
 
     pub fn weight_bytes(&self) -> usize {

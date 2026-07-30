@@ -1,7 +1,9 @@
 //! Machine learning primitives.
 
 pub mod model;
+pub mod sample;
 pub mod tensor;
+pub mod tokenizer;
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -48,8 +50,10 @@ pub fn fpu_guard(tag: f32) -> bool {
     true
 }
 
-use crate::gfx::console::{self, LTGREEN, LTRED, WHITE, YELLOW};
-use crate::kprintln;
+use crate::gfx::console::{self, LTCYAN, LTGRAY, LTGREEN, LTRED, WHITE, YELLOW};
+use crate::sync::Racy;
+use crate::uefi::Blob;
+use crate::{kprint, kprintln};
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -350,4 +354,231 @@ pub fn bench() {
     );
     // Guard against the compiler deciding the whole loop is dead.
     kprintln!("  checksum {}", (out[0] * 1000.0) as i64);
+}
+
+// --- the engine ---------------------------------------------------------
+
+/// A loaded model, its tokenizer, and the scratch space a decode step needs.
+///
+/// Held as one unit because they are only ever meaningful together: the
+/// tokenizer is parsed using the vocabulary size from the model header, and
+/// `State` is sized from the same config.
+pub struct Engine {
+    pub model: model::Model,
+    pub tok: tokenizer::Tokenizer,
+    pub state: model::State,
+    pub rng: sample::Rng,
+}
+
+static ENGINE: Racy<Option<Engine>> = Racy::new(None);
+
+pub fn engine_ready() -> bool {
+    unsafe { ENGINE.get().is_some() }
+}
+
+pub fn with_engine<R>(f: impl FnOnce(&mut Engine) -> R) -> Option<R> {
+    unsafe { ENGINE.get().as_mut().map(f) }
+}
+
+/// Build the engine from whatever the firmware managed to read off the ESP.
+///
+/// Every failure here is reported and survivable. A system that refuses to
+/// boot because a model file is missing would be a worse system.
+pub fn init(model_blob: Option<Blob>, tok_blob: Option<Blob>) {
+    console::set_color(YELLOW);
+    kprintln!("\n[ai]");
+    console::set_color(LTGRAY);
+
+    let Some(mb) = model_blob else {
+        kprintln!("  no checkpoint on the boot volume ({})", crate::MODEL_PATH);
+        kprintln!("  'model' still works against synthetic weights");
+        return;
+    };
+
+    let m = match model::Model::from_bytes(mb.as_slice()) {
+        Ok(m) => m,
+        Err(e) => {
+            console::set_color(LTRED);
+            match e {
+                model::LoadError::Truncated { want, have } => {
+                    kprintln!("  checkpoint truncated: header wants {} floats, file has {}", want, have)
+                }
+                other => kprintln!("  checkpoint rejected: {:?}", other),
+            }
+            console::set_color(LTGRAY);
+            return;
+        }
+    };
+
+    let c = m.cfg;
+    kprintln!(
+        "  dim {}  hidden {}  layers {}  heads {}/{} kv  vocab {}  seq {}",
+        c.dim, c.hidden_dim, c.n_layers, c.n_heads, c.n_kv_heads, c.vocab_size, c.seq_len
+    );
+    kprintln!(
+        "  {} params, {} KiB of weights",
+        c.param_count(),
+        m.weight_bytes() / 1024
+    );
+
+    let Some(tb) = tok_blob else {
+        console::set_color(LTRED);
+        kprintln!("  no tokenizer ({}) -- cannot decode text", crate::TOKENIZER_PATH);
+        console::set_color(LTGRAY);
+        return;
+    };
+
+    // The vocabulary size is not in the tokenizer file, so a mismatched pair
+    // parses as far as it can and then runs off the end. Failing here almost
+    // always means the two files came from different models.
+    let Some(tok) = tokenizer::Tokenizer::from_bytes(tb.as_slice(), c.vocab_size) else {
+        console::set_color(LTRED);
+        kprintln!("  tokenizer does not match a {}-token vocabulary", c.vocab_size);
+        console::set_color(LTGRAY);
+        return;
+    };
+
+    let state = model::State::new(&c);
+    kprintln!(
+        "  tokenizer {} tokens, longest {} bytes; state {} KiB",
+        tok.vocab_size(),
+        tok.max_token_length,
+        state.bytes(&c) / 1024
+    );
+
+    // Seed from the TSC so successive boots do not retell the same story.
+    let seed = crate::time::rdtsc();
+    unsafe { *ENGINE.get() = Some(Engine { model: m, tok, state, rng: sample::Rng::new(seed) }) };
+
+    console::set_color(LTGREEN);
+    kprintln!("  ready -- 'gen <prompt>' to generate");
+    console::set_color(LTGRAY);
+}
+
+/// Write raw token bytes to the console.
+///
+/// Pieces are not individually valid UTF-8: a byte-fallback token is one
+/// arbitrary byte, and a multi-byte character can straddle two tokens. So this
+/// buffers and only prints what is currently decodable, keeping any trailing
+/// partial sequence for the next call.
+fn emit(pending: &mut Vec<u8>) {
+    loop {
+        if pending.is_empty() {
+            return;
+        }
+        match core::str::from_utf8(pending) {
+            Ok(s) => {
+                kprint!("{}", s);
+                pending.clear();
+                return;
+            }
+            Err(e) => {
+                let good = e.valid_up_to();
+                if good > 0 {
+                    if let Ok(s) = core::str::from_utf8(&pending[..good]) {
+                        kprint!("{}", s);
+                    }
+                    pending.drain(..good);
+                    continue;
+                }
+                // Not a truncated tail but a genuinely invalid byte: drop it,
+                // otherwise this loops forever on the same byte.
+                if e.error_len().is_some() {
+                    pending.remove(0);
+                    continue;
+                }
+                return; // incomplete tail; wait for more
+            }
+        }
+    }
+}
+
+pub struct GenOpts {
+    pub steps: usize,
+    pub temperature: f32,
+    pub topp: f32,
+}
+
+impl Default for GenOpts {
+    fn default() -> Self {
+        // llama2.c's defaults. 0.9 top-p keeps a 260K model from wandering.
+        Self { steps: 256, temperature: 1.0, topp: 0.9 }
+    }
+}
+
+/// Run the decode loop, printing as it goes.
+pub fn generate(prompt: &str, opts: &GenOpts) {
+    let ok = with_engine(|e| {
+        let prompt_tokens = e.tok.encode(prompt, true, false);
+        if prompt_tokens.is_empty() {
+            return false;
+        }
+
+        let limit = opts.steps.min(e.model.cfg.seq_len);
+        let mut token = prompt_tokens[0];
+        let mut pos = 0usize;
+        let mut generated = 0usize;
+        let mut pending: Vec<u8> = Vec::new();
+
+        let t0 = crate::time::rdtsc();
+        console::set_color(LTCYAN);
+
+        while pos < limit {
+            e.model.forward(&mut e.state, token, pos);
+
+            // While the prompt lasts we already know the answer; the forward
+            // pass is still needed, because it is what fills the KV cache.
+            let next = if pos + 1 < prompt_tokens.len() {
+                prompt_tokens[pos + 1]
+            } else {
+                generated += 1;
+                sample::sample(&mut e.state.logits, opts.temperature, opts.topp, &mut e.rng)
+            };
+            pos += 1;
+
+            // llama2.c's training data separates stories with BOS, so the model
+            // emits it to mean "the end".
+            if next == tokenizer::BOS {
+                break;
+            }
+
+            e.tok.append_piece(token, next, &mut pending);
+            emit(&mut pending);
+            token = next;
+        }
+
+        emit(&mut pending);
+        let elapsed = crate::time::rdtsc() - t0;
+        console::set_color(LTGRAY);
+        kprintln!();
+
+        let mhz = crate::time::tsc_mhz();
+        if mhz > 0 && generated > 0 {
+            let us = elapsed / mhz;
+            if us > 0 {
+                kprintln!(
+                    "  {} tokens in {}.{:03} s  ({} tok/s)",
+                    generated,
+                    us / 1_000_000,
+                    (us % 1_000_000) / 1000,
+                    (generated as u64 * 1_000_000) / us
+                );
+            }
+        }
+        true
+    });
+
+    match ok {
+        None => {
+            console::set_color(LTRED);
+            kprintln!("  no model loaded");
+            console::set_color(LTGRAY);
+        }
+        Some(false) => {
+            console::set_color(LTRED);
+            kprintln!("  empty prompt");
+            console::set_color(LTGRAY);
+        }
+        Some(true) => {}
+    }
 }

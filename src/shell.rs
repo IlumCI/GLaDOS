@@ -444,6 +444,31 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             }
         }
         "refresh" => console::redraw(),
+        "gen" => {
+            // `gen -t 0 once upon a time` -- flags first, everything after is
+            // the prompt verbatim, so it can contain spaces without quoting.
+            let mut opts = crate::ai::GenOpts::default();
+            let mut prompt = rest;
+            loop {
+                let mut it = prompt.splitn(3, ' ');
+                let flag = it.next().unwrap_or("");
+                if !matches!(flag, "-t" | "-p" | "-n") {
+                    break;
+                }
+                let Some(value) = it.next() else { break };
+                let tail = it.next().unwrap_or("");
+                match flag {
+                    "-t" => opts.temperature = value.parse().unwrap_or(opts.temperature),
+                    "-p" => opts.topp = value.parse().unwrap_or(opts.topp),
+                    _ => opts.steps = value.parse().unwrap_or(opts.steps),
+                }
+                prompt = tail.trim_start();
+            }
+            if prompt.is_empty() {
+                prompt = "Once upon a time";
+            }
+            crate::ai::generate(prompt, &opts);
+        }
         "help" => {
             console::set_color(YELLOW);
             kprintln!("commands");

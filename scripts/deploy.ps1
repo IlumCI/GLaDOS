@@ -82,4 +82,32 @@ Copy-Item $efi $dest -Force
 $info = Get-Item $dest
 Write-Host ''
 Write-Host ("deployed {0:N1} KB -> {1}" -f ($info.Length/1KB), $dest) -ForegroundColor Green
+
+# The model is part of the system now, not an optional extra: without it the
+# [ai] section reports no checkpoint and `gen` has nothing to run. Kept beside
+# the binary on the ESP because the firmware's FAT driver is the only
+# filesystem that exists before ExitBootServices, and that is where the
+# weights have to be read from.
+$payload = Join-Path $root 'esp\GLADOS'
+if (Test-Path $payload) {
+    $targetDir = Join-Path "$EspDrive\" 'GLADOS'
+    New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
+    foreach ($f in Get-ChildItem $payload -File) {
+        $to = Join-Path $targetDir $f.Name
+        # Skip files already byte-identical: the ESP is on a slow USB stick and
+        # a model is a lot of bytes to rewrite for nothing.
+        $same = (Test-Path $to) -and
+                ((Get-FileHash $f.FullName -Algorithm SHA256).Hash -eq
+                 (Get-FileHash $to -Algorithm SHA256).Hash)
+        if ($same) {
+            Write-Host ("  {0,-16} unchanged ({1:N0} B)" -f $f.Name, $f.Length)
+        } else {
+            Copy-Item $f.FullName $to -Force
+            Write-Host ("  {0,-16} copied ({1:N0} B)" -f $f.Name, $f.Length) -ForegroundColor Green
+        }
+    }
+} else {
+    Write-Warning "no payload at $payload -- the system will boot without a model."
+}
+
 Write-Host 'reboot and hold F11 to pick the USB device.'
