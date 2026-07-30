@@ -1,0 +1,34 @@
+[package]
+name = "sanctum"
+version = "0.1.0"
+edition = "2021"
+description = "A from-scratch ring-0 operating system for the MSI MS-16R8"
+
+# No dependencies, deliberately. Everything here is written from scratch.
+#
+# This also keeps the build free of build.rs and proc-macro crates, which would
+# need a host linker -- and this toolchain was installed without the MSVC build
+# tools. Cross-compiling to x86_64-unknown-uefi uses the bundled rust-lld, so as
+# long as nothing needs to link a *host* binary, no MSVC is required.
+[dependencies]
+
+[[bin]]
+name = "sanctum"
+path = "src/main.rs"
+test = false
+bench = false
+
+[profile.dev]
+# There is no unwinder in a freestanding binary.
+panic = "abort"
+# opt-level 0 produces enormous stack frames, which matters a lot while we are
+# still running on the firmware's modest boot stack. 1 is the safe floor.
+opt-level = 1
+overflow-checks = true
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+lto = true
+# Keep symbols: the QEMU gdb stub is our only source-level debugger.
+debug = true

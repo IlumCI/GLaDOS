@@ -1,0 +1,8 @@
+[build]
+target = "x86_64-unknown-uefi"
+
+# rust-std for x86_64-unknown-uefi is a tier-2 precompiled component, so we get
+# core/alloc/compiler_builtins without -Z build-std. If that ever stops being
+# true, add:
+#   [unstable]
+#   build-std = ["core", "alloc", "compiler_builtins"]
