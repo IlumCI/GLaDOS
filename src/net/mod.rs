@@ -53,6 +53,7 @@ pub mod tls;
 pub mod trust;
 pub mod udp;
 pub mod wifi;
+pub mod wpa2;
 pub mod x509;
 
 use iface::{Interface, Kind, Loopback};

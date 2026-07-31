@@ -94,8 +94,9 @@ All of it verified running under QEMU, not merely compiling.
 | M20 | TCP: active open, retransmission, HTTP | done |
 | M21 | UDP, DNS, DHCP | done |
 | M22 | Named interfaces, routing, loopback | done |
-| M23 | TLS 1.3 — encrypted, **not authenticated** | partial |
-| M24 | Certificate validation, and the GF63's real NIC | next |
+| M23 | TLS 1.3, with certificate validation | done |
+| M24 | WPA2 supplicant crypto (no driver to run it on) | done |
+| M25 | A wireless driver, once the GF63 names its card | next |
 
 ## The model
 
@@ -304,23 +305,29 @@ id, where it cannot be bypassed by pattern order.
 - **DHCP does not renew.** The lease time comes back and is reported, and then
   nothing watches it. A machine left running past its lease keeps using an
   address the server believes is free.
-- **TLS does not authenticate the server.** This is the important one. The
-  handshake is real TLS 1.3 and the traffic is really encrypted, but the
-  certificate is fingerprinted and then not verified — no signature check, no
-  chain, no trust store, no name matching, no expiry. That stops a *passive*
-  eavesdropper and does nothing whatever against an *active* one, who
-  completes the same handshake with their own key. Do not put a password
-  through it. Certificate validation needs X.509 DER parsing, RSA-PSS and
-  ECDSA P-256, and a trust store to ship and update; it is the honest next
-  step and it is not small.
+- **TLS validates but does not enforce.** The chain, the transcript signature,
+  the dates and the name are all checked, and the result is *reported* —
+  `https` prints the body either way. That suits a system whose purpose is
+  inspection and is the opposite of what a browser should do; a caller that
+  cares must check `identity.ok()`.
+- **No revocation.** No CRL, no OCSP, so a withdrawn certificate is accepted
+  until it expires. No `iPAddress` subjectAltName either, which is why
+  `https 1.1.1.1` is reported as a name mismatch rather than matched.
+- **Roots are the host's.** `scripts/fetch-roots.ps1` copies the Windows
+  trusted-root store, so GLaDOS inherits whatever that machine trusts —
+  including anything added by management software. `trust` lists them; with no
+  bundle, nothing validates, which is the right default.
 - **Entropy is the TSC.** Private keys and nonces come from a cycle counter,
   which is not a random number generator. `RDRAND` exists on this CPU and is
   the fix.
 - **No wireless driver.** `wlan0` is a slot that identifies hardware and
-  refuses to pretend. A modern card needs a signed firmware blob, an
-  asynchronous host-command protocol, 802.11 framing, and a WPA2 supplicant —
-  see the header of `net/wifi.rs`. It also cannot be started under QEMU, which
-  emulates no wireless hardware at all.
+  refuses to pretend. The *supplicant* now exists — PBKDF2 for the PMK, the
+  802.11 PRF for the PTK, RFC 3394 key unwrap for the GTK, and the four-way
+  handshake, all checked against the IEEE 802.11i vectors at boot — but there
+  is nothing to send a frame over. What remains is a signed firmware blob, an
+  asynchronous host-command protocol, and 802.11 framing; see the header of
+  `net/wifi.rs`. None of it can be started under QEMU, which emulates no
+  wireless hardware at all, so the card must name itself on the GF63 first.
 - **No plain-HTTP alternative to adopting a TLS stack.** Vendoring one
   will not be as simple as adding a dependency — rustls needs proc macros and
   ring builds C, neither of which this toolchain can compile. It would have to
@@ -358,10 +365,12 @@ src/
   time.rs        TSC calibrated against the LAPIC timer
   edit.rs        modal editor, nvim-shaped
   pkg.rs         content-addressed package manager
-  net/           interfaces and routing, ARP, IPv4, ICMP, TCP, UDP,
-                 DNS, DHCP, TLS 1.3, and an honest wlan0
-  crypto/        sha-256, hmac/hkdf, chacha20-poly1305, x25519 --
-                 every one checked against its RFC vectors at boot
+  net/           interfaces and routing, ARP, IPv4, ICMP, TCP, UDP, DNS,
+                 DHCP, TLS 1.3 + X.509 + trust store, WPA2 supplicant,
+                 and an honest wlan0
+  crypto/        sha-1/256/384, hmac/hkdf, chacha20-poly1305, x25519,
+                 aes + rfc3394, rsa, ecdsa p-256/384, montgomery bigint --
+                 eleven vector sets, all re-run at every boot
   recovery.rs    console reachable when the store will not mount
   acpi.rs        RSDP/XSDT walk: MADT, MCFG, FADT
   cpu/           GDT+TSS with IST stacks, IDT and the fault reporter, port I/O
