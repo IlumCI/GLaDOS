@@ -20,12 +20,16 @@
 //!
 //! What is deliberately *not* here yet is the loop. Feeding results back and
 //! iterating is only worth building against a model that can follow an
-//! instruction; stories260K cannot, and never will. What can be established
-//! now -- and is, by `selftest` -- is that the mechanism is sound: that the
-//! grammar admits exactly the applet names, that permission cannot leak, and
-//! that a decode always terminates on a real applet. Those properties are
-//! independent of which model is loaded, which is the point of testing them
-//! against one that has no idea what it is doing.
+//! instruction. This was written when the loaded model was stories260K, which
+//! could not and never would; SmolLM2-135M can to a degree, and `act` does
+//! reach the right applet on clear tasks. It is still not good enough to
+//! iterate on -- `route` beats it -- so the loop stays unbuilt.
+//!
+//! What can be established regardless -- and is, by `selftest` -- is that the
+//! mechanism is sound: that the grammar admits exactly the applet names, that
+//! permission cannot leak, and that a decode always terminates on a real
+//! applet. Those properties are independent of which model is loaded, which is
+//! why they were worth testing against one that had no idea what it was doing.
 
 use super::constrain::{step_bound, Alphabet, Cursor, Grammar, MAX_LEADING_SPACES};
 use super::{sample, tensor, tokenizer, with_engine};
@@ -83,9 +87,10 @@ fn grammar_for(trust: Trust) -> (Grammar, Vec<&'static str>) {
 /// Render the action space as the model sees it.
 ///
 /// Still text, and still the weakest link: this is the one place the model has
-/// to *understand* rather than merely be constrained. It is what a competent
-/// model would read to make a sensible choice, and what stories260K will
-/// ignore entirely.
+/// to *understand* rather than merely be constrained. Everything else in this
+/// module is guaranteed by construction; this is the part that is merely
+/// hoped for. It is measurably the weak link -- the probe in `probe.rs`, which
+/// never reads this prompt at all, routes better than decoding against it.
 fn prompt_for(task: &str, names: &[&'static str]) -> String {
     let mut s = String::from("Tools:");
     for (i, n) in names.iter().enumerate() {
@@ -238,9 +243,10 @@ fn check(what: &str, pass: bool) -> bool {
 
 /// Verify the constraint mechanism itself.
 ///
-/// The model's *judgement* cannot be tested here -- stories260K has none to
-/// test. What can be tested is that no sequence of sampling outcomes escapes
-/// the grammar, and that is the property the whole design leans on.
+/// The model's *judgement* is deliberately not what is tested here; it varies
+/// with whichever checkpoint is loaded, and `fit`/`gate` measure it properly.
+/// What is tested is that no sequence of sampling outcomes escapes the
+/// grammar, and that is the property the whole design leans on.
 pub fn selftest() -> bool {
     let mut ok = true;
 

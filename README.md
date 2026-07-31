@@ -1,66 +1,166 @@
-# glados
+# GLaDOS
 
-A from-scratch, non-Unix, ring-0 operating system for one specific laptop:
-an **MSI Thin GF63 12UC**, board **MS-16R8**.
+A from-scratch, non-Unix, ring-0 operating system for one specific laptop —
+an **MSI Thin GF63 12UC**, board **MS-16R8** — built around a language model
+that lives *inside* the kernel rather than on top of it.
 
-Written in the spirit of TempleOS. Single address space, identity-mapped,
-everything at CPL 0, no syscalls, no user/kernel split. Not a Linux
-distribution, not a fork of anything — the only code here that this project did
-not write is the Rust `core` library.
+There is no user/kernel split, no syscalls, no process isolation, and no
+address space but the one. The model runs at CPL 0 with the same view of
+memory as the page fault handler. When it selects a tool, there is no IPC,
+no serialisation, and no sandbox to cross — the call is a function call.
+
+TempleOS is the lineage: single address space, everything at ring 0, no
+syscalls, written by one person from nothing. It is not the target. TempleOS
+put a programming language where the shell goes. GLaDOS puts a model there.
+
+## The idea
+
+Every "AI operating system" so far is an application: a model in userspace,
+talking to the kernel through the same syscall interface as a text editor,
+handed a sandbox and a JSON tool schema and asked to pretend it is an agent.
+The boundary is inherited from an assumption — that untrusted code runs here —
+which does not apply when there is exactly one program and one user.
+
+Take the boundary away and things that are normally hard become arithmetic:
+
+- **The KV cache is a filesystem object.** Not a serialised copy of one — the
+  same bytes, in the content-addressed store, snapshot-able and rollback-able
+  like any other object. Forking a conversation is a hash copy.
+- **Tool selection cannot emit an invalid tool.** The applet name is decoded
+  under a grammar built from the live applet table, so a name that does not
+  exist is not an improbable output, it is an unreachable one. Read-only mode
+  is enforced by removing mutating applets from the reachable set, before
+  sampling, not by checking afterwards.
+- **The model is a scheduler task.** `think` runs it in the background against
+  the same run queue as the shell and the clock. It is preempted like anything
+  else, and its FPU state is saved like anything else.
+- **It can read its own machine.** `peek64`, `inb`, the page tables, its own
+  weights. There is no privileged operation to ask permission for.
+
+The safety story is not isolation, because there is none. It is that the
+dangerous operations are gated on measurements, and the measurements are in
+the repository.
+
+## Watch it work
+
+```
+glados> route trusted make a folder for notes
+[route]
+  mkdir
+  all 3 cores agree (measured 90% right when they do)
+  1602 us, no transformer involved
+  that applet mutates content
+
+glados> ping 10.0.2.2 3
+[ping] 10.0.2.2
+  reply from 10.0.2.2  seq 1  1820 us
+  reply from 10.0.2.2  seq 2  30 us
+  reply from 10.0.2.2  seq 3  15 us
+  3 sent, 3 received
+
+glados> i=0 while(i<8){ rect(i*40,300,32,32,i+1) i=i+1 }
+```
+
+Anything typed at the prompt that is not a command is evaluated as code.
+Integers are 64-bit, strings concatenate with `+`, and the builtins include
+framebuffer drawing, timing, and — because everything is ring 0 — raw
+`peek`/`poke`/`in`/`out`. A bad `peek` faults, and the fault reporter names
+the address; that is the intended debugging loop rather than an accident. An
+evaluation-step budget stops `while(1){}` from wedging the shell, since there
+is no Ctrl-C to rescue you.
 
 ## State
 
-| Milestone | What it does | Status |
+All of it verified running under QEMU, not merely compiling.
+
+| | | |
 |---|---|---|
-| M0 | Toolchain, QEMU+OVMF loop, ESP staging | done |
-| M1 | UEFI entry, GOP framebuffer, ExitBootServices, own PML4 | done |
-| M2 | Framebuffer console, GDT+TSS, IDT with fault reporting | done |
-| M3 | Physical frame allocator, kernel heap | done |
-| M4 | ACPI, LAPIC/IOAPIC, APIC timer, i8042 keyboard, tasking, shell | done |
-| M5 | Tokenizer, parser, REPL | interpreter done; JIT pending |
-| M6 | NVMe driver, own filesystem | not started |
-| M7 | 640×480 16-colour aesthetic layer, hypertext documents | not started |
+| M0–M1 | Toolchain, ESP staging, UEFI entry, GOP framebuffer, `ExitBootServices`, own PML4 | done |
+| M2–M3 | Framebuffer console, GDT+TSS, IDT with fault reporting, frame allocator, heap | done |
+| M4 | ACPI, LAPIC/IOAPIC, APIC timer, i8042 keyboard, preemptive tasking, shell | done |
+| M5 | Lexer, parser, tree-walking interpreter with kernel builtins | done |
+| M6 | TSC microsecond timing, console scroll as a memmove, typewriter pacing | done |
+| M7 | `sysbox` — a Merkle namespace and its applet set | done |
+| M8 | NVMe driver, content-addressed store, snapshot and rollback | done |
+| M9 | Model loader, tokenizer, sampling, generation | done |
+| M10 | Constrained decoding under a live grammar, tool-selection harness | done |
+| M11–M12 | Adapter head, KV cache as a store object, model as a resident task | done |
+| M13–M14 | Synthetic tool-selection corpus, honest evaluation protocol | done |
+| M15 | Ridge probe and the three-core council | done |
+| M16 | Verified self-modification search | done |
+| M17 | Wall-clock RTC, self-snapshotting | done |
+| M18 | Content-addressed package manager, modal editor, FAT16/32 reader | done |
+| M19 | e1000 NIC, ARP, IPv4, ICMP echo | done |
+| M20 | TCP | next |
 
-All of the above is verified running under QEMU, not merely compiling. The
-shell accepts `help`, `mem`, `uptime`, `acpi`, `tasks`, `video`, `echo`,
-`clear` and `fault`.
+## The model
 
-### The language
+**SmolLM2-135M**, 30 layers, dim 576, 9 query heads over 3 KV heads, vocab
+49152, RoPE θ=100000 — quantised to int8 with a per-row scale, 129 MB on the
+ESP. The weights are the one artifact here that this project did not produce;
+`tools/convert.py` flattens them from safetensors into the layout
+`ai::model::offsets` indexes by arithmetic, because parsing JSON and
+rearranging 134 M values inside a kernel with no debugger is a bad trade
+against 200 lines of Python that runs once.
 
-Anything typed at the prompt that is not a command is evaluated as code. There
-is no separation between using the machine and programming it — which is the
-whole reason TempleOS was productive for one person.
+The loader identifies the format by content rather than filename, so
+karpathy's llama2.c checkpoints still load from the same path.
+
+## The interesting result
+
+The obvious way to route a task to a tool is to ask the transformer. It works:
+`act` decodes the applet name token by token under the grammar, and gets there.
+It is also slow, and it is not the best answer.
+
+`route` instead reads one hidden state out of the model and hands it to a
+**closed-form ridge regression** — Widrow-Hoff, 1960 — solved by Cholesky
+in-kernel. 12,672 parameters, no epochs, nothing to overfit:
 
 ```
-glados> 2+3*4
-  14
-glados> x=7
-glados> x*6
-  42
-glados> s=0 i=1 while(i<5){s=s+i i=i+1} s
-  10
-glados> hex(peek32(0xfec00000))
+[probe]
+  357 train, 108 held out, 21 classes
+  seen      99%
+  held out  77%   <- the one that counts
+  chance is 4%
 ```
 
-Integers are 64-bit; strings concatenate with `+`. Builtins cover printing,
-framebuffer drawing (`pixel`, `rect`, `text`), timing (`ticks`, `hz`), and —
-because everything runs at ring 0 — raw hardware access via `peek8/16/32/64`,
-`poke8/32/64`, `inb`/`outb`/`inl`/`outl`. A bad `peek` faults and the M2
-reporter names the address, which is the intended debugging loop rather than an
-accident.
+Three "cores" vote: the probe, a multinomial naive Bayes over hashed
+character n-grams, and a lexical matcher. **Their agreement is the useful
+signal, not their vote** — the council does not beat the probe on accuracy,
+but when all three agree the answer is right 90% of the time versus 61% when
+they split. That gap is what the confidence gate acts on.
 
-An evaluation-step budget stops `while(1){}` from wedging the shell, since
-there is no Ctrl-C to rescue you.
+```
+[gate]
+  all agree    72/108  90% right
+  they split   36/108  61% right
+  overall     80%
+```
 
-### Verified numbers
+A 65-year-old linear method, on features the transformer computed, answering
+in **1.6 ms with no transformer forward pass at inference**. That result came
+from being told to stop reading only recent papers.
 
-- Heap returns to **exactly 0 bytes used** after a 256-element `Vec` and a
-  `String` are dropped, so `alloc` and `dealloc` are exact inverses.
-- APIC timer measured at **63,067,500 Hz** against the PIT — QEMU's 1.009 GHz
-  bus clock over the divide-by-16 — giving 50 ticks in half a second at 100 Hz.
-- `cpus 4` counted correctly under `-smp 4`, exercising the MADT entry walk.
-- Two tasks round-robin fairly at **819 and 820 resumes**, with the shell
-  responsive while a never-yielding task burns 10.5 M iterations.
+### On the evaluation
+
+The three-way split (`SEED_TRAIN` / `SEED_VAL_END` / test) exists because
+selection-on-held-out was done wrong three separate times: a grid sweep scored
+on the test set, cross-validation folded by template family, and a test set
+that *moved* every time the corpus was appended to, so 77.6% → 75.0% read as a
+regression when nothing had regressed. `search` now reports the validation
+number as spent and reads the test set once:
+
+```
+  adopted: lambda 1/10, rule majority
+  validation 87%  (spent -- selected on, so optimistic)
+  test       77%  (54 items, read once)
+  a configuration is adopted only when measured better, never argued better
+```
+
+Negative results are kept in the tree rather than deleted. Training the
+adapter head *hurts* at this data scale. The Product-of-Experts council does
+not improve accuracy. Both are in the repository, because the reason to know
+them is the same reason they were worth measuring.
 
 ## Build and run
 
@@ -77,8 +177,8 @@ Bare metal, once an ESP exists on the USB SSD:
 .\scripts\deploy.ps1 -EspDrive S:
 ```
 
-Then reboot and hold **F11**. `deploy.ps1` writes exactly one file and creates
-no partitions. The internal Windows NVMe is never touched.
+Then reboot and hold **F11**. `deploy.ps1` writes exactly one file, creates no
+partitions, and formats nothing. The internal Windows NVMe is never involved.
 
 ## Design
 
@@ -96,7 +196,34 @@ every null dereference into a `#PF` the reporter can name.
 
 **Faults report to the framebuffer.** The GF63 has no serial port. On real
 hardware, pixels are the only channel by which a diagnostic reaches a human, so
-the exception handlers draw. Under QEMU everything is also mirrored to COM1.
+the exception handlers draw. Under QEMU everything is mirrored to COM1.
+
+**Storage is content-addressed.** Objects are named by SHA-256 of their
+contents and assembled into Merkle trees, so a copy is O(1), identical data is
+stored once, and a snapshot is a single root hash. The hash covers content
+only and never block locations — otherwise moving a block would change an
+object's name.
+
+**NVMe writes are locked by default.** `store::init` unlocks them only after
+`find_store_region` has named a target — a partition tagged with the GLaDOS
+type GUID, or unclaimed space past every partition on a bare image — and
+`Store::format` re-checks that the region is inside our own partition or
+overlaps nothing at all. On a disk fully allocated to Windows with no GLaDOS
+partition, there is no such region and initialisation fails. That is the
+intended outcome, not an inconvenience. Every error path re-locks; leaving it
+open on the way out is how a safety mechanism becomes decorative.
+
+**No dependencies.** The only code in the kernel this project did not write is
+the Rust `core` library. That is mostly a choice and partly a constraint:
+there is no MSVC `link.exe` on this machine, so anything that runs on the host
+at build time cannot be built. A plain library crate is fine — `typenum`
+compiles for the UEFI target in under 4 seconds — but a proc-macro crate dies
+with *"linker `link.exe` not found"*, and so does `-Zbuild-std`, which is why
+the custom target in `x86_64-glados.json` is still unusable. That is the real
+reason vendoring a TLS stack is an obstacle rather than a preference. The
+host-side tools in `tools/` do use Python and numpy; they run once, on a real
+computer, and none of their output is trusted without being re-checked
+in-kernel.
 
 ## Hardware notes
 
@@ -109,7 +236,8 @@ Surveyed from the running Windows install, not assumed.
 | Boot mode | No CSM assumed: no real mode, no INT 10h, no VGA text mode, no `0xB8000` |
 | Display | Intel UHD via GOP. The RTX 3050 is mux-less and irrelevant — the iGPU owns the panel |
 | Keyboard | **i8042** (`ACPI\MSI0007`) — ports `0x60`/`0x64`. Most 2022 laptops route the internal keyboard over USB-HID, which would mean an xHCI + HID stack before you could type one character. This one does not |
-| Storage | Boots from a USB SSD. UEFI's own drivers load us *before* `ExitBootServices`, so no USB driver is needed to boot. Persistence in M6 targets the internal NVMe (~600 lines) rather than USB Mass Storage (several times that) |
+| Storage | Boots from a USB SSD. UEFI's own drivers load us *before* `ExitBootServices`, so no USB driver is needed to boot. Persistence targets the internal NVMe (~600 lines) rather than USB Mass Storage (several times that) |
+| Network | Unidentified. The driver written so far is for the **e1000**, which is what QEMU emulates; the GF63 is most likely a Realtek RTL8168 and is not yet supported |
 
 ## The boot disk is counterfeit
 
@@ -136,9 +264,10 @@ Consequences baked into `scripts/build-layout.ps1`:
   the fictional capacity to anything.
 
 Do not put anything you care about on this device. It is acceptable as a boot
-target only because the entire payload is a 77 KB file reproducible from git.
+target only because the entire payload is reproducible: a 745 KB binary from
+git, plus a model file regenerable from `tools/convert.py`.
 
-## Two bugs worth remembering
+## Bugs worth remembering
 
 **`extern "C"` on this target is Microsoft x64, not System V.**
 `x86_64-unknown-uefi` is a Windows-ABI target. The context switch assembly read
@@ -156,13 +285,30 @@ turn made the null-dereference self-test pass without faulting. A masked
 failure disabling the test meant to catch it. `max_ram_address` now uses an
 allowlist of genuinely-RAM types plus a hard clamp.
 
+**A guarded match arm placed after the arms it guards is unreachable.** The
+exclusion check in `engine_free()` sat below the patterns it was supposed to
+constrain, so it never ran — for several commits, while the compiler said so
+in a warning nobody read. Exclusion is now enforced in `with_engine` by task
+id, where it cannot be bypassed by pattern order.
+
 ## Known gaps
 
+- **None of the AI stack has run on the real machine.** Three claims are
+  waiting there: the AVX2 int8 kernel has never executed (QEMU's default CPU
+  reports `avx2=0`), the attention window has never run at a realistic size,
+  and the generation baseline of ~8 s/token is very likely a QEMU artifact.
+- **No TCP.** ARP, IPv4 and ICMP work; there is no byte stream yet, so there
+  is nothing for TLS to sit on. And when it matters, adopting an existing TLS
+  stack will not be as simple as adding a dependency — rustls needs proc
+  macros and ring builds C, neither of which this toolchain can compile. It
+  would have to be hand-vendored. Moot until M20 either way.
+- **`Racy<T>` is not a lock.** It is single-core interior mutability, and the
+  designated grep target for the day SMP arrives.
 - **Exception handlers do not dump general-purpose registers.** The
   `x86-interrupt` ABI hands us the hardware frame, but the compiler's prologue
-  has already clobbered the GPRs. Capturing them needs a naked assembly stub per
-  vector. `RIP` plus `CR2` diagnoses most early faults, so this is deliberately
-  deferred rather than faked.
+  has already clobbered the GPRs. Capturing them needs a naked assembly stub
+  per vector. `RIP` plus `CR2` diagnoses most early faults, so this is
+  deliberately deferred rather than faked.
 - **The framebuffer is mapped write-back, not write-combining.** Correct, just
   slower than it could be. Needs PAT setup.
 - **No NX.** Every mapping is `PRESENT | WRITABLE`. Requires `EFER.NXE` plus
@@ -173,21 +319,30 @@ allowlist of genuinely-RAM types plus a hard clamp.
 
 ## Layout
 
+~19,500 lines of Rust.
+
 ```
 src/
   main.rs        UEFI entry and boot sequence
   uefi.rs        hand-written firmware bindings -- field order IS the ABI
   sync.rs        Racy<T>: single-core interior mutability. Grep target for SMP
-  serial.rs      COM1, for QEMU only
-  cpu/
-    gdt.rs       GDT + TSS, IST stacks for #DF and #PF
-    idt.rs       IDT and the fault reporter
-    port.rs      port I/O
-  gfx/
-    mod.rs       linear framebuffer
-    font.rs      8x8 bitmap font, drawn at 2x
-    console.rs   scrolling console over a RAM shadow buffer
-  mem/
-    frame.rs     bump frame allocator over the UEFI memory map
-    paging.rs    identity map construction
+  shell.rs       command dispatch; anything unrecognised is evaluated as code
+  task.rs        preemptive round-robin tasking, fxsave per task
+  time.rs        TSC calibrated against the LAPIC timer
+  edit.rs        modal editor, nvim-shaped
+  pkg.rs         content-addressed package manager
+  net.rs         ARP, IPv4, ICMP, and the address configuration
+  recovery.rs    console reachable when the store will not mount
+  acpi.rs        RSDP/XSDT walk: MADT, MCFG, FADT
+  cpu/           GDT+TSS with IST stacks, IDT and the fault reporter, port I/O
+  mem/           frame allocator over the UEFI map, identity map, kernel heap
+  gfx/           linear framebuffer, 8x8 font at 2x, scrolling console
+  lang/          lexer, parser, tree-walking interpreter
+  dev/           lapic, ioapic, pic, i8042, pci, nvme, rtc, e1000
+  store/         block layer, SHA-256, content-addressed store, FAT16/32 reader
+  sysbox/        the Merkle namespace and its applets
+  ai/            model, weights, tokenizer, sampling, constrained decoding,
+                 corpus, ridge probe, council, harness
+tools/           host-side: checkpoint conversion, corpus generation, evaluation
+scripts/         build, run, deploy, and the disk-forensics scripts
 ```

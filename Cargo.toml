@@ -6,17 +6,30 @@ description = "A from-scratch ring-0 operating system for the MSI MS-16R8"
 
 # No dependencies, deliberately. Everything here is written from scratch.
 #
-# That is a choice, not a constraint. This comment used to claim build.rs and
-# proc-macro crates were impossible because the toolchain had no host linker,
-# and that claim steered several decisions -- including an assessment that
-# vendoring a TLS implementation was off the table. It was never tested. It is
-# false: `typenum`, which has a build script, compiles here in 24 seconds.
-# Cargo finds MSVC through the registry even though link.exe is not on PATH.
+# That is mostly a choice and partly a constraint, and it is worth being exact
+# about which is which, because a wrong version of this comment briefly claimed
+# the constraint did not exist at all. Measured, on this machine:
 #
-# So dependencies remain absent because writing this from scratch is the point,
-# and each one added would be a deliberate exception -- most likely for
-# cryptography, where writing it from scratch is how you get a security bug
-# rather than an education.
+#   * A pure-Rust crate with no build script and no proc macro WORKS.
+#     `typenum` compiles for x86_64-unknown-uefi in under 4 seconds. (It proves
+#     less than it seems to: typenum 1.20 sets `build = false`, so nothing was
+#     linked for the host. An earlier note cited it as evidence build scripts
+#     work. It is not.)
+#   * A proc-macro crate FAILS. `paste` dies with "linker `link.exe` not
+#     found" -- a proc macro is a host cdylib, and there is no MSVC linker
+#     here.
+#   * -Zbuild-std FAILS for the same reason, on compiler_builtins' build
+#     script. So the custom target in x86_64-glados.json stays unusable.
+#
+# The practical line: anything that has to run on the host at build time is
+# out; plain library crates are in. That is why vendoring TLS is a real
+# obstacle rather than a preference -- rustls pulls proc macros, and ring
+# builds C. It would have to be a from-scratch or hand-vendored implementation.
+#
+# Beyond that line, dependencies remain absent because writing this from
+# scratch is the point, and each one added would be a deliberate exception --
+# most likely for cryptography, where writing it from scratch is how you get a
+# security bug rather than an education.
 [dependencies]
 
 [[bin]]

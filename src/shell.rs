@@ -728,31 +728,57 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             }
             crate::ai::generate(prompt, &opts);
         }
+        // Grouped rather than alphabetical: the list is long enough now that
+        // finding a command matters more than enumerating them. Each group is
+        // one subsystem, in the order you would meet them.
         "help" => {
             console::set_color(YELLOW);
-            kprintln!("commands");
+            kprintln!("machine");
             console::set_color(WHITE);
-            kprintln!("  help          this list");
-            kprintln!("  mem           heap usage");
-            kprintln!("  uptime        ticks since boot");
-            kprintln!("  acpi          parsed firmware tables");
-            kprintln!("  tasks         scheduler state");
-            kprintln!("  pci           enumerate PCIe devices");
-            kprintln!("  cpu           processor identification");
-            kprintln!("  reboot        reset the machine");
-            kprintln!("  video         framebuffer geometry");
-            kprintln!("  echo <text>   print text");
-            kprintln!("  clear         clear the screen");
-            kprintln!("  words         list language builtins");
-            kprintln!("  vars          list variables you have defined");
+            kprintln!("  mem uptime tasks cpu acpi pci video date reboot");
             kprintln!("  fault         deliberately dereference null");
+            kprintln!("  clear refresh echo <text>");
             kprintln!("  typewriter    output pacing, in us per character");
-            kprintln!("  refresh       repaint the console");
+
+            console::set_color(YELLOW);
+            kprintln!("\nstorage");
+            console::set_color(WHITE);
+            kprintln!("  nvme disk     controller and namespace state");
+            kprintln!("  store         init/unlock/test/log/rollback -- 'store' for the list");
+            kprintln!("  autosnap      snapshot the namespace on every write");
+            kprintln!("  fat           read a FAT16/32 volume: fat ls|cat <path>");
+            kprintln!("  pkg           list/info/add/remove content-addressed packages");
+            kprintln!("  edit <path>   modal editor ('vi' works too)");
+
+            console::set_color(YELLOW);
+            kprintln!("\nnetwork");
+            console::set_color(WHITE);
+            kprintln!("  net           link, addresses, ARP cache");
+            kprintln!("  net ip <addr> [gw]    set them");
+            kprintln!("  ping <addr> [count]");
+
+            console::set_color(YELLOW);
+            kprintln!("\nthe model");
+            console::set_color(WHITE);
+            kprintln!("  gen <prompt>  generate text     ask <prompt>  chat turn");
+            kprintln!("  think <p>     run it in the background, off the shell");
+            kprintln!("  act <task>    choose an applet by constrained decoding");
+            kprintln!("  route <task>  choose one with the probe -- no transformer");
+            kprintln!("  teach <applet> <task>   add an example ('teach file <path>' for many)");
+            kprintln!("  fit [lambda]  refit the probe and the council on what it knows");
+            kprintln!("  gate search   how often agreement is right; the config search");
+            kprintln!("  ctx cont window logits probe feature zeroshot train");
+            console::set_color(YELLOW);
+            kprintln!("  'act' and 'route' are read-only unless you type 'trusted' first");
+            console::set_color(WHITE);
+
             console::set_color(YELLOW);
             kprintln!("\nsysbox owns the namespace -- type 'sysbox' for its applets");
+            kprintln!("a command may be piped into a filter: <cmd> | grep|head|tail|sort|wc");
             console::set_color(WHITE);
+
             console::set_color(YELLOW);
-            kprintln!("\nanything else is evaluated as code");
+            kprintln!("\nanything else is evaluated as code -- 'words' and 'vars' to look around");
             console::set_color(WHITE);
             kprintln!("  x = 6*7               println(\"hi\", x)");
             kprintln!("  i=0 while(i<8){{ rect(i*40,300,32,32,i+1) i=i+1 }}");

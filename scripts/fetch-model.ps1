@@ -3,6 +3,15 @@
     Fetch a llama2.c checkpoint into esp\GLADOS so deploy.ps1 can carry it.
 
 .DESCRIPTION
+    This is the SECONDARY path. The model GLaDOS actually runs is SmolLM2-135M,
+    produced by tools\convert.py from a Hugging Face safetensors checkpoint into
+    a quantised GLADOSM2 file. Use this script for karpathy's tinyllamas instead
+    -- they are small, they load fast, and they are useful for exercising the
+    loader and the sampler without waiting on 129 MB.
+
+    The loader identifies a checkpoint by content, not by filename, so both
+    formats live at the same path and either can be dropped in.
+
     The weights are not in the repository -- they are someone else's artifact,
     they are large, and git is the wrong place for either. This script puts them
     where the loader expects them: esp\GLADOS\model.bin and tokenizer.bin, read
@@ -32,6 +41,22 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $dir  = Join-Path $root 'esp\GLADOS'
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
+
+# Both formats share model.bin, so downloading a 1 MB tinyllama on top of a
+# converted 129 MB SmolLM2 is an easy accident with a slow recovery -- the
+# conversion needs the safetensors checkpoint fetched again. Refuse unless the
+# overwrite was asked for.
+$existing = Join-Path $root 'esp\GLADOS\model.bin'
+if ((Test-Path $existing) -and -not $Force) {
+    $fs = [System.IO.File]::OpenRead($existing)
+    $magic = New-Object byte[] 8
+    [void]$fs.Read($magic, 0, 8)
+    $fs.Close()
+    if ([Text.Encoding]::ASCII.GetString($magic) -eq 'GLADOSM2') {
+        Write-Error ("model.bin is a converted GLADOSM2 checkpoint ({0:N0} B). " -f (Get-Item $existing).Length +
+                     "Pass -Force to replace it with a llama2.c checkpoint.")
+    }
+}
 
 $repo = 'https://huggingface.co/karpathy/tinyllamas/resolve/main'
 

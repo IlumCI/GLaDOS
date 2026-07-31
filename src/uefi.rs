@@ -413,7 +413,7 @@ impl Blob {
 /// Read a whole file from the volume this image was loaded from.
 ///
 /// `path` is an absolute path on that volume using backslashes, e.g.
-/// `\GLADOS\stories260K.bin`. ASCII only -- it is widened to UCS-2 by zero
+/// `\GLADOS\model.bin`. ASCII only -- it is widened to UCS-2 by zero
 /// extension, which is correct for ASCII and wrong for anything else.
 ///
 /// Returns `None` for every failure, including "not there". A missing model is

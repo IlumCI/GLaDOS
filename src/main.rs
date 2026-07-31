@@ -563,16 +563,16 @@ fn init_keyboard(acpi: &Option<acpi::Acpi>) {
     }
 }
 
-/// 16 MiB of kernel heap.
+/// 64 MiB of kernel heap.
 ///
-/// Was 4 MiB, which was ample until a model had to fit in it. stories260K needs
-/// about 1 MiB for weights and 700 KiB of KV cache and scratch; the headroom is
-/// for the next model up, and for the namespace, which lives entirely in RAM.
+/// Grown twice, each time by a model. 4 MiB was ample until weights had to fit
+/// at all; 16 MiB was enough until a 30-layer one arrived. SmolLM2's KV cache
+/// alone is 23.8 MiB at seq 512, and its 49152-entry vocabulary costs a few
+/// more in tokenizer tables -- about 29 MiB resident once the corpus and the
+/// namespace are in, both of which live entirely in RAM.
 ///
-/// 16 MiB was enough until a 30-layer model arrived. SmolLM2's KV cache alone
-/// is 23.8 MiB at seq 512, and its 49152-entry vocabulary costs a few more in
-/// tokenizer tables. The weights themselves are *not* here -- they stay in the
-/// LoaderData pool the firmware filled, referenced in place.
+/// The weights themselves are *not* here -- they stay in the LoaderData pool
+/// the firmware filled, referenced in place.
 const HEAP_PAGES: usize = 16384;
 
 fn init_heap(frames: &mut mem::frame::EarlyFrames) {
