@@ -6,6 +6,7 @@ pub mod model;
 pub mod sample;
 pub mod tensor;
 pub mod tokenizer;
+pub mod vocab;
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -370,6 +371,8 @@ pub struct Engine {
     pub tok: tokenizer::Tokenizer,
     pub state: model::State,
     pub rng: sample::Rng,
+    /// The part that is allowed to change. Everything above it is frozen.
+    pub head: vocab::Head,
 }
 
 static ENGINE: Racy<Option<Engine>> = Racy::new(None);
@@ -450,7 +453,35 @@ pub fn init(model_blob: Option<Blob>, tok_blob: Option<Blob>) {
 
     // Seed from the TSC so successive boots do not retell the same story.
     let seed = crate::time::rdtsc();
-    unsafe { *ENGINE.get() = Some(Engine { model: m, tok, state, rng: sample::Rng::new(seed) }) };
+    let mut rng = sample::Rng::new(seed);
+
+    // One token per applet, each starting from the mean of the embeddings of
+    // the words describing it. The base model's weights are not touched here
+    // or anywhere else.
+    let head = vocab::Head::for_applets(&m, &tok, &mut rng);
+    kprintln!(
+        "  head {} applet tokens, {} trainable params (base {} frozen)",
+        head.len(),
+        head.params(),
+        c.param_count()
+    );
+
+    unsafe { *ENGINE.get() = Some(Engine { model: m, tok, state, rng, head }) };
+
+    // The corpus lives in the namespace, so it is restored along with
+    // everything else; only seed it when there is nothing there.
+    if crate::sysbox::children(vocab::CORPUS).is_empty() {
+        for (applet, task) in vocab::SEED {
+            vocab::record(applet, task);
+        }
+        kprintln!("  corpus seeded with {} examples at {}", vocab::SEED.len(), vocab::CORPUS);
+    } else {
+        kprintln!(
+            "  corpus has {} examples at {}",
+            crate::sysbox::children(vocab::CORPUS).len(),
+            vocab::CORPUS
+        );
+    }
 
     console::set_color(LTGREEN);
     kprintln!("  ready -- 'gen <prompt>' to generate, 'act <task>' to choose an applet");

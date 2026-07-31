@@ -456,6 +456,39 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             let task = if task.is_empty() { "look at the files" } else { task };
             crate::ai::harness::report(task, trust, 1.0);
         }
+        "teach" => {
+            let mut it = rest.splitn(2, ' ');
+            match (it.next(), it.next()) {
+                (Some(applet), Some(task)) if !task.trim().is_empty() => {
+                    if crate::sysbox::APPLETS.iter().any(|a| a.name == applet) {
+                        if crate::ai::vocab::record(applet, task.trim()) {
+                            kprintln!("  recorded: {} <- \"{}\"", applet, task.trim());
+                        } else {
+                            kprintln!("  could not write to {}", crate::ai::vocab::CORPUS);
+                        }
+                    } else {
+                        kprintln!("  '{}' is not an applet", applet);
+                    }
+                }
+                _ => kprintln!("  usage: teach <applet> <task description>"),
+            }
+        }
+        "probe" => crate::ai::harness::probe_features(),
+        "feature" => {
+            use crate::ai::harness::{set_feature_mode, Feature};
+            match rest {
+                "hidden" => { set_feature_mode(Feature::Hidden); kprintln!("  feature = hidden state"); }
+                "pooled" => { set_feature_mode(Feature::Pooled); kprintln!("  feature = pooled embedding"); }
+                _ => kprintln!("  usage: feature hidden|pooled"),
+            }
+        }
+        "zeroshot" => crate::ai::harness::zero_shot_report(if rest.is_empty() { "diff" } else { rest }),
+        "train" => {
+            let epochs: usize = rest.split_whitespace().next()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(20);
+            crate::ai::harness::train_report(epochs);
+        }
         "gen" => {
             // `gen -t 0 once upon a time` -- flags first, everything after is
             // the prompt verbatim, so it can contain spaces without quoting.

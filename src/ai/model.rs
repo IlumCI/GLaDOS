@@ -168,6 +168,15 @@ impl State {
         }
     }
 
+    /// The final normed hidden state -- exactly what the classifier sees.
+    ///
+    /// Only meaningful immediately after `forward`. This is the feature vector
+    /// the vocabulary extension scores against, and the one its gradient step
+    /// multiplies by.
+    pub fn hidden(&self) -> &[f32] {
+        &self.xb
+    }
+
     pub fn bytes(&self, cfg: &Config) -> usize {
         let kv = cfg.kv_dim();
         4 * (cfg.dim * 4
@@ -400,14 +409,27 @@ impl Model {
         }
 
         let rms_final = self.slice(self.o.rms_final, dim);
-        let x = s.x.clone();
-        tensor::rmsnorm(&mut s.x, &x, rms_final);
+        // Normalise into xb rather than cloning x into a temporary. The clone
+        // was a heap allocation on every single token, in the one loop that
+        // runs most often.
+        tensor::rmsnorm(&mut s.xb, &s.x, rms_final);
         tensor::matmul(
             &mut s.logits,
-            &s.x,
+            &s.xb,
             self.slice(self.o.wcls, c.vocab_size * dim),
             dim,
             c.vocab_size,
         );
+    }
+
+    /// One row of the token embedding table.
+    ///
+    /// Public because the vocabulary extension initialises its new rows by
+    /// pooling these: a token that never existed during training has to start
+    /// somewhere, and the average of the words describing it is a far better
+    /// starting point than noise.
+    pub fn embed(&self, token: usize) -> &[f32] {
+        let t = token.min(self.cfg.vocab_size - 1);
+        self.slice(self.o.token_embedding + t * self.cfg.dim, self.cfg.dim)
     }
 }

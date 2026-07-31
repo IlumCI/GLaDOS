@@ -28,7 +28,7 @@
 //! against one that has no idea what it is doing.
 
 use super::constrain::{step_bound, Alphabet, Cursor, Grammar, MAX_LEADING_SPACES};
-use super::{sample, tokenizer, with_engine};
+use super::{sample, tensor, tokenizer, with_engine};
 use crate::gfx::console::{self, LTCYAN, LTGRAY, LTGREEN, LTRED, WHITE, YELLOW};
 use crate::sysbox;
 use crate::{kprintln, sync::Racy};
@@ -338,4 +338,440 @@ pub fn selftest() -> bool {
     let _ = tokenizer::BOS;
     let _ = WHITE;
     ok
+}
+
+// --- native tool selection ----------------------------------------------
+//
+// The grammar path above spells an applet name out character by character.
+// This one does not spell anything: the applet *is* a token, scored directly
+// against the model's final hidden state. No grammar, no cursor, no
+// terminator, one step instead of four to seven.
+//
+// Permission is enforced identically and for the same reason -- a forbidden
+// applet is simply not among the rows scored, so it has no logit and cannot be
+// sampled. The guarantee does not weaken by dropping the grammar.
+
+use super::vocab::{self, Head};
+
+fn allowed_indices(head: &Head, trust: Trust) -> Vec<usize> {
+    sysbox::APPLETS
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| trust.admits(a))
+        .filter_map(|(i, _)| head.index_of(sysbox::APPLETS[i].name))
+        .collect()
+}
+
+/// Which representation of a task the head classifies.
+///
+/// `Hidden` is the obvious choice and the one that failed: `probe` measures
+/// a separation gap of zero, because a 260K story model fed text far outside
+/// its training distribution collapses every prompt onto nearly the same
+/// direction. `Pooled` skips the transformer entirely and averages the
+/// *embeddings* of the task's words, which the zero-shot result showed does
+/// carry signal -- a row built from descriptions alone ranks its own applet
+/// 4th of 21 rather than 11th.
+///
+/// Keeping both is the point. The failure is a measured property of one
+/// feature, not a fact about the machine, and it is worth being able to
+/// re-measure when a competent model arrives -- at which case `Hidden` should
+/// win decisively and `Pooled` should look crude.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Feature {
+    Hidden,
+    Pooled,
+}
+
+static FEATURE: Racy<Feature> = Racy::new(Feature::Pooled);
+
+pub fn feature_mode() -> Feature {
+    unsafe { *FEATURE.get() }
+}
+
+pub fn set_feature_mode(f: Feature) {
+    unsafe { *FEATURE.get() = f };
+}
+
+fn feature(e: &mut super::Engine, task: &str) -> Option<Vec<f32>> {
+    match feature_mode() {
+        Feature::Hidden => feature_hidden(e, task),
+        Feature::Pooled => {
+            let ids = e.tok.encode(task, false, false);
+            if ids.is_empty() {
+                return None;
+            }
+            let dim = e.model.cfg.dim;
+            let mut v = alloc::vec![0.0f32; dim];
+            for id in &ids {
+                for (a, x) in v.iter_mut().zip(e.model.embed(*id).iter()) {
+                    *a += *x;
+                }
+            }
+            let k = 1.0 / ids.len() as f32;
+            for a in v.iter_mut() {
+                *a *= k;
+            }
+            Some(v)
+        }
+    }
+}
+
+/// Run a prompt through the model and return the final hidden state.
+fn feature_hidden(e: &mut super::Engine, task: &str) -> Option<Vec<f32>> {
+    let prompt = prompt_for_task(task);
+    let tokens = e.tok.encode(&prompt, true, false);
+    if tokens.is_empty() {
+        return None;
+    }
+    let limit = e.model.cfg.seq_len;
+    let mut pos = 0usize;
+    for &t in tokens.iter() {
+        if pos >= limit {
+            break;
+        }
+        e.model.forward(&mut e.state, t, pos);
+        pos += 1;
+    }
+    Some(e.state.hidden().to_vec())
+}
+
+/// Shorter than the grammar prompt: with applet tokens there is no need to
+/// list the tools, because the candidate set is imposed by the scoring rather
+/// than described in words.
+fn prompt_for_task(task: &str) -> String {
+    let mut s = String::from("Task: ");
+    s.push_str(task);
+    s.push_str(". Tool:");
+    s
+}
+
+pub fn choose_native(task: &str, trust: Trust, temperature: f32) -> Option<Choice> {
+    with_engine(|e| {
+        let allowed = allowed_indices(&e.head, trust);
+        if allowed.is_empty() {
+            return None;
+        }
+        let x = feature(e, task)?;
+        let logits = e.head.logits(&x, &allowed);
+        let slot = sample::sample_among(
+            &logits,
+            &(0..logits.len() as u32).collect::<Vec<u32>>(),
+            temperature,
+            0.0,
+            &mut e.rng,
+        )?;
+        let name = e.head.name(allowed[slot]);
+        let mutates = sysbox::APPLETS
+            .iter()
+            .find(|a| a.name == name)
+            .map(|a| a.mutates)
+            .unwrap_or(false);
+        Some(Choice { applet: name, mutates, steps: 1 })
+    })?
+}
+
+// --- training -----------------------------------------------------------
+
+pub struct TrainReport {
+    pub examples: usize,
+    pub held_out: usize,
+    pub before_train: f32,
+    pub after_train: f32,
+    pub before_test: f32,
+    pub after_test: f32,
+}
+
+/// Every fourth example is held out. Reporting only training accuracy would
+/// measure memorisation, which a per-applet delta can always achieve and which
+/// says nothing about whether anything was learned.
+fn is_held_out(i: usize) -> bool {
+    i % 4 == 3
+}
+
+fn accuracy(e: &mut super::Engine, examples: &[vocab::Example], held: bool) -> f32 {
+    let all: Vec<usize> = (0..e.head.len()).collect();
+    let mut right = 0usize;
+    let mut total = 0usize;
+    for (i, ex) in examples.iter().enumerate() {
+        if is_held_out(i) != held {
+            continue;
+        }
+        let Some(target) = e.head.index_of(&ex.applet) else { continue };
+        let Some(x) = feature(e, &ex.task) else { continue };
+        let logits = e.head.logits(&x, &all);
+        let mut best = 0usize;
+        for (j, l) in logits.iter().enumerate() {
+            if *l > logits[best] {
+                best = j;
+            }
+        }
+        total += 1;
+        if all[best] == target {
+            right += 1;
+        }
+    }
+    if total == 0 {
+        0.0
+    } else {
+        right as f32 / total as f32
+    }
+}
+
+pub fn train(epochs: usize, lr: f32) -> Option<TrainReport> {
+    let examples = vocab::examples();
+    if examples.is_empty() {
+        return None;
+    }
+    with_engine(|e| {
+        let all: Vec<usize> = (0..e.head.len()).collect();
+        let held_out = examples.iter().enumerate().filter(|(i, _)| is_held_out(*i)).count();
+
+        // The base model is frozen, so a feature vector is a constant. The
+        // first version recomputed it every epoch, which meant 600 forward
+        // passes to do 600 outer products and made a 20-epoch run take two
+        // minutes. Caching is not an optimisation detail here -- it is the
+        // reason adapter training is cheap at all, and skipping it gave away
+        // the entire advantage of freezing the base.
+        let mut cached: Vec<(usize, Vec<f32>, bool)> = Vec::new();
+        for (i, ex) in examples.iter().enumerate() {
+            let Some(target) = e.head.index_of(&ex.applet) else { continue };
+            let Some(x) = feature(e, &ex.task) else { continue };
+            cached.push((target, x, is_held_out(i)));
+        }
+
+        let score = |e: &super::Engine, held: bool, cached: &[(usize, Vec<f32>, bool)]| -> f32 {
+            let (mut right, mut total) = (0usize, 0usize);
+            for (target, x, h) in cached.iter() {
+                if *h != held {
+                    continue;
+                }
+                let logits = e.head.logits(x, &all);
+                let mut best = 0usize;
+                for (j, l) in logits.iter().enumerate() {
+                    if *l > logits[best] {
+                        best = j;
+                    }
+                }
+                total += 1;
+                if best == *target {
+                    right += 1;
+                }
+            }
+            if total == 0 { 0.0 } else { right as f32 / total as f32 }
+        };
+
+        let before_train = score(e, false, &cached);
+        let before_test = score(e, true, &cached);
+
+        for _ in 0..epochs {
+            for (target, x, held) in cached.iter() {
+                if *held {
+                    continue;
+                }
+                let mut probs = e.head.logits(x, &all);
+                tensor::softmax(&mut probs);
+                e.head.learn(x, &all, &probs, *target, lr);
+            }
+        }
+
+        let after_train = score(e, false, &cached);
+        let after_test = score(e, true, &cached);
+
+        TrainReport {
+            examples: examples.len(),
+            held_out,
+            before_train,
+            after_train,
+            before_test,
+            after_test,
+        }
+    })
+}
+
+/// Score a description that belongs to no applet in the table.
+///
+/// This is the hypernetwork's reason to exist: if `h` learned the general map
+/// from a description to a row, then a tool written after training still gets a
+/// usable row. Returns the rank of the true applet among all of them, where 0
+/// means the generated row scored it first.
+pub fn zero_shot_rank(held: &str) -> Option<(usize, usize)> {
+    with_engine(|e| {
+        let idx = e.head.index_of(held)?;
+        let applet = sysbox::APPLETS.iter().find(|a| a.name == held)?;
+        let mut text = String::from(applet.name);
+        text.push(' ');
+        text.push_str(applet.help);
+
+        // A row built only from the description, with no per-applet delta.
+        let generated = e.head.row_for_text(&e.model, &e.tok, &text);
+
+        // Rank the real rows by similarity to it.
+        let mut better = 0usize;
+        let target = vocab::cosine(&generated, &e.head.row(idx));
+        for i in 0..e.head.len() {
+            if i != idx && vocab::cosine(&generated, &e.head.row(i)) > target {
+                better += 1;
+            }
+        }
+        Some((better, e.head.len()))
+    })?
+}
+
+pub fn train_report(epochs: usize) {
+    console::set_color(YELLOW);
+    kprintln!("[train]");
+    console::set_color(LTGRAY);
+
+    let t0 = crate::time::rdtsc();
+    let Some(r) = train(epochs, 0.05) else {
+        console::set_color(LTRED);
+        kprintln!("  no corpus at {} (or no model loaded)", vocab::CORPUS);
+        console::set_color(LTGRAY);
+        return;
+    };
+    let elapsed = crate::time::rdtsc() - t0;
+
+    let held = r.held_out;
+    kprintln!(
+        "  {} examples, {} held out, {} epochs",
+        r.examples - held,
+        held,
+        epochs
+    );
+    kprintln!(
+        "  seen      {}% -> {}%",
+        (r.before_train * 100.0) as u32,
+        (r.after_train * 100.0) as u32
+    );
+    // The number that means anything. Training accuracy can be driven up by
+    // the per-applet delta memorising each example; held-out accuracy can only
+    // improve if something general was learned.
+    let up = r.after_test > r.before_test;
+    console::set_color(if up { LTGREEN } else { YELLOW });
+    kprintln!(
+        "  held out  {}% -> {}%   <- the one that counts",
+        (r.before_test * 100.0) as u32,
+        (r.after_test * 100.0) as u32
+    );
+    console::set_color(LTGRAY);
+
+    let mhz = crate::time::tsc_mhz();
+    if mhz > 0 {
+        let ms = elapsed / mhz / 1000;
+        kprintln!("  {} ms, base model never touched", ms);
+    }
+
+    // Chance level, so the accuracies above can be read against something.
+    with_engine(|e| {
+        kprintln!("  (chance is {}%)", 100 / e.head.len().max(1));
+    });
+}
+
+/// Report how well a description alone locates an applet.
+pub fn zero_shot_report(name: &str) {
+    console::set_color(YELLOW);
+    kprintln!("[zero-shot]");
+    console::set_color(LTGRAY);
+    match zero_shot_rank(name) {
+        None => kprintln!("  '{}' is not an applet, or no model is loaded", name),
+        Some((rank, total)) => {
+            console::set_color(if rank == 0 { LTGREEN } else { YELLOW });
+            kprintln!(
+                "  a row generated from '{}' descriptions alone ranks it {} of {}",
+                name,
+                rank + 1,
+                total
+            );
+            console::set_color(LTGRAY);
+            kprintln!("  (no per-applet delta used -- this is what a brand new applet would get)");
+        }
+    }
+}
+
+/// Ask whether the features can possibly work, before blaming the head.
+///
+/// The head is a linear classifier on the model's last hidden state. If that
+/// state is nearly the same vector for every prompt -- which is entirely
+/// plausible, since a 260K story model is being fed text far outside anything
+/// it was trained on, through a template that barely varies -- then no linear
+/// head can separate the classes and no amount of training or architecture
+/// will help. That is a property of the features, not of the classifier, and
+/// it is worth measuring before tuning anything.
+///
+/// The number that matters is the gap: mean cosine between features of
+/// examples sharing an applet, against those with different applets. A gap of
+/// nearly zero means the features carry no task information.
+pub fn probe_features() {
+    console::set_color(YELLOW);
+    kprintln!("[probe]");
+    console::set_color(LTGRAY);
+
+    let examples = vocab::examples();
+    if examples.is_empty() {
+        kprintln!("  no corpus");
+        return;
+    }
+
+    let got = with_engine(|e| {
+        let mut feats: Vec<(usize, Vec<f32>)> = Vec::new();
+        for ex in examples.iter() {
+            let Some(t) = e.head.index_of(&ex.applet) else { continue };
+            let Some(x) = feature(e, &ex.task) else { continue };
+            feats.push((t, x));
+        }
+
+        let (mut same, mut same_n) = (0.0f32, 0usize);
+        let (mut diff, mut diff_n) = (0.0f32, 0usize);
+        let (mut lo, mut hi) = (1.0f32, -1.0f32);
+        for i in 0..feats.len() {
+            for j in (i + 1)..feats.len() {
+                let c = vocab::cosine(&feats[i].1, &feats[j].1);
+                if c < lo { lo = c; }
+                if c > hi { hi = c; }
+                if feats[i].0 == feats[j].0 {
+                    same += c;
+                    same_n += 1;
+                } else {
+                    diff += c;
+                    diff_n += 1;
+                }
+            }
+        }
+        (
+            feats.len(),
+            if same_n > 0 { same / same_n as f32 } else { 0.0 },
+            if diff_n > 0 { diff / diff_n as f32 } else { 0.0 },
+            lo,
+            hi,
+        )
+    });
+
+    let Some((n, same, diff, lo, hi)) = got else {
+        kprintln!("  no model loaded");
+        return;
+    };
+
+    let pct = |v: f32| (v * 1000.0) as i32;
+    kprintln!("  {} features, pairwise cosine {}..{} (x1000)", n, pct(lo), pct(hi));
+    kprintln!("  same applet      {}", pct(same));
+    kprintln!("  different applet {}", pct(diff));
+
+    let gap = same - diff;
+    let spread = hi - lo;
+    console::set_color(if gap > 0.005 { LTGREEN } else { LTRED });
+    kprintln!("  separation gap   {} (x1000)", pct(gap));
+    console::set_color(LTGRAY);
+
+    // Two different diagnoses, and conflating them sent me tuning a learning
+    // rate when the features were the problem. Collapse means every prompt maps
+    // to nearly one direction, and nothing downstream can recover; a small gap
+    // with a wide spread means the features vary but not along task lines,
+    // which more or better-labelled data could still exploit.
+    if spread < 0.1 {
+        console::set_color(LTRED);
+        kprintln!("  features are collapsed -- no head of any kind can separate them");
+        console::set_color(LTGRAY);
+    } else if gap <= 0.005 {
+        kprintln!("  features vary, but not along task lines");
+    }
 }

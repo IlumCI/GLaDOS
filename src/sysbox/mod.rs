@@ -261,6 +261,45 @@ pub fn is_ready() -> bool {
     unsafe { BOX.get().is_some() }
 }
 
+// --- programmatic access ------------------------------------------------
+//
+// The applets above exist to be typed at. These exist so the rest of the
+// system can use the namespace as storage -- the training corpus lives in it,
+// which is what makes a training set a snapshottable object rather than a file
+// somebody has to remember to keep.
+
+pub fn write_text(path: &str, text: &str) -> bool {
+    with(|s| {
+        let p = parse(&s.cwd, path);
+        tree::put(&mut s.root, &p, Node::Blob(text.as_bytes().to_vec())).is_ok()
+    })
+    .unwrap_or(false)
+}
+
+pub fn read_blob(path: &str) -> Option<Vec<u8>> {
+    with(|s| {
+        let p = parse(&s.cwd, path);
+        match tree::resolve(&s.root, &p) {
+            Some(Node::Blob(b)) => Some(b.clone()),
+            _ => None,
+        }
+    })
+    .flatten()
+}
+
+/// Entry names directly under `path`, in sorted order. Empty if it is missing
+/// or is a file.
+pub fn children(path: &str) -> Vec<String> {
+    with(|s| {
+        let p = parse(&s.cwd, path);
+        match tree::resolve(&s.root, &p) {
+            Some(Node::Dir(es)) => es.iter().map(|(k, _)| k.clone()).collect(),
+            _ => Vec::new(),
+        }
+    })
+    .unwrap_or_default()
+}
+
 // --- selftest -----------------------------------------------------------
 
 fn check(what: &str, pass: bool) -> bool {
