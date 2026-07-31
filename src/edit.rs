@@ -80,6 +80,19 @@ fn colour(i: u8) -> (Color, Color) {
 
 const BLANK: Cell = Cell { ch: b' ', fg: C_FG, bg: C_FG };
 
+/// How far back `u` can go. Bounded because the buffer is cloned each time and
+/// an editor that grows without limit on a machine with no swap is a way to
+/// lose the file it is holding.
+const UNDO_MAX: usize = 200;
+
+#[derive(Clone)]
+struct Snapshot {
+    lines: Vec<Vec<char>>,
+    cx: usize,
+    cy: usize,
+    dirty: bool,
+}
+
 pub struct Editor {
     /// Lines as characters rather than bytes, so cursor arithmetic is index
     /// arithmetic and cannot land in the middle of a multi-byte sequence.
@@ -95,6 +108,16 @@ pub struct Editor {
     quit: bool,
     /// A single pending operator, for the two-key sequences: `dd`, `gg`.
     pending: Option<u8>,
+
+    /// Whole-buffer snapshots.
+    ///
+    /// Files here are small enough that cloning the buffer costs less than the
+    /// bookkeeping a diff-based history would need, and it cannot be subtly
+    /// wrong the way a partial record can. Pushed once per normal-mode change
+    /// and once per insert *session*, so `u` undoes a typed word rather than
+    /// one letter -- which is what vi does and what muscle memory expects.
+    undo: Vec<Snapshot>,
+    redo: Vec<Snapshot>,
 
     cols: usize,
     rows: usize,
@@ -139,6 +162,8 @@ impl Editor {
             status,
             quit: false,
             pending: None,
+            undo: Vec::new(),
+            redo: Vec::new(),
             cols,
             rows,
             // Deliberately not equal to any real cell, so the first frame
@@ -311,6 +336,57 @@ impl Editor {
         }
     }
 
+    // --- history --------------------------------------------------------
+
+    fn snapshot(&self) -> Snapshot {
+        Snapshot { lines: self.lines.clone(), cx: self.cx, cy: self.cy, dirty: self.dirty }
+    }
+
+    /// Record the state *before* a change.
+    ///
+    /// Any new edit invalidates the redo stack: once history has branched,
+    /// replaying the abandoned branch would apply changes to a buffer they
+    /// were never computed against.
+    fn checkpoint(&mut self) {
+        let s = self.snapshot();
+        self.undo.push(s);
+        if self.undo.len() > UNDO_MAX {
+            self.undo.remove(0);
+        }
+        self.redo.clear();
+    }
+
+    fn restore(&mut self, s: Snapshot) {
+        self.lines = s.lines;
+        self.cx = s.cx;
+        self.cy = s.cy;
+        self.dirty = s.dirty;
+    }
+
+    fn undo_one(&mut self) {
+        match self.undo.pop() {
+            Some(s) => {
+                let now = self.snapshot();
+                self.redo.push(now);
+                self.restore(s);
+                self.status = alloc::format!("undo ({} left)", self.undo.len());
+            }
+            None => self.status = String::from("nothing to undo"),
+        }
+    }
+
+    fn redo_one(&mut self) {
+        match self.redo.pop() {
+            Some(s) => {
+                let now = self.snapshot();
+                self.undo.push(now);
+                self.restore(s);
+                self.status = alloc::format!("redo ({} left)", self.redo.len());
+            }
+            None => self.status = String::from("nothing to redo"),
+        }
+    }
+
     // --- editing --------------------------------------------------------
 
     fn insert_char(&mut self, ch: char) {
@@ -464,7 +540,10 @@ impl Editor {
         // single-key meanings of their second character.
         if let Some(p) = self.pending.take() {
             match (p, k) {
-                (b'd', b'd') => self.delete_line(),
+                (b'd', b'd') => {
+                    self.checkpoint();
+                    self.delete_line();
+                }
                 (b'g', b'g') => {
                     self.cy = 0;
                     self.cx = 0;
@@ -488,24 +567,37 @@ impl Editor {
             b'x' => {
                 let cx = self.cx;
                 if cx < self.line_len(self.cy) {
+                    self.checkpoint();
                     self.lines[self.cy].remove(cx);
                     self.dirty = true;
                 }
             }
-            b'i' => self.mode = Mode::Insert,
+            b'u' => self.undo_one(),
+            // Ctrl-R, as in vi.
+            0x12 => self.redo_one(),
+            // Entering insert mode checkpoints once, so `u` undoes the whole
+            // typed run rather than one character at a time.
+            b'i' => {
+                self.checkpoint();
+                self.mode = Mode::Insert;
+            }
             b'a' => {
+                self.checkpoint();
                 self.mode = Mode::Insert;
                 self.cx += 1;
             }
             b'A' => {
+                self.checkpoint();
                 self.mode = Mode::Insert;
                 self.cx = self.line_len(self.cy);
             }
             b'I' => {
+                self.checkpoint();
                 self.mode = Mode::Insert;
                 self.cx = 0;
             }
             b'o' => {
+                self.checkpoint();
                 self.lines.insert(self.cy + 1, Vec::new());
                 self.cy += 1;
                 self.cx = 0;
@@ -513,6 +605,7 @@ impl Editor {
                 self.dirty = true;
             }
             b'O' => {
+                self.checkpoint();
                 self.lines.insert(self.cy, Vec::new());
                 self.cx = 0;
                 self.mode = Mode::Insert;

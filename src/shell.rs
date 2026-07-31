@@ -509,6 +509,48 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             let task = if task.is_empty() { "look at the files" } else { task };
             crate::ai::harness::report(task, trust, 1.0);
         }
+        // `teach file <path>` reads "applet task" one per line, so a batch of
+        // examples can be written in the editor instead of one shell line at a
+        // time. Whitespace-separated rather than tab-separated: a tab is
+        // awkward to type in a modal editor, and the applet name never
+        // contains a space.
+        "teach" if rest.starts_with("file ") => {
+            let path = rest[5..].trim();
+            match crate::sysbox::read_blob(path) {
+                None => kprintln!("  no such file: {}", path),
+                Some(bytes) => {
+                    let text = core::str::from_utf8(&bytes).unwrap_or("");
+                    let (mut ok, mut bad) = (0usize, 0usize);
+                    for line in text.lines() {
+                        let line = line.trim();
+                        if line.is_empty() || line.starts_with('#') {
+                            continue;
+                        }
+                        let mut p = line.splitn(2, char::is_whitespace);
+                        match (p.next(), p.next()) {
+                            (Some(applet), Some(task)) if !task.trim().is_empty() => {
+                                if crate::sysbox::APPLETS.iter().any(|a| a.name == applet)
+                                    && crate::ai::vocab::record(applet, task.trim())
+                                {
+                                    ok += 1;
+                                } else {
+                                    bad += 1;
+                                    kprintln!("  skipped: {}", line);
+                                }
+                            }
+                            _ => {
+                                bad += 1;
+                                kprintln!("  skipped: {}", line);
+                            }
+                        }
+                    }
+                    kprintln!("  {} example(s) recorded, {} skipped", ok, bad);
+                    if ok > 0 {
+                        kprintln!("  'fit' to rebuild the router from them");
+                    }
+                }
+            }
+        }
         "teach" => {
             let mut it = rest.splitn(2, ' ');
             match (it.next(), it.next()) {
