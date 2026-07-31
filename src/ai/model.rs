@@ -11,6 +11,7 @@
 //! is worth making.
 
 use super::tensor;
+use super::weights::{self, Mat};
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -25,6 +26,10 @@ pub struct Config {
     pub seq_len: usize,
     /// Whether the output classifier reuses the token embedding matrix.
     pub shared_classifier: bool,
+    /// RoPE base frequency. llama2.c hardcodes 10000; SmolLM2 trained with
+    /// 100000, and using the wrong one does not fail -- it silently rotates
+    /// every position by the wrong angle and produces fluent nonsense.
+    pub rope_theta: f32,
 }
 
 impl Config {
@@ -258,6 +263,11 @@ pub const HEADER_BYTES: usize = 28;
 
 const KV_MAGIC: &[u8; 8] = b"GLADOSKV";
 
+const GLADOS_MAGIC: &[u8; 8] = b"GLADOSM2";
+const GLADOS_VERSION: u32 = 2;
+const GLADOS_HEADER: usize = 64;
+const GLADOS_QUANT_I8: u32 = 1;
+
 #[derive(Debug, Clone, Copy)]
 pub enum LoadError {
     TooShort,
@@ -268,9 +278,45 @@ pub enum LoadError {
     OutOfMemory,
 }
 
+/// Byte offsets of each tensor group in a GLADOSM2 blob.
+#[derive(Clone, Copy, Default)]
+struct ByteOffsets {
+    embed: usize,
+    wq: usize,
+    wk: usize,
+    wv: usize,
+    wo: usize,
+    w1: usize,
+    w2: usize,
+    w3: usize,
+    wcls: usize,
+}
+
+/// Where the weights live.
+///
+/// Two shapes rather than one because they want opposite things. A llama2.c
+/// checkpoint is all f32 and small, so owning it as `Vec<f32>` gives the
+/// fastest possible access. A GLADOSM2 checkpoint is 135 MB of mixed
+/// precision that the firmware already placed in RAM, so copying it would cost
+/// both the copy and a second 135 MB of heap for no benefit.
+enum Source {
+    Flat(Vec<f32>),
+    Blob {
+        bytes: &'static [u8],
+        off: ByteOffsets,
+        /// Norm weights, pulled out of the blob at load.
+        ///
+        /// They are read per element rather than per row, so unaligned access
+        /// would be on the hot path -- and at 35K values out of 134M, copying
+        /// them costs 140 KB. Layout: rms_att[L*dim], rms_ffn[L*dim],
+        /// rms_final[dim].
+        norms: Vec<f32>,
+    },
+}
+
 pub struct Model {
     pub cfg: Config,
-    w: Vec<f32>,
+    src: Source,
     o: Offsets,
 }
 
@@ -299,7 +345,7 @@ impl Model {
         }
 
         let o = offsets(&cfg, false);
-        Some(Self { cfg, w, o })
+        Some(Self { cfg, src: Source::Flat(w), o })
     }
 
     /// Load a llama2.c checkpoint.
@@ -341,6 +387,9 @@ impl Model {
             vocab_size: raw_vocab.unsigned_abs() as usize,
             seq_len: seq_len as usize,
             shared_classifier: raw_vocab > 0,
+            // The legacy format has no field for it; llama2.c hardcodes 10000
+            // and every checkpoint in that format was trained with it.
+            rope_theta: 10000.0,
         };
 
         // Both are assumed by head_size() and kv_mul(), which divide.
@@ -362,16 +411,241 @@ impl Model {
         }
 
         let o = offsets(&cfg, true);
-        Ok(Self { cfg, w, o })
+        Ok(Self { cfg, src: Source::Flat(w), o })
+    }
+
+    /// Load a GLADOSM2 checkpoint, referencing the blob in place.
+    ///
+    /// The bytes must outlive the model, which they do: `uefi::read_file`
+    /// allocates LoaderData and never frees it, and the frame allocator
+    /// deliberately excludes that type so it can never be handed out as free
+    /// memory.
+    pub fn from_glados(data: &'static [u8]) -> Result<Self, LoadError> {
+        if data.len() < GLADOS_HEADER || &data[0..8] != GLADOS_MAGIC {
+            return Err(LoadError::BadHeader);
+        }
+        let u32_at = |o: usize| u32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]);
+        let i32_at = |o: usize| i32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]);
+
+        if u32_at(8) != GLADOS_VERSION {
+            return Err(LoadError::BadHeader);
+        }
+        let dim = i32_at(12);
+        let hidden_dim = i32_at(16);
+        let n_layers = i32_at(20);
+        let n_heads = i32_at(24);
+        let n_kv_heads = i32_at(28);
+        let raw_vocab = i32_at(32);
+        let seq_len = i32_at(36);
+        let rope_theta = f32::from_le_bytes([data[40], data[41], data[42], data[43]]);
+        let quant = u32_at(44);
+
+        if dim <= 0
+            || hidden_dim <= 0
+            || n_layers <= 0
+            || n_heads <= 0
+            || n_kv_heads <= 0
+            || seq_len <= 0
+            || raw_vocab == 0
+        {
+            return Err(LoadError::BadHeader);
+        }
+        // Only the quantised form is implemented; an f32 GLADOSM2 file would
+        // need a different stride everywhere and there is no reason to build
+        // one, since f32 is what does not fit.
+        if quant != GLADOS_QUANT_I8 {
+            return Err(LoadError::BadHeader);
+        }
+
+        let cfg = Config {
+            dim: dim as usize,
+            hidden_dim: hidden_dim as usize,
+            n_layers: n_layers as usize,
+            n_heads: n_heads as usize,
+            n_kv_heads: n_kv_heads as usize,
+            vocab_size: raw_vocab.unsigned_abs() as usize,
+            seq_len: seq_len as usize,
+            shared_classifier: raw_vocab > 0,
+            rope_theta,
+        };
+        if cfg.dim % cfg.n_heads != 0 || cfg.n_heads % cfg.n_kv_heads != 0 {
+            return Err(LoadError::BadHeader);
+        }
+
+        let (d, h, l, kv, v) = (
+            cfg.dim,
+            cfg.hidden_dim,
+            cfg.n_layers,
+            cfg.kv_dim(),
+            cfg.vocab_size,
+        );
+
+        // Walk the layout the converter wrote: grouped by tensor, then by
+        // layer, exactly as `offsets` orders the flat form.
+        let mut p = GLADOS_HEADER;
+        let mut off = ByteOffsets { embed: p, ..Default::default() };
+        p += Self::q8_stride(v, d);
+
+        let rms_att_at = p;
+        p += l * d * 4;
+        off.wq = p;
+        p += l * Self::q8_stride(d, d);
+        off.wk = p;
+        p += l * Self::q8_stride(kv, d);
+        off.wv = p;
+        p += l * Self::q8_stride(kv, d);
+        off.wo = p;
+        p += l * Self::q8_stride(d, d);
+        let rms_ffn_at = p;
+        p += l * d * 4;
+        off.w1 = p;
+        p += l * Self::q8_stride(h, d);
+        off.w2 = p;
+        p += l * Self::q8_stride(d, h);
+        off.w3 = p;
+        p += l * Self::q8_stride(h, d);
+        let rms_final_at = p;
+        p += d * 4;
+        off.wcls = p;
+        if !cfg.shared_classifier {
+            p += Self::q8_stride(v, d);
+        }
+
+        if data.len() < p {
+            return Err(LoadError::Truncated { want: p, have: data.len() });
+        }
+
+        // Copy the norms out so the hot path reads aligned f32.
+        let mut norms = Vec::new();
+        norms.try_reserve_exact(2 * l * d + d).map_err(|_| LoadError::OutOfMemory)?;
+        for (base, count) in [(rms_att_at, l * d), (rms_ffn_at, l * d), (rms_final_at, d)] {
+            for i in 0..count {
+                norms.push(weights::f32_at(&data[base..], i));
+            }
+        }
+
+        Ok(Self { cfg, src: Source::Blob { bytes: data, off, norms }, o: Offsets::default() })
     }
 
     pub fn weight_bytes(&self) -> usize {
-        self.w.len() * 4
+        match &self.src {
+            Source::Flat(w) => w.len() * 4,
+            Source::Blob { bytes, norms, .. } => bytes.len() + norms.len() * 4,
+        }
+    }
+
+    pub fn is_quantised(&self) -> bool {
+        matches!(self.src, Source::Blob { .. })
     }
 
     #[inline]
     fn slice(&self, off: usize, len: usize) -> &[f32] {
-        &self.w[off..off + len]
+        match &self.src {
+            Source::Flat(w) => &w[off..off + len],
+            // Only the Flat path indexes by float offset; reaching here means
+            // a caller was not converted to the Mat accessors.
+            Source::Blob { .. } => &[],
+        }
+    }
+
+    /// One int8 tensor: `rows` f32 scales, then `rows * cols` int8 values.
+    fn q8<'a>(bytes: &'a [u8], off: usize, rows: usize, cols: usize) -> Mat<'a> {
+        let scales = &bytes[off..off + rows * 4];
+        let start = off + rows * 4;
+        let raw = &bytes[start..start + rows * cols];
+        // i8 has alignment 1, so this cast is always valid -- which is exactly
+        // why the quantised half can be read in place while the f32 half
+        // cannot.
+        let data = unsafe { core::slice::from_raw_parts(raw.as_ptr() as *const i8, raw.len()) };
+        Mat::Q8 { data, scales, rows, cols }
+    }
+
+    /// Bytes one int8 tensor of this shape occupies.
+    fn q8_stride(rows: usize, cols: usize) -> usize {
+        rows * 4 + rows * cols
+    }
+
+    fn mat(&self, flat_off: usize, blob_off: usize, layer: usize, rows: usize, cols: usize) -> Mat<'_> {
+        match &self.src {
+            Source::Flat(w) => {
+                let n = rows * cols;
+                let base = flat_off + layer * n;
+                Mat::F32 { data: &w[base..base + n], rows, cols }
+            }
+            Source::Blob { bytes, .. } => {
+                Self::q8(bytes, blob_off + layer * Self::q8_stride(rows, cols), rows, cols)
+            }
+        }
+    }
+
+    fn blob_off(&self) -> ByteOffsets {
+        match &self.src {
+            Source::Blob { off, .. } => *off,
+            Source::Flat(_) => ByteOffsets::default(),
+        }
+    }
+
+    fn wq(&self, l: usize) -> Mat<'_> {
+        let d = self.cfg.dim;
+        self.mat(self.o.wq, self.blob_off().wq, l, d, d)
+    }
+    fn wk(&self, l: usize) -> Mat<'_> {
+        let (d, kv) = (self.cfg.dim, self.cfg.kv_dim());
+        self.mat(self.o.wk, self.blob_off().wk, l, kv, d)
+    }
+    fn wv(&self, l: usize) -> Mat<'_> {
+        let (d, kv) = (self.cfg.dim, self.cfg.kv_dim());
+        self.mat(self.o.wv, self.blob_off().wv, l, kv, d)
+    }
+    fn wo(&self, l: usize) -> Mat<'_> {
+        let d = self.cfg.dim;
+        self.mat(self.o.wo, self.blob_off().wo, l, d, d)
+    }
+    fn w1(&self, l: usize) -> Mat<'_> {
+        let (d, h) = (self.cfg.dim, self.cfg.hidden_dim);
+        self.mat(self.o.w1, self.blob_off().w1, l, h, d)
+    }
+    fn w2(&self, l: usize) -> Mat<'_> {
+        let (d, h) = (self.cfg.dim, self.cfg.hidden_dim);
+        self.mat(self.o.w2, self.blob_off().w2, l, d, h)
+    }
+    fn w3(&self, l: usize) -> Mat<'_> {
+        let (d, h) = (self.cfg.dim, self.cfg.hidden_dim);
+        self.mat(self.o.w3, self.blob_off().w3, l, h, d)
+    }
+    fn embed_mat(&self) -> Mat<'_> {
+        let (d, v) = (self.cfg.dim, self.cfg.vocab_size);
+        self.mat(self.o.token_embedding, self.blob_off().embed, 0, v, d)
+    }
+    fn classifier(&self) -> Mat<'_> {
+        let (d, v) = (self.cfg.dim, self.cfg.vocab_size);
+        if self.cfg.shared_classifier {
+            self.embed_mat()
+        } else {
+            self.mat(self.o.wcls, self.blob_off().wcls, 0, v, d)
+        }
+    }
+
+    fn rms_att_w(&self, l: usize) -> &[f32] {
+        let d = self.cfg.dim;
+        match &self.src {
+            Source::Flat(_) => self.slice(self.o.rms_att + l * d, d),
+            Source::Blob { norms, .. } => &norms[l * d..(l + 1) * d],
+        }
+    }
+    fn rms_ffn_w(&self, l: usize) -> &[f32] {
+        let (d, n) = (self.cfg.dim, self.cfg.n_layers);
+        match &self.src {
+            Source::Flat(_) => self.slice(self.o.rms_ffn + l * d, d),
+            Source::Blob { norms, .. } => &norms[(n + l) * d..(n + l + 1) * d],
+        }
+    }
+    fn rms_final_w(&self) -> &[f32] {
+        let (d, n) = (self.cfg.dim, self.cfg.n_layers);
+        match &self.src {
+            Source::Flat(_) => self.slice(self.o.rms_final, d),
+            Source::Blob { norms, .. } => &norms[2 * n * d..2 * n * d + d],
+        }
     }
 
     /// One decode step: token at position `pos` in, logits out.
@@ -383,14 +657,15 @@ impl Model {
         let head_size = c.head_size();
         let hidden = c.hidden_dim;
 
-        // Embedding lookup is a copy, not a matmul against a one-hot vector.
+        // Embedding lookup is a row fetch, not a matmul against a one-hot
+        // vector. When the table is quantised the row is dequantised on the
+        // way out.
         let tok = token.min(c.vocab_size - 1);
-        s.x.copy_from_slice(self.slice(self.o.token_embedding + tok * dim, dim));
+        self.embed_mat().row_into(tok, &mut s.x);
 
         for l in 0..c.n_layers {
             // --- attention ---
-            let rms_att = self.slice(self.o.rms_att + l * dim, dim);
-            tensor::rmsnorm(&mut s.xb, &s.x, rms_att);
+            tensor::rmsnorm(&mut s.xb, &s.x, self.rms_att_w(l));
 
             let loff = l * c.seq_len * kv_dim;
             // Keys and values are written straight into the cache slot for this
@@ -401,14 +676,14 @@ impl Model {
                 loff + pos * kv_dim..loff + pos * kv_dim + kv_dim,
             );
 
-            tensor::matmul(&mut s.q, &s.xb, self.slice(self.o.wq + l * dim * dim, dim * dim), dim, dim);
+            self.wq(l).matvec(&mut s.q, &s.xb);
             {
                 let k = &mut s.key_cache[kslice.clone()];
-                tensor::matmul(k, &s.xb, self.slice(self.o.wk + l * dim * kv_dim, dim * kv_dim), dim, kv_dim);
+                self.wk(l).matvec(k, &s.xb);
             }
             {
                 let v = &mut s.value_cache[vslice.clone()];
-                tensor::matmul(v, &s.xb, self.slice(self.o.wv + l * dim * kv_dim, dim * kv_dim), dim, kv_dim);
+                self.wv(l).matvec(v, &s.xb);
             }
 
             // RoPE on q and k. The rotation frequency depends on the position
@@ -416,7 +691,7 @@ impl Model {
             // uses `i % head_size` rather than `i`.
             for i in (0..dim).step_by(2) {
                 let head_dim = i % head_size;
-                let freq = 1.0 / tensor::powf(10000.0, head_dim as f32 / head_size as f32);
+                let freq = 1.0 / tensor::powf(c.rope_theta, head_dim as f32 / head_size as f32);
                 let val = pos as f32 * freq;
                 let (fci, fcr) = (tensor::sinf(val), tensor::cosf(val));
 
@@ -463,41 +738,36 @@ impl Model {
                 }
             }
 
-            tensor::matmul(&mut s.xb2, &s.xb, self.slice(self.o.wo + l * dim * dim, dim * dim), dim, dim);
+            self.wo(l).matvec(&mut s.xb2, &s.xb);
             tensor::add_into(&mut s.x, &s.xb2);
 
             // --- feed forward ---
-            let rms_ffn = self.slice(self.o.rms_ffn + l * dim, dim);
-            tensor::rmsnorm(&mut s.xb, &s.x, rms_ffn);
-            tensor::matmul(&mut s.hb, &s.xb, self.slice(self.o.w1 + l * hidden * dim, hidden * dim), dim, hidden);
-            tensor::matmul(&mut s.hb2, &s.xb, self.slice(self.o.w3 + l * hidden * dim, hidden * dim), dim, hidden);
+            tensor::rmsnorm(&mut s.xb, &s.x, self.rms_ffn_w(l));
+            self.w1(l).matvec(&mut s.hb, &s.xb);
+            self.w3(l).matvec(&mut s.hb2, &s.xb);
             tensor::swiglu(&mut s.hb, &s.hb2);
-            tensor::matmul(&mut s.xb, &s.hb, self.slice(self.o.w2 + l * dim * hidden, dim * hidden), hidden, dim);
+            self.w2(l).matvec(&mut s.xb, &s.hb);
             tensor::add_into(&mut s.x, &s.xb);
         }
 
-        let rms_final = self.slice(self.o.rms_final, dim);
         // Normalise into xb rather than cloning x into a temporary. The clone
         // was a heap allocation on every single token, in the one loop that
         // runs most often.
-        tensor::rmsnorm(&mut s.xb, &s.x, rms_final);
-        tensor::matmul(
-            &mut s.logits,
-            &s.xb,
-            self.slice(self.o.wcls, c.vocab_size * dim),
-            dim,
-            c.vocab_size,
-        );
+        tensor::rmsnorm(&mut s.xb, &s.x, self.rms_final_w());
+        self.classifier().matvec(&mut s.logits, &s.xb);
     }
 
-    /// One row of the token embedding table.
+    /// One row of the token embedding table, written into `out`.
     ///
-    /// Public because the vocabulary extension initialises its new rows by
-    /// pooling these: a token that never existed during training has to start
-    /// somewhere, and the average of the words describing it is a far better
-    /// starting point than noise.
-    pub fn embed(&self, token: usize) -> &[f32] {
+    /// Takes a buffer rather than returning a slice because a quantised table
+    /// has no f32 row to borrow -- it has to be dequantised somewhere, and
+    /// making that the caller's buffer keeps it off the heap.
+    ///
+    /// Used by the vocabulary extension, which initialises new rows by pooling
+    /// these: a token that never existed during training has to start
+    /// somewhere, and the average of the words describing it beats noise.
+    pub fn embed_into(&self, token: usize, out: &mut [f32]) {
         let t = token.min(self.cfg.vocab_size - 1);
-        self.slice(self.o.token_embedding + t * self.cfg.dim, self.cfg.dim)
+        self.embed_mat().row_into(t, out);
     }
 }

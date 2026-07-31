@@ -517,6 +517,10 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             opts.steps = 60;
             crate::ai::generate(rest, &opts);
         }
+        "logits" => {
+            let ids: Vec<usize> = rest.split_whitespace().filter_map(|s| s.parse().ok()).collect();
+            crate::ai::logits_for(&ids);
+        }
         "probe" => crate::ai::harness::probe_features(),
         "feature" => {
             use crate::ai::harness::{set_feature_mode, Feature};

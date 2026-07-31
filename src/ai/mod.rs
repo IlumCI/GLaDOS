@@ -7,6 +7,7 @@ pub mod sample;
 pub mod tensor;
 pub mod tokenizer;
 pub mod vocab;
+pub mod weights;
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -215,6 +216,7 @@ pub fn model_demo() {
         vocab_size: 256, // byte-level: no tokenizer needed
         seq_len: 64,
         shared_classifier: true,
+        rope_theta: 10000.0,
     };
 
     console::set_color(YELLOW);
@@ -407,7 +409,15 @@ pub fn init(model_blob: Option<Blob>, tok_blob: Option<Blob>) {
         return;
     };
 
-    let m = match model::Model::from_bytes(mb.as_slice()) {
+    // GLADOSM2 first, then the llama2.c legacy layout. Both are identified by
+    // content rather than by filename, so either can sit at model.bin.
+    let loaded = match model::Model::from_glados(mb.as_slice()) {
+        Ok(m) => Ok(m),
+        Err(model::LoadError::BadHeader) => model::Model::from_bytes(mb.as_slice()),
+        Err(e) => Err(e),
+    };
+
+    let m = match loaded {
         Ok(m) => m,
         Err(e) => {
             console::set_color(LTRED);
@@ -428,9 +438,11 @@ pub fn init(model_blob: Option<Blob>, tok_blob: Option<Blob>) {
         c.dim, c.hidden_dim, c.n_layers, c.n_heads, c.n_kv_heads, c.vocab_size, c.seq_len
     );
     kprintln!(
-        "  {} params, {} KiB of weights",
+        "  {} params, {} KiB of weights, {}, rope_theta {}",
         c.param_count(),
-        m.weight_bytes() / 1024
+        m.weight_bytes() / 1024,
+        if m.is_quantised() { "int8" } else { "f32" },
+        c.rope_theta as u32
     );
 
     let Some(tb) = tok_blob else {
@@ -838,4 +850,63 @@ pub fn mind_task() {
 
 pub fn spawn_mind() -> bool {
     crate::task::spawn("mind", mind_task).is_some()
+}
+
+/// Run a raw token sequence and print the top logits.
+///
+/// Deliberately bypasses the tokenizer. A quantised 30-layer model has a lot
+/// of places to be subtly wrong -- a stride miscomputed, sign extension
+/// dropped in the AVX2 widening, the wrong rope_theta -- and every one of them
+/// produces fluent-looking nonsense rather than an error. Feeding fixed ids and
+/// diffing the logits against the same arithmetic done in numpy turns all of
+/// that into one comparison, with no tokenizer in the way to muddy it.
+pub fn logits_for(ids: &[usize]) {
+    console::set_color(YELLOW);
+    kprintln!("[logits]");
+    console::set_color(LTGRAY);
+    if ids.is_empty() {
+        kprintln!("  usage: logits <id> [id ...]");
+        return;
+    }
+    let done = with_engine(|e| {
+        let cap = e.model.cfg.seq_len;
+        let t0 = crate::time::rdtsc();
+        for (pos, &t) in ids.iter().enumerate() {
+            if pos >= cap {
+                break;
+            }
+            e.model.forward(&mut e.state, t, pos);
+        }
+        let elapsed = crate::time::rdtsc() - t0;
+
+        // Top 5 by logit, found without sorting 49152 entries.
+        let mut top = [(0usize, f32::NEG_INFINITY); 5];
+        for (i, v) in e.state.logits.iter().enumerate() {
+            if *v > top[4].1 {
+                top[4] = (i, *v);
+                let mut j = 4;
+                while j > 0 && top[j].1 > top[j - 1].1 {
+                    top.swap(j, j - 1);
+                    j -= 1;
+                }
+            }
+        }
+        (top, elapsed, ids.len())
+    });
+
+    let Some((top, elapsed, n)) = done else {
+        kprintln!("  no model loaded");
+        return;
+    };
+    for (rank, (id, v)) in top.iter().enumerate() {
+        // Printed as thousandths: the console has no float formatting, and an
+        // integer comparison against the reference is unambiguous anyway.
+        let milli = (*v * 1000.0) as i64;
+        kprintln!("  {}. id {:6}  logit {}.{:03}", rank + 1, id, milli / 1000, (milli % 1000).abs());
+    }
+    let mhz = crate::time::tsc_mhz();
+    if mhz > 0 && n > 0 {
+        let us = elapsed / mhz;
+        kprintln!("  {} token(s) in {} ms  ({} us/token)", n, us / 1000, us / n as u64);
+    }
 }

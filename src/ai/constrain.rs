@@ -103,6 +103,22 @@ impl<'a> Cursor<'a> {
         &self.produced
     }
 
+    /// Strip one leading space from the first piece of a decode.
+    ///
+    /// Sentencepiece emits the space as its own token, so tolerating
+    /// whitespace-only pieces was enough. GPT-2 style byte-level BPE packs it
+    /// *into* the word -- " ls" is a single token -- so without this, " ls"
+    /// fails to prefix "ls\n" and the only reachable spellings are whichever
+    /// space-less variants happen to exist. That took the constrained decode
+    /// from always succeeding to almost never.
+    fn trim_lead<'p>(&self, piece: &'p [u8]) -> &'p [u8] {
+        if !self.started && piece.first() == Some(&b' ') {
+            &piece[1..]
+        } else {
+            piece
+        }
+    }
+
     /// Would appending `piece` keep at least one alternative reachable?
     fn admits(&self, piece: &[u8]) -> bool {
         if piece.is_empty() {
@@ -112,12 +128,17 @@ impl<'a> Cursor<'a> {
         if !self.started && piece.iter().all(|b| *b == b' ') {
             return true;
         }
-        let mut candidate = self.produced.clone();
-        candidate.extend_from_slice(piece);
-        self.grammar
-            .alternatives
-            .iter()
-            .any(|alt| alt.len() >= candidate.len() && alt.starts_with(&candidate))
+        let piece = self.trim_lead(piece);
+        let n = self.produced.len();
+        // Compared in place rather than by building `produced + piece`. This
+        // runs once per vocabulary entry per step, so with a 49k vocabulary
+        // the old clone was tens of millions of allocations per decode and
+        // took the selftest from instant to minutes.
+        self.grammar.alternatives.iter().any(|alt| {
+            alt.len() >= n + piece.len()
+                && alt.starts_with(&self.produced[..])
+                && alt[n..].starts_with(piece)
+        })
     }
 
     /// Token ids that may be sampled next. Empty means the decode is stuck,
@@ -145,7 +166,10 @@ impl<'a> Cursor<'a> {
             if piece.iter().all(|b| *b == b' ') {
                 return false;
             }
+            let trimmed = self.trim_lead(piece);
             self.started = true;
+            self.produced.extend_from_slice(trimmed);
+            return true;
         }
         self.produced.extend_from_slice(piece);
         true

@@ -402,8 +402,10 @@ fn feature(e: &mut super::Engine, task: &str) -> Option<Vec<f32>> {
             }
             let dim = e.model.cfg.dim;
             let mut v = alloc::vec![0.0f32; dim];
+            let mut row = alloc::vec![0.0f32; dim];
             for id in &ids {
-                for (a, x) in v.iter_mut().zip(e.model.embed(*id).iter()) {
+                e.model.embed_into(*id, &mut row);
+                for (a, x) in v.iter_mut().zip(row.iter()) {
                     *a += *x;
                 }
             }

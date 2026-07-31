@@ -79,8 +79,12 @@ pub struct Head {
 fn pool(model: &Model, tok: &Tokenizer, text: &str, dim: usize) -> Vec<f32> {
     let ids = tok.encode(text, false, false);
     let mut v = vec![0.0f32; dim];
+    // A quantised embedding table has no f32 row to borrow, so rows are
+    // dequantised into a scratch buffer rather than returned by reference.
+    let mut row = vec![0.0f32; dim];
     for id in &ids {
-        for (acc, e) in v.iter_mut().zip(model.embed(*id).iter()) {
+        model.embed_into(*id, &mut row);
+        for (acc, e) in v.iter_mut().zip(row.iter()) {
             *acc += *e;
         }
     }
