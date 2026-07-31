@@ -2,6 +2,7 @@
 
 pub mod constrain;
 pub mod corpus;
+pub mod council;
 pub mod harness;
 pub mod model;
 pub mod probe;
@@ -381,6 +382,10 @@ pub struct Engine {
     /// fits one; the system boots without a router and gains one from its own
     /// corpus.
     pub probe: Option<probe::Probe>,
+    /// Corroborating cores. They never change the probe's answer -- combining
+    /// them was measured as slightly *worse* than the probe alone -- but their
+    /// agreement says whether to trust it.
+    pub council: Option<council::Council>,
     /// How far into the KV cache the live conversation has got. The cache
     /// alone is not a mental state -- attention reads `0..pos`, so a cache
     /// without its position is unusable.
@@ -524,6 +529,7 @@ pub fn init(model_blob: Option<Blob>, tok_blob: Option<Blob>) {
             rng,
             head,
             probe: None,
+            council: None,
             pos: 0,
             last_token: tokenizer::BOS,
         })

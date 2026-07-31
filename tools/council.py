@@ -244,6 +244,47 @@ def main():
     print(f"    equal weights on EVAL       {accuracy(equal, yte):6.1%}")
     print(f"    semantic alone (baseline)   {accuracy(cores['semantic'], yte):6.1%}")
 
+    # --- answer rules ----------------------------------------------------
+    #
+    # A product is not the only way to use three cores, and the kernel turned
+    # up a case that made the distinction concrete: for "delete that file
+    # please" the probe answered cat while both counting cores answered rm.
+    # Under "the probe answers" that request routes wrongly even though two
+    # cores out of three had it right. Majority vote is a different rule and
+    # has to be measured rather than reasoned about.
+    print("\n  answer rules:")
+    picks = np.stack([cores[k].argmax(1) for k in ("semantic", "lexical", "character")])
+
+    def majority(prefer_row):
+        out = np.empty(len(yte), dtype=int)
+        for i in range(len(yte)):
+            col = picks[:, i]
+            counts = Counter(col.tolist())
+            top, n = counts.most_common(1)[0]
+            # Ties go to the preferred core rather than to whichever class
+            # happens to sort first.
+            out[i] = top if n > 1 else col[prefer_row]
+        return out
+
+    for label, pred in (
+        ("probe answers (current)", picks[0]),
+        ("majority, ties to probe", majority(0)),
+        ("majority, ties to lexical", majority(1)),
+    ):
+        print(f"    {label:28} {float((pred == yte).mean()):6.1%}")
+    print(f"    {'product, equal weights':28} {accuracy(equal, yte):6.1%}")
+
+    # The subset that matters: where the probe stands alone against the other
+    # two. If the pair is usually right there, deferring to them is free
+    # accuracy; if not, the current rule is correct as it stands.
+    alone = (picks[0] != picks[1]) & (picks[1] == picks[2])
+    if alone.any():
+        probe_ok = float((picks[0][alone] == yte[alone]).mean())
+        pair_ok = float((picks[1][alone] == yte[alone]).mean())
+        print(f"\n  probe outvoted 2-1 on {int(alone.sum())} items:")
+        print(f"    probe right there  {probe_ok:6.1%}")
+        print(f"    pair right there   {pair_ok:6.1%}")
+
     # --- where the cores disagree ----------------------------------------
     # The interesting property is not only the score. If the cores agree on
     # most items, a cascade can answer those instantly and escalate only the

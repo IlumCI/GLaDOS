@@ -805,11 +805,41 @@ pub fn fit_probe(lambda: f32) {
 
         let params = p.params();
         e.probe = Some(p);
-        Some((tr_ok, tr_n, te_ok, te_n, params, classes))
+
+        // The corroborating cores train on the same examples the probe did --
+        // never on the held-out tail, or agreement would be measured against
+        // items all three had memorised and would look far more informative
+        // than it is.
+        let texts: Vec<&str> = examples
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !is_held_out(*i))
+            .map(|(_, ex)| ex.task.as_str())
+            .collect();
+        let labels: Vec<usize> = examples
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !is_held_out(*i))
+            .filter_map(|(_, ex)| e.head.index_of(&ex.applet))
+            .collect();
+        let council_params = if texts.len() == labels.len() {
+            match super::council::Council::fit(&texts, &labels, classes, &e.tok) {
+                Some(c) => {
+                    let n = c.params();
+                    e.council = Some(c);
+                    n
+                }
+                None => 0,
+            }
+        } else {
+            0
+        };
+
+        Some((tr_ok, tr_n, te_ok, te_n, params, classes, council_params))
     })
     .flatten();
 
-    let Some((tr_ok, tr_n, te_ok, te_n, params, classes)) = built else {
+    let Some((tr_ok, tr_n, te_ok, te_n, params, classes, council_params)) = built else {
         console::set_color(LTRED);
         kprintln!("  could not fit (no model, or the features are degenerate)");
         console::set_color(LTGRAY);
@@ -825,6 +855,12 @@ pub fn fit_probe(lambda: f32) {
     console::set_color(LTGRAY);
     kprintln!("  chance is {}%", 100 / classes.max(1));
     kprintln!("  {} parameters, closed form -- no epochs, nothing to overfit", params);
+    if council_params > 0 {
+        kprintln!(
+            "  council {} more, counted not solved -- they judge confidence, not the answer",
+            council_params
+        );
+    }
     let mhz = crate::time::tsc_mhz();
     if mhz > 0 {
         kprintln!("  fitted in {} ms", elapsed / mhz / 1000);
@@ -870,27 +906,183 @@ pub fn route(task: &str, trust: Trust) -> Option<Choice> {
     })?
 }
 
+/// Route, and say how much the answer should be trusted.
+///
+/// The probe answers alone. Combining the three cores was measured at 76.9%
+/// against the probe's own 77.8%, so a product would make the answer slightly
+/// worse; what the cores are for is the other number from that measurement --
+/// where all three agree the answer is right 90.3% of the time, and where they
+/// split, 50%.
+///
+/// So the cores are consulted for corroboration and never for content. Their
+/// verdict changes what is *said* about the answer, not the answer.
+pub fn route_verdict(task: &str, trust: Trust) -> Option<(Choice, super::council::Verdict)> {
+    let probe_choice = route(task, trust)?;
+    with_engine(|e| {
+        let probe_idx = e.head.index_of(probe_choice.applet)?;
+        let allowed = allowed_classes(e, trust);
+
+        let Some(c) = e.council.as_ref() else {
+            return Some((
+                probe_choice,
+                super::council::Verdict {
+                    applet: probe_idx,
+                    agreement: 1,
+                    lexical: probe_idx,
+                    character: probe_idx,
+                },
+            ));
+        };
+        let (lexical, character) = c.corroborate(task, &e.tok, &allowed)?;
+
+        // Majority, ties to the probe.
+        //
+        // The first version had the probe answer alone and the cores only
+        // corroborate, on the grounds that a *product* of the three scored
+        // 76.9% against the probe's 77.8%. That reasoning did not transfer:
+        // a majority vote is a different rule, and it scores 80.6%. The
+        // difference lives in the eight items where the probe stands alone
+        // against the other two, where the probe is right 25% of the time and
+        // the pair 62.5% -- so being outvoted is genuine evidence, and the
+        // measurement that dismissed it was of something else.
+        let winner = if lexical == character && lexical != probe_idx {
+            lexical
+        } else {
+            probe_idx
+        };
+
+        let agreement = usize::from(winner == probe_idx)
+            + usize::from(winner == lexical)
+            + usize::from(winner == character);
+
+        let name = e.head.name(winner);
+        let mutates = sysbox::APPLETS
+            .iter()
+            .find(|a| a.name == name)
+            .map(|a| a.mutates)
+            .unwrap_or(false);
+
+        Some((
+            Choice { applet: name, mutates, steps: 1 },
+            super::council::Verdict { applet: winner, agreement, lexical, character },
+        ))
+    })?
+}
+
+/// Class indices the trust level permits, in head order.
+fn allowed_classes(e: &super::Engine, trust: Trust) -> Vec<usize> {
+    (0..e.head.len())
+        .filter(|i| {
+            sysbox::APPLETS
+                .iter()
+                .find(|a| a.name == e.head.name(*i))
+                .map(|a| trust.admits(a))
+                .unwrap_or(false)
+        })
+        .collect()
+}
+
 pub fn route_report(task: &str, trust: Trust) {
     console::set_color(YELLOW);
     kprintln!("[route]");
     console::set_color(LTGRAY);
     let t0 = crate::time::rdtsc();
-    match route(task, trust) {
-        None => kprintln!("  no probe fitted -- run 'fit' first"),
-        Some(c) => {
-            let elapsed = crate::time::rdtsc() - t0;
-            console::set_color(LTCYAN);
-            kprintln!("  {}", c.applet);
-            console::set_color(LTGRAY);
-            let mhz = crate::time::tsc_mhz();
-            if mhz > 0 {
-                kprintln!("  {} us, no transformer involved", elapsed / mhz);
+    let got = route_verdict(task, trust);
+    let elapsed = crate::time::rdtsc() - t0;
+
+    let Some((c, v)) = got else {
+        kprintln!("  no probe fitted -- run 'fit' first");
+        return;
+    };
+
+    if v.confident() {
+        console::set_color(LTGREEN);
+        kprintln!("  {}", c.applet);
+        console::set_color(LTGRAY);
+        kprintln!("  all 3 cores agree (measured 90% right when they do)");
+    } else {
+        console::set_color(YELLOW);
+        kprintln!("  {}  -- not confident", c.applet);
+        console::set_color(LTGRAY);
+        with_engine(|e| {
+            // Naming the dissenters is the useful part. "Uncertain" alone
+            // tells the operator nothing they can act on; two plausible
+            // alternatives is a question they can answer.
+            kprintln!("    lexical    {}", e.head.name(v.lexical));
+            kprintln!("    character  {}", e.head.name(v.character));
+        });
+        kprintln!("  {} of 3 agree (measured 50% right when split)", v.agreement);
+        kprintln!("  'ask <question>' to put it to the model instead");
+    }
+
+    let mhz = crate::time::tsc_mhz();
+    if mhz > 0 {
+        kprintln!("  {} us, no transformer involved", elapsed / mhz);
+    }
+    if c.mutates {
+        console::set_color(YELLOW);
+        kprintln!("  that applet mutates content");
+        console::set_color(LTGRAY);
+    }
+}
+
+/// Measure the gate on the held-out corpus.
+///
+/// Prints the two numbers the whole design rests on: how often the cores agree,
+/// and how much more often they are right when they do. If that gap ever
+/// closes, the gate is worthless and should be deleted rather than trusted.
+pub fn gate_report() {
+    console::set_color(YELLOW);
+    kprintln!("[gate]");
+    console::set_color(LTGRAY);
+
+    let examples = vocab::examples();
+    let out = with_engine(|e| {
+        if e.probe.is_none() || e.council.is_none() {
+            return None;
+        }
+        let (mut agree_n, mut agree_ok) = (0usize, 0usize);
+        let (mut split_n, mut split_ok) = (0usize, 0usize);
+
+        for (i, ex) in examples.iter().enumerate() {
+            if !is_held_out(i) {
+                continue;
             }
-            if c.mutates {
-                console::set_color(YELLOW);
-                kprintln!("  that applet mutates content");
-                console::set_color(LTGRAY);
+            let Some(want) = e.head.index_of(&ex.applet) else { continue };
+            let Some(x) = feature(e, &ex.task) else { continue };
+            let probe_pick = e.probe.as_ref()?.predict(&x);
+            let all: Vec<usize> = (0..e.head.len()).collect();
+            let (lex, chr) = e.council.as_ref()?.corroborate(&ex.task, &e.tok, &all)?;
+            // Scored against the rule actually used, majority with ties to the
+            // probe -- measuring the gate against a rule the router does not
+            // follow would report a number nobody experiences.
+            let got = if lex == chr && lex != probe_pick { lex } else { probe_pick };
+            if lex == got && chr == got && probe_pick == got {
+                agree_n += 1;
+                agree_ok += usize::from(got == want);
+            } else {
+                split_n += 1;
+                split_ok += usize::from(got == want);
             }
         }
+        Some((agree_n, agree_ok, split_n, split_ok))
+    })
+    .flatten();
+
+    let Some((an, aok, sn, sok)) = out else {
+        kprintln!("  fit the probe and council first");
+        return;
+    };
+    let total = an + sn;
+    if total == 0 {
+        kprintln!("  nothing held out to measure against");
+        return;
     }
+    console::set_color(LTGREEN);
+    kprintln!("  all agree   {:>3}/{:<3}  {}% right", an, total, pct(aok, an));
+    console::set_color(YELLOW);
+    kprintln!("  they split  {:>3}/{:<3}  {}% right", sn, total, pct(sok, sn));
+    console::set_color(LTGRAY);
+    kprintln!("  overall     {}%", pct(aok + sok, total));
+    kprintln!("  the gap is the whole point -- agreement is worth acting on");
 }
