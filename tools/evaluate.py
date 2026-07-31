@@ -248,6 +248,46 @@ def suffix(task):
     return f"Task: {task}<|im_end|>\n<|im_start|>assistant\n"
 
 
+def log_softmax(v):
+    m = v.max()
+    return v - m - np.log(np.exp(v - m).sum())
+
+
+def score_pick(runner, item_base, tok, names, prompt_logits):
+    """Pick by likelihood instead of by decoding.
+
+    Constrained decoding asks the model to *emit* a name, which it will not do:
+    its top continuations for a selection prompt are 'You', 'The', 'If' -- it
+    wants to explain, and every tool name sits about three logits below that.
+    Restricting the sample to tool names therefore reads off a distribution
+    that is mostly about prose style, which is why the answer barely moves with
+    the task.
+
+    Scoring asks a different question -- how likely is this exact name, given
+    the prompt -- and never requires the model to have chosen the format. That
+    is standard for classification with small models, and it is also far
+    cheaper here: the prompt is already in the cache, so each candidate costs
+    only its own one-to-three tokens.
+
+    Normalised by length, or short names win purely for being short.
+    """
+    best_name, best = None, -1e30
+    for name in names:
+        runner.restore(item_base)
+        ids = encode(tok, name)
+        if not ids:
+            continue
+        logits = prompt_logits
+        total = 0.0
+        for t in ids:
+            total += float(log_softmax(logits)[t])
+            logits = runner.feed([t])
+        total /= len(ids)
+        if total > best:
+            best, best_name = total, name
+    return best_name
+
+
 def pooled(w, tok, text):
     ids = encode(tok, text)
     if not ids:
@@ -280,15 +320,22 @@ def main():
 
     # --- knn: no transformer, the ceiling for a linear head over these
     #     features ---
-    tr_vec = np.stack([pooled(w, tok, e["task"]) for e in train])
+    tr_raw = np.stack([pooled(w, tok, e["task"]) for e in train])
+    # Centred before comparing. Pooled embeddings share a large common
+    # component -- every sentence contains the same function words -- and
+    # without removing it every cosine is ~0.99 and the argmax is whichever
+    # vector happens to be longest, giving the same neighbour for every query.
+    centre = tr_raw.mean(axis=0)
+    tr_vec = tr_raw - centre
     tr_vec /= np.linalg.norm(tr_vec, axis=1, keepdims=True) + 1e-9
+
     right = 0
     for e in test:
-        q = pooled(w, tok, e["task"])
+        q = pooled(w, tok, e["task"]) - centre
         q /= np.linalg.norm(q) + 1e-9
-        right += NAMES[NAMES.index(train[int(np.argmax(tr_vec @ q))]["applet"])] == e["applet"]
-    knn = right / len(test)
-    print(f"  knn (pooled embeddings, no transformer) : {knn:6.1%}")
+        nearest = train[int(np.argmax(tr_vec @ q))]["applet"]
+        right += nearest == e["applet"]
+    print(f"  knn (pooled embeddings, no transformer) : {right/len(test):6.1%}")
 
     # --- zero-shot ---
     for label, prefix, shots in (
@@ -311,16 +358,27 @@ def main():
         runner.feed(encode(tok, prefix))
         base = runner.snapshot()
 
-        right = 0
+        decoded = 0
+        scored = 0
         for i, e in enumerate(test):
             runner.restore(base)
             logits = runner.feed(encode(tok, suffix(e["task"])))
+            item_base = runner.snapshot()
+
             got = constrained_pick(runner, tok, alphabet, NAMES, logits)
-            right += got == e["applet"]
-            if i < 5:
-                mark = "ok  " if got == e["applet"] else "MISS"
-                print(f"      {mark} {e['task'][:44]:46} -> {got} (want {e['applet']})")
-        print(f"  {label:40}: {right/len(test):6.1%}\n")
+            decoded += got == e["applet"]
+
+            runner.restore(item_base)
+            got_s = score_pick(runner, item_base, tok, NAMES, logits)
+            scored += got_s == e["applet"]
+
+            if i < 6:
+                m1 = "ok " if got == e["applet"] else "-- "
+                m2 = "ok " if got_s == e["applet"] else "-- "
+                print(f"      decode {m1}{str(got):8} score {m2}{str(got_s):8} "
+                      f"want {e['applet']:7} | {e['task'][:38]}")
+        print(f"  {label + ', decoded':50}: {decoded/len(test):6.1%}")
+        print(f"  {label + ', scored':50}: {scored/len(test):6.1%}\n")
 
 
 if __name__ == "__main__":
