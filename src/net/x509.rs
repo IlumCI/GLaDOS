@@ -459,7 +459,7 @@ pub fn parse(der: &[u8]) -> Result<Cert, Error> {
     // [3] extensions.
     while !b.empty() {
         if let Some(ext) = b.context(3) {
-            let mut e = ext;
+            let e = ext;
             parse_extensions(e.rest(), &mut cert);
             break;
         }

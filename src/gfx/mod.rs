@@ -380,7 +380,7 @@ impl Framebuffer {
         let raw = self.encode(c);
         let (mut x, mut y) = (r, 0);
         let mut err = 1 - r;
-        let mut plot = |px: i32, py: i32| {
+        let plot = |px: i32, py: i32| {
             if px >= 0 && py >= 0 {
                 self.put(px as u32, py as u32, raw);
             }
