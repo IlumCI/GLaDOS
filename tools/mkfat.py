@@ -162,7 +162,22 @@ def main():
     sub_entries += short_entry("INNER", "TXT", 0x20, inner_cluster, len(inner))
     sub_cluster = alloc(bytes(sub_entries).ljust(cluster_bytes, b"\x00"))
 
+    # Extra files named on the command line, so a package can be delivered the
+    # way one actually would: written to a disk elsewhere, read here.
+    extra_entries = bytearray()
+    for spec in sys.argv[2:]:
+        src = Path(spec)
+        if not src.is_file():
+            continue
+        payload = src.read_bytes()
+        c = alloc(payload)
+        stem = src.stem.upper()[:8]
+        ext = src.suffix.lstrip(".").upper()[:3]
+        extra_entries += short_entry(stem, ext, 0x20, c, len(payload))
+        print(f"  added {stem}.{ext}  {len(payload):,} B")
+
     root = bytearray()
+    root += extra_entries
     root += short_entry("HELLO", "TXT", 0x20, hello_cluster, len(hello))
     root += short_entry("BIG", "TXT", 0x20, big_cluster, len(big))
     root += short_entry("EFI", "", 0x10, sub_cluster, 0)

@@ -469,6 +469,23 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
         }
         "refresh" => console::redraw(),
         "fat" => fat_cmd(rest),
+        "pkg" => {
+            let mut it = rest.splitn(2, ' ');
+            let verb = it.next().unwrap_or("");
+            let arg = it.next().unwrap_or("").trim();
+            match verb {
+                "" | "list" => crate::pkg::list(),
+                "info" => crate::pkg::info(arg),
+                "remove" => crate::pkg::remove(arg),
+                "add" => match crate::sysbox::read_blob(arg) {
+                    Some(bytes) => {
+                        crate::pkg::install(&bytes);
+                    }
+                    None => kprintln!("  no such file: {}", arg),
+                },
+                other => kprintln!("  not a pkg subcommand: {}", other),
+            }
+        }
         "edit" | "vi" => {
             if rest.is_empty() {
                 kprintln!("  usage: edit <path>");

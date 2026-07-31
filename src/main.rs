@@ -23,6 +23,7 @@ mod edit;
 mod gfx;
 mod lang;
 mod mem;
+mod pkg;
 mod recovery;
 mod serial;
 mod shell;

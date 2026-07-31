@@ -291,6 +291,31 @@ pub fn read_blob(path: &str) -> Option<Vec<u8>> {
     .flatten()
 }
 
+/// Detach a name. The content stays addressable, as everywhere else.
+pub fn detach(path: &str) -> bool {
+    with(|s| {
+        let p = parse(&s.cwd, path);
+        tree::remove(&mut s.root, &p).is_some()
+    })
+    .unwrap_or(false)
+}
+
+/// Print the content address of a path, if it exists.
+pub fn print_hash(path: &str) {
+    let h = with(|s| {
+        let p = parse(&s.cwd, path);
+        tree::resolve(&s.root, &p).map(tree::content_hash)
+    })
+    .flatten();
+    match h {
+        Some(h) => {
+            let hx = tree::short(&h);
+            kprintln!("  address {}", core::str::from_utf8(&hx).unwrap_or("?"));
+        }
+        None => kprintln!("  (not present)"),
+    }
+}
+
 /// Entry names directly under `path`, in sorted order. Empty if it is missing
 /// or is a file.
 pub fn children(path: &str) -> Vec<String> {
