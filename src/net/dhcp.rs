@@ -210,10 +210,6 @@ fn await_reply(xid: u32, want: u8, ms: u64) -> Option<Reply> {
 }
 
 /// Run the exchange and adopt whatever comes back.
-pub fn configure() -> Result<Config, Error> {
-    configure_on(super::primary())
-}
-
 pub fn configure_on(n: usize) -> Result<Config, Error> {
     let mac = match super::ifaces()[n].nic.as_ref() {
         Some(d) => d.mac(),

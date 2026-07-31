@@ -42,7 +42,7 @@
 //! interpret the result as a signed 32-bit number -- the RFC 793 rule, and the
 //! reason a connection that wraps mid-transfer does not stall.
 
-use super::{checksum, config, send_ipv4, Ipv4, PROTO_TCP};
+use super::{checksum, send_ipv4, Ipv4, PROTO_TCP};
 use crate::gfx::console::{self, LTGRAY, LTGREEN, LTRED, YELLOW};
 use crate::kprintln;
 use crate::sync::Racy;

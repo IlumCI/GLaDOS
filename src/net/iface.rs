@@ -40,6 +40,11 @@ pub trait Nic {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Ethernet,
+    /// Nothing constructs this yet -- it is the shape the slot is waiting in,
+    /// and the compiler is right that it is unused. Kept because a wireless
+    /// driver is a driver plus this one line, not a change to the interface
+    /// layer.
+    #[allow(dead_code)]
     Wireless,
     Loopback,
 }

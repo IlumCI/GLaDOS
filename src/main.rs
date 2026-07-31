@@ -18,6 +18,7 @@ extern crate alloc;
 mod acpi;
 mod ai;
 mod cpu;
+mod crypto;
 mod dev;
 mod edit;
 mod gfx;
@@ -727,6 +728,12 @@ fn selftest() {
     kprintln!("\n[selftest] sysbox namespace:");
     console::set_color(LTGRAY_IDX);
     sysbox::selftest();
+
+    // The RFC vectors, at every boot. 25 ms, and it is the only thing standing
+    // between a broken field arithmetic and a TLS handshake that fails with
+    // nothing to point at -- crypto is the one place where wrong code still
+    // produces perfectly plausible output.
+    crypto::selftest();
 
     console::set_color(LTGREEN);
     kprintln!("\n[selftest] int3 should report and resume:");

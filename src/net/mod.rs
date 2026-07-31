@@ -49,10 +49,11 @@ pub mod dhcp;
 pub mod dns;
 pub mod iface;
 pub mod tcp;
+pub mod tls;
 pub mod udp;
 pub mod wifi;
 
-use iface::{Interface, Kind, Loopback, Nic};
+use iface::{Interface, Kind, Loopback};
 
 pub const UNSPECIFIED: Ipv4 = [0, 0, 0, 0];
 pub const BROADCAST_IP: Ipv4 = [255, 255, 255, 255];
@@ -157,11 +158,6 @@ pub fn ready() -> bool {
     n != LO && ifaces()[n].present()
 }
 
-pub fn mac() -> Option<Mac> {
-    let n = primary();
-    ifaces()[n].nic.as_ref().map(|d| d.mac())
-}
-
 pub fn config() -> Config {
     config_of(primary())
 }
@@ -174,10 +170,6 @@ pub fn config_of(n: usize) -> Config {
         netmask: i.netmask,
         dns: i.dns,
     }
-}
-
-pub fn set_config(c: Config) {
-    set_config_of(primary(), c)
 }
 
 pub fn set_config_of(n: usize, c: Config) {

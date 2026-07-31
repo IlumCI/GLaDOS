@@ -532,6 +532,31 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             }
         }
         "wlan" | "wifi" => crate::net::wifi::report(),
+        "https" => {
+            let mut it = rest.split_whitespace();
+            match it.next() {
+                None => kprintln!("  usage: https <host>[:port] [/path]"),
+                Some(host) => {
+                    let (h, port) = match host.split_once(':') {
+                        Some((h, p)) => (h, p.parse().unwrap_or(443)),
+                        None => (host, 443),
+                    };
+                    if let Some(ip) = host_to_ip(h) {
+                        crate::net::tls::report(ip, h, port, it.next().unwrap_or("/"));
+                    }
+                }
+            }
+        }
+        "crypto" => {
+            let t0 = crate::time::rdtsc();
+            let ok = crate::crypto::selftest();
+            let mhz = crate::time::tsc_mhz().max(1);
+            kprintln!(
+                "  {} in {} ms",
+                if ok { "all vectors pass" } else { "SOMETHING IS WRONG" },
+                (crate::time::rdtsc() - t0) / mhz / 1000
+            );
+        }
         "ping" => {
             let mut it = rest.split_whitespace();
             match it.next() {
@@ -896,8 +921,12 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             kprintln!("  tcp           connection state");
             kprintln!("  tcp connect <host> <port> | send <text> | recv | close");
             kprintln!("  http <host>[:port] [/path]   fetch over HTTP/1.0");
+            kprintln!("  https <host>[:port] [/path]  the same, over TLS 1.3");
+            kprintln!("  wlan          what wireless hardware is present");
+            kprintln!("  crypto        re-run the cipher test vectors");
             console::set_color(YELLOW);
             kprintln!("  <host> is a name or an address, anywhere one is taken");
+            kprintln!("  https encrypts but does NOT verify the server -- see net/tls.rs");
             console::set_color(WHITE);
 
             console::set_color(YELLOW);
