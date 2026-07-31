@@ -21,7 +21,9 @@
 //!      no name canonicalisation and there is nothing to confuse.
 //!   3. **Dates.** Not before, not after, against the CMOS clock.
 //!   4. **The name matches.** RFC 6125: subjectAltName dNSName entries, with
-//!      wildcards permitted only in the leftmost label.
+//!      wildcards permitted only in the leftmost label -- or iPAddress
+//!      entries, when the host was given as an address literal. The two are
+//!      kept strictly apart: a dNSName never matches an address.
 //!
 //! ### What it still does not check
 //!
@@ -217,6 +219,10 @@ pub struct Cert {
     pub not_after: u64,
     pub is_ca: bool,
     pub dns_names: Vec<Vec<u8>>,
+    /// subjectAltName iPAddress entries, raw: four bytes for IPv4, sixteen
+    /// for IPv6. Kept unparsed because the comparison is a byte comparison and
+    /// converting to text only creates a way to get it wrong.
+    pub ip_names: Vec<Vec<u8>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -347,6 +353,8 @@ fn parse_extensions(der: &[u8], cert: &mut Cert) {
                     match i.tlv() {
                         // [2] IMPLICIT IA5String is a dNSName.
                         Some((0x82, name)) => cert.dns_names.push(name.to_vec()),
+                        // [7] IMPLICIT OCTET STRING is an iPAddress.
+                        Some((0x87, ip)) => cert.ip_names.push(ip.to_vec()),
                         Some(_) => {}
                         None => break,
                     }
@@ -387,6 +395,7 @@ pub fn parse(der: &[u8]) -> Result<Cert, Error> {
         not_after: u64::MAX,
         is_ca: false,
         dns_names: Vec::new(),
+        ip_names: Vec::new(),
     };
 
     // --- inside tbsCertificate ---
@@ -516,6 +525,15 @@ impl Cert {
 
     /// RFC 6125 name matching over subjectAltName.
     pub fn matches_host(&self, host: &str) -> bool {
+        // An address literal is matched against iPAddress entries and against
+        // nothing else. RFC 6125 is explicit that a dNSName never matches an
+        // IP -- so a certificate for the *name* "1.1.1.1", which is a legal
+        // thing to issue, must not authenticate the *address* 1.1.1.1. And no
+        // wildcard applies: "*.1.1" is not a thing.
+        if let Some(ip) = super::parse_ip(host) {
+            return self.ip_names.iter().any(|n| n.as_slice() == ip);
+        }
+
         let host = host.trim_end_matches('.').to_ascii_lowercase();
         for name in &self.dns_names {
             let Ok(n) = core::str::from_utf8(name) else { continue };

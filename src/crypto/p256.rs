@@ -5,11 +5,23 @@
 //! arithmetic underneath is not a leak. Signing would need entirely different
 //! care and is not implemented.
 //!
-//! Points are affine with an explicit identity flag rather than Jacobian.
-//! Jacobian coordinates save an inversion per addition, which matters when
-//! signing thousands of times a second and does not matter at all when
-//! verifying two certificates; affine has no special cases hiding in the
-//! conversion back, which is where the bugs live.
+//! ### Jacobian coordinates, and why the obvious choice was wrong
+//!
+//! This started out affine, on the reasoning that Jacobian only saves an
+//! inversion per point operation and that cannot matter when the job is
+//! verifying two certificates. That reasoning was wrong, and expensively so.
+//!
+//! An inversion here is a full modular exponentiation -- for P-384, about 600
+//! multiplies. A scalar multiply is roughly 768 point operations. So affine
+//! coordinates meant ~460,000 modular multiplies per signature, each
+//! allocating, and verifying one real certificate chain exhausted the heap and
+//! panicked. Jacobian does one inversion at the very end: ~13,000 multiplies,
+//! a factor of thirty-five.
+//!
+//! A point is (X, Y, Z) standing for the affine (X/Z^2, Y/Z^3), with Z = 0 as
+//! the identity. Everything stays in Montgomery form for the whole ladder --
+//! converting per operation was the second-largest cost -- and comes out once
+//! at the end.
 
 use super::bigint::{Big, Mont};
 use alloc::vec::Vec;
@@ -37,11 +49,14 @@ const GY: [u8; 32] = [
     0x2B, 0xCE, 0x33, 0x57, 0x6B, 0x31, 0x5E, 0xCE, 0xCB, 0xB6, 0x40, 0x68, 0x37, 0xBF, 0x51, 0xF5,
 ];
 
+/// A point in Jacobian coordinates, with every value in Montgomery form.
+/// `z` zero is the point at infinity, which removes the separate flag and the
+/// special cases that went with it.
 #[derive(Clone)]
 struct Point {
     x: Big,
     y: Big,
-    infinity: bool,
+    z: Big,
 }
 
 /// p = 2^384 - 2^128 - 2^96 + 2^32 - 1
@@ -133,101 +148,196 @@ impl Curve {
         Curve { fp, p, a_m, b_m, limbs }
     }
 
-    fn on_curve(&self, pt: &Point) -> bool {
-        if pt.infinity {
-            return true;
-        }
-        let x = self.fp.to_mont(&pt.x);
-        let y = self.fp.to_mont(&pt.y);
-        let y2 = self.fp.mul(&y, &y);
-        let x2 = self.fp.mul(&x, &x);
-        let x3 = self.fp.mul(&x2, &x);
-        let ax = self.fp.mul(&self.a_m, &x);
-        let rhs = x3.add_mod(&ax, &self.p).add_mod(&self.b_m, &self.p);
-        y2 == rhs
-    }
-
-    /// Modular inverse in the field, by Fermat.
-    fn inv(&self, a: &Big) -> Big {
-        self.fp.inv_prime(a)
-    }
-
-    fn double(&self, pt: &Point) -> Point {
-        if pt.infinity || pt.y.is_zero() {
-            return Point { x: Big::zero(self.limbs), y: Big::zero(self.limbs), infinity: true };
-        }
-        // lambda = (3x^2 + a) / 2y
-        let xm = self.fp.to_mont(&pt.x);
-        let ym = self.fp.to_mont(&pt.y);
-        let x2 = self.fp.mul(&xm, &xm);
-        let three_x2 = x2.add_mod(&x2, &self.p).add_mod(&x2, &self.p);
-        let num = three_x2.add_mod(&self.a_m, &self.p);
-        let two_y = ym.add_mod(&ym, &self.p);
-        let inv = self.fp.to_mont(&self.inv(&self.fp.from_mont(&two_y)));
-        let lam = self.fp.mul(&num, &inv);
-
-        let lam2 = self.fp.mul(&lam, &lam);
-        let x3 = lam2.sub_mod(&xm, &self.p).sub_mod(&xm, &self.p);
-        let y3 = self.fp.mul(&lam, &xm.sub_mod(&x3, &self.p)).sub_mod(&ym, &self.p);
+    fn zero(&self) -> Point {
         Point {
-            x: self.fp.from_mont(&x3),
-            y: self.fp.from_mont(&y3),
-            infinity: false,
+            x: self.one_m(),
+            y: self.one_m(),
+            z: Big::zero(self.limbs),
         }
     }
 
-    fn add(&self, a: &Point, b: &Point) -> Point {
-        if a.infinity {
-            return b.clone();
+    fn one_m(&self) -> Big {
+        self.fp.to_mont(&Big::from_u64(1, self.limbs))
+    }
+
+    /// Lift affine (x, y) into Montgomery-form Jacobian with Z = 1.
+    fn affine(&self, x: &Big, y: &Big) -> Point {
+        Point {
+            x: self.fp.to_mont(x),
+            y: self.fp.to_mont(y),
+            z: self.one_m(),
         }
-        if b.infinity {
-            return a.clone();
+    }
+
+    fn dbl_m(&self, a: &Big) -> Big {
+        a.add_mod(a, &self.p)
+    }
+
+    /// Invert a value that is *already* in Montgomery form, returning one that
+    /// still is.
+    ///
+    /// `Mont::inv_prime` takes and returns ordinary values -- it converts
+    /// internally -- so handing it a Montgomery value computes
+    /// `(z*R)^(p-2)`, which is not `z^-1 * R` and is not anything useful. The
+    /// affine code got this right and the Jacobian rewrite dropped it, which
+    /// broke every ECDSA verification while leaving RSA untouched: exactly the
+    /// shape of failure the trust-store check surfaced.
+    fn inv_m(&self, a_m: &Big) -> Big {
+        self.fp.to_mont(&self.fp.inv_prime(&self.fp.from_mont(a_m)))
+    }
+
+    /// y^2 == x^3 - 3x + b, on the affine values as given.
+    fn on_curve(&self, x: &Big, y: &Big) -> bool {
+        let x = self.fp.to_mont(x);
+        let y = self.fp.to_mont(y);
+        let y2 = self.fp.mul(&y, &y);
+        let x3 = self.fp.mul(&self.fp.mul(&x, &x), &x);
+        let ax = self.fp.mul(&self.a_m, &x);
+        y2 == x3.add_mod(&ax, &self.p).add_mod(&self.b_m, &self.p)
+    }
+
+    /// Point doubling, the a = -3 form. Both NIST curves have a = -3, which is
+    /// what lets `alpha` be computed as 3(X-Z^2)(X+Z^2) instead of needing a
+    /// separate multiply by a.
+    fn double(&self, pt: &Point) -> Point {
+        if pt.z.is_zero() {
+            return self.zero();
         }
-        if a.x == b.x {
-            // Same x means either a doubling or a pair that sums to infinity.
-            if a.y == b.y {
+        let delta = self.fp.mul(&pt.z, &pt.z);
+        let gamma = self.fp.mul(&pt.y, &pt.y);
+        let beta = self.fp.mul(&pt.x, &gamma);
+
+        let t1 = pt.x.sub_mod(&delta, &self.p);
+        let t2 = pt.x.add_mod(&delta, &self.p);
+        let t3 = self.fp.mul(&t1, &t2);
+        let alpha = t3.add_mod(&t3, &self.p).add_mod(&t3, &self.p);
+
+        let x3 = {
+            let a2 = self.fp.mul(&alpha, &alpha);
+            let eight_beta = self.dbl_m(&self.dbl_m(&self.dbl_m(&beta)));
+            a2.sub_mod(&eight_beta, &self.p)
+        };
+        let z3 = {
+            let yz = pt.y.add_mod(&pt.z, &self.p);
+            let s = self.fp.mul(&yz, &yz);
+            s.sub_mod(&gamma, &self.p).sub_mod(&delta, &self.p)
+        };
+        let y3 = {
+            let four_beta = self.dbl_m(&self.dbl_m(&beta));
+            let t = four_beta.sub_mod(&x3, &self.p);
+            let g2 = self.fp.mul(&gamma, &gamma);
+            let eight_g2 = self.dbl_m(&self.dbl_m(&self.dbl_m(&g2)));
+            self.fp.mul(&alpha, &t).sub_mod(&eight_g2, &self.p)
+        };
+        Point { x: x3, y: y3, z: z3 }
+    }
+
+    /// Mixed addition: Jacobian + affine (Z2 = 1). Both operands added to the
+    /// accumulator are fixed affine points, so the general Jacobian-Jacobian
+    /// form is never needed.
+    fn add_mixed(&self, a: &Point, bx: &Big, by: &Big) -> Point {
+        if a.z.is_zero() {
+            return Point {
+                x: bx.clone(),
+                y: by.clone(),
+                z: self.one_m(),
+            };
+        }
+        let z1z1 = self.fp.mul(&a.z, &a.z);
+        let u2 = self.fp.mul(bx, &z1z1);
+        let s2 = self.fp.mul(&self.fp.mul(by, &a.z), &z1z1);
+
+        let h = u2.sub_mod(&a.x, &self.p);
+        let r = self.dbl_m(&s2.sub_mod(&a.y, &self.p));
+
+        if h.is_zero() {
+            // Same x. Either the points are equal -- a doubling -- or they are
+            // inverses and the sum is the identity. Getting this wrong is the
+            // classic Jacobian bug: the general formula yields (0,0,0) here
+            // and silently poisons the rest of the ladder.
+            if r.is_zero() {
                 return self.double(a);
             }
-            return Point { x: Big::zero(self.limbs), y: Big::zero(self.limbs), infinity: true };
+            return self.zero();
         }
-        let ax = self.fp.to_mont(&a.x);
-        let ay = self.fp.to_mont(&a.y);
-        let bx = self.fp.to_mont(&b.x);
-        let by = self.fp.to_mont(&b.y);
 
-        let dx = bx.sub_mod(&ax, &self.p);
-        let dy = by.sub_mod(&ay, &self.p);
-        let inv = self.fp.to_mont(&self.inv(&self.fp.from_mont(&dx)));
-        let lam = self.fp.mul(&dy, &inv);
+        let hh = self.fp.mul(&h, &h);
+        let i = self.dbl_m(&self.dbl_m(&hh));
+        let j = self.fp.mul(&h, &i);
+        let v = self.fp.mul(&a.x, &i);
 
-        let lam2 = self.fp.mul(&lam, &lam);
-        let x3 = lam2.sub_mod(&ax, &self.p).sub_mod(&bx, &self.p);
-        let y3 = self.fp.mul(&lam, &ax.sub_mod(&x3, &self.p)).sub_mod(&ay, &self.p);
-        Point {
-            x: self.fp.from_mont(&x3),
-            y: self.fp.from_mont(&y3),
-            infinity: false,
-        }
+        let x3 = {
+            let r2 = self.fp.mul(&r, &r);
+            r2.sub_mod(&j, &self.p).sub_mod(&v, &self.p).sub_mod(&v, &self.p)
+        };
+        let y3 = {
+            let t = v.sub_mod(&x3, &self.p);
+            let y1j = self.fp.mul(&a.y, &j);
+            self.fp
+                .mul(&r, &t)
+                .sub_mod(&y1j, &self.p)
+                .sub_mod(&y1j, &self.p)
+        };
+        let z3 = {
+            let zh = a.z.add_mod(&h, &self.p);
+            let s = self.fp.mul(&zh, &zh);
+            s.sub_mod(&z1z1, &self.p).sub_mod(&hh, &self.p)
+        };
+        Point { x: x3, y: y3, z: z3 }
     }
 
     /// u1*G + u2*Q, by interleaved double-and-add ("Shamir's trick").
     ///
     /// One pass over the bits instead of two scalar multiplications. Safe here
     /// only because both scalars are public.
-    fn mul_two(&self, u1: &Big, g: &Point, u2: &Big, q: &Point) -> Point {
-        let sum = self.add(g, q);
-        let mut acc = Point { x: Big::zero(self.limbs), y: Big::zero(self.limbs), infinity: true };
+    ///
+    /// Returns the affine x-coordinate, which is all ECDSA verification needs
+    /// -- so the single inversion converts x and nothing else.
+    fn mul_two_x(&self, u1: &Big, g: (&Big, &Big), u2: &Big, q: (&Big, &Big)) -> Option<Big> {
+        // G + Q, precomputed once so a bit set in both scalars costs one add.
+        let sum = {
+            let gp = self.affine(g.0, g.1);
+            let p = self.add_mixed(&gp, &self.fp.to_mont(q.0), &self.fp.to_mont(q.1));
+            if p.z.is_zero() {
+                None
+            } else {
+                // Bring it back to affine so it can be used with add_mixed.
+                let zi = self.inv_m(&p.z);
+                let zi2 = self.fp.mul(&zi, &zi);
+                let zi3 = self.fp.mul(&zi2, &zi);
+                Some((self.fp.mul(&p.x, &zi2), self.fp.mul(&p.y, &zi3)))
+            }
+        };
+
+        let gm = (self.fp.to_mont(g.0), self.fp.to_mont(g.1));
+        let qm = (self.fp.to_mont(q.0), self.fp.to_mont(q.1));
+
+        let mut acc = self.zero();
         let bits = u1.bits().max(u2.bits());
         for i in (0..bits).rev() {
             acc = self.double(&acc);
-            match (u1.bit(i), u2.bit(i)) {
-                (true, true) => acc = self.add(&acc, &sum),
-                (true, false) => acc = self.add(&acc, g),
-                (false, true) => acc = self.add(&acc, q),
-                (false, false) => {}
+            let (b1, b2) = (u1.bit(i), u2.bit(i));
+            if b1 && b2 {
+                match &sum {
+                    // G + Q was the identity, so G = -Q and the two terms
+                    // cancel: adding neither is correct.
+                    None => {}
+                    Some((sx, sy)) => acc = self.add_mixed(&acc, sx, sy),
+                }
+            } else if b1 {
+                acc = self.add_mixed(&acc, &gm.0, &gm.1);
+            } else if b2 {
+                acc = self.add_mixed(&acc, &qm.0, &qm.1);
             }
         }
-        acc
+
+        if acc.z.is_zero() {
+            return None;
+        }
+        // The one inversion in the whole operation.
+        let zi = self.inv_m(&acc.z);
+        let zi2 = self.fp.mul(&zi, &zi);
+        Some(self.fp.from_mont(&self.fp.mul(&acc.x, &zi2)))
     }
 }
 
@@ -258,19 +368,14 @@ pub fn verify(c: Nist, pubkey: &[u8], hash: &[u8], r: &[u8], s: &[u8]) -> bool {
         return false;
     }
 
-    let q = Point {
-        x: Big::from_bytes(&pubkey[1..1 + sz]),
-        y: Big::from_bytes(&pubkey[1 + sz..1 + 2 * sz]),
-        infinity: false,
-    };
+    let qx = Big::from_bytes(&pubkey[1..1 + sz]);
+    let qy = Big::from_bytes(&pubkey[1 + sz..1 + 2 * sz]);
     // A public key off the curve can be used to extract information in some
     // protocols; checking is cheap and unconditional.
-    if !curve.on_curve(&q) {
+    if !curve.on_curve(&qx, &qy) {
         return false;
     }
 
-    // e is the leftmost bits of the hash, up to the bit length of n. For
-    // SHA-256 and P-256 those are both 256, so the hash is used whole.
     // e is the leftmost bits of the hash, up to the bit length of n: a
     // SHA-384 digest verified against P-256 is truncated, and a SHA-256
     // digest against P-384 is used whole.
@@ -280,17 +385,13 @@ pub fn verify(c: Nist, pubkey: &[u8], hash: &[u8], r: &[u8], s: &[u8]) -> bool {
     let u1 = fnq.from_mont(&fnq.mul(&fnq.to_mont(&e), &fnq.to_mont(&w)));
     let u2 = fnq.from_mont(&fnq.mul(&fnq.to_mont(&r), &fnq.to_mont(&w)));
 
-    let (gx, gy) = c.g();
-    let g = Point {
-        x: Big::from_bytes(gx),
-        y: Big::from_bytes(gy),
-        infinity: false,
-    };
-    let pt = curve.mul_two(&u1, &g, &u2, &q);
-    if pt.infinity {
-        return false;
+    let (gxb, gyb) = c.g();
+    let gx = Big::from_bytes(gxb);
+    let gy = Big::from_bytes(gyb);
+    match curve.mul_two_x(&u1, (&gx, &gy), &u2, (&qx, &qy)) {
+        None => false,
+        Some(x) => x.rem(&n).cmp(&r) == core::cmp::Ordering::Equal,
     }
-    pt.x.rem(&n).cmp(&r) == core::cmp::Ordering::Equal
 }
 
 /// Parse the DER SEQUENCE { INTEGER r, INTEGER s } that carries an ECDSA

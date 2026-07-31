@@ -532,7 +532,10 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             }
         }
         "wlan" | "wifi" => crate::net::wifi::report(),
-        "trust" => crate::net::trust::report(),
+        "trust" => match rest.trim() {
+            "verify" => crate::net::trust::verify_roots(),
+            _ => crate::net::trust::report(),
+        },
         "wpa2" => crate::net::wpa2::report(),
         "https" => {
             let mut it = rest.split_whitespace();

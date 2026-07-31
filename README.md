@@ -311,8 +311,10 @@ id, where it cannot be bypassed by pattern order.
   inspection and is the opposite of what a browser should do; a caller that
   cares must check `identity.ok()`.
 - **No revocation.** No CRL, no OCSP, so a withdrawn certificate is accepted
-  until it expires. No `iPAddress` subjectAltName either, which is why
-  `https 1.1.1.1` is reported as a name mismatch rather than matched.
+  until it expires.
+- **IPv4 only in names too.** `iPAddress` subjectAltNames are matched, so
+  `https 1.1.1.1` verifies, but an IPv6 entry is listed and never matched
+  because nothing here speaks IPv6.
 - **Roots are the host's.** `scripts/fetch-roots.ps1` copies the Windows
   trusted-root store, so GLaDOS inherits whatever that machine trusts —
   including anything added by management software. `trust` lists them; with no

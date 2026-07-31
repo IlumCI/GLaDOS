@@ -802,6 +802,13 @@ pub fn connect(dst: Ipv4, host: &str, port: u16) -> Result<Session, Error> {
             .dns_names
             .iter()
             .map(|n| String::from_utf8_lossy(n).into_owned())
+            .chain(leaf.ip_names.iter().map(|n| match n.len() {
+                4 => alloc::format!("IP:{}.{}.{}.{}", n[0], n[1], n[2], n[3]),
+                // IPv6 entries are listed but never match, since nothing here
+                // speaks IPv6 -- saying so beats omitting them.
+                16 => alloc::string::String::from("IP:<ipv6>"),
+                _ => alloc::string::String::from("IP:<malformed>"),
+            }))
             .collect();
     }
     s.identity = check_identity(&chain, cert_verify.as_deref(), &transcript_for_cv, host);

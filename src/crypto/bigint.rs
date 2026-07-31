@@ -226,7 +226,18 @@ impl Mont {
     /// CIOS Montgomery multiplication: a*b*R^-1 mod m.
     pub fn mul(&self, a: &Big, b: &Big) -> Big {
         let n = self.n;
-        let mut t = vec![0u64; n + 2];
+        // A stack buffer rather than a Vec: this is the hottest function in
+        // the system by a wide margin -- a single ECDSA verification calls it
+        // over ten thousand times -- and an allocation per call was measurable
+        // heap churn for no reason. 66 limbs covers RSA-4096 with room.
+        let mut stack = [0u64; 66];
+        let mut heap;
+        let t: &mut [u64] = if n + 2 <= stack.len() {
+            &mut stack[..n + 2]
+        } else {
+            heap = vec![0u64; n + 2];
+            &mut heap
+        };
         for i in 0..n {
             let bi = b.v.get(i).copied().unwrap_or(0) as u128;
             let mut carry = 0u128;

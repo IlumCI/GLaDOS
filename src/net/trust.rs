@@ -114,6 +114,74 @@ pub fn find_issuer(issuer: &[u8]) -> Option<Vec<u8>> {
         .map(|r| r.der.clone())
 }
 
+/// Verify every root's signature against its own key, and time it.
+///
+/// A root is self-signed, so `verify_signed_by(self)` must succeed. That makes
+/// the trust store a free offline test corpus for the whole signature path --
+/// real certificates, several key types and hash sizes, no network, no server,
+/// and a deterministic answer in seconds instead of a five-minute round trip
+/// to Cloudflare that fails for unrelated reasons.
+///
+/// It is also the honest way to measure. Verification cost is what made an
+/// earlier version exhaust the heap, and per-algorithm timings here say
+/// exactly which one is expensive.
+pub fn verify_roots() {
+    use crate::gfx::console::WHITE;
+
+    console::set_color(YELLOW);
+    kprintln!("[trust] self-signature check");
+    console::set_color(LTGRAY);
+
+    let list = roots();
+    if list.is_empty() {
+        kprintln!("  no roots loaded");
+        return;
+    }
+
+    let mhz = crate::time::tsc_mhz().max(1);
+    let (mut ok, mut bad, mut unsupported) = (0usize, 0usize, 0usize);
+    let mut slowest_ms = 0u64;
+    let mut slowest_name = alloc::string::String::new();
+    let t_all = crate::time::rdtsc();
+
+    for r in list.iter() {
+        let Ok(c) = x509::parse(&r.der) else {
+            bad += 1;
+            continue;
+        };
+        let t0 = crate::time::rdtsc();
+        let verdict = c.verify_signed_by(&c);
+        let ms = (crate::time::rdtsc() - t0) / mhz / 1000;
+        let name = core::str::from_utf8(&r.cn).unwrap_or("<unnamed>");
+        if ms > slowest_ms {
+            slowest_ms = ms;
+            slowest_name = alloc::string::String::from(name);
+        }
+        match verdict {
+            Ok(()) => ok += 1,
+            Err(x509::Error::UnsupportedSignature) => {
+                unsupported += 1;
+                console::set_color(YELLOW);
+                kprintln!("  skip  {:>5} ms  {}", ms, name);
+                console::set_color(LTGRAY);
+            }
+            Err(e) => {
+                bad += 1;
+                console::set_color(LTRED);
+                kprintln!("  FAIL  {:>5} ms  {}  ({})", ms, name, e.name());
+                console::set_color(LTGRAY);
+            }
+        }
+    }
+
+    let total = (crate::time::rdtsc() - t_all) / mhz / 1000;
+    console::set_color(if bad == 0 { LTGREEN } else { LTRED });
+    kprintln!("  {} verified, {} unsupported, {} failed", ok, unsupported, bad);
+    console::set_color(LTGRAY);
+    kprintln!("  {} ms total, slowest {} ms ({})", total, slowest_ms, slowest_name);
+    let _ = WHITE;
+}
+
 pub fn report() {
     console::set_color(YELLOW);
     kprintln!("[trust]");

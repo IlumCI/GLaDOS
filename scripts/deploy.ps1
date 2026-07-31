@@ -3,9 +3,15 @@
     Copy glados to a real EFI System Partition for bare-metal boot.
 
 .DESCRIPTION
-    Writes only EFI\BOOT\BOOTX64.EFI on the target volume. It creates no
-    partitions, formats nothing, and touches no other file -- deliberately.
-    Repartitioning is a separate, manual, deliberate act.
+    Writes EFI\BOOT\BOOTX64.EFI and the contents of esp\GLADOS -- the model,
+    the tokenizer, and the root certificate bundle, each skipped when already
+    byte-identical. It creates no partitions, formats nothing, and touches no
+    other file -- deliberately. Repartitioning is a separate, manual,
+    deliberate act.
+
+    The payload is not optional garnish. Without model.bin the [ai] section
+    reports no checkpoint; without roots.der every certificate fails to
+    validate and https encrypts without authenticating.
 
     On the GF63: reboot and hold F11 for the boot menu, then pick the USB
     device. The internal Windows NVMe is never involved.
