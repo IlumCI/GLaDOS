@@ -483,11 +483,16 @@ pub struct TrainReport {
     pub after_test: f32,
 }
 
-/// Every fourth example is held out. Reporting only training accuracy would
-/// measure memorisation, which a per-applet delta can always achieve and which
-/// says nothing about whether anything was learned.
+/// The tail of the corpus is held out.
+///
+/// Not every fourth example, which is what this used to do. The corpus is
+/// generated from template families and the generator emits whole families
+/// into the held-out tail, so an interleaved split would put paraphrases of
+/// training items into the test set and report memorisation as generalisation.
+/// Anything appended later by `teach` lands past the seed and trains.
 fn is_held_out(i: usize) -> bool {
-    i % 4 == 3
+    let seed = super::corpus::SEED.len();
+    i >= super::corpus::SEED_TRAIN && i < seed
 }
 
 fn accuracy(e: &mut super::Engine, examples: &[vocab::Example], held: bool) -> f32 {
@@ -775,5 +780,155 @@ pub fn probe_features() {
         console::set_color(LTGRAY);
     } else if gap <= 0.005 {
         kprintln!("  features vary, but not along task lines");
+    }
+}
+
+// --- the closed-form router ---------------------------------------------
+
+/// Fit a ridge probe from the corpus, holding out a quarter to score it.
+///
+/// Replaces `train`. That one ran SGD on the vocabulary head and made held-out
+/// accuracy fall monotonically -- 30% untrained, 0% after eight epochs -- which
+/// is what fitting 21 classes from 40 examples by descent gets you. There is no
+/// equivalent knob to get wrong here: the solution is closed form, so the only
+/// choice is the regularisation, and the measured curve across two orders of
+/// magnitude of it is 51%, 55%, 49%.
+pub fn fit_probe(lambda: f32) {
+    console::set_color(YELLOW);
+    kprintln!("[probe]");
+    console::set_color(LTGRAY);
+
+    let examples = vocab::examples();
+    if examples.is_empty() {
+        kprintln!("  no corpus at {}", vocab::CORPUS);
+        return;
+    }
+
+    let t0 = crate::time::rdtsc();
+    let built = with_engine(|e| {
+        let classes = e.head.len();
+        let mut train_x: Vec<Vec<f32>> = Vec::new();
+        let mut train_y: Vec<usize> = Vec::new();
+        let mut test: Vec<(Vec<f32>, usize)> = Vec::new();
+
+        for (i, ex) in examples.iter().enumerate() {
+            let Some(y) = e.head.index_of(&ex.applet) else { continue };
+            let Some(x) = feature(e, &ex.task) else { continue };
+            if is_held_out(i) {
+                test.push((x, y));
+            } else {
+                train_x.push(x);
+                train_y.push(y);
+            }
+        }
+        if train_x.is_empty() {
+            return None;
+        }
+
+        let p = super::probe::Probe::fit(&train_x, &train_y, classes, lambda)?;
+
+        let hit = |set: &[(Vec<f32>, usize)]| -> (usize, usize) {
+            let mut right = 0;
+            for (x, y) in set {
+                if p.predict(x) == *y {
+                    right += 1;
+                }
+            }
+            (right, set.len())
+        };
+        let seen: Vec<(Vec<f32>, usize)> =
+            train_x.iter().cloned().zip(train_y.iter().copied()).collect();
+        let (tr_ok, tr_n) = hit(&seen);
+        let (te_ok, te_n) = hit(&test);
+
+        let params = p.params();
+        e.probe = Some(p);
+        Some((tr_ok, tr_n, te_ok, te_n, params, classes))
+    })
+    .flatten();
+
+    let Some((tr_ok, tr_n, te_ok, te_n, params, classes)) = built else {
+        console::set_color(LTRED);
+        kprintln!("  could not fit (no model, or the features are degenerate)");
+        console::set_color(LTGRAY);
+        return;
+    };
+    let elapsed = crate::time::rdtsc() - t0;
+
+    kprintln!("  {} train, {} held out, {} classes", tr_n, te_n, classes);
+    kprintln!("  seen      {}%", pct(tr_ok, tr_n));
+    let te = pct(te_ok, te_n);
+    console::set_color(if te * classes as u32 > 200 { LTGREEN } else { YELLOW });
+    kprintln!("  held out  {}%   <- the one that counts", te);
+    console::set_color(LTGRAY);
+    kprintln!("  chance is {}%", 100 / classes.max(1));
+    kprintln!("  {} parameters, closed form -- no epochs, nothing to overfit", params);
+    let mhz = crate::time::tsc_mhz();
+    if mhz > 0 {
+        kprintln!("  fitted in {} ms", elapsed / mhz / 1000);
+    }
+}
+
+fn pct(a: usize, b: usize) -> u32 {
+    if b == 0 {
+        0
+    } else {
+        (a * 100 / b) as u32
+    }
+}
+
+/// Route a task with the probe. Microseconds: one matrix-vector product.
+pub fn route(task: &str, trust: Trust) -> Option<Choice> {
+    with_engine(|e| {
+        let x = feature(e, task)?;
+        let p = e.probe.as_ref()?;
+        let scores = p.scores(&x);
+
+        // Permission is still enforced by omission -- a forbidden applet is
+        // not considered, so it cannot be returned however high it scored.
+        let mut best: Option<(usize, f32)> = None;
+        for (i, s) in scores.iter().enumerate() {
+            let name = e.head.name(i);
+            let Some(a) = sysbox::APPLETS.iter().find(|a| a.name == name) else { continue };
+            if !trust.admits(a) {
+                continue;
+            }
+            if best.map(|(_, b)| *s > b).unwrap_or(true) {
+                best = Some((i, *s));
+            }
+        }
+        let (i, _) = best?;
+        let name = e.head.name(i);
+        let mutates = sysbox::APPLETS
+            .iter()
+            .find(|a| a.name == name)
+            .map(|a| a.mutates)
+            .unwrap_or(false);
+        Some(Choice { applet: name, mutates, steps: 1 })
+    })?
+}
+
+pub fn route_report(task: &str, trust: Trust) {
+    console::set_color(YELLOW);
+    kprintln!("[route]");
+    console::set_color(LTGRAY);
+    let t0 = crate::time::rdtsc();
+    match route(task, trust) {
+        None => kprintln!("  no probe fitted -- run 'fit' first"),
+        Some(c) => {
+            let elapsed = crate::time::rdtsc() - t0;
+            console::set_color(LTCYAN);
+            kprintln!("  {}", c.applet);
+            console::set_color(LTGRAY);
+            let mhz = crate::time::tsc_mhz();
+            if mhz > 0 {
+                kprintln!("  {} us, no transformer involved", elapsed / mhz);
+            }
+            if c.mutates {
+                console::set_color(YELLOW);
+                kprintln!("  that applet mutates content");
+                console::set_color(LTGRAY);
+            }
+        }
     }
 }

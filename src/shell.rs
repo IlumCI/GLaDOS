@@ -537,6 +537,23 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             let ids: Vec<usize> = rest.split_whitespace().filter_map(|s| s.parse().ok()).collect();
             crate::ai::logits_for(&ids);
         }
+        "fit" => {
+            let lambda: f32 = rest.split_whitespace().next()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1.0);
+            crate::ai::harness::fit_probe(lambda);
+        }
+        "route" => {
+            let (trust, task) = match rest.strip_prefix("trusted ") {
+                Some(t) => (crate::ai::harness::Trust::Full, t.trim()),
+                None => (crate::ai::harness::Trust::ReadOnly, rest),
+            };
+            if task.is_empty() {
+                kprintln!("  usage: route [trusted] <task>");
+            } else {
+                crate::ai::harness::route_report(task, trust);
+            }
+        }
         "probe" => crate::ai::harness::probe_features(),
         "feature" => {
             use crate::ai::harness::{set_feature_mode, Feature};

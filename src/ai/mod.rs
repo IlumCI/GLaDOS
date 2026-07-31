@@ -1,8 +1,10 @@
 //! Machine learning primitives.
 
 pub mod constrain;
+pub mod corpus;
 pub mod harness;
 pub mod model;
+pub mod probe;
 pub mod sample;
 pub mod tensor;
 pub mod tokenizer;
@@ -375,6 +377,10 @@ pub struct Engine {
     pub rng: sample::Rng,
     /// The part that is allowed to change. Everything above it is frozen.
     pub head: vocab::Head,
+    /// Closed-form replacement for the gradient head. `None` until `train`
+    /// fits one; the system boots without a router and gains one from its own
+    /// corpus.
+    pub probe: Option<probe::Probe>,
     /// How far into the KV cache the live conversation has got. The cache
     /// alone is not a mental state -- attention reads `0..pos`, so a cache
     /// without its position is unusable.
@@ -486,17 +492,30 @@ pub fn init(model_blob: Option<Blob>, tok_blob: Option<Blob>) {
     );
 
     unsafe {
-        *ENGINE.get() =
-            Some(Engine { model: m, tok, state, rng, head, pos: 0, last_token: tokenizer::BOS })
+        *ENGINE.get() = Some(Engine {
+            model: m,
+            tok,
+            state,
+            rng,
+            head,
+            probe: None,
+            pos: 0,
+            last_token: tokenizer::BOS,
+        })
     };
 
     // The corpus lives in the namespace, so it is restored along with
     // everything else; only seed it when there is nothing there.
     if crate::sysbox::children(vocab::CORPUS).is_empty() {
-        for (applet, task) in vocab::SEED {
+        for (applet, task) in corpus::SEED {
             vocab::record(applet, task);
         }
-        kprintln!("  corpus seeded with {} examples at {}", vocab::SEED.len(), vocab::CORPUS);
+        kprintln!(
+            "  corpus seeded with {} examples ({} held out) at {}",
+            corpus::SEED.len(),
+            corpus::SEED.len() - corpus::SEED_TRAIN,
+            vocab::CORPUS
+        );
     } else {
         kprintln!(
             "  corpus has {} examples at {}",
