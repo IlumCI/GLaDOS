@@ -468,6 +468,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             }
         }
         "refresh" => console::redraw(),
+        "fat" => fat_cmd(rest),
         "edit" | "vi" => {
             if rest.is_empty() {
                 kprintln!("  usage: edit <path>");
@@ -1187,4 +1188,123 @@ pub fn run_pipeline(
         _ => return false,
     }
     true
+}
+
+/// Browse a real filesystem on the disk.
+///
+/// The firmware could read files and no longer exists; this is the kernel
+/// doing it for itself. Read-only on purpose -- a tool that can inspect a
+/// broken disk is useful, one that can half-write it is worse than nothing.
+fn fat_cmd(rest: &str) {
+    use crate::store::{block, fat};
+
+    let mut it = rest.split_whitespace();
+    let verb = it.next().unwrap_or("");
+    let arg = it.next().unwrap_or("");
+    let arg2 = rest.splitn(3, ' ').nth(2).unwrap_or("").trim();
+
+    // Which partition. Named by index from `disk`, or "auto" for the first one
+    // that actually parses as FAT -- which is the useful default, since the
+    // partition type byte is a claim and mounting is a check.
+    let layout = match block::scan() {
+        Ok(l) => l,
+        Err(e) => {
+            kprintln!("  cannot read the partition table: {:?}", e);
+            return;
+        }
+    };
+
+    let pick_auto = || -> Option<(u32, fat::Volume)> {
+        for p in layout.partitions.iter() {
+            if let Ok(v) = fat::Volume::mount(p.start_lba) {
+                return Some((p.index, v));
+            }
+        }
+        None
+    };
+
+    match verb {
+        "" | "list" if arg.is_empty() => {
+            console::set_color(YELLOW);
+            kprintln!("[fat]");
+            console::set_color(LTGRAY);
+            let mut any = false;
+            for p in layout.partitions.iter() {
+                if let Ok(v) = fat::Volume::mount(p.start_lba) {
+                    any = true;
+                    kprintln!(
+                        "  partition {}  {:?}  {} clusters of {} B  ({})",
+                        p.index,
+                        v.kind(),
+                        v.total_clusters(),
+                        v.cluster_bytes(),
+                        p.kind()
+                    );
+                }
+            }
+            if !any {
+                kprintln!("  no FAT filesystem found on this disk");
+            } else {
+                kprintln!("  'fat ls <path>', 'fat cat <path>', 'fat get <path> <namespace-path>'");
+            }
+        }
+        "ls" | "cat" | "get" => {
+            let Some((idx, vol)) = pick_auto() else {
+                kprintln!("  no FAT filesystem found");
+                return;
+            };
+            let path = if verb == "get" { arg } else { rest[verb.len()..].trim() };
+            match vol.find(path) {
+                Err(e) => kprintln!("  {}: {:?}", path, e),
+                Ok(entry) => match verb {
+                    "ls" => {
+                        if !entry.is_dir {
+                            kprintln!("  {:>10}  {}", entry.size, entry.name);
+                            return;
+                        }
+                        match vol.list(entry.cluster) {
+                            Err(e) => kprintln!("  {:?}", e),
+                            Ok(items) => {
+                                kprintln!("  partition {}, {} entries", idx, items.len());
+                                for e in items {
+                                    if e.is_dir {
+                                        console::set_color(LTCYAN);
+                                        kprintln!("  {:>10}  {}/", "", e.name);
+                                    } else {
+                                        console::set_color(WHITE);
+                                        kprintln!("  {:>10}  {}", e.size, e.name);
+                                    }
+                                }
+                                console::set_color(LTGRAY);
+                            }
+                        }
+                    }
+                    "cat" => match vol.read_file(&entry) {
+                        Err(e) => kprintln!("  {:?}", e),
+                        Ok(bytes) => {
+                            for line in bytes.split(|c| *c == b'\n') {
+                                kprintln!(
+                                    "  {}",
+                                    core::str::from_utf8(line).unwrap_or("<binary>")
+                                );
+                            }
+                        }
+                    },
+                    _ => match vol.read_file(&entry) {
+                        Err(e) => kprintln!("  {:?}", e),
+                        Ok(bytes) => {
+                            let dest = if arg2.is_empty() { "/tmp/imported" } else { arg2 };
+                            let n = bytes.len();
+                            if crate::sysbox::write_blob(dest, bytes) {
+                                kprintln!("  {} bytes -> {}", n, dest);
+                            } else {
+                                kprintln!("  could not write {}", dest);
+                            }
+                        }
+                    },
+                },
+            }
+        }
+        other => kprintln!("  not a fat subcommand: {}", other),
+    }
 }

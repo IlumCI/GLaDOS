@@ -2,6 +2,7 @@
 
 pub mod block;
 pub mod cas;
+pub mod fat;
 pub mod sha256;
 
 use crate::sync::Racy;
