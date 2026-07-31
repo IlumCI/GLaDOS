@@ -557,6 +557,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             }
         }
         "gate" => crate::ai::harness::gate_report(),
+        "search" => crate::ai::harness::search_report(),
         "probe" => crate::ai::harness::probe_features(),
         "feature" => {
             use crate::ai::harness::{set_feature_mode, Feature};

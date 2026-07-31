@@ -1086,3 +1086,204 @@ pub fn gate_report() {
     kprintln!("  overall     {}%", pct(aok + sok, total));
     kprintln!("  the gap is the whole point -- agreement is worth acting on");
 }
+
+// --- searching the space of routing functions ---------------------------
+//
+// Everything above fixes one pipeline and fits its parameters. This searches
+// the pipeline itself: which cores participate, how they combine, how much
+// each is smoothed or regularised. In the meta-learning ladder that is the
+// step from f_theta(x) to P(f) -- the object being chosen is the reasoning
+// function, not its coefficients.
+//
+// The Godel-machine condition is what keeps that from being decoration: a
+// self-modification is adopted only when it is *verified* to improve a
+// measured objective. Here the verification is held-out accuracy, the
+// objective is routing, and the modification is a configuration. Nothing is
+// adopted on the strength of an argument.
+//
+// Three splits, because selecting among candidates by score is fitting the set
+// you select on. Validation is spent freely during the search; the test slice
+// is read once, afterwards, and its number is the one that means anything.
+
+#[derive(Clone, Copy, PartialEq)]
+pub struct Config {
+    pub lambda: f32,
+    /// How the three cores decide. See `Rule`.
+    pub rule: Rule,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Rule {
+    /// The ridge probe alone.
+    ProbeOnly,
+    /// Majority of three, ties to the probe.
+    Majority,
+    /// Lexical core alone -- included so the search can discover that the
+    /// expensive core is not pulling its weight, rather than being told.
+    LexicalOnly,
+}
+
+impl Rule {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Rule::ProbeOnly => "probe",
+            Rule::Majority => "majority",
+            Rule::LexicalOnly => "lexical",
+        }
+    }
+}
+
+fn split_of(i: usize) -> u8 {
+    let seed = super::corpus::SEED.len();
+    if i < super::corpus::SEED_TRAIN {
+        0 // train
+    } else if i < super::corpus::SEED_VAL_END {
+        1 // validation
+    } else if i < seed {
+        2 // test
+    } else {
+        0 // anything `teach` appended trains
+    }
+}
+
+/// Score one configuration on a split, having fitted it on train.
+fn evaluate(e: &mut super::Engine, cfg: Config, split: u8) -> Option<(usize, usize)> {
+    let examples = vocab::examples();
+    let classes = e.head.len();
+
+    let mut xs: Vec<Vec<f32>> = Vec::new();
+    let mut ys: Vec<usize> = Vec::new();
+    let mut texts: Vec<&str> = Vec::new();
+    for (i, ex) in examples.iter().enumerate() {
+        if split_of(i) != 0 {
+            continue;
+        }
+        let Some(y) = e.head.index_of(&ex.applet) else { continue };
+        let Some(x) = feature(e, &ex.task) else { continue };
+        xs.push(x);
+        ys.push(y);
+        texts.push(&ex.task);
+    }
+    if xs.is_empty() {
+        return None;
+    }
+
+    let probe = super::probe::Probe::fit(&xs, &ys, classes, cfg.lambda)?;
+    let council = super::council::Council::fit(&texts, &ys, classes, &e.tok);
+    let all: Vec<usize> = (0..classes).collect();
+
+    let (mut right, mut total) = (0usize, 0usize);
+    for (i, ex) in examples.iter().enumerate() {
+        if split_of(i) != split {
+            continue;
+        }
+        let Some(want) = e.head.index_of(&ex.applet) else { continue };
+        let Some(x) = feature(e, &ex.task) else { continue };
+        let p = probe.predict(&x);
+
+        let got = match (cfg.rule, council.as_ref()) {
+            (Rule::ProbeOnly, _) | (_, None) => p,
+            (Rule::Majority, Some(c)) => match c.corroborate(&ex.task, &e.tok, &all) {
+                Some((l, ch)) if l == ch && l != p => l,
+                _ => p,
+            },
+            (Rule::LexicalOnly, Some(c)) => match c.corroborate(&ex.task, &e.tok, &all) {
+                Some((l, _)) => l,
+                None => p,
+            },
+        };
+        total += 1;
+        right += usize::from(got == want);
+    }
+    Some((right, total))
+}
+
+/// Search the configuration space, adopt the winner, then report on test.
+pub fn search_report() {
+    console::set_color(YELLOW);
+    kprintln!("[search]");
+    console::set_color(LTGRAY);
+
+    let lambdas = [0.1f32, 1.0, 10.0];
+    let rules = [Rule::ProbeOnly, Rule::Majority, Rule::LexicalOnly];
+
+    let t0 = crate::time::rdtsc();
+    let outcome = with_engine(|e| {
+        let mut best: Option<(Config, usize, usize)> = None;
+        let mut tried = 0usize;
+
+        for &lambda in lambdas.iter() {
+            for &rule in rules.iter() {
+                let cfg = Config { lambda, rule };
+                let Some((ok, n)) = evaluate(e, cfg, 1) else { continue };
+                tried += 1;
+                console::set_color(LTGRAY);
+                kprintln!(
+                    "    lambda {:>4}  {:8}  val {}%",
+                    (lambda * 10.0) as u32,
+                    rule.name(),
+                    pct(ok, n)
+                );
+                let better = best
+                    .map(|(_, bok, bn)| ok * bn > bok * n)
+                    .unwrap_or(true);
+                if better {
+                    best = Some((cfg, ok, n));
+                }
+            }
+        }
+
+        let (cfg, vok, vn) = best?;
+        // Read once, after the choice is already made.
+        let (tok_, tn) = evaluate(e, cfg, 2)?;
+
+        // Adopt: refit on train and install, so the engine is left holding the
+        // configuration that won rather than whichever was tried last.
+        let examples = vocab::examples();
+        let classes = e.head.len();
+        let mut xs = Vec::new();
+        let mut ys = Vec::new();
+        let mut texts: Vec<&str> = Vec::new();
+        for (i, ex) in examples.iter().enumerate() {
+            if split_of(i) != 0 {
+                continue;
+            }
+            let Some(y) = e.head.index_of(&ex.applet) else { continue };
+            let Some(x) = feature(e, &ex.task) else { continue };
+            xs.push(x);
+            ys.push(y);
+            texts.push(&ex.task);
+        }
+        e.probe = super::probe::Probe::fit(&xs, &ys, classes, cfg.lambda);
+        e.council = super::council::Council::fit(&texts, &ys, classes, &e.tok);
+
+        Some((cfg, vok, vn, tok_, tn, tried))
+    })
+    .flatten();
+
+    let Some((cfg, vok, vn, tok_, tn, tried)) = outcome else {
+        console::set_color(LTRED);
+        kprintln!("  no model, or no corpus to search against");
+        console::set_color(LTGRAY);
+        return;
+    };
+    let elapsed = crate::time::rdtsc() - t0;
+
+    console::set_color(LTGREEN);
+    kprintln!(
+        "\n  adopted: lambda {}/10, rule {}",
+        (cfg.lambda * 10.0) as u32,
+        cfg.rule.name()
+    );
+    console::set_color(LTGRAY);
+    kprintln!("  {} configurations tried, chosen on {} validation items", tried, vn);
+    kprintln!("  validation {}%  (spent -- selected on, so optimistic)", pct(vok, vn));
+    console::set_color(LTCYAN);
+    kprintln!("  test       {}%  ({} items, read once)", pct(tok_, tn), tn);
+    console::set_color(LTGRAY);
+    let mhz = crate::time::tsc_mhz();
+    if mhz > 0 {
+        kprintln!("  searched in {} ms", elapsed / mhz / 1000);
+    }
+    kprintln!("  a configuration is adopted only when measured better, never argued better");
+}

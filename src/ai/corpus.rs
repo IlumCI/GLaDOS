@@ -476,3 +476,12 @@ pub const SEED: &[(&str, &str)] = &[
 
 /// How many of `SEED` are training examples.
 pub const SEED_TRAIN: usize = 357;
+
+/// Where validation ends and the final test begins.
+///
+/// Three splits, not two, because the search selects among candidate
+/// configurations by score -- and selecting on a set is fitting it. With
+/// one held-out set the winner's score would be optimistic by however
+/// many candidates were tried. Validation is spent freely; the test
+/// slice is read once, at the end, to say what was actually achieved.
+pub const SEED_VAL_END: usize = 411;
