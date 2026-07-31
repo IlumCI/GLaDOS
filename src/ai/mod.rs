@@ -564,12 +564,28 @@ pub struct GenOpts {
     /// running while it thinks; left clear for a foreground `gen`, where
     /// yielding would only add latency.
     pub yielding: bool,
+    /// Prepend the begin-of-sequence token. Cleared for ChatML, where
+    /// `<|im_start|>` does the framing and an extra BOS is a token the model
+    /// never saw in that position.
+    pub bos: bool,
+    /// Print the prompt back as it is fed. Useful for `gen`, where the
+    /// continuation reads as one piece with what preceded it, and wrong for
+    /// chat, where it would spray the role markers across the screen.
+    pub echo_prompt: bool,
 }
 
 impl Default for GenOpts {
     fn default() -> Self {
         // llama2.c's defaults. 0.9 top-p keeps a 260K model from wandering.
-        Self { steps: 256, temperature: 1.0, topp: 0.9, resume: false, yielding: false }
+        Self {
+            steps: 256,
+            temperature: 1.0,
+            topp: 0.9,
+            resume: false,
+            yielding: false,
+            bos: true,
+            echo_prompt: true,
+        }
     }
 }
 
@@ -580,7 +596,7 @@ pub fn generate(prompt: &str, opts: &GenOpts) {
         // one, so no BOS: that token means "a new story begins", and inserting
         // it mid-conversation tells the model to forget what it was doing.
         let resuming = opts.resume && e.pos > 0;
-        let prompt_tokens = e.tok.encode(prompt, !resuming, false);
+        let prompt_tokens = e.tok.encode(prompt, opts.bos && !resuming, false);
         let mut pos = if resuming { e.pos } else { 0 };
         let mut token = if prompt_tokens.is_empty() {
             if !resuming {
@@ -607,21 +623,33 @@ pub fn generate(prompt: &str, opts: &GenOpts) {
             // While the prompt lasts we already know the next token; the
             // forward pass still had to happen, because it is what fills the
             // KV cache that everything after depends on.
-            let next = if fed < prompt_tokens.len() {
+            let from_prompt = fed < prompt_tokens.len();
+            let next = if from_prompt {
                 prompt_tokens[fed]
             } else {
                 generated += 1;
                 sample::sample(&mut e.state.logits, opts.temperature, opts.topp, &mut e.rng)
             };
 
-            // llama2.c's training data separates stories with BOS, so the model
-            // emits it to mean "the end".
-            if next == tokenizer::BOS {
+            // Stopping conditions differ by checkpoint and both have to be
+            // honoured. llama2.c separates stories with BOS, so the model emits
+            // it to mean "the end"; an instruct model closes its turn with EOS
+            // -- for SmolLM2 that is <|im_end|>, and missing it means the model
+            // carries on and writes the user's next message itself.
+            //
+            // Only for *sampled* tokens. A ChatML prompt contains both markers
+            // by construction, so applying this while feeding it stopped the
+            // generation at the end of the user's turn, before the assistant
+            // turn had even been entered -- which looked exactly like a model
+            // that had nothing to say.
+            if !from_prompt && (next == e.tok.bos() || next == e.tok.eos()) {
                 break;
             }
 
-            e.tok.append_piece(token, next, &mut pending);
-            emit(&mut pending);
+            if opts.echo_prompt || fed >= prompt_tokens.len() {
+                e.tok.append_piece(token, next, &mut pending);
+                emit(&mut pending);
+            }
             token = next;
 
             if opts.yielding {
@@ -643,12 +671,18 @@ pub fn generate(prompt: &str, opts: &GenOpts) {
         if mhz > 0 && generated > 0 {
             let us = elapsed / mhz;
             if us > 0 {
+                // Reported as ms per token rather than tokens per second.
+                // Integer division rendered anything slower than 1 tok/s as
+                // "0 tok/s", which is exactly the range a 135M model sits in
+                // under emulation -- the number was least informative where it
+                // mattered most.
+                let per = us / generated.max(1) as u64;
                 kprintln!(
-                    "  {} tokens in {}.{:03} s  ({} tok/s)",
+                    "  {} tokens in {}.{:03} s  ({} ms/token)",
                     generated,
                     us / 1_000_000,
                     (us % 1_000_000) / 1000,
-                    (generated as u64 * 1_000_000) / us
+                    per / 1000
                 );
             }
         }
@@ -836,7 +870,8 @@ pub fn mind_task() {
         console::set_color(LTGRAY);
 
         let opts =
-            GenOpts { steps: 48, temperature: 0.9, topp: 0.9, resume: true, yielding: true };
+            GenOpts { steps: 48, temperature: 0.9, topp: 0.9, resume: true, yielding: true,
+                      ..Default::default() };
         generate(&prompt, &opts);
 
         console::set_color(YELLOW);
@@ -909,4 +944,26 @@ pub fn logits_for(ids: &[usize]) {
         let us = elapsed / mhz;
         kprintln!("  {} token(s) in {} ms  ({} us/token)", n, us / 1000, us / n as u64);
     }
+}
+
+/// Ask the model a question, framed the way it was fine-tuned.
+///
+/// SmolLM2-Instruct was trained on ChatML: turns delimited by `<|im_start|>`
+/// and `<|im_end|>` with a role on the first line. Those markers are single
+/// tokens the model has strong associations with, which is the entire reason
+/// the tokenizer had to learn to match added tokens literally -- BPE'd into
+/// twenty pieces they mean nothing, and the model answers as though it were
+/// still completing a document.
+///
+/// The trailing `<|im_start|>assistant\n` is the part that actually elicits an
+/// answer: it puts the model at the start of the assistant's turn, so the most
+/// likely continuation is a reply rather than more of the question.
+pub fn chat(question: &str, opts: &GenOpts) {
+    let mut prompt = alloc::string::String::new();
+    prompt.push_str("<|im_start|>user\n");
+    prompt.push_str(question);
+    prompt.push_str("<|im_end|>\n<|im_start|>assistant\n");
+
+    let framed = GenOpts { bos: false, echo_prompt: false, ..*opts };
+    generate(&prompt, &framed);
 }

@@ -517,6 +517,22 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             opts.steps = 60;
             crate::ai::generate(rest, &opts);
         }
+        "ask" => {
+            let mut opts = crate::ai::GenOpts { steps: 64, temperature: 0.3, ..Default::default() };
+            let mut q = rest;
+            if let Some(t) = q.strip_prefix("-n ") {
+                let mut it = t.splitn(2, ' ');
+                if let (Some(n), Some(tail)) = (it.next(), it.next()) {
+                    opts.steps = n.parse().unwrap_or(opts.steps);
+                    q = tail.trim_start();
+                }
+            }
+            if q.is_empty() {
+                kprintln!("  usage: ask [-n tokens] <question>");
+            } else {
+                crate::ai::chat(q, &opts);
+            }
+        }
         "logits" => {
             let ids: Vec<usize> = rest.split_whitespace().filter_map(|s| s.parse().ok()).collect();
             crate::ai::logits_for(&ids);
