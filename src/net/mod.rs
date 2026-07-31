@@ -50,8 +50,10 @@ pub mod dns;
 pub mod iface;
 pub mod tcp;
 pub mod tls;
+pub mod trust;
 pub mod udp;
 pub mod wifi;
+pub mod x509;
 
 use iface::{Interface, Kind, Loopback};
 
@@ -182,11 +184,24 @@ pub fn set_config_of(n: usize, c: Config) {
 
 // --- bring-up ------------------------------------------------------------
 
-pub fn init(ecam: u64) {
+pub fn init(ecam: u64, roots: Option<&[u8]>) {
     console::set_color(YELLOW);
     kprintln!("\n[net]");
     console::set_color(LTGRAY);
     unsafe { *ECAM.get() = Some(ecam) };
+
+    match roots {
+        Some(data) => {
+            let n = trust::load(data);
+            kprintln!("  trust  {} root certificate(s)", n);
+        }
+        None => {
+            // Said at boot rather than at the first failed connection, because
+            // "https does not work" is a much worse symptom to debug than
+            // "there are no roots".
+            kprintln!("  trust  no roots -- https will encrypt but not authenticate");
+        }
+    }
 
     {
         let lo = &mut ifaces()[LO];

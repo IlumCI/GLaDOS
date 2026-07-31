@@ -1,30 +1,29 @@
 //! TLS 1.3 client: X25519, ChaCha20-Poly1305, SHA-256.
 //!
-//! # Read this before trusting it with anything
+//! ## Authentication
 //!
-//! **This does not authenticate the server.** The certificate is received,
-//! parsed far enough to fingerprint, and then *not verified*: no signature
-//! check, no chain building, no trust store, no name matching, no expiry.
+//! The server is now identified as well as encrypted to. Four things are
+//! checked, in `check_identity` and `x509::validate`, and any one failing
+//! leaves `Session::identity` as `Failed`:
 //!
-//! What that buys and what it does not:
+//!   1. **CertificateVerify** -- the server signs the handshake transcript
+//!      with the key in its certificate. This is the step that proves the
+//!      party at the other end of *this* connection holds the private key;
+//!      without it an attacker could replay any certificate ever seen.
+//!   2. **The chain** -- each certificate is verified against the next, up to
+//!      one whose fingerprint is in the trust store.
+//!   3. **Dates**, against the CMOS clock.
+//!   4. **The name**, RFC 6125, from subjectAltName only.
 //!
-//!   * It stops a **passive** eavesdropper. Someone recording the wire sees
-//!     ChaCha20-Poly1305 ciphertext and cannot read it.
-//!   * It does **nothing** against an **active** attacker. Anyone able to
-//!     answer in the server's place -- the network operator, anyone on the
-//!     path, anyone who can redirect a route -- completes this handshake
-//!     perfectly with their own key and reads everything.
+//! The result is *reported*, not enforced: `https` prints what was
+//! established and shows the body either way. That is a deliberate choice for
+//! a system whose purpose is inspection, and it is the opposite of what a
+//! browser should do. A caller that cares must check `identity.ok()`.
 //!
-//! So it is real encryption with no identity behind it, which is the useful
-//! half of TLS and the less important half. It is here because a byte stream
-//! that survives the public internet is worth having, and because the
-//! primitives underneath it are checked against their RFC vectors. It is not
-//! here because it is safe. Do not put a password through it.
-//!
-//! Certificate validation is a larger job than everything above: X.509 DER
-//! parsing, RSA-PSS and ECDSA P-256 verification (a bignum modexp and a second
-//! curve), a trust store to ship and to update, and name matching with its own
-//! long history of bugs. It is the honest next step and it is not a small one.
+//! Two things still make this unsuitable for anything that matters. There is
+//! **no revocation** -- no CRL, no OCSP -- so a withdrawn certificate is
+//! accepted until it expires. And key material comes from the **TSC**, which
+//! is a counter and not a random number generator.
 //!
 //! ## What is implemented
 //!
@@ -36,6 +35,7 @@
 //! surfaces several messages later with nothing to point at.
 
 use super::tcp;
+use super::x509;
 use super::Ipv4;
 use crate::crypto::{chacha, hkdf, x25519};
 use crate::gfx::console::{self, LTGRAY, LTGREEN, LTRED, YELLOW};
@@ -129,9 +129,64 @@ impl Keys {
     }
 }
 
+/// What, if anything, was established about the peer.
+#[derive(Clone, PartialEq, Eq)]
+pub enum Identity {
+    /// Chain verified to a trusted root, signature over the transcript
+    /// checked, dates in range, name matches.
+    Verified { subject: String, roots: usize },
+    /// The handshake completed but the peer's identity did not check out.
+    Failed(x509::Error),
+    /// No roots are loaded, so nothing could be checked.
+    NoTrustStore,
+}
+
+impl Identity {
+    pub fn ok(&self) -> bool {
+        matches!(self, Identity::Verified { .. })
+    }
+}
+
+/// Run every identity check, in the order that gives the most useful failure.
+fn check_identity(
+    chain: &[x509::Cert],
+    cert_verify: Option<&[u8]>,
+    transcript: &[u8],
+    host: &str,
+) -> Identity {
+    if chain.is_empty() {
+        return Identity::Failed(x509::Error::Malformed);
+    }
+    if super::trust::count() == 0 {
+        return Identity::NoTrustStore;
+    }
+    // Proof of possession first: it is the cheapest check and the one whose
+    // failure means the peer is not who the certificate says regardless of how
+    // good the certificate is.
+    let Some(cv) = cert_verify else {
+        return Identity::Failed(x509::Error::BadSignature);
+    };
+    if let Err(e) = verify_certificate_verify(&chain[0], cv, transcript) {
+        return Identity::Failed(e);
+    }
+    // The clock: zero means the RTC never answered, and a date comparison
+    // against a wrong clock is worse than none.
+    let now = crate::dev::rtc::now()
+        .map(|dt| crate::dev::rtc::unix_seconds(&dt) as u64)
+        .unwrap_or(0);
+    match x509::validate(chain, host, now) {
+        Ok(()) => Identity::Verified {
+            subject: String::from_utf8_lossy(&chain[0].subject_cn).into_owned(),
+            roots: super::trust::count(),
+        },
+        Err(e) => Identity::Failed(e),
+    }
+}
+
 pub struct Session {
     client: Keys,
     server: Keys,
+    pub identity: Identity,
     /// Bytes received from TCP that do not yet make a whole record.
     inbuf: Vec<u8>,
     /// Decrypted application bytes not yet handed to the caller.
@@ -139,6 +194,10 @@ pub struct Session {
     closed: bool,
     pub cert_fingerprint: Option<[u8; 32]>,
     pub cert_count: usize,
+    /// What the leaf certificate says it is for. Kept so a name mismatch can
+    /// report the names it did find instead of only that it found none.
+    pub leaf_cn: String,
+    pub leaf_names: Vec<String>,
 }
 
 // --- wire helpers --------------------------------------------------------
@@ -423,10 +482,111 @@ fn handshake_messages(buf: &[u8]) -> Vec<(u8, Vec<u8>)> {
     out
 }
 
-/// The leaf certificate, if the Certificate message carries one.
+/// Split the Certificate message into its list of DER certificates.
+fn certificate_list(body: &[u8]) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    if body.is_empty() {
+        return out;
+    }
+    let ctx_len = body[0] as usize;
+    let mut at = 1 + ctx_len;
+    if at + 3 > body.len() {
+        return out;
+    }
+    let list_len =
+        ((body[at] as usize) << 16) | ((body[at + 1] as usize) << 8) | body[at + 2] as usize;
+    at += 3;
+    let end = core::cmp::min(at + list_len, body.len());
+    while at + 3 <= end {
+        let clen =
+            ((body[at] as usize) << 16) | ((body[at + 1] as usize) << 8) | body[at + 2] as usize;
+        at += 3;
+        if at + clen > end {
+            break;
+        }
+        out.push(body[at..at + clen].to_vec());
+        at += clen;
+        if at + 2 > end {
+            break;
+        }
+        // Each entry carries its own extensions, skipped here.
+        let ext = u16::from_be_bytes([body[at], body[at + 1]]) as usize;
+        at += 2 + ext;
+    }
+    out
+}
+
+fn parse_chain(body: &[u8]) -> Vec<x509::Cert> {
+    certificate_list(body)
+        .iter()
+        .filter_map(|der| x509::parse(der).ok())
+        .collect()
+}
+
+/// The signature scheme codes that can appear in CertificateVerify.
+const SIG_RSA_PKCS1_SHA256: u16 = 0x0401;
+const SIG_ECDSA_SECP256R1_SHA256: u16 = 0x0403;
+const SIG_RSA_PSS_RSAE_SHA256: u16 = 0x0804;
+const SIG_RSA_PSS_PSS_SHA256: u16 = 0x0809;
+
+/// Verify CertificateVerify: the server's signature over the transcript.
 ///
-/// Parsed only far enough to find and fingerprint it. Nothing here inspects
-/// the contents, and nothing here verifies anything -- see the module header.
+/// This is the step that actually proves possession. Everything else in the
+/// chain establishes that a certificate is genuine; only this establishes that
+/// the party on the other end of *this* connection holds its private key.
+/// Without it, an attacker could replay any certificate they had ever seen.
+///
+/// What is signed is not the transcript itself but a fixed context string --
+/// 64 spaces, a label, a zero byte -- followed by the transcript hash. The
+/// padding exists so that a signature made for one purpose cannot be presented
+/// as one made for another.
+fn verify_certificate_verify(
+    cert: &x509::Cert,
+    msg: &[u8],
+    transcript: &[u8],
+) -> Result<(), x509::Error> {
+    if msg.len() < 4 {
+        return Err(x509::Error::Malformed);
+    }
+    let scheme = u16::from_be_bytes([msg[0], msg[1]]);
+    let siglen = u16::from_be_bytes([msg[2], msg[3]]) as usize;
+    if msg.len() < 4 + siglen {
+        return Err(x509::Error::Malformed);
+    }
+    let sig = &msg[4..4 + siglen];
+
+    let mut signed = Vec::with_capacity(130);
+    signed.extend_from_slice(&[0x20u8; 64]);
+    signed.extend_from_slice(b"TLS 1.3, server CertificateVerify");
+    signed.push(0);
+    signed.extend_from_slice(&sha256::hash(transcript));
+    let digest = sha256::hash(&signed);
+
+    let ok = match (scheme, cert.key_kind) {
+        (SIG_ECDSA_SECP256R1_SHA256, x509::KeyKind::EcP256) => {
+            match crate::crypto::p256::parse_der_signature(sig, 32) {
+                None => false,
+                Some((r, s)) => crate::crypto::p256::verify(
+                    crate::crypto::p256::Nist::P256, &cert.key, &digest, &r, &s),
+            }
+        }
+        (SIG_RSA_PKCS1_SHA256, x509::KeyKind::Rsa) => {
+            crate::crypto::rsa::verify_pkcs1_sha256(&cert.key, &cert.key_exp, &digest, sig)
+        }
+        (SIG_RSA_PSS_RSAE_SHA256, x509::KeyKind::Rsa)
+        | (SIG_RSA_PSS_PSS_SHA256, x509::KeyKind::Rsa) => {
+            crate::crypto::rsa::verify_pss_sha256(&cert.key, &cert.key_exp, &digest, sig)
+        }
+        _ => return Err(x509::Error::UnsupportedSignature),
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(x509::Error::BadSignature)
+    }
+}
+
+/// The leaf certificate, if the Certificate message carries one.
 fn leaf_certificate(body: &[u8]) -> (Option<[u8; 32]>, usize) {
     if body.is_empty() {
         return (None, 0);
@@ -501,11 +661,14 @@ pub fn connect(dst: Ipv4, host: &str, port: u16) -> Result<Session, Error> {
     let mut s = Session {
         client: Keys { key: [0; 32], iv: [0; 12], seq: 0 },
         server: Keys { key: [0; 32], iv: [0; 12], seq: 0 },
+        identity: Identity::Failed(x509::Error::Malformed),
         inbuf: Vec::new(),
         plain: Vec::new(),
         closed: false,
         cert_fingerprint: None,
         cert_count: 0,
+        leaf_cn: String::new(),
+        leaf_names: Vec::new(),
     };
 
     // --- ServerHello, in the clear ---
@@ -542,6 +705,9 @@ pub fn connect(dst: Ipv4, host: &str, port: u16) -> Result<Session, Error> {
     let mut pending: Vec<u8> = Vec::new();
     let mut server_finished: Option<Vec<u8>> = None;
     let mut transcript_before_finished: Vec<u8> = Vec::new();
+    let mut chain: Vec<x509::Cert> = Vec::new();
+    let mut cert_verify: Option<Vec<u8>> = None;
+    let mut transcript_for_cv: Vec<u8> = Vec::new();
 
     while server_finished.is_none() {
         let (inner, body) = s.read_encrypted(8000)?;
@@ -559,11 +725,21 @@ pub fn connect(dst: Ipv4, host: &str, port: u16) -> Result<Session, Error> {
             framed.extend_from_slice(&msg);
 
             match kind {
-                HS_ENCRYPTED_EXTENSIONS | HS_CERTIFICATE_VERIFY => {}
+                HS_ENCRYPTED_EXTENSIONS => {}
                 HS_CERTIFICATE => {
                     let (fp, n) = leaf_certificate(&msg);
                     s.cert_fingerprint = fp;
                     s.cert_count = n;
+                    chain = parse_chain(&msg);
+                    // The transcript up to and including Certificate is what
+                    // CertificateVerify signs, so it is captured before the
+                    // Certificate message is appended below... which means
+                    // capturing it after.
+                    transcript_for_cv = transcript.clone();
+                    transcript_for_cv.extend_from_slice(&framed);
+                }
+                HS_CERTIFICATE_VERIFY => {
+                    cert_verify = Some(msg.clone());
                 }
                 HS_FINISHED => {
                     // The transcript for verifying Finished stops *before*
@@ -613,6 +789,22 @@ pub fn connect(dst: Ipv4, host: &str, port: u16) -> Result<Session, Error> {
     let ccs = [REC_CHANGE_CIPHER_SPEC, 0x03, 0x03, 0x00, 0x01, 0x01];
     tcp::send(&ccs, 5000).map_err(|_| Error::Tcp)?;
     s.write_encrypted(REC_HANDSHAKE, &fin)?;
+
+    // --- who is this? ---
+    //
+    // Done after Finished so that a failure is reported against a handshake
+    // that was otherwise sound, and before any application data is sent: the
+    // connection is cryptographically complete and the identity behind it is
+    // still unestablished until this passes.
+    if let Some(leaf) = chain.first() {
+        s.leaf_cn = String::from_utf8_lossy(&leaf.subject_cn).into_owned();
+        s.leaf_names = leaf
+            .dns_names
+            .iter()
+            .map(|n| String::from_utf8_lossy(n).into_owned())
+            .collect();
+    }
+    s.identity = check_identity(&chain, cert_verify.as_deref(), &transcript_for_cv, host);
 
     // --- application keys ---
     let derived2 = hkdf::derive_secret(&handshake_secret, "derived", &sha256::hash(&[]));
@@ -682,7 +874,7 @@ impl Session {
 }
 
 /// Fetch one resource over HTTPS.
-pub fn https_get(dst: Ipv4, host: &str, port: u16, path: &str) -> Result<(Vec<u8>, Option<[u8; 32]>, usize), Error> {
+pub fn https_get(dst: Ipv4, host: &str, port: u16, path: &str) -> Result<(Vec<u8>, Option<[u8; 32]>, usize, Identity, String, Vec<String>), Error> {
     let mut s = connect(dst, host, port)?;
 
     let mut req = String::new();
@@ -707,8 +899,11 @@ pub fn https_get(dst: Ipv4, host: &str, port: u16, path: &str) -> Result<(Vec<u8
     }
     let fp = s.cert_fingerprint;
     let n = s.cert_count;
+    let id = s.identity.clone();
+    let cn = s.leaf_cn.clone();
+    let names = s.leaf_names.clone();
     s.close();
-    Ok((body, fp, n))
+    Ok((body, fp, n, id, cn, names))
 }
 
 /// Undo chunked transfer encoding.
@@ -771,7 +966,7 @@ pub fn report(dst: Ipv4, host: &str, port: u16, path: &str) {
             kprintln!("  {}", e.name());
             console::set_color(LTGRAY);
         }
-        Ok((body, fp, ncerts)) => {
+        Ok((body, fp, ncerts, identity, leaf_cn, leaf_names)) => {
             let mhz = crate::time::tsc_mhz().max(1);
             let ms = (crate::time::rdtsc() - t0) / mhz / 1000;
             console::set_color(LTGREEN);
@@ -782,9 +977,29 @@ pub fn report(dst: Ipv4, host: &str, port: u16, path: &str) {
                 let s = core::str::from_utf8(&h).unwrap_or("?");
                 kprintln!("  {} certificate(s); leaf sha256 {}..", ncerts, s);
             }
-            console::set_color(YELLOW);
-            kprintln!("  NOT VERIFIED -- encrypted, but the peer proved nothing");
-            console::set_color(LTGRAY);
+            match &identity {
+                Identity::Verified { subject, roots } => {
+                    console::set_color(LTGREEN);
+                    kprintln!("  verified: {} -- chain to 1 of {} trusted roots", subject, roots);
+                    console::set_color(LTGRAY);
+                }
+                Identity::NoTrustStore => {
+                    console::set_color(YELLOW);
+                    kprintln!("  NOT VERIFIED -- no roots loaded, so nothing could be checked");
+                    console::set_color(LTGRAY);
+                }
+                Identity::Failed(e) => {
+                    console::set_color(LTRED);
+                    kprintln!("  NOT VERIFIED -- {}", e.name());
+                    console::set_color(LTGRAY);
+                    // Say what the certificate claims, so a mismatch can be
+                    // told apart from a certificate that was not parsed.
+                    kprintln!("  leaf cn '{}', {} name(s):", leaf_cn, leaf_names.len());
+                    for n in leaf_names.iter().take(6) {
+                        kprintln!("    {}", n);
+                    }
+                }
+            }
 
             let text = String::from_utf8_lossy(&body);
             if let Some(status) = text.lines().next() {

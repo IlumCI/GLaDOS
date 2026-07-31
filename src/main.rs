@@ -71,6 +71,9 @@ pub struct BootInfo {
     pub model: Option<Blob>,
     /// The matching tokenizer.
     pub tokenizer: Option<Blob>,
+    /// A DER bundle of root certificates. `None` means TLS can encrypt and
+    /// cannot authenticate, which is reported rather than assumed.
+    pub roots: Option<Blob>,
 }
 
 /// Where the weights live on the boot volume. Backslashes: this is a UEFI path
@@ -156,6 +159,13 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     // retry loop below and not worth entangling.
     let model = uefi::read_file(bs, image, MODEL_PATH);
     let tokenizer = uefi::read_file(bs, image, TOKENIZER_PATH);
+    // The root bundle comes off the same volume for the same reason: this is
+    // the only moment there is a filesystem to read it from.
+    let roots = uefi::read_file(bs, image, net::trust::ROOTS_PATH);
+    match &roots {
+        Some(b) => serial_println!("glados: roots {} bytes from {}", b.len, net::trust::ROOTS_PATH),
+        None => serial_println!("glados: no roots at {}", net::trust::ROOTS_PATH),
+    }
     match &model {
         Some(b) => serial_println!("glados: model {} bytes from {}", b.len, MODEL_PATH),
         None => serial_println!("glados: no model at {}", MODEL_PATH),
@@ -233,6 +243,7 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
         fb_end,
         model,
         tokenizer,
+        roots,
     };
 
     console::init(boot.fb, 2, palette::BLACK);
@@ -295,7 +306,7 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     // depends on it -- so a machine with no supported NIC just reports that
     // and carries on.
     if let Some(ecam) = acpi.as_ref().and_then(|a| a.mcfg) {
-        net::init(ecam);
+        net::init(ecam, boot.roots.as_ref().map(|b| b.as_slice()));
     }
 
     let damaged = init_storage(&acpi);

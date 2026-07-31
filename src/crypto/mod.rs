@@ -23,8 +23,12 @@
 //! implementation is free of side channels, and nothing here should be trusted
 //! with anything that matters.
 
+pub mod bigint;
 pub mod chacha;
 pub mod hkdf;
+pub mod p256;
+pub mod rsa;
+pub mod sha512;
 pub mod x25519;
 
 /// Run every vector. Called at boot, and by the `crypto` command.
@@ -35,9 +39,13 @@ pub fn selftest() -> bool {
     console::set_color(YELLOW);
     kprintln!("\n[selftest] crypto:");
 
-    let checks: [(&str, fn() -> bool); 4] = [
+    let checks: [(&str, fn() -> bool); 8] = [
         ("sha-256   NIST vectors", crate::store::sha256::selftest),
         ("hmac/hkdf RFC 4231 and RFC 5869", hkdf::selftest),
+        ("sha-384   FIPS 180-4", sha512::selftest),
+        ("bigint    montgomery modexp", bigint::selftest),
+        ("rsa       pkcs#1 shape and mgf1", rsa::selftest),
+        ("ecdsa     FIPS 186-4 P-256, tamper rejected", p256::selftest),
         ("chacha20  RFC 8439, and a flipped bit is rejected", chacha::selftest),
         ("x25519    RFC 7748, and both sides agree", x25519::selftest),
     ];
