@@ -1,15 +1,24 @@
-//! Ethernet, ARP, IPv4 and ICMP -- enough to answer a ping.
+//! Ethernet, ARP, IPv4 and ICMP, with TCP in `tcp`.
 //!
-//! `ping` is chosen as the first milestone because it exercises the whole path
-//! in one visible result: PCI discovery, an MMIO mapping, DMA rings, frame
-//! parsing, ARP resolution, an IPv4 header with a correct checksum, and a
-//! reply that has to come back. Anything broken anywhere in that stack shows
-//! up as silence, and silence is easy to bisect when the alternative is a TCP
-//! state machine failing intermittently.
+//! `ping` was the first milestone because it exercises the whole path in one
+//! visible result: PCI discovery, an MMIO mapping, DMA rings, frame parsing,
+//! ARP resolution, an IPv4 header with a correct checksum, and a reply that
+//! has to come back. Anything broken anywhere in that stack shows up as
+//! silence, and silence is easy to bisect when the alternative is a TCP state
+//! machine failing intermittently. That ordering paid for itself.
 //!
-//! No TCP and no DHCP yet. The address is configured by hand, which is one
-//! fewer moving part while the layers underneath are still being trusted for
-//! the first time.
+//! Still no DHCP and no DNS: the address is configured by hand and peers are
+//! named by number. Both need UDP, which does not exist yet.
+//!
+//! ### Why TCP segments are queued rather than handled inline
+//!
+//! `poll` does not hand a segment straight to the TCP state machine. It pushes
+//! it onto an inbox that `tcp::pump` drains later. The reason is re-entrancy:
+//! sending anything calls `send_ipv4` -> `resolve`, and `resolve` calls `poll`
+//! while it waits for an ARP reply. If `poll` ran the state machine directly,
+//! a connection could re-enter its own control block through that path while
+//! an earlier borrow was still live. Queueing breaks the cycle at the one
+//! place it can form.
 
 use crate::dev::e1000::E1000;
 use crate::gfx::console::{self, LTCYAN, LTGRAY, LTGREEN, LTRED, YELLOW};
@@ -30,8 +39,11 @@ const ARP_REQUEST: u16 = 1;
 const ARP_REPLY: u16 = 2;
 
 const PROTO_ICMP: u8 = 1;
+pub(crate) const PROTO_TCP: u8 = 6;
 const ICMP_ECHO_REQUEST: u8 = 8;
 const ICMP_ECHO_REPLY: u8 = 0;
+
+pub mod tcp;
 
 static NIC: Racy<Option<E1000>> = Racy::new(None);
 static CONFIG: Racy<Config> = Racy::new(Config {
@@ -104,7 +116,7 @@ fn with_nic<R>(f: impl FnOnce(&mut E1000) -> R) -> Option<R> {
 /// carry behind, and the resulting checksum is wrong for about one packet in
 /// sixty thousand -- which is exactly the kind of bug that looks like a flaky
 /// network.
-fn checksum(data: &[u8]) -> u16 {
+pub(crate) fn checksum(data: &[u8]) -> u16 {
     let mut sum: u32 = 0;
     let mut i = 0;
     while i + 1 < data.len() {
@@ -210,6 +222,7 @@ pub enum Event {
     None,
     Arp,
     EchoReply { from: Ipv4, seq: u16 },
+    Tcp,
     Other,
 }
 
@@ -233,10 +246,26 @@ pub fn poll() -> Event {
                 return Event::Other;
             }
             let ihl = ((payload[0] & 0x0F) as usize) * 4;
-            if payload.len() < ihl || payload[9] != PROTO_ICMP {
+            let total = u16::from_be_bytes([payload[2], payload[3]]) as usize;
+            // Trim to the length the IP header declares. Ethernet pads frames
+            // to 60 bytes, so a bare 40-byte ACK arrives with 6 bytes of
+            // trailing garbage -- and a TCP checksum computed over the padding
+            // is wrong every time, which presents as a peer that answers
+            // nothing. ICMP got away with ignoring this because its checksum
+            // covers a length it carries itself.
+            if ihl < 20 || total < ihl || payload.len() < total {
                 return Event::Other;
             }
+            let payload = &payload[..total];
             let src: Ipv4 = payload[12..16].try_into().unwrap_or([0; 4]);
+
+            if payload[9] == PROTO_TCP {
+                tcp::deliver(src, &payload[ihl..]);
+                return Event::Tcp;
+            }
+            if payload[9] != PROTO_ICMP {
+                return Event::Other;
+            }
             let icmp = &payload[ihl..];
             if icmp.len() < 8 {
                 return Event::Other;
@@ -292,7 +321,7 @@ fn resolve(target: Ipv4) -> Option<Mac> {
     None
 }
 
-fn send_ipv4(dst: Ipv4, proto: u8, payload: &[u8]) -> bool {
+pub(crate) fn send_ipv4(dst: Ipv4, proto: u8, payload: &[u8]) -> bool {
     let cfg = config();
     let Some(mac) = with_nic(|n| n.mac()) else { return false };
     let Some(dst_mac) = resolve(dst) else { return false };

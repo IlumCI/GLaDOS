@@ -90,8 +90,11 @@ pub fn run(boot: &BootInfo, acpi: &Option<Acpi>) -> ! {
         let key = if let Some(k) = kbd::pop_any() {
             k
         } else {
-            // Nothing queued: idle until the next interrupt rather than
-            // spinning. The timer alone wakes us 100 times a second.
+            // Nothing queued: give the network a slice, then idle until the
+            // next interrupt rather than spinning. The timer alone wakes us
+            // 100 times a second, so this is also the stack's clock -- an
+            // open connection only advances between keystrokes.
+            crate::net::tcp::service();
             unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };
             continue;
         };
@@ -496,6 +499,68 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
                 None => kprintln!("  usage: ping <a.b.c.d> [count]"),
             }
         }
+        "tcp" => {
+            use crate::net::tcp;
+            let mut it = rest.splitn(2, ' ');
+            match (it.next().unwrap_or(""), it.next().unwrap_or("").trim()) {
+                ("connect", args) => {
+                    let mut a = args.split_whitespace();
+                    match (a.next().and_then(crate::net::parse_ip),
+                           a.next().and_then(|s| s.parse::<u16>().ok())) {
+                        (Some(ip), Some(port)) => match tcp::connect(ip, port, 5000) {
+                            Ok(()) => kprintln!("  connected to {}.{}.{}.{}:{}",
+                                ip[0], ip[1], ip[2], ip[3], port),
+                            Err(e) => kprintln!("  {}", e.name()),
+                        },
+                        _ => kprintln!("  usage: tcp connect <a.b.c.d> <port>"),
+                    }
+                }
+                ("send", text) if !text.is_empty() => {
+                    // A trailing CRLF is what a line-oriented peer is waiting
+                    // for; typing one at this prompt is not possible.
+                    let mut line = alloc::string::String::from(text);
+                    line.push_str("\r\n");
+                    match tcp::send(line.as_bytes(), 5000) {
+                        Ok(()) => kprintln!("  sent {} B, acknowledged", line.len()),
+                        Err(e) => kprintln!("  {}", e.name()),
+                    }
+                }
+                ("recv", arg) => {
+                    let ms = arg.parse().unwrap_or(2000);
+                    let data = tcp::recv(ms);
+                    if data.is_empty() {
+                        kprintln!("  nothing");
+                    } else {
+                        kprintln!("  {} B", data.len());
+                        let s = alloc::string::String::from_utf8_lossy(&data);
+                        for line in s.lines().take(20) {
+                            kprintln!("  | {}", line);
+                        }
+                    }
+                }
+                ("close", _) => {
+                    tcp::close(2000);
+                    kprintln!("  closed");
+                }
+                _ => tcp::report(),
+            }
+        }
+        "http" => {
+            let mut it = rest.split_whitespace();
+            match it.next() {
+                None => kprintln!("  usage: http <a.b.c.d>[:port] [/path]"),
+                Some(host) => {
+                    let (h, port) = match host.split_once(':') {
+                        Some((h, p)) => (h, p.parse().unwrap_or(80)),
+                        None => (host, 80),
+                    };
+                    match crate::net::parse_ip(h) {
+                        Some(ip) => crate::net::tcp::http_report(ip, port, it.next().unwrap_or("/")),
+                        None => kprintln!("  not an address: {} (there is no DNS yet)", h),
+                    }
+                }
+            }
+        }
         "pkg" => {
             let mut it = rest.splitn(2, ' ');
             let verb = it.next().unwrap_or("");
@@ -756,6 +821,12 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             kprintln!("  net           link, addresses, ARP cache");
             kprintln!("  net ip <addr> [gw]    set them");
             kprintln!("  ping <addr> [count]");
+            kprintln!("  tcp           connection state");
+            kprintln!("  tcp connect <addr> <port> | send <text> | recv | close");
+            kprintln!("  http <addr>[:port] [/path]   fetch over HTTP/1.0");
+            console::set_color(YELLOW);
+            kprintln!("  addresses only -- there is no DNS yet");
+            console::set_color(WHITE);
 
             console::set_color(YELLOW);
             kprintln!("\nthe model");

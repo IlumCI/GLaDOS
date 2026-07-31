@@ -308,9 +308,32 @@ pub fn tick() {
 }
 
 /// Give up the rest of this quantum voluntarily.
+///
+/// Interrupts are off across the switch, and this is not optional.
+/// `schedule()` stores `CURRENT` and *then* switches stacks; a timer tick
+/// landing between those two runs `tick()` -> `schedule()` with `CURRENT`
+/// already naming the incoming task, so the outgoing stack pointer is saved
+/// into the wrong slot and one task is never resumable again. The interrupt
+/// path cannot hit this because an interrupt gate clears IF for us. Only the
+/// voluntary path was exposed, and it was exposed the whole time -- the two
+/// callers in `ai` yield rarely enough that it never showed up. A polling loop
+/// in `net::tcp` that yielded a hundred times a second wedged the shell on
+/// every run, which is how it was finally found.
 pub fn yield_now() {
     if ENABLED.load(Ordering::Acquire) == 0 {
         return;
     }
+    let flags: u64;
+    // No options: `pushfq` writes to the stack, so this is neither `nomem`
+    // nor `nostack`.
+    unsafe {
+        core::arch::asm!("pushfq", "pop {}", "cli", out(reg) flags);
+    }
     schedule();
+    // Restore rather than unconditionally enabling: a caller that had them off
+    // wants them off. Whichever task we switched to has already restored its
+    // own IF by its own route -- `iretq`, this same line, or `trampoline`.
+    if flags & (1 << 9) != 0 {
+        crate::cpu::enable_interrupts();
+    }
 }
