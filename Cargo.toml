@@ -6,10 +6,17 @@ description = "A from-scratch ring-0 operating system for the MSI MS-16R8"
 
 # No dependencies, deliberately. Everything here is written from scratch.
 #
-# This also keeps the build free of build.rs and proc-macro crates, which would
-# need a host linker -- and this toolchain was installed without the MSVC build
-# tools. Cross-compiling to x86_64-unknown-uefi uses the bundled rust-lld, so as
-# long as nothing needs to link a *host* binary, no MSVC is required.
+# That is a choice, not a constraint. This comment used to claim build.rs and
+# proc-macro crates were impossible because the toolchain had no host linker,
+# and that claim steered several decisions -- including an assessment that
+# vendoring a TLS implementation was off the table. It was never tested. It is
+# false: `typenum`, which has a build script, compiles here in 24 seconds.
+# Cargo finds MSVC through the registry even though link.exe is not on PATH.
+#
+# So dependencies remain absent because writing this from scratch is the point,
+# and each one added would be a deliberate exception -- most likely for
+# cryptography, where writing it from scratch is how you get a security bug
+# rather than an education.
 [dependencies]
 
 [[bin]]

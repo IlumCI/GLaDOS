@@ -23,6 +23,7 @@ mod edit;
 mod gfx;
 mod lang;
 mod mem;
+mod net;
 mod pkg;
 mod recovery;
 mod serial;
@@ -289,6 +290,13 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     // gets its chance before that too. Ordering is the whole point: a repair
     // tool that only runs after a successful restore is useless on the day the
     // restore is what is broken.
+    // Networking needs the same ECAM window storage does, and nothing later
+    // depends on it -- so a machine with no supported NIC just reports that
+    // and carries on.
+    if let Some(ecam) = acpi.as_ref().and_then(|a| a.mcfg) {
+        net::init(ecam);
+    }
+
     let damaged = init_storage(&acpi);
     let restore = match recovery::maybe_enter(damaged) {
         recovery::Outcome::Continue => true,

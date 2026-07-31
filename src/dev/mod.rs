@@ -1,5 +1,6 @@
 //! Device drivers.
 
+pub mod e1000;
 pub mod ioapic;
 pub mod kbd;
 pub mod lapic;

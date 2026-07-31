@@ -469,6 +469,33 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
         }
         "refresh" => console::redraw(),
         "fat" => fat_cmd(rest),
+        "net" => {
+            let mut it = rest.split_whitespace();
+            match it.next() {
+                Some("ip") => {
+                    let mut c = crate::net::config();
+                    if let Some(ip) = it.next().and_then(crate::net::parse_ip) {
+                        c.ip = ip;
+                    }
+                    if let Some(gw) = it.next().and_then(crate::net::parse_ip) {
+                        c.gateway = gw;
+                    }
+                    crate::net::set_config(c);
+                    crate::net::report();
+                }
+                _ => crate::net::report(),
+            }
+        }
+        "ping" => {
+            let mut it = rest.split_whitespace();
+            match it.next().and_then(crate::net::parse_ip) {
+                Some(ip) => {
+                    let n = it.next().and_then(|s| s.parse().ok()).unwrap_or(4);
+                    crate::net::ping(ip, n);
+                }
+                None => kprintln!("  usage: ping <a.b.c.d> [count]"),
+            }
+        }
         "pkg" => {
             let mut it = rest.splitn(2, ' ');
             let verb = it.next().unwrap_or("");
