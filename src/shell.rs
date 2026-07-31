@@ -1264,6 +1264,16 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
                 kprintln!("  'video bars' to check the pixel format");
             }
         }
+        // `splash hold` leaves the boot screen up and returns to the prompt,
+        // so a following `fault` lands while it owns the framebuffer. That is
+        // the one path that cannot be checked by reading the code: the fault
+        // reporter prints through the console, and if the console is still
+        // hidden the diagnostic goes nowhere -- on the machine where the
+        // framebuffer is the only output there is.
+        "splash" if rest.trim() == "hold" => {
+            crate::gfx::splash::begin();
+            crate::gfx::splash::stage("held -- try 'fault'");
+        }
         "splash" => {
             // Worth having beyond nostalgia: it is the only way to look at the
             // boot screen without rebooting, which is how it got laid out.

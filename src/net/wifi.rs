@@ -79,7 +79,12 @@ fn describe(vendor: u16, device: u16) -> &'static str {
 
 pub fn probe(ecam: u64) -> Probe {
     let mut found: Option<(u16, u16)> = None;
-    pci::scan(ecam, 8, |d| {
+    // Every other caller walks all 255 buses, and this one must too. A
+    // wireless card sits behind a PCIe root port, so its bus number is
+    // assigned by the firmware and is routinely well above 8 on a laptop --
+    // stopping early would report "no wireless controller" on a machine that
+    // has one, which is the single question this module exists to answer.
+    pci::scan(ecam, 255, |d| {
         if d.class == CLASS_NETWORK && d.subclass == SUBCLASS_OTHER && found.is_none() {
             found = Some((d.vendor, d.device));
         }

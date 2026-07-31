@@ -43,7 +43,15 @@ impl Mat<'_> {
             }
             Mat::Q8 { data, scales, rows, cols } => {
                 let f = crate::cpu::detected();
-                if f.avx_enabled && f.fma {
+                // All three, and `avx2` is not optional: the kernel below is
+                // `target_feature(avx2,fma)` and uses `_mm256_cvtepi8_epi32`,
+                // which is an AVX2 instruction. Gating on AVX alone would take
+                // a #UD on any part with AVX and FMA but no AVX2 -- AMD's
+                // Piledriver, for one. `avx_enabled` is separate again and
+                // means the OS has actually set CR4.OSXSAVE and XCR0, without
+                // which every one of these faults regardless of what CPUID
+                // advertises.
+                if f.avx_enabled && f.avx2 && f.fma {
                     unsafe { q8_matvec_avx2(out, x, data, scales, *rows, *cols) }
                 } else {
                     q8_matvec_scalar(out, x, data, scales, *rows, *cols)

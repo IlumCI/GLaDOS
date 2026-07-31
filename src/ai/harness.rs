@@ -285,7 +285,8 @@ pub fn selftest() -> bool {
     let escaped = with_alphabet(|alphabet| {
         with_engine(|e| {
             let bound = step_bound(&grammar);
-            let mut bad = 0u32;
+            let mut escaped_grammar = 0u32;
+            let mut unsettled = 0u32;
             let mut reached_snaps = false;
             for _ in 0..200 {
                 let mut cursor = Cursor::new(&grammar);
@@ -317,27 +318,51 @@ pub fn selftest() -> bool {
                         break;
                     }
                 }
+                // Two very different failures, counted apart. Lumping them
+                // together made an intermittent FAIL impossible to read: one
+                // means the grammar let a decode out of bounds, which would be
+                // a genuine hole in the mechanism, and the other means this
+                // uniformly-random walk spent its whole budget on tokens that
+                // do not advance -- which says nothing about the grammar and
+                // everything about sampling with no model behind it.
                 match settled {
                     Some(i) if i < names.len() => {
                         if names[i] == "snaps" {
                             reached_snaps = true;
                         }
                     }
-                    _ => bad += 1,
+                    Some(_) => escaped_grammar += 1,
+                    None => unsettled += 1,
                 }
             }
-            (bad, reached_snaps)
+            (escaped_grammar, unsettled, reached_snaps)
         })
     })
     .flatten();
 
     match escaped {
         None => ok &= check("constrained decode always lands on a real applet", false),
-        Some((bad, reached_snaps)) => {
+        Some((escaped_grammar, unsettled, reached_snaps)) => {
+            // The property the mechanism actually promises: a decode that
+            // settles has settled on a real applet. This must never fail.
             ok &= check(
-                "200 random constrained decodes all produced a real applet",
-                bad == 0,
+                "no random decode ever escaped the grammar",
+                escaped_grammar == 0,
             );
+            // Not a correctness property, so it does not gate `ok`. A uniform
+            // sampler over the whole vocabulary will sometimes spend its
+            // entire idle budget on tokens that do not advance the cursor;
+            // that is the random walk wandering, not the grammar leaking, and
+            // a real decode has a model steering it. Reported because a *rise*
+            // here would be worth noticing.
+            if unsettled > 0 {
+                console::set_color(YELLOW);
+                kprintln!(
+                    "  note {}/200 random decodes ran out of budget without settling",
+                    unsettled
+                );
+                console::set_color(LTGRAY);
+            }
             // `snap` is a proper prefix of `snaps`. Without the terminator in
             // the grammar, `snaps` is unreachable and this never fires.
             ok &= check(

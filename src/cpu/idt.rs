@@ -88,6 +88,12 @@ fn fault(frame: &InterruptStackFrame, vector: u8, name: &str, err: Option<u64>) 
     let cr2 = read_cr2();
     let cr3 = read_cr3();
 
+    // Everything below is `kprintln`, which paints nothing while the boot
+    // screen owns the framebuffer. A fault during boot would then show a
+    // progress bar and no diagnostic at all -- on a machine whose only output
+    // device is that screen. Take it back first.
+    crate::gfx::splash::abandon();
+
     console::set_color(console::LTRED);
     kprintln!("\n*** EXCEPTION {:#04x}  {} ***", vector, name);
 
