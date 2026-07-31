@@ -125,6 +125,10 @@ pub fn run(boot: &BootInfo, acpi: &Option<Acpi>) -> ! {
                 // command's output does not silently disable it forever.
                 console::resume_pacing();
                 execute(trimmed, boot, acpi, &mut interp);
+                // Between commands is the only place the namespace is
+                // guaranteed to be whole, so this is where an automatic
+                // snapshot is allowed to run.
+                crate::sysbox::autosnap_poll();
                 // Anything needing the model will have quietly done nothing if
                 // the mind had it; say so once, here, rather than at each of a
                 // dozen call sites that would drift out of step.
@@ -471,6 +475,28 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             }
         }
         "refresh" => console::redraw(),
+        "date" => match crate::dev::rtc::now() {
+            Some(d) => {
+                kprintln!(
+                    "  {:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+                    d.year, d.month, d.day, d.hour, d.minute, d.second
+                );
+                kprintln!("  {} seconds since 1970", crate::dev::rtc::unix_seconds(&d));
+            }
+            None => kprintln!("  no usable RTC on this machine"),
+        },
+        "autosnap" => {
+            let mut it = rest.split_whitespace();
+            match it.next() {
+                Some("on") => {
+                    let secs = it.next().and_then(|s| s.parse().ok()).unwrap_or(60);
+                    crate::sysbox::autosnap_configure(true, secs);
+                }
+                Some("off") => crate::sysbox::autosnap_configure(false, 0),
+                _ => {}
+            }
+            crate::sysbox::autosnap_report();
+        }
         "act" => {
             // Read-only unless explicitly told otherwise, and "trusted" has to
             // be typed in full. The distinction is enforced in the grammar, not

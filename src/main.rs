@@ -405,6 +405,10 @@ fn clock_task() {
         // an ongoing verdict instead of a one-off test result.
         ai::fpu_guard(1000.0);
 
+        // Only raises a flag; the shell does the writing. See
+        // `sysbox::autosnap_poll` for why it cannot happen here.
+        sysbox::autosnap_tick();
+
         let tenths = dev::lapic::ticks() * 10 / TIMER_HZ as u64;
         if tenths != last {
             last = tenths;
@@ -688,6 +692,25 @@ fn selftest() {
     } else {
         console::set_color(LTRED);
         kprintln!("  only {} ticks -- timer is not delivering", elapsed);
+    }
+
+    console::set_color(LTGREEN);
+    kprintln!("\n[selftest] clock:");
+    console::set_color(LTGRAY_IDX);
+    if dev::rtc::selftest() {
+        console::set_color(LTGREEN);
+        kprintln!("  ok   calendar round-trips, including leap years and 2000");
+    } else {
+        console::set_color(LTRED);
+        kprintln!("  FAIL calendar arithmetic is wrong");
+    }
+    console::set_color(LTGRAY_IDX);
+    match dev::rtc::now() {
+        Some(d) => kprintln!(
+            "  now  {:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+            d.year, d.month, d.day, d.hour, d.minute, d.second
+        ),
+        None => kprintln!("  no usable RTC -- snapshots will record no time"),
     }
 
     console::set_color(LTGREEN);

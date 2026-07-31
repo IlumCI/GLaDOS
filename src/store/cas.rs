@@ -92,6 +92,13 @@ pub struct Manifest {
     pub seq: u64,
     pub prev: ChunkRef,
     pub entries: Vec<Entry>,
+    /// Seconds since 1970, or zero when unknown.
+    ///
+    /// Stored in the four bytes between the entry count and the entries, which
+    /// were already being written as zero -- so this costs no format change and
+    /// every manifest written before it reads back as "no time recorded"
+    /// rather than as a wrong one.
+    pub time: u32,
 }
 
 fn bs() -> u64 {
@@ -273,6 +280,8 @@ impl Store {
         put_u64(&mut m, 24, self.sb.root.len);
         m[32..64].copy_from_slice(&self.sb.root.hash);
         put_u32(&mut m, 64, entries.len() as u32);
+        let now = crate::dev::rtc::now().map(|d| crate::dev::rtc::unix_seconds(&d)).unwrap_or(0);
+        put_u32(&mut m, 68, now);
         for (i, e) in entries.iter().enumerate() {
             let o = 72 + i * ENTRY_SIZE;
             m[o..o + NAME_LEN].copy_from_slice(&e.name);
@@ -326,6 +335,7 @@ impl Store {
                 hash: prev_hash,
             },
             entries,
+            time: get_u32(&m, 68),
         })
     }
 

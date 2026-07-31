@@ -6,6 +6,7 @@ pub mod lapic;
 pub mod nvme;
 pub mod pci;
 pub mod pic;
+pub mod rtc;
 
 /// Interrupt vector assignments.
 ///

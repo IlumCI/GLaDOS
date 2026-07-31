@@ -763,6 +763,9 @@ fn cmd_snap() {
                 false
             }
             Some(Ok((seq, m, blocks))) => {
+                // So the next automatic snapshot does not rewrite a tree that
+                // was just committed by hand.
+                note_committed();
                 let hx = crate::store::sha256::short_hex(&m.hash);
                 console::set_color(LTGREEN);
                 kprintln!(
@@ -849,7 +852,7 @@ fn cmd_snaps() {
         while !cur.is_none() && guard < 256 {
             match st.read_manifest(&cur) {
                 Ok(m) => {
-                    out.push((m.seq, cur.hash, m.entries.len()));
+                    out.push((m.seq, cur.hash, m.entries.len(), m.time));
                     cur = m.prev;
                 }
                 Err(_) => break,
@@ -866,11 +869,31 @@ fn cmd_snaps() {
         }
         Some(list) => {
             console::set_color(YELLOW);
-            kprintln!("  {:>5}  {:16}  entries", "seq", "root");
+            kprintln!("  {:>5}  {:16}  {:19}  entries", "seq", "root", "taken");
             console::set_color(WHITE);
-            for (seq, hash, n) in list {
+            for (seq, hash, n, time) in list {
                 let hx = crate::store::sha256::short_hex(&hash);
-                kprintln!("  {:>5}  {}  {}", seq, core::str::from_utf8(&hx).unwrap_or("?"), n);
+                // A snapshot written before the clock existed, or on a machine
+                // with no working RTC, records zero. Saying so beats printing
+                // 1970 as though it were a fact.
+                if time == 0 {
+                    kprintln!(
+                        "  {:>5}  {}  {:19}  {}",
+                        seq,
+                        core::str::from_utf8(&hx).unwrap_or("?"),
+                        "(no clock)",
+                        n
+                    );
+                } else {
+                    let d = crate::dev::rtc::from_unix(time);
+                    kprintln!(
+                        "  {:>5}  {}  {:04}-{:02}-{:02} {:02}:{:02}:{:02}  {}",
+                        seq,
+                        core::str::from_utf8(&hx).unwrap_or("?"),
+                        d.year, d.month, d.day, d.hour, d.minute, d.second,
+                        n
+                    );
+                }
             }
             console::set_color(LTGRAY);
         }
@@ -1088,4 +1111,126 @@ fn verify(
         }
     }
     Ok(())
+}
+
+// --- keeping itself ------------------------------------------------------
+//
+// The namespace has been persistent only when asked. `snap` writes it; forget
+// to and a reboot loses everything since the last one. Orthogonal persistence
+// was on the list from the beginning and this is the usable half of it: the
+// system notices its own state has changed and commits it, without being told.
+//
+// The snapshot does *not* happen on the clock task, which is where a timer
+// naturally belongs. Sysbox lives behind `Racy`, and a background writer would
+// race the shell mid-command -- a `mkdir` half-applied while the tree is being
+// serialised is a corrupt snapshot, and the single-core argument does not save
+// it because preemption is real. So the timer only sets a flag and the shell
+// acts on it between commands, where nothing else is touching the tree. Same
+// discipline as the engine: one place, not a list of call sites.
+
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+static AUTOSNAP_ON: AtomicBool = AtomicBool::new(false);
+static AUTOSNAP_DUE: AtomicBool = AtomicBool::new(false);
+static AUTOSNAP_EVERY: AtomicU64 = AtomicU64::new(60);
+static LAST_SNAP_TICK: AtomicU64 = AtomicU64::new(0);
+/// Content address of the tree as last committed, so an unchanged namespace
+/// costs nothing.
+static LAST_ROOT: Racy<Option<tree::Hash>> = Racy::new(None);
+
+pub fn autosnap_configure(on: bool, seconds: u64) {
+    AUTOSNAP_ON.store(on, Ordering::Relaxed);
+    if seconds > 0 {
+        AUTOSNAP_EVERY.store(seconds, Ordering::Relaxed);
+    }
+    LAST_SNAP_TICK.store(crate::dev::lapic::ticks(), Ordering::Relaxed);
+}
+
+pub fn autosnap_enabled() -> bool {
+    AUTOSNAP_ON.load(Ordering::Relaxed)
+}
+
+pub fn autosnap_interval() -> u64 {
+    AUTOSNAP_EVERY.load(Ordering::Relaxed)
+}
+
+/// Called from the clock task. Sets a flag and nothing more.
+pub fn autosnap_tick() {
+    if !AUTOSNAP_ON.load(Ordering::Relaxed) {
+        return;
+    }
+    let hz = crate::TIMER_HZ as u64;
+    let now = crate::dev::lapic::ticks();
+    let last = LAST_SNAP_TICK.load(Ordering::Relaxed);
+    if now.saturating_sub(last) >= AUTOSNAP_EVERY.load(Ordering::Relaxed) * hz {
+        LAST_SNAP_TICK.store(now, Ordering::Relaxed);
+        AUTOSNAP_DUE.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Called by the shell between commands. Does the work, if any is due.
+pub fn autosnap_poll() {
+    if !AUTOSNAP_DUE.swap(false, Ordering::Relaxed) {
+        return;
+    }
+    if !crate::store::mounted() || !crate::dev::nvme::writes_unlocked() {
+        return;
+    }
+
+    // Hash first. An unchanged tree hashes the same, so a system sitting idle
+    // writes nothing at all -- which is what makes a one-minute interval
+    // reasonable rather than a way to fill the store with duplicates.
+    let current = with(|s| tree::content_hash(&s.root));
+    let Some(current) = current else { return };
+    let unchanged = unsafe { LAST_ROOT.get().map(|h| h == current).unwrap_or(false) };
+    if unchanged {
+        return;
+    }
+
+    let saved = with(|s| {
+        crate::store::with(|st| {
+            let root = write_node(st, &s.root, &mut s.written).ok()?;
+            let mut name = [0u8; cas::NAME_LEN];
+            name[..4].copy_from_slice(b"root");
+            let entry = cas::Entry { name, chunk: root };
+            st.commit(core::slice::from_ref(&entry)).ok().map(|_| st.sb.seq)
+        })
+    })
+    .flatten()
+    .flatten();
+
+    if let Some(seq) = saved {
+        unsafe { *LAST_ROOT.get() = Some(current) };
+        console::set_color(LTGRAY);
+        kprintln!("\n[autosnap] snapshot {}", seq);
+    }
+}
+
+/// Remember what was just committed, so a manual `snap` does not cause the
+/// next automatic one to rewrite the same tree.
+pub fn note_committed() {
+    let current = with(|s| tree::content_hash(&s.root));
+    if let Some(h) = current {
+        unsafe { *LAST_ROOT.get() = Some(h) };
+    }
+}
+
+pub fn autosnap_report() {
+    console::set_color(YELLOW);
+    kprintln!("[autosnap]");
+    console::set_color(LTGRAY);
+    if !autosnap_enabled() {
+        kprintln!("  off -- 'autosnap on [seconds]' to have the system keep itself");
+        return;
+    }
+    kprintln!("  every {} s, when the namespace has actually changed", autosnap_interval());
+    if !crate::store::mounted() {
+        console::set_color(YELLOW);
+        kprintln!("  but no store is mounted, so nothing will be written");
+        console::set_color(LTGRAY);
+    } else if !crate::dev::nvme::writes_unlocked() {
+        console::set_color(YELLOW);
+        kprintln!("  but writes are locked -- 'store unlock'");
+        console::set_color(LTGRAY);
+    }
 }
