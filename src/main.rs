@@ -19,6 +19,7 @@ mod acpi;
 mod ai;
 mod cpu;
 mod dev;
+mod edit;
 mod gfx;
 mod lang;
 mod mem;

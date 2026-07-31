@@ -87,18 +87,8 @@ pub fn run(boot: &BootInfo, acpi: &Option<Acpi>) -> ! {
     prompt();
 
     loop {
-        let key = if let Some(k) = kbd::pop() {
+        let key = if let Some(k) = kbd::pop_any() {
             k
-        } else if let Some(b) = crate::serial::read_byte() {
-            // A terminal speaks a slightly different dialect than the i8042
-            // driver: Enter arrives as CR, and Backspace as DEL. Translate here
-            // rather than in `read_byte`, because the keyboard's own DELETE key
-            // is a different key that happens to share the 0x7F code.
-            match b {
-                b'\r' => b'\n',
-                0x7F => 8,
-                other => other,
-            }
         } else {
             // Nothing queued: idle until the next interrupt rather than
             // spinning. The timer alone wakes us 100 times a second.
@@ -124,7 +114,10 @@ pub fn run(boot: &BootInfo, acpi: &Option<Acpi>) -> ! {
                 // Re-arm pacing per command, so a skip requested during one
                 // command's output does not silently disable it forever.
                 console::resume_pacing();
-                execute(trimmed, boot, acpi, &mut interp);
+                // A pipeline runs `execute` itself, with the console captured.
+                if !run_pipeline(trimmed, boot, acpi, &mut interp) {
+                    execute(trimmed, boot, acpi, &mut interp);
+                }
                 // Between commands is the only place the namespace is
                 // guaranteed to be whole, so this is where an automatic
                 // snapshot is allowed to run.
@@ -475,6 +468,13 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             }
         }
         "refresh" => console::redraw(),
+        "edit" | "vi" => {
+            if rest.is_empty() {
+                kprintln!("  usage: edit <path>");
+            } else {
+                crate::edit::run(rest);
+            }
+        }
         "date" => match crate::dev::rtc::now() {
             Some(d) => {
                 kprintln!(
@@ -1012,4 +1012,137 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             }
         }
     }
+}
+
+// --- composition --------------------------------------------------------
+//
+// `cmd > /path` sends what a command printed into the namespace, and
+// `cmd | filter` runs it through a text filter. Both work by capturing the
+// console rather than by changing any applet, which is what makes them
+// available to every command at once -- including the ones that existed long
+// before this did.
+//
+// Filters take text and give text. They are not applets: an applet acts on the
+// namespace, and these only ever look at a string that has already been
+// produced.
+
+fn strip_ansi_free(s: &str) -> alloc::string::String {
+    // Console colour is set through a side channel rather than escape codes,
+    // so captured text is already plain. This exists so that stays true by
+    // intent rather than by accident.
+    alloc::string::String::from(s)
+}
+
+fn apply_filter(text: &str, spec: &str) -> alloc::string::String {
+    let mut it = spec.trim().splitn(2, ' ');
+    let verb = it.next().unwrap_or("");
+    let arg = it.next().unwrap_or("").trim();
+    let lines: Vec<&str> = text.lines().collect();
+
+    let mut out = alloc::string::String::new();
+    match verb {
+        "grep" => {
+            for l in lines.iter().filter(|l| l.contains(arg)) {
+                out.push_str(l);
+                out.push('\n');
+            }
+        }
+        "head" => {
+            let n: usize = arg.parse().unwrap_or(10);
+            for l in lines.iter().take(n) {
+                out.push_str(l);
+                out.push('\n');
+            }
+        }
+        "tail" => {
+            let n: usize = arg.parse().unwrap_or(10);
+            let skip = lines.len().saturating_sub(n);
+            for l in lines.iter().skip(skip) {
+                out.push_str(l);
+                out.push('\n');
+            }
+        }
+        "sort" => {
+            let mut v = lines.clone();
+            v.sort_unstable();
+            for l in v {
+                out.push_str(l);
+                out.push('\n');
+            }
+        }
+        "count" | "wc" => {
+            let words = text.split_whitespace().count();
+            out = alloc::format!(
+                "  {} lines, {} words, {} bytes\n",
+                lines.len(),
+                words,
+                text.len()
+            );
+        }
+        other => {
+            out = alloc::format!("  not a filter: {}\n", other);
+        }
+    }
+    out
+}
+
+/// Split a command line on the *last* unquoted `|` or `>`.
+///
+/// Last rather than first, so `grep >` reads as a filter argument rather than
+/// as a redirection -- the trailing operator is the one that applies to
+/// everything before it.
+fn split_pipeline(line: &str) -> Option<(&str, char, &str)> {
+    let mut found: Option<(usize, char)> = None;
+    for (i, c) in line.char_indices() {
+        if c == '|' || c == '>' {
+            found = Some((i, c));
+        }
+    }
+    let (i, c) = found?;
+    Some((line[..i].trim(), c, line[i + 1..].trim()))
+}
+
+/// Run `cmd`, capturing everything it prints.
+fn capture(
+    cmd: &str,
+    boot: &BootInfo,
+    acpi: &Option<Acpi>,
+    interp: &mut lang::Interp,
+) -> alloc::string::String {
+    console::begin_capture();
+    execute(cmd, boot, acpi, interp);
+    console::end_capture().unwrap_or_default()
+}
+
+/// Handle a line containing `|` or `>`. Returns false if there was neither.
+pub fn run_pipeline(
+    line: &str,
+    boot: &BootInfo,
+    acpi: &Option<Acpi>,
+    interp: &mut lang::Interp,
+) -> bool {
+    let Some((head, op, tail)) = split_pipeline(line) else {
+        return false;
+    };
+    if head.is_empty() || tail.is_empty() {
+        return false;
+    }
+
+    let text = strip_ansi_free(&capture(head, boot, acpi, interp));
+
+    match op {
+        '|' => {
+            let out = apply_filter(&text, tail);
+            kprint!("{}", out);
+        }
+        '>' => {
+            if crate::sysbox::write_text(tail, &text) {
+                kprintln!("  {} bytes -> {}", text.len(), tail);
+            } else {
+                kprintln!("  could not write {}", tail);
+            }
+        }
+        _ => return false,
+    }
+    true
 }

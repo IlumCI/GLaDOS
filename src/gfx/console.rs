@@ -333,9 +333,41 @@ pub fn cols() -> usize {
     n
 }
 
+// --- capture ------------------------------------------------------------
+//
+// Applets print rather than return, which is fine for a person reading them
+// and useless for feeding one command into another. Rather than rewriting
+// twenty applets to produce values, the console can be told to collect what it
+// is given instead of drawing it -- so `tree | grep ai` and `snaps > /log`
+// work without any applet knowing it is being redirected.
+//
+// Serial still receives everything. A capture is about what the operator sees,
+// not about hiding output from the debug channel.
+
+static CAPTURE: Racy<Option<alloc::string::String>> = Racy::new(None);
+
+pub fn begin_capture() {
+    unsafe { *CAPTURE.get() = Some(alloc::string::String::new()) };
+}
+
+/// Stop capturing and return what was collected.
+pub fn end_capture() -> Option<alloc::string::String> {
+    unsafe { CAPTURE.get().take() }
+}
+
+pub fn capturing() -> bool {
+    unsafe { CAPTURE.get().is_some() }
+}
+
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
     use fmt::Write;
+    unsafe {
+        if let Some(buf) = CAPTURE.get().as_mut() {
+            let _ = buf.write_fmt(args);
+            return;
+        }
+    }
     with(|c| {
         let _ = c.write_fmt(args);
     });

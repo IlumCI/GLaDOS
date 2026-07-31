@@ -163,6 +163,29 @@ pub fn pop() -> Option<u8> {
 }
 
 #[allow(dead_code)]
+/// A keystroke from the keyboard, or from the serial console if one answers.
+///
+/// Everything that reads input should use this rather than `pop`. The shell
+/// grew a serial fallback inline and the editor did not, which made the editor
+/// impossible to drive headlessly -- and an interactive program that can only
+/// be tested by a human at the machine does not get tested.
+///
+/// A terminal speaks a slightly different dialect than the i8042 driver: Enter
+/// arrives as CR and Backspace as DEL. Translating here rather than in
+/// `serial::read_byte` keeps the keyboard's own DELETE key, which is a
+/// different key that happens to share the 0x7F code, distinguishable.
+pub fn pop_any() -> Option<u8> {
+    if let Some(k) = pop() {
+        return Some(k);
+    }
+    let b = crate::serial::read_byte()?;
+    Some(match b {
+        b'\r' => b'\n',
+        0x7F => 8,
+        other => other,
+    })
+}
+
 pub fn has_input() -> bool {
     TAIL.load(Ordering::Relaxed) != HEAD.load(Ordering::Acquire)
 }

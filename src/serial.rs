@@ -120,6 +120,13 @@ impl fmt::Write for Serial {
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
     use fmt::Write;
+    // A captured command's output belongs to whatever asked for it, not to the
+    // log. Suppressing only the console left `tree | head 6` printing the whole
+    // tree to serial and then the six lines -- the filtering worked and the
+    // transcript showed no sign of it.
+    if crate::gfx::console::capturing() {
+        return;
+    }
     let _ = Serial.write_fmt(args);
 }
 
