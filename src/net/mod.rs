@@ -40,19 +40,41 @@ const ARP_REPLY: u16 = 2;
 
 const PROTO_ICMP: u8 = 1;
 pub(crate) const PROTO_TCP: u8 = 6;
+pub(crate) const PROTO_UDP: u8 = 17;
 const ICMP_ECHO_REQUEST: u8 = 8;
 const ICMP_ECHO_REPLY: u8 = 0;
 
+pub mod dhcp;
+pub mod dns;
 pub mod tcp;
+pub mod udp;
+
+/// The checksum TCP and UDP share, over the pseudo-header plus the segment.
+///
+/// The pseudo-header is never transmitted; it exists so that the checksum
+/// covers the addresses and protocol, which is what catches a segment
+/// delivered to the wrong host or handed to the wrong protocol.
+pub(crate) fn transport_checksum(src: Ipv4, dst: Ipv4, proto: u8, segment: &[u8]) -> u16 {
+    let mut buf = Vec::with_capacity(12 + segment.len());
+    buf.extend_from_slice(&src);
+    buf.extend_from_slice(&dst);
+    buf.push(0);
+    buf.push(proto);
+    buf.extend_from_slice(&(segment.len() as u16).to_be_bytes());
+    buf.extend_from_slice(segment);
+    checksum(&buf)
+}
 
 static NIC: Racy<Option<E1000>> = Racy::new(None);
 static CONFIG: Racy<Config> = Racy::new(Config {
     // QEMU's user-mode network puts the guest at 10.0.2.15, the gateway at
     // 10.0.2.2 and its DNS at 10.0.2.3. Defaulting to that makes the first
-    // test work without configuring anything.
+    // test work without configuring anything -- and `dhcp` replaces all of it
+    // with whatever the network actually says.
     ip: [10, 0, 2, 15],
     gateway: [10, 0, 2, 2],
     netmask: [255, 255, 255, 0],
+    dns: [10, 0, 2, 3],
 });
 
 #[derive(Clone, Copy)]
@@ -60,7 +82,11 @@ pub struct Config {
     pub ip: Ipv4,
     pub gateway: Ipv4,
     pub netmask: Ipv4,
+    pub dns: Ipv4,
 }
+
+pub const UNSPECIFIED: Ipv4 = [0, 0, 0, 0];
+pub const BROADCAST_IP: Ipv4 = [255, 255, 255, 255];
 
 /// A very small ARP cache. One entry is enough to ping a gateway, and a table
 /// that never evicts is a table that eventually holds something wrong.
@@ -76,6 +102,10 @@ pub fn set_config(c: Config) {
 
 pub fn ready() -> bool {
     unsafe { NIC.get().is_some() }
+}
+
+pub fn mac() -> Option<Mac> {
+    with_nic(|n| n.mac())
 }
 
 pub fn init(ecam: u64) {
@@ -223,6 +253,7 @@ pub enum Event {
     Arp,
     EchoReply { from: Ipv4, seq: u16 },
     Tcp,
+    Udp,
     Other,
 }
 
@@ -258,10 +289,18 @@ pub fn poll() -> Event {
             }
             let payload = &payload[..total];
             let src: Ipv4 = payload[12..16].try_into().unwrap_or([0; 4]);
+            let dst: Ipv4 = payload[16..20].try_into().unwrap_or([0; 4]);
+            if !addressed_to_us(dst) {
+                return Event::Other;
+            }
 
             if payload[9] == PROTO_TCP {
                 tcp::deliver(src, &payload[ihl..]);
                 return Event::Tcp;
+            }
+            if payload[9] == PROTO_UDP {
+                udp::deliver(src, dst, &payload[ihl..]);
+                return Event::Udp;
             }
             if payload[9] != PROTO_ICMP {
                 return Event::Other;
@@ -296,6 +335,11 @@ pub fn poll() -> Event {
 
 fn resolve(target: Ipv4) -> Option<Mac> {
     let cfg = config();
+    // Broadcast is never resolved: there is nothing to ask, and DHCP has to
+    // send this way before it owns an address to ask *from*.
+    if target == BROADCAST_IP {
+        return Some(BROADCAST);
+    }
     // Anything off-link goes via the gateway, which is the whole of routing
     // for a host with one interface.
     let same_subnet = (0..4).all(|i| target[i] & cfg.netmask[i] == cfg.ip[i] & cfg.netmask[i]);
@@ -322,12 +366,34 @@ fn resolve(target: Ipv4) -> Option<Mac> {
 }
 
 pub(crate) fn send_ipv4(dst: Ipv4, proto: u8, payload: &[u8]) -> bool {
-    let cfg = config();
+    send_ipv4_from(config().ip, dst, proto, payload)
+}
+
+/// Send with an explicit source address.
+///
+/// Exists for DHCP, which must send from 0.0.0.0 -- it is asking for the
+/// address it would otherwise put in that field.
+pub(crate) fn send_ipv4_from(src: Ipv4, dst: Ipv4, proto: u8, payload: &[u8]) -> bool {
     let Some(mac) = with_nic(|n| n.mac()) else { return false };
     let Some(dst_mac) = resolve(dst) else { return false };
-    let packet = ipv4_packet(cfg.ip, dst, proto, payload, 0x1234);
+    let packet = ipv4_packet(src, dst, proto, payload, 0x1234);
     let frame = eth_frame(dst_mac, mac, ETHERTYPE_IPV4, &packet);
     with_nic(|n| n.transmit(&frame)).unwrap_or(false)
+}
+
+/// Would a packet addressed here be ours?
+///
+/// Broadcast counts, and so does anything at all while our address is still
+/// 0.0.0.0 -- during DHCP the reply is addressed to an address we do not have
+/// yet, and refusing it would make the protocol impossible to complete.
+fn addressed_to_us(dst: Ipv4) -> bool {
+    let cfg = config();
+    if dst == BROADCAST_IP || dst == cfg.ip || cfg.ip == UNSPECIFIED {
+        return true;
+    }
+    // Directed broadcast for our subnet, e.g. 10.0.2.255.
+    (0..4).all(|i| dst[i] | cfg.netmask[i] == 255 || dst[i] == cfg.ip[i])
+        && (0..4).all(|i| dst[i] & cfg.netmask[i] == cfg.ip[i] & cfg.netmask[i])
 }
 
 pub fn ping(dst: Ipv4, count: u16) {
@@ -413,6 +479,10 @@ pub fn report() {
             let c = config();
             kprintln!("  ip   {}.{}.{}.{}", c.ip[0], c.ip[1], c.ip[2], c.ip[3]);
             kprintln!("  gw   {}.{}.{}.{}", c.gateway[0], c.gateway[1], c.gateway[2], c.gateway[3]);
+            kprintln!("  dns  {}.{}.{}.{}", c.dns[0], c.dns[1], c.dns[2], c.dns[3]);
+            if let Some((name, ip)) = dns::cached() {
+                kprintln!("  last {} is {}.{}.{}.{}", name, ip[0], ip[1], ip[2], ip[3]);
+            }
             match unsafe { *ARP_CACHE.get() } {
                 Some((ip, mac)) => kprintln!(
                     "  arp  {}.{}.{}.{} is {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",

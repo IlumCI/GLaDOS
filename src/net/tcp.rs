@@ -134,9 +134,6 @@ impl Error {
 // RFC 793's rule: a is before b when their difference, read as a signed 32-bit
 // number, is negative. This is what makes wraparound a non-event.
 
-fn seq_lt(a: u32, b: u32) -> bool {
-    (a.wrapping_sub(b) as i32) < 0
-}
 fn seq_le(a: u32, b: u32) -> bool {
     (a.wrapping_sub(b) as i32) <= 0
 }
@@ -940,15 +937,19 @@ pub fn report() {
 /// HTTP/1.0 with `Connection: close` on purpose: the end of the body is the
 /// end of the stream, so this needs no chunked-transfer decoder and no
 /// Content-Length parser to know when it is done.
-pub fn http_get(dst: Ipv4, port: u16, path: &str) -> Result<Vec<u8>, Error> {
+pub fn http_get(dst: Ipv4, host: &str, port: u16, path: &str) -> Result<Vec<u8>, Error> {
     connect(dst, port, 5000)?;
 
     let mut req = alloc::string::String::new();
     req.push_str("GET ");
     req.push_str(if path.is_empty() { "/" } else { path });
     req.push_str(" HTTP/1.0\r\nHost: ");
-    let c = dst;
-    req.push_str(&alloc::format!("{}.{}.{}.{}", c[0], c[1], c[2], c[3]));
+    // The name, not the address, when we have one: an address shared by many
+    // virtual hosts answers on whichever the Host header names.
+    req.push_str(host);
+    if port != 80 {
+        req.push_str(&alloc::format!(":{}", port));
+    }
     req.push_str("\r\nUser-Agent: glados/0.1\r\nConnection: close\r\n\r\n");
 
     send(req.as_bytes(), 5000)?;
@@ -958,14 +959,14 @@ pub fn http_get(dst: Ipv4, port: u16, path: &str) -> Result<Vec<u8>, Error> {
 }
 
 /// Print a summary of a fetch rather than dumping the whole body.
-pub fn http_report(dst: Ipv4, port: u16, path: &str) {
+pub fn http_report(dst: Ipv4, host: &str, port: u16, path: &str) {
     console::set_color(YELLOW);
-    kprintln!("[http] {}.{}.{}.{}:{}{}", dst[0], dst[1], dst[2], dst[3], port,
-        if path.is_empty() { "/" } else { path });
+    kprintln!("[http] {}:{}{}", host, port, if path.is_empty() { "/" } else { path });
     console::set_color(LTGRAY);
+    kprintln!("  {}.{}.{}.{}", dst[0], dst[1], dst[2], dst[3]);
 
     let t0 = crate::time::rdtsc();
-    match http_get(dst, port, path) {
+    match http_get(dst, host, port, path) {
         Err(e) => {
             console::set_color(LTRED);
             kprintln!("  {}", e.name());

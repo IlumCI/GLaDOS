@@ -491,12 +491,34 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
         }
         "ping" => {
             let mut it = rest.split_whitespace();
-            match it.next().and_then(crate::net::parse_ip) {
-                Some(ip) => {
-                    let n = it.next().and_then(|s| s.parse().ok()).unwrap_or(4);
-                    crate::net::ping(ip, n);
+            match it.next() {
+                None => kprintln!("  usage: ping <host> [count]"),
+                Some(host) => match host_to_ip(host) {
+                    None => {}
+                    Some(ip) => {
+                        let n = it.next().and_then(|s| s.parse().ok()).unwrap_or(4);
+                        crate::net::ping(ip, n);
+                    }
+                },
+            }
+        }
+        "dhcp" => crate::net::dhcp::report(),
+        "dns" => {
+            if rest.is_empty() {
+                kprintln!("  usage: dns <name>");
+            } else {
+                let t0 = crate::time::rdtsc();
+                match crate::net::dns::resolve(rest.trim()) {
+                    Ok(ip) => {
+                        let mhz = crate::time::tsc_mhz().max(1);
+                        kprintln!(
+                            "  {} is {}.{}.{}.{}   ({} ms)",
+                            rest.trim(), ip[0], ip[1], ip[2], ip[3],
+                            (crate::time::rdtsc() - t0) / mhz / 1000
+                        );
+                    }
+                    Err(e) => kprintln!("  {}", e.name()),
                 }
-                None => kprintln!("  usage: ping <a.b.c.d> [count]"),
             }
         }
         "tcp" => {
@@ -505,14 +527,17 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             match (it.next().unwrap_or(""), it.next().unwrap_or("").trim()) {
                 ("connect", args) => {
                     let mut a = args.split_whitespace();
-                    match (a.next().and_then(crate::net::parse_ip),
-                           a.next().and_then(|s| s.parse::<u16>().ok())) {
-                        (Some(ip), Some(port)) => match tcp::connect(ip, port, 5000) {
-                            Ok(()) => kprintln!("  connected to {}.{}.{}.{}:{}",
-                                ip[0], ip[1], ip[2], ip[3], port),
-                            Err(e) => kprintln!("  {}", e.name()),
-                        },
-                        _ => kprintln!("  usage: tcp connect <a.b.c.d> <port>"),
+                    match (a.next(), a.next().and_then(|s| s.parse::<u16>().ok())) {
+                        (Some(host), Some(port)) => {
+                            if let Some(ip) = host_to_ip(host) {
+                                match tcp::connect(ip, port, 5000) {
+                                    Ok(()) => kprintln!("  connected to {}.{}.{}.{}:{}",
+                                        ip[0], ip[1], ip[2], ip[3], port),
+                                    Err(e) => kprintln!("  {}", e.name()),
+                                }
+                            }
+                        }
+                        _ => kprintln!("  usage: tcp connect <host> <port>"),
                     }
                 }
                 ("send", text) if !text.is_empty() => {
@@ -548,15 +573,17 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
         "http" => {
             let mut it = rest.split_whitespace();
             match it.next() {
-                None => kprintln!("  usage: http <a.b.c.d>[:port] [/path]"),
+                None => kprintln!("  usage: http <host>[:port] [/path]"),
                 Some(host) => {
                     let (h, port) = match host.split_once(':') {
                         Some((h, p)) => (h, p.parse().unwrap_or(80)),
                         None => (host, 80),
                     };
-                    match crate::net::parse_ip(h) {
-                        Some(ip) => crate::net::tcp::http_report(ip, port, it.next().unwrap_or("/")),
-                        None => kprintln!("  not an address: {} (there is no DNS yet)", h),
+                    if let Some(ip) = host_to_ip(h) {
+                        // The Host header carries the name when there is one:
+                        // a virtual host answers on a shared address and would
+                        // otherwise hand back the wrong site.
+                        crate::net::tcp::http_report(ip, h, port, it.next().unwrap_or("/"));
                     }
                 }
             }
@@ -818,14 +845,16 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             console::set_color(YELLOW);
             kprintln!("\nnetwork");
             console::set_color(WHITE);
-            kprintln!("  net           link, addresses, ARP cache");
-            kprintln!("  net ip <addr> [gw]    set them");
-            kprintln!("  ping <addr> [count]");
+            kprintln!("  net           link, addresses, ARP and resolver cache");
+            kprintln!("  dhcp          ask the network for all of it");
+            kprintln!("  net ip <addr> [gw]    or set it by hand");
+            kprintln!("  dns <name>    resolve a name");
+            kprintln!("  ping <host> [count]");
             kprintln!("  tcp           connection state");
-            kprintln!("  tcp connect <addr> <port> | send <text> | recv | close");
-            kprintln!("  http <addr>[:port] [/path]   fetch over HTTP/1.0");
+            kprintln!("  tcp connect <host> <port> | send <text> | recv | close");
+            kprintln!("  http <host>[:port] [/path]   fetch over HTTP/1.0");
             console::set_color(YELLOW);
-            kprintln!("  addresses only -- there is no DNS yet");
+            kprintln!("  <host> is a name or an address, anywhere one is taken");
             console::set_color(WHITE);
 
             console::set_color(YELLOW);
@@ -1336,6 +1365,21 @@ pub fn run_pipeline(
 /// The firmware could read files and no longer exists; this is the kernel
 /// doing it for itself. Read-only on purpose -- a tool that can inspect a
 /// broken disk is useful, one that can half-write it is worse than nothing.
+/// Turn a command-line host into an address, reporting why if it cannot.
+///
+/// Every network command routes through this so that a name and a dotted quad
+/// are interchangeable everywhere -- there is no separate "resolve first" step
+/// to forget.
+fn host_to_ip(host: &str) -> Option<crate::net::Ipv4> {
+    match crate::net::dns::lookup(host) {
+        Ok(ip) => Some(ip),
+        Err(e) => {
+            kprintln!("  {}: {}", host, e.name());
+            None
+        }
+    }
+}
+
 fn fat_cmd(rest: &str) {
     use crate::store::{block, fat};
 

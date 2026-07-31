@@ -51,11 +51,12 @@ glados> route trusted make a folder for notes
   1602 us, no transformer involved
   that applet mutates content
 
-glados> http 10.0.2.2:8080 /final
-[http] 10.0.2.2:8080/final
-  HTTP/1.0 200 OK
-  2931 B in 133 ms, 2845 B of body
-  | hello from the host
+glados> http example.com /
+[http] example.com:80/
+  104.20.23.154
+  HTTP/1.1 200 OK
+  828 B in 38 ms, 559 B of body
+  | <!doctype html><html lang="en"><head><title>Example Domain</title>...
 
 glados> i=0 while(i<8){ rect(i*40,300,32,32,i+1) i=i+1 }
 ```
@@ -91,7 +92,8 @@ All of it verified running under QEMU, not merely compiling.
 | M18 | Content-addressed package manager, modal editor, FAT16/32 reader | done |
 | M19 | e1000 NIC, ARP, IPv4, ICMP echo | done |
 | M20 | TCP: active open, retransmission, HTTP | done |
-| M21 | UDP, and the DNS and DHCP it unlocks | next |
+| M21 | UDP, DNS, DHCP | done |
+| M22 | TLS, or the GF63's real NIC | next |
 
 ## The model
 
@@ -297,10 +299,10 @@ id, where it cannot be bypassed by pattern order.
   waiting there: the AVX2 int8 kernel has never executed (QEMU's default CPU
   reports `avx2=0`), the attention window has never run at a realistic size,
   and the generation baseline of ~8 s/token is very likely a QEMU artifact.
-- **No UDP, so no DNS and no DHCP.** Peers are named by number and the address
-  is set by hand. This is the next thing worth building: UDP is a header and a
-  checksum that already exists, and it buys both.
-- **No TLS.** There is a byte stream now, but adopting an existing TLS stack
+- **DHCP does not renew.** The lease time comes back and is reported, and then
+  nothing watches it. A machine left running past its lease keeps using an
+  address the server believes is free.
+- **No TLS**, so `http` means http. Adopting an existing TLS stack
   will not be as simple as adding a dependency — rustls needs proc macros and
   ring builds C, neither of which this toolchain can compile. It would have to
   be hand-vendored.
@@ -337,7 +339,7 @@ src/
   time.rs        TSC calibrated against the LAPIC timer
   edit.rs        modal editor, nvim-shaped
   pkg.rs         content-addressed package manager
-  net/           ARP, IPv4, ICMP, address configuration, and TCP
+  net/           ARP, IPv4, ICMP, TCP, UDP, DNS, DHCP
   recovery.rs    console reachable when the store will not mount
   acpi.rs        RSDP/XSDT walk: MADT, MCFG, FADT
   cpu/           GDT+TSS with IST stacks, IDT and the fault reporter, port I/O
