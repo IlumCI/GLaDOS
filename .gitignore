@@ -13,3 +13,6 @@ esp/GLADOS/
 tools/venv/
 tools/hf/
 tools/out/
+__pycache__/
+*.pyc
+
