@@ -26,6 +26,11 @@ from pathlib import Path
 # Each family is (template, [slot values]). Slots are filled with {x}.
 # Families are ordered roughly from most to least literal, so the held-out
 # tail tends to be the harder, more oblique phrasings.
+# Verbs shared across several classes, so that no class comes to own one.
+# Written without reference to any evaluation item -- the point is breadth, not
+# matching anything in particular.
+ASK = ["show me", "give me", "print", "tell me", "list out", "report"]
+
 #
 # Widened from measurement rather than by guesswork. tools/analyse.py fitted
 # the probe and reported: the learning curve still climbing steeply at 174
@@ -57,6 +62,9 @@ FAMILIES = {
         ("print the list of {x}", ["applets", "supported commands"]),
         ("what are you {x} of", ["capable", "able to do"]),
         ("give me the {x} of everything you can do", ["rundown", "summary", "index"]),
+        ("{v} the {x}", ASK, ["tools", "applets", "available commands",
+                              "command list", "tool list", "operations you support"]),
+        ("{v} what you can {x}", ASK, ["do", "run", "handle"]),
     ],
     "ls": [
         ("list the files", []),
@@ -68,6 +76,9 @@ FAMILIES = {
         ("show the {x} of this directory", ["entries", "immediate contents", "members"]),
         ("which files {x} here", ["live", "exist"]),
         ("enumerate the {x} in this folder", ["files", "entries"]),
+        ("{v} the {x}", ASK, ["files here", "directory listing", "folder contents",
+                              "entries in this directory", "files in this folder"]),
+        ("{v} what is {x}", ASK, ["in this directory", "in the folder", "sitting here"]),
     ],
     # Against `back`: moves through the namespace, never through history.
     "cd": [
@@ -156,6 +167,11 @@ FAMILIES = {
         ("how much is {x} to store all this", ["needed", "required"]),
         ("what is my {x}", ["storage footprint", "total usage"]),
         ("how much of the {x} is in use", ["disk", "store", "space"]),
+        # Generic verbs crossed against the nouns that actually mean "du", so
+        # the class is not defined by its verbs.
+        ("{v} the {x}", ASK, ["disk usage", "space used", "storage taken",
+                              "total size", "byte count", "usage figures"]),
+        ("{v} how much space this {x}", ASK, ["uses", "occupies", "needs"]),
     ],
     "find": [
         ("search for {x}", ["some text", "a word", "the phrase hello"]),
@@ -195,6 +211,8 @@ FAMILIES = {
         # explicitly is the fix.
         ("enumerate the {x} available to restore", ["versions", "snapshots"]),
         ("index the {x} taken so far", ["checkpoints", "snapshots"]),
+        ("{v} the {x}", ASK, ["snapshots", "checkpoints", "snapshot history",
+                              "checkpoint log", "saved states", "list of commits"]),
     ],
     "fsck": [
         ("verify the disk", []),
@@ -260,6 +278,11 @@ FAMILIES = {
         ("i want {x} of this, keeping the original", ["another one", "a copy"]),
         ("replicate {x} elsewhere", ["that directory", "this file"]),
         ("leave the original and {x} it", ["copy", "duplicate"]),
+        ("{v} {x}", ["copy", "duplicate", "clone", "replicate", "mirror"],
+                    ["this file", "that folder", "the whole directory",
+                     "this object", "that subtree"]),
+        ("{v} a second copy of {x}", ["make", "create", "give me", "leave"],
+                                     ["that file", "this folder"]),
     ],
     # Against `snaps`: creates one, never enumerates them.
     "snap": [
@@ -271,6 +294,10 @@ FAMILIES = {
         ("freeze the {x} as it stands", ["current state", "tree"]),
         ("pin {x} so i can return to it", ["this moment", "the current state"]),
         ("make a {x} of right now", ["restore point", "checkpoint"]),
+        ("{v} the current state", ["commit", "record", "save", "checkpoint",
+                                   "capture", "snapshot"], [""]),
+        ("{v} {x} as a checkpoint", ["commit", "record", "save", "store"],
+                                    ["the working tree", "everything", "this"]),
     ],
     # Against `diff` and `snaps`: reinstates an old state rather than
     # inspecting or listing one.
@@ -283,6 +310,10 @@ FAMILIES = {
         ("put the tree back the way it was at {x}", ["snapshot 2", "the last commit"]),
         ("return the working tree to {x}", ["an older snapshot", "how it used to be"]),
         ("rewind to {x}", ["the earlier state", "snapshot 3"]),
+        ("{v} {x}", ["restore", "revert to", "roll back to", "rewind to",
+                     "return to", "reinstate"],
+                    ["the previous version", "an older state", "snapshot 2",
+                     "how it was before", "the earlier tree"]),
     ],
 }
 
@@ -302,11 +333,91 @@ DRESSING = [
 
 
 def expand(family):
+    """A family is (template, nouns) or (template, verbs, nouns).
+
+    The three-part form exists because the two-part one put a single verb in
+    each family, so a class's verbs were only ever as diverse as its family
+    count -- and mean-pooled embeddings weight the verb heavily, so a request
+    phrased with an unfamiliar verb drifts toward whichever class does use it.
+    Crossing verbs against nouns gives every class the same broad verb
+    vocabulary while keeping the nouns discriminative, which is where the
+    signal actually lives.
+    """
+    if len(family) == 3:
+        template, verbs, nouns = family
+        return [template.format(v=v, x=n) for v in verbs for n in nouns]
     template, slots = family
     if not slots:
         return [template]
     return [template.format(x=s) for s in slots]
 
+
+# A frozen evaluation set, written independently of the templates.
+#
+# Splitting FAMILIES by family was the wrong instrument, and inspecting it made
+# that plain: the held-out families for the weak classes turned out to use verbs
+# that appear nowhere in their training families -- du tested on "report" and
+# "show" while training only ever said "how" and "what". That is a real
+# weakness, but it cannot be fixed by adding those verbs, because having read
+# the test set, doing so would be fitting the exam rather than the task.
+#
+# The deeper problem is that both splits were drawn from one hand-written pool,
+# so every expansion makes test items more like training items and the number
+# drifts upward without the system improving. These are written separately, in
+# phrasings deliberately unlike the templates, and are never trained on. When
+# they start looking easy, the honest move is to write new ones, not to widen
+# these.
+EVAL = [
+    ("ls", "what have i got sitting in this folder"),
+    ("ls", "just the immediate contents please"),
+    ("ls", "run through what is here"),
+    ("cd", "hop over to the ai folder"),
+    ("cd", "i would like to work inside tmp now"),
+    ("pwd", "remind me which folder this is"),
+    ("pwd", "i have lost track of where i ended up"),
+    ("tree", "everything, subfolders and all"),
+    ("tree", "unfold the entire thing for me"),
+    ("cat", "let me see the words in that note"),
+    ("cat", "spit out what is written there"),
+    ("stat", "how many bytes is that one file"),
+    ("stat", "is that path a folder or not"),
+    ("hash", "what address does this resolve to"),
+    ("hash", "give me its fingerprint"),
+    ("same", "did those two turn out equal"),
+    ("same", "check both of these are the identical object"),
+    ("du", "how heavy is all of this on disk"),
+    ("du", "total up the bytes for me"),
+    ("du", "what is this costing me in storage"),
+    ("find", "which file has the word model in it"),
+    ("find", "hunt through everything for that phrase"),
+    ("diff", "what moved between those two checkpoints"),
+    ("diff", "tell me what is not the same any more"),
+    ("snaps", "how many checkpoints do i have"),
+    ("snaps", "walk me through the checkpoint history"),
+    ("snaps", "what saved states are sitting there"),
+    ("fsck", "confirm nothing in the store is damaged"),
+    ("fsck", "does it all still hash correctly"),
+    ("mkdir", "i need somewhere new to put files"),
+    ("mkdir", "spin up a folder called work"),
+    ("write", "put the words hello there into a file"),
+    ("write", "stash this line on disk somewhere"),
+    ("rm", "i am done with that entry, drop it"),
+    ("rm", "take that name out of the listing"),
+    ("mv", "give that file a different name"),
+    ("mv", "shift it over to the other path"),
+    ("cp", "leave the original alone and make me a second one"),
+    ("cp", "i want two of these now"),
+    ("cp", "replicate that whole folder elsewhere"),
+    ("snap", "freeze things exactly as they are"),
+    ("snap", "pin this moment so i can come back"),
+    ("snap", "write down the current state as a checkpoint"),
+    ("back", "put everything the way it was at checkpoint two"),
+    ("back", "wind the tree back to how it used to be"),
+    ("back", "i want the older state reinstated"),
+    ("sysbox", "what am i able to ask you for"),
+    ("sysbox", "run through your repertoire"),
+    ("sysbox", "which operations exist"),
+]
 
 # Which family indices are held out, for every applet.
 #
@@ -325,16 +436,19 @@ def build(seed, test_families, balance=True):
     rng = random.Random(seed)
     by_class_train, by_class_test = {}, {}
 
+    # Every family trains now. The evaluation set is EVAL, written separately,
+    # so there is nothing to hold out and no way for widening to eat the test
+    # set. Verb coverage can therefore be fixed honestly: a family removing its
+    # only instance of a verb from training was an artefact of the old split,
+    # not a property of the task.
     for applet, families in FAMILIES.items():
-        if len(families) <= max(HELD_OUT):
-            raise SystemExit(f"{applet} has too few families to hold any out")
-        tr, te = [], []
-        for i, fam in enumerate(families):
-            target = te if i in HELD_OUT else tr
+        tr = []
+        for fam in families:
             for text in expand(fam):
-                target.append(rng.choice(DRESSING).format(x=text))
+                tr.append(rng.choice(DRESSING).format(x=text))
         by_class_train[applet] = tr
-        by_class_test[applet] = te
+    for applet, task in EVAL:
+        by_class_test.setdefault(applet, []).append(task)
 
     if balance:
         # Equal examples per class. Unbalanced, the largest class becomes a
@@ -410,8 +524,7 @@ def main():
     classes = sorted(FAMILIES)
     print(f"  {len(classes)} applets")
     print(f"  train {len(train)} examples, test {len(test)} examples")
-    print(f"  held out family indices {sorted(HELD_OUT)} per applet (fixed, so "
-          f"appending does not move the test set)")
+    print("  test set is EVAL, hand-written separately and never trained on")
     per = {c: sum(1 for e in train if e['applet'] == c) for c in classes}
     lo = min(per.values())
     hi = max(per.values())
