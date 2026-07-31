@@ -29,6 +29,31 @@ fn prompt() {
     console::set_color(WHITE);
 }
 
+/// Redraw the prompt after something else has printed over it.
+///
+/// A background task writing to the console leaves the cursor wherever its
+/// output ended, and the line the operator was typing scrolled away with it.
+/// This at least restores the prompt so the shell does not look dead.
+pub fn reprompt() {
+    prompt();
+}
+
+/// Refuse to touch the engine while the mind task owns it.
+///
+/// Both would hold `&mut Engine` from the same `Racy`, which is undefined
+/// behaviour rather than a mere race -- the flag is what makes the mind task
+/// safe at all.
+fn engine_free() -> bool {
+    if crate::ai::mind_busy() {
+        console::set_color(YELLOW);
+        kprintln!("  the mind is busy -- wait for it to finish");
+        console::set_color(WHITE);
+        false
+    } else {
+        true
+    }
+}
+
 /// Repaint the edited line and place the cursor.
 ///
 /// Deliberately console-only rather than `kprint!`: echoing every keystroke and
@@ -473,6 +498,25 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
                 _ => kprintln!("  usage: teach <applet> <task description>"),
             }
         }
+        "ctx" => {
+            let mut it = rest.splitn(2, ' ');
+            match (it.next().unwrap_or(""), it.next().unwrap_or("").trim()) {
+                ("save", name) if !name.is_empty() => match crate::ai::ctx_save(name) {
+                    Some(n) => kprintln!("  saved {} B to {}/{}", n, crate::ai::CTX_DIR, name),
+                    None => kprintln!("  could not save"),
+                },
+                ("load", name) if !name.is_empty() => match crate::ai::ctx_load(name) {
+                    Some(p) => kprintln!("  restored to position {}", p),
+                    None => kprintln!("  no such context, or it does not fit this model"),
+                },
+                _ => crate::ai::ctx_report(),
+            }
+        }
+        "cont" => {
+            let mut opts = crate::ai::GenOpts { resume: true, ..Default::default() };
+            opts.steps = 60;
+            crate::ai::generate(rest, &opts);
+        }
         "probe" => crate::ai::harness::probe_features(),
         "feature" => {
             use crate::ai::harness::{set_feature_mode, Feature};
@@ -489,6 +533,17 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
                 .unwrap_or(20);
             crate::ai::harness::train_report(epochs);
         }
+        "think" => {
+            if rest.is_empty() {
+                kprintln!("  usage: think <prompt>   (runs in the background)");
+            } else if crate::ai::think(rest) {
+                kprintln!("  queued -- the shell stays yours while it runs");
+            } else {
+                kprintln!("  a request is already pending");
+            }
+        }
+        "gen" if !engine_free() => {}
+        "cont" | "act" | "ctx" | "train" | "probe" | "zeroshot" if !engine_free() => {}
         "gen" => {
             // `gen -t 0 once upon a time` -- flags first, everything after is
             // the prompt verbatim, so it can contain spaces without quoting.

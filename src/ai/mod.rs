@@ -373,6 +373,13 @@ pub struct Engine {
     pub rng: sample::Rng,
     /// The part that is allowed to change. Everything above it is frozen.
     pub head: vocab::Head,
+    /// How far into the KV cache the live conversation has got. The cache
+    /// alone is not a mental state -- attention reads `0..pos`, so a cache
+    /// without its position is unusable.
+    pub pos: usize,
+    /// The last token emitted, so a resumed generation has something to feed
+    /// the model when no new prompt is supplied.
+    pub last_token: usize,
 }
 
 static ENGINE: Racy<Option<Engine>> = Racy::new(None);
@@ -466,7 +473,10 @@ pub fn init(model_blob: Option<Blob>, tok_blob: Option<Blob>) {
         c.param_count()
     );
 
-    unsafe { *ENGINE.get() = Some(Engine { model: m, tok, state, rng, head }) };
+    unsafe {
+        *ENGINE.get() =
+            Some(Engine { model: m, tok, state, rng, head, pos: 0, last_token: tokenizer::BOS })
+    };
 
     // The corpus lives in the namespace, so it is restored along with
     // everything else; only seed it when there is nothing there.
@@ -536,44 +546,61 @@ pub struct GenOpts {
     pub steps: usize,
     pub temperature: f32,
     pub topp: f32,
+    /// Continue from the live KV cache instead of starting a fresh one.
+    pub resume: bool,
+    /// Yield the CPU between tokens. Set by the mind task so the shell keeps
+    /// running while it thinks; left clear for a foreground `gen`, where
+    /// yielding would only add latency.
+    pub yielding: bool,
 }
 
 impl Default for GenOpts {
     fn default() -> Self {
         // llama2.c's defaults. 0.9 top-p keeps a 260K model from wandering.
-        Self { steps: 256, temperature: 1.0, topp: 0.9 }
+        Self { steps: 256, temperature: 1.0, topp: 0.9, resume: false, yielding: false }
     }
 }
 
 /// Run the decode loop, printing as it goes.
 pub fn generate(prompt: &str, opts: &GenOpts) {
     let ok = with_engine(|e| {
-        let prompt_tokens = e.tok.encode(prompt, true, false);
-        if prompt_tokens.is_empty() {
-            return false;
-        }
+        // Resuming means picking up the existing cache rather than rebuilding
+        // one, so no BOS: that token means "a new story begins", and inserting
+        // it mid-conversation tells the model to forget what it was doing.
+        let resuming = opts.resume && e.pos > 0;
+        let prompt_tokens = e.tok.encode(prompt, !resuming, false);
+        let mut pos = if resuming { e.pos } else { 0 };
+        let mut token = if prompt_tokens.is_empty() {
+            if !resuming {
+                return false;
+            }
+            e.last_token
+        } else {
+            prompt_tokens[0]
+        };
 
-        let limit = opts.steps.min(e.model.cfg.seq_len);
-        let mut token = prompt_tokens[0];
-        let mut pos = 0usize;
+        let cap = e.model.cfg.seq_len;
         let mut generated = 0usize;
+        let mut fed = 0usize;
         let mut pending: Vec<u8> = Vec::new();
 
         let t0 = crate::time::rdtsc();
         console::set_color(LTCYAN);
 
-        while pos < limit {
+        while pos < cap && generated < opts.steps {
             e.model.forward(&mut e.state, token, pos);
+            pos += 1;
+            fed += 1;
 
-            // While the prompt lasts we already know the answer; the forward
-            // pass is still needed, because it is what fills the KV cache.
-            let next = if pos + 1 < prompt_tokens.len() {
-                prompt_tokens[pos + 1]
+            // While the prompt lasts we already know the next token; the
+            // forward pass still had to happen, because it is what fills the
+            // KV cache that everything after depends on.
+            let next = if fed < prompt_tokens.len() {
+                prompt_tokens[fed]
             } else {
                 generated += 1;
                 sample::sample(&mut e.state.logits, opts.temperature, opts.topp, &mut e.rng)
             };
-            pos += 1;
 
             // llama2.c's training data separates stories with BOS, so the model
             // emits it to mean "the end".
@@ -584,7 +611,16 @@ pub fn generate(prompt: &str, opts: &GenOpts) {
             e.tok.append_piece(token, next, &mut pending);
             emit(&mut pending);
             token = next;
+
+            if opts.yielding {
+                crate::task::yield_now();
+            }
         }
+
+        // The conversation is now here. Saving a context after this captures
+        // exactly what was just produced.
+        e.pos = pos;
+        e.last_token = token;
 
         emit(&mut pending);
         let elapsed = crate::time::rdtsc() - t0;
@@ -620,4 +656,186 @@ pub fn generate(prompt: &str, opts: &GenOpts) {
         }
         Some(true) => {}
     }
+}
+
+// --- context as an addressable object -----------------------------------
+//
+// The KV cache is the model's working memory: everything it has attended to
+// this conversation, and the only thing that distinguishes one mental state
+// from another. On a hosted runtime it is anonymous heap inside a process, and
+// it dies with that process.
+//
+// Here it is bytes we own, and there is already a content-addressed store
+// downstairs. Writing it into the namespace therefore costs one serialisation
+// and inherits everything sysbox can do -- so a conversation forks by copying
+// a hash (O(1) at any size), versions with `snap`, and rolls back with `back`.
+// None of that machinery had to learn what attention is.
+
+pub const CTX_DIR: &str = "/ai/ctx";
+
+/// Position and RNG travel with the cache.
+///
+/// Without the RNG a restore would put the model in the right state but on a
+/// different branch of the random stream, so "load the same context twice and
+/// continue" would diverge -- and the exactness of the restore would be
+/// unfalsifiable. With it, that is a test.
+/// Trailer: RNG state, then the last token emitted.
+const CTX_TRAILER: usize = 16;
+
+fn ctx_blob(e: &Engine) -> Vec<u8> {
+    let mut out = e.state.export_kv(&e.model.cfg, e.pos);
+    out.extend_from_slice(&e.rng.state().to_le_bytes());
+    // `last_token` is as much a part of the state as the cache is: it is what
+    // gets fed at `pos`, so restoring without it resumes from the right memory
+    // with the wrong next word. The first version omitted it, and continuing
+    // twice from one restored context produced two different stories -- which
+    // is exactly the check that caught it.
+    out.extend_from_slice(&(e.last_token as u64).to_le_bytes());
+    out
+}
+
+pub fn ctx_save(name: &str) -> Option<usize> {
+    with_engine(|e| {
+        let blob = ctx_blob(e);
+        let n = blob.len();
+        let mut path = alloc::string::String::from(CTX_DIR);
+        path.push('/');
+        path.push_str(name);
+        if crate::sysbox::write_blob(&path, blob) {
+            Some(n)
+        } else {
+            None
+        }
+    })?
+}
+
+pub fn ctx_load(name: &str) -> Option<usize> {
+    let mut path = alloc::string::String::from(CTX_DIR);
+    path.push('/');
+    path.push_str(name);
+    let blob = crate::sysbox::read_blob(&path)?;
+    if blob.len() < CTX_TRAILER {
+        return None;
+    }
+    let split = blob.len() - CTX_TRAILER;
+    with_engine(|e| {
+        let cfg = e.model.cfg;
+        let pos = e.state.import_kv(&cfg, &blob[..split])?;
+        let mut word = [0u8; 8];
+        word.copy_from_slice(&blob[split..split + 8]);
+        e.rng.set_state(u64::from_le_bytes(word));
+        word.copy_from_slice(&blob[split + 8..]);
+        e.last_token = u64::from_le_bytes(word) as usize;
+        e.pos = pos;
+        Some(pos)
+    })?
+}
+
+pub fn ctx_report() {
+    console::set_color(YELLOW);
+    kprintln!("[ctx]");
+    console::set_color(LTGRAY);
+    let live = with_engine(|e| (e.pos, e.model.cfg.seq_len));
+    match live {
+        None => {
+            kprintln!("  no model loaded");
+            return;
+        }
+        Some((pos, seq)) => kprintln!("  live position {} of {}", pos, seq),
+    }
+    let saved = crate::sysbox::children(CTX_DIR);
+    if saved.is_empty() {
+        kprintln!("  nothing saved -- 'ctx save <name>'");
+        return;
+    }
+    for name in saved {
+        let mut path = alloc::string::String::from(CTX_DIR);
+        path.push('/');
+        path.push_str(&name);
+        let n = crate::sysbox::read_blob(&path).map(|b| b.len()).unwrap_or(0);
+        kprintln!("  {:12} {} B", name, n);
+    }
+    console::set_color(LTGRAY);
+    kprintln!("  these are ordinary objects: 'cp' one to fork it, 'same' to compare");
+}
+
+// --- the model as a resident task ---------------------------------------
+//
+// Until now generation was a shell command: type `gen`, and nothing else in
+// the system runs until it finishes. That is the shape a hosted runtime is
+// forced into, where inference is a call into a library and the caller blocks.
+//
+// There is a scheduler here, and `task.rs` already saves extended state across
+// preemption -- that was fixed for exactly this. So the model can be a task
+// like any other: resident, scheduled, yielding between tokens, with the shell
+// staying responsive while it thinks.
+//
+// Concurrency is handled by a flag rather than a lock, and it is worth being
+// explicit about why that is sufficient and where it stops being so. The
+// engine is behind `Racy`, so two tasks holding `&mut Engine` at once is
+// undefined behaviour, not merely a race. `BUSY` is claimed with a
+// compare-exchange before the mind touches the engine and every other entry
+// point refuses while it is set, so the two can never overlap. That argument
+// depends on there being one core. When SMP arrives this needs a real lock,
+// which is exactly what `Racy` exists to make greppable.
+
+use core::sync::atomic::AtomicBool;
+
+static REQUEST: Racy<Option<alloc::string::String>> = Racy::new(None);
+static BUSY: AtomicBool = AtomicBool::new(false);
+
+pub fn mind_busy() -> bool {
+    BUSY.load(Ordering::Acquire)
+}
+
+/// Queue a prompt for the mind task. Returns false if one is already pending.
+pub fn think(prompt: &str) -> bool {
+    crate::cpu::without_interrupts(|| unsafe {
+        if REQUEST.get().is_some() {
+            return false;
+        }
+        *REQUEST.get() = Some(alloc::string::String::from(prompt));
+        true
+    })
+}
+
+/// The resident mind. Spawned once; never returns.
+pub fn mind_task() {
+    loop {
+        // Taking the request has to be atomic against the shell posting one,
+        // or a request can be dropped in the window between the test and the
+        // take.
+        let req = crate::cpu::without_interrupts(|| unsafe { REQUEST.get().take() });
+
+        let Some(prompt) = req else {
+            crate::task::yield_now();
+            continue;
+        };
+
+        if BUSY
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            continue;
+        }
+
+        console::set_color(YELLOW);
+        kprintln!("\n[mind] thinking...");
+        console::set_color(LTGRAY);
+
+        let opts =
+            GenOpts { steps: 48, temperature: 0.9, topp: 0.9, resume: true, yielding: true };
+        generate(&prompt, &opts);
+
+        console::set_color(YELLOW);
+        kprintln!("[mind] done");
+        console::set_color(LTGRAY);
+        crate::shell::reprompt();
+
+        BUSY.store(false, Ordering::Release);
+    }
+}
+
+pub fn spawn_mind() -> bool {
+    crate::task::spawn("mind", mind_task).is_some()
 }

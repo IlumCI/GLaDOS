@@ -20,6 +20,18 @@ impl Rng {
         Self(if seed == 0 { 0x853c_49e6_748f_ea9b } else { seed })
     }
 
+    /// Exposed so a saved context can carry it. Restoring the attention state
+    /// without the random stream would put the model in the right place on a
+    /// different branch, and "load the same context twice and continue" would
+    /// diverge -- which would make the exactness of a restore untestable.
+    pub fn state(&self) -> u64 {
+        self.0
+    }
+
+    pub fn set_state(&mut self, s: u64) {
+        self.0 = if s == 0 { 0x853c_49e6_748f_ea9b } else { s };
+    }
+
     pub fn next_u32(&mut self) -> u32 {
         self.0 ^= self.0 >> 12;
         self.0 ^= self.0 << 25;

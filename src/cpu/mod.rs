@@ -79,6 +79,24 @@ pub fn enable_interrupts() {
     unsafe { asm!("sti", options(nomem, nostack)) };
 }
 
+/// Run `f` with interrupts masked, restoring whatever they were before.
+///
+/// Restoring rather than unconditionally enabling matters: this gets called
+/// from places that are already inside a masked region, and an unconditional
+/// `sti` on the way out would quietly re-enable preemption in the middle of
+/// someone else's critical section.
+pub fn without_interrupts<R>(f: impl FnOnce() -> R) -> R {
+    let flags: u64;
+    unsafe { asm!("pushfq; pop {}", out(reg) flags, options(preserves_flags)) };
+    let was_enabled = flags & (1 << 9) != 0; // RFLAGS.IF
+    disable_interrupts();
+    let out = f();
+    if was_enabled {
+        enable_interrupts();
+    }
+    out
+}
+
 /// Raw CPUID.
 ///
 /// The `xchg` dance around `rbx` is not optional: LLVM reserves that register

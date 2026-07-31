@@ -269,9 +269,13 @@ pub fn is_ready() -> bool {
 // somebody has to remember to keep.
 
 pub fn write_text(path: &str, text: &str) -> bool {
+    write_blob(path, text.as_bytes().to_vec())
+}
+
+pub fn write_blob(path: &str, data: Vec<u8>) -> bool {
     with(|s| {
         let p = parse(&s.cwd, path);
-        tree::put(&mut s.root, &p, Node::Blob(text.as_bytes().to_vec())).is_ok()
+        tree::put(&mut s.root, &p, Node::Blob(data)).is_ok()
     })
     .unwrap_or(false)
 }

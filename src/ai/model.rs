@@ -168,6 +168,72 @@ impl State {
         }
     }
 
+    /// Serialise the *used* prefix of the KV cache.
+    ///
+    /// This is the model's working memory made into an ordinary byte string,
+    /// which is the whole trick: once it is bytes, the content-addressed store
+    /// already knows what to do with it. Hashing, O(1) copies, snapshots and
+    /// rollback all apply to the model's attention state for free, because
+    /// none of that machinery cares what the bytes mean.
+    ///
+    /// Only positions `0..pos` are written. The cache is allocated for the full
+    /// `seq_len`, but attention never reads past the current position, so the
+    /// tail is uninitialised noise -- including it would make two identical
+    /// mental states hash differently depending on what had been in the buffer
+    /// before, which would silently destroy every property above.
+    pub fn export_kv(&self, cfg: &Config, pos: usize) -> Vec<u8> {
+        let kv = cfg.kv_dim();
+        let pos = pos.min(cfg.seq_len);
+        let mut out = Vec::new();
+        out.extend_from_slice(KV_MAGIC);
+        out.extend_from_slice(&(cfg.n_layers as u32).to_le_bytes());
+        out.extend_from_slice(&(kv as u32).to_le_bytes());
+        out.extend_from_slice(&(pos as u32).to_le_bytes());
+
+        for src in [&self.key_cache, &self.value_cache] {
+            for l in 0..cfg.n_layers {
+                let loff = l * cfg.seq_len * kv;
+                for v in &src[loff..loff + pos * kv] {
+                    out.extend_from_slice(&v.to_le_bytes());
+                }
+            }
+        }
+        out
+    }
+
+    /// Restore a cache written by `export_kv`. Returns the position it held.
+    pub fn import_kv(&mut self, cfg: &Config, data: &[u8]) -> Option<usize> {
+        if data.len() < 20 || &data[0..8] != KV_MAGIC {
+            return None;
+        }
+        let g = |o: usize| u32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]) as usize;
+        let (layers, kv, pos) = (g(8), g(12), g(16));
+        // A cache from a different model would restore as plausible-looking
+        // garbage rather than failing, so the shape is checked rather than
+        // trusted.
+        if layers != cfg.n_layers || kv != cfg.kv_dim() || pos > cfg.seq_len {
+            return None;
+        }
+        let need = 20 + 2 * layers * pos * kv * 4;
+        if data.len() < need {
+            return None;
+        }
+
+        let mut o = 20;
+        for which in 0..2 {
+            for l in 0..layers {
+                let loff = l * cfg.seq_len * kv;
+                let dst = if which == 0 { &mut self.key_cache } else { &mut self.value_cache };
+                for i in 0..pos * kv {
+                    dst[loff + i] =
+                        f32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]);
+                    o += 4;
+                }
+            }
+        }
+        Some(pos)
+    }
+
     /// The final normed hidden state -- exactly what the classifier sees.
     ///
     /// Only meaningful immediately after `forward`. This is the feature vector
@@ -189,6 +255,8 @@ impl State {
 
 /// Size of the llama2.c legacy header: seven i32.
 pub const HEADER_BYTES: usize = 28;
+
+const KV_MAGIC: &[u8; 8] = b"GLADOSKV";
 
 #[derive(Debug, Clone, Copy)]
 pub enum LoadError {

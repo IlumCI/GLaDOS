@@ -311,6 +311,13 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     // rather than off the ESP.
     ai::init(boot.model, boot.tokenizer);
 
+    // The model becomes a resident task rather than a blocking command. This
+    // has to come after ai::init: the task starts running as soon as it is
+    // spawned, and it expects an engine to exist.
+    if ai::engine_ready() && ai::spawn_mind() {
+        kprintln!("  mind spawned -- 'think <prompt>' runs in the background");
+    }
+
     shell::run(&boot, &acpi);
 }
 
