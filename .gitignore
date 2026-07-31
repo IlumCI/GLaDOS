@@ -1,10 +1,15 @@
 /target
 /esp
 /.qemu
-/tools
 *.log
 *.fd
 
-# Model weights: fetched, not authored. See scripts/fetch-model.ps1
+# Model weights and converter artifacts: fetched or generated, never authored.
+# The scripts that produce them ARE tracked -- tools/convert.py and
+# tools/tokenizer.py -- so all of it is reproducible from the repo plus a
+# download. `/tools` used to be ignored wholesale, from when it was scratch
+# space, which would have silently dropped both converters.
 esp/GLADOS/
-
+tools/venv/
+tools/hf/
+tools/out/
