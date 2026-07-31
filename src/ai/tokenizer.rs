@@ -15,6 +15,8 @@ use alloc::vec::Vec;
 use core::cmp::Ordering;
 
 /// Sentencepiece is trained here with `unk_id=0, bos_id=1, eos_id=2`.
+/// Unused directly, but it is what `BYTE_FALLBACK_BASE` counts from.
+#[allow(dead_code)]
 pub const UNK: usize = 0;
 pub const BOS: usize = 1;
 pub const EOS: usize = 2;
@@ -186,10 +188,6 @@ impl Tokenizer {
 
     pub fn eos(&self) -> usize {
         self.eos_id
-    }
-
-    pub fn is_v2(&self) -> bool {
-        self.v2
     }
 
     pub fn vocab_size(&self) -> usize {

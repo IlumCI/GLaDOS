@@ -11,7 +11,7 @@ pub mod tokenizer;
 pub mod vocab;
 pub mod weights;
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 static FPU_CHECKS: AtomicU64 = AtomicU64::new(0);
 static FPU_ERRORS: AtomicU64 = AtomicU64::new(0);
@@ -396,8 +396,33 @@ pub fn engine_ready() -> bool {
     unsafe { ENGINE.get().is_some() }
 }
 
+/// Which task owns the engine while the mind is running.
+static MIND_TASK: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+/// Borrow the engine, or refuse if another task already holds it.
+///
+/// This is the only place the exclusion is enforced, and it has to be, because
+/// the previous attempt enforced it at the call sites and silently did not.
+/// The shell had a list of commands to refuse while the mind was busy, written
+/// as a guarded match arm placed *after* the arms it was guarding -- so it was
+/// unreachable, the compiler said so as "unreachable pattern", and every one of
+/// `gen`, `act`, `ctx`, `fit`, `route` and `logits` could take a second
+/// `&mut Engine` while the mind held one. That is undefined behaviour rather
+/// than a race, and no amount of care at call sites would have kept a list like
+/// that correct as commands were added.
+///
+/// Checking the task id rather than a flag is what lets the mind keep working
+/// while everyone else is turned away.
 pub fn with_engine<R>(f: impl FnOnce(&mut Engine) -> R) -> Option<R> {
+    if mind_busy() && crate::task::current() != MIND_TASK.load(Ordering::Acquire) {
+        return None;
+    }
     unsafe { ENGINE.get().as_mut().map(f) }
+}
+
+/// True when the engine is unavailable because the mind has it.
+pub fn engine_held_by_mind() -> bool {
+    mind_busy() && crate::task::current() != MIND_TASK.load(Ordering::Acquire)
 }
 
 /// Build the engine from whatever the firmware managed to read off the ESP.
@@ -533,6 +558,18 @@ pub fn init(model_blob: Option<Blob>, tok_blob: Option<Blob>) {
     kprintln!("[selftest] constrained decoding:");
     console::set_color(LTGRAY);
     harness::selftest();
+
+    console::set_color(LTGREEN);
+    kprintln!("\n[selftest] linear probe:");
+    console::set_color(LTGRAY);
+    if probe::selftest() {
+        console::set_color(LTGREEN);
+        kprintln!("  ok   cholesky recovers a known separable fit, and refuses a singular one");
+    } else {
+        console::set_color(LTRED);
+        kprintln!("  FAIL the probe does not solve a problem with a known answer");
+    }
+    console::set_color(LTGRAY);
 }
 
 /// Write raw token bytes to the console.
@@ -903,7 +940,16 @@ pub fn mind_task() {
 }
 
 pub fn spawn_mind() -> bool {
-    crate::task::spawn("mind", mind_task).is_some()
+    match crate::task::spawn("mind", mind_task) {
+        Some(id) => {
+            // Recorded before the task can possibly claim BUSY, so the
+            // ownership test in `with_engine` is never consulted against a
+            // stale id.
+            MIND_TASK.store(id, Ordering::Release);
+            true
+        }
+        None => false,
+    }
 }
 
 /// Run a raw token sequence and print the top logits.

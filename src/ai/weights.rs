@@ -35,18 +35,6 @@ pub fn f32_at(bytes: &[u8], i: usize) -> f32 {
 }
 
 impl Mat<'_> {
-    pub fn rows(&self) -> usize {
-        match self {
-            Mat::F32 { rows, .. } | Mat::Q8 { rows, .. } => *rows,
-        }
-    }
-
-    pub fn cols(&self) -> usize {
-        match self {
-            Mat::F32 { cols, .. } | Mat::Q8 { cols, .. } => *cols,
-        }
-    }
-
     /// `out = self * x`. `out` must have `rows` entries, `x` must have `cols`.
     pub fn matvec(&self, out: &mut [f32], x: &[f32]) {
         match self {
@@ -123,30 +111,30 @@ pub unsafe fn q8_matvec_avx2(
 
     for r in 0..rows {
         let row = &data[r * cols..(r + 1) * cols];
-        let mut acc0 = unsafe { _mm256_setzero_ps() };
-        let mut acc1 = unsafe { _mm256_setzero_ps() };
+        let mut acc0 = _mm256_setzero_ps();
+        let mut acc1 = _mm256_setzero_ps();
 
         let chunks = cols / 16;
         for c in 0..chunks {
             let base = c * 16;
-            let packed = unsafe { _mm_loadu_si128(row.as_ptr().add(base) as *const __m128i) };
+            let packed = _mm_loadu_si128(row.as_ptr().add(base) as *const __m128i);
             // Sign-extend: cvtepi8_epi32 takes the low 8 bytes, so the high
             // half is shifted down first. Using an unsigned widen here would
             // turn every negative weight into a large positive one, which
             // looks like a plausible model that generates nonsense.
-            let lo = unsafe { _mm256_cvtepi8_epi32(packed) };
-            let hi = unsafe { _mm256_cvtepi8_epi32(_mm_srli_si128(packed, 8)) };
-            let lof = unsafe { _mm256_cvtepi32_ps(lo) };
-            let hif = unsafe { _mm256_cvtepi32_ps(hi) };
-            let x0 = unsafe { _mm256_loadu_ps(x.as_ptr().add(base)) };
-            let x1 = unsafe { _mm256_loadu_ps(x.as_ptr().add(base + 8)) };
-            acc0 = unsafe { _mm256_fmadd_ps(lof, x0, acc0) };
-            acc1 = unsafe { _mm256_fmadd_ps(hif, x1, acc1) };
+            let lo = _mm256_cvtepi8_epi32(packed);
+            let hi = _mm256_cvtepi8_epi32(_mm_srli_si128(packed, 8));
+            let lof = _mm256_cvtepi32_ps(lo);
+            let hif = _mm256_cvtepi32_ps(hi);
+            let x0 = _mm256_loadu_ps(x.as_ptr().add(base));
+            let x1 = _mm256_loadu_ps(x.as_ptr().add(base + 8));
+            acc0 = _mm256_fmadd_ps(lof, x0, acc0);
+            acc1 = _mm256_fmadd_ps(hif, x1, acc1);
         }
 
-        let sum = unsafe { _mm256_add_ps(acc0, acc1) };
+        let sum = _mm256_add_ps(acc0, acc1);
         let mut lanes = [0.0f32; 8];
-        unsafe { _mm256_storeu_ps(lanes.as_mut_ptr(), sum) };
+        _mm256_storeu_ps(lanes.as_mut_ptr(), sum);
         let mut total = lanes.iter().sum::<f32>();
 
         // Ragged tail. Every dimension in the models here is a multiple of 16,

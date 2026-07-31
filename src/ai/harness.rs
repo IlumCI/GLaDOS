@@ -164,6 +164,11 @@ pub fn choose(task: &str, trust: Trust, temperature: f32) -> Option<Choice> {
                         .find(|a| a.name == name)
                         .map(|a| a.mutates)
                         .unwrap_or(false);
+                    // On the way out of the success path too, not just the
+                    // failure one -- the cache is equally overwritten either
+                    // way, and only invalidating on failure would leave the
+                    // corruption in place exactly when it went well.
+                    invalidate_conversation(e);
                     return Some(Choice { applet: name, mutates, steps });
                 }
 
@@ -171,6 +176,7 @@ pub fn choose(task: &str, trust: Trust, temperature: f32) -> Option<Choice> {
                 e.model.forward(&mut e.state, next, pos);
                 pos += 1;
             }
+            invalidate_conversation(e);
             None
         })?
     })?
@@ -351,16 +357,7 @@ pub fn selftest() -> bool {
 // applet is simply not among the rows scored, so it has no logit and cannot be
 // sampled. The guarantee does not weaken by dropping the grammar.
 
-use super::vocab::{self, Head};
-
-fn allowed_indices(head: &Head, trust: Trust) -> Vec<usize> {
-    sysbox::APPLETS
-        .iter()
-        .enumerate()
-        .filter(|(_, a)| trust.admits(a))
-        .filter_map(|(i, _)| head.index_of(sysbox::APPLETS[i].name))
-        .collect()
-}
+use super::vocab;
 
 /// Which representation of a task the head classifies.
 ///
@@ -434,7 +431,26 @@ fn feature_hidden(e: &mut super::Engine, task: &str) -> Option<Vec<f32>> {
         e.model.forward(&mut e.state, t, pos);
         pos += 1;
     }
-    Some(e.state.hidden().to_vec())
+    let out = e.state.hidden().to_vec();
+    invalidate_conversation(e);
+    Some(out)
+}
+
+/// Mark the live conversation as gone.
+///
+/// Anything that runs a prompt from position zero overwrites the KV cache for
+/// those positions, and `e.pos` is then a promise the cache cannot keep: a
+/// `cont` would resume from entries belonging to somebody else's prompt and
+/// produce fluent continuations of a sentence that was never written. Resetting
+/// makes the next generation start clean, which is the honest outcome, and is
+/// cheap next to snapshotting a cache purely to restore something the operator
+/// was probably not still using.
+///
+/// Only reachable with `feature hidden`; the default pooled features never
+/// touch the model at all.
+fn invalidate_conversation(e: &mut super::Engine) {
+    e.pos = 0;
+    e.last_token = super::tokenizer::BOS;
 }
 
 /// Shorter than the grammar prompt: with applet tokens there is no need to
@@ -445,31 +461,6 @@ fn prompt_for_task(task: &str) -> String {
     s.push_str(task);
     s.push_str(". Tool:");
     s
-}
-
-pub fn choose_native(task: &str, trust: Trust, temperature: f32) -> Option<Choice> {
-    with_engine(|e| {
-        let allowed = allowed_indices(&e.head, trust);
-        if allowed.is_empty() {
-            return None;
-        }
-        let x = feature(e, task)?;
-        let logits = e.head.logits(&x, &allowed);
-        let slot = sample::sample_among(
-            &logits,
-            &(0..logits.len() as u32).collect::<Vec<u32>>(),
-            temperature,
-            0.0,
-            &mut e.rng,
-        )?;
-        let name = e.head.name(allowed[slot]);
-        let mutates = sysbox::APPLETS
-            .iter()
-            .find(|a| a.name == name)
-            .map(|a| a.mutates)
-            .unwrap_or(false);
-        Some(Choice { applet: name, mutates, steps: 1 })
-    })?
 }
 
 // --- training -----------------------------------------------------------
@@ -493,35 +484,6 @@ pub struct TrainReport {
 fn is_held_out(i: usize) -> bool {
     let seed = super::corpus::SEED.len();
     i >= super::corpus::SEED_TRAIN && i < seed
-}
-
-fn accuracy(e: &mut super::Engine, examples: &[vocab::Example], held: bool) -> f32 {
-    let all: Vec<usize> = (0..e.head.len()).collect();
-    let mut right = 0usize;
-    let mut total = 0usize;
-    for (i, ex) in examples.iter().enumerate() {
-        if is_held_out(i) != held {
-            continue;
-        }
-        let Some(target) = e.head.index_of(&ex.applet) else { continue };
-        let Some(x) = feature(e, &ex.task) else { continue };
-        let logits = e.head.logits(&x, &all);
-        let mut best = 0usize;
-        for (j, l) in logits.iter().enumerate() {
-            if *l > logits[best] {
-                best = j;
-            }
-        }
-        total += 1;
-        if all[best] == target {
-            right += 1;
-        }
-    }
-    if total == 0 {
-        0.0
-    } else {
-        right as f32 / total as f32
-    }
 }
 
 pub fn train(epochs: usize, lr: f32) -> Option<TrainReport> {

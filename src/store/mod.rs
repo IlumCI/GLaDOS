@@ -43,11 +43,27 @@ pub fn init() -> Result<(u64, u64), InitError> {
     }
     let (start, blocks) = cas::find_store_region(MIN_REGION_BLOCKS).ok_or(InitError::NoRoom)?;
 
-    crate::dev::nvme::unlock_writes(0xD15EA5E);
+    // Check before unlocking, not after. `format` re-checks internally, but it
+    // needs writes already enabled to lay down a superblock -- so unlocking
+    // first meant a region that failed the check returned an error with the
+    // disk left writable. Verifying here keeps the unlock from happening at all
+    // in the case that matters most.
+    cas::verify_region_safe(start, blocks).map_err(InitError::Store)?;
 
-    let s = cas::Store::format(start, blocks).map_err(InitError::Store)?;
-    unsafe { *STORE.get() = Some(s) };
-    Ok((start, blocks))
+    crate::dev::nvme::unlock_writes(0xD15EA5E);
+    match cas::Store::format(start, blocks) {
+        Ok(s) => {
+            unsafe { *STORE.get() = Some(s) };
+            Ok((start, blocks))
+        }
+        Err(e) => {
+            // Any other failure -- I/O, a short region -- puts the lock back
+            // too. Leaving it open on the way out of an error path is how a
+            // safety mechanism becomes decorative.
+            crate::dev::nvme::lock_writes();
+            Err(InitError::Store(e))
+        }
+    }
 }
 
 /// Allow writes to an already-mounted store.

@@ -38,19 +38,17 @@ pub fn reprompt() {
     prompt();
 }
 
-/// Refuse to touch the engine while the mind task owns it.
+/// Say why a command did nothing, when the mind holds the engine.
 ///
-/// Both would hold `&mut Engine` from the same `Racy`, which is undefined
-/// behaviour rather than a mere race -- the flag is what makes the mind task
-/// safe at all.
-fn engine_free() -> bool {
-    if crate::ai::mind_busy() {
+/// The refusal itself is enforced inside `with_engine`, not here. This existed
+/// as a guarded match arm sitting *after* the arms it guarded, so it was
+/// unreachable and protected nothing; the compiler had been reporting it as an
+/// unreachable pattern the whole time.
+fn note_if_mind_busy() {
+    if crate::ai::engine_held_by_mind() {
         console::set_color(YELLOW);
-        kprintln!("  the mind is busy -- wait for it to finish");
+        kprintln!("  the mind is using the model -- try again when it finishes");
         console::set_color(WHITE);
-        false
-    } else {
-        true
     }
 }
 
@@ -127,6 +125,10 @@ pub fn run(boot: &BootInfo, acpi: &Option<Acpi>) -> ! {
                 // command's output does not silently disable it forever.
                 console::resume_pacing();
                 execute(trimmed, boot, acpi, &mut interp);
+                // Anything needing the model will have quietly done nothing if
+                // the mind had it; say so once, here, rather than at each of a
+                // dozen call sites that would drift out of step.
+                note_if_mind_busy();
 
                 line.clear();
                 cursor = 0;
@@ -579,8 +581,6 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
                 kprintln!("  a request is already pending");
             }
         }
-        "gen" if !engine_free() => {}
-        "cont" | "act" | "ctx" | "train" | "probe" | "zeroshot" if !engine_free() => {}
         "gen" => {
             // `gen -t 0 once upon a time` -- flags first, everything after is
             // the prompt verbatim, so it can contain spaces without quoting.

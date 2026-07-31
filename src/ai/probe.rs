@@ -88,10 +88,6 @@ fn cholesky_solve(l: &[f32], n: usize, b: &mut [f32]) {
 }
 
 impl Probe {
-    pub fn classes(&self) -> usize {
-        self.classes
-    }
-
     pub fn params(&self) -> usize {
         self.w.len() + self.mean.len()
     }
@@ -205,4 +201,103 @@ impl Probe {
         }
         best
     }
+}
+
+// --- selftest -----------------------------------------------------------
+
+/// Fit a problem whose answer is known, and check it is recovered.
+///
+/// The probe has been verified so far only by agreeing with numpy on the real
+/// corpus, which is a good check but an external one -- it cannot run on the
+/// machine, and it cannot notice a regression introduced later. Cholesky is
+/// exactly the kind of routine that fails quietly: a transposed index or a
+/// missed subtraction leaves it producing plausible numbers and slightly worse
+/// routing, which looks like the corpus being hard.
+///
+/// So: classes placed on distinct axes, separated far above the noise. A
+/// correct solver recovers that perfectly. A subtly wrong one does not.
+pub fn selftest() -> bool {
+    use super::sample::Rng;
+
+    let mut rng = Rng::new(0x5EED_1234);
+    let dim = 24usize;
+    let classes = 6usize;
+    let per = 8usize;
+
+    let mut features = Vec::new();
+    let mut labels = Vec::new();
+    for c in 0..classes {
+        for _ in 0..per {
+            let mut x = vec![0.0f32; dim];
+            for (j, v) in x.iter_mut().enumerate() {
+                // Noise at 0.1 against a signal of 1.0, so the classes are
+                // separable but the fit is not trivially reading one exact
+                // value.
+                *v = (rng.next_f32() - 0.5) * 0.2;
+                if j == c {
+                    *v += 1.0;
+                }
+            }
+            features.push(x);
+            labels.push(c);
+        }
+    }
+
+    let Some(p) = Probe::fit(&features, &labels, classes, 1.0) else {
+        return false;
+    };
+
+    let mut right = 0usize;
+    for (x, y) in features.iter().zip(labels.iter()) {
+        if p.predict(x) == *y {
+            right += 1;
+        }
+    }
+    if right != features.len() {
+        return false;
+    }
+
+    // Unseen points from the same generator. Fitting the training set is not
+    // the property that matters; this is.
+    let mut held = 0usize;
+    for c in 0..classes {
+        let mut x = vec![0.0f32; dim];
+        for (j, v) in x.iter_mut().enumerate() {
+            *v = (rng.next_f32() - 0.5) * 0.2;
+            if j == c {
+                *v += 1.0;
+            }
+        }
+        if p.predict(&x) == c {
+            held += 1;
+        }
+    }
+    if held != classes {
+        return false;
+    }
+
+    // A degenerate fit must be refused rather than answered. Identical
+    // features make A'A singular, and only the ridge term keeps it invertible
+    // -- with lambda at zero the factorisation must fail rather than return
+    // whatever the arithmetic happens to produce.
+    let flat: Vec<Vec<f32>> = (0..8).map(|_| vec![1.0f32; dim]).collect();
+    let flat_labels: Vec<usize> = (0..8).map(|i| i % classes).collect();
+    if Probe::fit(&flat, &flat_labels, classes, 0.0).is_some() {
+        return false;
+    }
+    // The same data with regularisation is solvable -- it just cannot
+    // discriminate, which is a different thing from being broken.
+    if Probe::fit(&flat, &flat_labels, classes, 1.0).is_none() {
+        return false;
+    }
+
+    // Mismatched shapes must be rejected, not indexed into.
+    if Probe::fit(&[vec![1.0, 2.0], vec![1.0]], &[0, 1], 2, 1.0).is_some() {
+        return false;
+    }
+    if Probe::fit(&features, &[classes + 5; 48], classes, 1.0).is_some() {
+        return false;
+    }
+
+    true
 }

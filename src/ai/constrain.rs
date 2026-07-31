@@ -98,11 +98,6 @@ impl<'a> Cursor<'a> {
         Self { grammar, produced: Vec::new(), started: false }
     }
 
-    /// The content decoded so far, with leading whitespace removed.
-    pub fn text(&self) -> &[u8] {
-        &self.produced
-    }
-
     /// Strip one leading space from the first piece of a decode.
     ///
     /// Sentencepiece emits the space as its own token, so tolerating

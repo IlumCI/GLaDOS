@@ -305,10 +305,6 @@ impl Head {
         }
     }
 
-    /// Cosine similarity between two effective rows.
-    pub fn similarity(&self, a: usize, b: usize) -> f32 {
-        cosine(&self.row(a), &self.row(b))
-    }
 }
 
 pub fn dot(a: &[f32], b: &[f32]) -> f32 {
@@ -377,48 +373,3 @@ pub fn examples() -> Vec<Example> {
     out
 }
 
-/// A starting corpus, so training has something before anyone has typed
-/// anything. Deliberately obvious mappings -- these are what a competent model
-/// would get right unprompted.
-pub const SEED: &[(&str, &str)] = &[
-    ("ls", "list the files"),
-    ("ls", "what is in this directory"),
-    ("ls", "show me the contents of the folder"),
-    ("cat", "read the readme"),
-    ("cat", "print the contents of a file"),
-    ("cat", "show me what that file says"),
-    ("pwd", "where am i"),
-    ("pwd", "what directory am i in"),
-    ("cd", "go to another directory"),
-    ("cd", "change into the folder"),
-    ("tree", "list everything recursively"),
-    ("tree", "show the whole hierarchy"),
-    ("stat", "how big is that file"),
-    ("stat", "give me details about a path"),
-    ("hash", "what is the address of that object"),
-    ("hash", "show me the content hash"),
-    ("same", "are these two identical"),
-    ("same", "compare two subtrees"),
-    ("du", "how much space is used"),
-    ("du", "report disk usage"),
-    ("find", "search for some text"),
-    ("find", "look for a word in the files"),
-    ("diff", "compare two snapshots"),
-    ("diff", "what changed between versions"),
-    ("snaps", "list the snapshots"),
-    ("snaps", "show snapshot history"),
-    ("fsck", "verify the disk"),
-    ("fsck", "check everything is intact"),
-    ("mkdir", "make a directory"),
-    ("mkdir", "create a new folder"),
-    ("write", "save some text to a file"),
-    ("write", "create a file with content"),
-    ("rm", "delete that name"),
-    ("rm", "remove the file"),
-    ("cp", "copy it somewhere else"),
-    ("mv", "rename that"),
-    ("snap", "take a snapshot"),
-    ("snap", "commit the current state"),
-    ("back", "go back to an earlier snapshot"),
-    ("back", "restore the previous version"),
-];

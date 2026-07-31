@@ -318,6 +318,17 @@ pub fn unlock_writes(confirm: u64) -> bool {
     }
 }
 
+/// Put the lock back.
+///
+/// Needed because unlocking was one-way. `store::init` unlocked writes and then
+/// formatted, so a region that failed its safety check returned an error while
+/// leaving the disk writable -- the failure of a guard made the system less
+/// safe than not having tried. Anything that unlocks speculatively must be able
+/// to undo it.
+pub fn lock_writes() {
+    WRITES.store(false, Ordering::Relaxed);
+}
+
 static CONTROLLER: Racy<Option<Nvme>> = Racy::new(None);
 
 pub fn with<R>(f: impl FnOnce(&mut Nvme) -> R) -> Option<R> {

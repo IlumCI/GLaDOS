@@ -14,7 +14,7 @@
 
 use crate::dev::kbd;
 use crate::gfx::console::{self, LTCYAN, LTGRAY, LTGREEN, LTRED, WHITE, YELLOW};
-use crate::store::{self, cas, sha256};
+use crate::store::{self, sha256};
 use crate::{kprint, kprintln};
 use alloc::string::String;
 

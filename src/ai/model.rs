@@ -655,7 +655,6 @@ impl Model {
         let kv_dim = c.kv_dim();
         let kv_mul = c.kv_mul();
         let head_size = c.head_size();
-        let hidden = c.hidden_dim;
 
         // Embedding lookup is a row fetch, not a matmul against a one-hot
         // vector. When the table is quantised the row is dequantised on the
