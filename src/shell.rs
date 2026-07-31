@@ -556,6 +556,13 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
                 crate::ai::harness::route_report(task, trust);
             }
         }
+        "window" => {
+            let n: Vec<usize> = rest.split_whitespace().filter_map(|s| s.parse().ok()).collect();
+            if n.len() == 2 {
+                crate::ai::set_window(n[0], n[1]);
+            }
+            crate::ai::window_report();
+        }
         "gate" => crate::ai::harness::gate_report(),
         "search" => crate::ai::harness::search_report(),
         "probe" => crate::ai::harness::probe_features(),

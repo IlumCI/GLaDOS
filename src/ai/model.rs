@@ -30,6 +30,12 @@ pub struct Config {
     /// 100000, and using the wrong one does not fail -- it silently rotates
     /// every position by the wrong angle and produces fluent nonsense.
     pub rope_theta: f32,
+    /// How many of the earliest tokens are kept forever.
+    pub attn_sinks: usize,
+    /// How many recent tokens are kept alongside them. Together with
+    /// `attn_sinks` this is the live cache size; when their sum reaches
+    /// `seq_len` nothing is ever evicted and attention is exactly as before.
+    pub attn_window: usize,
 }
 
 impl Config {
@@ -152,13 +158,50 @@ pub struct State {
     q: Vec<f32>,
     att: Vec<f32>,
     pub logits: Vec<f32>,
+    /// Keys are stored *unrotated*.
+    ///
+    /// RoPE used to be applied on the way in, which is fine while positions
+    /// never move. They move the moment eviction exists: after dropping the
+    /// oldest entry, every survivor is one place closer to the query, and a
+    /// key rotated for its original position encodes a distance that is no
+    /// longer true. Rotating at attention time instead makes position a
+    /// property of where an entry sits in the cache, which is what
+    /// StreamingLLM requires and what makes a window possible at all.
     key_cache: Vec<f32>,
     value_cache: Vec<f32>,
+    /// Rotated copies of the live keys, rebuilt per layer per token.
+    krot: Vec<f32>,
+    /// cos/sin for every (position, dimension pair), precomputed.
+    ///
+    /// Rotating on the fly means `seq_len * head_size/2` angles per layer per
+    /// token; computing sin and cos each time with the software
+    /// implementations would dominate the forward pass entirely. The table is
+    /// `seq_len * head_size/2` entries -- 128 KiB at 512 by 64 -- and is
+    /// indexed rather than recomputed.
+    rope_cos: Vec<f32>,
+    rope_sin: Vec<f32>,
 }
 
 impl State {
     pub fn new(cfg: &Config) -> Self {
         let kv = cfg.kv_dim();
+        let half = cfg.head_size() / 2;
+
+        let mut rope_cos = vec![0.0f32; cfg.seq_len * half];
+        let mut rope_sin = vec![0.0f32; cfg.seq_len * half];
+        for p in 0..cfg.seq_len {
+            for i in 0..half {
+                // Matches the old inline computation exactly: the exponent is
+                // the pair index doubled over head_size, so that a rotation is
+                // shared across heads.
+                let freq =
+                    1.0 / tensor::powf(cfg.rope_theta, (i * 2) as f32 / cfg.head_size() as f32);
+                let a = p as f32 * freq;
+                rope_cos[p * half + i] = tensor::cosf(a);
+                rope_sin[p * half + i] = tensor::sinf(a);
+            }
+        }
+
         Self {
             x: vec![0.0; cfg.dim],
             xb: vec![0.0; cfg.dim],
@@ -170,6 +213,9 @@ impl State {
             logits: vec![0.0; cfg.vocab_size],
             key_cache: vec![0.0; cfg.n_layers * cfg.seq_len * kv],
             value_cache: vec![0.0; cfg.n_layers * cfg.seq_len * kv],
+            krot: vec![0.0; cfg.seq_len * kv],
+            rope_cos,
+            rope_sin,
         }
     }
 
@@ -390,6 +436,10 @@ impl Model {
             // The legacy format has no field for it; llama2.c hardcodes 10000
             // and every checkpoint in that format was trained with it.
             rope_theta: 10000.0,
+            attn_sinks: 0,
+            // seq_len means the sum reaches capacity, so nothing is ever
+            // evicted and this is off until asked for.
+            attn_window: usize::MAX,
         };
 
         // Both are assumed by head_size() and kv_mul(), which divide.
@@ -467,6 +517,10 @@ impl Model {
             seq_len: seq_len as usize,
             shared_classifier: raw_vocab > 0,
             rope_theta,
+            attn_sinks: 0,
+            // seq_len means the sum reaches capacity, so nothing is ever
+            // evicted and this is off until asked for.
+            attn_window: usize::MAX,
         };
         if cfg.dim % cfg.n_heads != 0 || cfg.n_heads % cfg.n_kv_heads != 0 {
             return Err(LoadError::BadHeader);
@@ -656,6 +710,54 @@ impl Model {
         let kv_mul = c.kv_mul();
         let head_size = c.head_size();
 
+        // --- where in the cache this token lives, and what else is still there
+        //
+        // Without a window (`sinks + window >= seq_len`) this is the identity:
+        // slot j holds absolute position j, `live` is pos+1, and every angle
+        // below is the one the old code computed inline. That is deliberate --
+        // it makes "output below the window is bit-identical to before" a
+        // property that can be tested rather than hoped for.
+        //
+        // With one, the cache holds the first `sinks` tokens permanently plus a
+        // ring of the most recent `window`. The sinks are not sentiment: a
+        // transformer dumps attention mass onto its earliest tokens regardless
+        // of what they say, and a plain sliding window that drops them leaves
+        // that mass with nowhere to go and the distribution collapses
+        // (StreamingLLM, Xiao et al. 2023).
+        let cap = c.seq_len;
+        let sinks = c.attn_sinks.min(cap);
+        let window = c.attn_window.min(cap - sinks);
+        let ring = cap - sinks;
+
+        let windowed = sinks + window < cap;
+        let n_sinks = if windowed { sinks.min(pos + 1) } else { 0 };
+        let n_window = if windowed {
+            (pos + 1 - n_sinks).min(window)
+        } else {
+            pos + 1
+        };
+        let live = (n_sinks + n_window).min(cap);
+        // Absolute position of the oldest entry still in the window.
+        let first = pos + 1 - n_window;
+
+        let slot_of = |j: usize| -> usize {
+            if !windowed {
+                return j;
+            }
+            if j < n_sinks {
+                return j;
+            }
+            let abs = first + (j - n_sinks);
+            if abs < sinks {
+                abs
+            } else {
+                sinks + (abs - sinks) % ring
+            }
+        };
+
+        // Where this token's key and value go.
+        let here = slot_of(live - 1);
+
         // Embedding lookup is a row fetch, not a matmul against a one-hot
         // vector. When the table is quantised the row is dequantised on the
         // way out.
@@ -671,8 +773,8 @@ impl Model {
             // position, so attention below can read the whole history without
             // any copying.
             let (kslice, vslice) = (
-                loff + pos * kv_dim..loff + pos * kv_dim + kv_dim,
-                loff + pos * kv_dim..loff + pos * kv_dim + kv_dim,
+                loff + here * kv_dim..loff + here * kv_dim + kv_dim,
+                loff + here * kv_dim..loff + here * kv_dim + kv_dim,
             );
 
             self.wq(l).matvec(&mut s.q, &s.xb);
@@ -685,28 +787,36 @@ impl Model {
                 self.wv(l).matvec(v, &s.xb);
             }
 
-            // RoPE on q and k. The rotation frequency depends on the position
-            // *within a head*, not within the whole vector, which is why this
-            // uses `i % head_size` rather than `i`.
+            // The key just written stays unrotated; only the query is rotated
+            // here, at the position it will occupy in the cache.
+            let half = head_size / 2;
+            let qpos = live.saturating_sub(1);
             for i in (0..dim).step_by(2) {
-                let head_dim = i % head_size;
-                let freq = 1.0 / tensor::powf(c.rope_theta, head_dim as f32 / head_size as f32);
-                let val = pos as f32 * freq;
-                let (fci, fcr) = (tensor::sinf(val), tensor::cosf(val));
-
+                let pair = (i % head_size) / 2;
+                let fcr = s.rope_cos[qpos * half + pair];
+                let fci = s.rope_sin[qpos * half + pair];
                 let q0 = s.q[i];
                 let q1 = s.q[i + 1];
                 s.q[i] = q0 * fcr - q1 * fci;
                 s.q[i + 1] = q0 * fci + q1 * fcr;
+            }
 
-                // Only the first kv_dim lanes exist in the key vector when
-                // grouped-query attention narrows it.
-                if i < kv_dim {
-                    let base = loff + pos * kv_dim;
-                    let k0 = s.key_cache[base + i];
-                    let k1 = s.key_cache[base + i + 1];
-                    s.key_cache[base + i] = k0 * fcr - k1 * fci;
-                    s.key_cache[base + i + 1] = k0 * fci + k1 * fcr;
+            // Rotate every live key into `krot`, indexed by cache position
+            // rather than by the absolute position it arrived at. Done once
+            // per layer rather than once per head: grouped-query attention
+            // shares each key across `kv_mul` heads, so rotating per head
+            // would redo the same work three times.
+            for j in 0..live {
+                let src = loff + slot_of(j) * kv_dim;
+                let dst = j * kv_dim;
+                for i in (0..kv_dim).step_by(2) {
+                    let pair = (i % head_size) / 2;
+                    let fcr = s.rope_cos[j * half + pair];
+                    let fci = s.rope_sin[j * half + pair];
+                    let k0 = s.key_cache[src + i];
+                    let k1 = s.key_cache[src + i + 1];
+                    s.krot[dst + i] = k0 * fcr - k1 * fci;
+                    s.krot[dst + i + 1] = k0 * fci + k1 * fcr;
                 }
             }
 
@@ -714,22 +824,22 @@ impl Model {
             for h in 0..c.n_heads {
                 let qo = h * head_size;
                 let ao = h * c.seq_len;
-                // Attend over every position up to and including this one.
-                for t in 0..=pos {
-                    let ko = loff + t * kv_dim + (h / kv_mul) * head_size;
+                let hoff = (h / kv_mul) * head_size;
+                for t in 0..live {
+                    let ko = t * kv_dim + hoff;
                     let mut score = 0.0f32;
                     for i in 0..head_size {
-                        score += s.q[qo + i] * s.key_cache[ko + i];
+                        score += s.q[qo + i] * s.krot[ko + i];
                     }
                     s.att[ao + t] = score * scale;
                 }
-                tensor::softmax(&mut s.att[ao..ao + pos + 1]);
+                tensor::softmax(&mut s.att[ao..ao + live]);
 
                 for i in 0..head_size {
                     s.xb[qo + i] = 0.0;
                 }
-                for t in 0..=pos {
-                    let vo = loff + t * kv_dim + (h / kv_mul) * head_size;
+                for t in 0..live {
+                    let vo = loff + slot_of(t) * kv_dim + hoff;
                     let a = s.att[ao + t];
                     for i in 0..head_size {
                         s.xb[qo + i] += a * s.value_cache[vo + i];

@@ -220,6 +220,8 @@ pub fn model_demo() {
         seq_len: 64,
         shared_classifier: true,
         rope_theta: 10000.0,
+        attn_sinks: 0,
+        attn_window: usize::MAX,
     };
 
     console::set_color(YELLOW);
@@ -1037,4 +1039,36 @@ pub fn chat(question: &str, opts: &GenOpts) {
 
     let framed = GenOpts { bos: false, echo_prompt: false, ..*opts };
     generate(&prompt, &framed);
+}
+
+/// Configure the attention window.
+///
+/// `sinks + window >= seq_len` turns it off, which is the default and is
+/// exactly the behaviour that existed before the cache learned to evict.
+pub fn set_window(sinks: usize, window: usize) {
+    with_engine(|e| {
+        e.model.cfg.attn_sinks = sinks;
+        e.model.cfg.attn_window = window;
+    });
+}
+
+pub fn window_report() {
+    console::set_color(YELLOW);
+    kprintln!("[window]");
+    console::set_color(LTGRAY);
+    let got = with_engine(|e| {
+        let c = e.model.cfg;
+        (c.attn_sinks, c.attn_window.min(c.seq_len), c.seq_len)
+    });
+    let Some((sinks, window, cap)) = got else {
+        kprintln!("  no model loaded");
+        return;
+    };
+    if sinks + window >= cap {
+        kprintln!("  off -- the cache holds {} positions and never evicts", cap);
+        kprintln!("  'window <sinks> <recent>' to enable, e.g. 'window 4 128'");
+    } else {
+        kprintln!("  {} sink(s) + {} recent = {} live of {} capacity", sinks, window, sinks + window, cap);
+        kprintln!("  context is unbounded; memory and per-token cost are not");
+    }
 }
