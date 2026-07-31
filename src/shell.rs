@@ -472,23 +472,66 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
         }
         "refresh" => console::redraw(),
         "fat" => fat_cmd(rest),
-        "net" => {
+        // `if` and `net` are the same command. `if` because that is what it
+        // operates on; `net` because that is what it used to be called and
+        // muscle memory is a real cost.
+        "if" | "net" | "ifconfig" => {
             let mut it = rest.split_whitespace();
             match it.next() {
-                Some("ip") => {
-                    let mut c = crate::net::config();
-                    if let Some(ip) = it.next().and_then(crate::net::parse_ip) {
-                        c.ip = ip;
+                None => crate::net::report(),
+                Some(name) => {
+                    let Some(n) = crate::net::index_of(name) else {
+                        kprintln!("  no such interface: {}  ('if' to list)", name);
+                        return;
+                    };
+                    match it.next() {
+                        None => crate::net::report(),
+                        Some("up") => {
+                            crate::net::ifaces()[n].up = true;
+                            crate::net::report();
+                        }
+                        Some("down") => {
+                            crate::net::ifaces()[n].up = false;
+                            crate::net::report();
+                        }
+                        Some("dhcp") => crate::net::dhcp::report_on(n),
+                        Some("ip") => {
+                            // `if eth0 ip 10.0.2.15/24 10.0.2.2 10.0.2.3`
+                            let mut c = crate::net::config_of(n);
+                            if let Some(spec) = it.next() {
+                                let (addr, prefix) = match spec.split_once('/') {
+                                    Some((a, p)) => (a, p.parse().ok()),
+                                    None => (spec, None),
+                                };
+                                match crate::net::parse_ip(addr) {
+                                    None => {
+                                        kprintln!("  not an address: {}", addr);
+                                        return;
+                                    }
+                                    Some(ip) => c.ip = ip,
+                                }
+                                if let Some(bits) = prefix {
+                                    c.netmask = crate::net::mask_from_prefix(bits);
+                                }
+                            }
+                            if let Some(gw) = it.next().and_then(crate::net::parse_ip) {
+                                c.gateway = gw;
+                            }
+                            if let Some(d) = it.next().and_then(crate::net::parse_ip) {
+                                c.dns = d;
+                            }
+                            crate::net::set_config_of(n, c);
+                            crate::net::report();
+                        }
+                        Some(other) => {
+                            kprintln!("  unknown: if {} {}", name, other);
+                            kprintln!("  try: up | down | dhcp | ip <a.b.c.d>[/bits] [gw] [dns]");
+                        }
                     }
-                    if let Some(gw) = it.next().and_then(crate::net::parse_ip) {
-                        c.gateway = gw;
-                    }
-                    crate::net::set_config(c);
-                    crate::net::report();
                 }
-                _ => crate::net::report(),
             }
         }
+        "wlan" | "wifi" => crate::net::wifi::report(),
         "ping" => {
             let mut it = rest.split_whitespace();
             match it.next() {

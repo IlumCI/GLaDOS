@@ -99,7 +99,10 @@ fn datagram(src: Ipv4, dst: Ipv4, src_port: u16, dst_port: u16, payload: &[u8]) 
 }
 
 pub fn send(dst: Ipv4, dst_port: u16, src_port: u16, payload: &[u8]) -> bool {
-    let src = super::config().ip;
+    // The source is whichever interface routing picks, not "the" address --
+    // with more than one interface those differ, and a checksum computed over
+    // the wrong one is rejected silently at the far end.
+    let src = super::local_addr_for(dst);
     let d = datagram(src, dst, src_port, dst_port, payload);
     send_ipv4(dst, PROTO_UDP, &d)
 }

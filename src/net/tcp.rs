@@ -148,6 +148,10 @@ struct Tcb {
     state: State,
     remote: Ipv4,
     remote_port: u16,
+    /// Fixed when the connection opens rather than looked up per segment: a
+    /// connection belongs to the interface it was routed out of, and a
+    /// checksum built from a different source address later would be wrong.
+    local_ip: Ipv4,
     local_port: u16,
 
     /// Oldest unacknowledged sequence number.
@@ -266,7 +270,7 @@ impl Tcb {
         }
         s.extend_from_slice(payload);
 
-        let c = tcp_checksum(config().ip, self.remote, &s);
+        let c = tcp_checksum(self.local_ip, self.remote, &s);
         s[16..18].copy_from_slice(&c.to_be_bytes());
         s
     }
@@ -320,13 +324,17 @@ fn with_tcb<R>(f: impl FnOnce(&mut Tcb) -> R) -> Option<R> {
 // --- inbound -------------------------------------------------------------
 
 /// Queue a segment. Called from `net::poll`; does no work beyond validation.
-pub fn deliver(src: Ipv4, segment: &[u8]) {
+///
+/// `dst` is the address the packet was actually sent to, taken from the IP
+/// header rather than from our configuration -- with more than one interface
+/// those are not the same, and the checksum covers the one on the wire.
+pub fn deliver(src: Ipv4, dst: Ipv4, segment: &[u8]) {
     if segment.len() < 20 {
         return;
     }
     // Verify the checksum here, once, so the state machine never has to
     // consider whether what it is reading is real.
-    if tcp_checksum(src, config().ip, segment) != 0 {
+    if tcp_checksum(src, dst, segment) != 0 {
         return;
     }
     let inbox = unsafe { &mut *INBOX.get() };
@@ -448,7 +456,7 @@ fn reject(src: Ipv4, seg: &[u8]) {
     r.extend_from_slice(&0u16.to_be_bytes()); // window
     r.extend_from_slice(&[0, 0]); // checksum
     r.extend_from_slice(&[0, 0]); // urgent
-    let c = tcp_checksum(config().ip, src, &r);
+    let c = tcp_checksum(super::local_addr_for(src), src, &r);
     r[16..18].copy_from_slice(&c.to_be_bytes());
     send_ipv4(src, PROTO_TCP, &r);
 }
@@ -750,6 +758,7 @@ pub fn connect(dst: Ipv4, port: u16, timeout_ms: u64) -> Result<(), Error> {
         state: State::SynSent,
         remote: dst,
         remote_port: port,
+        local_ip: super::local_addr_for(dst),
         local_port,
         snd_una: iss,
         snd_nxt: iss.wrapping_add(1),

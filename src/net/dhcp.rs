@@ -211,19 +211,23 @@ fn await_reply(xid: u32, want: u8, ms: u64) -> Option<Reply> {
 
 /// Run the exchange and adopt whatever comes back.
 pub fn configure() -> Result<Config, Error> {
-    if !super::ready() {
-        return Err(Error::NoNic);
-    }
-    let mac = super::mac().ok_or(Error::NoNic)?;
+    configure_on(super::primary())
+}
+
+pub fn configure_on(n: usize) -> Result<Config, Error> {
+    let mac = match super::ifaces()[n].nic.as_ref() {
+        Some(d) => d.mac(),
+        None => return Err(Error::NoNic),
+    };
     let xid = crate::time::rdtsc() as u32;
 
     // Give up our address for the duration. It is not ours until the server
     // says so, and `addressed_to_us` lets everything through while it is
     // unspecified -- which is exactly what receiving the reply requires.
-    let previous = super::config();
+    let previous = super::config_of(n);
     let mut blank = previous;
     blank.ip = UNSPECIFIED;
-    super::set_config(blank);
+    super::set_config_of(n, blank);
     udp::bind(CLIENT_PORT);
 
     let outcome = (|| {
@@ -262,14 +266,14 @@ pub fn configure() -> Result<Config, Error> {
 
     match outcome {
         Ok((cfg, lease)) => {
-            super::set_config(cfg);
+            super::set_config_of(n, cfg);
             unsafe { LAST_LEASE = lease };
             Ok(cfg)
         }
         Err(e) => {
             // Put back what was working before rather than leaving the machine
             // with no address because a server did not answer.
-            super::set_config(previous);
+            super::set_config_of(n, previous);
             Err(e)
         }
     }
@@ -278,10 +282,14 @@ pub fn configure() -> Result<Config, Error> {
 static mut LAST_LEASE: Option<u32> = None;
 
 pub fn report() {
+    report_on(super::primary())
+}
+
+pub fn report_on(n: usize) {
     console::set_color(YELLOW);
-    kprintln!("[dhcp]");
+    kprintln!("[dhcp] {}", super::ifaces()[n].name);
     console::set_color(LTGRAY);
-    match configure() {
+    match configure_on(n) {
         Err(e) => {
             console::set_color(LTRED);
             kprintln!("  {}", e.name());
