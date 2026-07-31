@@ -249,6 +249,11 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     console::init(boot.fb, 2, palette::BLACK);
     gfx::set_primary(boot.fb);
 
+    // From here until `finish`, the console writes to its shadow grid without
+    // painting. Nothing is lost -- the whole log is repainted at the end -- and
+    // the slow parts of boot get a progress bar instead of a blank panel.
+    gfx::splash::begin();
+
     // Replace the firmware's descriptor tables with ours. Until the IDT is in,
     // any fault is a triple fault: an instant reboot with no diagnostic.
     cpu::gdt::init();
@@ -276,17 +281,21 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
         mem::frame::EarlyFrames::new(boot.mmap, boot.mmap_size, boot.desc_size)
     };
 
+    gfx::splash::stage("memory map and page tables");
     install_paging(&boot, &mut frames);
     init_heap(&mut frames);
 
     let acpi = unsafe { acpi::parse(boot.rsdp) };
 
     banner(&boot, &acpi);
+    gfx::splash::stage("interrupts and keyboard");
     init_interrupts(&acpi);
     init_keyboard(&acpi);
+    gfx::splash::stage("self-test");
     selftest();
 
     // Adopt the current thread of execution as task 0, then give it company.
+    gfx::splash::stage("scheduler");
     task::init("shell");
     console::set_color(YELLOW);
     kprintln!("\n[tasks]");
@@ -305,11 +314,16 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     // Networking needs the same ECAM window storage does, and nothing later
     // depends on it -- so a machine with no supported NIC just reports that
     // and carries on.
+    gfx::splash::stage("network");
     if let Some(ecam) = acpi.as_ref().and_then(|a| a.mcfg) {
         net::init(ecam, boot.roots.as_ref().map(|b| b.as_slice()));
     }
 
+    gfx::splash::stage("storage");
     let damaged = init_storage(&acpi);
+    // The recovery prompt is a question, and it is being asked of a console
+    // that is not currently on screen.
+    gfx::splash::note("hold ESC or R for the recovery console");
     let restore = match recovery::maybe_enter(damaged) {
         recovery::Outcome::Continue => true,
         recovery::Outcome::SkipRestore => {
@@ -324,6 +338,7 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     // outlive a reboot. Restoring is skipped when the recovery console said so,
     // because "the last snapshot is what broke it" has to be a recoverable
     // situation.
+    gfx::splash::stage("namespace");
     sysbox::init();
     if restore {
         sysbox::restore_latest();
@@ -331,6 +346,7 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
 
     // After storage, so a future version can pull weights out of the store
     // rather than off the ESP.
+    gfx::splash::stage("loading the model");
     ai::init(boot.model, boot.tokenizer);
 
     // The model becomes a resident task rather than a blocking command. This
@@ -339,6 +355,9 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     if ai::engine_ready() && ai::spawn_mind() {
         kprintln!("  mind spawned -- 'think <prompt>' runs in the background");
     }
+
+    gfx::splash::stage("ready");
+    gfx::splash::finish();
 
     shell::run(&boot, &acpi);
 }
@@ -434,7 +453,10 @@ fn clock_task() {
         let tenths = dev::lapic::ticks() * 10 / TIMER_HZ as u64;
         if tenths != last {
             last = tenths;
-            if let Some(fb) = gfx::primary() {
+            // The boot screen owns the framebuffer while it is up; an uptime
+            // counter in the corner of a splash is the tell that something is
+            // drawing behind the curtain.
+            if let (Some(fb), false) = (gfx::primary(), gfx::splash::active()) {
                 let text = alloc::format!(
                     " up {}.{}s  switches {} ",
                     tenths / 10,
@@ -839,12 +861,21 @@ fn banner(boot: &BootInfo, acpi: &Option<acpi::Acpi>) {
     // the bars below read blue-green-red instead. Faster to see than to reason
     // about.
     console::set_color(LTGREEN);
+    // The pixel-format check: if red and blue come out swapped, the firmware
+    // reported Rgbx where it meant Bgrx. Drawn only once the boot screen has
+    // handed the framebuffer back -- until then there is a panel in the way,
+    // and three bars across it prove nothing except that something else is
+    // drawing.
     kprintln!("\n[selftest] bars should read RED GREEN BLUE, left to right:");
-    let y = boot.fb.height().saturating_sub(80);
-    let w = boot.fb.width() / 6;
-    boot.fb.rect(w, y, w, 40, palette::LTRED);
-    boot.fb.rect(w * 2, y, w, 40, palette::LTGREEN);
-    boot.fb.rect(w * 3, y, w, 40, palette::LTBLUE);
+    if !gfx::splash::active() {
+        let y = boot.fb.height().saturating_sub(80);
+        let w = boot.fb.width() / 6;
+        boot.fb.rect(w, y, w, 40, palette::LTRED);
+        boot.fb.rect(w * 2, y, w, 40, palette::LTGREEN);
+        boot.fb.rect(w * 3, y, w, 40, palette::LTBLUE);
+    } else {
+        kprintln!("  deferred: 'video bars' redraws them");
+    }
 
     console::set_color(LTGRAY_IDX);
 }
@@ -906,6 +937,9 @@ fn halt() -> ! {
 fn panic(info: &PanicInfo) -> ! {
     serial_println!("\n*** PANIC *** {}", info);
     if console::is_ready() {
+        // A panic behind a progress bar helps nobody, and on the GF63 the
+        // framebuffer is the only place a diagnostic can go.
+        gfx::splash::abandon();
         console::set_color(LTRED);
         console::_print(format_args!("\n*** KERNEL PANIC ***\n{}\n", info));
     }

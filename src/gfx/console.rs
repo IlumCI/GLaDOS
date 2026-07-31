@@ -73,6 +73,8 @@ pub struct Console {
     fg: u8,
     bg: Color,
     scale: u32,
+    /// False while the boot screen owns the framebuffer.
+    visible: bool,
 }
 
 impl Console {
@@ -90,6 +92,7 @@ impl Console {
             fg: LTGRAY,
             bg,
             scale,
+            visible: true,
         }
     }
 
@@ -105,10 +108,19 @@ impl Console {
         }
         self.col = 0;
         self.row = 0;
-        self.fb.fill(self.bg);
+        if self.visible {
+            self.fb.fill(self.bg);
+        }
     }
 
     fn draw_cell(&self, r: usize, c: usize) {
+        // While the boot screen owns the framebuffer, text still updates the
+        // shadow grid and simply is not painted. Nothing is lost: `redraw_all`
+        // brings the whole log back the moment the splash hands over, so the
+        // boot output is there to read exactly as it always was.
+        if !self.visible {
+            return;
+        }
         let cell = self.cells[r][c];
         let rows = font::glyph(cell.ch);
         let fg = self.fb.encode(PALETTE[(cell.fg & 0x0F) as usize]);
@@ -133,11 +145,16 @@ impl Console {
         }
     }
 
+    /// Hand the framebuffer to something else, or take it back.
+    pub fn set_visible(&mut self, v: bool) {
+        self.visible = v;
+    }
+
     /// Repaint every cell from the shadow grid.
     ///
-    /// No longer on the scroll path, but the language's `rect` builtin draws
-    /// straight to the framebuffer and will happily scribble over text, so
-    /// there has to be a way back.
+    /// The way back from anything that drew over the console -- the boot
+    /// screen, or the language`s `rect` builtin, which writes straight to the
+    /// framebuffer and will happily scribble over text.
     pub fn redraw_all(&self) {
         for r in 0..self.rows {
             for c in 0..self.cols {
@@ -161,7 +178,9 @@ impl Console {
         // a multiple of the 16-pixel cell height, and the 8-pixel remainder at
         // the bottom would otherwise be dragged up into the last text row.
         let cell_h = font::GLYPH_H * self.scale;
-        self.fb.scroll_up(self.rows as u32 * cell_h, cell_h, self.bg);
+        if self.visible {
+            self.fb.scroll_up(self.rows as u32 * cell_h, cell_h, self.bg);
+        }
     }
 
     fn newline(&mut self) {

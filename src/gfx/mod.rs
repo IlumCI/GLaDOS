@@ -6,6 +6,7 @@
 //! are the only output device that exists.
 
 pub mod console;
+pub mod splash;
 pub mod font;
 
 use crate::sync::Racy;
@@ -23,6 +24,20 @@ pub fn primary() -> Option<Framebuffer> {
 }
 
 use core::ptr::write_volatile;
+
+/// Integer square root, Newton. Used per scan line by `fill_circle`.
+pub fn isqrt(n: u32) -> u32 {
+    if n == 0 {
+        return 0;
+    }
+    let mut x = n;
+    let mut y = (x + 1) / 2;
+    while y < x {
+        x = y;
+        y = (x + n / x) / 2;
+    }
+    x
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Color {
@@ -57,6 +72,14 @@ pub mod palette {
     pub const LTMAGENTA: Color = Color::new(0xFF, 0x55, 0xFF);
     pub const YELLOW: Color = Color::new(0xFF, 0xFF, 0x55);
     pub const WHITE: Color = Color::new(0xFF, 0xFF, 0xFF);
+
+    /// The one colour outside the sixteen, and a deliberate exception.
+    ///
+    /// The palette above is a choice, not a limit -- the framebuffer is 32-bit
+    /// and we are declining to use it. A brand mark is the one thing that has
+    /// to be a specific colour rather than the nearest of sixteen: BROWN
+    /// (0xAA5500) is the closest available and reads as mud.
+    pub const AMBER: Color = Color::new(0xDD, 0xA3, 0x3C);
 }
 
 /// Pixel encodings we can drive. `BltOnly` is not here on purpose: it means
@@ -247,6 +270,173 @@ impl Framebuffer {
 
     /// One-pixel outline. Handy as a stride check: if `stride` is wrong the
     /// right-hand edge walks across the screen instead of staying vertical.
+    /// Filled disc, by horizontal runs.
+    ///
+    /// One integer square root per scan line rather than a distance test per
+    /// pixel: the same picture for a fraction of the work, and `rect` already
+    /// knows how to lay down a run.
+    pub fn fill_circle(&self, cx: i32, cy: i32, r: i32, c: Color) {
+        if r <= 0 {
+            return;
+        }
+        for dy in -r..=r {
+            let half = isqrt((r * r - dy * dy) as u32) as i32;
+            let x0 = cx - half;
+            let y = cy + dy;
+            if y < 0 || half <= 0 {
+                continue;
+            }
+            self.rect(x0.max(0) as u32, y as u32, (half * 2) as u32, 1, c);
+        }
+    }
+
+    /// Filled triangle, scanline. The workhorse for anything that is not a
+    /// rectangle -- which on this display is very nearly nothing, and then
+    /// suddenly a logo.
+    pub fn fill_triangle(&self, a: (i32, i32), b: (i32, i32), c: (i32, i32), col: Color) {
+        let mut v = [a, b, c];
+        v.sort_by_key(|p| p.1);
+        let (top, mid, bot) = (v[0], v[1], v[2]);
+        if bot.1 == top.1 {
+            return;
+        }
+
+        // x along an edge at height y, in halves to keep the rounding honest
+        // without reaching for floating point.
+        let edge = |p: (i32, i32), q: (i32, i32), y: i32| -> i32 {
+            if q.1 == p.1 {
+                return p.0;
+            }
+            p.0 + (q.0 - p.0) * (y - p.1) / (q.1 - p.1)
+        };
+
+        for y in top.1.max(0)..=bot.1.max(0) {
+            if y < 0 {
+                continue;
+            }
+            let xa = edge(top, bot, y);
+            let xb = if y < mid.1 {
+                edge(top, mid, y)
+            } else {
+                edge(mid, bot, y)
+            };
+            let (x0, x1) = if xa <= xb { (xa, xb) } else { (xb, xa) };
+            if x1 < 0 {
+                continue;
+            }
+            let x0 = x0.max(0);
+            self.rect(x0 as u32, y as u32, (x1 - x0 + 1) as u32, 1, col);
+        }
+    }
+
+    /// Bresenham. Integer only -- there is no floating point in early boot and
+    /// no reason to want any here.
+    pub fn line(&self, x0: i32, y0: i32, x1: i32, y1: i32, c: Color) {
+        let raw = self.encode(c);
+        let dx = (x1 - x0).abs();
+        let dy = -(y1 - y0).abs();
+        let sx = if x0 < x1 { 1 } else { -1 };
+        let sy = if y0 < y1 { 1 } else { -1 };
+        let (mut x, mut y) = (x0, y0);
+        let mut err = dx + dy;
+        loop {
+            if x >= 0 && y >= 0 {
+                self.put(x as u32, y as u32, raw);
+            }
+            if x == x1 && y == y1 {
+                break;
+            }
+            let e2 = 2 * err;
+            if e2 >= dy {
+                err += dy;
+                x += sx;
+            }
+            if e2 <= dx {
+                err += dx;
+                y += sy;
+            }
+        }
+    }
+
+    /// A thick line, drawn as `w` parallel offsets.
+    ///
+    /// Crude next to a proper polygon fill, and exactly right for a 16-colour
+    /// display with no antialiasing: the result is the same hard-edged stroke
+    /// either way.
+    pub fn line_thick(&self, x0: i32, y0: i32, x1: i32, y1: i32, w: i32, c: Color) {
+        let steep = (y1 - y0).abs() > (x1 - x0).abs();
+        for i in 0..w {
+            let o = i - w / 2;
+            if steep {
+                self.line(x0 + o, y0, x1 + o, y1, c);
+            } else {
+                self.line(x0, y0 + o, x1, y1 + o, c);
+            }
+        }
+    }
+
+    /// Midpoint circle, outline only.
+    pub fn circle(&self, cx: i32, cy: i32, r: i32, c: Color) {
+        let raw = self.encode(c);
+        let (mut x, mut y) = (r, 0);
+        let mut err = 1 - r;
+        let mut plot = |px: i32, py: i32| {
+            if px >= 0 && py >= 0 {
+                self.put(px as u32, py as u32, raw);
+            }
+        };
+        while x >= y {
+            for (a, b) in [
+                (x, y), (y, x), (-y, x), (-x, y),
+                (-x, -y), (-y, -x), (y, -x), (x, -y),
+            ] {
+                plot(cx + a, cy + b);
+            }
+            y += 1;
+            if err < 0 {
+                err += 2 * y + 1;
+            } else {
+                x -= 1;
+                err += 2 * (y - x) + 1;
+            }
+        }
+    }
+
+    pub fn circle_thick(&self, cx: i32, cy: i32, r: i32, w: i32, c: Color) {
+        for i in 0..w {
+            self.circle(cx, cy, r - i, c);
+        }
+    }
+
+    /// The two-pixel 3D edge that every control in a Windows 3.x interface is
+    /// made of.
+    ///
+    /// This is the whole aesthetic, and it is four line draws: a light edge on
+    /// the top and left, a dark edge on the bottom and right, and the reverse
+    /// for a sunken one. Raised means a button or a panel; sunken means a well
+    /// something sits *in* -- a text field, a progress trough, a list box.
+    ///
+    /// It lives here rather than in the boot screen because it is the single
+    /// primitive a window manager needs most, and there should be exactly one
+    /// of it.
+    pub fn bevel(&self, x: u32, y: u32, w: u32, h: u32, raised: bool) {
+        if w < 2 || h < 2 {
+            return;
+        }
+        let (tl, br) = if raised {
+            (palette::WHITE, palette::DKGRAY)
+        } else {
+            (palette::DKGRAY, palette::WHITE)
+        };
+        // Top and left.
+        self.rect(x, y, w, 1, tl);
+        self.rect(x, y, 1, h, tl);
+        // Bottom and right. Drawn second so the corners belong to the shadow,
+        // which is what makes the corner read as a mitre rather than a stair.
+        self.rect(x, y + h - 1, w, 1, br);
+        self.rect(x + w - 1, y, 1, h, br);
+    }
+
     pub fn frame(&self, x: u32, y: u32, w: u32, h: u32, c: Color) {
         let raw = self.encode(c);
         for dx in 0..w {

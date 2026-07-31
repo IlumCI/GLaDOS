@@ -1249,6 +1249,34 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
                 boot.fb.stride(),
                 boot.fb.format()
             );
+            if rest.trim() == "bars" {
+                // Deferred from boot because the splash owned the screen.
+                // Swapped red and blue mean the firmware's reported pixel
+                // format is wrong, which is worth being able to re-check.
+                let y = boot.fb.height().saturating_sub(80);
+                let w = boot.fb.width() / 6;
+                use crate::gfx::palette;
+                boot.fb.rect(w, y, w, 40, palette::LTRED);
+                boot.fb.rect(w * 2, y, w, 40, palette::LTGREEN);
+                boot.fb.rect(w * 3, y, w, 40, palette::LTBLUE);
+                kprintln!("  bars drawn: red green blue, left to right");
+            } else {
+                kprintln!("  'video bars' to check the pixel format");
+            }
+        }
+        "splash" => {
+            // Worth having beyond nostalgia: it is the only way to look at the
+            // boot screen without rebooting, which is how it got laid out.
+            crate::gfx::splash::begin();
+            for s in ["a", "b", "c", "d", "e", "f", "g", "h"] {
+                crate::gfx::splash::stage(s);
+                crate::time::delay_us(120_000);
+            }
+            crate::gfx::splash::note("press a key");
+            while crate::dev::kbd::pop_any().is_none() {
+                unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };
+            }
+            crate::gfx::splash::finish();
         }
         "echo" => kprintln!("  {}", rest),
         "clear" => console::with(|c| c.clear()),
