@@ -62,9 +62,17 @@ fn describe(vendor: u16, device: u16) -> &'static str {
         // Intel wireless is the likeliest thing in a 2022 MSI laptop, and the
         // hardest case: everything from Wireless-AC onward needs a signed blob.
         0x8086 => match device {
-            0x2723 => "Intel Wi-Fi 6 AX200",
-            0x02f0 | 0x4df0 | 0xa0f0 => "Intel Wi-Fi 6 AX201",
-            0x51f0 | 0x54f0 => "Intel Wi-Fi 6E AX211",
+            // Discrete M.2 cards on the PCIe bus.
+            0x2723 => "Intel Wi-Fi 6 AX200 (discrete)",
+            // CNVi: the MAC and baseband live in the PCH and the M.2 module
+            // carries only the radio. Confirmed present on the GF63 as
+            // 8086:51f0 at 00:14.3. Worth calling out rather than filing under
+            // "Intel wireless": a CNVi part is not a self-contained NIC, so
+            // there is no card to drive on its own -- the driver talks to the
+            // chipset over an interface Intel does not document, and the
+            // firmware blob is still required on top of that.
+            0x51f0 | 0x54f0 => "Intel Wi-Fi 6E, CNVi in the PCH (Alder Lake-P)",
+            0x02f0 | 0x4df0 | 0xa0f0 => "Intel Wi-Fi 6 AX201, CNVi in the PCH",
             _ => "Intel wireless (firmware blob required)",
         },
         0x10ec => "Realtek wireless",

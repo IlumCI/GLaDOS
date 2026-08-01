@@ -7,6 +7,13 @@
 //!   * top-p 0 or 1  -- sample from the full softmax
 //!   * otherwise     -- nucleus sampling over the smallest set of tokens whose
 //!                      probabilities sum past `topp`
+//!
+//! Plus a repetition penalty, which llama2.c does not have and which a small
+//! model badly needs. Asked for the meaning of life, SmolLM2-135M produced
+//! "philosophers and scientists and scientists and philosophers and scientists"
+//! until it hit the token limit. That is not the model being 135M -- it is a
+//! sampler with nothing stopping a high-probability loop from reinforcing
+//! itself. See `apply_repetition_penalty`.
 
 use super::tensor;
 use alloc::vec::Vec;
@@ -47,6 +54,31 @@ impl Rng {
 }
 
 /// Consumes `logits` -- it is scaled and softmaxed in place.
+/// Divide the logits of tokens already produced, before softmax.
+///
+/// The CTRL formulation (Keskar et al. 2019), and the sign matters: a logit
+/// may be negative, so scaling it down would *raise* the probability of the
+/// very token being discouraged. Dividing a positive logit and multiplying a
+/// negative one moves both toward zero, which is what "less likely" means on
+/// either side.
+///
+/// `recent` is a window rather than the whole history. Penalising every token
+/// ever emitted makes long output progressively unable to use common words --
+/// "the" gets suppressed out of existence -- so only the last few dozen count.
+///
+/// A penalty of 1.0 is exactly no penalty, which is why that is the default
+/// for anything comparing against llama2.c.
+pub fn apply_repetition_penalty(logits: &mut [f32], recent: &[usize], penalty: f32) {
+    if penalty == 1.0 || penalty <= 0.0 {
+        return;
+    }
+    for &t in recent {
+        if let Some(l) = logits.get_mut(t) {
+            *l = if *l > 0.0 { *l / penalty } else { *l * penalty };
+        }
+    }
+}
+
 pub fn sample(logits: &mut [f32], temperature: f32, topp: f32, rng: &mut Rng) -> usize {
     if logits.is_empty() {
         return 0;

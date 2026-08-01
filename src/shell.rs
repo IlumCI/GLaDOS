@@ -813,6 +813,18 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
                 crate::ai::chat(q, &opts);
             }
         }
+        "repeat" => {
+            let mut it = rest.split_whitespace();
+            let (p, w) = crate::ai::repeat_settings();
+            let p = it.next().and_then(|s| s.parse().ok()).unwrap_or(p);
+            let w = it.next().and_then(|s| s.parse().ok()).unwrap_or(w);
+            crate::ai::set_repeat(p, w);
+            let (p, w) = crate::ai::repeat_settings();
+            kprintln!("  repetition penalty {} over the last {} tokens", p, w);
+            if p <= 1.0 {
+                kprintln!("  (1.0 is off -- a loop can reinforce itself unchecked)");
+            }
+        }
         "logits" => {
             let ids: Vec<usize> = rest.split_whitespace().filter_map(|s| s.parse().ok()).collect();
             crate::ai::logits_for(&ids);

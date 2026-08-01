@@ -618,6 +618,18 @@ fn emit(pending: &mut Vec<u8>) {
     }
 }
 
+/// Live sampling knobs, so the penalty can be tuned against a real model at
+/// 63 ms a token instead of guessed at 8 seconds a token under emulation.
+static REPEAT: Racy<(f32, usize)> = Racy::new((1.1, 64));
+
+pub fn repeat_settings() -> (f32, usize) {
+    unsafe { *REPEAT.get() }
+}
+
+pub fn set_repeat(penalty: f32, window: usize) {
+    unsafe { *REPEAT.get() = (penalty.max(0.0), window.min(512)) };
+}
+
 pub struct GenOpts {
     pub steps: usize,
     pub temperature: f32,
@@ -636,11 +648,23 @@ pub struct GenOpts {
     /// continuation reads as one piece with what preceded it, and wrong for
     /// chat, where it would spray the role markers across the screen.
     pub echo_prompt: bool,
+    /// Divisor applied to the logits of recently emitted tokens. 1.0 is off.
+    pub repeat_penalty: f32,
+    /// How many recent tokens the penalty covers.
+    pub repeat_window: usize,
 }
 
 impl Default for GenOpts {
     fn default() -> Self {
         // llama2.c's defaults. 0.9 top-p keeps a 260K model from wandering.
+        //
+        // The repetition penalty is ours and is deliberately mild. 1.1 is
+        // enough to break a self-reinforcing loop; much above 1.2 and the
+        // model starts avoiding words it legitimately needs, which reads as
+        // incoherence rather than variety. The window is 64 for the same
+        // reason -- penalise everything ever said and ordinary words become
+        // unusable a paragraph in.
+        let (repeat_penalty, repeat_window) = repeat_settings();
         Self {
             steps: 256,
             temperature: 1.0,
@@ -649,6 +673,8 @@ impl Default for GenOpts {
             yielding: false,
             bos: true,
             echo_prompt: true,
+            repeat_penalty,
+            repeat_window,
         }
     }
 }
@@ -675,6 +701,10 @@ pub fn generate(prompt: &str, opts: &GenOpts) {
         let mut generated = 0usize;
         let mut fed = 0usize;
         let mut pending: Vec<u8> = Vec::new();
+        // Sampled tokens only. The prompt is not the model repeating itself,
+        // and penalising it would push the model away from the very words the
+        // user just asked about.
+        let mut recent: Vec<usize> = Vec::with_capacity(opts.repeat_window);
 
         let t0 = crate::time::rdtsc();
         console::set_color(LTCYAN);
@@ -692,7 +722,22 @@ pub fn generate(prompt: &str, opts: &GenOpts) {
                 prompt_tokens[fed]
             } else {
                 generated += 1;
-                sample::sample(&mut e.state.logits, opts.temperature, opts.topp, &mut e.rng)
+                sample::apply_repetition_penalty(
+                    &mut e.state.logits,
+                    &recent,
+                    opts.repeat_penalty,
+                );
+                let t = sample::sample(
+                    &mut e.state.logits,
+                    opts.temperature,
+                    opts.topp,
+                    &mut e.rng,
+                );
+                recent.push(t);
+                if recent.len() > opts.repeat_window {
+                    recent.remove(0);
+                }
+                t
             };
 
             // Stopping conditions differ by checkpoint and both have to be
