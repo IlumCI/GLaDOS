@@ -8,6 +8,7 @@ pub mod nvme;
 pub mod pci;
 pub mod pic;
 pub mod rtc;
+pub mod rtl8168;
 
 /// Interrupt vector assignments.
 ///

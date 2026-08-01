@@ -56,7 +56,7 @@ pub mod wifi;
 pub mod wpa2;
 pub mod x509;
 
-use iface::{Interface, Kind, Loopback};
+use iface::{Interface, Kind, Loopback, Nic};
 
 pub const UNSPECIFIED: Ipv4 = [0, 0, 0, 0];
 pub const BROADCAST_IP: Ipv4 = [255, 255, 255, 255];
@@ -212,14 +212,27 @@ pub fn init(ecam: u64, roots: Option<&[u8]>) {
         lo.up = true;
     }
 
-    match crate::dev::e1000::probe(ecam) {
-        Err(e) => {
-            kprintln!("  eth0   no supported NIC ({:?})", e);
-        }
-        Ok(nic) => {
+    // Try each driver in turn and take the first that answers. The e1000 is
+    // first only because it is what QEMU emulates, so the common development
+    // case costs one probe; on the GF63 it misses and the Realtek answers.
+    let driver: Option<(Box<dyn Nic>, &str)> = match crate::dev::e1000::probe(ecam) {
+        Ok(n) => Some((Box::new(n), "e1000")),
+        Err(e1000_err) => match crate::dev::rtl8168::probe(ecam) {
+            Ok(n) => Some((Box::new(n), "rtl8168")),
+            Err(rtl_err) => {
+                kprintln!("  eth0   no supported NIC");
+                kprintln!("         e1000 {:?}, rtl8168 {:?}", e1000_err, rtl_err);
+                None
+            }
+        },
+    };
+
+    match driver {
+        None => {}
+        Some((nic, name)) => {
             let eth = &mut ifaces()[ETH0];
             let m = nic.mac();
-            eth.nic = Some(Box::new(nic));
+            eth.nic = Some(nic);
             // QEMU's user-mode network puts the guest at 10.0.2.15, the
             // gateway at 10.0.2.2 and its resolver at 10.0.2.3. Defaulting to
             // that makes the first test work without configuring anything, and
@@ -231,8 +244,8 @@ pub fn init(ecam: u64, roots: Option<&[u8]>) {
             eth.up = true;
             let up = eth.usable();
             kprintln!(
-                "  eth0   e1000 {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}  link {}",
-                m[0], m[1], m[2], m[3], m[4], m[5],
+                "  eth0   {} {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}  link {}",
+                name, m[0], m[1], m[2], m[3], m[4], m[5],
                 if up { "up" } else { "down" }
             );
             kprintln!("         10.0.2.15 via 10.0.2.2  ('dhcp' to ask, 'if' to see)");
