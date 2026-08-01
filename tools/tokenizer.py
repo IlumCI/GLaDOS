@@ -36,6 +36,16 @@ VERSION = 2
 
 FLAG_DUMMY_PREFIX = 1 << 0
 FLAG_INDIVIDUAL_DIGITS = 1 << 1
+# Which pre-tokenizer regex the checkpoint was trained with. Absent means the
+# GPT-2 pattern that ByteLevel(use_regex) implies; set means the cl100k one
+# Qwen3 spells out as an explicit Split.
+FLAG_SPLIT_CL100K = 1 << 2
+
+# The distinguishing fragment of the cl100k pattern: a word may be led by any
+# non-alphanumeric. Matching on the whole pattern string would break on
+# whitespace or escaping differences between tokenizers releases; this clause
+# appears in no other pattern in use.
+CL100K_MARK = r"[^\r\n\p{L}\p{N}]?\p{L}+"
 
 
 def bytes_to_unicode():
@@ -74,7 +84,20 @@ def load(path):
         raise SystemExit(f"unsupported tokenizer type {model.get('type')!r}")
 
     vocab = model["vocab"]
+    specials_meta = spec.get("added_tokens", [])
+
+    # The BPE table is not the vocabulary. SmolLM2 numbers its added tokens
+    # inside `model.vocab`, so the two coincide and length alone was enough.
+    # Qwen3 appends its 293 specials *above* the BPE range -- 151643 merges
+    # plus specials to 151935 -- so sizing by the table drops every special and
+    # then indexes past the end of it.
+    #
+    # This has to agree with the model's `vocab_size`, or every id above the
+    # BPE range addresses a different row of the embedding than it was trained
+    # on.
     size = len(vocab)
+    if specials_meta:
+        size = max(size, max(t["id"] for t in specials_meta) + 1)
 
     # Merge rank per resulting token. `merges` may be strings or pairs
     # depending on the tokenizers version that wrote the file.
@@ -85,25 +108,44 @@ def load(path):
         if joined in vocab:
             rank.setdefault(vocab[joined], i)
 
-    specials = {t["id"]: t["content"] for t in spec.get("added_tokens", [])}
+    specials = {t["id"]: t["content"] for t in specials_meta}
 
     by_id = [None] * size
     for tok, i in vocab.items():
         by_id[i] = tok
     for i, content in specials.items():
-        if i < size:
-            by_id[i] = content
+        by_id[i] = content
 
     flags = 0
     pre = spec.get("pre_tokenizer") or {}
     subs = pre.get("pretokenizers", [pre])
+    saw_split = False
     for p in subs:
         if p.get("type") == "Digits" and p.get("individual_digits"):
             flags |= FLAG_INDIVIDUAL_DIGITS
         if p.get("type") == "ByteLevel" and p.get("add_prefix_space"):
             flags |= FLAG_DUMMY_PREFIX
+        if p.get("type") == "Split":
+            saw_split = True
+            if CL100K_MARK in (p.get("pattern") or {}).get("Regex", ""):
+                flags |= FLAG_SPLIT_CL100K
+    # An unrecognised Split would silently fall back to the GPT-2 pattern and
+    # mis-tokenise everything by a few percent, which reads as the model being
+    # mysteriously worse rather than as a bug.
+    if saw_split and not flags & FLAG_SPLIT_CL100K:
+        raise SystemExit(
+            "the tokenizer has a Split pre-tokenizer whose pattern is not "
+            "recognised; add it rather than falling back"
+        )
 
-    return by_id, rank, set(specials), flags, vocab
+    # Name -> id over the *whole* vocabulary, not just the BPE table.
+    # `<|im_start|>` and friends live in `added_tokens` for Qwen3, so looking
+    # them up in `model.vocab` silently returns the default of 1 -- an ordinary
+    # BPE token -- and the model is handed an end-of-turn marker it was never
+    # trained on. Generation then never terminates.
+    names = {tok: i for i, tok in enumerate(by_id) if tok is not None}
+
+    return by_id, rank, set(specials), flags, names
 
 
 def convert(src, dst):
@@ -129,9 +171,19 @@ def convert(src, dst):
         if ch is not None and ch in vocab:
             byte_table[b] = vocab[ch]
 
-    bos = vocab.get("<|im_start|>", 1)
-    eos = vocab.get("<|im_end|>", 2)
-    unk = vocab.get("<|endoftext|>", 0)
+    # ChatML markers, by name. Falling back to a small integer here is how a
+    # tokenizer ends up declaring an ordinary BPE token as end-of-turn, so a
+    # miss is reported rather than defaulted -- the failure it causes
+    # (generation that never stops) is a long way from the cause.
+    def special(name, fallback):
+        if name in vocab:
+            return vocab[name]
+        print(f"  WARNING: {name} not in the vocabulary; using {fallback}")
+        return fallback
+
+    bos = special("<|im_start|>", 1)
+    eos = special("<|im_end|>", 2)
+    unk = special("<|endoftext|>", 0)
 
     # Not every byte necessarily has a standalone token. SmolLM2 trained its
     # own 49152-entry BPE and 21 byte-characters never survived as single
@@ -175,7 +227,8 @@ def convert(src, dst):
     print(f"  {size} tokens, {len(rank)} merges, longest {max_len} B")
     print(f"  specials: bos={bos} eos={eos} unk={unk}, {len(special_ids)} added")
     print(f"  flags: dummy_prefix={bool(flags & FLAG_DUMMY_PREFIX)} "
-          f"individual_digits={bool(flags & FLAG_INDIVIDUAL_DIGITS)}")
+          f"individual_digits={bool(flags & FLAG_INDIVIDUAL_DIGITS)} "
+          f"split={'cl100k' if flags & FLAG_SPLIT_CL100K else 'gpt2'}")
     if missing:
         print(f"  {len(missing)} unreachable bytes mapped to unk "
               f"(control codes and invalid UTF-8 lead bytes)")
@@ -238,6 +291,99 @@ def pretokenize(text, individual_digits):
     return out
 
 
+CONTRACTIONS = ["'s", "'t", "'re", "'ve", "'m", "'ll", "'d"]
+
+
+def pretokenize_cl100k(text):
+    """Split before BPE, the way Qwen3's explicit Split regex does.
+
+        (?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}
+        | ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+
+
+    Four differences from the GPT-2 pattern above, and every one of them
+    changes real text:
+
+      * a word may be led by *any* non-alphanumeric, not only a space, so
+        `(x` is one piece where GPT-2 gives `(` and `x`;
+      * `\\p{N}` takes one digit at a time, so Qwen3 gets digit splitting from
+        the regex rather than from a Digits pre-tokenizer and the
+        individual_digits flag is not set for it;
+      * a punctuation run swallows the newlines that follow it;
+      * whitespace ending in a newline is its own piece, which is what keeps
+        `<|im_end|>\\n<|im_start|>` aligned.
+
+    Alternation is ordered and first-match-wins, so the branches below are in
+    the order the regex lists them. Written as a scan rather than with `re`
+    because the kernel has no regex engine and this has to be the same
+    algorithm there.
+    """
+    out = []
+    i = 0
+    n = len(text)
+    is_nl = lambda c: c in "\r\n"
+    while i < n:
+        start = i
+
+        # 1. contractions, case-insensitively
+        hit = next((c for c in CONTRACTIONS if text[i:i + len(c)].lower() == c), None)
+        if hit:
+            out.append(text[i:i + len(hit)])
+            i += len(hit)
+            continue
+
+        # 2. [^\r\n\p{L}\p{N}]? \p{L}+
+        j = i
+        if not is_nl(text[j]) and not text[j].isalpha() and not text[j].isdigit():
+            j += 1
+        if j < n and text[j].isalpha():
+            while j < n and text[j].isalpha():
+                j += 1
+            out.append(text[start:j])
+            i = j
+            continue
+
+        # 3. one digit
+        if text[i].isdigit():
+            out.append(text[i])
+            i += 1
+            continue
+
+        # 4. ' ?' punctuation+ newline*
+        j = i + (1 if text[i] == " " else 0)
+        if j < n and not text[j].isspace() and not text[j].isalpha() and not text[j].isdigit():
+            while j < n and not text[j].isspace() and not text[j].isalpha() and not text[j].isdigit():
+                j += 1
+            while j < n and is_nl(text[j]):
+                j += 1
+            out.append(text[start:j])
+            i = j
+            continue
+
+        # 5/6/7. whitespace
+        if text[i].isspace():
+            j = i
+            while j < n and text[j].isspace():
+                j += 1
+            # `\s*[\r\n]+` is greedy on both halves, so it ends at the LAST
+            # newline in the run, not the first.
+            last_nl = max((k for k in range(i, j) if is_nl(text[k])), default=None)
+            if last_nl is not None:
+                out.append(text[start:last_nl + 1])
+                i = last_nl + 1
+                continue
+            # `\s+(?!\S)` takes the whole run only at end of string; otherwise
+            # it gives back one character and the last space leads the next
+            # word.
+            stop = j if j == n else max(j - 1, i + 1)
+            out.append(text[start:stop])
+            i = stop
+            continue
+
+        out.append(text[i])
+        i += 1
+    return out
+
+
 def encode_like_kernel(text, raw, scores, byte_table, flags, specials=()):
     lookup = {}
     for i, r in enumerate(raw):
@@ -276,7 +422,12 @@ def encode_like_kernel(text, raw, scores, byte_table, flags, specials=()):
 
 def _bpe(text, raw, scores, byte_table, flags, lookup):
     ids = []
-    for piece in pretokenize(text, bool(flags & FLAG_INDIVIDUAL_DIGITS)):
+    split = (
+        pretokenize_cl100k(text)
+        if flags & FLAG_SPLIT_CL100K
+        else pretokenize(text, bool(flags & FLAG_INDIVIDUAL_DIGITS))
+    )
+    for piece in split:
         toks = [byte_table[b] for b in piece.encode("utf-8")]
         while True:
             best, best_at, best_id = -1e29, -1, -1

@@ -800,15 +800,34 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
         "ask" => {
             let mut opts = crate::ai::GenOpts { steps: 64, temperature: 0.3, ..Default::default() };
             let mut q = rest;
-            if let Some(t) = q.strip_prefix("-n ") {
-                let mut it = t.splitn(2, ' ');
-                if let (Some(n), Some(tail)) = (it.next(), it.next()) {
-                    opts.steps = n.parse().unwrap_or(opts.steps);
-                    q = tail.trim_start();
+            // Flags in any order, and -t before -n is the natural way to type
+            // it, so this loops rather than testing a fixed sequence.
+            loop {
+                if let Some(t) = q.strip_prefix("-t ") {
+                    opts.think = true;
+                    q = t.trim_start();
+                } else if let Some(t) = q.strip_prefix("-n ") {
+                    let mut it = t.splitn(2, ' ');
+                    match (it.next(), it.next()) {
+                        (Some(n), Some(tail)) => {
+                            opts.steps = n.parse().unwrap_or(opts.steps);
+                            q = tail.trim_start();
+                        }
+                        _ => break,
+                    }
+                } else {
+                    break;
                 }
             }
+            if opts.think && opts.steps < 256 {
+                // Reasoning is not free and a truncated <think> block prints as
+                // a monologue with no answer, which looks like a broken model.
+                opts.steps = 256;
+                kprintln!("  (thinking: raised to {} tokens)", opts.steps);
+            }
             if q.is_empty() {
-                kprintln!("  usage: ask [-n tokens] <question>");
+                kprintln!("  usage: ask [-t] [-n tokens] <question>");
+                kprintln!("     -t  let the model reason first, if it can");
             } else {
                 crate::ai::chat(q, &opts);
             }

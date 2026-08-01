@@ -47,13 +47,20 @@ Use the project venv — there is no Python on PATH:
 ```powershell
 .\tools\venv\Scripts\python.exe tools\traces.py out\traces.jsonl --count 40000 --per-family 300
 .\tools\venv\Scripts\python.exe tools\dataset.py out\corpus.json --rust src\ai\corpus.rs
-.\tools\venv\Scripts\python.exe tools\convert.py tools\hf esp\GLADOS\model.bin
+.\tools\venv\Scripts\python.exe tools\convert.py tools\qwen3 esp\GLADOS\model.bin --seq 512
+.\tools\venv\Scripts\python.exe tools\tokenizer.py tools\qwen3\tokenizer.json esp\GLADOS\tokenizer.bin --verify
 ```
 
-`tools/hf/` holds the safetensors checkpoint. `convert.py <src> <dst> [--f32]
-[--seq N]` flattens it into the `GLADOSM2` layout `ai::model::offsets` indexes
-by arithmetic. `--seq` sets the context window and is bounded by KV cache size,
-not by the model.
+`tools/qwen3/` and `tools/hf/` hold safetensors checkpoints. `convert.py <src>
+<dst> [--f32] [--seq N]` flattens one into the `GLADOSM3` layout
+`ai::model::offsets` indexes by arithmetic. `--seq` sets the context window and
+is bounded by **KV cache size, not by the model**: Qwen3-0.6B costs 112 MiB of
+kernel heap at 512, and convert.py prints that figure so it is decided where
+`--seq` is chosen rather than discovered as an allocation failure at boot.
+
+Always run `tokenizer.py` with `--verify`. It reimplements the kernel's
+algorithm and diffs it against the reference `tokenizers` library; a tokenizer
+that is subtly wrong produces text that still looks like text.
 
 Root certificate bundle, built from the host's store:
 
@@ -69,12 +76,40 @@ system runs heap, timer, clock, namespace, crypto (11 RFC vector sets),
 constrained-decoding and probe selftests, and prints `ok` / `FAIL` per line.
 Read that output; it is the test suite.
 
-Shell commands that re-run tests on demand: `crypto`, `trust verify`,
-`fit`, `gate`, `search`, `wpa2`, `video bars`.
+Shell commands that re-run tests on demand: `tensor`, `model`, `crypto`,
+`trust verify`, `fit`, `gate`, `search`, `wpa2`, `video bars`. `tensor` and
+`model` are **not** part of the boot sequence and hold the checks for the
+pre-tokenizer and the wide-head attention geometry.
 
-To drive QEMU non-interactively, attach to the serial port as a TCP socket —
-QEMU's Windows stdio chardev reads console handles, not redirected files, so
-piping a script into it silently does nothing.
+`tools/drive.py` boots QEMU and drives the shell over a serial socket:
+
+```powershell
+.\tools\venv\Scripts\python.exe tools\drive.py "tensor" "model" "ask -n 20 hello"
+```
+
+It stages `BOOTX64.EFI`, resets NVRAM to pristine (a stale boot entry sends the
+firmware to the UEFI shell, which looks like the system not booting), and
+attaches serial as TCP — QEMU's Windows stdio chardev reads console handles,
+not redirected files, so piping a script into it silently does nothing.
+
+**QEMU cannot run the real model.** VVFAT is FAT16 on a fixed geometry and the
+whole disk is 516 MB; `fat:32:` raises that in principle but QEMU says its
+FAT32 is untested and the firmware cannot read the directory it produces. So
+Qwen3-0.6B is only runnable on the GF63, and QEMU work uses the SmolLM2
+checkpoint in `out/`. Guest RAM must also cover the weights, which are read
+whole into a pool before `ExitBootServices` — `run.ps1 -Memory` defaults to 2G.
+
+`tools/reference.py` is the numeric oracle and the way to check the real model
+without hardware. It reads the *converted* file, so a `convert.py` bug shows up
+there too and only a Rust bug shows up as a mismatch:
+
+```powershell
+.\tools\venv\Scripts\python.exe tools\reference.py out\qwen3-0.6b.bin --tokenizer tools\qwen3\tokenizer.json --generate 40 --prompt "..."
+```
+
+Compare `logits <ids>` in GLaDOS against the same ids here. Coherent generated
+text is the cheap end of the same check: an 0.6B instruction-tuned model whose
+attention path is wired correctly writes real sentences.
 
 **Boot selftest output is easy to skip past and it does catch real bugs.** An
 ECDSA break was visible in `[selftest] crypto` for a whole debugging cycle
@@ -149,8 +184,47 @@ TLS 1.3 validates the chain, the transcript signature, dates and name — and
 
 ### The model (`src/ai/`)
 
-SmolLM2-135M, int8, ~129 MB on the ESP, referenced in place in the LoaderData
-pool rather than copied to the heap.
+Qwen3-0.6B, int8, ~570 MB on the ESP, referenced in place in the LoaderData
+pool rather than copied to the heap. SmolLM2-135M still loads and is the small
+checkpoint to reach for when something needs to run under QEMU.
+
+**Qwen3 is not a Llama, and neither difference fails loudly.** Its head width
+is *stated* (128) rather than derived (1024/16 = 64), so `wq` is `[2048, 1024]`
+and the attention path is wider than the residual stream; and it RMSNorms each
+head's query and key before RoPE. Ignore either and the model loads, runs, and
+generates confident nonsense. `Config::head_dim` and `Config::qk_norm` carry
+them, and the `GLADOSM3` header (v3) records them per checkpoint. v2 files still
+load: their defaults are exactly the Llama ones.
+
+**RoPE pairs `i` with `i + head_dim/2`, not `2i` with `2i+1`.** This is
+`rotate_half` in HuggingFace's modeling code, and therefore what every
+checkpoint trained through transformers expects -- Qwen3 and SmolLM2 alike.
+The kernel used the interleaved convention for a long time and nothing looked
+broken, because both are norm-preserving rotations by the same angles: no NaN,
+no drift, no error. The model stays fluent and attends by a scrambled notion of
+distance, which is indistinguishable from a small model being small. It cost
+SmolLM2 `"The capital of France."` followed by blank lines where the corrected
+path gives `"The capital of France is Paris. Paris is a city known for..."`.
+`Config::rope_interleaved` is true only for genuine llama2.c checkpoints.
+
+Generation is memory-bandwidth bound -- bytes read per token is roughly the
+model size -- so 570 MB against 135 MB is about 4.4x the time per token. The
+classifier is 155 MB of that, and constrained decoding only ever needs logits
+for the reachable set, so restricting that matvec is the obvious win when it
+matters.
+
+`ask` closes the `<think>` block itself unless given `-t`. Qwen3 left alone
+reasons at length, which is the model working as designed and useless at a
+64-token budget. `has_think_token()` decides by asking whether the tokenizer
+knows `<think>` as one token -- a property of the vocabulary rather than a
+guess from a name.
+
+The tokenizer carries which pre-tokenizer regex the checkpoint trained with.
+SmolLM2 is the GPT-2 pattern; Qwen3 spells out the cl100k one, where a word may
+be led by any non-alphanumeric (`(x` is one piece), digits come one at a time,
+and punctuation swallows following newlines. Using the wrong one moved ~12% of
+tokens on the training corpus -- again with no error, just a model fed
+sequences it never saw.
 
 Two routing paths, and the interesting result is that the older one wins:
 `act` decodes an applet name token-by-token under a grammar; `route` reads one
@@ -219,6 +293,16 @@ near-duplicates yields a corpus that trains a model to recite.
   gated on `avx_enabled && fma` and never on `avx2`.
 - **DER `expect(tag)` must not consume on mismatch**, and "try for the value,
   skip if that failed" throws it away when the optional field is absent.
+- **A model can be wrong without being broken.** RoPE pairing, QK-Norm, head
+  width, RMSNorm epsilon and the pre-tokenizer regex all produce a network that
+  loads, runs, stays numerically well-behaved and writes fluent text. There is
+  no error to catch, so the only thing that settles any of them is comparing
+  against `tools/reference.py` or reading generated output that is supposed to
+  contain a known fact.
+- **The kernel heap is a ladder, not a constant** (`HEAP_LADDER`). It is one
+  physically contiguous allocation, the GF63 cannot be tested from here, and a
+  fixed size its memory map cannot satisfy is an unbootable system. Boot prints
+  the size it got and says when it had to come down a rung.
 - The boot disk is **counterfeit**: it advertises 976 GB and holds 14.67. Hence
   MBR (a GPT backup header would land in flash that does not exist) and hence
   `SafeLimitGB` in `build-layout.ps1`. Do not put anything you care about on it.

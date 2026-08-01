@@ -22,8 +22,42 @@ pub struct Config {
     pub n_layers: usize,
     pub n_heads: usize,
     pub n_kv_heads: usize,
+    /// Width of one attention head.
+    ///
+    /// Not `dim / n_heads`. Llama defines it that way and every model here did
+    /// until Qwen3, which states it separately: 1024 wide, 16 heads, and a head
+    /// size of 128 rather than the 64 that division gives. So `wq` is
+    /// `[2048, 1024]` and the attention path is *wider* than the residual
+    /// stream it reads from.
+    ///
+    /// This is the field to suspect first when a converted model produces
+    /// fluent nonsense: the old formula divides evenly for Qwen3 and yields a
+    /// perfectly self-consistent set of wrong shapes.
+    pub head_dim: usize,
     pub vocab_size: usize,
     pub seq_len: usize,
+    /// The constant inside RMSNorm's square root, from the checkpoint.
+    pub norm_eps: f32,
+    /// Whether each head's query and key are RMSNormed before RoPE.
+    ///
+    /// Qwen3 does this; Llama and SmolLM2 do not. Skipping it costs no shape
+    /// mismatch and no error -- attention simply attends to the wrong things.
+    pub qk_norm: bool,
+    /// Which dimensions RoPE pairs together.
+    ///
+    /// `true` pairs 2i with 2i+1, which is what llama2.c does and what the
+    /// GPT-NeoX paper describes. `false` pairs i with i + head_size/2, which is
+    /// what `rotate_half` in HuggingFace's modeling code does -- and therefore
+    /// what every checkpoint trained through transformers expects, Llama and
+    /// SmolLM2 included. SmolLM2's config states it outright:
+    /// `rope_interleaved: false`.
+    ///
+    /// Both are norm-preserving rotations by the same set of angles, so the
+    /// wrong one produces no error, no NaN and no drift in magnitude. The model
+    /// stays fluent and simply attends by a scrambled notion of distance. It
+    /// reads as a model that knows the topic and gets the facts wrong, which is
+    /// indistinguishable from a small model being small.
+    pub rope_interleaved: bool,
     /// Whether the output classifier reuses the token embedding matrix.
     pub shared_classifier: bool,
     /// RoPE base frequency. llama2.c hardcodes 10000; SmolLM2 trained with
@@ -40,12 +74,18 @@ pub struct Config {
 
 impl Config {
     pub fn head_size(&self) -> usize {
-        self.dim / self.n_heads
+        self.head_dim
     }
-    /// Width of the key/value projections. Smaller than `dim` when the model
+    /// Total width of the query projection, which is what `wq` produces and
+    /// what `wo` consumes. Equal to `dim` for every Llama-shaped model, and
+    /// twice it for Qwen3-0.6B.
+    pub fn q_dim(&self) -> usize {
+        self.n_heads * self.head_dim
+    }
+    /// Width of the key/value projections. Smaller than `q_dim` when the model
     /// uses grouped-query attention.
     pub fn kv_dim(&self) -> usize {
-        self.dim * self.n_kv_heads / self.n_heads
+        self.n_kv_heads * self.head_dim
     }
     /// How many query heads share each key/value head.
     pub fn kv_mul(&self) -> usize {
@@ -53,24 +93,28 @@ impl Config {
     }
 
     pub fn param_count(&self) -> usize {
-        let (d, h, l, kv, v) = (
+        let (d, h, l, q, kv, v) = (
             self.dim,
             self.hidden_dim,
             self.n_layers,
+            self.q_dim(),
             self.kv_dim(),
             self.vocab_size,
         );
         let mut n = v * d          // token embedding
             + l * d                // rms_att
-            + l * d * d            // wq
-            + l * d * kv           // wk
-            + l * d * kv           // wv
-            + l * d * d            // wo
+            + l * q * d            // wq
+            + l * kv * d           // wk
+            + l * kv * d           // wv
+            + l * d * q            // wo
             + l * d                // rms_ffn
             + l * h * d            // w1
             + l * d * h            // w2
             + l * h * d            // w3
             + d; // rms_final
+        if self.qk_norm {
+            n += 2 * l * self.head_dim;
+        }
         if !self.shared_classifier {
             n += v * d;
         }
@@ -83,6 +127,8 @@ impl Config {
 struct Offsets {
     token_embedding: usize,
     rms_att: usize,
+    q_norm: usize,
+    k_norm: usize,
     wq: usize,
     wk: usize,
     wv: usize,
@@ -107,10 +153,11 @@ struct Offsets {
 /// ties its output weights to the embedding, which is why getting this wrong
 /// would have gone unnoticed until the first model that does not.
 fn offsets(cfg: &Config, legacy_rope_tables: bool) -> Offsets {
-    let (d, h, l, kv, v) = (
+    let (d, h, l, q, kv, v) = (
         cfg.dim,
         cfg.hidden_dim,
         cfg.n_layers,
+        cfg.q_dim(),
         cfg.kv_dim(),
         cfg.vocab_size,
     );
@@ -120,14 +167,23 @@ fn offsets(cfg: &Config, legacy_rope_tables: bool) -> Offsets {
     p += v * d;
     o.rms_att = p;
     p += l * d;
+    // QK-Norm weights sit with the other attention norms rather than beside the
+    // projections they modify, so that a model without them leaves a hole of
+    // length zero and every later offset is unchanged.
+    if cfg.qk_norm {
+        o.q_norm = p;
+        p += l * cfg.head_dim;
+        o.k_norm = p;
+        p += l * cfg.head_dim;
+    }
     o.wq = p;
-    p += l * d * d;
+    p += l * q * d;
     o.wk = p;
-    p += l * d * kv;
+    p += l * kv * d;
     o.wv = p;
-    p += l * d * kv;
+    p += l * kv * d;
     o.wo = p;
-    p += l * d * d;
+    p += l * d * q;
     o.rms_ffn = p;
     p += l * d;
     o.w1 = p;
@@ -180,6 +236,8 @@ pub struct State {
     /// indexed rather than recomputed.
     rope_cos: Vec<f32>,
     rope_sin: Vec<f32>,
+    /// Width of the residual stream, kept so `hidden` can bound itself.
+    dim: usize,
 }
 
 impl State {
@@ -204,11 +262,14 @@ impl State {
 
         Self {
             x: vec![0.0; cfg.dim],
-            xb: vec![0.0; cfg.dim],
+            // Attention writes `n_heads * head_dim` values into `xb` before
+            // `wo` projects them back down, so it has to hold the wider of the
+            // two. For every Llama-shaped model these are equal.
+            xb: vec![0.0; cfg.dim.max(cfg.q_dim())],
             xb2: vec![0.0; cfg.dim],
             hb: vec![0.0; cfg.hidden_dim],
             hb2: vec![0.0; cfg.hidden_dim],
-            q: vec![0.0; cfg.dim],
+            q: vec![0.0; cfg.q_dim()],
             att: vec![0.0; cfg.n_heads * cfg.seq_len],
             logits: vec![0.0; cfg.vocab_size],
             key_cache: vec![0.0; cfg.n_layers * cfg.seq_len * kv],
@@ -216,6 +277,7 @@ impl State {
             krot: vec![0.0; cfg.seq_len * kv],
             rope_cos,
             rope_sin,
+            dim: cfg.dim,
         }
     }
 
@@ -291,15 +353,23 @@ impl State {
     /// the vocabulary extension scores against, and the one its gradient step
     /// multiplies by.
     pub fn hidden(&self) -> &[f32] {
-        &self.xb
+        // Bounded, not the whole buffer: `xb` is sized for the wider of the
+        // residual stream and the attention output, and on Qwen3 the tail holds
+        // last layer's attention values. Handing those to the probe would add
+        // 1024 stale features that look perfectly plausible.
+        &self.xb[..self.dim]
     }
 
     pub fn bytes(&self, cfg: &Config) -> usize {
         let kv = cfg.kv_dim();
-        4 * (cfg.dim * 4
+        4 * (cfg.dim * 2                    // x, xb2
+            + cfg.dim.max(cfg.q_dim())      // xb
+            + cfg.q_dim()                   // q
             + cfg.hidden_dim * 2
             + cfg.n_heads * cfg.seq_len
             + cfg.vocab_size
+            + cfg.seq_len * kv              // krot
+            + cfg.seq_len * cfg.head_dim    // rope cos+sin, half each
             + 2 * cfg.n_layers * cfg.seq_len * kv)
     }
 }
@@ -310,9 +380,18 @@ pub const HEADER_BYTES: usize = 28;
 const KV_MAGIC: &[u8; 8] = b"GLADOSKV";
 
 const GLADOS_MAGIC: &[u8; 8] = b"GLADOSM2";
-const GLADOS_VERSION: u32 = 2;
+/// Versions this loader understands.
+///
+/// v2 ends at byte 48 and describes a Llama: head size is `dim / n_heads`,
+/// RMSNorm epsilon is 1e-5, no QK-Norm. v3 fills three of the sixteen bytes
+/// that were already spare in the 64-byte header, so the magic is unchanged and
+/// every v2 checkpoint on an ESP keeps loading untouched.
+const GLADOS_VERSION_LLAMA: u32 = 2;
+const GLADOS_VERSION_GENERAL: u32 = 3;
 const GLADOS_HEADER: usize = 64;
 const GLADOS_QUANT_I8: u32 = 1;
+const GLADOS_FLAG_QK_NORM: u32 = 1 << 0;
+const GLADOS_FLAG_ROPE_INTERLEAVED: u32 = 1 << 1;
 
 #[derive(Debug, Clone, Copy)]
 pub enum LoadError {
@@ -430,8 +509,16 @@ impl Model {
             n_layers: n_layers as usize,
             n_heads: n_heads as usize,
             n_kv_heads: n_kv_heads as usize,
+            // The legacy format predates any model that separated the two, so
+            // the Llama identity holds by construction here.
+            head_dim: if n_heads > 0 { (dim / n_heads) as usize } else { 0 },
             vocab_size: raw_vocab.unsigned_abs() as usize,
             seq_len: seq_len as usize,
+            norm_eps: 1e-5,
+            qk_norm: false,
+            // llama2.c's own exporter, and llama2.c rotates adjacent pairs.
+            // This is the one format where interleaved is right.
+            rope_interleaved: true,
             shared_classifier: raw_vocab > 0,
             // The legacy format has no field for it; llama2.c hardcodes 10000
             // and every checkpoint in that format was trained with it.
@@ -477,7 +564,8 @@ impl Model {
         let u32_at = |o: usize| u32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]);
         let i32_at = |o: usize| i32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]);
 
-        if u32_at(8) != GLADOS_VERSION {
+        let version = u32_at(8);
+        if version != GLADOS_VERSION_LLAMA && version != GLADOS_VERSION_GENERAL {
             return Err(LoadError::BadHeader);
         }
         let dim = i32_at(12);
@@ -507,14 +595,35 @@ impl Model {
             return Err(LoadError::BadHeader);
         }
 
+        // v2 carried none of these; its defaults are exactly the Llama ones.
+        let (head_dim, norm_eps, flags) = if version >= GLADOS_VERSION_GENERAL {
+            (
+                i32_at(48),
+                f32::from_le_bytes([data[52], data[53], data[54], data[55]]),
+                u32_at(56),
+            )
+        } else {
+            (if n_heads > 0 { dim / n_heads } else { 0 }, 1e-5, 0)
+        };
+        if head_dim <= 0 || head_dim % 2 != 0 || !(norm_eps > 0.0) {
+            return Err(LoadError::BadHeader);
+        }
+
         let cfg = Config {
             dim: dim as usize,
             hidden_dim: hidden_dim as usize,
             n_layers: n_layers as usize,
             n_heads: n_heads as usize,
             n_kv_heads: n_kv_heads as usize,
+            head_dim: head_dim as usize,
             vocab_size: raw_vocab.unsigned_abs() as usize,
             seq_len: seq_len as usize,
+            norm_eps,
+            qk_norm: flags & GLADOS_FLAG_QK_NORM != 0,
+            // v2 predates the flag, and every v2 file was produced by
+            // convert.py from a HuggingFace checkpoint -- so `false` is not a
+            // fallback here, it is the correct value for all of them.
+            rope_interleaved: flags & GLADOS_FLAG_ROPE_INTERLEAVED != 0,
             shared_classifier: raw_vocab > 0,
             rope_theta,
             attn_sinks: 0,
@@ -522,14 +631,18 @@ impl Model {
             // evicted and this is off until asked for.
             attn_window: usize::MAX,
         };
-        if cfg.dim % cfg.n_heads != 0 || cfg.n_heads % cfg.n_kv_heads != 0 {
+        // kv_mul() divides by n_kv_heads. `dim % n_heads` is deliberately *not*
+        // checked any more: it is no longer a constraint the geometry implies,
+        // and on Qwen3 it happens to hold while meaning nothing.
+        if cfg.n_heads % cfg.n_kv_heads != 0 {
             return Err(LoadError::BadHeader);
         }
 
-        let (d, h, l, kv, v) = (
+        let (d, h, l, q, kv, v) = (
             cfg.dim,
             cfg.hidden_dim,
             cfg.n_layers,
+            cfg.q_dim(),
             cfg.kv_dim(),
             cfg.vocab_size,
         );
@@ -542,14 +655,23 @@ impl Model {
 
         let rms_att_at = p;
         p += l * d * 4;
+        let (q_norm_at, k_norm_at) = if cfg.qk_norm {
+            let a = p;
+            p += l * cfg.head_dim * 4;
+            let b = p;
+            p += l * cfg.head_dim * 4;
+            (a, b)
+        } else {
+            (0, 0)
+        };
         off.wq = p;
-        p += l * Self::q8_stride(d, d);
+        p += l * Self::q8_stride(q, d);
         off.wk = p;
         p += l * Self::q8_stride(kv, d);
         off.wv = p;
         p += l * Self::q8_stride(kv, d);
         off.wo = p;
-        p += l * Self::q8_stride(d, d);
+        p += l * Self::q8_stride(d, q);
         let rms_ffn_at = p;
         p += l * d * 4;
         off.w1 = p;
@@ -570,11 +692,23 @@ impl Model {
         }
 
         // Copy the norms out so the hot path reads aligned f32.
+        //
+        // Layout: rms_att[L*dim], rms_ffn[L*dim], rms_final[dim], then the
+        // QK-Norm pair if the model has one. Appending rather than interleaving
+        // keeps every existing offset arithmetic-identical for a model without.
+        let qk = if cfg.qk_norm { l * cfg.head_dim } else { 0 };
         let mut norms = Vec::new();
-        norms.try_reserve_exact(2 * l * d + d).map_err(|_| LoadError::OutOfMemory)?;
+        norms.try_reserve_exact(2 * l * d + d + 2 * qk).map_err(|_| LoadError::OutOfMemory)?;
         for (base, count) in [(rms_att_at, l * d), (rms_ffn_at, l * d), (rms_final_at, d)] {
             for i in 0..count {
                 norms.push(weights::f32_at(&data[base..], i));
+            }
+        }
+        if cfg.qk_norm {
+            for base in [q_norm_at, k_norm_at] {
+                for i in 0..qk {
+                    norms.push(weights::f32_at(&data[base..], i));
+                }
             }
         }
 
@@ -640,8 +774,8 @@ impl Model {
     }
 
     fn wq(&self, l: usize) -> Mat<'_> {
-        let d = self.cfg.dim;
-        self.mat(self.o.wq, self.blob_off().wq, l, d, d)
+        let (d, q) = (self.cfg.dim, self.cfg.q_dim());
+        self.mat(self.o.wq, self.blob_off().wq, l, q, d)
     }
     fn wk(&self, l: usize) -> Mat<'_> {
         let (d, kv) = (self.cfg.dim, self.cfg.kv_dim());
@@ -652,8 +786,8 @@ impl Model {
         self.mat(self.o.wv, self.blob_off().wv, l, kv, d)
     }
     fn wo(&self, l: usize) -> Mat<'_> {
-        let d = self.cfg.dim;
-        self.mat(self.o.wo, self.blob_off().wo, l, d, d)
+        let (d, q) = (self.cfg.dim, self.cfg.q_dim());
+        self.mat(self.o.wo, self.blob_off().wo, l, d, q)
     }
     fn w1(&self, l: usize) -> Mat<'_> {
         let (d, h) = (self.cfg.dim, self.cfg.hidden_dim);
@@ -702,13 +836,39 @@ impl Model {
         }
     }
 
+    /// QK-Norm weights, one vector of `head_dim` shared by every head.
+    ///
+    /// In the blob they live past the three ordinary norm groups; `which` is 0
+    /// for the query and 1 for the key. Callers must check `cfg.qk_norm` --
+    /// there is nothing here for a model without them.
+    fn qk_norm_w(&self, which: usize, l: usize) -> &[f32] {
+        let c = &self.cfg;
+        let (d, n, hd) = (c.dim, c.n_layers, c.head_dim);
+        match &self.src {
+            Source::Flat(_) => {
+                let base = if which == 0 { self.o.q_norm } else { self.o.k_norm };
+                self.slice(base + l * hd, hd)
+            }
+            Source::Blob { norms, .. } => {
+                let base = 2 * n * d + d + (which * n + l) * hd;
+                &norms[base..base + hd]
+            }
+        }
+    }
+    fn q_norm_w(&self, l: usize) -> &[f32] {
+        self.qk_norm_w(0, l)
+    }
+    fn k_norm_w(&self, l: usize) -> &[f32] {
+        self.qk_norm_w(1, l)
+    }
+
     /// One decode step: token at position `pos` in, logits out.
     pub fn forward(&self, s: &mut State, token: usize, pos: usize) {
         let c = &self.cfg;
-        let dim = c.dim;
         let kv_dim = c.kv_dim();
         let kv_mul = c.kv_mul();
         let head_size = c.head_size();
+        let eps = c.norm_eps;
 
         // --- where in the cache this token lives, and what else is still there
         //
@@ -766,7 +926,7 @@ impl Model {
 
         for l in 0..c.n_layers {
             // --- attention ---
-            tensor::rmsnorm(&mut s.xb, &s.x, self.rms_att_w(l));
+            tensor::rmsnorm_eps(&mut s.xb[..c.dim], &s.x, self.rms_att_w(l), eps);
 
             let loff = l * c.seq_len * kv_dim;
             // Keys and values are written straight into the cache slot for this
@@ -787,18 +947,47 @@ impl Model {
                 self.wv(l).matvec(v, &s.xb);
             }
 
+            // QK-Norm, before RoPE and before anything is cached.
+            //
+            // Order is the whole of it: Qwen3 normalises the raw projection,
+            // then rotates. Normalising after RoPE would rescale a vector whose
+            // length already encodes position, and normalising the key on the
+            // way *out* of the cache would redo the same work for every token
+            // that ever attends to it. Keys are therefore stored normed and
+            // unrotated -- normalisation is a property of the key, rotation is
+            // a property of where it currently sits.
+            if c.qk_norm {
+                let qn = self.q_norm_w(l);
+                for h in 0..c.n_heads {
+                    let o = h * head_size;
+                    tensor::rmsnorm_inplace(&mut s.q[o..o + head_size], qn, eps);
+                }
+                let kn = self.k_norm_w(l);
+                let kbase = loff + here * kv_dim;
+                for h in 0..c.n_kv_heads {
+                    let o = kbase + h * head_size;
+                    tensor::rmsnorm_inplace(&mut s.key_cache[o..o + head_size], kn, eps);
+                }
+            }
+
             // The key just written stays unrotated; only the query is rotated
             // here, at the position it will occupy in the cache.
             let half = head_size / 2;
             let qpos = live.saturating_sub(1);
-            for i in (0..dim).step_by(2) {
-                let pair = (i % head_size) / 2;
-                let fcr = s.rope_cos[qpos * half + pair];
-                let fci = s.rope_sin[qpos * half + pair];
-                let q0 = s.q[i];
-                let q1 = s.q[i + 1];
-                s.q[i] = q0 * fcr - q1 * fci;
-                s.q[i + 1] = q0 * fci + q1 * fcr;
+            for h in 0..c.n_heads {
+                let base = h * head_size;
+                for p in 0..half {
+                    let fcr = s.rope_cos[qpos * half + p];
+                    let fci = s.rope_sin[qpos * half + p];
+                    let (i, j) = if c.rope_interleaved {
+                        (base + 2 * p, base + 2 * p + 1)
+                    } else {
+                        (base + p, base + p + half)
+                    };
+                    let (a, b) = (s.q[i], s.q[j]);
+                    s.q[i] = a * fcr - b * fci;
+                    s.q[j] = a * fci + b * fcr;
+                }
             }
 
             // Rotate every live key into `krot`, indexed by cache position
@@ -809,14 +998,21 @@ impl Model {
             for j in 0..live {
                 let src = loff + slot_of(j) * kv_dim;
                 let dst = j * kv_dim;
-                for i in (0..kv_dim).step_by(2) {
-                    let pair = (i % head_size) / 2;
-                    let fcr = s.rope_cos[j * half + pair];
-                    let fci = s.rope_sin[j * half + pair];
-                    let k0 = s.key_cache[src + i];
-                    let k1 = s.key_cache[src + i + 1];
-                    s.krot[dst + i] = k0 * fcr - k1 * fci;
-                    s.krot[dst + i + 1] = k0 * fci + k1 * fcr;
+                for h in 0..c.n_kv_heads {
+                    let base = h * head_size;
+                    for p in 0..half {
+                        let fcr = s.rope_cos[j * half + p];
+                        let fci = s.rope_sin[j * half + p];
+                        let (a_off, b_off) = if c.rope_interleaved {
+                            (base + 2 * p, base + 2 * p + 1)
+                        } else {
+                            (base + p, base + p + half)
+                        };
+                        let k0 = s.key_cache[src + a_off];
+                        let k1 = s.key_cache[src + b_off];
+                        s.krot[dst + a_off] = k0 * fcr - k1 * fci;
+                        s.krot[dst + b_off] = k0 * fci + k1 * fcr;
+                    }
                 }
             }
 
@@ -851,7 +1047,7 @@ impl Model {
             tensor::add_into(&mut s.x, &s.xb2);
 
             // --- feed forward ---
-            tensor::rmsnorm(&mut s.xb, &s.x, self.rms_ffn_w(l));
+            tensor::rmsnorm_eps(&mut s.xb[..c.dim], &s.x, self.rms_ffn_w(l), eps);
             self.w1(l).matvec(&mut s.hb, &s.xb);
             self.w3(l).matvec(&mut s.hb2, &s.xb);
             tensor::swiglu(&mut s.hb, &s.hb2);
@@ -862,7 +1058,7 @@ impl Model {
         // Normalise into xb rather than cloning x into a temporary. The clone
         // was a heap allocation on every single token, in the one loop that
         // runs most often.
-        tensor::rmsnorm(&mut s.xb, &s.x, self.rms_final_w());
+        tensor::rmsnorm_eps(&mut s.xb[..c.dim], &s.x, self.rms_final_w(), eps);
         self.classifier().matvec(&mut s.logits, &s.xb);
     }
 

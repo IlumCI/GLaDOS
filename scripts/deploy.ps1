@@ -98,6 +98,29 @@ $payload = Join-Path $root 'esp\GLADOS'
 if (Test-Path $payload) {
     $targetDir = Join-Path "$EspDrive\" 'GLADOS'
     New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
+
+    # Refuse rather than run out of room halfway. Copy-Item on a full volume
+    # leaves a truncated file behind, and a truncated model.bin is not a failed
+    # deploy -- it is a system that boots, reports a checkpoint, and is wrong.
+    # Counted against free space plus whatever the existing copies would
+    # release, since most deploys overwrite.
+    if ($vol) {
+        $need = (Get-ChildItem $payload -File | Measure-Object -Sum Length).Sum
+        $reclaim = 0
+        foreach ($f in Get-ChildItem $payload -File) {
+            $existing = Join-Path $targetDir $f.Name
+            if (Test-Path $existing) { $reclaim += (Get-Item $existing).Length }
+        }
+        $avail = $vol.FreeSpace + $reclaim
+        if ($need -gt $avail) {
+            Write-Error ("payload is {0:N0} MB but only {1:N0} MB is available on {2}. " -f `
+                ($need/1MB), ($avail/1MB), $EspDrive) `
+                -ErrorAction Continue
+            Write-Error ("Re-lay the stick with a larger ESP, e.g. " +
+                ".\scripts\build-layout.ps1 -EspSizeMB 8192 -ReservedSizeMB 4096 -Execute")
+        }
+    }
+
     foreach ($f in Get-ChildItem $payload -File) {
         $to = Join-Path $targetDir $f.Name
         # Skip files already byte-identical: the ESP is on a slow USB stick and

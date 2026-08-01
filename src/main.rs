@@ -597,35 +597,45 @@ fn init_keyboard(acpi: &Option<acpi::Acpi>) {
     }
 }
 
-/// 64 MiB of kernel heap.
+/// Kernel heap sizes to try, largest first.
 ///
-/// Grown twice, each time by a model. 4 MiB was ample until weights had to fit
-/// at all; 16 MiB was enough until a 30-layer one arrived. SmolLM2's KV cache
-/// alone is 23.8 MiB at seq 512, and its 49152-entry vocabulary costs a few
-/// more in tokenizer tables -- about 29 MiB resident once the corpus and the
-/// namespace are in, both of which live entirely in RAM.
+/// Grown three times, each time by a model. 4 MiB was ample until weights had
+/// to fit at all; 16 MiB was enough until a 30-layer one arrived; 64 MiB held
+/// SmolLM2's 23.8 MiB KV cache with room. Qwen3-0.6B needs 112 MiB of KV cache
+/// alone at seq 512 -- 28 layers of 1024-wide keys and values -- and snapshotting
+/// it into the store transiently wants that much again.
 ///
-/// The weights themselves are *not* here -- they stay in the LoaderData pool
-/// the firmware filled, referenced in place.
-const HEAP_PAGES: usize = 16384;
+/// A ladder rather than a constant because this is one allocation of *physically
+/// contiguous* frames, and the only machine that matters cannot be tested from
+/// here. A fixed 320 MiB that the GF63's memory map cannot satisfy is an
+/// unbootable system; falling back to 64 MiB is a system that boots and says so.
+/// The sizes it lands on are all ones that have run.
+const HEAP_LADDER: [usize; 5] = [81920, 65536, 32768, 16384, 4096];
 
 fn init_heap(frames: &mut mem::frame::EarlyFrames) {
-    match frames.alloc_contiguous(HEAP_PAGES) {
-        Some(base) => {
-            let size = HEAP_PAGES * mem::PAGE_SIZE as usize;
-            unsafe { mem::heap::HEAP.add_region(base as usize, size) };
-            kprintln!(
-                "[boot] heap {} KiB at {:#x}",
-                size / 1024,
-                base
-            );
+    for (i, &pages) in HEAP_LADDER.iter().enumerate() {
+        let Some(base) = frames.alloc_contiguous(pages) else {
+            continue;
+        };
+        let size = pages * mem::PAGE_SIZE as usize;
+        unsafe { mem::heap::HEAP.add_region(base as usize, size) };
+        // Anything below the first rung means a model may fail to allocate its
+        // state later, with a message far from the cause. Say it here.
+        if i > 0 {
+            console::set_color(YELLOW);
         }
-        None => {
-            console::set_color(LTRED);
-            kprintln!("[boot] heap allocation FAILED -- no contiguous region");
-            console::set_color(LTGRAY_IDX);
-        }
+        kprintln!(
+            "[boot] heap {} MiB at {:#x}{}",
+            size / 1024 / 1024,
+            base,
+            if i > 0 { "  (reduced -- no larger contiguous region)" } else { "" }
+        );
+        console::set_color(LTGRAY_IDX);
+        return;
     }
+    console::set_color(LTRED);
+    kprintln!("[boot] heap allocation FAILED -- no contiguous region");
+    console::set_color(LTGRAY_IDX);
 }
 
 /// Build and install our own identity map, replacing the firmware's.

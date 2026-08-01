@@ -18,7 +18,13 @@ param(
     [switch]$Gdb,
     [switch]$TraceFaults,
     [string]$Qemu,
-    [string]$Ovmf
+    [string]$Ovmf,
+    # Guest RAM. The weights are read into a LoaderData pool whole, before
+    # ExitBootServices, so the guest needs room for the model plus the firmware
+    # plus the heap. 512M was ample for SmolLM2's 135 MB and cannot load
+    # Qwen3-0.6B's 570 MB at all -- the read fails and the system boots into a
+    # shell with no model, which reads as a loader bug rather than as memory.
+    [string]$Memory = '2048M'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -146,7 +152,7 @@ Copy-Item $efi (Join-Path $bootDir 'BOOTX64.EFI') -Force
 # --- launch ---
 $qemuArgs = @(
     '-machine', 'q35',
-    '-m', '512M'
+    '-m', $Memory
 )
 
 if ($combined) {
@@ -173,7 +179,10 @@ if (-not (Test-Path $nvmeImg)) {
 }
 
 $qemuArgs += @(
-    '-drive', "format=raw,file=fat:rw:$esp",
+    # fat:32: rather than the default: QEMU's VVFAT builds FAT16 unless told
+    # otherwise, and FAT16 tops out at 516 MB. Qwen3-0.6B is 570 MB, and the
+    # refusal comes from the -drive parser before any firmware runs.
+    '-drive', "format=raw,file=fat:32:rw:$esp",
     '-drive', "file=$nvmeImg,if=none,id=nvm0,format=raw",
     '-device', 'nvme,serial=GLADOSQEMU0001,drive=nvm0',
     '-serial', 'stdio',

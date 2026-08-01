@@ -33,7 +33,10 @@
 param(
     [switch]$Execute,
     [string]$SerialNumber = '3212271080340376147',
-    [int]$EspSizeMB = 512,
+    # Large enough for the weights with room to keep a second checkpoint beside
+    # them. Qwen3-0.6B is 570 MB at int8, which does not fit the 512 MB this
+    # defaulted to while the model was SmolLM2-135M.
+    [int]$EspSizeMB = 8192,
     [int]$ReservedSizeMB = 4096,
     # Measured real capacity, with the 10% margin find-capacity recommends.
     [double]$SafeLimitGB = 13.2,

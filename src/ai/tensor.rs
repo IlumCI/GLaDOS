@@ -159,17 +159,46 @@ pub unsafe fn matmul_avx2(out: &mut [f32], x: &[f32], w: &[f32], n: usize, d: us
 /// No mean subtraction and no bias, unlike LayerNorm -- that is the whole
 /// point of RMSNorm, and getting it wrong produces output that looks almost
 /// right, which is worse than output that looks broken.
-pub fn rmsnorm(out: &mut [f32], x: &[f32], weight: &[f32]) {
+///
+/// `eps` is a property of the checkpoint, not of the algorithm: SmolLM2 trained
+/// with 1e-5 and Qwen3 with 1e-6. It sits inside the square root, so the wrong
+/// one perturbs every activation in the network by a small amount rather than
+/// failing anywhere -- the same class of silent error as the wrong rope_theta.
+pub fn rmsnorm_eps(out: &mut [f32], x: &[f32], weight: &[f32], eps: f32) {
     let n = x.len();
     let mut ss = 0.0f32;
     for v in x.iter().take(n) {
         ss += v * v;
     }
-    ss = ss / n as f32 + 1e-5;
+    ss = ss / n as f32 + eps;
     let scale = 1.0 / sqrtf(ss);
     for i in 0..n {
         out[i] = weight[i] * (x[i] * scale);
     }
+}
+
+/// In-place RMSNorm over one slice, for QK-Norm.
+///
+/// Qwen3 normalises each attention head's query and key vectors before RoPE,
+/// with a weight shared across heads. It is in place because the target is one
+/// head's window into `q` or into the key cache, and copying it out and back
+/// would cost more than the normalisation.
+pub fn rmsnorm_inplace(x: &mut [f32], weight: &[f32], eps: f32) {
+    let n = x.len();
+    let mut ss = 0.0f32;
+    for v in x.iter() {
+        ss += v * v;
+    }
+    ss = ss / n as f32 + eps;
+    let scale = 1.0 / sqrtf(ss);
+    for i in 0..n {
+        x[i] = weight[i] * (x[i] * scale);
+    }
+}
+
+/// RMSNorm at the Llama default epsilon.
+pub fn rmsnorm(out: &mut [f32], x: &[f32], weight: &[f32]) {
+    rmsnorm_eps(out, x, weight, 1e-5)
 }
 
 /// In-place softmax, shifted by the maximum for numerical stability.

@@ -30,6 +30,9 @@ const V2_VERSION: u32 = 2;
 
 pub const FLAG_DUMMY_PREFIX: u32 = 1 << 0;
 pub const FLAG_INDIVIDUAL_DIGITS: u32 = 1 << 1;
+/// Which pre-tokenizer regex the checkpoint was trained with. Clear means the
+/// GPT-2 pattern; set means the cl100k one Qwen3 spells out as a Split.
+pub const FLAG_SPLIT_CL100K: u32 = 1 << 2;
 
 pub struct Tokenizer {
     vocab: Vec<Vec<u8>>,
@@ -278,7 +281,11 @@ impl Tokenizer {
 
     fn bpe_chunk(&self, text: &str, out: &mut Vec<usize>) {
         let mut spans: Vec<(usize, usize)> = Vec::new();
-        pretokenize(text, self.flags & FLAG_INDIVIDUAL_DIGITS != 0, &mut spans);
+        if self.flags & FLAG_SPLIT_CL100K != 0 {
+            pretokenize_cl100k(text, &mut spans);
+        } else {
+            pretokenize(text, self.flags & FLAG_INDIVIDUAL_DIGITS != 0, &mut spans);
+        }
 
         let mut toks: Vec<usize> = Vec::new();
         let mut joined: Vec<u8> = Vec::new();
@@ -482,5 +489,131 @@ fn pretokenize(text: &str, individual_digits: bool, out: &mut Vec<(usize, usize)
         }
         out.push((start, byte_at(j)));
         i = j;
+    }
+}
+
+/// Split text before BPE, the way Qwen3's explicit Split regex does.
+///
+///     (?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}
+///     | ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+
+///
+/// Four differences from the GPT-2 pattern above, and each one moves real
+/// boundaries:
+///
+///   * a word may be led by *any* non-alphanumeric rather than only a space,
+///     so `(x` is one piece where GPT-2 gives `(` then `x`;
+///   * `\p{N}` takes one digit at a time, so Qwen3 gets digit splitting from
+///     its regex and never sets `FLAG_INDIVIDUAL_DIGITS`;
+///   * a punctuation run swallows the newlines after it;
+///   * whitespace ending in a newline is its own piece, which is what keeps
+///     `<|im_end|>\n<|im_start|>` aligned.
+///
+/// Alternation is ordered and first-match-wins, so the branches are in the
+/// order the pattern lists them. The Python verifier implements this same scan
+/// and agrees with the reference tokenizer over the training corpus; the one
+/// place the two could still part company is the exact membership of
+/// `is_alphabetic` and `is_numeric`, which differ slightly between Rust and
+/// Python at the edges of Unicode.
+pub(super) fn pretokenize_cl100k(text: &str, out: &mut Vec<(usize, usize)>) {
+    const CONTRACTIONS: [&str; 7] = ["'s", "'t", "'re", "'ve", "'m", "'ll", "'d"];
+
+    let cs: Vec<(usize, char)> = text.char_indices().collect();
+    let n = cs.len();
+    let end = text.len();
+    let byte_at = |i: usize| if i < n { cs[i].0 } else { end };
+    let nl = |c: char| c == '\r' || c == '\n';
+    let letter = |c: char| c.is_alphabetic();
+    let digit = |c: char| c.is_numeric();
+    let word_lead = |c: char| !nl(c) && !letter(c) && !digit(c);
+    let punct = |c: char| !c.is_whitespace() && !letter(c) && !digit(c);
+
+    let mut i = 0usize;
+    while i < n {
+        let start = cs[i].0;
+        let here = cs[i].1;
+
+        // 1. Contractions, case-insensitively. All ASCII, so a byte length is
+        //    also a character count.
+        let rest = text.as_bytes();
+        let mut hit = 0usize;
+        for c in CONTRACTIONS {
+            let b = c.as_bytes();
+            if rest.len() >= start + b.len() && rest[start..start + b.len()].eq_ignore_ascii_case(b)
+            {
+                hit = b.len();
+                break;
+            }
+        }
+        if hit > 0 {
+            out.push((start, start + hit));
+            i += hit;
+            continue;
+        }
+
+        // 2. An optional lead character, then letters. The lead is only taken
+        //    if letters actually follow, so `((` does not eat a bracket here
+        //    and leave the next branch a shorter run.
+        let mut j = i + usize::from(word_lead(here));
+        if j < n && letter(cs[j].1) {
+            while j < n && letter(cs[j].1) {
+                j += 1;
+            }
+            out.push((start, byte_at(j)));
+            i = j;
+            continue;
+        }
+
+        // 3. One digit, alone.
+        if digit(here) {
+            out.push((start, byte_at(i + 1)));
+            i += 1;
+            continue;
+        }
+
+        // 4. An optional space, a punctuation run, then any newlines it drags
+        //    along.
+        let mut j = i + usize::from(here == ' ');
+        if j < n && punct(cs[j].1) {
+            while j < n && punct(cs[j].1) {
+                j += 1;
+            }
+            while j < n && nl(cs[j].1) {
+                j += 1;
+            }
+            out.push((start, byte_at(j)));
+            i = j;
+            continue;
+        }
+
+        // 5/6/7. Whitespace.
+        if here.is_whitespace() {
+            let mut j = i;
+            while j < n && cs[j].1.is_whitespace() {
+                j += 1;
+            }
+            // `\s*[\r\n]+` is greedy on both halves, so it ends at the LAST
+            // newline in the run rather than the first.
+            let mut last_nl = None;
+            for k in i..j {
+                if nl(cs[k].1) {
+                    last_nl = Some(k);
+                }
+            }
+            if let Some(k) = last_nl {
+                out.push((start, byte_at(k + 1)));
+                i = k + 1;
+                continue;
+            }
+            // `\s+(?!\S)` takes the whole run only at the end of the string.
+            // Otherwise it gives back one character, and that last space goes
+            // on to lead the next word.
+            let stop = if j == n { j } else { (j - 1).max(i + 1) };
+            out.push((start, byte_at(stop)));
+            i = stop;
+            continue;
+        }
+
+        out.push((start, byte_at(i + 1)));
+        i += 1;
     }
 }

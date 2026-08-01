@@ -199,6 +199,44 @@ pub fn selftest() -> bool {
         console::set_color(WHITE);
     }
 
+    // --- cl100k pre-tokenizer ---
+    //
+    // Qwen3 splits text differently from the GPT-2 lineage, and a wrong split
+    // does not fail: it moves merge boundaries so the model is fed sequences it
+    // never saw in training, and reads as the model simply being worse. These
+    // expectations are the output of `tools/tokenizer.py`, which is verified
+    // against the reference `tokenizers` library over the whole corpus -- so
+    // this checks the Rust port against a Python implementation that is itself
+    // checked against the real thing.
+    //
+    // Each case is here for a specific clause: `(x` for a non-space word lead,
+    // `'t` for case-insensitive contractions, `a1b2` for one-digit-at-a-time,
+    // `.\n` for punctuation swallowing newlines, and the double space for a run
+    // that leaves its last character to the following word.
+    const SPLITS: [(&str, &[&str]); 7] = [
+        ("println(x)", &["println", "(x", ")"]),
+        ("Don't STOP", &["Don", "'t", " STOP"]),
+        ("a  b", &["a", " ", " b"]),
+        ("x = 6*7; f(y)", &["x", " =", " ", "6", "*", "7", ";", " f", "(y", ")"]),
+        ("line1\n\nline2", &["line", "1", "\n\n", "line", "2"]),
+        ("end.\n", &["end", ".\n"]),
+        ("a1b2", &["a", "1", "b", "2"]),
+    ];
+    let mut splits_ok = true;
+    for (text, want) in SPLITS {
+        let mut spans: Vec<(usize, usize)> = Vec::new();
+        tokenizer::pretokenize_cl100k(text, &mut spans);
+        let got = spans.len() == want.len()
+            && spans.iter().zip(want.iter()).all(|(&(a, b), w)| &&text[a..b] == w);
+        if !got {
+            splits_ok = false;
+            console::set_color(LTRED);
+            kprintln!("    {:?} split into {} pieces, wanted {}", text, spans.len(), want.len());
+            console::set_color(WHITE);
+        }
+    }
+    all &= check("cl100k pre-tokenizer", splits_ok, "7 cases, Qwen3 clauses");
+
     all
 }
 
@@ -216,8 +254,12 @@ pub fn model_demo() {
         n_layers: 2,
         n_heads: 4,
         n_kv_heads: 4,
+        head_dim: 16,
         vocab_size: 256, // byte-level: no tokenizer needed
         seq_len: 64,
+        norm_eps: 1e-5,
+        qk_norm: false,
+        rope_interleaved: false,
         shared_classifier: true,
         rope_theta: 10000.0,
         attn_sinks: 0,
@@ -286,6 +328,66 @@ pub fn model_demo() {
     let seq_logits: Vec<f32> = s4.logits.clone();
     let ctx_matters = seq_logits.iter().zip(first.iter()).any(|(a, b)| a != b);
     ok &= check("context changes output", ctx_matters, "position 8 vs position 0");
+
+    // 6. Qwen3 geometry: a head that is not `dim / n_heads`, plus QK-Norm.
+    //
+    //    Worth its own model because every shape here used to be derivable from
+    //    `dim` and `n_heads`, and a wrong derivation divides evenly and produces
+    //    a self-consistent network that attends to the wrong things. This one is
+    //    64 wide with 4 heads of 32, so `q_dim` is 128 -- double the residual
+    //    stream -- and `kv_dim` is 64 where the old formula would have said 32.
+    //    If `xb` is sized by `dim` alone this panics rather than misbehaving,
+    //    which is the point.
+    let wide = model::Config {
+        dim: 64,
+        hidden_dim: 176,
+        n_layers: 2,
+        n_heads: 4,
+        n_kv_heads: 2,
+        head_dim: 32,
+        vocab_size: 256,
+        seq_len: 64,
+        norm_eps: 1e-6,
+        qk_norm: true,
+        rope_interleaved: false,
+        shared_classifier: true,
+        rope_theta: 1_000_000.0,
+        attn_sinks: 0,
+        attn_window: usize::MAX,
+    };
+    ok &= check(
+        "wide-head geometry",
+        wide.q_dim() == 128 && wide.kv_dim() == 64 && wide.head_size() == 32,
+        "q_dim 128, kv_dim 64, head 32",
+    );
+    match model::Model::synthetic(wide, 0xC0FFEE) {
+        Some(wm) => {
+            let mut ws = model::State::new(&wide);
+            for (i, b) in b"hello wor".iter().enumerate() {
+                wm.forward(&mut ws, *b as usize, i);
+            }
+            let a: Vec<f32> = ws.logits.clone();
+            let mut ws2 = model::State::new(&wide);
+            for (i, b) in b"hello wor".iter().enumerate() {
+                wm.forward(&mut ws2, *b as usize, i);
+            }
+            let mut ws3 = model::State::new(&wide);
+            for (i, b) in b"hello wox".iter().enumerate() {
+                wm.forward(&mut ws3, *b as usize, i);
+            }
+            ok &= check(
+                "wide-head forward",
+                a.iter().all(|v| v.is_finite())
+                    && a.iter().zip(ws2.logits.iter()).all(|(x, y)| x == y)
+                    && a.iter().zip(ws3.logits.iter()).any(|(x, y)| x != y),
+                "finite, deterministic, input-sensitive",
+            );
+            // The probe reads this; on a wide-head model the buffer behind it is
+            // longer than the residual stream and the tail is attention output.
+            ok &= check("hidden bounded to dim", ws.hidden().len() == wide.dim, "64 features");
+        }
+        None => ok &= check("wide-head forward", false, "out of memory"),
+    }
 
     // --- throughput ---
     let hz = crate::TIMER_HZ as u64;
@@ -652,6 +754,13 @@ pub struct GenOpts {
     pub repeat_penalty: f32,
     /// How many recent tokens the penalty covers.
     pub repeat_window: usize,
+    /// Let a hybrid reasoning model reason before answering.
+    ///
+    /// Only meaningful for a checkpoint that has `<think>`. Left clear, `chat`
+    /// closes the block itself, which is how Qwen3 documents turning thinking
+    /// off -- and without that, `ask -n 64` spends every one of its 64 tokens
+    /// thinking and prints no answer at all.
+    pub think: bool,
 }
 
 impl Default for GenOpts {
@@ -675,6 +784,7 @@ impl Default for GenOpts {
             echo_prompt: true,
             repeat_penalty,
             repeat_window,
+            think: false,
         }
     }
 }
@@ -1076,11 +1186,31 @@ pub fn logits_for(ids: &[usize]) {
 /// The trailing `<|im_start|>assistant\n` is the part that actually elicits an
 /// answer: it puts the model at the start of the assistant's turn, so the most
 /// likely continuation is a reply rather than more of the question.
+/// Whether the loaded tokenizer knows `<think>` as a single token.
+///
+/// The presence of the token is the signal that the checkpoint is a hybrid
+/// reasoning model, which is more reliable than a name or a version: it is a
+/// property of the vocabulary the model was actually trained on. Encoding is
+/// the test because specials are matched literally before BPE, so a tokenizer
+/// without it shreds the string into several tokens instead of one.
+pub fn has_think_token() -> bool {
+    with_engine(|e| e.tok.encode("<think>", false, false).len() == 1).unwrap_or(false)
+}
+
 pub fn chat(question: &str, opts: &GenOpts) {
     let mut prompt = alloc::string::String::new();
     prompt.push_str("<|im_start|>user\n");
     prompt.push_str(question);
     prompt.push_str("<|im_end|>\n<|im_start|>assistant\n");
+
+    // Qwen3 opens a `<think>` block unprompted and reasons at length. That is
+    // the model working as designed and it is useless at a 64-token budget, so
+    // unless thinking was asked for, the block is opened and closed here --
+    // which is exactly how Qwen documents disabling it. A checkpoint without
+    // the token gets nothing extra.
+    if !opts.think && has_think_token() {
+        prompt.push_str("<think>\n\n</think>\n\n");
+    }
 
     let framed = GenOpts { bos: false, echo_prompt: false, ..*opts };
     generate(&prompt, &framed);
