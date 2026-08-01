@@ -113,11 +113,12 @@ if (Test-Path $payload) {
         }
         $avail = $vol.FreeSpace + $reclaim
         if ($need -gt $avail) {
-            Write-Error ("payload is {0:N0} MB but only {1:N0} MB is available on {2}. " -f `
-                ($need/1MB), ($avail/1MB), $EspDrive) `
-                -ErrorAction Continue
-            Write-Error ("Re-lay the stick with a larger ESP, e.g. " +
-                ".\scripts\build-layout.ps1 -EspSizeMB 8192 -ReservedSizeMB 4096 -Execute")
+            Write-Error (
+                ("payload is {0:N0} MB but only {1:N0} MB is available on {2}.`n" -f `
+                    ($need/1MB), ($avail/1MB), $EspDrive) +
+                "Re-lay the stick with a larger ESP:`n" +
+                "  .\scripts\build-layout.ps1 -EspSizeMB 8192 -ReservedSizeMB 4096 -Execute"
+            )
         }
     }
 
