@@ -16,3 +16,4 @@ tools/out/
 __pycache__/
 *.pyc
 
+out/

@@ -47,6 +47,7 @@ Usage
 """
 
 import argparse
+import collections
 import json
 import random
 from pathlib import Path
@@ -108,11 +109,16 @@ OBS = {
          inet {ip}/24
          gw {gw}   dns {dns}
   wlan0  not present""",
-    "no_nic": """[interfaces]
+    # Mirrors what net::init actually prints when both drivers miss: the
+    # per-driver reason, which is the useful half of the message.
+    "no_nic": """[net]
+  eth0   no supported NIC
+         e1000 {e1000_err}, rtl8168 {rtl_err}
+[interfaces]
   lo     loopback  up
          inet 127.0.0.1/8
   eth0   not present
-  wlan0  not present""",
+  wlan0  {wlan_line}""",
     "store_none": """[storage]
   nvme {blocks} blocks x 512 B = {mib} MiB
   no unclaimed space for a store on this disk""",
@@ -121,8 +127,10 @@ OBS = {
   {objects} objects, {snaps} snapshots""",
     "mem_tight": """  heap  {used} B used / {total} B total
   free  {free} KiB""",
-    "trust_empty": """[trust]
-  no roots loaded -- every certificate will fail to validate""",
+    "trust_empty": r"""[trust]
+  no roots loaded -- every certificate will fail to validate
+  put a DER bundle at \GLADOS\roots.der and reboot
+  {n} certificate(s) were offered by {host}""",
     "trust_ok": """[trust]
   {n} root(s) trusted""",
     "tls_unverified": """[https] {host}:443/
@@ -137,12 +145,35 @@ OBS = {
   {what}
   pci {vendor:04x}:{device:04x}
   no driver.""",
+    # Every family gets an observation, including the ones where the answer is
+    # obvious. Not for the reasoning's sake but for the corpus's: a family with
+    # no varying state has only its goal phrasings to draw on, which left five
+    # of them contributing three traces each against another's four hundred.
+    # An unbalanced corpus teaches a prior, and the model learns the shape of
+    # the majority rather than the task.
+    "cpu_flags": """  {model}
+  vendor  GenuineIntel
+  simd    sse=1 sse2=1 sse4.1=1 avx={avx} avx2={avx2} fma={fma}
+  avx state enabled by the OS: {osxsave}""",
+    "ai_block": """[ai]
+  dim {dim}  hidden {hidden}  layers {layers}  vocab {vocab}  seq {seq}
+  {params} params, int8, rope_theta {theta}""",
+    "snaps_list": """[snaps]
+  {s0}  {n0} objects
+  {s1}  {n1} objects
+  {s2}  {n2} objects  <- latest""",
+    "ls_listing": """  {p0}   {b0} B
+  {p1}   {b1} B
+  {p2}   {b2} B
+  {count} entries""",
 }
 
 MACS = ["e0:d5:5e:{:02x}:{:02x}:{:02x}", "52:54:00:12:34:56", "a4:6b:b6:{:02x}:{:02x}:{:02x}"]
 IPS = ["10.0.2.15", "192.168.1.42", "192.168.0.117", "172.20.10.4"]
 GWS = ["10.0.2.2", "192.168.1.1", "192.168.0.1", "172.20.10.1"]
 DNSS = ["10.0.2.3", "192.168.1.1", "1.1.1.1", "8.8.8.8"]
+PATHS = ["/tmp/a", "/tmp/b", "/notes", "/ai/train", "/etc/hosts", "/log/boot",
+         "/tmp/draft", "/work/report"]
 HOSTS = ["example.com", "www.google.com", "api.github.com", "one.one.one.one"]
 
 
@@ -177,6 +208,42 @@ def fill(rng, template):
         what="Intel Wi-Fi 6E, CNVi in the PCH (Alder Lake-P)",
         vendor=0x8086,
         device=0x51F0,
+        model=rng.choice([
+            "12th Gen Intel(R) Core(TM) i7-12650H",
+            "QEMU Virtual CPU version 2.5+",
+            "11th Gen Intel(R) Core(TM) i5-1135G7",
+        ]),
+        avx=rng.choice([0, 1]),
+        avx2=rng.choice([0, 1]),
+        fma=rng.choice([0, 1]),
+        osxsave=rng.choice(["true", "false"]),
+        dim=rng.choice([576, 960, 1024]),
+        hidden=rng.choice([1536, 2560, 3072]),
+        layers=rng.choice([30, 32, 28]),
+        vocab=rng.choice([49152, 49152, 65536]),
+        seq=rng.choice([512, 1024, 2048]),
+        params=rng.choice(["134515008", "361821120", "600000000"]),
+        theta=rng.choice([100000, 1000000]),
+        s0="%016x" % rng.randrange(1 << 60),
+        s1="%016x" % rng.randrange(1 << 60),
+        s2="%016x" % rng.randrange(1 << 60),
+        n0=rng.randrange(5, 900),
+        n1=rng.randrange(5, 900),
+        n2=rng.randrange(5, 900),
+        p0=rng.choice(PATHS),
+        p1=rng.choice(PATHS),
+        p2=rng.choice(PATHS),
+        b0=rng.randrange(1, 90000),
+        b1=rng.randrange(1, 90000),
+        b2=rng.randrange(1, 90000),
+        count=rng.randrange(3, 40),
+        e1000_err=rng.choice(["NotFound", "NoBar", "NoMemory"]),
+        rtl_err=rng.choice(["NotFound", "NoBar", "ResetTimeout", "NoMac"]),
+        wlan_line=rng.choice([
+            "not present",
+            "Intel Wi-Fi 6E, CNVi in the PCH (Alder Lake-P) -- no driver",
+            "Realtek wireless -- no driver",
+        ]),
     )
 
 
@@ -320,7 +387,7 @@ FAMILIES = [
         "survive-snapshot-first",
         ["delete everything under /tmp", "remove the old files",
          "clean up the namespace"],
-        None,
+        "ls_listing",
         ["This removes content, and the namespace is content-addressed -- a "
          "removal is cheap to undo *if* there is a snapshot to go back to, "
          "and unrecoverable if there is not.",
@@ -343,7 +410,7 @@ FAMILIES = [
         "inspect-cpu",
         ["what processor is this", "do we have avx2", "what simd is available",
          "is this machine fast"],
-        None,
+        "cpu_flags",
         ["The feature flags decide which kernels run -- the int8 matmul takes "
          "the AVX2 path only when the OS has enabled the wider state, not "
          "merely when CPUID advertises it.",
@@ -354,7 +421,7 @@ FAMILIES = [
         "inspect-model",
         ["what model is loaded", "how big is the model",
          "what is the context length"],
-        None,
+        "ai_block",
         ["The loaded checkpoint reports its own geometry, so this needs no "
          "guessing from the file size."],
         "model",
@@ -378,7 +445,7 @@ FAMILIES = [
         "survive-before-risk",
         ["unlock writes to the disk", "let me write to the nvme",
          "enable persistent writes"],
-        None,
+        "store_ok",
         ["Unlocking NVMe writes removes the guard that keeps a bug in this "
          "system from reaching a disk that belongs to something else.",
          "The lock is not an inconvenience to route around; it is the reason "
@@ -405,7 +472,7 @@ FAMILIES = [
         "confuse-snap-snaps",
         ["what snapshots exist", "list the snapshots",
          "show me the snapshot history"],
-        None,
+        "snaps_list",
         ["This asks to *list* snapshots, not to take one. `snap` creates and "
          "`snaps` lists -- one character apart and opposite in effect.",
          "Listing changes nothing, so there is no reason to hesitate."],
@@ -425,8 +492,6 @@ FAMILIES = [
     ),
 ]
 
-PATHS = ["/tmp/a", "/tmp/b", "/notes", "/ai/train", "/etc/hosts", "/log/boot",
-         "/tmp/draft", "/work/report"]
 
 
 def render(rng, fam, fmt):
@@ -481,22 +546,64 @@ def build(seed, count, holdout, fmt):
 
     train, test = [], []
     seen = set()
-    # Round-robin the families so the corpus stays balanced no matter how many
+    # Round-robin the families so the corpus stays balanced whatever number of
     # phrasings each happens to have -- an unbalanced corpus teaches a prior,
     # and `ls` becoming a magnet in dataset.py is what that looks like.
-    tries = 0
-    while len(train) + len(test) < count and tries < count * 40:
-        tries += 1
-        fam = fams[(len(train) + len(test)) % len(fams)]
+    #
+    # Exhaustion is tracked per family rather than globally. A family whose
+    # unique combinations have run out must stop being asked, or the loop
+    # spends its whole budget re-rolling the same four sentences.
+    exhausted = set()
+    misses = {f[0]: 0 for f in fams}
+    i = 0
+    while len(train) + len(test) < count and len(exhausted) < len(fams):
+        fam = fams[i % len(fams)]
+        i += 1
+        if fam[0] in exhausted:
+            continue
         rec = render(rng, fam, fmt)
         key = rec.get("text") or (rec["goal"], rec["action"])
         if key in seen:
+            # Enough consecutive collisions and this family has nothing new to
+            # say. 200 is generous: a family with n combinations left collides
+            # with probability 1 - n/total, so 200 misses means n is tiny.
+            misses[fam[0]] += 1
+            if misses[fam[0]] > 200:
+                exhausted.add(fam[0])
             continue
+        misses[fam[0]] = 0
         seen.add(key)
         if not validate(rec):
             raise SystemExit(f"family {fam[0]} emits an unknown command: {rec['action']}")
         (test if fam[0] in test_fams else train).append(rec)
-    return train, test
+    return train, test, exhausted
+
+
+def cap(recs, rng, target=None):
+    """Trim every family to `target`, or to the smallest family if unset.
+
+    dataset.py balances the same way and for the same reason: ridge regression
+    has no class prior to correct an unbalanced corpus with, so the fix has to
+    be in the data. A fine-tune has no prior either.
+
+    Capping at the *minimum* is the strict reading and it is usually too harsh
+    -- one thin family drags the whole corpus down to its size. A target caps
+    the rich families and lets the thin ones contribute everything they have,
+    which is a milder imbalance than doing nothing and a far larger corpus than
+    levelling down.
+    """
+    by = collections.defaultdict(list)
+    for r in recs:
+        by[r["family"]].append(r)
+    if not by:
+        return recs
+    n = target or min(len(v) for v in by.values())
+    out = []
+    for v in by.values():
+        rng.shuffle(v)
+        out.extend(v[:n])
+    rng.shuffle(out)
+    return out
 
 
 def main():
@@ -507,18 +614,58 @@ def main():
     ap.add_argument("--holdout", type=int, default=3,
                     help="scenario families held out whole")
     ap.add_argument("--format", choices=["chatml", "raw"], default="chatml")
+    ap.add_argument("--balance", action="store_true",
+                    help="cap every family at the size of the smallest")
+    ap.add_argument("--per-family", type=int, default=None,
+                    help="cap each family at N, letting thin ones fall short")
     ap.add_argument("--stats-only", action="store_true")
     args = ap.parse_args()
 
     fmt = "chatml" if args.format == "chatml" else "raw"
-    train, test = build(args.seed, args.count, args.holdout, fmt)
+    train, test, exhausted = build(args.seed, args.count, args.holdout, fmt)
+    if args.balance or args.per_family:
+        train = cap(train, random.Random(args.seed), args.per_family)
+        test = cap(test, random.Random(args.seed), args.per_family)
 
+    total = len(train) + len(test)
     print(f"  {len(FAMILIES)} scenario families, {args.holdout} held out whole")
     print(f"  train {len(train)}  test {len(test)}")
     refusals = sum(1 for r in train if "I will not" in json.dumps(r))
     print(f"  {refusals} training traces decline the request outright")
     print(f"  every action verified against {len(COMMANDS)} commands "
           f"and {len(APPLETS)} applets")
+
+    # Balance, reported unprompted. A corpus where one family contributes two
+    # thousand traces and another contributes three does not train the task,
+    # it trains the majority's shape -- and the count alone hides that
+    # completely. dataset.py found this the hard way when `ls` had thirteen
+    # examples against six and swallowed three other classes in the confusion
+    # matrix.
+    per = collections.Counter(r["family"] for r in train + test)
+    lo_name, lo_n = min(per.items(), key=lambda kv: kv[1])
+    hi_name, hi_n = max(per.items(), key=lambda kv: kv[1])
+    print(f"  per family: {lo_n} ({lo_name}) to {hi_n} ({hi_name})")
+    if hi_n > lo_n * 4:
+        print(f"  IMBALANCED by {hi_n // max(lo_n, 1)}x."
+              f" --balance caps every family at the smallest.")
+
+    # Said loudly, because the failure it warns about is the one that looks
+    # like success: a generator asked for 20000 and quietly returning 54 near
+    # duplicates produces a corpus that trains a model to recite. dataset.py's
+    # own docstring records what that cost the last time -- 40 examples across
+    # 21 classes, and every gradient step made generalisation worse.
+    if total < args.count:
+        print()
+        print(f"  ONLY {total} UNIQUE TRACES -- asked for {args.count}.")
+        print(f"  {len(exhausted)}/{len(FAMILIES)} families ran out of "
+              f"distinct combinations:")
+        for name in sorted(exhausted):
+            print(f"    {name}")
+        print()
+        print("  Templates cap out here. More volume from these families would")
+        print("  be near-duplicates, which is worse than fewer traces because it")
+        print("  looks like data. Getting to tens of thousands needs either many")
+        print("  more hand-written families or a larger model to paraphrase.")
 
     if args.stats_only:
         return
