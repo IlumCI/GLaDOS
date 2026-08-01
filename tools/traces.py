@@ -166,6 +166,53 @@ OBS = {
   {p1}   {b1} B
   {p2}   {b2} B
   {count} entries""",
+    # --- second wave -----------------------------------------------------
+    "cert_expired": """[https] {host}:443/
+  handshake ok -- TLS 1.3, x25519, chacha20-poly1305
+  {n} certificate(s); leaf sha256 {fp}..
+  NOT VERIFIED -- the certificate has expired""",
+    "date_wrong": """  {yr}-{mo:02d}-{dy:02d} {hh:02d}:{mm:02d}:{ss:02d}
+  {epoch} seconds since 1970""",
+    "fsck_bad": """[fsck]
+  {objects} objects reachable from the root
+  {bad} unreadable
+  {orphans} orphaned""",
+    "store_unclaimed": """[storage]
+  nvme {blocks} blocks x 512 B = {mib} MiB
+  unclaimed space from block {base}, {free_mib} MiB""",
+    "ctx_full": """[ctx]
+  {pos}/{seq} positions used
+  {kib} KiB of kv cache""",
+    "gate_split": """[gate]
+  all agree    {agree}/{n_eval}  {agree_pct}% right
+  they split   {split}/{n_eval}  {split_pct}% right""",
+    "probe_unfit": """[probe]
+  not fitted -- 'fit' first
+  {n_train} examples recorded at /ai/train""",
+    "model_absent": r"""[ai]
+  no checkpoint at \GLADOS\model.bin
+  tokenizer {tok_state}
+  {n_train} corpus examples at /ai/train
+  'gen' and 'ask' will do nothing""",
+    "tasks_busy": """  {n_tasks} tasks, {switches} switches total
+  *0 shell    resumed {r0}
+   1 clock    resumed {r1}
+   2 mind     resumed {r2}""",
+    "bench_out": """[bench]
+  512x512 matmul, {iters} iterations in 50 ticks
+  {gflops} GFLOP/s ({kernel})""",
+    "pkg_list": """[pkg]
+  {pkg0}  {b0} B
+  {pkg1}  {b1} B
+  {count} package(s)""",
+    "video_fmt": """  {w}x{h}  stride {w}  {fmt}""",
+    "du_big": """  {p0}  {big} B
+  {p1}  {b1} B
+  total {total_b} B across {count} objects""",
+    "tcp_state": """[tcp]
+  {state}
+  {ip}:{port} from :{lport}
+  unacked {unacked} B   readable {readable} B""",
 }
 
 MACS = ["e0:d5:5e:{:02x}:{:02x}:{:02x}", "52:54:00:12:34:56", "a4:6b:b6:{:02x}:{:02x}:{:02x}"]
@@ -205,9 +252,14 @@ def fill(rng, template):
             "the certificate has expired",
             "the chain does not reach a trusted root",
         ]),
-        what="Intel Wi-Fi 6E, CNVi in the PCH (Alder Lake-P)",
-        vendor=0x8086,
-        device=0x51F0,
+        **dict(zip(("what", "vendor", "device"), rng.choice([
+            ("Intel Wi-Fi 6E, CNVi in the PCH (Alder Lake-P)", 0x8086, 0x51F0),
+            ("Intel Wi-Fi 6 AX201, CNVi in the PCH", 0x8086, 0x02F0),
+            ("Intel Wi-Fi 6 AX200 (discrete)", 0x8086, 0x2723),
+            ("Realtek wireless", 0x10EC, 0xB822),
+            ("Qualcomm Atheros wireless", 0x168C, 0x0042),
+            ("MediaTek wireless", 0x14C3, 0x7961),
+        ]))),
         model=rng.choice([
             "12th Gen Intel(R) Core(TM) i7-12650H",
             "QEMU Virtual CPU version 2.5+",
@@ -244,6 +296,49 @@ def fill(rng, template):
             "Intel Wi-Fi 6E, CNVi in the PCH (Alder Lake-P) -- no driver",
             "Realtek wireless -- no driver",
         ]),
+        yr=rng.choice([1980, 2016, 2026, 2099]),
+        mo=rng.randrange(1, 13),
+        dy=rng.randrange(1, 29),
+        hh=rng.randrange(24),
+        mm=rng.randrange(60),
+        ss=rng.randrange(60),
+        epoch=rng.randrange(0, 4_000_000_000),
+        bad=rng.randrange(1, 9),
+        orphans=rng.randrange(0, 12),
+        free_mib=rng.choice([2048, 4096, 8192]),
+        pos=rng.randrange(400, 512),
+        kib=rng.randrange(20000, 42000),
+        agree=rng.randrange(50, 90),
+        split=rng.randrange(10, 50),
+        n_eval=108,
+        agree_pct=rng.randrange(84, 96),
+        split_pct=rng.randrange(50, 68),
+        n_train=rng.randrange(100, 600),
+        tok_state=rng.choice([
+            "49152 tokens, longest 81 bytes",
+            "also missing",
+            "65536 tokens, longest 128 bytes",
+        ]),
+        n_tasks=3,
+        switches=rng.randrange(1000, 90000),
+        r0=rng.randrange(500, 5000),
+        r1=rng.randrange(500, 5000),
+        r2=rng.randrange(10, 900),
+        iters=rng.randrange(200, 20000),
+        gflops=rng.choice(["0.42", "2.11", "19.61", "24.80"]),
+        kernel=rng.choice(["avx2+fma", "scalar"]),
+        pkg0=rng.choice(["tldr", "notes", "boot-log", "corpus"]),
+        pkg1=rng.choice(["tldr", "notes", "boot-log", "corpus"]),
+        w=rng.choice([800, 1280, 1920]),
+        h=rng.choice([600, 800, 1080]),
+        fmt=rng.choice(["Bgrx", "Rgbx"]),
+        big=rng.randrange(1_000_000, 90_000_000),
+        total_b=rng.randrange(1_000_000, 200_000_000),
+        state=rng.choice(["ESTABLISHED", "CLOSE_WAIT", "SYN_SENT", "TIME_WAIT"]),
+        port=rng.choice([80, 443, 8080]),
+        lport=rng.randrange(49152, 65535),
+        unacked=rng.randrange(0, 4000),
+        readable=rng.randrange(0, 9000),
     )
 
 
@@ -490,6 +585,384 @@ FAMILIES = [
          "they differ, which is not what was asked."],
         "same {a} {b}",
     ),
+
+    # --- second wave ---------------------------------------------------
+    #
+    # Written after measuring the first: eighteen families balanced to 576
+    # unique traces, which will not fine-tune anything. A family is worth
+    # roughly 32 balanced traces, so the route to a usable corpus is more
+    # families rather than harder sampling of the ones already here -- and
+    # harder sampling was actively the wrong answer, since it returns near
+    # duplicates that look like data.
+
+    # --- clock, and what depends on it ---------------------------------
+    (
+        "clock-breaks-certs",
+        ["every certificate says expired", "https stopped working today",
+         "why is nothing verifying any more"],
+        "cert_expired",
+        ["An expired certificate is either genuinely old or the clock is "
+         "wrong, and those look identical from here.",
+         "Everything expiring at once is the tell. A whole chain does not "
+         "lapse on the same day; a clock that lost its battery does.",
+         "Check the date before blaming the certificate authority."],
+        "date",
+    ),
+    (
+        "clock-implausible",
+        ["is the clock right", "what year does it think it is",
+         "the timestamps look wrong"],
+        "date_wrong",
+        ["The RTC is battery-backed and the battery is the part that fails "
+         "first on a machine this age.",
+         "A date far from now invalidates every certificate check and makes "
+         "snapshot ordering meaningless, so it is worth more than it looks.",
+         "Read what it currently believes; the calendar round-trip selftest "
+         "already proved the arithmetic, so a wrong answer here is the "
+         "hardware."],
+        "date",
+    ),
+
+    # --- storage, deeper -----------------------------------------------
+    (
+        "store-space-found",
+        ["set up persistent storage", "make the namespace survive a reboot",
+         "initialise the store"],
+        "store_unclaimed",
+        ["There is unclaimed space past every partition, so unlike the usual "
+         "answer here there is somewhere a store could legitimately go.",
+         "That is necessary and not sufficient. Formatting writes to a disk, "
+         "and the guard that normally refuses is the reason a bug here cannot "
+         "reach something that belongs to another system.",
+         "The region is named, so this is the one case where proceeding is "
+         "defensible -- init re-checks the geometry itself before unlocking "
+         "writes."],
+        "store init",
+    ),
+    (
+        "store-corrupt",
+        ["something is wrong with the store", "objects are missing",
+         "the namespace looks damaged"],
+        "fsck_bad",
+        ["Unreadable objects mean the Merkle tree references content that is "
+         "no longer there, so some part of the namespace cannot be walked.",
+         "Orphans are the milder problem -- content nothing points at wastes "
+         "space but breaks nothing. The unreadable ones are what matter.",
+         "Do not write anything yet. A snapshot taken over a damaged tree "
+         "preserves the damage; find the last good root first."],
+        "store log",
+    ),
+    (
+        "namespace-verify",
+        ["check the namespace is intact", "is anything corrupted",
+         "verify the store"],
+        "store_ok",
+        ["Every object is addressed by the hash of its content, so integrity "
+         "is checkable rather than assumed -- recomputing an address either "
+         "reproduces it or does not.",
+         "This reads and changes nothing, so there is no reason to hesitate."],
+        "fsck",
+    ),
+
+    # --- the model, managing itself ------------------------------------
+    (
+        "model-missing",
+        ["gen does nothing", "the model will not answer",
+         "why is there no output"],
+        "model_absent",
+        ["There is no checkpoint loaded, so the decode loop has no weights to "
+         "run -- this is not the model being bad, it is the model being "
+         "absent.",
+         "The file is read from the ESP before ExitBootServices, which is the "
+         "only moment a filesystem exists, so a missing file cannot be fixed "
+         "from the running system.",
+         "Confirm what the loader believes before rebuilding the ESP."],
+        "model",
+    ),
+    (
+        "ctx-exhausted",
+        ["it stopped mid-sentence", "the model will not continue",
+         "generation cuts off"],
+        "ctx_full",
+        ["The context is nearly full. Positions are a fixed budget set at "
+         "conversion time, not something the model can extend by trying.",
+         "Once it is spent the KV cache has nowhere to put the next key, so "
+         "generation stops rather than degrading.",
+         "Look at the window before assuming the model gave up."],
+        "window",
+    ),
+    (
+        "probe-not-fitted",
+        ["route says it cannot answer", "why is routing not working",
+         "the probe is not responding"],
+        "probe_unfit",
+        ["The probe has not been fitted, so there are no coefficients to "
+         "multiply -- the examples are recorded but nothing has been solved "
+         "from them.",
+         "Fitting is closed form: a Cholesky solve rather than a training "
+         "run, so it costs seconds and there is no reason to defer it.",
+         "Fit it from what is already recorded."],
+        "fit",
+    ),
+    (
+        "gate-disagrees",
+        ["should I trust this answer", "how confident is the routing",
+         "the cores disagree"],
+        "gate_split",
+        ["The measured split is the useful number here: agreement is right far "
+         "more often than disagreement, and that gap is the whole reason the "
+         "gate exists.",
+         "This case is a split, so the answer falls in the band that is wrong "
+         "roughly two times in five.",
+         "Do not act on it as if it were certain. Report the disagreement "
+         "rather than picking a side the measurement does not support."],
+        "gate",
+    ),
+    (
+        "slow-generation",
+        ["generation is very slow", "why is it taking so long per token",
+         "is the fast path being used"],
+        "bench_out",
+        ["Throughput here is decided by which matmul kernel runs, and the "
+         "bench names it directly.",
+         "A scalar kernel on a machine with AVX2 means the feature gate "
+         "refused it -- usually because the OS never enabled the wider "
+         "register state, which CPUID alone does not tell you.",
+         "Check what the processor reports and whether the OS enabled it."],
+        "cpu",
+    ),
+    (
+        "model-loops",
+        ["it keeps repeating itself", "the output goes in circles",
+         "same phrase over and over"],
+        "ai_block",
+        ["A high-probability loop reinforces itself: each repetition makes the "
+         "next one likelier still, and nothing in plain sampling opposes that.",
+         "This is a sampler property rather than a model one -- a small model "
+         "makes it likelier but does not cause it.",
+         "Raise the repetition penalty before concluding the model is too "
+         "small for the task."],
+        "repeat 1.2",
+    ),
+
+    # --- hardware ------------------------------------------------------
+    (
+        "pixel-format",
+        ["the colours look wrong", "red and blue are swapped",
+         "check the pixel format"],
+        "video_fmt",
+        ["Red and blue swapping is the signature of the framebuffer format "
+         "being reported the wrong way round -- Rgbx read as Bgrx or the "
+         "reverse.",
+         "The firmware reports it and nothing verifies the claim, so the "
+         "check has to be visual.",
+         "Draw the bars: they read red, green, blue left to right when the "
+         "format is right and red and blue swap when it is not."],
+        "video bars",
+    ),
+    (
+        "no-wireless",
+        ["can we use wifi", "why is there no wlan0",
+         "get wireless working"],
+        "wlan_none",
+        ["The card is present on the bus and there is no driver for it, which "
+         "are two different problems and only one is solvable by trying "
+         "harder.",
+         "A CNVi part is not a self-contained NIC -- the MAC lives in the "
+         "chipset and the module is a radio, so there is no card to drive on "
+         "its own, and signed firmware is required on top of that.",
+         "Nothing here will bring it up. The wired interface is the tractable "
+         "one."],
+        "if",
+    ),
+    (
+        "machine-inventory",
+        ["what hardware is in this machine", "list the devices",
+         "what is on the bus"],
+        "no_nic",
+        ["Enumerating configuration space is read-only and reports every "
+         "function, which is the ground truth a missing driver is diagnosed "
+         "against.",
+         "Vendor and device ids are what name a driver, so this is the first "
+         "step for any absent device."],
+        "pci",
+    ),
+    (
+        "scheduler-check",
+        ["is anything running", "what is using the cpu",
+         "check the background task"],
+        "tasks_busy",
+        ["The resume counts show whether a task is being scheduled at all, "
+         "which distinguishes a busy system from a stuck one.",
+         "A task with far fewer resumes than the others is blocked rather "
+         "than slow.",
+         "This reads counters and changes nothing."],
+        "tasks",
+    ),
+
+    # --- network, deeper -----------------------------------------------
+    (
+        "tcp-half-open",
+        ["the connection hangs", "it connects but nothing comes back",
+         "the fetch never finishes"],
+        "tcp_state",
+        ["The state says where in the handshake or teardown this stopped, "
+         "which is more informative than the fetch failing.",
+         "Unacknowledged bytes with nothing readable means data went out and "
+         "was never acknowledged -- the far end is not answering rather than "
+         "answering badly.",
+         "Read the connection state before retrying, since a retry against an "
+         "unresponsive peer just repeats the wait."],
+        "tcp",
+    ),
+    (
+        "resolver-wrong",
+        ["names resolve to the wrong address", "dns gives odd answers",
+         "resolution looks hijacked"],
+        "if_ok",
+        ["The configured resolver is whatever DHCP handed over, and a network "
+         "that lies about its resolver is a normal hazard rather than an "
+         "exotic one.",
+         "An answer is accepted only from the server asked, from port 53, "
+         "with the transaction id sent -- so a wrong answer from the right "
+         "server is a policy problem, not a spoof.",
+         "Resolve a known name and compare what comes back."],
+        "dns example.com",
+    ),
+    (
+        "fetch-plain-http",
+        ["fetch {h}", "get the page at {h}", "download {h}"],
+        "if_ok",
+        ["The interface is configured and routing is in place, so a fetch is "
+         "reasonable to attempt.",
+         "Plain HTTP is unauthenticated and unencrypted; that is acceptable "
+         "for reading a public page and not for anything else.",
+         "If this is meant to be private, https is the command and it will "
+         "say whether the peer was actually verified."],
+        "http {h}",
+    ),
+
+    # --- namespace work ------------------------------------------------
+    (
+        "space-audit",
+        ["what is using the space", "where did the room go",
+         "what is the biggest thing here"],
+        "du_big",
+        ["Sizes are summed over a Merkle tree, so shared content is counted "
+         "once no matter how many names point at it -- which is why the total "
+         "can be smaller than the parts.",
+         "This reads and changes nothing."],
+        "du",
+    ),
+    (
+        "find-by-name",
+        ["where is {a}", "find the file called {a}",
+         "which path holds {a}"],
+        "ls_listing",
+        ["A listing shows one level; this is a search over the whole tree, "
+         "which is the difference between `ls` and `find`.",
+         "Reading the namespace changes nothing."],
+        "find {a}",
+    ),
+    (
+        "identity-by-hash",
+        ["what is the address of {a}", "hash {a}",
+         "give me the content id for {a}"],
+        None,
+        ["An object's address is the hash of its content, so this is asking "
+         "for the identity rather than for a checksum computed over it.",
+         "Two objects with this address are the same object, which is what "
+         "makes a copy cost nothing."],
+        "hash {a}",
+    ),
+    (
+        "restore-after-mistake",
+        ["undo what I just did", "put it back", "revert the last change"],
+        "snaps_list",
+        ["The namespace is content-addressed, so going back is adopting an "
+         "earlier root rather than replaying anything.",
+         "The latest snapshot is marked, but the one wanted is the last "
+         "before the mistake -- which is not necessarily the same.",
+         "Go back one, having looked at what that means."],
+        "back",
+    ),
+
+    # --- packages ------------------------------------------------------
+    (
+        "package-inventory",
+        ["what packages are installed", "list the packages",
+         "what has been added"],
+        "pkg_list",
+        ["Packages are content-addressed objects like everything else, so "
+         "listing them is a namespace read.",
+         "Nothing is fetched and nothing changes."],
+        "pkg",
+    ),
+
+    # --- refusals, the important ones ----------------------------------
+    (
+        "refuse-reboot-unsaved",
+        ["reboot", "restart the machine", "reboot now"],
+        "store_none",
+        ["There is no store on this disk, so the namespace lives entirely in "
+         "memory and a reboot discards all of it.",
+         "That is not a reason to refuse outright -- it may be exactly what "
+         "is wanted -- but it is a reason not to do it silently.",
+         "I will not reboot without saying that first. Everything in the "
+         "namespace is lost on the next power cycle, snapshots included."],
+        "snaps",
+    ),
+    (
+        "refuse-train-on-test",
+        ["train on everything", "use the whole corpus for training",
+         "include the held-out set"],
+        "gate_split",
+        ["The held-out split is the only thing that says whether any of this "
+         "generalises. Training on it does not make the model better, it "
+         "makes the number meaningless.",
+         "The three-way split exists because selecting on a set is fitting "
+         "it -- that was learned here by getting it wrong three separate "
+         "times.",
+         "I will not train on the test slice. Fit on the training portion and "
+         "let the held-out number say what it says."],
+        "fit",
+    ),
+    (
+        "refuse-fault",
+        ["crash the machine", "trigger a fault", "test the panic handler"],
+        "store_none",
+        ["This dereferences null on purpose and halts. It is a real "
+         "diagnostic and it does exactly what it says.",
+         "Everything in the namespace is in memory, so halting discards it "
+         "unless there is a store, and a halt needs a power cycle to leave.",
+         "I will not run it without that being deliberate. Snapshot first if "
+         "any of this session matters."],
+        "snap",
+    ),
+
+    # --- confusables, second batch --------------------------------------
+    (
+        "confuse-ls-tree",
+        ["show me everything under {a}", "list {a} recursively",
+         "what is beneath {a}"],
+        "ls_listing",
+        ["A recursive view is `tree`; `ls` shows one level and would answer a "
+         "different question.",
+         "Both read only, so the cost of choosing wrong is a wrong answer "
+         "rather than damage."],
+        "tree {a}",
+    ),
+    (
+        "confuse-cat-stat",
+        ["how big is {a}", "what are the properties of {a}",
+         "tell me about {a} without printing it"],
+        "ls_listing",
+        ["This asks about the object rather than for its contents, so `stat` "
+         "answers and `cat` would dump bytes nobody asked for.",
+         "For a large object that distinction is the difference between a "
+         "line and a screenful."],
+        "stat {a}",
+    ),
 ]
 
 
@@ -497,8 +970,9 @@ FAMILIES = [
 def render(rng, fam, fmt):
     name, goals, obs_key, steps, action = fam
     a, b = rng.sample(PATHS, 2)
-    goal = rng.choice(goals).format(a=a, b=b)
-    action = action.format(a=a, b=b)
+    h = rng.choice(HOSTS)
+    goal = rng.choice(goals).format(a=a, b=b, h=h)
+    action = action.format(a=a, b=b, h=h)
 
     user = goal
     if obs_key:
