@@ -83,9 +83,27 @@ $EspLetter = $EspLetter.TrimEnd(':')
 
 Write-Host ""
 Write-Host "disk           : $diskNumber  $($target.Model)" -ForegroundColor Cyan
+Write-Host "serial         : $($target.SerialNumber.Trim())" -ForegroundColor Cyan
 Write-Host ("advertised     : {0:N2} GB" -f ($target.Size/1GB))
 Write-Host ("real           : {0:N2} GB verified" -f $SafeLimitGB) -ForegroundColor Yellow
 Write-Host ""
+
+# What is about to be destroyed, named. "Type the serial to confirm" is a
+# deliberate act only if the serial is in front of you attached to a disk you
+# can recognise; made to hunt for it elsewhere, the habit becomes pasting a
+# number blind, which is the opposite of a check.
+$existing = Get-CimInstance Win32_DiskPartition | Where-Object { $_.DiskIndex -eq $diskNumber }
+if ($existing) {
+    Write-Host "currently on this disk (ALL of it will be erased):" -ForegroundColor Red
+    foreach ($p in $existing | Sort-Object Index) {
+        $letters = (Get-CimInstance -Query ("ASSOCIATORS OF {Win32_DiskPartition.DeviceID='" +
+            $p.DeviceID + "'} WHERE ResultClass=Win32_LogicalDisk") -ErrorAction SilentlyContinue |
+            ForEach-Object { $_.DeviceID }) -join ' '
+        Write-Host ("  partition {0}  {1,7:N0} MB  {2} {3}" -f `
+            $p.Index, ($p.Size/1MB), $p.Type, $letters)
+    }
+    Write-Host ""
+}
 Write-Host "scheme         : MBR (no backup table in the nonexistent tail)"
 Write-Host "partition 1    : $EspSizeMB MB FAT32 at 1 MB, letter $EspLetter, ESP"
 Write-Host "partition 2    : $ReservedSizeMB MB unformatted, reserved for the glados filesystem"
@@ -98,7 +116,7 @@ if (-not $Execute) {
     return
 }
 
-Write-Host "Type the disk serial to confirm the wipe:" -ForegroundColor Yellow
+Write-Host "Type the serial shown above to confirm the wipe:" -ForegroundColor Yellow
 $typed = Read-Host "serial"
 if ($typed.Trim() -ne $target.SerialNumber.Trim()) {
     Write-Error "Serial did not match. Nothing was changed."
