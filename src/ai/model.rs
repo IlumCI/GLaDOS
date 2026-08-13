@@ -76,6 +76,41 @@ impl Config {
     pub fn head_size(&self) -> usize {
         self.head_dim
     }
+
+    /// Sinks and window, clamped to what the checkpoint was trained for.
+    fn window_parts(&self) -> (usize, usize) {
+        let sinks = self.attn_sinks.min(self.seq_len);
+        let window = self.attn_window.min(self.seq_len - sinks);
+        (sinks, window)
+    }
+
+    /// Whether the cache evicts, and therefore whether position may run past
+    /// `seq_len`.
+    ///
+    /// The default is `attn_window: usize::MAX`, which clamps to the whole
+    /// trained length and makes this false -- the cache holds every position
+    /// and behaves exactly as it did before eviction existed.
+    pub fn streams(&self) -> bool {
+        let (sinks, window) = self.window_parts();
+        sinks + window < self.seq_len
+    }
+
+    /// How many cache slots actually have to exist.
+    ///
+    /// This is what `State` allocates, and it is the whole reason a window is
+    /// worth having. Previously the cache was sized by `seq_len` whether or not
+    /// a window was configured, so windowing bought compute and nothing else --
+    /// the memory was allocated regardless and most of it held stale entries.
+    /// At Qwen3's trained 32768 that distinction is the difference between
+    /// 7 GiB and whatever the window costs.
+    pub fn live_cap(&self) -> usize {
+        let (sinks, window) = self.window_parts();
+        if sinks + window >= self.seq_len {
+            self.seq_len
+        } else {
+            sinks + window
+        }
+    }
     /// Total width of the query projection, which is what `wq` produces and
     /// what `wo` consumes. Equal to `dim` for every Llama-shaped model, and
     /// twice it for Qwen3-0.6B.
@@ -248,16 +283,30 @@ pub struct State {
     rope_sin: Vec<f32>,
     /// Width of the residual stream, kept so `hidden` can bound itself.
     dim: usize,
+    /// Slots actually allocated. Held rather than recomputed from the config,
+    /// so that a config whose window changed after allocation cannot be used to
+    /// index buffers sized for the old one -- the mismatch would be a silent
+    /// out-of-bounds into a neighbouring layer's keys, not a panic.
+    cap: usize,
 }
 
 impl State {
     pub fn new(cfg: &Config) -> Self {
         let kv = cfg.kv_dim();
         let half = cfg.head_size() / 2;
+        // Everything below is sized by the number of slots that can be live at
+        // once, not by the trained length. Without a window the two are equal
+        // and this is the allocation it always was.
+        //
+        // Angles are indexed by *cache* position rather than absolute position
+        // -- that is what makes eviction possible at all, and it is why the
+        // table needs `cap` entries and not `seq_len` however far generation
+        // runs.
+        let cap = cfg.live_cap();
 
-        let mut rope_cos = vec![0.0f32; cfg.seq_len * half];
-        let mut rope_sin = vec![0.0f32; cfg.seq_len * half];
-        for p in 0..cfg.seq_len {
+        let mut rope_cos = vec![0.0f32; cap * half];
+        let mut rope_sin = vec![0.0f32; cap * half];
+        for p in 0..cap {
             for i in 0..half {
                 // Matches the old inline computation exactly: the exponent is
                 // the pair index doubled over head_size, so that a rotation is
@@ -280,14 +329,15 @@ impl State {
             hb: vec![0.0; cfg.hidden_dim],
             hb2: vec![0.0; cfg.hidden_dim],
             q: vec![0.0; cfg.q_dim()],
-            att: vec![0.0; cfg.n_heads * cfg.seq_len],
+            att: vec![0.0; cfg.n_heads * cap],
             logits: vec![0.0; cfg.vocab_size],
-            key_cache: (0..cfg.n_layers).map(|_| vec![0.0; cfg.seq_len * kv]).collect(),
-            value_cache: (0..cfg.n_layers).map(|_| vec![0.0; cfg.seq_len * kv]).collect(),
-            krot: vec![0.0; cfg.seq_len * kv],
+            key_cache: (0..cfg.n_layers).map(|_| vec![0.0; cap * kv]).collect(),
+            value_cache: (0..cfg.n_layers).map(|_| vec![0.0; cap * kv]).collect(),
+            krot: vec![0.0; cap * kv],
             rope_cos,
             rope_sin,
             dim: cfg.dim,
+            cap,
         }
     }
 
@@ -306,7 +356,10 @@ impl State {
     /// before, which would silently destroy every property above.
     pub fn export_kv(&self, cfg: &Config, pos: usize) -> Vec<u8> {
         let kv = cfg.kv_dim();
-        let pos = pos.min(cfg.seq_len);
+        // Bounded by what is allocated, not by the trained length. With a
+        // window those differ, and `pos` is an absolute position that can be
+        // far past either.
+        let pos = pos.min(self.cap);
         let mut out = Vec::new();
         out.extend_from_slice(KV_MAGIC);
         out.extend_from_slice(&(cfg.n_layers as u32).to_le_bytes());
@@ -336,7 +389,7 @@ impl State {
         // A cache from a different model would restore as plausible-looking
         // garbage rather than failing, so the shape is checked rather than
         // trusted.
-        if layers != cfg.n_layers || kv != cfg.kv_dim() || pos > cfg.seq_len {
+        if layers != cfg.n_layers || kv != cfg.kv_dim() || pos > self.cap {
             return None;
         }
         let need = 20 + 2 * layers * pos * kv * 4;
@@ -377,11 +430,11 @@ impl State {
             + cfg.dim.max(cfg.q_dim())      // xb
             + cfg.q_dim()                   // q
             + cfg.hidden_dim * 2
-            + cfg.n_heads * cfg.seq_len
+            + cfg.n_heads * self.cap
             + cfg.vocab_size
-            + cfg.seq_len * kv              // krot
-            + cfg.seq_len * cfg.head_dim    // rope cos+sin, half each
-            + 2 * cfg.n_layers * cfg.seq_len * kv)
+            + self.cap * kv                 // krot
+            + self.cap * cfg.head_dim       // rope cos+sin, half each
+            + 2 * cfg.n_layers * self.cap * kv)
     }
 }
 
@@ -895,12 +948,21 @@ impl Model {
         // of what they say, and a plain sliding window that drops them leaves
         // that mass with nowhere to go and the distribution collapses
         // (StreamingLLM, Xiao et al. 2023).
-        let cap = c.seq_len;
+        // `cap` is what `State` allocated, which is the window when there is
+        // one and the trained length when there is not. Taken from the state
+        // rather than recomputed from the config, because `window` can be
+        // changed at runtime and a config that disagrees with the buffers would
+        // index out of one layer's keys into the next -- silently, since the
+        // per-layer split made every layer a separate allocation of exactly
+        // this size.
+        let cap = s.cap;
+        let windowed = c.streams();
         let sinks = c.attn_sinks.min(cap);
-        let window = c.attn_window.min(cap - sinks);
+        // The ring is the whole allocation past the sinks, which is now exactly
+        // the window rather than whatever was left over from `seq_len`.
         let ring = cap - sinks;
+        let window = ring;
 
-        let windowed = sinks + window < cap;
         let n_sinks = if windowed { sinks.min(pos + 1) } else { 0 };
         let n_window = if windowed {
             (pos + 1 - n_sinks).min(window)
@@ -1028,7 +1090,7 @@ impl Model {
             let scale = 1.0 / tensor::sqrtf(head_size as f32);
             for h in 0..c.n_heads {
                 let qo = h * head_size;
-                let ao = h * c.seq_len;
+                let ao = h * cap;
                 let hoff = (h / kv_mul) * head_size;
                 for t in 0..live {
                     let ko = t * kv_dim + hoff;

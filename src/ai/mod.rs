@@ -807,7 +807,16 @@ pub fn generate(prompt: &str, opts: &GenOpts) {
             prompt_tokens[0]
         };
 
-        let cap = e.model.cfg.seq_len;
+        // Without a window this is the trained length and generation stops at
+        // it, as it always has. With one, the cache evicts and position is no
+        // longer bounded by anything: `slot_of` wraps into the ring, and every
+        // buffer below is indexed by cache position (`j`, `t` < `live`) rather
+        // than by absolute position, so the forward pass was already correct
+        // past `seq_len` -- this loop was the only thing stopping it.
+        //
+        // That is what `window_report` has been claiming all along. Until now
+        // it was not true.
+        let cap = if e.model.cfg.streams() { usize::MAX } else { e.model.cfg.seq_len };
         let mut generated = 0usize;
         let mut fed = 0usize;
         let mut pending: Vec<u8> = Vec::new();
@@ -1222,8 +1231,30 @@ pub fn chat(question: &str, opts: &GenOpts) {
 /// exactly the behaviour that existed before the cache learned to evict.
 pub fn set_window(sinks: usize, window: usize) {
     with_engine(|e| {
+        let before = e.model.cfg.live_cap();
         e.model.cfg.attn_sinks = sinks;
         e.model.cfg.attn_window = window;
+        let after = e.model.cfg.live_cap();
+        if after == before {
+            return;
+        }
+        // The cache is allocated for the window, so changing it changes every
+        // buffer's size. Reallocating is not optional -- the old buffers would
+        // be indexed with the new capacity and read into the next layer's keys.
+        //
+        // The conversation cannot survive that: entries sit at positions
+        // derived from the old ring, and there is no honest way to re-seat them
+        // in a ring of a different size. Say so rather than silently continuing
+        // from a cache that means something else now.
+        e.state = model::State::new(&e.model.cfg);
+        e.pos = 0;
+        e.last_token = tokenizer::BOS;
+        console::set_color(YELLOW);
+        kprintln!(
+            "  cache resized {} -> {} positions; context cleared",
+            before, after
+        );
+        console::set_color(LTGRAY);
     });
 }
 
@@ -1233,17 +1264,33 @@ pub fn window_report() {
     console::set_color(LTGRAY);
     let got = with_engine(|e| {
         let c = e.model.cfg;
-        (c.attn_sinks, c.attn_window.min(c.seq_len), c.seq_len)
+        (
+            c.attn_sinks,
+            c.attn_window.min(c.seq_len),
+            c.seq_len,
+            c.live_cap(),
+            c.streams(),
+            e.state.bytes(&c),
+            e.pos,
+        )
     });
-    let Some((sinks, window, cap)) = got else {
+    let Some((sinks, window, trained, cap, streams, bytes, pos)) = got else {
         kprintln!("  no model loaded");
         return;
     };
-    if sinks + window >= cap {
-        kprintln!("  off -- the cache holds {} positions and never evicts", cap);
+    if !streams {
+        kprintln!("  off -- the cache holds all {} trained positions and never evicts", trained);
         kprintln!("  'window <sinks> <recent>' to enable, e.g. 'window 4 128'");
     } else {
-        kprintln!("  {} sink(s) + {} recent = {} live of {} capacity", sinks, window, sinks + window, cap);
-        kprintln!("  context is unbounded; memory and per-token cost are not");
+        kprintln!("  {} sink(s) + {} recent = {} live of {} trained", sinks, window, cap, trained);
+        kprintln!("  input is unbounded; the window is what attention sees");
     }
+    // The number that decides whether a larger window fits, next to the number
+    // it would have to come out of.
+    kprintln!(
+        "  state {} MiB for {} positions; at {} now",
+        bytes / 1024 / 1024,
+        cap,
+        pos
+    );
 }
