@@ -230,18 +230,48 @@ pub fn report(ecam: u64) {
                 return;
             }
             for p in ports {
-                match ctl.enumerate(p) {
-                    Ok((vid, pid)) => {
-                        console::set_color(LTGREEN);
-                        kprintln!("  port {}  {:04x}:{:04x}", p, vid, pid);
-                        console::set_color(WHITE);
-                    }
+                let mut dev = match ctl.enumerate(p) {
+                    Ok(d) => d,
                     Err(e) => {
                         console::set_color(LTRED);
                         kprintln!("  port {}  {}", p, e);
                         console::set_color(WHITE);
+                        continue;
+                    }
+                };
+                console::set_color(LTGREEN);
+                kprintln!("  port {}  {:04x}:{:04x}  slot {}", p, dev.vid, dev.pid, dev.slot);
+                console::set_color(LTGRAY);
+
+                // Every configuration, because the interesting one is rarely
+                // the first: QEMU's usb-net puts RNDIS on configuration 1 and
+                // CDC Ethernet on 2, and only the second is worth driving.
+                for i in 0..4u8 {
+                    let (buf, total) = match ctl.config_descriptor(&mut dev, i) {
+                        Ok(x) => x,
+                        Err(_) => break,
+                    };
+                    let c = parse_config(buf, total);
+                    kprintln!(
+                        "    config {}  {} interface(s)  {} bytes{}",
+                        c.value,
+                        c.interfaces,
+                        total,
+                        if c.ecm { "  CDC data" } else { "" }
+                    );
+                    if let Some((n, alt)) = c.data_iface {
+                        kprintln!("      data interface {} alt {}", n, alt);
+                    }
+                    for (label, ep) in [("in", c.bulk_in), ("out", c.bulk_out)] {
+                        if let Some(e) = ep {
+                            kprintln!(
+                                "      bulk {} ep {:#04x}  max packet {}",
+                                label, e.addr, e.max_packet
+                            );
+                        }
                     }
                 }
+                console::set_color(WHITE);
             }
         }
     }
@@ -566,12 +596,70 @@ impl Controller {
         false
     }
 
-    /// Enumerate one port far enough to read its device descriptor.
+    /// A control transfer with an IN data stage.
     ///
-    /// Vendor and product are the point of this milestone: that pair is what
-    /// says which driver a dongle needs, and it is the one fact about the
-    /// hardware that cannot be looked up from here.
-    pub fn enumerate(&mut self, port: u8) -> Result<(u16, u16), &'static str> {
+    /// Extracted from `enumerate` the moment a second caller existed. The
+    /// three stages are not optional and their order is the protocol: Setup
+    /// carries the request in the TRB itself (Immediate Data), Data moves the
+    /// bytes, Status is the handshake -- and only the last carries Interrupt
+    /// On Completion, because one event per transfer is what the caller waits
+    /// for.
+    fn control_in(
+        &mut self,
+        dev: &mut Device,
+        setup_lo: u32,
+        setup_hi: u32,
+        buf: u64,
+        len: u32,
+    ) -> Result<u32, &'static str> {
+        dev.ep0.push(Trb {
+            lo: setup_lo,
+            hi: setup_hi,
+            status: 8,
+            control: (TRB_SETUP << 10) | (1 << 6) | (3 << 16),
+        });
+        dev.ep0.push(Trb {
+            lo: buf as u32,
+            hi: (buf >> 32) as u32,
+            status: len,
+            control: (TRB_DATA << 10) | (1 << 16),
+        });
+        dev.ep0.push(Trb {
+            control: (TRB_STATUS << 10) | (1 << 5),
+            ..Default::default()
+        });
+        self.doorbell(dev.slot, 1);
+
+        let ev = self
+            .wait_event(TRB_TRANSFER_EVENT, 500)
+            .ok_or("no response to control transfer")?;
+        // 13 is Short Packet: fewer bytes than asked for, which for a
+        // descriptor read is success rather than failure -- the device is
+        // telling you how long the thing actually is.
+        if ev.code() != 1 && ev.code() != 13 {
+            return Err("control transfer failed");
+        }
+        // The event reports bytes *not* transferred, so the length is what was
+        // asked for minus that.
+        Ok(len.saturating_sub(ev.status & 0xFFFFFF))
+    }
+
+    /// Read a descriptor into `buf`. `value` is the type and index, as the
+    /// standard packs them: 0x0100 device, 0x0200 configuration.
+    pub fn descriptor(
+        &mut self,
+        dev: &mut Device,
+        value: u16,
+        buf: u64,
+        len: u16,
+    ) -> Result<u32, &'static str> {
+        // bmRequestType 0x80 (device to host), bRequest 6 (GET_DESCRIPTOR).
+        let lo = 0x0680 | ((value as u32) << 16);
+        self.control_in(dev, lo, (len as u32) << 16, buf, len as u32)
+    }
+
+    /// Enumerate one port far enough to talk to the device on it.
+    pub fn enumerate(&mut self, port: u8) -> Result<Device, &'static str> {
         if !self.reset_port(port) {
             return Err("port did not enable after reset");
         }
@@ -596,7 +684,7 @@ impl Controller {
             write_volatile((inp + 4) as *mut u32, 0b11);
         }
 
-        let mut ring = Ring::new().ok_or("out of memory")?;
+        let ring = Ring::new().ok_or("out of memory")?;
         let speed = (self.r32(self.portsc(port)) >> 10) & 0xF;
         // The default endpoint's maximum packet size is fixed by speed and is
         // not negotiable. Guessing high on a low-speed device makes the first
@@ -634,43 +722,136 @@ impl Controller {
             return Err("Address Device refused");
         }
 
+        let mut dev = Device { slot, ep0: ring, vid: 0, pid: 0, inp, port };
         let buf = dma(18, 16).ok_or("out of memory")?;
-        // GET_DESCRIPTOR(Device), 18 bytes: bmRequestType 0x80, bRequest 6,
-        // wValue 0x0100, wIndex 0, wLength 18. The setup packet travels in the
-        // TRB itself rather than in a buffer, which is what Immediate Data
-        // means here.
-        ring.push(Trb {
-            lo: 0x0100_0680,
-            hi: 18 << 16,
-            status: 8,
-            control: (TRB_SETUP << 10) | (1 << 6) | (3 << 16),
-        });
-        ring.push(Trb {
-            lo: buf as u32,
-            hi: (buf >> 32) as u32,
-            status: 18,
-            control: (TRB_DATA << 10) | (1 << 16),
-        });
-        ring.push(Trb {
-            // Interrupt On Completion, or the event never arrives and this
-            // looks like a device that ignored the request.
-            control: (TRB_STATUS << 10) | (1 << 5),
-            ..Default::default()
-        });
-        // Endpoint zero is device context index one.
-        self.doorbell(slot, 1);
-
-        let ev = self
-            .wait_event(TRB_TRANSFER_EVENT, 500)
-            .ok_or("no response to GET_DESCRIPTOR")?;
-        // 13 is Short Packet, which for a descriptor read is success with
-        // fewer bytes than asked for -- normal, not a failure.
-        if ev.code() != 1 && ev.code() != 13 {
-            return Err("GET_DESCRIPTOR failed");
-        }
-
-        let vid = unsafe { read_volatile((buf + 8) as *const u16) };
-        let pid = unsafe { read_volatile((buf + 10) as *const u16) };
-        Ok((vid, pid))
+        self.descriptor(&mut dev, 0x0100, buf, 18)?;
+        dev.vid = unsafe { read_volatile((buf + 8) as *const u16) };
+        dev.pid = unsafe { read_volatile((buf + 10) as *const u16) };
+        Ok(dev)
     }
+
+    /// Read the configuration descriptor and everything that follows it.
+    ///
+    /// Two reads, not one: the first nine bytes say how long the whole block
+    /// is, and only then can a buffer the right size be asked for. Asking for
+    /// a fixed large length instead works on most devices and returns a stall
+    /// on the ones that take wLength literally.
+    pub fn config_descriptor(
+        &mut self,
+        dev: &mut Device,
+        index: u8,
+    ) -> Result<(u64, usize), &'static str> {
+        let head = dma(9, 16).ok_or("out of memory")?;
+        self.descriptor(dev, 0x0200 | index as u16, head, 9)?;
+        let total = unsafe { read_volatile((head + 2) as *const u16) } as usize;
+        if total < 9 || total > 4096 {
+            return Err("implausible configuration descriptor length");
+        }
+        let buf = dma(total, 16).ok_or("out of memory")?;
+        self.descriptor(dev, 0x0200 | index as u16, buf, total as u16)?;
+        Ok((buf, total))
+    }
+}
+
+/// One addressed device: its slot, its default endpoint, and what it is.
+pub struct Device {
+    pub slot: u8,
+    ep0: Ring,
+    pub vid: u16,
+    pub pid: u16,
+    /// The input context, kept because Configure Endpoint reuses it.
+    inp: u64,
+    pub port: u8,
+}
+
+/// A bulk endpoint found in a configuration descriptor.
+#[derive(Clone, Copy)]
+pub struct Endpoint {
+    /// bEndpointAddress, including the direction bit.
+    pub addr: u8,
+    pub max_packet: u16,
+    pub input: bool,
+}
+
+/// What a configuration offers, as far as this driver cares.
+pub struct Config {
+    pub value: u8,
+    pub interfaces: usize,
+    /// Interface number and alternate setting that carry the bulk pair.
+    pub data_iface: Option<(u8, u8)>,
+    pub bulk_in: Option<Endpoint>,
+    pub bulk_out: Option<Endpoint>,
+    /// True when this looks like CDC Ethernet rather than RNDIS.
+    pub ecm: bool,
+}
+
+/// Walk a configuration descriptor block.
+///
+/// Descriptors are a flat sequence of length-prefixed records, so this is a
+/// walk rather than a parse -- step by `bLength` and dispatch on `bDescriptorType`.
+/// Trusting the length field is also the only defence against a malformed
+/// block: a zero length would spin forever, so it terminates instead.
+pub fn parse_config(buf: u64, total: usize) -> Config {
+    const IFACE: u8 = 4;
+    const ENDPOINT: u8 = 5;
+    // USB class codes: 0x02 communications, 0x0A CDC data.
+    const CLASS_CDC_DATA: u8 = 0x0A;
+
+    let mut cfg = Config {
+        value: 0,
+        interfaces: 0,
+        data_iface: None,
+        bulk_in: None,
+        bulk_out: None,
+        ecm: false,
+    };
+    let at = |o: usize| -> u8 { unsafe { read_volatile((buf + o as u64) as *const u8) } };
+
+    if total >= 9 {
+        cfg.interfaces = at(4) as usize;
+        cfg.value = at(5);
+    }
+
+    let mut o = 0usize;
+    let mut in_data_iface = false;
+    while o + 2 <= total {
+        let len = at(o) as usize;
+        let kind = at(o + 1);
+        if len == 0 {
+            break;
+        }
+        match kind {
+            IFACE if o + 9 <= total => {
+                let class = at(o + 5);
+                in_data_iface = class == CLASS_CDC_DATA;
+                if in_data_iface {
+                    // An ECM data interface carries its endpoints on a
+                    // non-zero alternate setting; alt 0 is deliberately empty
+                    // so an unconfigured device consumes no bus bandwidth.
+                    let alt = at(o + 3);
+                    if cfg.data_iface.is_none() || alt > 0 {
+                        cfg.data_iface = Some((at(o + 2), alt));
+                    }
+                    cfg.ecm = true;
+                }
+            }
+            ENDPOINT if o + 7 <= total && in_data_iface => {
+                let addr = at(o + 2);
+                let attrs = at(o + 3);
+                let mps = unsafe { read_volatile((buf + o as u64 + 4) as *const u16) } & 0x7FF;
+                // Transfer type is the low two bits; 2 is bulk.
+                if attrs & 0x3 == 2 {
+                    let ep = Endpoint { addr, max_packet: mps, input: addr & 0x80 != 0 };
+                    if ep.input {
+                        cfg.bulk_in = Some(ep);
+                    } else {
+                        cfg.bulk_out = Some(ep);
+                    }
+                }
+            }
+            _ => {}
+        }
+        o += len;
+    }
+    cfg
 }
