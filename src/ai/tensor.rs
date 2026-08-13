@@ -337,6 +337,22 @@ pub fn floorf(x: f32) -> f32 {
     }
 }
 
+/// Round half away from zero, matching numpy's `rint` closely enough for
+/// quantisation and exactly on every value that is not a tie.
+///
+/// Ties differ: numpy rounds half to even, this rounds half away from zero. The
+/// disagreement is one least-significant int8 step on a value that landed
+/// exactly halfway, which is a smaller perturbation than the quantisation it is
+/// part of -- and `tools/reference.py` is the oracle for the *scheme*, not for
+/// the last bit of a tie.
+pub fn roundf(x: f32) -> f32 {
+    if x < 0.0 {
+        -floorf(-x + 0.5)
+    } else {
+        floorf(x + 0.5)
+    }
+}
+
 pub fn powf(base: f32, exp: f32) -> f32 {
     if base <= 0.0 {
         return 0.0;

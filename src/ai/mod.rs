@@ -1009,13 +1009,19 @@ pub fn ctx_report() {
     console::set_color(YELLOW);
     kprintln!("[ctx]");
     console::set_color(LTGRAY);
-    let live = with_engine(|e| (e.pos, e.model.cfg.seq_len));
+    let live = with_engine(|e| (e.pos, e.model.cfg.live_cap(), e.model.cfg.streams()));
     match live {
         None => {
             kprintln!("  no model loaded");
             return;
         }
-        Some((pos, seq)) => kprintln!("  live position {} of {}", pos, seq),
+        // While streaming, position is not bounded by anything and "of N" reads
+        // as a bug the moment it goes past N. Say what the cache holds instead,
+        // which is the number that is actually a limit.
+        Some((pos, cap, true)) => {
+            kprintln!("  position {}, streaming through a {}-slot cache", pos, cap)
+        }
+        Some((pos, cap, false)) => kprintln!("  live position {} of {}", pos, cap),
     }
     let saved = crate::sysbox::children(CTX_DIR);
     if saved.is_empty() {

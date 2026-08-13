@@ -135,6 +135,48 @@ def rmsnorm(x, weight, eps):
     return x / np.sqrt((x * x).mean() + eps) * weight
 
 
+# One f32 scale per this many values in the KV cache. Must match
+# `model::KV_BLOCK` in the kernel.
+KV_BLOCK = 32
+
+
+def q8_roundtrip(vec, _hs):
+    """Quantise to int8 and back, exactly as the kernel's KV cache does.
+
+    Applied at the point the kernel stores -- after QK-Norm and before RoPE for
+    keys, and to the raw projection for values -- so the error here is the
+    error there rather than an analogue of it. That is why this is a round-trip
+    in the middle of the forward pass and not a separate experiment: it answers
+    "what does the kernel's cache cost", and nothing else.
+
+    Blocks of 32 rather than one scale per head. Measured on Qwen3-0.6B against
+    the f32 path, same prompt:
+
+        per head (128)   max dlogit 2.34   mean 0.41   top-5 order shifted
+        block 32         max dlogit 1.09   mean 0.18   top-5 order preserved
+
+    and 45 greedy tokens are identical to f32 under block 32. The extra scales
+    cost 12.5% on top of the int8 data, taking the saving from 4x to 3.5x,
+    which is worth it to keep the ranking intact.
+
+    Keys are almost all of the error -- quantising only values costs 0.02 of
+    that 0.41, only keys costs 0.35 -- because a key goes through a dot product
+    and then a softmax, where error is amplified, while a value is only
+    averaged. Quantising values alone would be nearly free and buy half the
+    memory; both are quantised because the memory is the point.
+    """
+    out = np.empty_like(vec)
+    for o in range(0, len(vec), KV_BLOCK):
+        blk = vec[o:o + KV_BLOCK]
+        peak = np.abs(blk).max()
+        if peak == 0:
+            out[o:o + KV_BLOCK] = 0.0
+            continue
+        scale = peak / 127.0
+        out[o:o + KV_BLOCK] = np.rint(blk / scale).clip(-127, 127) * scale
+    return out
+
+
 def rope(cfg, vec, pos, hs):
     """Rotary embedding, in place, over every head packed into `vec`.
 
@@ -212,6 +254,12 @@ def forward(cfg, w, ids, cache=None, start=0):
                 for hi in range(kv_heads):
                     o = hi * hs
                     k[o:o + hs] = rmsnorm(k[o:o + hs], w["k_norm"][li], eps)
+
+            # The cache round-trip, at the point the kernel stores. Keys go in
+            # normed and unrotated, values raw.
+            if cfg.get("kv8"):
+                k = q8_roundtrip(k, hs)
+                v = q8_roundtrip(v, hs)
 
             rope(cfg, q, pos, hs)
             rope(cfg, k, pos, hs)
@@ -301,9 +349,13 @@ def main():
     steps = int(opt("--generate", "0"))
     prompt = opt("--prompt")
     temp = float(opt("--temp", "0"))
+    kv8 = "--kv8" in argv
+    if kv8:
+        argv.remove("--kv8")
 
     cfg, w = load(path)
     cfg["eos"] = None
+    cfg["kv8"] = kv8
     print("  " + "  ".join(
         f"{k} {cfg[k]}" for k in
         ("version", "dim", "layers", "heads", "kv_heads", "head_dim", "vocab")

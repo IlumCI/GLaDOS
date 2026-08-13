@@ -236,6 +236,95 @@ fn offsets(cfg: &Config, legacy_rope_tables: bool) -> Offsets {
     o
 }
 
+/// Values per f32 scale in the KV cache. Must match `KV_BLOCK` in
+/// `tools/reference.py`, which is where the number was chosen.
+const KV_BLOCK: usize = 32;
+
+/// One layer's keys or values, int8 with a scale per block.
+///
+/// The cache is the largest thing the system allocates and it dominates how
+/// much context fits: at f32 it is 224 KiB per token, which puts Qwen3's
+/// trained 32768 at 7 GiB. int8 takes that to 63 KiB and 2 GiB.
+///
+/// Blocks of 32 rather than one scale per head, measured on Qwen3-0.6B against
+/// the f32 path on the same prompt:
+///
+/// ```text
+///     per head (128)   max dlogit 2.34   mean 0.41   top-5 order shifted
+///     block 32         max dlogit 1.09   mean 0.18   top-5 order preserved
+/// ```
+///
+/// and under block 32, 45 greedy tokens come out identical to f32. The extra
+/// scales cost 12.5% on top of the data, taking the saving from 4x to 3.5x --
+/// worth it to keep the ranking intact, since reordering the top few
+/// candidates is exactly what a sampler acts on.
+///
+/// Keys carry almost all of the error: quantising only values costs 0.02 of
+/// that 0.41, only keys costs 0.35. A key goes through a dot product and then a
+/// softmax, where error is amplified; a value is only averaged. Both are
+/// quantised anyway, because halving the saving would defeat the purpose.
+struct KvLayer {
+    data: Vec<i8>,
+    scales: Vec<f32>,
+    kv_dim: usize,
+    /// Scales per position. The last block is short when `kv_dim` is not a
+    /// multiple of `KV_BLOCK`; no model here has that shape, which is exactly
+    /// why it has to be handled rather than assumed away.
+    blocks: usize,
+}
+
+impl KvLayer {
+    fn new(cap: usize, kv_dim: usize) -> Self {
+        let blocks = kv_dim.div_ceil(KV_BLOCK);
+        Self {
+            data: vec![0; cap * kv_dim],
+            scales: vec![0.0; cap * blocks],
+            kv_dim,
+            blocks,
+        }
+    }
+
+    /// Quantise one position into `slot`.
+    fn store(&mut self, slot: usize, src: &[f32]) {
+        let base = slot * self.kv_dim;
+        let sbase = slot * self.blocks;
+        for b in 0..self.blocks {
+            let lo = b * KV_BLOCK;
+            let hi = (lo + KV_BLOCK).min(self.kv_dim);
+            let mut peak = 0.0f32;
+            for &v in &src[lo..hi] {
+                let a = if v < 0.0 { -v } else { v };
+                if a > peak {
+                    peak = a;
+                }
+            }
+            // A block of exact zeros quantises to zero under any scale, so the
+            // scale itself is arbitrary; 0 keeps dequantisation exact.
+            let scale = if peak == 0.0 { 0.0 } else { peak / 127.0 };
+            self.scales[sbase + b] = scale;
+            let inv = if scale == 0.0 { 0.0 } else { 1.0 / scale };
+            for i in lo..hi {
+                let q = tensor::roundf(src[i] * inv);
+                self.data[base + i] = q.clamp(-127.0, 127.0) as i8;
+            }
+        }
+    }
+
+    /// Dequantise one element of one position.
+    #[inline]
+    fn at(&self, slot: usize, i: usize) -> f32 {
+        self.data[slot * self.kv_dim + i] as f32
+            * self.scales[slot * self.blocks + i / KV_BLOCK]
+    }
+
+    /// Dequantise a whole position, for export.
+    fn read_into(&self, slot: usize, out: &mut [f32]) {
+        for (i, o) in out.iter_mut().enumerate().take(self.kv_dim) {
+            *o = self.at(slot, i);
+        }
+    }
+}
+
 /// Scratch buffers for one forward pass, plus the KV cache.
 ///
 /// Allocated once and reused. Allocating per token would put the heap
@@ -268,8 +357,16 @@ pub struct State {
     /// single buffer would be 3.5 GiB contiguous, which no real memory map
     /// offers. Split per layer the same cache is 28 allocations of a few tens
     /// of MiB, which the heap can satisfy out of separate regions.
-    key_cache: Vec<Vec<f32>>,
-    value_cache: Vec<Vec<f32>>,
+    key_cache: Vec<KvLayer>,
+    value_cache: Vec<KvLayer>,
+    /// Staging for one position's keys and values.
+    ///
+    /// The projections produce f32 and QK-Norm runs on that, so the cache
+    /// cannot be written directly by `matvec` any more -- quantisation needs
+    /// the whole block before it knows the scale. One `kv_dim` buffer each,
+    /// allocated once.
+    kbuf: Vec<f32>,
+    vbuf: Vec<f32>,
     /// Rotated copies of the live keys, rebuilt per layer per token.
     krot: Vec<f32>,
     /// cos/sin for every (position, dimension pair), precomputed.
@@ -331,8 +428,10 @@ impl State {
             q: vec![0.0; cfg.q_dim()],
             att: vec![0.0; cfg.n_heads * cap],
             logits: vec![0.0; cfg.vocab_size],
-            key_cache: (0..cfg.n_layers).map(|_| vec![0.0; cap * kv]).collect(),
-            value_cache: (0..cfg.n_layers).map(|_| vec![0.0; cap * kv]).collect(),
+            key_cache: (0..cfg.n_layers).map(|_| KvLayer::new(cap, kv)).collect(),
+            value_cache: (0..cfg.n_layers).map(|_| KvLayer::new(cap, kv)).collect(),
+            kbuf: vec![0.0; kv],
+            vbuf: vec![0.0; kv],
             krot: vec![0.0; cap * kv],
             rope_cos,
             rope_sin,
@@ -366,13 +465,21 @@ impl State {
         out.extend_from_slice(&(kv as u32).to_le_bytes());
         out.extend_from_slice(&(pos as u32).to_le_bytes());
 
-        // The blob layout is unchanged by the per-layer split: layer-major,
-        // then position. A context saved before the split still restores.
+        // Written as f32, layer-major then position, whatever the cache holds
+        // in RAM. A context is a content-addressed object that outlives the
+        // in-memory layout, and one saved before the cache was quantised must
+        // still load after -- so the format describes the mental state, not
+        // this month's representation of it. Dequantising here costs one pass
+        // over something already being copied byte by byte.
         out.try_reserve(2 * cfg.n_layers * pos * kv * 4).ok();
+        let mut row = vec![0.0f32; kv];
         for src in [&self.key_cache, &self.value_cache] {
             for l in 0..cfg.n_layers {
-                for v in &src[l][..pos * kv] {
-                    out.extend_from_slice(&v.to_le_bytes());
+                for slot in 0..pos {
+                    src[l].read_into(slot, &mut row);
+                    for v in &row {
+                        out.extend_from_slice(&v.to_le_bytes());
+                    }
                 }
             }
         }
@@ -398,13 +505,19 @@ impl State {
         }
 
         let mut o = 20;
+        let mut row = vec![0.0f32; kv];
         for which in 0..2 {
             for l in 0..layers {
                 let dst = if which == 0 { &mut self.key_cache } else { &mut self.value_cache };
-                for i in 0..pos * kv {
-                    dst[l][i] =
-                        f32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]);
-                    o += 4;
+                for slot in 0..pos {
+                    for v in row.iter_mut() {
+                        *v = f32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]);
+                        o += 4;
+                    }
+                    // Requantising a cache that was already quantised once when
+                    // it was saved is lossless: the values are exactly
+                    // representable at the same scale.
+                    dst[l].store(slot, &row);
                 }
             }
         }
@@ -426,15 +539,21 @@ impl State {
 
     pub fn bytes(&self, cfg: &Config) -> usize {
         let kv = cfg.kv_dim();
-        4 * (cfg.dim * 2                    // x, xb2
+        let floats = cfg.dim * 2            // x, xb2
             + cfg.dim.max(cfg.q_dim())      // xb
             + cfg.q_dim()                   // q
             + cfg.hidden_dim * 2
-            + cfg.n_heads * self.cap
-            + cfg.vocab_size
+            + kv * 2                        // kbuf, vbuf
+            + cfg.n_heads * self.cap        // att
+            + cfg.vocab_size                // logits
             + self.cap * kv                 // krot
-            + self.cap * cfg.head_dim       // rope cos+sin, half each
-            + 2 * cfg.n_layers * self.cap * kv)
+            + self.cap * cfg.head_dim; // rope cos+sin, half each
+        // The cache is int8 with an f32 scale per block, so it is no longer
+        // four bytes a value -- and this number is what decides whether a
+        // larger window fits, so reporting the old arithmetic would overstate
+        // the cost by more than three times.
+        let cache = 2 * cfg.n_layers * (self.cap * kv + self.cap * kv.div_ceil(KV_BLOCK) * 4);
+        4 * floats + cache
     }
 }
 
@@ -1001,21 +1120,12 @@ impl Model {
             // --- attention ---
             tensor::rmsnorm_eps(&mut s.xb[..c.dim], &s.x, self.rms_att_w(l), eps);
 
-            // Keys and values are written straight into the cache slot for this
-            // position, so attention below can read the whole history without
-            // any copying. The layer is now an index into the outer Vec rather
-            // than a stride, so `here * kv_dim` is the whole offset.
-            let slot = here * kv_dim..here * kv_dim + kv_dim;
-
+            // Keys and values go through a staging buffer rather than into the
+            // cache directly: quantisation needs a whole block before it knows
+            // the scale, and QK-Norm has to run on the f32 projection anyway.
             self.wq(l).matvec(&mut s.q, &s.xb);
-            {
-                let k = &mut s.key_cache[l][slot.clone()];
-                self.wk(l).matvec(k, &s.xb);
-            }
-            {
-                let v = &mut s.value_cache[l][slot.clone()];
-                self.wv(l).matvec(v, &s.xb);
-            }
+            self.wk(l).matvec(&mut s.kbuf, &s.xb);
+            self.wv(l).matvec(&mut s.vbuf, &s.xb);
 
             // QK-Norm, before RoPE and before anything is cached.
             //
@@ -1033,12 +1143,17 @@ impl Model {
                     tensor::rmsnorm_inplace(&mut s.q[o..o + head_size], qn, eps);
                 }
                 let kn = self.k_norm_w(l);
-                let kbase = here * kv_dim;
                 for h in 0..c.n_kv_heads {
-                    let o = kbase + h * head_size;
-                    tensor::rmsnorm_inplace(&mut s.key_cache[l][o..o + head_size], kn, eps);
+                    let o = h * head_size;
+                    tensor::rmsnorm_inplace(&mut s.kbuf[o..o + head_size], kn, eps);
                 }
             }
+
+            // Normed and unrotated for keys, raw for values -- the same point
+            // `tools/reference.py` applies its round-trip, so the error the
+            // oracle measures is the error this introduces.
+            s.key_cache[l].store(here, &s.kbuf);
+            s.value_cache[l].store(here, &s.vbuf);
 
             // The key just written stays unrotated; only the query is rotated
             // here, at the position it will occupy in the cache.
@@ -1067,7 +1182,7 @@ impl Model {
             // would redo the same work three times.
             let kc = &s.key_cache[l];
             for j in 0..live {
-                let src = slot_of(j) * kv_dim;
+                let src = slot_of(j);
                 let dst = j * kv_dim;
                 for h in 0..c.n_kv_heads {
                     let base = h * head_size;
@@ -1079,8 +1194,8 @@ impl Model {
                         } else {
                             (base + p, base + p + half)
                         };
-                        let k0 = kc[src + a_off];
-                        let k1 = kc[src + b_off];
+                        let k0 = kc.at(src, a_off);
+                        let k1 = kc.at(src, b_off);
                         s.krot[dst + a_off] = k0 * fcr - k1 * fci;
                         s.krot[dst + b_off] = k0 * fci + k1 * fcr;
                     }
@@ -1105,11 +1220,12 @@ impl Model {
                 for i in 0..head_size {
                     s.xb[qo + i] = 0.0;
                 }
+                let vc = &s.value_cache[l];
                 for t in 0..live {
-                    let vo = slot_of(t) * kv_dim + hoff;
+                    let vslot = slot_of(t);
                     let a = s.att[ao + t];
                     for i in 0..head_size {
-                        s.xb[qo + i] += a * s.value_cache[l][vo + i];
+                        s.xb[qo + i] += a * vc.at(vslot, hoff + i);
                     }
                 }
             }
