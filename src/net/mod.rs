@@ -50,6 +50,7 @@ pub mod dns;
 pub mod iface;
 pub mod tcp;
 pub mod tls;
+pub mod ws;
 pub mod trust;
 pub mod udp;
 pub mod wifi;

@@ -22,6 +22,7 @@ mod crypto;
 mod dev;
 mod edit;
 mod gfx;
+mod json;
 mod lang;
 mod mem;
 mod net;
@@ -860,6 +861,16 @@ fn selftest() {
     // nothing to point at -- crypto is the one place where wrong code still
     // produces perfectly plausible output.
     crypto::selftest();
+    if json::selftest() {
+        console::set_color(LTGREEN);
+        kprintln!("  ok     json      parse, escapes, snowflakes, depth bound");
+        console::set_color(LTGRAY_IDX);
+    }
+    if net::ws::selftest() {
+        console::set_color(LTGREEN);
+        kprintln!("  ok     websocket RFC 6455 accept, masking, split frames");
+        console::set_color(LTGRAY_IDX);
+    }
 
     console::set_color(LTGREEN);
     kprintln!("\n[selftest] int3 should report and resume:");
