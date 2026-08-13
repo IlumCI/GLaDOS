@@ -58,16 +58,38 @@ fn note_if_mind_busy() {
 /// every redraw to the serial port would bury the log in partial lines. The
 /// finished line is written to serial once, when Enter is pressed.
 ///
-/// Assumes the line fits on one row. Longer input wraps and the cursor
-/// arithmetic stops being right -- a limitation, not a crash.
-fn redraw(line: &str, cursor: usize, prev_len: usize) {
+/// Scrolls horizontally rather than wrapping.
+///
+/// It used to assume the line fit on one row, which was true at 80 columns and
+/// stopped being true when the terminal became a window 47 wide: the line
+/// wrapped, `set_col` kept addressing the row the prompt started on, and the
+/// echo went to pieces.
+///
+/// Scrolling rather than wrapping because the console can only address a
+/// column, not a row -- there is no `set_row`. Following a wrapped line would
+/// mean teaching the console to place a cursor in two dimensions for the
+/// benefit of one caller. A window onto the line needs neither, and a shell
+/// that scrolls its input is a shell every user has already met.
+fn redraw(line: &str, cursor: usize) {
     console::with(|c| {
+        let avail = c.cols().saturating_sub(PROMPT_LEN + 1);
+        if avail == 0 {
+            return;
+        }
+        // Keep the cursor on screen. Everything else follows from that.
+        let off = cursor.saturating_sub(avail.saturating_sub(1));
+        let end = (off + avail).min(line.len());
+        let shown = &line[off..end];
+
         c.set_col(PROMPT_LEN);
-        c.write_bytes(line.as_bytes());
-        for _ in line.len()..prev_len {
+        c.write_bytes(shown.as_bytes());
+        // Blank the rest of the row unconditionally rather than tracking how
+        // long the line used to be: it is 47 stores, and a stale tail is the
+        // one artefact that makes an editor look broken.
+        for _ in shown.len()..avail {
             c.put_char(b' ');
         }
-        c.set_col(PROMPT_LEN + cursor);
+        c.set_col(PROMPT_LEN + (cursor - off));
     });
 }
 
@@ -106,6 +128,7 @@ pub fn run(boot: &BootInfo, acpi: &Option<Acpi>) -> ! {
             line.clear();
             cursor = 0;
             prompt();
+            crate::gfx::desk::redraw_over_terminal();
             continue;
         }
 
@@ -130,10 +153,12 @@ pub fn run(boot: &BootInfo, acpi: &Option<Acpi>) -> ! {
             crate::gfx::desk::Route::Shell(k) => k,
         };
 
-        let prev = line.len();
         match key {
             b'\n' => {
-                console::with(|c| c.set_col(PROMPT_LEN + line.len()));
+                console::with(|c| {
+                    let avail = c.cols().saturating_sub(PROMPT_LEN + 1);
+                    c.set_col(PROMPT_LEN + line.len().min(avail));
+                });
                 kprintln!();
                 // The one place the typed line reaches the serial log.
                 serial_println!("{}{}", PROMPT, line);
@@ -166,19 +191,24 @@ pub fn run(boot: &BootInfo, acpi: &Option<Acpi>) -> ! {
                 hist = history.len();
                 stash.clear();
                 prompt();
+                // *After* the prompt, not before. Everything the console prints
+                // -- including the prompt itself -- lands in the terminal's
+                // rectangle without regard for what is drawn on top of it, so
+                // the repair has to be the last thing that touches the screen.
+                crate::gfx::desk::redraw_over_terminal();
             }
 
             8 => {
                 if cursor > 0 {
                     cursor -= 1;
                     line.remove(cursor);
-                    redraw(&line, cursor, prev);
+                    redraw(&line, cursor);
                 }
             }
             kbd::KEY_DELETE => {
                 if cursor < line.len() {
                     line.remove(cursor);
-                    redraw(&line, cursor, prev);
+                    redraw(&line, cursor);
                 }
             }
 
@@ -207,7 +237,7 @@ pub fn run(boot: &BootInfo, acpi: &Option<Acpi>) -> ! {
             0x15 => {
                 line.clear();
                 cursor = 0;
-                redraw(&line, cursor, prev);
+                redraw(&line, cursor);
             }
 
             kbd::KEY_UP => {
@@ -218,7 +248,7 @@ pub fn run(boot: &BootInfo, acpi: &Option<Acpi>) -> ! {
                     hist -= 1;
                     line = history[hist].clone();
                     cursor = line.len();
-                    redraw(&line, cursor, prev);
+                    redraw(&line, cursor);
                 }
             }
             kbd::KEY_DOWN => {
@@ -230,14 +260,14 @@ pub fn run(boot: &BootInfo, acpi: &Option<Acpi>) -> ! {
                         history[hist].clone()
                     };
                     cursor = line.len();
-                    redraw(&line, cursor, prev);
+                    redraw(&line, cursor);
                 }
             }
 
             ch if (0x20..0x7F).contains(&ch) => {
                 line.insert(cursor, ch as char);
                 cursor += 1;
-                redraw(&line, cursor, prev);
+                redraw(&line, cursor);
             }
             _ => {}
         }

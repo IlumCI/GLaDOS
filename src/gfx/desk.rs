@@ -127,7 +127,8 @@ const TASK_H: u32 = theme::TITLE_H + 10;
 const TASK_GAP: u32 = 4;
 
 /// Apps the app bar can launch. Name, and the panel `ui::panel_named` builds.
-const APPS: [(&str, &str); 2] = [("Programs", "programs"), ("System", "status")];
+const APPS: [(&str, &str); 3] =
+    [("Programs", "programs"), ("Files", "files"), ("System", "status")];
 
 pub fn ready() -> bool {
     unsafe { (*DESK.get()).is_some() }
@@ -264,7 +265,24 @@ pub fn open(title: &str, panel: Panel) {
         // one looked like nothing had happened.
         let n = d.windows.len() as u32;
         let off = (n % 6) * 28;
-        let x = screen.x + screen.w.saturating_sub(w);
+        // Clear of the terminal's right edge where possible.
+        //
+        // Not tidiness. The console draws straight to the framebuffer on its
+        // own schedule, with no idea which windows are above it, so a window
+        // overlapping the terminal gets its overlapping strip repainted with
+        // console output the moment anything is printed. Windows may still be
+        // moved over it -- `redraw_over_terminal` repairs that between
+        // commands -- but nothing should start out overlapping.
+        let clear_of_terminal = d
+            .windows
+            .iter()
+            .find(|win| matches!(win.content, Content::Terminal))
+            .map(|win| win.rect.x + win.rect.w + MARGIN)
+            .unwrap_or(screen.x);
+        let x = screen
+            .x
+            .max(screen.x + screen.w.saturating_sub(w))
+            .max(clear_of_terminal.min(screen.x + screen.w.saturating_sub(w)));
         let y = (screen.y + screen.h / 3 + off)
             .min(screen.y + screen.h.saturating_sub(h));
         d.windows.push(Window {
@@ -706,6 +724,29 @@ pub fn key(k: u8) -> Route {
                     focus_terminal();
                     unsafe { *PENDING.get() = Some(cmd) };
                 }
+                // Navigation replaces the panel where it stands. The window
+                // keeps its geometry, its place in the z-order and the
+                // keyboard -- browsing is not opening something, and a browser
+                // that jumped to the front of the stack on every keystroke
+                // would be unusable.
+                Some(ui::Step::Do(Action::Browse(path))) => {
+                    with(|d| {
+                        if let Some(f) = d.focus() {
+                            let target = if crate::sysbox::is_dir(&path) {
+                                path.clone()
+                            } else {
+                                // A path that is not a directory is either a
+                                // typo or a file; either way the listing that
+                                // contains it is the useful thing to show.
+                                let cut = path.trim_end_matches('/').rfind('/').unwrap_or(0);
+                                if cut == 0 { String::from("/") } else { String::from(&path[..cut]) }
+                            };
+                            d.windows[f].title = alloc::format!("Files -- {}", target);
+                            d.windows[f].content = Content::Panel(ui::file_browser(&target));
+                        }
+                    });
+                    draw();
+                }
                 _ => {}
             }
             Route::Handled
@@ -871,6 +912,43 @@ pub fn focus_terminal() {
         }
     });
     draw();
+}
+
+/// Repaint if any window overlaps the terminal.
+///
+/// The console owns its rectangle and paints into it whenever the system
+/// prints, which is correct until a window is in front of it -- then the
+/// overlapping strip becomes console output on top of a window. Rather than
+/// teach the console about occlusion (it would have to be consulted per
+/// character, and it is the one path that has to stay fast) the desktop
+/// repairs the damage between commands, which is the only moment the shell is
+/// not printing.
+///
+/// Cheap because it does nothing in the common case: with no overlap there is
+/// nothing to repair.
+pub fn redraw_over_terminal() {
+    let overlapped = with(|d| {
+        let Some(ti) = d
+            .windows
+            .iter()
+            .position(|w| matches!(w.content, Content::Terminal))
+        else {
+            return false;
+        };
+        let t = d.windows[ti].rect;
+        d.windows.iter().enumerate().any(|(i, w)| {
+            i > ti
+                && w.state != WinState::Minimised
+                && w.rect.x < t.x + t.w
+                && t.x < w.rect.x + w.rect.w
+                && w.rect.y < t.y + t.h
+                && t.y < w.rect.y + w.rect.h
+        })
+    })
+    .unwrap_or(false);
+    if overlapped {
+        draw();
+    }
 }
 
 pub fn take_pending() -> Option<String> {

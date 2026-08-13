@@ -316,6 +316,38 @@ pub fn print_hash(path: &str) {
     }
 }
 
+/// Entries under `path` with what a browser needs to draw them: the name,
+/// whether it is a directory, and how many children or bytes it holds.
+///
+/// Separate from `children` rather than replacing it because the callers that
+/// only want names are the majority, and a browser is the only thing that has
+/// to tell a directory from a file without opening it.
+pub fn listing(path: &str) -> Vec<(String, bool, usize)> {
+    with(|s| {
+        let p = parse(&s.cwd, path);
+        match tree::resolve(&s.root, &p) {
+            Some(Node::Dir(es)) => es
+                .iter()
+                .map(|(k, v)| match v {
+                    Node::Dir(inner) => (k.clone(), true, inner.len()),
+                    Node::Blob(b) => (k.clone(), false, b.len()),
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    })
+    .unwrap_or_default()
+}
+
+/// Whether a path names a directory.
+pub fn is_dir(path: &str) -> bool {
+    with(|s| {
+        let p = parse(&s.cwd, path);
+        matches!(tree::resolve(&s.root, &p), Some(Node::Dir(_)))
+    })
+    .unwrap_or(false)
+}
+
 /// Entry names directly under `path`, in sorted order. Empty if it is missing
 /// or is a file.
 pub fn children(path: &str) -> Vec<String> {

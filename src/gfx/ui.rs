@@ -52,6 +52,12 @@ const PAD: u32 = 10;
 #[derive(Clone)]
 pub enum Action {
     Run(String),
+    /// Replace this window's panel with a browser rooted at a new path.
+    ///
+    /// Distinct from `Run` because navigating is not a command: it changes what
+    /// the window *is showing*, and routing it through the shell would print a
+    /// listing into the terminal instead of moving the browser.
+    Browse(String),
     Close,
     None,
 }
@@ -60,6 +66,9 @@ pub enum Widget {
     Label(String),
     Sep,
     List { items: Vec<(String, Action)>, sel: usize },
+    /// An editable line. `cursor` is a byte index, which is the same thing the
+    /// shell's own editor tracks.
+    Field { name: String, text: String, cursor: usize },
     Button { label: String, action: Action },
 }
 
@@ -69,12 +78,13 @@ impl Widget {
             Widget::Label(_) => TEXT_H + GAP,
             Widget::Sep => GAP * 2,
             Widget::List { items, .. } => items.len() as u32 * ROW_H + 8,
+            Widget::Field { .. } => TEXT_H + 14,
             Widget::Button { .. } => BTN_H,
         }
     }
 
     fn focusable(&self) -> bool {
-        matches!(self, Widget::List { .. } | Widget::Button { .. })
+        matches!(self, Widget::List { .. } | Widget::Field { .. } | Widget::Button { .. })
     }
 
     /// A one-line description for the serial transcript.
@@ -86,6 +96,7 @@ impl Widget {
             Widget::List { items, sel } => {
                 (mark, items.get(*sel).map(|i| i.0.as_str()).unwrap_or(""), *sel)
             }
+            Widget::Field { text, cursor, .. } => (mark, text.as_str(), *cursor),
             Widget::Button { label, .. } => (mark, label.as_str(), 0),
         }
     }
@@ -139,6 +150,9 @@ impl Panel {
                 Action::Close => Step::Close,
                 a => Step::Do(a.clone()),
             },
+            // Enter in a field means "use what I typed". The panel decides
+            // what that is; the browser reads it as a path to open.
+            Some(Widget::Field { text, .. }) => Step::Do(Action::Browse(text.clone())),
             Some(Widget::List { items, sel }) => match items.get(*sel) {
                 Some((_, Action::Close)) => Step::Close,
                 Some((_, a)) => Step::Do(a.clone()),
@@ -180,10 +194,57 @@ impl Panel {
                 self.advance(true);
                 Step::Redraw
             }
+            kbd::KEY_LEFT | kbd::KEY_RIGHT | kbd::KEY_HOME | kbd::KEY_END | 8
+            | kbd::KEY_DELETE => self.edit(k),
             b'\n' | b'\r' => self.activate(),
             27 => Step::Close,
+            // Printable text goes to a focused field and nowhere else. A panel
+            // with no field ignores typing rather than inventing a meaning for
+            // it -- type-ahead selection in a list is a feature, and guessing
+            // at it here would make Escape and Enter behave differently
+            // depending on what was typed before them.
+            0x20..=0x7E => self.edit(k),
             _ => Step::Idle,
         }
+    }
+
+    /// Text editing inside a focused `Field`. Anything else leaves it alone.
+    fn edit(&mut self, k: u8) -> Step {
+        let Some(Widget::Field { text, cursor, .. }) = self.widgets.get_mut(self.focus) else {
+            // Left and Right still have to do something sensible elsewhere:
+            // in a list they mean nothing, so they mean nothing here.
+            return Step::Idle;
+        };
+        match k {
+            kbd::KEY_LEFT => *cursor = cursor.saturating_sub(1),
+            kbd::KEY_RIGHT => *cursor = (*cursor + 1).min(text.len()),
+            kbd::KEY_HOME => *cursor = 0,
+            kbd::KEY_END => *cursor = text.len(),
+            8 => {
+                if *cursor > 0 {
+                    *cursor -= 1;
+                    text.remove(*cursor);
+                }
+            }
+            kbd::KEY_DELETE => {
+                if *cursor < text.len() {
+                    text.remove(*cursor);
+                }
+            }
+            c => {
+                text.insert(*cursor, c as char);
+                *cursor += 1;
+            }
+        }
+        Step::Redraw
+    }
+
+    /// The text of the first field, for a panel that has one.
+    pub fn field_text(&self) -> Option<&str> {
+        self.widgets.iter().find_map(|w| match w {
+            Widget::Field { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
     }
 
     pub fn set_title(&mut self, t: &str) {
@@ -224,6 +285,27 @@ impl Panel {
                             break;
                         }
                         theme::list_row(fb, row, label, j == *sel, focused);
+                    }
+                }
+                Widget::Field { name, text, cursor } => {
+                    let cap = theme::text_w(name.len() + 1);
+                    theme::text(fb, x, y + 4, name, theme::TEXT, theme::FACE);
+                    let well = Rect::new(x + cap, y, w.saturating_sub(cap), h - 2);
+                    theme::well(fb, well, theme::HILIGHT);
+                    let inner = well.shrink(3);
+                    // Scroll so the caret stays visible, exactly as the shell's
+                    // own line editor does -- a field narrower than its
+                    // contents is the normal case, not an error.
+                    let room = (inner.w / (font::GLYPH_W * theme::CHROME_SCALE)) as usize;
+                    if room > 0 {
+                        let off = cursor.saturating_sub(room.saturating_sub(1));
+                        let end = (off + room).min(text.len());
+                        theme::text(fb, inner.x, inner.y, &text[off..end], theme::TEXT, theme::HILIGHT);
+                        if focused {
+                            let cx = inner.x
+                                + (cursor - off) as u32 * font::GLYPH_W * theme::CHROME_SCALE;
+                            fb.rect(cx, inner.y, 2, TEXT_H, theme::TEXT);
+                        }
                     }
                 }
                 Widget::Button { label, .. } => {
@@ -316,6 +398,8 @@ impl Panel {
                 Widget::List { items, .. } => {
                     items.iter().map(|i| i.0.len()).max().unwrap_or(0) + 2
                 }
+                // A field wants room to type in, not just room for its caption.
+                Widget::Field { name, .. } => name.len() + 28,
                 Widget::Button { label, .. } => label.len() + 4,
             };
             text_cols = text_cols.max(cols);
@@ -348,8 +432,68 @@ pub fn panel_named(name: &str) -> Option<Panel> {
     match name {
         "programs" => Some(program_manager()),
         "status" => Some(status_panel()),
+        "files" => Some(file_browser("/")),
         _ => None,
     }
+}
+
+/// A browser over the namespace, rooted at `path`.
+///
+/// Rebuilt whole on every navigation rather than mutated in place. A panel is
+/// data -- the same data the model will one day be writing -- so "go to a
+/// different directory" is "make the panel for that directory", and there is no
+/// second code path that edits a browser into a different browser.
+///
+/// Directories carry a trailing slash and a child count, files their size, so
+/// the two are distinguishable without colour. Colour is how the console tells
+/// them apart, and the same information should not depend on it twice.
+pub fn file_browser(path: &str) -> Panel {
+    let path = if path.is_empty() { "/" } else { path };
+    let entries = crate::sysbox::listing(path);
+
+    let mut items: Vec<(String, Action)> = Vec::new();
+    // Parent first, and only when there is one. An entry that navigates
+    // nowhere is worse than an absent one.
+    if path != "/" {
+        let cut = path.trim_end_matches('/').rfind('/').unwrap_or(0);
+        let parent = if cut == 0 { String::from("/") } else { String::from(&path[..cut]) };
+        items.push((String::from(".."), Action::Browse(parent)));
+    }
+    for (name, is_dir, n) in &entries {
+        let joined = if path == "/" {
+            alloc::format!("/{}", name)
+        } else {
+            alloc::format!("{}/{}", path, name)
+        };
+        if *is_dir {
+            items.push((alloc::format!("{}/  ({})", name, n), Action::Browse(joined)));
+        } else {
+            // Opening a file is a shell command, because printing it is what
+            // `cat` already does and a second implementation would be a second
+            // thing to keep right.
+            items.push((
+                alloc::format!("{}  {} B", name, n),
+                Action::Run(alloc::format!("cat {}", joined)),
+            ));
+        }
+    }
+    if items.is_empty() {
+        items.push((String::from("(empty)"), Action::None));
+    }
+
+    Panel::new(
+        "Files",
+        alloc::vec![
+            Widget::Field {
+                name: String::from("Path"),
+                text: String::from(path),
+                cursor: path.len(),
+            },
+            Widget::Sep,
+            Widget::List { items, sel: 0 },
+            Widget::Button { label: String::from("Close"), action: Action::Close },
+        ],
+    )
 }
 
 /// A second window worth opening, so the window manager has something to
