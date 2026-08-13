@@ -47,6 +47,59 @@ impl EarlyFrames {
         self.allocated
     }
 
+    /// The largest contiguous run still available, in pages, without taking it.
+    ///
+    /// `alloc_contiguous` cannot answer "would this fit?" -- it advances `idx`
+    /// on every region it rejects and never rewinds, so asking it costs the
+    /// regions it walked past. That made the heap ladder above it a fiction:
+    /// once the first rung failed, the allocator sat at the end of the map and
+    /// every smaller rung failed instantly, so a size the machine could not
+    /// satisfy produced no heap at all rather than a smaller one.
+    ///
+    /// Rewinding to fix that would be worse than the bug. `install_paging` runs
+    /// before the heap and took its frames from this same allocator; resetting
+    /// `idx` and `cursor` would offer the live page tables' own frames a second
+    /// time. So this looks forward from wherever the cursor already is, touches
+    /// nothing, and reports what a subsequent call could actually get.
+    pub fn largest_span(&self) -> usize {
+        let mut best = 0u64;
+        let mut cursor = self.cursor;
+        for i in self.idx..self.count() {
+            let d = self.desc(i);
+            let region_end = d.phys_start + d.num_pages * PAGE_SIZE;
+            let start = d.phys_start.max(MIN_PHYS).max(cursor);
+            // The cursor only applies to the region it is inside; past that,
+            // each region starts from its own base.
+            cursor = 0;
+            if !d.is_conventional() || start >= region_end {
+                continue;
+            }
+            best = best.max(region_end - start);
+        }
+        (best / PAGE_SIZE) as usize
+    }
+
+    /// Total conventional memory still available, in pages, without taking it.
+    ///
+    /// Reported alongside `largest_span` because the two answer different
+    /// questions and only one of them bounds an allocation. A machine can have
+    /// gigabytes free and refuse a 200 MiB request.
+    pub fn total_free(&self) -> usize {
+        let mut total = 0u64;
+        let mut cursor = self.cursor;
+        for i in self.idx..self.count() {
+            let d = self.desc(i);
+            let region_end = d.phys_start + d.num_pages * PAGE_SIZE;
+            let start = d.phys_start.max(MIN_PHYS).max(cursor);
+            cursor = 0;
+            if !d.is_conventional() || start >= region_end {
+                continue;
+            }
+            total += region_end - start;
+        }
+        (total / PAGE_SIZE) as usize
+    }
+
     /// Take `pages` physically contiguous zeroed frames from a single region.
     ///
     /// The heap needs one unbroken span; the bump cursor alone would happily

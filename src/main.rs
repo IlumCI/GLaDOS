@@ -613,28 +613,64 @@ fn init_keyboard(acpi: &Option<acpi::Acpi>) {
 const HEAP_LADDER: [usize; 5] = [81920, 65536, 32768, 16384, 4096];
 
 fn init_heap(frames: &mut mem::frame::EarlyFrames) {
-    for (i, &pages) in HEAP_LADDER.iter().enumerate() {
-        let Some(base) = frames.alloc_contiguous(pages) else {
-            continue;
-        };
-        let size = pages * mem::PAGE_SIZE as usize;
-        unsafe { mem::heap::HEAP.add_region(base as usize, size) };
-        // Anything below the first rung means a model may fail to allocate its
-        // state later, with a message far from the cause. Say it here.
-        if i > 0 {
-            console::set_color(YELLOW);
-        }
+    // Measure, then ask once. The obvious shape -- try each rung until one
+    // succeeds -- does not work with this allocator and silently did not:
+    // `alloc_contiguous` advances its region index on every rejection and never
+    // rewinds, so a failed first rung leaves it at the end of the map and every
+    // smaller rung fails immediately. The ladder degraded to all-or-nothing
+    // while its comment claimed otherwise.
+    let span = frames.largest_span();
+    let free = frames.total_free();
+
+    // The largest single region is what bounds an allocation; the total is not.
+    // Printed because the KV cache is the largest thing this system allocates
+    // and this is the number that decides how much context fits -- and on the
+    // one machine that matters it has never been measured.
+    kprintln!(
+        "[boot] phys  {} MiB free, largest contiguous region {} MiB",
+        free * mem::PAGE_SIZE as usize / 1024 / 1024,
+        span * mem::PAGE_SIZE as usize / 1024 / 1024,
+    );
+
+    let Some((i, pages)) = HEAP_LADDER
+        .iter()
+        .copied()
+        .enumerate()
+        .find(|&(_, pages)| pages <= span)
+    else {
+        console::set_color(LTRED);
         kprintln!(
-            "[boot] heap {} MiB at {:#x}{}",
-            size / 1024 / 1024,
-            base,
-            if i > 0 { "  (reduced -- no larger contiguous region)" } else { "" }
+            "[boot] heap allocation FAILED -- largest region is {} MiB, smallest rung is {} MiB",
+            span * mem::PAGE_SIZE as usize / 1024 / 1024,
+            HEAP_LADDER[HEAP_LADDER.len() - 1] * mem::PAGE_SIZE as usize / 1024 / 1024,
         );
         console::set_color(LTGRAY_IDX);
         return;
+    };
+
+    let Some(base) = frames.alloc_contiguous(pages) else {
+        // Unreachable unless `largest_span` and `alloc_contiguous` disagree
+        // about what is available, which would mean one of them is wrong.
+        console::set_color(LTRED);
+        kprintln!("[boot] heap allocation FAILED -- {} MiB was measured available",
+            pages * mem::PAGE_SIZE as usize / 1024 / 1024);
+        console::set_color(LTGRAY_IDX);
+        return;
+    };
+
+    let size = pages * mem::PAGE_SIZE as usize;
+    unsafe { mem::heap::HEAP.add_region(base as usize, size) };
+    // Anything below the first rung means a model may fail to allocate its
+    // state later, with a message far from the cause. Say it here.
+    if i > 0 {
+        console::set_color(YELLOW);
     }
-    console::set_color(LTRED);
-    kprintln!("[boot] heap allocation FAILED -- no contiguous region");
+    kprintln!(
+        "[boot] heap {} MiB at {:#x}{}",
+        size / 1024 / 1024,
+        base,
+        if i > 0 { "  (reduced -- no larger contiguous region)" } else { "" }
+    );
     console::set_color(LTGRAY_IDX);
 }
 

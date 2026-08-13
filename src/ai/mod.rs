@@ -339,14 +339,14 @@ pub fn model_demo() {
     //    If `xb` is sized by `dim` alone this panics rather than misbehaving,
     //    which is the point.
     let wide = model::Config {
-        dim: 64,
-        hidden_dim: 176,
+        dim: 128,
+        hidden_dim: 512,
         n_layers: 2,
         n_heads: 4,
         n_kv_heads: 2,
         head_dim: 32,
-        vocab_size: 256,
-        seq_len: 64,
+        vocab_size: 1024,
+        seq_len: 16384,
         norm_eps: 1e-6,
         qk_norm: true,
         rope_interleaved: false,
