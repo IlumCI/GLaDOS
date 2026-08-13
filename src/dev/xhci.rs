@@ -22,10 +22,37 @@
 //! screen -- from QEMU's `qemu-xhci` and from the GF63's real controller --
 //! is what turns the rest from guesswork into arithmetic.
 //!
-//! Still to come: the operational registers, a command ring, an event ring,
-//! device slots and endpoint contexts, then USB enumeration on top.
+//! ### Rings, and why they are the whole design
+//!
+//! xHCI is not register-poking like the e1000. Everything is a ring of 16-byte
+//! Transfer Request Blocks shared with the controller, and each ring carries a
+//! *cycle bit* that flips every time the producer wraps. That single bit is
+//! how both sides know which entries are new without any other synchronisation
+//! -- the controller consumes entries whose cycle matches its state and stops
+//! at the first that does not. Getting it wrong does not corrupt anything; the
+//! controller simply never sees the command, which presents as a device that
+//! enumerates to silence.
+//!
+//! Three rings matter here: a command ring the driver writes and the
+//! controller reads, an event ring the controller writes and the driver reads,
+//! and one transfer ring per endpoint. Commands complete asynchronously by
+//! posting a Command Completion event, so nothing is synchronous even though
+//! it reads that way.
+//!
+//! ### Memory
+//!
+//! Every structure the controller touches is allocated from the kernel heap,
+//! which comes from identity-mapped physical frames -- so a heap address *is*
+//! its physical address and no translation is needed anywhere below. That is
+//! true because of how `init_heap` gets its memory, and it is the assumption
+//! that would break first if this kernel ever grew a higher-half mapping.
+//!
+//! None of it is ever freed. A host controller lives as long as the machine.
 
 use super::pci;
+use crate::time::delay_us;
+use alloc::vec::Vec;
+use core::ptr::write_volatile;
 use crate::mem::paging;
 use core::ptr::read_volatile;
 
@@ -78,6 +105,8 @@ pub enum InitError {
     NotFound,
     NoBar,
     NoMap,
+    NoMem,
+    ResetTimeout,
 }
 
 /// Find the first xHCI controller and read what it says about itself.
@@ -148,7 +177,7 @@ pub fn probe(ecam: u64) -> Result<Caps, InitError> {
 
 /// What `usb` prints.
 pub fn report(ecam: u64) {
-    use crate::gfx::console::{self, LTGRAY, LTRED, WHITE, YELLOW};
+    use crate::gfx::console::{self, LTGRAY, LTGREEN, LTRED, WHITE, YELLOW};
     use crate::kprintln;
 
     console::set_color(YELLOW);
@@ -185,8 +214,463 @@ pub fn report(ecam: u64) {
                 if c.ac64 { 64 } else { 32 }
             );
             console::set_color(WHITE);
-            kprintln!("  no enumeration yet -- rings and slots are the next step");
+
+            let mut ctl = match Controller::start(&c) {
+                Ok(x) => x,
+                Err(e) => {
+                    console::set_color(LTRED);
+                    kprintln!("  controller did not start: {:?}", e);
+                    console::set_color(WHITE);
+                    return;
+                }
+            };
+            let ports = ctl.connected();
+            if ports.is_empty() {
+                kprintln!("  running; no devices attached");
+                return;
+            }
+            for p in ports {
+                match ctl.enumerate(p) {
+                    Ok((vid, pid)) => {
+                        console::set_color(LTGREEN);
+                        kprintln!("  port {}  {:04x}:{:04x}", p, vid, pid);
+                        console::set_color(WHITE);
+                    }
+                    Err(e) => {
+                        console::set_color(LTRED);
+                        kprintln!("  port {}  {}", p, e);
+                        console::set_color(WHITE);
+                    }
+                }
+            }
         }
     }
     console::set_color(WHITE);
+}
+
+// --- operational, runtime and doorbell registers --------------------------
+
+const USBCMD: u64 = 0x00;
+const USBSTS: u64 = 0x04;
+const CRCR: u64 = 0x18;
+const DCBAAP: u64 = 0x30;
+const CONFIG: u64 = 0x38;
+/// Port register sets begin here, 0x10 bytes each, one-based.
+const PORTSC_BASE: u64 = 0x400;
+
+const CMD_RS: u32 = 1 << 0;
+const CMD_HCRST: u32 = 1 << 1;
+
+const STS_HCH: u32 = 1 << 0;
+const STS_CNR: u32 = 1 << 11;
+
+/// Port status bits that clear when written as one. Every read-modify-write of
+/// PORTSC has to mask these off, or it clears status it never meant to touch --
+/// the classic way to lose a connect event while enabling a port.
+const PORTSC_RW1C: u32 = (1 << 17) | (1 << 18) | (1 << 20) | (1 << 21) | (1 << 22) | (1 << 23);
+const PORTSC_CCS: u32 = 1 << 0;
+const PORTSC_PED: u32 = 1 << 1;
+const PORTSC_PR: u32 = 1 << 4;
+const PORTSC_PP: u32 = 1 << 9;
+const PORTSC_PRC: u32 = 1 << 21;
+
+/// Interrupter 0's registers, relative to the runtime base.
+const IR0: u64 = 0x20;
+const ERSTSZ: u64 = 0x08;
+const ERSTBA: u64 = 0x10;
+const ERDP: u64 = 0x18;
+
+// TRB types this driver produces.
+const TRB_LINK: u32 = 6;
+const TRB_ENABLE_SLOT: u32 = 9;
+const TRB_ADDRESS_DEVICE: u32 = 11;
+const TRB_SETUP: u32 = 2;
+const TRB_DATA: u32 = 3;
+const TRB_STATUS: u32 = 4;
+// ...and the ones the controller posts back.
+const TRB_TRANSFER_EVENT: u32 = 32;
+const TRB_CMD_COMPLETE: u32 = 33;
+
+/// TRBs per ring. Far more than this driver ever has outstanding, and it keeps
+/// a ring inside one page.
+const RING_TRBS: usize = 64;
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct Trb {
+    lo: u32,
+    hi: u32,
+    status: u32,
+    control: u32,
+}
+
+impl Trb {
+    fn kind(&self) -> u32 {
+        (self.control >> 10) & 0x3F
+    }
+    /// Completion code from an event TRB. 1 is success; everything else is a
+    /// reason.
+    fn code(&self) -> u32 {
+        self.status >> 24
+    }
+    fn slot(&self) -> u8 {
+        (self.control >> 24) as u8
+    }
+}
+
+/// Allocate zeroed, aligned memory the controller may read.
+///
+/// Never freed, by design -- see the module note. The address returned is
+/// simultaneously the virtual and the physical one.
+fn dma(size: usize, align: usize) -> Option<u64> {
+    let layout = core::alloc::Layout::from_size_align(size, align).ok()?;
+    let p = unsafe { alloc::alloc::alloc_zeroed(layout) };
+    if p.is_null() {
+        None
+    } else {
+        Some(p as u64)
+    }
+}
+
+/// A producer ring: TRBs, plus the cycle state that says which are new.
+struct Ring {
+    base: u64,
+    idx: usize,
+    cycle: u32,
+}
+
+impl Ring {
+    fn new() -> Option<Ring> {
+        let base = dma(RING_TRBS * 16, 64)?;
+        // The last TRB is a Link back to the start carrying Toggle Cycle,
+        // which is what makes a fixed-size ring behave like an endless queue.
+        let link = Trb {
+            lo: base as u32,
+            hi: (base >> 32) as u32,
+            status: 0,
+            control: (TRB_LINK << 10) | (1 << 1),
+        };
+        unsafe { write_volatile((base as *mut Trb).add(RING_TRBS - 1), link) };
+        Some(Ring { base, idx: 0, cycle: 1 })
+    }
+
+    fn push(&mut self, mut t: Trb) {
+        t.control = (t.control & !1) | self.cycle;
+        unsafe { write_volatile((self.base as *mut Trb).add(self.idx), t) };
+        self.idx += 1;
+        if self.idx == RING_TRBS - 1 {
+            // Give the Link TRB the current cycle so the controller follows
+            // it, then flip: everything after the wrap is the other polarity.
+            let ctrl = (TRB_LINK << 10) | (1 << 1) | self.cycle;
+            unsafe {
+                let p = (self.base as *mut Trb).add(RING_TRBS - 1);
+                write_volatile(&mut (*p).control, ctrl);
+            }
+            self.idx = 0;
+            self.cycle ^= 1;
+        }
+    }
+}
+
+pub struct Controller {
+    op: u64,
+    rt: u64,
+    db: u64,
+    max_ports: u8,
+    ctx_bytes: usize,
+    dcbaa: u64,
+    cmd: Ring,
+    ev_base: u64,
+    ev_idx: usize,
+    ev_cycle: u32,
+}
+
+impl Controller {
+    #[inline]
+    fn r32(&self, off: u64) -> u32 {
+        unsafe { read_volatile((self.op + off) as *const u32) }
+    }
+    #[inline]
+    fn w32(&self, off: u64, v: u32) {
+        unsafe { write_volatile((self.op + off) as *mut u32, v) }
+    }
+    #[inline]
+    fn w64(&self, off: u64, v: u64) {
+        // Low half first: several of these registers latch on the high write,
+        // so the order is part of the protocol rather than a preference.
+        unsafe {
+            write_volatile((self.op + off) as *mut u32, v as u32);
+            write_volatile((self.op + off + 4) as *mut u32, (v >> 32) as u32);
+        }
+    }
+    #[inline]
+    fn portsc(&self, port: u8) -> u64 {
+        PORTSC_BASE + (port as u64 - 1) * 0x10
+    }
+    #[inline]
+    fn doorbell(&self, slot: u8, target: u32) {
+        unsafe { write_volatile((self.db + slot as u64 * 4) as *mut u32, target) };
+    }
+
+    /// Reset, build the rings, and start the controller.
+    pub fn start(caps: &Caps) -> Result<Controller, InitError> {
+        let mut c = Controller {
+            op: caps.base + caps.op_off,
+            rt: caps.base + caps.rt_off,
+            db: caps.base + caps.db_off,
+            max_ports: caps.max_ports,
+            ctx_bytes: if caps.ctx64 { 64 } else { 32 },
+            dcbaa: 0,
+            cmd: Ring::new().ok_or(InitError::NoMem)?,
+            ev_base: 0,
+            ev_idx: 0,
+            ev_cycle: 1,
+        };
+
+        // Halt before resetting. Resetting a running controller is undefined,
+        // and this one *is* running -- UEFI was using it a moment ago.
+        c.w32(USBCMD, c.r32(USBCMD) & !CMD_RS);
+        for _ in 0..1000 {
+            if c.r32(USBSTS) & STS_HCH != 0 {
+                break;
+            }
+            delay_us(1000);
+        }
+        c.w32(USBCMD, CMD_HCRST);
+        // Two waits, not one. HCRST clears when the reset finishes; CNR clears
+        // when the controller is willing to be written to at all. Programming
+        // registers between those two moments is ignored silently.
+        for _ in 0..1000 {
+            if c.r32(USBCMD) & CMD_HCRST == 0 {
+                break;
+            }
+            delay_us(1000);
+        }
+        for _ in 0..1000 {
+            if c.r32(USBSTS) & STS_CNR == 0 {
+                break;
+            }
+            delay_us(1000);
+        }
+        if c.r32(USBSTS) & STS_CNR != 0 {
+            return Err(InitError::ResetTimeout);
+        }
+
+        // Device Context Base Address Array: one pointer per slot, plus entry
+        // zero, which the controller owns.
+        let n = caps.max_slots as usize + 1;
+        c.dcbaa = dma(n * 8, 64).ok_or(InitError::NoMem)?;
+        c.w32(CONFIG, (c.r32(CONFIG) & !0xFF) | caps.max_slots as u32);
+        c.w64(DCBAAP, c.dcbaa);
+
+        // Command ring. Bit 0 is the ring cycle state and must agree with the
+        // ring's own producer cycle, or the first command is never seen.
+        c.w64(CRCR, c.cmd.base | 1);
+
+        // Event ring: a segment table of one entry, pointing at the ring.
+        c.ev_base = dma(RING_TRBS * 16, 64).ok_or(InitError::NoMem)?;
+        let erst = dma(16, 64).ok_or(InitError::NoMem)?;
+        unsafe {
+            write_volatile(erst as *mut u32, c.ev_base as u32);
+            write_volatile((erst + 4) as *mut u32, (c.ev_base >> 32) as u32);
+            write_volatile((erst + 8) as *mut u32, RING_TRBS as u32);
+            write_volatile((erst + 12) as *mut u32, 0);
+            write_volatile((c.rt + IR0 + ERSTSZ) as *mut u32, 1);
+            // Dequeue pointer before the table base: the controller may start
+            // using the ring the moment ERSTBA is written.
+            write_volatile((c.rt + IR0 + ERDP) as *mut u32, c.ev_base as u32);
+            write_volatile((c.rt + IR0 + ERDP + 4) as *mut u32, (c.ev_base >> 32) as u32);
+            write_volatile((c.rt + IR0 + ERSTBA) as *mut u32, erst as u32);
+            write_volatile((c.rt + IR0 + ERSTBA + 4) as *mut u32, (erst >> 32) as u32);
+        }
+
+        c.w32(USBCMD, c.r32(USBCMD) | CMD_RS);
+        for _ in 0..1000 {
+            if c.r32(USBSTS) & STS_HCH == 0 {
+                return Ok(c);
+            }
+            delay_us(1000);
+        }
+        Err(InitError::ResetTimeout)
+    }
+
+    /// Take the next event, if the controller has posted one.
+    fn poll_event(&mut self) -> Option<Trb> {
+        let t = unsafe { read_volatile((self.ev_base as *const Trb).add(self.ev_idx)) };
+        // The cycle bit is the entire handshake: an entry whose cycle does not
+        // match ours has not been written this time round.
+        if t.control & 1 != self.ev_cycle {
+            return None;
+        }
+        self.ev_idx += 1;
+        if self.ev_idx == RING_TRBS {
+            self.ev_idx = 0;
+            self.ev_cycle ^= 1;
+        }
+        let dq = self.ev_base + (self.ev_idx * 16) as u64;
+        unsafe {
+            // Bit 3 is Event Handler Busy, write-one-to-clear.
+            write_volatile((self.rt + IR0 + ERDP) as *mut u32, (dq as u32) | (1 << 3));
+            write_volatile((self.rt + IR0 + ERDP + 4) as *mut u32, (dq >> 32) as u32);
+        }
+        Some(t)
+    }
+
+    /// Wait for an event of a given type, discarding others.
+    ///
+    /// Port change events arrive unbidden throughout and are not errors.
+    fn wait_event(&mut self, kind: u32, ms: u64) -> Option<Trb> {
+        for _ in 0..ms {
+            while let Some(t) = self.poll_event() {
+                if t.kind() == kind {
+                    return Some(t);
+                }
+            }
+            delay_us(1000);
+        }
+        None
+    }
+
+    fn command(&mut self, t: Trb, ms: u64) -> Option<Trb> {
+        self.cmd.push(t);
+        // Slot 0, target 0 is the command doorbell.
+        self.doorbell(0, 0);
+        self.wait_event(TRB_CMD_COMPLETE, ms)
+    }
+
+    /// Ports with something plugged into them.
+    pub fn connected(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        for port in 1..=self.max_ports {
+            if self.r32(self.portsc(port)) & PORTSC_CCS != 0 {
+                out.push(port);
+            }
+        }
+        out
+    }
+
+    /// Reset one port and wait for it to enable.
+    fn reset_port(&mut self, port: u8) -> bool {
+        let off = self.portsc(port);
+        let v = self.r32(off) & !PORTSC_RW1C;
+        self.w32(off, v | PORTSC_PP | PORTSC_PR);
+        for _ in 0..500 {
+            let s = self.r32(off);
+            if s & PORTSC_PRC != 0 {
+                // Acknowledge the reset-change bit, and only that bit.
+                self.w32(off, (s & !PORTSC_RW1C) | PORTSC_PRC);
+                return s & PORTSC_PED != 0;
+            }
+            delay_us(1000);
+        }
+        false
+    }
+
+    /// Enumerate one port far enough to read its device descriptor.
+    ///
+    /// Vendor and product are the point of this milestone: that pair is what
+    /// says which driver a dongle needs, and it is the one fact about the
+    /// hardware that cannot be looked up from here.
+    pub fn enumerate(&mut self, port: u8) -> Result<(u16, u16), &'static str> {
+        if !self.reset_port(port) {
+            return Err("port did not enable after reset");
+        }
+
+        let ev = self
+            .command(Trb { control: TRB_ENABLE_SLOT << 10, ..Default::default() }, 200)
+            .ok_or("no response to Enable Slot")?;
+        if ev.code() != 1 {
+            return Err("Enable Slot refused");
+        }
+        let slot = ev.slot();
+
+        // The input context is one context larger than the device context: an
+        // Input Control Context at the front says which of the following
+        // entries the controller should consume.
+        let cb = self.ctx_bytes;
+        let dev_ctx = dma(cb * 32, 64).ok_or("out of memory")?;
+        let inp = dma(cb * 33, 64).ok_or("out of memory")?;
+        unsafe {
+            write_volatile((self.dcbaa + slot as u64 * 8) as *mut u64, dev_ctx);
+            // Add-context flags: bit 0 the slot context, bit 1 endpoint zero.
+            write_volatile((inp + 4) as *mut u32, 0b11);
+        }
+
+        let mut ring = Ring::new().ok_or("out of memory")?;
+        let speed = (self.r32(self.portsc(port)) >> 10) & 0xF;
+        // The default endpoint's maximum packet size is fixed by speed and is
+        // not negotiable. Guessing high on a low-speed device makes the first
+        // control transfer fail with nothing useful to look at.
+        let mps: u32 = match speed {
+            4 => 512,
+            2 => 8,
+            _ => 64,
+        };
+
+        let slot_ctx = inp + cb as u64;
+        let ep0_ctx = inp + 2 * cb as u64;
+        unsafe {
+            // Route string zero, one context entry, speed, root hub port.
+            write_volatile(slot_ctx as *mut u32, (1 << 27) | (speed << 20));
+            write_volatile((slot_ctx + 4) as *mut u32, (port as u32) << 16);
+            // EP0: control endpoint, three retries, and its transfer ring.
+            write_volatile((ep0_ctx + 4) as *mut u32, (4 << 3) | (3 << 1) | (mps << 16));
+            write_volatile((ep0_ctx + 8) as *mut u32, (ring.base as u32) | 1);
+            write_volatile((ep0_ctx + 12) as *mut u32, (ring.base >> 32) as u32);
+        }
+
+        let ev = self
+            .command(
+                Trb {
+                    lo: inp as u32,
+                    hi: (inp >> 32) as u32,
+                    control: (TRB_ADDRESS_DEVICE << 10) | ((slot as u32) << 24),
+                    ..Default::default()
+                },
+                200,
+            )
+            .ok_or("no response to Address Device")?;
+        if ev.code() != 1 {
+            return Err("Address Device refused");
+        }
+
+        let buf = dma(18, 16).ok_or("out of memory")?;
+        // GET_DESCRIPTOR(Device), 18 bytes: bmRequestType 0x80, bRequest 6,
+        // wValue 0x0100, wIndex 0, wLength 18. The setup packet travels in the
+        // TRB itself rather than in a buffer, which is what Immediate Data
+        // means here.
+        ring.push(Trb {
+            lo: 0x0100_0680,
+            hi: 18 << 16,
+            status: 8,
+            control: (TRB_SETUP << 10) | (1 << 6) | (3 << 16),
+        });
+        ring.push(Trb {
+            lo: buf as u32,
+            hi: (buf >> 32) as u32,
+            status: 18,
+            control: (TRB_DATA << 10) | (1 << 16),
+        });
+        ring.push(Trb {
+            // Interrupt On Completion, or the event never arrives and this
+            // looks like a device that ignored the request.
+            control: (TRB_STATUS << 10) | (1 << 5),
+            ..Default::default()
+        });
+        // Endpoint zero is device context index one.
+        self.doorbell(slot, 1);
+
+        let ev = self
+            .wait_event(TRB_TRANSFER_EVENT, 500)
+            .ok_or("no response to GET_DESCRIPTOR")?;
+        // 13 is Short Packet, which for a descriptor read is success with
+        // fewer bytes than asked for -- normal, not a failure.
+        if ev.code() != 1 && ev.code() != 13 {
+            return Err("GET_DESCRIPTOR failed");
+        }
+
+        let vid = unsafe { read_volatile((buf + 8) as *const u16) };
+        let pid = unsafe { read_volatile((buf + 10) as *const u16) };
+        Ok((vid, pid))
+    }
 }

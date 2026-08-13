@@ -214,6 +214,10 @@ def main():
         # enough to bring up rings and enumerate, which is the whole reason the
         # USB work can be done before the dongle is involved at all.
         "-device", "qemu-xhci,id=xhci",
+        # Something to enumerate. usb-net is also the eventual goal: a USB
+        # network device is what the dongle will look like once its driver
+        # exists, so proving enumeration against one is not a detour.
+        "-device", "usb-net,bus=xhci.0",
         "-serial", f"tcp:127.0.0.1:{PORT},server=on,wait=on",
         # The monitor is how a screenshot happens. The serial transcript proves
         # a panel's *behaviour*; it says nothing about whether the thing on
