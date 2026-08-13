@@ -73,15 +73,29 @@ pub struct Console {
     fg: u8,
     bg: Color,
     scale: u32,
+    /// Pixel origin of the character grid.
+    ///
+    /// The console no longer owns the panel: it sits in the client area of a
+    /// window, and everything that used to be an absolute coordinate is now
+    /// relative to here. Zero reproduces the old behaviour exactly, which is
+    /// what boot uses before the chrome is drawn.
+    ox: u32,
+    oy: u32,
     /// False while the boot screen owns the framebuffer.
     visible: bool,
 }
 
 impl Console {
     pub fn new(fb: Framebuffer, scale: u32, bg: Color) -> Self {
+        let (w, h) = (fb.width(), fb.height());
+        Self::new_in(fb, scale, bg, 0, 0, w, h)
+    }
+
+    /// A console occupying one rectangle of the framebuffer.
+    pub fn new_in(fb: Framebuffer, scale: u32, bg: Color, x: u32, y: u32, w: u32, h: u32) -> Self {
         let scale = scale.max(1);
-        let cols = ((fb.width() / (font::GLYPH_W * scale)) as usize).min(MAX_COLS);
-        let rows = ((fb.height() / (font::GLYPH_H * scale)) as usize).min(MAX_ROWS);
+        let cols = ((w / (font::GLYPH_W * scale)) as usize).min(MAX_COLS);
+        let rows = ((h / (font::GLYPH_H * scale)) as usize).min(MAX_ROWS);
         Self {
             fb,
             cells: [[BLANK; MAX_COLS]; MAX_ROWS],
@@ -92,8 +106,46 @@ impl Console {
             fg: LTGRAY,
             bg,
             scale,
+            ox: x,
+            oy: y,
             visible: true,
         }
+    }
+
+    /// Move the grid into a new rectangle, keeping its contents.
+    ///
+    /// Used once, when the boot screen hands over and the terminal gains its
+    /// window. Text written during boot is in the shadow grid and is repainted
+    /// at the new origin, so the log survives the move.
+    pub fn reflow(&mut self, x: u32, y: u32, w: u32, h: u32) {
+        let cols = ((w / (font::GLYPH_W * self.scale)) as usize).min(MAX_COLS);
+        let rows = ((h / (font::GLYPH_H * self.scale)) as usize).min(MAX_ROWS);
+        // Keep the tail rather than the head: the interesting part of a boot
+        // log is the end of it, and a shrinking grid would otherwise scroll the
+        // most recent lines off the bottom.
+        if self.row >= rows {
+            let drop = self.row + 1 - rows;
+            for r in 0..rows {
+                self.cells[r] = self.cells[r + drop];
+            }
+            for r in rows..MAX_ROWS {
+                self.cells[r] = [BLANK; MAX_COLS];
+            }
+            self.row -= drop;
+        }
+        self.cols = cols;
+        self.rows = rows;
+        self.col = self.col.min(cols.saturating_sub(1));
+        self.ox = x;
+        self.oy = y;
+    }
+
+    /// Pixel size of the grid as currently laid out.
+    pub fn pixel_size(&self) -> (u32, u32) {
+        (
+            self.cols as u32 * font::GLYPH_W * self.scale,
+            self.rows as u32 * font::GLYPH_H * self.scale,
+        )
     }
 
     pub fn set_color(&mut self, fg: u8) {
@@ -109,7 +161,10 @@ impl Console {
         self.col = 0;
         self.row = 0;
         if self.visible {
-            self.fb.fill(self.bg);
+            // The grid's own rectangle, not the panel: clearing the screen must
+            // not erase the window around it.
+            let (w, h) = self.pixel_size();
+            self.fb.rect(self.ox, self.oy, w, h, self.bg);
         }
     }
 
@@ -126,8 +181,8 @@ impl Console {
         let fg = self.fb.encode(PALETTE[(cell.fg & 0x0F) as usize]);
         let bg = self.fb.encode(self.bg);
         let s = self.scale;
-        let ox = c as u32 * font::GLYPH_W * s;
-        let oy = r as u32 * font::GLYPH_H * s;
+        let ox = self.ox + c as u32 * font::GLYPH_W * s;
+        let oy = self.oy + r as u32 * font::GLYPH_H * s;
 
         for (gy, bits) in rows.iter().enumerate() {
             for gx in 0..font::GLYPH_W {
@@ -173,13 +228,14 @@ impl Console {
         self.row = self.rows - 1;
         self.col = 0;
 
-        // Shift pixels instead of re-rendering the grid. The region handed to
-        // scroll_up is the console's own area, not the whole panel: 1080 is not
-        // a multiple of the 16-pixel cell height, and the 8-pixel remainder at
-        // the bottom would otherwise be dragged up into the last text row.
+        // Shift pixels instead of re-rendering the grid, over the console's own
+        // rectangle rather than the whole panel -- the panel height is rarely a
+        // whole number of rows, and the console now has a window frame beside
+        // it that must not be dragged upwards.
         let cell_h = font::GLYPH_H * self.scale;
         if self.visible {
-            self.fb.scroll_up(self.rows as u32 * cell_h, cell_h, self.bg);
+            let (w, h) = self.pixel_size();
+            self.fb.scroll_rect(self.ox, self.oy, w, h, cell_h, self.bg);
         }
     }
 

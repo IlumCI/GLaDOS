@@ -8,6 +8,7 @@
 pub mod console;
 pub mod splash;
 pub mod font;
+pub mod theme;
 
 use crate::sync::Racy;
 
@@ -232,6 +233,46 @@ impl Framebuffer {
             buf.copy_within(shift..span, 0);
         }
         self.fill_rows(region_h - pixels, pixels, raw);
+    }
+
+    /// Scroll a sub-rectangle up by `pixels`, filling the exposed strip.
+    ///
+    /// `scroll_up` moves whole scan lines and cannot be used once the console
+    /// is inset into a window: it would drag the frame and anything beside it
+    /// upwards too. This copies row by row within the rectangle, which is more
+    /// work per line and the only thing that is correct.
+    pub fn scroll_rect(&self, x: u32, y: u32, w: u32, h: u32, pixels: u32, bg: Color) {
+        if pixels == 0 || w == 0 || h == 0 || x >= self.width || y >= self.height {
+            return;
+        }
+        let w = w.min(self.width - x);
+        let h = h.min(self.height - y);
+        let raw = self.encode(bg);
+        if pixels >= h {
+            for dy in 0..h {
+                self.fill_span(x, y + dy, w, raw);
+            }
+            return;
+        }
+
+        let stride = self.stride as usize;
+        for dy in 0..(h - pixels) {
+            let src = ((y + dy + pixels) as usize) * stride + x as usize;
+            let dst = ((y + dy) as usize) * stride + x as usize;
+            unsafe {
+                let buf = core::slice::from_raw_parts_mut(self.base, (self.height as usize) * stride);
+                buf.copy_within(src..src + w as usize, dst);
+            }
+        }
+        for dy in (h - pixels)..h {
+            self.fill_span(x, y + dy, w, raw);
+        }
+    }
+
+    fn fill_span(&self, x: u32, y: u32, w: u32, raw: u32) {
+        for dx in 0..w {
+            self.put(x + dx, y, raw);
+        }
     }
 
     pub fn rect(&self, x: u32, y: u32, w: u32, h: u32, c: Color) {
