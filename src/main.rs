@@ -672,7 +672,46 @@ fn init_heap(frames: &mut mem::frame::EarlyFrames) {
         if i > 0 { "  (reduced -- no larger contiguous region)" } else { "" }
     );
     console::set_color(LTGRAY_IDX);
+
+    // Then take everything else that is left.
+    //
+    // `add_region` inserts into one address-sorted free list and coalesces, so
+    // extra regions cost nothing and are indistinguishable from the first once
+    // they are in. This raises *total* heap without raising the largest single
+    // allocation -- the regions are disjoint by definition -- which is exactly
+    // what the per-layer KV cache needs: many allocations of a few tens of MiB
+    // rather than one of several hundred.
+    //
+    // Safe to consume the map because `frames` has no users after this point.
+    // If SMP ever arrives it will want low memory for AP trampolines and must
+    // reserve before this runs, not after.
+    let mut extra = 0usize;
+    let mut regions = 1usize;
+    loop {
+        let span = frames.largest_span();
+        if span < MIN_EXTRA_PAGES {
+            break;
+        }
+        let Some(base) = frames.alloc_contiguous(span) else {
+            break;
+        };
+        unsafe { mem::heap::HEAP.add_region(base as usize, span * mem::PAGE_SIZE as usize) };
+        extra += span;
+        regions += 1;
+    }
+    if extra > 0 {
+        kprintln!(
+            "[boot] heap +{} MiB across {} more regions ({} MiB total)",
+            extra * mem::PAGE_SIZE as usize / 1024 / 1024,
+            regions - 1,
+            (extra + pages) * mem::PAGE_SIZE as usize / 1024 / 1024,
+        );
+    }
 }
+
+/// Ignore scraps. A region too small to hold anything the model allocates costs
+/// a free-list entry on every traversal and buys nothing.
+const MIN_EXTRA_PAGES: usize = 256; // 1 MiB
 
 /// Build and install our own identity map, replacing the firmware's.
 ///

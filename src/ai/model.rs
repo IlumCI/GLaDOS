@@ -223,8 +223,18 @@ pub struct State {
     /// longer true. Rotating at attention time instead makes position a
     /// property of where an entry sits in the cache, which is what
     /// StreamingLLM requires and what makes a window possible at all.
-    key_cache: Vec<f32>,
-    value_cache: Vec<f32>,
+    /// One allocation per layer, not one for the whole cache.
+    ///
+    /// This is the largest thing the system allocates and it used to be a
+    /// single `Vec`, which meant it needed one unbroken block from the heap's
+    /// first-fit walk. Nothing required that -- the index was always
+    /// `l * seq_len * kv_dim + ...`, i.e. a layer stride over a flat buffer --
+    /// and it put a hard ceiling on context: at Qwen3's trained 32768 the
+    /// single buffer would be 3.5 GiB contiguous, which no real memory map
+    /// offers. Split per layer the same cache is 28 allocations of a few tens
+    /// of MiB, which the heap can satisfy out of separate regions.
+    key_cache: Vec<Vec<f32>>,
+    value_cache: Vec<Vec<f32>>,
     /// Rotated copies of the live keys, rebuilt per layer per token.
     krot: Vec<f32>,
     /// cos/sin for every (position, dimension pair), precomputed.
@@ -272,8 +282,8 @@ impl State {
             q: vec![0.0; cfg.q_dim()],
             att: vec![0.0; cfg.n_heads * cfg.seq_len],
             logits: vec![0.0; cfg.vocab_size],
-            key_cache: vec![0.0; cfg.n_layers * cfg.seq_len * kv],
-            value_cache: vec![0.0; cfg.n_layers * cfg.seq_len * kv],
+            key_cache: (0..cfg.n_layers).map(|_| vec![0.0; cfg.seq_len * kv]).collect(),
+            value_cache: (0..cfg.n_layers).map(|_| vec![0.0; cfg.seq_len * kv]).collect(),
             krot: vec![0.0; cfg.seq_len * kv],
             rope_cos,
             rope_sin,
@@ -303,10 +313,12 @@ impl State {
         out.extend_from_slice(&(kv as u32).to_le_bytes());
         out.extend_from_slice(&(pos as u32).to_le_bytes());
 
+        // The blob layout is unchanged by the per-layer split: layer-major,
+        // then position. A context saved before the split still restores.
+        out.try_reserve(2 * cfg.n_layers * pos * kv * 4).ok();
         for src in [&self.key_cache, &self.value_cache] {
             for l in 0..cfg.n_layers {
-                let loff = l * cfg.seq_len * kv;
-                for v in &src[loff..loff + pos * kv] {
+                for v in &src[l][..pos * kv] {
                     out.extend_from_slice(&v.to_le_bytes());
                 }
             }
@@ -335,10 +347,9 @@ impl State {
         let mut o = 20;
         for which in 0..2 {
             for l in 0..layers {
-                let loff = l * cfg.seq_len * kv;
                 let dst = if which == 0 { &mut self.key_cache } else { &mut self.value_cache };
                 for i in 0..pos * kv {
-                    dst[loff + i] =
+                    dst[l][i] =
                         f32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]);
                     o += 4;
                 }
@@ -928,22 +939,19 @@ impl Model {
             // --- attention ---
             tensor::rmsnorm_eps(&mut s.xb[..c.dim], &s.x, self.rms_att_w(l), eps);
 
-            let loff = l * c.seq_len * kv_dim;
             // Keys and values are written straight into the cache slot for this
             // position, so attention below can read the whole history without
-            // any copying.
-            let (kslice, vslice) = (
-                loff + here * kv_dim..loff + here * kv_dim + kv_dim,
-                loff + here * kv_dim..loff + here * kv_dim + kv_dim,
-            );
+            // any copying. The layer is now an index into the outer Vec rather
+            // than a stride, so `here * kv_dim` is the whole offset.
+            let slot = here * kv_dim..here * kv_dim + kv_dim;
 
             self.wq(l).matvec(&mut s.q, &s.xb);
             {
-                let k = &mut s.key_cache[kslice.clone()];
+                let k = &mut s.key_cache[l][slot.clone()];
                 self.wk(l).matvec(k, &s.xb);
             }
             {
-                let v = &mut s.value_cache[vslice.clone()];
+                let v = &mut s.value_cache[l][slot.clone()];
                 self.wv(l).matvec(v, &s.xb);
             }
 
@@ -963,10 +971,10 @@ impl Model {
                     tensor::rmsnorm_inplace(&mut s.q[o..o + head_size], qn, eps);
                 }
                 let kn = self.k_norm_w(l);
-                let kbase = loff + here * kv_dim;
+                let kbase = here * kv_dim;
                 for h in 0..c.n_kv_heads {
                     let o = kbase + h * head_size;
-                    tensor::rmsnorm_inplace(&mut s.key_cache[o..o + head_size], kn, eps);
+                    tensor::rmsnorm_inplace(&mut s.key_cache[l][o..o + head_size], kn, eps);
                 }
             }
 
@@ -995,8 +1003,9 @@ impl Model {
             // per layer rather than once per head: grouped-query attention
             // shares each key across `kv_mul` heads, so rotating per head
             // would redo the same work three times.
+            let kc = &s.key_cache[l];
             for j in 0..live {
-                let src = loff + slot_of(j) * kv_dim;
+                let src = slot_of(j) * kv_dim;
                 let dst = j * kv_dim;
                 for h in 0..c.n_kv_heads {
                     let base = h * head_size;
@@ -1008,8 +1017,8 @@ impl Model {
                         } else {
                             (base + p, base + p + half)
                         };
-                        let k0 = s.key_cache[src + a_off];
-                        let k1 = s.key_cache[src + b_off];
+                        let k0 = kc[src + a_off];
+                        let k1 = kc[src + b_off];
                         s.krot[dst + a_off] = k0 * fcr - k1 * fci;
                         s.krot[dst + b_off] = k0 * fci + k1 * fcr;
                     }
@@ -1035,10 +1044,10 @@ impl Model {
                     s.xb[qo + i] = 0.0;
                 }
                 for t in 0..live {
-                    let vo = loff + slot_of(t) * kv_dim + hoff;
+                    let vo = slot_of(t) * kv_dim + hoff;
                     let a = s.att[ao + t];
                     for i in 0..head_size {
-                        s.xb[qo + i] += a * s.value_cache[vo + i];
+                        s.xb[qo + i] += a * s.value_cache[l][vo + i];
                     }
                 }
             }
