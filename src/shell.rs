@@ -1297,23 +1297,35 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             use crate::gfx::desk;
             let mut it = rest.split_whitespace();
             match it.next().unwrap_or("") {
-                "next" | "" => desk::cycle(false),
-                "prev" => desk::cycle(true),
+                "" | "list" => {}
+                "next" => desk::cycle(false),
+                "open" => {
+                    let what = it.next().unwrap_or("status");
+                    match crate::gfx::ui::panel_named(what) {
+                        Some(p) => desk::open(what, p),
+                        None => {
+                            kprintln!("  no such panel: {}", what);
+                            kprintln!("  try: status, programs");
+                            return;
+                        }
+                    }
+                }
                 "keys" => {
-                    // Feed keystrokes to the desktop as if typed. Alt-Tab and
-                    // the arrows have no wire representation over serial, so
-                    // without this the desktop could only ever be driven by a
-                    // person sitting at the machine -- and an interface that
-                    // cannot be driven headlessly does not get tested.
+                    // Feed keystrokes to the desktop as if typed. Alt-Tab,
+                    // Alt-Space and the arrows have no wire representation over
+                    // serial, so without this the window manager could only be
+                    // driven by a person sitting at the machine -- and an
+                    // interface that cannot be driven headlessly does not get
+                    // tested.
                     for k in crate::gfx::ui::parse_keys(rest[4..].trim()) {
                         if let desk::Route::Shell(_) = desk::key(k) {
-                            // The terminal has focus and would have eaten it.
+                            // The terminal had focus and would have typed it.
                         }
                     }
                 }
                 other => {
                     kprintln!("  no such action: {}", other);
-                    kprintln!("  usage: win [next|prev|keys <spec>]");
+                    kprintln!("  usage: win [list|next|open <panel>|keys <spec>]");
                     return;
                 }
             }

@@ -1,4 +1,4 @@
-//! The desktop: a background, a set of windows, and which one has the keyboard.
+//! The desktop and its window manager.
 //!
 //! The terminal is a window on this, not the other way round. That distinction
 //! is the whole design: a shell that draws a dialog over itself is a program
@@ -7,41 +7,116 @@
 //! (`console::reflow`), so the terminal needs no special case -- it is a window
 //! whose content happens to be the character grid.
 //!
-//! ### What this deliberately is not
+//! ### Repaint is always total, and that is the design
 //!
-//! No mouse, no dragging, no overlapping-window z-order management, no
-//! minimise. Windows are tiled at fixed positions and Alt-Tab moves focus.
-//! Overlap is the expensive part -- it needs damage tracking and back-to-front
-//! repaint, and every one of those costs is paid to support a pointer that does
-//! not exist. Tiling is what a keyboard-only desktop actually wants.
+//! Windows overlap, and the usual price for that is damage tracking: work out
+//! which rectangles a change dirtied and repaint only those. Not here. Every
+//! change repaints the wall and then every window back to front.
+//!
+//! It is affordable because of *what causes* a change. Nothing here animates --
+//! a repaint happens when a key is pressed, which is at most a few times a
+//! second, and 1280x800 is a million stores into a write-back-mapped aperture.
+//! Damage tracking would buy nothing measurable and cost the one thing this
+//! code cannot afford to lose, which is being obviously correct: the entire
+//! class of "stale pixels from a window that used to be there" cannot occur if
+//! there is no such thing as a partial repaint.
+//!
+//! Back-to-front is also what makes the terminal work with no special case.
+//! `console::redraw` paints the whole grid; a window in front of it is simply
+//! drawn afterwards.
+//!
+//! ### What is deliberately absent
+//!
+//! No mouse. Every operation is a keystroke, because there is no pointer and
+//! there is not going to be one soon -- and a window you can only move by
+//! dragging is a window that cannot be moved.
 
 use super::theme::{self, Rect};
-use super::ui::{self, Panel};
+use super::ui::{self, Action, Panel};
 use super::Framebuffer;
+use crate::dev::kbd;
 use crate::sync::Racy;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 /// What is inside a window.
 pub enum Content {
-    /// The character grid. Exactly one window may hold it -- there is one
-    /// console -- and that is enforced by construction rather than checked.
+    /// The character grid. Exactly one window holds it -- there is one console
+    /// -- and that is true by construction rather than checked.
     Terminal,
     Panel(Panel),
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum WinState {
+    Normal,
+    Maximised,
+    Minimised,
+}
+
+pub struct MenuItem {
+    pub label: String,
+    pub action: Action,
+}
+
+pub struct Menu {
+    pub label: String,
+    pub items: Vec<MenuItem>,
+}
+
 pub struct Window {
     pub title: String,
+    /// Geometry when not maximised. Kept across a maximise so restoring is
+    /// exact rather than approximate.
     pub rect: Rect,
+    pub state: WinState,
     pub content: Content,
+    pub menus: Vec<Menu>,
+    pub closable: bool,
+}
+
+impl Window {
+    /// Where the window actually is right now.
+    fn frame(&self, screen: Rect) -> Rect {
+        match self.state {
+            WinState::Maximised => screen,
+            _ => self.rect,
+        }
+    }
+}
+
+/// What the keyboard is doing.
+///
+/// A mode rather than a pile of booleans: the states are mutually exclusive by
+/// nature -- a window cannot be both being moved and being resized -- and an
+/// enum makes that unrepresentable instead of merely unlikely.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Normal,
+    /// A menu-bar menu is open.
+    Menu { menu: usize, item: usize },
+    /// The system menu (Alt-Space) is open.
+    Sys { item: usize },
+    /// Arrows move the focused window; Enter commits, Esc restores.
+    Move { from: Rect },
+    /// Arrows resize it.
+    Size { from: Rect },
 }
 
 pub struct Desktop {
+    /// Back to front. The last visible window is the focused one, so z-order
+    /// and focus are the same fact stored once -- two fields would be two
+    /// things to keep in agreement, and they would drift.
     pub windows: Vec<Window>,
-    pub focus: usize,
+    pub mode: Mode,
 }
 
 static DESK: Racy<Option<Desktop>> = Racy::new(None);
+static PENDING: Racy<Option<String>> = Racy::new(None);
+
+const MARGIN: u32 = 8;
+const NUDGE: u32 = 16;
+const MENU_H: u32 = theme::TITLE_H;
 
 pub fn ready() -> bool {
     unsafe { (*DESK.get()).is_some() }
@@ -51,56 +126,156 @@ pub fn with<R>(f: impl FnOnce(&mut Desktop) -> R) -> Option<R> {
     unsafe { (*DESK.get()).as_mut().map(f) }
 }
 
-/// Lay the desktop out for this panel and paint it.
-///
-/// Tiled side by side rather than stacked: the terminal wants height above all
-/// -- it is a scrolling log -- and the launcher wants only as much as its
-/// contents need, so a vertical split wastes the dimension each one cares
-/// about.
+/// The system menu, identical for every window. Items a particular window
+/// cannot do are still listed and simply refuse, which is what 3.1 did -- a
+/// menu whose contents move around is a menu you cannot learn.
+const SYS_ITEMS: [&str; 4] = ["Move", "Size", "Maximise / Restore", "Close"];
+
+fn screen_rect(fb: &Framebuffer) -> Rect {
+    Rect::new(
+        MARGIN,
+        MARGIN,
+        fb.width().saturating_sub(MARGIN * 2),
+        fb.height().saturating_sub(MARGIN * 2),
+    )
+}
+
+impl Desktop {
+    /// Index of the focused window: the topmost that is not minimised.
+    pub fn focus(&self) -> Option<usize> {
+        self.windows
+            .iter()
+            .rposition(|w| w.state != WinState::Minimised)
+    }
+
+    /// Bring a window to the front. Focus follows, because they are the same.
+    fn raise(&mut self, i: usize) {
+        if i >= self.windows.len() {
+            return;
+        }
+        let w = self.windows.remove(i);
+        self.windows.push(w);
+    }
+}
+
 pub fn init() {
     let Some(fb) = super::primary() else {
         return;
     };
-    let (w, h) = (fb.width(), fb.height());
-    let margin = 8u32;
+    let screen = screen_rect(&fb);
+
     let mut pm = ui::program_manager();
     let (pm_w, pm_h) = pm.preferred();
     pm.set_title("Program Manager");
+    let pm_w = pm_w.min(screen.w / 2);
+    let term_w = screen.w.saturating_sub(pm_w + MARGIN);
 
-    // Only as wide as it asked for. Clamping to half the screen sounds safe
-    // and is not: it silently truncated the hint text and took the width out of
-    // the terminal, which is the window that actually needs columns.
-    let pm_w = pm_w.min(w / 2).min(w - margin * 3);
-    let term_w = w.saturating_sub(pm_w + margin * 3);
+    let terminal = Window {
+        title: String::from("GLaDOS Terminal"),
+        rect: Rect::new(screen.x, screen.y, term_w, screen.h),
+        state: WinState::Normal,
+        content: Content::Terminal,
+        menus: alloc::vec![
+            Menu {
+                label: String::from("File"),
+                items: alloc::vec![
+                    item("New window", "win open status"),
+                    item("Snapshot now", "snap"),
+                    item("Reboot", "reboot"),
+                ],
+            },
+            Menu {
+                label: String::from("View"),
+                items: alloc::vec![
+                    item("Clear", "clear"),
+                    item("Redraw", "refresh"),
+                    item("Help", "help"),
+                ],
+            },
+            Menu {
+                label: String::from("System"),
+                items: alloc::vec![
+                    item("Status", "status"),
+                    item("Memory", "mem"),
+                    item("Windows", "win"),
+                ],
+            },
+        ],
+        closable: false,
+    };
 
-    let windows = alloc::vec![
-        Window {
-            title: String::from("GLaDOS Terminal"),
-            rect: Rect::new(margin, margin, term_w, h - margin * 2),
-            content: Content::Terminal,
-        },
-        Window {
-            title: String::from("Program Manager"),
-            rect: Rect::new(
-                margin * 2 + term_w,
-                margin,
-                pm_w,
-                pm_h.min(h - margin * 2),
-            ),
-            content: Content::Panel(pm),
-        },
-    ];
+    let pmw = Window {
+        title: String::from("Program Manager"),
+        rect: Rect::new(screen.x + term_w + MARGIN, screen.y, pm_w, pm_h.min(screen.h)),
+        state: WinState::Normal,
+        content: Content::Panel(pm),
+        menus: Vec::new(),
+        closable: false,
+    };
 
-    unsafe { *DESK.get() = Some(Desktop { windows, focus: 0 }) };
+    unsafe {
+        *DESK.get() = Some(Desktop {
+            windows: alloc::vec![pmw, terminal],
+            mode: Mode::Normal,
+        })
+    };
     draw();
 }
 
-/// The background.
+fn item(label: &str, cmd: &str) -> MenuItem {
+    MenuItem {
+        label: String::from(label),
+        action: Action::Run(String::from(cmd)),
+    }
+}
+
+/// Open a new window holding a panel.
+pub fn open(title: &str, panel: Panel) {
+    let Some(fb) = super::primary() else {
+        return;
+    };
+    let screen = screen_rect(&fb);
+    let (w, h) = panel.preferred();
+    let (w, h) = (w.min(screen.w), h.min(screen.h));
+    with(|d| {
+        // Cascade down the right-hand side rather than from the top-left
+        // corner. The terminal is the widest window and starts at the left, so
+        // a window cascading from the origin lands entirely behind it: opening
+        // one looked like nothing had happened.
+        let n = d.windows.len() as u32;
+        let off = (n % 6) * 28;
+        let x = screen.x + screen.w.saturating_sub(w);
+        let y = (screen.y + screen.h / 3 + off)
+            .min(screen.y + screen.h.saturating_sub(h));
+        d.windows.push(Window {
+            title: String::from(title),
+            rect: Rect::new(x, y, w, h),
+            state: WinState::Normal,
+            content: Content::Panel(panel),
+            menus: Vec::new(),
+            closable: true,
+        });
+    });
+    // The keyboard goes back where the command came from.
+    //
+    // Raising and focusing are the same fact here, so a new window taking the
+    // front also takes the keyboard -- and a window opened by typing at a
+    // prompt would then swallow whatever was typed next. That is not a
+    // theoretical worry: it is what happened, and the panel's list ran an entry
+    // when the Enter at the end of the following command line reached it.
+    focus_terminal();
+}
+
+/// The wall: a flat field, a sparse grid, and the mark in the middle.
 ///
-/// A flat fill and a sparse grid rather than a gradient or a bitmap: the wall
-/// is repainted on every full redraw, and a per-pixel background on a 1920x1080
-/// framebuffer over an uncached-until-M4 aperture is the one thing here that
-/// could actually be slow.
+/// The same `splash::aperture` the boot screen draws, not a second copy of the
+/// geometry -- five earlier attempts at that logo were wrong in five different
+/// ways, and the way to stop a sixth is for there to be exactly one of it.
+///
+/// Drawn dim. A wallpaper competing with the windows on it is a wallpaper
+/// nobody can work in front of, and the cut wedges have to be painted in the
+/// wall's own colour anyway, so the mark is a two-colour figure by
+/// construction.
 fn wallpaper(fb: &Framebuffer) {
     fb.rect(0, 0, fb.width(), fb.height(), theme::DESKTOP);
     let step = 32;
@@ -113,24 +288,80 @@ fn wallpaper(fb: &Framebuffer) {
         }
         y += step;
     }
+
+    let r = (fb.height() / 5).min(fb.width() / 5) as i32;
+    super::splash::aperture(
+        fb,
+        (fb.width() / 2) as i32,
+        (fb.height() / 2) as i32,
+        r,
+        theme::WALL_MARK,
+        theme::DESKTOP,
+    );
+}
+
+/// A minimised window, as an icon along the bottom of the wall.
+fn icon(fb: &Framebuffer, slot: u32, title: &str, bottom: u32) {
+    let w = theme::text_w(14) + 12;
+    let r = Rect::new(MARGIN + slot * (w + 8), bottom.saturating_sub(MENU_H + 6), w, MENU_H);
+    theme::panel(fb, r);
+    let room = 14.min(title.len());
+    theme::text(fb, r.x + 6, r.y + 5, &title[..room], theme::TEXT, theme::FACE);
 }
 
 pub fn draw() {
     let Some(fb) = super::primary() else {
         return;
     };
+    let screen = screen_rect(&fb);
     with(|d| {
         wallpaper(&fb);
+        let focus = d.focus();
+
+        let mut slot = 0;
         for (i, win) in d.windows.iter().enumerate() {
-            let active = i == d.focus;
-            let client = theme::window(&fb, win.rect, &win.title, active);
+            if win.state == WinState::Minimised {
+                icon(&fb, slot, &win.title, fb.height());
+                slot += 1;
+                continue;
+            }
+            let active = Some(i) == focus;
+            let frame = win.frame(screen);
+            let mut client = theme::window(&fb, frame, &win.title, active);
             if client.is_empty() {
                 continue;
             }
+
+            if !win.menus.is_empty() {
+                let bar = Rect::new(client.x, client.y, client.w, MENU_H);
+                theme::panel(&fb, bar);
+                let open = match d.mode {
+                    Mode::Menu { menu, .. } if active => Some(menu),
+                    _ => None,
+                };
+                let mut x = bar.x + 6;
+                for (mi, m) in win.menus.iter().enumerate() {
+                    let w = theme::text_w(m.label.len()) + 12;
+                    let hot = Some(mi) == open;
+                    let (fg, bg) = if hot {
+                        (theme::SELECT_TEXT, theme::SELECT)
+                    } else {
+                        (theme::TEXT, theme::FACE)
+                    };
+                    fb.rect(x, bar.y + 2, w, bar.h - 4, bg);
+                    theme::text(&fb, x + 6, bar.y + 5, &m.label, fg, bg);
+                    x += w;
+                }
+                client = Rect::new(
+                    client.x,
+                    client.y + MENU_H,
+                    client.w,
+                    client.h.saturating_sub(MENU_H),
+                );
+            }
+
             match &win.content {
                 Content::Terminal => {
-                    // The console is a shadow grid, so moving it is a reflow
-                    // and a repaint; nothing written before the move is lost.
                     let well = client.shrink(2);
                     theme::well(&fb, well, theme::SCREEN);
                     let grid = well.shrink(3);
@@ -143,71 +374,160 @@ pub fn draw() {
                 }
             }
         }
+
+        // Popups last, over everything, because that is what a popup is.
+        if let Some(f) = focus {
+            let frame = d.windows[f].frame(screen);
+            match d.mode {
+                Mode::Menu { menu, item } => {
+                    if let Some(m) = d.windows[f].menus.get(menu) {
+                        let inner = frame.shrink(theme::FRAME);
+                        let mut x = inner.x + 6;
+                        for prev in &d.windows[f].menus[..menu] {
+                            x += theme::text_w(prev.label.len()) + 12;
+                        }
+                        dropdown(
+                            &fb,
+                            x,
+                            inner.y + theme::TITLE_H + 2 + MENU_H,
+                            m.items.iter().map(|i| i.label.as_str()),
+                            item,
+                        );
+                    }
+                }
+                Mode::Sys { item } => {
+                    let inner = frame.shrink(theme::FRAME);
+                    dropdown(
+                        &fb,
+                        inner.x,
+                        inner.y + theme::TITLE_H,
+                        SYS_ITEMS.iter().copied(),
+                        item,
+                    );
+                }
+                Mode::Move { .. } | Mode::Size { .. } => {
+                    // A hint, because a mode with no indication that it is on is
+                    // a keyboard that has stopped working.
+                    let msg = if matches!(d.mode, Mode::Move { .. }) {
+                        " Move: arrows, Enter to place, Esc to cancel "
+                    } else {
+                        " Size: arrows, Enter to keep, Esc to cancel "
+                    };
+                    let w = theme::text_w(msg.len());
+                    let r = Rect::new(
+                        (fb.width().saturating_sub(w)) / 2,
+                        MARGIN,
+                        w,
+                        MENU_H,
+                    );
+                    theme::panel(&fb, r);
+                    theme::text(&fb, r.x, r.y + 5, msg, theme::TEXT, theme::FACE);
+                }
+                Mode::Normal => {}
+            }
+        }
     });
 }
 
-/// The terminal window's title bar, for the uptime readout.
-///
-/// The clock used to draw at a fixed screen corner, which was right while that
-/// corner was bare framebuffer. On a desktop that corner belongs to whichever
-/// window is there, so the clock has to ask where it may write rather than
-/// assume -- otherwise it punches a hole through the Program Manager once a
-/// tenth of a second.
+fn dropdown<'a>(
+    fb: &Framebuffer,
+    x: u32,
+    y: u32,
+    labels: impl Iterator<Item = &'a str> + Clone,
+    sel: usize,
+) {
+    let items: Vec<&str> = labels.collect();
+    if items.is_empty() {
+        return;
+    }
+    let w = theme::text_w(items.iter().map(|s| s.len()).max().unwrap_or(4)) + 24;
+    let h = items.len() as u32 * MENU_H + 8;
+    let r = Rect::new(x, y, w.min(fb.width().saturating_sub(x)), h);
+    theme::panel(fb, r);
+    // A menu opened near the right edge can be clipped to nothing, and `r.w - 8`
+    // on a narrow one wraps to four billion -- which is not a crash but a fill
+    // loop long enough to look like a hang.
+    if r.w < 16 {
+        return;
+    }
+    for (i, label) in items.iter().enumerate() {
+        let row = Rect::new(r.x + 4, r.y + 4 + i as u32 * MENU_H, r.w - 8, MENU_H);
+        theme::list_row(fb, row, label, i == sel, true);
+    }
+}
+
+/// The terminal's title bar, minus what the title already uses.
 pub fn terminal_status_area() -> Option<(Rect, bool)> {
+    let fb = super::primary()?;
+    let screen = screen_rect(&fb);
     with(|d| {
-        d.windows
+        let focus = d.focus();
+        let i = d
+            .windows
             .iter()
-            .enumerate()
-            .find(|(_, w)| matches!(w.content, Content::Terminal))
-            .map(|(i, w)| {
-                // The part of the bar the title has not already used. The
-                // clock drew from the right edge and met the title coming the
-                // other way on a narrow window; a status area that starts after
-                // the title cannot.
-                let inner = w.rect.shrink(theme::FRAME);
-                let used = 28 + theme::text_w(w.title.len()) + 8;
-                (
-                    Rect::new(
-                        inner.x + used,
-                        inner.y,
-                        inner.w.saturating_sub(used),
-                        theme::TITLE_H,
-                    ),
-                    i == d.focus,
-                )
-            })
+            .position(|w| matches!(w.content, Content::Terminal))?;
+        let w = &d.windows[i];
+        if w.state == WinState::Minimised {
+            return None;
+        }
+        let inner = w.frame(screen).shrink(theme::FRAME);
+        let used = 28 + theme::text_w(w.title.len()) + 8;
+        Some((
+            Rect::new(
+                inner.x + used,
+                inner.y,
+                inner.w.saturating_sub(used),
+                theme::TITLE_H,
+            ),
+            Some(i) == focus,
+        ))
     })
     .flatten()
 }
 
-/// Where the keyboard is pointing.
 pub fn focus_is_terminal() -> bool {
-    with(|d| matches!(d.windows.get(d.focus).map(|w| &w.content), Some(Content::Terminal)))
-        .unwrap_or(true)
+    with(|d| match d.focus() {
+        Some(f) => matches!(d.windows[f].content, Content::Terminal),
+        None => false,
+    })
+    .unwrap_or(true)
 }
 
-pub fn cycle(back: bool) {
+/// Cycle focus. Sends the top window to the back, which brings the next one up.
+pub fn cycle(_back: bool) {
     with(|d| {
-        let n = d.windows.len();
-        if n == 0 {
+        if d.windows.len() < 2 {
             return;
         }
-        d.focus = if back { (d.focus + n - 1) % n } else { (d.focus + 1) % n };
-        crate::serial_println!("[desk] focus {} \"{}\"", d.focus, d.windows[d.focus].title);
+        let w = d.windows.pop().unwrap();
+        d.windows.insert(0, w);
+        // Skip minimised windows, or Alt-Tab appears to do nothing.
+        let mut guard = 0;
+        while d.focus().is_none() && guard < 8 {
+            let w = d.windows.pop().unwrap();
+            d.windows.insert(0, w);
+            guard += 1;
+        }
     });
+    trace("alt-tab");
     draw();
 }
 
-/// One line per window on the serial port, focused one marked. The oracle a
-/// headless run reads instead of looking at the screen.
 pub fn trace(event: &str) {
     with(|d| {
+        let focus = d.focus();
         crate::serial_println!("[desk] {}", event);
         for (i, w) in d.windows.iter().enumerate() {
+            let state = match w.state {
+                WinState::Normal => "normal",
+                WinState::Maximised => "max",
+                WinState::Minimised => "min",
+            };
             crate::serial_println!(
-                "[desk] {} {} {}x{}+{}+{}",
-                if i == d.focus { '>' } else { ' ' },
+                "[desk] {} {} {} {}x{}+{}+{}",
+                if Some(i) == focus { '>' } else { ' ' },
                 w.title,
+                state,
                 w.rect.w,
                 w.rect.h,
                 w.rect.x,
@@ -217,65 +537,215 @@ pub fn trace(event: &str) {
     });
 }
 
-/// What the shell should do with a key.
 pub enum Route {
-    /// The desktop consumed it.
     Handled,
-    /// Give it to the shell's line editor.
     Shell(u8),
 }
 
-/// Route one keystroke.
-///
-/// Alt-Tab is taken before anything else and Tab is deliberately not, because
-/// the terminal has to keep receiving Tab. A window switcher that stole it
-/// would make the shell unusable in exchange for saving one modifier.
+/// Act on a system-menu choice.
+fn sys_action(d: &mut Desktop, f: usize, item: usize, screen: Rect) {
+    match item {
+        0 => d.mode = Mode::Move { from: d.windows[f].rect },
+        1 => d.mode = Mode::Size { from: d.windows[f].rect },
+        2 => {
+            d.windows[f].state = match d.windows[f].state {
+                WinState::Maximised => WinState::Normal,
+                _ => WinState::Maximised,
+            };
+            let _ = screen;
+        }
+        3 => {
+            if d.windows[f].closable {
+                d.windows.remove(f);
+            } else {
+                // The terminal is the shell. Minimising is the honest thing to
+                // offer instead of pretending a close happened.
+                d.windows[f].state = WinState::Minimised;
+            }
+        }
+        _ => {}
+    }
+}
+
 pub fn key(k: u8) -> Route {
     if !ready() {
         return Route::Shell(k);
     }
-    if k == crate::dev::kbd::KEY_ALTTAB {
+    let Some(fb) = super::primary() else {
+        return Route::Shell(k);
+    };
+    let screen = screen_rect(&fb);
+
+    // Window management first, in every mode, so there is no state the keyboard
+    // can get stuck in.
+    if k == kbd::KEY_ALTTAB {
+        with(|d| d.mode = Mode::Normal);
         cycle(false);
         return Route::Handled;
     }
-    if focus_is_terminal() {
-        return Route::Shell(k);
-    }
-    // A panel has focus. Feed it, and act on whatever it decides.
-    let step = with(|d| match d.windows.get_mut(d.focus).map(|w| &mut w.content) {
-        Some(Content::Panel(p)) => p.key(k),
-        _ => ui::Step::Idle,
-    });
-    match step {
-        Some(ui::Step::Redraw) => {
+
+    let mode = with(|d| d.mode).unwrap_or(Mode::Normal);
+
+    match mode {
+        Mode::Normal => {
+            if k == kbd::KEY_SYSMENU {
+                with(|d| d.mode = Mode::Sys { item: 0 });
+                draw();
+                return Route::Handled;
+            }
+            if k == kbd::KEY_MENU {
+                let opened = with(|d| match d.focus() {
+                    Some(f) if !d.windows[f].menus.is_empty() => {
+                        d.mode = Mode::Menu { menu: 0, item: 0 };
+                        true
+                    }
+                    _ => false,
+                })
+                .unwrap_or(false);
+                if opened {
+                    draw();
+                    return Route::Handled;
+                }
+                return Route::Handled;
+            }
+            if focus_is_terminal() {
+                return Route::Shell(k);
+            }
+            // A panel has the keyboard.
+            let step = with(|d| match d.focus() {
+                Some(f) => match &mut d.windows[f].content {
+                    Content::Panel(p) => p.key(k),
+                    _ => ui::Step::Idle,
+                },
+                None => ui::Step::Idle,
+            });
+            match step {
+                Some(ui::Step::Redraw) => draw(),
+                Some(ui::Step::Close) => cycle(false),
+                Some(ui::Step::Do(Action::Run(cmd))) => {
+                    focus_terminal();
+                    unsafe { *PENDING.get() = Some(cmd) };
+                }
+                _ => {}
+            }
+            Route::Handled
+        }
+
+        Mode::Sys { item } => {
+            with(|d| {
+                let Some(f) = d.focus() else { return };
+                match k {
+                    kbd::KEY_DOWN => {
+                        d.mode = Mode::Sys { item: (item + 1) % SYS_ITEMS.len() }
+                    }
+                    kbd::KEY_UP => {
+                        d.mode = Mode::Sys {
+                            item: (item + SYS_ITEMS.len() - 1) % SYS_ITEMS.len(),
+                        }
+                    }
+                    b'\n' | b'\r' => {
+                        d.mode = Mode::Normal;
+                        sys_action(d, f, item, screen);
+                    }
+                    27 => d.mode = Mode::Normal,
+                    _ => {}
+                }
+            });
             draw();
             Route::Handled
         }
-        // Esc from a panel hands the keyboard back rather than closing it:
-        // these windows are the desktop's furniture, not dialogs, and a
-        // Program Manager you can dismiss with no way to get it back would be
-        // a desktop with a missing shell.
-        Some(ui::Step::Close) => {
-            cycle(false);
-            Route::Handled
-        }
-        Some(ui::Step::Do(ui::Action::Run(cmd))) => {
-            // Hand focus back to the terminal, so the output lands in a window
-            // that is looking at it, and queue the command rather than running
-            // it. The shell owns execution and the borrows it needs; the
-            // desktop decides only *that* something should run.
-            with(|d| d.focus = 0);
+
+        Mode::Menu { menu, item } => {
+            with(|d| {
+                let Some(f) = d.focus() else { return };
+                let n_menus = d.windows[f].menus.len();
+                let n_items = d.windows[f].menus[menu].items.len();
+                match k {
+                    kbd::KEY_RIGHT => d.mode = Mode::Menu { menu: (menu + 1) % n_menus, item: 0 },
+                    kbd::KEY_LEFT => {
+                        d.mode = Mode::Menu { menu: (menu + n_menus - 1) % n_menus, item: 0 }
+                    }
+                    kbd::KEY_DOWN => {
+                        d.mode = Mode::Menu { menu, item: (item + 1) % n_items.max(1) }
+                    }
+                    kbd::KEY_UP => {
+                        d.mode = Mode::Menu {
+                            menu,
+                            item: (item + n_items.saturating_sub(1)) % n_items.max(1),
+                        }
+                    }
+                    b'\n' | b'\r' => {
+                        d.mode = Mode::Normal;
+                        if let Some(mi) = d.windows[f].menus[menu].items.get(item) {
+                            if let Action::Run(cmd) = &mi.action {
+                                unsafe { *PENDING.get() = Some(cmd.clone()) };
+                            }
+                        }
+                    }
+                    27 => d.mode = Mode::Normal,
+                    _ => {}
+                }
+            });
             draw();
-            unsafe { *PENDING.get() = Some(cmd) };
             Route::Handled
         }
-        _ => Route::Handled,
+
+        Mode::Move { from } | Mode::Size { from } => {
+            let moving = matches!(mode, Mode::Move { .. });
+            with(|d| {
+                let Some(f) = d.focus() else { return };
+                // Maximised windows have nowhere to go; the geometry being
+                // edited is the restored one, so drop out of maximised first
+                // rather than editing a rectangle nobody can see.
+                d.windows[f].state = WinState::Normal;
+                let r = &mut d.windows[f].rect;
+                match k {
+                    kbd::KEY_LEFT if moving => r.x = r.x.saturating_sub(NUDGE),
+                    kbd::KEY_RIGHT if moving => {
+                        r.x = (r.x + NUDGE).min(screen.x + screen.w.saturating_sub(r.w))
+                    }
+                    kbd::KEY_UP if moving => r.y = r.y.saturating_sub(NUDGE),
+                    kbd::KEY_DOWN if moving => {
+                        r.y = (r.y + NUDGE).min(screen.y + screen.h.saturating_sub(r.h))
+                    }
+                    kbd::KEY_LEFT => r.w = r.w.saturating_sub(NUDGE).max(160),
+                    kbd::KEY_RIGHT => {
+                        r.w = (r.w + NUDGE).min(screen.x + screen.w - r.x)
+                    }
+                    kbd::KEY_UP => r.h = r.h.saturating_sub(NUDGE).max(theme::TITLE_H * 3),
+                    kbd::KEY_DOWN => r.h = (r.h + NUDGE).min(screen.y + screen.h - r.y),
+                    b'\n' | b'\r' => d.mode = Mode::Normal,
+                    27 => {
+                        d.windows[f].rect = from;
+                        d.mode = Mode::Normal;
+                    }
+                    _ => {}
+                }
+            });
+            draw();
+            Route::Handled
+        }
     }
 }
 
-static PENDING: Racy<Option<String>> = Racy::new(None);
+/// Put the keyboard back on the terminal, raising it if need be.
+pub fn focus_terminal() {
+    with(|d| {
+        if let Some(i) = d
+            .windows
+            .iter()
+            .position(|w| matches!(w.content, Content::Terminal))
+        {
+            d.windows[i].state = match d.windows[i].state {
+                WinState::Minimised => WinState::Normal,
+                s => s,
+            };
+            d.raise(i);
+        }
+    });
+    draw();
+}
 
-/// A command a panel asked for, if any. The shell polls this.
 pub fn take_pending() -> Option<String> {
     unsafe { (*PENDING.get()).take() }
 }

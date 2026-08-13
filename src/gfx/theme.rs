@@ -42,6 +42,11 @@ pub const DESKTOP: Color = Color::new(0x0A, 0x0C, 0x10);
 /// A sparse dot grid over it. Barely there on purpose: a wall should read
 /// as a surface rather than compete with the windows on it.
 pub const DESKTOP_GRID: Color = Color::new(0x1C, 0x22, 0x2C);
+/// The Aperture mark on the wall. A muted orange rather than the title bar's:
+/// at a fifth of the screen it would otherwise be the brightest thing on the
+/// desktop, and a wallpaper that outshines the windows is one nobody can work
+/// in front of.
+pub const WALL_MARK: Color = Color::new(0x4A, 0x2E, 0x12);
 pub const TEXT: Color = Color::new(0x00, 0x00, 0x00);
 pub const TEXT_DIM: Color = Color::new(0x80, 0x80, 0x80);
 

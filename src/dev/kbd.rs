@@ -128,6 +128,8 @@ const SC_EXTENDED: u8 = 0xE0;
 static SHIFT: AtomicBool = AtomicBool::new(false);
 static CTRL: AtomicBool = AtomicBool::new(false);
 static ALT: AtomicBool = AtomicBool::new(false);
+/// Alt has been pressed and nothing else has happened since.
+static ALT_ALONE: AtomicBool = AtomicBool::new(false);
 static CAPS: AtomicBool = AtomicBool::new(false);
 static EXTENDED: AtomicBool = AtomicBool::new(false);
 
@@ -216,6 +218,10 @@ pub const KEY_BACKTAB: u8 = 0x87;
 /// the shell -- a window switcher that stole Tab would make the terminal
 /// unusable. The `win` command exists for the headless path.
 pub const KEY_ALTTAB: u8 = 0x88;
+/// Alt-Space: the window's own menu -- move, size, maximise, close.
+pub const KEY_SYSMENU: u8 = 0x89;
+/// Alt on its own: open the focused window's menu bar.
+pub const KEY_MENU: u8 = 0x8A;
 
 fn decode(scancode: u8) {
     // E0 introduces a two-byte sequence: arrows, navigation keys, and the
@@ -262,6 +268,17 @@ fn decode(scancode: u8) {
             return;
         }
         SC_LALT => {
+            // Alt pressed and released with nothing in between opens the menu
+            // bar, which is how every window of this vintage behaved. The flag
+            // is cleared by any other key while Alt is held, so Alt-Tab and
+            // Alt-Space do not also trip it on release.
+            if released {
+                if ALT_ALONE.swap(false, Ordering::Relaxed) {
+                    push(KEY_MENU);
+                }
+            } else {
+                ALT_ALONE.store(true, Ordering::Relaxed);
+            }
             ALT.store(!released, Ordering::Relaxed);
             return;
         }
@@ -280,18 +297,29 @@ fn decode(scancode: u8) {
     }
 
     let shift = SHIFT.load(Ordering::Relaxed);
-    // Tab is the one key whose modified forms are *different keys* rather than
-    // different characters, and the map cannot express that: both tables hold
-    // 0x09 at this index. Alt first, so Alt-Shift-Tab still switches windows.
-    if code == 0x0F {
-        if ALT.load(Ordering::Relaxed) {
-            push(KEY_ALTTAB);
-            return;
+    // Any other key means Alt was a modifier, not a menu request.
+    ALT_ALONE.store(false, Ordering::Relaxed);
+
+    // Tab and Space are the keys whose modified forms are *different keys*
+    // rather than different characters, and the map cannot express that: both
+    // tables hold the same byte at those indices. Alt is checked first, so
+    // Alt-Shift-Tab still switches windows.
+    if ALT.load(Ordering::Relaxed) {
+        match code {
+            0x0F => {
+                push(KEY_ALTTAB);
+                return;
+            }
+            0x39 => {
+                push(KEY_SYSMENU);
+                return;
+            }
+            _ => {}
         }
-        if shift {
-            push(KEY_BACKTAB);
-            return;
-        }
+    }
+    if code == 0x0F && shift {
+        push(KEY_BACKTAB);
+        return;
     }
     let mut ch = if shift {
         SHIFTED[code as usize]

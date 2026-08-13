@@ -265,6 +265,8 @@ pub fn parse_keys(spec: &str) -> Vec<u8> {
             "tab" => b'\t',
             "backtab" | "shift-tab" => kbd::KEY_BACKTAB,
             "alttab" | "alt-tab" => kbd::KEY_ALTTAB,
+            "sysmenu" | "alt-space" => kbd::KEY_SYSMENU,
+            "menu" | "alt" => kbd::KEY_MENU,
             "up" => kbd::KEY_UP,
             "down" => kbd::KEY_DOWN,
             "left" => kbd::KEY_LEFT,
@@ -339,6 +341,40 @@ fn frame_for(fb: &Framebuffer, panel: &Panel) -> Rect {
 /// panels it will be writing this shape, so it is deliberately made of nothing
 /// a decoder could not emit -- a title, a list of (label, command) pairs, and
 /// buttons.
+/// Panels by name, so a menu item or a shell command can open one without
+/// every caller knowing how each is built.
+pub fn panel_named(name: &str) -> Option<Panel> {
+    match name {
+        "programs" => Some(program_manager()),
+        "status" => Some(status_panel()),
+        _ => None,
+    }
+}
+
+/// A second window worth opening, so the window manager has something to
+/// manage. Every entry is a command, exactly as in the launcher.
+pub fn status_panel() -> Panel {
+    let entries: [(&str, &str); 6] = [
+        ("Uptime and tasks", "tasks"),
+        ("Heap", "mem"),
+        ("Interfaces", "net"),
+        ("Disks", "storage"),
+        ("Certificates", "trust"),
+        ("Attention window", "window"),
+    ];
+    let items = entries
+        .iter()
+        .map(|(label, cmd)| (String::from(*label), Action::Run(String::from(*cmd))))
+        .collect();
+    Panel::new(
+        "System",
+        alloc::vec![
+            Widget::List { items, sel: 0 },
+            Widget::Button { label: String::from("Close"), action: Action::Close },
+        ],
+    )
+}
+
 pub fn program_manager() -> Panel {
     let entries: [(&str, &str); 8] = [
         ("System status", "status"),

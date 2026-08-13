@@ -88,6 +88,11 @@ def capture(dest):
     except OSError as e:
         print(f"[drive] no monitor: {e}", file=sys.stderr)
         return
+    # Let the guest finish whatever it is painting. A repaint here is a
+    # million stores and the capture is asynchronous, so without this the
+    # screenshot can land mid-frame -- which reads as a broken window manager
+    # rather than as a broken screenshot, and cost a bisect to rule out.
+    time.sleep(0.8)
     with mon:
         mon.settimeout(2.0)
         try:

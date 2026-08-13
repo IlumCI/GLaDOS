@@ -140,7 +140,9 @@ const BLADE_STEP: usize = 4;
 ///
 /// So the gaps are painted in the background colour and the blades are simply
 /// whatever disc is left over, which is also how a real iris works.
-fn aperture(fb: &super::Framebuffer, cx: i32, cy: i32, r: i32, fg: super::Color, bg: super::Color) {
+/// Public because the desktop wall draws the same mark. One definition of
+/// what the logo *is*, so the wall and the boot screen cannot drift apart.
+pub fn aperture(fb: &super::Framebuffer, cx: i32, cy: i32, r: i32, fg: super::Color, bg: super::Color) {
     let at = |k: usize, rad: i32| -> (i32, i32) {
         let (dx, dy) = DIRS[k % 24];
         (cx + dx * rad / 1000, cy + dy * rad / 1000)
