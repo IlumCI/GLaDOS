@@ -175,6 +175,15 @@ pub fn probe(ecam: u64) -> Result<Caps, InitError> {
     })
 }
 
+/// Set once networking owns the controller.
+///
+/// Starting a second `Controller` on the same hardware resets it, which drops
+/// every configured device -- so running `usb` after boot took eth0 down and
+/// left it looking like a driver regression rather than like a command with a
+/// side effect. There is no controller registry to consult, and one flag is
+/// enough for the single-controller case this machine actually has.
+static CLAIMED: crate::sync::Racy<bool> = crate::sync::Racy::new(false);
+
 /// What `usb` prints.
 pub fn report(ecam: u64) {
     use crate::gfx::console::{self, LTGRAY, LTGREEN, LTRED, WHITE, YELLOW};
@@ -182,6 +191,12 @@ pub fn report(ecam: u64) {
 
     console::set_color(YELLOW);
     kprintln!("[usb]");
+    console::set_color(LTGRAY);
+    if unsafe { *CLAIMED.get() } {
+        kprintln!("  eth0 is driving the controller -- scanning would reset it");
+        kprintln!("  and drop the link. Nothing to do that would not break more.");
+        return;
+    }
     console::set_color(LTGRAY);
 
     match probe(ecam) {
@@ -242,6 +257,39 @@ pub fn report(ecam: u64) {
                 console::set_color(LTGREEN);
                 kprintln!("  port {}  {:04x}:{:04x}  slot {}  {} config(s)", p, dev.vid, dev.pid, dev.slot, dev.num_configs);
                 console::set_color(LTGRAY);
+                // A vendor-specific interface has no class code to key off, so
+                // the id list is the whole of the detection.
+                if let Some(name) = super::rtl8188eu::identify(dev.vid, dev.pid) {
+                    kprintln!("    {} -- wireless", name);
+                    // One register read is the whole point of getting this far:
+                    // REG_SYS_CFG is readable from reset, so a plausible answer
+                    // proves rings, enumeration, control transfers and vendor
+                    // requests all at once, and a garbage one says the fault is
+                    // below the driver rather than in its tables.
+                    match dma(64, 16) {
+                        None => kprintln!("    no memory for a register read"),
+                        Some(scratch) => {
+                            let mut regs =
+                                super::rtl8188eu::Regs::new(&mut ctl, &mut dev, scratch);
+                            match regs.chip_id() {
+                                Err(e) => {
+                                    console::set_color(LTRED);
+                                    kprintln!("    chip id unreadable: {}", e);
+                                    console::set_color(LTGRAY);
+                                }
+                                Ok(id) => {
+                                    kprintln!(
+                                        "    sys_cfg 0x{:08x}  version {}  {}{}",
+                                        id.raw, id.version,
+                                        if id.vendor_umc { "UMC" } else { "TSMC" },
+                                        if id.test_chip { "  TEST CHIP -- suspect read" }
+                                        else { "" }
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
 
                 let mut best: Option<Config> = None;
                 // Every configuration, because the interesting one is rarely
@@ -450,7 +498,7 @@ impl Trb {
 ///
 /// Never freed, by design -- see the module note. The address returned is
 /// simultaneously the virtual and the physical one.
-fn dma(size: usize, align: usize) -> Option<u64> {
+pub(crate) fn dma(size: usize, align: usize) -> Option<u64> {
     let layout = core::alloc::Layout::from_size_align(size, align).ok()?;
     let p = unsafe { alloc::alloc::alloc_zeroed(layout) };
     if p.is_null() {
@@ -772,8 +820,12 @@ impl Controller {
         });
         self.doorbell(dev.slot, 1);
 
+        // Endpoint zero is DCI 1, and saying so matters as soon as anything
+        // else is in flight: a driver that reads registers over the control
+        // pipe while a receive is armed would otherwise complete its register
+        // read against an arriving frame. Same bug as the bulk path had.
         let ev = self
-            .wait_event(TRB_TRANSFER_EVENT, 500)
+            .wait_event_ep(TRB_TRANSFER_EVENT, 1, 500)
             .ok_or("no response to control transfer")?;
         // 13 is Short Packet: fewer bytes than asked for, which for a
         // descriptor read is success rather than failure -- the device is
@@ -784,6 +836,77 @@ impl Controller {
         // The event reports bytes *not* transferred, so the length is what was
         // asked for minus that.
         Ok(len.saturating_sub(ev.status & 0xFFFFFF))
+    }
+
+    /// A control transfer with a host-to-device data stage.
+    ///
+    /// The three differences from `control_in` are all direction bits and all
+    /// silent if got wrong: the Setup TRB's transfer type is 2 (OUT) rather
+    /// than 3, the Data TRB's direction bit is clear, and the Status stage runs
+    /// the *opposite* way to the data -- so it is IN here and OUT there.
+    fn control_out(
+        &mut self,
+        dev: &mut Device,
+        setup_lo: u32,
+        setup_hi: u32,
+        buf: u64,
+        len: u32,
+    ) -> Result<(), &'static str> {
+        dev.ep0.push(Trb {
+            lo: setup_lo,
+            hi: setup_hi,
+            status: 8,
+            control: (TRB_SETUP << 10) | (1 << 6) | (2 << 16),
+        });
+        if len > 0 {
+            dev.ep0.push(Trb {
+                lo: buf as u32,
+                hi: (buf >> 32) as u32,
+                status: len,
+                control: TRB_DATA << 10,
+            });
+        }
+        dev.ep0.push(Trb {
+            control: (TRB_STATUS << 10) | (1 << 5) | (1 << 16),
+            ..Default::default()
+        });
+        self.doorbell(dev.slot, 1);
+        let ev = self
+            .wait_event_ep(TRB_TRANSFER_EVENT, 1, 500)
+            .ok_or("no response to control transfer")?;
+        if ev.code() != 1 && ev.code() != 13 {
+            return Err("control transfer failed");
+        }
+        Ok(())
+    }
+
+    /// A vendor-defined control transfer, which is how every Realtek USB part
+    /// exposes its register file. `read` picks the direction; `value` is the
+    /// register offset and `len` is 1, 2 or 4.
+    ///
+    /// Public because the register layout belongs to the device driver, not
+    /// here -- this module knows how to move the bytes and nothing about what
+    /// they mean.
+    pub fn vendor(
+        &mut self,
+        dev: &mut Device,
+        read: bool,
+        request: u8,
+        value: u16,
+        index: u16,
+        buf: u64,
+        len: u16,
+    ) -> Result<u32, &'static str> {
+        // bmRequestType: bit 7 direction, bits 6-5 = 2 for vendor, bits 4-0 = 0
+        // for a device recipient. 0xC0 in, 0x40 out.
+        let rt: u32 = if read { 0xC0 } else { 0x40 };
+        let lo = rt | ((request as u32) << 8) | ((value as u32) << 16);
+        let hi = (index as u32) | ((len as u32) << 16);
+        if read {
+            self.control_in(dev, lo, hi, buf, len as u32)
+        } else {
+            self.control_out(dev, lo, hi, buf, len as u32).map(|_| len as u32)
+        }
     }
 
     /// Read a descriptor into `buf`. `value` is the type and index, as the
@@ -1095,7 +1218,9 @@ pub fn probe_net(ecam: u64) -> Result<UsbNet, &'static str> {
                 }
             }
             ctl.configure_bulk(&mut dev, ep_in, ep_out)?;
-            return UsbNet::new(ctl, dev, mac).ok_or("out of memory");
+            let nic = UsbNet::new(ctl, dev, mac).ok_or("out of memory")?;
+            unsafe { *CLAIMED.get() = true };
+            return Ok(nic);
         }
     }
     Err("no CDC Ethernet adapter found")

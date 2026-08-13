@@ -171,7 +171,28 @@ def main():
         del argv[i:i + 2]
     commands = argv
 
-    esp = ROOT / "esp"
+    # A QEMU-only ESP, assembled here rather than borrowing esp/.
+    #
+    # esp/ is the deploy staging directory and holds Qwen3, which is 574 MB and
+    # cannot be hosted by VVFAT at all -- so testing used to mean copying
+    # SmolLM2 over it and remembering to put Qwen3 back. Forgetting leaves the
+    # GF63 staged with the wrong model, which is a silent and slow way to be
+    # wrong. Build a separate tree instead: the small checkpoint is what QEMU
+    # can run, and deploy staging is left alone.
+    esp = ROOT / ".qemu/esp"
+    (esp / "GLADOS").mkdir(parents=True, exist_ok=True)
+    for src, dst in [
+        (ROOT / "out/smollm2-135m.bin", "model.bin"),
+        (ROOT / "out/smollm2-tokenizer.bin", "tokenizer.bin"),
+        (ROOT / "esp/GLADOS/roots.der", "roots.der"),
+    ]:
+        if not src.exists():
+            raise SystemExit(f"missing {src}")
+        target = esp / "GLADOS" / dst
+        # Content-compare rather than always copying: these are 135 MB and the
+        # copy is the slowest thing in a run that is otherwise seconds.
+        if not target.exists() or target.stat().st_size != src.stat().st_size:
+            target.write_bytes(src.read_bytes())
 
     # Stage the binary the same way run.ps1 does. Without this the firmware
     # finds no bootloader and reports "Not Found", which looks nothing like
