@@ -240,13 +240,14 @@ pub fn report(ecam: u64) {
                     }
                 };
                 console::set_color(LTGREEN);
-                kprintln!("  port {}  {:04x}:{:04x}  slot {}", p, dev.vid, dev.pid, dev.slot);
+                kprintln!("  port {}  {:04x}:{:04x}  slot {}  {} config(s)", p, dev.vid, dev.pid, dev.slot, dev.num_configs);
                 console::set_color(LTGRAY);
 
+                let mut best: Option<Config> = None;
                 // Every configuration, because the interesting one is rarely
                 // the first: QEMU's usb-net puts RNDIS on configuration 1 and
                 // CDC Ethernet on 2, and only the second is worth driving.
-                for i in 0..4u8 {
+                for i in 0..dev.num_configs {
                     let (buf, total) = match ctl.config_descriptor(&mut dev, i) {
                         Ok(x) => x,
                         Err(_) => break,
@@ -268,6 +269,68 @@ pub fn report(ecam: u64) {
                                 "      bulk {} ep {:#04x}  max packet {}",
                                 label, e.addr, e.max_packet
                             );
+                        }
+                    }
+                    if best.is_none() && c.ecm && c.bulk_in.is_some() && c.bulk_out.is_some() {
+                        best = Some(c);
+                    }
+                }
+
+                // Bring the CDC Ethernet configuration up and move a frame.
+                if let Some(c) = best {
+                    let (iface, alt) = c.data_iface.unwrap_or((0, 0));
+                    let r = ctl
+                        .set_configuration(&mut dev, c.value)
+                        .and_then(|_| {
+                            // Only when the endpoints live on a non-zero
+                            // alternate setting. Sending SET_INTERFACE(0) to a
+                            // device with no alternates stalls on some.
+                            if alt > 0 {
+                                ctl.set_interface(&mut dev, iface, alt)
+                            } else {
+                                Ok(())
+                            }
+                        })
+                        .and_then(|_| {
+                            ctl.configure_bulk(&mut dev, c.bulk_in.unwrap(), c.bulk_out.unwrap())
+                        });
+                    match r {
+                        Err(e) => {
+                            console::set_color(LTRED);
+                            kprintln!("    bring-up failed: {}", e);
+                            console::set_color(WHITE);
+                        }
+                        Ok(()) => {
+                            console::set_color(LTGREEN);
+                            kprintln!("    configuration {} up, bulk endpoints ready", c.value);
+                            console::set_color(LTGRAY);
+                            // A broadcast ARP-shaped frame. The point is the
+                            // transfer completing, not the reply: this proves
+                            // TRBs reach the device and the controller reports
+                            // the bytes it moved.
+                            if let Some(tx) = dma(64, 16) {
+                                unsafe {
+                                    for i in 0..6u64 {
+                                        write_volatile((tx + i) as *mut u8, 0xFF);
+                                    }
+                                    write_volatile((tx + 12) as *mut u16, 0x0608);
+                                }
+                                match ctl.bulk_out(&mut dev, tx, 60) {
+                                    Ok(n) => kprintln!("    bulk out moved {} bytes", n),
+                                    Err(e) => {
+                                        console::set_color(LTRED);
+                                        kprintln!("    bulk out: {}", e);
+                                        console::set_color(LTGRAY);
+                                    }
+                                }
+                            }
+                            if let Some(rx) = dma(1536, 16) {
+                                match ctl.bulk_in(&mut dev, rx, 1536, 300) {
+                                    Ok(n) => kprintln!("    bulk in received {} bytes", n),
+                                    Err(e) => kprintln!("    bulk in: {}", e),
+                                }
+                            }
+                            console::set_color(WHITE);
                         }
                     }
                 }
@@ -317,6 +380,8 @@ const TRB_ADDRESS_DEVICE: u32 = 11;
 const TRB_SETUP: u32 = 2;
 const TRB_DATA: u32 = 3;
 const TRB_STATUS: u32 = 4;
+const TRB_NORMAL: u32 = 1;
+const TRB_CONFIG_EP: u32 = 12;
 // ...and the ones the controller posts back.
 const TRB_TRANSFER_EVENT: u32 = 32;
 const TRB_CMD_COMPLETE: u32 = 33;
@@ -722,11 +787,22 @@ impl Controller {
             return Err("Address Device refused");
         }
 
-        let mut dev = Device { slot, ep0: ring, vid: 0, pid: 0, inp, port };
+        let mut dev = Device {
+            slot,
+            ep0: ring,
+            vid: 0,
+            pid: 0,
+            num_configs: 0,
+            inp,
+            port,
+            bulk_in: None,
+            bulk_out: None,
+        };
         let buf = dma(18, 16).ok_or("out of memory")?;
         self.descriptor(&mut dev, 0x0100, buf, 18)?;
         dev.vid = unsafe { read_volatile((buf + 8) as *const u16) };
         dev.pid = unsafe { read_volatile((buf + 10) as *const u16) };
+        dev.num_configs = unsafe { read_volatile((buf + 17) as *const u8) };
         Ok(dev)
     }
 
@@ -759,9 +835,181 @@ pub struct Device {
     ep0: Ring,
     pub vid: u16,
     pub pid: u16,
+    /// How many configurations the device has. Read rather than discovered by
+    /// asking for one too many: a request for a configuration that does not
+    /// exist is answered with a stall, and a stall *halts endpoint zero* until
+    /// it is explicitly reset -- so probing past the end does not merely fail,
+    /// it disables the device for everything after.
+    pub num_configs: u8,
     /// The input context, kept because Configure Endpoint reuses it.
     inp: u64,
     pub port: u8,
+    /// Transfer rings for the bulk pair, once configured. Held here because a
+    /// ring the controller is walking must not be dropped, and the device
+    /// outlives the call that set it up.
+    bulk_in: Option<(u8, Ring)>,
+    bulk_out: Option<(u8, Ring)>,
+}
+
+/// Device Context Index for an endpoint address.
+///
+/// Endpoint N has two of these -- OUT at 2N, IN at 2N+1 -- because a USB
+/// endpoint number names a *pair*, and the context array indexes directions
+/// separately. Endpoint 0 is DCI 1, which is why the array starts at one and
+/// the doorbell for the default endpoint is 1 rather than 0.
+fn dci(addr: u8) -> u32 {
+    let num = (addr & 0x0F) as u32;
+    num * 2 + if addr & 0x80 != 0 { 1 } else { 0 }
+}
+
+impl Controller {
+    /// A control transfer with no data stage.
+    ///
+    /// The status stage of a no-data transfer is always IN, regardless of the
+    /// request's direction. That is not symmetry for its own sake: the status
+    /// stage is the *device* acknowledging, so it flows device to host even
+    /// when the request was host to device.
+    fn control_nodata(&mut self, dev: &mut Device, lo: u32, hi: u32) -> Result<(), &'static str> {
+        dev.ep0.push(Trb {
+            lo,
+            hi,
+            status: 8,
+            // TRT 0: no data stage.
+            control: (TRB_SETUP << 10) | (1 << 6),
+        });
+        dev.ep0.push(Trb {
+            control: (TRB_STATUS << 10) | (1 << 5) | (1 << 16),
+            ..Default::default()
+        });
+        self.doorbell(dev.slot, 1);
+        let ev = self
+            .wait_event(TRB_TRANSFER_EVENT, 500)
+            .ok_or("no response to control transfer")?;
+        if ev.code() != 1 && ev.code() != 13 {
+            return Err("control transfer refused");
+        }
+        Ok(())
+    }
+
+    /// SET_CONFIGURATION. bmRequestType 0, bRequest 9, wValue the value from
+    /// the descriptor -- not its index.
+    pub fn set_configuration(&mut self, dev: &mut Device, value: u8) -> Result<(), &'static str> {
+        // 0x0900, not 0x0009: the setup packet is little-endian, so byte 0
+        // is bmRequestType and byte 1 is bRequest. Writing them the way they
+        // are spoken aloud swaps the pair, and the device answers a request
+        // type of 9 with silence rather than a stall.
+        self.control_nodata(dev, 0x0900 | ((value as u32) << 16), 0)
+    }
+
+    /// SET_INTERFACE, for a data interface whose endpoints live on a non-zero
+    /// alternate setting. bmRequestType 1 (interface), bRequest 11.
+    pub fn set_interface(&mut self, dev: &mut Device, iface: u8, alt: u8) -> Result<(), &'static str> {
+        self.control_nodata(dev, 0x0B01 | ((alt as u32) << 16), iface as u32)
+    }
+
+    /// Add the bulk pair to the device context.
+    ///
+    /// Configure Endpoint reuses the input context built during addressing.
+    /// The add-context flags say which entries the controller should read, and
+    /// the slot context's Context Entries field has to reach the highest DCI
+    /// being added -- a controller told about an endpoint at DCI 5 while the
+    /// slot still claims one entry accepts the command and then never rings.
+    pub fn configure_bulk(
+        &mut self,
+        dev: &mut Device,
+        ep_in: Endpoint,
+        ep_out: Endpoint,
+    ) -> Result<(), &'static str> {
+        let cb = self.ctx_bytes as u64;
+        let inp = dev.inp;
+        let din = dci(ep_in.addr);
+        let dout = dci(ep_out.addr);
+        let max_dci = din.max(dout);
+
+        let rin = Ring::new().ok_or("out of memory")?;
+        let rout = Ring::new().ok_or("out of memory")?;
+
+        unsafe {
+            // Add the slot context and both endpoints; drop nothing.
+            write_volatile(inp as *mut u32, 0);
+            write_volatile((inp + 4) as *mut u32, 1 | (1 << din) | (1 << dout));
+            // Context Entries, in the slot context's first dword.
+            let slot_ctx = inp + cb;
+            let d0 = read_volatile(slot_ctx as *const u32);
+            write_volatile(slot_ctx as *mut u32, (d0 & 0x07FF_FFFF) | (max_dci << 27));
+
+            for (d, ep, ring) in [(din, ep_in, &rin), (dout, ep_out, &rout)] {
+                let c = inp + cb * (d as u64 + 1);
+                // EP Type: 2 is Bulk OUT, 6 is Bulk IN.
+                let ep_type: u32 = if ep.input { 6 } else { 2 };
+                write_volatile((c + 4) as *mut u32,
+                    (ep_type << 3) | (3 << 1) | ((ep.max_packet as u32) << 16));
+                write_volatile((c + 8) as *mut u32, (ring.base as u32) | 1);
+                write_volatile((c + 12) as *mut u32, (ring.base >> 32) as u32);
+                // Average TRB length. Zero is legal and some controllers
+                // schedule badly on it; the packet size is the honest estimate.
+                write_volatile((c + 16) as *mut u32, ep.max_packet as u32);
+            }
+        }
+
+        let ev = self
+            .command(
+                Trb {
+                    lo: inp as u32,
+                    hi: (inp >> 32) as u32,
+                    control: (TRB_CONFIG_EP << 10) | ((dev.slot as u32) << 24),
+                    ..Default::default()
+                },
+                200,
+            )
+            .ok_or("no response to Configure Endpoint")?;
+        if ev.code() != 1 {
+            return Err("Configure Endpoint refused");
+        }
+
+        dev.bulk_in = Some((ep_in.addr, rin));
+        dev.bulk_out = Some((ep_out.addr, rout));
+        Ok(())
+    }
+
+    /// Queue one bulk transfer and wait for it.
+    ///
+    /// Interrupt On Short Packet as well as On Completion: an IN transfer that
+    /// receives less than a full buffer is the normal case for a network
+    /// endpoint, and without ISP the event only arrives when the buffer fills
+    /// -- which for a 1514-byte read of a 60-byte frame is never.
+    fn bulk(&mut self, slot: u8, ring: &mut Ring, addr: u8, buf: u64, len: u32, ms: u64)
+        -> Result<u32, &'static str>
+    {
+        ring.push(Trb {
+            lo: buf as u32,
+            hi: (buf >> 32) as u32,
+            status: len,
+            control: (TRB_NORMAL << 10) | (1 << 5) | (1 << 2),
+        });
+        self.doorbell(slot, dci(addr));
+        let ev = self.wait_event(TRB_TRANSFER_EVENT, ms).ok_or("bulk timed out")?;
+        if ev.code() != 1 && ev.code() != 13 {
+            return Err("bulk transfer failed");
+        }
+        Ok(len.saturating_sub(ev.status & 0xFFFFFF))
+    }
+
+    pub fn bulk_out(&mut self, dev: &mut Device, buf: u64, len: u32) -> Result<u32, &'static str> {
+        let (addr, mut ring) = dev.bulk_out.take().ok_or("no bulk out endpoint")?;
+        let r = self.bulk(dev.slot, &mut ring, addr, buf, len, 500);
+        dev.bulk_out = Some((addr, ring));
+        r
+    }
+
+    pub fn bulk_in(&mut self, dev: &mut Device, buf: u64, len: u32, ms: u64)
+        -> Result<u32, &'static str>
+    {
+        let (addr, mut ring) = dev.bulk_in.take().ok_or("no bulk in endpoint")?;
+        let r = self.bulk(dev.slot, &mut ring, addr, buf, len, ms);
+        dev.bulk_in = Some((addr, ring));
+        r
+    }
 }
 
 /// A bulk endpoint found in a configuration descriptor.

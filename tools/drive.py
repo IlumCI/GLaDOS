@@ -217,7 +217,8 @@ def main():
         # Something to enumerate. usb-net is also the eventual goal: a USB
         # network device is what the dongle will look like once its driver
         # exists, so proving enumeration against one is not a detour.
-        "-device", "usb-net,bus=xhci.0",
+        "-netdev", "user,id=usbnet",
+        "-device", "usb-net,bus=xhci.0,netdev=usbnet",
         "-serial", f"tcp:127.0.0.1:{PORT},server=on,wait=on",
         # The monitor is how a screenshot happens. The serial transcript proves
         # a panel's *behaviour*; it says nothing about whether the thing on
@@ -225,7 +226,6 @@ def main():
         # nobody has tested.
         "-monitor", f"tcp:127.0.0.1:{MONITOR_PORT},server=on,wait=off",
         "-display", "none",
-        "-net", "none",
         "-no-reboot",
     ]
 
