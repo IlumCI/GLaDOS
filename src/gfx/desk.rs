@@ -128,7 +128,7 @@ const TASK_GAP: u32 = 4;
 
 /// Apps the app bar can launch. Name, and the panel `ui::panel_named` builds.
 const APPS: [(&str, &str); 3] =
-    [("Programs", "programs"), ("Files", "files"), ("System", "status")];
+    [("Programs", "programs"), ("Files", "files"), ("Settings", "settings")];
 
 pub fn ready() -> bool {
     unsafe { (*DESK.get()).is_some() }
@@ -729,23 +729,18 @@ pub fn key(k: u8) -> Route {
                 // keyboard -- browsing is not opening something, and a browser
                 // that jumped to the front of the stack on every keystroke
                 // would be unusable.
-                Some(ui::Step::Do(Action::Browse(path))) => {
-                    with(|d| {
-                        if let Some(f) = d.focus() {
-                            let target = if crate::sysbox::is_dir(&path) {
-                                path.clone()
-                            } else {
-                                // A path that is not a directory is either a
-                                // typo or a file; either way the listing that
-                                // contains it is the useful thing to show.
-                                let cut = path.trim_end_matches('/').rfind('/').unwrap_or(0);
-                                if cut == 0 { String::from("/") } else { String::from(&path[..cut]) }
-                            };
-                            d.windows[f].title = alloc::format!("Files -- {}", target);
-                            d.windows[f].content = Content::Panel(ui::file_browser(&target));
-                        }
-                    });
-                    draw();
+                Some(ui::Step::Do(Action::Browse(route))) => {
+                    // The desktop resolves a route without knowing what kind
+                    // of app is on the other end of it.
+                    if let Some((title, panel)) = ui::panel_for_route(&route) {
+                        with(|d| {
+                            if let Some(f) = d.focus() {
+                                d.windows[f].title = title;
+                                d.windows[f].content = Content::Panel(panel);
+                            }
+                        });
+                        draw();
+                    }
                 }
                 _ => {}
             }

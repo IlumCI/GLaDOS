@@ -52,6 +52,9 @@ const PAD: u32 = 10;
 #[derive(Clone)]
 pub enum Action {
     Run(String),
+    /// Run this command with the panel's field text appended. `Apply("window")`
+    /// on a panel whose field holds `4 128` runs `window 4 128`.
+    Apply(String),
     /// Replace this window's panel with a browser rooted at a new path.
     ///
     /// Distinct from `Run` because navigating is not a command: it changes what
@@ -68,7 +71,12 @@ pub enum Widget {
     List { items: Vec<(String, Action)>, sel: usize },
     /// An editable line. `cursor` is a byte index, which is the same thing the
     /// shell's own editor tracks.
-    Field { name: String, text: String, cursor: usize },
+    ///
+    /// `submit` is a *template*: its payload is a prefix, and activating the
+    /// field appends what was typed. That is what lets one field mean "go to
+    /// this path" in a browser and "set the window to these numbers" in
+    /// settings without either panel needing its own key handling.
+    Field { name: String, text: String, cursor: usize, submit: Action },
     Button { label: String, action: Action },
 }
 
@@ -148,17 +156,32 @@ impl Panel {
         match self.widgets.get(self.focus) {
             Some(Widget::Button { action, .. }) => match action {
                 Action::Close => Step::Close,
+                Action::Apply(prefix) => Step::Do(self.substituted(prefix)),
                 a => Step::Do(a.clone()),
             },
-            // Enter in a field means "use what I typed". The panel decides
-            // what that is; the browser reads it as a path to open.
-            Some(Widget::Field { text, .. }) => Step::Do(Action::Browse(text.clone())),
+            // Enter in a field submits it, through whatever template it
+            // carries.
+            Some(Widget::Field { text, submit, .. }) => match submit {
+                Action::Apply(prefix) => Step::Do(self.substituted(prefix)),
+                Action::Browse(prefix) => {
+                    Step::Do(Action::Browse(alloc::format!("{}{}", prefix, text)))
+                }
+                a => Step::Do(a.clone()),
+            },
             Some(Widget::List { items, sel }) => match items.get(*sel) {
                 Some((_, Action::Close)) => Step::Close,
                 Some((_, a)) => Step::Do(a.clone()),
                 None => Step::Idle,
             },
             _ => Step::Idle,
+        }
+    }
+
+    /// A command with the field text appended, or bare if there is no field.
+    fn substituted(&self, prefix: &str) -> Action {
+        match self.field_text() {
+            Some(t) if !t.is_empty() => Action::Run(alloc::format!("{} {}", prefix, t)),
+            _ => Action::Run(String::from(prefix)),
         }
     }
 
@@ -287,7 +310,7 @@ impl Panel {
                         theme::list_row(fb, row, label, j == *sel, focused);
                     }
                 }
-                Widget::Field { name, text, cursor } => {
+                Widget::Field { name, text, cursor, .. } => {
                     let cap = theme::text_w(name.len() + 1);
                     theme::text(fb, x, y + 4, name, theme::TEXT, theme::FACE);
                     let well = Rect::new(x + cap, y, w.saturating_sub(cap), h - 2);
@@ -433,8 +456,154 @@ pub fn panel_named(name: &str) -> Option<Panel> {
         "programs" => Some(program_manager()),
         "status" => Some(status_panel()),
         "files" => Some(file_browser("/")),
+        "settings" => Some(settings("net")),
         _ => None,
     }
+}
+
+/// Resolve a `kind:argument` route to a titled panel.
+///
+/// One resolver for every in-place swap rather than one per app. The desktop
+/// replaces a window's content without knowing what kind of app is in it, and
+/// an app that wanted its own navigation would have to teach the desktop about
+/// itself -- which is how a window manager ends up knowing what a file is.
+pub fn panel_for_route(route: &str) -> Option<(String, Panel)> {
+    let (kind, arg) = route.split_once(':').unwrap_or((route, ""));
+    match kind {
+        "files" => {
+            let path = if arg.is_empty() { "/" } else { arg };
+            Some((alloc::format!("Files -- {}", path), file_browser(path)))
+        }
+        "set" => Some((String::from("Settings"), settings(arg))),
+        _ => None,
+    }
+}
+
+/// Settings, one page at a time.
+///
+/// Every control is a shell command, exactly as in the launcher. That rule
+/// matters most here: a settings program able to change something the command
+/// line could not would be a second way to configure the system, and the two
+/// would disagree within a week.
+///
+/// Values are shown by *running* the relevant command into the terminal rather
+/// than mirrored into labels. Mirroring means a cache, and a settings window
+/// showing a stale value is worse than one showing none.
+pub fn settings(page: &str) -> Panel {
+    let nav = |sel: usize| Widget::List {
+        items: alloc::vec![
+            (String::from("Network"), Action::Browse(String::from("set:net"))),
+            (String::from("Model"), Action::Browse(String::from("set:model"))),
+            (String::from("System"), Action::Browse(String::from("set:sys"))),
+        ],
+        sel,
+    };
+
+    let (sel, mut body) = match page {
+        "model" => (
+            1usize,
+            alloc::vec![
+                Widget::Label(String::from("Attention: sinks and recent")),
+                Widget::Field {
+                    name: String::from("window"),
+                    text: String::from("4 512"),
+                    cursor: 5,
+                    submit: Action::Apply(String::from("window")),
+                },
+                Widget::Button {
+                    label: String::from("Apply window"),
+                    action: Action::Apply(String::from("window")),
+                },
+                Widget::Sep,
+                Widget::Button {
+                    label: String::from("Model status"),
+                    action: Action::Run(String::from("status")),
+                },
+                Widget::Button {
+                    label: String::from("Show window"),
+                    action: Action::Run(String::from("window")),
+                },
+                Widget::Button {
+                    label: String::from("Contexts"),
+                    action: Action::Run(String::from("ctx")),
+                },
+                Widget::Button {
+                    label: String::from("Refit router"),
+                    action: Action::Run(String::from("fit")),
+                },
+            ],
+        ),
+        "sys" => (
+            2usize,
+            alloc::vec![
+                Widget::Label(String::from("Snapshots, memory, power")),
+                Widget::Button {
+                    label: String::from("Snapshot now"),
+                    action: Action::Run(String::from("snap")),
+                },
+                Widget::Button {
+                    label: String::from("Autosnap"),
+                    action: Action::Run(String::from("autosnap")),
+                },
+                Widget::Button {
+                    label: String::from("Memory"),
+                    action: Action::Run(String::from("mem")),
+                },
+                Widget::Button {
+                    label: String::from("Tasks"),
+                    action: Action::Run(String::from("tasks")),
+                },
+                Widget::Button {
+                    label: String::from("Storage"),
+                    action: Action::Run(String::from("store")),
+                },
+                Widget::Sep,
+                Widget::Button {
+                    label: String::from("Reboot"),
+                    action: Action::Run(String::from("reboot")),
+                },
+            ],
+        ),
+        // Network is the default: it is the page most likely to be wrong.
+        _ => (
+            0usize,
+            alloc::vec![
+                Widget::Label(String::from("Interfaces, DHCP, names, trust")),
+                Widget::Field {
+                    name: String::from("host"),
+                    text: String::from("discord.com"),
+                    cursor: 11,
+                    submit: Action::Apply(String::from("dns")),
+                },
+                Widget::Button {
+                    label: String::from("Resolve"),
+                    action: Action::Apply(String::from("dns")),
+                },
+                Widget::Sep,
+                Widget::Button {
+                    label: String::from("Interfaces"),
+                    action: Action::Run(String::from("net")),
+                },
+                Widget::Button {
+                    label: String::from("Renew DHCP"),
+                    action: Action::Run(String::from("dhcp")),
+                },
+                Widget::Button {
+                    label: String::from("Wireless"),
+                    action: Action::Run(String::from("wifi")),
+                },
+                Widget::Button {
+                    label: String::from("Certificates"),
+                    action: Action::Run(String::from("trust")),
+                },
+            ],
+        ),
+    };
+
+    let mut widgets = alloc::vec![nav(sel), Widget::Sep];
+    widgets.append(&mut body);
+    widgets.push(Widget::Button { label: String::from("Close"), action: Action::Close });
+    Panel::new("Settings", widgets)
 }
 
 /// A browser over the namespace, rooted at `path`.
@@ -457,7 +626,10 @@ pub fn file_browser(path: &str) -> Panel {
     if path != "/" {
         let cut = path.trim_end_matches('/').rfind('/').unwrap_or(0);
         let parent = if cut == 0 { String::from("/") } else { String::from(&path[..cut]) };
-        items.push((String::from(".."), Action::Browse(parent)));
+        items.push((
+            String::from(".."),
+            Action::Browse(alloc::format!("files:{}", parent)),
+        ));
     }
     for (name, is_dir, n) in &entries {
         let joined = if path == "/" {
@@ -466,7 +638,10 @@ pub fn file_browser(path: &str) -> Panel {
             alloc::format!("{}/{}", path, name)
         };
         if *is_dir {
-            items.push((alloc::format!("{}/  ({})", name, n), Action::Browse(joined)));
+            items.push((
+                alloc::format!("{}/  ({})", name, n),
+                Action::Browse(alloc::format!("files:{}", joined)),
+            ));
         } else {
             // Opening a file is a shell command, because printing it is what
             // `cat` already does and a second implementation would be a second
@@ -488,6 +663,7 @@ pub fn file_browser(path: &str) -> Panel {
                 name: String::from("Path"),
                 text: String::from(path),
                 cursor: path.len(),
+                submit: Action::Browse(String::from("files:")),
             },
             Widget::Sep,
             Widget::List { items, sel: 0 },
