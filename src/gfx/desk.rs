@@ -101,6 +101,10 @@ pub enum Mode {
     Move { from: Rect },
     /// Arrows resize it.
     Size { from: Rect },
+    /// The keyboard is on the taskbar. `item` indexes the app buttons first,
+    /// then the task buttons -- one flat list, because Left and Right should
+    /// walk the bar the way it looks rather than the way it is built.
+    Taskbar { item: usize },
 }
 
 pub struct Desktop {
@@ -117,6 +121,13 @@ static PENDING: Racy<Option<String>> = Racy::new(None);
 const MARGIN: u32 = 8;
 const NUDGE: u32 = 16;
 const MENU_H: u32 = theme::TITLE_H;
+/// The bar along the bottom.
+const TASK_H: u32 = theme::TITLE_H + 10;
+/// Gap between task buttons.
+const TASK_GAP: u32 = 4;
+
+/// Apps the app bar can launch. Name, and the panel `ui::panel_named` builds.
+const APPS: [(&str, &str); 2] = [("Programs", "programs"), ("System", "status")];
 
 pub fn ready() -> bool {
     unsafe { (*DESK.get()).is_some() }
@@ -131,13 +142,22 @@ pub fn with<R>(f: impl FnOnce(&mut Desktop) -> R) -> Option<R> {
 /// menu whose contents move around is a menu you cannot learn.
 const SYS_ITEMS: [&str; 4] = ["Move", "Size", "Maximise / Restore", "Close"];
 
+/// The area windows may occupy: everything above the taskbar.
+///
+/// Windows are laid out and maximised against this rather than the panel, so
+/// the taskbar is never covered. A bar that a maximised window hides is a bar
+/// that is not there when it is most wanted.
 fn screen_rect(fb: &Framebuffer) -> Rect {
     Rect::new(
         MARGIN,
         MARGIN,
         fb.width().saturating_sub(MARGIN * 2),
-        fb.height().saturating_sub(MARGIN * 2),
+        fb.height().saturating_sub(MARGIN * 2 + TASK_H),
     )
+}
+
+fn taskbar_rect(fb: &Framebuffer) -> Rect {
+    Rect::new(0, fb.height().saturating_sub(TASK_H), fb.width(), TASK_H)
 }
 
 impl Desktop {
@@ -300,13 +320,86 @@ fn wallpaper(fb: &Framebuffer) {
     );
 }
 
-/// A minimised window, as an icon along the bottom of the wall.
-fn icon(fb: &Framebuffer, slot: u32, title: &str, bottom: u32) {
-    let w = theme::text_w(14) + 12;
-    let r = Rect::new(MARGIN + slot * (w + 8), bottom.saturating_sub(MENU_H + 6), w, MENU_H);
-    theme::panel(fb, r);
-    let room = 14.min(title.len());
-    theme::text(fb, r.x + 6, r.y + 5, &title[..room], theme::TEXT, theme::FACE);
+/// Buttons on the bar, left to right: the apps, then one per window.
+///
+/// One flat list so `item` in `Mode::Taskbar` can index it directly, and so
+/// that adding an app or opening a window cannot put the two halves out of
+/// step with each other.
+fn task_slots(d: &Desktop) -> Vec<(String, bool)> {
+    let mut out: Vec<(String, bool)> = APPS
+        .iter()
+        .map(|(label, _)| (String::from(*label), false))
+        .collect();
+    let focus = d.focus();
+    for (i, w) in d.windows.iter().enumerate() {
+        out.push((w.title.clone(), Some(i) == focus));
+    }
+    out
+}
+
+/// The bar along the bottom: apps, then open windows, then the clock.
+///
+/// A minimised window is a task button that is not pressed, which is why the
+/// icons that used to sit on the wall are gone. An icon on the wallpaper is
+/// findable only if no window covers it, and something you stow is exactly
+/// what you then cannot find.
+fn taskbar(fb: &Framebuffer, d: &Desktop, sel: Option<usize>) {
+    let bar = taskbar_rect(fb);
+    theme::panel(fb, bar);
+
+    let slots = task_slots(d);
+    let n_apps = APPS.len();
+    let btn_h = bar.h - 8;
+    let y = bar.y + 4;
+    let mut x = bar.x + 4;
+
+    for (i, (label, pressed)) in slots.iter().enumerate() {
+        let is_app = i < n_apps;
+        // Titles are capped rather than allowed to set the width. "GLaDOS
+        // Terminal" at full length is a quarter of the bar on its own.
+        let shown = label.len().min(12);
+        let w = theme::text_w(shown) + if is_app { 24 } else { 16 };
+        // Stop before the clock rather than drawing under it.
+        if x + w > clock_rect(fb).x {
+            break;
+        }
+        let r = Rect::new(x, y, w, btn_h);
+        let focused = sel == Some(i);
+        // A task button is sunken while its window has the keyboard, which is
+        // the same claim about light the bevels make everywhere else.
+        theme::button(fb, r, &label[..shown], focused, *pressed);
+        if is_app {
+            // The apps carry the mark, so the launcher half of the bar reads
+            // as different in kind from the window half without a caption
+            // saying so.
+            theme::aperture_dot(fb, r.x + 8, r.y + r.h / 2, (btn_h / 2) as i32 - 4);
+        }
+        x += w + TASK_GAP;
+        if i == n_apps - 1 {
+            theme::separator_v(fb, x + 2, y, btn_h);
+            x += 8;
+        }
+    }
+
+    let c = clock_rect(fb);
+    theme::well(fb, c, theme::FACE);
+}
+
+/// Where the uptime readout goes. Right-hand end of the bar.
+pub fn clock_rect(fb: &Framebuffer) -> Rect {
+    let bar = taskbar_rect(fb);
+    // Wide enough for " up 1234.5s " and no wider. Reserving more silently
+    // steals room from the task buttons -- which is how the terminal's own
+    // button came to be missing from the bar, and how the clock came to be
+    // blank: the string was one character longer than its well and the draw
+    // refused rather than overflowing.
+    let w = theme::text_w(13);
+    Rect::new(
+        bar.x + bar.w.saturating_sub(w + 6),
+        bar.y + 4,
+        w,
+        bar.h - 8,
+    )
 }
 
 pub fn draw() {
@@ -317,12 +410,14 @@ pub fn draw() {
     with(|d| {
         wallpaper(&fb);
         let focus = d.focus();
+        let sel = match d.mode {
+            Mode::Taskbar { item } => Some(item),
+            _ => None,
+        };
+        taskbar(&fb, d, sel);
 
-        let mut slot = 0;
         for (i, win) in d.windows.iter().enumerate() {
             if win.state == WinState::Minimised {
-                icon(&fb, slot, &win.title, fb.height());
-                slot += 1;
                 continue;
             }
             let active = Some(i) == focus;
@@ -423,7 +518,9 @@ pub fn draw() {
                     theme::panel(&fb, r);
                     theme::text(&fb, r.x, r.y + 5, msg, theme::TEXT, theme::FACE);
                 }
-                Mode::Normal => {}
+                // The taskbar draws its own selection, and it is not a popup
+                // over the focused window -- it is a fixture with the keyboard.
+                Mode::Normal | Mode::Taskbar { .. } => {}
             }
         }
     });
@@ -454,35 +551,6 @@ fn dropdown<'a>(
         let row = Rect::new(r.x + 4, r.y + 4 + i as u32 * MENU_H, r.w - 8, MENU_H);
         theme::list_row(fb, row, label, i == sel, true);
     }
-}
-
-/// The terminal's title bar, minus what the title already uses.
-pub fn terminal_status_area() -> Option<(Rect, bool)> {
-    let fb = super::primary()?;
-    let screen = screen_rect(&fb);
-    with(|d| {
-        let focus = d.focus();
-        let i = d
-            .windows
-            .iter()
-            .position(|w| matches!(w.content, Content::Terminal))?;
-        let w = &d.windows[i];
-        if w.state == WinState::Minimised {
-            return None;
-        }
-        let inner = w.frame(screen).shrink(theme::FRAME);
-        let used = 28 + theme::text_w(w.title.len()) + 8;
-        Some((
-            Rect::new(
-                inner.x + used,
-                inner.y,
-                inner.w.saturating_sub(used),
-                theme::TITLE_H,
-            ),
-            Some(i) == focus,
-        ))
-    })
-    .flatten()
 }
 
 pub fn focus_is_terminal() -> bool {
@@ -581,6 +649,18 @@ pub fn key(k: u8) -> Route {
     if k == kbd::KEY_ALTTAB {
         with(|d| d.mode = Mode::Normal);
         cycle(false);
+        return Route::Handled;
+    }
+    if k == kbd::KEY_TASKBAR {
+        with(|d| {
+            d.mode = match d.mode {
+                // A second Ctrl-Esc puts the keyboard back, so the bar cannot
+                // become somewhere you get stuck.
+                Mode::Taskbar { .. } => Mode::Normal,
+                _ => Mode::Taskbar { item: 0 },
+            }
+        });
+        draw();
         return Route::Handled;
     }
 
@@ -687,6 +767,53 @@ pub fn key(k: u8) -> Route {
                 }
             });
             draw();
+            Route::Handled
+        }
+
+        Mode::Taskbar { item } => {
+            let n_apps = APPS.len();
+            let n = with(|d| task_slots(d).len()).unwrap_or(0);
+            if n == 0 {
+                return Route::Handled;
+            }
+            match k {
+                kbd::KEY_RIGHT => {
+                    with(|d| d.mode = Mode::Taskbar { item: (item + 1) % n });
+                    draw();
+                }
+                kbd::KEY_LEFT => {
+                    with(|d| d.mode = Mode::Taskbar { item: (item + n - 1) % n });
+                    draw();
+                }
+                b'\n' | b'\r' => {
+                    with(|d| d.mode = Mode::Normal);
+                    if item < n_apps {
+                        // Launching goes through the shell like everything
+                        // else, so there is one path to a running command.
+                        let cmd = alloc::format!("win open {}", APPS[item].1);
+                        focus_terminal();
+                        unsafe { *PENDING.get() = Some(cmd) };
+                    } else {
+                        let w = item - n_apps;
+                        with(|d| {
+                            if w < d.windows.len() {
+                                // Clicking a task button restores a minimised
+                                // window, which is the only way back for one.
+                                if d.windows[w].state == WinState::Minimised {
+                                    d.windows[w].state = WinState::Normal;
+                                }
+                                d.raise(w);
+                            }
+                        });
+                        draw();
+                    }
+                }
+                27 => {
+                    with(|d| d.mode = Mode::Normal);
+                    draw();
+                }
+                _ => {}
+            }
             Route::Handled
         }
 

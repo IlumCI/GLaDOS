@@ -222,6 +222,12 @@ pub const KEY_ALTTAB: u8 = 0x88;
 pub const KEY_SYSMENU: u8 = 0x89;
 /// Alt on its own: open the focused window's menu bar.
 pub const KEY_MENU: u8 = 0x8A;
+/// Ctrl-Esc: put the keyboard on the taskbar.
+///
+/// Ctrl-Esc rather than a lone key because Esc alone has to keep meaning
+/// "back out", and the Ctrl-letter mapping below cannot express this one --
+/// Esc is not a letter, so both would otherwise arrive as plain 27.
+pub const KEY_TASKBAR: u8 = 0x8B;
 
 fn decode(scancode: u8) {
     // E0 introduces a two-byte sequence: arrows, navigation keys, and the
@@ -319,6 +325,10 @@ fn decode(scancode: u8) {
     }
     if code == 0x0F && shift {
         push(KEY_BACKTAB);
+        return;
+    }
+    if code == 0x01 && CTRL.load(Ordering::Relaxed) {
+        push(KEY_TASKBAR);
         return;
     }
     let mut ch = if shift {

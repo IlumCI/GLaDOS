@@ -255,6 +255,21 @@ pub fn list_row(fb: &Framebuffer, r: Rect, label: &str, selected: bool, focused:
     text(fb, r.x + 6, ty, shown, fg, bg);
 }
 
+/// A vertical groove, for dividing a bar into sections.
+pub fn separator_v(fb: &Framebuffer, x: u32, y: u32, h: u32) {
+    fb.rect(x, y, 1, h, SHADOW);
+    fb.rect(x + 1, y, 1, h, HILIGHT);
+}
+
+/// The Aperture mark at button size, on a raised face.
+///
+/// Small enough that the six blades are mush, so this is the ring and the
+/// opening -- the same reduction `mark` makes for a title bar, exposed because
+/// the app bar wants it too.
+pub fn aperture_dot(fb: &Framebuffer, cx: u32, cy: u32, r: i32) {
+    mark(fb, cx as i32, cy as i32, r.max(3), APERTURE_DEEP);
+}
+
 /// A horizontal rule, drawn as a groove. The 3.1 separator.
 pub fn separator(fb: &Framebuffer, x: u32, y: u32, w: u32) {
     fb.rect(x, y, w, 1, SHADOW);

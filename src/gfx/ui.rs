@@ -267,6 +267,7 @@ pub fn parse_keys(spec: &str) -> Vec<u8> {
             "alttab" | "alt-tab" => kbd::KEY_ALTTAB,
             "sysmenu" | "alt-space" => kbd::KEY_SYSMENU,
             "menu" | "alt" => kbd::KEY_MENU,
+            "taskbar" | "ctrl-esc" | "start" => kbd::KEY_TASKBAR,
             "up" => kbd::KEY_UP,
             "down" => kbd::KEY_DOWN,
             "left" => kbd::KEY_LEFT,

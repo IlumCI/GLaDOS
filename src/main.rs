@@ -457,33 +457,22 @@ fn clock_task() {
             // counter in the corner of a splash is the tell that something is
             // drawing behind the curtain.
             if let (Some(fb), false) = (gfx::primary(), gfx::splash::active()) {
-                let text = alloc::format!(
-                    " up {}.{}s  switches {} ",
-                    tenths / 10,
-                    tenths % 10,
-                    task::total_switches()
-                );
-                // The right-hand end of the terminal's own title bar, in that
-                // bar's colours. It used to draw at a fixed screen corner,
-                // which was correct while the corner was bare framebuffer and
-                // became a rectangle punched through whichever window now owns
-                // that spot -- ten times a second.
-                if let Some((bar, active)) = gfx::desk::terminal_status_area() {
-                    let cs = gfx::theme::CHROME_SCALE;
-                    let width = text.len() as u32 * gfx::font::GLYPH_W * cs;
-                    if bar.w > width + 12 {
-                        let x = bar.x + bar.w - width - 6;
-                        let y = bar.y + (bar.h - gfx::font::GLYPH_H * cs) / 2;
-                        // The lower third of an active bar is the deeper orange.
-                        let bg = if !active {
-                            gfx::theme::TITLE_IDLE
-                        } else if y + gfx::font::GLYPH_H * cs > bar.y + bar.h - bar.h / 3 {
-                            gfx::theme::APERTURE_DEEP
-                        } else {
-                            gfx::theme::APERTURE
-                        };
-                        fb.draw_text(x, y, &text, gfx::theme::TITLE_TEXT, bg, cs);
-                    }
+                // Short, because the taskbar reserves a fixed well for it and
+                // every character of that well is a character the task buttons
+                // do not get. The switch counter moved to `tasks`, which is
+                // where someone actually reads it.
+                let text = alloc::format!(" up {}.{}s ", tenths / 10, tenths % 10);
+                // The taskbar's clock well. It used to draw at a fixed
+                // screen corner, then on the terminal's title bar; the bar is
+                // where it belongs, and it is the one region no window can
+                // cover.
+                let c = gfx::desk::clock_rect(&fb);
+                let cs = gfx::theme::CHROME_SCALE;
+                let width = text.len() as u32 * gfx::font::GLYPH_W * cs;
+                if c.w > width {
+                    let x = c.x + (c.w - width) / 2;
+                    let y = c.y + (c.h.saturating_sub(gfx::font::GLYPH_H * cs)) / 2;
+                    fb.draw_text(x, y, &text, gfx::theme::TEXT, gfx::theme::FACE, cs);
                 }
             }
         }
