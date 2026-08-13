@@ -260,6 +260,34 @@ pub fn report(ecam: u64) {
                         total,
                         if c.ecm { "  CDC data" } else { "" }
                     );
+                    // Every descriptor is length-prefixed, so walking the
+                    // records and printing type and length says what the device
+                    // actually offers -- guessing which functional descriptors
+                    // a config carries from its total size is how the MAC came
+                    // back empty from a config that had no room for one.
+                    let mut o = 0usize;
+                    while o + 2 <= total {
+                        let ln = unsafe { read_volatile((buf + o as u64) as *const u8) } as usize;
+                        let ty = unsafe { read_volatile((buf + o as u64 + 1) as *const u8) };
+                        if ln == 0 {
+                            break;
+                        }
+                        let sub = if ty == 0x24 && o + 3 <= total {
+                            unsafe { read_volatile((buf + o as u64 + 2) as *const u8) }
+                        } else {
+                            0xFF
+                        };
+                        kprintln!(
+                            "      desc type 0x{:02x} len {}{}",
+                            ty, ln,
+                            if sub != 0xFF { alloc::format!("  subtype 0x{:02x}", sub) }
+                            else { alloc::string::String::new() }
+                        );
+                        o += ln;
+                    }
+                    kprintln!(
+                        "      imac string index {}", c.imac
+                    );
                     if let Some((n, alt)) = c.data_iface {
                         kprintln!("      data interface {} alt {}", n, alt);
                     }
@@ -400,6 +428,11 @@ struct Trb {
 }
 
 impl Trb {
+    /// Endpoint ID (a DCI) from a transfer event.
+    fn endpoint(&self) -> u32 {
+        (self.control >> 16) & 0x1F
+    }
+
     fn kind(&self) -> u32 {
         (self.control >> 10) & 0x3F
     }
@@ -478,11 +511,14 @@ pub struct Controller {
     ev_base: u64,
     ev_idx: usize,
     ev_cycle: u32,
+    /// Transfer events belonging to an endpoint other than the one being
+    /// waited on. See `wait_event_ep`.
+    pending: Vec<Trb>,
 }
 
 impl Controller {
     #[inline]
-    fn r32(&self, off: u64) -> u32 {
+    pub(crate) fn r32(&self, off: u64) -> u32 {
         unsafe { read_volatile((self.op + off) as *const u32) }
     }
     #[inline]
@@ -499,7 +535,7 @@ impl Controller {
         }
     }
     #[inline]
-    fn portsc(&self, port: u8) -> u64 {
+    pub(crate) fn portsc(&self, port: u8) -> u64 {
         PORTSC_BASE + (port as u64 - 1) * 0x10
     }
     #[inline]
@@ -520,6 +556,7 @@ impl Controller {
             ev_base: 0,
             ev_idx: 0,
             ev_cycle: 1,
+            pending: Vec::new(),
         };
 
         // Halt before resetting. Resetting a running controller is undefined,
@@ -615,15 +652,55 @@ impl Controller {
     ///
     /// Port change events arrive unbidden throughout and are not errors.
     fn wait_event(&mut self, kind: u32, ms: u64) -> Option<Trb> {
-        for _ in 0..ms {
+        self.wait_event_ep(kind, 0, ms)
+    }
+
+    /// Wait for an event, optionally for one endpoint only.
+    ///
+    /// The event ring is shared by every endpoint on every slot, so matching on
+    /// the TRB type alone is only correct while exactly one transfer is in
+    /// flight. It stops being correct the moment a receive is left armed: a
+    /// send then completes against whichever transfer event arrives first, so
+    /// `bulk_out` reports success on the *receive*, and the frame that actually
+    /// arrived is dropped with the endpoint still looking armed. That is what a
+    /// DHCP that sends fine and never sees an offer looks like from here.
+    ///
+    /// An event for somebody else is therefore set aside rather than discarded.
+    fn wait_event_ep(&mut self, kind: u32, ep: u32, ms: u64) -> Option<Trb> {
+        let hit = |t: &Trb| t.kind() == kind && (ep == 0 || t.endpoint() == ep);
+        if let Some(i) = self.pending.iter().position(hit) {
+            return Some(self.pending.remove(i));
+        }
+        // Drain the ring before consulting the clock, so a zero timeout still
+        // means "check" rather than "do nothing". It read as the latter, and a
+        // non-blocking receive that never looks at the ring only sees frames
+        // some other waiter happened to stash -- which is why DHCP completed
+        // (it alternates send and receive) while ARP timed out.
+        let mut waited = 0u64;
+        loop {
             while let Some(t) = self.poll_event() {
-                if t.kind() == kind {
+                if hit(&t) {
                     return Some(t);
                 }
+                // Only transfer events are worth keeping: they are the ones
+                // another waiter is owed. Port changes are informational and
+                // command completions are always awaited synchronously.
+                if t.kind() == TRB_TRANSFER_EVENT {
+                    // Bounded, so a device that spews cannot grow this without
+                    // limit. Dropping the oldest loses a completion, which
+                    // costs a frame -- unbounded growth would cost the heap.
+                    if self.pending.len() >= 16 {
+                        self.pending.remove(0);
+                    }
+                    self.pending.push(t);
+                }
+            }
+            if waited >= ms {
+                return None;
             }
             delay_us(1000);
+            waited += 1;
         }
-        None
     }
 
     fn command(&mut self, t: Trb, ms: u64) -> Option<Trb> {
@@ -829,6 +906,201 @@ impl Controller {
     }
 }
 
+impl Controller {
+    /// Read a string descriptor as ASCII.
+    ///
+    /// USB strings are UTF-16LE after a two-byte header. Everything this
+    /// driver reads from one is hex digits, so the high byte is dropped rather
+    /// than decoded -- a real UTF-16 reader would be code with no second
+    /// caller.
+    pub fn string(&mut self, dev: &mut Device, index: u8) -> Result<alloc::string::String, &'static str> {
+        if index == 0 {
+            return Err("no such string");
+        }
+        let buf = dma(256, 16).ok_or("out of memory")?;
+        // wIndex is the language id. 0x0409 is US English, and asking for a
+        // language the device does not have gets a stall -- which halts
+        // endpoint zero, so it is worth getting right first time.
+        let lo = 0x0680 | ((0x0300u32 | index as u32) << 16);
+        let n = self.control_in(dev, lo, 0x0409 | (255u32 << 16), buf, 255)? as usize;
+        let mut s = alloc::string::String::new();
+        let mut i = 2usize;
+        while i + 1 < n {
+            let c = unsafe { read_volatile((buf + i as u64) as *const u8) };
+            if c.is_ascii_graphic() {
+                s.push(c as char);
+            }
+            i += 2;
+        }
+        Ok(s)
+    }
+
+    /// The adapter's MAC, from the string the ECM descriptor points at.
+    pub fn ecm_mac(&mut self, dev: &mut Device, imac: u8) -> Result<[u8; 6], &'static str> {
+        let s = self.string(dev, imac)?;
+        let b = s.as_bytes();
+        if b.len() < 12 {
+            return Err("MAC string too short");
+        }
+        let hex = |c: u8| -> Option<u8> {
+            match c {
+                b'0'..=b'9' => Some(c - b'0'),
+                b'a'..=b'f' => Some(c - b'a' + 10),
+                b'A'..=b'F' => Some(c - b'A' + 10),
+                _ => None,
+            }
+        };
+        let mut mac = [0u8; 6];
+        for i in 0..6 {
+            let hi = hex(b[i * 2]).ok_or("MAC string is not hex")?;
+            let lo = hex(b[i * 2 + 1]).ok_or("MAC string is not hex")?;
+            mac[i] = (hi << 4) | lo;
+        }
+        Ok(mac)
+    }
+
+    /// Queue a receive without waiting for it.
+    fn arm_rx(&mut self, dev: &mut Device, buf: u64, len: u32) -> bool {
+        let Some((addr, mut ring)) = dev.bulk_in.take() else { return false };
+        ring.push(Trb {
+            lo: buf as u32,
+            hi: (buf >> 32) as u32,
+            status: len,
+            control: (TRB_NORMAL << 10) | (1 << 5) | (1 << 2),
+        });
+        let d = dci(addr);
+        self.doorbell(dev.slot, d);
+        dev.bulk_in = Some((addr, ring));
+        true
+    }
+
+    /// Bytes received, if the armed transfer has completed. Never waits.
+    fn poll_rx(&mut self, ep: u32, len: u32) -> Option<u32> {
+        let ev = self.wait_event_ep(TRB_TRANSFER_EVENT, ep, 0)?;
+        if ev.code() != 1 && ev.code() != 13 {
+            return None;
+        }
+        Some(len.saturating_sub(ev.status & 0xFFFFFF))
+    }
+}
+
+/// A CDC Ethernet adapter behind USB, as the IP stack sees it.
+///
+/// The interesting part is `receive`. One IN transfer is kept permanently
+/// armed and each poll checks whether it completed -- rather than queueing a
+/// fresh one per call and abandoning it on a timeout, which piles up transfers
+/// the controller will complete later into events nobody is expecting.
+pub struct UsbNet {
+    ctl: Controller,
+    dev: Device,
+    mac: [u8; 6],
+    rx: u64,
+    tx: u64,
+    armed: bool,
+    /// DCI of the bulk IN endpoint, so its completions can be told apart from
+    /// the transmit side's on the shared event ring.
+    rx_dci: u32,
+}
+
+/// Ethernet's maximum frame, plus room for the CRC some devices append.
+const RX_LEN: u32 = 1600;
+
+impl UsbNet {
+    pub fn new(mut ctl: Controller, mut dev: Device, mac: [u8; 6]) -> Option<UsbNet> {
+        let rx = dma(RX_LEN as usize, 16)?;
+        let tx = dma(RX_LEN as usize, 16)?;
+        let rx_dci = dev.bulk_in.as_ref().map(|(a, _)| dci(*a))?;
+        let armed = ctl.arm_rx(&mut dev, rx, RX_LEN);
+        Some(UsbNet { ctl, dev, mac, rx, tx, armed, rx_dci })
+    }
+}
+
+impl crate::net::iface::Nic for UsbNet {
+    fn mac(&self) -> crate::net::Mac {
+        self.mac
+    }
+
+    fn link_up(&mut self) -> bool {
+        // The port still reporting a connection is the closest thing to a link
+        // state USB offers: CDC has a notification endpoint for it, and
+        // reading that would mean a third transfer ring for one bit.
+        let off = self.ctl.portsc(self.dev.port);
+        self.ctl.r32(off) & PORTSC_CCS != 0
+    }
+
+    fn transmit(&mut self, frame: &[u8]) -> bool {
+        if frame.len() > RX_LEN as usize {
+            return false;
+        }
+        unsafe {
+            core::ptr::copy_nonoverlapping(frame.as_ptr(), self.tx as *mut u8, frame.len());
+        }
+        self.ctl.bulk_out(&mut self.dev, self.tx, frame.len() as u32).is_ok()
+    }
+
+    fn receive(&mut self) -> Option<Vec<u8>> {
+        if !self.armed {
+            self.armed = self.ctl.arm_rx(&mut self.dev, self.rx, RX_LEN);
+            return None;
+        }
+        let ep = self.rx_dci;
+        let n = self.ctl.poll_rx(ep, RX_LEN)?;
+        self.armed = false;
+        let mut out = Vec::new();
+        if out.try_reserve_exact(n as usize).is_err() {
+            return None;
+        }
+        for i in 0..n as u64 {
+            out.push(unsafe { read_volatile((self.rx + i) as *const u8) });
+        }
+        // Re-arm immediately: a receiver that only listens after being asked
+        // drops everything that arrives between polls.
+        self.armed = self.ctl.arm_rx(&mut self.dev, self.rx, RX_LEN);
+        Some(out)
+    }
+
+    fn kind(&self) -> crate::net::iface::Kind {
+        crate::net::iface::Kind::Ethernet
+    }
+}
+
+/// Bring up the first CDC Ethernet adapter on the bus, if there is one.
+pub fn probe_net(ecam: u64) -> Result<UsbNet, &'static str> {
+    let caps = probe(ecam).map_err(|_| "no xHCI controller")?;
+    let mut ctl = Controller::start(&caps).map_err(|_| "controller did not start")?;
+    for port in ctl.connected() {
+        let Ok(mut dev) = ctl.enumerate(port) else { continue };
+        for i in 0..dev.num_configs {
+            let Ok((buf, total)) = ctl.config_descriptor(&mut dev, i) else { break };
+            let c = parse_config(buf, total);
+            let (Some(ep_in), Some(ep_out)) = (c.bulk_in, c.bulk_out) else { continue };
+            if !c.ecm {
+                continue;
+            }
+            let mac = match ctl.ecm_mac(&mut dev, c.imac) {
+                Ok(m) => m,
+                Err(e) => {
+                    // Locally-administered and deliberately odd, so it is never
+                    // mistaken for a real address in a capture -- and so a boot
+                    // log distinguishes "read the descriptor" from "made one
+                    // up", which an invented 02:00:00:00:00:01 did not.
+                    crate::kprintln!("  eth0   MAC string unreadable ({}), inventing one", e);
+                    [0x02, 0x47, 0x4C, 0x41, 0x44, 0x53]
+                }
+            };
+            ctl.set_configuration(&mut dev, c.value)?;
+            if let Some((iface, alt)) = c.data_iface {
+                if alt > 0 {
+                    ctl.set_interface(&mut dev, iface, alt)?;
+                }
+            }
+            ctl.configure_bulk(&mut dev, ep_in, ep_out)?;
+            return UsbNet::new(ctl, dev, mac).ok_or("out of memory");
+        }
+    }
+    Err("no CDC Ethernet adapter found")
+}
+
 /// One addressed device: its slot, its default endpoint, and what it is.
 pub struct Device {
     pub slot: u8,
@@ -987,8 +1259,9 @@ impl Controller {
             status: len,
             control: (TRB_NORMAL << 10) | (1 << 5) | (1 << 2),
         });
-        self.doorbell(slot, dci(addr));
-        let ev = self.wait_event(TRB_TRANSFER_EVENT, ms).ok_or("bulk timed out")?;
+        let d = dci(addr);
+        self.doorbell(slot, d);
+        let ev = self.wait_event_ep(TRB_TRANSFER_EVENT, d, ms).ok_or("bulk timed out")?;
         if ev.code() != 1 && ev.code() != 13 {
             return Err("bulk transfer failed");
         }
@@ -1031,6 +1304,10 @@ pub struct Config {
     pub bulk_out: Option<Endpoint>,
     /// True when this looks like CDC Ethernet rather than RNDIS.
     pub ecm: bool,
+    /// String index of the adapter's MAC, from the Ethernet Networking
+    /// Functional Descriptor. CDC puts the address in a *string*, in ASCII
+    /// hex -- there is no binary field for it anywhere in the descriptors.
+    pub imac: u8,
 }
 
 /// Walk a configuration descriptor block.
@@ -1052,6 +1329,7 @@ pub fn parse_config(buf: u64, total: usize) -> Config {
         bulk_in: None,
         bulk_out: None,
         ecm: false,
+        imac: 0,
     };
     let at = |o: usize| -> u8 { unsafe { read_volatile((buf + o as u64) as *const u8) } };
 
@@ -1080,8 +1358,20 @@ pub fn parse_config(buf: u64, total: usize) -> Config {
                     if cfg.data_iface.is_none() || alt > 0 {
                         cfg.data_iface = Some((at(o + 2), alt));
                     }
-                    cfg.ecm = true;
                 }
+            }
+            // 0x24 is CS_INTERFACE, a class-specific interface descriptor;
+            // subtype 0x0F is Ethernet Networking Functional, whose fourth
+            // byte is the string index holding the MAC.
+            // Descriptor 0x0F is what makes a configuration Ethernet, and the
+            // only thing that does. A CDC *data* interface is not enough:
+            // QEMU's usb-net offers two configurations that both have one, and
+            // the first is RNDIS -- which accepts bulk writes and silently
+            // passes nothing, because it wants a control protocol first. Taking
+            // it cost a send that worked and a receive that never fired.
+            0x24 if o + 4 <= total && at(o + 2) == 0x0F => {
+                cfg.imac = at(o + 3);
+                cfg.ecm = true;
             }
             ENDPOINT if o + 7 <= total && in_data_iface => {
                 let addr = at(o + 2);

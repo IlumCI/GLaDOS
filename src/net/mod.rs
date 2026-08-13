@@ -220,11 +220,22 @@ pub fn init(ecam: u64, roots: Option<&[u8]>) {
         Ok(n) => Some((Box::new(n), "e1000")),
         Err(e1000_err) => match crate::dev::rtl8168::probe(ecam) {
             Ok(n) => Some((Box::new(n), "rtl8168")),
-            Err(rtl_err) => {
-                kprintln!("  eth0   no supported NIC");
-                kprintln!("         e1000 {:?}, rtl8168 {:?}", e1000_err, rtl_err);
-                None
-            }
+            // USB last, and only when no PCI card answered. Bringing up the
+            // xHCI controller resets it, so a machine with a working wired card
+            // should not have its USB bus reset during boot for nothing -- and
+            // `usb` on the shell resets it again, which would take the
+            // interface out from under this driver.
+            Err(rtl_err) => match crate::dev::xhci::probe_net(ecam) {
+                Ok(n) => Some((Box::new(n), "usb-ecm")),
+                Err(usb_err) => {
+                    kprintln!("  eth0   no supported NIC");
+                    kprintln!(
+                        "         e1000 {:?}, rtl8168 {:?}, usb {}",
+                        e1000_err, rtl_err, usb_err
+                    );
+                    None
+                }
+            },
         },
     };
 
