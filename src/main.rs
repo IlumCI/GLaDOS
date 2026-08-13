@@ -463,9 +463,28 @@ fn clock_task() {
                     tenths % 10,
                     task::total_switches()
                 );
-                let width = text.len() as u32 * gfx::font::GLYPH_W * 2;
-                let x = fb.width().saturating_sub(width + 8);
-                fb.draw_text(x, 4, &text, palette::YELLOW, palette::BLUE, 2);
+                // The right-hand end of the terminal's own title bar, in that
+                // bar's colours. It used to draw at a fixed screen corner,
+                // which was correct while the corner was bare framebuffer and
+                // became a rectangle punched through whichever window now owns
+                // that spot -- ten times a second.
+                if let Some((bar, active)) = gfx::desk::terminal_status_area() {
+                    let cs = gfx::theme::CHROME_SCALE;
+                    let width = text.len() as u32 * gfx::font::GLYPH_W * cs;
+                    if bar.w > width + 12 {
+                        let x = bar.x + bar.w - width - 6;
+                        let y = bar.y + (bar.h - gfx::font::GLYPH_H * cs) / 2;
+                        // The lower third of an active bar is the deeper orange.
+                        let bg = if !active {
+                            gfx::theme::TITLE_IDLE
+                        } else if y + gfx::font::GLYPH_H * cs > bar.y + bar.h - bar.h / 3 {
+                            gfx::theme::APERTURE_DEEP
+                        } else {
+                            gfx::theme::APERTURE
+                        };
+                        fb.draw_text(x, y, &text, gfx::theme::TITLE_TEXT, bg, cs);
+                    }
+                }
             }
         }
         core::hint::spin_loop();

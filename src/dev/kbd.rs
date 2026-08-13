@@ -121,11 +121,13 @@ const SC_LSHIFT: u8 = 0x2A;
 const SC_RSHIFT: u8 = 0x36;
 const SC_CAPS: u8 = 0x3A;
 const SC_LCTRL: u8 = 0x1D;
+const SC_LALT: u8 = 0x38;
 const SC_RELEASE: u8 = 0x80;
 const SC_EXTENDED: u8 = 0xE0;
 
 static SHIFT: AtomicBool = AtomicBool::new(false);
 static CTRL: AtomicBool = AtomicBool::new(false);
+static ALT: AtomicBool = AtomicBool::new(false);
 static CAPS: AtomicBool = AtomicBool::new(false);
 static EXTENDED: AtomicBool = AtomicBool::new(false);
 
@@ -199,6 +201,21 @@ pub const KEY_RIGHT: u8 = 0x83;
 pub const KEY_HOME: u8 = 0x84;
 pub const KEY_END: u8 = 0x85;
 pub const KEY_DELETE: u8 = 0x86;
+/// Shift-Tab. Not an extended scancode -- the i8042 sends plain 0x0F and the
+/// shift state is what distinguishes it, so it has to be synthesised here.
+///
+/// Nothing is allowed to *depend* on it: a terminal sends `ESC [ Z` for the
+/// same key and the serial path does no ANSI decoding, so any control
+/// reachable only this way is one a headless test could never focus. It exists
+/// because it is the right behaviour on the real machine.
+pub const KEY_BACKTAB: u8 = 0x87;
+/// Alt-Tab: cycle the focused window.
+///
+/// Alt rather than something the serial line can send, because this is the
+/// gesture the desktop it imitates used and because Tab has to keep reaching
+/// the shell -- a window switcher that stole Tab would make the terminal
+/// unusable. The `win` command exists for the headless path.
+pub const KEY_ALTTAB: u8 = 0x88;
 
 fn decode(scancode: u8) {
     // E0 introduces a two-byte sequence: arrows, navigation keys, and the
@@ -244,6 +261,10 @@ fn decode(scancode: u8) {
             CTRL.store(!released, Ordering::Relaxed);
             return;
         }
+        SC_LALT => {
+            ALT.store(!released, Ordering::Relaxed);
+            return;
+        }
         SC_CAPS => {
             if !released {
                 CAPS.fetch_xor(true, Ordering::Relaxed);
@@ -259,6 +280,19 @@ fn decode(scancode: u8) {
     }
 
     let shift = SHIFT.load(Ordering::Relaxed);
+    // Tab is the one key whose modified forms are *different keys* rather than
+    // different characters, and the map cannot express that: both tables hold
+    // 0x09 at this index. Alt first, so Alt-Shift-Tab still switches windows.
+    if code == 0x0F {
+        if ALT.load(Ordering::Relaxed) {
+            push(KEY_ALTTAB);
+            return;
+        }
+        if shift {
+            push(KEY_BACKTAB);
+            return;
+        }
+    }
     let mut ch = if shift {
         SHIFTED[code as usize]
     } else {

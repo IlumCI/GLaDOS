@@ -39,6 +39,9 @@ pub const SHADOW: Color = Color::new(0x80, 0x80, 0x80);
 pub const DARKEDGE: Color = Color::new(0x00, 0x00, 0x00);
 /// The desktop behind everything.
 pub const DESKTOP: Color = Color::new(0x0A, 0x0C, 0x10);
+/// A sparse dot grid over it. Barely there on purpose: a wall should read
+/// as a surface rather than compete with the windows on it.
+pub const DESKTOP_GRID: Color = Color::new(0x1C, 0x22, 0x2C);
 pub const TEXT: Color = Color::new(0x00, 0x00, 0x00);
 pub const TEXT_DIM: Color = Color::new(0x80, 0x80, 0x80);
 

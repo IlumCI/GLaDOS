@@ -9,6 +9,8 @@ pub mod console;
 pub mod splash;
 pub mod font;
 pub mod theme;
+pub mod ui;
+pub mod desk;
 
 use crate::sync::Racy;
 

@@ -713,7 +713,7 @@ pub fn run(path: &str) {
         }
     }
 
-    // Hand the screen back.
-    fb.fill(palette::BLACK);
-    crate::gfx::console::redraw();
+    // Hand the screen back. `chrome` repaints the desktop and the window as
+    // well as the text; filling with black first would only be undone.
+    crate::gfx::desk::draw();
 }

@@ -304,7 +304,11 @@ pub fn finish() {
     crate::gfx::console::with(|c| {
         c.set_visible(true);
     });
-    crate::gfx::console::redraw();
+    // The console has been writing to its shadow grid the whole time, so
+    // reflowing it into the window's client area and repainting brings the
+    // boot log back at the new origin -- nothing logged during boot is lost by
+    // gaining a frame around it.
+    crate::gfx::desk::init();
 }
 
 /// Abandon the splash immediately, keeping whatever is on screen.
@@ -317,5 +321,9 @@ pub fn abandon() {
     }
     unsafe { *ACTIVE.get() = false };
     crate::gfx::console::with(|c| c.set_visible(true));
+    // Deliberately *not* `ui::chrome()`. This is the fault path: the reporter
+    // is about to draw and the console is the only diagnostic channel there
+    // is, so the cheapest thing that makes text visible is the right thing.
+    // Painting a window frame first would be decoration on the way to a halt.
     crate::gfx::console::redraw();
 }

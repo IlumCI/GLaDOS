@@ -24,6 +24,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 PORT = 45454
+MONITOR_PORT = 45455
 PROMPT = b"glados> "
 
 
@@ -68,10 +69,93 @@ def find_firmware():
     raise SystemExit(f"no UEFI firmware in {share}")
 
 
+def capture(dest):
+    """Ask QEMU's monitor for a screenshot, and convert it to PNG.
+
+    QEMU writes PPM, which nothing on this machine opens. The conversion is
+    hand-rolled -- PNG is a zlib stream of filtered scanlines wrapped in four
+    CRC'd chunks, and `zlib` is in the standard library -- rather than adding a
+    dependency to a repo whose entire point is not having any.
+    """
+    import binascii
+    import struct as _s
+    import zlib
+
+    dest = Path(dest)
+    ppm = dest.with_suffix(".ppm")
+    try:
+        mon = socket.create_connection(("127.0.0.1", MONITOR_PORT), timeout=5)
+    except OSError as e:
+        print(f"[drive] no monitor: {e}", file=sys.stderr)
+        return
+    with mon:
+        mon.settimeout(2.0)
+        try:
+            mon.recv(4096)
+        except OSError:
+            pass
+        # Forward slashes: the monitor treats a backslash as an escape.
+        mon.sendall(f"screendump {ppm.as_posix()}\n".encode())
+        time.sleep(1.5)
+        try:
+            mon.recv(4096)
+        except OSError:
+            pass
+
+    if not ppm.exists():
+        print("[drive] screendump produced nothing", file=sys.stderr)
+        return
+
+    raw = ppm.read_bytes()
+    # P6 header: magic, width height, maxval -- each possibly separated by any
+    # whitespace, with # comments allowed between them.
+    fields, i = [], 2
+    while len(fields) < 3:
+        while i < len(raw) and raw[i : i + 1].isspace():
+            i += 1
+        if raw[i : i + 1] == b"#":
+            while i < len(raw) and raw[i] != 0x0A:
+                i += 1
+            continue
+        j = i
+        while j < len(raw) and not raw[j : j + 1].isspace():
+            j += 1
+        fields.append(int(raw[i:j]))
+        i = j
+    w, h, _maxval = fields
+    pix = raw[i + 1 :]
+
+    stride = w * 3
+    lines = b"".join(b"\x00" + pix[y * stride : (y + 1) * stride] for y in range(h))
+
+    def chunk(tag, data):
+        return (
+            _s.pack(">I", len(data))
+            + tag
+            + data
+            + _s.pack(">I", binascii.crc32(tag + data) & 0xFFFFFFFF)
+        )
+
+    png = (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", _s.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(lines, 6))
+        + chunk(b"IEND", b"")
+    )
+    dest.write_bytes(png)
+    ppm.unlink(missing_ok=True)
+    print(f"[drive] screenshot {dest} ({w}x{h})")
+
+
 def main():
     argv = sys.argv[1:]
     timeout = 240
     memory = "2048M"
+    shot = None
+    if "--screenshot" in argv:
+        i = argv.index("--screenshot")
+        shot = Path(argv[i + 1])
+        del argv[i:i + 2]
     if "--timeout" in argv:
         i = argv.index("--timeout")
         timeout = int(argv[i + 1])
@@ -122,6 +206,11 @@ def main():
         "-drive", f"file={ROOT / '.qemu/nvme.img'},if=none,id=nvm0,format=raw",
         "-device", "nvme,serial=GLADOSQEMU0001,drive=nvm0",
         "-serial", f"tcp:127.0.0.1:{PORT},server=on,wait=on",
+        # The monitor is how a screenshot happens. The serial transcript proves
+        # a panel's *behaviour*; it says nothing about whether the thing on
+        # screen is legible, and a GUI that has never been looked at is a GUI
+        # nobody has tested.
+        "-monitor", f"tcp:127.0.0.1:{MONITOR_PORT},server=on,wait=off",
         "-display", "none",
         "-net", "none",
         "-no-reboot",
@@ -173,6 +262,8 @@ def main():
                     idle_prompts += 1
                     sent_all = True
                     if idle_prompts >= 2:
+                        if shot:
+                            capture(shot)
                         break
                     time.sleep(0.5)
     finally:

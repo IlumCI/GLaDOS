@@ -87,7 +87,29 @@ pub fn run(boot: &BootInfo, acpi: &Option<Acpi>) -> ! {
     prompt();
 
     loop {
-        let key = if let Some(k) = kbd::pop_any() {
+        // A window may have asked for a command. Run it as though it had been
+        // typed, so there is exactly one path from "a command should run" to
+        // "a command ran", whether it came from the keyboard or from a panel.
+        if let Some(cmd) = crate::gfx::desk::take_pending() {
+            // `kprintln!` already mirrors to serial, so the explicit
+            // `serial_println!` the typed path uses would echo this twice --
+            // the typed path needs it precisely because the line editor draws
+            // to the console only.
+            console::with(|c| c.set_col(PROMPT_LEN + line.len()));
+            kprintln!("{}", cmd);
+            console::resume_pacing();
+            if !run_pipeline(&cmd, boot, acpi, &mut interp) {
+                execute(&cmd, boot, acpi, &mut interp);
+            }
+            crate::sysbox::autosnap_poll();
+            note_if_mind_busy();
+            line.clear();
+            cursor = 0;
+            prompt();
+            continue;
+        }
+
+        let raw = if let Some(k) = kbd::pop_any() {
             k
         } else {
             // Nothing queued: give the network a slice, then idle until the
@@ -97,6 +119,15 @@ pub fn run(boot: &BootInfo, acpi: &Option<Acpi>) -> ! {
             crate::net::tcp::service();
             unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };
             continue;
+        };
+
+        // The desktop gets first refusal. It takes Alt-Tab always, and every
+        // key when a window other than the terminal has focus -- which is what
+        // makes the terminal a window on the desktop rather than the desktop a
+        // thing the terminal occasionally draws.
+        let key = match crate::gfx::desk::key(raw) {
+            crate::gfx::desk::Route::Handled => continue,
+            crate::gfx::desk::Route::Shell(k) => k,
         };
 
         let prev = line.len();
@@ -470,7 +501,10 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
                 }
             }
         }
-        "refresh" => console::redraw(),
+        // The whole screen, not just the character grid. `redraw` alone would
+        // restore the text and leave whatever scribbled on the frame around it
+        // still there -- which is exactly the state `refresh` exists to fix.
+        "refresh" => crate::gfx::desk::draw(),
         "fat" => fat_cmd(rest),
         // `if` and `net` are the same command. `if` because that is what it
         // operates on; `net` because that is what it used to be called and
@@ -1258,6 +1292,32 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             console::set_color(YELLOW);
             kprintln!("  resetting...");
             crate::cpu::reboot();
+        }
+        "win" => {
+            use crate::gfx::desk;
+            let mut it = rest.split_whitespace();
+            match it.next().unwrap_or("") {
+                "next" | "" => desk::cycle(false),
+                "prev" => desk::cycle(true),
+                "keys" => {
+                    // Feed keystrokes to the desktop as if typed. Alt-Tab and
+                    // the arrows have no wire representation over serial, so
+                    // without this the desktop could only ever be driven by a
+                    // person sitting at the machine -- and an interface that
+                    // cannot be driven headlessly does not get tested.
+                    for k in crate::gfx::ui::parse_keys(rest[4..].trim()) {
+                        if let desk::Route::Shell(_) = desk::key(k) {
+                            // The terminal has focus and would have eaten it.
+                        }
+                    }
+                }
+                other => {
+                    kprintln!("  no such action: {}", other);
+                    kprintln!("  usage: win [next|prev|keys <spec>]");
+                    return;
+                }
+            }
+            desk::trace("windows");
         }
         "tensor" => {
             let ok = crate::ai::selftest();
