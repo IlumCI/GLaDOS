@@ -1119,6 +1119,14 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             kprintln!("  ymm survived {} preemption checks, {} corrupted", checks, errs);
             console::set_color(WHITE);
         }
+        "usb" => match acpi.as_ref().and_then(|a| a.mcfg) {
+            Some(ecam) => crate::dev::xhci::report(ecam),
+            None => {
+                console::set_color(LTRED);
+                kprintln!("  no MCFG -- cannot reach PCI configuration space");
+                console::set_color(WHITE);
+            }
+        },
         "pci" => match acpi.as_ref().and_then(|a| a.mcfg) {
             Some(ecam) => {
                 console::set_color(YELLOW);

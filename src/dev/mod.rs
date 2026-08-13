@@ -9,6 +9,7 @@ pub mod pci;
 pub mod pic;
 pub mod rtc;
 pub mod rtl8168;
+pub mod xhci;
 
 /// Interrupt vector assignments.
 ///

@@ -210,6 +210,10 @@ def main():
         "-drive", f"format=raw,file=fat:rw:{esp}",
         "-drive", f"file={ROOT / '.qemu/nvme.img'},if=none,id=nvm0,format=raw",
         "-device", "nvme,serial=GLADOSQEMU0001,drive=nvm0",
+        # A USB controller to develop against. QEMU emulates xHCI faithfully
+        # enough to bring up rings and enumerate, which is the whole reason the
+        # USB work can be done before the dongle is involved at all.
+        "-device", "qemu-xhci,id=xhci",
         "-serial", f"tcp:127.0.0.1:{PORT},server=on,wait=on",
         # The monitor is how a screenshot happens. The serial transcript proves
         # a panel's *behaviour*; it says nothing about whether the thing on
