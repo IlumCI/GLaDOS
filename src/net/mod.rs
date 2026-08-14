@@ -47,6 +47,7 @@ const ICMP_ECHO_REPLY: u8 = 0;
 
 pub mod dhcp;
 pub mod dns;
+pub mod html;
 pub mod iface;
 pub mod tcp;
 pub mod tls;

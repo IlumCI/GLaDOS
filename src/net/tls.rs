@@ -960,6 +960,35 @@ fn dechunk(body: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Split an HTTP response into its status code, its headers, and a decoded body.
+///
+/// `https_get` returns the response as it came off the wire, headers and chunk
+/// framing included. Every caller has to undo that, and when only one caller
+/// existed it was reasonable to do it inline. The browser was the second, and
+/// it rendered the headers as page text with the chunked terminator on the end
+/// before anybody noticed, which is exactly what a second copy of this buys.
+pub fn http_response(resp: &[u8]) -> (u16, String, Vec<u8>) {
+    let text = String::from_utf8_lossy(resp);
+    let status = text
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(0);
+    match text.find("\r\n\r\n").map(|i| i + 4) {
+        None => (status, String::new(), resp.to_vec()),
+        Some(i) => {
+            let head = text[..i].to_ascii_lowercase();
+            let raw = &resp[i..];
+            let body = if head.contains("transfer-encoding: chunked") {
+                dechunk(raw)
+            } else {
+                raw.to_vec()
+            };
+            (status, head, body)
+        }
+    }
+}
+
 pub fn report(dst: Ipv4, host: &str, port: u16, path: &str) {
     console::set_color(YELLOW);
     kprintln!("[https] {}:{}{}", host, port, if path.is_empty() { "/" } else { path });

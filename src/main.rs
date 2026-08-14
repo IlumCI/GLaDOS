@@ -871,6 +871,11 @@ fn selftest() {
         kprintln!("  ok     websocket RFC 6455 accept, masking, split frames");
         console::set_color(LTGRAY_IDX);
     }
+    if net::html::selftest() {
+        console::set_color(LTGREEN);
+        kprintln!("  ok     html      urls, entities, unclosed tags");
+        console::set_color(LTGRAY_IDX);
+    }
 
     console::set_color(LTGREEN);
     kprintln!("\n[selftest] int3 should report and resume:");

@@ -31,6 +31,7 @@
 //! there is not going to be one soon -- and a window you can only move by
 //! dragging is a window that cannot be moved.
 
+use super::browse::Browser;
 use super::theme::{self, Rect};
 use super::ui::{self, Action, Panel};
 use super::Framebuffer;
@@ -45,6 +46,10 @@ pub enum Content {
     /// -- and that is true by construction rather than checked.
     Terminal,
     Panel(Panel),
+    /// Enternet. Its own variant rather than a Panel because a page is not a
+    /// stack of widgets: it scrolls, it wraps to the window, and its links are
+    /// a selection model the widget enum has no shape for.
+    Browser(Browser),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -304,6 +309,50 @@ pub fn open(title: &str, panel: Panel) {
     focus_terminal();
 }
 
+/// Open Enternet, optionally at a URL.
+pub fn open_browser(url: &str) {
+    let mut b = Browser::new();
+    if !url.is_empty() {
+        b.load(url);
+    }
+    let title = String::from("Enternet");
+    with(|d| {
+        let Some(fb) = super::primary() else { return };
+        let screen = screen_rect(&fb);
+        let w = (screen.w * 3 / 4).min(screen.w);
+        let h = (screen.h * 3 / 4).min(screen.h);
+        let x = screen.x + (screen.w.saturating_sub(w)) / 2;
+        let y = screen.y + (screen.h.saturating_sub(h)) / 3;
+        d.windows.push(Window {
+            title,
+            rect: Rect::new(x, y, w, h),
+            state: WinState::Normal,
+            content: Content::Browser(b),
+            menus: Vec::new(),
+            closable: true,
+        });
+    });
+    focus_browser();
+    draw();
+}
+
+/// Give the keyboard to the newest browser window.
+///
+/// Not `focus_terminal`: a browser opened by typing `enternet` at the shell is
+/// a window the user is about to drive, and handing the keys straight back to
+/// the console would mean the first thing they type goes into the prompt.
+fn focus_browser() {
+    with(|d| {
+        if let Some(i) = d
+            .windows
+            .iter()
+            .rposition(|w| matches!(w.content, Content::Browser(_)))
+        {
+            d.raise(i);
+        }
+    });
+}
+
 /// The wall: a flat field, a sparse grid, and the mark in the middle.
 ///
 /// The same `splash::aperture` the boot screen draws, not a second copy of the
@@ -499,6 +548,7 @@ pub fn draw() {
                     theme::panel(&fb, client);
                     p.draw_in(&fb, client, active);
                 }
+                Content::Browser(b) => b.draw_in(&fb, client, active),
             }
         }
 
@@ -727,6 +777,12 @@ pub fn key(k: u8) -> Route {
             let step = with(|d| match d.focus() {
                 Some(f) => match &mut d.windows[f].content {
                     Content::Panel(p) => p.key(k),
+                    // The browser answers "did I use it", which is all the
+                    // desktop needs: anything it declines falls through to the
+                    // window manager, so Alt-Tab keeps working inside a page.
+                    Content::Browser(b) => {
+                        if b.key(k) { ui::Step::Redraw } else { ui::Step::Idle }
+                    }
                     _ => ui::Step::Idle,
                 },
                 None => ui::Step::Idle,

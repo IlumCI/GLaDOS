@@ -5,6 +5,7 @@
 //! CSM, so there is no INT 10h, no 0xB8000 text buffer, and no VGA BIOS. Pixels
 //! are the only output device that exists.
 
+pub mod browse;
 pub mod console;
 pub mod splash;
 pub mod font;

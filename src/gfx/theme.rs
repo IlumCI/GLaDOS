@@ -66,6 +66,13 @@ pub const SCREEN: Color = Color::new(0x0A, 0x0C, 0x10);
 pub const SELECT: Color = APERTURE;
 pub const SELECT_TEXT: Color = Color::new(0x00, 0x00, 0x00);
 
+/// Reading colours for a page drawn in a screen well. Body is not pure white:
+/// a wall of #FFF on near-black glares, and a browser is the one program here
+/// somebody reads for minutes at a time.
+pub const SCREEN_TEXT: Color = Color::new(0xC8, 0xC8, 0xC8);
+pub const LINK: Color = APERTURE;
+pub const HEADING: Color = HILIGHT;
+
 pub const CHROME_SCALE: u32 = 2;
 /// Height of a title bar at `CHROME_SCALE`, with room above and below the text.
 pub const TITLE_H: u32 = font::GLYPH_H * CHROME_SCALE + 8;
@@ -136,6 +143,11 @@ pub fn well(fb: &Framebuffer, r: Rect, fill: Color) {
 
 pub fn text(fb: &Framebuffer, x: u32, y: u32, s: &str, fg: Color, bg: Color) {
     fb.draw_text(x, y, s, fg, bg, CHROME_SCALE);
+}
+
+/// Height of one line of chrome text, the companion to `text_w`.
+pub fn text_h() -> u32 {
+    font::GLYPH_H * CHROME_SCALE
 }
 
 pub fn text_w(len: usize) -> u32 {

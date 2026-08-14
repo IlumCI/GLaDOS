@@ -1331,6 +1331,11 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             kprintln!("  resetting...");
             crate::cpu::reboot();
         }
+        "enternet" => {
+            // Named for the dial-up software, and it browses about as much of
+            // the web as that era did: no scripts, no images, no forms.
+            crate::gfx::desk::open_browser(rest.trim());
+        }
         "win" => {
             use crate::gfx::desk;
             let mut it = rest.split_whitespace();
