@@ -430,12 +430,16 @@ pub fn poll_mouse() {
     let was = unsafe { *BUTTONS.get() };
     unsafe { *BUTTONS.get() = (s.left, s.right) };
     let pressed_left = s.left && !was.0;
+    let pressed_right = s.right && !was.1;
 
     if s.wheel != 0 {
         wheel_at(s.x, s.y, s.wheel);
     }
     if pressed_left {
         click_at(s.x, s.y);
+    }
+    if pressed_right {
+        right_click_at(s.x, s.y);
     }
     cursor_show(&fb, s.x.max(0) as u32, s.y.max(0) as u32);
 }
@@ -460,6 +464,24 @@ fn click_at(x: i32, y: i32) {
     let Some(i) = window_at(x, y) else { return };
     // Raising is focusing here, which is the one fact the window manager keeps.
     with(|d| d.raise(i));
+    draw();
+}
+
+/// The second button opens the menu for whatever is under it.
+///
+/// Reuses the two menus that already exist rather than inventing a third: over
+/// a window it is that window's system menu, which is the same one Alt-Space
+/// opens, and over the wall it is the application list the taskbar shows. Both
+/// are already driven by the arrow keys and already tested, so the button is a
+/// second way in rather than a second implementation.
+fn right_click_at(x: i32, y: i32) {
+    match window_at(x, y) {
+        Some(i) => with(|d| {
+            d.raise(i);
+            d.mode = Mode::Sys { item: 0 };
+        }),
+        None => with(|d| d.mode = Mode::Taskbar { item: 0 }),
+    };
     draw();
 }
 
