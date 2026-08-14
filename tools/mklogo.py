@@ -1,34 +1,37 @@
 #!/usr/bin/env python3
-"""Draw the GLaDOS aperture mark for the web, from the kernel's own geometry.
+"""Draw the GLaDOS aperture mark for the web.
 
-This is a port of `gfx::splash::aperture`, deliberately step for step, so the
-favicon and the boot screen are the same mark rather than two drawings that
-resemble each other. If the kernel's version changes, this one is wrong and
-should be re-ported.
+This and `gfx::splash::aperture` in the kernel are the same construction, in
+integer arithmetic there and floating point here. The kernel was ported from
+this file, so if the geometry changes it changes here first and the constants
+in splash.rs (BLADE_DIR, OPEN_DIR, OPEN_PCT, CUT_PCT) follow. Two drawings that
+merely resemble each other is the thing being avoided: the boot screen, the
+desktop wallpaper and the favicon are one mark.
 
-What the mark is, and the three ways to get it wrong
+What the mark is, and the ways it has been got wrong
 ---------------------------------------------------
-It is a **solid disc with wedges cut out of it** -- not blades drawn onto a
-background, and not a ring with spokes.
+A solid disc with wedges cut out of it: seven blades around a large open
+middle. Not blades drawn onto a background, and not a ring with spokes.
 
   * Stroking the blade edges as lines gives a wireframe, and full chords
     between evenly spaced points always make a star.
-  * Leaving the middle solid gives a flower: six petals around a hub, rather
-    than six blades around a hole. The middle is *open*, and its corners are
-    where consecutive blade edges meet, so the opening is a hexagon.
-  * Fanning each slash out into a triangle wide enough to read at the rim
-    makes it far too wide where it meets the opening, and it eats the blades.
-    A slash is a constant-width quadrilateral.
-
-The sweep is what sells it: each slash starts at a corner of the hexagonal
-opening and runs to the rim 45 degrees ahead of that corner, so the blades left
-over appear to spiral, exactly as a camera iris does.
+  * Leaving the middle solid gives a flower, petals around a hub rather than
+    blades around a hole. The middle is open, and largely so: the opening is
+    46% of the radius.
+  * Cutting radially. This was the long-lived one, and it survived three
+    attempts. A cut aimed out from the centre only notches the disc, and the
+    result reads as a wheel. The cuts are **tangent to the opening**, so each
+    blade's inner edge is a straight chord and the blades left over appear to
+    spiral. That tangency is the whole mark; without it the blade count hardly
+    matters.
+  * A circular opening. It leaves a nub where each straight cut meets the
+    curve. The opening is the polygon bounded by those same tangent lines,
+    which is what gives the blades their points.
 
 No image library, for the same reason there is no ISO tool here: PNG is a zlib
 stream of filtered scanlines in four CRC'd chunks, and zlib is in the standard
 library. Antialiasing is 4x4 supersampling, because a hard-edged rasteriser
-makes this look like a staircase at 32 pixels -- which is the size at which a
-favicon is judged.
+makes this a staircase at 32 pixels, which is the size a favicon is judged at.
 
 Usage:
     mklogo.py [--out docs/img]

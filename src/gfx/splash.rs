@@ -108,21 +108,32 @@ fn layout(w: u32, h: u32) -> Layout {
     }
 }
 
-/// Unit vectors every 15 degrees, scaled by 1000.
+/// Blade directions and opening vertices, as unit vectors scaled by 1000.
 ///
-/// A whole trig implementation for a logo would be silly, and there is no
-/// floating point this early anyway. Fifteen degrees is the coarsest step that
-/// still divides the six blade positions and their offsets exactly.
-const DIRS: [(i32, i32); 24] = [
-    (1000, 0), (966, 259), (866, 500), (707, 707), (500, 866), (259, 966),
-    (0, 1000), (-259, 966), (-500, 866), (-707, 707), (-866, 500), (-966, 259),
-    (-1000, 0), (-966, -259), (-866, -500), (-707, -707), (-500, -866), (-259, -966),
-    (0, -1000), (259, -966), (500, -866), (707, -707), (866, -500), (966, -259),
+/// Seven blades, so the angles are multiples of 360/7 and no table of round
+/// degrees divides them. A whole trig implementation for a logo would be silly
+/// and there is no floating point this early, so the fourteen vectors the mark
+/// needs are simply written down.
+///
+/// `BLADE_DIR[i]` points at the tangent point of cut `i`. `OPEN_DIR[i]` points
+/// at a vertex of the opening, offset half a step, which is where two blade
+/// edges meet.
+const BLADE_DIR: [(i32, i32); BLADES] = [
+    (1000, 0), (623, 782), (-222, 975), (-901, 434),
+    (-901, -434), (-222, -975), (623, -782),
+];
+const OPEN_DIR: [(i32, i32); BLADES] = [
+    (901, 434), (222, 975), (-623, 782), (-1000, 0),
+    (-623, -782), (222, -975), (901, -434),
 ];
 
-const BLADES: usize = 6;
-/// 60 degrees, in 15-degree units.
-const BLADE_STEP: usize = 4;
+const BLADES: usize = 7;
+/// Opening radius, as hundredths of the disc radius.
+const OPEN_PCT: i32 = 46;
+/// Circumradius of the opening is its inradius over cos(pi/7) = 0.9010.
+const OPEN_CIRCUM_NUM: i32 = 1110;
+/// Half-width of a cut, as thousandths of the disc radius.
+const CUT_PCT: i32 = 35;
 
 /// The iris on the wall at Aperture Science.
 ///
@@ -131,64 +142,59 @@ const BLADE_STEP: usize = 4;
 /// figure -- a camera aperture -- rather than a traced copy of anybody's
 /// artwork.
 ///
-/// Cut, not drawn. The first two attempts stroked the blade edges as lines,
-/// and that is wrong twice over: it looks like wireframe, and full chords
-/// between evenly spaced points always make a star -- at a quarter-circle span
-/// it is literally two overlapping squares. What the mark actually is: a solid
-/// disc with wedges taken *out* of it, each wedge narrow at the centre and
-/// wide at the rim, swept round so the remaining blades appear to spiral.
+/// Cut, not drawn: a solid disc with wedges taken *out* of it. Three ways this
+/// has been got wrong here, each of which looked plausible until put beside a
+/// real aperture:
 ///
-/// So the gaps are painted in the background colour and the blades are simply
-/// whatever disc is left over, which is also how a real iris works.
-/// Public because the desktop wall draws the same mark. One definition of
-/// what the logo *is*, so the wall and the boot screen cannot drift apart.
+///   * Stroking the blade edges as lines gives wireframe, and full chords
+///     between evenly spaced points always make a star.
+///   * Leaving the middle solid gives a flower -- petals around a hub, rather
+///     than blades around a hole. The middle is *open*, and largely so.
+///   * **Cutting radially.** This was the long-lived one. A cut aimed out from
+///     the centre only notches the disc, and six of them read as a wheel. The
+///     cuts are **tangent to the opening**, so each blade's inner edge is a
+///     straight chord and the leftover blades appear to spiral. That tangency
+///     is the entire mark; without it the number of blades hardly matters.
+///
+/// Public because the desktop wall draws the same mark. One definition of what
+/// the logo *is*, so the wall and the boot screen cannot drift apart --
+/// `tools/mklogo.py` is a port of this and must be re-run if it changes.
 pub fn aperture(fb: &super::Framebuffer, cx: i32, cy: i32, r: i32, fg: super::Color, bg: super::Color) {
-    let at = |k: usize, rad: i32| -> (i32, i32) {
-        let (dx, dy) = DIRS[k % 24];
-        (cx + dx * rad / 1000, cy + dy * rad / 1000)
-    };
+    let scaled = |(dx, dy): (i32, i32), rad: i32| (cx + dx * rad / 1000, cy + dy * rad / 1000);
 
     fb.fill_circle(cx, cy, r, fg);
 
-    // The opening. This is what every earlier attempt missed: the blades are a
-    // *ring*, and the middle is open. A solid hub is what made the last version
-    // read as a flower -- six petals around a centre, rather than six blades
-    // around a hole.
-    //
-    // Its corners are where consecutive blade edges meet, so the opening is a
-    // hexagon and not a circle, and the slashes below start from those corners.
-    let open_r = r * 46 / 100;
+    // The opening: the polygon bounded by the same lines the cuts run along.
+    // A circular hole leaves a nub where each straight cut meets the curve;
+    // the polygon is what gives the blades their points.
+    let rin = r * OPEN_PCT / 100;
+    let circum = rin * OPEN_CIRCUM_NUM / 1000;
     let centre = (cx, cy);
     for b in 0..BLADES {
-        let k = b * BLADE_STEP;
-        fb.fill_triangle(centre, at(k, open_r), at(k + BLADE_STEP, open_r), bg);
+        let v0 = scaled(OPEN_DIR[b], circum);
+        let v1 = scaled(OPEN_DIR[(b + 1) % BLADES], circum);
+        fb.fill_triangle(centre, v0, v1, bg);
     }
 
-    // One slash per corner, running outward and swept well off radial.
-    //
-    // A slash is a constant-width quadrilateral, not a triangle fanning out to
-    // a span of the rim. A triangle wide enough to read at the edge is far too
-    // wide where it meets the opening, and it takes the blades with it -- the
-    // previous attempt cut them down to stubs. Width is set in pixels and the
-    // ends are found by stepping perpendicular to the slash's own direction.
-    let rim = r + 2;
-    let half = (r / 14).max(1);
+    // One cut per blade, tangent to the opening, running out past the rim. The
+    // chord from a tangent point to the rim is sqrt(r^2 - rin^2); overshooting
+    // it slightly means the cut leaves the disc cleanly instead of stopping a
+    // pixel short and leaving a bridge.
+    let reach = (super::isqrt((r * r - rin * rin) as u32) as i32) * 106 / 100;
+    let half = (r * CUT_PCT / 1000).max(1);
     for b in 0..BLADES {
-        let k = b * BLADE_STEP;
-        let (ax, ay) = at(k, open_r);
-        // Out at the rim, swept 45 degrees ahead of the corner it starts from.
-        let (ox, oy) = at(k + 3, rim);
-
-        let (dx, dy) = (ox - ax, oy - ay);
-        let len = (super::isqrt((dx * dx + dy * dy) as u32) as i32).max(1);
-        let (px, py) = (-dy * half / len, dx * half / len);
-
-        let a0 = (ax + px, ay + py);
-        let a1 = (ax - px, ay - py);
-        let o0 = (ox + px, oy + py);
-        let o1 = (ox - px, oy - py);
-        fb.fill_triangle(a0, a1, o1, bg);
-        fb.fill_triangle(a0, o1, o0, bg);
+        let (ux, uy) = BLADE_DIR[b];
+        let (ax, ay) = scaled(BLADE_DIR[b], rin);
+        // Tangent is the radial direction turned a quarter turn.
+        let (ex, ey) = (ax - uy * reach / 1000, ay + ux * reach / 1000);
+        // Width is measured along the radius, which is normal to the cut.
+        let (ox, oy) = (ux * half / 1000, uy * half / 1000);
+        let a0 = (ax + ox, ay + oy);
+        let a1 = (ax - ox, ay - oy);
+        let e0 = (ex + ox, ey + oy);
+        let e1 = (ex - ox, ey - oy);
+        fb.fill_triangle(a0, a1, e1, bg);
+        fb.fill_triangle(a0, e1, e0, bg);
     }
 }
 
