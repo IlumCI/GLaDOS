@@ -381,6 +381,10 @@ pub fn parse_keys(spec: &str) -> Vec<u8> {
             "end" => kbd::KEY_END,
             "enter" | "return" => b'\n',
             "esc" | "escape" => 27,
+            // Enternet uses backspace for "back", and a browser whose history
+            // cannot be driven headlessly is a browser whose history is never
+            // tested. Same reason the arrows have names.
+            "backspace" | "bksp" | "back" => 8,
             "space" => b' ',
             other => {
                 // A single literal character, so a panel that takes typed
