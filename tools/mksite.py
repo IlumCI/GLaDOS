@@ -469,9 +469,8 @@ page(
         h2("Results worth knowing about"),
         p("Two of the most useful things this project has established are negative, "
           "and both are still in the tree with the code that produced them. Training "
-          "an adapter head on top of the model made held-out accuracy worse with "
-          "every epoch — 30% untrained, 10% after two epochs, 0% after eight — "
-          "because forty examples spread across twenty-one classes gives gradient "
+          "an adapter head on top of the model made held-out accuracy worse with every epoch (30% untrained, 10% after two epochs, 0% "
+          "after eight), because forty examples spread across twenty-one classes gives gradient "
           "descent nothing to do except memorise. And a Product-of-Experts council "
           "combining three classifiers scored 76.9% where the best single classifier "
           "scored 77.8%, so the ensemble was quietly worse than one of its members."),
@@ -553,7 +552,7 @@ page(
           "unambitious about autonomy as a result. There is no agent loop: the model "
           "proposes and a keystroke adopts. Read-only mode works by deleting the "
           "mutating applets from the grammar before sampling begins, so a forbidden "
-          "action is not rejected after the fact — there is no sequence of sampling "
+          "action is not rejected after the fact: there is no sequence of sampling "
           "outcomes that produces one. Self-modification, where it exists at all, is "
           "gated on measurement against a held-out split that is read once."),
         p("None of the engineering is a joke. The "
@@ -620,8 +619,8 @@ page(
         p("The action surface is shaped like busybox: one flat table of small "
           "applets, each with a name, an argument spec, a line of help, and a flag "
           "saying whether it can change anything. That shape was borrowed because it "
-          "is the right shape for something that is not only typed at — the table "
-          "renders directly into a prompt, and the mutation flag is the leash, so "
+          "is the right shape for something that is not only typed at. The table renders directly "
+          "into a prompt, and the mutation flag is the leash, so "
           "read-only applets can be handed to the model long before the rest."),
         p("Because the namespace underneath is content-addressed, the applet list "
           "reads slightly strangely to anyone expecting POSIX. <code>cp</code> is "
@@ -682,9 +681,9 @@ page(
         p("The one that catches people building anything numeric: there are no "
           "floating-point maths functions. <code>exp</code>, <code>sqrt</code>, "
           "<code>tanh</code> and friends live in libm, which is a C library, which "
-          "is not present. For an operating system with a transformer in it this is "
-          "not a footnote — softmax is defined in terms of <code>exp</code> and "
-          "RMSNorm needs a reciprocal square root — so the "
+          "is not present. For an operating system with a transformer in it this is not a footnote. Softmax is defined in terms of "
+          "<code>exp</code> and RMSNorm needs a reciprocal square root, so "
+          "the "
           "<a href=\"llm-in-kernel.html\">inference code</a> carries its own "
           "implementations and the boot self-test checks them against known values."),
         h2("What ownership buys at ring 0"),
@@ -783,7 +782,7 @@ page(
           "becomes the dominant cost."),
         p("A language model driving an operating system makes a great many very "
           "small calls. A tool invocation, a namespace lookup, a read of the applet "
-          "table, the sampler asking which tokens the grammar still permits — in a "
+          "table, the sampler asking which tokens the grammar still permits. In a "
           "conventional design every one of those is a boundary crossing, and the "
           "grammar question happens once per token."),
         p("Removing the boundary also removes the reason tool calls are text. When "
@@ -804,9 +803,8 @@ page(
            "then.",
            "A script that exhausts the heap exhausts <em>the</em> heap, and the "
            "allocator has nowhere to fail back to."),
-        p("Some of that is mitigated. Virtual page zero is "
-          "deliberately left unmapped — it costs one extra page table for the first "
-          "2 MiB — so a null dereference produces a hard fault with a legible "
+        p("Some of that is mitigated. Virtual page zero is deliberately left unmapped, which costs one extra page table "
+          "for the first 2 MiB, so a null dereference produces a hard fault with a legible "
           "message from the page-fault reporter instead of silently reading whatever "
           "the firmware happened to leave at address zero. Scripts run under "
           "capabilities, and a tame mode refuses raw port access by name before the "
@@ -819,8 +817,8 @@ page(
           "for one laptop, booted from a USB stick, running one model that is not "
           "adversarial and is in any case too small to be much of anything. The "
           "failure mode being designed against is a bug, and the tool against bugs is the self-test output at boot."),
-        p("The alternative — claiming a security boundary and enforcing it "
-          "incompletely — is worse than having none, because it invites the system "
+        p("The alternative, claiming a security boundary and enforcing it "
+          "incompletely, is worse than having none, because it invites the system "
           "to be used as though the boundary were real. So the documentation says "
           "there is no isolation, the shell says it, and "
           "<a href=\"tls.html\">the TLS page</a> says the equivalent thing about "
@@ -842,8 +840,8 @@ page(
             "filesystem driver, a memory allocator and a framebuffer, all available "
             "before your code starts.",
             "The UEFI logo"),
-        p("A kernel is normally loaded by a bootloader — GRUB, systemd-boot, limine "
-          "— which reads an ELF file off a filesystem, arranges long mode, gathers a "
+        p("A kernel is normally loaded by a bootloader (GRUB, systemd-boot, limine) which reads "
+          "an ELF file off a filesystem, arranges long mode, gathers a "
           "memory map and jumps to an entry point under an agreed calling "
           "convention. Two codebases, one handoff contract between them, and a "
           "great deal of setup code."),
@@ -869,9 +867,9 @@ page(
           "jumps into the middle of an unrelated firmware routine, which presents as "
           "a spontaneous reboot with nothing printed."),
         h2("The one-way door"),
-        p("Boot services — the filesystem access, the allocator, the console, the "
-          "device protocols, the firmware's own USB and disk drivers — exist only "
-          "until <code>ExitBootServices</code>. After that call they are gone "
+        p("Boot services, meaning the filesystem access, the allocator, "
+          "the console, the device protocols and the firmware's own USB and "
+          "disk drivers, exist only until <code>ExitBootServices</code>. After that call they are gone "
           "permanently, every pointer into them is dangling, and there is no way "
           "back. The firmware does not offer a re-entry."),
         p("So everything the kernel will ever need from disk has to be read before "
@@ -892,9 +890,8 @@ page(
           "the firmware's own page tables stay active instead."),
         p("The reason this was expensive and not merely wrong: the "
           "firmware's "
-          "tables map page zero. So the null-dereference self-test — which exists "
-          "specifically to prove that page zero is unmapped — passed, without "
-          "faulting, because the mapping it was testing for had never been "
+          "tables map page zero. So the null-dereference self-test, which exists specifically to "
+          "prove that page zero is unmapped, passed without faulting, because the mapping it was testing for had never been "
           "installed. A test that passes for the exact reason it should fail is the "
           "worst possible outcome, and it is the reason boot now prints the map "
           "limit it chose."),
@@ -904,8 +901,8 @@ page(
           "address, covering RAM out to 4 GiB, with one deliberate exception. "
           "Virtual page zero is left unmapped. That costs one extra page table to "
           "describe the first 2 MiB at 4 KiB granularity instead of one large page, "
-          "and it buys a hard fault on every null dereference — which, given the "
-          "page-fault reporter, turns the most common bug in the kernel into a legible message "
+          "and it buys a hard fault on every null dereference, which, given "
+          "the page-fault reporter, turns the most common bug in the kernel into a legible message "
           "instead of a silent read of whatever the firmware happened to "
           "leave lying at address zero."),
         p("Non-RAM pages are mapped uncacheable, which is not optional: a doorbell "
@@ -915,8 +912,8 @@ page(
         p("Then a GDT, an IDT with the fault handlers installed, the local APIC "
           "timer at 100 Hz for preemption, and a PS/2 keyboard, in that order. The "
           "frame allocator underneath all of it is a bump allocator over the UEFI "
-          "memory map that never frees, which is exactly right for what it is used "
-          "for — the page tables and the initial heap both live for the lifetime of "
+          "memory map that never frees, which is exactly right for what it is used for: the page tables "
+          "and the initial heap both live for the lifetime of "
           "the machine."),
         ("seealso", ["rust-os", "ring-0", "usb-xhci", "iso-el-torito"]),
     ],
@@ -975,8 +972,8 @@ page(
           "Producing "
           "one token requires reading essentially every weight once, so the number "
           "that predicts throughput is the size of the model in bytes, not its FLOP "
-          "count. That is why the 570 MB Qwen3 checkpoint costs about 4.4 times as "
-          "long per token as the 135 MB SmolLM2 one — almost exactly the size ratio, "
+          "count. That is why the 570 MB Qwen3 checkpoint costs about 4.4 times as long per token as the 135 MB SmolLM2 one, almost exactly the "
+          "size ratio, "
           "which is the signature of a bandwidth-bound workload."),
         p("Around 155 MB of that 570 is the output classifier: one matrix multiply "
           "against the full vocabulary, performed once per token, to produce logits "
@@ -1038,17 +1035,17 @@ page(
           "1024. The attention path is deliberately wider than the thing it reads "
           "from, and narrows again on the way out."),
         p("Derive it instead and every attention tensor gets reshaped along the "
-          "wrong axis. The shapes remain self-consistent — that is the trap, since "
-          "64 divides 1024 perfectly well — so nothing asserts, nothing overflows, "
+          "wrong axis. The shapes remain self-consistent, which is the trap, since 64 "
+          "divides 1024 perfectly well, so nothing asserts, nothing overflows, "
           "and the model loads and runs and produces confident nonsense. The source "
           "comment on that field names it as the first thing to suspect when a "
           "converted model is fluent and wrong."),
         h2("QK-Norm"),
         p("Qwen3 also applies RMSNorm to each head's queries and keys, per head, "
-          "before rotary embeddings go on. Omitting the step leaves the network "
-          "numerically well-behaved — the vectors are just a bit longer than they "
-          "should be, in a way softmax mostly absorbs — and it will keep producing "
-          "fluent English. The text is coming from a network being fed activations "
+          "before rotary embeddings go on. Omitting the step leaves the network numerically well-behaved, since the vectors "
+          "come out only a little longer than they should be and softmax "
+          "absorbs most of the difference, and it will keep producing fluent "
+          "English. The text is coming from a network being fed activations "
           "at a scale it never saw in training, which is a model hallucinating for a mechanical reason, and the "
           "mechanical kind does not go away with a better prompt."),
         h2("How these get caught"),
@@ -1086,7 +1083,7 @@ page(
           "first time someone renames a file."),
         h2("Getting it onto the machine"),
         p("The checkpoint arrives as safetensors and is flattened by a converter "
-          "into a layout the kernel indexes by arithmetic — a header followed by "
+          "into a layout the kernel indexes by arithmetic: a header followed by "
           "tensors in a fixed order, so loading is a matter of "
           "computing offsets against a buffer that was read before "
           "<code>ExitBootServices</code>. Nothing is rearranged at boot, because "
@@ -1103,10 +1100,10 @@ page(
           "dynamic range representing a handful of large values badly while "
           "flattening everything else."),
         h2("Running it at all"),
-        p("Qwen3-0.6B only runs on real hardware. QEMU's built-in FAT support caps "
-          "the whole emulated disk at 516 MB — <code>fat:32:</code> raises that in "
-          "principle, but QEMU describes its FAT32 as untested and the firmware "
-          "cannot read the directory it produces — so QEMU work uses the SmolLM2 "
+        p("Qwen3-0.6B only runs on real hardware. QEMU's built-in FAT support caps the whole emulated disk at 516 MB. (<code>fat:32:</code> "
+          "raises that in principle, but QEMU describes its FAT32 as "
+          "untested and the firmware cannot read the directory it produces.) "
+          "So QEMU work uses the SmolLM2 "
           "checkpoint and the real model is only exercised on the GF63, or "
           "numerically against the reference implementation."),
         ("seealso", ["llm-in-kernel", "rope", "tokenizer", "kv-cache"]),
@@ -1166,7 +1163,7 @@ page(
           "notion of distance: tokens that should be five apart score as though they "
           "were some other distance apart, consistently but wrongly. From outside, "
           "the result is a model that is a bit vague, loses the thread over long "
-          "spans, and repeats itself — which is an exact description of a small "
+          "spans, and repeats itself, which is an exact description of a small "
           "model being small. There is no observation that separates the two except "
           "comparing against a reference or checking a fact."),
         h2("What it cost, measured"),
@@ -1238,8 +1235,8 @@ page(
         p("The measured error is not symmetric between keys and values: keys carry "
           "roughly fifteen times the impact. The reason is structural. A key goes into a dot product whose result then passes through "
           "softmax, which is exponential, so a small perturbation in a score becomes "
-          "a disproportionate change in attention weight — and because softmax "
-          "normalises, that error redistributes across every other position too. A "
+          "a disproportionate change in attention weight, and because "
+          "softmax normalises, that error redistributes across every other position too. A "
           "value is only ever averaged, and averaging is forgiving. If you have "
           "quantisation budget to spend unevenly, spend it on the keys."),
         h2("Attention sinks and a sliding window"),
@@ -1254,8 +1251,8 @@ page(
           "tokens are pinned in place as attention sinks and everything after them "
           "slides. The sinks look like an arbitrary hack and are not. Transformers "
           "place a large amount of attention mass on the first few positions "
-          "regardless of what those tokens actually say — the mechanism appears to "
-          "be that softmax must sum to one, so a head with nothing it wants to "
+          "regardless of what those tokens actually say. The mechanism "
+          "appears to be that softmax must sum to one, so so a head with nothing it wants to "
           "attend to has to put its mass somewhere, and the beginning of the "
           "sequence is the one place every query can see."),
         p("Evict those positions and every head that was using them as a null option "
@@ -1277,15 +1274,15 @@ page(
           "attention over a sliding window each time. That is correct, and it is "
           "quadratic in the window length, which turns every token into a "
           "prefill. On a machine that is already bandwidth-bound and single-core, "
-          "the cache is not an optimisation to be traded away — it is what makes "
-          "generation possible at a usable rate at all."),
+          "the cache is not an optimisation to be traded away; it is what "
+          "makes generation possible at a usable rate at all."),
         p("The int8 encoding and the sink-plus-window scheme are therefore both "
           "answers to the same question: how to keep the cache, given that doing without one is not an "
           "option."),
         note("Memory stops being the binding constraint before speed does. Attention "
              "is linear in the number of live positions, so at 32k tokens it comes "
-             "to roughly 3.8 GMAC per token on top of the model's own 0.6 GMAC — "
-             "several seconds per token at full context. That is a perfectly good "
+             "to roughly 3.8 GMAC per token on top of the model's own 0.6 GMAC, which is several seconds "
+             "per token at full context. That is a perfectly good "
              "rate for reading one long document once, and an unpleasant one for a "
              "conversation."),
         ("seealso", ["llm-in-kernel", "qwen3", "rope"]),
@@ -1308,8 +1305,8 @@ page(
           "is invisible."),
         p("The kernel's tokenizer reads a flat binary: a maximum token length, then "
           "one record per vocabulary entry holding a merge score, a length and that "
-          "many raw bytes. The vocabulary size deliberately is not in the file — it "
-          "comes from the model header, which is what binds a tokenizer to a "
+          "many raw bytes. The vocabulary size deliberately is not in the file. It comes "
+          "from the model header, which is what binds a tokenizer to a "
           "particular checkpoint. Hand it a mismatched pair and it parses "
           "cheerfully and produces nonsense."),
         h2("The regexes differ, and it matters"),
@@ -1322,17 +1319,16 @@ page(
            "every line ending in a full stop tokenises."),
         p("SmolLM2 trained with the GPT-2 pattern. Qwen3 spells out the cl100k one "
           "explicitly as a Split rule in its tokenizer configuration. Using the "
-          "wrong one moved about 12% of tokens across this project's training "
-          "corpus — including, unhelpfully, the ChatML control structure that the "
+          "wrong one moved about 12% of tokens across this project's training corpus, "
+          "including, unhelpfully, the ChatML control structure that the "
           "instruction tuning depends on, where <code>&lt;|im_start|&gt;</code> and "
           "its neighbours have to land exactly as trained."),
         h2("Twelve percent of nothing visible"),
         p("There is no error anywhere in that. The tokenizer emits ids, the ids are "
           "in range, the model consumes them and produces fluent text. What is "
           "happening underneath is that the model is being handed sequences whose "
-          "segmentation it never saw in training, and transformers degrade gently under that without failing — a "
-          "word split two ways instead of one "
-          "still carries most of its meaning through the embedding."),
+          "segmentation it never saw in training, and transformers degrade gently under that without failing, since a word split two "
+          "ways instead of one still carries most of its meaning through the embedding."),
         p("The fix is the same shape as the one for "
           "<a href=\"qwen3.html\">head width and QK-norm</a>: the checkpoint carries "
           "which pre-tokenizer it needs as a flag in its own header, so the fact "
@@ -1367,7 +1363,7 @@ page(
           "and every one of them fails silently if guessed."),
         h2("An earlier design, and why it was abandoned"),
         p("The model code was originally written around a byte-level vocabulary of "
-          "256 entries, which removes the tokenizer completely — no merge table, no "
+          "256 entries, which removes the tokenizer completely: no merge table, and no "
           "vocabulary file to get onto a machine that has no filesystem driver yet. "
           "For bootstrapping something that had to run before storage existed, that "
           "was the right trade."),
@@ -1402,9 +1398,8 @@ page(
             "transitions"),
         p("The standard way to get a tool call out of a language model is to ask for "
           "one in the prompt, generate text, parse the result, and handle the case "
-          "where the model named a tool that does not exist. That approach is not a "
-          "mistake — it is the only option available when the model sits behind an "
-          "API and the sole thing you control is the text going in and out. It is "
+          "where the model named a tool that does not exist. That approach is not a mistake; it is the only option available "
+          "when the model sits behind an API and the sole thing you control is the text going in and out. It is "
           "also why tool calling is usually said to need a large model: a good fraction of the capability goes on producing well-formed "
           "syntax when it could have gone on choosing correctly."),
         p("GLaDOS owns the sampler, so none of that applies."),
@@ -1413,10 +1408,10 @@ page(
           "prefix into a valid name from the live applet table is computable. The "
           "sampler is handed exactly that set, and every other logit is removed before sampling, with nothing "
           "checked afterwards."),
-        p("The consequence is categorical, not statistical. There is no "
-          "sequence of sampling outcomes that produces an invalid applet name — not "
-          "an unlikely one, an unreachable one. Temperature is irrelevant. A badly "
-          "calibrated model is irrelevant. A 260K-parameter story model driven "
+        p("The consequence is categorical. No sequence of sampling "
+          "outcomes produces an invalid applet name, at any temperature, "
+          "however badly calibrated the model happens to be. A "
+          "260K-parameter story model driven "
           "through this grammar will choose absurdly and will still never emit "
           "anything other than a real applet name, which is a useful property to "
           "have tested against, since it proves the mechanism holds independently of "
@@ -1439,8 +1434,8 @@ page(
           "called a mutating applet would insert a mutating entry into the read-only "
           "grammar, and the guarantee would leak through the one door it was not "
           "watching. So the system walks the syntax tree instead, and treats any "
-          "call whose target is not a literal string as mutating — a computed name "
-          "cannot be resolved ahead of time, and guessing would break the property "
+          "call whose target is not a literal string as mutating, because a computed "
+          "name cannot be resolved ahead of time, and guessing would break the property "
           "that makes the whole thing worth having."),
         h2("How it is tested"),
         p("The grammar self-test runs at every boot. It performs 200 random decodes "
@@ -1468,9 +1463,9 @@ page(
           "<code>snap</code> and <code>snaps</code> both exist, then after decoding "
           "<code>snap</code> the machine is simultaneously at an accepting state and "
           "able to continue. An implementation that treats \"can continue\" as \"must "
-          "continue\" makes the shorter name impossible to finish, and the applet "
-          "quietly becomes unreachable — a bug that only appears when someone adds a "
-          "name that extends an existing one, which is to say, later."),
+          "continue\" makes the shorter name impossible to finish, and the applet quietly becomes unreachable. That bug only appears "
+          "when someone adds a name extending an existing one, which is to "
+          "say, later."),
         ("seealso", ["routing", "llm-in-kernel", "tokenizer", "glados-os"]),
     ],
 )
@@ -1489,9 +1484,9 @@ page(
             "regularisation term, and it is what routes tool calls here.",
             "A scatter plot with a fitted least-squares regression line"),
         p("Given a task written in natural language, something has to decide which "
-          "applet to call. There are two implementations of that in the tree, and "
-          "the interesting result — interesting enough that it shaped how the rest "
-          "of the project is evaluated — is that the much older idea wins "
+          "applet to call. There are two implementations of that in the tree, and the interesting result, interesting enough that it shaped how "
+          "the rest of the project is evaluated, is that the much older idea "
+          "wins "
           "comfortably."),
         h2("The two paths"),
         table(
@@ -1505,9 +1500,9 @@ page(
               "12,672 parameters, ~1.6 ms, no forward pass", "54.7%"]]),
         p("The winner is a linear probe. Take the hidden state the model has already "
           "computed while reading the request, subtract a mean, and multiply by a "
-          "576×22 matrix. That matrix is solved in closed form — "
-          "<code>W = (A'A + λI)⁻¹A'Y</code>, by Cholesky decomposition — which is "
-          "ridge regression onto one-hot targets, or Widrow-Hoff least mean squares "
+          "576×22 matrix. That matrix is solved in closed form, <code>W = (A'A + "
+          "λI)⁻¹A'Y</code>, by Cholesky decomposition, which is ridge "
+          "regression onto one-hot targets, or Widrow-Hoff least mean squares "
           "as published in 1960, solved directly instead of by descent."),
         p("It costs effectively nothing, because the hidden state is a byproduct of "
           "work already done, and it beats asking the 135M transformer the same "
@@ -1519,8 +1514,8 @@ page(
           "twenty-one classes there is nothing for SGD to do except memorise, and it "
           "did, thoroughly."),
         p("Ridge regression has no such failure mode. There is no learning rate, no "
-          "epoch count and no schedule, so there is no way for it to drift past the "
-          "optimum — it <em>is</em> the optimum for the regularisation chosen. That property is also what makes fitting practical on the machine "
+          "epoch count and no schedule, so there is no way for it to drift past the optimum; it <em>is</em> the "
+          "optimum for the regularisation chosen. That property is also what makes fitting practical on the machine "
           "itself: a 576×576 Cholesky is about 64 million operations, a "
           "fraction of a second, so the system can refit from its own accumulated "
           "corpus every time someone runs <code>teach</code>."),
@@ -1534,8 +1529,8 @@ page(
         p("Three independent cores run over the same request: the ridge probe, a "
           "multinomial naive Bayes over hashed character trigrams, and a lexical one "
           "over exact token identity. The two Bayes cores are trained by counting, "
-          "so there is no matrix to factorise, and each sees something the probe "
-          "cannot — the character core notices that \"duplicating\" and "
+          "so there is no matrix to factorise, and each sees something the probe cannot. The character core "
+          "notices that \"duplicating\" and "
           "\"duplicate\" share most of their trigrams even when they tokenise "
           "differently, and needs no tokenizer at all."),
         p("The obvious thing to do with three cores is combine them into a better "
@@ -1546,8 +1541,8 @@ page(
         p("What the same measurement did show is that their agreement predicts "
           "correctness sharply. Where all three pick the same applet they are right "
           "90.3% of the time; where they split, 50%. So the probe answers, the other "
-          "two corroborate, and their disagreement never changes the answer — it "
-          "changes what the system says about the answer. A router that knows when "
+          "two corroborate, and their disagreement never changes the answer; it changes what the "
+          "system says about the answer. A router that knows when "
           "it is guessing can ask, escalate or refuse. One that is silently 78% "
           "accurate cannot, and that is worth considerably more than the point or "
           "two the ensemble was supposed to buy."),
@@ -1560,9 +1555,8 @@ page(
           "were not comparable across runs and nobody noticed for a while."),
         p("The current arrangement has three splits rather than two. Validation is "
           "spent freely; the test slice is read once, at the end. A configuration is "
-          "adopted only when it measures better, and the corpus holds out whole "
-          "template families rather than sampled instances — instances within a "
-          "family differ only by their slot values, so an instance split measures "
+          "adopted only when it measures better, and the corpus holds out whole template families rather than sampled instances, since "
+          "instances within a family differ only by their slot values, so an instance split measures "
           "memorisation while looking exactly like generalisation."),
         note("Negative results stay in the tree next to the code that produced them. "
              "The adapter head hurts at this data scale; the Product-of-Experts "
@@ -1582,8 +1576,8 @@ page(
      "retro UI", "OS graphics"],
     blocks=[
         p("There is no graphics library anywhere in this. UEFI's Graphics Output "
-          "Protocol hands the kernel four numbers — a base address, a width, a "
-          "height and a stride — and everything above them is written by hand: the "
+          "Protocol hands the kernel four numbers (a base address, a width, a height "
+          "and a stride) and everything above them is written by hand: the "
           "glyph renderer, the bevel primitives, the window manager, the wallpaper "
           "geometry and the taskbar. There is no VGA text mode to retreat to "
           "either, because the machine boots UEFI with no CSM, so there is no "
@@ -1593,8 +1587,8 @@ page(
         p("The look is not an approximation of the era, it is the actual "
           "construction:"),
         ul("A <code>#C0C0C0</code> face colour on every panel.",
-           "Two-pixel bevels — white along the top and left, dark grey along the "
-           "bottom and right — for a raised surface, and the same two colours "
+           "Two-pixel bevels, white along the top and left and dark grey "
+           "along the bottom and right, for a raised surface, and the same two colours "
            "swapped for a sunken one. That single trick is most of the visual "
            "language.",
            "Title bars that fill with the selection colour when focused and go grey "
@@ -1622,15 +1616,15 @@ page(
           "dialog over itself is a program with a pop-up; a desktop that hosts a "
           "terminal alongside other windows is an environment. The console already "
           "knew how to live inside a rectangle and reflow to it, so the terminal "
-          "needed no special case at all — it is a window whose contents happen to "
-          "be a character grid."),
+          "needed no special case at all; it is a window whose contents "
+          "happen to be a character grid."),
         p("Repainting is total, back to front, on every change: no damage tracking, "
           "no dirty rectangles. That is affordable because of what causes a change. "
           "Nothing here animates, so a repaint happens when a key is pressed or the "
           "mouse moves, which is at most a few times a second, and 1280×800 is about "
           "a million stores into a write-back-mapped aperture. Damage tracking would "
           "buy nothing measurable and would cost the property this code cannot "
-          "afford to lose, which is being obviously correct — the entire category of "
+          "afford to lose, which is being obviously correct. The entire category of "
           "\"stale pixels from a window that used to be there\" cannot occur if "
           "there is no such thing as a partial repaint."),
         ("shots", [
@@ -1682,9 +1676,8 @@ page(
         p("Every layer here is hand-written: ARP, IPv4, ICMP, UDP, TCP, DHCP, DNS "
           "and <a href=\"tls.html\">TLS 1.3</a>. Underneath them are drivers for the "
           "Intel e1000, the Realtek RTL8168 and "
-          "<a href=\"usb-xhci.html\">USB CDC Ethernet</a>. Interfaces are named — "
-          "<code>lo</code>, <code>eth0</code>, <code>wlan0</code> — routing picks "
-          "one by destination, and every address belongs to an interface, not to the machine."),
+          "<a href=\"usb-xhci.html\">USB CDC Ethernet</a>. Interfaces are named (<code>lo</code>, <code>eth0</code>, "
+          "<code>wlan0</code>), routing picks one by destination, and every address belongs to an interface, not to the machine."),
         p("<code>ping</code> was the first milestone, deliberately, because it "
           "exercises the entire path and produces one visible result. PCI discovery, "
           "an MMIO mapping, DMA rings, frame parsing, ARP resolution, an IPv4 header "
@@ -1709,9 +1702,8 @@ page(
             "The TCP connection state transition diagram",
             wide=True),
         h2("What the TCP implementation is, and is not"),
-        p("It handles one connection at a time, actively opened, which is enough to "
-          "fetch something over HTTP — and a byte stream is the thing every useful "
-          "protocol is built on, so until one exists the network can only answer "
+        p("It handles one connection at a time, actively opened, which is enough to fetch something over HTTP, and a byte stream "
+          "is the thing every useful protocol is built on, so until one exists the network can only answer "
           "questions about itself. What is there: the RFC 793 state machine for an "
           "active open, RFC 6298 retransmission with Jacobson/Karels round-trip "
           "estimation and Karn's algorithm, sequence arithmetic that survives "
@@ -1753,8 +1745,8 @@ page(
            "endpoint\" meant a send completed against an arriving receive. DHCP kept "
            "working, because it alternates send and receive and the mismatched "
            "events happened to pair up; ARP broke, because it has no send to "
-           "piggyback on. That asymmetry is what identified the bug — the protocol "
-           "that worked was the clue, not the one that failed."),
+           "piggyback on. That asymmetry is what identified the bug: the protocol that "
+           "worked was the clue, not the one that failed."),
         h2("What it can actually do"),
         p("From the shell: <code>dhcp</code> obtains a lease and configures the "
           "interface, <code>ping</code> round-trips, <code>dns example.com</code> "
@@ -1806,8 +1798,8 @@ page(
             "construction over an elliptic curve.",
             "Diagram of the Diffie-Hellman key exchange using mixed colours as an "
             "analogy"),
-        p("Every primitive is checked against published RFC and FIPS test vectors at "
-          "every boot — eleven vector sets in total — and the boot log prints a pass "
+        p("Every primitive is checked against published RFC and FIPS test vectors at every boot, eleven vector sets in total, and the "
+          "boot log prints a pass "
           "or fail line for each one."),
         h2("An ECDSA break that sat in plain sight"),
         p("That self-test output is easy to scroll past, and scrolling past it cost "
@@ -1848,17 +1840,17 @@ page(
           "<em>ordinary</em> values, so handing it something already in Montgomery "
           "form computes the wrong answer and says nothing. There is a wrapper that "
           "converts correctly, and using it is not optional. This is the same shape "
-          "of failure as the model bugs elsewhere in this wiki — a representation "
-          "mismatch that produces well-formed output — which is why the boot vectors "
-          "exist."),
+          "of failure as the model bugs elsewhere in this wiki, a representation "
+          "mismatch that produces well-formed output, which is why the boot "
+          "vectors exist."),
         h2("What is still not safe"),
         ul("Validation reports, and does not enforce. The <code>https</code> command "
            "prints what was established and shows the body either way, which is a "
            "deliberate choice for a system whose purpose is inspection and the exact "
            "opposite of what a browser should do. A caller that cares has to check "
            "the result itself.",
-           "There is no revocation checking of any kind — no CRL, no OCSP — so a "
-           "certificate withdrawn by its issuer is accepted here until it expires.",
+           "There is no revocation checking of any kind, no CRL and no "
+           "OCSP, so a certificate withdrawn by its issuer is accepted here until it expires.",
            "Key material comes from the timestamp counter and not from "
            "<code>RDRAND</code>. A counter is not a random number generator. This is "
            "a genuine weakness and it is on the list.",
@@ -1907,16 +1899,14 @@ page(
           "they became cheap."),
         h2("The rule that makes it work"),
         p("The content hash covers content only, and never block locations. This "
-          "sounds too obvious to state and is easy to violate by including a block "
-          "pointer somewhere in the hashed structure — at which point moving a block "
-          "to defragment renames the object that contains it, every reference to "
+          "sounds too obvious to state and is easy to violate by including a block pointer somewhere in the hashed structure, at which point "
+          "moving a block to defragment renames the object that contains it, every reference to "
           "that object breaks, and deduplication stops working without any error "
           "being raised."),
         h2("Surviving power loss"),
         p("Three properties, each chosen against a specific failure. The store is "
-          "append-only, so chunks are never rewritten and a checkpoint that fails "
-          "halfway cannot damage an earlier one — it never touches the blocks an "
-          "earlier one occupies. It is content-addressed, so every chunk carries the "
+          "append-only, so chunks are never rewritten and a checkpoint that fails halfway cannot damage an earlier one, "
+          "because it never touches the blocks an earlier one occupies. It is content-addressed, so every chunk carries the "
           "SHA-256 of its contents and reads verify it, which means corruption "
           "surfaces at read time instead of propagating into whatever is being "
           "restored."),
@@ -1936,8 +1926,8 @@ page(
             "An M.2 NVMe solid state drive"),
         h2("The driver, and why it is small"),
         p("The NVMe driver exists at all because of decisions made earlier. Identity "
-          "mapping means virtual equals physical, so a heap pointer <em>is</em> a "
-          "DMA address — no IOMMU setup, no translation, no bounce buffers. PCI "
+          "mapping means virtual equals physical, so a heap pointer <em>is</em> a DMA address, with no IOMMU setup, "
+          "no translation and no bounce buffers. PCI "
           "enumeration through ECAM finds the controller and its BAR. And non-RAM "
           "pages are mapped uncacheable, so doorbell writes actually reach the device and do not sit in a "
           "write-back cache line, which is the kind "
@@ -1955,9 +1945,8 @@ page(
           "than a bug to work around. Leaving the lock open on a failure path is "
           "precisely how a safety mechanism becomes decorative."),
         note("The development machine's boot disk is counterfeit. It advertises "
-             "976 GB and holds 14.67, which is why the partitioning tooling uses MBR "
-             "— a GPT backup header would be written to flash that does not exist — "
-             "and why it carries an explicit safe-capacity limit. Nothing anyone "
+             "976 GB and holds 14.67, which is why the partitioning tooling uses MBR (a GPT backup header would "
+             "be written to flash that does not exist) and why it carries an explicit safe-capacity limit. Nothing anyone "
              "cares about goes on that disk."),
         ("seealso", ["glados-os", "tls", "testing"]),
     ],
@@ -1995,8 +1984,8 @@ page(
         p("That single bit is the entire synchronisation protocol between driver and "
           "controller. The controller consumes entries whose cycle matches its "
           "current state and stops at the first that does not, so both sides know "
-          "which entries are new without any other coordination. Get it wrong and "
-          "nothing is corrupted — the controller simply never sees the command, "
+          "which entries are new without any other coordination. Get it wrong and nothing is corrupted. The controller simply "
+          "never sees the command, "
           "which presents as a device that enumerates and then goes quiet, with no "
           "error anywhere to attach a debugger to."),
         p("Three kinds of ring matter: a command ring the driver writes and the "
@@ -2042,7 +2031,7 @@ page(
           "which accepts bulk writes cheerfully and passes nothing at all, because "
           "it wants a control protocol spoken to it first."),
         p("The correct test is the presence of an Ethernet Networking Functional "
-          "Descriptor. That is also where the MAC address lives — as a string index, "
+          "Descriptor. That is also where the MAC address lives, as a string index "
           "resolved to ASCII hex, because CDC provides no binary field for it "
           "anywhere in the specification."),
         ("seealso", ["usb-wifi-driver", "network-stack", "uefi-kernel"]),
@@ -2065,9 +2054,8 @@ page(
         p("Wireless is the one major subsystem that does not work, and the reason is "
           "worth setting out, because it is not a question of effort."),
         h2("CNVi: the card is not a card"),
-        p("The laptop's built-in wireless is CNVi, Intel's split architecture. The "
-          "MAC — the part a driver would actually talk to — lives in the platform "
-          "controller hub, and the M.2 module is only a radio. Reaching it means an "
+        p("The laptop's built-in wireless is CNVi, Intel's split architecture. The MAC, the part a driver would actually talk to, lives in the "
+          "platform controller hub, and the M.2 module is only a radio. Reaching it means an "
           "undocumented signed-firmware protocol that is published nowhere."),
         p("It is worth being concrete about what a modern wireless driver costs, "
           "because \"add WiFi\" sounds like the same size of job as \"add "
@@ -2077,7 +2065,7 @@ page(
           "over a bootstrap protocol before it will do anything at all, "
           "non-redistributable and undocumented and different between families. Then "
           "an asynchronous host command interface with its own versioned message "
-          "formats. Then 802.11 itself — scanning, authentication, association, and "
+          "formats. Then 802.11 itself: scanning, authentication, association, and "
           "the fact that a wireless frame carries three or four address fields "
           "depending on direction, plus fragmentation and aggregation. Then WPA2."),
         p("So the wireless module identifies the hardware and declines to pretend it "
@@ -2118,9 +2106,8 @@ page(
         h2("Order is content"),
         p("One property of those tables deserves its own warning. The AGC table "
           "writes the <em>same register</em> 130 times in a row, with the table "
-          "index encoded into the value being written. It is not a set of "
-          "register/value assignments at all — it is a sequence, and the position of "
-          "each entry is part of the data."),
+          "index encoded into the value being written. It is a sequence, and the position of each entry is part of the "
+          "data."),
         p("Which means sorting it, deduplicating it, or reordering it for tidiness "
           "produces a completely different table that still looks entirely "
           "reasonable to anyone reading the source. The tooling that transcribed it "
@@ -2151,8 +2138,8 @@ page(
         h2("How UEFI boots an optical disc"),
         p("The firmware reads the El Torito boot catalog, looks for an entry whose "
           "platform id is <code>0xEF</code>, and treats the sectors that entry "
-          "points at as a FAT filesystem — an EFI System Partition that happens to "
-          "be living inside an ISO image. It then loads "
+          "points at as a FAT filesystem: an EFI System Partition that "
+          "happens to be living inside an ISO image. It then loads "
           "<code>\\EFI\\BOOT\\BOOTX64.EFI</code> from it and jumps."),
         p("Which makes the ISO 9660 structure wrapped around the whole thing almost "
           "ceremonial: it exists so the disc mounts and shows its contents, not so "
@@ -2165,9 +2152,8 @@ page(
         h2("Long file names are not optional"),
         p("The kernel opens <code>\\GLADOS\\tokenizer.bin</code>. That base name is "
           "nine characters and has no 8.3 representation, so a short-name-only image "
-          "presents it as <code>TOKENI~1.BIN</code> and the kernel fails to find its "
-          "tokenizer at boot — on real hardware, at the exact moment there is no "
-          "filesystem left to debug from, since this all happens after "
+          "presents it as <code>TOKENI~1.BIN</code> and the kernel fails to find its tokenizer at boot, on real hardware, "
+          "at the exact moment there is no filesystem left to debug from, since this all happens after "
           "<code>ExitBootServices</code>."),
         p("So the builder generates VFAT long-name entries, complete with the "
           "specified rotate-and-add checksum that ties each set of long entries to "
@@ -2190,8 +2176,8 @@ page(
         h2("Why write a FAT reader as well"),
         p("There is a matching FAT implementation inside the kernel, and it exists "
           "for a reason that only becomes obvious after "
-          "<code>ExitBootServices</code>. The firmware can read files, and does — "
-          "that is how the model gets loaded. But its filesystem driver dies with "
+          "<code>ExitBootServices</code>. The firmware can read files, and does; that is how the model gets "
+          "loaded. But its filesystem driver dies with "
           "boot services, so from the moment the kernel owns the machine it can "
           "address every block on the disk and understand none of them. That gap is "
           "the difference between a system that boots and a system you could use to "
@@ -2250,8 +2236,8 @@ page(
            "built."),
         h2("Where the two diverge"),
         p("TempleOS had HolyC serving as compiler, shell and system language "
-          "simultaneously, which is a genuinely radical unification — the command "
-          "line was the language, and the language was compiled. GLaDOS has "
+          "simultaneously, which is a genuinely radical unification: the command line was "
+          "the language, and the language was compiled. GLaDOS has "
           "<a href=\"glados-os.html\">a small interpreted language</a> in the shell, "
           "but the system is Rust and stays Rust, and the interpreter is a guest in it."),
         p("The organising question is different too. TempleOS was built around one "
@@ -2329,8 +2315,9 @@ page(
           "confirms that page zero faults, which is what caught the memory-map bug "
           "described on <a href=\"uefi-kernel.html\">the UEFI page</a>. And there is "
           "a floating-point guard that parks a known pattern in the vector registers "
-          "across a context switch and checks it survived — it never fires now, and "
-          "it fires immediately if extended state saving is removed."),
+          "across a context switch and checks it survived. It never fires "
+          "now, and it fires immediately if extended state saving is "
+          "removed."),
         note("It is easy to scroll past, and it does catch real bugs. An ECDSA break "
              "was sitting in the crypto block printing <code>FAIL</code> for an "
              "entire debugging cycle while the log was being sliced down to look at "
@@ -2342,9 +2329,8 @@ page(
           "sending commands and capturing everything that comes back. That makes a "
           "regression test out of any sequence someone can type."),
         p("Two details in there were not obvious in advance. QEMU's Windows stdio "
-          "backend reads console handles directly, so piping a script into it does "
-          "nothing whatsoever — silently, with no error and no output — whereas a "
-          "TCP socket behaves like a socket on every platform. And a stale firmware "
+          "backend reads console handles directly, so piping a script into it does nothing whatsoever, silently, "
+          "with no error and no output, whereas a TCP socket behaves like a socket on every platform. And a stale firmware "
           "boot entry sends the machine to the UEFI shell instead of the image, "
           "which is visually indistinguishable from the system failing to boot, so the NVRAM gets reset on every run and is never trusted."),
         p("The harness also captures the framebuffer through QEMU's monitor and "
