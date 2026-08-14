@@ -209,6 +209,15 @@ extern "x86-interrupt" fn mouse_isr(_frame: idt::InterruptStackFrame) {
     }
 
     if want == 4 {
+        // Untested against a real notch, and QEMU cannot supply one. Tracing
+        // the raw bytes showed the mouse in four-byte mode (the enable knock
+        // worked) with byte 3 always 0x00, and the monitor's `mouse_button 8`
+        // and `mouse_button 16` producing no packet at all, while
+        // `mouse_button 1` produced a clean 0x09 press and 0x08 release. So
+        // HMP has no wheel; verifying this needs QMP input-send-event or real
+        // hardware, and until then this decode is written from the spec rather
+        // than measured.
+        //
         // Low nibble, sign extended: 0x01 is one notch down, 0x0F one up.
         let z = (buf[3] & 0x0F) as i8;
         let z = if z & 0x08 != 0 { z - 16 } else { z };

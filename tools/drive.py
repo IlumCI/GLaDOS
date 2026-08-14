@@ -339,7 +339,25 @@ def main():
                     if idle_prompts >= 2:
                         if mouse:
                             monitor(mouse)
-                            time.sleep(0.8)
+                            # Keep reading afterwards. Anything the guest says
+                            # in response to a pointer event is emitted after
+                            # the last prompt, and the loop that reads the
+                            # socket has already decided it is done -- so
+                            # without this the bytes sit in the buffer and the
+                            # socket closes on top of them. That cost a run
+                            # whose whole purpose was a trace, and read as the
+                            # interrupt never firing.
+                            deadline2 = time.time() + 2.0
+                            while time.time() < deadline2:
+                                try:
+                                    extra = sock.recv(4096)
+                                except socket.timeout:
+                                    continue
+                                except OSError:
+                                    break
+                                if extra:
+                                    sys.stdout.write(extra.decode("utf-8", "replace"))
+                                    sys.stdout.flush()
                         if shot:
                             capture(shot)
                         break
