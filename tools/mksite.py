@@ -1439,10 +1439,14 @@ page(
 # rendering
 # --------------------------------------------------------------------------
 
-CSS = """/* Layout copied in proportion from linux.org as it stood in 2005: a fixed
-   centre column, a coloured masthead bar, a narrow left nav of boxed sections,
-   and a white content well. Aperture supplies the two colours and nothing
-   else. */
+CSS = """/* Layout copied from linux.org as it stood in 2005: a coloured masthead bar, a
+   left column of boxed navigation sections, and a white content well. Aperture
+   supplies the two colours and nothing else.
+
+   Fluid rather than the original's fixed 850px. That width existed because
+   screens were 1024x768; reproducing it on a modern display is not period
+   accuracy, it is a narrow strip of text between two fields of grey. Type is
+   scaled up for the same reason: 11px was legible on a 15 inch CRT. */
 
 body {
   background: #e8e8e8;
@@ -1450,8 +1454,8 @@ body {
   margin: 0;
   padding: 0;
   font-family: Verdana, Arial, sans-serif;
-  font-size: 12px;
-  line-height: 1.5;
+  font-size: 15px;
+  line-height: 1.6;
 }
 
 a { color: #964b00; }
@@ -1459,56 +1463,53 @@ a:visited { color: #6b3600; }
 a:hover { color: #f28c1e; }
 
 #page {
-  width: 900px;
-  margin: 0 auto;
+  width: 100%;
   background: #fff;
-  border-left: 1px solid #999;
-  border-right: 1px solid #999;
 }
 
 #masthead {
   background: #b35900;
-  padding: 8px 10px;
+  padding: 12px 18px;
   overflow: hidden;
 }
-#masthead img { float: left; margin-right: 10px; }
+#masthead img { float: left; margin-right: 12px; }
 #masthead .name {
   color: #fff;
-  font-size: 19px;
+  font-size: 26px;
   font-weight: bold;
   text-decoration: none;
 }
-#masthead .sub { color: #f4e2c8; font-size: 11px; display: block; }
+#masthead .sub { color: #f4e2c8; font-size: 14px; display: block; }
 
 #bar {
   background: #f4e6d0;
   border-top: 1px solid #b35900;
   border-bottom: 1px solid #b35900;
-  padding: 3px 10px;
-  font-size: 11px;
+  padding: 5px 18px;
+  font-size: 13px;
 }
 #bar a { text-decoration: none; }
 #bar a:hover { text-decoration: underline; }
 
-#body { overflow: hidden; padding: 10px; }
-#sidebar { float: left; width: 150px; }
-#content { margin-left: 162px; }
+#body { overflow: hidden; padding: 14px 18px 24px; }
+#sidebar { float: left; width: 210px; }
+#content { margin-left: 228px; }
 
 .box { margin-bottom: 10px; }
 .box .t {
   background: #b35900;
   color: #fff;
-  font-size: 11px;
+  font-size: 13px;
   font-weight: bold;
-  padding: 2px 5px;
+  padding: 3px 7px;
 }
 .box ul {
   margin: 0;
-  padding: 4px 4px 5px 20px;
+  padding: 6px 6px 7px 24px;
   background: #f4e6d0;
   border: 1px solid #d8bc94;
   border-top: 0;
-  font-size: 11px;
+  font-size: 13px;
   list-style: square;
 }
 .box li { margin: 2px 0; }
@@ -1516,31 +1517,41 @@ a:hover { color: #f28c1e; }
 .box a:hover { text-decoration: underline; }
 
 h1 {
-  font-size: 18px;
+  font-size: 26px;
   font-weight: bold;
   margin: 0 0 6px;
   padding-bottom: 3px;
   border-bottom: 1px solid #b35900;
 }
 h2 {
-  font-size: 14px;
+  font-size: 19px;
   font-weight: bold;
   margin: 18px 0 5px;
   padding-bottom: 2px;
   border-bottom: 1px solid #ccc;
 }
-h3 { font-size: 12px; font-weight: bold; margin: 14px 0 4px; }
+h3 { font-size: 16px; font-weight: bold; margin: 16px 0 5px; }
 
 p { margin: 8px 0; }
 ul, ol { margin: 8px 0; padding-left: 22px; }
 li { margin: 3px 0; }
 
+/* The page fills the screen; the prose does not. At 1600px an uncapped
+   paragraph runs to about 157 characters a line, and the eye loses its place
+   on the way back to the left margin. Capped here rather than by narrowing the
+   whole column, so tables, code and screenshots still get the full width. */
+#main > p,
+#main > ul,
+#main > ol,
+#main > dl,
+#main > .note { max-width: 48em; }
+
 code {
   font-family: "Courier New", monospace;
   background: #f4f4f4;
   border: 1px solid #ddd;
-  padding: 0 2px;
-  font-size: 11px;
+  padding: 0 3px;
+  font-size: 13px;
 }
 pre {
   font-family: "Courier New", monospace;
@@ -1548,9 +1559,9 @@ pre {
   border: 1px solid #ccc;
   padding: 7px 9px;
   overflow-x: auto;
-  margin: 10px 0;
-  font-size: 11px;
-  line-height: 1.4;
+  margin: 12px 0;
+  font-size: 13px;
+  line-height: 1.45;
 }
 pre code { background: none; border: 0; padding: 0; }
 
@@ -1558,9 +1569,9 @@ pre code { background: none; border: 0; padding: 0; }
   display: table;
   background: #f9f9f9;
   border: 1px solid #ccc;
-  padding: 5px 14px 5px 5px;
-  margin: 10px 0;
-  font-size: 11px;
+  padding: 7px 18px 7px 7px;
+  margin: 12px 0;
+  font-size: 13px;
 }
 .toc .h { font-weight: bold; text-align: center; margin-bottom: 3px; }
 .toc ol { margin: 0; padding-left: 22px; }
@@ -1572,7 +1583,7 @@ pre code { background: none; border: 0; padding: 0; }
   margin: 10px 0;
 }
 
-table.data { border-collapse: collapse; margin: 10px 0; font-size: 11px; }
+table.data { border-collapse: collapse; margin: 12px 0; font-size: 13px; }
 table.data th, table.data td {
   border: 1px solid #ccc;
   padding: 3px 7px;
@@ -1583,11 +1594,11 @@ table.data th { background: #f4e6d0; }
 
 .infobox {
   float: right;
-  width: 230px;
+  width: 280px;
   border: 1px solid #ccc;
   background: #f9f9f9;
-  margin: 0 0 10px 12px;
-  font-size: 11px;
+  margin: 0 0 12px 16px;
+  font-size: 13px;
 }
 .infobox .ib-t {
   background: #b35900;
@@ -1601,7 +1612,7 @@ table.data th { background: #f4e6d0; }
 .infobox tr:last-child td { border-bottom: 0; }
 .infobox td:first-child { color: #555; width: 42%; }
 
-table.dl { border-collapse: collapse; width: 100%; margin: 10px 0; font-size: 11px; }
+table.dl { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 13px; }
 table.dl th, table.dl td {
   border: 1px solid #ccc;
   padding: 4px 7px;
@@ -1612,8 +1623,14 @@ table.dl th { background: #f4e6d0; }
 table.dl td.size { white-space: nowrap; }
 
 .shot { margin: 12px 0; }
-.shot img { display: block; border: 1px solid #999; max-width: 100%; height: auto; }
-.shot .cap { font-size: 11px; color: #444; margin-top: 3px; }
+.shot img {
+  display: block;
+  border: 1px solid #999;
+  width: 100%;
+  max-width: 1280px;
+  height: auto;
+}
+.shot .cap { font-size: 13px; color: #444; margin-top: 4px; }
 
 .wikilist { list-style: square; }
 .wikilist span { color: #555; }
@@ -1626,16 +1643,16 @@ dl.faq dd { margin: 3px 0 0 20px; }
   clear: both;
   background: #f4e6d0;
   border-top: 1px solid #b35900;
-  padding: 6px 10px;
-  font-size: 10px;
+  padding: 8px 18px;
+  font-size: 12px;
   color: #555;
 }
 #footer p { margin: 3px 0; }
 
-.crumbs { font-size: 11px; color: #555; margin-bottom: 6px; }
+.crumbs { font-size: 13px; color: #555; margin-bottom: 8px; }
 .crumbs a { color: #555; }
 
-.listing { border-collapse: collapse; width: 100%; font-size: 11px; }
+.listing { border-collapse: collapse; width: 100%; font-size: 13px; }
 .listing th {
   border-bottom: 1px solid #999;
   text-align: left;
@@ -1646,11 +1663,12 @@ dl.faq dd { margin: 3px 0 0 20px; }
 
 .skip { position: absolute; left: -9999px; }
 
-@media (max-width: 920px) {
-  #page { width: auto; border: 0; }
+@media (max-width: 45rem) {
   #sidebar { float: none; width: auto; }
   #content { margin-left: 0; }
   .infobox { float: none; width: 100%; margin-left: 0; }
+  #body { padding: 10px; }
+  #masthead, #bar, #footer { padding-left: 10px; padding-right: 10px; }
 }
 """
 
