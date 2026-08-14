@@ -60,6 +60,37 @@ const VENDOR_REQ: u8 = 0x05;
 /// is initialised.
 const REG_SYS_CFG: u16 = 0x00F0;
 
+// The rest of the register file this driver touches. Offsets and bit positions
+// are from Linux's rtl8xxxu regs.h; see rtl8188eu_tables.rs on provenance.
+const REG_SYS_FUNC: u16 = 0x0002;
+const REG_APS_FSMCO: u16 = 0x0004;
+const REG_LPLDO_CTRL: u16 = 0x0023;
+const REG_AFE_XTAL_CTRL: u16 = 0x0024;
+const REG_CR: u16 = 0x0100;
+
+const SYS_FUNC_BBRSTB: u32 = 1 << 0;
+const SYS_FUNC_BB_GLB_RSTN: u32 = 1 << 1;
+const APS_FSMCO_MAC_ENABLE: u32 = 1 << 8;
+const APS_FSMCO_HW_SUSPEND: u32 = 1 << 11;
+const APS_FSMCO_PCIE: u32 = 1 << 12;
+const APS_FSMCO_HW_POWERDOWN: u32 = 1 << 15;
+/// Power ready, in the same register.
+const APS_FSMCO_PFM_ALDN: u32 = 1 << 17;
+
+/// DMA, protocol, scheduler, security and the 32k calibration timer.
+///
+/// Deliberately *not* including the MAC TX and RX enables: the 88E has a
+/// hardware bug where setting them before `REG_TRXFF_BNDY` makes the receive
+/// FIFO boundary come out larger than the buffer actually is. Linux carries
+/// the same comment, and it is the kind of ordering constraint that corrupts
+/// quietly rather than failing.
+const CR_INIT: u32 = 0x063F;
+
+/// How many times to poll a register before giving up, matching Linux. Each
+/// poll here is a USB round trip rather than an MMIO read, so this is a much
+/// longer wall-clock timeout than the same number would be on a PCI part.
+const MAX_POLL: u32 = 500;
+
 /// USB ids that are an RTL8188EU behind some other company's badge.
 ///
 /// The dongle on this machine reports 2357:010c -- TP-Link, not Realtek -- and
@@ -157,4 +188,97 @@ pub struct ChipId {
     pub test_chip: bool,
     pub vendor_umc: bool,
     pub version: u8,
+}
+
+// --- power on -------------------------------------------------------------
+
+impl Regs<'_> {
+    /// Read, clear some bits, write back.
+    ///
+    /// Two USB round trips per call, which is why the sequence below is
+    /// written as explicit steps rather than folded into a table: half of
+    /// these are read-modify-write and a table of (register, value) pairs
+    /// cannot express one.
+    fn clear(&mut self, reg: u16, n: u16, bits: u32) -> Result<(), &'static str> {
+        let v = self.read(reg, n)?;
+        self.write(reg, n, v & !bits)
+    }
+
+    fn set(&mut self, reg: u16, n: u16, bits: u32) -> Result<(), &'static str> {
+        let v = self.read(reg, n)?;
+        self.write(reg, n, v | bits)
+    }
+
+    /// Poll a register until `f` is satisfied.
+    fn poll(&mut self, reg: u16, mut f: impl FnMut(u32) -> bool) -> Result<(), &'static str> {
+        for _ in 0..MAX_POLL {
+            if f(self.read(reg, 4)?) {
+                return Ok(());
+            }
+            crate::time::delay_us(10);
+        }
+        Err("register poll timed out")
+    }
+
+    /// Bring the chip from cold to a state where the MAC responds.
+    ///
+    /// This follows `rtl8188eu_power_on` in Linux step for step, including the
+    /// order, which is the part that matters: the sequence walks the chip
+    /// through disabled -> emulation -> active, and the analogue blocks need
+    /// settling time between stages that is expressed only as "this write
+    /// comes after that one". Reordering it produces a chip that acknowledges
+    /// every write and does not work.
+    pub fn power_on(&mut self) -> Result<(), &'static str> {
+        // Disabled to emulation: drop the suspend bits.
+        self.clear(REG_APS_FSMCO, 2, APS_FSMCO_HW_SUSPEND | APS_FSMCO_PCIE)?;
+
+        // Emulation to active.
+        self.poll(REG_APS_FSMCO, |v| v & APS_FSMCO_PFM_ALDN != 0)?;
+        self.clear(REG_SYS_FUNC, 1, SYS_FUNC_BBRSTB | SYS_FUNC_BB_GLB_RSTN)?;
+        // Schmitt trigger on the crystal input.
+        self.set(REG_AFE_XTAL_CTRL, 4, 1 << 23)?;
+        self.clear(REG_APS_FSMCO, 2, APS_FSMCO_HW_POWERDOWN)?;
+        self.clear(REG_APS_FSMCO, 2, APS_FSMCO_HW_SUSPEND | APS_FSMCO_PCIE)?;
+
+        // Setting MAC_ENABLE starts the power-up; the hardware clears the bit
+        // when it has finished, so the same bit is both the request and the
+        // completion flag.
+        self.set(REG_APS_FSMCO, 4, APS_FSMCO_MAC_ENABLE)?;
+        self.poll(REG_APS_FSMCO, |v| v & APS_FSMCO_MAC_ENABLE == 0)?;
+
+        // LDO back to normal mode.
+        self.clear(REG_LPLDO_CTRL, 1, 1 << 4)?;
+
+        self.write(REG_CR, 2, CR_INIT)
+    }
+
+    /// Apply one of the initialisation tables.
+    ///
+    /// Order is preserved because order is the content -- see the note in
+    /// `rtl8188eu_tables`.
+    pub fn apply8(&mut self, table: &[(u16, u8)]) -> Result<(), &'static str> {
+        for (reg, val) in table {
+            self.write(*reg, 1, *val as u32)?;
+        }
+        Ok(())
+    }
+
+    pub fn apply32(&mut self, table: &[(u16, u32)]) -> Result<(), &'static str> {
+        for (reg, val) in table {
+            self.write(*reg, 4, *val)?;
+        }
+        Ok(())
+    }
+
+    /// MAC initialisation: power on, then the MAC register table.
+    ///
+    /// Stops here on purpose. The PHY and radio tables exist in
+    /// `rtl8188eu_tables` but applying them needs the baseband brought up
+    /// first and the RF writes go through a serial interface rather than
+    /// straight to a register, neither of which is written yet. Applying them
+    /// anyway would half-configure the chip, which is worse than not starting.
+    pub fn bring_up(&mut self) -> Result<(), &'static str> {
+        self.power_on()?;
+        self.apply8(super::rtl8188eu_tables::MAC_INIT)
+    }
 }

@@ -10,7 +10,11 @@ model that lives *inside* the kernel rather than on top of it. No user/kernel
 split, no syscalls, no process isolation, one address space. A tool call from
 the model is a function call.
 
-The only code in the kernel this project did not write is Rust `core`.
+The only code in the kernel this project did not write is Rust `core` — and
+`src/dev/rtl8188eu_tables.rs`, which is 509 hardware initialisation constants
+transcribed from Linux's GPL-2.0 rtl8xxxu driver because there is no other
+source for them. It is one file, marked as such at the top, and nothing else in
+the tree is copied from anywhere.
 
 ## Commands
 

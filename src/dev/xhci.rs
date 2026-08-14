@@ -285,6 +285,27 @@ pub fn report(ecam: u64) {
                                         if id.test_chip { "  TEST CHIP -- suspect read" }
                                         else { "" }
                                     );
+                                    // This writes to the chip, which `usb` is
+                                    // otherwise too passive a name for -- but
+                                    // scanning already reset the bus, nothing
+                                    // else is using this device, and it is the
+                                    // only place the sequence can be run at
+                                    // all. Said out loud rather than done
+                                    // quietly.
+                                    kprintln!("    powering on and loading the MAC table...");
+                                    match regs.bring_up() {
+                                        Ok(()) => {
+                                            console::set_color(LTGREEN);
+                                            kprintln!("    MAC up -- power sequence and 92 registers accepted");
+                                            console::set_color(LTGRAY);
+                                            kprintln!("    (PHY, radio and firmware are not written yet)");
+                                        }
+                                        Err(e) => {
+                                            console::set_color(LTRED);
+                                            kprintln!("    bring-up failed: {}", e);
+                                            console::set_color(LTGRAY);
+                                        }
+                                    }
                                 }
                             }
                         }
