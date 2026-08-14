@@ -426,6 +426,17 @@ pub fn draw() {
     };
     let screen = screen_rect(&fb);
     with(|d| {
+        // The terminal is an application, not the screen itself. While its
+        // window is minimised the shell keeps running -- it still reads serial,
+        // still answers, and its output still lands in the console's shadow
+        // grid -- but nothing may reach the framebuffer, or the prompt paints
+        // straight over the desktop it is supposed to be behind. That leak is
+        // what drew a prompt and a black bar across the wallpaper.
+        //
+        // Cleared here and set again only if the terminal is actually drawn
+        // below, so visibility is *derived* from whether it was painted rather
+        // than tracked alongside the window state and able to disagree with it.
+        super::console::with(|c| c.set_visible(false));
         wallpaper(&fb);
         let focus = d.focus();
         let sel = match d.mode {
@@ -478,7 +489,10 @@ pub fn draw() {
                     let well = client.shrink(2);
                     theme::well(&fb, well, theme::SCREEN);
                     let grid = well.shrink(3);
-                    super::console::with(|c| c.reflow(grid.x, grid.y, grid.w, grid.h));
+                    super::console::with(|c| {
+                        c.set_visible(true);
+                        c.reflow(grid.x, grid.y, grid.w, grid.h);
+                    });
                     super::console::redraw();
                 }
                 Content::Panel(p) => {
@@ -899,11 +913,14 @@ pub fn focus_terminal() {
             .iter()
             .position(|w| matches!(w.content, Content::Terminal))
         {
-            d.windows[i].state = match d.windows[i].state {
-                WinState::Minimised => WinState::Normal,
-                s => s,
-            };
-            d.raise(i);
+            // Deliberately does *not* un-minimise. The terminal is an
+            // application: it keeps running while closed, and a shell that
+            // reopens its own window every time it prints is not something the
+            // user can close. Restoring it is the taskbar's job, which is the
+            // one place the user actually asked for it back.
+            if d.windows[i].state != WinState::Minimised {
+                d.raise(i);
+            }
         }
     });
     draw();

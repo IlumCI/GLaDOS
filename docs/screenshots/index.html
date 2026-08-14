@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GLaDOS OS screenshots — the desktop, the shell and the model</title>
+<meta name="description" content="Screenshots of GLaDOS: a Windows 3.1 styled desktop drawn straight into a UEFI framebuffer, the shell, and a language model answering from inside the kernel.">
+<meta name="keywords" content="GLaDOS screenshots, GLaDOS OS screenshots, AI operating system screenshots, Rust OS screenshots, Aperture Science OS, retro desktop">
+<link rel="canonical" href="https://ilumci.github.io/GLaDOS/screenshots/">
+<meta name="robots" content="index,follow,max-image-preview:large">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="GLaDOS">
+<meta property="og:title" content="GLaDOS OS screenshots — the desktop, the shell and the model">
+<meta property="og:description" content="Screenshots of GLaDOS: a Windows 3.1 styled desktop drawn straight into a UEFI framebuffer, the shell, and a language model answering from inside the kernel.">
+<meta property="og:url" content="https://ilumci.github.io/GLaDOS/screenshots/">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="GLaDOS OS screenshots — the desktop, the shell and the model">
+<meta name="twitter:description" content="Screenshots of GLaDOS: a Windows 3.1 styled desktop drawn straight into a UEFI framebuffer, the shell, and a language model answering from inside the kernel.">
+<meta name="theme-color" content="#f28c1e">
+<meta property="og:image" content="https://ilumci.github.io/GLaDOS/img/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="The GLaDOS aperture mark">
+<meta name="twitter:image" content="https://ilumci.github.io/GLaDOS/img/og.png">
+<link rel="stylesheet" href="../style.css">
+<link rel="icon" type="image/svg+xml" href="../img/logo.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="../img/icon-32.png">
+<link rel="apple-touch-icon" sizes="180x180" href="../img/icon-180.png">
+<link rel="manifest" href="../site.webmanifest">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://ilumci.github.io/GLaDOS/"},{"@type":"ListItem","position":2,"name":"Screenshots","item":"https://ilumci.github.io/GLaDOS/screenshots/"}]}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"GLaDOS OS screenshots \u2014 the desktop, the shell and the model","description":"Screenshots of GLaDOS: a Windows 3.1 styled desktop drawn straight into a UEFI framebuffer, the shell, and a language model answering from inside the kernel.","url":"https://ilumci.github.io/GLaDOS/screenshots/","dateModified":"2026-08-14","keywords":"GLaDOS screenshots, GLaDOS OS screenshots, AI operating system screenshots, Rust OS screenshots, Aperture Science OS, retro desktop","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<div class="hazard"></div>
+<div class="wrap">
+<header class="top">
+  <div class="brand">
+    <img src="../img/logo.svg" alt="" width="26" height="26">
+    <a class="logo" href="../">GLaDOS</a>
+    <span class="tag">an AI operating system in Rust · ring 0 · bare metal</span>
+  </div>
+  <nav class="main"><a href="../">Home</a> <a class="btn" href="../download/">↓ Download</a> <a href="../wiki/">Wiki</a> <a href="../screenshots/">Screenshots</a> <a href="../archive/">Archive</a> <a href="https://github.com/IlumCI/GLaDOS" rel="noopener">Source</a></nav>
+</header>
+<nav class="crumbs"><a href="../">GLaDOS</a> / Screenshots</nav>
+<main id="main">
+<h1>GLaDOS OS screenshots</h1>
+<p class="lede">Screenshots of GLaDOS: a Windows 3.1 styled desktop drawn straight into a UEFI framebuffer, the shell, and a language model answering from inside the kernel.</p>
+<p>Captured from the running system under QEMU, through the emulator's monitor rather than a camera pointed at a screen. These are the framebuffer's actual contents.</p>
+<div class="shots"><figure class="shot shot-wide"><div class="bar">Desktop — terminal and program manager</div><img src="../img/desktop.png" alt="GLaDOS OS desktop showing a Windows 3.1 styled terminal window with the boot log, a Program Manager window, and a taskbar" width="1280" height="800" loading="lazy" decoding="async"><figcaption>The desktop as it comes up: the terminal showing its own boot log, Program Manager, and a taskbar. Every pixel is drawn by the kernel into a UEFI framebuffer — there is no graphics library under it.</figcaption></figure><figure class="shot"><div class="bar">Desktop — wallpaper</div><img src="../img/desktop-clean.png" alt="The GLaDOS desktop wallpaper showing the aperture mark drawn as vector geometry" width="1280" height="800" loading="lazy" decoding="async"><figcaption>With the terminal minimised. The wallpaper mark is drawn as geometry at boot rather than decoded from an image — there is no image decoder in the kernel.</figcaption></figure><figure class="shot"><div class="bar">The model answering</div><img src="../img/model.png" alt="GLaDOS running a language model in kernel space, answering a question about operating systems" width="1280" height="800" loading="lazy" decoding="async"><figcaption>The resident model answering <em>what is an operating system</em> from inside the kernel. No process, no API, no server.</figcaption></figure></div>
+<h2 id="what-you-are-looking-at">What you are looking at</h2>
+<p>The window chrome is genuine Windows 3.1 construction: a <code>#C0C0C0</code> face, two-pixel bevels light on the top-left and dark on the bottom-right, title bars that fill with the selection colour when focused. Over that sits the <a href="../wiki/aperture-science.html">Aperture palette</a>.</p>
+<p>There is no graphics library beneath any of it. The kernel gets a base address, a width, a height and a stride from UEFI's Graphics Output Protocol, and everything above that — glyphs, bevels, the window manager, the wallpaper — is written by hand. See <a href="../wiki/gui.html">the GUI page</a> for how, and for the bug that only a screenshot could have found.</p>
+<div class="seealso"><strong>See also</strong><a href="../wiki/gui.html">The Windows 3.1 desktop</a> · <a href="../wiki/glados-os.html">GLaDOS OS</a> · <a href="../download/">Download</a> · <a href="../wiki/aperture-science.html">Aperture Science</a></div>
+</main>
+<footer>
+  <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This is an independent, non-commercial homage and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
+  <p>Copyright © 2026. All rights reserved. Source published to be read, not
+  reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from the
+  Linux kernel and carries its own terms.</p>
+  <p>No cookies, no analytics, nothing to accept. Last updated 2026-08-14.</p>
+</footer>
+</div>
+<div class="hazard"></div>
+</body>
+</html>

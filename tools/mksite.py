@@ -98,10 +98,32 @@ page(
              "Bootable UEFI images with the model baked in. 33 MB to 575 MB."),
             ("Read the wiki", "wiki/",
              "How every subsystem works, and what it cost to find out."),
+            ("See it running", "screenshots/",
+             "The desktop, the shell, and the model answering from ring 0."),
             ("Browse the archive", "archive/",
              "Mirror-style file index of images, sources and checksums."),
             ("Source on GitHub", REPO,
              "119 files of Rust. All rights reserved, published to be read."),
+        ]),
+        ("shots", [
+            ("desktop.png", "Desktop — terminal and program manager",
+             "GLaDOS OS desktop showing a Windows 3.1 styled terminal window with "
+             "the boot log, a Program Manager window, and a taskbar",
+             "The desktop as it comes up: the terminal showing its own boot log, "
+             "Program Manager, and a taskbar. Every pixel is drawn by the kernel "
+             "into a UEFI framebuffer — there is no graphics library under it.",
+             True),
+            ("desktop-clean.png", "Desktop — wallpaper",
+             "The GLaDOS desktop wallpaper showing the aperture mark drawn as "
+             "vector geometry",
+             "With the terminal minimised. The wallpaper mark is drawn as geometry "
+             "at boot rather than decoded from an image — there is no image "
+             "decoder in the kernel.", False),
+            ("model.png", "The model answering",
+             "GLaDOS running a language model in kernel space, answering a question "
+             "about operating systems",
+             "The resident model answering <em>what is an operating system</em> "
+             "from inside the kernel. No process, no API, no server.", False),
         ]),
         h2("What actually works"),
         p("This is a research kernel, and the honest version of a feature list "
@@ -1341,6 +1363,56 @@ page(
     ],
 )
 
+
+page(
+    "screenshots/index",
+    "GLaDOS OS screenshots — the desktop, the shell and the model",
+    "Screenshots of GLaDOS: a Windows 3.1 styled desktop drawn straight into a "
+    "UEFI framebuffer, the shell, and a language model answering from inside "
+    "the kernel.",
+    ["GLaDOS screenshots", "GLaDOS OS screenshots", "AI operating system screenshots",
+     "Rust OS screenshots", "Aperture Science OS", "retro desktop"],
+    kind="index",
+    blocks=[
+        p("Captured from the running system under QEMU, through the emulator's "
+          "monitor rather than a camera pointed at a screen. These are the "
+          "framebuffer's actual contents."),
+        ("shots", [
+            ("desktop.png", "Desktop — terminal and program manager",
+             "GLaDOS OS desktop showing a Windows 3.1 styled terminal window with "
+             "the boot log, a Program Manager window, and a taskbar",
+             "The desktop as it comes up: the terminal showing its own boot log, "
+             "Program Manager, and a taskbar. Every pixel is drawn by the kernel "
+             "into a UEFI framebuffer — there is no graphics library under it.",
+             True),
+            ("desktop-clean.png", "Desktop — wallpaper",
+             "The GLaDOS desktop wallpaper showing the aperture mark drawn as "
+             "vector geometry",
+             "With the terminal minimised. The wallpaper mark is drawn as geometry "
+             "at boot rather than decoded from an image — there is no image "
+             "decoder in the kernel.", False),
+            ("model.png", "The model answering",
+             "GLaDOS running a language model in kernel space, answering a question "
+             "about operating systems",
+             "The resident model answering <em>what is an operating system</em> "
+             "from inside the kernel. No process, no API, no server.", False),
+        ]),
+        h2("What you are looking at"),
+        p("The window chrome is genuine Windows 3.1 construction: a "
+          "<code>#C0C0C0</code> face, two-pixel bevels light on the top-left and "
+          "dark on the bottom-right, title bars that fill with the selection "
+          "colour when focused. Over that sits the "
+          "<a href=\"../wiki/aperture-science.html\">Aperture palette</a>."),
+        p("There is no graphics library beneath any of it. The kernel gets a base "
+          "address, a width, a height and a stride from UEFI's Graphics Output "
+          "Protocol, and everything above that — glyphs, bevels, the window "
+          "manager, the wallpaper — is written by hand. See "
+          "<a href=\"../wiki/gui.html\">the GUI page</a> for how, and for the bug "
+          "that only a screenshot could have found."),
+        ("seealso", ["gui", "glados-os", "download", "aperture-science"]),
+    ],
+)
+
 # --------------------------------------------------------------------------
 # Archive (the file listing, now a real page)
 # --------------------------------------------------------------------------
@@ -1367,94 +1439,150 @@ page(
 # rendering
 # --------------------------------------------------------------------------
 
-CSS = """/* GLaDOS docs: monospace, amber, and as little as possible. */
-:root{--bg:#fff;--fg:#111;--link:#0b45c4;--visited:#551a8b;--rule:#cfcfcf;
---hard:#111;--dim:#5a5a5a;--head:#f2f2f2;--accent:#b35900;--card:#fafafa}
-@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
---bg:#0e0e0e;--fg:#dcdcdc;--link:#7aa2f7;--visited:#bb9af7;--rule:#333;
---hard:#555;--dim:#8a8a8a;--head:#191919;--accent:#f28c1e;--card:#151515}}
-:root[data-theme="dark"]{--bg:#0e0e0e;--fg:#dcdcdc;--link:#7aa2f7;
---visited:#bb9af7;--rule:#333;--hard:#555;--dim:#8a8a8a;--head:#191919;
---accent:#f28c1e;--card:#151515}
+CSS = """/* GLaDOS docs. Aperture Science by way of a terminal: amber on near-black,
+   monospace throughout, hard edges, hazard stripes where a facility would put
+   them. Dark is the primary palette because that is what the aesthetic *is*;
+   light mode is supported rather than designed for. */
+:root{
+  --bg:#0b0b0c;--panel:#131315;--fg:#dad7d1;--dim:#8c8c8c;
+  --amber:#f28c1e;--deep:#b35900;--link:#f2a94e;--visited:#d98b3a;
+  --rule:#2b2b2e;--hard:#3c3c41;
+}
+@media (prefers-color-scheme:light){:root:not([data-theme="dark"]){
+  --bg:#faf9f7;--panel:#fff;--fg:#1a1a1a;--dim:#5c5c5c;
+  --amber:#b35900;--deep:#8a4400;--link:#a04e00;--visited:#7a3c00;
+  --rule:#ddd9d3;--hard:#b9b3aa;
+}}
+:root[data-theme="light"]{
+  --bg:#faf9f7;--panel:#fff;--fg:#1a1a1a;--dim:#5c5c5c;
+  --amber:#b35900;--deep:#8a4400;--link:#a04e00;--visited:#7a3c00;
+  --rule:#ddd9d3;--hard:#b9b3aa;
+}
 *{box-sizing:border-box}
-body{background:var(--bg);color:var(--fg);margin:0;padding:0;
+html{-webkit-text-size-adjust:100%}
+body{background:var(--bg);color:var(--fg);margin:0;
 font-family:"DejaVu Sans Mono","Liberation Mono",Consolas,ui-monospace,monospace;
-font-size:14px;line-height:1.6}
-.wrap{max-width:56rem;margin:0 auto;padding:1rem 1rem 4rem}
+font-size:14px;line-height:1.65}
+.wrap{max-width:58rem;margin:0 auto;padding:0 1rem 4rem}
 a{color:var(--link)}a:visited{color:var(--visited)}
 hr{border:0;border-top:1px solid var(--rule);margin:1rem 0}
-header.top{border-bottom:1px solid var(--hard);margin-bottom:1rem}
-.brand{display:flex;align-items:baseline;gap:.8rem;flex-wrap:wrap;
-padding:.7rem 0 .5rem}
-.brand a.logo{color:var(--accent);font-weight:bold;text-decoration:none;
-font-size:1.05rem;letter-spacing:.06em}
-.brand .tag{color:var(--dim);font-size:12px}
-nav.main{display:flex;gap:1.1rem;flex-wrap:wrap;padding-bottom:.6rem;font-size:13px}
-nav.main a{text-decoration:none}nav.main a:hover{text-decoration:underline}
-nav.main a.btn{background:var(--accent);color:#000;padding:.15rem .7rem;
-font-weight:bold;border:1px solid var(--accent)}
-nav.main a.btn:hover{background:transparent;color:var(--accent)}
-nav.crumbs{font-size:12px;color:var(--dim);margin:.6rem 0 .3rem}
+
+/* The one piece of pure set-dressing, and it earns its place by marking the
+   edges of the page the way the facility marks its floors. */
+.hazard{height:6px;background:repeating-linear-gradient(45deg,
+var(--amber) 0 9px,transparent 9px 18px);opacity:.9}
+
+header.top{border-bottom:1px solid var(--hard)}
+.brand{display:flex;align-items:center;gap:.7rem;padding:.85rem 0 .5rem;
+flex-wrap:wrap}
+.brand img{width:26px;height:26px;flex:0 0 auto}
+.brand a.logo{color:var(--amber);font-weight:bold;text-decoration:none;
+font-size:1.1rem;letter-spacing:.16em;text-transform:uppercase}
+.brand .tag{color:var(--dim);font-size:11px;letter-spacing:.05em}
+nav.main{display:flex;gap:1rem;flex-wrap:wrap;padding-bottom:.7rem;
+font-size:12px;text-transform:uppercase;letter-spacing:.09em}
+nav.main a{text-decoration:none;color:var(--fg);border-bottom:1px solid transparent}
+nav.main a:hover{border-bottom-color:var(--amber);color:var(--amber)}
+nav.main a.btn{background:var(--amber);color:#0b0b0c;padding:.12rem .8rem;
+font-weight:bold;border:1px solid var(--amber)}
+nav.main a.btn:hover{background:transparent;color:var(--amber)}
+nav.crumbs{font-size:11px;color:var(--dim);margin:.8rem 0 .2rem;
+letter-spacing:.06em;text-transform:uppercase}
 nav.crumbs a{color:var(--dim)}
-h1{font-size:1.5rem;line-height:1.3;margin:.4rem 0 .2rem}
-h2{font-size:1.12rem;margin:1.7rem 0 .4rem;border-bottom:1px solid var(--rule);
-padding-bottom:.2rem}
-h3{font-size:1rem;margin:1.2rem 0 .3rem;color:var(--accent)}
-p{margin:.6rem 0}
-ul,ol{margin:.6rem 0;padding-left:1.4rem}li{margin:.3rem 0}
-code{background:var(--head);padding:.05em .3em;font-size:.93em}
-pre{background:var(--head);border-left:3px solid var(--accent);padding:.7rem .9rem;
-overflow-x:auto;margin:.8rem 0}
-pre code{background:none;padding:0}
-.note{background:var(--head);border-left:3px solid var(--accent);
-padding:.6rem .9rem;margin:1rem 0}
-.lede{color:var(--dim);margin:.2rem 0 1rem;font-size:13px}
-table{border-collapse:collapse;width:100%;margin:.9rem 0;font-size:13px;
+
+h1{font-size:1.55rem;line-height:1.25;margin:.5rem 0 .2rem}
+h2{font-size:.92rem;margin:2rem 0 .5rem;text-transform:uppercase;
+letter-spacing:.14em;color:var(--amber);border-bottom:1px solid var(--rule);
+padding-bottom:.3rem}
+h3{font-size:.98rem;margin:1.3rem 0 .3rem;font-weight:bold}
+p{margin:.7rem 0}
+ul,ol{margin:.7rem 0}
+ul{list-style:none;padding-left:1.1rem}
+ul li::before{content:"\25aa";color:var(--deep);display:inline-block;
+width:1.1rem;margin-left:-1.1rem}
+ol{padding-left:1.6rem}
+li{margin:.35rem 0}
+code{background:var(--panel);border:1px solid var(--rule);padding:.02em .3em;
+font-size:.92em;color:var(--amber)}
+pre{background:var(--panel);border:1px solid var(--rule);
+border-left:3px solid var(--amber);padding:.8rem 1rem;overflow-x:auto;margin:1rem 0}
+pre code{background:none;border:0;padding:0;color:var(--fg)}
+.note{background:var(--panel);border:1px solid var(--rule);
+border-left:3px solid var(--amber);padding:.7rem 1rem;margin:1.1rem 0}
+.lede{color:var(--dim);margin:.2rem 0 1.2rem;font-size:13px}
+
+table{border-collapse:collapse;width:100%;margin:1rem 0;font-size:12.5px;
 display:block;overflow-x:auto}
-th,td{border:1px solid var(--rule);padding:.35rem .6rem;text-align:left;
+th,td{border:1px solid var(--rule);padding:.4rem .7rem;text-align:left;
 vertical-align:top}
-th{background:var(--head);font-weight:bold}
-.infobox{float:right;width:17rem;max-width:100%;border:1px solid var(--rule);
-background:var(--card);margin:0 0 1rem 1.2rem;font-size:12px}
-.infobox .ib-t{background:var(--accent);color:#000;font-weight:bold;
-padding:.35rem .6rem}
-.infobox table{margin:0;font-size:12px;display:table}
+th{background:var(--panel);color:var(--amber);text-transform:uppercase;
+letter-spacing:.09em;font-size:11px;white-space:nowrap}
+
+/* Infobox in the shape of the OS's own dialogs: title bar and all. */
+.infobox{float:right;width:17rem;max-width:100%;border:1px solid var(--hard);
+background:var(--panel);margin:.2rem 0 1rem 1.3rem;font-size:11.5px}
+.infobox .ib-t{background:var(--amber);color:#0b0b0c;font-weight:bold;
+padding:.3rem .6rem;text-transform:uppercase;letter-spacing:.1em}
+.infobox table{margin:0;display:table}
 .infobox td{border:0;border-bottom:1px solid var(--rule);padding:.3rem .6rem}
 .infobox tr:last-child td{border-bottom:0}
-.infobox td:first-child{color:var(--dim);white-space:nowrap}
+.infobox td:first-child{color:var(--dim)}
 @media (max-width:44rem){.infobox{float:none;width:100%;margin:1rem 0}}
+
 .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(15rem,1fr));
-gap:.8rem;margin:1.2rem 0}
-.card{border:1px solid var(--rule);background:var(--card);padding:.8rem}
-.card a{font-weight:bold;text-decoration:none}
+gap:.8rem;margin:1.3rem 0}
+.card{border:1px solid var(--rule);background:var(--panel);padding:.9rem;
+border-top:2px solid var(--amber)}
+.card a{font-weight:bold;text-decoration:none;text-transform:uppercase;
+letter-spacing:.08em;font-size:12px}
 .card a:hover{text-decoration:underline}
-.card p{margin:.35rem 0 0;color:var(--dim);font-size:12.5px}
-.dl{border:1px solid var(--rule);background:var(--card);padding:.8rem;
-margin:.8rem 0}
-.dl .row{display:flex;justify-content:space-between;gap:1rem;align-items:baseline;
-flex-wrap:wrap}
+.card p{margin:.4rem 0 0;color:var(--dim);font-size:12px}
+
+.dl{border:1px solid var(--rule);background:var(--panel);padding:.9rem;
+margin:.9rem 0;border-left:3px solid var(--amber)}
+.dl .row{display:flex;justify-content:space-between;gap:1rem;
+align-items:baseline;flex-wrap:wrap}
 .dl .name{font-weight:bold}
-.dl .size{color:var(--accent);white-space:nowrap}
-.dl p{margin:.35rem 0 0;color:var(--dim);font-size:12.5px}
+.dl .size{color:var(--amber);white-space:nowrap;font-weight:bold}
+.dl p{margin:.4rem 0 0;color:var(--dim);font-size:12px}
+
+/* Screenshots, framed. A capture of a windowing system floating loose on a
+   page reads as a stray image rather than as a machine. */
+.shots{display:grid;grid-template-columns:repeat(auto-fit,minmax(20rem,1fr));
+gap:1.1rem;margin:1.2rem 0}
+figure.shot{margin:0;border:1px solid var(--hard);background:var(--panel)}
+figure.shot .bar{background:var(--amber);color:#0b0b0c;font-weight:bold;
+padding:.22rem .6rem;font-size:10.5px;text-transform:uppercase;
+letter-spacing:.11em}
+figure.shot img{display:block;width:100%;height:auto;
+border-top:1px solid var(--hard);image-rendering:pixelated}
+figure.shot figcaption{padding:.5rem .7rem;color:var(--dim);font-size:11.5px}
+.shot-wide{grid-column:1/-1}
+
 .wikilist{list-style:none;padding:0}
-.wikilist li{border-bottom:1px solid var(--rule);padding:.45rem 0}
+.wikilist li{border-bottom:1px solid var(--rule);padding:.5rem 0}
+.wikilist li::before{content:none}
 .wikilist a{font-weight:bold;text-decoration:none}
 .wikilist a:hover{text-decoration:underline}
-.wikilist span{display:block;color:var(--dim);font-size:12.5px}
-.seealso{border-top:1px solid var(--hard);margin-top:2rem;padding-top:.6rem}
-.seealso strong{display:block;margin-bottom:.3rem}
-.faq dt{font-weight:bold;margin-top:.9rem}
-.faq dd{margin:.25rem 0 0;color:var(--fg)}
-footer{border-top:1px solid var(--hard);margin-top:2.5rem;padding-top:.8rem;
-color:var(--dim);font-size:12px}
-footer p{margin:.4rem 0}
-.listing{font-size:13px}
-.listing td{border:0;border-bottom:1px solid var(--rule);white-space:nowrap}
-.listing td.d{white-space:normal;color:var(--dim)}
-.listing th{border:0;border-bottom:1px solid var(--hard)}
-.icon{color:var(--dim);display:inline-block;width:2.6em}
+.wikilist span{display:block;color:var(--dim);font-size:12px}
+
+.seealso{border-top:1px solid var(--hard);margin-top:2.2rem;padding-top:.7rem;
+font-size:12.5px}
+.seealso strong{display:block;margin-bottom:.35rem;color:var(--amber);
+text-transform:uppercase;letter-spacing:.1em;font-size:11px}
+.faq dt{font-weight:bold;margin-top:1rem;color:var(--amber)}
+.faq dd{margin:.3rem 0 0}
+
+footer{border-top:1px solid var(--hard);margin-top:2.5rem;padding-top:.9rem;
+color:var(--dim);font-size:11.5px}
+footer p{margin:.45rem 0}
+.listing{font-size:12.5px}
+.listing td{border:0;border-bottom:1px solid var(--rule)}
+.listing th{border:0;border-bottom:1px solid var(--hard);background:none}
+.icon{color:var(--deep);display:inline-block;width:2.6em}
 .skip{position:absolute;left:-9999px}
-.skip:focus{left:.5rem;top:.5rem;background:var(--accent);color:#000;padding:.4rem}
+.skip:focus{left:.5rem;top:.5rem;background:var(--amber);color:#000;
+padding:.4rem;z-index:9}
 """
 
 JS = """// Archive listing. The only script on the site, and only this page needs it.
@@ -1563,6 +1691,7 @@ def canonical(slug):
 
 def render_blocks(blocks, slug):
     out = []
+    up = rel_prefix(slug)
     for b in blocks:
         kind, val = b
         if kind == "p":
@@ -1606,6 +1735,15 @@ def render_blocks(blocks, slug):
                 f'<p><a href="{h}">Download {esc(n)}</a></p></div>'
                 for n, s, h, d in val)
             out.append(ds)
+        elif kind == "shots":
+            fs = "".join(
+                f'<figure class="shot{" shot-wide" if wide else ""}">'
+                f'<div class="bar">{esc(t_)}</div>'
+                f'<img src="{up}img/{f}" alt="{html.escape(alt, quote=True)}" '
+                f'width="1280" height="800" loading="lazy" decoding="async">'
+                f"<figcaption>{c}</figcaption></figure>"
+                for f, t_, alt, c, wide in val)
+            out.append(f'<div class="shots">{fs}</div>')
         elif kind == "wikilist":
             ls = "".join(
                 f'<li><a href="{url_for("wiki/" + s, slug)}">{esc(t)}</a>'
@@ -1617,7 +1755,7 @@ def render_blocks(blocks, slug):
                 # Bare slugs mean wiki pages; anything with a path is literal.
                 # The top-level pages must be checked *before* that default, or
                 # "download" silently becomes "wiki/download" and links nowhere.
-                if s in ("download", "archive", "wiki"):
+                if s in ("download", "archive", "wiki", "screenshots"):
                     target = s + "/index"
                 elif "/" in s:
                     target = s
@@ -1645,7 +1783,8 @@ def short_title(slug):
         if "wiki/" + s == slug:
             return t
     return {"download/index": "Download", "archive/index": "Archive",
-            "wiki/index": "Wiki", "index": "Home"}.get(slug, slug)
+            "wiki/index": "Wiki", "index": "Home",
+            "screenshots/index": "Screenshots"}.get(slug, slug)
 
 
 def jsonld(pg):
@@ -1715,7 +1854,8 @@ def jsonld(pg):
 
 
 NAVITEMS = [("index", "Home"), ("download/index", "Download"),
-            ("wiki/index", "Wiki"), ("archive/index", "Archive")]
+            ("wiki/index", "Wiki"), ("screenshots/index", "Screenshots"),
+            ("archive/index", "Archive")]
 
 
 def render_page(pg):
@@ -1760,16 +1900,26 @@ def render_page(pg):
 <meta name="twitter:title" content="{html.escape(pg["title"], quote=True)}">
 <meta name="twitter:description" content="{html.escape(pg["desc"], quote=True)}">
 <meta name="theme-color" content="#f28c1e">
+<meta property="og:image" content="{BASE}/img/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="The GLaDOS aperture mark">
+<meta name="twitter:image" content="{BASE}/img/og.png">
 <link rel="stylesheet" href="{up}style.css">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='14' fill='%230e0e0e'/><circle cx='16' cy='16' r='7' fill='%23f28c1e'/></svg>">
+<link rel="icon" type="image/svg+xml" href="{up}img/logo.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="{up}img/icon-32.png">
+<link rel="apple-touch-icon" sizes="180x180" href="{up}img/icon-180.png">
+<link rel="manifest" href="{up}site.webmanifest">
 {jsonld(pg)}
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
+<div class="hazard"></div>
 <div class="wrap">
 <header class="top">
   <div class="brand">
-    <a class="logo" href="{url_for("index", slug)}">◉ GLaDOS</a>
+    <img src="{up}img/logo.svg" alt="" width="26" height="26">
+    <a class="logo" href="{url_for("index", slug)}">GLaDOS</a>
     <span class="tag">an AI operating system in Rust · ring 0 · bare metal</span>
   </div>
   <nav class="main">{nav}</nav>
@@ -1788,6 +1938,7 @@ def render_page(pg):
   <p>No cookies, no analytics, nothing to accept. Last updated {UPDATED}.</p>
 </footer>
 </div>
+<div class="hazard"></div>
 </body>
 </html>
 """
@@ -1842,6 +1993,19 @@ def main():
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
         + urls + "</urlset>\n", encoding="utf-8")
+
+    import json as _j
+    (out / "site.webmanifest").write_text(_j.dumps({
+        "name": "GLaDOS", "short_name": "GLaDOS",
+        "description": "An AI operating system in Rust, ring 0, bare metal.",
+        "start_url": BASE + "/", "display": "standalone",
+        "background_color": "#0b0b0c", "theme_color": "#f28c1e",
+        "icons": [
+            {"src": "img/icon-192.png", "sizes": "192x192", "type": "image/png"},
+            {"src": "img/icon-512.png", "sizes": "512x512", "type": "image/png"},
+            {"src": "img/logo.svg", "sizes": "any", "type": "image/svg+xml"},
+        ],
+    }, indent=1), encoding="utf-8")
 
     (out / "robots.txt").write_text(
         "User-agent: *\nAllow: /\n\nSitemap: " + BASE + "/sitemap.xml\n",
