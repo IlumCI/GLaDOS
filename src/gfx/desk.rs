@@ -332,25 +332,16 @@ pub fn open_browser(url: &str) {
             closable: true,
         });
     });
-    focus_browser();
+    // The keyboard goes back to the shell, exactly as `open` does.
+    //
+    // The opposite was tried first, on the reasoning that a browser opened by
+    // typing `enternet` is one the user is about to drive. That is wrong here:
+    // the shell *is* the console, so a window holding the keyboard means the
+    // next command typed is swallowed a character at a time. It presented as
+    // the browser hanging, and the trace showed it receiving 'w','i','n',' ',
+    // 'k','e','y','s' one by one. Alt-Tab or the taskbar switches to it.
+    focus_terminal();
     draw();
-}
-
-/// Give the keyboard to the newest browser window.
-///
-/// Not `focus_terminal`: a browser opened by typing `enternet` at the shell is
-/// a window the user is about to drive, and handing the keys straight back to
-/// the console would mean the first thing they type goes into the prompt.
-fn focus_browser() {
-    with(|d| {
-        if let Some(i) = d
-            .windows
-            .iter()
-            .rposition(|w| matches!(w.content, Content::Browser(_)))
-        {
-            d.raise(i);
-        }
-    });
 }
 
 /// The wall: a flat field, a sparse grid, and the mark in the middle.
