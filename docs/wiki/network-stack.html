@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Writing a TCP/IP stack from scratch — ARP to TLS in a kernel</title>
+<meta name="description" content="GLaDOS implements its own ARP, IPv4, ICMP, UDP, TCP, DHCP and DNS, with no interrupt-driven receive and a deliberate rule against re-entrant dispatch.">
+<meta name="keywords" content="TCP/IP stack, network stack from scratch, ARP, DHCP, DNS, TCP implementation, OS networking">
+<link rel="canonical" href="https://ilumci.github.io/GLaDOS/wiki/network-stack.html">
+<meta name="robots" content="index,follow,max-image-preview:large">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="GLaDOS">
+<meta property="og:title" content="Writing a TCP/IP stack from scratch — ARP to TLS in a kernel">
+<meta property="og:description" content="GLaDOS implements its own ARP, IPv4, ICMP, UDP, TCP, DHCP and DNS, with no interrupt-driven receive and a deliberate rule against re-entrant dispatch.">
+<meta property="og:url" content="https://ilumci.github.io/GLaDOS/wiki/network-stack.html">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="Writing a TCP/IP stack from scratch — ARP to TLS in a kernel">
+<meta name="twitter:description" content="GLaDOS implements its own ARP, IPv4, ICMP, UDP, TCP, DHCP and DNS, with no interrupt-driven receive and a deliberate rule against re-entrant dispatch.">
+<meta name="theme-color" content="#f28c1e">
+<link rel="stylesheet" href="../style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='14' fill='%230e0e0e'/><circle cx='16' cy='16' r='7' fill='%23f28c1e'/></svg>">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://ilumci.github.io/GLaDOS/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://ilumci.github.io/GLaDOS/wiki/"},{"@type":"ListItem","position":3,"name":"The network stack","item":"https://ilumci.github.io/GLaDOS/wiki/network-stack.html"}]}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Writing a TCP/IP stack from scratch \u2014 ARP to TLS in a kernel","description":"GLaDOS implements its own ARP, IPv4, ICMP, UDP, TCP, DHCP and DNS, with no interrupt-driven receive and a deliberate rule against re-entrant dispatch.","url":"https://ilumci.github.io/GLaDOS/wiki/network-stack.html","dateModified":"2026-08-14","keywords":"TCP/IP stack, network stack from scratch, ARP, DHCP, DNS, TCP implementation, OS networking","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<div class="wrap">
+<header class="top">
+  <div class="brand">
+    <a class="logo" href="../">◉ GLaDOS</a>
+    <span class="tag">an AI operating system in Rust · ring 0 · bare metal</span>
+  </div>
+  <nav class="main"><a href="../">Home</a> <a class="btn" href="../download/">↓ Download</a> <a href="../wiki/">Wiki</a> <a href="../archive/">Archive</a> <a href="https://github.com/IlumCI/GLaDOS" rel="noopener">Source</a></nav>
+</header>
+<nav class="crumbs"><a href="../">GLaDOS</a> / <a href="../wiki/">Wiki</a> / The network stack</nav>
+<main id="main">
+<h1>Writing a TCP/IP stack from scratch</h1>
+<p class="lede">GLaDOS implements its own ARP, IPv4, ICMP, UDP, TCP, DHCP and DNS, with no interrupt-driven receive and a deliberate rule against re-entrant dispatch.</p>
+<p>Every layer is hand-written: ARP, IPv4, ICMP, UDP, TCP, DHCP, DNS and <a href="tls.html">TLS 1.3</a>. Drivers exist for Intel e1000, Realtek RTL8168 and <a href="usb-xhci.html">USB CDC Ethernet</a>.</p>
+<h2 id="the-rule-that-shapes-everything">The rule that shapes everything</h2>
+<p><strong>The poll function never dispatches into a transport state machine. It only queues.</strong></p>
+<p>The reason is a re-entrancy trap that is easy to walk into. Sending an IPv4 packet calls address resolution; resolution has to poll for the ARP reply while it waits. If polling could run TCP's state machine, a connection could re-enter its own control block while an earlier mutable borrow was still live. So poll queues frames, and TCP and UDP drain their own inboxes from a context where nothing else is borrowed.</p>
+<h2 id="no-interrupt-driven-receive">No interrupt-driven receive</h2>
+<p>TCP advances while the shell is idle, or inside a blocking call. This is a deliberate simplification, and it is visible in behaviour: a connection makes no progress while a long generation is running unless the generation yields.</p>
+<h2 id="bugs-worth-knowing">Bugs worth knowing</h2>
+<ul><li><strong>Ethernet pads frames to 60 bytes.</strong> A bare 40-byte TCP ACK therefore arrives with 20 bytes of garbage after it. IPv4 payloads must be trimmed to the length the header declares, not to the length the frame happens to be.</li><li><strong>A shared event ring needs demultiplexing.</strong> On the USB driver, waiting for "a transfer event" rather than "a transfer event for <em>my</em> endpoint" meant a send completed against an arriving receive. DHCP still worked, because it alternates send and receive; ARP did not, because it had no send to piggyback on. The asymmetry is what named the bug.</li></ul>
+<h2 id="what-it-can-actually-do">What it can actually do</h2>
+<p>From the shell: <code>dhcp</code> obtains a lease, <code>ping</code> round-trips, <code>dns example.com</code> resolves, and <code>https example.com /</code> completes a TLS 1.3 handshake, validates the certificate chain against a bundled root store, and returns the page.</p>
+<div class="seealso"><strong>See also</strong><a href="../wiki/tls.html">TLS 1.3 from scratch</a> · <a href="../wiki/usb-xhci.html">The USB stack</a> · <a href="../wiki/usb-wifi-driver.html">USB WiFi</a> · <a href="../wiki/glados-os.html">GLaDOS OS</a></div>
+</main>
+<footer>
+  <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This is an independent, non-commercial homage and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
+  <p>Copyright © 2026. All rights reserved. Source published to be read, not
+  reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from the
+  Linux kernel and carries its own terms.</p>
+  <p>No cookies, no analytics, nothing to accept. Last updated 2026-08-14.</p>
+</footer>
+</div>
+</body>
+</html>

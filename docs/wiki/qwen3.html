@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Qwen3-0.6B in a kernel — head width, QK-norm, and silent failure modes</title>
+<meta name="description" content="Running Qwen3-0.6B inside an OS kernel: why its head dimension is stated rather than derived, what QK-Norm does, and why both fail without any error.">
+<meta name="keywords" content="Qwen3, Qwen3-0.6B, QK-Norm, head_dim, quantised LLM, int8 inference">
+<link rel="canonical" href="https://ilumci.github.io/GLaDOS/wiki/qwen3.html">
+<meta name="robots" content="index,follow,max-image-preview:large">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="GLaDOS">
+<meta property="og:title" content="Qwen3-0.6B in a kernel — head width, QK-norm, and silent failure modes">
+<meta property="og:description" content="Running Qwen3-0.6B inside an OS kernel: why its head dimension is stated rather than derived, what QK-Norm does, and why both fail without any error.">
+<meta property="og:url" content="https://ilumci.github.io/GLaDOS/wiki/qwen3.html">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="Qwen3-0.6B in a kernel — head width, QK-norm, and silent failure modes">
+<meta name="twitter:description" content="Running Qwen3-0.6B inside an OS kernel: why its head dimension is stated rather than derived, what QK-Norm does, and why both fail without any error.">
+<meta name="theme-color" content="#f28c1e">
+<link rel="stylesheet" href="../style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='14' fill='%230e0e0e'/><circle cx='16' cy='16' r='7' fill='%23f28c1e'/></svg>">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://ilumci.github.io/GLaDOS/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://ilumci.github.io/GLaDOS/wiki/"},{"@type":"ListItem","position":3,"name":"Qwen3 in 570 MB","item":"https://ilumci.github.io/GLaDOS/wiki/qwen3.html"}]}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Qwen3-0.6B in a kernel \u2014 head width, QK-norm, and silent failure modes","description":"Running Qwen3-0.6B inside an OS kernel: why its head dimension is stated rather than derived, what QK-Norm does, and why both fail without any error.","url":"https://ilumci.github.io/GLaDOS/wiki/qwen3.html","dateModified":"2026-08-14","keywords":"Qwen3, Qwen3-0.6B, QK-Norm, head_dim, quantised LLM, int8 inference","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<div class="wrap">
+<header class="top">
+  <div class="brand">
+    <a class="logo" href="../">◉ GLaDOS</a>
+    <span class="tag">an AI operating system in Rust · ring 0 · bare metal</span>
+  </div>
+  <nav class="main"><a href="../">Home</a> <a class="btn" href="../download/">↓ Download</a> <a href="../wiki/">Wiki</a> <a href="../archive/">Archive</a> <a href="https://github.com/IlumCI/GLaDOS" rel="noopener">Source</a></nav>
+</header>
+<nav class="crumbs"><a href="../">GLaDOS</a> / <a href="../wiki/">Wiki</a> / Qwen3 in 570 MB</nav>
+<main id="main">
+<h1>Qwen3-0.6B in a kernel</h1>
+<p class="lede">Running Qwen3-0.6B inside an OS kernel: why its head dimension is stated rather than derived, what QK-Norm does, and why both fail without any error.</p>
+<p>Qwen3-0.6B is the default model: 28 layers, 1024-dimensional residual stream, 16 query heads and 8 key/value heads, quantised to int8 for about 570 MB on disk.</p>
+<h2 id="it-is-not-a-llama-and-neither-difference-is-loud">It is not a Llama, and neither difference is loud</h2>
+<h3>Head width is stated, not derived</h3>
+<p>Most implementations compute head dimension as <code>dim / n_heads</code>. For Qwen3 that gives 1024/16 = 64, and the correct answer is <strong>128</strong>. The model states it independently, which means the query projection is 2048 wide against a 1024-wide residual stream — the attention path is deliberately wider than the thing it reads from.</p>
+<p>Derive it instead and every weight tensor is reshaped wrong. The model still loads. It still runs. It generates confident nonsense.</p>
+<h3>QK-Norm</h3>
+<p>Qwen3 applies RMSNorm to each head's queries and keys, per head, before rotary embeddings. Omit it and the model remains numerically well-behaved and produces fluent text — just text from a network being fed activations it was never trained on.</p>
+<h2 id="how-these-get-caught">How these get caught</h2>
+<p>Not by exceptions, because there are none. The checkpoint converter writes both facts into the file header so they travel with the weights rather than being inferred, and a NumPy reference implementation reads the <em>converted</em> file and produces logits to diff against. A converter bug shows up there too; only a kernel bug shows as a mismatch between the two.</p>
+<p>The cheap end of the same check is reading the output. An instruction-tuned model whose attention path is wired correctly answers "what is the capital of France" with Paris.</p>
+<h2 id="thinking-tokens">Thinking tokens</h2>
+<p>Qwen3 reasons at length inside <code>&lt;think&gt;</code> blocks when left alone, which is the model working as designed and useless at a 64-token budget. The shell closes the block itself unless told not to. Whether the model has thinking tokens at all is decided by asking the tokenizer whether it knows <code>&lt;think&gt;</code> as a single token — a property of the vocabulary, rather than a guess from the model's name.</p>
+<div class="seealso"><strong>See also</strong><a href="../wiki/llm-in-kernel.html">A language model in the kernel</a> · <a href="../wiki/rope.html">RoPE</a> · <a href="../wiki/tokenizer.html">Tokenizers</a> · <a href="../wiki/kv-cache.html">The int8 KV cache</a></div>
+</main>
+<footer>
+  <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This is an independent, non-commercial homage and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
+  <p>Copyright © 2026. All rights reserved. Source published to be read, not
+  reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from the
+  Linux kernel and carries its own terms.</p>
+  <p>No cookies, no analytics, nothing to accept. Last updated 2026-08-14.</p>
+</footer>
+</div>
+</body>
+</html>

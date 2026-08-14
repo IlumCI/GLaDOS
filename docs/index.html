@@ -3,302 +3,60 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Index of / — glados.archive</title>
-<style>
-  :root {
-    --bg: #ffffff;
-    --fg: #000000;
-    --link: #0000ee;
-    --visited: #551a8b;
-    --rule: #000000;
-    --dim: #555555;
-    --head: #f0f0f0;
-    --accent: #b35900;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root:not([data-theme="light"]) {
-      --bg: #101010;
-      --fg: #d8d8d8;
-      --link: #7aa2f7;
-      --visited: #bb9af7;
-      --rule: #444444;
-      --dim: #888888;
-      --head: #1c1c1c;
-      --accent: #f28c1e;
-    }
-  }
-  :root[data-theme="dark"] {
-    --bg: #101010;
-    --fg: #d8d8d8;
-    --link: #7aa2f7;
-    --visited: #bb9af7;
-    --rule: #444444;
-    --dim: #888888;
-    --head: #1c1c1c;
-    --accent: #f28c1e;
-  }
-
-  body {
-    background: var(--bg);
-    color: var(--fg);
-    font-family: "DejaVu Sans Mono", "Liberation Mono", Consolas, monospace;
-    font-size: 14px;
-    line-height: 1.45;
-    margin: 0;
-    padding: 1.5rem 1rem 3rem;
-  }
-  .wrap { max-width: 60rem; margin: 0 auto; }
-  h1 { font-size: 1.35rem; font-weight: bold; margin: 0 0 .2rem; }
-  a { color: var(--link); text-decoration: underline; }
-  a:visited { color: var(--visited); }
-  hr { border: 0; border-top: 1px solid var(--rule); margin: .6rem 0; }
-
-  .banner {
-    color: var(--accent);
-    white-space: pre;
-    font-size: 11px;
-    line-height: 1.15;
-    overflow-x: auto;
-    margin: 0 0 .6rem;
-  }
-  .motd {
-    background: var(--head);
-    border-left: 3px solid var(--accent);
-    padding: .55rem .8rem;
-    margin: .8rem 0;
-  }
-  .motd p { margin: .3rem 0; }
-
-  .path { margin: .6rem 0 .2rem; }
-  .path .seg { color: var(--dim); }
-
-  .listing { width: 100%; border-collapse: collapse; }
-  .listing th {
-    text-align: left;
-    font-weight: bold;
-    padding: .2rem .8rem .2rem 0;
-    border-bottom: 1px solid var(--rule);
-    white-space: nowrap;
-  }
-  .listing td {
-    padding: .12rem .8rem .12rem 0;
-    vertical-align: top;
-    white-space: nowrap;
-  }
-  .listing td.desc { white-space: normal; color: var(--dim); }
-  .listing tr.dir td:first-child a { font-weight: bold; }
-  .size { text-align: right; padding-right: 1.2rem !important; }
-
-  .icon { color: var(--dim); display: inline-block; width: 2.4em; }
-
-  footer {
-    color: var(--dim);
-    font-size: 12px;
-    margin-top: 1.2rem;
-  }
-  .note { color: var(--dim); font-size: 12px; margin-top: .4rem; }
-  code { background: var(--head); padding: 0 .25em; }
-  @media (max-width: 40rem) {
-    .listing .hide-narrow { display: none; }
-    body { font-size: 13px; }
-  }
-</style>
+<title>GLaDOS — an AI operating system in Rust, built on bare metal</title>
+<meta name="description" content="GLaDOS is a from-scratch ring-0 operating system written in Rust with a language model running inside the kernel. Free bootable ISO, full source, and documentation on how every part works.">
+<meta name="keywords" content="GLaDOS, GLaDOS OS, AI operating system, Rust OS, Aperture Science OS, Portal OS, bare metal Rust, ring 0 kernel, LLM in kernel">
+<link rel="canonical" href="https://ilumci.github.io/GLaDOS/">
+<meta name="robots" content="index,follow,max-image-preview:large">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="GLaDOS">
+<meta property="og:title" content="GLaDOS — an AI operating system in Rust, built on bare metal">
+<meta property="og:description" content="GLaDOS is a from-scratch ring-0 operating system written in Rust with a language model running inside the kernel. Free bootable ISO, full source, and documentation on how every part works.">
+<meta property="og:url" content="https://ilumci.github.io/GLaDOS/">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="GLaDOS — an AI operating system in Rust, built on bare metal">
+<meta name="twitter:description" content="GLaDOS is a from-scratch ring-0 operating system written in Rust with a language model running inside the kernel. Free bootable ISO, full source, and documentation on how every part works.">
+<meta name="theme-color" content="#f28c1e">
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='14' fill='%230e0e0e'/><circle cx='16' cy='16' r='7' fill='%23f28c1e'/></svg>">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://ilumci.github.io/GLaDOS/"}]}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareApplication","name":"GLaDOS","applicationCategory":"OperatingSystem","operatingSystem":"x86-64 UEFI (bare metal)","description":"GLaDOS is a from-scratch ring-0 operating system written in Rust with a language model running inside the kernel. Free bootable ISO, full source, and documentation on how every part works.","url":"https://ilumci.github.io/GLaDOS/","downloadUrl":"https://ilumci.github.io/GLaDOS/download/","softwareVersion":"0.1","programmingLanguage":"Rust","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"}}</script>
 </head>
 <body>
+<a class="skip" href="#main">Skip to content</a>
 <div class="wrap">
+<header class="top">
+  <div class="brand">
+    <a class="logo" href="">◉ GLaDOS</a>
+    <span class="tag">an AI operating system in Rust · ring 0 · bare metal</span>
+  </div>
+  <nav class="main"><a href="">Home</a> <a class="btn" href="download/">↓ Download</a> <a href="wiki/">Wiki</a> <a href="archive/">Archive</a> <a href="https://github.com/IlumCI/GLaDOS" rel="noopener">Source</a></nav>
+</header>
 
-<pre class="banner">   ____ _        ____   ___  ____
-  / ___| |    __| |  \ / _ \/ ___|
- | |  _| |   / _` | | | | | \___ \
- | |_| | |__| (_| | |_| |_| |___) |
-  \____|_____\__,_|____/\___/|____/     archive mirror</pre>
-
-<h1 id="title">Index of /</h1>
-<hr>
-
-<div class="motd">
-  <p><strong>glados.archive</strong> — a ring-0 operating system in Rust with a
-  language model inside the kernel.</p>
-  <p>Images here are bootable UEFI ISOs. Write one to a USB stick with
-  <code>dd</code>, Rufus or balenaEtcher, then boot with Secure Boot disabled —
-  the kernel is unsigned.</p>
-</div>
-
-<div class="path" id="crumbs"></div>
-
-<table class="listing">
-  <thead>
-    <tr>
-      <th>Name</th>
-      <th class="hide-narrow">Last modified</th>
-      <th class="size">Size</th>
-      <th class="hide-narrow">Description</th>
-    </tr>
-  </thead>
-  <tbody id="rows"></tbody>
-</table>
-<hr>
-
+<main id="main">
+<h1>GLaDOS</h1>
+<p class="lede">GLaDOS is a from-scratch ring-0 operating system written in Rust with a language model running inside the kernel. Free bootable ISO, full source, and documentation on how every part works.</p>
+<p><strong>GLaDOS</strong> is an operating system written from scratch in Rust, for x86-64, running in ring 0 on bare metal — with a language model living <em>inside</em> the kernel rather than on top of it.</p>
+<p>No user/kernel split. No syscalls. No process isolation. One address space. A tool call from the model is a function call: not an IPC round trip, not a sandbox boundary, just a call.</p>
+<p>It is named after the AI from <em>Portal</em>, and it borrows Aperture Science's look — amber on black, Windows 3.1 chrome, an enrichment centre tone. The engineering underneath is entirely real: a TCP/IP stack, TLS 1.3, NVMe, USB 3, and a transformer, all written by hand.</p>
+<div class="cards"><div class="card"><a href="download/">Download the ISO</a><p>Bootable UEFI images with the model baked in. 33 MB to 575 MB.</p></div><div class="card"><a href="wiki/">Read the wiki</a><p>How every subsystem works, and what it cost to find out.</p></div><div class="card"><a href="archive/">Browse the archive</a><p>Mirror-style file index of images, sources and checksums.</p></div><div class="card"><a href="https://github.com/IlumCI/GLaDOS">Source on GitHub</a><p>119 files of Rust. All rights reserved, published to be read.</p></div></div>
+<h2 id="what-actually-works">What actually works</h2>
+<p>This is a research kernel, and the honest version of a feature list includes the parts that do not work. Both lists are below.</p>
+<table><thead><tr><th>Subsystem</th><th>State</th></tr></thead><tbody><tr><td>Boot</td><td>UEFI application, own page tables, GDT/IDT, APIC timer, PS/2 keyboard</td></tr><tr><td>Memory</td><td>Frame allocator, identity paging to 4 GiB, coalescing heap</td></tr><tr><td>Tasks</td><td>Preemptive at 100 Hz, hand-written context switch</td></tr><tr><td>Graphics</td><td>GOP framebuffer, Windows 3.1 desktop, window manager, taskbar</td></tr><tr><td>Storage</td><td>NVMe driver, content-addressed store, Merkle trees, snapshots</td></tr><tr><td>Network</td><td>ARP, IPv4, ICMP, UDP, TCP, DHCP, DNS, TLS 1.3 with chain validation</td></tr><tr><td>Crypto</td><td>SHA-1/256/384, HMAC, AES, ChaCha20-Poly1305, X25519, RSA, ECDSA</td></tr><tr><td>Model</td><td>Qwen3-0.6B or SmolLM2-135M, int8, inference in kernel</td></tr><tr><td>Language</td><td>Lexer, parser, interpreter with kernel builtins</td></tr></tbody></table>
+<h3>And what does not</h3>
+<ul><li><strong>Wireless.</strong> The laptop's card is CNVi, so the MAC is in the chipset and the module is only a radio behind an undocumented signed-firmware protocol. The WPA2 supplicant is finished and passes IEEE test vectors at every boot, and has never had hardware to run on. See <a href="wiki/usb-wifi-driver.html">the USB WiFi work</a>.</li><li><strong>SMP.</strong> One core. The interior-mutability type is named <code>Racy</code> precisely so it is greppable the day that changes.</li><li><strong>An autonomous agent loop.</strong> Deliberately absent. The model proposes; a keystroke adopts.</li></ul>
+<h2 id="why-it-exists">Why it exists</h2>
+<p>Most "AI operating systems" are a chat window on top of Linux. The question here is narrower and more interesting: if a model is a kernel primitive rather than a userspace process, what changes?</p>
+<p>Some answers so far. Tool calls stop being serialised — the model names a function and the kernel calls it. Invalid tool names become <a href="wiki/constrained-decoding.html">unreachable rather than improbable</a>, because the grammar is built from the live table. And the best router turned out not to be the transformer at all, but <a href="wiki/routing.html">a ridge regression from 1960</a> reading one hidden state, 12,672 parameters, no forward pass, better accuracy.</p>
+<div class="note">Lineage, not target: <a href="wiki/templeos.html">TempleOS</a> is the obvious ancestor — one person, ring 0, no isolation, a deliberate aesthetic. GLaDOS is not trying to be it.</div>
+</main>
 <footer>
-  <div>GLaDOS archive — served as a static index. No cookies, no analytics,
-  nothing to accept.</div>
-  <div class="note">Copyright © 2026. All rights reserved. Source is published
-  to be read, not reused. One file
-  (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from the Linux kernel
-  and carries its own terms.</div>
+  <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This is an independent, non-commercial homage and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
+  <p>Copyright © 2026. All rights reserved. Source published to be read, not
+  reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from the
+  Linux kernel and carries its own terms.</p>
+  <p>No cookies, no analytics, nothing to accept. Last updated 2026-08-14.</p>
 </footer>
-
 </div>
-
-<script>
-// The tree this index walks. Kept as data rather than as generated pages so the
-// whole archive is one file that works from any host, including file://.
-//
-// `href` on a leaf points at wherever the bytes actually live -- GitHub
-// Releases for images, the repository for source. Nothing large is served from
-// Pages itself, which caps at 100 MB per file and would reject every ISO here.
-const REPO = "https://github.com/IlumCI/GLaDOS";
-const REL  = REPO + "/releases/latest/download/";
-
-const TREE = {
-  "": {
-    desc: "archive root",
-    kids: [
-      { n: "iso/",        t: "dir",  d: "bootable images" },
-      { n: "src/",        t: "dir",  d: "source tree" },
-      { n: "docs/",       t: "dir",  d: "documentation" },
-      { n: "checksums/",  t: "dir",  d: "digests and verification" },
-      { n: "README.md",   t: "file", d: "start here",
-        href: REPO + "/blob/main/README.md", size: "13K", mod: "2026-08-14" },
-    ]
-  },
-  "iso": {
-    desc: "bootable images",
-    kids: [
-      { n: "glados-qwen3-0.6b.iso", t: "file",
-        d: "full image — kernel + Qwen3-0.6B, int8, 512-token context",
-        href: REL + "glados-qwen3-0.6b.iso", size: "575M", mod: "2026-08-14" },
-      { n: "glados-smollm2-135m.iso", t: "file",
-        d: "small image — kernel + SmolLM2-135M, boots under QEMU",
-        href: REL + "glados-smollm2-135m.iso", size: "257M", mod: "2026-08-14" },
-      { n: "glados-nomodel.iso", t: "file",
-        d: "kernel only — supply your own model on the ESP",
-        href: REL + "glados-nomodel.iso", size: "33M", mod: "2026-08-14" },
-    ]
-  },
-  "src": {
-    desc: "source tree",
-    kids: [
-      { n: "glados-src.tar.gz", t: "file", d: "snapshot of the repository",
-        href: REPO + "/archive/refs/heads/main.tar.gz", size: "700K",
-        mod: "2026-08-14" },
-      { n: "browse/", t: "link", d: "read it on GitHub", href: REPO },
-    ]
-  },
-  "docs": {
-    desc: "documentation",
-    kids: [
-      { n: "README.md", t: "file", d: "overview, building, hardware notes",
-        href: REPO + "/blob/main/README.md", size: "13K", mod: "2026-08-14" },
-      { n: "CLAUDE.md", t: "file",
-        d: "architecture notes and gotchas that cost time",
-        href: REPO + "/blob/main/CLAUDE.md", size: "16K", mod: "2026-08-14" },
-    ]
-  },
-  "checksums": {
-    desc: "digests and verification",
-    kids: [
-      { n: "SHA256SUMS", t: "file", d: "digests for every image above",
-        href: REL + "SHA256SUMS", size: "312", mod: "2026-08-14" },
-    ]
-  },
-};
-
-const ICON = { dir: "[DIR]", file: "[   ]", link: "[LNK]", up: "[UP ]" };
-
-// The path is a parameter with the hash as its default, rather than being read
-// from the hash inside. Not style: a render that reaches for global location is
-// one that can only be tested by driving a real browser at a real URL, and this
-// page has to work from file:// and from a static host equally.
-function render(explicit) {
-  const src = explicit !== undefined ? explicit : location.hash;
-  const path = (String(src).replace(/^#\/?/, "") || "").replace(/\/$/, "");
-  const node = TREE[path];
-  const rows = document.getElementById("rows");
-  const crumbs = document.getElementById("crumbs");
-  rows.innerHTML = "";
-
-  if (!node) {
-    document.getElementById("title").textContent = "404 — Not Found";
-    crumbs.textContent = "/" + path;
-    rows.innerHTML = '<tr><td colspan="4">No such directory. ' +
-      '<a href="#/">Return to root</a>.</td></tr>';
-    return;
-  }
-
-  const shown = "/" + (path ? path + "/" : "");
-  document.getElementById("title").textContent = "Index of " + shown;
-  document.title = "Index of " + shown + " — glados.archive";
-
-  // Breadcrumbs, each segment its own link.
-  crumbs.innerHTML = "";
-  const parts = path ? path.split("/") : [];
-  let acc = "";
-  const root = document.createElement("a");
-  root.href = "#/"; root.textContent = "/";
-  crumbs.appendChild(root);
-  parts.forEach((p) => {
-    acc = acc ? acc + "/" + p : p;
-    const a = document.createElement("a");
-    a.href = "#/" + acc; a.textContent = p;
-    crumbs.appendChild(a);
-    const s = document.createElement("span");
-    s.className = "seg"; s.textContent = "/";
-    crumbs.appendChild(s);
-  });
-
-  if (path) {
-    const up = path.split("/").slice(0, -1).join("/");
-    rows.appendChild(row({
-      n: "Parent Directory", t: "up", href: "#/" + up, size: "-", mod: "", d: ""
-    }));
-  }
-  node.kids.forEach((k) => rows.appendChild(row(k)));
-}
-
-function row(k) {
-  const tr = document.createElement("tr");
-  if (k.t === "dir") tr.className = "dir";
-
-  const name = document.createElement("td");
-  const icon = document.createElement("span");
-  icon.className = "icon";
-  icon.textContent = ICON[k.t] || ICON.file;
-  name.appendChild(icon);
-  const a = document.createElement("a");
-  a.href = k.t === "dir" ? "#/" + k.n.replace(/\/$/, "") : k.href;
-  a.textContent = k.n;
-  if (k.t !== "dir" && k.t !== "up") a.rel = "noopener";
-  name.appendChild(a);
-
-  const mod = document.createElement("td");
-  mod.className = "hide-narrow";
-  mod.textContent = k.mod || "";
-
-  const size = document.createElement("td");
-  size.className = "size";
-  size.textContent = k.size || "-";
-
-  const desc = document.createElement("td");
-  desc.className = "desc hide-narrow";
-  desc.textContent = k.d || "";
-
-  tr.append(name, mod, size, desc);
-  return tr;
-}
-
-addEventListener("hashchange", render);
-render();
-</script>
 </body>
 </html>

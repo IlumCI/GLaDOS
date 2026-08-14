@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Content-addressed storage — Merkle trees, NVMe, and O(1) snapshots</title>
+<meta name="description" content="How GLaDOS stores data: objects named by SHA-256 of their contents, assembled into Merkle trees, so a copy is free and a snapshot is one hash.">
+<meta name="keywords" content="content addressed storage, Merkle tree, NVMe driver, snapshots, SHA-256, filesystem design">
+<link rel="canonical" href="https://ilumci.github.io/GLaDOS/wiki/storage.html">
+<meta name="robots" content="index,follow,max-image-preview:large">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="GLaDOS">
+<meta property="og:title" content="Content-addressed storage — Merkle trees, NVMe, and O(1) snapshots">
+<meta property="og:description" content="How GLaDOS stores data: objects named by SHA-256 of their contents, assembled into Merkle trees, so a copy is free and a snapshot is one hash.">
+<meta property="og:url" content="https://ilumci.github.io/GLaDOS/wiki/storage.html">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="Content-addressed storage — Merkle trees, NVMe, and O(1) snapshots">
+<meta name="twitter:description" content="How GLaDOS stores data: objects named by SHA-256 of their contents, assembled into Merkle trees, so a copy is free and a snapshot is one hash.">
+<meta name="theme-color" content="#f28c1e">
+<link rel="stylesheet" href="../style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='14' fill='%230e0e0e'/><circle cx='16' cy='16' r='7' fill='%23f28c1e'/></svg>">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://ilumci.github.io/GLaDOS/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://ilumci.github.io/GLaDOS/wiki/"},{"@type":"ListItem","position":3,"name":"Content-addressed storage","item":"https://ilumci.github.io/GLaDOS/wiki/storage.html"}]}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Content-addressed storage \u2014 Merkle trees, NVMe, and O(1) snapshots","description":"How GLaDOS stores data: objects named by SHA-256 of their contents, assembled into Merkle trees, so a copy is free and a snapshot is one hash.","url":"https://ilumci.github.io/GLaDOS/wiki/storage.html","dateModified":"2026-08-14","keywords":"content addressed storage, Merkle tree, NVMe driver, snapshots, SHA-256, filesystem design","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<div class="wrap">
+<header class="top">
+  <div class="brand">
+    <a class="logo" href="../">◉ GLaDOS</a>
+    <span class="tag">an AI operating system in Rust · ring 0 · bare metal</span>
+  </div>
+  <nav class="main"><a href="../">Home</a> <a class="btn" href="../download/">↓ Download</a> <a href="../wiki/">Wiki</a> <a href="../archive/">Archive</a> <a href="https://github.com/IlumCI/GLaDOS" rel="noopener">Source</a></nav>
+</header>
+<nav class="crumbs"><a href="../">GLaDOS</a> / <a href="../wiki/">Wiki</a> / Content-addressed storage</nav>
+<main id="main">
+<h1>Content-addressed storage</h1>
+<p class="lede">How GLaDOS stores data: objects named by SHA-256 of their contents, assembled into Merkle trees, so a copy is free and a snapshot is one hash.</p>
+<p>The filesystem is not a tree of blocks with names attached. Objects are named by the SHA-256 of their contents and assembled into Merkle trees, which makes several operations collapse to nothing.</p>
+<ul><li><strong>A copy is O(1)</strong> — identical content already has the same name, so copying is adding a reference.</li><li><strong>A snapshot is one hash</strong> — the root of the tree names the entire state.</li><li><strong>Rolling back branches rather than rewrites</strong> — the old root is still valid and still points at everything it did.</li></ul>
+<h2 id="the-rule-that-makes-it-work">The rule that makes it work</h2>
+<p><strong>The content hash covers content only, and never block locations.</strong> This sounds obvious and is easy to violate by including a block pointer in the hashed structure — at which point moving a block to defragment renames the object, every reference breaks, and deduplication silently stops working.</p>
+<h2 id="write-locking-and-why-it-stays-that-way">Write locking, and why it stays that way</h2>
+<p>NVMe writes are locked by default. They unlock only after a target region has been explicitly identified, the formatter re-checks before touching anything, and every error path re-locks.</p>
+<p>On a laptop whose disk is fully allocated to Windows there is no such region, and storage initialisation <em>fails</em>. That is the intended outcome, not a bug to work around. Leaving the lock open on failure is exactly how a safety mechanism becomes decorative.</p>
+<div class="note">The development machine's boot disk is counterfeit: it advertises 976 GB and holds 14.67. That is why the partitioning tooling uses MBR — a GPT backup header would be written to flash that does not exist — and why it carries an explicit safe-capacity limit.</div>
+<div class="seealso"><strong>See also</strong><a href="../wiki/glados-os.html">GLaDOS OS</a> · <a href="../wiki/tls.html">TLS 1.3 from scratch</a> · <a href="../wiki/testing.html">Testing without a test runner</a></div>
+</main>
+<footer>
+  <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This is an independent, non-commercial homage and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
+  <p>Copyright © 2026. All rights reserved. Source published to be read, not
+  reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from the
+  Linux kernel and carries its own terms.</p>
+  <p>No cookies, no analytics, nothing to accept. Last updated 2026-08-14.</p>
+</footer>
+</div>
+</body>
+</html>

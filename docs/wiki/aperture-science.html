@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aperture Science — the aesthetic behind an amber-on-black operating system</title>
+<meta name="description" content="Why GLaDOS OS looks like Aperture Science: amber on black, Windows 3.1 chrome, and a boot screen built from the Portal-era design language.">
+<meta name="keywords" content="Aperture Science, Aperture Science OS, Portal aesthetic, GLaDOS, Aperture Laboratories, Portal design">
+<link rel="canonical" href="https://ilumci.github.io/GLaDOS/wiki/aperture-science.html">
+<meta name="robots" content="index,follow,max-image-preview:large">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="GLaDOS">
+<meta property="og:title" content="Aperture Science — the aesthetic behind an amber-on-black operating system">
+<meta property="og:description" content="Why GLaDOS OS looks like Aperture Science: amber on black, Windows 3.1 chrome, and a boot screen built from the Portal-era design language.">
+<meta property="og:url" content="https://ilumci.github.io/GLaDOS/wiki/aperture-science.html">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="Aperture Science — the aesthetic behind an amber-on-black operating system">
+<meta name="twitter:description" content="Why GLaDOS OS looks like Aperture Science: amber on black, Windows 3.1 chrome, and a boot screen built from the Portal-era design language.">
+<meta name="theme-color" content="#f28c1e">
+<link rel="stylesheet" href="../style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='14' fill='%230e0e0e'/><circle cx='16' cy='16' r='7' fill='%23f28c1e'/></svg>">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://ilumci.github.io/GLaDOS/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://ilumci.github.io/GLaDOS/wiki/"},{"@type":"ListItem","position":3,"name":"Aperture Science","item":"https://ilumci.github.io/GLaDOS/wiki/aperture-science.html"}]}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Aperture Science \u2014 the aesthetic behind an amber-on-black operating system","description":"Why GLaDOS OS looks like Aperture Science: amber on black, Windows 3.1 chrome, and a boot screen built from the Portal-era design language.","url":"https://ilumci.github.io/GLaDOS/wiki/aperture-science.html","dateModified":"2026-08-14","keywords":"Aperture Science, Aperture Science OS, Portal aesthetic, GLaDOS, Aperture Laboratories, Portal design","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<div class="wrap">
+<header class="top">
+  <div class="brand">
+    <a class="logo" href="../">◉ GLaDOS</a>
+    <span class="tag">an AI operating system in Rust · ring 0 · bare metal</span>
+  </div>
+  <nav class="main"><a href="../">Home</a> <a class="btn" href="../download/">↓ Download</a> <a href="../wiki/">Wiki</a> <a href="../archive/">Archive</a> <a href="https://github.com/IlumCI/GLaDOS" rel="noopener">Source</a></nav>
+</header>
+<nav class="crumbs"><a href="../">GLaDOS</a> / <a href="../wiki/">Wiki</a> / Aperture Science</nav>
+<main id="main">
+<h1>Aperture Science</h1>
+<p class="lede">Why GLaDOS OS looks like Aperture Science: amber on black, Windows 3.1 chrome, and a boot screen built from the Portal-era design language.</p>
+<p><strong>Aperture Science</strong> is the fictional research company from Valve's <em>Portal</em>, and GLaDOS is the artificial intelligence that runs its facility. This operating system takes the name and the look and applies both to something real.</p>
+<div class="note">GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This is an independent, non-commercial homage and is not affiliated with, endorsed by, or connected to Valve in any way.</div>
+<h2 id="what-the-aesthetic-actually-is">What the aesthetic actually is</h2>
+<p>Reduced to specifics, the Aperture look is a small set of decisions:</p>
+<ul><li><strong>Amber on black.</strong> The accent here is <code>#F28C1E</code>, the colour of a CRT phosphor and of every warning label in the facility.</li><li><strong>Monospace everything.</strong> Not a font choice so much as an institutional one — the typography of test protocols and lab equipment.</li><li><strong>Cheerful text about dangerous things.</strong> The enrichment centre voice: procedural, encouraging, describing hazards in the tone of a safety video.</li><li><strong>Industrial chrome.</strong> Beveled panels, hard edges, visible structure. Which lands, conveniently, very close to Windows 3.1.</li></ul>
+<h2 id="where-it-shows-up">Where it shows up</h2>
+<p>The boot screen draws the Aperture logo as vector geometry — there is no image decoder in the kernel, so it is arcs and lines computed at startup. The desktop wallpaper uses the same mark. The window chrome is <a href="gui.html">genuine Windows 3.1</a>: two-pixel bevels, light on the top-left, dark on the bottom-right, over a <code>#C0C0C0</code> face.</p>
+<p>The result is a machine that looks like it was requisitioned by a 1990s research facility with a generous budget and poor oversight.</p>
+<h2 id="the-joke-and-the-part-that-is-not-a-joke">The joke, and the part that is not a joke</h2>
+<p>Naming an operating system after a fictional AI that murders its researchers is a joke about AI safety, and it is meant as one. The system itself is deliberately unambitious about autonomy: there is no agent loop, the model proposes and a human keystroke adopts, and self-modification is gated behind measurement on a held-out split.</p>
+<p>The engineering is not a joke at all. The <a href="network-stack.html">TCP/IP stack</a>, the <a href="tls.html">TLS 1.3 implementation</a>, the <a href="usb-xhci.html">xHCI driver</a> and the <a href="llm-in-kernel.html">transformer</a> are all real, all hand-written, and all tested.</p>
+<div class="seealso"><strong>See also</strong><a href="../wiki/portal-os.html">Portal OS</a> · <a href="../wiki/gui.html">The Windows 3.1 desktop</a> · <a href="../wiki/glados-os.html">GLaDOS OS</a> · <a href="../wiki/templeos.html">TempleOS</a></div>
+</main>
+<footer>
+  <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This is an independent, non-commercial homage and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
+  <p>Copyright © 2026. All rights reserved. Source published to be read, not
+  reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from the
+  Linux kernel and carries its own terms.</p>
+  <p>No cookies, no analytics, nothing to accept. Last updated 2026-08-14.</p>
+</footer>
+</div>
+</body>
+</html>

@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Testing an OS with no test runner — boot self-tests and driving QEMU</title>
+<meta name="description" content="There is no cargo test for a no_std UEFI binary. How GLaDOS is verified: self-tests at boot, a scripted QEMU serial harness, and a NumPy oracle.">
+<meta name="keywords" content="OS testing, kernel testing, QEMU automation, self-test, no_std testing, embedded testing">
+<link rel="canonical" href="https://ilumci.github.io/GLaDOS/wiki/testing.html">
+<meta name="robots" content="index,follow,max-image-preview:large">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="GLaDOS">
+<meta property="og:title" content="Testing an OS with no test runner — boot self-tests and driving QEMU">
+<meta property="og:description" content="There is no cargo test for a no_std UEFI binary. How GLaDOS is verified: self-tests at boot, a scripted QEMU serial harness, and a NumPy oracle.">
+<meta property="og:url" content="https://ilumci.github.io/GLaDOS/wiki/testing.html">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="Testing an OS with no test runner — boot self-tests and driving QEMU">
+<meta name="twitter:description" content="There is no cargo test for a no_std UEFI binary. How GLaDOS is verified: self-tests at boot, a scripted QEMU serial harness, and a NumPy oracle.">
+<meta name="theme-color" content="#f28c1e">
+<link rel="stylesheet" href="../style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='14' fill='%230e0e0e'/><circle cx='16' cy='16' r='7' fill='%23f28c1e'/></svg>">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://ilumci.github.io/GLaDOS/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://ilumci.github.io/GLaDOS/wiki/"},{"@type":"ListItem","position":3,"name":"Testing without a test runner","item":"https://ilumci.github.io/GLaDOS/wiki/testing.html"}]}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Testing an OS with no test runner \u2014 boot self-tests and driving QEMU","description":"There is no cargo test for a no_std UEFI binary. How GLaDOS is verified: self-tests at boot, a scripted QEMU serial harness, and a NumPy oracle.","url":"https://ilumci.github.io/GLaDOS/wiki/testing.html","dateModified":"2026-08-14","keywords":"OS testing, kernel testing, QEMU automation, self-test, no_std testing, embedded testing","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<div class="wrap">
+<header class="top">
+  <div class="brand">
+    <a class="logo" href="../">◉ GLaDOS</a>
+    <span class="tag">an AI operating system in Rust · ring 0 · bare metal</span>
+  </div>
+  <nav class="main"><a href="../">Home</a> <a class="btn" href="../download/">↓ Download</a> <a href="../wiki/">Wiki</a> <a href="../archive/">Archive</a> <a href="https://github.com/IlumCI/GLaDOS" rel="noopener">Source</a></nav>
+</header>
+<nav class="crumbs"><a href="../">GLaDOS</a> / <a href="../wiki/">Wiki</a> / Testing without a test runner</nav>
+<main id="main">
+<h1>Testing an OS with no test runner</h1>
+<p class="lede">There is no cargo test for a no_std UEFI binary. How GLaDOS is verified: self-tests at boot, a scripted QEMU serial harness, and a NumPy oracle.</p>
+<p>There is no <code>cargo test</code>. This is a <code>no_std</code> UEFI binary with no host test runner, so the test suite had to be somewhere else. It is in three places.</p>
+<h2 id="1-self-tests-at-boot">1. Self-tests at boot</h2>
+<p>At every boot the system exercises the heap, timer, clock, namespace, 13 sets of published cryptographic vectors, <a href="constrained-decoding.html">constrained decoding</a> and the linear probe, printing <code>ok</code> or <code>FAIL</code> per line. That output <em>is</em> the test suite.</p>
+<div class="note">It is easy to scroll past, and it does catch real bugs. An ECDSA break was visible in the crypto block for an entire debugging cycle while the output was being sliced away to look at something else.</div>
+<h2 id="2-a-scripted-qemu-harness">2. A scripted QEMU harness</h2>
+<p>A driver script boots QEMU, stages the binary, resets the firmware's NVRAM to a pristine state, and drives the shell over a serial socket, sending commands and capturing everything.</p>
+<p>Two details that were not obvious. QEMU's Windows stdio backend reads console handles directly, so piping a script into it does nothing at all — silently; a TCP socket behaves like a socket everywhere. And a stale firmware boot entry sends the machine to the UEFI shell, which looks exactly like the system failing to boot, so the NVRAM is reset every run.</p>
+<p>The harness also captures the framebuffer through QEMU's monitor and converts it to PNG, because <a href="gui.html">a serial log says nothing about whether the screen is right</a>.</p>
+<h2 id="3-a-numeric-oracle">3. A numeric oracle</h2>
+<p>For the model, a NumPy reference implementation reads the <em>converted</em> checkpoint and produces logits to diff against. Reading the converted file rather than the original is the point: a converter bug shows up in both, so only a genuine kernel bug appears as a mismatch.</p>
+<p>This is what caught <a href="rope.html">the RoPE convention</a>, which no amount of reading the code would have — both conventions are perfectly reasonable code.</p>
+<h2 id="the-habit-underneath">The habit underneath</h2>
+<p>Measure, do not assume; and look at it. Repeatedly in this project a confident belief turned out to be false, and a cheap deterministic test found it: the oracle found the RoPE bug, screenshots found three layout bugs the serial log could not, and an A/B against a deliberately tiny context isolated an off-by-one to a single token.</p>
+<div class="seealso"><strong>See also</strong><a href="../wiki/gui.html">The Windows 3.1 desktop</a> · <a href="../wiki/rope.html">RoPE</a> · <a href="../wiki/tls.html">TLS 1.3 from scratch</a> · <a href="../wiki/glados-os.html">GLaDOS OS</a></div>
+</main>
+<footer>
+  <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This is an independent, non-commercial homage and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
+  <p>Copyright © 2026. All rights reserved. Source published to be read, not
+  reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from the
+  Linux kernel and carries its own terms.</p>
+  <p>No cookies, no analytics, nothing to accept. Last updated 2026-08-14.</p>
+</footer>
+</div>
+</body>
+</html>

@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://ilumci.github.io/GLaDOS/sitemap.xml

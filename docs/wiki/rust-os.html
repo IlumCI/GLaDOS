@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Writing an operating system in Rust — no_std, ring 0, and no runtime</title>
+<meta name="description" content="What building a Rust OS actually involves: no_std, a hand-written allocator, the UEFI target, calling-convention traps, and where Rust genuinely helps.">
+<meta name="keywords" content="Rust OS, Rust operating system, no_std, bare metal Rust, Rust kernel development, osdev Rust">
+<link rel="canonical" href="https://ilumci.github.io/GLaDOS/wiki/rust-os.html">
+<meta name="robots" content="index,follow,max-image-preview:large">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="GLaDOS">
+<meta property="og:title" content="Writing an operating system in Rust — no_std, ring 0, and no runtime">
+<meta property="og:description" content="What building a Rust OS actually involves: no_std, a hand-written allocator, the UEFI target, calling-convention traps, and where Rust genuinely helps.">
+<meta property="og:url" content="https://ilumci.github.io/GLaDOS/wiki/rust-os.html">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="Writing an operating system in Rust — no_std, ring 0, and no runtime">
+<meta name="twitter:description" content="What building a Rust OS actually involves: no_std, a hand-written allocator, the UEFI target, calling-convention traps, and where Rust genuinely helps.">
+<meta name="theme-color" content="#f28c1e">
+<link rel="stylesheet" href="../style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='14' fill='%230e0e0e'/><circle cx='16' cy='16' r='7' fill='%23f28c1e'/></svg>">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://ilumci.github.io/GLaDOS/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://ilumci.github.io/GLaDOS/wiki/"},{"@type":"ListItem","position":3,"name":"Writing an OS in Rust","item":"https://ilumci.github.io/GLaDOS/wiki/rust-os.html"}]}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Writing an operating system in Rust \u2014 no_std, ring 0, and no runtime","description":"What building a Rust OS actually involves: no_std, a hand-written allocator, the UEFI target, calling-convention traps, and where Rust genuinely helps.","url":"https://ilumci.github.io/GLaDOS/wiki/rust-os.html","dateModified":"2026-08-14","keywords":"Rust OS, Rust operating system, no_std, bare metal Rust, Rust kernel development, osdev Rust","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<div class="wrap">
+<header class="top">
+  <div class="brand">
+    <a class="logo" href="../">◉ GLaDOS</a>
+    <span class="tag">an AI operating system in Rust · ring 0 · bare metal</span>
+  </div>
+  <nav class="main"><a href="../">Home</a> <a class="btn" href="../download/">↓ Download</a> <a href="../wiki/">Wiki</a> <a href="../archive/">Archive</a> <a href="https://github.com/IlumCI/GLaDOS" rel="noopener">Source</a></nav>
+</header>
+<nav class="crumbs"><a href="../">GLaDOS</a> / <a href="../wiki/">Wiki</a> / Writing an OS in Rust</nav>
+<main id="main">
+<h1>Writing an operating system in Rust</h1>
+<p class="lede">What building a Rust OS actually involves: no_std, a hand-written allocator, the UEFI target, calling-convention traps, and where Rust genuinely helps.</p>
+<p>GLaDOS is written in Rust targeting <code>x86_64-unknown-uefi</code>, with <code>no_std</code> and no runtime. This is what that means in practice.</p>
+<h2 id="what-you-give-up">What you give up</h2>
+<p><code>no_std</code> removes the standard library, which removes rather more than people expect: no heap until you write an allocator, no <code>File</code>, no <code>Vec</code> until <code>alloc</code> is wired up, no threads, no <code>println!</code>, and no floating-point maths functions — <code>exp</code>, <code>sqrt</code> and <code>tanh</code> live in libm, which is C, which is not there.</p>
+<p>For an OS with a transformer in it, that last one is not a detail. Softmax needs <code>exp</code>. So the <a href="llm-in-kernel.html">inference code</a> carries its own.</p>
+<h2 id="what-you-get">What you get</h2>
+<p>Ownership does not stop caring at the hardware boundary. A driver that hands out a buffer it still holds, a ring the allocator might free underneath the controller, a device structure aliased by two code paths — these are compile errors rather than corruption discovered three subsystems later.</p>
+<p>The honest caveat: everything touching hardware is <code>unsafe</code> anyway. Rust does not verify that a physical address is mapped, that a DMA buffer is where the device thinks, or that a volatile write hit the register you meant. It narrows the blast radius; it does not remove it.</p>
+<h2 id="traps-that-cost-real-time">Traps that cost real time</h2>
+<ul><li><strong><code>extern "C"</code> on the UEFI target is Microsoft x64, not System V.</strong> The context switch has to say <code>extern "sysv64"</code> explicitly, or arguments arrive in the wrong registers and the failure looks like memory corruption.</li><li><strong>A guarded match arm placed after the arms it guards is unreachable.</strong> The compiler warns. The warning went unread for several commits.</li><li><strong>Interior mutability is not a lock.</strong> The type used here is called <code>Racy</code> so that the day SMP arrives, one grep finds every place that assumed one core.</li></ul>
+<h2 id="the-allocator">The allocator</h2>
+<p>The kernel heap is a single physically contiguous allocation chosen from the UEFI memory map, sized by a ladder that steps down until one fits. That matters because the machine's largest contiguous region is not its total RAM — a map can report 1.9 GB free across 84 regions and not have 320 MB in one piece.</p>
+<div class="note">A subtle bug lived here: the ladder never degraded, because the probing allocator advanced its cursor destructively, so once the largest rung failed every smaller rung failed too. The fix was a non-consuming <code>largest_span()</code> that looks forward without consuming — rewinding would have handed out the page tables' own frames a second time.</div>
+<div class="seealso"><strong>See also</strong><a href="../wiki/ring-0.html">Ring 0</a> · <a href="../wiki/uefi-kernel.html">UEFI as the kernel</a> · <a href="../wiki/llm-in-kernel.html">A language model in the kernel</a> · <a href="../wiki/glados-os.html">GLaDOS OS</a></div>
+</main>
+<footer>
+  <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This is an independent, non-commercial homage and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
+  <p>Copyright © 2026. All rights reserved. Source published to be read, not
+  reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from the
+  Linux kernel and carries its own terms.</p>
+  <p>No cookies, no analytics, nothing to accept. Last updated 2026-08-14.</p>
+</footer>
+</div>
+</body>
+</html>

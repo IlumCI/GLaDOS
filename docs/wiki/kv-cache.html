@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The int8 KV cache — quantising attention memory, and why keys hurt more</title>
+<meta name="description" content="How GLaDOS fits a long context in kernel memory: int8 KV cache with per-block scales, split per layer, plus attention sinks and a sliding window.">
+<meta name="keywords" content="KV cache, int8 quantisation, attention sinks, StreamingLLM, long context, LLM memory">
+<link rel="canonical" href="https://ilumci.github.io/GLaDOS/wiki/kv-cache.html">
+<meta name="robots" content="index,follow,max-image-preview:large">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="GLaDOS">
+<meta property="og:title" content="The int8 KV cache — quantising attention memory, and why keys hurt more">
+<meta property="og:description" content="How GLaDOS fits a long context in kernel memory: int8 KV cache with per-block scales, split per layer, plus attention sinks and a sliding window.">
+<meta property="og:url" content="https://ilumci.github.io/GLaDOS/wiki/kv-cache.html">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="The int8 KV cache — quantising attention memory, and why keys hurt more">
+<meta name="twitter:description" content="How GLaDOS fits a long context in kernel memory: int8 KV cache with per-block scales, split per layer, plus attention sinks and a sliding window.">
+<meta name="theme-color" content="#f28c1e">
+<link rel="stylesheet" href="../style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='14' fill='%230e0e0e'/><circle cx='16' cy='16' r='7' fill='%23f28c1e'/></svg>">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://ilumci.github.io/GLaDOS/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://ilumci.github.io/GLaDOS/wiki/"},{"@type":"ListItem","position":3,"name":"The int8 KV cache","item":"https://ilumci.github.io/GLaDOS/wiki/kv-cache.html"}]}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"The int8 KV cache \u2014 quantising attention memory, and why keys hurt more","description":"How GLaDOS fits a long context in kernel memory: int8 KV cache with per-block scales, split per layer, plus attention sinks and a sliding window.","url":"https://ilumci.github.io/GLaDOS/wiki/kv-cache.html","dateModified":"2026-08-14","keywords":"KV cache, int8 quantisation, attention sinks, StreamingLLM, long context, LLM memory","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<div class="wrap">
+<header class="top">
+  <div class="brand">
+    <a class="logo" href="../">◉ GLaDOS</a>
+    <span class="tag">an AI operating system in Rust · ring 0 · bare metal</span>
+  </div>
+  <nav class="main"><a href="../">Home</a> <a class="btn" href="../download/">↓ Download</a> <a href="../wiki/">Wiki</a> <a href="../archive/">Archive</a> <a href="https://github.com/IlumCI/GLaDOS" rel="noopener">Source</a></nav>
+</header>
+<nav class="crumbs"><a href="../">GLaDOS</a> / <a href="../wiki/">Wiki</a> / The int8 KV cache</nav>
+<main id="main">
+<h1>The int8 KV cache</h1>
+<p class="lede">How GLaDOS fits a long context in kernel memory: int8 KV cache with per-block scales, split per layer, plus attention sinks and a sliding window.</p>
+<p>The key-value cache is where an autoregressive model keeps everything it has already read. It is also, past a few thousand tokens, far larger than the model itself.</p>
+<h2 id="the-arithmetic">The arithmetic</h2>
+<p>For Qwen3-0.6B: 2 (keys and values) × 28 layers × 1024 kv-dimensions × 4 bytes = <strong>224 KiB per token</strong>.</p>
+<table><thead><tr><th>Scheme</th><th>Per token</th><th>At 32,768 tokens</th></tr></thead><tbody><tr><td>f32, one allocation</td><td>224 KiB</td><td>7.0 GiB contiguous — unreachable</td></tr><tr><td>int8, one allocation</td><td>56 KiB</td><td>1.75 GiB contiguous — very unlikely</td></tr><tr><td>int8, split per layer</td><td>56 KiB</td><td>28 × ~66 MiB — achievable</td></tr></tbody></table>
+<p>The split is what makes long context possible at all. As a single allocation the cache needs one unbroken physical region; split per layer the largest single request drops 28-fold, and a fragmented memory map can satisfy it.</p>
+<h2 id="quantisation-and-an-asymmetry">Quantisation, and an asymmetry</h2>
+<p>Values are stored int8 in blocks of 32 with one f32 scale per block. The measured error is not symmetric between keys and values: <strong>keys carry roughly 15× the error impact</strong>.</p>
+<p>The reason is structural. A key participates in a dot product and then goes through softmax, which is exponential — a small perturbation in a score becomes a large change in attention weight. A value is only averaged, and averaging is forgiving.</p>
+<h2 id="attention-sinks-and-a-sliding-window">Attention sinks and a sliding window</h2>
+<p>Past the allocated window, the cache runs as a ring: a few initial tokens are pinned as attention sinks and the rest slides. The sinks matter more than they look — models place a large amount of attention mass on the first few positions regardless of content, and evicting them degrades output sharply. With them, generation continues past the nominal context length instead of stopping.</p>
+<div class="note">Speed is the real ceiling, not memory. Attention is linear in live positions, so at 32k tokens it is roughly 3.8 GMAC per token on top of the model's own 0.6 GMAC — several seconds per token at full context. Excellent for reading a long document once; painful for chat.</div>
+<div class="seealso"><strong>See also</strong><a href="../wiki/llm-in-kernel.html">A language model in the kernel</a> · <a href="../wiki/qwen3.html">Qwen3 in 570 MB</a> · <a href="../wiki/rope.html">RoPE</a></div>
+</main>
+<footer>
+  <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This is an independent, non-commercial homage and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
+  <p>Copyright © 2026. All rights reserved. Source published to be read, not
+  reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from the
+  Linux kernel and carries its own terms.</p>
+  <p>No cookies, no analytics, nothing to accept. Last updated 2026-08-14.</p>
+</footer>
+</div>
+</body>
+</html>

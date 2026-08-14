@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TLS 1.3 from scratch — and why hand-written crypto is the dangerous part</title>
+<meta name="description" content="GLaDOS implements TLS 1.3, X25519, ChaCha20-Poly1305 and ECDSA by hand, validates certificate chains, and is honest about what is still not safe.">
+<meta name="keywords" content="TLS 1.3, cryptography from scratch, X25519, ChaCha20, ECDSA, certificate validation, kernel TLS">
+<link rel="canonical" href="https://ilumci.github.io/GLaDOS/wiki/tls.html">
+<meta name="robots" content="index,follow,max-image-preview:large">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="GLaDOS">
+<meta property="og:title" content="TLS 1.3 from scratch — and why hand-written crypto is the dangerous part">
+<meta property="og:description" content="GLaDOS implements TLS 1.3, X25519, ChaCha20-Poly1305 and ECDSA by hand, validates certificate chains, and is honest about what is still not safe.">
+<meta property="og:url" content="https://ilumci.github.io/GLaDOS/wiki/tls.html">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="TLS 1.3 from scratch — and why hand-written crypto is the dangerous part">
+<meta name="twitter:description" content="GLaDOS implements TLS 1.3, X25519, ChaCha20-Poly1305 and ECDSA by hand, validates certificate chains, and is honest about what is still not safe.">
+<meta name="theme-color" content="#f28c1e">
+<link rel="stylesheet" href="../style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='14' fill='%230e0e0e'/><circle cx='16' cy='16' r='7' fill='%23f28c1e'/></svg>">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://ilumci.github.io/GLaDOS/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://ilumci.github.io/GLaDOS/wiki/"},{"@type":"ListItem","position":3,"name":"TLS 1.3 from scratch","item":"https://ilumci.github.io/GLaDOS/wiki/tls.html"}]}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"TLS 1.3 from scratch \u2014 and why hand-written crypto is the dangerous part","description":"GLaDOS implements TLS 1.3, X25519, ChaCha20-Poly1305 and ECDSA by hand, validates certificate chains, and is honest about what is still not safe.","url":"https://ilumci.github.io/GLaDOS/wiki/tls.html","dateModified":"2026-08-14","keywords":"TLS 1.3, cryptography from scratch, X25519, ChaCha20, ECDSA, certificate validation, kernel TLS","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<div class="wrap">
+<header class="top">
+  <div class="brand">
+    <a class="logo" href="../">◉ GLaDOS</a>
+    <span class="tag">an AI operating system in Rust · ring 0 · bare metal</span>
+  </div>
+  <nav class="main"><a href="../">Home</a> <a class="btn" href="../download/">↓ Download</a> <a href="../wiki/">Wiki</a> <a href="../archive/">Archive</a> <a href="https://github.com/IlumCI/GLaDOS" rel="noopener">Source</a></nav>
+</header>
+<nav class="crumbs"><a href="../">GLaDOS</a> / <a href="../wiki/">Wiki</a> / TLS 1.3 from scratch</nav>
+<main id="main">
+<h1>TLS 1.3 from scratch</h1>
+<p class="lede">GLaDOS implements TLS 1.3, X25519, ChaCha20-Poly1305 and ECDSA by hand, validates certificate chains, and is honest about what is still not safe.</p>
+<p>The kernel speaks TLS 1.3 using its own implementations of SHA-256/384, HMAC, HKDF, AES, ChaCha20-Poly1305, X25519, RSA and ECDSA. It validates certificate chains against a root bundle exported from the host's store.</p>
+<div class="note"><strong>This is the one place where writing everything yourself is a liability rather than a virtue.</strong> A bug in a driver produces a device that does not work. A bug here produces a connection that works perfectly and is not secure.</div>
+<h2 id="primitives-chosen-for-checkability">Primitives chosen for checkability</h2>
+<p>The selections are deliberate:</p>
+<ul><li><strong>ChaCha20-Poly1305 over AES-GCM</strong> — no key-dependent table lookups, so no cache-timing side channel to reason about.</li><li><strong>X25519 over a NIST curve</strong> — no point validation required, far fewer ways to be subtly wrong.</li></ul>
+<p>Every primitive is verified against published RFC and FIPS test vectors at every boot, and the boot log prints a pass or fail line for each.</p>
+<h2 id="an-ecdsa-break-that-sat-in-plain-sight">An ECDSA break that sat in plain sight</h2>
+<p>The self-test output is easy to scroll past, and doing so cost an entire debugging cycle: a broken ECDSA implementation was printing <code>FAIL</code> in the crypto block the whole time, while the log was being sliced away to look at something else.</p>
+<h2 id="jacobian-coordinates-and-a-trap">Jacobian coordinates, and a trap</h2>
+<p>ECDSA uses Jacobian coordinates because affine ones cost a modular inversion per point operation — a full modular exponentiation. For P-384 that meant roughly 460,000 allocating multiplications per signature, which exhausted the heap.</p>
+<p>The trap: the inversion routine takes and returns <em>ordinary</em> values, and passing it something already in Montgomery form computes the wrong thing silently. There is a wrapper that does the right conversion, and using it is not optional.</p>
+<h2 id="what-is-still-not-safe">What is still not safe</h2>
+<ul><li>Validation <strong>reports</strong> rather than enforces — a caller that cares must check the result. This is a known gap.</li><li>There is no revocation checking of any kind.</li><li><strong>Key material still comes from the timestamp counter, not <code>RDRAND</code>.</strong> That is a real weakness and it is on the list.</li></ul>
+<p>Stating these is the point. A system that claimed to be secure here would be worse than one that says exactly where it is not.</p>
+<div class="seealso"><strong>See also</strong><a href="../wiki/network-stack.html">The network stack</a> · <a href="../wiki/storage.html">Content-addressed storage</a> · <a href="../wiki/glados-os.html">GLaDOS OS</a></div>
+</main>
+<footer>
+  <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This is an independent, non-commercial homage and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
+  <p>Copyright © 2026. All rights reserved. Source published to be read, not
+  reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from the
+  Linux kernel and carries its own terms.</p>
+  <p>No cookies, no analytics, nothing to accept. Last updated 2026-08-14.</p>
+</footer>
+</div>
+</body>
+</html>
