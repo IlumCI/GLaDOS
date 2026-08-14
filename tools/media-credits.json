@@ -1,0 +1,233 @@
+{
+ "attention-heads": {
+  "file": "paper/attention-heads.png",
+  "width": 720,
+  "height": 1105,
+  "source": "arXiv 1706.03762",
+  "title": "Figure 2 (right), Attention Is All You Need",
+  "author": "Vaswani, Shazeer, Parmar, Uszkoreit, Jones, Gomez, Kaiser and Polosukhin",
+  "licence": "",
+  "url": "https://arxiv.org/abs/1706.03762",
+  "page": "qwen3"
+ },
+ "attention-sinks": {
+  "file": "paper/attention-sinks.png",
+  "width": 720,
+  "height": 164,
+  "source": "arXiv 2309.17453",
+  "title": "Figure 2, Efficient Streaming Language Models with Attention Sinks",
+  "author": "Xiao, Tian, Chen, Han and Lewis",
+  "licence": "",
+  "url": "https://arxiv.org/abs/2309.17453",
+  "page": "kv-cache"
+ },
+ "chain-of-trust": {
+  "file": "wm/chain-of-trust.svg",
+  "width": 1280,
+  "height": 720,
+  "source": "Wikimedia Commons",
+  "title": "Chain Of Trust.svg",
+  "author": "Yuhkih",
+  "licence": "CC BY-SA 4.0",
+  "url": "https://commons.wikimedia.org/wiki/File:Chain_Of_Trust.svg",
+  "page": "tls"
+ },
+ "compact-disc": {
+  "file": "wm/compact-disc.svg",
+  "width": 500,
+  "height": 500,
+  "source": "Wikimedia Commons",
+  "title": "OD Compact disc.svg",
+  "author": "The original uploader was Sakurambo~commonswiki at Wikimedia Commons.",
+  "licence": "CC BY-SA 2.5",
+  "url": "https://commons.wikimedia.org/wiki/File:OD_Compact_disc.svg",
+  "page": "iso-el-torito"
+ },
+ "dfa": {
+  "file": "wm/dfa.svg",
+  "width": 358,
+  "height": 158,
+  "source": "Wikimedia Commons",
+  "title": "DFA example multiplies of 3.svg",
+  "author": "Self-made",
+  "licence": "Public domain",
+  "url": "https://commons.wikimedia.org/wiki/File:DFA_example_multiplies_of_3.svg",
+  "page": "constrained-decoding"
+ },
+ "dh-exchange": {
+  "file": "wm/dh-exchange.svg",
+  "width": 427,
+  "height": 641,
+  "source": "Wikimedia Commons",
+  "title": "Diffie-Hellman Key Exchange.svg",
+  "author": "Original schema: A.J. Vinck, University of Duisburg-Essen SVG version: Flugaal",
+  "licence": "Public domain",
+  "url": "https://commons.wikimedia.org/wiki/File:Diffie-Hellman_Key_Exchange.svg",
+  "page": "tls"
+ },
+ "ip-stack": {
+  "file": "wm/ip-stack.svg",
+  "width": 490,
+  "height": 580,
+  "source": "Wikimedia Commons",
+  "title": "IP stack connections.svg",
+  "author": "en:User:Kbrose",
+  "licence": "CC BY-SA 3.0",
+  "url": "https://commons.wikimedia.org/wiki/File:IP_stack_connections.svg",
+  "page": "network-stack"
+ },
+ "linear-regression": {
+  "file": "wm/linear-regression.svg",
+  "width": 350,
+  "height": 231,
+  "source": "Wikimedia Commons",
+  "title": "Linear regression.svg",
+  "author": "Sewaqu",
+  "licence": "Public domain",
+  "url": "https://commons.wikimedia.org/wiki/File:Linear_regression.svg",
+  "page": "routing"
+ },
+ "merkle-tree": {
+  "file": "wm/merkle-tree.svg",
+  "width": 2200,
+  "height": 1400,
+  "source": "Wikimedia Commons",
+  "title": "Hash Tree.svg",
+  "author": "Azaghal",
+  "licence": "CC0",
+  "url": "https://commons.wikimedia.org/wiki/File:Hash_Tree.svg",
+  "page": "storage"
+ },
+ "nvme-ssd": {
+  "file": "wm/nvme-ssd.jpg",
+  "width": 720,
+  "height": 257,
+  "source": "Wikimedia Commons",
+  "title": "Samsung 980 PRO PCIe 4.0 NVMe SSD 1TB-top PNr°0915.jpg",
+  "author": "D-Kuru",
+  "licence": "CC BY-SA 4.0",
+  "url": "https://commons.wikimedia.org/wiki/File:Samsung_980_PRO_PCIe_4.0_NVMe_SSD_1TB-top_PNr%C2%B00915.jpg",
+  "page": "storage"
+ },
+ "priv-rings": {
+  "file": "wm/priv-rings.svg",
+  "width": 675,
+  "height": 487,
+  "source": "Wikimedia Commons",
+  "title": "Priv rings.svg",
+  "author": "Hertzsprung at English Wikipedia",
+  "licence": "CC BY-SA 3.0",
+  "url": "https://commons.wikimedia.org/wiki/File:Priv_rings.svg",
+  "page": "ring-0"
+ },
+ "rope-diagram": {
+  "file": "paper/rope-diagram.svg",
+  "width": 812,
+  "height": 454,
+  "source": "arXiv 2104.09864",
+  "title": "Figure 1, RoFormer: Enhanced Transformer with Rotary Position Embedding",
+  "author": "Su, Lu, Pan, Murtadha, Wen and Liu",
+  "licence": "",
+  "url": "https://arxiv.org/abs/2104.09864",
+  "page": "rope"
+ },
+ "rust-logo": {
+  "file": "wm/rust-logo.svg",
+  "width": 106,
+  "height": 106,
+  "source": "Wikimedia Commons",
+  "title": "Rust programming language black logo.svg",
+  "author": "™/®Rust Foundation",
+  "licence": "CC BY 4.0",
+  "url": "https://commons.wikimedia.org/wiki/File:Rust_programming_language_black_logo.svg",
+  "page": "rust-os"
+ },
+ "streaming-kv": {
+  "file": "paper/streaming-kv.png",
+  "width": 720,
+  "height": 239,
+  "source": "arXiv 2309.17453",
+  "title": "Figure 1, Efficient Streaming Language Models with Attention Sinks",
+  "author": "Xiao, Tian, Chen, Han and Lewis",
+  "licence": "",
+  "url": "https://arxiv.org/abs/2309.17453",
+  "page": "kv-cache"
+ },
+ "tcp-states": {
+  "file": "wm/tcp-states.svg",
+  "width": 1084,
+  "height": 817,
+  "source": "Wikimedia Commons",
+  "title": "Tcp state diagram fixed new.svg",
+  "author": "Sergiodc2, Marty Pauley, Scil100",
+  "licence": "CC BY-SA 3.0",
+  "url": "https://commons.wikimedia.org/wiki/File:Tcp_state_diagram_fixed_new.svg",
+  "page": "network-stack"
+ },
+ "templeos": {
+  "file": "wm/templeos.png",
+  "width": 640,
+  "height": 480,
+  "source": "Wikimedia Commons",
+  "title": "VirtualBox TempleOS x64 27 02 2021 20 43 48.png",
+  "author": "Terry A. Davis",
+  "licence": "TempleOS",
+  "url": "https://commons.wikimedia.org/wiki/File:VirtualBox_TempleOS_x64_27_02_2021_20_43_48.png",
+  "page": "templeos"
+ },
+ "transformer-arch": {
+  "file": "paper/transformer-arch.png",
+  "width": 720,
+  "height": 1061,
+  "source": "arXiv 1706.03762",
+  "title": "Figure 1, Attention Is All You Need",
+  "author": "Vaswani, Shazeer, Parmar, Uszkoreit, Jones, Gomez, Kaiser and Polosukhin",
+  "licence": "",
+  "url": "https://arxiv.org/abs/1706.03762",
+  "page": "llm-in-kernel"
+ },
+ "udp-encap": {
+  "file": "wm/udp-encap.svg",
+  "width": 800,
+  "height": 500,
+  "source": "Wikimedia Commons",
+  "title": "UDP encapsulation.svg",
+  "author": "en:User:Cburnett original work, colorization by en:User:Kbrose",
+  "licence": "CC BY-SA 3.0",
+  "url": "https://commons.wikimedia.org/wiki/File:UDP_encapsulation.svg",
+  "page": "network-stack"
+ },
+ "uefi-logo": {
+  "file": "wm/uefi-logo.svg",
+  "width": 368,
+  "height": 425,
+  "source": "Wikimedia Commons",
+  "title": "Uefi logo.svg",
+  "author": "Mouagip",
+  "licence": "Public domain",
+  "url": "https://commons.wikimedia.org/wiki/File:Logo_of_the_UEFI_Forum.svg",
+  "page": "uefi-kernel"
+ },
+ "usb3-contacts": {
+  "file": "wm/usb3-contacts.svg",
+  "width": 1280,
+  "height": 960,
+  "source": "Wikimedia Commons",
+  "title": "USB 3.0 (zoom contacts).svg",
+  "author": "9MKR",
+  "licence": "CC BY-SA 4.0",
+  "url": "https://commons.wikimedia.org/wiki/File:USB_3.0_(zoom_contacts).svg",
+  "page": "usb-xhci"
+ },
+ "wifi-dongle": {
+  "file": "wm/wifi-dongle.jpg",
+  "width": 720,
+  "height": 960,
+  "source": "Wikimedia Commons",
+  "title": "Tp-link usb wi-fi dongle tl-wn821n.jpg",
+  "author": "OleksandrOmelchuk",
+  "licence": "CC BY-SA 3.0",
+  "url": "https://commons.wikimedia.org/wiki/File:Tp-link_usb_wi-fi_dongle_tl-wn821n.jpg",
+  "page": "usb-wifi-driver"
+ }
+}

@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="675" height="487">
+	<g transform="translate(230,228)" stroke="#000" stroke-width="1.9">
+		<circle r="224" fill="#91ff96"/>
+		<circle r="178" fill="#fffa91"/>
+		<circle r="132" fill="#ffd291"/>
+		<circle r="86" fill="#ff9191"/>
+	</g>
+
+	<g text-anchor="middle" font-size="20" font-weight="400" font-family="Bitstream Vera Sans">
+		<g transform="translate(230,232)">
+			<switch><text y="-200" id="trsvg11-pt-br" systemLanguage="pt-br"><tspan id="trsvg1-pt-br">Anel 3</tspan></text><text y="-200" id="trsvg11"><tspan id="trsvg1">Ring 3</tspan></text></switch>
+			<switch><text y="-152" id="trsvg12-pt-br" systemLanguage="pt-br"><tspan id="trsvg2-pt-br">Anel 2</tspan></text><text y="-152" id="trsvg12"><tspan id="trsvg2">Ring 2</tspan></text></switch>
+			<switch><text y="-104" id="trsvg13-pt-br" systemLanguage="pt-br"><tspan id="trsvg3-pt-br">Anel 1</tspan></text><text y="-104" id="trsvg13"><tspan id="trsvg3">Ring 1</tspan></text></switch>
+			<switch><text y="-56" id="trsvg14-pt-br" systemLanguage="pt-br"><tspan id="trsvg4-pt-br">Anel 0</tspan></text><text y="-56" id="trsvg14"><tspan id="trsvg4">Ring 0</tspan></text></switch>
+			<switch><text y="0" id="trsvg15-pt-br" systemLanguage="pt-br"><tspan id="trsvg5-pt-br">N&#xFA;cleo</tspan></text><text y="0" id="trsvg15"><tspan id="trsvg5">Kernel</tspan></text></switch>
+			<switch><text y="104" id="trsvg16-pt-br" systemLanguage="pt-br"><tspan id="trsvg6-pt-br">Drivers de dispositivos</tspan></text><text y="104" id="trsvg16"><tspan id="trsvg6">Device drivers</tspan></text></switch>
+			<switch><text y="152" id="trsvg17-pt-br" systemLanguage="pt-br"><tspan id="trsvg7-pt-br">Drivers de dispositivos</tspan></text><text y="152" id="trsvg17"><tspan id="trsvg7">Device drivers</tspan></text></switch>
+			<switch><text y="200" id="trsvg18-pt-br" systemLanguage="pt-br"><tspan id="trsvg8-pt-br">Aplica&#xE7;&#xF5;es</tspan></text><text y="200" id="trsvg18"><tspan id="trsvg8">Applications</tspan></text></switch>
+		</g>
+		<switch><text x="550" y="74" id="trsvg19-pt-br" systemLanguage="pt-br"><tspan id="trsvg9-pt-br">Menos privilegiados</tspan></text><text x="550" y="74" id="trsvg19"><tspan id="trsvg9">Least privileged</tspan></text></switch>
+		<switch><text x="550" y="313" id="trsvg20-pt-br" systemLanguage="pt-br"><tspan id="trsvg10-pt-br">Mais privilegiados</tspan></text><text x="550" y="313" id="trsvg20"><tspan id="trsvg10">Most privileged</tspan></text></switch>
+	</g>
+
+	<g transform="translate(530,89.5)" stroke="#000">
+		<rect width="40" height="50" fill="#91ff96"/>
+		<rect y="50" width="40" height="50" fill="#fffc91"/>
+		<rect y="100" width="40" height="50" fill="#ffd291"/>
+		<rect y="150" width="40" height="50" fill="#ff9191"/>
+		<rect width="40" height="200" fill="none" stroke-width="1.5"/>
+	</g>
+</svg>
