@@ -3,20 +3,19 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>How the GLaDOS ISO is built — FAT32 and El Torito, written from scratch</title>
+<title>How the GLaDOS ISO is built. FAT32 and El Torito, written from scratch</title>
 <meta name="description" content="Building a bootable UEFI ISO without xorriso: a hand-written FAT32 EFI System Partition wrapped in ISO 9660 with an El Torito EFI boot catalog.">
 <meta name="keywords" content="El Torito, bootable ISO, FAT32, ISO 9660, UEFI boot, EFI System Partition, mkisofs alternative">
 <link rel="canonical" href="https://ilumci.github.io/GLaDOS/wiki/iso-el-torito.html">
 <meta name="robots" content="index,follow,max-image-preview:large">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="GLaDOS">
-<meta property="og:title" content="How the GLaDOS ISO is built — FAT32 and El Torito, written from scratch">
+<meta property="og:title" content="How the GLaDOS ISO is built. FAT32 and El Torito, written from scratch">
 <meta property="og:description" content="Building a bootable UEFI ISO without xorriso: a hand-written FAT32 EFI System Partition wrapped in ISO 9660 with an El Torito EFI boot catalog.">
 <meta property="og:url" content="https://ilumci.github.io/GLaDOS/wiki/iso-el-torito.html">
 <meta name="twitter:card" content="summary">
-<meta name="twitter:title" content="How the GLaDOS ISO is built — FAT32 and El Torito, written from scratch">
+<meta name="twitter:title" content="How the GLaDOS ISO is built. FAT32 and El Torito, written from scratch">
 <meta name="twitter:description" content="Building a bootable UEFI ISO without xorriso: a hand-written FAT32 EFI System Partition wrapped in ISO 9660 with an El Torito EFI boot catalog.">
-<meta name="theme-color" content="#f28c1e">
 <meta property="og:image" content="https://ilumci.github.io/GLaDOS/img/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
@@ -28,45 +27,50 @@
 <link rel="apple-touch-icon" sizes="180x180" href="../img/icon-180.png">
 <link rel="manifest" href="../site.webmanifest">
 <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://ilumci.github.io/GLaDOS/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://ilumci.github.io/GLaDOS/wiki/"},{"@type":"ListItem","position":3,"name":"How the ISO is built","item":"https://ilumci.github.io/GLaDOS/wiki/iso-el-torito.html"}]}</script>
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"How the GLaDOS ISO is built \u2014 FAT32 and El Torito, written from scratch","description":"Building a bootable UEFI ISO without xorriso: a hand-written FAT32 EFI System Partition wrapped in ISO 9660 with an El Torito EFI boot catalog.","url":"https://ilumci.github.io/GLaDOS/wiki/iso-el-torito.html","dateModified":"2026-08-14","keywords":"El Torito, bootable ISO, FAT32, ISO 9660, UEFI boot, EFI System Partition, mkisofs alternative","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"How the GLaDOS ISO is built. FAT32 and El Torito, written from scratch","description":"Building a bootable UEFI ISO without xorriso: a hand-written FAT32 EFI System Partition wrapped in ISO 9660 with an El Torito EFI boot catalog.","url":"https://ilumci.github.io/GLaDOS/wiki/iso-el-torito.html","dateModified":"2026-08-14","keywords":"El Torito, bootable ISO, FAT32, ISO 9660, UEFI boot, EFI System Partition, mkisofs alternative","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
-<div class="hazard"></div>
-<div class="wrap">
-<header class="top">
-  <div class="brand">
-    <img src="../img/logo.svg" alt="" width="26" height="26">
-    <a class="logo" href="../">GLaDOS</a>
-    <span class="tag">an AI operating system in Rust · ring 0 · bare metal</span>
-  </div>
-  <nav class="main"><a href="../">Home</a> <a class="btn" href="../download/">↓ Download</a> <a href="../wiki/">Wiki</a> <a href="../screenshots/">Screenshots</a> <a href="../archive/">Archive</a> <a href="https://github.com/IlumCI/GLaDOS" rel="noopener">Source</a></nav>
-</header>
-<nav class="crumbs"><a href="../">GLaDOS</a> / <a href="../wiki/">Wiki</a> / How the ISO is built</nav>
-<main id="main">
+<div id="page">
+
+<div id="masthead">
+  <img src="../img/logo.svg" alt="" width="34" height="34">
+  <a class="name" href="../">GLaDOS</a>
+  <span class="sub">An operating system in Rust, with a language model in the kernel</span>
+</div>
+
+<div id="bar"><a href="../">Home</a> | <a href="../download/">Download</a> | <a href="../wiki/">Wiki</a> | <a href="../screenshots/">Screenshots</a> | <a href="../archive/">Archive</a> | <a href="https://github.com/IlumCI/GLaDOS" rel="noopener">Source code</a></div>
+
+<div id="body">
+<div id="sidebar"><div class="box"><div class="t">Navigation</div><ul><li><a href="../">Home</a></li><li><a href="../download/">Download</a></li><li><a href="../wiki/">Wiki</a></li><li><a href="../screenshots/">Screenshots</a></li><li><a href="../archive/">Archive</a></li><li><a href="https://github.com/IlumCI/GLaDOS">Source code</a></li></ul></div><div class="box"><div class="t">Get it</div><ul><li><a href="../download/">Download the ISO</a></li><li><a href="https://github.com/IlumCI/GLaDOS/releases/latest/download/SHA256SUMS">Checksums</a></li></ul></div><div class="box"><div class="t">The system</div><ul><li><a href="../wiki/glados-os.html">GLaDOS OS</a></li><li><a href="../wiki/aperture-science.html">Aperture Science</a></li><li><a href="../wiki/portal-os.html">Portal OS</a></li><li><a href="../wiki/rust-os.html">Writing an OS in Rust</a></li><li><a href="../wiki/ring-0.html">Ring 0</a></li><li><a href="../wiki/uefi-kernel.html">UEFI as the kernel</a></li><li><a href="../wiki/llm-in-kernel.html">A language model in the kernel</a></li><li><a href="../wiki/qwen3.html">Qwen3 in 570 MB</a></li></ul></div><div class="box"><div class="t">Internals</div><ul><li><a href="../wiki/rope.html">RoPE</a></li><li><a href="../wiki/kv-cache.html">The int8 KV cache</a></li><li><a href="../wiki/tokenizer.html">Tokenizers</a></li><li><a href="../wiki/constrained-decoding.html">Constrained decoding</a></li><li><a href="../wiki/routing.html">Tool routing</a></li><li><a href="../wiki/gui.html">The Windows 3.1 desktop</a></li><li><a href="../wiki/network-stack.html">The network stack</a></li><li><a href="../wiki/tls.html">TLS 1.3 from scratch</a></li></ul></div><div class="box"><div class="t">Hardware</div><ul><li><a href="../wiki/storage.html">Content-addressed storage</a></li><li><a href="../wiki/usb-xhci.html">The USB stack</a></li><li><a href="../wiki/usb-wifi-driver.html">USB WiFi</a></li><li><a href="../wiki/iso-el-torito.html">How the ISO is built</a></li><li><a href="../wiki/templeos.html">TempleOS</a></li><li><a href="../wiki/testing.html">Testing without a test runner</a></li></ul></div></div>
+<div id="content">
+<div class="crumbs"><a href="../">GLaDOS</a> / <a href="../wiki/">Wiki</a> / How the ISO is built</div>
+<div id="main">
 <h1>How the GLaDOS ISO is built</h1>
-<p class="lede">Building a bootable UEFI ISO without xorriso: a hand-written FAT32 EFI System Partition wrapped in ISO 9660 with an El Torito EFI boot catalog.</p>
-<p>The ISO builder writes both filesystems itself. xorriso and mkisofs are not present on most Windows machines, and the Windows ADK's tool is a 1.5 GB install to produce one 600 MB file — while both formats are published and neither is large.</p>
+<p>The ISO builder writes both filesystems itself. xorriso and mkisofs are not present on most Windows machines, and the Windows ADK's tool is a 1.5 GB install to produce one 600 MB file. While both formats are published and neither is large.</p>
 <h2 id="how-uefi-boots-an-optical-disc">How UEFI boots an optical disc</h2>
-<p>The firmware reads the El Torito boot catalog, looks for an entry whose platform id is <code>0xEF</code>, and treats the sectors it points at as a FAT filesystem — an EFI System Partition that happens to live inside an ISO.</p>
+<p>The firmware reads the El Torito boot catalog, looks for an entry whose platform id is <code>0xEF</code>, and treats the sectors it points at as a FAT filesystem, an EFI System Partition that happens to live inside an ISO.</p>
 <p>So the ISO 9660 structure wrapped around it is almost ceremonial. It exists so the disc mounts and shows its contents, not so it boots. It is built correctly anyway, because a disc that boots and appears empty when mounted looks broken.</p>
 <h2 id="long-file-names-are-not-optional">Long file names are not optional</h2>
-<p>The kernel opens <code>\GLADOS\tokenizer.bin</code>. That base name is nine characters, which has no 8.3 representation — a short-name-only image presents it as <code>TOKENI~1.BIN</code>, and the kernel then fails to find its tokenizer at boot, on real hardware, with no filesystem available to debug from.</p>
+<p>The kernel opens <code>\GLADOS\tokenizer.bin</code>. That base name is nine characters, which has no 8.3 representation, a short-name-only image presents it as <code>TOKENI~1.BIN</code>, and the kernel then fails to find its tokenizer at boot, on real hardware, with no filesystem available to debug from.</p>
 <p>So the builder generates VFAT long-name entries, with the specified rotate-and-add checksum tying each set to its short entry.</p>
 <h2 id="fat32-has-a-floor">FAT32 has a floor</h2>
-<p>FAT32 is <em>defined</em> as having at least 65,525 clusters — below that the volume is FAT16, and firmware that trusts the count misparses everything. So the cluster size sets a minimum image size.</p>
-<table><thead><tr><th>Cluster size</th><th>Smallest possible volume</th></tr></thead><tbody><tr><td>4 KiB</td><td>~256 MB</td></tr><tr><td>512 B</td><td>~33 MB</td></tr></tbody></table>
-<p>The kernel-only image was 269 MB for a 1 MB kernel before this was noticed — 255 MB of zeroes. Choosing the cluster size from the payload brings it to 33 MB, and that is still the floor rather than slack.</p>
-<div class="seealso"><strong>See also</strong><a href="../wiki/uefi-kernel.html">UEFI as the kernel</a> · <a href="../download/">Download</a> · <a href="../wiki/testing.html">Testing without a test runner</a></div>
-</main>
-<footer>
-  <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This is an independent, non-commercial homage and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
-  <p>Copyright © 2026. All rights reserved. Source published to be read, not
-  reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from the
-  Linux kernel and carries its own terms.</p>
-  <p>No cookies, no analytics, nothing to accept. Last updated 2026-08-14.</p>
-</footer>
+<p>FAT32 is <em>defined</em> as having at least 65,525 clusters. Below that the volume is FAT16, and firmware that trusts the count misparses everything. So the cluster size sets a minimum image size.</p>
+<table class="data"><thead><tr><th>Cluster size</th><th>Smallest possible volume</th></tr></thead><tbody><tr><td>4 KiB</td><td>~256 MB</td></tr><tr><td>512 B</td><td>~33 MB</td></tr></tbody></table>
+<p>The kernel-only image was 269 MB for a 1 MB kernel before this was noticed. 255 MB of zeroes. Choosing the cluster size from the payload brings it to 33 MB, and that is still the floor rather than slack.</p>
+<div class="seealso"><b>See also:</b> <a href="../wiki/uefi-kernel.html">UEFI as the kernel</a>, <a href="../download/">Download</a>, <a href="../wiki/testing.html">Testing without a test runner</a></div>
 </div>
-<div class="hazard"></div>
+</div>
+</div>
+
+<div id="footer">
+  <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This is an independent, non-commercial homage and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
+  <p>Copyright 2026. All rights reserved. Source is published to be read, not
+  reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from
+  the Linux kernel and carries its own terms.</p>
+  <p>No cookies, no analytics. Last updated 2026-08-14.</p>
+</div>
+
+</div>
 </body>
 </html>

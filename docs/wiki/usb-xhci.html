@@ -3,20 +3,19 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>The USB stack — xHCI rings, cycle bits, and enumeration from scratch</title>
+<title>The USB stack. xHCI rings, cycle bits, and enumeration from scratch</title>
 <meta name="description" content="Writing an xHCI driver in a kernel: transfer request blocks, the cycle bit handshake, device slots, endpoint contexts, and CDC Ethernet over bulk pipes.">
 <meta name="keywords" content="xHCI, USB driver, USB 3, TRB ring, CDC ECM, USB Ethernet, kernel USB stack">
 <link rel="canonical" href="https://ilumci.github.io/GLaDOS/wiki/usb-xhci.html">
 <meta name="robots" content="index,follow,max-image-preview:large">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="GLaDOS">
-<meta property="og:title" content="The USB stack — xHCI rings, cycle bits, and enumeration from scratch">
+<meta property="og:title" content="The USB stack. xHCI rings, cycle bits, and enumeration from scratch">
 <meta property="og:description" content="Writing an xHCI driver in a kernel: transfer request blocks, the cycle bit handshake, device slots, endpoint contexts, and CDC Ethernet over bulk pipes.">
 <meta property="og:url" content="https://ilumci.github.io/GLaDOS/wiki/usb-xhci.html">
 <meta name="twitter:card" content="summary">
-<meta name="twitter:title" content="The USB stack — xHCI rings, cycle bits, and enumeration from scratch">
+<meta name="twitter:title" content="The USB stack. xHCI rings, cycle bits, and enumeration from scratch">
 <meta name="twitter:description" content="Writing an xHCI driver in a kernel: transfer request blocks, the cycle bit handshake, device slots, endpoint contexts, and CDC Ethernet over bulk pipes.">
-<meta name="theme-color" content="#f28c1e">
 <meta property="og:image" content="https://ilumci.github.io/GLaDOS/img/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
@@ -28,47 +27,52 @@
 <link rel="apple-touch-icon" sizes="180x180" href="../img/icon-180.png">
 <link rel="manifest" href="../site.webmanifest">
 <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://ilumci.github.io/GLaDOS/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://ilumci.github.io/GLaDOS/wiki/"},{"@type":"ListItem","position":3,"name":"The USB stack","item":"https://ilumci.github.io/GLaDOS/wiki/usb-xhci.html"}]}</script>
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"The USB stack \u2014 xHCI rings, cycle bits, and enumeration from scratch","description":"Writing an xHCI driver in a kernel: transfer request blocks, the cycle bit handshake, device slots, endpoint contexts, and CDC Ethernet over bulk pipes.","url":"https://ilumci.github.io/GLaDOS/wiki/usb-xhci.html","dateModified":"2026-08-14","keywords":"xHCI, USB driver, USB 3, TRB ring, CDC ECM, USB Ethernet, kernel USB stack","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"The USB stack. xHCI rings, cycle bits, and enumeration from scratch","description":"Writing an xHCI driver in a kernel: transfer request blocks, the cycle bit handshake, device slots, endpoint contexts, and CDC Ethernet over bulk pipes.","url":"https://ilumci.github.io/GLaDOS/wiki/usb-xhci.html","dateModified":"2026-08-14","keywords":"xHCI, USB driver, USB 3, TRB ring, CDC ECM, USB Ethernet, kernel USB stack","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
-<div class="hazard"></div>
-<div class="wrap">
-<header class="top">
-  <div class="brand">
-    <img src="../img/logo.svg" alt="" width="26" height="26">
-    <a class="logo" href="../">GLaDOS</a>
-    <span class="tag">an AI operating system in Rust · ring 0 · bare metal</span>
-  </div>
-  <nav class="main"><a href="../">Home</a> <a class="btn" href="../download/">↓ Download</a> <a href="../wiki/">Wiki</a> <a href="../screenshots/">Screenshots</a> <a href="../archive/">Archive</a> <a href="https://github.com/IlumCI/GLaDOS" rel="noopener">Source</a></nav>
-</header>
-<nav class="crumbs"><a href="../">GLaDOS</a> / <a href="../wiki/">Wiki</a> / The USB stack</nav>
-<main id="main">
+<div id="page">
+
+<div id="masthead">
+  <img src="../img/logo.svg" alt="" width="34" height="34">
+  <a class="name" href="../">GLaDOS</a>
+  <span class="sub">An operating system in Rust, with a language model in the kernel</span>
+</div>
+
+<div id="bar"><a href="../">Home</a> | <a href="../download/">Download</a> | <a href="../wiki/">Wiki</a> | <a href="../screenshots/">Screenshots</a> | <a href="../archive/">Archive</a> | <a href="https://github.com/IlumCI/GLaDOS" rel="noopener">Source code</a></div>
+
+<div id="body">
+<div id="sidebar"><div class="box"><div class="t">Navigation</div><ul><li><a href="../">Home</a></li><li><a href="../download/">Download</a></li><li><a href="../wiki/">Wiki</a></li><li><a href="../screenshots/">Screenshots</a></li><li><a href="../archive/">Archive</a></li><li><a href="https://github.com/IlumCI/GLaDOS">Source code</a></li></ul></div><div class="box"><div class="t">Get it</div><ul><li><a href="../download/">Download the ISO</a></li><li><a href="https://github.com/IlumCI/GLaDOS/releases/latest/download/SHA256SUMS">Checksums</a></li></ul></div><div class="box"><div class="t">The system</div><ul><li><a href="../wiki/glados-os.html">GLaDOS OS</a></li><li><a href="../wiki/aperture-science.html">Aperture Science</a></li><li><a href="../wiki/portal-os.html">Portal OS</a></li><li><a href="../wiki/rust-os.html">Writing an OS in Rust</a></li><li><a href="../wiki/ring-0.html">Ring 0</a></li><li><a href="../wiki/uefi-kernel.html">UEFI as the kernel</a></li><li><a href="../wiki/llm-in-kernel.html">A language model in the kernel</a></li><li><a href="../wiki/qwen3.html">Qwen3 in 570 MB</a></li></ul></div><div class="box"><div class="t">Internals</div><ul><li><a href="../wiki/rope.html">RoPE</a></li><li><a href="../wiki/kv-cache.html">The int8 KV cache</a></li><li><a href="../wiki/tokenizer.html">Tokenizers</a></li><li><a href="../wiki/constrained-decoding.html">Constrained decoding</a></li><li><a href="../wiki/routing.html">Tool routing</a></li><li><a href="../wiki/gui.html">The Windows 3.1 desktop</a></li><li><a href="../wiki/network-stack.html">The network stack</a></li><li><a href="../wiki/tls.html">TLS 1.3 from scratch</a></li></ul></div><div class="box"><div class="t">Hardware</div><ul><li><a href="../wiki/storage.html">Content-addressed storage</a></li><li><a href="../wiki/usb-xhci.html">The USB stack</a></li><li><a href="../wiki/usb-wifi-driver.html">USB WiFi</a></li><li><a href="../wiki/iso-el-torito.html">How the ISO is built</a></li><li><a href="../wiki/templeos.html">TempleOS</a></li><li><a href="../wiki/testing.html">Testing without a test runner</a></li></ul></div></div>
+<div id="content">
+<div class="crumbs"><a href="../">GLaDOS</a> / <a href="../wiki/">Wiki</a> / The USB stack</div>
+<div id="main">
 <h1>The USB stack</h1>
-<p class="lede">Writing an xHCI driver in a kernel: transfer request blocks, the cycle bit handshake, device slots, endpoint contexts, and CDC Ethernet over bulk pipes.</p>
 <p>UEFI has a working USB stack, and <a href="uefi-kernel.html"><code>ExitBootServices</code> throws it away</a> permanently. So the kernel has its own.</p>
 <h2 id="rings-are-the-whole-design">Rings are the whole design</h2>
 <p>xHCI is not register-poking like an older NIC. Everything is a ring of 16-byte Transfer Request Blocks shared with the controller, and each ring carries a <strong>cycle bit</strong> that flips every time the producer wraps around.</p>
-<p>That single bit is the entire synchronisation protocol. The controller consumes entries whose cycle matches its own state and stops at the first that does not. Get it wrong and nothing is corrupted — the controller simply never sees the command, which presents as a device that enumerates into silence.</p>
+<p>That single bit is the entire synchronisation protocol. The controller consumes entries whose cycle matches its own state and stops at the first that does not. Get it wrong and nothing is corrupted. The controller simply never sees the command, which presents as a device that enumerates into silence.</p>
 <p>Three rings matter: a command ring the driver writes, an event ring the controller writes, and one transfer ring per endpoint. Everything completes asynchronously through the event ring, even the operations that read as synchronous.</p>
 <h2 id="three-bugs-each-found-by-the-layer-above">Three bugs, each found by the layer above</h2>
-<ol><li><strong>Version 0.0.</strong> The capability-length and version fields share one 32-bit register, and this block only answers dword reads — a 16-bit read at offset 2 returns zero. The controller appeared to implement xHCI version 0.0.</li><li><strong>Setup packet byte order.</strong> Little-endian means byte zero is the request type, so <code>SET_CONFIGURATION</code> is <code>0x0900</code>, not <code>0x0009</code>. The descriptor read next to it was correct by luck.</li><li><strong>A stall halts the endpoint.</strong> Probing configuration descriptors past the end stalls, which halts endpoint zero until it is reset — so every later control transfer failed. The symptom appeared two steps downstream of the cause.</li></ol>
+<ol><li><strong>Version 0.0.</strong> The capability-length and version fields share one 32-bit register, and this block only answers dword reads, a 16-bit read at offset 2 returns zero. The controller appeared to implement xHCI version 0.0.</li><li><strong>Setup packet byte order.</strong> Little-endian means byte zero is the request type, so <code>SET_CONFIGURATION</code> is <code>0x0900</code>, not <code>0x0009</code>. The descriptor read next to it was correct by luck.</li><li><strong>A stall halts the endpoint.</strong> Probing configuration descriptors past the end stalls, which halts endpoint zero until it is reset. So every later control transfer failed. The symptom appeared two steps downstream of the cause.</li></ol>
 <h2 id="the-shared-event-ring">The shared event ring</h2>
 <p>The subtlest one. The event ring is shared by every endpoint, and code that waits for "a transfer event" rather than "a transfer event for this endpoint" is only correct while exactly one transfer is in flight.</p>
 <p>It stops being correct the moment a receive is left permanently armed: a send then completes against whichever event arrives first, so a transmit reports success on a <em>receive</em>, and the frame that actually arrived is dropped while the endpoint still looks armed.</p>
 <h2 id="cdc-ethernet">CDC Ethernet</h2>
-<p>With bulk endpoints working, a USB Ethernet adapter becomes a network interface. One trap: "has a CDC data interface" is not the same as "is an Ethernet adapter" — a common emulated device offers two configurations that both qualify, and the first is RNDIS, which accepts bulk writes and silently passes nothing because it wants a control protocol first.</p>
-<p>The correct test is the Ethernet Networking Functional Descriptor, which is also where the MAC address lives — as a string, in ASCII hex, because CDC has no binary field for it anywhere.</p>
-<div class="seealso"><strong>See also</strong><a href="../wiki/usb-wifi-driver.html">USB WiFi</a> · <a href="../wiki/network-stack.html">The network stack</a> · <a href="../wiki/uefi-kernel.html">UEFI as the kernel</a></div>
-</main>
-<footer>
-  <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This is an independent, non-commercial homage and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
-  <p>Copyright © 2026. All rights reserved. Source published to be read, not
-  reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from the
-  Linux kernel and carries its own terms.</p>
-  <p>No cookies, no analytics, nothing to accept. Last updated 2026-08-14.</p>
-</footer>
+<p>With bulk endpoints working, a USB Ethernet adapter becomes a network interface. One trap: "has a CDC data interface" is not the same as "is an Ethernet adapter", a common emulated device offers two configurations that both qualify, and the first is RNDIS, which accepts bulk writes and silently passes nothing because it wants a control protocol first.</p>
+<p>The correct test is the Ethernet Networking Functional Descriptor, which is also where the MAC address lives, as a string, in ASCII hex, because CDC has no binary field for it anywhere.</p>
+<div class="seealso"><b>See also:</b> <a href="../wiki/usb-wifi-driver.html">USB WiFi</a>, <a href="../wiki/network-stack.html">The network stack</a>, <a href="../wiki/uefi-kernel.html">UEFI as the kernel</a></div>
 </div>
-<div class="hazard"></div>
+</div>
+</div>
+
+<div id="footer">
+  <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This is an independent, non-commercial homage and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
+  <p>Copyright 2026. All rights reserved. Source is published to be read, not
+  reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from
+  the Linux kernel and carries its own terms.</p>
+  <p>No cookies, no analytics. Last updated 2026-08-14.</p>
+</div>
+
+</div>
 </body>
 </html>

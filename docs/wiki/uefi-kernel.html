@@ -3,20 +3,19 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>UEFI as the kernel — booting an OS with no bootloader at all</title>
-<meta name="description" content="How GLaDOS boots: the UEFI application is the kernel. No GRUB, no ELF loading, no handoff ABI — and what ExitBootServices takes away permanently.">
+<title>UEFI as the kernel. Booting an OS with no bootloader at all</title>
+<meta name="description" content="How GLaDOS boots: the UEFI application is the kernel. No GRUB, no ELF loading, no handoff ABI, and what ExitBootServices takes away permanently.">
 <meta name="keywords" content="UEFI, UEFI bootloader, ExitBootServices, EFI application, OS boot, bare metal boot, EFI System Partition">
 <link rel="canonical" href="https://ilumci.github.io/GLaDOS/wiki/uefi-kernel.html">
 <meta name="robots" content="index,follow,max-image-preview:large">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="GLaDOS">
-<meta property="og:title" content="UEFI as the kernel — booting an OS with no bootloader at all">
-<meta property="og:description" content="How GLaDOS boots: the UEFI application is the kernel. No GRUB, no ELF loading, no handoff ABI — and what ExitBootServices takes away permanently.">
+<meta property="og:title" content="UEFI as the kernel. Booting an OS with no bootloader at all">
+<meta property="og:description" content="How GLaDOS boots: the UEFI application is the kernel. No GRUB, no ELF loading, no handoff ABI, and what ExitBootServices takes away permanently.">
 <meta property="og:url" content="https://ilumci.github.io/GLaDOS/wiki/uefi-kernel.html">
 <meta name="twitter:card" content="summary">
-<meta name="twitter:title" content="UEFI as the kernel — booting an OS with no bootloader at all">
-<meta name="twitter:description" content="How GLaDOS boots: the UEFI application is the kernel. No GRUB, no ELF loading, no handoff ABI — and what ExitBootServices takes away permanently.">
-<meta name="theme-color" content="#f28c1e">
+<meta name="twitter:title" content="UEFI as the kernel. Booting an OS with no bootloader at all">
+<meta name="twitter:description" content="How GLaDOS boots: the UEFI application is the kernel. No GRUB, no ELF loading, no handoff ABI, and what ExitBootServices takes away permanently.">
 <meta property="og:image" content="https://ilumci.github.io/GLaDOS/img/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
@@ -28,44 +27,49 @@
 <link rel="apple-touch-icon" sizes="180x180" href="../img/icon-180.png">
 <link rel="manifest" href="../site.webmanifest">
 <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://ilumci.github.io/GLaDOS/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://ilumci.github.io/GLaDOS/wiki/"},{"@type":"ListItem","position":3,"name":"UEFI as the kernel","item":"https://ilumci.github.io/GLaDOS/wiki/uefi-kernel.html"}]}</script>
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"UEFI as the kernel \u2014 booting an OS with no bootloader at all","description":"How GLaDOS boots: the UEFI application is the kernel. No GRUB, no ELF loading, no handoff ABI \u2014 and what ExitBootServices takes away permanently.","url":"https://ilumci.github.io/GLaDOS/wiki/uefi-kernel.html","dateModified":"2026-08-14","keywords":"UEFI, UEFI bootloader, ExitBootServices, EFI application, OS boot, bare metal boot, EFI System Partition","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"UEFI as the kernel. Booting an OS with no bootloader at all","description":"How GLaDOS boots: the UEFI application is the kernel. No GRUB, no ELF loading, no handoff ABI, and what ExitBootServices takes away permanently.","url":"https://ilumci.github.io/GLaDOS/wiki/uefi-kernel.html","dateModified":"2026-08-14","keywords":"UEFI, UEFI bootloader, ExitBootServices, EFI application, OS boot, bare metal boot, EFI System Partition","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
-<div class="hazard"></div>
-<div class="wrap">
-<header class="top">
-  <div class="brand">
-    <img src="../img/logo.svg" alt="" width="26" height="26">
-    <a class="logo" href="../">GLaDOS</a>
-    <span class="tag">an AI operating system in Rust · ring 0 · bare metal</span>
-  </div>
-  <nav class="main"><a href="../">Home</a> <a class="btn" href="../download/">↓ Download</a> <a href="../wiki/">Wiki</a> <a href="../screenshots/">Screenshots</a> <a href="../archive/">Archive</a> <a href="https://github.com/IlumCI/GLaDOS" rel="noopener">Source</a></nav>
-</header>
-<nav class="crumbs"><a href="../">GLaDOS</a> / <a href="../wiki/">Wiki</a> / UEFI as the kernel</nav>
-<main id="main">
+<div id="page">
+
+<div id="masthead">
+  <img src="../img/logo.svg" alt="" width="34" height="34">
+  <a class="name" href="../">GLaDOS</a>
+  <span class="sub">An operating system in Rust, with a language model in the kernel</span>
+</div>
+
+<div id="bar"><a href="../">Home</a> | <a href="../download/">Download</a> | <a href="../wiki/">Wiki</a> | <a href="../screenshots/">Screenshots</a> | <a href="../archive/">Archive</a> | <a href="https://github.com/IlumCI/GLaDOS" rel="noopener">Source code</a></div>
+
+<div id="body">
+<div id="sidebar"><div class="box"><div class="t">Navigation</div><ul><li><a href="../">Home</a></li><li><a href="../download/">Download</a></li><li><a href="../wiki/">Wiki</a></li><li><a href="../screenshots/">Screenshots</a></li><li><a href="../archive/">Archive</a></li><li><a href="https://github.com/IlumCI/GLaDOS">Source code</a></li></ul></div><div class="box"><div class="t">Get it</div><ul><li><a href="../download/">Download the ISO</a></li><li><a href="https://github.com/IlumCI/GLaDOS/releases/latest/download/SHA256SUMS">Checksums</a></li></ul></div><div class="box"><div class="t">The system</div><ul><li><a href="../wiki/glados-os.html">GLaDOS OS</a></li><li><a href="../wiki/aperture-science.html">Aperture Science</a></li><li><a href="../wiki/portal-os.html">Portal OS</a></li><li><a href="../wiki/rust-os.html">Writing an OS in Rust</a></li><li><a href="../wiki/ring-0.html">Ring 0</a></li><li><a href="../wiki/uefi-kernel.html">UEFI as the kernel</a></li><li><a href="../wiki/llm-in-kernel.html">A language model in the kernel</a></li><li><a href="../wiki/qwen3.html">Qwen3 in 570 MB</a></li></ul></div><div class="box"><div class="t">Internals</div><ul><li><a href="../wiki/rope.html">RoPE</a></li><li><a href="../wiki/kv-cache.html">The int8 KV cache</a></li><li><a href="../wiki/tokenizer.html">Tokenizers</a></li><li><a href="../wiki/constrained-decoding.html">Constrained decoding</a></li><li><a href="../wiki/routing.html">Tool routing</a></li><li><a href="../wiki/gui.html">The Windows 3.1 desktop</a></li><li><a href="../wiki/network-stack.html">The network stack</a></li><li><a href="../wiki/tls.html">TLS 1.3 from scratch</a></li></ul></div><div class="box"><div class="t">Hardware</div><ul><li><a href="../wiki/storage.html">Content-addressed storage</a></li><li><a href="../wiki/usb-xhci.html">The USB stack</a></li><li><a href="../wiki/usb-wifi-driver.html">USB WiFi</a></li><li><a href="../wiki/iso-el-torito.html">How the ISO is built</a></li><li><a href="../wiki/templeos.html">TempleOS</a></li><li><a href="../wiki/testing.html">Testing without a test runner</a></li></ul></div></div>
+<div id="content">
+<div class="crumbs"><a href="../">GLaDOS</a> / <a href="../wiki/">Wiki</a> / UEFI as the kernel</div>
+<div id="main">
 <h1>UEFI as the kernel</h1>
-<p class="lede">How GLaDOS boots: the UEFI application is the kernel. No GRUB, no ELF loading, no handoff ABI — and what ExitBootServices takes away permanently.</p>
-<p>Most kernels are loaded by a bootloader — GRUB, systemd-boot, limine — which reads an ELF file, sets up long mode, builds a memory map and jumps to an entry point with an agreed calling convention.</p>
+<p>Most kernels are loaded by a bootloader. GRUB, systemd-boot, limine. which reads an ELF file, sets up long mode, builds a memory map and jumps to an entry point with an agreed calling convention.</p>
 <p>GLaDOS skips all of it. UEFI firmware already puts you in 64-bit long mode, at ring 0, with an identity-mapped address space and a working memory allocator. A UEFI application starting in that state is already a kernel. So this one simply is.</p>
 <h2 id="what-that-removes">What that removes</h2>
 <ul><li>No ELF loader, no relocation, no linker script gymnastics.</li><li>No handoff ABI to agree on and get subtly wrong.</li><li>No second codebase to keep in sync with the first.</li><li>No multiboot header, no protected-mode stub, no A20 line.</li></ul>
 <h2 id="the-one-way-door">The one-way door</h2>
-<p>Boot services — the firmware's filesystem access, allocator, console and device protocols — exist only until <code>ExitBootServices</code>. After that call they are gone, permanently, and every pointer into them is dangling.</p>
+<p>Boot services. The firmware's filesystem access, allocator, console and device protocols. Exist only until <code>ExitBootServices</code>. After that call they are gone, permanently, and every pointer into them is dangling.</p>
 <p>So everything the kernel needs from disk must be read <em>before</em> that moment: the 574 MB model, the tokenizer, the root certificate bundle. They are loaded into a pool that survives the transition and referenced in place afterwards, never copied to the heap.</p>
 <div class="note">This is also why the firmware's perfectly good USB stack is thrown away and <a href="usb-xhci.html">rewritten from scratch</a>. It lives in boot services. That is the price of being the kernel rather than a guest of the firmware, and it is not refundable.</div>
 <h2 id="a-memory-map-trap">A memory-map trap</h2>
-<p>Do not take the maximum over every UEFI memory descriptor to decide how much to map. OVMF describes reserved space out to 1 TiB; using that as a limit exceeds what one page-directory-pointer table can cover, the identity map silently fails to install, and the firmware's own tables stay active — which map page zero. The null-dereference self-test then passes without faulting, for the worst possible reason.</p>
-<div class="seealso"><strong>See also</strong><a href="../wiki/rust-os.html">Writing an OS in Rust</a> · <a href="../wiki/ring-0.html">Ring 0</a> · <a href="../wiki/usb-xhci.html">The USB stack</a> · <a href="../wiki/iso-el-torito.html">How the ISO is built</a></div>
-</main>
-<footer>
-  <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This is an independent, non-commercial homage and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
-  <p>Copyright © 2026. All rights reserved. Source published to be read, not
-  reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from the
-  Linux kernel and carries its own terms.</p>
-  <p>No cookies, no analytics, nothing to accept. Last updated 2026-08-14.</p>
-</footer>
+<p>Do not take the maximum over every UEFI memory descriptor to decide how much to map. OVMF describes reserved space out to 1 TiB; using that as a limit exceeds what one page-directory-pointer table can cover, the identity map silently fails to install, and the firmware's own tables stay active. Which map page zero. The null-dereference self-test then passes without faulting, for the worst possible reason.</p>
+<div class="seealso"><b>See also:</b> <a href="../wiki/rust-os.html">Writing an OS in Rust</a>, <a href="../wiki/ring-0.html">Ring 0</a>, <a href="../wiki/usb-xhci.html">The USB stack</a>, <a href="../wiki/iso-el-torito.html">How the ISO is built</a></div>
 </div>
-<div class="hazard"></div>
+</div>
+</div>
+
+<div id="footer">
+  <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This is an independent, non-commercial homage and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
+  <p>Copyright 2026. All rights reserved. Source is published to be read, not
+  reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from
+  the Linux kernel and carries its own terms.</p>
+  <p>No cookies, no analytics. Last updated 2026-08-14.</p>
+</div>
+
+</div>
 </body>
 </html>

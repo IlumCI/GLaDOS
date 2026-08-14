@@ -3,20 +3,19 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>The Windows 3.1 desktop — writing a window manager from scratch</title>
+<title>The Windows 3.1 desktop. Writing a window manager from scratch</title>
 <meta name="description" content="How GLaDOS draws its GUI: raw GOP framebuffer, two-pixel bevels, z-order as focus, total repaint, and a keyboard-only window manager in kernel space.">
 <meta name="keywords" content="window manager, Windows 3.1 UI, framebuffer graphics, GUI from scratch, retro UI, OS graphics">
 <link rel="canonical" href="https://ilumci.github.io/GLaDOS/wiki/gui.html">
 <meta name="robots" content="index,follow,max-image-preview:large">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="GLaDOS">
-<meta property="og:title" content="The Windows 3.1 desktop — writing a window manager from scratch">
+<meta property="og:title" content="The Windows 3.1 desktop. Writing a window manager from scratch">
 <meta property="og:description" content="How GLaDOS draws its GUI: raw GOP framebuffer, two-pixel bevels, z-order as focus, total repaint, and a keyboard-only window manager in kernel space.">
 <meta property="og:url" content="https://ilumci.github.io/GLaDOS/wiki/gui.html">
 <meta name="twitter:card" content="summary">
-<meta name="twitter:title" content="The Windows 3.1 desktop — writing a window manager from scratch">
+<meta name="twitter:title" content="The Windows 3.1 desktop. Writing a window manager from scratch">
 <meta name="twitter:description" content="How GLaDOS draws its GUI: raw GOP framebuffer, two-pixel bevels, z-order as focus, total repaint, and a keyboard-only window manager in kernel space.">
-<meta name="theme-color" content="#f28c1e">
 <meta property="og:image" content="https://ilumci.github.io/GLaDOS/img/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
@@ -28,45 +27,50 @@
 <link rel="apple-touch-icon" sizes="180x180" href="../img/icon-180.png">
 <link rel="manifest" href="../site.webmanifest">
 <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://ilumci.github.io/GLaDOS/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://ilumci.github.io/GLaDOS/wiki/"},{"@type":"ListItem","position":3,"name":"The Windows 3.1 desktop","item":"https://ilumci.github.io/GLaDOS/wiki/gui.html"}]}</script>
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"The Windows 3.1 desktop \u2014 writing a window manager from scratch","description":"How GLaDOS draws its GUI: raw GOP framebuffer, two-pixel bevels, z-order as focus, total repaint, and a keyboard-only window manager in kernel space.","url":"https://ilumci.github.io/GLaDOS/wiki/gui.html","dateModified":"2026-08-14","keywords":"window manager, Windows 3.1 UI, framebuffer graphics, GUI from scratch, retro UI, OS graphics","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"The Windows 3.1 desktop. Writing a window manager from scratch","description":"How GLaDOS draws its GUI: raw GOP framebuffer, two-pixel bevels, z-order as focus, total repaint, and a keyboard-only window manager in kernel space.","url":"https://ilumci.github.io/GLaDOS/wiki/gui.html","dateModified":"2026-08-14","keywords":"window manager, Windows 3.1 UI, framebuffer graphics, GUI from scratch, retro UI, OS graphics","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
-<div class="hazard"></div>
-<div class="wrap">
-<header class="top">
-  <div class="brand">
-    <img src="../img/logo.svg" alt="" width="26" height="26">
-    <a class="logo" href="../">GLaDOS</a>
-    <span class="tag">an AI operating system in Rust · ring 0 · bare metal</span>
-  </div>
-  <nav class="main"><a href="../">Home</a> <a class="btn" href="../download/">↓ Download</a> <a href="../wiki/">Wiki</a> <a href="../screenshots/">Screenshots</a> <a href="../archive/">Archive</a> <a href="https://github.com/IlumCI/GLaDOS" rel="noopener">Source</a></nav>
-</header>
-<nav class="crumbs"><a href="../">GLaDOS</a> / <a href="../wiki/">Wiki</a> / The Windows 3.1 desktop</nav>
-<main id="main">
+<div id="page">
+
+<div id="masthead">
+  <img src="../img/logo.svg" alt="" width="34" height="34">
+  <a class="name" href="../">GLaDOS</a>
+  <span class="sub">An operating system in Rust, with a language model in the kernel</span>
+</div>
+
+<div id="bar"><a href="../">Home</a> | <a href="../download/">Download</a> | <a href="../wiki/">Wiki</a> | <a href="../screenshots/">Screenshots</a> | <a href="../archive/">Archive</a> | <a href="https://github.com/IlumCI/GLaDOS" rel="noopener">Source code</a></div>
+
+<div id="body">
+<div id="sidebar"><div class="box"><div class="t">Navigation</div><ul><li><a href="../">Home</a></li><li><a href="../download/">Download</a></li><li><a href="../wiki/">Wiki</a></li><li><a href="../screenshots/">Screenshots</a></li><li><a href="../archive/">Archive</a></li><li><a href="https://github.com/IlumCI/GLaDOS">Source code</a></li></ul></div><div class="box"><div class="t">Get it</div><ul><li><a href="../download/">Download the ISO</a></li><li><a href="https://github.com/IlumCI/GLaDOS/releases/latest/download/SHA256SUMS">Checksums</a></li></ul></div><div class="box"><div class="t">The system</div><ul><li><a href="../wiki/glados-os.html">GLaDOS OS</a></li><li><a href="../wiki/aperture-science.html">Aperture Science</a></li><li><a href="../wiki/portal-os.html">Portal OS</a></li><li><a href="../wiki/rust-os.html">Writing an OS in Rust</a></li><li><a href="../wiki/ring-0.html">Ring 0</a></li><li><a href="../wiki/uefi-kernel.html">UEFI as the kernel</a></li><li><a href="../wiki/llm-in-kernel.html">A language model in the kernel</a></li><li><a href="../wiki/qwen3.html">Qwen3 in 570 MB</a></li></ul></div><div class="box"><div class="t">Internals</div><ul><li><a href="../wiki/rope.html">RoPE</a></li><li><a href="../wiki/kv-cache.html">The int8 KV cache</a></li><li><a href="../wiki/tokenizer.html">Tokenizers</a></li><li><a href="../wiki/constrained-decoding.html">Constrained decoding</a></li><li><a href="../wiki/routing.html">Tool routing</a></li><li><a href="../wiki/gui.html">The Windows 3.1 desktop</a></li><li><a href="../wiki/network-stack.html">The network stack</a></li><li><a href="../wiki/tls.html">TLS 1.3 from scratch</a></li></ul></div><div class="box"><div class="t">Hardware</div><ul><li><a href="../wiki/storage.html">Content-addressed storage</a></li><li><a href="../wiki/usb-xhci.html">The USB stack</a></li><li><a href="../wiki/usb-wifi-driver.html">USB WiFi</a></li><li><a href="../wiki/iso-el-torito.html">How the ISO is built</a></li><li><a href="../wiki/templeos.html">TempleOS</a></li><li><a href="../wiki/testing.html">Testing without a test runner</a></li></ul></div></div>
+<div id="content">
+<div class="crumbs"><a href="../">GLaDOS</a> / <a href="../wiki/">Wiki</a> / The Windows 3.1 desktop</div>
+<div id="main">
 <h1>The Windows 3.1 desktop</h1>
-<p class="lede">How GLaDOS draws its GUI: raw GOP framebuffer, two-pixel bevels, z-order as focus, total repaint, and a keyboard-only window manager in kernel space.</p>
-<p>There is no graphics library. The kernel gets a linear framebuffer from UEFI's Graphics Output Protocol — a base address, a width, a height and a stride — and everything above that is written by hand.</p>
+<p>There is no graphics library. The kernel gets a linear framebuffer from UEFI's Graphics Output Protocol, a base address, a width, a height and a stride, and everything above that is written by hand.</p>
 <h2 id="windows-3-1-chrome-precisely">Windows 3.1 chrome, precisely</h2>
 <p>The look is not approximate. It is the actual construction:</p>
-<ul><li>A <code>#C0C0C0</code> face colour on every panel.</li><li>Two-pixel bevels: white on the top and left, dark grey on the bottom and right, for a raised surface — reversed for a sunken one.</li><li>Title bars that fill with the selection colour when focused and grey when not.</li><li>Hard rectangles. No anti-aliasing, no shadows, no rounded corners.</li></ul>
-<p>Over that sits the <a href="aperture-science.html">Aperture palette</a> — amber accents, and a wallpaper drawn as vector geometry because there is no image decoder in the kernel.</p>
+<ul><li>A <code>#C0C0C0</code> face colour on every panel.</li><li>Two-pixel bevels: white on the top and left, dark grey on the bottom and right, for a raised surface. Reversed for a sunken one.</li><li>Title bars that fill with the selection colour when focused and grey when not.</li><li>Hard rectangles. No anti-aliasing, no shadows, no rounded corners.</li></ul>
+<p>Over that sits the <a href="aperture-science.html">Aperture palette</a> , amber accents, and a wallpaper drawn as vector geometry because there is no image decoder in the kernel.</p>
 <h2 id="the-window-manager-and-its-one-idea">The window manager, and its one idea</h2>
 <p>Z-order <em>is</em> focus. There is no separate focused-window pointer to keep in agreement with the stacking order; the front window is the focused window, and raising is focusing. One fact instead of two that can disagree.</p>
-<p>Repainting is total, back to front, on every change. No damage tracking, no dirty rectangles. At this resolution a full repaint is a few million stores and costs less than the bookkeeping would — and damage tracking bugs are the worst kind, because they leave the screen showing something that was true a moment ago.</p>
+<p>Repainting is total, back to front, on every change. No damage tracking, no dirty rectangles. At this resolution a full repaint is a few million stores and costs less than the bookkeeping would, and damage tracking bugs are the worst kind, because they leave the screen showing something that was true a moment ago.</p>
 <h2 id="a-bug-that-only-a-screenshot-could-find">A bug that only a screenshot could find</h2>
-<p>The console wrote directly to its own rectangle with no knowledge of windows on top of it, so a file browser opened over the terminal was gradually eaten by shell output. Nothing in the serial log showed it — the log was correct, the window manager was correct, and the screen was wrong.</p>
+<p>The console wrote directly to its own rectangle with no knowledge of windows on top of it, so a file browser opened over the terminal was gradually eaten by shell output. Nothing in the serial log showed it. the log was correct, the window manager was correct, and the screen was wrong.</p>
 <div class="note">It was found by capturing the framebuffer through QEMU's monitor and converting it to PNG. That capture also produced a false alarm: a screenshot taken mid-repaint looked like a broken compositor, and cost a bisect before the fix turned out to be waiting two seconds for the frame to settle. A GUI nobody has looked at is a GUI nobody has tested.</div>
-<div class="seealso"><strong>See also</strong><a href="../wiki/aperture-science.html">Aperture Science</a> · <a href="../wiki/glados-os.html">GLaDOS OS</a> · <a href="../wiki/testing.html">Testing without a test runner</a></div>
-</main>
-<footer>
-  <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This is an independent, non-commercial homage and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
-  <p>Copyright © 2026. All rights reserved. Source published to be read, not
-  reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from the
-  Linux kernel and carries its own terms.</p>
-  <p>No cookies, no analytics, nothing to accept. Last updated 2026-08-14.</p>
-</footer>
+<div class="seealso"><b>See also:</b> <a href="../wiki/aperture-science.html">Aperture Science</a>, <a href="../wiki/glados-os.html">GLaDOS OS</a>, <a href="../wiki/testing.html">Testing without a test runner</a></div>
 </div>
-<div class="hazard"></div>
+</div>
+</div>
+
+<div id="footer">
+  <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This is an independent, non-commercial homage and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
+  <p>Copyright 2026. All rights reserved. Source is published to be read, not
+  reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from
+  the Linux kernel and carries its own terms.</p>
+  <p>No cookies, no analytics. Last updated 2026-08-14.</p>
+</div>
+
+</div>
 </body>
 </html>

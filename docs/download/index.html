@@ -3,20 +3,19 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Download GLaDOS ISO — bootable AI operating system images</title>
+<title>Download GLaDOS ISO. Bootable AI operating system images</title>
 <meta name="description" content="Download the GLaDOS OS ISO. Bootable UEFI images from 33 MB to 575 MB, with an in-kernel language model included. Flash with Rufus, balenaEtcher or dd.">
 <meta name="keywords" content="GLaDOS ISO, GLaDOS download, AI OS ISO, Rust OS ISO, bootable ISO, Aperture Science OS download">
 <link rel="canonical" href="https://ilumci.github.io/GLaDOS/download/">
 <meta name="robots" content="index,follow,max-image-preview:large">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="GLaDOS">
-<meta property="og:title" content="Download GLaDOS ISO — bootable AI operating system images">
+<meta property="og:title" content="Download GLaDOS ISO. Bootable AI operating system images">
 <meta property="og:description" content="Download the GLaDOS OS ISO. Bootable UEFI images from 33 MB to 575 MB, with an in-kernel language model included. Flash with Rufus, balenaEtcher or dd.">
 <meta property="og:url" content="https://ilumci.github.io/GLaDOS/download/">
 <meta name="twitter:card" content="summary">
-<meta name="twitter:title" content="Download GLaDOS ISO — bootable AI operating system images">
+<meta name="twitter:title" content="Download GLaDOS ISO. Bootable AI operating system images">
 <meta name="twitter:description" content="Download the GLaDOS OS ISO. Bootable UEFI images from 33 MB to 575 MB, with an in-kernel language model included. Flash with Rufus, balenaEtcher or dd.">
-<meta name="theme-color" content="#f28c1e">
 <meta property="og:image" content="https://ilumci.github.io/GLaDOS/img/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
@@ -28,52 +27,57 @@
 <link rel="apple-touch-icon" sizes="180x180" href="../img/icon-180.png">
 <link rel="manifest" href="../site.webmanifest">
 <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://ilumci.github.io/GLaDOS/"},{"@type":"ListItem","position":2,"name":"Download","item":"https://ilumci.github.io/GLaDOS/download/"}]}</script>
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Download GLaDOS ISO \u2014 bootable AI operating system images","description":"Download the GLaDOS OS ISO. Bootable UEFI images from 33 MB to 575 MB, with an in-kernel language model included. Flash with Rufus, balenaEtcher or dd.","url":"https://ilumci.github.io/GLaDOS/download/","dateModified":"2026-08-14","keywords":"GLaDOS ISO, GLaDOS download, AI OS ISO, Rust OS ISO, bootable ISO, Aperture Science OS download","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Is the GLaDOS ISO free?","acceptedAnswer":{"@type":"Answer","text":"Yes, and free to download and run. The source is published under all-rights-reserved, so you may read it but not redistribute or build derivatives from it without permission."}},{"@type":"Question","name":"Will it damage my computer or my files?","acceptedAnswer":{"@type":"Answer","text":"It runs entirely from the USB stick and does not install anything. It will not write to your disk unless it finds unallocated space that has been explicitly designated \u2014 on a machine whose disk is fully allocated to Windows, storage initialisation simply fails, which is the intended outcome."}},{"@type":"Question","name":"Can I run it in a virtual machine?","acceptedAnswer":{"@type":"Answer","text":"Yes, with UEFI firmware (OVMF). Use the SmolLM2 image: QEMU's built-in FAT support caps the whole disk at 516 MB, which the larger image exceeds."}},{"@type":"Question","name":"Why does it need Secure Boot disabled?","acceptedAnswer":{"@type":"Answer","text":"The kernel is not signed by a key your firmware trusts. Signing would mean a Microsoft-signed shim, which is a distribution problem rather than a technical one."}}]}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Download GLaDOS ISO. Bootable AI operating system images","description":"Download the GLaDOS OS ISO. Bootable UEFI images from 33 MB to 575 MB, with an in-kernel language model included. Flash with Rufus, balenaEtcher or dd.","url":"https://ilumci.github.io/GLaDOS/download/","dateModified":"2026-08-14","keywords":"GLaDOS ISO, GLaDOS download, AI OS ISO, Rust OS ISO, bootable ISO, Aperture Science OS download","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Is the GLaDOS ISO free?","acceptedAnswer":{"@type":"Answer","text":"Yes, and free to download and run. The source is published under all-rights-reserved, so you may read it but not redistribute or build derivatives from it without permission."}},{"@type":"Question","name":"Will it damage my computer or my files?","acceptedAnswer":{"@type":"Answer","text":"It runs entirely from the USB stick and does not install anything. It will not write to your disk unless it finds unallocated space that has been explicitly designated. On a machine whose disk is fully allocated to Windows, storage initialisation simply fails, which is the intended outcome."}},{"@type":"Question","name":"Can I run it in a virtual machine?","acceptedAnswer":{"@type":"Answer","text":"Yes, with UEFI firmware (OVMF). Use the SmolLM2 image: QEMU's built-in FAT support caps the whole disk at 516 MB, which the larger image exceeds."}},{"@type":"Question","name":"Why does it need Secure Boot disabled?","acceptedAnswer":{"@type":"Answer","text":"The kernel is not signed by a key your firmware trusts. Signing would mean a Microsoft-signed shim, which is a distribution problem rather than a technical one."}}]}</script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
-<div class="hazard"></div>
-<div class="wrap">
-<header class="top">
-  <div class="brand">
-    <img src="../img/logo.svg" alt="" width="26" height="26">
-    <a class="logo" href="../">GLaDOS</a>
-    <span class="tag">an AI operating system in Rust · ring 0 · bare metal</span>
-  </div>
-  <nav class="main"><a href="../">Home</a> <a class="btn" href="../download/">↓ Download</a> <a href="../wiki/">Wiki</a> <a href="../screenshots/">Screenshots</a> <a href="../archive/">Archive</a> <a href="https://github.com/IlumCI/GLaDOS" rel="noopener">Source</a></nav>
-</header>
-<nav class="crumbs"><a href="../">GLaDOS</a> / Download</nav>
-<main id="main">
+<div id="page">
+
+<div id="masthead">
+  <img src="../img/logo.svg" alt="" width="34" height="34">
+  <a class="name" href="../">GLaDOS</a>
+  <span class="sub">An operating system in Rust, with a language model in the kernel</span>
+</div>
+
+<div id="bar"><a href="../">Home</a> | <a href="../download/">Download</a> | <a href="../wiki/">Wiki</a> | <a href="../screenshots/">Screenshots</a> | <a href="../archive/">Archive</a> | <a href="https://github.com/IlumCI/GLaDOS" rel="noopener">Source code</a></div>
+
+<div id="body">
+<div id="sidebar"><div class="box"><div class="t">Navigation</div><ul><li><a href="../">Home</a></li><li><a href="../download/">Download</a></li><li><a href="../wiki/">Wiki</a></li><li><a href="../screenshots/">Screenshots</a></li><li><a href="../archive/">Archive</a></li><li><a href="https://github.com/IlumCI/GLaDOS">Source code</a></li></ul></div><div class="box"><div class="t">Get it</div><ul><li><a href="../download/">Download the ISO</a></li><li><a href="https://github.com/IlumCI/GLaDOS/releases/latest/download/SHA256SUMS">Checksums</a></li></ul></div><div class="box"><div class="t">The system</div><ul><li><a href="../wiki/glados-os.html">GLaDOS OS</a></li><li><a href="../wiki/aperture-science.html">Aperture Science</a></li><li><a href="../wiki/portal-os.html">Portal OS</a></li><li><a href="../wiki/rust-os.html">Writing an OS in Rust</a></li><li><a href="../wiki/ring-0.html">Ring 0</a></li><li><a href="../wiki/uefi-kernel.html">UEFI as the kernel</a></li><li><a href="../wiki/llm-in-kernel.html">A language model in the kernel</a></li><li><a href="../wiki/qwen3.html">Qwen3 in 570 MB</a></li></ul></div><div class="box"><div class="t">Internals</div><ul><li><a href="../wiki/rope.html">RoPE</a></li><li><a href="../wiki/kv-cache.html">The int8 KV cache</a></li><li><a href="../wiki/tokenizer.html">Tokenizers</a></li><li><a href="../wiki/constrained-decoding.html">Constrained decoding</a></li><li><a href="../wiki/routing.html">Tool routing</a></li><li><a href="../wiki/gui.html">The Windows 3.1 desktop</a></li><li><a href="../wiki/network-stack.html">The network stack</a></li><li><a href="../wiki/tls.html">TLS 1.3 from scratch</a></li></ul></div><div class="box"><div class="t">Hardware</div><ul><li><a href="../wiki/storage.html">Content-addressed storage</a></li><li><a href="../wiki/usb-xhci.html">The USB stack</a></li><li><a href="../wiki/usb-wifi-driver.html">USB WiFi</a></li><li><a href="../wiki/iso-el-torito.html">How the ISO is built</a></li><li><a href="../wiki/templeos.html">TempleOS</a></li><li><a href="../wiki/testing.html">Testing without a test runner</a></li></ul></div></div>
+<div id="content">
+<div class="crumbs"><a href="../">GLaDOS</a> / Download</div>
+<div id="main">
 <h1>Download GLaDOS ISO</h1>
-<p class="lede">Download the GLaDOS OS ISO. Bootable UEFI images from 33 MB to 575 MB, with an in-kernel language model included. Flash with Rufus, balenaEtcher or dd.</p>
-<p>Three images. All are bootable UEFI ISOs built by <a href="../wiki/iso-el-torito.html">a from-scratch ISO writer</a> — a FAT32 EFI System Partition wrapped in ISO 9660 with an El Torito EFI boot entry.</p>
-<div class="dl"><div class="row"><span class="name">glados-qwen3-0.6b.iso</span><span class="size">575 MB</span></div><p>The full system. Kernel plus Qwen3-0.6B quantised to int8, 512-token context. What you want unless you have a reason otherwise.</p><p><a href="https://github.com/IlumCI/GLaDOS/releases/latest/download/glados-qwen3-0.6b.iso">Download glados-qwen3-0.6b.iso</a></p></div><div class="dl"><div class="row"><span class="name">glados-smollm2-135m.iso</span><span class="size">257 MB</span></div><p>Kernel plus SmolLM2-135M. Smaller and faster, and the one that fits inside QEMU's disk limits, so it is the image to test with.</p><p><a href="https://github.com/IlumCI/GLaDOS/releases/latest/download/glados-smollm2-135m.iso">Download glados-smollm2-135m.iso</a></p></div><div class="dl"><div class="row"><span class="name">glados-nomodel.iso</span><span class="size">33 MB</span></div><p>Kernel only. Boots to a shell and reports no model. Supply your own on the EFI System Partition.</p><p><a href="https://github.com/IlumCI/GLaDOS/releases/latest/download/glados-nomodel.iso">Download glados-nomodel.iso</a></p></div>
+<p>Three images. All are bootable UEFI ISOs built by <a href="../wiki/iso-el-torito.html">a from-scratch ISO writer</a>. a FAT32 EFI System Partition wrapped in ISO 9660 with an El Torito EFI boot entry.</p>
+<table class="dl"><thead><tr><th>File</th><th>Size</th><th>Contents</th></tr></thead><tbody><tr><td><a href="https://github.com/IlumCI/GLaDOS/releases/latest/download/glados-qwen3-0.6b.iso">glados-qwen3-0.6b.iso</a></td><td class="size">575 MB</td><td>The full system. Kernel plus Qwen3-0.6B quantised to int8, 512-token context. What you want unless you have a reason otherwise.</td></tr><tr><td><a href="https://github.com/IlumCI/GLaDOS/releases/latest/download/glados-smollm2-135m.iso">glados-smollm2-135m.iso</a></td><td class="size">257 MB</td><td>Kernel plus SmolLM2-135M. Smaller and faster, and the one that fits inside QEMU's disk limits, so it is the image to test with.</td></tr><tr><td><a href="https://github.com/IlumCI/GLaDOS/releases/latest/download/glados-nomodel.iso">glados-nomodel.iso</a></td><td class="size">33 MB</td><td>Kernel only. Boots to a shell and reports no model. Supply your own on the EFI System Partition.</td></tr></tbody></table>
 <p>The same files are browsable in <a href="../archive/#/iso">the archive index</a>, if you prefer a directory listing.</p>
-<p>Checksums: <a href="https://github.com/IlumCI/GLaDOS/releases/latest/download/SHA256SUMS">SHA256SUMS</a>. Verify before flashing — a truncated download produces a disc that boots partway and fails somewhere confusing.</p>
+<p>Checksums: <a href="https://github.com/IlumCI/GLaDOS/releases/latest/download/SHA256SUMS">SHA256SUMS</a>. Verify before flashing, a truncated download produces a disc that boots partway and fails somewhere confusing.</p>
 <h2 id="flashing-it">Flashing it</h2>
 <p>Write the image to a USB stick. Any of these work:</p>
-<pre><code># Linux / macOS — check the device name first, this overwrites it
+<pre><code># Linux / macOS. Check the device name first, this overwrites it
 sudo dd if=glados-qwen3-0.6b.iso of=/dev/sdX bs=4M status=progress oflag=sync</code></pre>
 <ul><li><strong>Windows:</strong> Rufus, in DD mode, or balenaEtcher.</li><li><strong>Anywhere:</strong> balenaEtcher handles the ISO directly.</li></ul>
-<div class="note"><strong>Secure Boot must be off.</strong> The kernel is unsigned — there is no Microsoft-signed shim in front of it — so firmware with Secure Boot enabled refuses to load it and usually says nothing more useful than "no bootable device".</div>
+<div class="note"><strong>Secure Boot must be off.</strong> The kernel is unsigned. there is no Microsoft-signed shim in front of it. So firmware with Secure Boot enabled refuses to load it and usually says nothing more useful than "no bootable device".</div>
 <h2 id="booting-it">Booting it</h2>
-<ol><li>Write the image and leave the stick in.</li><li>Reboot and open the firmware boot menu — commonly F11, F12, F8 or Esc.</li><li>Pick the USB device listed under UEFI.</li><li>Watch the boot log. It prints its memory map, every driver it finds, and a pass or fail line for each self-test.</li></ol>
+<ol><li>Write the image and leave the stick in.</li><li>Reboot and open the firmware boot menu. Commonly F11, F12, F8 or Esc.</li><li>Pick the USB device listed under UEFI.</li><li>Watch the boot log. It prints its memory map, every driver it finds, and a pass or fail line for each self-test.</li></ol>
 <h2 id="what-you-get">What you get</h2>
 <p>A Windows 3.1-styled desktop with a window manager, taskbar and a terminal, and a shell where <code>gen</code> generates text, <code>ask</code> answers a question, <code>if</code> shows interfaces, <code>dhcp</code> gets a lease and <code>https example.com /</code> fetches a page over a TLS 1.3 connection this kernel negotiated itself.</p>
 <h2 id="hardware-support-honestly">Hardware support, honestly</h2>
 <p>Developed against one laptop: an MSI Thin GF63 12UC. That is the only machine it is meaningfully tested on.</p>
-<p>It should boot on most x86-64 UEFI systems — the graphics path is plain GOP and nothing in the boot path is vendor-specific. Storage and networking are another matter: the drivers target particular chips (Intel e1000, Realtek RTL8168, NVMe, xHCI). Expect a working shell and a working model; do not expect your disk or your network card.</p>
-<h2 id="faq">Frequently asked questions</h2><dl class="faq"><dt>Is the GLaDOS ISO free?</dt><dd>Yes, and free to download and run. The source is published under all-rights-reserved, so you may read it but not redistribute or build derivatives from it without permission.</dd><dt>Will it damage my computer or my files?</dt><dd>It runs entirely from the USB stick and does not install anything. It will not write to your disk unless it finds unallocated space that has been explicitly designated — on a machine whose disk is fully allocated to Windows, storage initialisation simply fails, which is the intended outcome.</dd><dt>Can I run it in a virtual machine?</dt><dd>Yes, with UEFI firmware (OVMF). Use the SmolLM2 image: QEMU's built-in FAT support caps the whole disk at 516 MB, which the larger image exceeds.</dd><dt>Why does it need Secure Boot disabled?</dt><dd>The kernel is not signed by a key your firmware trusts. Signing would mean a Microsoft-signed shim, which is a distribution problem rather than a technical one.</dd></dl>
-</main>
-<footer>
-  <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This is an independent, non-commercial homage and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
-  <p>Copyright © 2026. All rights reserved. Source published to be read, not
-  reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from the
-  Linux kernel and carries its own terms.</p>
-  <p>No cookies, no analytics, nothing to accept. Last updated 2026-08-14.</p>
-</footer>
+<p>It should boot on most x86-64 UEFI systems. The graphics path is plain GOP and nothing in the boot path is vendor-specific. Storage and networking are another matter: the drivers target particular chips (Intel e1000, Realtek RTL8168, NVMe, xHCI). Expect a working shell and a working model; do not expect your disk or your network card.</p>
+<h2 id="faq">Frequently asked questions</h2><dl class="faq"><dt>Is the GLaDOS ISO free?</dt><dd>Yes, and free to download and run. The source is published under all-rights-reserved, so you may read it but not redistribute or build derivatives from it without permission.</dd><dt>Will it damage my computer or my files?</dt><dd>It runs entirely from the USB stick and does not install anything. It will not write to your disk unless it finds unallocated space that has been explicitly designated. On a machine whose disk is fully allocated to Windows, storage initialisation simply fails, which is the intended outcome.</dd><dt>Can I run it in a virtual machine?</dt><dd>Yes, with UEFI firmware (OVMF). Use the SmolLM2 image: QEMU's built-in FAT support caps the whole disk at 516 MB, which the larger image exceeds.</dd><dt>Why does it need Secure Boot disabled?</dt><dd>The kernel is not signed by a key your firmware trusts. Signing would mean a Microsoft-signed shim, which is a distribution problem rather than a technical one.</dd></dl>
 </div>
-<div class="hazard"></div>
+</div>
+</div>
+
+<div id="footer">
+  <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This is an independent, non-commercial homage and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
+  <p>Copyright 2026. All rights reserved. Source is published to be read, not
+  reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from
+  the Linux kernel and carries its own terms.</p>
+  <p>No cookies, no analytics. Last updated 2026-08-14.</p>
+</div>
+
+</div>
 </body>
 </html>

@@ -3,20 +3,19 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>GLaDOS OS — a ring-0 Rust operating system with an in-kernel LLM</title>
+<title>GLaDOS OS, a ring-0 Rust operating system with an in-kernel LLM</title>
 <meta name="description" content="GLaDOS OS explained: a from-scratch Rust kernel for x86-64 with a transformer running in ring 0, no syscalls, and one address space.">
 <meta name="keywords" content="GLaDOS OS, AI operating system, Rust kernel, in-kernel LLM, operating system with AI">
 <link rel="canonical" href="https://ilumci.github.io/GLaDOS/wiki/glados-os.html">
 <meta name="robots" content="index,follow,max-image-preview:large">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="GLaDOS">
-<meta property="og:title" content="GLaDOS OS — a ring-0 Rust operating system with an in-kernel LLM">
+<meta property="og:title" content="GLaDOS OS, a ring-0 Rust operating system with an in-kernel LLM">
 <meta property="og:description" content="GLaDOS OS explained: a from-scratch Rust kernel for x86-64 with a transformer running in ring 0, no syscalls, and one address space.">
 <meta property="og:url" content="https://ilumci.github.io/GLaDOS/wiki/glados-os.html">
 <meta name="twitter:card" content="summary">
-<meta name="twitter:title" content="GLaDOS OS — a ring-0 Rust operating system with an in-kernel LLM">
+<meta name="twitter:title" content="GLaDOS OS, a ring-0 Rust operating system with an in-kernel LLM">
 <meta name="twitter:description" content="GLaDOS OS explained: a from-scratch Rust kernel for x86-64 with a transformer running in ring 0, no syscalls, and one address space.">
-<meta name="theme-color" content="#f28c1e">
 <meta property="og:image" content="https://ilumci.github.io/GLaDOS/img/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
@@ -28,47 +27,52 @@
 <link rel="apple-touch-icon" sizes="180x180" href="../img/icon-180.png">
 <link rel="manifest" href="../site.webmanifest">
 <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://ilumci.github.io/GLaDOS/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://ilumci.github.io/GLaDOS/wiki/"},{"@type":"ListItem","position":3,"name":"GLaDOS OS","item":"https://ilumci.github.io/GLaDOS/wiki/glados-os.html"}]}</script>
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"GLaDOS OS \u2014 a ring-0 Rust operating system with an in-kernel LLM","description":"GLaDOS OS explained: a from-scratch Rust kernel for x86-64 with a transformer running in ring 0, no syscalls, and one address space.","url":"https://ilumci.github.io/GLaDOS/wiki/glados-os.html","dateModified":"2026-08-14","keywords":"GLaDOS OS, AI operating system, Rust kernel, in-kernel LLM, operating system with AI","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"GLaDOS OS, a ring-0 Rust operating system with an in-kernel LLM","description":"GLaDOS OS explained: a from-scratch Rust kernel for x86-64 with a transformer running in ring 0, no syscalls, and one address space.","url":"https://ilumci.github.io/GLaDOS/wiki/glados-os.html","dateModified":"2026-08-14","keywords":"GLaDOS OS, AI operating system, Rust kernel, in-kernel LLM, operating system with AI","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
-<div class="hazard"></div>
-<div class="wrap">
-<header class="top">
-  <div class="brand">
-    <img src="../img/logo.svg" alt="" width="26" height="26">
-    <a class="logo" href="../">GLaDOS</a>
-    <span class="tag">an AI operating system in Rust · ring 0 · bare metal</span>
-  </div>
-  <nav class="main"><a href="../">Home</a> <a class="btn" href="../download/">↓ Download</a> <a href="../wiki/">Wiki</a> <a href="../screenshots/">Screenshots</a> <a href="../archive/">Archive</a> <a href="https://github.com/IlumCI/GLaDOS" rel="noopener">Source</a></nav>
-</header>
-<nav class="crumbs"><a href="../">GLaDOS</a> / <a href="../wiki/">Wiki</a> / GLaDOS OS</nav>
-<main id="main">
-<h1>GLaDOS OS</h1>
-<p class="lede">GLaDOS OS explained: a from-scratch Rust kernel for x86-64 with a transformer running in ring 0, no syscalls, and one address space.</p>
+<div id="page">
+
+<div id="masthead">
+  <img src="../img/logo.svg" alt="" width="34" height="34">
+  <a class="name" href="../">GLaDOS</a>
+  <span class="sub">An operating system in Rust, with a language model in the kernel</span>
+</div>
+
+<div id="bar"><a href="../">Home</a> | <a href="../download/">Download</a> | <a href="../wiki/">Wiki</a> | <a href="../screenshots/">Screenshots</a> | <a href="../archive/">Archive</a> | <a href="https://github.com/IlumCI/GLaDOS" rel="noopener">Source code</a></div>
+
+<div id="body">
+<div id="sidebar"><div class="box"><div class="t">Navigation</div><ul><li><a href="../">Home</a></li><li><a href="../download/">Download</a></li><li><a href="../wiki/">Wiki</a></li><li><a href="../screenshots/">Screenshots</a></li><li><a href="../archive/">Archive</a></li><li><a href="https://github.com/IlumCI/GLaDOS">Source code</a></li></ul></div><div class="box"><div class="t">Get it</div><ul><li><a href="../download/">Download the ISO</a></li><li><a href="https://github.com/IlumCI/GLaDOS/releases/latest/download/SHA256SUMS">Checksums</a></li></ul></div><div class="box"><div class="t">The system</div><ul><li><a href="../wiki/glados-os.html">GLaDOS OS</a></li><li><a href="../wiki/aperture-science.html">Aperture Science</a></li><li><a href="../wiki/portal-os.html">Portal OS</a></li><li><a href="../wiki/rust-os.html">Writing an OS in Rust</a></li><li><a href="../wiki/ring-0.html">Ring 0</a></li><li><a href="../wiki/uefi-kernel.html">UEFI as the kernel</a></li><li><a href="../wiki/llm-in-kernel.html">A language model in the kernel</a></li><li><a href="../wiki/qwen3.html">Qwen3 in 570 MB</a></li></ul></div><div class="box"><div class="t">Internals</div><ul><li><a href="../wiki/rope.html">RoPE</a></li><li><a href="../wiki/kv-cache.html">The int8 KV cache</a></li><li><a href="../wiki/tokenizer.html">Tokenizers</a></li><li><a href="../wiki/constrained-decoding.html">Constrained decoding</a></li><li><a href="../wiki/routing.html">Tool routing</a></li><li><a href="../wiki/gui.html">The Windows 3.1 desktop</a></li><li><a href="../wiki/network-stack.html">The network stack</a></li><li><a href="../wiki/tls.html">TLS 1.3 from scratch</a></li></ul></div><div class="box"><div class="t">Hardware</div><ul><li><a href="../wiki/storage.html">Content-addressed storage</a></li><li><a href="../wiki/usb-xhci.html">The USB stack</a></li><li><a href="../wiki/usb-wifi-driver.html">USB WiFi</a></li><li><a href="../wiki/iso-el-torito.html">How the ISO is built</a></li><li><a href="../wiki/templeos.html">TempleOS</a></li><li><a href="../wiki/testing.html">Testing without a test runner</a></li></ul></div></div>
+<div id="content">
+<div class="crumbs"><a href="../">GLaDOS</a> / <a href="../wiki/">Wiki</a> / GLaDOS OS</div>
+<div id="main">
+<h1>GLaDOS OS, a ring-0 Rust operating system with an in-kernel LLM</h1>
 <aside class="infobox"><div class="ib-t">GLaDOS</div><table><tbody><tr><td>Type</td><td>Research operating system</td></tr><tr><td>Language</td><td>Rust (<code>no_std</code>)</td></tr><tr><td>Architecture</td><td>x86-64, UEFI</td></tr><tr><td>Privilege</td><td>Ring 0 only</td></tr><tr><td>Model</td><td>Qwen3-0.6B, int8</td></tr><tr><td>Lines of Rust</td><td>~119 files</td></tr><tr><td>Licence</td><td>All rights reserved</td></tr></tbody></table></aside>
-<p>GLaDOS is a single-address-space operating system whose distinguishing feature is that a transformer runs inside the kernel. There is no userspace to put it in — there is no userspace at all.</p>
+<p>GLaDOS is a single-address-space operating system whose distinguishing feature is that a transformer runs inside the kernel. There is no userspace to put it in. There is no userspace at all.</p>
 <h2 id="the-structural-choice">The structural choice</h2>
 <p>Conventional systems separate kernel and user code with a privilege boundary, crossed by syscalls. That boundary buys isolation and costs a context switch. GLaDOS removes it entirely: everything runs at <a href="ring-0.html">ring 0</a>, in one address space, with no syscalls and no memory protection between components.</p>
 <p>The consequence that matters is what a tool call becomes. In a normal AI agent, the model emits text, something parses it, a dispatcher looks up a handler, and the call crosses a process boundary. Here the model names a function under <a href="constrained-decoding.html">a grammar built from the live function table</a> and the kernel calls it. There is nothing in between.</p>
 <p>What this costs is equally plain: a bug anywhere can corrupt anything. There is no adversary model, and the system does not pretend to have one. It stops incompetence, not intent.</p>
 <h2 id="boot">Boot</h2>
-<p>There is no bootloader. UEFI already delivers long mode, ring 0 and an identity map, so the UEFI application <em>is</em> the kernel — no ELF loading, no relocation, no handoff ABI. See <a href="uefi-kernel.html">UEFI as the kernel</a>.</p>
+<p>There is no bootloader. UEFI already delivers long mode, ring 0 and an identity map, so the UEFI application <em>is</em> the kernel. No ELF loading, no relocation, no handoff ABI. See <a href="uefi-kernel.html">UEFI as the kernel</a>.</p>
 <p>The model, tokenizer and root certificates are read before <code>ExitBootServices</code>, because that is the only moment a filesystem exists. After that the system is on its own page tables with no firmware services at all.</p>
 <h2 id="subsystems">Subsystems</h2>
-<ul><li><a href="llm-in-kernel.html">Inference</a> — a transformer with no allocator behind it and no libm to call.</li><li><a href="network-stack.html">Networking</a> — ARP through TCP, DHCP, DNS and <a href="tls.html">TLS 1.3</a>, all hand-written.</li><li><a href="storage.html">Storage</a> — NVMe under a content-addressed object store where a snapshot is one hash.</li><li><a href="usb-xhci.html">USB</a> — xHCI rings, enumeration, and a CDC Ethernet driver that carries real traffic.</li><li><a href="gui.html">Graphics</a> — a Windows 3.1 desktop drawn pixel by pixel into a GOP framebuffer.</li></ul>
+<ul><li><a href="llm-in-kernel.html">Inference</a>, a transformer with no allocator behind it and no libm to call.</li><li><a href="network-stack.html">Networking</a>, ARP through TCP, DHCP, DNS and <a href="tls.html">TLS 1.3</a>, all hand-written.</li><li><a href="storage.html">Storage</a>. NVMe under a content-addressed object store where a snapshot is one hash.</li><li><a href="usb-xhci.html">USB</a>. xHCI rings, enumeration, and a CDC Ethernet driver that carries real traffic.</li><li><a href="gui.html">Graphics</a>, a Windows 3.1 desktop drawn pixel by pixel into a GOP framebuffer.</li></ul>
 <h2 id="the-interesting-negative-results">The interesting negative results</h2>
 <p>Training an adapter head on top of the model <em>hurts</em> at this data scale. A Product-of-Experts council of three classifiers does not beat the single best one. Both stay in the source tree, because the reason to know them is the reason they were worth measuring.</p>
-<div class="seealso"><strong>See also</strong><a href="../wiki/rust-os.html">Writing an OS in Rust</a> · <a href="../wiki/ring-0.html">Ring 0</a> · <a href="../wiki/templeos.html">TempleOS</a> · <a href="../wiki/routing.html">Tool routing</a></div>
-</main>
-<footer>
-  <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This is an independent, non-commercial homage and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
-  <p>Copyright © 2026. All rights reserved. Source published to be read, not
-  reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from the
-  Linux kernel and carries its own terms.</p>
-  <p>No cookies, no analytics, nothing to accept. Last updated 2026-08-14.</p>
-</footer>
+<div class="seealso"><b>See also:</b> <a href="../wiki/rust-os.html">Writing an OS in Rust</a>, <a href="../wiki/ring-0.html">Ring 0</a>, <a href="../wiki/templeos.html">TempleOS</a>, <a href="../wiki/routing.html">Tool routing</a></div>
 </div>
-<div class="hazard"></div>
+</div>
+</div>
+
+<div id="footer">
+  <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This is an independent, non-commercial homage and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
+  <p>Copyright 2026. All rights reserved. Source is published to be read, not
+  reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from
+  the Linux kernel and carries its own terms.</p>
+  <p>No cookies, no analytics. Last updated 2026-08-14.</p>
+</div>
+
+</div>
 </body>
 </html>

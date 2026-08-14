@@ -75,7 +75,7 @@ def page(slug, title, desc, keywords, blocks, kind="article", nav=None, faqs=Non
 
 page(
     "index",
-    "GLaDOS — an AI operating system in Rust, built on bare metal",
+    "GLaDOS: an operating system in Rust with a language model in the kernel",
     "GLaDOS is a from-scratch ring-0 operating system written in Rust with a "
     "language model running inside the kernel. Free bootable ISO, full source, "
     "and documentation on how every part works.",
@@ -84,13 +84,13 @@ page(
     kind="home",
     blocks=[
         p("<strong>GLaDOS</strong> is an operating system written from scratch in "
-          "Rust, for x86-64, running in ring 0 on bare metal — with a language "
+          "Rust, for x86-64, running in ring 0 on bare metal. With a language "
           "model living <em>inside</em> the kernel rather than on top of it."),
         p("No user/kernel split. No syscalls. No process isolation. One address "
           "space. A tool call from the model is a function call: not an IPC round "
           "trip, not a sandbox boundary, just a call."),
         p("It is named after the AI from <em>Portal</em>, and it borrows Aperture "
-          "Science's look — amber on black, Windows 3.1 chrome, an enrichment "
+          "Science's look, amber on black, Windows 3.1 chrome, an enrichment "
           "centre tone. The engineering underneath is entirely real: a TCP/IP "
           "stack, TLS 1.3, NVMe, USB 3, and a transformer, all written by hand."),
         ("cards", [
@@ -106,18 +106,18 @@ page(
              "119 files of Rust. All rights reserved, published to be read."),
         ]),
         ("shots", [
-            ("desktop.png", "Desktop — terminal and program manager",
+            ("desktop.png", "Desktop with terminal and Program Manager",
              "GLaDOS OS desktop showing a Windows 3.1 styled terminal window with "
              "the boot log, a Program Manager window, and a taskbar",
              "The desktop as it comes up: the terminal showing its own boot log, "
              "Program Manager, and a taskbar. Every pixel is drawn by the kernel "
-             "into a UEFI framebuffer — there is no graphics library under it.",
+             "into a UEFI framebuffer. There is no graphics library under it.",
              True),
-            ("desktop-clean.png", "Desktop — wallpaper",
+            ("desktop-clean.png", "Desktop wallpaper",
              "The GLaDOS desktop wallpaper showing the aperture mark drawn as "
              "vector geometry",
              "With the terminal minimised. The wallpaper mark is drawn as geometry "
-             "at boot rather than decoded from an image — there is no image "
+             "at boot rather than decoded from an image. There is no image "
              "decoder in the kernel.", False),
             ("model.png", "The model answering",
              "GLaDOS running a language model in kernel space, answering a question "
@@ -153,7 +153,7 @@ page(
         p("Most \"AI operating systems\" are a chat window on top of Linux. The "
           "question here is narrower and more interesting: if a model is a kernel "
           "primitive rather than a userspace process, what changes?"),
-        p("Some answers so far. Tool calls stop being serialised — the model names "
+        p("Some answers so far. Tool calls stop being serialised. The model names "
           "a function and the kernel calls it. Invalid tool names become "
           "<a href=\"wiki/constrained-decoding.html\">unreachable rather than "
           "improbable</a>, because the grammar is built from the live table. And "
@@ -161,7 +161,7 @@ page(
           "<a href=\"wiki/routing.html\">a ridge regression from 1960</a> reading "
           "one hidden state, 12,672 parameters, no forward pass, better accuracy."),
         note("Lineage, not target: <a href=\"wiki/templeos.html\">TempleOS</a> is "
-             "the obvious ancestor — one person, ring 0, no isolation, a "
+             "the obvious ancestor. One person, ring 0, no isolation, a "
              "deliberate aesthetic. GLaDOS is not trying to be it."),
     ],
 )
@@ -172,7 +172,7 @@ page(
 
 page(
     "download/index",
-    "Download GLaDOS ISO — bootable AI operating system images",
+    "Download GLaDOS ISO. Bootable AI operating system images",
     "Download the GLaDOS OS ISO. Bootable UEFI images from 33 MB to 575 MB, with "
     "an in-kernel language model included. Flash with Rufus, balenaEtcher or dd.",
     ["GLaDOS ISO", "GLaDOS download", "AI OS ISO", "Rust OS ISO", "bootable ISO",
@@ -180,7 +180,7 @@ page(
     kind="download",
     blocks=[
         p("Three images. All are bootable UEFI ISOs built by "
-          "<a href=\"../wiki/iso-el-torito.html\">a from-scratch ISO writer</a> — "
+          "<a href=\"../wiki/iso-el-torito.html\">a from-scratch ISO writer</a>. "
           "a FAT32 EFI System Partition wrapped in ISO 9660 with an El Torito EFI "
           "boot entry."),
         ("downloads", [
@@ -198,22 +198,22 @@ page(
           "<a href=\"../archive/#/iso\">the archive index</a>, if you prefer a "
           "directory listing."),
         p("Checksums: <a href=\"" + REL + "SHA256SUMS\">SHA256SUMS</a>. Verify "
-          "before flashing — a truncated download produces a disc that boots "
+          "before flashing, a truncated download produces a disc that boots "
           "partway and fails somewhere confusing."),
         h2("Flashing it"),
         p("Write the image to a USB stick. Any of these work:"),
-        code("# Linux / macOS — check the device name first, this overwrites it\n"
+        code("# Linux / macOS. Check the device name first, this overwrites it\n"
              "sudo dd if=glados-qwen3-0.6b.iso of=/dev/sdX bs=4M status=progress oflag=sync",
              "bash"),
         ul("<strong>Windows:</strong> Rufus, in DD mode, or balenaEtcher.",
            "<strong>Anywhere:</strong> balenaEtcher handles the ISO directly."),
-        note("<strong>Secure Boot must be off.</strong> The kernel is unsigned — "
-             "there is no Microsoft-signed shim in front of it — so firmware with "
+        note("<strong>Secure Boot must be off.</strong> The kernel is unsigned. "
+             "there is no Microsoft-signed shim in front of it. So firmware with "
              "Secure Boot enabled refuses to load it and usually says nothing more "
              "useful than \"no bootable device\"."),
         h2("Booting it"),
         ol("Write the image and leave the stick in.",
-           "Reboot and open the firmware boot menu — commonly F11, F12, F8 or Esc.",
+           "Reboot and open the firmware boot menu. Commonly F11, F12, F8 or Esc.",
            "Pick the USB device listed under UEFI.",
            "Watch the boot log. It prints its memory map, every driver it finds, "
            "and a pass or fail line for each self-test."),
@@ -226,7 +226,7 @@ page(
         h2("Hardware support, honestly"),
         p("Developed against one laptop: an MSI Thin GF63 12UC. That is the only "
           "machine it is meaningfully tested on."),
-        p("It should boot on most x86-64 UEFI systems — the graphics path is plain "
+        p("It should boot on most x86-64 UEFI systems. The graphics path is plain "
           "GOP and nothing in the boot path is vendor-specific. Storage and "
           "networking are another matter: the drivers target particular chips "
           "(Intel e1000, Realtek RTL8168, NVMe, xHCI). Expect a working shell and "
@@ -239,7 +239,7 @@ page(
             ("Will it damage my computer or my files?",
              "It runs entirely from the USB stick and does not install anything. "
              "It will not write to your disk unless it finds unallocated space "
-             "that has been explicitly designated — on a machine whose disk is "
+             "that has been explicitly designated. On a machine whose disk is "
              "fully allocated to Windows, storage initialisation simply fails, "
              "which is the intended outcome."),
             ("Can I run it in a virtual machine?",
@@ -285,14 +285,14 @@ WIKI = [
 
 page(
     "wiki/index",
-    "GLaDOS Wiki — how an AI operating system is built, subsystem by subsystem",
+    "GLaDOS Wiki. How an AI operating system is built, subsystem by subsystem",
     "Documentation for GLaDOS OS: the kernel, the in-kernel language model, the "
     "network stack, the USB drivers, and the bugs that cost the most time.",
     ["GLaDOS wiki", "OS development", "kernel documentation", "Rust OS tutorial",
      "operating system internals"],
     kind="index",
     blocks=[
-        p("Every subsystem, how it works, and — where it is interesting — what it "
+        p("Every subsystem, how it works, and. Where it is interesting. What it "
           "cost to get right. This project's habit is to record the measurement "
           "that overturned an assumption rather than only the conclusion, so a "
           "fair number of these pages are about being wrong."),
@@ -306,7 +306,7 @@ page(
 
 page(
     "wiki/glados-os",
-    "GLaDOS OS — a ring-0 Rust operating system with an in-kernel LLM",
+    "GLaDOS OS, a ring-0 Rust operating system with an in-kernel LLM",
     "GLaDOS OS explained: a from-scratch Rust kernel for x86-64 with a "
     "transformer running in ring 0, no syscalls, and one address space.",
     ["GLaDOS OS", "AI operating system", "Rust kernel", "in-kernel LLM",
@@ -323,7 +323,7 @@ page(
         ]),
         p("GLaDOS is a single-address-space operating system whose distinguishing "
           "feature is that a transformer runs inside the kernel. There is no "
-          "userspace to put it in — there is no userspace at all."),
+          "userspace to put it in. There is no userspace at all."),
         h2("The structural choice"),
         p("Conventional systems separate kernel and user code with a privilege "
           "boundary, crossed by syscalls. That boundary buys isolation and costs a "
@@ -341,7 +341,7 @@ page(
           "one. It stops incompetence, not intent."),
         h2("Boot"),
         p("There is no bootloader. UEFI already delivers long mode, ring 0 and an "
-          "identity map, so the UEFI application <em>is</em> the kernel — no ELF "
+          "identity map, so the UEFI application <em>is</em> the kernel. No ELF "
           "loading, no relocation, no handoff ABI. See "
           "<a href=\"uefi-kernel.html\">UEFI as the kernel</a>."),
         p("The model, tokenizer and root certificates are read before "
@@ -349,15 +349,15 @@ page(
           "filesystem exists. After that the system is on its own page tables with "
           "no firmware services at all."),
         h2("Subsystems"),
-        ul("<a href=\"llm-in-kernel.html\">Inference</a> — a transformer with no "
+        ul("<a href=\"llm-in-kernel.html\">Inference</a>, a transformer with no "
            "allocator behind it and no libm to call.",
-           "<a href=\"network-stack.html\">Networking</a> — ARP through TCP, DHCP, "
+           "<a href=\"network-stack.html\">Networking</a>, ARP through TCP, DHCP, "
            "DNS and <a href=\"tls.html\">TLS 1.3</a>, all hand-written.",
-           "<a href=\"storage.html\">Storage</a> — NVMe under a content-addressed "
+           "<a href=\"storage.html\">Storage</a>. NVMe under a content-addressed "
            "object store where a snapshot is one hash.",
-           "<a href=\"usb-xhci.html\">USB</a> — xHCI rings, enumeration, and a "
+           "<a href=\"usb-xhci.html\">USB</a>. xHCI rings, enumeration, and a "
            "CDC Ethernet driver that carries real traffic.",
-           "<a href=\"gui.html\">Graphics</a> — a Windows 3.1 desktop drawn pixel "
+           "<a href=\"gui.html\">Graphics</a>, a Windows 3.1 desktop drawn pixel "
            "by pixel into a GOP framebuffer."),
         h2("The interesting negative results"),
         p("Training an adapter head on top of the model <em>hurts</em> at this data "
@@ -370,7 +370,7 @@ page(
 
 page(
     "wiki/aperture-science",
-    "Aperture Science — the aesthetic behind an amber-on-black operating system",
+    "Aperture Science. The aesthetic behind an amber-on-black operating system",
     "Why GLaDOS OS looks like Aperture Science: amber on black, Windows 3.1 "
     "chrome, and a boot screen built from the Portal-era design language.",
     ["Aperture Science", "Aperture Science OS", "Portal aesthetic", "GLaDOS",
@@ -387,14 +387,14 @@ page(
            "<code>#F28C1E</code>, the colour of a CRT phosphor and of every warning "
            "label in the facility.",
            "<strong>Monospace everything.</strong> Not a font choice so much as an "
-           "institutional one — the typography of test protocols and lab equipment.",
+           "institutional one. The typography of test protocols and lab equipment.",
            "<strong>Cheerful text about dangerous things.</strong> The enrichment "
            "centre voice: procedural, encouraging, describing hazards in the tone "
            "of a safety video.",
            "<strong>Industrial chrome.</strong> Beveled panels, hard edges, visible "
            "structure. Which lands, conveniently, very close to Windows 3.1."),
         h2("Where it shows up"),
-        p("The boot screen draws the Aperture logo as vector geometry — there is no "
+        p("The boot screen draws the Aperture logo as vector geometry. There is no "
           "image decoder in the kernel, so it is arcs and lines computed at "
           "startup. The desktop wallpaper uses the same mark. The window chrome is "
           "<a href=\"gui.html\">genuine Windows 3.1</a>: two-pixel bevels, light on "
@@ -419,7 +419,7 @@ page(
 
 page(
     "wiki/portal-os",
-    "Portal OS — what a real Portal-inspired operating system looks like",
+    "Portal OS. What a real Portal-inspired operating system looks like",
     "Portal OS: not a theme pack, but a genuine ring-0 kernel named for GLaDOS, "
     "with Aperture Science styling and a language model in kernel space.",
     ["Portal OS", "Portal operating system", "GLaDOS OS", "Portal theme",
@@ -428,7 +428,7 @@ page(
         p("Search for a \"Portal OS\" and you mostly find themes: wallpapers, icon "
           "packs, a terminal colour scheme, occasionally a Linux distribution with "
           "the logo swapped. This is not that."),
-        p("GLaDOS is an operating system in the literal sense — it boots on bare "
+        p("GLaDOS is an operating system in the literal sense. It boots on bare "
           "metal, brings up its own page tables, drives its own hardware, and has "
           "no Linux, no BSD and no kernel from anyone else underneath it. The "
           "Portal reference is in the name, the "
@@ -461,7 +461,7 @@ page(
 
 page(
     "wiki/rust-os",
-    "Writing an operating system in Rust — no_std, ring 0, and no runtime",
+    "Writing an operating system in Rust. no_std, ring 0, and no runtime",
     "What building a Rust OS actually involves: no_std, a hand-written allocator, "
     "the UEFI target, calling-convention traps, and where Rust genuinely helps.",
     ["Rust OS", "Rust operating system", "no_std", "bare metal Rust",
@@ -475,7 +475,7 @@ page(
           "more than people expect: no heap until you write an allocator, no "
           "<code>File</code>, no <code>Vec</code> until <code>alloc</code> is wired "
           "up, no threads, no <code>println!</code>, and no floating-point maths "
-          "functions — <code>exp</code>, <code>sqrt</code> and <code>tanh</code> "
+          "functions, <code>exp</code>, <code>sqrt</code> and <code>tanh</code> "
           "live in libm, which is C, which is not there."),
         p("For an OS with a transformer in it, that last one is not a detail. "
           "Softmax needs <code>exp</code>. So the "
@@ -484,7 +484,7 @@ page(
         p("Ownership does not stop caring at the hardware boundary. A driver that "
           "hands out a buffer it still holds, a ring the allocator might free "
           "underneath the controller, a device structure aliased by two code paths "
-          "— these are compile errors rather than corruption discovered three "
+          ". These are compile errors rather than corruption discovered three "
           "subsystems later."),
         p("The honest caveat: everything touching hardware is <code>unsafe</code> "
           "anyway. Rust does not verify that a physical address is mapped, that a "
@@ -505,13 +505,13 @@ page(
         p("The kernel heap is a single physically contiguous allocation chosen from "
           "the UEFI memory map, sized by a ladder that steps down until one fits. "
           "That matters because the machine's largest contiguous region is not its "
-          "total RAM — a map can report 1.9 GB free across 84 regions and not have "
+          "total RAM, a map can report 1.9 GB free across 84 regions and not have "
           "320 MB in one piece."),
         note("A subtle bug lived here: the ladder never degraded, because the "
              "probing allocator advanced its cursor destructively, so once the "
              "largest rung failed every smaller rung failed too. The fix was a "
              "non-consuming <code>largest_span()</code> that looks forward without "
-             "consuming — rewinding would have handed out the page tables' own "
+             "consuming. Rewinding would have handed out the page tables' own "
              "frames a second time."),
         ("seealso", ["ring-0", "uefi-kernel", "llm-in-kernel", "glados-os"]),
     ],
@@ -519,7 +519,7 @@ page(
 
 page(
     "wiki/ring-0",
-    "Ring 0 — what an operating system with no privilege boundary looks like",
+    "Ring 0. What an operating system with no privilege boundary looks like",
     "x86 protection rings explained, and what changes when a kernel deletes the "
     "user/kernel split entirely: no syscalls, one address space, no isolation.",
     ["ring 0", "kernel mode", "protection rings", "x86 privilege levels",
@@ -538,16 +538,16 @@ page(
           "calls it is the dominant cost."),
         p("An in-kernel language model makes millions of tiny calls. A tool "
           "invocation, a namespace read, a tensor operation dispatched by the "
-          "router — all of it would cross the boundary in a conventional design."),
+          "router, all of it would cross the boundary in a conventional design."),
         h2("What removing it costs"),
         p("Everything the boundary was buying:"),
         ul("A null dereference is a triple fault and a reboot, not a segfault.",
            "A buffer overrun can overwrite the page tables.",
-           "There is no <code>kill</code> — a runaway loop owns the machine.",
+           "There is no <code>kill</code>, a runaway loop owns the machine.",
            "A script that exhausts the heap exhausts <em>the</em> heap."),
         p("The system says this plainly rather than claiming a security model it "
-          "does not have. Capabilities exist for scripts — a tame mode that refuses "
-          "raw port access by name before arguments are even examined — but this is "
+          "does not have. Capabilities exist for scripts, a tame mode that refuses "
+          "raw port access by name before arguments are even examined. But this is "
           "one interpreter in one address space with no isolation. It stops "
           "incompetence, not intent."),
         h2("Why that is acceptable here"),
@@ -561,13 +561,13 @@ page(
 
 page(
     "wiki/uefi-kernel",
-    "UEFI as the kernel — booting an OS with no bootloader at all",
+    "UEFI as the kernel. Booting an OS with no bootloader at all",
     "How GLaDOS boots: the UEFI application is the kernel. No GRUB, no ELF "
-    "loading, no handoff ABI — and what ExitBootServices takes away permanently.",
+    "loading, no handoff ABI, and what ExitBootServices takes away permanently.",
     ["UEFI", "UEFI bootloader", "ExitBootServices", "EFI application", "OS boot",
      "bare metal boot", "EFI System Partition"],
     blocks=[
-        p("Most kernels are loaded by a bootloader — GRUB, systemd-boot, limine — "
+        p("Most kernels are loaded by a bootloader. GRUB, systemd-boot, limine. "
           "which reads an ELF file, sets up long mode, builds a memory map and "
           "jumps to an entry point with an agreed calling convention."),
         p("GLaDOS skips all of it. UEFI firmware already puts you in 64-bit long "
@@ -580,8 +580,8 @@ page(
            "No second codebase to keep in sync with the first.",
            "No multiboot header, no protected-mode stub, no A20 line."),
         h2("The one-way door"),
-        p("Boot services — the firmware's filesystem access, allocator, console and "
-          "device protocols — exist only until <code>ExitBootServices</code>. After "
+        p("Boot services. The firmware's filesystem access, allocator, console and "
+          "device protocols. Exist only until <code>ExitBootServices</code>. After "
           "that call they are gone, permanently, and every pointer into them is "
           "dangling."),
         p("So everything the kernel needs from disk must be read <em>before</em> "
@@ -597,7 +597,7 @@ page(
           "much to map. OVMF describes reserved space out to 1 TiB; using that as a "
           "limit exceeds what one page-directory-pointer table can cover, the "
           "identity map silently fails to install, and the firmware's own tables "
-          "stay active — which map page zero. The null-dereference self-test then "
+          "stay active. Which map page zero. The null-dereference self-test then "
           "passes without faulting, for the worst possible reason."),
         ("seealso", ["rust-os", "ring-0", "usb-xhci", "iso-el-torito"]),
     ],
@@ -605,13 +605,13 @@ page(
 
 page(
     "wiki/llm-in-kernel",
-    "Running a language model inside a kernel — transformer inference at ring 0",
+    "Running a language model inside a kernel. Transformer inference at ring 0",
     "How a transformer runs in kernel space with no standard library, no libm and "
     "no allocator underneath it: int8 weights, hand-written exp, SIMD matmul.",
     ["LLM in kernel", "in-kernel inference", "transformer bare metal",
      "AI operating system", "no_std machine learning", "kernel LLM"],
     blocks=[
-        p("The model is a decoder-only transformer — Qwen3-0.6B by default — "
+        p("The model is a decoder-only transformer. Qwen3-0.6B by default. "
           "quantised to int8 and executed inside the kernel address space. It is "
           "not a service, not a process, and not behind an API."),
         h2("What is missing at ring 0"),
@@ -628,7 +628,7 @@ page(
         h2("Where the time goes"),
         p("Generation is memory-bandwidth bound, not compute bound. Bytes read per "
           "token is roughly the model size, so a 570 MB model takes about 4.4× as "
-          "long per token as a 135 MB one — almost exactly the size ratio."),
+          "long per token as a 135 MB one, almost exactly the size ratio."),
         p("155 MB of that 570 is the output classifier. Since "
           "<a href=\"constrained-decoding.html\">constrained decoding</a> only ever "
           "needs logits for the reachable token set, restricting that final "
@@ -653,7 +653,7 @@ page(
 
 page(
     "wiki/qwen3",
-    "Qwen3-0.6B in a kernel — head width, QK-norm, and silent failure modes",
+    "Qwen3-0.6B in a kernel. Head width, QK-norm, and silent failure modes",
     "Running Qwen3-0.6B inside an OS kernel: why its head dimension is stated "
     "rather than derived, what QK-Norm does, and why both fail without any error.",
     ["Qwen3", "Qwen3-0.6B", "QK-Norm", "head_dim", "quantised LLM", "int8 inference"],
@@ -667,14 +667,14 @@ page(
           "<code>dim / n_heads</code>. For Qwen3 that gives 1024/16 = 64, and the "
           "correct answer is <strong>128</strong>. The model states it "
           "independently, which means the query projection is 2048 wide against a "
-          "1024-wide residual stream — the attention path is deliberately wider "
+          "1024-wide residual stream. The attention path is deliberately wider "
           "than the thing it reads from."),
         p("Derive it instead and every weight tensor is reshaped wrong. The model "
           "still loads. It still runs. It generates confident nonsense."),
         h3("QK-Norm"),
         p("Qwen3 applies RMSNorm to each head's queries and keys, per head, before "
           "rotary embeddings. Omit it and the model remains numerically "
-          "well-behaved and produces fluent text — just text from a network being "
+          "well-behaved and produces fluent text. Just text from a network being "
           "fed activations it was never trained on."),
         h2("How these get caught"),
         p("Not by exceptions, because there are none. The checkpoint converter "
@@ -692,7 +692,7 @@ page(
           "64-token budget. The shell closes the block itself unless told not to. "
           "Whether the model has thinking tokens at all is decided by asking the "
           "tokenizer whether it knows <code>&lt;think&gt;</code> as a single token "
-          "— a property of the vocabulary, rather than a guess from the model's "
+          ", a property of the vocabulary, rather than a guess from the model's "
           "name."),
         ("seealso", ["llm-in-kernel", "rope", "tokenizer", "kv-cache"]),
     ],
@@ -700,7 +700,7 @@ page(
 
 page(
     "wiki/rope",
-    "RoPE — rotary position embeddings, and the convention that fails silently",
+    "RoPE. Rotary position embeddings, and the convention that fails silently",
     "Rotary Position Embedding explained, and why pairing dimension i with "
     "i+head_dim/2 instead of 2i with 2i+1 produces fluent text and wrong attention.",
     ["RoPE", "rotary position embedding", "rotate_half", "transformer positions",
@@ -725,7 +725,7 @@ page(
           "NaN, no overflow, no drift, no assertion. The vectors keep their "
           "lengths. The softmax stays well-behaved. The model stays fluent."),
         p("What actually happens is that the model attends by a scrambled notion of "
-          "distance — which is indistinguishable, from the outside, from a small "
+          "distance. Which is indistinguishable, from the outside, from a small "
           "model being small."),
         h2("What it cost, measured"),
         p("This kernel used the interleaved convention for a long time. Switching "
@@ -748,7 +748,7 @@ page(
 
 page(
     "wiki/kv-cache",
-    "The int8 KV cache — quantising attention memory, and why keys hurt more",
+    "The int8 KV cache. Quantising attention memory, and why keys hurt more",
     "How GLaDOS fits a long context in kernel memory: int8 KV cache with per-block "
     "scales, split per layer, plus attention sinks and a sliding window.",
     ["KV cache", "int8 quantisation", "attention sinks", "StreamingLLM",
@@ -762,9 +762,9 @@ page(
           "4 bytes = <strong>224 KiB per token</strong>."),
         table(
             ["Scheme", "Per token", "At 32,768 tokens"],
-            [["f32, one allocation", "224 KiB", "7.0 GiB contiguous — unreachable"],
-             ["int8, one allocation", "56 KiB", "1.75 GiB contiguous — very unlikely"],
-             ["int8, split per layer", "56 KiB", "28 × ~66 MiB — achievable"]]),
+            [["f32, one allocation", "224 KiB", "7.0 GiB contiguous. Unreachable"],
+             ["int8, one allocation", "56 KiB", "1.75 GiB contiguous. Very unlikely"],
+             ["int8, split per layer", "56 KiB", "28 × ~66 MiB, achievable"]]),
         p("The split is what makes long context possible at all. As a single "
           "allocation the cache needs one unbroken physical region; split per layer "
           "the largest single request drops 28-fold, and a fragmented memory map "
@@ -774,19 +774,19 @@ page(
           "measured error is not symmetric between keys and values: <strong>keys "
           "carry roughly 15× the error impact</strong>."),
         p("The reason is structural. A key participates in a dot product and then "
-          "goes through softmax, which is exponential — a small perturbation in a "
+          "goes through softmax, which is exponential, a small perturbation in a "
           "score becomes a large change in attention weight. A value is only "
           "averaged, and averaging is forgiving."),
         h2("Attention sinks and a sliding window"),
         p("Past the allocated window, the cache runs as a ring: a few initial "
           "tokens are pinned as attention sinks and the rest slides. The sinks "
-          "matter more than they look — models place a large amount of attention "
+          "matter more than they look. Models place a large amount of attention "
           "mass on the first few positions regardless of content, and evicting them "
           "degrades output sharply. With them, generation continues past the "
           "nominal context length instead of stopping."),
         note("Speed is the real ceiling, not memory. Attention is linear in live "
              "positions, so at 32k tokens it is roughly 3.8 GMAC per token on top "
-             "of the model's own 0.6 GMAC — several seconds per token at full "
+             "of the model's own 0.6 GMAC. Several seconds per token at full "
              "context. Excellent for reading a long document once; painful for chat."),
         ("seealso", ["llm-in-kernel", "qwen3", "rope"]),
     ],
@@ -794,14 +794,14 @@ page(
 
 page(
     "wiki/tokenizer",
-    "Tokenizers — BPE, pre-tokenizer regexes, and 12% silent divergence",
+    "Tokenizers. BPE, pre-tokenizer regexes, and 12% silent divergence",
     "Why a byte-pair encoding tokenizer needs the exact pre-tokenizer regex its "
     "model trained with, and how the wrong one moved 12% of tokens with no error.",
     ["tokenizer", "BPE", "byte pair encoding", "pre-tokenizer", "cl100k", "GPT-2 regex"],
     blocks=[
         p("A byte-pair encoding tokenizer has two halves. A merge table, which "
           "everyone remembers, and a <strong>pre-tokenizer regex</strong> that "
-          "splits text into candidate pieces before any merging happens — which "
+          "splits text into candidate pieces before any merging happens. Which "
           "people forget, because it is usually invisible."),
         h2("The regexes differ, and it matters"),
         p("GPT-2's pattern and cl100k's pattern disagree in ways that look "
@@ -812,7 +812,7 @@ page(
            "Punctuation swallows the newlines that follow it."),
         p("SmolLM2 trained with the GPT-2 pattern. Qwen3 spells out the cl100k one. "
           "Using the wrong pattern moved <strong>about 12% of tokens</strong> on "
-          "this project's training corpus — including on the ChatML structure that "
+          "this project's training corpus. Including on the ChatML structure that "
           "the instruction tuning depends on."),
         h2("Twelve percent of nothing visible"),
         p("There is no error. The tokenizer produces token ids, the model consumes "
@@ -831,7 +831,7 @@ page(
           "text."),
         note("A related trap: sizing the vocabulary from the merge table. Qwen3's "
              "293 special tokens live <em>above</em> it, so the vocabulary was "
-             "indexed past its end, and the end-of-turn token resolved to id 2 — "
+             "indexed past its end, and the end-of-turn token resolved to id 2. "
              "meaning generation would never stop. Size from the highest added "
              "token id, not from the BPE table."),
         ("seealso", ["qwen3", "llm-in-kernel", "constrained-decoding"]),
@@ -840,7 +840,7 @@ page(
 
 page(
     "wiki/constrained-decoding",
-    "Constrained decoding — making invalid model output unreachable, not unlikely",
+    "Constrained decoding. Making invalid model output unreachable, not unlikely",
     "How GLaDOS guarantees a model can never name a tool that does not exist: a "
     "grammar built from the live function table, applied before sampling.",
     ["constrained decoding", "grammar-constrained generation", "structured output",
@@ -856,7 +856,7 @@ page(
           "checked afterwards."),
         p("The consequence is categorical rather than statistical: <strong>there is "
           "no sequence of sampling outcomes that produces an invalid name.</strong> "
-          "Not unlikely — unreachable. Temperature does not matter. A badly "
+          "Not unlikely. Unreachable. Temperature does not matter. A badly "
           "calibrated model does not matter."),
         h2("Read-only mode is the same mechanism"),
         p("When the system runs in a read-only trust level, mutating functions are "
@@ -866,14 +866,14 @@ page(
         p("This is why a script's mutating-ness is <em>derived</em> from its code "
           "rather than declared in its header. A script that claims to be read-only "
           "and then calls a mutating function would put a mutating entry into the "
-          "read-only grammar — which is exactly the guarantee leaking. So the "
+          "read-only grammar. Which is exactly the guarantee leaking. So the "
           "system walks the syntax tree, and treats any call whose target is not a "
           "literal string as mutating, because a computed name cannot be resolved "
           "and guessing would break the property."),
         h2("How it is tested"),
         p("The grammar's self-test runs 200 random decodes at maximum temperature "
           "and asserts that none escaped the reachable set. It also checks a subtle "
-          "case: that a name which is a prefix of another name is still reachable — "
+          "case: that a name which is a prefix of another name is still reachable. "
           "if <code>snap</code> and <code>snaps</code> both exist, a naive "
           "implementation makes the shorter one impossible to finish."),
         ("seealso", ["routing", "llm-in-kernel", "tokenizer", "glados-os"]),
@@ -882,7 +882,7 @@ page(
 
 page(
     "wiki/routing",
-    "Tool routing — why a 1960 regression beats the transformer",
+    "Tool routing. Why a 1960 regression beats the transformer",
     "GLaDOS routes tool calls with closed-form ridge regression on one hidden "
     "state: 12,672 parameters, 1.6 ms, no forward pass, and better accuracy.",
     ["tool routing", "LLM routing", "ridge regression", "Widrow-Hoff", "linear probe",
@@ -901,7 +901,7 @@ page(
               "<strong>Higher</strong>"]]),
         p("The second is a linear probe: take the hidden state the model has "
           "already computed, and multiply it by a matrix solved in closed form by "
-          "Cholesky decomposition — the Widrow-Hoff least-mean-squares idea from "
+          "Cholesky decomposition. The Widrow-Hoff least-mean-squares idea from "
           "1960, fitted inside the kernel at boot."),
         p("It wins on held-out accuracy <em>and</em> costs nothing, because the "
           "hidden state is a byproduct of work already done."),
@@ -920,7 +920,7 @@ page(
           "by template family, and a test set that moved whenever the corpus grew."),
         p("The current arrangement has three splits. Validation is spent freely; "
           "the test slice is read once. Corpora hold out <em>whole template "
-          "families</em>, never sampled instances — instances within a family "
+          "families</em>, never sampled instances. Instances within a family "
           "differ only by slot values, so splitting by instance measures "
           "memorisation while looking like generalisation."),
         note("Negative results stay in the tree. Training an adapter head hurts at "
@@ -933,25 +933,25 @@ page(
 
 page(
     "wiki/gui",
-    "The Windows 3.1 desktop — writing a window manager from scratch",
+    "The Windows 3.1 desktop. Writing a window manager from scratch",
     "How GLaDOS draws its GUI: raw GOP framebuffer, two-pixel bevels, z-order as "
     "focus, total repaint, and a keyboard-only window manager in kernel space.",
     ["window manager", "Windows 3.1 UI", "framebuffer graphics", "GUI from scratch",
      "retro UI", "OS graphics"],
     blocks=[
         p("There is no graphics library. The kernel gets a linear framebuffer from "
-          "UEFI's Graphics Output Protocol — a base address, a width, a height and "
-          "a stride — and everything above that is written by hand."),
+          "UEFI's Graphics Output Protocol, a base address, a width, a height and "
+          "a stride, and everything above that is written by hand."),
         h2("Windows 3.1 chrome, precisely"),
         p("The look is not approximate. It is the actual construction:"),
         ul("A <code>#C0C0C0</code> face colour on every panel.",
            "Two-pixel bevels: white on the top and left, dark grey on the bottom "
-           "and right, for a raised surface — reversed for a sunken one.",
+           "and right, for a raised surface. Reversed for a sunken one.",
            "Title bars that fill with the selection colour when focused and grey "
            "when not.",
            "Hard rectangles. No anti-aliasing, no shadows, no rounded corners."),
         p("Over that sits the <a href=\"aperture-science.html\">Aperture palette</a> "
-          "— amber accents, and a wallpaper drawn as vector geometry because there "
+          ", amber accents, and a wallpaper drawn as vector geometry because there "
           "is no image decoder in the kernel."),
         h2("The window manager, and its one idea"),
         p("Z-order <em>is</em> focus. There is no separate focused-window pointer to "
@@ -960,13 +960,13 @@ page(
           "can disagree."),
         p("Repainting is total, back to front, on every change. No damage tracking, "
           "no dirty rectangles. At this resolution a full repaint is a few million "
-          "stores and costs less than the bookkeeping would — and damage tracking "
+          "stores and costs less than the bookkeeping would, and damage tracking "
           "bugs are the worst kind, because they leave the screen showing something "
           "that was true a moment ago."),
         h2("A bug that only a screenshot could find"),
         p("The console wrote directly to its own rectangle with no knowledge of "
           "windows on top of it, so a file browser opened over the terminal was "
-          "gradually eaten by shell output. Nothing in the serial log showed it — "
+          "gradually eaten by shell output. Nothing in the serial log showed it. "
           "the log was correct, the window manager was correct, and the screen was "
           "wrong."),
         note("It was found by capturing the framebuffer through QEMU's monitor and "
@@ -981,7 +981,7 @@ page(
 
 page(
     "wiki/network-stack",
-    "Writing a TCP/IP stack from scratch — ARP to TLS in a kernel",
+    "Writing a TCP/IP stack from scratch, ARP to TLS in a kernel",
     "GLaDOS implements its own ARP, IPv4, ICMP, UDP, TCP, DHCP and DNS, with no "
     "interrupt-driven receive and a deliberate rule against re-entrant dispatch.",
     ["TCP/IP stack", "network stack from scratch", "ARP", "DHCP", "DNS",
@@ -1027,7 +1027,7 @@ page(
 
 page(
     "wiki/tls",
-    "TLS 1.3 from scratch — and why hand-written crypto is the dangerous part",
+    "TLS 1.3 from scratch, and why hand-written crypto is the dangerous part",
     "GLaDOS implements TLS 1.3, X25519, ChaCha20-Poly1305 and ECDSA by hand, "
     "validates certificate chains, and is honest about what is still not safe.",
     ["TLS 1.3", "cryptography from scratch", "X25519", "ChaCha20", "ECDSA",
@@ -1042,9 +1042,9 @@ page(
              "works perfectly and is not secure."),
         h2("Primitives chosen for checkability"),
         p("The selections are deliberate:"),
-        ul("<strong>ChaCha20-Poly1305 over AES-GCM</strong> — no key-dependent "
+        ul("<strong>ChaCha20-Poly1305 over AES-GCM</strong>. No key-dependent "
            "table lookups, so no cache-timing side channel to reason about.",
-           "<strong>X25519 over a NIST curve</strong> — no point validation "
+           "<strong>X25519 over a NIST curve</strong>. No point validation "
            "required, far fewer ways to be subtly wrong."),
         p("Every primitive is verified against published RFC and FIPS test vectors "
           "at every boot, and the boot log prints a pass or fail line for each."),
@@ -1055,7 +1055,7 @@ page(
           "being sliced away to look at something else."),
         h2("Jacobian coordinates, and a trap"),
         p("ECDSA uses Jacobian coordinates because affine ones cost a modular "
-          "inversion per point operation — a full modular exponentiation. For "
+          "inversion per point operation, a full modular exponentiation. For "
           "P-384 that meant roughly 460,000 allocating multiplications per "
           "signature, which exhausted the heap."),
         p("The trap: the inversion routine takes and returns <em>ordinary</em> "
@@ -1063,7 +1063,7 @@ page(
           "wrong thing silently. There is a wrapper that does the right conversion, "
           "and using it is not optional."),
         h2("What is still not safe"),
-        ul("Validation <strong>reports</strong> rather than enforces — a caller "
+        ul("Validation <strong>reports</strong> rather than enforces, a caller "
            "that cares must check the result. This is a known gap.",
            "There is no revocation checking of any kind.",
            "<strong>Key material still comes from the timestamp counter, not "
@@ -1077,7 +1077,7 @@ page(
 
 page(
     "wiki/storage",
-    "Content-addressed storage — Merkle trees, NVMe, and O(1) snapshots",
+    "Content-addressed storage. Merkle trees, NVMe, and O(1) snapshots",
     "How GLaDOS stores data: objects named by SHA-256 of their contents, "
     "assembled into Merkle trees, so a copy is free and a snapshot is one hash.",
     ["content addressed storage", "Merkle tree", "NVMe driver", "snapshots",
@@ -1086,16 +1086,16 @@ page(
         p("The filesystem is not a tree of blocks with names attached. Objects are "
           "named by the SHA-256 of their contents and assembled into Merkle trees, "
           "which makes several operations collapse to nothing."),
-        ul("<strong>A copy is O(1)</strong> — identical content already has the "
+        ul("<strong>A copy is O(1)</strong>. Identical content already has the "
            "same name, so copying is adding a reference.",
-           "<strong>A snapshot is one hash</strong> — the root of the tree names "
+           "<strong>A snapshot is one hash</strong>. The root of the tree names "
            "the entire state.",
-           "<strong>Rolling back branches rather than rewrites</strong> — the old "
+           "<strong>Rolling back branches rather than rewrites</strong>. The old "
            "root is still valid and still points at everything it did."),
         h2("The rule that makes it work"),
         p("<strong>The content hash covers content only, and never block "
           "locations.</strong> This sounds obvious and is easy to violate by "
-          "including a block pointer in the hashed structure — at which point "
+          "including a block pointer in the hashed structure, at which point "
           "moving a block to defragment renames the object, every reference breaks, "
           "and deduplication silently stops working."),
         h2("Write locking, and why it stays that way"),
@@ -1108,7 +1108,7 @@ page(
           "exactly how a safety mechanism becomes decorative."),
         note("The development machine's boot disk is counterfeit: it advertises "
              "976 GB and holds 14.67. That is why the partitioning tooling uses MBR "
-             "— a GPT backup header would be written to flash that does not exist — "
+             ", a GPT backup header would be written to flash that does not exist. "
              "and why it carries an explicit safe-capacity limit."),
         ("seealso", ["glados-os", "tls", "testing"]),
     ],
@@ -1116,7 +1116,7 @@ page(
 
 page(
     "wiki/usb-xhci",
-    "The USB stack — xHCI rings, cycle bits, and enumeration from scratch",
+    "The USB stack. xHCI rings, cycle bits, and enumeration from scratch",
     "Writing an xHCI driver in a kernel: transfer request blocks, the cycle bit "
     "handshake, device slots, endpoint contexts, and CDC Ethernet over bulk pipes.",
     ["xHCI", "USB driver", "USB 3", "TRB ring", "CDC ECM", "USB Ethernet",
@@ -1132,7 +1132,7 @@ page(
           "producer wraps around."),
         p("That single bit is the entire synchronisation protocol. The controller "
           "consumes entries whose cycle matches its own state and stops at the "
-          "first that does not. Get it wrong and nothing is corrupted — the "
+          "first that does not. Get it wrong and nothing is corrupted. The "
           "controller simply never sees the command, which presents as a device "
           "that enumerates into silence."),
         p("Three rings matter: a command ring the driver writes, an event ring the "
@@ -1141,7 +1141,7 @@ page(
           "that read as synchronous."),
         h2("Three bugs, each found by the layer above"),
         ol("<strong>Version 0.0.</strong> The capability-length and version fields "
-           "share one 32-bit register, and this block only answers dword reads — a "
+           "share one 32-bit register, and this block only answers dword reads, a "
            "16-bit read at offset 2 returns zero. The controller appeared to "
            "implement xHCI version 0.0.",
            "<strong>Setup packet byte order.</strong> Little-endian means byte zero "
@@ -1150,7 +1150,7 @@ page(
            "to it was correct by luck.",
            "<strong>A stall halts the endpoint.</strong> Probing configuration "
            "descriptors past the end stalls, which halts endpoint zero until it is "
-           "reset — so every later control transfer failed. The symptom appeared "
+           "reset. So every later control transfer failed. The symptom appeared "
            "two steps downstream of the cause."),
         h2("The shared event ring"),
         p("The subtlest one. The event ring is shared by every endpoint, and code "
@@ -1163,12 +1163,12 @@ page(
         h2("CDC Ethernet"),
         p("With bulk endpoints working, a USB Ethernet adapter becomes a network "
           "interface. One trap: \"has a CDC data interface\" is not the same as "
-          "\"is an Ethernet adapter\" — a common emulated device offers two "
+          "\"is an Ethernet adapter\", a common emulated device offers two "
           "configurations that both qualify, and the first is RNDIS, which accepts "
           "bulk writes and silently passes nothing because it wants a control "
           "protocol first."),
         p("The correct test is the Ethernet Networking Functional Descriptor, which "
-          "is also where the MAC address lives — as a string, in ASCII hex, because "
+          "is also where the MAC address lives, as a string, in ASCII hex, because "
           "CDC has no binary field for it anywhere."),
         ("seealso", ["usb-wifi-driver", "network-stack", "uefi-kernel"]),
     ],
@@ -1176,7 +1176,7 @@ page(
 
 page(
     "wiki/usb-wifi-driver",
-    "USB WiFi on bare metal — CNVi, a Realtek dongle, and 509 constants",
+    "USB WiFi on bare metal. CNVi, a Realtek dongle, and 509 constants",
     "Why the laptop's built-in WiFi cannot work, how a USB dongle sidesteps it, "
     "and why the RTL8188EU init tables were transcribed rather than written.",
     ["USB WiFi driver", "RTL8188EU", "CNVi", "WPA2", "802.11", "wireless driver",
@@ -1186,13 +1186,13 @@ page(
           "is worth explaining because it is not a matter of effort."),
         h2("CNVi: the card is not a card"),
         p("The laptop's built-in wireless is CNVi, Intel's split architecture. The "
-          "MAC — the part that would need a driver — lives <em>in the chipset</em>, "
+          "MAC. The part that would need a driver. Lives <em>in the chipset</em>, "
           "and the M.2 module is only a radio. Talking to it requires an "
           "undocumented signed-firmware protocol that is not published anywhere."),
         p("So the kernel's wireless module identifies the hardware and refuses to "
           "pretend it can drive it. The "
           "<a href=\"tls.html\">WPA2 supplicant</a> is complete, implements the "
-          "four-way handshake, and passes IEEE 802.11i test vectors at every boot — "
+          "four-way handshake, and passes IEEE 802.11i test vectors at every boot. "
           "and has never had a radio to run on."),
         h2("A USB dongle sidesteps all of it"),
         p("A USB wireless adapter is a complete radio <em>and</em> MAC behind a bus "
@@ -1200,7 +1200,7 @@ page(
           "Realtek RTL8188EU."),
         p("It has no memory-mapped registers at all. Every register is a vendor "
           "control transfer, so a single register read is a full USB round trip of "
-          "a few hundred microseconds — a fact that shapes the entire driver, since "
+          "a few hundred microseconds, a fact that shapes the entire driver, since "
           "anything that polls a register in a loop is far slower than it looks."),
         h2("Why the tables were copied, and why that is stated"),
         p("Bringing up the chip needs a power-on sequence, PHY and radio "
@@ -1208,7 +1208,7 @@ page(
           "register/value pairs</strong> that exist in Realtek's vendor driver and "
           "in Linux's rtl8xxxu, and nowhere else."),
         p("They were transcribed from Linux rather than written, and mechanically "
-          "rather than by hand — 509 hex pairs retyped by a human contain errors at "
+          "rather than by hand. 509 hex pairs retyped by a human contain errors at "
           "some rate, and an error here does not fail loudly. A wrong AGC value "
           "costs sensitivity; a wrong PHY value skews a filter. Both present as "
           "\"wireless is a bit unreliable.\""),
@@ -1226,7 +1226,7 @@ page(
 
 page(
     "wiki/iso-el-torito",
-    "How the GLaDOS ISO is built — FAT32 and El Torito, written from scratch",
+    "How the GLaDOS ISO is built. FAT32 and El Torito, written from scratch",
     "Building a bootable UEFI ISO without xorriso: a hand-written FAT32 EFI "
     "System Partition wrapped in ISO 9660 with an El Torito EFI boot catalog.",
     ["El Torito", "bootable ISO", "FAT32", "ISO 9660", "UEFI boot", "EFI System Partition",
@@ -1234,12 +1234,12 @@ page(
     blocks=[
         p("The ISO builder writes both filesystems itself. xorriso and mkisofs are "
           "not present on most Windows machines, and the Windows ADK's tool is a "
-          "1.5 GB install to produce one 600 MB file — while both formats are "
+          "1.5 GB install to produce one 600 MB file. While both formats are "
           "published and neither is large."),
         h2("How UEFI boots an optical disc"),
         p("The firmware reads the El Torito boot catalog, looks for an entry whose "
           "platform id is <code>0xEF</code>, and treats the sectors it points at as "
-          "a FAT filesystem — an EFI System Partition that happens to live inside "
+          "a FAT filesystem, an EFI System Partition that happens to live inside "
           "an ISO."),
         p("So the ISO 9660 structure wrapped around it is almost ceremonial. It "
           "exists so the disc mounts and shows its contents, not so it boots. It is "
@@ -1247,14 +1247,14 @@ page(
           "mounted looks broken."),
         h2("Long file names are not optional"),
         p("The kernel opens <code>\\GLADOS\\tokenizer.bin</code>. That base name is "
-          "nine characters, which has no 8.3 representation — a short-name-only "
+          "nine characters, which has no 8.3 representation, a short-name-only "
           "image presents it as <code>TOKENI~1.BIN</code>, and the kernel then "
           "fails to find its tokenizer at boot, on real hardware, with no "
           "filesystem available to debug from."),
         p("So the builder generates VFAT long-name entries, with the specified "
           "rotate-and-add checksum tying each set to its short entry."),
         h2("FAT32 has a floor"),
-        p("FAT32 is <em>defined</em> as having at least 65,525 clusters — below "
+        p("FAT32 is <em>defined</em> as having at least 65,525 clusters. Below "
           "that the volume is FAT16, and firmware that trusts the count misparses "
           "everything. So the cluster size sets a minimum image size."),
         table(
@@ -1262,7 +1262,7 @@ page(
             [["4 KiB", "~256 MB"],
              ["512 B", "~33 MB"]]),
         p("The kernel-only image was 269 MB for a 1 MB kernel before this was "
-          "noticed — 255 MB of zeroes. Choosing the cluster size from the payload "
+          "noticed. 255 MB of zeroes. Choosing the cluster size from the payload "
           "brings it to 33 MB, and that is still the floor rather than slack."),
         ("seealso", ["uefi-kernel", "download", "testing"]),
     ],
@@ -1270,7 +1270,7 @@ page(
 
 page(
     "wiki/templeos",
-    "TempleOS — the lineage behind a single-address-space ring-0 kernel",
+    "TempleOS. The lineage behind a single-address-space ring-0 kernel",
     "What TempleOS got right about single-address-space computing, and how GLaDOS "
     "relates to it: lineage, not target.",
     ["TempleOS", "Terry Davis", "single address space", "hobby OS", "ring 0",
@@ -1282,7 +1282,7 @@ page(
         ul("<strong>Ring 0, always.</strong> No user/kernel split, no syscalls.",
            "<strong>One address space.</strong> Everything can reach everything.",
            "<strong>No isolation, as a design choice</strong> rather than an "
-           "oversight — with the costs accepted rather than hidden.",
+           "oversight. With the costs accepted rather than hidden.",
            "<strong>A deliberate aesthetic.</strong> TempleOS committed to 640×480 "
            "and 16 colours; this one commits to "
            "<a href=\"aperture-science.html\">amber on black and Windows 3.1 "
@@ -1299,7 +1299,7 @@ page(
           "is a kernel primitive instead of a userspace process?"),
         h2("What it got right"),
         p("That the boundary between kernel and user is a <em>choice</em>, not a "
-          "law — and that removing it makes some things genuinely simpler rather "
+          "law, and that removing it makes some things genuinely simpler rather "
           "than merely more dangerous. A function call is a function call. There is "
           "no marshalling, no permission check, no context switch, and no ABI to "
           "keep stable."),
@@ -1314,7 +1314,7 @@ page(
 
 page(
     "wiki/testing",
-    "Testing an OS with no test runner — boot self-tests and driving QEMU",
+    "Testing an OS with no test runner. Boot self-tests and driving QEMU",
     "There is no cargo test for a no_std UEFI binary. How GLaDOS is verified: "
     "self-tests at boot, a scripted QEMU serial harness, and a NumPy oracle.",
     ["OS testing", "kernel testing", "QEMU automation", "self-test", "no_std testing",
@@ -1338,7 +1338,7 @@ page(
           "sending commands and capturing everything."),
         p("Two details that were not obvious. QEMU's Windows stdio backend reads "
           "console handles directly, so piping a script into it does nothing at all "
-          "— silently; a TCP socket behaves like a socket everywhere. And a stale "
+          ". Silently; a TCP socket behaves like a socket everywhere. And a stale "
           "firmware boot entry sends the machine to the UEFI shell, which looks "
           "exactly like the system failing to boot, so the NVRAM is reset every run."),
         p("The harness also captures the framebuffer through QEMU's monitor and "
@@ -1351,7 +1351,7 @@ page(
           "converter bug shows up in both, so only a genuine kernel bug appears as "
           "a mismatch."),
         p("This is what caught <a href=\"rope.html\">the RoPE convention</a>, which "
-          "no amount of reading the code would have — both conventions are "
+          "no amount of reading the code would have. Both conventions are "
           "perfectly reasonable code."),
         h2("The habit underneath"),
         p("Measure, do not assume; and look at it. Repeatedly in this project a "
@@ -1366,7 +1366,7 @@ page(
 
 page(
     "screenshots/index",
-    "GLaDOS OS screenshots — the desktop, the shell and the model",
+    "GLaDOS OS screenshots. The desktop, the shell and the model",
     "Screenshots of GLaDOS: a Windows 3.1 styled desktop drawn straight into a "
     "UEFI framebuffer, the shell, and a language model answering from inside "
     "the kernel.",
@@ -1378,18 +1378,18 @@ page(
           "monitor rather than a camera pointed at a screen. These are the "
           "framebuffer's actual contents."),
         ("shots", [
-            ("desktop.png", "Desktop — terminal and program manager",
+            ("desktop.png", "Desktop with terminal and Program Manager",
              "GLaDOS OS desktop showing a Windows 3.1 styled terminal window with "
              "the boot log, a Program Manager window, and a taskbar",
              "The desktop as it comes up: the terminal showing its own boot log, "
              "Program Manager, and a taskbar. Every pixel is drawn by the kernel "
-             "into a UEFI framebuffer — there is no graphics library under it.",
+             "into a UEFI framebuffer. There is no graphics library under it.",
              True),
-            ("desktop-clean.png", "Desktop — wallpaper",
+            ("desktop-clean.png", "Desktop wallpaper",
              "The GLaDOS desktop wallpaper showing the aperture mark drawn as "
              "vector geometry",
              "With the terminal minimised. The wallpaper mark is drawn as geometry "
-             "at boot rather than decoded from an image — there is no image "
+             "at boot rather than decoded from an image. There is no image "
              "decoder in the kernel.", False),
             ("model.png", "The model answering",
              "GLaDOS running a language model in kernel space, answering a question "
@@ -1405,8 +1405,8 @@ page(
           "<a href=\"../wiki/aperture-science.html\">Aperture palette</a>."),
         p("There is no graphics library beneath any of it. The kernel gets a base "
           "address, a width, a height and a stride from UEFI's Graphics Output "
-          "Protocol, and everything above that — glyphs, bevels, the window "
-          "manager, the wallpaper — is written by hand. See "
+          "Protocol, and everything above that. Glyphs, bevels, the window "
+          "manager, the wallpaper. Is written by hand. See "
           "<a href=\"../wiki/gui.html\">the GUI page</a> for how, and for the bug "
           "that only a screenshot could have found."),
         ("seealso", ["gui", "glados-os", "download", "aperture-science"]),
@@ -1419,7 +1419,7 @@ page(
 
 page(
     "archive/index",
-    "GLaDOS archive — ISO images, source snapshots and checksums",
+    "GLaDOS archive. ISO images, source snapshots and checksums",
     "Mirror-style file index for GLaDOS OS: bootable ISO images, source "
     "snapshots, documentation and SHA-256 checksums.",
     ["GLaDOS archive", "GLaDOS mirror", "ISO download", "software archive",
@@ -1427,7 +1427,7 @@ page(
     kind="archive",
     blocks=[
         p("A file index in the shape of the mirrors this sort of thing used to be "
-          "distributed from. Images are served from GitHub Releases — GitHub Pages "
+          "distributed from. Images are served from GitHub Releases. GitHub Pages "
           "caps at 100 MB per file and would reject every one of them."),
         p("If you only want the ISO, "
           "<a href=\"../download/\">the download page</a> has flashing "
@@ -1439,150 +1439,219 @@ page(
 # rendering
 # --------------------------------------------------------------------------
 
-CSS = """/* GLaDOS docs. Aperture Science by way of a terminal: amber on near-black,
-   monospace throughout, hard edges, hazard stripes where a facility would put
-   them. Dark is the primary palette because that is what the aesthetic *is*;
-   light mode is supported rather than designed for. */
-:root{
-  --bg:#0b0b0c;--panel:#131315;--fg:#dad7d1;--dim:#8c8c8c;
-  --amber:#f28c1e;--deep:#b35900;--link:#f2a94e;--visited:#d98b3a;
-  --rule:#2b2b2e;--hard:#3c3c41;
+CSS = """/* Layout copied in proportion from linux.org as it stood in 2005: a fixed
+   centre column, a coloured masthead bar, a narrow left nav of boxed sections,
+   and a white content well. Aperture supplies the two colours and nothing
+   else. */
+
+body {
+  background: #e8e8e8;
+  color: #000;
+  margin: 0;
+  padding: 0;
+  font-family: Verdana, Arial, sans-serif;
+  font-size: 12px;
+  line-height: 1.5;
 }
-@media (prefers-color-scheme:light){:root:not([data-theme="dark"]){
-  --bg:#faf9f7;--panel:#fff;--fg:#1a1a1a;--dim:#5c5c5c;
-  --amber:#b35900;--deep:#8a4400;--link:#a04e00;--visited:#7a3c00;
-  --rule:#ddd9d3;--hard:#b9b3aa;
-}}
-:root[data-theme="light"]{
-  --bg:#faf9f7;--panel:#fff;--fg:#1a1a1a;--dim:#5c5c5c;
-  --amber:#b35900;--deep:#8a4400;--link:#a04e00;--visited:#7a3c00;
-  --rule:#ddd9d3;--hard:#b9b3aa;
+
+a { color: #964b00; }
+a:visited { color: #6b3600; }
+a:hover { color: #f28c1e; }
+
+#page {
+  width: 900px;
+  margin: 0 auto;
+  background: #fff;
+  border-left: 1px solid #999;
+  border-right: 1px solid #999;
 }
-*{box-sizing:border-box}
-html{-webkit-text-size-adjust:100%}
-body{background:var(--bg);color:var(--fg);margin:0;
-font-family:"DejaVu Sans Mono","Liberation Mono",Consolas,ui-monospace,monospace;
-font-size:14px;line-height:1.65}
-.wrap{max-width:58rem;margin:0 auto;padding:0 1rem 4rem}
-a{color:var(--link)}a:visited{color:var(--visited)}
-hr{border:0;border-top:1px solid var(--rule);margin:1rem 0}
 
-/* The one piece of pure set-dressing, and it earns its place by marking the
-   edges of the page the way the facility marks its floors. */
-.hazard{height:6px;background:repeating-linear-gradient(45deg,
-var(--amber) 0 9px,transparent 9px 18px);opacity:.9}
+#masthead {
+  background: #b35900;
+  padding: 8px 10px;
+  overflow: hidden;
+}
+#masthead img { float: left; margin-right: 10px; }
+#masthead .name {
+  color: #fff;
+  font-size: 19px;
+  font-weight: bold;
+  text-decoration: none;
+}
+#masthead .sub { color: #f4e2c8; font-size: 11px; display: block; }
 
-header.top{border-bottom:1px solid var(--hard)}
-.brand{display:flex;align-items:center;gap:.7rem;padding:.85rem 0 .5rem;
-flex-wrap:wrap}
-.brand img{width:26px;height:26px;flex:0 0 auto}
-.brand a.logo{color:var(--amber);font-weight:bold;text-decoration:none;
-font-size:1.1rem;letter-spacing:.16em;text-transform:uppercase}
-.brand .tag{color:var(--dim);font-size:11px;letter-spacing:.05em}
-nav.main{display:flex;gap:1rem;flex-wrap:wrap;padding-bottom:.7rem;
-font-size:12px;text-transform:uppercase;letter-spacing:.09em}
-nav.main a{text-decoration:none;color:var(--fg);border-bottom:1px solid transparent}
-nav.main a:hover{border-bottom-color:var(--amber);color:var(--amber)}
-nav.main a.btn{background:var(--amber);color:#0b0b0c;padding:.12rem .8rem;
-font-weight:bold;border:1px solid var(--amber)}
-nav.main a.btn:hover{background:transparent;color:var(--amber)}
-nav.crumbs{font-size:11px;color:var(--dim);margin:.8rem 0 .2rem;
-letter-spacing:.06em;text-transform:uppercase}
-nav.crumbs a{color:var(--dim)}
+#bar {
+  background: #f4e6d0;
+  border-top: 1px solid #b35900;
+  border-bottom: 1px solid #b35900;
+  padding: 3px 10px;
+  font-size: 11px;
+}
+#bar a { text-decoration: none; }
+#bar a:hover { text-decoration: underline; }
 
-h1{font-size:1.55rem;line-height:1.25;margin:.5rem 0 .2rem}
-h2{font-size:.92rem;margin:2rem 0 .5rem;text-transform:uppercase;
-letter-spacing:.14em;color:var(--amber);border-bottom:1px solid var(--rule);
-padding-bottom:.3rem}
-h3{font-size:.98rem;margin:1.3rem 0 .3rem;font-weight:bold}
-p{margin:.7rem 0}
-ul,ol{margin:.7rem 0}
-ul{list-style:none;padding-left:1.1rem}
-ul li::before{content:"\25aa";color:var(--deep);display:inline-block;
-width:1.1rem;margin-left:-1.1rem}
-ol{padding-left:1.6rem}
-li{margin:.35rem 0}
-code{background:var(--panel);border:1px solid var(--rule);padding:.02em .3em;
-font-size:.92em;color:var(--amber)}
-pre{background:var(--panel);border:1px solid var(--rule);
-border-left:3px solid var(--amber);padding:.8rem 1rem;overflow-x:auto;margin:1rem 0}
-pre code{background:none;border:0;padding:0;color:var(--fg)}
-.note{background:var(--panel);border:1px solid var(--rule);
-border-left:3px solid var(--amber);padding:.7rem 1rem;margin:1.1rem 0}
-.lede{color:var(--dim);margin:.2rem 0 1.2rem;font-size:13px}
+#body { overflow: hidden; padding: 10px; }
+#sidebar { float: left; width: 150px; }
+#content { margin-left: 162px; }
 
-table{border-collapse:collapse;width:100%;margin:1rem 0;font-size:12.5px;
-display:block;overflow-x:auto}
-th,td{border:1px solid var(--rule);padding:.4rem .7rem;text-align:left;
-vertical-align:top}
-th{background:var(--panel);color:var(--amber);text-transform:uppercase;
-letter-spacing:.09em;font-size:11px;white-space:nowrap}
+.box { margin-bottom: 10px; }
+.box .t {
+  background: #b35900;
+  color: #fff;
+  font-size: 11px;
+  font-weight: bold;
+  padding: 2px 5px;
+}
+.box ul {
+  margin: 0;
+  padding: 4px 4px 5px 20px;
+  background: #f4e6d0;
+  border: 1px solid #d8bc94;
+  border-top: 0;
+  font-size: 11px;
+  list-style: square;
+}
+.box li { margin: 2px 0; }
+.box a { text-decoration: none; }
+.box a:hover { text-decoration: underline; }
 
-/* Infobox in the shape of the OS's own dialogs: title bar and all. */
-.infobox{float:right;width:17rem;max-width:100%;border:1px solid var(--hard);
-background:var(--panel);margin:.2rem 0 1rem 1.3rem;font-size:11.5px}
-.infobox .ib-t{background:var(--amber);color:#0b0b0c;font-weight:bold;
-padding:.3rem .6rem;text-transform:uppercase;letter-spacing:.1em}
-.infobox table{margin:0;display:table}
-.infobox td{border:0;border-bottom:1px solid var(--rule);padding:.3rem .6rem}
-.infobox tr:last-child td{border-bottom:0}
-.infobox td:first-child{color:var(--dim)}
-@media (max-width:44rem){.infobox{float:none;width:100%;margin:1rem 0}}
+h1 {
+  font-size: 18px;
+  font-weight: bold;
+  margin: 0 0 6px;
+  padding-bottom: 3px;
+  border-bottom: 1px solid #b35900;
+}
+h2 {
+  font-size: 14px;
+  font-weight: bold;
+  margin: 18px 0 5px;
+  padding-bottom: 2px;
+  border-bottom: 1px solid #ccc;
+}
+h3 { font-size: 12px; font-weight: bold; margin: 14px 0 4px; }
 
-.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(15rem,1fr));
-gap:.8rem;margin:1.3rem 0}
-.card{border:1px solid var(--rule);background:var(--panel);padding:.9rem;
-border-top:2px solid var(--amber)}
-.card a{font-weight:bold;text-decoration:none;text-transform:uppercase;
-letter-spacing:.08em;font-size:12px}
-.card a:hover{text-decoration:underline}
-.card p{margin:.4rem 0 0;color:var(--dim);font-size:12px}
+p { margin: 8px 0; }
+ul, ol { margin: 8px 0; padding-left: 22px; }
+li { margin: 3px 0; }
 
-.dl{border:1px solid var(--rule);background:var(--panel);padding:.9rem;
-margin:.9rem 0;border-left:3px solid var(--amber)}
-.dl .row{display:flex;justify-content:space-between;gap:1rem;
-align-items:baseline;flex-wrap:wrap}
-.dl .name{font-weight:bold}
-.dl .size{color:var(--amber);white-space:nowrap;font-weight:bold}
-.dl p{margin:.4rem 0 0;color:var(--dim);font-size:12px}
+code {
+  font-family: "Courier New", monospace;
+  background: #f4f4f4;
+  border: 1px solid #ddd;
+  padding: 0 2px;
+  font-size: 11px;
+}
+pre {
+  font-family: "Courier New", monospace;
+  background: #f8f8f8;
+  border: 1px solid #ccc;
+  padding: 7px 9px;
+  overflow-x: auto;
+  margin: 10px 0;
+  font-size: 11px;
+  line-height: 1.4;
+}
+pre code { background: none; border: 0; padding: 0; }
 
-/* Screenshots, framed. A capture of a windowing system floating loose on a
-   page reads as a stray image rather than as a machine. */
-.shots{display:grid;grid-template-columns:repeat(auto-fit,minmax(20rem,1fr));
-gap:1.1rem;margin:1.2rem 0}
-figure.shot{margin:0;border:1px solid var(--hard);background:var(--panel)}
-figure.shot .bar{background:var(--amber);color:#0b0b0c;font-weight:bold;
-padding:.22rem .6rem;font-size:10.5px;text-transform:uppercase;
-letter-spacing:.11em}
-figure.shot img{display:block;width:100%;height:auto;
-border-top:1px solid var(--hard);image-rendering:pixelated}
-figure.shot figcaption{padding:.5rem .7rem;color:var(--dim);font-size:11.5px}
-.shot-wide{grid-column:1/-1}
+.toc {
+  display: table;
+  background: #f9f9f9;
+  border: 1px solid #ccc;
+  padding: 5px 14px 5px 5px;
+  margin: 10px 0;
+  font-size: 11px;
+}
+.toc .h { font-weight: bold; text-align: center; margin-bottom: 3px; }
+.toc ol { margin: 0; padding-left: 22px; }
 
-.wikilist{list-style:none;padding:0}
-.wikilist li{border-bottom:1px solid var(--rule);padding:.5rem 0}
-.wikilist li::before{content:none}
-.wikilist a{font-weight:bold;text-decoration:none}
-.wikilist a:hover{text-decoration:underline}
-.wikilist span{display:block;color:var(--dim);font-size:12px}
+.note {
+  background: #f4e6d0;
+  border: 1px solid #d8bc94;
+  padding: 6px 9px;
+  margin: 10px 0;
+}
 
-.seealso{border-top:1px solid var(--hard);margin-top:2.2rem;padding-top:.7rem;
-font-size:12.5px}
-.seealso strong{display:block;margin-bottom:.35rem;color:var(--amber);
-text-transform:uppercase;letter-spacing:.1em;font-size:11px}
-.faq dt{font-weight:bold;margin-top:1rem;color:var(--amber)}
-.faq dd{margin:.3rem 0 0}
+table.data { border-collapse: collapse; margin: 10px 0; font-size: 11px; }
+table.data th, table.data td {
+  border: 1px solid #ccc;
+  padding: 3px 7px;
+  text-align: left;
+  vertical-align: top;
+}
+table.data th { background: #f4e6d0; }
 
-footer{border-top:1px solid var(--hard);margin-top:2.5rem;padding-top:.9rem;
-color:var(--dim);font-size:11.5px}
-footer p{margin:.45rem 0}
-.listing{font-size:12.5px}
-.listing td{border:0;border-bottom:1px solid var(--rule)}
-.listing th{border:0;border-bottom:1px solid var(--hard);background:none}
-.icon{color:var(--deep);display:inline-block;width:2.6em}
-.skip{position:absolute;left:-9999px}
-.skip:focus{left:.5rem;top:.5rem;background:var(--amber);color:#000;
-padding:.4rem;z-index:9}
+.infobox {
+  float: right;
+  width: 230px;
+  border: 1px solid #ccc;
+  background: #f9f9f9;
+  margin: 0 0 10px 12px;
+  font-size: 11px;
+}
+.infobox .ib-t {
+  background: #b35900;
+  color: #fff;
+  font-weight: bold;
+  padding: 3px 6px;
+  text-align: center;
+}
+.infobox table { border-collapse: collapse; width: 100%; }
+.infobox td { padding: 2px 6px; border-bottom: 1px solid #e2e2e2; }
+.infobox tr:last-child td { border-bottom: 0; }
+.infobox td:first-child { color: #555; width: 42%; }
+
+table.dl { border-collapse: collapse; width: 100%; margin: 10px 0; font-size: 11px; }
+table.dl th, table.dl td {
+  border: 1px solid #ccc;
+  padding: 4px 7px;
+  text-align: left;
+  vertical-align: top;
+}
+table.dl th { background: #f4e6d0; }
+table.dl td.size { white-space: nowrap; }
+
+.shot { margin: 12px 0; }
+.shot img { display: block; border: 1px solid #999; max-width: 100%; height: auto; }
+.shot .cap { font-size: 11px; color: #444; margin-top: 3px; }
+
+.wikilist { list-style: square; }
+.wikilist span { color: #555; }
+
+.seealso { margin-top: 18px; padding-top: 6px; border-top: 1px solid #ccc; }
+dl.faq dt { font-weight: bold; margin-top: 10px; }
+dl.faq dd { margin: 3px 0 0 20px; }
+
+#footer {
+  clear: both;
+  background: #f4e6d0;
+  border-top: 1px solid #b35900;
+  padding: 6px 10px;
+  font-size: 10px;
+  color: #555;
+}
+#footer p { margin: 3px 0; }
+
+.crumbs { font-size: 11px; color: #555; margin-bottom: 6px; }
+.crumbs a { color: #555; }
+
+.listing { border-collapse: collapse; width: 100%; font-size: 11px; }
+.listing th {
+  border-bottom: 1px solid #999;
+  text-align: left;
+  padding: 2px 8px 2px 0;
+}
+.listing td { padding: 2px 8px 2px 0; border-bottom: 1px solid #eee; }
+.icon { color: #777; display: inline-block; width: 2.6em; }
+
+.skip { position: absolute; left: -9999px; }
+
+@media (max-width: 920px) {
+  #page { width: auto; border: 0; }
+  #sidebar { float: none; width: auto; }
+  #content { margin-left: 0; }
+  .infobox { float: none; width: 100%; margin-left: 0; }
+}
 """
 
 JS = """// Archive listing. The only script on the site, and only this page needs it.
@@ -1625,7 +1694,7 @@ JS = """// Archive listing. The only script on the site, and only this page need
     var node=TREE[path];
     rows.innerHTML='';
     var t=document.getElementById('atitle');
-    if(!node){ t.textContent='Index of /'+path+' — not found';
+    if(!node){ t.textContent='Index of /'+path+'. Not found';
       var tr=document.createElement('tr'), c=td('d');
       c.colSpan=4; c.innerHTML='No such directory. <a href="#/">Return to root</a>.';
       tr.appendChild(c); rows.appendChild(tr); return; }
@@ -1717,33 +1786,33 @@ def render_blocks(blocks, slug):
             tr = "".join(
                 "<tr>" + "".join(f"<td>{c}</td>" for c in row) + "</tr>" for row in rows
             )
-            out.append(f"<table><thead><tr>{th}</tr></thead><tbody>{tr}</tbody></table>")
+            out.append(f'<table class="data"><thead><tr>{th}</tr></thead>'
+                       f"<tbody>{tr}</tbody></table>")
         elif kind == "infobox":
             title, pairs = val
             tr = "".join(f"<tr><td>{esc(k)}</td><td>{v}</td></tr>" for k, v in pairs)
             out.append(f'<aside class="infobox"><div class="ib-t">{esc(title)}</div>'
                        f"<table><tbody>{tr}</tbody></table></aside>")
         elif kind == "cards":
-            cs = "".join(
-                f'<div class="card"><a href="{h}">{esc(t)}</a><p>{esc(d)}</p></div>'
-                for t, h, d in val)
-            out.append(f'<div class="cards">{cs}</div>')
+            # A plain list. Boxed "cards" are a modern affectation and this
+            # layout predates them by twenty years.
+            items = "".join(f'<li><a href="{h}">{esc(t)}</a>: {esc(d)}</li>'
+                            for t, h, d in val)
+            out.append(f"<ul>{items}</ul>")
         elif kind == "downloads":
-            ds = "".join(
-                f'<div class="dl"><div class="row"><span class="name">{esc(n)}</span>'
-                f'<span class="size">{esc(s)}</span></div><p>{esc(d)}</p>'
-                f'<p><a href="{h}">Download {esc(n)}</a></p></div>'
+            rows = "".join(
+                f'<tr><td><a href="{h}">{esc(n)}</a></td>'
+                f'<td class="size">{esc(s)}</td><td>{esc(d)}</td></tr>'
                 for n, s, h, d in val)
-            out.append(ds)
+            out.append('<table class="dl"><thead><tr><th>File</th><th>Size</th>'
+                       f"<th>Contents</th></tr></thead><tbody>{rows}</tbody></table>")
         elif kind == "shots":
-            fs = "".join(
-                f'<figure class="shot{" shot-wide" if wide else ""}">'
-                f'<div class="bar">{esc(t_)}</div>'
-                f'<img src="{up}img/{f}" alt="{html.escape(alt, quote=True)}" '
-                f'width="1280" height="800" loading="lazy" decoding="async">'
-                f"<figcaption>{c}</figcaption></figure>"
-                for f, t_, alt, c, wide in val)
-            out.append(f'<div class="shots">{fs}</div>')
+            for f, t_, alt, c, wide in val:
+                out.append(
+                    f'<div class="shot"><img src="{up}img/{f}" '
+                    f'alt="{html.escape(alt, quote=True)}" width="1280" '
+                    f'height="800" loading="lazy" decoding="async">'
+                    f'<div class="cap"><b>{esc(t_)}.</b> {c}</div></div>')
         elif kind == "wikilist":
             ls = "".join(
                 f'<li><a href="{url_for("wiki/" + s, slug)}">{esc(t)}</a>'
@@ -1765,8 +1834,8 @@ def render_blocks(blocks, slug):
                     raise KeyError(f"see-also points at a page that does not exist: {s}")
                 title = PAGES.get(target, {}).get("nav") or short_title(target)
                 links.append(f'<a href="{url_for(target, slug)}">{esc(title)}</a>')
-            out.append('<div class="seealso"><strong>See also</strong>'
-                       + " · ".join(links) + "</div>")
+            out.append('<div class="seealso"><b>See also:</b> '
+                       + ", ".join(links) + "</div>")
         elif kind == "faq":
             items = "".join(f"<dt>{esc(q)}</dt><dd>{esc(a)}</dd>" for q, a in val)
             out.append(f'<h2 id="faq">Frequently asked questions</h2>'
@@ -1861,12 +1930,28 @@ NAVITEMS = [("index", "Home"), ("download/index", "Download"),
 def render_page(pg):
     slug = pg["slug"]
     up = rel_prefix(slug)
-    nav = " ".join(
-        f'<a class="btn" href="{url_for(s, slug)}">↓ {esc(t)}</a>'
-        if s == "download/index" else
-        f'<a href="{url_for(s, slug)}">{esc(t)}</a>'
-        for s, t in NAVITEMS)
-    nav += f' <a href="{REPO}" rel="noopener">Source</a>'
+    bar = " | ".join(
+        f'<a href="{url_for(s, slug)}">{esc(t)}</a>' for s, t in NAVITEMS)
+    bar += f' | <a href="{REPO}" rel="noopener">Source code</a>'
+
+    def sidebox(title, items):
+        li = "".join(f'<li><a href="{h}">{esc(n)}</a></li>' for n, h in items)
+        return (f'<div class="box"><div class="t">{esc(title)}</div>'
+                f"<ul>{li}</ul></div>")
+
+    side = sidebox("Navigation",
+                   [(n, url_for(s, slug)) for s, n in NAVITEMS]
+                   + [("Source code", REPO)])
+    side += sidebox("Get it", [
+        ("Download the ISO", url_for("download/index", slug)),
+        ("Checksums", REL + "SHA256SUMS"),
+    ])
+    side += sidebox("The system",
+                    [(ti, url_for("wiki/" + sl, slug)) for sl, ti, _ in WIKI[:8]])
+    side += sidebox("Internals",
+                    [(ti, url_for("wiki/" + sl, slug)) for sl, ti, _ in WIKI[8:16]])
+    side += sidebox("Hardware",
+                    [(ti, url_for("wiki/" + sl, slug)) for sl, ti, _ in WIKI[16:]])
 
     crumbs = ""
     if slug != "index":
@@ -1874,7 +1959,7 @@ def render_page(pg):
         if slug.startswith("wiki/") and slug != "wiki/index":
             parts.append(f'<a href="{url_for("wiki/index", slug)}">Wiki</a>')
         parts.append(esc(short_title(slug)))
-        crumbs = f'<nav class="crumbs">{" / ".join(parts)}</nav>'
+        crumbs = f'<div class="crumbs">{" / ".join(parts)}</div>'
 
     body = render_blocks(pg["blocks"], slug)
     if pg["kind"] == "archive":
@@ -1899,7 +1984,6 @@ def render_page(pg):
 <meta name="twitter:card" content="summary">
 <meta name="twitter:title" content="{html.escape(pg["title"], quote=True)}">
 <meta name="twitter:description" content="{html.escape(pg["desc"], quote=True)}">
-<meta name="theme-color" content="#f28c1e">
 <meta property="og:image" content="{BASE}/img/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
@@ -1914,31 +1998,36 @@ def render_page(pg):
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
-<div class="hazard"></div>
-<div class="wrap">
-<header class="top">
-  <div class="brand">
-    <img src="{up}img/logo.svg" alt="" width="26" height="26">
-    <a class="logo" href="{url_for("index", slug)}">GLaDOS</a>
-    <span class="tag">an AI operating system in Rust · ring 0 · bare metal</span>
-  </div>
-  <nav class="main">{nav}</nav>
-</header>
-{crumbs}
-<main id="main">
-<h1>{esc(pg["title"].split(" — ")[0])}</h1>
-<p class="lede">{esc(pg["desc"])}</p>
-{body}
-</main>
-<footer>
-  <p>{esc(DISCLAIMER)}</p>
-  <p>Copyright © 2026. All rights reserved. Source published to be read, not
-  reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from the
-  Linux kernel and carries its own terms.</p>
-  <p>No cookies, no analytics, nothing to accept. Last updated {UPDATED}.</p>
-</footer>
+<div id="page">
+
+<div id="masthead">
+  <img src="{up}img/logo.svg" alt="" width="34" height="34">
+  <a class="name" href="{url_for("index", slug)}">GLaDOS</a>
+  <span class="sub">An operating system in Rust, with a language model in the kernel</span>
 </div>
-<div class="hazard"></div>
+
+<div id="bar">{bar}</div>
+
+<div id="body">
+<div id="sidebar">{side}</div>
+<div id="content">
+{crumbs}
+<div id="main">
+<h1>{esc(pg["title"].split(". ")[0].split(". ")[0])}</h1>
+{body}
+</div>
+</div>
+</div>
+
+<div id="footer">
+  <p>{esc(DISCLAIMER)}</p>
+  <p>Copyright 2026. All rights reserved. Source is published to be read, not
+  reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from
+  the Linux kernel and carries its own terms.</p>
+  <p>No cookies, no analytics. Last updated {UPDATED}.</p>
+</div>
+
+</div>
 </body>
 </html>
 """
@@ -1972,7 +2061,7 @@ def main():
 
     # A 404 that keeps the navigation, so a bad link is recoverable rather than
     # a dead end. GitHub Pages serves docs/404.html automatically.
-    nf = dict(slug="404", title="404 — page not found",
+    nf = dict(slug="404", title="404. Page not found",
               desc="That page does not exist. The wiki index lists everything.",
               keywords=["404"], kind="article", nav=None, faqs=None,
               blocks=[p("No page at that address."),

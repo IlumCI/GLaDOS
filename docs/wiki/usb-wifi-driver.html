@@ -3,20 +3,19 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>USB WiFi on bare metal — CNVi, a Realtek dongle, and 509 constants</title>
+<title>USB WiFi on bare metal. CNVi, a Realtek dongle, and 509 constants</title>
 <meta name="description" content="Why the laptop&#x27;s built-in WiFi cannot work, how a USB dongle sidesteps it, and why the RTL8188EU init tables were transcribed rather than written.">
 <meta name="keywords" content="USB WiFi driver, RTL8188EU, CNVi, WPA2, 802.11, wireless driver, rtl8xxxu">
 <link rel="canonical" href="https://ilumci.github.io/GLaDOS/wiki/usb-wifi-driver.html">
 <meta name="robots" content="index,follow,max-image-preview:large">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="GLaDOS">
-<meta property="og:title" content="USB WiFi on bare metal — CNVi, a Realtek dongle, and 509 constants">
+<meta property="og:title" content="USB WiFi on bare metal. CNVi, a Realtek dongle, and 509 constants">
 <meta property="og:description" content="Why the laptop&#x27;s built-in WiFi cannot work, how a USB dongle sidesteps it, and why the RTL8188EU init tables were transcribed rather than written.">
 <meta property="og:url" content="https://ilumci.github.io/GLaDOS/wiki/usb-wifi-driver.html">
 <meta name="twitter:card" content="summary">
-<meta name="twitter:title" content="USB WiFi on bare metal — CNVi, a Realtek dongle, and 509 constants">
+<meta name="twitter:title" content="USB WiFi on bare metal. CNVi, a Realtek dongle, and 509 constants">
 <meta name="twitter:description" content="Why the laptop&#x27;s built-in WiFi cannot work, how a USB dongle sidesteps it, and why the RTL8188EU init tables were transcribed rather than written.">
-<meta name="theme-color" content="#f28c1e">
 <meta property="og:image" content="https://ilumci.github.io/GLaDOS/img/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
@@ -28,47 +27,52 @@
 <link rel="apple-touch-icon" sizes="180x180" href="../img/icon-180.png">
 <link rel="manifest" href="../site.webmanifest">
 <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://ilumci.github.io/GLaDOS/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://ilumci.github.io/GLaDOS/wiki/"},{"@type":"ListItem","position":3,"name":"USB WiFi","item":"https://ilumci.github.io/GLaDOS/wiki/usb-wifi-driver.html"}]}</script>
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"USB WiFi on bare metal \u2014 CNVi, a Realtek dongle, and 509 constants","description":"Why the laptop's built-in WiFi cannot work, how a USB dongle sidesteps it, and why the RTL8188EU init tables were transcribed rather than written.","url":"https://ilumci.github.io/GLaDOS/wiki/usb-wifi-driver.html","dateModified":"2026-08-14","keywords":"USB WiFi driver, RTL8188EU, CNVi, WPA2, 802.11, wireless driver, rtl8xxxu","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"USB WiFi on bare metal. CNVi, a Realtek dongle, and 509 constants","description":"Why the laptop's built-in WiFi cannot work, how a USB dongle sidesteps it, and why the RTL8188EU init tables were transcribed rather than written.","url":"https://ilumci.github.io/GLaDOS/wiki/usb-wifi-driver.html","dateModified":"2026-08-14","keywords":"USB WiFi driver, RTL8188EU, CNVi, WPA2, 802.11, wireless driver, rtl8xxxu","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
-<div class="hazard"></div>
-<div class="wrap">
-<header class="top">
-  <div class="brand">
-    <img src="../img/logo.svg" alt="" width="26" height="26">
-    <a class="logo" href="../">GLaDOS</a>
-    <span class="tag">an AI operating system in Rust · ring 0 · bare metal</span>
-  </div>
-  <nav class="main"><a href="../">Home</a> <a class="btn" href="../download/">↓ Download</a> <a href="../wiki/">Wiki</a> <a href="../screenshots/">Screenshots</a> <a href="../archive/">Archive</a> <a href="https://github.com/IlumCI/GLaDOS" rel="noopener">Source</a></nav>
-</header>
-<nav class="crumbs"><a href="../">GLaDOS</a> / <a href="../wiki/">Wiki</a> / USB WiFi</nav>
-<main id="main">
+<div id="page">
+
+<div id="masthead">
+  <img src="../img/logo.svg" alt="" width="34" height="34">
+  <a class="name" href="../">GLaDOS</a>
+  <span class="sub">An operating system in Rust, with a language model in the kernel</span>
+</div>
+
+<div id="bar"><a href="../">Home</a> | <a href="../download/">Download</a> | <a href="../wiki/">Wiki</a> | <a href="../screenshots/">Screenshots</a> | <a href="../archive/">Archive</a> | <a href="https://github.com/IlumCI/GLaDOS" rel="noopener">Source code</a></div>
+
+<div id="body">
+<div id="sidebar"><div class="box"><div class="t">Navigation</div><ul><li><a href="../">Home</a></li><li><a href="../download/">Download</a></li><li><a href="../wiki/">Wiki</a></li><li><a href="../screenshots/">Screenshots</a></li><li><a href="../archive/">Archive</a></li><li><a href="https://github.com/IlumCI/GLaDOS">Source code</a></li></ul></div><div class="box"><div class="t">Get it</div><ul><li><a href="../download/">Download the ISO</a></li><li><a href="https://github.com/IlumCI/GLaDOS/releases/latest/download/SHA256SUMS">Checksums</a></li></ul></div><div class="box"><div class="t">The system</div><ul><li><a href="../wiki/glados-os.html">GLaDOS OS</a></li><li><a href="../wiki/aperture-science.html">Aperture Science</a></li><li><a href="../wiki/portal-os.html">Portal OS</a></li><li><a href="../wiki/rust-os.html">Writing an OS in Rust</a></li><li><a href="../wiki/ring-0.html">Ring 0</a></li><li><a href="../wiki/uefi-kernel.html">UEFI as the kernel</a></li><li><a href="../wiki/llm-in-kernel.html">A language model in the kernel</a></li><li><a href="../wiki/qwen3.html">Qwen3 in 570 MB</a></li></ul></div><div class="box"><div class="t">Internals</div><ul><li><a href="../wiki/rope.html">RoPE</a></li><li><a href="../wiki/kv-cache.html">The int8 KV cache</a></li><li><a href="../wiki/tokenizer.html">Tokenizers</a></li><li><a href="../wiki/constrained-decoding.html">Constrained decoding</a></li><li><a href="../wiki/routing.html">Tool routing</a></li><li><a href="../wiki/gui.html">The Windows 3.1 desktop</a></li><li><a href="../wiki/network-stack.html">The network stack</a></li><li><a href="../wiki/tls.html">TLS 1.3 from scratch</a></li></ul></div><div class="box"><div class="t">Hardware</div><ul><li><a href="../wiki/storage.html">Content-addressed storage</a></li><li><a href="../wiki/usb-xhci.html">The USB stack</a></li><li><a href="../wiki/usb-wifi-driver.html">USB WiFi</a></li><li><a href="../wiki/iso-el-torito.html">How the ISO is built</a></li><li><a href="../wiki/templeos.html">TempleOS</a></li><li><a href="../wiki/testing.html">Testing without a test runner</a></li></ul></div></div>
+<div id="content">
+<div class="crumbs"><a href="../">GLaDOS</a> / <a href="../wiki/">Wiki</a> / USB WiFi</div>
+<div id="main">
 <h1>USB WiFi on bare metal</h1>
-<p class="lede">Why the laptop's built-in WiFi cannot work, how a USB dongle sidesteps it, and why the RTL8188EU init tables were transcribed rather than written.</p>
 <p>Wireless is the one major subsystem that does not work, and the reason is worth explaining because it is not a matter of effort.</p>
 <h2 id="cnvi-the-card-is-not-a-card">CNVi: the card is not a card</h2>
-<p>The laptop's built-in wireless is CNVi, Intel's split architecture. The MAC — the part that would need a driver — lives <em>in the chipset</em>, and the M.2 module is only a radio. Talking to it requires an undocumented signed-firmware protocol that is not published anywhere.</p>
-<p>So the kernel's wireless module identifies the hardware and refuses to pretend it can drive it. The <a href="tls.html">WPA2 supplicant</a> is complete, implements the four-way handshake, and passes IEEE 802.11i test vectors at every boot — and has never had a radio to run on.</p>
+<p>The laptop's built-in wireless is CNVi, Intel's split architecture. The MAC. The part that would need a driver. Lives <em>in the chipset</em>, and the M.2 module is only a radio. Talking to it requires an undocumented signed-firmware protocol that is not published anywhere.</p>
+<p>So the kernel's wireless module identifies the hardware and refuses to pretend it can drive it. The <a href="tls.html">WPA2 supplicant</a> is complete, implements the four-way handshake, and passes IEEE 802.11i test vectors at every boot. and has never had a radio to run on.</p>
 <h2 id="a-usb-dongle-sidesteps-all-of-it">A USB dongle sidesteps all of it</h2>
 <p>A USB wireless adapter is a complete radio <em>and</em> MAC behind a bus the kernel <a href="usb-xhci.html">now drives</a>. The target is a Realtek RTL8188EU.</p>
-<p>It has no memory-mapped registers at all. Every register is a vendor control transfer, so a single register read is a full USB round trip of a few hundred microseconds — a fact that shapes the entire driver, since anything that polls a register in a loop is far slower than it looks.</p>
+<p>It has no memory-mapped registers at all. Every register is a vendor control transfer, so a single register read is a full USB round trip of a few hundred microseconds, a fact that shapes the entire driver, since anything that polls a register in a loop is far slower than it looks.</p>
 <h2 id="why-the-tables-were-copied-and-why-that-is-stated">Why the tables were copied, and why that is stated</h2>
 <p>Bringing up the chip needs a power-on sequence, PHY and radio initialisation tables, and an efuse layout: <strong>509 specific register/value pairs</strong> that exist in Realtek's vendor driver and in Linux's rtl8xxxu, and nowhere else.</p>
-<p>They were transcribed from Linux rather than written, and mechanically rather than by hand — 509 hex pairs retyped by a human contain errors at some rate, and an error here does not fail loudly. A wrong AGC value costs sensitivity; a wrong PHY value skews a filter. Both present as "wireless is a bit unreliable."</p>
+<p>They were transcribed from Linux rather than written, and mechanically rather than by hand. 509 hex pairs retyped by a human contain errors at some rate, and an error here does not fail loudly. A wrong AGC value costs sensitivity; a wrong PHY value skews a filter. Both present as "wireless is a bit unreliable."</p>
 <div class="note">Those constants are GPL-2.0 and are kept in a single file, marked as such. They are the only code in this kernel that was not written for it, apart from Rust's <code>core</code>. Saying so is cheaper than a blanket claim that quietly covers someone else's work.</div>
 <h2 id="order-is-content">Order is content</h2>
 <p>The AGC table writes the <em>same register</em> 130 times, with the index encoded in the value. Sorting or deduplicating it produces a different table that still looks entirely reasonable.</p>
-<div class="seealso"><strong>See also</strong><a href="../wiki/usb-xhci.html">The USB stack</a> · <a href="../wiki/network-stack.html">The network stack</a> · <a href="../wiki/tls.html">TLS 1.3 from scratch</a></div>
-</main>
-<footer>
-  <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This is an independent, non-commercial homage and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
-  <p>Copyright © 2026. All rights reserved. Source published to be read, not
-  reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from the
-  Linux kernel and carries its own terms.</p>
-  <p>No cookies, no analytics, nothing to accept. Last updated 2026-08-14.</p>
-</footer>
+<div class="seealso"><b>See also:</b> <a href="../wiki/usb-xhci.html">The USB stack</a>, <a href="../wiki/network-stack.html">The network stack</a>, <a href="../wiki/tls.html">TLS 1.3 from scratch</a></div>
 </div>
-<div class="hazard"></div>
+</div>
+</div>
+
+<div id="footer">
+  <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This is an independent, non-commercial homage and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
+  <p>Copyright 2026. All rights reserved. Source is published to be read, not
+  reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from
+  the Linux kernel and carries its own terms.</p>
+  <p>No cookies, no analytics. Last updated 2026-08-14.</p>
+</div>
+
+</div>
 </body>
 </html>

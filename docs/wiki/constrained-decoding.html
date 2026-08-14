@@ -3,20 +3,19 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Constrained decoding — making invalid model output unreachable, not unlikely</title>
+<title>Constrained decoding. Making invalid model output unreachable, not unlikely</title>
 <meta name="description" content="How GLaDOS guarantees a model can never name a tool that does not exist: a grammar built from the live function table, applied before sampling.">
 <meta name="keywords" content="constrained decoding, grammar-constrained generation, structured output, LLM tool calling, guaranteed valid output">
 <link rel="canonical" href="https://ilumci.github.io/GLaDOS/wiki/constrained-decoding.html">
 <meta name="robots" content="index,follow,max-image-preview:large">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="GLaDOS">
-<meta property="og:title" content="Constrained decoding — making invalid model output unreachable, not unlikely">
+<meta property="og:title" content="Constrained decoding. Making invalid model output unreachable, not unlikely">
 <meta property="og:description" content="How GLaDOS guarantees a model can never name a tool that does not exist: a grammar built from the live function table, applied before sampling.">
 <meta property="og:url" content="https://ilumci.github.io/GLaDOS/wiki/constrained-decoding.html">
 <meta name="twitter:card" content="summary">
-<meta name="twitter:title" content="Constrained decoding — making invalid model output unreachable, not unlikely">
+<meta name="twitter:title" content="Constrained decoding. Making invalid model output unreachable, not unlikely">
 <meta name="twitter:description" content="How GLaDOS guarantees a model can never name a tool that does not exist: a grammar built from the live function table, applied before sampling.">
-<meta name="theme-color" content="#f28c1e">
 <meta property="og:image" content="https://ilumci.github.io/GLaDOS/img/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
@@ -28,43 +27,48 @@
 <link rel="apple-touch-icon" sizes="180x180" href="../img/icon-180.png">
 <link rel="manifest" href="../site.webmanifest">
 <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://ilumci.github.io/GLaDOS/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://ilumci.github.io/GLaDOS/wiki/"},{"@type":"ListItem","position":3,"name":"Constrained decoding","item":"https://ilumci.github.io/GLaDOS/wiki/constrained-decoding.html"}]}</script>
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Constrained decoding \u2014 making invalid model output unreachable, not unlikely","description":"How GLaDOS guarantees a model can never name a tool that does not exist: a grammar built from the live function table, applied before sampling.","url":"https://ilumci.github.io/GLaDOS/wiki/constrained-decoding.html","dateModified":"2026-08-14","keywords":"constrained decoding, grammar-constrained generation, structured output, LLM tool calling, guaranteed valid output","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Constrained decoding. Making invalid model output unreachable, not unlikely","description":"How GLaDOS guarantees a model can never name a tool that does not exist: a grammar built from the live function table, applied before sampling.","url":"https://ilumci.github.io/GLaDOS/wiki/constrained-decoding.html","dateModified":"2026-08-14","keywords":"constrained decoding, grammar-constrained generation, structured output, LLM tool calling, guaranteed valid output","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
-<div class="hazard"></div>
-<div class="wrap">
-<header class="top">
-  <div class="brand">
-    <img src="../img/logo.svg" alt="" width="26" height="26">
-    <a class="logo" href="../">GLaDOS</a>
-    <span class="tag">an AI operating system in Rust · ring 0 · bare metal</span>
-  </div>
-  <nav class="main"><a href="../">Home</a> <a class="btn" href="../download/">↓ Download</a> <a href="../wiki/">Wiki</a> <a href="../screenshots/">Screenshots</a> <a href="../archive/">Archive</a> <a href="https://github.com/IlumCI/GLaDOS" rel="noopener">Source</a></nav>
-</header>
-<nav class="crumbs"><a href="../">GLaDOS</a> / <a href="../wiki/">Wiki</a> / Constrained decoding</nav>
-<main id="main">
+<div id="page">
+
+<div id="masthead">
+  <img src="../img/logo.svg" alt="" width="34" height="34">
+  <a class="name" href="../">GLaDOS</a>
+  <span class="sub">An operating system in Rust, with a language model in the kernel</span>
+</div>
+
+<div id="bar"><a href="../">Home</a> | <a href="../download/">Download</a> | <a href="../wiki/">Wiki</a> | <a href="../screenshots/">Screenshots</a> | <a href="../archive/">Archive</a> | <a href="https://github.com/IlumCI/GLaDOS" rel="noopener">Source code</a></div>
+
+<div id="body">
+<div id="sidebar"><div class="box"><div class="t">Navigation</div><ul><li><a href="../">Home</a></li><li><a href="../download/">Download</a></li><li><a href="../wiki/">Wiki</a></li><li><a href="../screenshots/">Screenshots</a></li><li><a href="../archive/">Archive</a></li><li><a href="https://github.com/IlumCI/GLaDOS">Source code</a></li></ul></div><div class="box"><div class="t">Get it</div><ul><li><a href="../download/">Download the ISO</a></li><li><a href="https://github.com/IlumCI/GLaDOS/releases/latest/download/SHA256SUMS">Checksums</a></li></ul></div><div class="box"><div class="t">The system</div><ul><li><a href="../wiki/glados-os.html">GLaDOS OS</a></li><li><a href="../wiki/aperture-science.html">Aperture Science</a></li><li><a href="../wiki/portal-os.html">Portal OS</a></li><li><a href="../wiki/rust-os.html">Writing an OS in Rust</a></li><li><a href="../wiki/ring-0.html">Ring 0</a></li><li><a href="../wiki/uefi-kernel.html">UEFI as the kernel</a></li><li><a href="../wiki/llm-in-kernel.html">A language model in the kernel</a></li><li><a href="../wiki/qwen3.html">Qwen3 in 570 MB</a></li></ul></div><div class="box"><div class="t">Internals</div><ul><li><a href="../wiki/rope.html">RoPE</a></li><li><a href="../wiki/kv-cache.html">The int8 KV cache</a></li><li><a href="../wiki/tokenizer.html">Tokenizers</a></li><li><a href="../wiki/constrained-decoding.html">Constrained decoding</a></li><li><a href="../wiki/routing.html">Tool routing</a></li><li><a href="../wiki/gui.html">The Windows 3.1 desktop</a></li><li><a href="../wiki/network-stack.html">The network stack</a></li><li><a href="../wiki/tls.html">TLS 1.3 from scratch</a></li></ul></div><div class="box"><div class="t">Hardware</div><ul><li><a href="../wiki/storage.html">Content-addressed storage</a></li><li><a href="../wiki/usb-xhci.html">The USB stack</a></li><li><a href="../wiki/usb-wifi-driver.html">USB WiFi</a></li><li><a href="../wiki/iso-el-torito.html">How the ISO is built</a></li><li><a href="../wiki/templeos.html">TempleOS</a></li><li><a href="../wiki/testing.html">Testing without a test runner</a></li></ul></div></div>
+<div id="content">
+<div class="crumbs"><a href="../">GLaDOS</a> / <a href="../wiki/">Wiki</a> / Constrained decoding</div>
+<div id="main">
 <h1>Constrained decoding</h1>
-<p class="lede">How GLaDOS guarantees a model can never name a tool that does not exist: a grammar built from the live function table, applied before sampling.</p>
 <p>When a language model picks a tool to run, the usual approach is to generate text, parse it, and handle the case where it named something that does not exist. GLaDOS makes that case impossible instead.</p>
 <h2 id="the-mechanism">The mechanism</h2>
 <p>At each decoding step the sampler is given only the tokens that could extend the current prefix into a valid name from the live function table. Every other logit is removed <em>before</em> sampling, not checked afterwards.</p>
-<p>The consequence is categorical rather than statistical: <strong>there is no sequence of sampling outcomes that produces an invalid name.</strong> Not unlikely — unreachable. Temperature does not matter. A badly calibrated model does not matter.</p>
+<p>The consequence is categorical rather than statistical: <strong>there is no sequence of sampling outcomes that produces an invalid name.</strong> Not unlikely. Unreachable. Temperature does not matter. A badly calibrated model does not matter.</p>
 <h2 id="read-only-mode-is-the-same-mechanism">Read-only mode is the same mechanism</h2>
 <p>When the system runs in a read-only trust level, mutating functions are removed from the reachable set before sampling. The model is not asked to behave and then audited; the tokens that spell <code>rm</code> simply have no path.</p>
-<p>This is why a script's mutating-ness is <em>derived</em> from its code rather than declared in its header. A script that claims to be read-only and then calls a mutating function would put a mutating entry into the read-only grammar — which is exactly the guarantee leaking. So the system walks the syntax tree, and treats any call whose target is not a literal string as mutating, because a computed name cannot be resolved and guessing would break the property.</p>
+<p>This is why a script's mutating-ness is <em>derived</em> from its code rather than declared in its header. A script that claims to be read-only and then calls a mutating function would put a mutating entry into the read-only grammar. Which is exactly the guarantee leaking. So the system walks the syntax tree, and treats any call whose target is not a literal string as mutating, because a computed name cannot be resolved and guessing would break the property.</p>
 <h2 id="how-it-is-tested">How it is tested</h2>
-<p>The grammar's self-test runs 200 random decodes at maximum temperature and asserts that none escaped the reachable set. It also checks a subtle case: that a name which is a prefix of another name is still reachable — if <code>snap</code> and <code>snaps</code> both exist, a naive implementation makes the shorter one impossible to finish.</p>
-<div class="seealso"><strong>See also</strong><a href="../wiki/routing.html">Tool routing</a> · <a href="../wiki/llm-in-kernel.html">A language model in the kernel</a> · <a href="../wiki/tokenizer.html">Tokenizers</a> · <a href="../wiki/glados-os.html">GLaDOS OS</a></div>
-</main>
-<footer>
-  <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This is an independent, non-commercial homage and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
-  <p>Copyright © 2026. All rights reserved. Source published to be read, not
-  reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from the
-  Linux kernel and carries its own terms.</p>
-  <p>No cookies, no analytics, nothing to accept. Last updated 2026-08-14.</p>
-</footer>
+<p>The grammar's self-test runs 200 random decodes at maximum temperature and asserts that none escaped the reachable set. It also checks a subtle case: that a name which is a prefix of another name is still reachable. if <code>snap</code> and <code>snaps</code> both exist, a naive implementation makes the shorter one impossible to finish.</p>
+<div class="seealso"><b>See also:</b> <a href="../wiki/routing.html">Tool routing</a>, <a href="../wiki/llm-in-kernel.html">A language model in the kernel</a>, <a href="../wiki/tokenizer.html">Tokenizers</a>, <a href="../wiki/glados-os.html">GLaDOS OS</a></div>
 </div>
-<div class="hazard"></div>
+</div>
+</div>
+
+<div id="footer">
+  <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This is an independent, non-commercial homage and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
+  <p>Copyright 2026. All rights reserved. Source is published to be read, not
+  reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from
+  the Linux kernel and carries its own terms.</p>
+  <p>No cookies, no analytics. Last updated 2026-08-14.</p>
+</div>
+
+</div>
 </body>
 </html>
