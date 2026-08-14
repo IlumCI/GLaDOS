@@ -69,6 +69,33 @@ def find_firmware():
     raise SystemExit(f"no UEFI firmware in {share}")
 
 
+def monitor(lines):
+    """Send commands to QEMU's monitor.
+
+    The mouse is the reason this exists separately from `capture`: there is no
+    way to inject a PS/2 packet over the serial console, so the only way to
+    test a pointer headlessly is to ask the emulator to move it.
+    """
+    try:
+        mon = socket.create_connection(("127.0.0.1", MONITOR_PORT), timeout=5)
+    except OSError as e:
+        print(f"[drive] no monitor: {e}", file=sys.stderr)
+        return
+    with mon:
+        mon.settimeout(2.0)
+        try:
+            mon.recv(4096)
+        except OSError:
+            pass
+        for line in lines:
+            mon.sendall((line + "\n").encode())
+            time.sleep(0.35)
+        try:
+            mon.recv(4096)
+        except OSError:
+            pass
+
+
 def capture(dest):
     """Ask QEMU's monitor for a screenshot, and convert it to PNG.
 
@@ -169,6 +196,11 @@ def main():
     if "--iso" in argv:
         i = argv.index("--iso")
         iso = Path(argv[i + 1])
+        del argv[i:i + 2]
+    mouse = []
+    while "--mouse" in argv:
+        i = argv.index("--mouse")
+        mouse.append(argv[i + 1])
         del argv[i:i + 2]
     if "--memory" in argv:
         i = argv.index("--memory")
@@ -305,6 +337,9 @@ def main():
                     idle_prompts += 1
                     sent_all = True
                     if idle_prompts >= 2:
+                        if mouse:
+                            monitor(mouse)
+                            time.sleep(0.8)
                         if shot:
                             capture(shot)
                         break

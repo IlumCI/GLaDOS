@@ -64,19 +64,19 @@ fn wait_readable() -> bool {
     false
 }
 
-fn command(cmd: u8) {
+pub(super) fn command(cmd: u8) {
     if wait_writable() {
         unsafe { outb(COMMAND, cmd) };
     }
 }
 
-fn write_data(value: u8) {
+pub(super) fn write_data(value: u8) {
     if wait_writable() {
         unsafe { outb(DATA, value) };
     }
 }
 
-fn read_data() -> Option<u8> {
+pub(super) fn read_data() -> Option<u8> {
     if wait_readable() {
         Some(unsafe { inb(DATA) })
     } else {
@@ -84,7 +84,7 @@ fn read_data() -> Option<u8> {
     }
 }
 
-fn flush() {
+pub(super) fn flush() {
     for _ in 0..64 {
         if unsafe { inb(STATUS) } & STATUS_OUTPUT_FULL == 0 {
             return;

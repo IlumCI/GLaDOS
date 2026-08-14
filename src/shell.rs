@@ -140,6 +140,11 @@ pub fn run(boot: &BootInfo, acpi: &Option<Acpi>) -> ! {
             // 100 times a second, so this is also the stack's clock -- an
             // open connection only advances between keystrokes.
             crate::net::tcp::service();
+            // The pointer is read from the idle loop rather than acted on in
+            // the interrupt: a click raises a window and repaints, and doing
+            // that from an ISR would redraw the screen underneath whatever was
+            // drawing when the mouse moved.
+            crate::gfx::desk::poll_mouse();
             unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };
             continue;
         };

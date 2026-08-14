@@ -8,6 +8,7 @@ pub mod nvme;
 pub mod pci;
 pub mod pic;
 pub mod rtc;
+pub mod mouse;
 pub mod rtl8168;
 pub mod rtl8188eu;
 pub mod rtl8188eu_tables;
@@ -20,4 +21,5 @@ pub mod xhci;
 /// spurious IRQ7 from the masked PIC can never be mistaken for our timer.
 pub const VECTOR_TIMER: u8 = 0x20;
 pub const VECTOR_KEYBOARD: u8 = 0x21;
+pub const VECTOR_MOUSE: u8 = 0x22;
 pub const VECTOR_SPURIOUS: u8 = 0xFF;

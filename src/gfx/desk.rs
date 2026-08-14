@@ -344,6 +344,140 @@ pub fn open_browser(url: &str) {
     draw();
 }
 
+// --- the pointer ----------------------------------------------------------
+
+/// The arrow, as a bitmap. `X` is outline, `.` is fill, space is transparent.
+const CURSOR: [&str; 17] = [
+    "X          ",
+    "XX         ",
+    "X.X        ",
+    "X..X       ",
+    "X...X      ",
+    "X....X     ",
+    "X.....X    ",
+    "X......X   ",
+    "X.......X  ",
+    "X........X ",
+    "X.....XXXXX",
+    "X..X..X    ",
+    "X.X X..X   ",
+    "XX  X..X   ",
+    "X    X..X  ",
+    "     X..X  ",
+    "      XX   ",
+];
+const CUR_W: u32 = 11;
+const CUR_H: u32 = 17;
+
+/// Pixels the cursor is currently covering, and where.
+///
+/// Saved and restored rather than repainted. The desktop redraws everything
+/// back to front, which is a few million stores; doing that per mouse packet
+/// at a hundred reports a second is a system that cannot be used. Only the
+/// eleven by seventeen rectangle under the arrow is touched.
+static SAVED: Racy<[u32; (CUR_W * CUR_H) as usize]> = Racy::new([0; (CUR_W * CUR_H) as usize]);
+static SHOWN: Racy<Option<(u32, u32)>> = Racy::new(None);
+
+pub fn cursor_hide(fb: &Framebuffer) {
+    let Some((x, y)) = (unsafe { *SHOWN.get() }) else { return };
+    let saved = unsafe { &*SAVED.get() };
+    for row in 0..CUR_H {
+        for col in 0..CUR_W {
+            if x + col < fb.width() && y + row < fb.height() {
+                fb.put(x + col, y + row, saved[(row * CUR_W + col) as usize]);
+            }
+        }
+    }
+    unsafe { *SHOWN.get() = None };
+}
+
+pub fn cursor_show(fb: &Framebuffer, x: u32, y: u32) {
+    cursor_hide(fb);
+    let saved = unsafe { &mut *SAVED.get() };
+    for row in 0..CUR_H {
+        let line = CURSOR[row as usize].as_bytes();
+        for col in 0..CUR_W {
+            let (px, py) = (x + col, y + row);
+            if px >= fb.width() || py >= fb.height() {
+                continue;
+            }
+            saved[(row * CUR_W + col) as usize] = fb.get(px, py);
+            match line.get(col as usize) {
+                Some(b'X') => fb.put(px, py, fb.raw(theme::TEXT)),
+                Some(b'.') => fb.put(px, py, fb.raw(theme::HILIGHT)),
+                _ => {}
+            }
+        }
+    }
+    unsafe { *SHOWN.get() = Some((x, y)) };
+}
+
+/// Read the mouse and act on it. Called from the idle loop.
+pub fn poll_mouse() {
+    use crate::dev::mouse;
+    if !mouse::present() || !ready() {
+        return;
+    }
+    let s = mouse::take();
+    if !s.moved {
+        return;
+    }
+    let Some(fb) = super::primary() else { return };
+
+    // A press is an edge, not a level: the mouse reports the button held down
+    // in every packet while it is down, and acting on the level would fire a
+    // click for every packet of a drag.
+    let was = unsafe { *BUTTONS.get() };
+    unsafe { *BUTTONS.get() = (s.left, s.right) };
+    let pressed_left = s.left && !was.0;
+
+    if s.wheel != 0 {
+        wheel_at(s.x, s.y, s.wheel);
+    }
+    if pressed_left {
+        click_at(s.x, s.y);
+    }
+    cursor_show(&fb, s.x.max(0) as u32, s.y.max(0) as u32);
+}
+
+static BUTTONS: Racy<(bool, bool)> = Racy::new((false, false));
+
+/// Topmost visible window containing a point.
+fn window_at(x: i32, y: i32) -> Option<usize> {
+    with(|d| {
+        d.windows.iter().rposition(|w| {
+            w.state != WinState::Minimised
+                && x >= w.rect.x as i32
+                && y >= w.rect.y as i32
+                && x < (w.rect.x + w.rect.w) as i32
+                && y < (w.rect.y + w.rect.h) as i32
+        })
+    })
+    .flatten()
+}
+
+fn click_at(x: i32, y: i32) {
+    let Some(i) = window_at(x, y) else { return };
+    // Raising is focusing here, which is the one fact the window manager keeps.
+    with(|d| d.raise(i));
+    draw();
+}
+
+fn wheel_at(x: i32, y: i32, notches: i32) {
+    let Some(i) = window_at(x, y) else { return };
+    let hit = with(|d| match &mut d.windows[i].content {
+        Content::Browser(b) => {
+            b.scroll_by(notches * 3);
+            true
+        }
+        _ => false,
+    })
+    .unwrap_or(false);
+    if hit {
+        draw();
+    }
+}
+
 /// The wall: a flat field, a sparse grid, and the mark in the middle.
 ///
 /// The same `splash::aperture` the boot screen draws, not a second copy of the
@@ -465,6 +599,10 @@ pub fn draw() {
         return;
     };
     let screen = screen_rect(&fb);
+    // Lift the pointer before repainting, or the pixels saved under it are
+    // stale the moment anything below moves, and putting them back paints a
+    // rectangle of the previous frame onto the new one.
+    cursor_hide(&fb);
     with(|d| {
         // The terminal is an application, not the screen itself. While its
         // window is minimised the shell keeps running -- it still reads serial,

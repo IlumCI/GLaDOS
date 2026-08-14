@@ -173,6 +173,26 @@ impl Framebuffer {
         unsafe { write_volatile(self.base.add(off), raw) }
     }
 
+    /// Read a pixel back, raw.
+    ///
+    /// The framebuffer is normally write-only here, and this exists for one
+    /// caller: the mouse pointer saves what it covers so it can be lifted
+    /// without repainting the desktop underneath it.
+    #[inline]
+    pub fn get(&self, x: u32, y: u32) -> u32 {
+        if x >= self.width || y >= self.height {
+            return 0;
+        }
+        let off = (y as usize) * (self.stride as usize) + (x as usize);
+        unsafe { core::ptr::read_volatile(self.base.add(off)) }
+    }
+
+    /// Encode a colour for `put`.
+    #[inline]
+    pub fn raw(&self, c: Color) -> u32 {
+        self.encode(c)
+    }
+
     pub fn fill(&self, c: Color) {
         let raw = self.encode(c);
         if raw == 0 {

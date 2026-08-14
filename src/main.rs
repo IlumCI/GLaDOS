@@ -570,6 +570,10 @@ fn init_keyboard(acpi: &Option<acpi::Acpi>) {
     };
 
     let report = dev::kbd::init(a, dev::lapic::id());
+    let mouse = dev::mouse::init(a, dev::lapic::id());
+    if let Some(fb) = gfx::primary() {
+        dev::mouse::set_bounds(fb.width() as i32, fb.height() as i32);
+    }
 
     match report.self_test {
         // 0x55 is the controller's pass code.
@@ -603,6 +607,17 @@ fn init_keyboard(acpi: &Option<acpi::Acpi>) {
             kprintln!("  FAILED to route irq1 through the ioapic");
             console::set_color(LTGRAY_IDX);
         }
+    }
+
+    if mouse.present {
+        kprintln!(
+            "  mouse   id {:?}{}, irq12 via gsi {:?}",
+            mouse.id,
+            if mouse.wheel { " with wheel" } else { "" },
+            mouse.routed_gsi
+        );
+    } else {
+        kprintln!("  mouse   no answer on port 2");
     }
 }
 

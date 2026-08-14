@@ -232,6 +232,16 @@ impl Browser {
         out
     }
 
+    /// Scroll by a number of rows, as the wheel asks.
+    pub fn scroll_by(&mut self, rows: i32) {
+        let max = self.rows_seen.get().saturating_sub(1);
+        self.scroll = if rows < 0 {
+            self.scroll.saturating_sub((-rows) as usize)
+        } else {
+            self.scroll.saturating_add(rows as usize).min(max)
+        };
+    }
+
     // --- input ------------------------------------------------------------
 
     pub fn key(&mut self, k: u8) -> bool {
