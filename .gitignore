@@ -18,3 +18,7 @@ __pycache__/
 *.pyc
 
 out/
+
+# Built images. Large, reproducible from the repo plus a model, and
+# distributed through Releases rather than through git.
+dist/

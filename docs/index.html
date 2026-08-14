@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Index of / — glados.archive</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #000000;
+    --link: #0000ee;
+    --visited: #551a8b;
+    --rule: #000000;
+    --dim: #555555;
+    --head: #f0f0f0;
+    --accent: #b35900;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #101010;
+      --fg: #d8d8d8;
+      --link: #7aa2f7;
+      --visited: #bb9af7;
+      --rule: #444444;
+      --dim: #888888;
+      --head: #1c1c1c;
+      --accent: #f28c1e;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #101010;
+    --fg: #d8d8d8;
+    --link: #7aa2f7;
+    --visited: #bb9af7;
+    --rule: #444444;
+    --dim: #888888;
+    --head: #1c1c1c;
+    --accent: #f28c1e;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: "DejaVu Sans Mono", "Liberation Mono", Consolas, monospace;
+    font-size: 14px;
+    line-height: 1.45;
+    margin: 0;
+    padding: 1.5rem 1rem 3rem;
+  }
+  .wrap { max-width: 60rem; margin: 0 auto; }
+  h1 { font-size: 1.35rem; font-weight: bold; margin: 0 0 .2rem; }
+  a { color: var(--link); text-decoration: underline; }
+  a:visited { color: var(--visited); }
+  hr { border: 0; border-top: 1px solid var(--rule); margin: .6rem 0; }
+
+  .banner {
+    color: var(--accent);
+    white-space: pre;
+    font-size: 11px;
+    line-height: 1.15;
+    overflow-x: auto;
+    margin: 0 0 .6rem;
+  }
+  .motd {
+    background: var(--head);
+    border-left: 3px solid var(--accent);
+    padding: .55rem .8rem;
+    margin: .8rem 0;
+  }
+  .motd p { margin: .3rem 0; }
+
+  .path { margin: .6rem 0 .2rem; }
+  .path .seg { color: var(--dim); }
+
+  .listing { width: 100%; border-collapse: collapse; }
+  .listing th {
+    text-align: left;
+    font-weight: bold;
+    padding: .2rem .8rem .2rem 0;
+    border-bottom: 1px solid var(--rule);
+    white-space: nowrap;
+  }
+  .listing td {
+    padding: .12rem .8rem .12rem 0;
+    vertical-align: top;
+    white-space: nowrap;
+  }
+  .listing td.desc { white-space: normal; color: var(--dim); }
+  .listing tr.dir td:first-child a { font-weight: bold; }
+  .size { text-align: right; padding-right: 1.2rem !important; }
+
+  .icon { color: var(--dim); display: inline-block; width: 2.4em; }
+
+  footer {
+    color: var(--dim);
+    font-size: 12px;
+    margin-top: 1.2rem;
+  }
+  .note { color: var(--dim); font-size: 12px; margin-top: .4rem; }
+  code { background: var(--head); padding: 0 .25em; }
+  @media (max-width: 40rem) {
+    .listing .hide-narrow { display: none; }
+    body { font-size: 13px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<pre class="banner">   ____ _        ____   ___  ____
+  / ___| |    __| |  \ / _ \/ ___|
+ | |  _| |   / _` | | | | | \___ \
+ | |_| | |__| (_| | |_| |_| |___) |
+  \____|_____\__,_|____/\___/|____/     archive mirror</pre>
+
+<h1 id="title">Index of /</h1>
+<hr>
+
+<div class="motd">
+  <p><strong>glados.archive</strong> — a ring-0 operating system in Rust with a
+  language model inside the kernel.</p>
+  <p>Images here are bootable UEFI ISOs. Write one to a USB stick with
+  <code>dd</code>, Rufus or balenaEtcher, then boot with Secure Boot disabled —
+  the kernel is unsigned.</p>
+</div>
+
+<div class="path" id="crumbs"></div>
+
+<table class="listing">
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th class="hide-narrow">Last modified</th>
+      <th class="size">Size</th>
+      <th class="hide-narrow">Description</th>
+    </tr>
+  </thead>
+  <tbody id="rows"></tbody>
+</table>
+<hr>
+
+<footer>
+  <div>GLaDOS archive — served as a static index. No cookies, no analytics,
+  nothing to accept.</div>
+  <div class="note">Copyright © 2026. All rights reserved. Source is published
+  to be read, not reused. One file
+  (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from the Linux kernel
+  and carries its own terms.</div>
+</footer>
+
+</div>
+
+<script>
+// The tree this index walks. Kept as data rather than as generated pages so the
+// whole archive is one file that works from any host, including file://.
+//
+// `href` on a leaf points at wherever the bytes actually live -- GitHub
+// Releases for images, the repository for source. Nothing large is served from
+// Pages itself, which caps at 100 MB per file and would reject every ISO here.
+const REPO = "https://github.com/IlumCI/GLaDOS";
+const REL  = REPO + "/releases/latest/download/";
+
+const TREE = {
+  "": {
+    desc: "archive root",
+    kids: [
+      { n: "iso/",        t: "dir",  d: "bootable images" },
+      { n: "src/",        t: "dir",  d: "source tree" },
+      { n: "docs/",       t: "dir",  d: "documentation" },
+      { n: "checksums/",  t: "dir",  d: "digests and verification" },
+      { n: "README.md",   t: "file", d: "start here",
+        href: REPO + "/blob/main/README.md", size: "13K", mod: "2026-08-14" },
+    ]
+  },
+  "iso": {
+    desc: "bootable images",
+    kids: [
+      { n: "glados-qwen3-0.6b.iso", t: "file",
+        d: "full image — kernel + Qwen3-0.6B, int8, 512-token context",
+        href: REL + "glados-qwen3-0.6b.iso", size: "575M", mod: "2026-08-14" },
+      { n: "glados-smollm2-135m.iso", t: "file",
+        d: "small image — kernel + SmolLM2-135M, boots under QEMU",
+        href: REL + "glados-smollm2-135m.iso", size: "257M", mod: "2026-08-14" },
+      { n: "glados-nomodel.iso", t: "file",
+        d: "kernel only — supply your own model on the ESP",
+        href: REL + "glados-nomodel.iso", size: "33M", mod: "2026-08-14" },
+    ]
+  },
+  "src": {
+    desc: "source tree",
+    kids: [
+      { n: "glados-src.tar.gz", t: "file", d: "snapshot of the repository",
+        href: REPO + "/archive/refs/heads/main.tar.gz", size: "700K",
+        mod: "2026-08-14" },
+      { n: "browse/", t: "link", d: "read it on GitHub", href: REPO },
+    ]
+  },
+  "docs": {
+    desc: "documentation",
+    kids: [
+      { n: "README.md", t: "file", d: "overview, building, hardware notes",
+        href: REPO + "/blob/main/README.md", size: "13K", mod: "2026-08-14" },
+      { n: "CLAUDE.md", t: "file",
+        d: "architecture notes and gotchas that cost time",
+        href: REPO + "/blob/main/CLAUDE.md", size: "16K", mod: "2026-08-14" },
+    ]
+  },
+  "checksums": {
+    desc: "digests and verification",
+    kids: [
+      { n: "SHA256SUMS", t: "file", d: "digests for every image above",
+        href: REL + "SHA256SUMS", size: "312", mod: "2026-08-14" },
+    ]
+  },
+};
+
+const ICON = { dir: "[DIR]", file: "[   ]", link: "[LNK]", up: "[UP ]" };
+
+// The path is a parameter with the hash as its default, rather than being read
+// from the hash inside. Not style: a render that reaches for global location is
+// one that can only be tested by driving a real browser at a real URL, and this
+// page has to work from file:// and from a static host equally.
+function render(explicit) {
+  const src = explicit !== undefined ? explicit : location.hash;
+  const path = (String(src).replace(/^#\/?/, "") || "").replace(/\/$/, "");
+  const node = TREE[path];
+  const rows = document.getElementById("rows");
+  const crumbs = document.getElementById("crumbs");
+  rows.innerHTML = "";
+
+  if (!node) {
+    document.getElementById("title").textContent = "404 — Not Found";
+    crumbs.textContent = "/" + path;
+    rows.innerHTML = '<tr><td colspan="4">No such directory. ' +
+      '<a href="#/">Return to root</a>.</td></tr>';
+    return;
+  }
+
+  const shown = "/" + (path ? path + "/" : "");
+  document.getElementById("title").textContent = "Index of " + shown;
+  document.title = "Index of " + shown + " — glados.archive";
+
+  // Breadcrumbs, each segment its own link.
+  crumbs.innerHTML = "";
+  const parts = path ? path.split("/") : [];
+  let acc = "";
+  const root = document.createElement("a");
+  root.href = "#/"; root.textContent = "/";
+  crumbs.appendChild(root);
+  parts.forEach((p) => {
+    acc = acc ? acc + "/" + p : p;
+    const a = document.createElement("a");
+    a.href = "#/" + acc; a.textContent = p;
+    crumbs.appendChild(a);
+    const s = document.createElement("span");
+    s.className = "seg"; s.textContent = "/";
+    crumbs.appendChild(s);
+  });
+
+  if (path) {
+    const up = path.split("/").slice(0, -1).join("/");
+    rows.appendChild(row({
+      n: "Parent Directory", t: "up", href: "#/" + up, size: "-", mod: "", d: ""
+    }));
+  }
+  node.kids.forEach((k) => rows.appendChild(row(k)));
+}
+
+function row(k) {
+  const tr = document.createElement("tr");
+  if (k.t === "dir") tr.className = "dir";
+
+  const name = document.createElement("td");
+  const icon = document.createElement("span");
+  icon.className = "icon";
+  icon.textContent = ICON[k.t] || ICON.file;
+  name.appendChild(icon);
+  const a = document.createElement("a");
+  a.href = k.t === "dir" ? "#/" + k.n.replace(/\/$/, "") : k.href;
+  a.textContent = k.n;
+  if (k.t !== "dir" && k.t !== "up") a.rel = "noopener";
+  name.appendChild(a);
+
+  const mod = document.createElement("td");
+  mod.className = "hide-narrow";
+  mod.textContent = k.mod || "";
+
+  const size = document.createElement("td");
+  size.className = "size";
+  size.textContent = k.size || "-";
+
+  const desc = document.createElement("td");
+  desc.className = "desc hide-narrow";
+  desc.textContent = k.d || "";
+
+  tr.append(name, mod, size, desc);
+  return tr;
+}
+
+addEventListener("hashchange", render);
+render();
+</script>
+</body>
+</html>

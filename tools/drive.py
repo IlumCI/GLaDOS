@@ -165,6 +165,11 @@ def main():
         i = argv.index("--timeout")
         timeout = int(argv[i + 1])
         del argv[i:i + 2]
+    iso = None
+    if "--iso" in argv:
+        i = argv.index("--iso")
+        iso = Path(argv[i + 1])
+        del argv[i:i + 2]
     if "--memory" in argv:
         i = argv.index("--memory")
         memory = argv[i + 1]
@@ -228,7 +233,11 @@ def main():
         # the UEFI shell having found no bootloader. So the ceiling stands, and
         # a model larger than it is not testable here at all. See the size
         # check above.
-        "-drive", f"format=raw,file=fat:rw:{esp}",
+        # An ISO boots the same kernel through El Torito instead of VVFAT,
+        # which is the only way to test that the image tools/mkiso.py produces
+        # is actually bootable rather than merely well-formed.
+        *(["-cdrom", str(iso)] if iso else
+          ["-drive", f"format=raw,file=fat:rw:{esp}"]),
         "-drive", f"file={ROOT / '.qemu/nvme.img'},if=none,id=nvm0,format=raw",
         "-device", "nvme,serial=GLADOSQEMU0001,drive=nvm0",
         # A USB controller to develop against. QEMU emulates xHCI faithfully
