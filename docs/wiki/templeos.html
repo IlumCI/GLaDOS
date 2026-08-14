@@ -47,16 +47,22 @@
 <div class="crumbs"><a href="../">GLaDOS</a> / <a href="../wiki/">Wiki</a> / TempleOS</div>
 <div id="main">
 <h1>TempleOS</h1>
-<p>TempleOS is the obvious ancestor of a project like this, and it is worth being precise about what it shares and what it does not.</p>
-<h2 id="what-is-shared">What is shared</h2>
-<ul><li><strong>Ring 0, always.</strong> No user/kernel split, no syscalls.</li><li><strong>One address space.</strong> Everything can reach everything.</li><li><strong>No isolation, as a design choice</strong> rather than an oversight. With the costs accepted rather than hidden.</li><li><strong>A deliberate aesthetic.</strong> TempleOS committed to 640×480 and 16 colours; this one commits to <a href="aperture-science.html">amber on black and Windows 3.1 chrome</a>.</li><li><strong>One person, from scratch.</strong></li></ul>
-<h2 id="what-is-not">What is not</h2>
-<p>TempleOS had its own language, HolyC, as the shell and the system language at once. GLaDOS has <a href="glados-os.html">a small interpreted language</a>, but the system is Rust and stays Rust.</p>
-<p>More fundamentally, the organising idea is different. TempleOS was built around a specific personal vision of what a computer should be. This is built around one technical question: what changes when a language model is a kernel primitive instead of a userspace process?</p>
+<figure class="fig"><img src="../img/wm/templeos.png" alt="A TempleOS desktop screenshot showing its text-mode interface" width="640" height="480" loading="lazy" decoding="async"><figcaption>TempleOS: 640×480, sixteen colours, one address space, everything at ring 0, and a compiler you could call from anywhere in the system.<span class="credit">VirtualBox TempleOS x64 27 02 2021 20 43 48.png. Terry A. Davis, TempleOS, via <a href="https://commons.wikimedia.org/wiki/File:VirtualBox_TempleOS_x64_27_02_2021_20_43_48.png" rel="noopener">Wikimedia Commons</a>.</span></figcaption></figure>
+<p>TempleOS is the obvious ancestor of a project shaped like this one, and the parts it got right are the parts this system also relies on. Terry Davis wrote it alone over more than a decade: a 64-bit operating system in ring 0, in one address space, with its own compiler, its own graphics and its own language, and it worked.</p>
+<h2 id="the-inheritance">The inheritance</h2>
+<ul><li>Ring 0, always. No user/kernel split and no syscall instruction, in either system.</li><li>One identity-mapped address space, where everything can reach everything. The paging code here says so directly: physical equals virtual, one set of page tables for the whole machine, no higher half, no per-process tables and no TLB shootdown to design.</li><li>No isolation, arrived at deliberately, with the costs written down where a reader will find them.</li><li>An aesthetic committed to on purpose. TempleOS chose 640×480 and sixteen colours and never apologised for it; this one chooses <a href="aperture-science.html">amber on black and Windows 3.1 chrome</a> and does not either.</li><li>One person, from scratch, with the tools included in the thing being built.</li></ul>
+<h2 id="where-the-two-diverge">Where the two diverge</h2>
+<p>TempleOS had HolyC serving as compiler, shell and system language simultaneously, which is a genuinely radical unification — the command line was the language, and the language was compiled. GLaDOS has <a href="glados-os.html">a small interpreted language</a> in the shell, but the system is Rust and stays Rust, and the interpreter is a guest in it.</p>
+<p>The organising question is different too. TempleOS was built around one person's particular conviction about what a computer should be. This is built around a narrower technical question: what changes when a language model is a kernel primitive and not a userspace process? That is answerable by measurement, which is a different sort of project even where the architecture rhymes.</p>
 <h2 id="what-it-got-right">What it got right</h2>
-<p>That the boundary between kernel and user is a <em>choice</em>, not a law, and that removing it makes some things genuinely simpler rather than merely more dangerous. A function call is a function call. There is no marshalling, no permission check, no context switch, and no ABI to keep stable.</p>
-<p>For a system where the model calls kernel functions millions of times, that stops being a philosophical position and becomes an engineering one.</p>
-<div class="note">Lineage, not target. This is not an attempt to continue TempleOS, and it is not a tribute to it. It is a different project that happens to have reached some of the same conclusions.</div>
+<p>That the boundary between kernel and user is a choice and not a law of nature, and that removing it makes some things genuinely simpler instead of merely more dangerous. A function call is a function call. There is no marshalling, no permission check on the way through, no context switch and no ABI that has to stay stable across a release.</p>
+<p>For a system in which a model reaches for kernel functions constantly, that stops being a philosophical position and becomes an engineering one. The identity map, the single heap and the absence of a trap gate are all load-bearing here for the same reasons they were load-bearing there, and the null-page fault guard is the one deliberate exception in both.</p>
+<h2 id="the-parts-that-turned-out-to-be-practical-not-just-philosophical">The parts that turned out to be practical, not just philosophical</h2>
+<p>Three specific things fall out of the single-address-space choice, and each one saved real work here.</p>
+<p>Identity mapping means a heap pointer is a DMA address. The NVMe driver and both network drivers hand device controllers pointers straight out of the allocator, with no IOMMU configuration, no address translation and no bounce buffers anywhere. A conventional kernel spends a meaningful amount of code on that translation layer; here it does not exist to be got wrong.</p>
+<p>The context switch is six callee-saved registers and a stack pointer. There is no privilege transition, no reload of the ring-0 stack pointer in the task state segment, no page-table swap and no TLB flush. The caller-saved registers need no handling at all, because the calling convention already permits a function call to clobber them. Preemption works by calling the switch from inside the timer interrupt: the interrupted task's full state is sitting on its own stack, pushed by the handler prologue, so swapping the stack pointer underneath means each task carries its own suspended interrupt frame around with it and resumes into the middle of its own timer handler.</p>
+<p>And there is no ABI to keep stable, anywhere, because nothing crosses a boundary. Changing the signature of a kernel function is a recompile and nothing more. For a system where the model is expected to reach into the applet table constantly, that is what keeps the table editable instead of versioned.</p>
+<div class="note">This is lineage, not continuation. It is not an attempt to carry on TempleOS and it is not a tribute; it is a different project that started from a different question and arrived at several of the same structural answers, which is the most useful kind of corroboration a design decision can get.</div>
 <div class="seealso"><b>See also:</b> <a href="../wiki/ring-0.html">Ring 0</a>, <a href="../wiki/glados-os.html">GLaDOS OS</a>, <a href="../wiki/aperture-science.html">Aperture Science</a>, <a href="../wiki/rust-os.html">Writing an OS in Rust</a></div>
 </div>
 </div>
@@ -64,10 +70,12 @@
 
 <div id="footer">
   <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This is an independent, non-commercial homage and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
-  <p>Copyright 2026. All rights reserved. Source is published to be read, not
-  reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from
-  the Linux kernel and carries its own terms.</p>
-  <p>No cookies, no analytics. Last updated 2026-08-14.</p>
+  <p>Copyright 2026. All rights reserved. The source is published to be read
+  rather than reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is
+  GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are
+  other people's and are listed on <a href="../credits.html">the
+  credits page</a>.</p>
+  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-14.</p>
 </div>
 
 </div>

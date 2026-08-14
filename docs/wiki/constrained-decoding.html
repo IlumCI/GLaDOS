@@ -47,15 +47,23 @@
 <div class="crumbs"><a href="../">GLaDOS</a> / <a href="../wiki/">Wiki</a> / Constrained decoding</div>
 <div id="main">
 <h1>Constrained decoding</h1>
-<p>When a language model picks a tool to run, the usual approach is to generate text, parse it, and handle the case where it named something that does not exist. GLaDOS makes that case impossible instead.</p>
+<figure class="fig"><img src="../img/wm/dfa.svg" alt="A small deterministic finite automaton with three states and labelled transitions" width="358" height="158" loading="lazy" decoding="async"><figcaption>A grammar over applet names compiles to a state machine of this shape. At every state the set of admissible next symbols is known, which is the whole trick.<span class="credit">DFA example multiplies of 3.svg. Self-made, Public domain, via <a href="https://commons.wikimedia.org/wiki/File:DFA_example_multiplies_of_3.svg" rel="noopener">Wikimedia Commons</a>.</span></figcaption></figure>
+<p>The standard way to get a tool call out of a language model is to ask for one in the prompt, generate text, parse the result, and handle the case where the model named a tool that does not exist. That approach is not a mistake — it is the only option available when the model sits behind an API and the sole thing you control is the text going in and out. It is also why tool calling is usually said to need a large model: a good fraction of the capability goes on producing well-formed syntax when it could have gone on choosing correctly.</p>
+<p>GLaDOS owns the sampler, so none of that applies.</p>
 <h2 id="the-mechanism">The mechanism</h2>
-<p>At each decoding step the sampler is given only the tokens that could extend the current prefix into a valid name from the live function table. Every other logit is removed <em>before</em> sampling, not checked afterwards.</p>
-<p>The consequence is categorical rather than statistical: <strong>there is no sequence of sampling outcomes that produces an invalid name.</strong> Not unlikely. Unreachable. Temperature does not matter. A badly calibrated model does not matter.</p>
+<p>At each decoding step, the set of tokens that could extend the current prefix into a valid name from the live applet table is computable. The sampler is handed exactly that set, and every other logit is removed before sampling, with nothing checked afterwards.</p>
+<p>The consequence is categorical, not statistical. There is no sequence of sampling outcomes that produces an invalid applet name — not an unlikely one, an unreachable one. Temperature is irrelevant. A badly calibrated model is irrelevant. A 260K-parameter story model driven through this grammar will choose absurdly and will still never emit anything other than a real applet name, which is a useful property to have tested against, since it proves the mechanism holds independently of whatever is loaded.</p>
+<p>What is left for the model to be wrong about is <em>which</em> applet to pick, which is the part that actually requires intelligence. Model size stops gating correctness of form and starts gating only correctness of choice. And because the decode was structured by construction, nothing needs parsing at the end: the cursor reports the index of the applet that was decoded.</p>
 <h2 id="read-only-mode-is-the-same-mechanism">Read-only mode is the same mechanism</h2>
-<p>When the system runs in a read-only trust level, mutating functions are removed from the reachable set before sampling. The model is not asked to behave and then audited; the tokens that spell <code>rm</code> simply have no path.</p>
-<p>This is why a script's mutating-ness is <em>derived</em> from its code rather than declared in its header. A script that claims to be read-only and then calls a mutating function would put a mutating entry into the read-only grammar. Which is exactly the guarantee leaking. So the system walks the syntax tree, and treats any call whose target is not a literal string as mutating, because a computed name cannot be resolved and guessing would break the property.</p>
+<p>When the system runs at a read-only trust level, the mutating applets are removed from the reachable set before sampling begins. The model is not asked to behave and then audited afterwards; the tokens that spell <code>rm</code> have no path through the grammar at all. Permission enforcement and output validity are the same piece of code, which means there is no second place for them to disagree.</p>
+<p>That is also why a script's mutating-ness is derived from its code rather than declared in a header. A script that claimed to be read-only and then called a mutating applet would insert a mutating entry into the read-only grammar, and the guarantee would leak through the one door it was not watching. So the system walks the syntax tree instead, and treats any call whose target is not a literal string as mutating — a computed name cannot be resolved ahead of time, and guessing would break the property that makes the whole thing worth having.</p>
 <h2 id="how-it-is-tested">How it is tested</h2>
-<p>The grammar's self-test runs 200 random decodes at maximum temperature and asserts that none escaped the reachable set. It also checks a subtle case: that a name which is a prefix of another name is still reachable. if <code>snap</code> and <code>snaps</code> both exist, a naive implementation makes the shorter one impossible to finish.</p>
+<p>The grammar self-test runs at every boot. It performs 200 random decodes at maximum temperature and asserts that not one escaped the reachable set, checks that the read-only grammar excludes every mutating applet and retains every read-only one, and confirms that a decode always terminates on a real applet.</p>
+<h2 id="what-it-does-not-solve">What it does not solve</h2>
+<p>Constrained decoding guarantees the shape of the output and says nothing whatsoever about its quality. The model can still pick <code>rm</code> when it should have picked <code>ls</code>, at full confidence, and the grammar will help it spell that mistake correctly. Everything on <a href="routing.html">the routing page</a> exists because that is the remaining problem and it is a harder one.</p>
+<p>There is also a cost worth naming. Restricting the sampler means computing which tokens are admissible at every step, against a vocabulary of around 150,000. Done naively that is a scan per token; done properly it is a step bound over a compiled structure, which is why the grammar is compiled once from the applet table and not interpreted per token. The compensating win is much larger: the reachable set is usually a few dozen tokens, and the output classifier is 155 MB of the model, so the same information that constrains the sampler could restrict that matrix multiply too.</p>
+<h2 id="a-property-worth-stating-precisely">A property worth stating precisely</h2>
+<p>It also covers a case that a naive implementation gets wrong. If <code>snap</code> and <code>snaps</code> both exist, then after decoding <code>snap</code> the machine is simultaneously at an accepting state and able to continue. An implementation that treats "can continue" as "must continue" makes the shorter name impossible to finish, and the applet quietly becomes unreachable — a bug that only appears when someone adds a name that extends an existing one, which is to say, later.</p>
 <div class="seealso"><b>See also:</b> <a href="../wiki/routing.html">Tool routing</a>, <a href="../wiki/llm-in-kernel.html">A language model in the kernel</a>, <a href="../wiki/tokenizer.html">Tokenizers</a>, <a href="../wiki/glados-os.html">GLaDOS OS</a></div>
 </div>
 </div>
@@ -63,10 +71,12 @@
 
 <div id="footer">
   <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This is an independent, non-commercial homage and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
-  <p>Copyright 2026. All rights reserved. Source is published to be read, not
-  reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from
-  the Linux kernel and carries its own terms.</p>
-  <p>No cookies, no analytics. Last updated 2026-08-14.</p>
+  <p>Copyright 2026. All rights reserved. The source is published to be read
+  rather than reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is
+  GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are
+  other people's and are listed on <a href="../credits.html">the
+  credits page</a>.</p>
+  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-14.</p>
 </div>
 
 </div>

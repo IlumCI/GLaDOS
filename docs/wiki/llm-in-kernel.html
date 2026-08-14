@@ -47,15 +47,18 @@
 <div class="crumbs"><a href="../">GLaDOS</a> / <a href="../wiki/">Wiki</a> / A language model in the kernel</div>
 <div id="main">
 <h1>Running a language model inside a kernel</h1>
-<p>The model is a decoder-only transformer. Qwen3-0.6B by default. quantised to int8 and executed inside the kernel address space. It is not a service, not a process, and not behind an API.</p>
+<figure class="fig wide"><img src="../img/paper/transformer-arch.png" alt="The Transformer model architecture diagram from Attention Is All You Need" width="720" height="1061" loading="lazy" decoding="async"><figcaption>The decoder-only stack this implements is the right-hand half of the original Transformer: embedding, then repeated attention and feed-forward blocks, then a projection back to vocabulary logits.<span class="credit">Figure 1, Attention Is All You Need. Vaswani, Shazeer, Parmar, Uszkoreit, Jones, Gomez, Kaiser and Polosukhin, via <a href="https://arxiv.org/abs/1706.03762" rel="noopener">arXiv 1706.03762</a>.</span></figcaption></figure>
+<p>The model is a decoder-only transformer, Qwen3-0.6B by default, quantised to int8 and executed inside the kernel's address space. It is not a service and not a process. The forward pass is a function that the shell, the router or the fault handler could all call directly, and the same page tables are in effect throughout.</p>
 <h2 id="what-is-missing-at-ring-0">What is missing at ring 0</h2>
-<p>Inference code normally assumes a great deal: an allocator, threads, BLAS, and libm. None of it is present.</p>
-<ul><li><strong>No libm.</strong> Softmax needs <code>exp</code>, RMSNorm needs <code>sqrt</code>, GELU needs <code>tanh</code>. All hand-written.</li><li><strong>No BLAS.</strong> The matrix-vector product is the whole cost of inference, so it is written directly, with an AVX2 path.</li><li><strong>No memory to waste.</strong> The 574 MB of weights are referenced in place in the pool they were loaded into, never copied.</li><li><strong>No threads.</strong> One core, cooperative yields so the shell stays responsive during generation.</li></ul>
+<p>Inference code normally assumes an enormous amount of infrastructure: an allocator, threads, a BLAS library, libm, and an operating system to provide all four. None of it is here, so each one had to be replaced or designed around.</p>
+<ul><li>No libm. Softmax is defined in terms of <code>exp</code>, RMSNorm needs a square root, GELU needs <code>tanh</code>, and none of those exist in <code>core</code>. They are written out, and the boot self-test checks them against known values because a subtly wrong <code>expf</code> produces a subtly wrong distribution and no error.</li><li>No BLAS. The matrix-vector product is essentially the entire cost of inference, so it is written directly with an AVX2 and FMA path, and falls back to scalar when the CPU does not advertise them.</li><li>No memory to waste. The weights stay in the LoaderData pool they were read into before <code>ExitBootServices</code> and are referenced in place. Copying 570 MB onto a heap that is itself only a few hundred megabytes is not an option even if it were a good idea.</li><li>No threads. One core, with cooperative yields inside the generation loop so the shell and the clock keep running while a token is being produced.</li></ul>
+<p>There is a subtler consequence of running on one core with no operating system underneath: extended CPU state has to be saved on context switch by this kernel, or the YMM registers holding a partly-computed dot product get clobbered by whatever the clock task does next. There is a guard for exactly this, which parks a known pattern in the vector registers across a spin and checks it survived. With extended state saved it never fires; without it, the error count starts climbing the moment two tasks touch floating point.</p>
 <h2 id="where-the-time-goes">Where the time goes</h2>
-<p>Generation is memory-bandwidth bound, not compute bound. Bytes read per token is roughly the model size, so a 570 MB model takes about 4.4× as long per token as a 135 MB one, almost exactly the size ratio.</p>
-<p>155 MB of that 570 is the output classifier. Since <a href="constrained-decoding.html">constrained decoding</a> only ever needs logits for the reachable token set, restricting that final matrix-vector product is the obvious win whenever the grammar is narrow.</p>
+<p>Generation is bound by memory bandwidth, not arithmetic. Producing one token requires reading essentially every weight once, so the number that predicts throughput is the size of the model in bytes, not its FLOP count. That is why the 570 MB Qwen3 checkpoint costs about 4.4 times as long per token as the 135 MB SmolLM2 one — almost exactly the size ratio, which is the signature of a bandwidth-bound workload.</p>
+<p>Around 155 MB of that 570 is the output classifier: one matrix multiply against the full vocabulary, performed once per token, to produce logits that are then mostly thrown away. When <a href="constrained-decoding.html">constrained decoding</a> is active the grammar often admits a few dozen tokens out of 150,000, and logits for the rest are computed and discarded. Restricting that final product to the reachable set is therefore the single largest available optimisation, and it is available precisely because the sampler and the grammar are in the same address space.</p>
 <h2 id="a-feature-gate-that-tested-the-wrong-feature">A feature gate that tested the wrong feature</h2>
-<p>The AVX2 kernel was gated on <code>avx_enabled && fma</code> and never on <code>avx2</code> itself. It ran on hardware that had FMA without AVX2 and produced wrong numbers, and it did not run on hardware that had AVX2 without the exact FMA reporting expected. A feature gate must test the feature the code actually uses.</p>
+<p>The AVX2 kernel was gated on <code>avx_enabled &amp;&amp; fma</code> and never on <code>avx2</code> itself. The two are separate CPUID bits and neither implies the other. So the fast path ran on hardware that had FMA without AVX2, where it produced wrong numbers, and refused to run on hardware that had AVX2 without reporting FMA the way the check expected.</p>
+<p>The rule that came out of it is worth stating plainly: a feature gate must test the feature the code uses, not a feature that usually travels with it. Numerical code makes this failure especially unpleasant, because wrong-but-finite output looks like output.</p>
 <h2 id="the-general-lesson">The general lesson</h2>
 <div class="note"><strong>A model can be wrong without being broken.</strong> <a href="rope.html">RoPE pairing</a>, QK-Norm, head width, RMSNorm epsilon and <a href="tokenizer.html">the pre-tokenizer regex</a> each produce a network that loads, runs, stays numerically well-behaved and writes fluent text. There is no error to catch. The only things that settle them are a reference implementation to diff against, or output that is supposed to contain a known fact.</div>
 <div class="seealso"><b>See also:</b> <a href="../wiki/qwen3.html">Qwen3 in 570 MB</a>, <a href="../wiki/rope.html">RoPE</a>, <a href="../wiki/kv-cache.html">The int8 KV cache</a>, <a href="../wiki/constrained-decoding.html">Constrained decoding</a>, <a href="../wiki/routing.html">Tool routing</a></div>
@@ -65,10 +68,12 @@
 
 <div id="footer">
   <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This is an independent, non-commercial homage and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
-  <p>Copyright 2026. All rights reserved. Source is published to be read, not
-  reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from
-  the Linux kernel and carries its own terms.</p>
-  <p>No cookies, no analytics. Last updated 2026-08-14.</p>
+  <p>Copyright 2026. All rights reserved. The source is published to be read
+  rather than reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is
+  GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are
+  other people's and are listed on <a href="../credits.html">the
+  credits page</a>.</p>
+  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-14.</p>
 </div>
 
 </div>

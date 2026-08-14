@@ -47,16 +47,23 @@
 <div class="crumbs"><a href="../">GLaDOS</a> / <a href="../wiki/">Wiki</a> / UEFI as the kernel</div>
 <div id="main">
 <h1>UEFI as the kernel</h1>
-<p>Most kernels are loaded by a bootloader. GRUB, systemd-boot, limine. which reads an ELF file, sets up long mode, builds a memory map and jumps to an entry point with an agreed calling convention.</p>
-<p>GLaDOS skips all of it. UEFI firmware already puts you in 64-bit long mode, at ring 0, with an identity-mapped address space and a working memory allocator. A UEFI application starting in that state is already a kernel. So this one simply is.</p>
-<h2 id="what-that-removes">What that removes</h2>
-<ul><li>No ELF loader, no relocation, no linker script gymnastics.</li><li>No handoff ABI to agree on and get subtly wrong.</li><li>No second codebase to keep in sync with the first.</li><li>No multiboot header, no protected-mode stub, no A20 line.</li></ul>
+<figure class="fig"><img src="../img/wm/uefi-logo.svg" alt="The UEFI logo" width="368" height="425" loading="lazy" decoding="async"><figcaption>UEFI replaced the BIOS with a specification that includes a filesystem driver, a memory allocator and a framebuffer, all available before your code starts.<span class="credit">Uefi logo.svg. Mouagip, Public domain, via <a href="https://commons.wikimedia.org/wiki/File:Logo_of_the_UEFI_Forum.svg" rel="noopener">Wikimedia Commons</a>.</span></figcaption></figure>
+<p>A kernel is normally loaded by a bootloader — GRUB, systemd-boot, limine — which reads an ELF file off a filesystem, arranges long mode, gathers a memory map and jumps to an entry point under an agreed calling convention. Two codebases, one handoff contract between them, and a great deal of setup code.</p>
+<p>GLaDOS skips the entire arrangement, because UEFI has already done the work. Firmware hands a UEFI application a machine in 64-bit long mode, at ring 0, with an identity-mapped address space, a working allocator, a filesystem driver, a console and a linear framebuffer. An application that starts in that state is already running under the conditions a kernel spends its first thousand lines establishing, so this one just keeps going.</p>
+<h2 id="what-that-deletes">What that deletes</h2>
+<ul><li>No ELF loader, no relocation processing, no linker script.</li><li>No handoff ABI to define, document and then get subtly wrong.</li><li>No second codebase living on its own release cycle.</li><li>No multiboot header, no protected-mode stub, no A20 gate, and no real-mode assembly anywhere in the tree.</li></ul>
+<p>The bindings to the firmware are hand-written, not taken from <code>uefi-rs</code>, which is a decision with a cost attached. Field order and padding in those structs <em>are</em> the ABI: every entry in the <code>BootServices</code> table has to be declared, in the specification's order, including all the ones that are never called, or the handful that are called sit at the wrong offsets. The machine then jumps into the middle of an unrelated firmware routine, which presents as a spontaneous reboot with nothing printed.</p>
 <h2 id="the-one-way-door">The one-way door</h2>
-<p>Boot services. The firmware's filesystem access, allocator, console and device protocols. Exist only until <code>ExitBootServices</code>. After that call they are gone, permanently, and every pointer into them is dangling.</p>
-<p>So everything the kernel needs from disk must be read <em>before</em> that moment: the 574 MB model, the tokenizer, the root certificate bundle. They are loaded into a pool that survives the transition and referenced in place afterwards, never copied to the heap.</p>
-<div class="note">This is also why the firmware's perfectly good USB stack is thrown away and <a href="usb-xhci.html">rewritten from scratch</a>. It lives in boot services. That is the price of being the kernel rather than a guest of the firmware, and it is not refundable.</div>
-<h2 id="a-memory-map-trap">A memory-map trap</h2>
-<p>Do not take the maximum over every UEFI memory descriptor to decide how much to map. OVMF describes reserved space out to 1 TiB; using that as a limit exceeds what one page-directory-pointer table can cover, the identity map silently fails to install, and the firmware's own tables stay active. Which map page zero. The null-dereference self-test then passes without faulting, for the worst possible reason.</p>
+<p>Boot services — the filesystem access, the allocator, the console, the device protocols, the firmware's own USB and disk drivers — exist only until <code>ExitBootServices</code>. After that call they are gone permanently, every pointer into them is dangling, and there is no way back. The firmware does not offer a re-entry.</p>
+<p>So everything the kernel will ever need from disk has to be read before that moment: the 570 MB of model weights, the tokenizer, and the root certificate bundle. They go into a pool allocated as <code>LoaderData</code>, which survives the transition, and are then referenced in place for the rest of the machine's life. Copying half a gigabyte onto the heap to gain nothing would be an unusual way to spend the memory.</p>
+<div class="note">This is also why the firmware's perfectly serviceable USB stack gets thrown away and <a href="usb-xhci.html">written again from scratch</a>. It lives in boot services. Being the kernel and not a guest of the firmware is the whole point, and this is the bill for it.</div>
+<h2 id="a-memory-map-trap-worth-knowing">A memory-map trap worth knowing</h2>
+<p>Do not take the maximum over every UEFI memory descriptor to decide how much address space to map. OVMF describes reserved regions out to 1 TiB, and using that as a limit needs more than one page-directory-pointer table can cover. The identity map then fails to install, silently, and the firmware's own page tables stay active instead.</p>
+<p>The reason this was expensive and not merely wrong: the firmware's tables map page zero. So the null-dereference self-test — which exists specifically to prove that page zero is unmapped — passed, without faulting, because the mapping it was testing for had never been installed. A test that passes for the exact reason it should fail is the worst possible outcome, and it is the reason boot now prints the map limit it chose.</p>
+<h2 id="what-the-kernel-builds-for-itself">What the kernel builds for itself</h2>
+<p>Once the firmware is gone, the machine runs on page tables this kernel wrote: a straight identity map, physical address equal to virtual address, covering RAM out to 4 GiB, with one deliberate exception. Virtual page zero is left unmapped. That costs one extra page table to describe the first 2 MiB at 4 KiB granularity instead of one large page, and it buys a hard fault on every null dereference — which, given the page-fault reporter, turns the most common bug in the kernel into a legible message instead of a silent read of whatever the firmware happened to leave lying at address zero.</p>
+<p>Non-RAM pages are mapped uncacheable, which is not optional: a doorbell write to an NVMe or xHCI controller that sits in a write-back cache line never reaches the device, and the resulting symptom is a controller that accepts commands and never completes them.</p>
+<p>Then a GDT, an IDT with the fault handlers installed, the local APIC timer at 100 Hz for preemption, and a PS/2 keyboard, in that order. The frame allocator underneath all of it is a bump allocator over the UEFI memory map that never frees, which is exactly right for what it is used for — the page tables and the initial heap both live for the lifetime of the machine.</p>
 <div class="seealso"><b>See also:</b> <a href="../wiki/rust-os.html">Writing an OS in Rust</a>, <a href="../wiki/ring-0.html">Ring 0</a>, <a href="../wiki/usb-xhci.html">The USB stack</a>, <a href="../wiki/iso-el-torito.html">How the ISO is built</a></div>
 </div>
 </div>
@@ -64,10 +71,12 @@
 
 <div id="footer">
   <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This is an independent, non-commercial homage and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
-  <p>Copyright 2026. All rights reserved. Source is published to be read, not
-  reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from
-  the Linux kernel and carries its own terms.</p>
-  <p>No cookies, no analytics. Last updated 2026-08-14.</p>
+  <p>Copyright 2026. All rights reserved. The source is published to be read
+  rather than reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is
+  GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are
+  other people's and are listed on <a href="../credits.html">the
+  credits page</a>.</p>
+  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-14.</p>
 </div>
 
 </div>

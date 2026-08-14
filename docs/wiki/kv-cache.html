@@ -47,17 +47,23 @@
 <div class="crumbs"><a href="../">GLaDOS</a> / <a href="../wiki/">Wiki</a> / The int8 KV cache</div>
 <div id="main">
 <h1>The int8 KV cache</h1>
-<p>The key-value cache is where an autoregressive model keeps everything it has already read. It is also, past a few thousand tokens, far larger than the model itself.</p>
+<p>The key-value cache is where an autoregressive model keeps everything it has already read, so that generating token 500 does not require recomputing the first 499. Past a few thousand tokens it is comfortably larger than the model that produced it, and on a machine whose entire heap is one contiguous allocation, its size is a design constraint rather than an implementation detail.</p>
 <h2 id="the-arithmetic">The arithmetic</h2>
-<p>For Qwen3-0.6B: 2 (keys and values) × 28 layers × 1024 kv-dimensions × 4 bytes = <strong>224 KiB per token</strong>.</p>
+<p>For Qwen3-0.6B: 2 (keys and values) × 28 layers × 1024 kv-dimensions × 4 bytes comes to 224 KiB per token. At the default 512-token context that is 112 MiB of kernel heap, which is why <code>convert.py</code> prints the figure when the context window is chosen. The window is bounded by cache size and not by the model, and finding that out as an allocation failure at boot is a worse way to learn it.</p>
 <table class="data"><thead><tr><th>Scheme</th><th>Per token</th><th>At 32,768 tokens</th></tr></thead><tbody><tr><td>f32, one allocation</td><td>224 KiB</td><td>7.0 GiB contiguous. Unreachable</td></tr><tr><td>int8, one allocation</td><td>56 KiB</td><td>1.75 GiB contiguous. Very unlikely</td></tr><tr><td>int8, split per layer</td><td>56 KiB</td><td>28 × ~66 MiB, achievable</td></tr></tbody></table>
-<p>The split is what makes long context possible at all. As a single allocation the cache needs one unbroken physical region; split per layer the largest single request drops 28-fold, and a fragmented memory map can satisfy it.</p>
+<p>Splitting per layer is what makes long context reachable at all. As one allocation the cache needs a single unbroken physical region, and the largest contiguous span a real memory map offers is nothing like its total free memory. Split per layer, the largest single request drops 28-fold, and a fragmented map can satisfy 28 requests of 66 MiB when it cannot satisfy one of 1.75 GiB.</p>
 <h2 id="quantisation-and-an-asymmetry">Quantisation, and an asymmetry</h2>
-<p>Values are stored int8 in blocks of 32 with one f32 scale per block. The measured error is not symmetric between keys and values: <strong>keys carry roughly 15× the error impact</strong>.</p>
-<p>The reason is structural. A key participates in a dot product and then goes through softmax, which is exponential, a small perturbation in a score becomes a large change in attention weight. A value is only averaged, and averaging is forgiving.</p>
+<p>Entries are stored as int8 in blocks of 32, with one f32 scale per block, so the overhead is one scale per 32 values, not one per tensor. Block scaling matters here because attention activations have outliers, and a single scale across a whole tensor spends most of its range representing one large value badly.</p>
+<p>The measured error is not symmetric between keys and values: keys carry roughly fifteen times the impact. The reason is structural. A key goes into a dot product whose result then passes through softmax, which is exponential, so a small perturbation in a score becomes a disproportionate change in attention weight — and because softmax normalises, that error redistributes across every other position too. A value is only ever averaged, and averaging is forgiving. If you have quantisation budget to spend unevenly, spend it on the keys.</p>
 <h2 id="attention-sinks-and-a-sliding-window">Attention sinks and a sliding window</h2>
-<p>Past the allocated window, the cache runs as a ring: a few initial tokens are pinned as attention sinks and the rest slides. The sinks matter more than they look. Models place a large amount of attention mass on the first few positions regardless of content, and evicting them degrades output sharply. With them, generation continues past the nominal context length instead of stopping.</p>
-<div class="note">Speed is the real ceiling, not memory. Attention is linear in live positions, so at 32k tokens it is roughly 3.8 GMAC per token on top of the model's own 0.6 GMAC. Several seconds per token at full context. Excellent for reading a long document once; painful for chat.</div>
+<figure class="fig wide"><img src="../img/paper/attention-sinks.png" alt="Heatmap of average attention logits showing large values at the initial token positions" width="720" height="164" loading="lazy" decoding="async"><figcaption>Attention logits averaged over 256 sentences in Llama-2-7B. Beyond the first couple of layers, an enormous share of the mass lands on the first few positions no matter what those positions contain.<span class="credit">Figure 2, Efficient Streaming Language Models with Attention Sinks. Xiao, Tian, Chen, Han and Lewis, via <a href="https://arxiv.org/abs/2309.17453" rel="noopener">arXiv 2309.17453</a>.</span></figcaption></figure>
+<p>Past the allocated window the cache runs as a ring: a handful of initial tokens are pinned in place as attention sinks and everything after them slides. The sinks look like an arbitrary hack and are not. Transformers place a large amount of attention mass on the first few positions regardless of what those tokens actually say — the mechanism appears to be that softmax must sum to one, so a head with nothing it wants to attend to has to put its mass somewhere, and the beginning of the sequence is the one place every query can see.</p>
+<p>Evict those positions and every head that was using them as a null option is forced to redistribute onto real tokens it does not want, which degrades output sharply and immediately. Keep four of them pinned and generation continues past the nominal context length instead of falling apart at the boundary. This is the StreamingLLM result, and it costs four cache slots.</p>
+<figure class="fig wide"><img src="../img/paper/streaming-kv.png" alt="Diagram comparing dense attention, window attention, sliding window with recomputation, and StreamingLLM" width="720" height="239" loading="lazy" decoding="async"><figcaption>Four strategies for a cache that has run out of room. Recomputing the window is correct and quadratic; naive eviction is cheap and degrades badly; keeping a few initial tokens pinned gets most of the first for the price of the second.<span class="credit">Figure 1, Efficient Streaming Language Models with Attention Sinks. Xiao, Tian, Chen, Han and Lewis, via <a href="https://arxiv.org/abs/2309.17453" rel="noopener">arXiv 2309.17453</a>.</span></figcaption></figure>
+<h2 id="why-not-simply-recompute">Why not simply recompute</h2>
+<p>The obvious alternative to any of this is to drop the cache and recompute attention over a sliding window each time. That is correct, and it is quadratic in the window length, which turns every token into a prefill. On a machine that is already bandwidth-bound and single-core, the cache is not an optimisation to be traded away — it is what makes generation possible at a usable rate at all.</p>
+<p>The int8 encoding and the sink-plus-window scheme are therefore both answers to the same question: how to keep the cache, given that doing without one is not an option.</p>
+<div class="note">Memory stops being the binding constraint before speed does. Attention is linear in the number of live positions, so at 32k tokens it comes to roughly 3.8 GMAC per token on top of the model's own 0.6 GMAC — several seconds per token at full context. That is a perfectly good rate for reading one long document once, and an unpleasant one for a conversation.</div>
 <div class="seealso"><b>See also:</b> <a href="../wiki/llm-in-kernel.html">A language model in the kernel</a>, <a href="../wiki/qwen3.html">Qwen3 in 570 MB</a>, <a href="../wiki/rope.html">RoPE</a></div>
 </div>
 </div>
@@ -65,10 +71,12 @@
 
 <div id="footer">
   <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This is an independent, non-commercial homage and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
-  <p>Copyright 2026. All rights reserved. Source is published to be read, not
-  reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from
-  the Linux kernel and carries its own terms.</p>
-  <p>No cookies, no analytics. Last updated 2026-08-14.</p>
+  <p>Copyright 2026. All rights reserved. The source is published to be read
+  rather than reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is
+  GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are
+  other people's and are listed on <a href="../credits.html">the
+  credits page</a>.</p>
+  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-14.</p>
 </div>
 
 </div>

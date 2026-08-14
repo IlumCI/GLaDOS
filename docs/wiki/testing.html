@@ -47,19 +47,21 @@
 <div class="crumbs"><a href="../">GLaDOS</a> / <a href="../wiki/">Wiki</a> / Testing without a test runner</div>
 <div id="main">
 <h1>Testing an OS with no test runner</h1>
-<p>There is no <code>cargo test</code>. This is a <code>no_std</code> UEFI binary with no host test runner, so the test suite had to be somewhere else. It is in three places.</p>
+<p>There is no <code>cargo test</code> here. This is a <code>no_std</code> UEFI binary with no host test runner and no operating system underneath it to host one, so the test suite had to go somewhere else. It went to three places, each catching a category the others cannot.</p>
 <h2 id="1-self-tests-at-boot">1. Self-tests at boot</h2>
-<p>At every boot the system exercises the heap, timer, clock, namespace, 13 sets of published cryptographic vectors, <a href="constrained-decoding.html">constrained decoding</a> and the linear probe, printing <code>ok</code> or <code>FAIL</code> per line. That output <em>is</em> the test suite.</p>
-<div class="note">It is easy to scroll past, and it does catch real bugs. An ECDSA break was visible in the crypto block for an entire debugging cycle while the output was being sliced away to look at something else.</div>
+<p>Every boot exercises the heap, the timer, the clock, the namespace, eleven sets of published cryptographic vectors, <a href="constrained-decoding.html">constrained decoding</a> and the linear probe, printing <code>ok</code> or <code>FAIL</code> on each line. That output is the test suite, and it runs on the real machine against the real hardware every time anyone starts it, which no host runner could manage.</p>
+<p>Some of those checks are more interesting than a pass line suggests. The constrained-decoding test runs 200 random decodes at maximum temperature and asserts that none escaped the grammar. The null-dereference test confirms that page zero faults, which is what caught the memory-map bug described on <a href="uefi-kernel.html">the UEFI page</a>. And there is a floating-point guard that parks a known pattern in the vector registers across a context switch and checks it survived — it never fires now, and it fires immediately if extended state saving is removed.</p>
+<div class="note">It is easy to scroll past, and it does catch real bugs. An ECDSA break was sitting in the crypto block printing <code>FAIL</code> for an entire debugging cycle while the log was being sliced down to look at something else. The Enrichment Centre reminds you that the testing protocol only works if someone reads the results.</div>
 <h2 id="2-a-scripted-qemu-harness">2. A scripted QEMU harness</h2>
-<p>A driver script boots QEMU, stages the binary, resets the firmware's NVRAM to a pristine state, and drives the shell over a serial socket, sending commands and capturing everything.</p>
-<p>Two details that were not obvious. QEMU's Windows stdio backend reads console handles directly, so piping a script into it does nothing at all . Silently; a TCP socket behaves like a socket everywhere. And a stale firmware boot entry sends the machine to the UEFI shell, which looks exactly like the system failing to boot, so the NVRAM is reset every run.</p>
-<p>The harness also captures the framebuffer through QEMU's monitor and converts it to PNG, because <a href="gui.html">a serial log says nothing about whether the screen is right</a>.</p>
+<p>A driver script boots QEMU, stages the binary, resets the firmware's NVRAM to a pristine state, and drives the shell over a serial socket, sending commands and capturing everything that comes back. That makes a regression test out of any sequence someone can type.</p>
+<p>Two details in there were not obvious in advance. QEMU's Windows stdio backend reads console handles directly, so piping a script into it does nothing whatsoever — silently, with no error and no output — whereas a TCP socket behaves like a socket on every platform. And a stale firmware boot entry sends the machine to the UEFI shell instead of the image, which is visually indistinguishable from the system failing to boot, so the NVRAM gets reset on every run and is never trusted.</p>
+<p>The harness also captures the framebuffer through QEMU's monitor and converts it to PNG, because <a href="gui.html">a serial log says nothing at all about whether the screen is right</a>. That capture found three layout bugs and produced one memorable false alarm: a screenshot taken mid-repaint looked exactly like a broken compositor and cost a bisect before the fix turned out to be waiting two seconds for the frame to settle.</p>
 <h2 id="3-a-numeric-oracle">3. A numeric oracle</h2>
-<p>For the model, a NumPy reference implementation reads the <em>converted</em> checkpoint and produces logits to diff against. Reading the converted file rather than the original is the point: a converter bug shows up in both, so only a genuine kernel bug appears as a mismatch.</p>
-<p>This is what caught <a href="rope.html">the RoPE convention</a>, which no amount of reading the code would have. Both conventions are perfectly reasonable code.</p>
+<p>For the model there is a NumPy reference implementation that reads the <em>converted</em> checkpoint and produces logits to diff against. Reading the converted file, and not the original safetensors, is the entire point of the design: a converter bug then shows up in both, so agreement plus wrong output indicts the converter, and disagreement indicts the kernel. Without that property a mismatch tells you only that something, somewhere, is wrong.</p>
+<p>This is what caught <a href="rope.html">the RoPE convention</a>, and no amount of reading the code would have. Both conventions are perfectly reasonable code that does exactly what it says. The difference only exists relative to what the weights were trained under, which is not a fact any single implementation contains.</p>
+<p>QEMU cannot run the real model, incidentally, which shapes all of this. Its built-in FAT support caps the emulated disk at 516 MB and the Qwen3 image is larger, so the full checkpoint only runs on the actual laptop. The oracle is therefore the only way to check the real model's numerics without standing in front of the hardware.</p>
 <h2 id="the-habit-underneath">The habit underneath</h2>
-<p>Measure, do not assume; and look at it. Repeatedly in this project a confident belief turned out to be false, and a cheap deterministic test found it: the oracle found the RoPE bug, screenshots found three layout bugs the serial log could not, and an A/B against a deliberately tiny context isolated an off-by-one to a single token.</p>
+<p>Measure, do not assume, and then go and look at the result. This project has produced a steady supply of confident beliefs that turned out to be false, and in almost every case a cheap deterministic check found it: the oracle found the RoPE pairing, screenshots found the layout bugs the serial log could not express, an A/B against a deliberately tiny context window isolated an off-by-one to a single token, and the evaluation harness exists because the measurement itself was got wrong three separate times before it settled.</p>
 <div class="seealso"><b>See also:</b> <a href="../wiki/gui.html">The Windows 3.1 desktop</a>, <a href="../wiki/rope.html">RoPE</a>, <a href="../wiki/tls.html">TLS 1.3 from scratch</a>, <a href="../wiki/glados-os.html">GLaDOS OS</a></div>
 </div>
 </div>
@@ -67,10 +69,12 @@
 
 <div id="footer">
   <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This is an independent, non-commercial homage and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
-  <p>Copyright 2026. All rights reserved. Source is published to be read, not
-  reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from
-  the Linux kernel and carries its own terms.</p>
-  <p>No cookies, no analytics. Last updated 2026-08-14.</p>
+  <p>Copyright 2026. All rights reserved. The source is published to be read
+  rather than reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is
+  GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are
+  other people's and are listed on <a href="../credits.html">the
+  credits page</a>.</p>
+  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-14.</p>
 </div>
 
 </div>

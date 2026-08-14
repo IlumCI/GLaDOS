@@ -47,17 +47,21 @@
 <div class="crumbs"><a href="../">GLaDOS</a> / <a href="../wiki/">Wiki</a> / Aperture Science</div>
 <div id="main">
 <h1>Aperture Science</h1>
-<p><strong>Aperture Science</strong> is the fictional research company from Valve's <em>Portal</em>, and GLaDOS is the artificial intelligence that runs its facility. This operating system takes the name and the look and applies both to something real.</p>
+<p><strong>Aperture Science</strong> is the fictional research company in Valve's <em>Portal</em>, and GLaDOS is the artificial intelligence that runs its facility, administers its tests, and is extremely encouraging about how well you are doing right up until the incinerator. This operating system takes the name and the look and points them at a real machine.</p>
 <div class="note">GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This is an independent, non-commercial homage and is not affiliated with, endorsed by, or connected to Valve in any way.</div>
 <h2 id="what-the-aesthetic-actually-is">What the aesthetic actually is</h2>
-<p>Reduced to specifics, the Aperture look is a small set of decisions:</p>
-<ul><li><strong>Amber on black.</strong> The accent here is <code>#F28C1E</code>, the colour of a CRT phosphor and of every warning label in the facility.</li><li><strong>Monospace everything.</strong> Not a font choice so much as an institutional one. The typography of test protocols and lab equipment.</li><li><strong>Cheerful text about dangerous things.</strong> The enrichment centre voice: procedural, encouraging, describing hazards in the tone of a safety video.</li><li><strong>Industrial chrome.</strong> Beveled panels, hard edges, visible structure. Which lands, conveniently, very close to Windows 3.1.</li></ul>
+<p>Reduced to things a renderer can act on, the Aperture look is four decisions:</p>
+<ul><li>Amber on black. The accent is <code>#F28C1E</code>, which is roughly the colour of an amber CRT phosphor and of every warning label in the facility. It reads as instrumentation.</li><li>Monospace everywhere, which is less a font choice than an institutional one: the typography of test protocols, lab equipment and things printed by a machine that has no opinion about kerning.</li><li>Cheerful text about dangerous things. The Enrichment Centre voice is procedural and encouraging, and describes hazards in the register of a workplace safety video.</li><li>Industrial chrome: bevelled panels, hard edges, visible structure, nothing rounded. Which lands, very conveniently, about two pixels away from Windows 3.1.</li></ul>
 <h2 id="where-it-shows-up">Where it shows up</h2>
-<p>The boot screen draws the Aperture logo as vector geometry. There is no image decoder in the kernel, so it is arcs and lines computed at startup. The desktop wallpaper uses the same mark. The window chrome is <a href="gui.html">genuine Windows 3.1</a>: two-pixel bevels, light on the top-left, dark on the bottom-right, over a <code>#C0C0C0</code> face.</p>
-<p>The result is a machine that looks like it was requisitioned by a 1990s research facility with a generous budget and poor oversight.</p>
-<h2 id="the-joke-and-the-part-that-is-not-a-joke">The joke, and the part that is not a joke</h2>
-<p>Naming an operating system after a fictional AI that murders its researchers is a joke about AI safety, and it is meant as one. The system itself is deliberately unambitious about autonomy: there is no agent loop, the model proposes and a human keystroke adopts, and self-modification is gated behind measurement on a held-out split.</p>
-<p>The engineering is not a joke at all. The <a href="network-stack.html">TCP/IP stack</a>, the <a href="tls.html">TLS 1.3 implementation</a>, the <a href="usb-xhci.html">xHCI driver</a> and the <a href="llm-in-kernel.html">transformer</a> are all real, all hand-written, and all tested.</p>
+<p>The boot screen draws the aperture mark as vector geometry, because the kernel has no image decoder and writing a PNG decoder in order to display a logo would be a strange allocation of effort. It is arcs and lines computed at startup from the same geometry the desktop wallpaper uses. The window chrome is <a href="gui.html">Windows 3.1 construction</a>: two-pixel bevels with the light at the top-left, over a <code>#C0C0C0</code> face, with the title bar filling amber on focus.</p>
+<p>That combination is not a coincidence, and the source says so: a raised panel with a sunken trough, four colours and one bitmap font is simultaneously the Windows 3.x dialog vocabulary and the cheapest thing a framebuffer can draw. No blending, no antialiasing, no gradients, no scaling. The aesthetic and the constraint turned out to be the same decision, which is why it still looks right now that there is a window manager behind it.</p>
+<p>The overall effect is a machine that looks like it was requisitioned in 1994 by a research facility with a generous budget and very little oversight.</p>
+<h2 id="the-voice-and-where-it-is-load-bearing">The voice, and where it is load-bearing</h2>
+<p>The Enrichment Centre register is not only decoration, because a system that reports failures cheerfully has to actually report them. The boot log prints a pass or fail line for every self-test, including the ones that pass. The page-fault handler decodes the error code into English and prints the faulting address instead of halting. The storage layer announces that it found no unclaimed space and is therefore doing nothing, which is a non-event that a quieter system would omit and that is exactly the thing someone needs told.</p>
+<p>There is a real design principle hiding in the joke: describe the hazard in the same tone as everything else, and do not hide the outcome you would rather not have had. The wiki is written the same way, which is why several of these pages are accounts of a measurement that went against the assumption behind it.</p>
+<h2 id="taking-the-joke-seriously">Taking the joke seriously</h2>
+<p>Naming an operating system after a fictional AI that kills its research staff is a joke about AI safety, and it is meant as one. It also sets a standard the system then has to meet, and the design is conspicuously unambitious about autonomy as a result. There is no agent loop: the model proposes and a keystroke adopts. Read-only mode works by deleting the mutating applets from the grammar before sampling begins, so a forbidden action is not rejected after the fact — there is no sequence of sampling outcomes that produces one. Self-modification, where it exists at all, is gated on measurement against a held-out split that is read once.</p>
+<p>None of the engineering is a joke. The <a href="network-stack.html">TCP/IP stack</a>, the <a href="tls.html">TLS 1.3 client</a>, the <a href="usb-xhci.html">xHCI driver</a> and the <a href="llm-in-kernel.html">transformer</a> are all hand-written and all tested at every boot. The facility is fictional. The certificate chain validation is not.</p>
 <div class="seealso"><b>See also:</b> <a href="../wiki/portal-os.html">Portal OS</a>, <a href="../wiki/gui.html">The Windows 3.1 desktop</a>, <a href="../wiki/glados-os.html">GLaDOS OS</a>, <a href="../wiki/templeos.html">TempleOS</a></div>
 </div>
 </div>
@@ -65,10 +69,12 @@
 
 <div id="footer">
   <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This is an independent, non-commercial homage and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
-  <p>Copyright 2026. All rights reserved. Source is published to be read, not
-  reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from
-  the Linux kernel and carries its own terms.</p>
-  <p>No cookies, no analytics. Last updated 2026-08-14.</p>
+  <p>Copyright 2026. All rights reserved. The source is published to be read
+  rather than reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is
+  GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are
+  other people's and are listed on <a href="../credits.html">the
+  credits page</a>.</p>
+  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-14.</p>
 </div>
 
 </div>

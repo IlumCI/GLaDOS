@@ -191,6 +191,36 @@ table.dl td.size { white-space: nowrap; }
 }
 .shot .cap { font-size: 13px; color: #444; margin-top: 4px; }
 
+/* Borrowed diagrams, floated right the way a 2005 wiki floated a thumbnail.
+   Width is fixed rather than a percentage because these sit beside prose that
+   is itself capped at 48em: a figure that grows with the viewport would swallow
+   the column it is supposed to annotate. Diagrams get a white plate behind them
+   -- most were drawn for a white page and several have transparent
+   backgrounds, so on any other colour the linework disappears. */
+figure.fig {
+  float: right;
+  width: 320px;
+  margin: 4px 0 12px 18px;
+  border: 1px solid #ccc;
+  background: #f9f9f9;
+  padding: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+figure.fig img {
+  display: block;
+  width: 100%;
+  height: auto;
+  background: #fff;
+}
+figure.fig figcaption { color: #444; margin-top: 5px; }
+figure.fig .credit { display: block; color: #777; margin-top: 3px; font-size: 11px; }
+figure.fig .credit a { color: #777; }
+
+/* A figure wider than the text it interrupts, for the two diagrams that are
+   unreadable at 320px. */
+figure.fig.wide { float: none; width: auto; max-width: 48em; margin: 14px 0; }
+
 .wikilist { list-style: square; }
 .wikilist span { color: #555; }
 
@@ -226,6 +256,7 @@ dl.faq dd { margin: 3px 0 0 20px; }
   #sidebar { float: none; width: auto; }
   #content { margin-left: 0; }
   .infobox { float: none; width: 100%; margin-left: 0; }
+  figure.fig { float: none; width: auto; margin-left: 0; margin-right: 0; }
   #body { padding: 10px; }
   #masthead, #bar, #footer { padding-left: 10px; padding-right: 10px; }
 }

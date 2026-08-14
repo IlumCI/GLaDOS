@@ -47,8 +47,10 @@
 <div class="crumbs"><a href="../">GLaDOS</a> / Archive</div>
 <div id="main">
 <h1>GLaDOS archive</h1>
-<p>A file index in the shape of the mirrors this sort of thing used to be distributed from. Images are served from GitHub Releases. GitHub Pages caps at 100 MB per file and would reject every one of them.</p>
-<p>If you only want the ISO, <a href="../download/">the download page</a> has flashing instructions and hardware notes alongside it.</p>
+<p>A file index in the shape of the mirrors this sort of thing used to be distributed from, back when the way you got an operating system was to find a directory listing at a university and hope it was nearby. The listing below is live; the files behind it are served from GitHub Releases, because GitHub Pages caps at 100 MB per file and would turn away every ISO here.</p>
+<p>Sizes are what they are for reasons the <a href="../wiki/iso-el-torito.html">ISO page</a> explains: most of the 575 MB image is model weights, and even the 33 MB kernel-only image is at the smallest size FAT32 permits, which is not the smallest size the payload needs.</p>
+<p>Every release carries a <a href="https://github.com/IlumCI/GLaDOS/releases/latest/download/SHA256SUMS">SHA256SUMS</a> file. Checking it is worthwhile, since a truncated ISO still flashes and still boots before failing somewhere unrelated to the truncation.</p>
+<p>If you only want the ISO, <a href="../download/">the download page</a> has flashing instructions and hardware notes next to it.</p>
 <h2 id="atitle">Index of /</h2>
 <table class="listing">
 <thead><tr><th>Name</th><th>Size</th><th>Description</th></tr></thead>
@@ -126,10 +128,12 @@
 
 <div id="footer">
   <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This is an independent, non-commercial homage and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
-  <p>Copyright 2026. All rights reserved. Source is published to be read, not
-  reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from
-  the Linux kernel and carries its own terms.</p>
-  <p>No cookies, no analytics. Last updated 2026-08-14.</p>
+  <p>Copyright 2026. All rights reserved. The source is published to be read
+  rather than reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is
+  GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are
+  other people's and are listed on <a href="../credits.html">the
+  credits page</a>.</p>
+  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-14.</p>
 </div>
 
 </div>

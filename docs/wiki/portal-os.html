@@ -47,13 +47,19 @@
 <div class="crumbs"><a href="../">GLaDOS</a> / <a href="../wiki/">Wiki</a> / Portal OS</div>
 <div id="main">
 <h1>Portal OS</h1>
-<p>Search for a "Portal OS" and you mostly find themes: wallpapers, icon packs, a terminal colour scheme, occasionally a Linux distribution with the logo swapped. This is not that.</p>
-<p>GLaDOS is an operating system in the literal sense. It boots on bare metal, brings up its own page tables, drives its own hardware, and has no Linux, no BSD and no kernel from anyone else underneath it. The Portal reference is in the name, the <a href="aperture-science.html">aesthetic</a>, and one design joke. Everything else is an operating system.</p>
-<h2 id="what-makes-it-portal-ish">What makes it Portal-ish</h2>
-<ul><li>Named for the facility AI, and the resident model answers as it.</li><li>The <a href="aperture-science.html">Aperture visual language</a>: amber on black, monospace, vector-drawn logo at boot.</li><li>A tone that treats catastrophic failure as a procedural note.</li></ul>
-<h2 id="what-makes-it-an-operating-system">What makes it an operating system</h2>
+<p>GLaDOS is an operating system in the literal sense: it boots on bare metal, builds its own page tables, drives its own hardware, and has no Linux, no BSD and no kernel from anyone else underneath it. The Portal connection is in the name, in the <a href="aperture-science.html">visual language</a>, and in the voice the resident model answers in. Underneath that, it is a kernel, and the table further down is the honest inventory of what that means.</p>
+<p>The distinction matters mostly because the phrase gets used for theme packs, and someone arriving here from a search deserves to know within a paragraph which kind of thing they have found. This one requires you to turn Secure Boot off.</p>
+<h2 id="the-portal-shaped-parts">The Portal-shaped parts</h2>
+<ul><li>It is named for the facility AI, and the model answers in that register.</li><li>The <a href="aperture-science.html">Aperture palette</a> throughout: amber on black, monospace type, and the mark drawn as vector geometry at boot because there is no image decoder to draw it any other way.</li><li>A tone that treats catastrophic failure as a procedural note. The fault handler reports a page fault by decoding the error code into English and printing the faulting address, which is the Enrichment Centre approach to hazards and also just good diagnostics.</li><li>One design joke that is also the safety argument: the AI it is named after went autonomous, and this one categorically has not.</li></ul>
+<h2 id="the-operating-system-shaped-parts">The operating-system-shaped parts</h2>
 <table class="data"><thead><tr><th>Layer</th><th>What is there</th></tr></thead><tbody><tr><td>Boot</td><td>Its own UEFI application; no GRUB, no shim, no Linux</td></tr><tr><td>Memory</td><td>Physical frame allocator and hand-built page tables</td></tr><tr><td>Scheduling</td><td>Preemptive multitasking on an APIC timer</td></tr><tr><td>Drivers</td><td>NVMe, Intel e1000, Realtek RTL8168, xHCI USB 3</td></tr><tr><td>Network</td><td>Its own ARP, IPv4, ICMP, UDP, TCP, DHCP, DNS, TLS 1.3</td></tr><tr><td>Crypto</td><td>Its own SHA-2, AES, ChaCha20, X25519, RSA, ECDSA</td></tr><tr><td>Graphics</td><td>Its own compositor and window manager</td></tr><tr><td>AI</td><td>Its own transformer inference, in kernel space</td></tr></tbody></table>
-<p>The only code in it that was not written for this project is Rust's <code>core</code> library, and <a href="usb-wifi-driver.html">509 hardware constants</a> transcribed from Linux because there is no other source for them.</p>
+<p>The only code in the tree that was not written for this project is Rust's <code>core</code> library, which the compiler supplies, and <a href="usb-wifi-driver.html">509 hardware initialisation constants</a> transcribed from Linux's <code>rtl8xxxu</code> driver because no datasheet for that chip exists and there is nowhere else to get them. That is one file, it says so at the top, and it is listed on <a href="../credits.html">the credits page</a>.</p>
+<h2 id="what-using-it-is-like">What using it is like</h2>
+<p>The action surface is shaped like busybox: one flat table of small applets, each with a name, an argument spec, a line of help, and a flag saying whether it can change anything. That shape was borrowed because it is the right shape for something that is not only typed at — the table renders directly into a prompt, and the mutation flag is the leash, so read-only applets can be handed to the model long before the rest.</p>
+<p>Because the namespace underneath is content-addressed, the applet list reads slightly strangely to anyone expecting POSIX. <code>cp</code> is constant time at any size. <code>same</code> compares two whole subtrees in a single step. <code>rm</code> detaches a name and the content survives. <code>diff</code> compares two snapshots while skipping every subtree whose hashes already match, and <code>snap</code> commits the working tree for the price of one hash. None of that was designed in as a feature list; it is what content addressing already implies.</p>
+<p>Around that sits a shell with about eighty commands. <code>gen</code> and <code>ask</code> drive the model, <code>route</code> and <code>act</code> are the two tool-routing paths, <code>teach</code> adds an example to the corpus and <code>fit</code> refits the probe from it. <code>ping</code>, <code>dhcp</code>, <code>dns</code> and <code>https</code> exercise the network; <code>pci</code>, <code>usb</code>, <code>nvme</code> and <code>cpu</code> report on hardware; <code>vi</code> is a text editor and <code>enternet</code> is a browser. There is also a small interpreted language, so a sequence of those can be a script.</p>
+<h2 id="where-scepticism-is-warranted">Where scepticism is warranted</h2>
+<p>The parts worth being sceptical about are the ones where writing everything yourself is a liability. Hand-written cryptography is the clearest case: a mistake there produces output that works perfectly and is not secure, which is why every primitive is checked against published RFC vectors on every boot and why <a href="tls.html">the TLS page</a> spends most of its length on what is still wrong with it.</p>
 <div class="note">GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This is an independent, non-commercial homage and is not affiliated with, endorsed by, or connected to Valve in any way.</div>
 <div class="seealso"><b>See also:</b> <a href="../wiki/aperture-science.html">Aperture Science</a>, <a href="../wiki/glados-os.html">GLaDOS OS</a>, <a href="../wiki/rust-os.html">Writing an OS in Rust</a>, <a href="../download/">Download</a></div>
 </div>
@@ -62,10 +68,12 @@
 
 <div id="footer">
   <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This is an independent, non-commercial homage and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
-  <p>Copyright 2026. All rights reserved. Source is published to be read, not
-  reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from
-  the Linux kernel and carries its own terms.</p>
-  <p>No cookies, no analytics. Last updated 2026-08-14.</p>
+  <p>Copyright 2026. All rights reserved. The source is published to be read
+  rather than reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is
+  GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are
+  other people's and are listed on <a href="../credits.html">the
+  credits page</a>.</p>
+  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-14.</p>
 </div>
 
 </div>

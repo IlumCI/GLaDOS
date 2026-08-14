@@ -47,18 +47,27 @@
 <div class="crumbs"><a href="../">GLaDOS</a> / <a href="../wiki/">Wiki</a> / Qwen3 in 570 MB</div>
 <div id="main">
 <h1>Qwen3-0.6B in a kernel</h1>
-<p>Qwen3-0.6B is the default model: 28 layers, 1024-dimensional residual stream, 16 query heads and 8 key/value heads, quantised to int8 for about 570 MB on disk.</p>
-<h2 id="it-is-not-a-llama-and-neither-difference-is-loud">It is not a Llama, and neither difference is loud</h2>
-<h3>Head width is stated, not derived</h3>
-<p>Most implementations compute head dimension as <code>dim / n_heads</code>. For Qwen3 that gives 1024/16 = 64, and the correct answer is <strong>128</strong>. The model states it independently, which means the query projection is 2048 wide against a 1024-wide residual stream. The attention path is deliberately wider than the thing it reads from.</p>
-<p>Derive it instead and every weight tensor is reshaped wrong. The model still loads. It still runs. It generates confident nonsense.</p>
-<h3>QK-Norm</h3>
-<p>Qwen3 applies RMSNorm to each head's queries and keys, per head, before rotary embeddings. Omit it and the model remains numerically well-behaved and produces fluent text. Just text from a network being fed activations it was never trained on.</p>
+<figure class="fig wide"><img src="../img/paper/attention-heads.png" alt="Diagram of multi-head attention with parallel scaled dot-product attention blocks" width="720" height="1105" loading="lazy" decoding="async"><figcaption>Multi-head attention runs several attention operations in parallel and concatenates them. How wide each of those heads is turns out not to be something you can safely infer.<span class="credit">Figure 2 (right), Attention Is All You Need. Vaswani, Shazeer, Parmar, Uszkoreit, Jones, Gomez, Kaiser and Polosukhin, via <a href="https://arxiv.org/abs/1706.03762" rel="noopener">arXiv 1706.03762</a>.</span></figcaption></figure>
+<p>Qwen3-0.6B is the default checkpoint: 28 layers, a 1024-dimensional residual stream, 16 query heads against 8 key/value heads in grouped-query attention, and int8 quantisation bringing it to roughly 570 MB on disk. Loading it revealed two ways in which it differs from a Llama, and the interesting property of both is that getting them wrong raises nothing.</p>
+<h2 id="head-width-is-stated-not-derived">Head width is stated, not derived</h2>
+<p>Almost every implementation computes the head dimension as <code>dim / n_heads</code>, because for Llama that is the definition. For Qwen3 that arithmetic gives 1024/16 = 64, and the correct answer is 128. The architecture states head width as an independent hyperparameter, which makes the query projection 2048 wide against a residual stream of 1024. The attention path is deliberately wider than the thing it reads from, and narrows again on the way out.</p>
+<p>Derive it instead and every attention tensor gets reshaped along the wrong axis. The shapes remain self-consistent — that is the trap, since 64 divides 1024 perfectly well — so nothing asserts, nothing overflows, and the model loads and runs and produces confident nonsense. The source comment on that field names it as the first thing to suspect when a converted model is fluent and wrong.</p>
+<h2 id="qk-norm">QK-Norm</h2>
+<p>Qwen3 also applies RMSNorm to each head's queries and keys, per head, before rotary embeddings go on. Omitting the step leaves the network numerically well-behaved — the vectors are just a bit longer than they should be, in a way softmax mostly absorbs — and it will keep producing fluent English. The text is coming from a network being fed activations at a scale it never saw in training, which is a model hallucinating for a mechanical reason, and the mechanical kind does not go away with a better prompt.</p>
 <h2 id="how-these-get-caught">How these get caught</h2>
-<p>Not by exceptions, because there are none. The checkpoint converter writes both facts into the file header so they travel with the weights rather than being inferred, and a NumPy reference implementation reads the <em>converted</em> file and produces logits to diff against. A converter bug shows up there too; only a kernel bug shows as a mismatch between the two.</p>
-<p>The cheap end of the same check is reading the output. An instruction-tuned model whose attention path is wired correctly answers "what is the capital of France" with Paris.</p>
+<p>Not by exceptions, because there are none to catch. Three things are doing the work instead.</p>
+<p>First, the checkpoint converter writes both facts into the file header, so head width and the QK-norm flag travel with the weights and are never guessed at load time. That is what version 3 of the <code>GLADOSM3</code> format added; version 2 files still load, and their defaults are exactly the Llama ones, which is correct for every checkpoint that predates the problem.</p>
+<p>Second, there is a NumPy reference implementation that reads the <em>converted</em> file rather than the original safetensors. This matters more than it sounds: a converter bug shows up in the reference too, so a mismatch between reference and kernel isolates the fault to the Rust side, and agreement between them plus wrong output isolates it to the converter.</p>
+<p>Third, and cheapest: read what comes out. An instruction-tuned model with a correctly wired attention path answers "what is the capital of France" with Paris. One with a subtly scrambled one writes a fluent paragraph that never quite arrives at the fact. Having a known answer to check against is worth a surprising amount when there is no error to catch.</p>
 <h2 id="thinking-tokens">Thinking tokens</h2>
-<p>Qwen3 reasons at length inside <code>&lt;think&gt;</code> blocks when left alone, which is the model working as designed and useless at a 64-token budget. The shell closes the block itself unless told not to. Whether the model has thinking tokens at all is decided by asking the tokenizer whether it knows <code>&lt;think&gt;</code> as a single token , a property of the vocabulary, rather than a guess from the model's name.</p>
+<p>Left to itself, Qwen3 reasons at length inside a <code>&lt;think&gt;</code> block before answering. That is the model working exactly as designed and completely useless at a 64-token budget, where the entire generation is spent deliberating and the answer never arrives. So <code>ask</code> closes the block itself unless given <code>-t</code>.</p>
+<p>Whether a checkpoint has thinking tokens at all is decided by asking the tokenizer whether it knows <code>&lt;think&gt;</code> as a single token. That is a property of the vocabulary, which is a fact, as opposed to pattern-matching on the model's filename, which is a guess that fails the first time someone renames a file.</p>
+<h2 id="getting-it-onto-the-machine">Getting it onto the machine</h2>
+<p>The checkpoint arrives as safetensors and is flattened by a converter into a layout the kernel indexes by arithmetic — a header followed by tensors in a fixed order, so loading is a matter of computing offsets against a buffer that was read before <code>ExitBootServices</code>. Nothing is rearranged at boot, because rearranging 570 MB at boot would require somewhere to put it.</p>
+<p>The context window is a converter argument, and the <a href="kv-cache.html">KV cache</a> is what bounds it, not the model. Qwen3 at 512 tokens costs 112 MiB of kernel heap, and the converter prints that figure at conversion time so the decision is made where the trade-off is visible, instead of being discovered as an allocation failure on a laptop with no debugger attached.</p>
+<p>Int8 quantisation is per-block with an f32 scale, which matters for the same reason it matters in the KV cache: transformer weights have outliers, and one scale across an entire tensor spends most of its dynamic range representing a handful of large values badly while flattening everything else.</p>
+<h2 id="running-it-at-all">Running it at all</h2>
+<p>Qwen3-0.6B only runs on real hardware. QEMU's built-in FAT support caps the whole emulated disk at 516 MB — <code>fat:32:</code> raises that in principle, but QEMU describes its FAT32 as untested and the firmware cannot read the directory it produces — so QEMU work uses the SmolLM2 checkpoint and the real model is only exercised on the GF63, or numerically against the reference implementation.</p>
 <div class="seealso"><b>See also:</b> <a href="../wiki/llm-in-kernel.html">A language model in the kernel</a>, <a href="../wiki/rope.html">RoPE</a>, <a href="../wiki/tokenizer.html">Tokenizers</a>, <a href="../wiki/kv-cache.html">The int8 KV cache</a></div>
 </div>
 </div>
@@ -66,10 +75,12 @@
 
 <div id="footer">
   <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This is an independent, non-commercial homage and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
-  <p>Copyright 2026. All rights reserved. Source is published to be read, not
-  reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from
-  the Linux kernel and carries its own terms.</p>
-  <p>No cookies, no analytics. Last updated 2026-08-14.</p>
+  <p>Copyright 2026. All rights reserved. The source is published to be read
+  rather than reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is
+  GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are
+  other people's and are listed on <a href="../credits.html">the
+  credits page</a>.</p>
+  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-14.</p>
 </div>
 
 </div>

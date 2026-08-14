@@ -47,17 +47,25 @@
 <div class="crumbs"><a href="../">GLaDOS</a> / <a href="../wiki/">Wiki</a> / Tokenizers</div>
 <div id="main">
 <h1>Tokenizers</h1>
-<p>A byte-pair encoding tokenizer has two halves. A merge table, which everyone remembers, and a <strong>pre-tokenizer regex</strong> that splits text into candidate pieces before any merging happens. Which people forget, because it is usually invisible.</p>
+<p>A byte-pair encoding tokenizer has two halves. There is the merge table, which is the part everyone pictures: a ranked list of byte pairs, applied greedily until nothing more can be joined. And there is a pre-tokenizer regex, which chops the input into candidate pieces <em>before</em> any merging happens and forbids merges from crossing the boundaries it creates. The second half is easy to forget, because when it is right it is invisible.</p>
+<p>The kernel's tokenizer reads a flat binary: a maximum token length, then one record per vocabulary entry holding a merge score, a length and that many raw bytes. The vocabulary size deliberately is not in the file — it comes from the model header, which is what binds a tokenizer to a particular checkpoint. Hand it a mismatched pair and it parses cheerfully and produces nonsense.</p>
 <h2 id="the-regexes-differ-and-it-matters">The regexes differ, and it matters</h2>
-<p>GPT-2's pattern and cl100k's pattern disagree in ways that look cosmetic:</p>
-<ul><li>Under cl100k, a word may be led by any non-alphanumeric character, so <code>(x</code> is <em>one</em> piece rather than two.</li><li>Digits are emitted one at a time rather than in runs.</li><li>Punctuation swallows the newlines that follow it.</li></ul>
-<p>SmolLM2 trained with the GPT-2 pattern. Qwen3 spells out the cl100k one. Using the wrong pattern moved <strong>about 12% of tokens</strong> on this project's training corpus. Including on the ChatML structure that the instruction tuning depends on.</p>
+<p>GPT-2's pattern and the cl100k pattern disagree in ways that read as cosmetic:</p>
+<ul><li>Under cl100k a word may be led by any non-alphanumeric character, so <code>(x</code> is one piece and not two.</li><li>Digits come out one at a time, never in runs, so <code>2048</code> is four pieces.</li><li>Punctuation swallows the newlines that follow it, which changes how every line ending in a full stop tokenises.</li></ul>
+<p>SmolLM2 trained with the GPT-2 pattern. Qwen3 spells out the cl100k one explicitly as a Split rule in its tokenizer configuration. Using the wrong one moved about 12% of tokens across this project's training corpus — including, unhelpfully, the ChatML control structure that the instruction tuning depends on, where <code>&lt;|im_start|&gt;</code> and its neighbours have to land exactly as trained.</p>
 <h2 id="twelve-percent-of-nothing-visible">Twelve percent of nothing visible</h2>
-<p>There is no error. The tokenizer produces token ids, the model consumes them and emits fluent text. What is actually happening is that the model is being fed sequences it never saw during training, and it degrades gently rather than failing.</p>
-<p>So the checkpoint carries which pre-tokenizer it needs as a flag in its header, alongside <a href="qwen3.html">head width and QK-norm</a>. After the fix, divergence across 407 texts and 66,598 tokens was <strong>zero</strong>.</p>
+<p>There is no error anywhere in that. The tokenizer emits ids, the ids are in range, the model consumes them and produces fluent text. What is happening underneath is that the model is being handed sequences whose segmentation it never saw in training, and transformers degrade gently under that without failing — a word split two ways instead of one still carries most of its meaning through the embedding.</p>
+<p>The fix is the same shape as the one for <a href="qwen3.html">head width and QK-norm</a>: the checkpoint carries which pre-tokenizer it needs as a flag in its own header, so the fact travels with the weights instead of being inferred. After that change, divergence across 407 texts and 66,598 tokens was zero.</p>
 <h2 id="verify-against-the-reference-always">Verify against the reference, always</h2>
-<p>The converter has a <code>--verify</code> mode that reimplements the kernel's algorithm in Python and diffs it against the reference <code>tokenizers</code> library, token for token. It is not optional. A tokenizer that is subtly wrong produces text that still looks like text.</p>
-<div class="note">A related trap: sizing the vocabulary from the merge table. Qwen3's 293 special tokens live <em>above</em> it, so the vocabulary was indexed past its end, and the end-of-turn token resolved to id 2. meaning generation would never stop. Size from the highest added token id, not from the BPE table.</div>
+<p>The converter has a <code>--verify</code> mode that reimplements the kernel's algorithm in Python and diffs it, token for token, against the reference <code>tokenizers</code> library. Running it is not optional, for the reason that runs through this whole section of the wiki: a tokenizer that is subtly wrong produces text that still looks like text, so the only thing that catches it is a comparison against something known to be right.</p>
+<h2 id="what-the-kernel-s-implementation-actually-does">What the kernel's implementation actually does</h2>
+<p>Encoding runs greedy byte-pair merging over the pieces the pre-tokenizer produced. Start with the individual bytes, repeatedly find the adjacent pair whose merged form has the best score in the vocabulary, and join it, until no pair can be joined. The vocabulary is kept sorted by byte string so a merge candidate is found by binary search and not by scanning 150,000 entries per step, which is the difference between tokenising a prompt instantly and tokenising it noticeably.</p>
+<p>Bytes the vocabulary cannot express fall back to single-byte pieces. SentencePiece with byte fallback places those 256 pieces immediately after the three control ids, so any unrepresentable byte becomes <code>byte + 3</code>. That offset is a constant in the source with a comment explaining where the three comes from, because it is exactly the kind of number that looks arbitrary six months later.</p>
+<p>Three further per-checkpoint behaviours ride along as flags in the header, where the code would otherwise have assumed them: whether to prepend a dummy space, whether digits are split individually, and which pre-tokenizer regex applies. Every one of them is a property of how the model was trained, and every one of them fails silently if guessed.</p>
+<h2 id="an-earlier-design-and-why-it-was-abandoned">An earlier design, and why it was abandoned</h2>
+<p>The model code was originally written around a byte-level vocabulary of 256 entries, which removes the tokenizer completely — no merge table, no vocabulary file to get onto a machine that has no filesystem driver yet. For bootstrapping something that had to run before storage existed, that was the right trade.</p>
+<p>It cost roughly four times the context per unit of text, since every character is a token. Once the kernel could read files, a real vocabulary became a 6 KB read that buys back all of it, and the byte-level path was retired. The trade was correct when it was made and wrong six months later, which is the usual shape of a bootstrapping decision.</p>
+<div class="note">A related trap, and an expensive one. Sizing the vocabulary from the merge table is wrong for Qwen3, whose 293 special tokens live <em>above</em> it. Doing that indexed the vocabulary past its end and resolved the end-of-turn token to id 2, so generation had no way to stop and simply ran to the token limit every time. Size from the highest added token id instead.</div>
 <div class="seealso"><b>See also:</b> <a href="../wiki/qwen3.html">Qwen3 in 570 MB</a>, <a href="../wiki/llm-in-kernel.html">A language model in the kernel</a>, <a href="../wiki/constrained-decoding.html">Constrained decoding</a></div>
 </div>
 </div>
@@ -65,10 +73,12 @@
 
 <div id="footer">
   <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This is an independent, non-commercial homage and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
-  <p>Copyright 2026. All rights reserved. Source is published to be read, not
-  reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from
-  the Linux kernel and carries its own terms.</p>
-  <p>No cookies, no analytics. Last updated 2026-08-14.</p>
+  <p>Copyright 2026. All rights reserved. The source is published to be read
+  rather than reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is
+  GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are
+  other people's and are listed on <a href="../credits.html">the
+  credits page</a>.</p>
+  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-14.</p>
 </div>
 
 </div>

@@ -47,19 +47,24 @@
 <div class="crumbs"><a href="../">GLaDOS</a> / <a href="../wiki/">Wiki</a> / Tool routing</div>
 <div id="main">
 <h1>Tool routing</h1>
-<p>Given a task in natural language, something has to decide which function to call. This system has two implementations, and the interesting result is that the older idea wins.</p>
+<figure class="fig"><img src="../img/wm/linear-regression.svg" alt="A scatter plot with a fitted least-squares regression line" width="350" height="231" loading="lazy" decoding="async"><figcaption>Least squares fits a line by minimising squared error, and has a closed-form solution. Ridge regression is the same idea with a regularisation term, and it is what routes tool calls here.<span class="credit">Linear regression.svg. Sewaqu, Public domain, via <a href="https://commons.wikimedia.org/wiki/File:Linear_regression.svg" rel="noopener">Wikimedia Commons</a>.</span></figcaption></figure>
+<p>Given a task written in natural language, something has to decide which applet to call. There are two implementations of that in the tree, and the interesting result — interesting enough that it shaped how the rest of the project is evaluated — is that the much older idea wins comfortably.</p>
 <h2 id="the-two-paths">The two paths</h2>
-<table class="data"><thead><tr><th>Approach</th><th>Cost</th><th>Accuracy</th></tr></thead><tbody><tr><td>Decode the name token-by-token under a grammar</td><td>A full transformer forward pass per token</td><td>Lower</td></tr><tr><td>Read one hidden state into a ridge regression</td><td>12,672 parameters, ~1.6 ms, <strong>no forward pass</strong></td><td><strong>Higher</strong></td></tr></tbody></table>
-<p>The second is a linear probe: take the hidden state the model has already computed, and multiply it by a matrix solved in closed form by Cholesky decomposition. The Widrow-Hoff least-mean-squares idea from 1960, fitted inside the kernel at boot.</p>
-<p>It wins on held-out accuracy <em>and</em> costs nothing, because the hidden state is a byproduct of work already done.</p>
+<table class="data"><thead><tr><th>Approach</th><th>Cost</th><th>Held-out accuracy</th></tr></thead><tbody><tr><td>Decode the applet name token by token under a grammar</td><td>A transformer forward pass per token, 191 of them across the evaluation</td><td>5.7%</td></tr><tr><td>Nearest neighbour on pooled embeddings</td><td>One pass over the corpus per query</td><td>32.1%</td></tr><tr><td>Ridge regression on one hidden state</td><td>12,672 parameters, ~1.6 ms, no forward pass</td><td>54.7%</td></tr></tbody></table>
+<p>The winner is a linear probe. Take the hidden state the model has already computed while reading the request, subtract a mean, and multiply by a 576×22 matrix. That matrix is solved in closed form — <code>W = (A'A + λI)⁻¹A'Y</code>, by Cholesky decomposition — which is ridge regression onto one-hot targets, or Widrow-Hoff least mean squares as published in 1960, solved directly instead of by descent.</p>
+<p>It costs effectively nothing, because the hidden state is a byproduct of work already done, and it beats asking the 135M transformer the same question by a factor of nine.</p>
+<h2 id="why-the-closed-form-matters-more-than-the-accuracy">Why the closed form matters more than the accuracy</h2>
+<p>The probe replaced a gradient-descent head, and that head was measured getting <em>worse</em> as it trained: 30% held-out accuracy untrained, 10% after two epochs, 0% after eight. With forty examples spread across twenty-one classes there is nothing for SGD to do except memorise, and it did, thoroughly.</p>
+<p>Ridge regression has no such failure mode. There is no learning rate, no epoch count and no schedule, so there is no way for it to drift past the optimum — it <em>is</em> the optimum for the regularisation chosen. That property is also what makes fitting practical on the machine itself: a 576×576 Cholesky is about 64 million operations, a fraction of a second, so the system can refit from its own accumulated corpus every time someone runs <code>teach</code>.</p>
+<p>One detail that turned out to be load-bearing: the mean subtraction is not cosmetic. Pooled embeddings share a large common component, because every sentence contains the same function words, and leaving it in makes every pair of examples about 0.99 similar. The argmax then falls out as whichever vector happens to be longest. Uncentred nearest-neighbour answered the same class for all twelve items it was first tried on.</p>
 <h2 id="agreement-not-votes">Agreement, not votes</h2>
-<p>Three independent classifiers run: the linear probe, a hashed n-gram Bayes model, and a lexical matcher. The useful signal turns out not to be their majority vote but <strong>whether they agree</strong>:</p>
-<ul><li>All three agree: <strong>90%</strong> correct.</li><li>They split: <strong>61%</strong> correct.</li></ul>
-<p>That 29-point gap is actionable in a way a vote is not. It is a confidence measure that costs nothing extra, and it is what the system gates on when deciding whether to act or ask.</p>
+<p>Three independent cores run over the same request: the ridge probe, a multinomial naive Bayes over hashed character trigrams, and a lexical one over exact token identity. The two Bayes cores are trained by counting, so there is no matrix to factorise, and each sees something the probe cannot — the character core notices that "duplicating" and "duplicate" share most of their trigrams even when they tokenise differently, and needs no tokenizer at all.</p>
+<p>The obvious thing to do with three cores is combine them into a better answer. That was measured, and it does not work: across 108 held-out items the best single core scores 77.8% and an equal-weight product of all three scores 76.9%. The ensemble is slightly worse than its best member.</p>
+<p>What the same measurement did show is that their agreement predicts correctness sharply. Where all three pick the same applet they are right 90.3% of the time; where they split, 50%. So the probe answers, the other two corroborate, and their disagreement never changes the answer — it changes what the system says about the answer. A router that knows when it is guessing can ask, escalate or refuse. One that is silently 78% accurate cannot, and that is worth considerably more than the point or two the ensemble was supposed to buy.</p>
 <h2 id="measurement-discipline">Measurement discipline</h2>
-<p>This project got its evaluation wrong three separate times before settling: a grid sweep scored on the test set, cross-validation folded by template family, and a test set that moved whenever the corpus grew.</p>
-<p>The current arrangement has three splits. Validation is spent freely; the test slice is read once. Corpora hold out <em>whole template families</em>, never sampled instances. Instances within a family differ only by slot values, so splitting by instance measures memorisation while looking like generalisation.</p>
-<div class="note">Negative results stay in the tree. Training an adapter head hurts at this data scale. The Product-of-Experts council does not improve accuracy. Both are kept, because the reason to know them is the reason they were worth measuring.</div>
+<p>This project got its evaluation wrong three separate times before it settled, and each failure is worth naming because each one produced encouraging numbers. A grid sweep was scored on the test set. Cross-validation folded by template family in a way that leaked. And the test set itself moved whenever the corpus was appended to, so results were not comparable across runs and nobody noticed for a while.</p>
+<p>The current arrangement has three splits rather than two. Validation is spent freely; the test slice is read once, at the end. A configuration is adopted only when it measures better, and the corpus holds out whole template families rather than sampled instances — instances within a family differ only by their slot values, so an instance split measures memorisation while looking exactly like generalisation.</p>
+<div class="note">Negative results stay in the tree next to the code that produced them. The adapter head hurts at this data scale; the Product-of-Experts council does not improve accuracy. Both are kept, because the reason to know them is the same reason they were worth measuring, and because a deleted experiment gets repeated.</div>
 <div class="seealso"><b>See also:</b> <a href="../wiki/constrained-decoding.html">Constrained decoding</a>, <a href="../wiki/llm-in-kernel.html">A language model in the kernel</a>, <a href="../wiki/glados-os.html">GLaDOS OS</a></div>
 </div>
 </div>
@@ -67,10 +72,12 @@
 
 <div id="footer">
   <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This is an independent, non-commercial homage and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
-  <p>Copyright 2026. All rights reserved. Source is published to be read, not
-  reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from
-  the Linux kernel and carries its own terms.</p>
-  <p>No cookies, no analytics. Last updated 2026-08-14.</p>
+  <p>Copyright 2026. All rights reserved. The source is published to be read
+  rather than reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is
+  GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are
+  other people's and are listed on <a href="../credits.html">the
+  credits page</a>.</p>
+  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-14.</p>
 </div>
 
 </div>

@@ -47,18 +47,22 @@
 <div class="crumbs"><a href="../">GLaDOS</a> / <a href="../wiki/">Wiki</a> / RoPE</div>
 <div id="main">
 <h1>RoPE</h1>
-<p>Rotary Position Embedding encodes position by rotating pairs of dimensions in the query and key vectors by an angle proportional to position. Because a dot product between two rotated vectors depends only on the difference of their angles, attention scores become naturally relative.</p>
+<figure class="fig wide"><img src="../img/paper/rope-diagram.svg" alt="Diagram of rotary position embedding applied to a query vector" width="812" height="454" loading="lazy" decoding="async"><figcaption>RoPE rotates pairs of dimensions by an angle proportional to position. Each pair turns at its own frequency, so the vector encodes position the way the hands of a clock encode time.<span class="credit">Figure 1, RoFormer: Enhanced Transformer with Rotary Position Embedding. Su, Lu, Pan, Murtadha, Wen and Liu, via <a href="https://arxiv.org/abs/2104.09864" rel="noopener">arXiv 2104.09864</a>.</span></figcaption></figure>
+<p>Rotary Position Embedding encodes a token's position by rotating pairs of dimensions in its query and key vectors through an angle proportional to that position. Each pair gets its own frequency, geometrically spaced, so the fast pairs distinguish nearby positions and the slow ones carry long-range order.</p>
+<p>The reason this is elegant and not merely clever: a dot product between two rotated vectors depends only on the <em>difference</em> of their angles. Rotate the query for position 400 and the key for position 395 and the score you get is the score for a gap of five, wherever in the sequence that gap happens to sit. Relative position falls out of absolute rotation for free, with no extra parameters and no bias matrix.</p>
 <h2 id="two-conventions-one-right-answer-per-checkpoint">Two conventions, one right answer per checkpoint</h2>
-<p>There are two ways to choose the pairs:</p>
-<ul><li><strong>Interleaved:</strong> pair dimension <code>2i</code> with <code>2i+1</code>. This is what the original llama2.c does.</li><li><strong>rotate_half:</strong> pair dimension <code>i</code> with <code>i + head_dim/2</code>. This is what HuggingFace transformers does, and therefore what essentially every published checkpoint expects.</li></ul>
+<p>Rotating a pair requires deciding which dimensions constitute a pair, and there are two answers in circulation:</p>
+<ul><li>Interleaved: pair dimension <code>2i</code> with <code>2i+1</code>, so the pairs are adjacent. This is what the original llama2.c does, and it is the obvious reading of the paper.</li><li>rotate_half: pair dimension <code>i</code> with <code>i + head_dim/2</code>, so the first half of the vector pairs with the second. This is what HuggingFace's <code>rotate_half</code> does, and therefore what essentially every published checkpoint was trained with, because essentially every published checkpoint was trained through transformers.</li></ul>
+<p>Neither is more correct in the abstract. They are the same rotation applied to a different permutation of the axes, and a model trained under either works fine. What matters is agreeing with whatever the weights were fitted under, and the weights do not come with a note.</p>
 <h2 id="why-getting-it-wrong-produces-no-error">Why getting it wrong produces no error</h2>
-<p>This is the important part. Both conventions are norm-preserving rotations by the same set of angles. Pick the wrong one and there is no NaN, no overflow, no drift, no assertion. The vectors keep their lengths. The softmax stays well-behaved. The model stays fluent.</p>
-<p>What actually happens is that the model attends by a scrambled notion of distance. Which is indistinguishable, from the outside, from a small model being small.</p>
+<p>This is the part worth internalising. Both conventions are norm-preserving rotations through the same set of angles. Pick the wrong one and there is no NaN, no overflow, no gradual drift, no assertion and no warning. Vector lengths are unchanged. Attention scores stay in the range softmax expects. Every intermediate tensor looks exactly as healthy as it did before.</p>
+<p>What has actually happened is that the model is attending by a scrambled notion of distance: tokens that should be five apart score as though they were some other distance apart, consistently but wrongly. From outside, the result is a model that is a bit vague, loses the thread over long spans, and repeats itself — which is an exact description of a small model being small. There is no observation that separates the two except comparing against a reference or checking a fact.</p>
 <h2 id="what-it-cost-measured">What it cost, measured</h2>
-<p>This kernel used the interleaved convention for a long time. Switching to rotate_half on the same checkpoint, same prompt, same seed:</p>
+<p>This kernel used the interleaved convention for a long time, on the strength of having started from llama2.c, and nothing looked broken. Switching to rotate_half with the same checkpoint, prompt and seed:</p>
 <table class="data"><thead><tr><th>Convention</th><th>Output for "The capital of France"</th></tr></thead><tbody><tr><td>Interleaved (wrong)</td><td>"The capital of France." then blank lines</td></tr><tr><td>rotate_half (correct)</td><td>"The capital of France is Paris. Paris is a city known for..."</td></tr></tbody></table>
-<p>Token-level, the first tokens went from <code>'\n'</code>, <code>'\n\n'</code>, <code>'ity'</code>, <code>' capital'</code> to <code>'The'</code>, <code>'Paris'</code>, <code>'France'</code>.</p>
-<div class="note">If you are debugging an implementation that produces plausible but slightly-wrong text, check the RoPE pairing before anything else. It is the highest-probability silent bug in a hand-written transformer, and it never announces itself.</div>
+<p>At token level, the highest-probability first tokens went from <code>'\n'</code>, <code>'\n\n'</code>, <code>'ity'</code> and <code>' capital'</code> to <code>'The'</code>, <code>'Paris'</code> and <code>'France'</code>. The wrong version was not producing garbage. It was producing a model that had lost track of what the prompt was about and defaulted to whitespace.</p>
+<p>One checkpoint genuinely wants the interleaved convention: an actual llama2.c model, trained by that code. So the choice is recorded per checkpoint in <code>Config::rope_interleaved</code> and written into the file header at conversion time, so the kernel never decides it globally. A global constant here is a bug waiting for the second model.</p>
+<div class="note">If you are debugging an implementation that produces plausible but slightly-off text, check the RoPE pairing before anything else. It is the highest-probability silent failure in a hand-written transformer, it survives every sanity check that looks at magnitudes, and it will not announce itself at any point.</div>
 <div class="seealso"><b>See also:</b> <a href="../wiki/qwen3.html">Qwen3 in 570 MB</a>, <a href="../wiki/llm-in-kernel.html">A language model in the kernel</a>, <a href="../wiki/kv-cache.html">The int8 KV cache</a>, <a href="../wiki/tokenizer.html">Tokenizers</a></div>
 </div>
 </div>
@@ -66,10 +70,12 @@
 
 <div id="footer">
   <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This is an independent, non-commercial homage and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
-  <p>Copyright 2026. All rights reserved. Source is published to be read, not
-  reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from
-  the Linux kernel and carries its own terms.</p>
-  <p>No cookies, no analytics. Last updated 2026-08-14.</p>
+  <p>Copyright 2026. All rights reserved. The source is published to be read
+  rather than reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is
+  GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are
+  other people's and are listed on <a href="../credits.html">the
+  credits page</a>.</p>
+  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-14.</p>
 </div>
 
 </div>
