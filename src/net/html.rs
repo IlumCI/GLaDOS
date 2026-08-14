@@ -17,6 +17,7 @@
 //! Latin-1. Each is a real feature rather than an oversight, and each would be
 //! a lot of code for a browser whose output is a character grid.
 
+use super::css;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -265,6 +266,14 @@ fn is_break(tag: &str) -> bool {
         | "form" | "table" | "tbody" | "thead" | "dl" | "dt" | "dd" | "address")
 }
 
+/// Elements with no closing tag. Hiding one by skipping to its close would
+/// swallow the rest of the document, which is a far worse failure than showing
+/// something the stylesheet wanted hidden.
+fn is_void(tag: &str) -> bool {
+    matches!(tag, "br" | "hr" | "img" | "input" | "meta" | "link" | "source"
+        | "area" | "base" | "col" | "embed" | "param" | "track" | "wbr")
+}
+
 /// Tags whose entire contents are not prose and must be dropped.
 fn is_opaque(tag: &str) -> bool {
     matches!(tag, "script" | "style" | "head" | "svg" | "noscript" | "template")
@@ -384,6 +393,8 @@ fn squeeze(into: &mut String, s: &str) {
 pub fn parse(body: &[u8], base: &Url) -> Page {
     let mut p = Parser { b: body, i: 0 };
     let mut page = Page { title: String::new(), blocks: Vec::new() };
+    let mut sheet_src = String::new();
+    let mut sheet = css::Sheet::new();
 
     // Current block being accumulated.
     let mut spans: Vec<Span> = Vec::new();
@@ -443,6 +454,19 @@ pub fn parse(body: &[u8], base: &Url) -> Page {
             continue; // doctype or comment; the tag scanner already ate it
         }
 
+        if !closing && name == "style" {
+            // The one opaque element worth reading. Collected as it is met,
+            // which is enough for a single pass because a stylesheet in the
+            // head is parsed before any of the body it applies to.
+            let start = p.i;
+            p.skip_to_close("style");
+            let end = p.i.saturating_sub(8).max(start);
+            sheet_src.push_str(core::str::from_utf8(&body[start..end]).unwrap_or(""));
+            sheet_src.push('\n');
+            sheet = css::parse(&sheet_src);
+            continue;
+        }
+
         if !closing && is_opaque(&name) {
             if name == "head" {
                 // The title lives in here and is the one thing worth keeping.
@@ -451,9 +475,29 @@ pub fn parse(body: &[u8], base: &Url) -> Page {
                 h.skip_to_close("head");
                 let head = &body[end..h.i.min(body.len())];
                 page.title = title_of(head);
+                // The stylesheet almost always lives in here, and the head is
+                // skipped whole -- so collecting <style> only in the body meant
+                // the sheet was never seen at all. The title has the same
+                // problem and was already handled this way.
+                sheet_src.push_str(&styles_of(head));
+                sheet = css::parse(&sheet_src);
             }
             p.skip_to_close(&name);
             continue;
+        }
+
+        // Hidden by the stylesheet, or by an inline style. Skipping the whole
+        // element is what removes skip-links, off-screen navigation and cookie
+        // banners, which otherwise render as a site map above the article.
+        if !closing && !is_void(&name) && !raw.is_empty() {
+            let class = attr(&raw, "class").unwrap_or_default();
+            let id = attr(&raw, "id").unwrap_or_default();
+            let inline = attr(&raw, "style").unwrap_or_default();
+            if css::hides_inline(&inline) || sheet.hides(&name, &class, &id) {
+                flush_block!();
+                p.skip_to_close(&name);
+                continue;
+            }
         }
 
         match name.as_str() {
@@ -518,6 +562,31 @@ pub fn parse(body: &[u8], base: &Url) -> Page {
     }
     flush_block!();
     page
+}
+
+/// Every `<style>` block's contents, concatenated.
+fn styles_of(head: &[u8]) -> String {
+    let mut out = String::new();
+    let mut p = Parser { b: head, i: 0 };
+    while p.i < head.len() {
+        if head[p.i] == b'<' {
+            let save = p.i;
+            match p.tag() {
+                Some((n, _, false)) if n == "style" => {
+                    let start = p.i;
+                    p.skip_to_close("style");
+                    let end = p.i.saturating_sub(8).max(start);
+                    out.push_str(core::str::from_utf8(&head[start..end]).unwrap_or(""));
+                    out.push('\n');
+                }
+                Some(_) => {}
+                None => p.i = save + 1,
+            }
+        } else {
+            p.i += 1;
+        }
+    }
+    out
 }
 
 fn title_of(head: &[u8]) -> String {
@@ -606,6 +675,36 @@ pub fn selftest() -> bool {
     let t = parse(b"<p title=\"a > b\">after</p>", &base);
     check(t.blocks.iter().any(|b| matches!(b, Block::Para(s)
         if s.iter().any(|x| x.text() == "after"))), "quoted '>' does not end a tag");
+
+    // The exact round trip a followed link makes: parsed out of an anchor,
+    // stored as text by Url::text, and parsed back when it is navigated to.
+    // The scheme has to survive all three.
+    let a = parse(b"<p><a href=\"https://iana.org/domains/example\">Learn more</a></p>", &base);
+    let mut href_seen = String::new();
+    for b in &a.blocks {
+        if let Block::Para(spans) = b {
+            for s in spans {
+                if let Span::Link { href, .. } = s {
+                    href_seen = href.clone();
+                }
+            }
+        }
+    }
+    check(href_seen == "https://iana.org/domains/example", "anchor href round trip");
+    check(parse_url(&href_seen).map(|u| u.https).unwrap_or(false),
+          "followed link keeps its scheme");
+
+    // A stylesheet in the head must remove the element it hides, and a void
+    // element must never be skipped to a closing tag it does not have.
+    let styled = parse(
+        b"<html><head><style>.skip{display:none}</style></head><body>          <p class=\"skip\">gone</p><p style=\"display:none\">also gone</p>          <hr><p>kept</p></body></html>", &base);
+    let texts: Vec<&str> = styled.blocks.iter().filter_map(|b| match b {
+        Block::Para(s) => s.first().map(|x| x.text()),
+        _ => None,
+    }).collect();
+    check(!texts.iter().any(|t| *t == "gone"), "stylesheet hides by class");
+    check(!texts.iter().any(|t| *t == "also gone"), "inline style hides");
+    check(texts.iter().any(|t| *t == "kept"), "content after a void element survives");
 
     // Unclosed tags are the normal case on the web, not an error case.
     check(parse(b"<p>one<p>two<div>three", &base).blocks.len() == 3,

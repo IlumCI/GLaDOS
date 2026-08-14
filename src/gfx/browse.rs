@@ -132,7 +132,23 @@ impl Browser {
                 if (300..400).contains(&status) {
                     if let Some(loc) = header(&head, "location:") {
                         if self.hops < 5 {
-                            if let Some(next) = html::resolve(&url, &loc) {
+                            if let Some(mut next) = html::resolve(&url, &loc) {
+                                // Never follow a redirect down from https to
+                                // http. Servers emit an http Location more
+                                // often than you would hope -- iana.org does
+                                // it, two hops off example.com -- and doing as
+                                // told meant arriving at a page this browser
+                                // then refused to fetch, reporting "only https
+                                // is supported" about a link that was https.
+                                // Keeping the scheme is also the safe
+                                // direction: it can never downgrade a
+                                // connection that was already encrypted.
+                                if url.https && !next.https {
+                                    next.https = true;
+                                    if next.port == 80 {
+                                        next.port = 443;
+                                    }
+                                }
                                 self.hops += 1;
                                 self.go(next);
                                 return;
@@ -437,8 +453,15 @@ fn wrap(
 }
 
 /// One header's value, from the lower-cased header block.
+///
+/// Matched at the start of a line. A bare `find` would take `content-location`
+/// for `location`, and the wrong one of those sends the browser somewhere the
+/// server never redirected it to.
 fn header(head: &str, name: &str) -> Option<String> {
-    let at = head.find(name)?;
+    let at = head
+        .match_indices(name)
+        .find(|(i, _)| *i == 0 || head.as_bytes()[i - 1] == b'\n')
+        .map(|(i, _)| i)?;
     let rest = &head[at + name.len()..];
     let end = rest.find('\n').unwrap_or(rest.len());
     Some(String::from(rest[..end].trim()))

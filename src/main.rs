@@ -876,6 +876,11 @@ fn selftest() {
         kprintln!("  ok     html      urls, entities, unclosed tags");
         console::set_color(LTGRAY_IDX);
     }
+    if net::css::selftest() {
+        console::set_color(LTGREEN);
+        kprintln!("  ok     css       selectors, at-rules, inline display");
+        console::set_color(LTGRAY_IDX);
+    }
 
     console::set_color(LTGREEN);
     kprintln!("\n[selftest] int3 should report and resume:");
