@@ -288,12 +288,104 @@ def forward(tokens, tensors, cfg, capture=None):
     return h @ W("embed_tokens.weight").T
 
 
+def run_converted(args):
+    """The same diff, but reading what `convert.py` wrote.
+
+    This is what establishes the **quantisation floor**. Phase 1 compared the
+    numpy port against the reference at f32 and got ~1e-6, which is the
+    architecture being right. This compares int8 weights against an f32
+    fixture, so the number it reports is not an error to fix -- it is the cost
+    of int8, and everything downstream (the kernel port, in particular) is
+    judged against it rather than against zero.
+
+    So the table is printed whole rather than stopped at the first line over
+    tolerance: with quantisation there is no single "first divergence", every
+    layer is a little off and what matters is whether the error stays bounded
+    or compounds.
+    """
+    import v4
+
+    z = np.load(args.fixture)
+    meta = json.loads(bytes(z["meta_json"]).decode())
+    tokens = z["input_ids"][0]
+
+    tensors, cfg = v4.load(args.converted)
+    print(f"[ref35] {args.converted}: arch {cfg['arch']}, "
+          f"{'int8' if cfg['quant'] else 'f32'}, {len(tensors)} tensors")
+
+    # The fixture and the checkpoint have to be the same model. Nothing else
+    # here would notice if they were not; the diff would just look bad.
+    for key in ("hidden_size", "head_dim", "num_attention_heads",
+                "num_key_value_heads", "linear_key_head_dim",
+                "linear_value_head_dim", "linear_num_key_heads",
+                "linear_num_value_heads", "linear_conv_kernel_dim",
+                "layer_types", "vocab_size"):
+        if cfg[key] != meta[key]:
+            raise SystemExit(f"{key}: file says {cfg[key]}, fixture says {meta[key]}")
+    rp = meta["rope_parameters"]
+    for key, want in (("rope_theta", rp["rope_theta"]),
+                      ("partial_rotary_factor", rp["partial_rotary_factor"]),
+                      ("rms_norm_eps", meta["rms_norm_eps"])):
+        if abs(cfg[key] - want) > 1e-6 * max(abs(want), 1.0):
+            raise SystemExit(f"{key}: file says {cfg[key]}, fixture says {want}")
+
+    cap = {}
+    logits = forward(tokens, tensors, cfg, capture=cap)
+
+    order = ["embed"]
+    for i, kind in enumerate(cfg["layer_types"]):
+        tag = "linear_attn" if kind == "linear_attention" else "self_attn"
+        order += [f"layer{i:02d}_{tag}", f"layer{i:02d}_mlp", f"layer{i:02d}_out"]
+    order += ["final_norm"]
+
+    print()
+    print(f"{'key':24s} {'max abs':>11s} {'rel':>10s}")
+    worst, worst_key = 0.0, None
+    for key in order:
+        if key not in z or key not in cap:
+            continue
+        want, got = z[key][0], cap[key]
+        d = float(np.abs(want - got).max())
+        rel = d / max(float(np.abs(want).max()), 1e-9)
+        # Residual-stream lines only, so the summary is not dominated by a
+        # branch output that is small next to the stream it is added into.
+        if key.endswith("_out") and rel > worst:
+            worst, worst_key = rel, key
+        print(f"{key:24s} {d:11.3e} {rel:10.2e}")
+
+    want = z["logits"][0]
+    d = float(np.abs(want - logits).max())
+    rel = d / max(float(np.abs(want).max()), 1e-9)
+    print(f"{'logits':24s} {d:11.3e} {rel:10.2e}")
+
+    agree = float((want.argmax(-1) == logits.argmax(-1)).mean())
+    print()
+    print(f"[ref35] quantisation floor: {worst:.3e} at {worst_key}")
+    print(f"[ref35] argmax agrees at {agree:.1%} of positions")
+    # Growth across the stack is the thing to watch. int8 noise that stays flat
+    # layer to layer is the scheme working; noise that doubles every layer is
+    # a scale being applied on the wrong axis.
+    outs = [k for k in order if k.endswith("_out") and k in z and k in cap]
+    if outs:
+        f = lambda k: float(np.abs(z[k][0] - cap[k]).max()) / max(
+            float(np.abs(z[k][0]).max()), 1e-9)
+        print(f"[ref35] first layer {f(outs[0]):.3e} -> last layer {f(outs[-1]):.3e}"
+              f"  ({f(outs[-1]) / max(f(outs[0]), 1e-12):.1f}x over {len(outs)} layers)")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--fixture", default="out/fixture-qwen35.npz")
     ap.add_argument("--model", default="Qwen/Qwen3.5-0.8B")
     ap.add_argument("--tol", type=float, default=2e-3)
+    ap.add_argument("--converted", metavar="MODEL.BIN",
+                    help="read a converted v4 file instead of the safetensors, "
+                         "which puts convert.py under the same diff")
     args = ap.parse_args()
+
+    if args.converted:
+        return run_converted(args)
 
     from huggingface_hub import snapshot_download
     # Loaded through torch because safetensors' numpy backend refuses bfloat16
