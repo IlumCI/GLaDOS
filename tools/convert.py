@@ -92,19 +92,107 @@ V4_HEADER = 160
 V4_BITMAP_AT = 112
 V4_BITMAP_WORDS = 8
 
+# Rows are quantised in blocks of roughly this many values. Big enough that the
+# per-block numpy overhead is nothing, small enough that the scratch buffers
+# stay a few MB whatever the tensor.
+BLOCK_VALUES = 1 << 22
+
+
+class Shards:
+    """Every tensor in a checkpoint, materialised one at a time.
+
+    Safetensors is small enough to not warrant a dependency: an 8-byte
+    little-endian header length, that many bytes of JSON giving each tensor's
+    dtype, shape and byte range, then the raw data. So this parses it, and
+    memory-maps rather than reads.
+
+    Reading the whole file was fine while the largest checkpoint here was
+    Qwen3-0.6B, 1.2 GB of bf16 that widens to 2.4 GB of f32. Qwen3.5-35B-A3B
+    is 71.9 GB and widens to about 143 GB, which is not a thing to hold in
+    order to write it back out a tensor at a time. Through a memmap the peak
+    is the largest single tensor instead of the model, and `expert()` slices
+    an MoE bank before widening so it is one expert rather than all 256.
+
+    Qwen3.5 also ships `model.safetensors-00001-of-00001.safetensors` plus an
+    index even at one shard. Opening exactly `model.safetensors` -- which is
+    all this used to do -- failed there with "missing tensor", which reads
+    like a bad checkpoint rather than a reader that never opened the file.
+    """
+
+    CODES = {"BF16": "<u2", "F16": "<f2", "F32": "<f4"}
+
+    def __init__(self, paths):
+        self._meta = {}
+        self._maps = {}
+        for path in paths:
+            with open(path, "rb") as f:
+                (header_len,) = struct.unpack("<Q", f.read(8))
+                header = json.loads(f.read(header_len))
+            base = 8 + header_len
+            for name, m in header.items():
+                if name == "__metadata__":
+                    continue
+                if m["dtype"] not in self.CODES:
+                    raise SystemExit(f"{name}: unsupported dtype {m['dtype']}")
+                self._meta[name] = (path, m["dtype"], tuple(m["shape"]),
+                                    base + m["data_offsets"][0])
+
+    def __contains__(self, name):
+        return name in self._meta
+
+    def __iter__(self):
+        return iter(self._meta)
+
+    def __len__(self):
+        return len(self._meta)
+
+    def shape(self, name):
+        return self._meta[name][2]
+
+    def _view(self, name):
+        if name not in self._meta:
+            raise KeyError(name)
+        path, dtype, shape, off = self._meta[name]
+        mm = self._maps.get(path)
+        if mm is None:
+            mm = np.memmap(path, dtype=np.uint8, mode="r")
+            self._maps[path] = mm
+        code = self.CODES[dtype]
+        n = int(np.prod(shape)) if shape else 1
+        seg = mm[off:off + n * np.dtype(code).itemsize]
+        return seg.view(code).reshape(shape), dtype
+
+    @staticmethod
+    def _widen(arr, dtype):
+        if dtype == "BF16":
+            # numpy has no bfloat16 and does not need one: bf16 is the top 16
+            # bits of an f32, so widening is a shift, exactly representable
+            # and lossless in this direction.
+            #
+            # Shifted in place. Written as `(asarray(...) << 16).view(f32)` it
+            # allocates the u32 twice -- once to widen, once for the shift
+            # result -- which on Qwen3.5's 254M-value embedding is 2 GB of
+            # peak to produce 1 GB of tensor.
+            u = np.asarray(arr, dtype=np.uint32)
+            u <<= 16
+            return u.view(np.float32)
+        return np.asarray(arr, dtype=np.float32)
+
+    def __getitem__(self, name):
+        arr, dtype = self._view(name)
+        return self._widen(arr, dtype)
+
+    def expert(self, name, i):
+        """One slice of a batched 3-D expert bank, without widening the rest."""
+        arr, dtype = self._view(name)
+        return self._widen(arr[i], dtype)
+
 
 def read_sharded(src):
-    """Every tensor in a checkpoint, whether it is one file or fourteen.
-
-    Qwen3.5 ships `model.safetensors-00001-of-00001.safetensors` plus an index
-    even when there is only one shard, and the MoE checkpoints are genuinely
-    split. Reading `model.safetensors` and nothing else -- which is all this
-    used to do -- fails on both with "missing tensor", which reads like a
-    checkpoint problem rather than a reader that never opened the file.
-    """
+    """Every tensor in a checkpoint, whether it is one file or fourteen."""
     single = src / "model.safetensors"
     if single.exists():
-        return read_safetensors(single)
+        return Shards([single])
 
     index = src / "model.safetensors.index.json"
     if not index.exists():
@@ -114,50 +202,43 @@ def read_sharded(src):
     else:
         wm = json.loads(index.read_text())["weight_map"]
         shards = sorted({src / n for n in wm.values()})
+        for s in shards:
+            if not s.exists():
+                raise SystemExit(f"the index names {s.name} but it is not here")
 
-    out = {}
-    for i, shard in enumerate(shards, 1):
-        if not shard.exists():
-            raise SystemExit(f"index names {shard.name} but it is not here")
-        print(f"  reading shard {i}/{len(shards)}: {shard.name}")
-        out.update(read_safetensors(shard))
-    return out
+    print(f"  mapping {len(shards)} shard(s)")
+    return Shards(shards)
 
 
-def read_safetensors(path):
-    """Parse safetensors without the library.
+class Sink:
+    """A write-through stand-in for the list the body used to be.
 
-    The format is small enough to not warrant a dependency: an 8-byte
-    little-endian header length, that many bytes of JSON describing each
-    tensor's dtype, shape and byte range, then the raw data.
+    Accumulating every tensor and writing at the end was fine while the output
+    was 570 MB. It is not fine at 36 GB: the peak became the whole output file
+    plus the largest widened input tensor, for no reason at all, since nothing
+    in the header is derived from the body. So the header space is reserved
+    first and each tensor goes straight to disk as it is produced.
+
+    Writing to a temporary and renaming at the end keeps the old property that
+    a failed conversion leaves no file, rather than a truncated one that looks
+    like a model.
     """
-    with open(path, "rb") as f:
-        (header_len,) = struct.unpack("<Q", f.read(8))
-        header = json.loads(f.read(header_len))
-        base = 8 + header_len
-        raw = f.read()
 
-    out = {}
-    for name, meta in header.items():
-        if name == "__metadata__":
-            continue
-        start, end = meta["data_offsets"]
-        chunk = raw[start:end]
-        dtype = meta["dtype"]
-        if dtype == "BF16":
-            # numpy has no bfloat16. It does not need one: bf16 is the top 16
-            # bits of an f32, so widening is a shift, exactly representable and
-            # lossless in this direction.
-            u16 = np.frombuffer(chunk, dtype="<u2").astype(np.uint32)
-            arr = (u16 << 16).view(np.float32)
-        elif dtype == "F32":
-            arr = np.frombuffer(chunk, dtype="<f4")
-        elif dtype == "F16":
-            arr = np.frombuffer(chunk, dtype="<f2").astype(np.float32)
-        else:
-            raise SystemExit(f"{name}: unsupported dtype {dtype}")
-        out[name] = arr.reshape(meta["shape"])
-    return out
+    def __init__(self, dst, header_bytes):
+        self.dst = dst
+        self.tmp = dst.with_name(dst.name + ".partial")
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        self.f = open(self.tmp, "wb")
+        self.f.seek(header_bytes)
+
+    def append(self, chunk):
+        self.f.write(chunk)
+
+    def finish(self, header):
+        self.f.seek(0)
+        self.f.write(header)
+        self.f.close()
+        self.tmp.replace(self.dst)
 
 
 def quantise_rows(mat):
@@ -170,32 +251,54 @@ def quantise_rows(mat):
     """
     mat = np.ascontiguousarray(mat, dtype=np.float32)
     rows = mat.reshape(mat.shape[0], -1)
-    peak = np.abs(rows).max(axis=1)
+    # max(|x|) over a row is max(max(x), -min(x)), and both of those reduce
+    # without building anything. `np.abs(rows).max(axis=1)` reads the same but
+    # materialises a second copy of the whole tensor first, which on the
+    # embedding was a gigabyte spent to find 248,320 numbers.
+    peak = np.maximum(rows.max(axis=1), -rows.min(axis=1))
     # A row of exact zeros would divide by zero; its values quantise to zero
     # under any scale, so the scale itself is arbitrary.
     scale = np.where(peak == 0, 1.0, peak / 127.0).astype(np.float32)
-    q = np.rint(rows / scale[:, None]).clip(-127, 127).astype(np.int8)
-    return q, scale
+
+    # In blocks, and writing into a preallocated output, because the one-liner
+    # this replaces allocated three full-size f32 temporaries -- the divide,
+    # the rint and the clip. On Qwen3-0.6B's 254M-value embedding that is
+    # 3 GB of scratch to produce 254 MB of int8, and on a 35B MoE expert bank
+    # it is the difference between converting and being killed.
+    q = np.empty(rows.shape, dtype=np.int8)
+    err, denom = 0.0, float(np.abs(peak).max())
+    step = max(1, BLOCK_VALUES // max(rows.shape[1], 1))
+    for i in range(0, rows.shape[0], step):
+        blk = rows[i:i + step] / scale[i:i + step, None]
+        np.rint(blk, out=blk)
+        np.clip(blk, -127, 127, out=blk)
+        q[i:i + step] = blk
+        # The round-trip error, measured on the block still in cache rather
+        # than by dequantising the whole tensor again afterwards.
+        blk *= scale[i:i + step, None]
+        blk -= rows[i:i + step]
+        err = max(err, float(np.abs(blk).max()))
+    return q, scale, (err / denom if denom > 0 else 0.0)
 
 
 def emit(buf, arr, quant, stats):
     """Append one tensor, quantised or not, and account for it."""
     if quant and arr.ndim == 2:
-        q, scale = quantise_rows(arr)
-        buf.append(scale.tobytes())
-        buf.append(q.tobytes())
+        q, scale, err = quantise_rows(arr)
+        # The arrays go to the sink as-is. `.tobytes()` here copied every
+        # quantised tensor a second time on the way out, which for the
+        # embedding is 254 MB of peak for no gain -- a contiguous ndarray is
+        # already a buffer that write() accepts.
+        buf.append(scale)
+        buf.append(q)
         stats["quantised"] += q.size
         stats["bytes"] += scale.nbytes + q.nbytes
-        # Report the worst relative error introduced, so a bad tensor is
-        # visible here rather than as mysteriously poor output later.
-        deq = q.astype(np.float32) * scale[:, None]
-        denom = np.abs(arr).max()
-        if denom > 0:
-            err = np.abs(deq - arr.reshape(q.shape)).max() / denom
-            stats["worst_err"] = max(stats["worst_err"], float(err))
+        # The worst relative error introduced, so a bad tensor is visible here
+        # rather than as mysteriously poor output later.
+        stats["worst_err"] = max(stats["worst_err"], err)
     else:
         f = np.ascontiguousarray(arr, dtype=np.float32)
-        buf.append(f.tobytes())
+        buf.append(f)
         stats["kept_f32"] += f.size
         stats["bytes"] += f.nbytes
 
@@ -220,7 +323,12 @@ def convert_hybrid(cfg, w, dst, quant, seq_len, model_type):
     """
     tc = cfg.get("text_config", cfg)
     moe = model_type == "qwen3_5_moe"
-    pre = "model.language_model."
+    # Detected rather than hardcoded. Every published Qwen3.5 nests the text
+    # model under a vision-capable wrapper, but that is a property of these
+    # releases and not of the architecture, and the failure if it ever changes
+    # is a wall of "missing tensor" naming a prefix that does not exist.
+    pre = ("model.language_model." if any(
+        k.startswith("model.language_model.") for k in w) else "model.")
 
     dim = tc["hidden_size"]
     layers = tc["num_hidden_layers"]
@@ -269,19 +377,23 @@ def convert_hybrid(cfg, w, dst, quant, seq_len, model_type):
     q_dim = heads * head_dim
     kv_dim = kv_heads * head_dim
 
-    def take(name, shape=None):
-        full = pre + name
+    consumed = set()
+
+    def check(full, shape):
+        """Validate a tensor's shape from the index, without reading it."""
         if full not in w:
             raise SystemExit(f"missing tensor {full}")
-        arr = w[full]
-        if shape is not None and tuple(arr.shape) != tuple(shape):
-            raise SystemExit(f"{full} is {tuple(arr.shape)}, config implies {tuple(shape)}")
-        return arr
+        got = w.shape(full)
+        if shape is not None and got != tuple(shape):
+            raise SystemExit(f"{full} is {got}, config implies {tuple(shape)}")
+        consumed.add(full)
+        return full
 
-    skipped = sum(1 for k in w if k.startswith("model.visual.") or k.startswith("mtp."))
+    def take(name, shape=None):
+        return w[check(pre + name, shape)]
 
     stats = {"quantised": 0, "kept_f32": 0, "bytes": 0, "worst_err": 0.0}
-    body = []
+    body = Sink(dst, V4_HEADER)
 
     emit(body, take("embed_tokens.weight", (vocab, dim)), quant, stats)
 
@@ -323,11 +435,13 @@ def convert_hybrid(cfg, w, dst, quant, seq_len, model_type):
             # not a small numeric perturbation, it is a different computation,
             # so it stays f32 however large the expert bank gets.
             emit(body, take(m + "gate.weight", (experts, dim)), False, stats)
-            gate_up = take(m + "experts.gate_up_proj", (experts, 2 * hidden, dim))
-            down = take(m + "experts.down_proj", (experts, dim, hidden))
+            gu = check(pre + m + "experts.gate_up_proj", (experts, 2 * hidden, dim))
+            dn = check(pre + m + "experts.down_proj", (experts, dim, hidden))
             for e in range(experts):
-                emit(body, gate_up[e], quant, stats)
-                emit(body, down[e], quant, stats)
+                # One expert at a time. The 35B bank is 2.1 GB once widened and
+                # nothing here needs more of it than the slice being written.
+                emit(body, w.expert(gu, e), quant, stats)
+                emit(body, w.expert(dn, e), quant, stats)
             s = m + "shared_expert."
             emit(body, take(s + "gate_proj.weight", (shared, dim)), quant, stats)
             emit(body, take(s + "up_proj.weight", (shared, dim)), quant, stats)
@@ -341,9 +455,20 @@ def convert_hybrid(cfg, w, dst, quant, seq_len, model_type):
 
     emit(body, take("norm.weight", (dim,)), False, stats)
     if not tied:
-        if "lm_head.weight" not in w:
-            raise SystemExit("untied checkpoint has no lm_head.weight")
-        emit(body, w["lm_head.weight"], quant, stats)
+        # Unprefixed even where everything else is nested, checked against the
+        # published 35B-A3B index rather than assumed.
+        emit(body, w[check("lm_head.weight", (vocab, dim))], quant, stats)
+
+    # Nothing may go missing quietly. The body is positional, so a tensor this
+    # writer forgot is not a short file or a load error -- it is a model with a
+    # layer of noise in it. Anything neither written nor deliberately skipped
+    # is a bug in this function.
+    ignored = {k for k in w if k.startswith("model.visual.") or k.startswith("mtp.")}
+    left = sorted(set(w) - consumed - ignored)
+    if left:
+        listed = "".join(f"\n  {k}" for k in left[:8])
+        raise SystemExit(f"{len(left)} tensor(s) neither written nor skipped:{listed}")
+    skipped = len(ignored)
 
     header = bytearray(V4_HEADER)
     header[0:8] = MAGIC
@@ -372,11 +497,7 @@ def convert_hybrid(cfg, w, dst, quant, seq_len, model_type):
             words[l // 32] |= 1 << (l % 32)
     struct.pack_into("<" + "I" * V4_BITMAP_WORDS, header, V4_BITMAP_AT, *words)
 
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    with open(dst, "wb") as f:
-        f.write(header)
-        for chunk in body:
-            f.write(chunk)
+    body.finish(header)
 
     total = dst.stat().st_size
     schedule = "".join("F" if k == "full_attention" else "L" for k in kinds)
@@ -508,7 +629,7 @@ def main():
             raise SystemExit(f"QK-Norm present on some layers but not {sorted(set(missing))}")
 
     stats = {"quantised": 0, "kept_f32": 0, "bytes": 0, "worst_err": 0.0}
-    body = []
+    body = Sink(dst, HEADER_BYTES)
 
     # Order must match ai::model::offsets exactly. The QK-Norm pair sits with
     # the other attention norms so that a model without them leaves a gap of
@@ -569,11 +690,7 @@ def main():
         | (FLAG_ROPE_INTERLEAVED if rope_interleaved else 0),
     )
 
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    with open(dst, "wb") as f:
-        f.write(header)
-        for chunk in body:
-            f.write(chunk)
+    body.finish(header)
 
     total = dst.stat().st_size
     print(f"  {arch}: dim {dim}  hidden {hidden}  layers {layers}  heads {heads}/{kv_heads} kv")

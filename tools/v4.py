@@ -226,7 +226,11 @@ def _synthetic(moe):
     w = {}
 
     def put(n, *shape):
-        w[PREFIX + n] = rng.standard_normal(shape).astype(np.float32)
+        v = rng.standard_normal(shape).astype(np.float32)
+        # Truncated to what bf16 can hold exactly, so the shards below can be
+        # written in bf16 -- the dtype every real checkpoint uses -- and still
+        # compared for equality rather than for closeness.
+        w[PREFIX + n] = (v.view(np.uint32) & 0xFFFF0000).view(np.float32)
 
     put("embed_tokens.weight", vocab, dim)
     for l, kind in enumerate(kinds):
@@ -267,8 +271,41 @@ def _synthetic(moe):
             put(m + "up_proj.weight", hidden, dim)
     put("norm.weight", dim)
     if moe:
-        w["lm_head.weight"] = rng.standard_normal((vocab, dim)).astype(np.float32)
+        put("lm_head.weight", vocab, dim)
+        w["lm_head.weight"] = w.pop(PREFIX + "lm_head.weight")
     return cfg, w
+
+
+def _write_shards(dirpath, w):
+    """Write `w` as two bf16 safetensors shards plus an index.
+
+    Two rather than one, and an index rather than a bare file, because that is
+    the shape every Qwen3.5 release ships and the shape the old reader could
+    not open. Writing it here means the selftest covers the reader as well as
+    the writer, instead of handing convert_hybrid a dict that no checkpoint
+    ever looks like.
+    """
+    names = sorted(w)
+    halves = [names[:len(names) // 2], names[len(names) // 2:]]
+    weight_map = {}
+    for i, half in enumerate(halves, 1):
+        fn = f"model-{i:05d}-of-{len(halves):05d}.safetensors"
+        header, blob, off = {}, [], 0
+        for n in half:
+            raw = (w[n].view(np.uint32) >> 16).astype("<u2").tobytes()
+            header[n] = {"dtype": "BF16", "shape": list(w[n].shape),
+                         "data_offsets": [off, off + len(raw)]}
+            blob.append(raw)
+            off += len(raw)
+            weight_map[n] = fn
+        js = json.dumps(header).encode()
+        with open(dirpath / fn, "wb") as f:
+            f.write(struct.pack("<Q", len(js)))
+            f.write(js)
+            for b in blob:
+                f.write(b)
+    (dirpath / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": weight_map}))
 
 
 def selftest():
@@ -286,9 +323,13 @@ def selftest():
             kind = "qwen3_5_moe" if moe else "qwen3_5"
             for quant in (False, True):
                 cfg, w = _synthetic(moe)
+                src = Path(tmp) / f"{kind}-src"
+                src.mkdir(exist_ok=True)
+                _write_shards(src, w)
                 dst = Path(tmp) / f"{kind}-{'i8' if quant else 'f32'}.bin"
                 with contextlib.redirect_stdout(io.StringIO()):
-                    convert.convert_hybrid(cfg, dict(w), dst, quant, 128, kind)
+                    convert.convert_hybrid(cfg, convert.read_sharded(src),
+                                           dst, quant, 128, kind)
                 # load() raises if the walk does not land on the last byte,
                 # which is the assertion this whole exercise is for.
                 got, _ = load(dst)
@@ -317,6 +358,26 @@ def selftest():
                 print(f"  {kind:12s} {'int8' if quant else 'f32 ':4s} "
                       f"{len(w):3d} tensors  worst {worst:.3e} {where}"
                       f"{'   <-- OVER ' + format(limit, '.3e') if bad else ''}")
+        # A guard nothing exercises is a guard that might not work. The
+        # accounting in convert_hybrid is the only thing standing between a
+        # tensor this writer forgot and a model with a layer of noise in it,
+        # so make it fire on purpose.
+        cfg, w = _synthetic(False)
+        w[PREFIX + "layers.0.linear_attn.something_new"] = np.zeros((4, 4), np.float32)
+        src = Path(tmp) / "negative"
+        src.mkdir(exist_ok=True)
+        _write_shards(src, w)
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                convert.convert_hybrid(cfg, convert.read_sharded(src),
+                                       Path(tmp) / "neg.bin", True, 128, "qwen3_5")
+            print("  unaccounted tensor was NOT caught")
+            ok = False
+        except SystemExit as e:
+            caught = "neither written nor skipped" in str(e)
+            print(f"  unaccounted tensor {'caught' if caught else 'raised the wrong error: ' + str(e)}")
+            ok = ok and caught
+
     print("[v4] round-trip ok" if ok else "[v4] round-trip FAILED")
     return 0 if ok else 1
 

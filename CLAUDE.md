@@ -66,6 +66,31 @@ Always run `tokenizer.py` with `--verify`. It reimplements the kernel's
 algorithm and diffs it against the reference `tokenizers` library; a tokenizer
 that is subtly wrong produces text that still looks like text.
 
+**Qwen3.5 writes v4, not v3.** `convert.py` dispatches on `model_type`:
+`llama`/`qwen2`/`qwen3` take the dense path and still produce a byte-identical
+v3 file, while `qwen3_5`/`qwen3_5_moe` take `convert_hybrid` and produce a
+160-byte header plus a **layer-major** body — three layers in four hold
+`linear_attn.*` and the fourth holds `self_attn.*`, so there is no single
+stride to multiply and grouping by tensor stops being possible. The layer
+schedule travels as an explicit bitmap rather than being derived from
+`full_attention_interval`, so a checkpoint that breaks the pattern fails
+instead of loading and running wrong.
+
+`tools/v4.py` reads a v4 file back, and is the oracle's front end the way
+`reference.py` is for v2/v3:
+
+```powershell
+.\tools\venv\Scripts\python.exe tools\v4.py --selftest      # writer/reader round-trip
+.\tools\venv\Scripts\python.exe tools\ref35.py --converted out\q35-0.8b.bin
+```
+
+The v4 body has no names, shapes or lengths in it, so a writer/reader
+disagreement about one dimension leaves everything after it as perfectly valid
+float32 garbage. Both readers therefore **walk and never seek**, and assert
+they land on the last byte. `convert_hybrid` makes the same bargain on input:
+every tensor must be written or explicitly skipped, and anything else is an
+error rather than a silent omission.
+
 Root certificate bundle, built from the host's store:
 
 ```powershell
