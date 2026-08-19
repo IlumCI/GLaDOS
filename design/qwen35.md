@@ -152,9 +152,25 @@ architecture whose failure mode is fluent nonsense is worse than none.
    The fixture is not committed. It is 5.9 MB against a 700 KB repository and
    `fixture.py` regenerates it, which matches the rule the model weights
    already follow: reproducible from the repo plus a download.
-1. **reference.py** grows the hybrid forward: partial RoPE, attention output
-   gate, the Gated DeltaNet recurrence, and the MoE router. Diffed layer by
-   layer against the fixture until it matches.
+1. **The forward pass in NumPy. Done.** `tools/ref35.py` matches the reference
+   at every layer boundary to about 1e-6 relative, and the argmax agrees at
+   every position. `tools/dbg35.py` bisects a single layer when it does not.
+
+   One real bug, and it is exactly the kind phase 0 exists for.
+   `Qwen3_5RMSNorm` scales by **(1 + weight)** with the parameter initialised
+   to zeros, not by `weight` initialised to ones. Using the ordinary
+   convention produced entirely plausible activations that were wrong from the
+   first layer, with nothing downstream to complain.
+
+   Worse, the model contains **two** RMSNorms with **different** conventions:
+   `Qwen3_5RMSNorm` is (1 + w) and is used by input_layernorm,
+   post_attention_layernorm, q_norm, k_norm and the final norm, while
+   `Qwen3_5RMSNormGated` inside the delta net is plain w. A single shared
+   helper is wrong, and sharing one is the obvious thing to do.
+
+   Found by bisecting: every stage inside the mixer agreed with torch to 1e-7,
+   which said the recurrence was right and the *input* was wrong, and the
+   input was one normalisation.
 2. **convert.py** reads the new config, strips the `model.language_model.`
    prefix, skips `model.visual.*` and `mtp.*`, and writes v4.
 3. **model.rs** ports the verified reference. Dense first, MoE second.
