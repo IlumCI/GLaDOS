@@ -206,6 +206,15 @@ def main():
         i = argv.index("--memory")
         memory = argv[i + 1]
         del argv[i:i + 2]
+    # An override for checking a checkpoint the default staging cannot hold.
+    # The port of Qwen3.5 needs a *hybrid* to exercise at all, and the real one
+    # is 723 MB against VVFAT's 516; `tools/hybtest.py` builds a small one
+    # shaped to hit every path it does.
+    model_src = ROOT / "out/smollm2-135m.bin"
+    if "--model" in argv:
+        i = argv.index("--model")
+        model_src = Path(argv[i + 1])
+        del argv[i:i + 2]
     commands = argv
 
     # A QEMU-only ESP, assembled here rather than borrowing esp/.
@@ -219,7 +228,7 @@ def main():
     esp = ROOT / ".qemu/esp"
     (esp / "GLADOS").mkdir(parents=True, exist_ok=True)
     for src, dst in [
-        (ROOT / "out/smollm2-135m.bin", "model.bin"),
+        (model_src, "model.bin"),
         (ROOT / "out/smollm2-tokenizer.bin", "tokenizer.bin"),
         (ROOT / "esp/GLADOS/roots.der", "roots.der"),
     ]:
@@ -228,7 +237,7 @@ def main():
         target = esp / "GLADOS" / dst
         # Content-compare rather than always copying: these are 135 MB and the
         # copy is the slowest thing in a run that is otherwise seconds.
-        if not target.exists() or target.stat().st_size != src.stat().st_size:
+        if not target.exists() or target.read_bytes() != src.read_bytes():
             target.write_bytes(src.read_bytes())
 
     # Stage the binary the same way run.ps1 does. Without this the firmware

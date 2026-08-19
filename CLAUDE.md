@@ -76,6 +76,28 @@ schedule travels as an explicit bitmap rather than being derived from
 `full_attention_interval`, so a checkpoint that breaks the pattern fails
 instead of loading and running wrong.
 
+The kernel runs the hybrid, `Arch::Qwen35`. **MoE is refused at load**
+(`LoadError::Unsupported`) rather than half-implemented: the smallest published
+one is 71.9 GB, nothing that size reaches a UEFI pool on the GF63, so a forward
+pass for it could never be run and contradicted.
+
+**QEMU cannot run Qwen3.5-0.8B either** -- 723 MB against VVFAT's 516 -- so the
+kernel port is checked against a *small* hybrid instead of deferring every bug
+to hardware. `tools/hybtest.py` builds one shaped to hit every path the real
+one does (both layer kinds, packed cache indices, partial RoPE, 4 value heads
+over 2 key heads, GQA, an untied classifier) and prints what `logits` should
+say:
+
+```powershell
+.	oolsenv\Scripts\python.exe tools\hybtest.py out\hybtest.bin --build
+.	oolsenv\Scripts\python.exe tools\drive.py --model out\hybtest.bin "logits 7 11 3"
+```
+
+`--schedule FFFF` / `LLLL` isolates the two mixers, and `--zero` zeroes every
+projection back into the residual stream so the loader, the final norm and the
+classifier can be checked apart from any layer. `drive.py --model` overrides
+the staged checkpoint.
+
 `tools/v4.py` reads a v4 file back, and is the oracle's front end the way
 `reference.py` is for v2/v3:
 

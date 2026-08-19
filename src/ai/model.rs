@@ -15,6 +15,30 @@ use super::weights::{self, Mat};
 use alloc::vec;
 use alloc::vec::Vec;
 
+/// Which forward pass a checkpoint wants.
+///
+/// Not a cosmetic label. `Dense` and `Qwen35` disagree about what a layer even
+/// contains: three layers in four of a Qwen3.5 hold a recurrence with no KV
+/// cache at all, and the fourth holds attention whose query projection is
+/// twice as wide as its query.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Arch {
+    /// Llama, Qwen2, Qwen3. Every layer identical, full attention throughout.
+    Dense,
+    /// Qwen3.5. Gated DeltaNet in three layers of four, full attention in the
+    /// fourth, and a dense SwiGLU feed-forward in all of them.
+    Qwen35,
+    /// Qwen3.5-MoE. The same layer schedule with a sparse feed-forward.
+    Qwen35Moe,
+}
+
+/// What one layer of a hybrid holds.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LayerKind {
+    Full,
+    Linear,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Config {
     pub dim: usize,
@@ -70,11 +94,171 @@ pub struct Config {
     /// `attn_sinks` this is the live cache size; when their sum reaches
     /// `seq_len` nothing is ever evicted and attention is exactly as before.
     pub attn_window: usize,
+
+    // --- v4, and every one of these is `Dense`'s answer for a v2/v3 file ---
+    pub arch: Arch,
+    /// How many of each head's dimensions RoPE actually rotates.
+    ///
+    /// Equal to `head_dim` for everything before Qwen3.5, which rotates 64 of
+    /// 256 and passes the rest through untouched. Stored as a count rather
+    /// than as the config's fraction because the kernel wants a number of
+    /// dimensions and `0.25 * 256` is a question with one answer.
+    pub rotary_dim: usize,
+    /// Whether `wq` emits a gate alongside the query and the attention output
+    /// is multiplied by `sigmoid(gate)` before `wo`.
+    pub attn_output_gate: bool,
+
+    /// Gated DeltaNet geometry. All zero unless `arch` is a hybrid.
+    pub lin_k_head: usize,
+    pub lin_v_head: usize,
+    pub lin_k_heads: usize,
+    pub lin_v_heads: usize,
+    pub conv_kernel: usize,
+
+    /// Mixture-of-experts geometry. All zero unless `arch` is `Qwen35Moe`.
+    pub n_experts: usize,
+    pub experts_per_tok: usize,
+    pub shared_dim: usize,
+
+    /// One bit per layer, set for full attention.
+    ///
+    /// Written down rather than derived from `full_attention_interval`. The
+    /// interval is 4 and describes every published checkpoint exactly, which
+    /// is the argument for computing it and the reason not to: a checkpoint
+    /// that broke the pattern would load and run wrong instead of failing.
+    pub layer_full: [u32; 8],
+}
+
+impl Default for Config {
+    /// A zero-sized Llama. Exists so the four struct literals that build a real
+    /// one can say `..Default::default()` and stay readable as the hybrid
+    /// fields accumulate.
+    fn default() -> Self {
+        Self {
+            dim: 0,
+            hidden_dim: 0,
+            n_layers: 0,
+            n_heads: 0,
+            n_kv_heads: 0,
+            head_dim: 0,
+            vocab_size: 0,
+            seq_len: 0,
+            norm_eps: 1e-5,
+            qk_norm: false,
+            rope_interleaved: false,
+            shared_classifier: true,
+            rope_theta: 10000.0,
+            attn_sinks: 0,
+            attn_window: usize::MAX,
+            arch: Arch::Dense,
+            rotary_dim: 0,
+            attn_output_gate: false,
+            lin_k_head: 0,
+            lin_v_head: 0,
+            lin_k_heads: 0,
+            lin_v_heads: 0,
+            conv_kernel: 0,
+            n_experts: 0,
+            experts_per_tok: 0,
+            shared_dim: 0,
+            layer_full: [0; 8],
+        }
+    }
 }
 
 impl Config {
     pub fn head_size(&self) -> usize {
         self.head_dim
+    }
+
+    pub fn hybrid(&self) -> bool {
+        !matches!(self.arch, Arch::Dense)
+    }
+
+    /// What layer `l` holds. Every layer of a dense model is `Full`.
+    pub fn layer_kind(&self, l: usize) -> LayerKind {
+        if !self.hybrid() || self.layer_full[l / 32] >> (l % 32) & 1 == 1 {
+            LayerKind::Full
+        } else {
+            LayerKind::Linear
+        }
+    }
+
+    /// Which KV cache belongs to layer `l`, or `None` if it needs none.
+    ///
+    /// The caches are allocated only for full-attention layers and packed, so
+    /// this counts set bits below `l`. Allocating `n_layers` of them and using
+    /// six would throw away the entire memory argument, which is the only
+    /// reason this port exists.
+    pub fn kv_slot(&self, l: usize) -> Option<usize> {
+        if self.layer_kind(l) != LayerKind::Full {
+            return None;
+        }
+        if !self.hybrid() {
+            return Some(l);
+        }
+        let mut n = 0;
+        for i in 0..l {
+            if self.layer_kind(i) == LayerKind::Full {
+                n += 1;
+            }
+        }
+        Some(n)
+    }
+
+    /// Which recurrent state belongs to layer `l`, packed the same way.
+    pub fn lin_slot(&self, l: usize) -> Option<usize> {
+        if !self.hybrid() || self.layer_kind(l) != LayerKind::Linear {
+            return None;
+        }
+        let mut n = 0;
+        for i in 0..l {
+            if self.layer_kind(i) == LayerKind::Linear {
+                n += 1;
+            }
+        }
+        Some(n)
+    }
+
+    pub fn n_full_layers(&self) -> usize {
+        (0..self.n_layers).filter(|&l| self.layer_kind(l) == LayerKind::Full).count()
+    }
+
+    pub fn n_linear_layers(&self) -> usize {
+        self.n_layers - self.n_full_layers()
+    }
+
+    /// Width of the delta net's key half, and of its value half.
+    pub fn lin_k_dim(&self) -> usize {
+        self.lin_k_head * self.lin_k_heads
+    }
+    pub fn lin_v_dim(&self) -> usize {
+        self.lin_v_head * self.lin_v_heads
+    }
+    /// What `in_proj_qkv` produces and what the convolution runs over.
+    pub fn conv_dim(&self) -> usize {
+        2 * self.lin_k_dim() + self.lin_v_dim()
+    }
+    /// How many value heads share each key head.
+    pub fn lin_mul(&self) -> usize {
+        if self.lin_k_heads == 0 { 1 } else { self.lin_v_heads / self.lin_k_heads }
+    }
+
+    /// How many dimensions RoPE rotates, with 0 meaning "the checkpoint did
+    /// not say", which is the Llama identity: all of them.
+    pub fn rot_dim(&self) -> usize {
+        if self.rotary_dim == 0 { self.head_dim } else { self.rotary_dim }
+    }
+
+    /// Floats in one layer's recurrent state, and in its convolution ring.
+    ///
+    /// The first is the whole argument for this architecture: it is the same
+    /// size at token 32 as at token 32,768.
+    pub fn lin_state_len(&self) -> usize {
+        self.lin_v_heads * self.lin_k_head * self.lin_v_head
+    }
+    pub fn conv_ring_len(&self) -> usize {
+        self.conv_dim() * self.conv_kernel.saturating_sub(1)
     }
 
     /// Sinks and window, clamped to what the checkpoint was trained for.
@@ -325,6 +509,99 @@ impl KvLayer {
     }
 }
 
+/// One linear-attention layer's memory.
+///
+/// Kept in f32 deliberately, where the KV cache is int8. The cache is
+/// enormous and each entry is read once per token; this is small and is
+/// **read and written every step**, so quantisation error would compound
+/// through the recurrence rather than average out across it.
+struct LinearState {
+    /// `[v_heads][k_head_dim][v_head_dim]`. Independent of context length --
+    /// this is 1 MiB per layer at token 32 and 1 MiB per layer at token
+    /// 32,768, which is the entire reason for the port.
+    s: Vec<f32>,
+    /// The previous `conv_kernel - 1` inputs to the depthwise convolution,
+    /// oldest first, as a ring.
+    conv: Vec<f32>,
+    conv_at: usize,
+}
+
+impl LinearState {
+    fn new(cfg: &Config) -> Self {
+        Self {
+            s: vec![0.0; cfg.lin_state_len()],
+            conv: vec![0.0; cfg.conv_ring_len()],
+            conv_at: 0,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.s.fill(0.0);
+        self.conv.fill(0.0);
+        self.conv_at = 0;
+    }
+}
+
+/// Which cache slots hold live entries, and where each one physically sits.
+///
+/// Extracted so the dense and hybrid passes cannot drift: the arithmetic is
+/// subtle -- an off-by-one in `first` reads a neighbour's key and produces no
+/// error -- and two transcriptions of it would eventually disagree.
+///
+/// Without a window (`sinks + window >= seq_len`) every method here is the
+/// identity: slot `j` holds absolute position `j` and `live` is `pos + 1`.
+/// That is deliberate, and it makes "output below the window is bit-identical
+/// to before" a property that can be tested rather than hoped for.
+struct Window {
+    windowed: bool,
+    sinks: usize,
+    ring: usize,
+    n_sinks: usize,
+    first: usize,
+    live: usize,
+}
+
+impl Window {
+    fn new(c: &Config, cap: usize, pos: usize) -> Self {
+        // The sinks are not sentiment: a transformer dumps attention mass onto
+        // its earliest tokens regardless of what they say, and a plain sliding
+        // window that drops them leaves that mass with nowhere to go and the
+        // distribution collapses (StreamingLLM, Xiao et al. 2023).
+        let windowed = c.streams();
+        let sinks = c.attn_sinks.min(cap);
+        // The ring is the whole allocation past the sinks, which is exactly
+        // the window rather than whatever was left over from `seq_len`.
+        let ring = cap - sinks;
+        let n_sinks = if windowed { sinks.min(pos + 1) } else { 0 };
+        let n_window =
+            if windowed { (pos + 1 - n_sinks).min(ring) } else { pos + 1 };
+        Self {
+            windowed,
+            sinks,
+            ring,
+            n_sinks,
+            // Absolute position of the oldest entry still in the window.
+            first: pos + 1 - n_window,
+            live: (n_sinks + n_window).min(cap),
+        }
+    }
+
+    fn slot_of(&self, j: usize) -> usize {
+        if !self.windowed {
+            return j;
+        }
+        if j < self.n_sinks {
+            return j;
+        }
+        let abs = self.first + (j - self.n_sinks);
+        if abs < self.sinks {
+            abs
+        } else {
+            self.sinks + (abs - self.sinks) % self.ring
+        }
+    }
+}
+
 /// Scratch buffers for one forward pass, plus the KV cache.
 ///
 /// Allocated once and reused. Allocating per token would put the heap
@@ -378,6 +655,23 @@ pub struct State {
     /// indexed rather than recomputed.
     rope_cos: Vec<f32>,
     rope_sin: Vec<f32>,
+    /// One per linear-attention layer, packed. Empty for a dense model.
+    linear: Vec<LinearState>,
+    /// Scratch for the delta net: the convolution's input and output, the
+    /// output gate, the two decay projections, and the recurrence's result.
+    /// All empty for a dense model, which allocates none of this.
+    qkv: Vec<f32>,
+    zbuf: Vec<f32>,
+    abuf: Vec<f32>,
+    bbuf: Vec<f32>,
+    core: Vec<f32>,
+    /// One value head's worth of delta, between the recurrence's two passes.
+    dbuf: Vec<f32>,
+    /// Query and gate, which leave a hybrid's `wq` together.
+    qg: Vec<f32>,
+    /// Router logits and the expert bank's doubled output. Empty unless MoE.
+    router: Vec<f32>,
+    moe_gu: Vec<f32>,
     /// Width of the residual stream, kept so `hidden` can bound itself.
     dim: usize,
     /// Slots actually allocated. Held rather than recomputed from the config,
@@ -390,7 +684,11 @@ pub struct State {
 impl State {
     pub fn new(cfg: &Config) -> Self {
         let kv = cfg.kv_dim();
-        let half = cfg.head_size() / 2;
+        // Half the *rotated* width, not half the head. They are equal for
+        // everything before Qwen3.5, which rotates 64 of 256 and leaves the
+        // rest alone, so the table is a quarter the size and the loop below
+        // is the one it always was.
+        let half = cfg.rot_dim() / 2;
         // Everything below is sized by the number of slots that can be live at
         // once, not by the trained length. Without a window the two are equal
         // and this is the allocation it always was.
@@ -400,6 +698,7 @@ impl State {
         // table needs `cap` entries and not `seq_len` however far generation
         // runs.
         let cap = cfg.live_cap();
+        let hyb = cfg.hybrid();
 
         let mut rope_cos = vec![0.0f32; cap * half];
         let mut rope_sin = vec![0.0f32; cap * half];
@@ -409,7 +708,7 @@ impl State {
                 // the pair index doubled over head_size, so that a rotation is
                 // shared across heads.
                 let freq =
-                    1.0 / tensor::powf(cfg.rope_theta, (i * 2) as f32 / cfg.head_size() as f32);
+                    1.0 / tensor::powf(cfg.rope_theta, (i * 2) as f32 / cfg.rot_dim() as f32);
                 let a = p as f32 * freq;
                 rope_cos[p * half + i] = tensor::cosf(a);
                 rope_sin[p * half + i] = tensor::sinf(a);
@@ -428,13 +727,27 @@ impl State {
             q: vec![0.0; cfg.q_dim()],
             att: vec![0.0; cfg.n_heads * cap],
             logits: vec![0.0; cfg.vocab_size],
-            key_cache: (0..cfg.n_layers).map(|_| KvLayer::new(cap, kv)).collect(),
-            value_cache: (0..cfg.n_layers).map(|_| KvLayer::new(cap, kv)).collect(),
+            // Only the full-attention layers get one. For a dense model that
+            // is every layer and this is the allocation it always was; for
+            // Qwen3.5-0.8B it is 6 of 24, and allocating all 24 would throw
+            // away the entire reason the hybrid is worth running.
+            key_cache: (0..cfg.n_full_layers()).map(|_| KvLayer::new(cap, kv)).collect(),
+            value_cache: (0..cfg.n_full_layers()).map(|_| KvLayer::new(cap, kv)).collect(),
             kbuf: vec![0.0; kv],
             vbuf: vec![0.0; kv],
             krot: vec![0.0; cap * kv],
             rope_cos,
             rope_sin,
+            linear: (0..cfg.n_linear_layers()).map(|_| LinearState::new(cfg)).collect(),
+            qkv: vec![0.0; if hyb { cfg.conv_dim() } else { 0 }],
+            zbuf: vec![0.0; if hyb { cfg.lin_v_dim() } else { 0 }],
+            abuf: vec![0.0; if hyb { cfg.lin_v_heads } else { 0 }],
+            bbuf: vec![0.0; if hyb { cfg.lin_v_heads } else { 0 }],
+            core: vec![0.0; if hyb { cfg.lin_v_dim() } else { 0 }],
+            dbuf: vec![0.0; if hyb { cfg.lin_v_head } else { 0 }],
+            qg: vec![0.0; if hyb { 2 * cfg.q_dim() } else { 0 }],
+            router: vec![0.0; cfg.n_experts],
+            moe_gu: vec![0.0; if cfg.n_experts > 0 { 2 * cfg.hidden_dim } else { 0 }],
             dim: cfg.dim,
             cap,
         }
@@ -459,9 +772,13 @@ impl State {
         // window those differ, and `pos` is an absolute position that can be
         // far past either.
         let pos = pos.min(self.cap);
+        // The number of *cached* layers, which is every layer of a dense
+        // model and only the full-attention ones of a hybrid. Writing
+        // `n_layers` would describe a cache that is not there.
+        let cached = self.key_cache.len();
         let mut out = Vec::new();
         out.extend_from_slice(KV_MAGIC);
-        out.extend_from_slice(&(cfg.n_layers as u32).to_le_bytes());
+        out.extend_from_slice(&(cached as u32).to_le_bytes());
         out.extend_from_slice(&(kv as u32).to_le_bytes());
         out.extend_from_slice(&(pos as u32).to_le_bytes());
 
@@ -471,10 +788,10 @@ impl State {
         // still load after -- so the format describes the mental state, not
         // this month's representation of it. Dequantising here costs one pass
         // over something already being copied byte by byte.
-        out.try_reserve(2 * cfg.n_layers * pos * kv * 4).ok();
+        out.try_reserve(2 * cached * pos * kv * 4).ok();
         let mut row = vec![0.0f32; kv];
         for src in [&self.key_cache, &self.value_cache] {
-            for l in 0..cfg.n_layers {
+            for l in 0..cached {
                 for slot in 0..pos {
                     src[l].read_into(slot, &mut row);
                     for v in &row {
@@ -482,6 +799,18 @@ impl State {
                     }
                 }
             }
+        }
+
+        // A hybrid keeps most of its memory in the recurrence rather than in
+        // the cache, and a context that saved only the cache would restore a
+        // model that had forgotten three layers in four -- fluently, and with
+        // no error anywhere. Appended rather than interleaved so a dense
+        // export is byte-identical to what it always was.
+        for ls in &self.linear {
+            for v in ls.s.iter().chain(ls.conv.iter()) {
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+            out.extend_from_slice(&(ls.conv_at as u32).to_le_bytes());
         }
         out
     }
@@ -496,10 +825,11 @@ impl State {
         // A cache from a different model would restore as plausible-looking
         // garbage rather than failing, so the shape is checked rather than
         // trusted.
-        if layers != cfg.n_layers || kv != cfg.kv_dim() || pos > self.cap {
+        if layers != self.key_cache.len() || kv != cfg.kv_dim() || pos > self.cap {
             return None;
         }
-        let need = 20 + 2 * layers * pos * kv * 4;
+        let per_lin = (cfg.lin_state_len() + cfg.conv_ring_len()) * 4 + 4;
+        let need = 20 + 2 * layers * pos * kv * 4 + self.linear.len() * per_lin;
         if data.len() < need {
             return None;
         }
@@ -520,6 +850,22 @@ impl State {
                     dst[l].store(slot, &row);
                 }
             }
+        }
+
+        for i in 0..self.linear.len() {
+            let (sl, cl) = (cfg.lin_state_len(), cfg.conv_ring_len());
+            for j in 0..sl + cl {
+                let v = f32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]);
+                o += 4;
+                if j < sl {
+                    self.linear[i].s[j] = v;
+                } else {
+                    self.linear[i].conv[j - sl] = v;
+                }
+            }
+            self.linear[i].conv_at =
+                u32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]) as usize;
+            o += 4;
         }
         Some(pos)
     }
@@ -552,8 +898,23 @@ impl State {
         // four bytes a value -- and this number is what decides whether a
         // larger window fits, so reporting the old arithmetic would overstate
         // the cost by more than three times.
-        let cache = 2 * cfg.n_layers * (self.cap * kv + self.cap * kv.div_ceil(KV_BLOCK) * 4);
-        4 * floats + cache
+        let cache = 2 * self.key_cache.len()
+            * (self.cap * kv + self.cap * kv.div_ceil(KV_BLOCK) * 4);
+        // The recurrence, which does not grow with context. Reported alongside
+        // the cache rather than folded into it because the whole point of the
+        // hybrid is that these two scale differently.
+        let recur = 4 * self.linear.len() * (cfg.lin_state_len() + cfg.conv_ring_len());
+        let scratch = 4
+            * (self.qkv.len()
+                + self.zbuf.len()
+                + self.abuf.len()
+                + self.bbuf.len()
+                + self.core.len()
+                + self.dbuf.len()
+                + self.qg.len()
+                + self.router.len()
+                + self.moe_gu.len());
+        4 * floats + cache + recur + scratch
     }
 }
 
@@ -571,10 +932,24 @@ const GLADOS_MAGIC: &[u8; 8] = b"GLADOSM2";
 /// every v2 checkpoint on an ESP keeps loading untouched.
 const GLADOS_VERSION_LLAMA: u32 = 2;
 const GLADOS_VERSION_GENERAL: u32 = 3;
+/// A second architecture whose layers are not all the same, which needs both a
+/// wider header and a different body layout. v2 and v3 are untouched: their
+/// fields sit at exactly the offsets they always did, and a v3 file produced
+/// today is byte-identical to one produced before v4 existed.
+const GLADOS_VERSION_HYBRID: u32 = 4;
 const GLADOS_HEADER: usize = 64;
+const GLADOS_HEADER_V4: usize = 160;
+const GLADOS_BITMAP_AT: usize = 112;
 const GLADOS_QUANT_I8: u32 = 1;
 const GLADOS_FLAG_QK_NORM: u32 = 1 << 0;
 const GLADOS_FLAG_ROPE_INTERLEAVED: u32 = 1 << 1;
+const GLADOS_FLAG_ATTN_OUTPUT_GATE: u32 = 1 << 2;
+const GLADOS_ARCH_DENSE: u32 = 0;
+const GLADOS_ARCH_QWEN35: u32 = 1;
+const GLADOS_ARCH_QWEN35_MOE: u32 = 2;
+/// The epsilon inside the delta rule's L2 normalisation, which is not the
+/// checkpoint's `rms_norm_eps` and is not learned.
+const L2_EPS: f32 = 1e-6;
 
 #[derive(Debug, Clone, Copy)]
 pub enum LoadError {
@@ -584,6 +959,8 @@ pub enum LoadError {
     /// means a truncated download rather than a format mismatch.
     Truncated { want: usize, have: usize },
     OutOfMemory,
+    /// The format is understood and this build will not run it.
+    Unsupported,
 }
 
 /// Byte offsets of each tensor group in a GLADOSM2 blob.
@@ -620,6 +997,94 @@ enum Source {
         /// rms_final[dim].
         norms: Vec<f32>,
     },
+    /// A v4 hybrid, whose body is layer-major.
+    ///
+    /// The dense layout groups by tensor and then by layer, so one base offset
+    /// plus `layer * stride` finds anything. A hybrid cannot: three layers in
+    /// four hold `linear_attn` tensors and the fourth holds `self_attn`, so
+    /// there is no single stride to multiply. The offsets are therefore
+    /// recorded per layer during the load walk, which is work that had to
+    /// happen anyway.
+    Hybrid {
+        bytes: &'static [u8],
+        /// Every f32 tensor in the file, copied out. Same reason as `norms`
+        /// above and rather more of them: the delta net keeps its convolution,
+        /// its decay parameters and its gated norm in f32, which for
+        /// Qwen3.5-0.8B is 1.09M values, 4.4 MB.
+        f: Vec<f32>,
+        layers: Vec<LayerOff>,
+        embed: usize,
+        rms_final: usize,
+        wcls: usize,
+    },
+}
+
+/// Where one hybrid layer's tensors are.
+///
+/// Byte offsets into the blob for the int8 tensors, float offsets into the
+/// model's own aligned copy for the f32 ones. Unused fields stay zero: a
+/// linear-attention layer has no `wq`, and reading one would be a bug this
+/// struct cannot prevent, only make obvious.
+#[derive(Clone, Copy, Default)]
+struct LayerOff {
+    rms_att: usize,
+    rms_ffn: usize,
+    // Gated DeltaNet.
+    in_qkv: usize,
+    in_z: usize,
+    in_a: usize,
+    in_b: usize,
+    conv1d: usize,
+    a_log: usize,
+    dt_bias: usize,
+    gate_norm: usize,
+    out_proj: usize,
+    // Full attention.
+    q_norm: usize,
+    k_norm: usize,
+    wq: usize,
+    wk: usize,
+    wv: usize,
+    wo: usize,
+    // Feed-forward, dense.
+    w1: usize,
+    w2: usize,
+    w3: usize,
+    // Feed-forward, sparse. `experts` is the base of `n_experts` consecutive
+    // (gate_up, down) pairs.
+    router: usize,
+    experts: usize,
+    sh_gate: usize,
+    sh_up: usize,
+    sh_down: usize,
+    sh_gate_w: usize,
+}
+
+/// A forward-only cursor over the body, recording where each tensor starts.
+///
+/// The f32 tensors are noted rather than read: their byte offsets go into
+/// `f32s` in walk order, and the copy happens once at the end, after the
+/// truncation check has established the bytes are all there.
+struct Walk {
+    p: usize,
+    fp: usize,
+    f32s: Vec<(usize, usize)>,
+}
+
+impl Walk {
+    fn q8(&mut self, rows: usize, cols: usize) -> usize {
+        let at = self.p;
+        self.p += Model::q8_stride(rows, cols);
+        at
+    }
+
+    fn f32(&mut self, n: usize) -> usize {
+        let at = self.fp;
+        self.f32s.push((self.p, n));
+        self.p += n * 4;
+        self.fp += n;
+        at
+    }
 }
 
 pub struct Model {
@@ -710,6 +1175,10 @@ impl Model {
             // seq_len means the sum reaches capacity, so nothing is ever
             // evicted and this is off until asked for.
             attn_window: usize::MAX,
+            // Nothing before Qwen3.5 rotates a prefix of the head; the two are
+            // equal and every RoPE loop below is the one it always was.
+            rotary_dim: if n_heads > 0 { (dim / n_heads) as usize } else { 0 },
+            ..Default::default()
         };
 
         // Both are assumed by head_size() and kv_mul(), which divide.
@@ -748,8 +1217,14 @@ impl Model {
         let i32_at = |o: usize| i32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]);
 
         let version = u32_at(8);
-        if version != GLADOS_VERSION_LLAMA && version != GLADOS_VERSION_GENERAL {
+        if version != GLADOS_VERSION_LLAMA
+            && version != GLADOS_VERSION_GENERAL
+            && version != GLADOS_VERSION_HYBRID
+        {
             return Err(LoadError::BadHeader);
+        }
+        if version >= GLADOS_VERSION_HYBRID && data.len() < GLADOS_HEADER_V4 {
+            return Err(LoadError::TooShort);
         }
         let dim = i32_at(12);
         let hidden_dim = i32_at(16);
@@ -792,6 +1267,45 @@ impl Model {
             return Err(LoadError::BadHeader);
         }
 
+        // v4 puts everything new past byte 64, so v2 and v3 never read any of
+        // it and this whole block collapses to Dense defaults for them.
+        let (arch, rotary_dim, hybrid) = if version >= GLADOS_VERSION_HYBRID {
+            let a = match u32_at(60) {
+                // A dense model is a v3 file. Accepting arch 0 here would set
+                // `hybrid()` false and send the walk below to byte 64, which
+                // is 96 bytes short of where a v4 body starts -- and it would
+                // find well-formed int8 there, because everything is.
+                GLADOS_ARCH_DENSE => return Err(LoadError::BadHeader),
+                GLADOS_ARCH_QWEN35 => Arch::Qwen35,
+                GLADOS_ARCH_QWEN35_MOE => Arch::Qwen35Moe,
+                _ => return Err(LoadError::BadHeader),
+            };
+            (a, i32_at(64), true)
+        } else {
+            (Arch::Dense, head_dim, false)
+        };
+        if rotary_dim <= 0 || rotary_dim % 2 != 0 || rotary_dim > head_dim {
+            return Err(LoadError::BadHeader);
+        }
+
+        let (lin_k_head, lin_v_head, lin_k_heads, lin_v_heads, conv_kernel) = if hybrid {
+            (i32_at(68), i32_at(72), i32_at(76), i32_at(80), i32_at(84))
+        } else {
+            (0, 0, 0, 0, 0)
+        };
+        let (n_experts, experts_per_tok, shared_dim) =
+            if hybrid { (i32_at(88), i32_at(92), i32_at(96)) } else { (0, 0, 0) };
+
+        let mut layer_full = [0u32; 8];
+        if hybrid {
+            if n_layers as usize > 8 * 32 {
+                return Err(LoadError::BadHeader);
+            }
+            for (w, slot) in layer_full.iter_mut().enumerate() {
+                *slot = u32_at(GLADOS_BITMAP_AT + w * 4);
+            }
+        }
+
         let cfg = Config {
             dim: dim as usize,
             hidden_dim: hidden_dim as usize,
@@ -813,12 +1327,47 @@ impl Model {
             // seq_len means the sum reaches capacity, so nothing is ever
             // evicted and this is off until asked for.
             attn_window: usize::MAX,
+            arch,
+            rotary_dim: rotary_dim as usize,
+            attn_output_gate: flags & GLADOS_FLAG_ATTN_OUTPUT_GATE != 0,
+            lin_k_head: lin_k_head as usize,
+            lin_v_head: lin_v_head as usize,
+            lin_k_heads: lin_k_heads as usize,
+            lin_v_heads: lin_v_heads as usize,
+            conv_kernel: conv_kernel as usize,
+            n_experts: n_experts as usize,
+            experts_per_tok: experts_per_tok as usize,
+            shared_dim: shared_dim as usize,
+            layer_full,
         };
         // kv_mul() divides by n_kv_heads. `dim % n_heads` is deliberately *not*
         // checked any more: it is no longer a constraint the geometry implies,
         // and on Qwen3 it happens to hold while meaning nothing.
         if cfg.n_heads % cfg.n_kv_heads != 0 {
             return Err(LoadError::BadHeader);
+        }
+
+        if cfg.hybrid() {
+            if lin_k_head <= 0
+                || lin_v_head <= 0
+                || lin_k_heads <= 0
+                || lin_v_heads <= 0
+                || conv_kernel <= 1
+                || cfg.lin_v_heads % cfg.lin_k_heads != 0
+            {
+                return Err(LoadError::BadHeader);
+            }
+            // Deliberately refused rather than half-implemented. The layout
+            // walk below handles a MoE body and is checked by the converter's
+            // round-trip, but there is no forward pass for one here and
+            // writing an unverifiable one would be the exact mistake this
+            // project keeps a fixture to avoid: the smallest published MoE is
+            // 35B-A3B at 71.9 GB, which cannot be read into a UEFI pool on
+            // this machine, so nothing could ever run it and disagree.
+            if cfg.arch == Arch::Qwen35Moe {
+                return Err(LoadError::Unsupported);
+            }
+            return Self::load_hybrid(data, cfg);
         }
 
         let (d, h, l, q, kv, v) = (
@@ -898,15 +1447,135 @@ impl Model {
         Ok(Self { cfg, src: Source::Blob { bytes: data, off, norms }, o: Offsets::default() })
     }
 
+    /// Walk a v4 body and record where every tensor of every layer starts.
+    ///
+    /// Mirrors `convert_hybrid` in `tools/convert.py` exactly, in the same
+    /// order, because the body carries no names, no shapes and no lengths. A
+    /// disagreement about one dimension does not fail here -- it leaves every
+    /// tensor after that point pointing at somebody else's weights, which are
+    /// still perfectly well-formed int8. The truncation check at the end is
+    /// the same assertion `v4.py` makes when it refuses to land anywhere but
+    /// the final byte, and it is the only thing standing between a shape bug
+    /// and a model that runs and is wrong.
+    fn load_hybrid(data: &'static [u8], cfg: Config) -> Result<Self, LoadError> {
+        let c = &cfg;
+        let (d, h, v) = (c.dim, c.hidden_dim, c.vocab_size);
+        let (q, kv) = (c.q_dim(), c.kv_dim());
+        let (vdim, conv_dim) = (c.lin_v_dim(), c.conv_dim());
+        let moe = c.arch == Arch::Qwen35Moe;
+
+        let mut w = Walk { p: GLADOS_HEADER_V4, fp: 0, f32s: Vec::new() };
+        let embed = w.q8(v, d);
+
+        let mut layers: Vec<LayerOff> = Vec::new();
+        layers.try_reserve_exact(c.n_layers).map_err(|_| LoadError::OutOfMemory)?;
+        for l in 0..c.n_layers {
+            let mut o = LayerOff { rms_att: w.f32(d), ..Default::default() };
+
+            if c.layer_kind(l) == LayerKind::Linear {
+                o.in_qkv = w.q8(conv_dim, d);
+                o.in_z = w.q8(vdim, d);
+                o.in_a = w.f32(c.lin_v_heads * d);
+                o.in_b = w.f32(c.lin_v_heads * d);
+                o.conv1d = w.f32(conv_dim * c.conv_kernel);
+                o.a_log = w.f32(c.lin_v_heads);
+                o.dt_bias = w.f32(c.lin_v_heads);
+                o.gate_norm = w.f32(c.lin_v_head);
+                o.out_proj = w.q8(d, vdim);
+            } else {
+                o.q_norm = w.f32(c.head_dim);
+                o.k_norm = w.f32(c.head_dim);
+                // Twice as wide as the query: it emits the output gate too.
+                o.wq = w.q8(2 * q, d);
+                o.wk = w.q8(kv, d);
+                o.wv = w.q8(kv, d);
+                o.wo = w.q8(d, q);
+            }
+
+            o.rms_ffn = w.f32(d);
+            if moe {
+                o.router = w.f32(c.n_experts * d);
+                o.experts = w.p;
+                for _ in 0..c.n_experts {
+                    w.q8(2 * h, d);
+                    w.q8(d, h);
+                }
+                o.sh_gate = w.q8(c.shared_dim, d);
+                o.sh_up = w.q8(c.shared_dim, d);
+                o.sh_down = w.q8(d, c.shared_dim);
+                o.sh_gate_w = w.f32(d);
+            } else {
+                o.w1 = w.q8(h, d);
+                o.w2 = w.q8(d, h);
+                o.w3 = w.q8(h, d);
+            }
+            layers.push(o);
+        }
+
+        let rms_final = w.f32(d);
+        let wcls = w.p;
+        if !c.shared_classifier {
+            w.q8(v, d);
+        }
+
+        // Landing anywhere but the last byte means this walk and the writer's
+        // disagree about a shape. Short is as bad as long: every tensor after
+        // the disagreement points at somebody else's weights, which are still
+        // perfectly well-formed int8 and produce a model that runs and is
+        // wrong. `tools/v4.py` makes exactly this assertion on the way back
+        // in, and it is the only cheap check there is.
+        if data.len() != w.p {
+            return Err(LoadError::Truncated { want: w.p, have: data.len() });
+        }
+
+        let mut f = Vec::new();
+        f.try_reserve_exact(w.fp).map_err(|_| LoadError::OutOfMemory)?;
+        for (base, count) in &w.f32s {
+            for i in 0..*count {
+                f.push(weights::f32_at(&data[*base..], i));
+            }
+        }
+
+        Ok(Self {
+            cfg,
+            src: Source::Hybrid { bytes: data, f, layers, embed, rms_final, wcls },
+            o: Offsets::default(),
+        })
+    }
+
     pub fn weight_bytes(&self) -> usize {
         match &self.src {
             Source::Flat(w) => w.len() * 4,
             Source::Blob { bytes, norms, .. } => bytes.len() + norms.len() * 4,
+            Source::Hybrid { bytes, f, .. } => bytes.len() + f.len() * 4,
         }
     }
 
     pub fn is_quantised(&self) -> bool {
-        matches!(self.src, Source::Blob { .. })
+        matches!(self.src, Source::Blob { .. } | Source::Hybrid { .. })
+    }
+
+    /// One f32 tensor out of a hybrid's aligned copy.
+    fn hf(&self, off: usize, n: usize) -> &[f32] {
+        match &self.src {
+            Source::Hybrid { f, .. } => &f[off..off + n],
+            _ => &[],
+        }
+    }
+
+    /// One int8 tensor out of a hybrid's blob, by absolute byte offset.
+    fn hq(&self, off: usize, rows: usize, cols: usize) -> Mat<'_> {
+        match &self.src {
+            Source::Hybrid { bytes, .. } => Self::q8(bytes, off, rows, cols),
+            _ => Mat::F32 { data: &[], rows: 0, cols: 0 },
+        }
+    }
+
+    fn lo(&self, l: usize) -> LayerOff {
+        match &self.src {
+            Source::Hybrid { layers, .. } => layers[l],
+            _ => LayerOff::default(),
+        }
     }
 
     #[inline]
@@ -915,7 +1584,7 @@ impl Model {
             Source::Flat(w) => &w[off..off + len],
             // Only the Flat path indexes by float offset; reaching here means
             // a caller was not converted to the Mat accessors.
-            Source::Blob { .. } => &[],
+            Source::Blob { .. } | Source::Hybrid { .. } => &[],
         }
     }
 
@@ -946,13 +1615,16 @@ impl Model {
             Source::Blob { bytes, .. } => {
                 Self::q8(bytes, blob_off + layer * Self::q8_stride(rows, cols), rows, cols)
             }
+            // A hybrid body is layer-major with no single stride to multiply,
+            // so nothing routes through here; `hq` takes an offset directly.
+            Source::Hybrid { .. } => Mat::F32 { data: &[], rows: 0, cols: 0 },
         }
     }
 
     fn blob_off(&self) -> ByteOffsets {
         match &self.src {
             Source::Blob { off, .. } => *off,
-            Source::Flat(_) => ByteOffsets::default(),
+            Source::Flat(_) | Source::Hybrid { .. } => ByteOffsets::default(),
         }
     }
 
@@ -986,14 +1658,19 @@ impl Model {
     }
     fn embed_mat(&self) -> Mat<'_> {
         let (d, v) = (self.cfg.dim, self.cfg.vocab_size);
-        self.mat(self.o.token_embedding, self.blob_off().embed, 0, v, d)
+        match &self.src {
+            Source::Hybrid { embed, .. } => self.hq(*embed, v, d),
+            _ => self.mat(self.o.token_embedding, self.blob_off().embed, 0, v, d),
+        }
     }
     fn classifier(&self) -> Mat<'_> {
         let (d, v) = (self.cfg.dim, self.cfg.vocab_size);
         if self.cfg.shared_classifier {
-            self.embed_mat()
-        } else {
-            self.mat(self.o.wcls, self.blob_off().wcls, 0, v, d)
+            return self.embed_mat();
+        }
+        match &self.src {
+            Source::Hybrid { wcls, .. } => self.hq(*wcls, v, d),
+            _ => self.mat(self.o.wcls, self.blob_off().wcls, 0, v, d),
         }
     }
 
@@ -1002,6 +1679,7 @@ impl Model {
         match &self.src {
             Source::Flat(_) => self.slice(self.o.rms_att + l * d, d),
             Source::Blob { norms, .. } => &norms[l * d..(l + 1) * d],
+            Source::Hybrid { .. } => self.hf(self.lo(l).rms_att, d),
         }
     }
     fn rms_ffn_w(&self, l: usize) -> &[f32] {
@@ -1009,6 +1687,7 @@ impl Model {
         match &self.src {
             Source::Flat(_) => self.slice(self.o.rms_ffn + l * d, d),
             Source::Blob { norms, .. } => &norms[(n + l) * d..(n + l + 1) * d],
+            Source::Hybrid { .. } => self.hf(self.lo(l).rms_ffn, d),
         }
     }
     fn rms_final_w(&self) -> &[f32] {
@@ -1016,6 +1695,7 @@ impl Model {
         match &self.src {
             Source::Flat(_) => self.slice(self.o.rms_final, d),
             Source::Blob { norms, .. } => &norms[2 * n * d..2 * n * d + d],
+            Source::Hybrid { rms_final, .. } => self.hf(*rms_final, d),
         }
     }
 
@@ -1036,6 +1716,10 @@ impl Model {
                 let base = 2 * n * d + d + (which * n + l) * hd;
                 &norms[base..base + hd]
             }
+            Source::Hybrid { .. } => {
+                let o = self.lo(l);
+                self.hf(if which == 0 { o.q_norm } else { o.k_norm }, hd)
+            }
         }
     }
     fn q_norm_w(&self, l: usize) -> &[f32] {
@@ -1047,68 +1731,24 @@ impl Model {
 
     /// One decode step: token at position `pos` in, logits out.
     pub fn forward(&self, s: &mut State, token: usize, pos: usize) {
+        if self.cfg.hybrid() {
+            self.forward_hybrid(s, token, pos)
+        } else {
+            self.forward_dense(s, token, pos)
+        }
+    }
+
+    fn forward_dense(&self, s: &mut State, token: usize, pos: usize) {
         let c = &self.cfg;
         let kv_dim = c.kv_dim();
         let kv_mul = c.kv_mul();
         let head_size = c.head_size();
         let eps = c.norm_eps;
 
-        // --- where in the cache this token lives, and what else is still there
-        //
-        // Without a window (`sinks + window >= seq_len`) this is the identity:
-        // slot j holds absolute position j, `live` is pos+1, and every angle
-        // below is the one the old code computed inline. That is deliberate --
-        // it makes "output below the window is bit-identical to before" a
-        // property that can be tested rather than hoped for.
-        //
-        // With one, the cache holds the first `sinks` tokens permanently plus a
-        // ring of the most recent `window`. The sinks are not sentiment: a
-        // transformer dumps attention mass onto its earliest tokens regardless
-        // of what they say, and a plain sliding window that drops them leaves
-        // that mass with nowhere to go and the distribution collapses
-        // (StreamingLLM, Xiao et al. 2023).
-        // `cap` is what `State` allocated, which is the window when there is
-        // one and the trained length when there is not. Taken from the state
-        // rather than recomputed from the config, because `window` can be
-        // changed at runtime and a config that disagrees with the buffers would
-        // index out of one layer's keys into the next -- silently, since the
-        // per-layer split made every layer a separate allocation of exactly
-        // this size.
         let cap = s.cap;
-        let windowed = c.streams();
-        let sinks = c.attn_sinks.min(cap);
-        // The ring is the whole allocation past the sinks, which is now exactly
-        // the window rather than whatever was left over from `seq_len`.
-        let ring = cap - sinks;
-        let window = ring;
-
-        let n_sinks = if windowed { sinks.min(pos + 1) } else { 0 };
-        let n_window = if windowed {
-            (pos + 1 - n_sinks).min(window)
-        } else {
-            pos + 1
-        };
-        let live = (n_sinks + n_window).min(cap);
-        // Absolute position of the oldest entry still in the window.
-        let first = pos + 1 - n_window;
-
-        let slot_of = |j: usize| -> usize {
-            if !windowed {
-                return j;
-            }
-            if j < n_sinks {
-                return j;
-            }
-            let abs = first + (j - n_sinks);
-            if abs < sinks {
-                abs
-            } else {
-                sinks + (abs - sinks) % ring
-            }
-        };
-
-        // Where this token's key and value go.
-        let here = slot_of(live - 1);
+        let w = Window::new(c, cap, pos);
+        let live = w.live;
+        let here = w.slot_of(live - 1);
 
         // Embedding lookup is a row fetch, not a matmul against a one-hot
         // vector. When the table is quantised the row is dequantised on the
@@ -1155,80 +1795,9 @@ impl Model {
             s.key_cache[l].store(here, &s.kbuf);
             s.value_cache[l].store(here, &s.vbuf);
 
-            // The key just written stays unrotated; only the query is rotated
-            // here, at the position it will occupy in the cache.
-            let half = head_size / 2;
-            let qpos = live.saturating_sub(1);
-            for h in 0..c.n_heads {
-                let base = h * head_size;
-                for p in 0..half {
-                    let fcr = s.rope_cos[qpos * half + p];
-                    let fci = s.rope_sin[qpos * half + p];
-                    let (i, j) = if c.rope_interleaved {
-                        (base + 2 * p, base + 2 * p + 1)
-                    } else {
-                        (base + p, base + p + half)
-                    };
-                    let (a, b) = (s.q[i], s.q[j]);
-                    s.q[i] = a * fcr - b * fci;
-                    s.q[j] = a * fci + b * fcr;
-                }
-            }
-
-            // Rotate every live key into `krot`, indexed by cache position
-            // rather than by the absolute position it arrived at. Done once
-            // per layer rather than once per head: grouped-query attention
-            // shares each key across `kv_mul` heads, so rotating per head
-            // would redo the same work three times.
-            let kc = &s.key_cache[l];
-            for j in 0..live {
-                let src = slot_of(j);
-                let dst = j * kv_dim;
-                for h in 0..c.n_kv_heads {
-                    let base = h * head_size;
-                    for p in 0..half {
-                        let fcr = s.rope_cos[j * half + p];
-                        let fci = s.rope_sin[j * half + p];
-                        let (a_off, b_off) = if c.rope_interleaved {
-                            (base + 2 * p, base + 2 * p + 1)
-                        } else {
-                            (base + p, base + p + half)
-                        };
-                        let k0 = kc.at(src, a_off);
-                        let k1 = kc.at(src, b_off);
-                        s.krot[dst + a_off] = k0 * fcr - k1 * fci;
-                        s.krot[dst + b_off] = k0 * fci + k1 * fcr;
-                    }
-                }
-            }
-
-            let scale = 1.0 / tensor::sqrtf(head_size as f32);
-            for h in 0..c.n_heads {
-                let qo = h * head_size;
-                let ao = h * cap;
-                let hoff = (h / kv_mul) * head_size;
-                for t in 0..live {
-                    let ko = t * kv_dim + hoff;
-                    let mut score = 0.0f32;
-                    for i in 0..head_size {
-                        score += s.q[qo + i] * s.krot[ko + i];
-                    }
-                    s.att[ao + t] = score * scale;
-                }
-                tensor::softmax(&mut s.att[ao..ao + live]);
-
-                for i in 0..head_size {
-                    s.xb[qo + i] = 0.0;
-                }
-                let vc = &s.value_cache[l];
-                for t in 0..live {
-                    let vslot = slot_of(t);
-                    let a = s.att[ao + t];
-                    for i in 0..head_size {
-                        s.xb[qo + i] += a * vc.at(vslot, hoff + i);
-                    }
-                }
-            }
+            self.rope_q(s, &w);
+            self.rope_keys(s, &w, l, kv_dim);
+            self.attend(s, &w, l, kv_dim, kv_mul);
 
             self.wo(l).matvec(&mut s.xb2, &s.xb);
             tensor::add_into(&mut s.x, &s.xb2);
@@ -1247,6 +1816,358 @@ impl Model {
         // runs most often.
         tensor::rmsnorm_eps(&mut s.xb[..c.dim], &s.x, self.rms_final_w(), eps);
         self.classifier().matvec(&mut s.logits, &s.xb);
+    }
+
+    /// Rotate the query at the position it will occupy in the cache.
+    ///
+    /// Only the first `rot_dim` dimensions of each head move. For everything
+    /// before Qwen3.5 that is the whole head and this is the loop it always
+    /// was; Qwen3.5 rotates 64 of 256 and passes the other 192 through
+    /// untouched, which is a property of the *tables* being narrower rather
+    /// than of any test in here.
+    fn rope_q(&self, s: &mut State, w: &Window) {
+        let c = &self.cfg;
+        let head_size = c.head_size();
+        let half = c.rot_dim() / 2;
+        let qpos = w.live.saturating_sub(1);
+        for h in 0..c.n_heads {
+            let base = h * head_size;
+            for p in 0..half {
+                let fcr = s.rope_cos[qpos * half + p];
+                let fci = s.rope_sin[qpos * half + p];
+                let (i, j) = if c.rope_interleaved {
+                    (base + 2 * p, base + 2 * p + 1)
+                } else {
+                    (base + p, base + p + half)
+                };
+                let (a, b) = (s.q[i], s.q[j]);
+                s.q[i] = a * fcr - b * fci;
+                s.q[j] = a * fci + b * fcr;
+            }
+        }
+    }
+
+    /// Rotate every live key into `krot`, indexed by *cache* position rather
+    /// than by the absolute position it arrived at.
+    ///
+    /// Done once per layer rather than once per head: grouped-query attention
+    /// shares each key across `kv_mul` heads, so rotating per head would redo
+    /// the same work three times.
+    fn rope_keys(&self, s: &mut State, w: &Window, cache: usize, kv_dim: usize) {
+        let c = &self.cfg;
+        let head_size = c.head_size();
+        let half = c.rot_dim() / 2;
+        let kc = &s.key_cache[cache];
+        for j in 0..w.live {
+            let src = w.slot_of(j);
+            let dst = j * kv_dim;
+            for h in 0..c.n_kv_heads {
+                let base = h * head_size;
+                // Dimensions past the rotated prefix still have to reach
+                // `krot`, or the dot product below reads whatever the last
+                // token left there.
+                for i in c.rot_dim()..head_size {
+                    s.krot[dst + base + i] = kc.at(src, base + i);
+                }
+                for p in 0..half {
+                    let fcr = s.rope_cos[j * half + p];
+                    let fci = s.rope_sin[j * half + p];
+                    let (a_off, b_off) = if c.rope_interleaved {
+                        (base + 2 * p, base + 2 * p + 1)
+                    } else {
+                        (base + p, base + p + half)
+                    };
+                    let k0 = kc.at(src, a_off);
+                    let k1 = kc.at(src, b_off);
+                    s.krot[dst + a_off] = k0 * fcr - k1 * fci;
+                    s.krot[dst + b_off] = k0 * fci + k1 * fcr;
+                }
+            }
+        }
+    }
+
+    /// Scaled dot-product attention over the live cache, into `xb`.
+    fn attend(&self, s: &mut State, w: &Window, cache: usize, kv_dim: usize, kv_mul: usize) {
+        let c = &self.cfg;
+        let head_size = c.head_size();
+        let cap = s.cap;
+        let scale = 1.0 / tensor::sqrtf(head_size as f32);
+        for h in 0..c.n_heads {
+            let qo = h * head_size;
+            let ao = h * cap;
+            let hoff = (h / kv_mul) * head_size;
+            for t in 0..w.live {
+                let ko = t * kv_dim + hoff;
+                let mut score = 0.0f32;
+                for i in 0..head_size {
+                    score += s.q[qo + i] * s.krot[ko + i];
+                }
+                s.att[ao + t] = score * scale;
+            }
+            tensor::softmax(&mut s.att[ao..ao + w.live]);
+
+            for i in 0..head_size {
+                s.xb[qo + i] = 0.0;
+            }
+            let vc = &s.value_cache[cache];
+            for t in 0..w.live {
+                let vslot = w.slot_of(t);
+                let a = s.att[ao + t];
+                for i in 0..head_size {
+                    s.xb[qo + i] += a * vc.at(vslot, hoff + i);
+                }
+            }
+        }
+    }
+
+    /// One decode step through a Qwen3.5 hybrid.
+    ///
+    /// Structurally the same shape as the dense pass -- mixer, residual, feed
+    /// forward, residual -- with three differences that all sit inside the
+    /// mixer. Three layers in four run a recurrence with no cache at all; the
+    /// fourth runs attention whose query projection is twice as wide as its
+    /// query and whose output passes through a gate; and every norm out here
+    /// scales by `1 + w` rather than by `w`.
+    fn forward_hybrid(&self, s: &mut State, token: usize, pos: usize) {
+        let c = &self.cfg;
+        let eps = c.norm_eps;
+        let w = Window::new(c, s.cap, pos);
+
+        // Position 0 starts a sequence, and for a recurrence that has to mean
+        // something. The KV cache needs no such rule -- attention reads slots
+        // `0..live` and position 0 overwrites slot 0, so whatever ran before
+        // is simply not looked at. The delta net's state is different in kind:
+        // nothing overwrites it, it is *carried*, so without this every
+        // `logits` call would answer from a state left behind by the boot
+        // selftests and no two runs would agree.
+        if pos == 0 {
+            for ls in s.linear.iter_mut() {
+                ls.clear();
+            }
+        }
+
+        let tok = token.min(c.vocab_size - 1);
+        self.embed_mat().row_into(tok, &mut s.x);
+
+        for l in 0..c.n_layers {
+            tensor::rmsnorm_1p(&mut s.xb[..c.dim], &s.x, self.rms_att_w(l), eps);
+            match c.layer_kind(l) {
+                LayerKind::Linear => self.delta_net(s, l),
+                LayerKind::Full => self.gated_attention(s, l, &w),
+            }
+            tensor::add_into(&mut s.x, &s.xb2);
+
+            tensor::rmsnorm_1p(&mut s.xb[..c.dim], &s.x, self.rms_ffn_w(l), eps);
+            let o = self.lo(l);
+            self.hq(o.w1, c.hidden_dim, c.dim).matvec(&mut s.hb, &s.xb);
+            self.hq(o.w3, c.hidden_dim, c.dim).matvec(&mut s.hb2, &s.xb);
+            tensor::swiglu(&mut s.hb, &s.hb2);
+            self.hq(o.w2, c.dim, c.hidden_dim).matvec(&mut s.xb2, &s.hb);
+            tensor::add_into(&mut s.x, &s.xb2);
+        }
+
+        tensor::rmsnorm_1p(&mut s.xb[..c.dim], &s.x, self.rms_final_w(), eps);
+        self.classifier().matvec(&mut s.logits, &s.xb);
+    }
+
+    /// Full attention with a partial rotation and an output gate, into `xb2`.
+    fn gated_attention(&self, s: &mut State, l: usize, w: &Window) {
+        let c = &self.cfg;
+        let o = self.lo(l);
+        let hd = c.head_dim;
+        let (kv_dim, q_dim) = (c.kv_dim(), c.q_dim());
+        let eps = c.norm_eps;
+        // Every full-attention layer has a cache and no other layer does, so
+        // this cannot be `l`: at layer 19 of Qwen3.5-0.8B the fifth cache is
+        // wanted, not the twentieth, which does not exist.
+        let cache = match c.kv_slot(l) {
+            Some(k) => k,
+            None => return,
+        };
+
+        // Query and gate leave one projection together, interleaved per head:
+        // `hd` of query then `hd` of gate, for each head in turn. Reading it
+        // as all queries followed by all gates gives a perfectly well-shaped
+        // and completely wrong split.
+        self.hq(o.wq, 2 * q_dim, c.dim).matvec(&mut s.qg, &s.xb);
+        self.hq(o.wk, kv_dim, c.dim).matvec(&mut s.kbuf, &s.xb);
+        self.hq(o.wv, kv_dim, c.dim).matvec(&mut s.vbuf, &s.xb);
+        for h in 0..c.n_heads {
+            let (src, dst) = (h * 2 * hd, h * hd);
+            s.q[dst..dst + hd].copy_from_slice(&s.qg[src..src + hd]);
+        }
+
+        // Both flags are set by every Qwen3.5 the converter has seen, and
+        // both are read from the header rather than assumed: a hybrid without
+        // QK-Norm would load fine and attend to the wrong things, and one
+        // without an output gate would have its attention scaled by the
+        // sigmoid of whatever the second half of `wq` happened to mean.
+        if c.qk_norm {
+            let qn = self.q_norm_w(l);
+            for h in 0..c.n_heads {
+                tensor::rmsnorm_1p_inplace(&mut s.q[h * hd..(h + 1) * hd], qn, eps);
+            }
+            let kn = self.k_norm_w(l);
+            for h in 0..c.n_kv_heads {
+                tensor::rmsnorm_1p_inplace(&mut s.kbuf[h * hd..(h + 1) * hd], kn, eps);
+            }
+        }
+
+        s.key_cache[cache].store(w.slot_of(w.live - 1), &s.kbuf);
+        s.value_cache[cache].store(w.slot_of(w.live - 1), &s.vbuf);
+
+        self.rope_q(s, w);
+        self.rope_keys(s, w, cache, kv_dim);
+        self.attend(s, w, cache, kv_dim, c.kv_mul());
+
+        // The gate multiplies the concatenated head outputs, before `wo` and
+        // not after: `wo` mixes heads, so gating on the far side would apply
+        // each head's gate to a blend of every head.
+        if c.attn_output_gate {
+            for h in 0..c.n_heads {
+                for i in 0..hd {
+                    s.xb[h * hd + i] *= tensor::sigmoid(s.qg[h * 2 * hd + hd + i]);
+                }
+            }
+        }
+        self.hq(o.wo, c.dim, q_dim).matvec(&mut s.xb2, &s.xb);
+    }
+
+    /// Gated DeltaNet: a depthwise causal convolution, then one step of the
+    /// delta rule against a state that does not grow. Output into `xb2`.
+    ///
+    /// The rule is an associative memory that corrects itself. `mem` is what
+    /// the state currently returns for this key; `delta` is how far that is
+    /// from the value that actually arrived; the state absorbs `beta` of the
+    /// difference. Written out over a sequence it is a linear attention, and
+    /// written out for one token -- which is all a decoder ever needs -- it is
+    /// two passes over a fixed-size array.
+    fn delta_net(&self, s: &mut State, l: usize) {
+        let c = &self.cfg;
+        let o = self.lo(l);
+        let (hk, hv) = (c.lin_k_head, c.lin_v_head);
+        let (nk, nv) = (c.lin_k_heads, c.lin_v_heads);
+        let (kdim, vdim, conv_dim) = (c.lin_k_dim(), c.lin_v_dim(), c.conv_dim());
+        let kern = c.conv_kernel;
+        let mul = c.lin_mul();
+        let eps = c.norm_eps;
+        let idx = match c.lin_slot(l) {
+            Some(i) => i,
+            None => return,
+        };
+
+        self.hq(o.in_qkv, conv_dim, c.dim).matvec(&mut s.qkv, &s.xb);
+        self.hq(o.in_z, vdim, c.dim).matvec(&mut s.zbuf, &s.xb);
+        // `in_proj_a` and `in_proj_b` stay f32 through the converter: they are
+        // 32x2048, a rounding error in the size of the file, and they feed a
+        // loop that carries its own output forward, so quantisation error
+        // would compound step over step instead of averaging out.
+        tensor::matmul(&mut s.abuf, &s.xb, self.hf(o.in_a, nv * c.dim), c.dim, nv);
+        tensor::matmul(&mut s.bbuf, &s.xb, self.hf(o.in_b, nv * c.dim), c.dim, nv);
+
+        let cw = self.hf(o.conv1d, conv_dim * kern);
+        let a_log = self.hf(o.a_log, nv);
+        let dt_bias = self.hf(o.dt_bias, nv);
+        let gnorm = self.hf(o.gate_norm, hv);
+
+        {
+            let State { qkv, zbuf, abuf, bbuf, core, dbuf, linear, .. } = &mut *s;
+            let ls = &mut linear[idx];
+
+            // Depthwise causal convolution over the last `kern` inputs, the
+            // older `kern - 1` of which live in a ring. `conv_at` indexes the
+            // oldest, so ring position `(conv_at + j) % (kern - 1)` holds input
+            // `t - kern + 1 + j` and the current input is the last tap.
+            let hist = kern - 1;
+            for ch in 0..conv_dim {
+                let mut acc = cw[ch * kern + hist] * qkv[ch];
+                for j in 0..hist {
+                    let r = (ls.conv_at + j) % hist;
+                    acc += cw[ch * kern + j] * ls.conv[r * conv_dim + ch];
+                }
+                // Stashed before SiLU: the convolution runs over the
+                // projection, not over its activation.
+                ls.conv[ls.conv_at * conv_dim + ch] = qkv[ch];
+                qkv[ch] = tensor::silu(acc);
+            }
+            ls.conv_at = (ls.conv_at + 1) % hist;
+
+            // q and k are L2-normalised *inside* the rule, and the
+            // 1/sqrt(k_head_dim) scale goes on the query only. Both are per
+            // key head, so value heads sharing a key head share the vector --
+            // which is why this normalises `nk` of them and the loop below
+            // indexes by `h / mul`.
+            let qscale = 1.0 / tensor::sqrtf(hk as f32);
+            for h in 0..nk {
+                let qo = h * hk;
+                tensor::l2norm_inplace(&mut qkv[qo..qo + hk], L2_EPS);
+                for v in &mut qkv[qo..qo + hk] {
+                    *v *= qscale;
+                }
+                let ko = kdim + h * hk;
+                tensor::l2norm_inplace(&mut qkv[ko..ko + hk], L2_EPS);
+            }
+
+            for h in 0..nv {
+                let kh = h / mul;
+                let (qo, ko, vo) = (kh * hk, kdim + kh * hk, 2 * kdim + h * hv);
+                let base = h * hk * hv;
+                let out = h * hv;
+                let beta = tensor::sigmoid(bbuf[h]);
+                // `g = -exp(A_log) * softplus(a + dt_bias)`, and the state
+                // decays by `exp(g)`. softplus is why `tensor` grew a
+                // two-branch one: the naive `ln(1 + exp(x))` returns a
+                // plausible 88.7 above x=88 rather than an infinity anyone
+                // would notice, and a wrong decay does not produce a NaN --
+                // it quietly empties the state.
+                let decay = tensor::expf(-tensor::expf(a_log[h])
+                    * tensor::softplus(abuf[h] + dt_bias[h]));
+
+                // Pass one: decay the state, and read out what it currently
+                // holds for this key.
+                for d in dbuf.iter_mut() {
+                    *d = 0.0;
+                }
+                for i in 0..hk {
+                    let k = qkv[ko + i];
+                    let row = base + i * hv;
+                    for j in 0..hv {
+                        let v = ls.s[row + j] * decay;
+                        ls.s[row + j] = v;
+                        dbuf[j] += v * k;
+                    }
+                }
+                // How far that is from the value that actually arrived.
+                for j in 0..hv {
+                    dbuf[j] = (qkv[vo + j] - dbuf[j]) * beta;
+                }
+                // Pass two: absorb the correction and read the query out.
+                for j in 0..hv {
+                    core[out + j] = 0.0;
+                }
+                for i in 0..hk {
+                    let (k, q) = (qkv[ko + i], qkv[qo + i]);
+                    let row = base + i * hv;
+                    for j in 0..hv {
+                        let v = ls.s[row + j] + k * dbuf[j];
+                        ls.s[row + j] = v;
+                        core[out + j] += v * q;
+                    }
+                }
+
+                // The one norm in this model that scales by `w` rather than
+                // `1 + w`, with a gate that goes through silu rather than the
+                // sigmoid the attention gate uses.
+                tensor::rmsnorm_gated(
+                    &mut core[out..out + hv],
+                    gnorm,
+                    &zbuf[out..out + hv],
+                    eps,
+                );
+            }
+        }
+
+        self.hq(o.out_proj, c.dim, vdim).matvec(&mut s.xb2, &s.core);
     }
 
     /// One row of the token embedding table, written into `out`.

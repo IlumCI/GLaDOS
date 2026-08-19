@@ -75,7 +75,13 @@ pub unsafe fn ymm_roundtrip(input: &[f32; 32], output: &mut [f32; 32], spin: u64
 /// `out[i] = dot(w[i], x)` for a (d, n) matrix. The hot loop of the whole model.
 pub fn matmul(out: &mut [f32], x: &[f32], w: &[f32], n: usize, d: usize) {
     debug_assert!(out.len() >= d && x.len() >= n && w.len() >= n * d);
-    if crate::cpu::detected().avx_enabled && crate::cpu::detected().fma {
+    // `avx2` is not optional, however much `matmul_avx2` looks like it only
+    // needs FMA: it is declared `target_feature(enable = "avx2,fma")`, and a
+    // part with AVX and FMA but no AVX2 -- AMD Piledriver -- takes a #UD here.
+    // `weights.rs` got this right for the int8 kernel and this half was missed,
+    // which is the exact gate CLAUDE.md records as already fixed.
+    let f = crate::cpu::detected();
+    if f.avx_enabled && f.avx2 && f.fma {
         unsafe { matmul_avx2(out, x, w, n, d) }
     } else {
         matmul_scalar(out, x, w, n, d)
@@ -230,8 +236,121 @@ pub fn softmax(x: &mut [f32]) {
 /// SwiGLU feed-forward activation: `out = silu(out) * gate`.
 pub fn swiglu(out: &mut [f32], gate: &[f32]) {
     for i in 0..out.len() {
-        let v = out[i];
-        out[i] = (v / (1.0 + expf(-v))) * gate[i];
+        out[i] = silu(out[i]) * gate[i];
+    }
+}
+
+/// The logistic function.
+///
+/// `expf` saturates cleanly at both tails -- 0 below -88, infinity above 88 --
+/// so the naive form needs no guard: `1/(1+inf)` is 0 and `1/(1+0)` is 1, both
+/// correct. This lived unnamed inside `swiglu` until Qwen3.5 wanted it in three
+/// other places.
+#[inline]
+pub fn sigmoid(x: f32) -> f32 {
+    1.0 / (1.0 + expf(-x))
+}
+
+#[inline]
+pub fn silu(x: f32) -> f32 {
+    x * sigmoid(x)
+}
+
+/// `ln(1 + exp(x))`, in two branches because there is no safe single form here.
+///
+/// The obvious `lnf(1.0 + expf(x))` breaks down twice. Above 88 `expf` returns
+/// infinity and `lnf` has no infinity guard -- it extracts the 0xFF exponent
+/// and returns 88.7, a plausible number that is not the answer. The stable
+/// identity `max(x,0) + log1p(exp(-|x|))` needs a `log1p` this kernel does not
+/// have, and `lnf(1.0 + t)` cannot stand in for one: for small `t` the sum
+/// rounds to exactly 1.0 and the result is 0.
+///
+/// So: `x` where the two agree to within f32 anyway, the naive form below it.
+/// The threshold is the reference implementation's own.
+///
+/// This is load-bearing rather than decorative. `g = -exp(A_log) *
+/// softplus(a + dt_bias)` is the decay of a recurrence, and a wrong `g` does
+/// not produce a NaN that surfaces somewhere -- it produces a plausible decay
+/// factor that quietly empties the state.
+pub fn softplus(x: f32) -> f32 {
+    if x > 20.0 {
+        // exp(20) is 4.85e8, so ln(1+exp(x)) and x differ by under 1e-8
+        // relative -- far below what f32 can represent at this magnitude.
+        x
+    } else {
+        lnf(1.0 + expf(x))
+    }
+}
+
+/// RMSNorm scaled by `1 + weight` rather than by `weight`.
+///
+/// Qwen3.5 has **two** RMSNorms with different conventions.
+/// `Qwen3_5RMSNorm` -- input_layernorm, post_attention_layernorm, q_norm,
+/// k_norm and the final norm -- initialises its parameter to zeros and scales
+/// by `(1 + w)`. `Qwen3_5RMSNormGated`, inside the delta net, initialises to
+/// ones and scales by `w`.
+///
+/// Deliberately a second function rather than a flag on the first. The whole
+/// point is that the call sites differ, and a flag that defaults wrong is
+/// invisible: using the ordinary convention here produces entirely plausible
+/// activations that are wrong from the first layer onward, which is what phase
+/// 0's fixture was built to catch and did.
+pub fn rmsnorm_1p(out: &mut [f32], x: &[f32], weight: &[f32], eps: f32) {
+    let n = x.len();
+    let mut ss = 0.0f32;
+    for v in x.iter() {
+        ss += v * v;
+    }
+    let scale = 1.0 / sqrtf(ss / n as f32 + eps);
+    for i in 0..n {
+        out[i] = (1.0 + weight[i]) * (x[i] * scale);
+    }
+}
+
+/// In-place form of [`rmsnorm_1p`], for one head's window into a buffer.
+pub fn rmsnorm_1p_inplace(x: &mut [f32], weight: &[f32], eps: f32) {
+    let n = x.len();
+    let mut ss = 0.0f32;
+    for v in x.iter() {
+        ss += v * v;
+    }
+    let scale = 1.0 / sqrtf(ss / n as f32 + eps);
+    for i in 0..n {
+        x[i] = (1.0 + weight[i]) * (x[i] * scale);
+    }
+}
+
+/// `rmsnorm(x, w) * silu(gate)`, the delta net's output stage.
+///
+/// Norm first, then gate; the class name says neither which order nor which
+/// norm. It is the plain `w` convention, unlike every other norm in this
+/// model, and the gate goes through **silu** rather than the sigmoid that the
+/// attention output gate uses.
+pub fn rmsnorm_gated(x: &mut [f32], weight: &[f32], gate: &[f32], eps: f32) {
+    let n = x.len();
+    let mut ss = 0.0f32;
+    for v in x.iter() {
+        ss += v * v;
+    }
+    let scale = 1.0 / sqrtf(ss / n as f32 + eps);
+    for i in 0..n {
+        x[i] = weight[i] * (x[i] * scale) * silu(gate[i]);
+    }
+}
+
+/// Scale a vector to unit length, with an epsilon inside the square root.
+///
+/// Not RMSNorm: this divides by the vector's own norm with no learned weight
+/// and no division by `n`. Applied to the delta rule's queries and keys, where
+/// `1/sqrt(head_k_dim)` goes on the query only.
+pub fn l2norm_inplace(x: &mut [f32], eps: f32) {
+    let mut ss = 0.0f32;
+    for v in x.iter() {
+        ss += v * v;
+    }
+    let inv = 1.0 / sqrtf(ss + eps);
+    for v in x.iter_mut() {
+        *v *= inv;
     }
 }
 

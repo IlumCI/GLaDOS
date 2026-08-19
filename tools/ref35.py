@@ -284,8 +284,14 @@ def forward(tokens, tensors, cfg, capture=None):
     h = rms_norm(h, W("norm.weight"), eps)
     if capture is not None:
         capture["final_norm"] = h.copy()
-    # Tied embeddings: the classifier is the embedding matrix.
-    return h @ W("embed_tokens.weight").T
+    # Qwen3.5-0.8B and -4B tie their embeddings, so the classifier *is* the
+    # embedding matrix and this used to assume so unconditionally. The MoE
+    # checkpoints ship a separate `lm_head.weight` and it is unprefixed even
+    # where everything else is nested. Assuming tied for an untied model does
+    # not fail: it produces logits that peak on the input token, which reads
+    # like a model that has learned to copy.
+    head = tensors.get("lm_head.weight")
+    return h @ (W("embed_tokens.weight") if head is None else np.asarray(head, np.float32)).T
 
 
 def run_converted(args):

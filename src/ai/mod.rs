@@ -125,6 +125,55 @@ pub fn selftest() -> bool {
         close(tensor::cosf(0.0), 1.0, 1e-4),
         "expect 1",
     );
+    all &= check(
+        "sigmoid(0), (2)",
+        close(tensor::sigmoid(0.0), 0.5, 1e-6)
+            && close(tensor::sigmoid(2.0), 0.880_797, 1e-5),
+        "expect 0.5, 0.880797",
+    );
+    all &= check(
+        "silu(0), (1)",
+        close(tensor::silu(0.0), 0.0, 1e-6) && close(tensor::silu(1.0), 0.731_058_6, 1e-5),
+        "expect 0, 0.7310586",
+    );
+    // The tails are the whole point of the two-branch form. At x = 100 the
+    // naive `lnf(1 + expf(x))` overflows to infinity and `lnf` has no guard
+    // for one -- it extracts the 0xFF exponent and returns 88.7, a plausible
+    // number that is not the answer, and a wrong decay does not produce a NaN
+    // anyone would notice, it quietly empties the recurrence's state.
+    all &= check(
+        "softplus(0), (100)",
+        close(tensor::softplus(0.0), core::f32::consts::LN_2, 1e-5)
+            && close(tensor::softplus(100.0), 100.0, 1e-3),
+        "expect ln2, 100",
+    );
+    all &= check(
+        "softplus(-10)",
+        close(tensor::softplus(-10.0), 4.539_79e-5, 1e-6),
+        "expect 4.53979e-5",
+    );
+    {
+        // (1 + w) rather than w: with w = 1 the scale is 2, so a unit-RMS
+        // input comes out at 2. The ordinary convention would give 1 here and
+        // a model that is wrong from its first layer with nothing to catch it.
+        let x = [3.0f32, 4.0];
+        let mut out = [0.0f32; 2];
+        tensor::rmsnorm_1p(&mut out, &x, &[1.0, 1.0], 0.0);
+        let rms = tensor::sqrtf((9.0 + 16.0) / 2.0);
+        all &= check(
+            "rmsnorm_1p",
+            close(out[0], 2.0 * 3.0 / rms, 1e-5) && close(out[1], 2.0 * 4.0 / rms, 1e-5),
+            "expect 2x the plain norm",
+        );
+
+        let mut v = [3.0f32, 4.0];
+        tensor::l2norm_inplace(&mut v, 0.0);
+        all &= check(
+            "l2norm",
+            close(v[0], 0.6, 1e-5) && close(v[1], 0.8, 1e-5),
+            "expect [0.6, 0.8]",
+        );
+    }
 
     // --- matmul against a hand-computed case ---
     // w = [[1,2,3],[4,5,6]], x = [1,2,3] -> [14, 32]
@@ -264,6 +313,8 @@ pub fn model_demo() {
         rope_theta: 10000.0,
         attn_sinks: 0,
         attn_window: usize::MAX,
+        rotary_dim: 16,
+        ..Default::default()
     };
 
     console::set_color(YELLOW);
@@ -354,6 +405,8 @@ pub fn model_demo() {
         rope_theta: 1_000_000.0,
         attn_sinks: 0,
         attn_window: usize::MAX,
+        rotary_dim: 32,
+        ..Default::default()
     };
     ok &= check(
         "wide-head geometry",
