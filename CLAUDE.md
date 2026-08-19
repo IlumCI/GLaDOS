@@ -89,8 +89,8 @@ over 2 key heads, GQA, an untied classifier) and prints what `logits` should
 say:
 
 ```powershell
-.	oolsenv\Scripts\python.exe tools\hybtest.py out\hybtest.bin --build
-.	oolsenv\Scripts\python.exe tools\drive.py --model out\hybtest.bin "logits 7 11 3"
+.\tools\venv\Scripts\python.exe tools\hybtest.py out\hybtest.bin --build
+.\tools\venv\Scripts\python.exe tools\drive.py --model out\hybtest.bin "logits 7 11 3"
 ```
 
 `--schedule FFFF` / `LLLL` isolates the two mixers, and `--zero` zeroes every
