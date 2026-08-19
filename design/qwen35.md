@@ -142,8 +142,16 @@ architecture whose failure mode is fluent nonsense is worse than none.
 
 ## Phases
 
-0. **Fixture.** torch + transformers in the venv, golden per-layer activations
-   and logits for Qwen3.5-0.8B on a fixed prompt. Nothing else proceeds first.
+0. **Fixture. Done.** torch 2.13 CPU, transformers 5.15 and safetensors in the
+   venv; `tools/fixture.py` captures golden activations. Verified: 24 layers
+   with the schedule `LLLFLLLFLLLFLLLFLLLFLLLF`, captures present at exactly
+   the six layers the config calls full attention, and the reference model
+   answers "The capital of France is Paris." so the download is sound. 78
+   arrays, 5.9 MB, at `out/fixture-qwen35.npz`.
+
+   The fixture is not committed. It is 5.9 MB against a 700 KB repository and
+   `fixture.py` regenerates it, which matches the rule the model weights
+   already follow: reproducible from the repo plus a download.
 1. **reference.py** grows the hybrid forward: partial RoPE, attention output
    gate, the Gated DeltaNet recurrence, and the MoE router. Diffed layer by
    layer against the fixture until it matches.
@@ -152,6 +160,45 @@ architecture whose failure mode is fluent nonsense is worse than none.
 3. **model.rs** ports the verified reference. Dense first, MoE second.
 4. Measure: tokens/sec and memory against Qwen3-0.6B at 512 and at 32k, which
    is where the whole argument is supposed to pay off.
+
+5. **Vision, optionally.** The tower is 12 layers at hidden 768, patch 16,
+   about 86M parameters -- roughly 86 MB at int8 against the text model's 850.
+   Size is not the objection.
+
+   The argument for doing it *here* specifically is that the framebuffer costs
+   nothing to read. Everywhere else, letting a model see the screen means a
+   capture API, an encoder and a transfer; in this kernel the framebuffer is a
+   pointer in the same address space the model runs in, so patchifying it is a
+   memory read.
+
+   What it costs: LayerNorm *with bias* (nothing here has a bias), GELU-tanh
+   (there is no `tanh`), a convolutional patch embedding, learned position
+   embeddings, a spatial merger, and **real mRoPE** -- the text-only reduction
+   above stops holding the moment an image supplies distinct h and w positions.
+
+   And it buys less than it appears to. Vision would let the model describe
+   what is on screen. It would not let it navigate, because navigating means
+   acting, and acting is phase 6.
+
+6. **The agent loop, if the measurement says so.** `harness.rs` does not omit
+   it out of caution alone: it says the loop is "only worth building against a
+   model that can follow an instruction", and that judgement was made when the
+   resident model was stories260K. That is a threshold, and this port is what
+   moves the model across it.
+
+   So the ordering is not arbitrary. Phases 0 to 3 are a precondition: they are
+   what make a loop worth iterating on rather than a way to watch a small model
+   fail repeatedly. The trigger already exists and is measured -- `gate` acts on
+   the three cores agreeing (90% correct) versus splitting (61%), and that gap
+   is the signal that says whether routing is good enough to act on.
+
+   Stated plainly, because the project states these: an agent loop, plus vision,
+   plus ring 0 with one address space and no isolation, is a system in which a
+   model can reach everything. The capability is already structurally present
+   and is withheld only by a missing edge in a call graph -- `sysbox::dispatch`
+   has one caller, the typed command line. Building the loop adds that edge. It
+   is the single most consequential change on this list and belongs last, after
+   the things that make it measurable.
 
 Phase 0 and 1 are where the risk is. Phase 3 is transcription of something
 already known correct, which is the position this project always tries to
