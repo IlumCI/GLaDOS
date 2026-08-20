@@ -79,8 +79,34 @@ pub struct Menu {
     pub items: Vec<MenuItem>,
 }
 
+/// Indices into the pictogram set, named so a window can say what it is
+/// without string-matching its own title.
+pub const ICO_TERM: usize = 0;
+pub const ICO_PROGRAMS: usize = 1;
+pub const ICO_FILES: usize = 2;
+pub const ICO_TODO: usize = 3;
+pub const ICO_NET: usize = 4;
+pub const ICO_PAINT: usize = 5;
+pub const ICO_WRITE: usize = 6;
+pub const ICO_MINES: usize = 7;
+pub const ICO_SET: usize = 8;
+
+/// The icon for a named panel -- the names `win open` and the Browse routes
+/// use. Anything unrecognised gets the mark, because everything here is
+/// Aperture something.
+fn panel_icon(name: &str) -> usize {
+    match name {
+        "files" => ICO_FILES,
+        "todo" => ICO_TODO,
+        "set" | "settings" => ICO_SET,
+        _ => ICO_PROGRAMS,
+    }
+}
+
 pub struct Window {
     pub title: String,
+    /// Which pictogram stands for this window on the taskbar.
+    pub icon: usize,
     /// Geometry when not maximised. Kept across a maximise so restoring is
     /// exact rather than approximate.
     pub rect: Rect,
@@ -312,7 +338,7 @@ fn icon_at(fb: &Framebuffer, x: i32, y: i32) -> Option<usize> {
 fn draw_icons(fb: &Framebuffer, hover: Hover) {
     for (r, k) in icon_rects(fb) {
         let px = r.x + (r.w - 40) / 2;
-        pictogram(fb, k, px, r.y);
+        pictogram(fb, k, px, r.y, 40, theme::DESKTOP);
         let (label, _) = ICONS[k];
         let tw = theme::text_w(label.len());
         let tx = r.x + (r.w.saturating_sub(tw)) / 2;
@@ -335,69 +361,83 @@ fn draw_icons(fb: &Framebuffer, hover: Hover) {
     }
 }
 
-/// One 40x40 pictogram at `(x, y)`, by icon index.
-fn pictogram(fb: &Framebuffer, k: usize, x: u32, y: u32) {
+/// One pictogram at `(x, y)`, `s` pixels square, by icon index.
+///
+/// Drawn in a 40-unit design space and scaled, so the wall (40) and the
+/// taskbar (20) share one set of drawings instead of two sets that drift.
+/// Thicknesses clamp to a pixel -- a hairline that rounds to zero is a
+/// detail that vanishes, and at 20 pixels every line is load-bearing.
+/// `bg` is what the mark's cut wedges are painted in: the wall behind an
+/// icon, the button face on the bar.
+fn pictogram(fb: &Framebuffer, k: usize, x: u32, y: u32, s: u32, bg: Color) {
     let face = theme::FACE;
     let dark = theme::DARKEDGE;
     let hi = theme::HILIGHT;
+    // Rounded scale from the 40-unit space, and the same for thicknesses but
+    // never less than a pixel.
+    let c = |v: u32| (v * s + 20) / 40;
+    let m = |v: u32| ((v * s + 20) / 40).max(1);
     match k {
         // Terminal: a monitor with a prompt on it.
-        0 => {
-            fb.rect(x + 2, y + 4, 36, 26, face);
-            fb.frame(x + 2, y + 4, 36, 26, dark);
-            fb.rect(x + 5, y + 7, 30, 20, theme::SCREEN);
-            fb.rect(x + 8, y + 10, 8, 2, theme::APERTURE);
-            fb.rect(x + 8, y + 15, 14, 2, Color::new(0xC8, 0xC8, 0xC8));
-            fb.rect(x + 14, y + 30, 12, 4, face);
-            fb.rect(x + 10, y + 34, 20, 3, face);
-            fb.frame(x + 10, y + 34, 20, 3, dark);
+        ICO_TERM => {
+            fb.rect(x + c(2), y + c(4), c(36), c(26), face);
+            fb.frame(x + c(2), y + c(4), c(36), c(26), dark);
+            fb.rect(x + c(5), y + c(7), c(30), c(20), theme::SCREEN);
+            fb.rect(x + c(8), y + c(10), c(8), m(2), theme::APERTURE);
+            fb.rect(x + c(8), y + c(15), c(14), m(2), Color::new(0xC8, 0xC8, 0xC8));
+            fb.rect(x + c(14), y + c(30), c(12), m(4), face);
+            fb.rect(x + c(10), y + c(34), c(20), m(3), face);
+            fb.frame(x + c(10), y + c(34), c(20), m(3), dark);
         }
         // Programs: the mark itself. This is the Aperture program manager.
-        1 => {
+        ICO_PROGRAMS => {
             super::splash::aperture(
                 fb,
-                (x + 20) as i32,
-                (y + 20) as i32,
-                18,
+                (x + c(20)) as i32,
+                (y + c(20)) as i32,
+                c(18) as i32,
                 theme::APERTURE,
-                theme::DESKTOP,
+                bg,
             );
         }
         // Files: a folder.
-        2 => {
-            fb.rect(x + 4, y + 10, 14, 6, theme::APERTURE_DEEP);
-            fb.rect(x + 4, y + 14, 32, 20, theme::APERTURE_DEEP);
-            fb.frame(x + 4, y + 14, 32, 20, dark);
-            fb.rect(x + 5, y + 15, 30, 3, theme::APERTURE);
+        ICO_FILES => {
+            fb.rect(x + c(4), y + c(10), c(14), c(6), theme::APERTURE_DEEP);
+            fb.rect(x + c(4), y + c(14), c(32), c(20), theme::APERTURE_DEEP);
+            fb.frame(x + c(4), y + c(14), c(32), c(20), dark);
+            fb.rect(x + c(5), y + c(15), c(30), m(3), theme::APERTURE);
         }
         // ToDo: a card with ticked lines.
-        3 => {
-            fb.rect(x + 6, y + 2, 28, 36, hi);
-            fb.frame(x + 6, y + 2, 28, 36, dark);
+        ICO_TODO => {
+            fb.rect(x + c(6), y + c(2), c(28), c(36), hi);
+            fb.frame(x + c(6), y + c(2), c(28), c(36), dark);
             for (i, done) in [true, true, false].iter().enumerate() {
-                let ly = y + 8 + i as u32 * 10;
-                fb.frame(x + 10, ly, 6, 6, dark);
+                let ly = y + c(8 + i as u32 * 10);
+                fb.frame(x + c(10), ly, m(6), m(6), dark);
                 if *done {
-                    fb.rect(x + 12, ly + 2, 3, 3, theme::APERTURE_DEEP);
+                    fb.rect(x + c(12), ly + m(2), m(3), m(3), theme::APERTURE_DEEP);
                 }
-                fb.rect(x + 20, ly + 2, 10, 2, theme::SHADOW);
+                fb.rect(x + c(20), ly + m(2), c(10), m(2), theme::SHADOW);
             }
         }
         // Enternet: a rough globe.
-        4 => {
+        ICO_NET => {
             for (i, w) in [16u32, 28, 34, 38, 38, 38, 34, 28, 16].iter().enumerate() {
-                let ly = y + 2 + i as u32 * 4;
-                fb.rect(x + 20 - w / 2, ly, *w, 4, Color::new(0x2A, 0x4A, 0x6E));
+                let ly = y + c(2 + i as u32 * 4);
+                fb.rect(x + c(20) - c(*w) / 2, ly, c(*w), m(4), Color::new(0x2A, 0x4A, 0x6E));
             }
-            fb.rect(x + 2, y + 16, 36, 3, hi);
-            fb.rect(x + 18, y + 2, 3, 36, hi);
-            fb.frame(x + 12, y + 8, 16, 24, hi);
+            fb.rect(x + c(2), y + c(16), c(36), m(3), hi);
+            fb.rect(x + c(18), y + c(2), m(3), c(36), hi);
+            fb.frame(x + c(12), y + c(8), c(16), c(24), hi);
         }
-        // Paint: a palette board with wells.
-        6 => {
-            fb.rect(x + 4, y + 8, 32, 26, Color::new(0xB0, 0x86, 0x50));
-            fb.frame(x + 4, y + 8, 32, 26, dark);
-            for (i, c) in [
+        // Paint: a palette board with wells. (This arm and the three after it
+        // were numbered one past their icons for a while -- Paint wore the
+        // sliders, Settings wore the minefield -- and the labels under the
+        // wall icons hid it. The names make that mistake unwriteable.)
+        ICO_PAINT => {
+            fb.rect(x + c(4), y + c(8), c(32), c(26), Color::new(0xB0, 0x86, 0x50));
+            fb.frame(x + c(4), y + c(8), c(32), c(26), dark);
+            for (i, col) in [
                 theme::APERTURE,
                 Color::new(0x30, 0x70, 0xC0),
                 Color::new(0x30, 0xA0, 0x40),
@@ -406,44 +446,47 @@ fn pictogram(fb: &Framebuffer, k: usize, x: u32, y: u32) {
             .iter()
             .enumerate()
             {
-                let (ix, iy) = (x + 8 + (i as u32 % 2) * 14, y + 12 + (i as u32 / 2) * 11);
-                fb.rect(ix, iy, 9, 7, *c);
-                fb.frame(ix, iy, 9, 7, dark);
+                let (ix, iy) = (
+                    x + c(8 + (i as u32 % 2) * 14),
+                    y + c(12 + (i as u32 / 2) * 11),
+                );
+                fb.rect(ix, iy, m(9), m(7), *col);
+                fb.frame(ix, iy, m(9), m(7), dark);
             }
-            fb.rect(x + 26, y + 2, 3, 14, dark);
-            fb.rect(x + 25, y + 1, 5, 4, theme::APERTURE_DEEP);
+            fb.rect(x + c(26), y + c(2), m(3), c(14), dark);
+            fb.rect(x + c(25), y + c(1), m(5), m(4), theme::APERTURE_DEEP);
         }
         // Write: a page with lines of text.
-        7 => {
-            fb.rect(x + 8, y + 2, 24, 36, hi);
-            fb.frame(x + 8, y + 2, 24, 36, dark);
+        ICO_WRITE => {
+            fb.rect(x + c(8), y + c(2), c(24), c(36), hi);
+            fb.frame(x + c(8), y + c(2), c(24), c(36), dark);
             for i in 0..5u32 {
                 let w = if i == 4 { 10 } else { 16 };
-                fb.rect(x + 12, y + 7 + i * 6, w, 2, theme::SHADOW);
+                fb.rect(x + c(12), y + c(7 + i * 6), c(w), m(2), theme::SHADOW);
             }
-            fb.rect(x + 12, y + 31, 8, 2, theme::APERTURE_DEEP);
+            fb.rect(x + c(12), y + c(31), c(8), m(2), theme::APERTURE_DEEP);
         }
         // Mines: a grid with one uncovered mine.
-        8 => {
-            fb.rect(x + 2, y + 2, 36, 36, face);
+        ICO_MINES => {
+            fb.rect(x + c(2), y + c(2), c(36), c(36), face);
             for i in 0..4u32 {
-                fb.rect(x + 2 + i * 12, y + 2, 1, 36, theme::SHADOW);
-                fb.rect(x + 2, y + 2 + i * 12, 36, 1, theme::SHADOW);
+                fb.rect(x + c(2 + i * 12), y + c(2), 1, c(36), theme::SHADOW);
+                fb.rect(x + c(2), y + c(2 + i * 12), c(36), 1, theme::SHADOW);
             }
-            fb.rect(x + 15, y + 15, 10, 10, dark);
-            fb.rect(x + 19, y + 11, 2, 18, dark);
-            fb.rect(x + 11, y + 19, 18, 2, dark);
-            fb.rect(x + 17, y + 17, 3, 3, hi);
+            fb.rect(x + c(15), y + c(15), c(10), c(10), dark);
+            fb.rect(x + c(19), y + c(11), m(2), c(18), dark);
+            fb.rect(x + c(11), y + c(19), c(18), m(2), dark);
+            fb.rect(x + c(17), y + c(17), m(3), m(3), hi);
         }
         // Settings: three sliders.
         _ => {
             for i in 0..3u32 {
-                let ly = y + 8 + i * 11;
-                fb.rect(x + 4, ly + 2, 32, 2, theme::SHADOW);
-                fb.rect(x + 4, ly + 4, 32, 1, hi);
-                let kx = x + 6 + (i * 11) % 24;
-                fb.rect(kx, ly - 2, 6, 10, face);
-                fb.frame(kx, ly - 2, 6, 10, dark);
+                let ly = y + c(8 + i * 11);
+                fb.rect(x + c(4), ly + m(2), c(32), m(2), theme::SHADOW);
+                fb.rect(x + c(4), ly + m(4), c(32), 1, hi);
+                let kx = x + c(6 + (i * 11) % 24);
+                fb.rect(kx, ly.saturating_sub(m(2)), m(6), m(10), face);
+                fb.frame(kx, ly.saturating_sub(m(2)), m(6), m(10), dark);
             }
         }
     }
@@ -487,6 +530,7 @@ pub fn init() {
 
     let terminal = Window {
         title: String::from("GLaDOS Terminal"),
+        icon: ICO_TERM,
         rect: Rect::new(term_x, screen.y, term_w, screen.h),
         state: WinState::Normal,
         content: Content::Terminal,
@@ -522,6 +566,7 @@ pub fn init() {
     let pm_x = (term_x + term_w + MARGIN).min(screen.x + screen.w.saturating_sub(pm_w));
     let pmw = Window {
         title: String::from("Program Manager"),
+        icon: ICO_PROGRAMS,
         rect: Rect::new(pm_x, screen.y, pm_w, pm_h.min(screen.h)),
         state: WinState::Normal,
         content: Content::Panel(pm),
@@ -590,6 +635,9 @@ pub fn open(title: &str, panel: Panel) {
             .min(screen.y + screen.h.saturating_sub(h));
         d.windows.push(Window {
             title: String::from(title),
+            // `open` is reached through `win open <name>` with the panel's
+            // name as the title, so the name is what there is to go by.
+            icon: panel_icon(title),
             rect: Rect::new(x, y, w, h),
             state: WinState::Normal,
             content: Content::Panel(panel),
@@ -619,7 +667,7 @@ pub fn open(title: &str, panel: Panel) {
 /// the f. The shell froze from the outside, which is exactly how the
 /// browser presented when it made the same mistake. Click the window or
 /// Alt-Tab to play; with a pointer that is one gesture.
-pub fn open_app(title: &str, app: Box<dyn DeskApp>, w: u32, h: u32) {
+pub fn open_app(title: &str, icon: usize, app: Box<dyn DeskApp>, w: u32, h: u32) {
     let Some(fb) = super::primary() else { return };
     let screen = screen_rect(&fb);
     let (w, h) = (w.min(screen.w), h.min(screen.h));
@@ -632,6 +680,7 @@ pub fn open_app(title: &str, app: Box<dyn DeskApp>, w: u32, h: u32) {
             .min(screen.y + screen.h.saturating_sub(h));
         d.windows.push(Window {
             title: String::from(title),
+            icon,
             rect: Rect::new(x, y, w, h),
             state: WinState::Normal,
             content: Content::App(app),
@@ -644,17 +693,17 @@ pub fn open_app(title: &str, app: Box<dyn DeskApp>, w: u32, h: u32) {
 
 pub fn open_paint() {
     let (w, h) = super::paint::Paint::preferred();
-    open_app("Paintbrush", Box::new(super::paint::Paint::new()), w, h);
+    open_app("Paintbrush", ICO_PAINT, Box::new(super::paint::Paint::new()), w, h);
 }
 
 pub fn open_mines() {
     let (w, h) = super::mines::Mines::preferred();
-    open_app("Minesweeper", Box::new(super::mines::Mines::new()), w, h);
+    open_app("Minesweeper", ICO_MINES, Box::new(super::mines::Mines::new()), w, h);
 }
 
 pub fn open_write(path: &str) {
     let (w, h) = super::write::Writer::preferred();
-    open_app("Write", Box::new(super::write::Writer::new(path)), w, h);
+    open_app("Write", ICO_WRITE, Box::new(super::write::Writer::new(path)), w, h);
 }
 
 /// Open Enternet, optionally at a URL.
@@ -673,6 +722,7 @@ pub fn open_browser(url: &str) {
         let y = screen.y + (screen.h.saturating_sub(h)) / 3;
         d.windows.push(Window {
             title,
+            icon: ICO_NET,
             rect: Rect::new(x, y, w, h),
             state: WinState::Normal,
             content: Content::Browser(b),
@@ -1130,9 +1180,13 @@ fn act_on(step: ui::Step) {
         }
         ui::Step::Do(Action::Browse(route)) => {
             if let Some((title, panel)) = ui::panel_for_route(&route) {
+                let kind = route.split(':').next().unwrap_or("");
                 with(|d| {
                     if let Some(f) = d.focus() {
                         d.windows[f].title = title;
+                        // Navigation changes what the window *is*, and the
+                        // taskbar shows windows by what they are.
+                        d.windows[f].icon = panel_icon(kind);
                         d.windows[f].content = Content::Panel(panel);
                     }
                 });
@@ -1529,16 +1583,17 @@ fn wallpaper(fb: &Framebuffer) {
     );
 }
 
-/// Buttons on the bar, one per window, in stacking order.
+/// Buttons on the bar, one per window, in stacking order: the window's
+/// pictogram and whether it is the focused one.
 ///
 /// No launcher buttons: launching lives in the Start menu and on the wall,
 /// so the bar never runs out of room for the windows it exists to hold.
-fn task_slots(d: &Desktop) -> Vec<(String, bool)> {
+fn task_slots(d: &Desktop) -> Vec<(usize, bool)> {
     let focus = d.focus();
     d.windows
         .iter()
         .enumerate()
-        .map(|(i, w)| (w.title.clone(), Some(i) == focus))
+        .map(|(i, w)| (w.icon, Some(i) == focus))
         .collect()
 }
 
@@ -1547,7 +1602,7 @@ fn task_slots(d: &Desktop) -> Vec<(String, bool)> {
 /// The single source for where the buttons are: the paint pass draws these
 /// rectangles and the pointer hit-tests them, so a button cannot highlight in
 /// one place and press in another.
-fn task_layout(fb: &Framebuffer, d: &Desktop) -> Vec<(Rect, String, bool, bool)> {
+fn task_layout(fb: &Framebuffer, d: &Desktop) -> Vec<(Rect, usize, bool)> {
     let bar = taskbar_rect(fb);
     let slots = task_slots(d);
     let btn_h = bar.h - 8;
@@ -1556,18 +1611,16 @@ fn task_layout(fb: &Framebuffer, d: &Desktop) -> Vec<(Rect, String, bool, bool)>
     let mut x = start.x + start.w + 10;
     let mut out = Vec::new();
 
-    for (label, pressed) in slots {
-        // Titles are capped rather than allowed to set the width. "GLaDOS
-        // Terminal" at full length is a quarter of the bar on its own.
-        let shown = label.len().min(12);
-        let w = theme::text_w(shown) + 16;
+    for (icon, pressed) in slots {
+        // A pictogram and its air: every button the same width, which is what
+        // lets a bar of nine windows still read as a row rather than a ransom
+        // note. The title lives on the window; the bar says what *kind*.
+        let w = btn_h + 10;
         // Stop before the clock rather than drawing under it.
         if x + w > clock_rect(fb).x {
             break;
         }
-        let mut title = label;
-        title.truncate(shown);
-        out.push((Rect::new(x, y, w, btn_h), title, false, pressed));
+        out.push((Rect::new(x, y, w, btn_h), icon, pressed));
         x += w + TASK_GAP;
     }
     out
@@ -1591,12 +1644,24 @@ fn taskbar(fb: &Framebuffer, d: &Desktop, sel: Option<usize>) {
     theme::aperture_dot(fb, s.x + 11, s.y + s.h / 2, (s.h / 2) as i32 - 4);
     theme::separator_v(fb, s.x + s.w + 3, s.y, s.h);
 
-    for (i, (r, label, _, pressed)) in task_layout(fb, d).into_iter().enumerate() {
+    for (i, (r, icon, pressed)) in task_layout(fb, d).into_iter().enumerate() {
         // Keyboard selection and pointer hover draw the same way: both are "the
         // next click or Enter lands here", and two different highlights would
         // claim two different things.
         let hot = sel == Some(i) || d.hover == Hover::Task(i);
-        theme::button(fb, r, &label, hot, pressed);
+        theme::button(fb, r, "", hot, pressed);
+        let s = r.h.saturating_sub(6);
+        // Nudged a pixel when pressed, the same lie about depth the label
+        // used to tell.
+        let off = u32::from(pressed);
+        pictogram(
+            fb,
+            icon,
+            r.x + (r.w.saturating_sub(s)) / 2 + off,
+            r.y + 3 + off,
+            s,
+            theme::FACE,
+        );
     }
 
     let c = clock_rect(fb);
@@ -2016,9 +2081,11 @@ pub fn key(k: u8) -> Route {
                     // The desktop resolves a route without knowing what kind
                     // of app is on the other end of it.
                     if let Some((title, panel)) = ui::panel_for_route(&route) {
+                        let kind = route.split(':').next().unwrap_or("");
                         with(|d| {
                             if let Some(f) = d.focus() {
                                 d.windows[f].title = title;
+                                d.windows[f].icon = panel_icon(kind);
                                 d.windows[f].content = Content::Panel(panel);
                             }
                         });
