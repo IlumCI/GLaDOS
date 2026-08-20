@@ -581,11 +581,12 @@ pub fn panel_named(name: &str) -> Option<Panel> {
 
 static TODO: Racy<Option<Vec<(String, bool)>>> = Racy::new(None);
 
-const TODO_SEED: [&str; 10] = [
+const TODO_SEED: [&str; 11] = [
     "deploy.ps1 -EspDrive S: -Release, reboot, F11",
     "write down the [boot] phys line (decides 4B)",
     "boot selftests: every line ok, note any FAIL",
-    "stage q35-0.8b.bin + its tokenizer on the ESP",
+    "q35.bin is staged: rename to model.bin to boot it",
+    "q35 is LOGITS ONLY: its tokenizer needs a new split mode",
     "logits 7 11 3 vs ref35 --converted top-5",
     "gen: time tok/s at seq 512, against qwen3-0.6b",
     "window: confirm 12 MiB KV + 19.3 MiB state",
