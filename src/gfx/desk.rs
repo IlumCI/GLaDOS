@@ -148,6 +148,8 @@ pub enum Hover {
     Icon(usize),
     /// The Start button.
     Start,
+    /// A caption button on window `win`: 0 minimise, 1 maximise, 2 close.
+    Caption { win: usize, which: usize },
 }
 
 pub struct Desktop {
@@ -927,6 +929,10 @@ fn press_at(x: i32, y: i32) {
     let double = is_double(x, y);
     // A new press starts a new gesture; whatever the last one was is over.
     unsafe { *APP_PRESS.get() = false };
+    // The one trace on this path: presses are the pointer's whole vocabulary,
+    // and a click that silently does nothing is undebuggable from a
+    // screenshot. Serial only, like every other trace here.
+    crate::serial_println!("[desk] press {},{}{}", x, y, if double { " double" } else { "" });
 
     // An open menu eats the press: on an item it acts, anywhere else it
     // closes. Both must come before window routing or the press falls through
@@ -972,6 +978,15 @@ fn press_at(x: i32, y: i32) {
     let (title, menubar, client) = chrome(frame, has_menus);
 
     if contains(title, x, y) {
+        // The caption buttons eat their presses before the bar means "drag".
+        let hit = theme::caption_buttons(title)
+            .iter()
+            .position(|b| contains(*b, x, y));
+        if let Some(which) = hit {
+            caption_action(f, which);
+            draw();
+            return;
+        }
         if double {
             with(|d| {
                 d.windows[f].state = match d.windows[f].state {
@@ -1073,6 +1088,36 @@ fn app_release() {
     if changed {
         draw();
     }
+}
+
+/// One caption button, pressed. The same three verbs the system menu
+/// offers, bound to the three squares 98 put them on.
+fn caption_action(f: usize, which: usize) {
+    crate::serial_println!("[desk] caption {} on window {}", which, f);
+    with(|d| {
+        if f >= d.windows.len() {
+            return;
+        }
+        match which {
+            0 => d.windows[f].state = WinState::Minimised,
+            1 => {
+                d.windows[f].state = match d.windows[f].state {
+                    WinState::Maximised => WinState::Normal,
+                    _ => WinState::Maximised,
+                };
+            }
+            _ => {
+                if d.windows[f].closable {
+                    d.windows.remove(f);
+                } else {
+                    // The terminal is the shell: it keeps running with no
+                    // window, so its X means "put it away", which is the
+                    // honest version of close for a program that cannot die.
+                    d.windows[f].state = WinState::Minimised;
+                }
+            }
+        }
+    });
 }
 
 /// Carry out what a panel handed back. The same arms the keyboard path runs,
@@ -1304,7 +1349,15 @@ fn hover_of(fb: &Framebuffer, x: i32, y: i32) -> Hover {
     if let Some(i) = window_at(x, y) {
         return with(|d| {
             let w = &d.windows[i];
-            let (_, menubar, client) = chrome(w.frame(screen), !w.menus.is_empty());
+            let (title, menubar, client) = chrome(w.frame(screen), !w.menus.is_empty());
+            if contains(title, x, y) {
+                if let Some(which) = theme::caption_buttons(title)
+                    .iter()
+                    .position(|b| contains(*b, x, y))
+                {
+                    return Hover::Caption { win: i, which };
+                }
+            }
             if let Some(bar) = menubar {
                 if let Some(mi) = menu_label_at(&w.menus, bar, x, y) {
                     return Hover::MenuLabel { win: i, menu: mi };
@@ -1607,7 +1660,18 @@ pub fn draw() {
             }
             let active = Some(i) == focus;
             let frame = win.frame(screen);
-            let mut client = theme::window(&fb, frame, &win.title, active);
+            let hot = match d.hover {
+                Hover::Caption { win, which } if win == i => Some(which),
+                _ => None,
+            };
+            let mut client = theme::window(
+                &fb,
+                frame,
+                &win.title,
+                active,
+                win.state == WinState::Maximised,
+                hot,
+            );
             if client.is_empty() {
                 continue;
             }
@@ -1768,7 +1832,13 @@ fn dropdown<'a>(
 pub fn focus_is_terminal() -> bool {
     with(|d| match d.focus() {
         Some(f) => matches!(d.windows[f].content, Content::Terminal),
-        None => false,
+        // No window at all: the shell has the keyboard. The terminal is an
+        // application over a shell that never stops, so with every window
+        // minimised, typing types at the prompt -- invisibly, but a command
+        // and Enter still run, and the output is waiting when the terminal
+        // comes back. `false` here made an all-minimised desktop swallow
+        // the keyboard entirely, which read as a hang.
+        None => true,
     })
     .unwrap_or(true)
 }

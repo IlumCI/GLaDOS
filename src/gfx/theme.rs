@@ -172,7 +172,14 @@ fn mark(fb: &Framebuffer, cx: i32, cy: i32, r: i32, fg: Color) {
 ///
 /// The caller gets a rectangle and no further obligations -- everything that
 /// makes it look like a window has already happened.
-pub fn window(fb: &Framebuffer, r: Rect, title: &str, active: bool) -> Rect {
+pub fn window(
+    fb: &Framebuffer,
+    r: Rect,
+    title: &str,
+    active: bool,
+    maximised: bool,
+    hot_caption: Option<usize>,
+) -> Rect {
     // Outer frame: a raised slab, then a groove, which is how 3.1 gets a border
     // thick enough to grab without looking like a picture frame.
     panel(fb, r);
@@ -182,7 +189,7 @@ pub fn window(fb: &Framebuffer, r: Rect, title: &str, active: bool) -> Rect {
     }
 
     let bar = Rect::new(inner.x, inner.y, inner.w, TITLE_H);
-    title_bar(fb, bar, title, active);
+    title_bar(fb, bar, title, active, maximised, hot_caption);
 
     let client = Rect::new(
         inner.x,
@@ -195,7 +202,37 @@ pub fn window(fb: &Framebuffer, r: Rect, title: &str, active: bool) -> Rect {
 
 const FACE_INSET: u32 = FRAME;
 
-pub fn title_bar(fb: &Framebuffer, r: Rect, title: &str, active: bool) {
+/// The three caption buttons in a title bar, left to right:
+/// minimise, maximise/restore, close.
+///
+/// One function for the geometry, used by the paint pass and the pointer's
+/// hit-test alike -- the same rule as every other control here, because a
+/// button that highlights in one place and presses in another is the bug
+/// that duplicated layout always becomes.
+pub fn caption_buttons(bar: Rect) -> [Rect; 3] {
+    let s = bar.h.saturating_sub(12);
+    let y = bar.y + 6;
+    let close_x = bar.x + bar.w.saturating_sub(s + 6);
+    // The close button sits apart from the pair, as it has since 95 -- the
+    // one you reach for blind should not share an edge with the one that
+    // merely tidies.
+    let max_x = close_x.saturating_sub(s + 6);
+    let min_x = max_x.saturating_sub(s + 2);
+    [
+        Rect::new(min_x, y, s, s),
+        Rect::new(max_x, y, s, s),
+        Rect::new(close_x, y, s, s),
+    ]
+}
+
+pub fn title_bar(
+    fb: &Framebuffer,
+    r: Rect,
+    title: &str,
+    active: bool,
+    maximised: bool,
+    hot_caption: Option<usize>,
+) {
     // The 98 half of the ancestry: a smooth left-to-right ramp, deep to
     // bright, in Aperture's colours instead of Redmond's blues. Inactive bars
     // ramp in greys, which is what makes the focused window findable at a
@@ -218,14 +255,64 @@ pub fn title_bar(fb: &Framebuffer, r: Rect, title: &str, active: bool) {
 
     let tx = r.x + pad + 22;
     let ty = r.y + (r.h - font::GLYPH_H * CHROME_SCALE) / 2;
-    // Clip by characters rather than pixels: the text is drawn glyph by glyph
-    // anyway, and a half-drawn glyph at the edge looks like a rendering fault.
-    let room = (r.w.saturating_sub(tx - r.x + pad) / (font::GLYPH_W * CHROME_SCALE)) as usize;
+    let btns = caption_buttons(r);
+    // Clip by characters rather than pixels, and stop short of the buttons:
+    // a title that runs under the close box reads as a title bar with no
+    // close box.
+    let text_end = btns[0].x.saturating_sub(6);
+    let room = (text_end.saturating_sub(tx) / (font::GLYPH_W * CHROME_SCALE)) as usize;
     let shown = if title.len() > room { &title[..room] } else { title };
     // Over a gradient there is no one background colour, so the glyphs carry
     // their own shadow instead of a box.
     text_over(fb, tx + 1, ty + 1, shown, DARKEDGE);
     text_over(fb, tx, ty, shown, TITLE_TEXT);
+
+    // The caption buttons: raised 3.1 faces on the 98 gradient, glyphs drawn
+    // by hand because the font has no box-drawing worth the name. Hover gets
+    // the same inner ring every other button here uses for "the next press
+    // lands here".
+    for (i, b) in btns.iter().enumerate() {
+        fb.rect(b.x, b.y, b.w, b.h, FACE);
+        bevel(fb, *b, true);
+        if hot_caption == Some(i) {
+            let f = b.shrink(2);
+            if !f.is_empty() {
+                fb.frame(f.x, f.y, f.w, f.h, DARKEDGE);
+            }
+        }
+        let g = b.shrink(6);
+        if g.is_empty() {
+            continue;
+        }
+        match i {
+            // Minimise: the bar along the bottom.
+            0 => fb.rect(g.x, g.y + g.h.saturating_sub(3), g.w, 3, TEXT),
+            // Maximise, or restore when already maximised: one frame with a
+            // thick lid, or two overlapping ones.
+            1 => {
+                if maximised {
+                    let s = g.w.saturating_sub(4);
+                    fb.frame(g.x + 4, g.y, s, s, TEXT);
+                    fb.rect(g.x + 4, g.y, s, 2, TEXT);
+                    fb.rect(g.x, g.y + 4, s, s, FACE);
+                    fb.frame(g.x, g.y + 4, s, s, TEXT);
+                    fb.rect(g.x, g.y + 4, s, 2, TEXT);
+                } else {
+                    fb.frame(g.x, g.y, g.w, g.h, TEXT);
+                    fb.rect(g.x, g.y, g.w, 2, TEXT);
+                }
+            }
+            // Close: the cross, two pixels wide so it reads at this size.
+            _ => {
+                let (x0, y0) = (g.x as i32, g.y as i32);
+                let (x1, y1) = ((g.x + g.w) as i32 - 1, (g.y + g.h) as i32 - 1);
+                fb.line(x0, y0, x1, y1, TEXT);
+                fb.line(x0 + 1, y0, x1, y1 - 1, TEXT);
+                fb.line(x0, y1, x1, y0, TEXT);
+                fb.line(x0 + 1, y1, x1, y0 + 1, TEXT);
+            }
+        }
+    }
 }
 
 /// Text with no background: only the glyph pixels are painted.

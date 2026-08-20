@@ -222,6 +222,11 @@ Three lessons already paid for, do not relearn them:
   Bigger deltas set the PS/2 overflow bit and the driver (correctly)
   discards the packet -- the pointer simply does not move, which reads as a
   dead drag rather than a clamped one.
+- **`font::GLYPH_H` is 8, not 16** (glyphs are 8x8, doubled by
+  `CHROME_SCALE`). `TITLE_H` is therefore 24, and the caption buttons are
+  12x12 at the bar's right end. Choreographing clicks from remembered
+  metrics instead of a `[desk] press` trace cost two full test cycles
+  aimed 40 pixels left of the close box.
 
 `write` is two things told apart by shape: with `<path> <text>` it is the
 sysbox applet, with at most a path it opens the editor (decided in
