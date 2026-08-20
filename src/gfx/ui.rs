@@ -491,6 +491,14 @@ pub fn parse_keys(spec: &str) -> Vec<u8> {
             // tested. Same reason the arrows have names.
             "backspace" | "bksp" | "back" => 8,
             "space" => b' ',
+            // "ctrl-s" and friends: the byte the driver produces for the
+            // chord, so ^S in Write is drivable over serial.
+            ctrl if ctrl.len() == 6
+                && ctrl.starts_with("ctrl-")
+                && ctrl.as_bytes()[5].is_ascii_alphabetic() =>
+            {
+                ctrl.as_bytes()[5].to_ascii_uppercase() - b'A' + 1
+            }
             other => {
                 // A single literal character, so a panel that takes typed
                 // input is drivable without inventing a name per key.
@@ -733,7 +741,7 @@ pub fn settings(page: &str) -> Panel {
                 Widget::Sep,
                 Widget::Button {
                     label: String::from("Model status"),
-                    action: Action::Run(String::from("status")),
+                    action: Action::Run(String::from("win open status")),
                 },
                 Widget::Button {
                     label: String::from("Show window"),
@@ -923,7 +931,10 @@ pub fn program_manager() -> Panel {
     // terminal, the shell said so, and the menu looked broken. Now it opens
     // the Model settings page, which is what the label promises.
     let items = alloc::vec![
-        run("System status", "status"),
+        // `status` is a subcommand of `net`, not a command -- typed at the
+        // top level it falls through to the interpreter and reports an
+        // undefined variable. The System panel is what the label means.
+        run("System status", "win open status"),
         run("Memory", "mem"),
         run("Network", "net"),
         run("Storage", "store"),
@@ -931,6 +942,9 @@ pub fn program_manager() -> Panel {
         (String::from("Model"), Action::Browse(String::from("set:model"))),
         (String::from("ToDo list"), Action::Run(String::from("win open todo"))),
         run("Enternet", "enternet"),
+        run("Paintbrush", "paint"),
+        run("Write", "write"),
+        run("Minesweeper", "mines"),
         run("Attention window", "window"),
         run("Self-test: tensor", "tensor"),
     ];

@@ -41,9 +41,10 @@
 use super::browse::Browser;
 use super::theme::{self, Rect};
 use super::ui::{self, Action, Panel};
-use super::{Color, Framebuffer};
+use super::{Color, DeskApp, Framebuffer};
 use crate::dev::kbd;
 use crate::sync::Racy;
+use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -57,6 +58,8 @@ pub enum Content {
     /// stack of widgets: it scrolls, it wraps to the window, and its links are
     /// a selection model the widget enum has no shape for.
     Browser(Browser),
+    /// A program that owns its client area: Paintbrush, Write, Minesweeper.
+    App(Box<dyn DeskApp>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -172,24 +175,30 @@ const TASK_GAP: u32 = 4;
 /// `term` is not a shell command: the terminal is not a panel to open but a
 /// window to bring back, and the special case lives in `launch` rather than in
 /// the shell so the icon works even while the shell is busy printing.
-const ICONS: [(&str, &str); 6] = [
+const ICONS: [(&str, &str); 9] = [
     ("Terminal", "term"),
     ("Programs", "win open programs"),
     ("Files", "win open files"),
     ("ToDo", "win open todo"),
     ("Enternet", "enternet"),
+    ("Paint", "paint"),
+    ("Write", "write"),
+    ("Mines", "mines"),
     ("Settings", "win open settings"),
 ];
 
 /// The Start menu, bottom of the bar upward -- the 98 half of the ancestry.
 /// Same entries as the icons plus the one thing that belongs behind a second
 /// look, exactly where 98 kept it.
-const START_ITEMS: [(&str, &str); 7] = [
+const START_ITEMS: [(&str, &str); 10] = [
     ("Terminal", "term"),
     ("Programs", "win open programs"),
     ("Files", "win open files"),
     ("ToDo", "win open todo"),
     ("Enternet", "enternet"),
+    ("Paint", "paint"),
+    ("Write", "write"),
+    ("Mines", "mines"),
     ("Settings", "win open settings"),
     ("Reboot", "reboot"),
 ];
@@ -272,12 +281,17 @@ const ICON_H: u32 = 84;
 /// ancestry. Stops above the taskbar rather than flowing into it.
 fn icon_rects(fb: &Framebuffer) -> Vec<(Rect, usize)> {
     let mut out = Vec::new();
+    let mut x = 10u32;
     let mut y = 14u32;
     for (k, _) in ICONS.iter().enumerate() {
         if y + ICON_H > fb.height().saturating_sub(TASK_H) {
-            break;
+            // Wrap to a second column, as the 98 desktop did. The terminal
+            // reserves only the first column, so overflow icons sit behind
+            // windows -- reachable, and always also in the Start menu.
+            x += ICON_W + 8;
+            y = 14;
         }
-        out.push((Rect::new(10, y, ICON_W, ICON_H), k));
+        out.push((Rect::new(x, y, ICON_W, ICON_H), k));
         y += ICON_H + 10;
     }
     out
@@ -376,6 +390,48 @@ fn pictogram(fb: &Framebuffer, k: usize, x: u32, y: u32) {
             fb.rect(x + 2, y + 16, 36, 3, hi);
             fb.rect(x + 18, y + 2, 3, 36, hi);
             fb.frame(x + 12, y + 8, 16, 24, hi);
+        }
+        // Paint: a palette board with wells.
+        6 => {
+            fb.rect(x + 4, y + 8, 32, 26, Color::new(0xB0, 0x86, 0x50));
+            fb.frame(x + 4, y + 8, 32, 26, dark);
+            for (i, c) in [
+                theme::APERTURE,
+                Color::new(0x30, 0x70, 0xC0),
+                Color::new(0x30, 0xA0, 0x40),
+                Color::new(0xC0, 0x30, 0x30),
+            ]
+            .iter()
+            .enumerate()
+            {
+                let (ix, iy) = (x + 8 + (i as u32 % 2) * 14, y + 12 + (i as u32 / 2) * 11);
+                fb.rect(ix, iy, 9, 7, *c);
+                fb.frame(ix, iy, 9, 7, dark);
+            }
+            fb.rect(x + 26, y + 2, 3, 14, dark);
+            fb.rect(x + 25, y + 1, 5, 4, theme::APERTURE_DEEP);
+        }
+        // Write: a page with lines of text.
+        7 => {
+            fb.rect(x + 8, y + 2, 24, 36, hi);
+            fb.frame(x + 8, y + 2, 24, 36, dark);
+            for i in 0..5u32 {
+                let w = if i == 4 { 10 } else { 16 };
+                fb.rect(x + 12, y + 7 + i * 6, w, 2, theme::SHADOW);
+            }
+            fb.rect(x + 12, y + 31, 8, 2, theme::APERTURE_DEEP);
+        }
+        // Mines: a grid with one uncovered mine.
+        8 => {
+            fb.rect(x + 2, y + 2, 36, 36, face);
+            for i in 0..4u32 {
+                fb.rect(x + 2 + i * 12, y + 2, 1, 36, theme::SHADOW);
+                fb.rect(x + 2, y + 2 + i * 12, 36, 1, theme::SHADOW);
+            }
+            fb.rect(x + 15, y + 15, 10, 10, dark);
+            fb.rect(x + 19, y + 11, 2, 18, dark);
+            fb.rect(x + 11, y + 19, 18, 2, dark);
+            fb.rect(x + 17, y + 17, 3, 3, hi);
         }
         // Settings: three sliders.
         _ => {
@@ -549,6 +605,56 @@ pub fn open(title: &str, panel: Panel) {
     focus_terminal();
 }
 
+/// Open a window around a program.
+///
+/// The keyboard goes back to the terminal, exactly as `open` and
+/// `open_browser` do -- and the first version of this function is why that
+/// rule exists in triplicate. It kept focus on the new window, on the
+/// reasoning that a game is opened to be played; but the desktop takes
+/// *every* key while a non-terminal window has focus, so the next command
+/// line -- typed or serial -- was fed to the program a byte at a time.
+/// Minesweeper ate "echo after-mines" as e,c,h,o... and flagged a cell on
+/// the f. The shell froze from the outside, which is exactly how the
+/// browser presented when it made the same mistake. Click the window or
+/// Alt-Tab to play; with a pointer that is one gesture.
+pub fn open_app(title: &str, app: Box<dyn DeskApp>, w: u32, h: u32) {
+    let Some(fb) = super::primary() else { return };
+    let screen = screen_rect(&fb);
+    let (w, h) = (w.min(screen.w), h.min(screen.h));
+    with(|d| {
+        let n = d.windows.len() as u32;
+        let off = (n % 5) * 32;
+        let x = (screen.x + (screen.w.saturating_sub(w)) / 2 + off)
+            .min(screen.x + screen.w.saturating_sub(w));
+        let y = (screen.y + (screen.h.saturating_sub(h)) / 3 + off)
+            .min(screen.y + screen.h.saturating_sub(h));
+        d.windows.push(Window {
+            title: String::from(title),
+            rect: Rect::new(x, y, w, h),
+            state: WinState::Normal,
+            content: Content::App(app),
+            menus: Vec::new(),
+            closable: true,
+        });
+    });
+    focus_terminal();
+}
+
+pub fn open_paint() {
+    let (w, h) = super::paint::Paint::preferred();
+    open_app("Paintbrush", Box::new(super::paint::Paint::new()), w, h);
+}
+
+pub fn open_mines() {
+    let (w, h) = super::mines::Mines::preferred();
+    open_app("Minesweeper", Box::new(super::mines::Mines::new()), w, h);
+}
+
+pub fn open_write(path: &str) {
+    let (w, h) = super::write::Writer::preferred();
+    open_app("Write", Box::new(super::write::Writer::new(path)), w, h);
+}
+
 /// Open Enternet, optionally at a URL.
 pub fn open_browser(url: &str) {
     let mut b = Browser::new();
@@ -686,15 +792,24 @@ pub fn poll_mouse() {
         with(|d| d.mode),
         Some(Mode::Drag { .. }) | Some(Mode::DragSize { .. })
     );
+    let in_app = unsafe { *APP_PRESS.get() };
     if pressed_left {
         press_at(x, y);
     } else if s.left && dragging {
         drag_to(x, y);
+    } else if s.left && in_app {
+        // The stroke: motion with the button held, inside the program that
+        // took the press.
+        app_drag_to(x, y);
     }
     if released_left && dragging {
         with(|d| d.mode = Mode::Normal);
         trace("drag end");
         draw();
+    }
+    if released_left && in_app {
+        unsafe { *APP_PRESS.get() = false };
+        app_release();
     }
     if pressed_right {
         right_click_at(x, y);
@@ -810,6 +925,8 @@ fn press_at(x: i32, y: i32) {
     let Some(fb) = super::primary() else { return };
     let screen = screen_rect(&fb);
     let double = is_double(x, y);
+    // A new press starts a new gesture; whatever the last one was is over.
+    unsafe { *APP_PRESS.get() = false };
 
     // An open menu eats the press: on an item it acts, anywhere else it
     // closes. Both must come before window routing or the press falls through
@@ -902,12 +1019,60 @@ fn press_at(x: i32, y: i32) {
                 ui::Step::Idle
             }
         }
+        Content::App(a) => {
+            if a.press(client, x, y) {
+                // The press begins a gesture: until the button lifts, motion
+                // belongs to this program. That is what a brush stroke is.
+                unsafe { *APP_PRESS.get() = true };
+                ui::Step::Redraw
+            } else {
+                ui::Step::Idle
+            }
+        }
         // A press in the terminal is focus, which raising already did.
         Content::Terminal => ui::Step::Idle,
     })
     .unwrap_or(ui::Step::Idle);
     act_on(step);
     draw();
+}
+
+/// Whether the held left button is a gesture inside an app's client area,
+/// as opposed to a window drag or nothing.
+static APP_PRESS: Racy<bool> = Racy::new(false);
+
+/// Forward held-button motion to the focused program.
+fn app_drag_to(x: i32, y: i32) {
+    let Some(fb) = super::primary() else { return };
+    let screen = screen_rect(&fb);
+    let changed = with(|d| {
+        let Some(f) = d.focus() else { return false };
+        let frame = d.windows[f].frame(screen);
+        let has_menus = !d.windows[f].menus.is_empty();
+        let (_, _, client) = chrome(frame, has_menus);
+        match &mut d.windows[f].content {
+            Content::App(a) => a.drag(client, x, y),
+            _ => false,
+        }
+    })
+    .unwrap_or(false);
+    if changed {
+        draw();
+    }
+}
+
+fn app_release() {
+    let changed = with(|d| {
+        let Some(f) = d.focus() else { return false };
+        match &mut d.windows[f].content {
+            Content::App(a) => a.release(),
+            _ => false,
+        }
+    })
+    .unwrap_or(false);
+    if changed {
+        draw();
+    }
 }
 
 /// Carry out what a panel handed back. The same arms the keyboard path runs,
@@ -1226,12 +1391,34 @@ fn update_hover(x: i32, y: i32) {
 /// are already driven by the arrow keys and already tested, so the button is a
 /// second way in rather than a second implementation.
 fn right_click_at(x: i32, y: i32) {
+    let Some(fb) = super::primary() else { return };
+    let screen = screen_rect(&fb);
     match window_at(x, y) {
-        Some(i) => with(|d| {
-            d.raise(i);
-            d.mode = Mode::Sys { item: 0 };
-        }),
-        None => with(|d| d.mode = Mode::Taskbar { item: 0 }),
+        Some(i) => {
+            // A program gets first refusal on the second button -- that is
+            // how Minesweeper flags. Only if it declines does the button
+            // mean the system menu, the meaning it has everywhere else.
+            let consumed = with(|d| {
+                d.raise(i);
+                let f = d.windows.len() - 1;
+                let frame = d.windows[f].frame(screen);
+                let has_menus = !d.windows[f].menus.is_empty();
+                let (_, _, client) = chrome(frame, has_menus);
+                match &mut d.windows[f].content {
+                    Content::App(a) if contains(client, x, y) => {
+                        a.right_press(client, x, y)
+                    }
+                    _ => false,
+                }
+            })
+            .unwrap_or(false);
+            if !consumed {
+                with(|d| d.mode = Mode::Sys { item: 0 });
+            }
+        }
+        None => {
+            with(|d| d.mode = Mode::Taskbar { item: 0 });
+        }
     };
     draw();
 }
@@ -1246,6 +1433,7 @@ fn wheel_at(x: i32, y: i32, notches: i32) {
         // Over a panel the wheel walks the first list, which is what a wheel
         // over a launcher or a checklist means.
         Content::Panel(p) => p.wheel(notches),
+        Content::App(a) => a.wheel(notches),
         _ => false,
     })
     .unwrap_or(false);
@@ -1473,6 +1661,7 @@ pub fn draw() {
                     p.draw_in(&fb, client, active, hov);
                 }
                 Content::Browser(b) => b.draw_in(&fb, client, active),
+                Content::App(a) => a.draw_in(&fb, client, active),
             }
         }
 
@@ -1584,21 +1773,31 @@ pub fn focus_is_terminal() -> bool {
     .unwrap_or(true)
 }
 
-/// Cycle focus. Sends the top window to the back, which brings the next one up.
+/// Alt-Tab: swap the top two visible windows.
+///
+/// A swap, not a rotation. This used to send the top window to the back,
+/// which walks all windows eventually but makes a second Alt-Tab land on a
+/// *third* window -- pressed twice, it went somewhere new instead of back.
+/// Windows has toggled the top pair on a single press since 3.1, for the
+/// reason that became obvious here the hard way: a headless script (and a
+/// person) needs "over and back" to be two presses, deterministically. It
+/// cost a test run in which the second Alt-Tab focused the Program Manager
+/// and the next command line ran one of its rows.
 pub fn cycle(_back: bool) {
     with(|d| {
-        if d.windows.len() < 2 {
+        let visible: Vec<usize> = d
+            .windows
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| w.state != WinState::Minimised)
+            .map(|(i, _)| i)
+            .collect();
+        if visible.len() < 2 {
             return;
         }
-        let w = d.windows.pop().unwrap();
-        d.windows.insert(0, w);
-        // Skip minimised windows, or Alt-Tab appears to do nothing.
-        let mut guard = 0;
-        while d.focus().is_none() && guard < 8 {
-            let w = d.windows.pop().unwrap();
-            d.windows.insert(0, w);
-            guard += 1;
-        }
+        // The two topmost visible windows; raising the lower one swaps them.
+        let below = visible[visible.len() - 2];
+        d.raise(below);
     });
     trace("alt-tab");
     draw();
@@ -1723,6 +1922,9 @@ pub fn key(k: u8) -> Route {
                     // window manager, so Alt-Tab keeps working inside a page.
                     Content::Browser(b) => {
                         if b.key(k) { ui::Step::Redraw } else { ui::Step::Idle }
+                    }
+                    Content::App(a) => {
+                        if a.key(k) { ui::Step::Redraw } else { ui::Step::Idle }
                     }
                     _ => ui::Step::Idle,
                 },

@@ -195,6 +195,40 @@ over the door. `todo` (shell) and the ToDo window share one list -- it is the
 hand-off note for what to test at the GF63, since the machine that builds
 this is not the machine that runs it.
 
+**Apps are `Content::App(Box<dyn DeskApp>)`** (`gfx/mod.rs`): a window whose
+client area belongs to a program -- Paintbrush (`paint.rs`), Write
+(`write.rs`), Minesweeper (`mines.rs`). Six methods (draw, key, press,
+right_press, drag, release/wheel); every handler returns whether it consumed
+the event so unclaimed keys fall through to the window manager. `draw_in`
+takes `&self`; layout facts discovered while drawing go in `Cell`s, the
+Browser's pattern. Held-button motion is forwarded to the pressed app
+(`APP_PRESS` in desk.rs) -- that is what a brush stroke is -- and the second
+button goes to the app before it means the system menu, which is how
+Minesweeper flags.
+
+Three lessons already paid for, do not relearn them:
+
+- **`open_app` returns focus to the terminal**, like `open` and
+  `open_browser`. The desktop takes *every* key while a non-terminal window
+  has focus, so an app that kept focus ate the next serial command line --
+  Minesweeper consumed `echo after-mines` a byte at a time and flagged a
+  cell on the `f`.
+- **Alt-Tab is a swap of the top two, not a rotation.** Rotating made a
+  second Alt-Tab land on a third window; scripts (and habit) need over-and-
+  back to be two presses. Headless recipe: every `win keys` line that drives
+  an app must be self-contained -- `alttab,...,alttab` -- because between
+  commands the focused app would swallow the next line.
+- **QEMU monitor `mouse_move` deltas must stay within +-255 per axis.**
+  Bigger deltas set the PS/2 overflow bit and the driver (correctly)
+  discards the packet -- the pointer simply does not move, which reads as a
+  dead drag rather than a clamped one.
+
+`write` is two things told apart by shape: with `<path> <text>` it is the
+sysbox applet, with at most a path it opens the editor (decided in
+`shell::execute` *before* sysbox dispatch, which would otherwise claim the
+bare form and print usage). Paint saves `/draw/painting.ppm` (P6);
+`tree::put` creates parent directories, so no mkdir ceremony.
+
 ### Boot
 
 UEFI already delivers long mode, CPL 0 and an identity map, so this UEFI

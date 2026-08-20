@@ -8,11 +8,51 @@
 pub mod browse;
 pub mod compose;
 pub mod console;
+pub mod mines;
+pub mod paint;
+pub mod write;
 pub mod splash;
 pub mod font;
 pub mod theme;
 pub mod ui;
 pub mod desk;
+
+/// A program that owns a window's client area.
+///
+/// The third kind of window content, after the terminal and the widget
+/// stack. A `Panel` is a form -- labels, lists, buttons in a column -- and
+/// three programs in a row (a canvas, a document, a minefield) turned out
+/// not to be forms. Rather than grow the widget enum until it could express
+/// a canvas, a window can hold anything that answers these six questions.
+/// `Browser` predates the trait and stays a named variant; these are the
+/// same idea generalised.
+///
+/// `draw_in` takes `&self` because the desktop paints from a shared borrow;
+/// layout facts discovered while drawing go in `Cell`s, the way the Browser
+/// keeps its row count. Every handler returns whether it consumed the event,
+/// so unclaimed keys keep falling through to the window manager -- Alt-Tab
+/// must work inside a game.
+pub trait DeskApp {
+    fn draw_in(&self, fb: &Framebuffer, client: theme::Rect, focused: bool);
+    fn key(&mut self, k: u8) -> bool;
+    fn press(&mut self, client: theme::Rect, x: i32, y: i32) -> bool;
+    /// The second button. Minesweeper flags with it; most programs decline
+    /// it and the desktop opens the system menu instead.
+    fn right_press(&mut self, _client: theme::Rect, _x: i32, _y: i32) -> bool {
+        false
+    }
+    /// Pointer motion while the left button is held on this window --
+    /// what a brush stroke is made of.
+    fn drag(&mut self, _client: theme::Rect, _x: i32, _y: i32) -> bool {
+        false
+    }
+    fn release(&mut self) -> bool {
+        false
+    }
+    fn wheel(&mut self, _notches: i32) -> bool {
+        false
+    }
+}
 
 use crate::sync::Racy;
 

@@ -510,6 +510,16 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
     let cmd = parts.next().unwrap_or("");
     let rest = parts.next().unwrap_or("").trim();
 
+    // One name, two meanings, told apart by shape: `write <path> <text>` is
+    // the sysbox applet and has always been; `write [path]` with no text is
+    // the editor window, because an editor is what "write" with nothing to
+    // write means. Decided here, before sysbox, or the applet's usage error
+    // would claim the bare form.
+    if cmd == "write" && rest.splitn(2, char::is_whitespace).nth(1).is_none() {
+        crate::gfx::desk::open_write(rest);
+        return;
+    }
+
     // sysbox first: it owns a whole vocabulary of short names, and claiming
     // them here keeps that list in one place instead of spreading twenty more
     // arms across this match.
@@ -1003,6 +1013,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             kprintln!("  mem uptime tasks cpu acpi pci video date reboot");
             kprintln!("  fault         deliberately dereference null");
             kprintln!("  clear refresh echo <text>");
+            kprintln!("  paint write [path] mines   desktop programs; todo    the checklist");
             kprintln!("  typewriter    output pacing, in us per character");
 
             console::set_color(YELLOW);
@@ -1341,6 +1352,8 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             // the web as that era did: no scripts, no images, no forms.
             crate::gfx::desk::open_browser(rest.trim());
         }
+        "paint" => crate::gfx::desk::open_paint(),
+        "mines" | "minesweeper" => crate::gfx::desk::open_mines(),
         "todo" => {
             // The hardware checklist, from the shell. One list, shared with
             // the ToDo window -- ticking here shows there and back, because a
