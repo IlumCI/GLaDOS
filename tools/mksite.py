@@ -132,20 +132,32 @@ page(
         ]),
         ("shots", [
             ("desktop.png", "Desktop with terminal and Program Manager",
-             "GLaDOS OS desktop showing a Windows 3.1 styled terminal window with "
-             "the boot log, a Program Manager window, and a taskbar",
-             "The desktop as it comes up, with the terminal showing its own boot "
-             "log, Program Manager beside it and a taskbar along the bottom. Every "
-             "pixel here was drawn by the kernel into a UEFI framebuffer, with no "
-             "graphics library underneath.",
+             "GLaDOS OS desktop showing a 98-styled terminal window with the boot "
+             "log, desktop icons, a Program Manager window, and an icon taskbar "
+             "with a Start button",
+             "The desktop as it comes up: the terminal showing its own boot log, "
+             "Program Manager beside it, icons down the wall, and a taskbar with a "
+             "Start button and one pictogram per window. The look is 98 furniture "
+             "on 3.1 construction in Aperture colours, and every pixel was drawn "
+             "by the kernel into a UEFI framebuffer with no graphics library "
+             "underneath.",
              True),
+            ("apps.png", "Paintbrush, Write and Minesweeper",
+             "GLaDOS desktop with Minesweeper, a text editor and a paint program "
+             "in overlapping windows",
+             "Three programs at once: Minesweeper with its counters and the mark "
+             "for a face, Write holding a document from the content-addressed "
+             "namespace, Paintbrush behind it. Windows drag by their title bars, "
+             "carry minimise, maximise and close buttons, and everything here can "
+             "also be driven entirely from the keyboard, which is how this "
+             "screenshot arranged itself.", False),
             ("desktop-clean.png", "Desktop wallpaper",
              "The GLaDOS desktop wallpaper showing the aperture mark drawn as "
              "vector geometry",
-             "The same desktop with the terminal minimised. The mark is computed as "
-             "arcs and lines at boot, since the kernel has no image decoder and "
-             "writing one in order to display a logo seemed like the wrong order to "
-             "do things in.", False),
+             "Everything minimised to the bar. The mark is computed as arcs and "
+             "lines at boot, since the kernel has no image decoder and writing one "
+             "in order to display a logo seemed like the wrong order to do things "
+             "in. The shell keeps running with no window at all.", False),
             ("model.png", "The model answering",
              "GLaDOS running a language model in kernel space, answering a question "
              "about operating systems",
@@ -2387,20 +2399,34 @@ page(
           "framebuffer's exact contents at 1280x800."),
         ("shots", [
             ("desktop.png", "Desktop with terminal and Program Manager",
-             "GLaDOS OS desktop showing a Windows 3.1 styled terminal window with "
-             "the boot log, a Program Manager window, and a taskbar",
-             "The desktop as it comes up. The terminal is showing its own boot log, "
-             "with Program Manager beside it and a taskbar along the bottom. Every "
-             "pixel here was drawn by the kernel into a UEFI framebuffer; there is "
-             "no graphics library underneath.",
+             "GLaDOS OS desktop showing a 98-styled terminal window with the boot "
+             "log, desktop icons, a Program Manager window, and an icon taskbar "
+             "with a Start button",
+             "The desktop as it comes up. The terminal is showing its own boot "
+             "log, with Program Manager beside it, icons down the wall, and a "
+             "taskbar carrying a Start button and one pictogram per window. Title "
+             "bars ramp through Aperture's colours and carry minimise, maximise "
+             "and close. Every pixel here was drawn by the kernel into a UEFI "
+             "framebuffer; there is no graphics library underneath.",
              True),
+            ("apps.png", "Paintbrush, Write and Minesweeper",
+             "GLaDOS desktop with Minesweeper, a text editor and a paint program "
+             "in overlapping windows",
+             "Three programs at once. Minesweeper plays the 3.1 rules with the "
+             "mark for a face; Write is a windowed editor over the same "
+             "content-addressed namespace the shell's <code>edit</code> uses; "
+             "Paintbrush is behind it with five tools and the console's sixteen "
+             "colours. Windows drag by their title bars, and everything also "
+             "drives from the keyboard, which is how this screenshot "
+             "arranged itself, headlessly, over a serial port.", False),
             ("desktop-clean.png", "Desktop wallpaper",
              "The GLaDOS desktop wallpaper showing the aperture mark drawn as "
              "vector geometry",
-             "The same desktop with the terminal minimised. The mark on the "
+             "Everything minimised to the bar. The mark on the "
              "wallpaper is computed as arcs and lines at boot, because the kernel "
              "has no image decoder and adding one to display a logo seemed like the "
-             "wrong order to do things in.", False),
+             "wrong order to do things in. The shell keeps running with no window "
+             "at all; typing still types at the prompt.", False),
             ("model.png", "The model answering",
              "GLaDOS running a language model in kernel space, answering a question "
              "about operating systems",
