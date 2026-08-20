@@ -1,8 +1,12 @@
 //! Widgets, keyboard focus, and the panel loop.
 //!
-//! `theme` draws; this decides. Everything here is keyboard-only on purpose:
-//! there is no pointer, and there is not going to be one soon, so a control
-//! that can only be reached by clicking is a control that cannot be reached.
+//! `theme` draws; this decides. Every control is reachable by keyboard, and
+//! the pointer is a second way in, never the only one: serial cannot inject
+//! PS/2 packets, so a control that could only be clicked is a control
+//! `drive.py` could never reach, and an interface that cannot be driven
+//! headlessly does not get tested. `rects` is the one layout, shared by the
+//! paint pass and the hit-test, so a control cannot highlight in one place
+//! and press in another.
 //!
 //! ### Why widgets are an enum
 //!
@@ -34,6 +38,7 @@ use super::font;
 use super::theme::{self, Rect};
 use super::Framebuffer;
 use crate::dev::kbd;
+use crate::sync::Racy;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -274,25 +279,126 @@ impl Panel {
         self.title = String::from(t);
     }
 
-    /// Draw the widget stack into a client rectangle.
+    /// Where each widget lands in a client rectangle, in stack order.
     ///
-    /// The frame and title bar are the desktop's business, not the panel's: a
-    /// panel that drew its own window could not be a window *on* something.
-    pub fn draw_in(&self, fb: &Framebuffer, client: Rect, focused: bool) {
+    /// The single source of layout: `draw_in` paints these rectangles and the
+    /// pointer hit-tests them, so a control cannot highlight in one place and
+    /// press in another. Clipping is part of the layout -- a widget that is
+    /// not in this list is not on screen and must not be clickable.
+    fn rects(&self, client: Rect) -> Vec<(usize, Rect)> {
+        let mut out = Vec::new();
         let mut y = client.y + PAD;
         let x = client.x + PAD;
         let w = client.w.saturating_sub(PAD * 2);
         for (i, widget) in self.widgets.iter().enumerate() {
             let h = widget.height();
-            // Clip rather than negotiate: a stack that runs off the bottom is
-            // a panel with too much in it, and drawing half a control is a
-            // clearer symptom than silently rearranging the rest.
             if y + h > client.y + client.h {
                 break;
             }
+            out.push((i, Rect::new(x, y, w, h)));
+            y += h + GAP;
+        }
+        out
+    }
+
+    /// The focusable widget under a point, for hover feedback.
+    pub fn hover_at(&self, client: Rect, px: i32, py: i32) -> Option<usize> {
+        self.rects(client).into_iter().find_map(|(i, r)| {
+            let inside = px >= r.x as i32
+                && py >= r.y as i32
+                && px < (r.x + r.w) as i32
+                && py < (r.y + r.h) as i32;
+            (inside && self.widgets[i].focusable()).then_some(i)
+        })
+    }
+
+    /// One pointer press. Focus moves to the control under the point, and the
+    /// control answers exactly as it would to the keyboard: a button presses,
+    /// a list row selects (and opens on a double press), a field takes the
+    /// caret to the character that was hit.
+    pub fn mouse(&mut self, client: Rect, px: i32, py: i32, double: bool) -> Step {
+        let Some(i) = self.hover_at(client, px, py) else {
+            return Step::Idle;
+        };
+        let r = self
+            .rects(client)
+            .into_iter()
+            .find(|(j, _)| *j == i)
+            .map(|(_, r)| r)
+            .unwrap_or(client);
+        self.focus = i;
+        match &mut self.widgets[i] {
+            Widget::Button { .. } => self.activate(),
+            Widget::List { items, sel } => {
+                let inner = r.shrink(2);
+                let row = (py - inner.y as i32) / ROW_H as i32;
+                if row < 0 || row as usize >= items.len() {
+                    return Step::Redraw;
+                }
+                let was = *sel;
+                *sel = row as usize;
+                // A double press opens; so does a second press on the row that
+                // is already selected, which is how a slow double-click still
+                // works on a machine timing its clicks by TSC.
+                if double && was == *sel {
+                    self.activate()
+                } else {
+                    Step::Redraw
+                }
+            }
+            Widget::Field { name, text, cursor, .. } => {
+                let cap = theme::text_w(name.len() + 1);
+                let well = Rect::new(r.x + cap, r.y, r.w.saturating_sub(cap), r.h - 2);
+                let inner = well.shrink(3);
+                let room = (inner.w / (font::GLYPH_W * theme::CHROME_SCALE)) as usize;
+                if room > 0 {
+                    // The same window the paint pass shows, so the caret lands
+                    // on the character that was actually under the pointer.
+                    let off = cursor.saturating_sub(room.saturating_sub(1));
+                    let col = ((px - inner.x as i32).max(0) as u32
+                        / (font::GLYPH_W * theme::CHROME_SCALE)) as usize;
+                    *cursor = (off + col).min(text.len());
+                }
+                Step::Redraw
+            }
+            _ => Step::Idle,
+        }
+    }
+
+    /// Wheel notches over the panel move the first list's selection.
+    pub fn wheel(&mut self, notches: i32) -> bool {
+        for w in &mut self.widgets {
+            if let Widget::List { items, sel } = w {
+                let n = items.len();
+                if n == 0 {
+                    return false;
+                }
+                let was = *sel;
+                *sel = if notches > 0 {
+                    (*sel + (notches as usize)).min(n - 1)
+                } else {
+                    sel.saturating_sub((-notches) as usize)
+                };
+                return *sel != was;
+            }
+        }
+        false
+    }
+
+    /// Draw the widget stack into a client rectangle.
+    ///
+    /// The frame and title bar are the desktop's business, not the panel's: a
+    /// panel that drew its own window could not be a window *on* something.
+    /// `hover` is the widget the pointer is over, drawn ready-to-press.
+    pub fn draw_in(&self, fb: &Framebuffer, client: Rect, focused: bool, hover: Option<usize>) {
+        let win_focused = focused;
+        for (i, r) in self.rects(client) {
+            let widget = &self.widgets[i];
+            let (x, y, w, h) = (r.x, r.y, r.w, r.h);
             // A control is only "focused" if the window is, so a desktop with
-            // several panels does not show two selections at once.
-            let focused = focused && i == self.focus;
+            // several panels does not show two selections at once. The pointer
+            // is one pointer, so hover needs no such gate.
+            let focused = (win_focused && i == self.focus) || hover == Some(i);
             match widget {
                 Widget::Label(t) => {
                     theme::text(fb, x, y, t, theme::TEXT, theme::FACE);
@@ -336,7 +442,6 @@ impl Panel {
                     theme::button(fb, Rect::new(x, y, bw, h - GAP), label, focused, false);
                 }
             }
-            y += h + GAP;
         }
     }
 
@@ -461,8 +566,96 @@ pub fn panel_named(name: &str) -> Option<Panel> {
         "status" => Some(status_panel()),
         "files" => Some(file_browser("/")),
         "settings" => Some(settings("net")),
+        "todo" => Some(todo_panel(0)),
         _ => None,
     }
+}
+
+// --- the ToDo list ---------------------------------------------------------
+//
+// The development machine and the target machine are not the same computer,
+// and the person carrying changes to the GF63 is not the one who wrote them.
+// This list is the hand-off: what to run there, in the order that answers the
+// most with the least standing around. Seeded with the current hardware
+// visit; `todo add` extends it from the shell.
+
+static TODO: Racy<Option<Vec<(String, bool)>>> = Racy::new(None);
+
+const TODO_SEED: [&str; 10] = [
+    "deploy.ps1 -EspDrive S: -Release, reboot, F11",
+    "write down the [boot] phys line (decides 4B)",
+    "boot selftests: every line ok, note any FAIL",
+    "stage q35-0.8b.bin + its tokenizer on the ESP",
+    "logits 7 11 3 vs ref35 --converted top-5",
+    "gen: time tok/s at seq 512, against qwen3-0.6b",
+    "window: confirm 12 MiB KV + 19.3 MiB state",
+    "mouse: wheel notches, drag, M2 menu, Start",
+    "net: dhcp, dns, https fetch on the rtl8168",
+    "photos of the desktop + enternet for the site",
+];
+
+fn todo_items() -> &'static mut Vec<(String, bool)> {
+    let slot = unsafe { &mut *TODO.get() };
+    slot.get_or_insert_with(|| {
+        TODO_SEED.iter().map(|s| (String::from(*s), false)).collect()
+    })
+}
+
+/// The list as (done, text) pairs, for the shell's `todo` command.
+pub fn todo_lines() -> Vec<(bool, String)> {
+    todo_items().iter().map(|(s, d)| (*d, s.clone())).collect()
+}
+
+pub fn todo_toggle(i: usize) -> bool {
+    let items = todo_items();
+    match items.get_mut(i) {
+        Some((_, done)) => {
+            *done = !*done;
+            true
+        }
+        None => false,
+    }
+}
+
+pub fn todo_add(text: &str) {
+    todo_items().push((String::from(text), false));
+}
+
+/// The checklist as a window. Every row is a toggle: activating it flips the
+/// tick and rebuilds the panel in place, which is the same navigation move
+/// the file browser makes -- a panel is data, so "change an item" is "make
+/// the panel where it is changed".
+pub fn todo_panel(sel: usize) -> Panel {
+    let items: Vec<(String, Action)> = todo_items()
+        .iter()
+        .enumerate()
+        .map(|(i, (text, done))| {
+            let mark = if *done { "[x]" } else { "[ ]" };
+            (
+                alloc::format!("{} {}", mark, text),
+                Action::Browse(alloc::format!("todo:{}", i)),
+            )
+        })
+        .collect();
+    let n_done = todo_items().iter().filter(|(_, d)| *d).count();
+    let sel = sel.min(items.len().saturating_sub(1));
+    Panel::new(
+        "ToDo",
+        alloc::vec![
+            Widget::Label(alloc::format!(
+                "Hardware visit -- {} of {} done. Enter toggles.",
+                n_done,
+                todo_items().len()
+            )),
+            Widget::Sep,
+            Widget::List { items, sel },
+            Widget::Button {
+                label: String::from("Clear ticks"),
+                action: Action::Browse(String::from("todo:reset")),
+            },
+            Widget::Button { label: String::from("Close"), action: Action::Close },
+        ],
+    )
 }
 
 /// Resolve a `kind:argument` route to a titled panel.
@@ -479,6 +672,23 @@ pub fn panel_for_route(route: &str) -> Option<(String, Panel)> {
             Some((alloc::format!("Files -- {}", path), file_browser(path)))
         }
         "set" => Some((String::from("Settings"), settings(arg))),
+        "programs" => Some((String::from("Program Manager"), program_manager())),
+        "todo" => {
+            let sel = match arg {
+                "reset" => {
+                    for (_, done) in todo_items().iter_mut() {
+                        *done = false;
+                    }
+                    0
+                }
+                n => {
+                    let i: usize = n.parse().ok()?;
+                    todo_toggle(i);
+                    i
+                }
+            };
+            Some((String::from("ToDo"), todo_panel(sel)))
+        }
         _ => None,
     }
 }
@@ -499,6 +709,7 @@ pub fn settings(page: &str) -> Panel {
             (String::from("Network"), Action::Browse(String::from("set:net"))),
             (String::from("Model"), Action::Browse(String::from("set:model"))),
             (String::from("System"), Action::Browse(String::from("set:sys"))),
+            (String::from("Programs"), Action::Browse(String::from("programs:"))),
         ],
         sel,
     };
@@ -683,7 +894,9 @@ pub fn status_panel() -> Panel {
         ("Uptime and tasks", "tasks"),
         ("Heap", "mem"),
         ("Interfaces", "net"),
-        ("Disks", "storage"),
+        // A command called storage never existed; disk is the controller and
+        // namespace report the label promises.
+        ("Disks", "disk"),
         ("Certificates", "trust"),
         ("Attention window", "window"),
     ];
@@ -701,20 +914,25 @@ pub fn status_panel() -> Panel {
 }
 
 pub fn program_manager() -> Panel {
-    let entries: [(&str, &str); 8] = [
-        ("System status", "status"),
-        ("Memory", "mem"),
-        ("Network", "net"),
-        ("Storage", "storage"),
-        ("Namespace", "tree /"),
-        ("Model", "ai"),
-        ("Attention window", "window"),
-        ("Self-test: tensor", "tensor"),
+    let run = |label: &str, cmd: &str| {
+        (String::from(label), Action::Run(String::from(cmd)))
+    };
+    // "Model" went to a command called `ai` for two milestones. There is no
+    // such command and there never was -- the entry typed it into the
+    // terminal, the shell said so, and the menu looked broken. Now it opens
+    // the Model settings page, which is what the label promises.
+    let items = alloc::vec![
+        run("System status", "status"),
+        run("Memory", "mem"),
+        run("Network", "net"),
+        run("Storage", "store"),
+        run("Namespace", "tree /"),
+        (String::from("Model"), Action::Browse(String::from("set:model"))),
+        (String::from("ToDo list"), Action::Run(String::from("win open todo"))),
+        run("Enternet", "enternet"),
+        run("Attention window", "window"),
+        run("Self-test: tensor", "tensor"),
     ];
-    let items = entries
-        .iter()
-        .map(|(label, cmd)| (String::from(*label), Action::Run(String::from(*cmd))))
-        .collect();
     Panel::new(
         "Aperture Program Manager",
         alloc::vec![

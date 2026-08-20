@@ -83,6 +83,14 @@ pub struct Console {
     oy: u32,
     /// False while the boot screen owns the framebuffer.
     visible: bool,
+    /// Whether painted cells are pushed straight to the screen.
+    ///
+    /// Set when `fb` is the compositor's back buffer: the console prints on
+    /// the shell's schedule, between desktop draws, and a cell that waited for
+    /// the next `present` would make typing invisible. False before the
+    /// compositor exists, when `fb` *is* the screen and there is nothing to
+    /// push to.
+    flush: bool,
 }
 
 impl Console {
@@ -109,7 +117,19 @@ impl Console {
             ox: x,
             oy: y,
             visible: true,
+            flush: false,
         }
+    }
+
+    /// Repoint the console at a different buffer.
+    ///
+    /// Called once, when the compositor comes up: from then on the console
+    /// paints into the back buffer like everything else, and pushes each cell
+    /// through itself. The shadow grid is untouched -- the text survives, and
+    /// the next full draw repaints it wherever the terminal window is.
+    pub fn retarget(&mut self, fb: Framebuffer, flush: bool) {
+        self.fb = fb;
+        self.flush = flush;
     }
 
     /// Move the grid into a new rectangle, keeping its contents.
@@ -165,6 +185,9 @@ impl Console {
             // not erase the window around it.
             let (w, h) = self.pixel_size();
             self.fb.rect(self.ox, self.oy, w, h, self.bg);
+            if self.flush {
+                super::compose::flush_rect(self.ox, self.oy, w, h);
+            }
         }
     }
 
@@ -197,6 +220,9 @@ impl Console {
                     }
                 }
             }
+        }
+        if self.flush {
+            super::compose::flush_rect(ox, oy, font::GLYPH_W * s, font::GLYPH_H * s);
         }
     }
 
@@ -236,6 +262,9 @@ impl Console {
         if self.visible {
             let (w, h) = self.pixel_size();
             self.fb.scroll_rect(self.ox, self.oy, w, h, cell_h, self.bg);
+            if self.flush {
+                super::compose::flush_rect(self.ox, self.oy, w, h);
+            }
         }
     }
 

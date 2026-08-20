@@ -1341,6 +1341,33 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             // the web as that era did: no scripts, no images, no forms.
             crate::gfx::desk::open_browser(rest.trim());
         }
+        "todo" => {
+            // The hardware checklist, from the shell. One list, shared with
+            // the ToDo window -- ticking here shows there and back, because a
+            // checklist that exists twice is two checklists.
+            use crate::gfx::ui;
+            let arg = rest.trim();
+            if let Some(text) = arg.strip_prefix("add ") {
+                ui::todo_add(text.trim());
+            } else if let Ok(i) = arg.parse::<usize>() {
+                if !ui::todo_toggle(i) {
+                    kprintln!("  no item {}", i);
+                    return;
+                }
+            } else if !arg.is_empty() {
+                kprintln!("  usage: todo [<n>|add <text>]");
+                return;
+            }
+            console::set_color(YELLOW);
+            kprintln!("[todo]");
+            console::set_color(LTGRAY);
+            let items = ui::todo_lines();
+            let done = items.iter().filter(|(d, _)| *d).count();
+            for (i, (d, text)) in items.iter().enumerate() {
+                kprintln!("  {:2}  {} {}", i, if *d { "[x]" } else { "[ ]" }, text);
+            }
+            kprintln!("  {} of {} done -- 'todo <n>' toggles, 'todo add <text>' extends", done, items.len());
+        }
         "win" => {
             use crate::gfx::desk;
             let mut it = rest.split_whitespace();

@@ -6,6 +6,7 @@
 //! are the only output device that exists.
 
 pub mod browse;
+pub mod compose;
 pub mod console;
 pub mod splash;
 pub mod font;

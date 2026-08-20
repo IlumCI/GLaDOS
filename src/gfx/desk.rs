@@ -7,34 +7,41 @@
 //! (`console::reflow`), so the terminal needs no special case -- it is a window
 //! whose content happens to be the character grid.
 //!
-//! ### Repaint is always total, and that is the design
+//! ### Repaint is always total; what reaches the screen is not
 //!
 //! Windows overlap, and the usual price for that is damage tracking: work out
 //! which rectangles a change dirtied and repaint only those. Not here. Every
-//! change repaints the wall and then every window back to front.
-//!
-//! It is affordable because of *what causes* a change. Nothing here animates --
-//! a repaint happens when a key is pressed, which is at most a few times a
-//! second, and 1280x800 is a million stores into a write-back-mapped aperture.
-//! Damage tracking would buy nothing measurable and cost the one thing this
-//! code cannot afford to lose, which is being obviously correct: the entire
-//! class of "stale pixels from a window that used to be there" cannot occur if
-//! there is no such thing as a partial repaint.
+//! change repaints the wall and then every window back to front -- into the
+//! compositor's back buffer, and `compose::present` copies to the screen only
+//! the rows that differ from what is already there. Total repaint keeps the
+//! window manager obviously correct (the entire class of "stale pixels from a
+//! window that used to be there" cannot occur when there is no partial
+//! repaint); the diffed present is what stopped every keystroke flashing the
+//! wallpaper through the frame while it was rebuilt, and it is what makes
+//! repainting on pointer *motion* affordable at all.
 //!
 //! Back-to-front is also what makes the terminal work with no special case.
 //! `console::redraw` paints the whole grid; a window in front of it is simply
 //! drawn afterwards.
 //!
-//! ### What is deliberately absent
+//! ### The pointer
 //!
-//! No mouse. Every operation is a keystroke, because there is no pointer and
-//! there is not going to be one soon -- and a window you can only move by
-//! dragging is a window that cannot be moved.
+//! Everything the pointer does, a keystroke can also do -- serial cannot
+//! inject PS/2 packets, so an operation that existed only as a gesture would
+//! be an operation `drive.py` could never test. The pointer's vocabulary:
+//! press to focus and raise, title bar to drag, the corner grip to resize, a
+//! double press on a title to maximise, the bar and the Start menu and the
+//! wall icons to launch, the wheel to scroll, hover to see where a press
+//! would land. The second button opens the menu for whatever is under it.
+//!
+//! The ancestry is deliberate: 98's furniture (icons, Start, a bar of window
+//! buttons, gradient titles), 3.1's construction (bevels, the grey face,
+//! dialogs that hug their content), Aperture's colours over both.
 
 use super::browse::Browser;
 use super::theme::{self, Rect};
 use super::ui::{self, Action, Panel};
-use super::Framebuffer;
+use super::{Color, Framebuffer};
 use crate::dev::kbd;
 use crate::sync::Racy;
 use alloc::string::String;
@@ -110,6 +117,34 @@ pub enum Mode {
     /// then the task buttons -- one flat list, because Left and Right should
     /// walk the bar the way it looks rather than the way it is built.
     Taskbar { item: usize },
+    /// The pointer is moving the focused window by its title bar. `dx`, `dy`
+    /// are where inside the bar it was grabbed, so the window does not snap
+    /// its corner to the pointer on the first packet.
+    Drag { dx: u32, dy: u32, from: Rect },
+    /// The pointer is resizing it by the bottom-right corner.
+    DragSize { from: Rect },
+    /// The Start menu is open above the taskbar.
+    Start { item: usize },
+}
+
+/// What the pointer is over, for the paint pass.
+///
+/// Only things that draw differently when pointed at. Kept on the desktop and
+/// compared per packet: a repaint happens when the *target* changes, not when
+/// the pointer moves, so sliding across one button costs one redraw.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Hover {
+    None,
+    /// A taskbar slot, apps and windows in one flat index.
+    Task(usize),
+    /// A menu-bar label: window `win`, label `menu`.
+    MenuLabel { win: usize, menu: usize },
+    /// A focusable widget in window `win`'s panel.
+    Widget { win: usize, idx: usize },
+    /// A desktop icon.
+    Icon(usize),
+    /// The Start button.
+    Start,
 }
 
 pub struct Desktop {
@@ -118,6 +153,7 @@ pub struct Desktop {
     /// things to keep in agreement, and they would drift.
     pub windows: Vec<Window>,
     pub mode: Mode,
+    pub hover: Hover,
 }
 
 static DESK: Racy<Option<Desktop>> = Racy::new(None);
@@ -131,9 +167,54 @@ const TASK_H: u32 = theme::TITLE_H + 10;
 /// Gap between task buttons.
 const TASK_GAP: u32 = 4;
 
-/// Apps the app bar can launch. Name, and the panel `ui::panel_named` builds.
-const APPS: [(&str, &str); 3] =
-    [("Programs", "programs"), ("Files", "files"), ("Settings", "settings")];
+/// The icons on the wall, top to bottom, and what opening one runs.
+///
+/// `term` is not a shell command: the terminal is not a panel to open but a
+/// window to bring back, and the special case lives in `launch` rather than in
+/// the shell so the icon works even while the shell is busy printing.
+const ICONS: [(&str, &str); 6] = [
+    ("Terminal", "term"),
+    ("Programs", "win open programs"),
+    ("Files", "win open files"),
+    ("ToDo", "win open todo"),
+    ("Enternet", "enternet"),
+    ("Settings", "win open settings"),
+];
+
+/// The Start menu, bottom of the bar upward -- the 98 half of the ancestry.
+/// Same entries as the icons plus the one thing that belongs behind a second
+/// look, exactly where 98 kept it.
+const START_ITEMS: [(&str, &str); 7] = [
+    ("Terminal", "term"),
+    ("Programs", "win open programs"),
+    ("Files", "win open files"),
+    ("ToDo", "win open todo"),
+    ("Enternet", "enternet"),
+    ("Settings", "win open settings"),
+    ("Reboot", "reboot"),
+];
+
+/// Run what an icon or Start entry names.
+fn launch(cmd: &str) {
+    if cmd == "term" {
+        with(|d| {
+            if let Some(i) = d
+                .windows
+                .iter()
+                .position(|w| matches!(w.content, Content::Terminal))
+            {
+                // The icon is the one place a minimised terminal comes back
+                // from besides its task button, so restoring here is wanted,
+                // not the leak `focus_terminal` guards against.
+                d.windows[i].state = WinState::Normal;
+                d.raise(i);
+            }
+        });
+        return;
+    }
+    focus_terminal();
+    unsafe { *PENDING.get() = Some(String::from(cmd)) };
+}
 
 pub fn ready() -> bool {
     unsafe { (*DESK.get()).is_some() }
@@ -166,6 +247,150 @@ fn taskbar_rect(fb: &Framebuffer) -> Rect {
     Rect::new(0, fb.height().saturating_sub(TASK_H), fb.width(), TASK_H)
 }
 
+/// The Start button, left end of the bar.
+fn start_rect(fb: &Framebuffer) -> Rect {
+    let bar = taskbar_rect(fb);
+    Rect::new(bar.x + 3, bar.y + 4, theme::text_w(6) + 30, bar.h - 8)
+}
+
+/// Where the Start menu pops, directly above its button. The width formula is
+/// `dropdown`'s own, so the paint and the hit-test cannot disagree.
+fn start_menu_rect(fb: &Framebuffer) -> (Rect, usize) {
+    let n = START_ITEMS.len();
+    let w = theme::text_w(START_ITEMS.iter().map(|(l, _)| l.len()).max().unwrap_or(4)) + 24;
+    let h = n as u32 * MENU_H + 8;
+    let bar = taskbar_rect(fb);
+    (Rect::new(bar.x + 2, bar.y.saturating_sub(h), w, h), n)
+}
+
+// --- desktop icons ---------------------------------------------------------
+
+const ICON_W: u32 = 132;
+const ICON_H: u32 = 84;
+
+/// The icon column, top-left of the wall, downwards -- the 98 half of the
+/// ancestry. Stops above the taskbar rather than flowing into it.
+fn icon_rects(fb: &Framebuffer) -> Vec<(Rect, usize)> {
+    let mut out = Vec::new();
+    let mut y = 14u32;
+    for (k, _) in ICONS.iter().enumerate() {
+        if y + ICON_H > fb.height().saturating_sub(TASK_H) {
+            break;
+        }
+        out.push((Rect::new(10, y, ICON_W, ICON_H), k));
+        y += ICON_H + 10;
+    }
+    out
+}
+
+fn icon_at(fb: &Framebuffer, x: i32, y: i32) -> Option<usize> {
+    icon_rects(fb)
+        .into_iter()
+        .find(|(r, _)| contains(*r, x, y))
+        .map(|(_, k)| k)
+}
+
+/// Paint the icon column. Hovering highlights the label, 98-style; the
+/// pictograms are rect art in the theme's own palette, because a 40-pixel
+/// bitmap format is more machinery than six drawings justify.
+fn draw_icons(fb: &Framebuffer, hover: Hover) {
+    for (r, k) in icon_rects(fb) {
+        let px = r.x + (r.w - 40) / 2;
+        pictogram(fb, k, px, r.y);
+        let (label, _) = ICONS[k];
+        let tw = theme::text_w(label.len());
+        let tx = r.x + (r.w.saturating_sub(tw)) / 2;
+        let ty = r.y + 46;
+        if hover == Hover::Icon(k) {
+            fb.rect(
+                tx.saturating_sub(3),
+                ty - 2,
+                tw + 6,
+                theme::text_h() + 4,
+                theme::SELECT,
+            );
+            theme::text_over(fb, tx, ty, label, theme::SELECT_TEXT);
+        } else {
+            // A shadow under white text is what keeps a label readable over
+            // any wallpaper without boxing it.
+            theme::text_over(fb, tx + 1, ty + 1, label, theme::DARKEDGE);
+            theme::text_over(fb, tx, ty, label, theme::TITLE_TEXT);
+        }
+    }
+}
+
+/// One 40x40 pictogram at `(x, y)`, by icon index.
+fn pictogram(fb: &Framebuffer, k: usize, x: u32, y: u32) {
+    let face = theme::FACE;
+    let dark = theme::DARKEDGE;
+    let hi = theme::HILIGHT;
+    match k {
+        // Terminal: a monitor with a prompt on it.
+        0 => {
+            fb.rect(x + 2, y + 4, 36, 26, face);
+            fb.frame(x + 2, y + 4, 36, 26, dark);
+            fb.rect(x + 5, y + 7, 30, 20, theme::SCREEN);
+            fb.rect(x + 8, y + 10, 8, 2, theme::APERTURE);
+            fb.rect(x + 8, y + 15, 14, 2, Color::new(0xC8, 0xC8, 0xC8));
+            fb.rect(x + 14, y + 30, 12, 4, face);
+            fb.rect(x + 10, y + 34, 20, 3, face);
+            fb.frame(x + 10, y + 34, 20, 3, dark);
+        }
+        // Programs: the mark itself. This is the Aperture program manager.
+        1 => {
+            super::splash::aperture(
+                fb,
+                (x + 20) as i32,
+                (y + 20) as i32,
+                18,
+                theme::APERTURE,
+                theme::DESKTOP,
+            );
+        }
+        // Files: a folder.
+        2 => {
+            fb.rect(x + 4, y + 10, 14, 6, theme::APERTURE_DEEP);
+            fb.rect(x + 4, y + 14, 32, 20, theme::APERTURE_DEEP);
+            fb.frame(x + 4, y + 14, 32, 20, dark);
+            fb.rect(x + 5, y + 15, 30, 3, theme::APERTURE);
+        }
+        // ToDo: a card with ticked lines.
+        3 => {
+            fb.rect(x + 6, y + 2, 28, 36, hi);
+            fb.frame(x + 6, y + 2, 28, 36, dark);
+            for (i, done) in [true, true, false].iter().enumerate() {
+                let ly = y + 8 + i as u32 * 10;
+                fb.frame(x + 10, ly, 6, 6, dark);
+                if *done {
+                    fb.rect(x + 12, ly + 2, 3, 3, theme::APERTURE_DEEP);
+                }
+                fb.rect(x + 20, ly + 2, 10, 2, theme::SHADOW);
+            }
+        }
+        // Enternet: a rough globe.
+        4 => {
+            for (i, w) in [16u32, 28, 34, 38, 38, 38, 34, 28, 16].iter().enumerate() {
+                let ly = y + 2 + i as u32 * 4;
+                fb.rect(x + 20 - w / 2, ly, *w, 4, Color::new(0x2A, 0x4A, 0x6E));
+            }
+            fb.rect(x + 2, y + 16, 36, 3, hi);
+            fb.rect(x + 18, y + 2, 3, 36, hi);
+            fb.frame(x + 12, y + 8, 16, 24, hi);
+        }
+        // Settings: three sliders.
+        _ => {
+            for i in 0..3u32 {
+                let ly = y + 8 + i * 11;
+                fb.rect(x + 4, ly + 2, 32, 2, theme::SHADOW);
+                fb.rect(x + 4, ly + 4, 32, 1, hi);
+                let kx = x + 6 + (i * 11) % 24;
+                fb.rect(kx, ly - 2, 6, 10, face);
+                fb.frame(kx, ly - 2, 6, 10, dark);
+            }
+        }
+    }
+}
+
 impl Desktop {
     /// Index of the focused window: the topmost that is not minimised.
     pub fn focus(&self) -> Option<usize> {
@@ -194,11 +419,17 @@ pub fn init() {
     let (pm_w, pm_h) = pm.preferred();
     pm.set_title("Program Manager");
     let pm_w = pm_w.min(screen.w / 2);
-    let term_w = screen.w.saturating_sub(pm_w + MARGIN);
+    // The icon column stays visible: the wall is part of the interface now,
+    // and a terminal that covers it leaves the icons reachable only by
+    // closing the terminal, which is backwards.
+    let icons_w = 10 + ICON_W + 10;
+    let term_x = screen.x.max(icons_w);
+    let term_w = (screen.x + screen.w)
+        .saturating_sub(term_x + pm_w + MARGIN);
 
     let terminal = Window {
         title: String::from("GLaDOS Terminal"),
-        rect: Rect::new(screen.x, screen.y, term_w, screen.h),
+        rect: Rect::new(term_x, screen.y, term_w, screen.h),
         state: WinState::Normal,
         content: Content::Terminal,
         menus: alloc::vec![
@@ -230,9 +461,10 @@ pub fn init() {
         closable: false,
     };
 
+    let pm_x = (term_x + term_w + MARGIN).min(screen.x + screen.w.saturating_sub(pm_w));
     let pmw = Window {
         title: String::from("Program Manager"),
-        rect: Rect::new(screen.x + term_w + MARGIN, screen.y, pm_w, pm_h.min(screen.h)),
+        rect: Rect::new(pm_x, screen.y, pm_w, pm_h.min(screen.h)),
         state: WinState::Normal,
         content: Content::Panel(pm),
         menus: Vec::new(),
@@ -243,8 +475,16 @@ pub fn init() {
         *DESK.get() = Some(Desktop {
             windows: alloc::vec![pmw, terminal],
             mode: Mode::Normal,
+            hover: Hover::None,
         })
     };
+    // The compositor needs the heap, which exists by now; the console then
+    // paints into the back buffer and pushes its own cells through, so shell
+    // output stays immediate between desktop draws.
+    super::compose::init();
+    if let Some(back) = super::compose::target() {
+        super::console::with(|c| c.retarget(back, true));
+    }
     draw();
 }
 
@@ -377,6 +617,9 @@ const CUR_H: u32 = 17;
 /// eleven by seventeen rectangle under the arrow is touched.
 static SAVED: Racy<[u32; (CUR_W * CUR_H) as usize]> = Racy::new([0; (CUR_W * CUR_H) as usize]);
 static SHOWN: Racy<Option<(u32, u32)>> = Racy::new(None);
+/// Where the pointer is, whether or not it is currently painted. `draw` uses
+/// this to put the arrow back after a repaint.
+static POS: Racy<Option<(u32, u32)>> = Racy::new(None);
 
 pub fn cursor_hide(fb: &Framebuffer) {
     let Some((x, y)) = (unsafe { *SHOWN.get() }) else { return };
@@ -423,6 +666,8 @@ pub fn poll_mouse() {
         return;
     }
     let Some(fb) = super::primary() else { return };
+    let (x, y) = (s.x.max(0), s.y.max(0));
+    unsafe { *POS.get() = Some((x as u32, y as u32)) };
 
     // A press is an edge, not a level: the mouse reports the button held down
     // in every packet while it is down, and acting on the level would fire a
@@ -430,21 +675,119 @@ pub fn poll_mouse() {
     let was = unsafe { *BUTTONS.get() };
     unsafe { *BUTTONS.get() = (s.left, s.right) };
     let pressed_left = s.left && !was.0;
+    let released_left = !s.left && was.0;
     let pressed_right = s.right && !was.1;
 
     if s.wheel != 0 {
-        wheel_at(s.x, s.y, s.wheel);
+        wheel_at(x, y, s.wheel);
     }
+
+    let dragging = matches!(
+        with(|d| d.mode),
+        Some(Mode::Drag { .. }) | Some(Mode::DragSize { .. })
+    );
     if pressed_left {
-        click_at(s.x, s.y);
+        press_at(x, y);
+    } else if s.left && dragging {
+        drag_to(x, y);
+    }
+    if released_left && dragging {
+        with(|d| d.mode = Mode::Normal);
+        trace("drag end");
+        draw();
     }
     if pressed_right {
-        right_click_at(s.x, s.y);
+        right_click_at(x, y);
     }
-    cursor_show(&fb, s.x.max(0) as u32, s.y.max(0) as u32);
+    // Hover feedback only while no button is down: mid-drag the pointer
+    // crosses half the screen, and highlighting everything on the way would
+    // be noise.
+    if !s.left {
+        update_hover(x, y);
+    }
+    cursor_show(&fb, x as u32, y as u32);
 }
 
 static BUTTONS: Racy<(bool, bool)> = Racy::new((false, false));
+/// The previous press, for double-click detection: milliseconds and place.
+static LAST_CLICK: Racy<(u64, i32, i32)> = Racy::new((0, -100, -100));
+
+fn now_ms() -> u64 {
+    let mhz = crate::time::tsc_mhz();
+    if mhz == 0 {
+        return 0;
+    }
+    crate::time::rdtsc() / (mhz * 1000)
+}
+
+/// True when this press pairs with the previous one as a double-click.
+fn is_double(x: i32, y: i32) -> bool {
+    let now = now_ms();
+    let (t, lx, ly) = unsafe { *LAST_CLICK.get() };
+    unsafe { *LAST_CLICK.get() = (now, x, y) };
+    now.saturating_sub(t) < 400 && (x - lx).abs() < 5 && (y - ly).abs() < 5
+}
+
+/// Where a window's title bar, menu bar and client area are.
+///
+/// One formula, used by the paint pass and the hit-test alike, because these
+/// two disagreeing is the classic pointer bug: a button that highlights in one
+/// place and presses in another. `theme::window` paints the same geometry; the
+/// client rectangle it returns is this one.
+fn chrome(frame: Rect, has_menus: bool) -> (Rect, Option<Rect>, Rect) {
+    let inner = frame.shrink(theme::FRAME);
+    let title = Rect::new(inner.x, inner.y, inner.w, theme::TITLE_H);
+    let mut client = Rect::new(
+        inner.x,
+        inner.y + theme::TITLE_H + 2,
+        inner.w,
+        inner.h.saturating_sub(theme::TITLE_H + 2),
+    );
+    let menubar = if has_menus {
+        let bar = Rect::new(client.x, client.y, client.w, MENU_H);
+        client = Rect::new(
+            client.x,
+            client.y + MENU_H,
+            client.w,
+            client.h.saturating_sub(MENU_H),
+        );
+        Some(bar)
+    } else {
+        None
+    };
+    (title, menubar, client)
+}
+
+/// Which menu-bar label sits under a point, mirroring the paint loop exactly.
+fn menu_label_at(menus: &[Menu], bar: Rect, x: i32, y: i32) -> Option<usize> {
+    if y < bar.y as i32 || y >= (bar.y + bar.h) as i32 {
+        return None;
+    }
+    let mut lx = bar.x + 6;
+    for (mi, m) in menus.iter().enumerate() {
+        let w = theme::text_w(m.label.len()) + 12;
+        if x >= lx as i32 && x < (lx + w) as i32 {
+            return Some(mi);
+        }
+        lx += w;
+    }
+    None
+}
+
+/// The bottom-right corner that resizes, generous enough to hit.
+fn size_grip(frame: Rect) -> Rect {
+    let g = 14u32;
+    Rect::new(
+        frame.x + frame.w.saturating_sub(g),
+        frame.y + frame.h.saturating_sub(g),
+        g,
+        g,
+    )
+}
+
+fn contains(r: Rect, x: i32, y: i32) -> bool {
+    x >= r.x as i32 && y >= r.y as i32 && x < (r.x + r.w) as i32 && y < (r.y + r.h) as i32
+}
 
 /// Topmost visible window containing a point.
 fn window_at(x: i32, y: i32) -> Option<usize> {
@@ -460,11 +803,419 @@ fn window_at(x: i32, y: i32) -> Option<usize> {
     .flatten()
 }
 
-fn click_at(x: i32, y: i32) {
-    let Some(i) = window_at(x, y) else { return };
-    // Raising is focusing here, which is the one fact the window manager keeps.
-    with(|d| d.raise(i));
+/// Route one left press: dropdowns, the Start menu, the taskbar, window
+/// chrome, and finally the content under the point. This is the pointer's
+/// whole vocabulary.
+fn press_at(x: i32, y: i32) {
+    let Some(fb) = super::primary() else { return };
+    let screen = screen_rect(&fb);
+    let double = is_double(x, y);
+
+    // An open menu eats the press: on an item it acts, anywhere else it
+    // closes. Both must come before window routing or the press falls through
+    // the menu onto whatever is behind it.
+    if menu_press(&fb, x, y, screen) {
+        draw();
+        return;
+    }
+
+    if contains(taskbar_rect(&fb), x, y) {
+        task_press(&fb, x, y);
+        draw();
+        return;
+    }
+
+    let Some(i) = window_at(x, y) else {
+        // The wall, or an icon on it. Icons open on a double press, as they
+        // have since 95 -- a single press is selection, which here is the
+        // hover highlight already showing.
+        with(|d| d.mode = Mode::Normal);
+        if double {
+            if let Some(k) = icon_at(&fb, x, y) {
+                launch(ICONS[k].1);
+            }
+        }
+        draw();
+        return;
+    };
+
+    // Raising is focusing here, which is the one fact the window manager
+    // keeps. Everything below acts on the window at its new index.
+    with(|d| {
+        d.raise(i);
+        d.mode = Mode::Normal;
+    });
+    let f = with(|d| d.windows.len() - 1).unwrap_or(0);
+
+    let got = with(|d| {
+        let w = &d.windows[f];
+        (w.frame(screen), !w.menus.is_empty(), w.state)
+    });
+    let Some((frame, has_menus, state)) = got else { return };
+    let (title, menubar, client) = chrome(frame, has_menus);
+
+    if contains(title, x, y) {
+        if double {
+            with(|d| {
+                d.windows[f].state = match d.windows[f].state {
+                    WinState::Maximised => WinState::Normal,
+                    _ => WinState::Maximised,
+                };
+            });
+        } else if state != WinState::Maximised {
+            // Remember where inside the frame the pointer took hold, so the
+            // window follows the grab instead of snapping a corner to it.
+            with(|d| {
+                d.mode = Mode::Drag {
+                    dx: (x - frame.x as i32).max(0) as u32,
+                    dy: (y - frame.y as i32).max(0) as u32,
+                    from: frame,
+                }
+            });
+        }
+        draw();
+        return;
+    }
+
+    if state != WinState::Maximised && contains(size_grip(frame), x, y) {
+        with(|d| d.mode = Mode::DragSize { from: frame });
+        draw();
+        return;
+    }
+
+    if let Some(bar) = menubar {
+        let hit = with(|d| menu_label_at(&d.windows[f].menus, bar, x, y)).flatten();
+        if let Some(mi) = hit {
+            with(|d| d.mode = Mode::Menu { menu: mi, item: 0 });
+            draw();
+            return;
+        }
+    }
+
+    // The content. Each kind answers the press in its own terms.
+    let step = with(|d| match &mut d.windows[f].content {
+        Content::Panel(p) => p.mouse(client, x, y, double),
+        Content::Browser(b) => {
+            if b.click(client, x, y) {
+                ui::Step::Redraw
+            } else {
+                ui::Step::Idle
+            }
+        }
+        // A press in the terminal is focus, which raising already did.
+        Content::Terminal => ui::Step::Idle,
+    })
+    .unwrap_or(ui::Step::Idle);
+    act_on(step);
     draw();
+}
+
+/// Carry out what a panel handed back. The same arms the keyboard path runs,
+/// in one place, so a pointer activation and an Enter cannot diverge.
+fn act_on(step: ui::Step) {
+    match step {
+        ui::Step::Do(Action::Run(cmd)) => {
+            focus_terminal();
+            unsafe { *PENDING.get() = Some(cmd) };
+        }
+        ui::Step::Do(Action::Browse(route)) => {
+            if let Some((title, panel)) = ui::panel_for_route(&route) {
+                with(|d| {
+                    if let Some(f) = d.focus() {
+                        d.windows[f].title = title;
+                        d.windows[f].content = Content::Panel(panel);
+                    }
+                });
+            }
+        }
+        ui::Step::Close => {
+            with(|d| {
+                if let Some(f) = d.focus() {
+                    if d.windows[f].closable {
+                        d.windows.remove(f);
+                    } else {
+                        d.windows[f].state = WinState::Minimised;
+                    }
+                }
+            });
+        }
+        _ => {}
+    }
+}
+
+/// A press on the taskbar: the Start button, an app, or a window button.
+/// The focused window's own button minimises it, which is the bar's one
+/// toggle and the reason it can replace stowed icons.
+fn task_press(fb: &Framebuffer, x: i32, y: i32) {
+    if contains(start_rect(fb), x, y) {
+        with(|d| {
+            d.mode = match d.mode {
+                Mode::Start { .. } => Mode::Normal,
+                _ => Mode::Start { item: 0 },
+            }
+        });
+        return;
+    }
+    let hit = with(|d| {
+        task_layout(fb, d)
+            .into_iter()
+            .enumerate()
+            .find(|(_, (r, ..))| contains(*r, x, y))
+            .map(|(i, _)| i)
+    })
+    .flatten();
+    with(|d| d.mode = Mode::Normal);
+    let Some(w) = hit else { return };
+    with(|d| {
+        if w >= d.windows.len() {
+            return;
+        }
+        if d.windows[w].state == WinState::Minimised {
+            d.windows[w].state = WinState::Normal;
+            d.raise(w);
+        } else if d.focus() == Some(w) {
+            d.windows[w].state = WinState::Minimised;
+        } else {
+            d.raise(w);
+        }
+    });
+}
+
+/// Where the open dropdown is -- window menu, system menu, or Start -- and how
+/// many rows it holds. Mirrors the paint pass; they must not disagree.
+fn dropdown_rows(fb: &Framebuffer, d: &Desktop, screen: Rect) -> Option<(Rect, usize)> {
+    if let Mode::Start { .. } = d.mode {
+        let (r, n) = start_menu_rect(fb);
+        return Some((r, n));
+    }
+    let f = d.focus()?;
+    let frame = d.windows[f].frame(screen);
+    let inner = frame.shrink(theme::FRAME);
+    match d.mode {
+        Mode::Menu { menu, .. } => {
+            let m = d.windows[f].menus.get(menu)?;
+            let mut x = inner.x + 6;
+            for prev in &d.windows[f].menus[..menu] {
+                x += theme::text_w(prev.label.len()) + 12;
+            }
+            let w = theme::text_w(m.items.iter().map(|i| i.label.len()).max().unwrap_or(4)) + 24;
+            let y = inner.y + theme::TITLE_H + 2 + MENU_H;
+            Some((Rect::new(x, y, w, m.items.len() as u32 * MENU_H + 8), m.items.len()))
+        }
+        Mode::Sys { .. } => {
+            let w = theme::text_w(SYS_ITEMS.iter().map(|s| s.len()).max().unwrap_or(4)) + 24;
+            let y = inner.y + theme::TITLE_H;
+            Some((
+                Rect::new(inner.x, y, w, SYS_ITEMS.len() as u32 * MENU_H + 8),
+                SYS_ITEMS.len(),
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// Which dropdown row a point is in, mirroring `dropdown`'s row layout.
+fn dropdown_item_at(r: Rect, n: usize, x: i32, y: i32) -> Option<usize> {
+    if !contains(r, x, y) {
+        return None;
+    }
+    let row = (y - (r.y + 4) as i32) / MENU_H as i32;
+    if row >= 0 && (row as usize) < n {
+        Some(row as usize)
+    } else {
+        None
+    }
+}
+
+/// A press while any menu is open. Returns true when consumed.
+fn menu_press(fb: &Framebuffer, x: i32, y: i32, screen: Rect) -> bool {
+    let open = with(|d| {
+        matches!(d.mode, Mode::Menu { .. } | Mode::Sys { .. } | Mode::Start { .. })
+    })
+    .unwrap_or(false);
+    if !open {
+        return false;
+    }
+    let mut run: Option<String> = None;
+    with(|d| {
+        let Some((r, n)) = dropdown_rows(fb, d, screen) else {
+            d.mode = Mode::Normal;
+            return;
+        };
+        let Some(item) = dropdown_item_at(r, n, x, y) else {
+            d.mode = Mode::Normal;
+            return;
+        };
+        match d.mode {
+            Mode::Start { .. } => {
+                d.mode = Mode::Normal;
+                run = Some(String::from(START_ITEMS[item].1));
+            }
+            Mode::Menu { menu, .. } => {
+                d.mode = Mode::Normal;
+                if let Some(f) = d.focus() {
+                    if let Some(mi) = d.windows[f].menus[menu].items.get(item) {
+                        if let Action::Run(cmd) = &mi.action {
+                            unsafe { *PENDING.get() = Some(cmd.clone()) };
+                        }
+                    }
+                }
+            }
+            Mode::Sys { .. } => {
+                d.mode = Mode::Normal;
+                if let Some(f) = d.focus() {
+                    sys_action(d, f, item, screen);
+                }
+            }
+            _ => {}
+        }
+    });
+    if let Some(cmd) = run {
+        launch(&cmd);
+    }
+    true
+}
+
+/// Pointer motion while the title bar or the size grip is held.
+fn drag_to(x: i32, y: i32) {
+    let Some(fb) = super::primary() else { return };
+    let screen = screen_rect(&fb);
+    let changed = with(|d| {
+        let Some(f) = d.focus() else { return false };
+        let r = d.windows[f].rect;
+        let new = match d.mode {
+            Mode::Drag { dx, dy, .. } => {
+                let nx = (x - dx as i32).max(screen.x as i32) as u32;
+                let ny = (y - dy as i32).max(screen.y as i32) as u32;
+                Rect::new(
+                    nx.min(screen.x + screen.w.saturating_sub(r.w)),
+                    ny.min(screen.y + screen.h.saturating_sub(r.h)),
+                    r.w,
+                    r.h,
+                )
+            }
+            Mode::DragSize { .. } => Rect::new(
+                r.x,
+                r.y,
+                ((x - r.x as i32).max(160) as u32).min(screen.x + screen.w - r.x),
+                ((y - r.y as i32).max((theme::TITLE_H * 3) as i32) as u32)
+                    .min(screen.y + screen.h - r.y),
+            ),
+            _ => return false,
+        };
+        let moved = new.x != r.x || new.y != r.y || new.w != r.w || new.h != r.h;
+        if moved {
+            d.windows[f].state = WinState::Normal;
+            d.windows[f].rect = new;
+        }
+        moved
+    })
+    .unwrap_or(false);
+    if changed {
+        draw();
+    }
+}
+
+/// What the pointer is over right now.
+fn hover_of(fb: &Framebuffer, x: i32, y: i32) -> Hover {
+    let screen = screen_rect(fb);
+    if contains(taskbar_rect(fb), x, y) {
+        if contains(start_rect(fb), x, y) {
+            return Hover::Start;
+        }
+        let hit = with(|d| {
+            task_layout(fb, d)
+                .into_iter()
+                .enumerate()
+                .find(|(_, (r, ..))| contains(*r, x, y))
+                .map(|(i, _)| i)
+        })
+        .flatten();
+        return match hit {
+            Some(i) => Hover::Task(i),
+            None => Hover::None,
+        };
+    }
+    if let Some(i) = window_at(x, y) {
+        return with(|d| {
+            let w = &d.windows[i];
+            let (_, menubar, client) = chrome(w.frame(screen), !w.menus.is_empty());
+            if let Some(bar) = menubar {
+                if let Some(mi) = menu_label_at(&w.menus, bar, x, y) {
+                    return Hover::MenuLabel { win: i, menu: mi };
+                }
+            }
+            if let Content::Panel(p) = &w.content {
+                if let Some(idx) = p.hover_at(client, x, y) {
+                    return Hover::Widget { win: i, idx };
+                }
+            }
+            Hover::None
+        })
+        .unwrap_or(Hover::None);
+    }
+    match icon_at(fb, x, y) {
+        Some(k) => Hover::Icon(k),
+        None => Hover::None,
+    }
+}
+
+/// Repaint only when what the pointer indicates has changed.
+fn update_hover(x: i32, y: i32) {
+    let Some(fb) = super::primary() else { return };
+    let screen = screen_rect(&fb);
+
+    // An open dropdown tracks the pointer with its selection, exactly as the
+    // arrows move it.
+    let tracked = with(|d| {
+        let Some((r, n)) = dropdown_rows(&fb, d, screen) else {
+            return None;
+        };
+        let Some(item) = dropdown_item_at(r, n, x, y) else {
+            // Off the menu: nothing tracks, and whatever was hot before the
+            // menu opened must not stay lit underneath it.
+            let stale = d.hover != Hover::None;
+            d.hover = Hover::None;
+            return Some(stale);
+        };
+        let moved = match d.mode {
+            Mode::Menu { menu, item: cur } if cur != item => {
+                d.mode = Mode::Menu { menu, item };
+                true
+            }
+            Mode::Sys { item: cur } if cur != item => {
+                d.mode = Mode::Sys { item };
+                true
+            }
+            Mode::Start { item: cur } if cur != item => {
+                d.mode = Mode::Start { item };
+                true
+            }
+            _ => false,
+        };
+        Some(moved)
+    })
+    .flatten();
+    if let Some(moved) = tracked {
+        if moved {
+            draw();
+        }
+        return;
+    }
+
+    let h = hover_of(&fb, x, y);
+    let changed = with(|d| {
+        if d.hover != h {
+            d.hover = h;
+            true
+        } else {
+            false
+        }
+    })
+    .unwrap_or(false);
+    if changed {
+        draw();
+    }
 }
 
 /// The second button opens the menu for whatever is under it.
@@ -492,6 +1243,9 @@ fn wheel_at(x: i32, y: i32, notches: i32) {
             b.scroll_by(notches * 3);
             true
         }
+        // Over a panel the wheel walks the first list, which is what a wheel
+        // over a launcher or a checklist means.
+        Content::Panel(p) => p.wheel(notches),
         _ => false,
     })
     .unwrap_or(false);
@@ -534,19 +1288,46 @@ fn wallpaper(fb: &Framebuffer) {
     );
 }
 
-/// Buttons on the bar, left to right: the apps, then one per window.
+/// Buttons on the bar, one per window, in stacking order.
 ///
-/// One flat list so `item` in `Mode::Taskbar` can index it directly, and so
-/// that adding an app or opening a window cannot put the two halves out of
-/// step with each other.
+/// No launcher buttons: launching lives in the Start menu and on the wall,
+/// so the bar never runs out of room for the windows it exists to hold.
 fn task_slots(d: &Desktop) -> Vec<(String, bool)> {
-    let mut out: Vec<(String, bool)> = APPS
-        .iter()
-        .map(|(label, _)| (String::from(*label), false))
-        .collect();
     let focus = d.focus();
-    for (i, w) in d.windows.iter().enumerate() {
-        out.push((w.title.clone(), Some(i) == focus));
+    d.windows
+        .iter()
+        .enumerate()
+        .map(|(i, w)| (w.title.clone(), Some(i) == focus))
+        .collect()
+}
+
+/// Every taskbar button's rectangle, in slot order.
+///
+/// The single source for where the buttons are: the paint pass draws these
+/// rectangles and the pointer hit-tests them, so a button cannot highlight in
+/// one place and press in another.
+fn task_layout(fb: &Framebuffer, d: &Desktop) -> Vec<(Rect, String, bool, bool)> {
+    let bar = taskbar_rect(fb);
+    let slots = task_slots(d);
+    let btn_h = bar.h - 8;
+    let y = bar.y + 4;
+    let start = start_rect(fb);
+    let mut x = start.x + start.w + 10;
+    let mut out = Vec::new();
+
+    for (label, pressed) in slots {
+        // Titles are capped rather than allowed to set the width. "GLaDOS
+        // Terminal" at full length is a quarter of the bar on its own.
+        let shown = label.len().min(12);
+        let w = theme::text_w(shown) + 16;
+        // Stop before the clock rather than drawing under it.
+        if x + w > clock_rect(fb).x {
+            break;
+        }
+        let mut title = label;
+        title.truncate(shown);
+        out.push((Rect::new(x, y, w, btn_h), title, false, pressed));
+        x += w + TASK_GAP;
     }
     out
 }
@@ -561,38 +1342,20 @@ fn taskbar(fb: &Framebuffer, d: &Desktop, sel: Option<usize>) {
     let bar = taskbar_rect(fb);
     theme::panel(fb, bar);
 
-    let slots = task_slots(d);
-    let n_apps = APPS.len();
-    let btn_h = bar.h - 8;
-    let y = bar.y + 4;
-    let mut x = bar.x + 4;
+    // The Start button: the mark and the name. Held down while its menu is
+    // open, which is the one place the bar states a mode rather than a focus.
+    let s = start_rect(fb);
+    let start_open = matches!(d.mode, Mode::Start { .. });
+    theme::button(fb, s, "GLaDOS", d.hover == Hover::Start, start_open);
+    theme::aperture_dot(fb, s.x + 11, s.y + s.h / 2, (s.h / 2) as i32 - 4);
+    theme::separator_v(fb, s.x + s.w + 3, s.y, s.h);
 
-    for (i, (label, pressed)) in slots.iter().enumerate() {
-        let is_app = i < n_apps;
-        // Titles are capped rather than allowed to set the width. "GLaDOS
-        // Terminal" at full length is a quarter of the bar on its own.
-        let shown = label.len().min(12);
-        let w = theme::text_w(shown) + if is_app { 24 } else { 16 };
-        // Stop before the clock rather than drawing under it.
-        if x + w > clock_rect(fb).x {
-            break;
-        }
-        let r = Rect::new(x, y, w, btn_h);
-        let focused = sel == Some(i);
-        // A task button is sunken while its window has the keyboard, which is
-        // the same claim about light the bevels make everywhere else.
-        theme::button(fb, r, &label[..shown], focused, *pressed);
-        if is_app {
-            // The apps carry the mark, so the launcher half of the bar reads
-            // as different in kind from the window half without a caption
-            // saying so.
-            theme::aperture_dot(fb, r.x + 8, r.y + r.h / 2, (btn_h / 2) as i32 - 4);
-        }
-        x += w + TASK_GAP;
-        if i == n_apps - 1 {
-            theme::separator_v(fb, x + 2, y, btn_h);
-            x += 8;
-        }
+    for (i, (r, label, _, pressed)) in task_layout(fb, d).into_iter().enumerate() {
+        // Keyboard selection and pointer hover draw the same way: both are "the
+        // next click or Enter lands here", and two different highlights would
+        // claim two different things.
+        let hot = sel == Some(i) || d.hover == Hover::Task(i);
+        theme::button(fb, r, &label, hot, pressed);
     }
 
     let c = clock_rect(fb);
@@ -617,14 +1380,18 @@ pub fn clock_rect(fb: &Framebuffer) -> Rect {
 }
 
 pub fn draw() {
-    let Some(fb) = super::primary() else {
+    let Some(real) = super::primary() else {
         return;
     };
-    let screen = screen_rect(&fb);
-    // Lift the pointer before repainting, or the pixels saved under it are
+    let screen = screen_rect(&real);
+    // Lift the pointer before presenting, or the pixels saved under it are
     // stale the moment anything below moves, and putting them back paints a
     // rectangle of the previous frame onto the new one.
-    cursor_hide(&fb);
+    cursor_hide(&real);
+    // Compose into the back buffer when there is one; the screen then gets
+    // only the rows that changed. Without one (no heap yet, or its
+    // allocation failed) this is the direct draw it always was.
+    let fb = super::compose::target().unwrap_or(real);
     with(|d| {
         // The terminal is an application, not the screen itself. While its
         // window is minimised the shell keeps running -- it still reads serial,
@@ -638,6 +1405,7 @@ pub fn draw() {
         // than tracked alongside the window state and able to disagree with it.
         super::console::with(|c| c.set_visible(false));
         wallpaper(&fb);
+        draw_icons(&fb, d.hover);
         let focus = d.focus();
         let sel = match d.mode {
             Mode::Taskbar { item } => Some(item),
@@ -666,7 +1434,8 @@ pub fn draw() {
                 let mut x = bar.x + 6;
                 for (mi, m) in win.menus.iter().enumerate() {
                     let w = theme::text_w(m.label.len()) + 12;
-                    let hot = Some(mi) == open;
+                    let hot = Some(mi) == open
+                        || d.hover == Hover::MenuLabel { win: i, menu: mi };
                     let (fg, bg) = if hot {
                         (theme::SELECT_TEXT, theme::SELECT)
                     } else {
@@ -697,7 +1466,11 @@ pub fn draw() {
                 }
                 Content::Panel(p) => {
                     theme::panel(&fb, client);
-                    p.draw_in(&fb, client, active);
+                    let hov = match d.hover {
+                        Hover::Widget { win, idx } if win == i => Some(idx),
+                        _ => None,
+                    };
+                    p.draw_in(&fb, client, active, hov);
                 }
                 Content::Browser(b) => b.draw_in(&fb, client, active),
             }
@@ -753,10 +1526,27 @@ pub fn draw() {
                 }
                 // The taskbar draws its own selection, and it is not a popup
                 // over the focused window -- it is a fixture with the keyboard.
-                Mode::Normal | Mode::Taskbar { .. } => {}
+                // A pointer drag needs no hint: the window moving under the
+                // pointer is the indication. Start draws below, unconditional
+                // on focus.
+                Mode::Normal
+                | Mode::Taskbar { .. }
+                | Mode::Drag { .. }
+                | Mode::DragSize { .. }
+                | Mode::Start { .. } => {}
             }
         }
+        if let Mode::Start { item } = d.mode {
+            let (r, _) = start_menu_rect(&fb);
+            dropdown(&fb, r.x, r.y, START_ITEMS.iter().map(|(l, _)| *l), item);
+        }
     });
+    super::compose::present();
+    // Put the pointer back where it was. Without this every keystroke that
+    // repaints would blink the arrow out until the mouse next moved.
+    if let Some((px, py)) = unsafe { *POS.get() } {
+        cursor_show(&real, px, py);
+    }
 }
 
 fn dropdown<'a>(
@@ -1028,7 +1818,6 @@ pub fn key(k: u8) -> Route {
         }
 
         Mode::Taskbar { item } => {
-            let n_apps = APPS.len();
             let n = with(|d| task_slots(d).len()).unwrap_or(0);
             if n == 0 {
                 return Route::Handled;
@@ -1044,32 +1833,65 @@ pub fn key(k: u8) -> Route {
                 }
                 b'\n' | b'\r' => {
                     with(|d| d.mode = Mode::Normal);
-                    if item < n_apps {
-                        // Launching goes through the shell like everything
-                        // else, so there is one path to a running command.
-                        let cmd = alloc::format!("win open {}", APPS[item].1);
-                        focus_terminal();
-                        unsafe { *PENDING.get() = Some(cmd) };
-                    } else {
-                        let w = item - n_apps;
-                        with(|d| {
-                            if w < d.windows.len() {
-                                // Clicking a task button restores a minimised
-                                // window, which is the only way back for one.
-                                if d.windows[w].state == WinState::Minimised {
-                                    d.windows[w].state = WinState::Normal;
-                                }
-                                d.raise(w);
+                    with(|d| {
+                        if item < d.windows.len() {
+                            // A task button restores a minimised window, which
+                            // is the only way back for one.
+                            if d.windows[item].state == WinState::Minimised {
+                                d.windows[item].state = WinState::Normal;
                             }
-                        });
-                        draw();
-                    }
+                            d.raise(item);
+                        }
+                    });
+                    draw();
                 }
                 27 => {
                     with(|d| d.mode = Mode::Normal);
                     draw();
                 }
                 _ => {}
+            }
+            Route::Handled
+        }
+
+        Mode::Start { item } => {
+            let n = START_ITEMS.len();
+            match k {
+                kbd::KEY_DOWN => {
+                    with(|d| d.mode = Mode::Start { item: (item + 1) % n });
+                    draw();
+                }
+                kbd::KEY_UP => {
+                    with(|d| d.mode = Mode::Start { item: (item + n - 1) % n });
+                    draw();
+                }
+                b'\n' | b'\r' => {
+                    with(|d| d.mode = Mode::Normal);
+                    launch(START_ITEMS[item].1);
+                    draw();
+                }
+                27 => {
+                    with(|d| d.mode = Mode::Normal);
+                    draw();
+                }
+                _ => {}
+            }
+            Route::Handled
+        }
+
+        // A pointer drag owns the screen until the button lifts; the keyboard
+        // can only abandon it. Anything else mid-drag is swallowed, because a
+        // window that responds to typing while it is being dragged is two
+        // interfaces fighting over one object.
+        Mode::Drag { from, .. } | Mode::DragSize { from } => {
+            if k == 27 {
+                with(|d| {
+                    if let Some(f) = d.focus() {
+                        d.windows[f].rect = from;
+                    }
+                    d.mode = Mode::Normal;
+                });
+                draw();
             }
             Route::Handled
         }

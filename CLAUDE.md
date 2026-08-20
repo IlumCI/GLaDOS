@@ -168,6 +168,33 @@ while the output was being sliced away.
 
 ## Architecture
 
+### Graphics and the desktop
+
+Rendering is composed, then diffed. `desk::draw` repaints everything --
+wallpaper, icons, every window back to front -- into `gfx::compose`'s heap
+back buffer, and `present()` writes to the framebuffer only the row spans
+that differ from the shadow of what is already on screen. Total repaint keeps
+the window manager obviously correct; the diff is why nothing flashes and why
+hover feedback on pointer motion is affordable. The console bypasses the next
+present through `compose::flush_rect` so shell output stays immediate; both
+paths update the shadow, so they cannot disagree about what is on screen.
+
+The pointer's whole vocabulary lives in `desk::press_at`, and every layout it
+hit-tests (`task_layout`, `chrome`, `Panel::rects`, `Browser::metrics`,
+`dropdown_rows`) is the same function the paint pass draws from -- a control
+that highlights in one place and presses in another is the class of bug that
+split forbids. Everything the pointer does a keystroke also does, because
+serial cannot inject PS/2 packets and `win keys` is how the desktop gets
+tested headlessly. Screenshots come from `drive.py --screenshot out/x.png`,
+pointer events from `--mouse "mouse_move dx dy"` / `--mouse "mouse_button 1"`
+(QEMU monitor, relative moves from (0,0) at boot).
+
+The look is 98 + 3.1 + Aperture: icons and Start and gradient titles from 98,
+bevels and dialogs that hug their content from 3.1, the palette from the sign
+over the door. `todo` (shell) and the ToDo window share one list -- it is the
+hand-off note for what to test at the GF63, since the machine that builds
+this is not the machine that runs it.
+
 ### Boot
 
 UEFI already delivers long mode, CPL 0 and an identity map, so this UEFI

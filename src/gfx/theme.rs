@@ -196,15 +196,20 @@ pub fn window(fb: &Framebuffer, r: Rect, title: &str, active: bool) -> Rect {
 const FACE_INSET: u32 = FRAME;
 
 pub fn title_bar(fb: &Framebuffer, r: Rect, title: &str, active: bool) {
-    let base = if active { APERTURE } else { TITLE_IDLE };
-    fb.rect(r.x, r.y, r.w, r.h, base);
-
-    // A one-step gradient rather than a smooth one: 3.1 had no gradient at all,
-    // and a full ramp reads as XP. This is just enough to stop a large bar
-    // looking like a flat sticker.
-    if active {
-        let band = r.h / 3;
-        fb.rect(r.x, r.y + r.h - band, r.w, band, APERTURE_DEEP);
+    // The 98 half of the ancestry: a smooth left-to-right ramp, deep to
+    // bright, in Aperture's colours instead of Redmond's blues. Inactive bars
+    // ramp in greys, which is what makes the focused window findable at a
+    // glance on a desktop of several.
+    let (from, to) = if active { (APERTURE_DEEP, APERTURE) } else { (Color::new(0x50, 0x50, 0x50), TITLE_IDLE) };
+    let w = r.w.max(1);
+    for i in 0..w {
+        let lerp = |a: u8, b: u8| (a as u32 + (b as u32).abs_diff(a as u32) * i / w) as u8;
+        let c = Color::new(
+            if to.r >= from.r { lerp(from.r, to.r) } else { (from.r as u32 - (from.r - to.r) as u32 * i / w) as u8 },
+            if to.g >= from.g { lerp(from.g, to.g) } else { (from.g as u32 - (from.g - to.g) as u32 * i / w) as u8 },
+            if to.b >= from.b { lerp(from.b, to.b) } else { (from.b as u32 - (from.b - to.b) as u32 * i / w) as u8 },
+        );
+        fb.rect(r.x + i, r.y, 1, r.h, c);
     }
 
     let pad = 6;
@@ -217,14 +222,38 @@ pub fn title_bar(fb: &Framebuffer, r: Rect, title: &str, active: bool) {
     // anyway, and a half-drawn glyph at the edge looks like a rendering fault.
     let room = (r.w.saturating_sub(tx - r.x + pad) / (font::GLYPH_W * CHROME_SCALE)) as usize;
     let shown = if title.len() > room { &title[..room] } else { title };
-    // The title bar is its own background, so glyphs are drawn over the bar
-    // colour rather than over the face.
-    let bg = if active && ty + font::GLYPH_H * CHROME_SCALE > r.y + r.h - r.h / 3 {
-        APERTURE_DEEP
-    } else {
-        base
-    };
-    text(fb, tx, ty, shown, TITLE_TEXT, bg);
+    // Over a gradient there is no one background colour, so the glyphs carry
+    // their own shadow instead of a box.
+    text_over(fb, tx + 1, ty + 1, shown, DARKEDGE);
+    text_over(fb, tx, ty, shown, TITLE_TEXT);
+}
+
+/// Text with no background: only the glyph pixels are painted.
+///
+/// For surfaces that are not one colour -- the title gradient, the wallpaper
+/// under an icon label. `text` fills the cell behind each glyph, which on a
+/// gradient stamps a rectangle of the wrong colour around every letter.
+pub fn text_over(fb: &Framebuffer, x: u32, y: u32, s: &str, fg: Color) {
+    let mut cx = x;
+    for &b in s.as_bytes() {
+        let rows = font::glyph(b);
+        for (gy, bits) in rows.iter().enumerate() {
+            for gx in 0..font::GLYPH_W {
+                if bits & (0x80 >> gx) != 0 {
+                    for dy in 0..CHROME_SCALE {
+                        for dx in 0..CHROME_SCALE {
+                            fb.put(
+                                cx + gx * CHROME_SCALE + dx,
+                                y + gy as u32 * CHROME_SCALE + dy,
+                                fb.raw(fg),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        cx += font::GLYPH_W * CHROME_SCALE;
+    }
 }
 
 /// A button. `focused` draws the keyboard focus; `default` marks the one Enter

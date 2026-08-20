@@ -329,6 +329,63 @@ impl Browser {
         }
     }
 
+    /// One pointer press inside the client area. In the address bar it starts
+    /// editing; on a link it follows it. Returns whether anything changed.
+    ///
+    /// The geometry here is `draw_in`'s, from the same `metrics`, so a link
+    /// is followed exactly where it is drawn.
+    pub fn click(&mut self, client: Rect, px: i32, py: i32) -> bool {
+        let (well, text) = Self::metrics(client);
+        let inside = |r: Rect| {
+            px >= r.x as i32 && py >= r.y as i32 && px < (r.x + r.w) as i32 && py < (r.y + r.h) as i32
+        };
+        if inside(well) {
+            self.editing = true;
+            self.status = String::from("Editing the address. Enter loads it, Esc cancels.");
+            return true;
+        }
+        if !inside(text) {
+            return false;
+        }
+        let lh = theme::text_h().max(1) as i32;
+        let cw = theme::text_w(1).max(1) as usize;
+        let line = self.scroll + ((py - text.y as i32) / lh).max(0) as usize;
+        let cols = (text.w as usize / cw).max(1);
+        let rows = self.rows(cols);
+        let Some(row) = rows.get(line) else { return false };
+        let Some(link) = row.link else { return false };
+        // Only within the text of the row, not the empty space after it.
+        let col = ((px - text.x as i32).max(0) as usize) / cw;
+        if col > row.text.len() {
+            return false;
+        }
+        self.sel = link;
+        if let Some(u) = self.links.get(link).cloned() {
+            self.go(u);
+        }
+        true
+    }
+
+    /// The address well and the page text area for a client rectangle --
+    /// the two places a press means something.
+    fn metrics(client: Rect) -> (Rect, Rect) {
+        let pad = 4;
+        let cw = theme::text_w(1).max(1);
+        let lh = theme::text_h().max(1);
+        let bar = Rect::new(client.x + pad, client.y + pad, client.w - pad * 2, lh + 6);
+        let cap = theme::text_w(4);
+        let well = Rect::new(bar.x + cap, bar.y, bar.w.saturating_sub(cap), bar.h);
+        let status_h = lh + 4;
+        let view = Rect::new(
+            client.x + pad,
+            bar.y + bar.h + 4,
+            client.w - pad * 2,
+            client.h.saturating_sub(bar.h + status_h + pad * 3 + 4),
+        );
+        let _ = cw;
+        (well, view.shrink(3))
+    }
+
     // --- drawing ----------------------------------------------------------
 
     pub fn draw_in(&self, fb: &Framebuffer, client: Rect, focused: bool) {
