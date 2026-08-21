@@ -166,6 +166,9 @@ pub fn init(acpi: &Acpi, apic_id: u8) -> InitReport {
 
 extern "x86-interrupt" fn mouse_isr(_frame: idt::InterruptStackFrame) {
     let byte = unsafe { inb(0x60) };
+    // The hand on the mouse feeds the Oracle's entropy ring exactly as the
+    // hand on the keyboard does -- TempleOS folded both into KbdMsEvtTime.
+    crate::ai::godbits::ins(crate::time::rdtsc());
     let phase = unsafe { &mut *PHASE.get() };
     let buf = unsafe { &mut *BUF.get() };
 

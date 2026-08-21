@@ -234,6 +234,36 @@ sysbox applet, with at most a path it opens the editor (decided in
 bare form and print usage). Paint saves `/draw/painting.ppm` (P6);
 `tree::put` creates parent directories, so no mkdir ceremony.
 
+### The Oracle (God Says, made honest)
+
+`src/ai/futures.rs` + `src/gfx/oracle.rs` are the TempleOS "God Says" descendant.
+Terry drew uniform words from Vocab.DD seeded by `KbdMsEvtTime` -- the timing
+of the operator's own hands. The entropy is kept (`src/ai/godbits.rs`: every
+keyboard and mouse ISR deposits `rdtsc() >> GOD_BAD_BITS`, folded into the
+sampler) and the subject is changed from hallucinated words to the one future
+that is actually knowable: this machine's.
+
+`futures::sample()` runs once a second from the clock task, recording heap,
+task-switch rate, the operator's touch rate and task count into a ring. On
+consult, a linear dynamical model `v_next = a + b*v + c*u` is fitted per
+variable by the router's own Cholesky (`probe::ridge_solve`), and the state is
+rolled forward under three interventions -- `do(activity := 0 / mean / high)`,
+the counterfactual "left alone / carried on / put under load". The window
+plots forked timelines: solid white history to the `now` line, three coloured
+projections after. It is genuinely causal (a controlled linear system fitted
+from real telemetry), never prophecy; the word-prophecy first draft was scrapped
+for exactly that reason.
+
+Two gotchas paid for here:
+- **`lapic::ticks()` is the timer-interrupt count at `TIMER_HZ` (100/s), not
+  `lapic::timer_hz()`** (the calibrated APIC frequency, in the millions).
+  Dividing uptime by the latter put every reading at 0s. `mem`/`uptime` use
+  `TIMER_HZ`; so must anything converting ticks to seconds.
+- **`win keys` bypasses the hardware ISR**, so scripted keystrokes do NOT feed
+  the entropy ring -- only real hardware events do. Correct (entropy IS
+  hardware timing), but it means headless tests show "fed by ~1 touches"; the
+  ring lights up on the GF63.
+
 ### Boot
 
 UEFI already delivers long mode, CPL 0 and an identity map, so this UEFI

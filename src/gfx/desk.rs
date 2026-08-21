@@ -90,6 +90,7 @@ pub const ICO_PAINT: usize = 5;
 pub const ICO_WRITE: usize = 6;
 pub const ICO_MINES: usize = 7;
 pub const ICO_SET: usize = 8;
+pub const ICO_ORACLE: usize = 9;
 
 /// The icon for a named panel -- the names `win open` and the Browse routes
 /// use. Anything unrecognised gets the mark, because everything here is
@@ -203,7 +204,7 @@ const TASK_GAP: u32 = 4;
 /// `term` is not a shell command: the terminal is not a panel to open but a
 /// window to bring back, and the special case lives in `launch` rather than in
 /// the shell so the icon works even while the shell is busy printing.
-const ICONS: [(&str, &str); 9] = [
+const ICONS: [(&str, &str); 10] = [
     ("Terminal", "term"),
     ("Programs", "win open programs"),
     ("Files", "win open files"),
@@ -212,13 +213,14 @@ const ICONS: [(&str, &str); 9] = [
     ("Paint", "paint"),
     ("Write", "write"),
     ("Mines", "mines"),
+    ("Oracle", "oracle"),
     ("Settings", "win open settings"),
 ];
 
 /// The Start menu, bottom of the bar upward -- the 98 half of the ancestry.
 /// Same entries as the icons plus the one thing that belongs behind a second
 /// look, exactly where 98 kept it.
-const START_ITEMS: [(&str, &str); 10] = [
+const START_ITEMS: [(&str, &str); 11] = [
     ("Terminal", "term"),
     ("Programs", "win open programs"),
     ("Files", "win open files"),
@@ -227,6 +229,7 @@ const START_ITEMS: [(&str, &str); 10] = [
     ("Paint", "paint"),
     ("Write", "write"),
     ("Mines", "mines"),
+    ("Oracle", "oracle"),
     ("Settings", "win open settings"),
     ("Reboot", "reboot"),
 ];
@@ -478,6 +481,18 @@ fn pictogram(fb: &Framebuffer, k: usize, x: u32, y: u32, s: u32, bg: Color) {
             fb.rect(x + c(11), y + c(19), c(18), m(2), dark);
             fb.rect(x + c(17), y + c(17), m(3), m(3), hi);
         }
+        // Oracle: an eye. The lids are stacked rows, the iris the mark's
+        // colour, and it reads at both sizes because an eye is mostly its
+        // contrast.
+        ICO_ORACLE => {
+            for (i, w) in [8u32, 20, 30, 36, 30, 20, 8].iter().enumerate() {
+                let ly = y + c(8 + i as u32 * 4);
+                fb.rect(x + c(20) - c(*w) / 2, ly, c(*w), m(4), hi);
+            }
+            fb.rect(x + c(14), y + c(14), c(12), c(12), theme::APERTURE);
+            fb.frame(x + c(14), y + c(14), c(12), c(12), dark);
+            fb.rect(x + c(18), y + c(18), m(4), m(4), dark);
+        }
         // Settings: three sliders.
         _ => {
             for i in 0..3u32 {
@@ -704,6 +719,11 @@ pub fn open_mines() {
 pub fn open_write(path: &str) {
     let (w, h) = super::write::Writer::preferred();
     open_app("Write", ICO_WRITE, Box::new(super::write::Writer::new(path)), w, h);
+}
+
+pub fn open_oracle(premise: &str) {
+    let (w, h) = super::oracle::Oracle::preferred();
+    open_app("Oracle", ICO_ORACLE, Box::new(super::oracle::Oracle::new(premise)), w, h);
 }
 
 /// Open Enternet, optionally at a URL.

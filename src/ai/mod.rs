@@ -2,6 +2,8 @@
 
 pub mod constrain;
 pub mod corpus;
+pub mod futures;
+pub mod godbits;
 pub mod council;
 pub mod harness;
 pub mod model;
@@ -61,6 +63,7 @@ use crate::gfx::console::{self, LTCYAN, LTGRAY, LTGREEN, LTRED, WHITE, YELLOW};
 use crate::sync::Racy;
 use crate::uefi::Blob;
 use crate::{kprint, kprintln};
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -1020,6 +1023,8 @@ fn ctx_blob(e: &Engine) -> Vec<u8> {
     out.extend_from_slice(&(e.last_token as u64).to_le_bytes());
     out
 }
+
+pub use futures::{project, Projection, Branch, snapshot_now, futures_report};
 
 pub fn ctx_save(name: &str) -> Option<usize> {
     with_engine(|e| {

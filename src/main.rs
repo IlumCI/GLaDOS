@@ -453,7 +453,15 @@ fn clock_task() {
 
         let tenths = dev::lapic::ticks() * 10 / TIMER_HZ as u64;
         if tenths != last {
+            let crossed_second = tenths / 10 != last / 10;
             last = tenths;
+            // Once a second, record the machine's state for the Oracle to fit
+            // its self-prediction from. Here rather than on demand because a
+            // future is only projectable from a history, and the history has
+            // to have been accruing before anyone asks.
+            if crossed_second {
+                ai::futures::sample();
+            }
             // The boot screen owns the framebuffer while it is up; an uptime
             // counter in the corner of a splash is the tell that something is
             // drawing behind the curtain.

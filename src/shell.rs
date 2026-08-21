@@ -1013,7 +1013,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             kprintln!("  mem uptime tasks cpu acpi pci video date reboot");
             kprintln!("  fault         deliberately dereference null");
             kprintln!("  clear refresh echo <text>");
-            kprintln!("  paint write [path] mines   desktop programs; todo    the checklist");
+            kprintln!("  paint write [path] mines oracle   desktop programs; todo   the checklist");
             kprintln!("  typewriter    output pacing, in us per character");
 
             console::set_color(YELLOW);
@@ -1353,6 +1353,16 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             crate::gfx::desk::open_browser(rest.trim());
         }
         "paint" => crate::gfx::desk::open_paint(),
+        "oracle" | "godsays" => {
+            // `-p` prints the machine's projected futures into the terminal,
+            // which is how a serial run verifies it; bare, it opens the
+            // timeline window. `godsays` is the ancestor's name and keeps
+            // working.
+            match rest.trim() {
+                "-p" => crate::ai::futures_report(),
+                _ => crate::gfx::desk::open_oracle(rest.trim()),
+            }
+        }
         "mines" | "minesweeper" => crate::gfx::desk::open_mines(),
         "todo" => {
             // The hardware checklist, from the shell. One list, shared with

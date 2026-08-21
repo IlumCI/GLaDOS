@@ -361,6 +361,10 @@ extern "x86-interrupt" fn keyboard_isr(_frame: idt::InterruptStackFrame) {
     // Always drain the byte. Leaving it in the output buffer means the
     // controller never asserts IRQ1 again and the keyboard silently dies.
     let scancode = unsafe { inb(DATA) };
+    // The moment of the press feeds the Oracle's entropy ring -- TempleOS's
+    // mechanism, kept: randomness is when the hands moved, and the interrupt
+    // is where that timing exists.
+    crate::ai::godbits::ins(crate::time::rdtsc());
     decode(scancode);
     lapic::eoi();
 }

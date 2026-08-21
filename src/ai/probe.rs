@@ -87,6 +87,22 @@ fn cholesky_solve(l: &[f32], n: usize, b: &mut [f32]) {
     }
 }
 
+/// Solve a symmetric positive-definite `g x = b` in place, factoring `g` by
+/// Cholesky. Returns false if `g` is not positive-definite -- a singular
+/// system the caller must handle rather than trust a garbage answer from.
+///
+/// Exposed for `super::futures`, which fits per-variable linear dynamics with
+/// the same normal-equations-plus-Cholesky the router uses, so the machine's
+/// self-prediction leans on the one solver already checked against a
+/// known-separable fit at every boot.
+pub(crate) fn ridge_solve(g: &mut [f32], n: usize, b: &mut [f32]) -> bool {
+    if !cholesky(g, n) {
+        return false;
+    }
+    cholesky_solve(g, n, b);
+    true
+}
+
 impl Probe {
     pub fn params(&self) -> usize {
         self.w.len() + self.mean.len()
