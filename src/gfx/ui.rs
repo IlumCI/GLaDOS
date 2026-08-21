@@ -38,7 +38,6 @@ use super::font;
 use super::theme::{self, Rect};
 use super::Framebuffer;
 use crate::dev::kbd;
-use crate::sync::Racy;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -574,105 +573,10 @@ pub fn panel_named(name: &str) -> Option<Panel> {
         "status" => Some(status_panel()),
         "files" => Some(file_browser("/")),
         "settings" => Some(settings("net")),
-        "todo" => Some(todo_panel(0)),
         _ => None,
     }
 }
 
-// --- the ToDo list ---------------------------------------------------------
-//
-// The development machine and the target machine are not the same computer,
-// and the person carrying changes to the GF63 is not the one who wrote them.
-// This list is the hand-off: what to run there, in the order that answers the
-// most with the least standing around. Seeded with the current hardware
-// visit; `todo add` extends it from the shell.
-
-static TODO: Racy<Option<Vec<(String, bool)>>> = Racy::new(None);
-
-const TODO_SEED: [&str; 11] = [
-    "deploy.ps1 -EspDrive S: -Release, reboot, F11",
-    "write down the [boot] phys line (decides 4B)",
-    "boot selftests: every line ok, note any FAIL",
-    "q35.bin is staged: rename to model.bin to boot it",
-    "q35 is LOGITS ONLY: its tokenizer needs a new split mode",
-    "logits 7 11 3 vs ref35 --converted top-5",
-    "gen: time tok/s at seq 512, against qwen3-0.6b",
-    "window: confirm 12 MiB KV + 19.3 MiB state",
-    "mouse: wheel notches, drag, M2 menu, Start",
-    "net: dhcp, dns, https fetch on the rtl8168",
-    "photos of the desktop + enternet for the site",
-];
-
-fn todo_items() -> &'static mut Vec<(String, bool)> {
-    let slot = unsafe { &mut *TODO.get() };
-    slot.get_or_insert_with(|| {
-        TODO_SEED.iter().map(|s| (String::from(*s), false)).collect()
-    })
-}
-
-/// The list as (done, text) pairs, for the shell's `todo` command.
-pub fn todo_lines() -> Vec<(bool, String)> {
-    todo_items().iter().map(|(s, d)| (*d, s.clone())).collect()
-}
-
-pub fn todo_toggle(i: usize) -> bool {
-    let items = todo_items();
-    match items.get_mut(i) {
-        Some((_, done)) => {
-            *done = !*done;
-            true
-        }
-        None => false,
-    }
-}
-
-pub fn todo_add(text: &str) {
-    todo_items().push((String::from(text), false));
-}
-
-/// The checklist as a window. Every row is a toggle: activating it flips the
-/// tick and rebuilds the panel in place, which is the same navigation move
-/// the file browser makes -- a panel is data, so "change an item" is "make
-/// the panel where it is changed".
-pub fn todo_panel(sel: usize) -> Panel {
-    let items: Vec<(String, Action)> = todo_items()
-        .iter()
-        .enumerate()
-        .map(|(i, (text, done))| {
-            let mark = if *done { "[x]" } else { "[ ]" };
-            (
-                alloc::format!("{} {}", mark, text),
-                Action::Browse(alloc::format!("todo:{}", i)),
-            )
-        })
-        .collect();
-    let n_done = todo_items().iter().filter(|(_, d)| *d).count();
-    let sel = sel.min(items.len().saturating_sub(1));
-    Panel::new(
-        "ToDo",
-        alloc::vec![
-            Widget::Label(alloc::format!(
-                "Hardware visit -- {} of {} done. Enter toggles.",
-                n_done,
-                todo_items().len()
-            )),
-            Widget::Sep,
-            Widget::List { items, sel },
-            Widget::Button {
-                label: String::from("Clear ticks"),
-                action: Action::Browse(String::from("todo:reset")),
-            },
-            Widget::Button { label: String::from("Close"), action: Action::Close },
-        ],
-    )
-}
-
-/// Resolve a `kind:argument` route to a titled panel.
-///
-/// One resolver for every in-place swap rather than one per app. The desktop
-/// replaces a window's content without knowing what kind of app is in it, and
-/// an app that wanted its own navigation would have to teach the desktop about
-/// itself -- which is how a window manager ends up knowing what a file is.
 pub fn panel_for_route(route: &str) -> Option<(String, Panel)> {
     let (kind, arg) = route.split_once(':').unwrap_or((route, ""));
     match kind {
@@ -682,22 +586,6 @@ pub fn panel_for_route(route: &str) -> Option<(String, Panel)> {
         }
         "set" => Some((String::from("Settings"), settings(arg))),
         "programs" => Some((String::from("Program Manager"), program_manager())),
-        "todo" => {
-            let sel = match arg {
-                "reset" => {
-                    for (_, done) in todo_items().iter_mut() {
-                        *done = false;
-                    }
-                    0
-                }
-                n => {
-                    let i: usize = n.parse().ok()?;
-                    todo_toggle(i);
-                    i
-                }
-            };
-            Some((String::from("ToDo"), todo_panel(sel)))
-        }
         _ => None,
     }
 }
@@ -940,7 +828,7 @@ pub fn program_manager() -> Panel {
         run("Storage", "store"),
         run("Namespace", "tree /"),
         (String::from("Model"), Action::Browse(String::from("set:model"))),
-        (String::from("ToDo list"), Action::Run(String::from("win open todo"))),
+        (String::from("ToDo list"), Action::Run(String::from("todo"))),
         run("Enternet", "enternet"),
         run("Paintbrush", "paint"),
         run("Write", "write"),

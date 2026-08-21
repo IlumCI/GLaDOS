@@ -208,7 +208,7 @@ const ICONS: [(&str, &str); 10] = [
     ("Terminal", "term"),
     ("Programs", "win open programs"),
     ("Files", "win open files"),
-    ("ToDo", "win open todo"),
+    ("ToDo", "todo"),
     ("Enternet", "enternet"),
     ("Paint", "paint"),
     ("Write", "write"),
@@ -224,7 +224,7 @@ const START_ITEMS: [(&str, &str); 11] = [
     ("Terminal", "term"),
     ("Programs", "win open programs"),
     ("Files", "win open files"),
-    ("ToDo", "win open todo"),
+    ("ToDo", "todo"),
     ("Enternet", "enternet"),
     ("Paint", "paint"),
     ("Write", "write"),
@@ -243,16 +243,18 @@ fn launch(cmd: &str) {
                 .iter()
                 .position(|w| matches!(w.content, Content::Terminal))
             {
-                // The icon is the one place a minimised terminal comes back
-                // from besides its task button, so restoring here is wanted,
-                // not the leak `focus_terminal` guards against.
+                // The icon is a way back for a minimised terminal besides
+                // its task button, so restoring and raising it here is wanted.
                 d.windows[i].state = WinState::Normal;
                 d.raise(i);
             }
         });
         return;
     }
-    focus_terminal();
+    // Queue the command and let it run. A command that opens a window leaves
+    // that window in front (see `open`/`open_app`); one that only prints does
+    // so in the terminal wherever it sits. The shell processes PENDING every
+    // loop regardless of focus, so nothing here needs to touch focus at all.
     unsafe { *PENDING.get() = Some(String::from(cmd)) };
 }
 
@@ -660,14 +662,13 @@ pub fn open(title: &str, panel: Panel) {
             closable: true,
         });
     });
-    // The keyboard goes back where the command came from.
-    //
-    // Raising and focusing are the same fact here, so a new window taking the
-    // front also takes the keyboard -- and a window opened by typing at a
-    // prompt would then swallow whatever was typed next. That is not a
-    // theoretical worry: it is what happened, and the panel's list ran an entry
-    // when the Enter at the end of the following command line reached it.
-    focus_terminal();
+    // The new window is what was opened, so it stays in front and focused --
+    // window priority a person expects, and what every launch path relies on.
+    // The keystroke that launched it (a shell Enter, a menu Enter, a click) is
+    // consumed before the window exists, so there is nothing left to leak into
+    // it; the earlier worry conflated "raise the window" with "steal the next
+    // command", which is only a problem for a headless driver typing blind.
+    draw();
 }
 
 /// Open a window around a program.
@@ -703,7 +704,9 @@ pub fn open_app(title: &str, icon: usize, app: Box<dyn DeskApp>, w: u32, h: u32)
             closable: true,
         });
     });
-    focus_terminal();
+    // Opened to be used -> in front and focused. To type at the shell again,
+    // click the terminal, Alt-Tab, or its taskbar button, as with any window.
+    draw();
 }
 
 pub fn open_paint() {
@@ -719,6 +722,11 @@ pub fn open_mines() {
 pub fn open_write(path: &str) {
     let (w, h) = super::write::Writer::preferred();
     open_app("Write", ICO_WRITE, Box::new(super::write::Writer::new(path)), w, h);
+}
+
+pub fn open_todo() {
+    let (w, h) = super::todo::Todo::preferred();
+    open_app("ToDo", ICO_TODO, Box::new(super::todo::Todo::new()), w, h);
 }
 
 pub fn open_oracle(premise: &str) {
@@ -752,13 +760,11 @@ pub fn open_browser(url: &str) {
     });
     // The keyboard goes back to the shell, exactly as `open` does.
     //
-    // The opposite was tried first, on the reasoning that a browser opened by
-    // typing `enternet` is one the user is about to drive. That is wrong here:
-    // the shell *is* the console, so a window holding the keyboard means the
-    // next command typed is swallowed a character at a time. It presented as
-    // the browser hanging, and the trace showed it receiving 'w','i','n',' ',
-    // 'k','e','y','s' one by one. Alt-Tab or the taskbar switches to it.
-    focus_terminal();
+    // In front and focused, like any opened window. A browser is opened to be
+    // driven, so it should have the keyboard; to return to the shell, focus
+    // the terminal. (The headless driver must Alt-Tab back before typing the
+    // next command -- it types blind over serial and cannot see what has the
+    // keyboard.)
     draw();
 }
 

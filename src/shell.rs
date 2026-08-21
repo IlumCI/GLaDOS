@@ -1365,31 +1365,44 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
         }
         "mines" | "minesweeper" => crate::gfx::desk::open_mines(),
         "todo" => {
-            // The hardware checklist, from the shell. One list, shared with
-            // the ToDo window -- ticking here shows there and back, because a
-            // checklist that exists twice is two checklists.
-            use crate::gfx::ui;
+            // No args opens the runbook window -- what someone clicking the
+            // icon wants. `-p` prints it to the terminal for a serial run;
+            // `todo <n>` ticks a step; `todo reset` clears the ticks. One
+            // list, shared with the window.
+            use crate::gfx::todo;
             let arg = rest.trim();
-            if let Some(text) = arg.strip_prefix("add ") {
-                ui::todo_add(text.trim());
-            } else if let Ok(i) = arg.parse::<usize>() {
-                if !ui::todo_toggle(i) {
-                    kprintln!("  no item {}", i);
+            match arg {
+                "" => {
+                    crate::gfx::desk::open_todo();
                     return;
                 }
-            } else if !arg.is_empty() {
-                kprintln!("  usage: todo [<n>|add <text>]");
-                return;
+                "reset" => todo::reset(),
+                "-p" | "p" | "list" => {}
+                n => match n.parse::<usize>() {
+                    Ok(i) if todo::toggle(i) => {}
+                    _ => {
+                        kprintln!("  usage: todo [<n>|reset|-p]   (bare opens the window)");
+                        return;
+                    }
+                },
             }
             console::set_color(YELLOW);
-            kprintln!("[todo]");
+            kprintln!("[todo] hardware runbook");
             console::set_color(LTGRAY);
-            let items = ui::todo_lines();
-            let done = items.iter().filter(|(d, _)| *d).count();
-            for (i, (d, text)) in items.iter().enumerate() {
-                kprintln!("  {:2}  {} {}", i, if *d { "[x]" } else { "[ ]" }, text);
+            for (i, s) in todo::STEPS.iter().enumerate() {
+                kprintln!(
+                    "  {:2}  {} [{:<6}] {}",
+                    i,
+                    if todo::is_done(i) { "x" } else { " " },
+                    s.place.tag(),
+                    s.title
+                );
             }
-            kprintln!("  {} of {} done -- 'todo <n>' toggles, 'todo add <text>' extends", done, items.len());
+            kprintln!(
+                "  {} of {} done. 'todo <n>' details+ticks in the window; '-p' prints here.",
+                todo::n_done(),
+                todo::STEPS.len()
+            );
         }
         "win" => {
             use crate::gfx::desk;
