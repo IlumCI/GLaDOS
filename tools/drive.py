@@ -11,9 +11,15 @@ between "the selftests probably pass" and knowing.
 
 Usage:
     drive.py [--timeout N] [--memory 2048M] [cmd ...]
+    drive.py --stage-iso MODEL.BIN [--tokenizer TOK.BIN] [--memory 3072M] [cmd ...]
 
 Each positional argument is one shell line. With none, it just captures the
 boot log and exits at the first prompt.
+
+VVFAT cannot hold more than ~500 MB, which excludes the real Qwen3.5
+checkpoint. `--stage-iso` assembles the same ESP tree into a FAT32 image,
+wraps it El Torito via tools/mkiso.py, and boots off -cdrom, which has no
+size cap; guest RAM still has to cover the weights, so raise --memory.
 """
 
 import socket
@@ -197,6 +203,27 @@ def main():
         i = argv.index("--iso")
         iso = Path(argv[i + 1])
         del argv[i:i + 2]
+    # Stage a checkpoint too large for VVFAT by building a one-shot ISO from
+    # the same tree the VVFAT path would have assembled, and booting that off
+    # -cdrom instead. This is how the real Qwen3.5 reaches QEMU at all: the
+    # hybrid is 723 MB against VVFAT's 516, and FAT32-in-ISO has no such cap.
+    stage_iso = None
+    if "--stage-iso" in argv:
+        i = argv.index("--stage-iso")
+        stage_iso = Path(argv[i + 1])
+        del argv[i:i + 2]
+        if iso:
+            raise SystemExit("--iso and --stage-iso are mutually exclusive")
+    # Raw passthrough to the QEMU command line, shell-split. The default
+    # qemu64 CPU model hides every SIMD extension, which costs an order of
+    # magnitude on the int8 kernels; "-cpu max" exposes what the host has,
+    # and "-accel whpx" swaps TCG for the Windows hypervisor where available.
+    qemu_extra = []
+    if "--qemu-extra" in argv:
+        i = argv.index("--qemu-extra")
+        import shlex
+        qemu_extra = shlex.split(argv[i + 1])
+        del argv[i:i + 2]
     mouse = []
     while "--mouse" in argv:
         i = argv.index("--mouse")
@@ -211,10 +238,25 @@ def main():
     # is 723 MB against VVFAT's 516; `tools/hybtest.py` builds a small one
     # shaped to hit every path it does.
     model_src = ROOT / "out/smollm2-135m.bin"
+    model_given = False
     if "--model" in argv:
         i = argv.index("--model")
         model_src = Path(argv[i + 1])
+        model_given = True
         del argv[i:i + 2]
+    # The tokenizer has to match the checkpoint: Qwen3.5's vocabulary is
+    # 248k against Qwen3's 152k, so staging the small tokenizer beside a big
+    # model hands it ids that name different rows of the embedding.
+    tokenizer_src = ROOT / "out/smollm2-tokenizer.bin"
+    if "--tokenizer" in argv:
+        i = argv.index("--tokenizer")
+        tokenizer_src = Path(argv[i + 1])
+        del argv[i:i + 2]
+    # --stage-iso names the checkpoint it stages. Saying the model twice would
+    # invite staging one while booting the other, so the flag carries both
+    # meanings and an explicit --model still wins.
+    if stage_iso is not None and not model_given:
+        model_src = stage_iso
     commands = argv
 
     # A QEMU-only ESP, assembled here rather than borrowing esp/.
@@ -225,19 +267,34 @@ def main():
     # GF63 staged with the wrong model, which is a silent and slow way to be
     # wrong. Build a separate tree instead: the small checkpoint is what QEMU
     # can run, and deploy staging is left alone.
+    def differs(a, b):
+        """Streamed content comparison. These files reach 723 MB; reading
+        both whole into host RAM to compare them was acceptable at 135 MB
+        and is not here."""
+        if a.stat().st_size != b.stat().st_size:
+            return True
+        with open(a, 'rb') as fa, open(b, 'rb') as fb:
+            while True:
+                ca = fa.read(1 << 20)
+                cb = fb.read(1 << 20)
+                if ca != cb:
+                    return True
+                if not ca:
+                    return False
+
     esp = ROOT / ".qemu/esp"
     (esp / "GLADOS").mkdir(parents=True, exist_ok=True)
     for src, dst in [
         (model_src, "model.bin"),
-        (ROOT / "out/smollm2-tokenizer.bin", "tokenizer.bin"),
+        (tokenizer_src, "tokenizer.bin"),
         (ROOT / "esp/GLADOS/roots.der", "roots.der"),
     ]:
         if not src.exists():
             raise SystemExit(f"missing {src}")
         target = esp / "GLADOS" / dst
-        # Content-compare rather than always copying: these are 135 MB and the
-        # copy is the slowest thing in a run that is otherwise seconds.
-        if not target.exists() or target.read_bytes() != src.read_bytes():
+        # Content-compare rather than always copying: the copy is the slowest
+        # thing in a run that is otherwise seconds.
+        if not target.exists() or differs(src, target):
             target.write_bytes(src.read_bytes())
 
     # Stage the binary the same way run.ps1 does. Without this the firmware
@@ -252,21 +309,55 @@ def main():
     boot.mkdir(parents=True, exist_ok=True)
     (boot / "BOOTX64.EFI").write_bytes(built.read_bytes())
 
-    # QEMU's VVFAT is FAT16 with a fixed geometry, and 516 MB is the whole disk.
-    # Say so here rather than letting the -drive parser refuse with a number
-    # that looks arbitrary.
+    # QEMU's VVFAT is FAT16 with a fixed geometry, and 516 MB is the whole
+    # disk. Say so here rather than letting the -drive parser refuse with a
+    # number that looks arbitrary. ISO staging has no such cap and skips it.
     total = sum(f.stat().st_size for f in esp.rglob("*") if f.is_file())
-    if total > 500 * 1024 * 1024:
+    if not stage_iso and total > 500 * 1024 * 1024:
         raise SystemExit(
             f"esp/ holds {total / 1024 / 1024:.0f} MB; QEMU's VVFAT caps at 516 MB.\n"
-            "Stage a smaller checkpoint to exercise the kernel here -- a model "
-            "this size can only be run on the GF63."
+            "Stage a smaller checkpoint to exercise the kernel here, or pass "
+            "--stage-iso to boot a larger one off an El Torito image."
         )
+
+    if stage_iso:
+        import mkiso
+
+        out_iso = ROOT / ".qemu/staged.iso"
+        out_iso.parent.mkdir(parents=True, exist_ok=True)
+        root = mkiso.Entry(None, 0)
+        efi_dir = mkiso.Entry('EFI', 0)
+        boot_dir = mkiso.Entry('BOOT', 0)
+        boot_dir.children.append(
+            mkiso.Entry('BOOTX64.EFI', built.stat().st_size, built))
+        efi_dir.children.append(boot_dir)
+        root.children.append(efi_dir)
+        g = mkiso.Entry('GLADOS', 0)
+        for f in sorted((esp / 'GLADOS').iterdir()):
+            if f.is_file():
+                g.children.append(mkiso.Entry(f.name, f.stat().st_size, f))
+        root.children.append(g)
+
+        cluster = 512
+        while cluster < 32768 and total > 60000 * cluster:
+            cluster *= 2
+
+        esp_offset = 24 * mkiso.ISO_SECTOR
+        with open(out_iso, 'wb') as fh:
+            fh.write(b'\x00' * esp_offset)
+            size = mkiso.build_fat(root, fh, cluster)
+            tail = fh.tell() % mkiso.ISO_SECTOR
+            if tail:
+                fh.write(b'\x00' * (mkiso.ISO_SECTOR - tail))
+        mkiso.build_iso(out_iso, esp_offset, size, 'GLADOS')
+        print(f"[drive] staged {total / 1024 / 1024:.0f} MB as {out_iso}")
+        iso = out_iso
 
     args = [
         find_qemu(),
         "-machine", "q35",
         "-m", memory,
+        *qemu_extra,
         *find_firmware(),
         # Plain VVFAT, which is FAT16. `fat:32:` raises the 516 MB ceiling in
         # principle, but QEMU says outright that its FAT32 is untested and the
@@ -385,6 +476,14 @@ def main():
     if not sent_all:
         print(f"\n[drive] TIMEOUT after {timeout}s with {len(queue)} commands unsent",
               file=sys.stderr)
+        # A guest crash usually leaves its cause in QEMU's own log -- a `-d
+        # int` trace carries the vector and RIP of every exception. Discarding
+        # stderr here is how a fault stays mysterious.
+        err = proc.stderr.read().decode("utf-8", "replace") if proc.stderr else ""
+        if err.strip():
+            Path(".qemu/qemu-stderr.log").write_text(err, encoding="utf-8")
+            print(f"[drive] qemu stderr ({len(err)} bytes) -> .qemu/qemu-stderr.log",
+                  file=sys.stderr)
         return 1
     return 0
 

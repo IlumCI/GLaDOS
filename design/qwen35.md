@@ -177,6 +177,41 @@ architecture whose failure mode is fluent nonsense is worse than none.
 4. Measure: tokens/sec and memory against Qwen3-0.6B at 512 and at 32k, which
    is where the whole argument is supposed to pay off.
 
+### The real checkpoint under QEMU. Done.
+
+The 516 MB VVFAT ceiling was assumed to put the real 0.8B out of QEMU's
+reach, which deferred every verification to hardware. It does not have to:
+`drive.py --stage-iso out/q35-0.8b.bin` assembles the same ESP tree into a
+FAT32 image, wraps it El Torito through `mkiso.py`, and boots off `-cdrom`,
+which has no such cap -- guest RAM (`--memory 3072M`) covers the weights.
+The tokenizer converts with `--verify` clean; it needed a new pre-tokenizer
+flag (`cl100km`): Qwen3.5's Split regex admits `\p{M}` into word runs and
+bars it from punctuation runs, two clauses implemented identically in
+`tools/tokenizer.py` and the kernel, with an exact Unicode-15.1 mark-range
+table where Rust's core has no category data.
+
+Parity, measured: feeding `logits 760 6511 314 9338 369` ("The capital of
+France is") matches `ref35.py --converted` on all five top ids in order,
+within 0.07 absolute (~5e-3 relative) -- accumulation-order noise over an
+int8 checkpoint, not a divergence. Generation under TCG writes coherent
+English. `-cpu max` exposes AVX2 to the guest and the SIMD path produces
+bit-identical top-5 with the scalar one at ~8% less wall clock, which says
+decode under emulation is bandwidth-bound in the emulator itself, not ALU
+bound -- absolute tokens/sec remains a GF63 number and only that.
+
+One accelerator was tried for speed and rejected. WHPX runs guest code
+natively but crashes the kernel with #XM at varying instructions even after
+the kernel pins MXCSR to the reset value (a pin worth keeping regardless:
+inheriting FP exception state was the last assumption `enable_simd` had not
+closed). The faulting instruction was resolved by giving the kernel its own
+load base -- the Loaded Image protocol reports base 0 through this firmware
+path, so boot walks page-aligned addresses down from the entry point until
+one carries a valid MZ/PE pair -- and reporting `rip - base` from the fault
+handler. The instruction was an ordinary `divss`; no masked exception can
+fire there, so the hypervisor loses guest SIMD state across VM exits. That
+is a QEMU-WHPX bug no guest can work around, and TCG stays the reference
+path.
+
 5. **Vision, optionally.** The tower is 12 layers at hidden 768, patch 16,
    about 86M parameters -- roughly 86 MB at int8 against the text model's 850.
    Size is not the objection.

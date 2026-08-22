@@ -29,6 +29,7 @@ in Python and diffs it against the reference `tokenizers` library.
 import json
 import struct
 import sys
+import unicodedata
 from pathlib import Path
 
 MAGIC = b"GLADOSTK"
@@ -38,14 +39,23 @@ FLAG_DUMMY_PREFIX = 1 << 0
 FLAG_INDIVIDUAL_DIGITS = 1 << 1
 # Which pre-tokenizer regex the checkpoint was trained with. Absent means the
 # GPT-2 pattern that ByteLevel(use_regex) implies; set means the cl100k one
-# Qwen3 spells out as an explicit Split.
+# Qwen3 spells out as an explicit Split; both means the variant Qwen3.5 uses,
+# which adds \p{M} to the letter run and to what punctuation may not swallow.
 FLAG_SPLIT_CL100K = 1 << 2
+FLAG_SPLIT_CL100KM = 1 << 3
 
 # The distinguishing fragment of the cl100k pattern: a word may be led by any
 # non-alphanumeric. Matching on the whole pattern string would break on
 # whitespace or escaping differences between tokenizers releases; this clause
 # appears in no other pattern in use.
 CL100K_MARK = r"[^\r\n\p{L}\p{N}]?\p{L}+"
+# And of the marks variant, which differs from plain cl100k exactly here:
+CL100KM_MARK = r"[\p{L}\p{M}]+"
+
+
+def is_mark(ch):
+    """\\p{M}: general categories Mn, Mc, Me."""
+    return unicodedata.category(ch)[0] == "M"
 
 
 def bytes_to_unicode():
@@ -127,12 +137,15 @@ def load(path):
             flags |= FLAG_DUMMY_PREFIX
         if p.get("type") == "Split":
             saw_split = True
-            if CL100K_MARK in (p.get("pattern") or {}).get("Regex", ""):
+            regex = (p.get("pattern") or {}).get("Regex", "")
+            if CL100K_MARK in regex:
                 flags |= FLAG_SPLIT_CL100K
+            elif CL100KM_MARK in regex:
+                flags |= FLAG_SPLIT_CL100KM
     # An unrecognised Split would silently fall back to the GPT-2 pattern and
     # mis-tokenise everything by a few percent, which reads as the model being
     # mysteriously worse rather than as a bug.
-    if saw_split and not flags & FLAG_SPLIT_CL100K:
+    if saw_split and not flags & (FLAG_SPLIT_CL100K | FLAG_SPLIT_CL100KM):
         raise SystemExit(
             "the tokenizer has a Split pre-tokenizer whose pattern is not "
             "recognised; add it rather than falling back"
@@ -228,7 +241,7 @@ def convert(src, dst):
     print(f"  specials: bos={bos} eos={eos} unk={unk}, {len(special_ids)} added")
     print(f"  flags: dummy_prefix={bool(flags & FLAG_DUMMY_PREFIX)} "
           f"individual_digits={bool(flags & FLAG_INDIVIDUAL_DIGITS)} "
-          f"split={'cl100k' if flags & FLAG_SPLIT_CL100K else 'gpt2'}")
+          f"split={'cl100k' if flags & FLAG_SPLIT_CL100K else ('cl100km' if flags & FLAG_SPLIT_CL100KM else 'gpt2')}")
     if missing:
         print(f"  {len(missing)} unreachable bytes mapped to unk "
               f"(control codes and invalid UTF-8 lead bytes)")
@@ -294,11 +307,15 @@ def pretokenize(text, individual_digits):
 CONTRACTIONS = ["'s", "'t", "'re", "'ve", "'m", "'ll", "'d"]
 
 
-def pretokenize_cl100k(text):
-    """Split before BPE, the way Qwen3's explicit Split regex does.
+def pretokenize_cl100k(text, marks=False):
+    """Split before BPE, the way Qwen's explicit Split regex does.
 
         (?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}
         | ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+
+
+    With `marks` set, this is the Qwen3.5 variant, which differs in exactly two
+    clauses: the letter run admits \\p{M} (combining marks), and punctuation
+    may no longer swallow them.
 
     Four differences from the GPT-2 pattern above, and every one of them
     changes real text:
@@ -321,6 +338,12 @@ def pretokenize_cl100k(text):
     i = 0
     n = len(text)
     is_nl = lambda c: c in "\r\n"
+    word = lambda c: c.isalpha() or (marks and is_mark(c))
+    punct = (
+        (lambda c: not c.isspace() and not c.isalpha() and not c.isdigit())
+        if not marks
+        else (lambda c: not c.isspace() and not c.isalpha() and not c.isdigit() and not is_mark(c))
+    )
     while i < n:
         start = i
 
@@ -331,15 +354,22 @@ def pretokenize_cl100k(text):
             i += len(hit)
             continue
 
-        # 2. [^\r\n\p{L}\p{N}]? \p{L}+
-        j = i
-        if not is_nl(text[j]) and not text[j].isalpha() and not text[j].isdigit():
-            j += 1
-        if j < n and text[j].isalpha():
-            while j < n and text[j].isalpha():
-                j += 1
-            out.append(text[start:j])
-            i = j
+        # 2. [^\r\n\p{L}\p{N}]? [\p{L}\p{M}]+ -- optional lead then a word run.
+        #    The regex backtracks: if the lead is taken but no run follows, it
+        #    is given back and the run is tried at i itself, which is how a
+        #    leading combining mark ends up as a piece of its own.
+        matched = False
+        for take_lead in (True, False):
+            j = i + (1 if take_lead and not is_nl(text[i]) and not text[i].isalpha()
+                     and not text[i].isdigit() else 0)
+            if j < n and word(text[j]):
+                while j < n and word(text[j]):
+                    j += 1
+                out.append(text[start:j])
+                i = j
+                matched = True
+                break
+        if matched:
             continue
 
         # 3. one digit
@@ -350,8 +380,8 @@ def pretokenize_cl100k(text):
 
         # 4. ' ?' punctuation+ newline*
         j = i + (1 if text[i] == " " else 0)
-        if j < n and not text[j].isspace() and not text[j].isalpha() and not text[j].isdigit():
-            while j < n and not text[j].isspace() and not text[j].isalpha() and not text[j].isdigit():
+        if j < n and punct(text[j]):
+            while j < n and punct(text[j]):
                 j += 1
             while j < n and is_nl(text[j]):
                 j += 1
@@ -423,8 +453,8 @@ def encode_like_kernel(text, raw, scores, byte_table, flags, specials=()):
 def _bpe(text, raw, scores, byte_table, flags, lookup):
     ids = []
     split = (
-        pretokenize_cl100k(text)
-        if flags & FLAG_SPLIT_CL100K
+        pretokenize_cl100k(text, marks=bool(flags & FLAG_SPLIT_CL100KM))
+        if flags & (FLAG_SPLIT_CL100K | FLAG_SPLIT_CL100KM)
         else pretokenize(text, bool(flags & FLAG_INDIVIDUAL_DIGITS))
     )
     for piece in split:
@@ -456,6 +486,13 @@ CASES = [
     "  leading and trailing  ",
     "unicode: café naïve über",
     "<|im_start|>user\nlist the files<|im_end|>\n",
+    # The Qwen3.5 pattern admits \p{M} into word runs and bars it from
+    # punctuation runs. NFC composes Latin accents away, so the Hindi text is
+    # what actually exercises the marks clauses; the last case forces both at
+    # once -- the mark after the full stop must end the punctuation run and
+    # then stand as a piece of its own via lead backtracking.
+    "हिन्दी and café and नमस्ते",
+    "end.\u0301go",
 ]
 
 

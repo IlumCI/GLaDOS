@@ -349,15 +349,23 @@ pub struct GraphicsOutputProtocol {
 // `is_usable_after_exit` deliberately excludes it so the frame allocator will
 // never hand a model's weights out as free pages.
 
-/// Only the leading fields are declared. The protocol continues past
-/// `device_handle`, but nothing here reads further and the struct is only ever
-/// used behind a pointer, so the tail can stay undescribed.
+/// Only the leading fields plus the geometry are declared. The protocol ends
+/// past `image_size`, but nothing here reads further and the struct is only
+/// ever used behind a pointer, so the tail can stay undescribed.
 #[repr(C)]
 pub struct LoadedImageProtocol {
     pub revision: u32,
     pub parent_handle: Handle,
     pub system_table: *mut SystemTable,
     pub device_handle: Handle,
+    reserved: usize,
+    pub load_options_size: u32,
+    load_options_pad: u32,
+    pub load_options: *mut c_void,
+    /// Where the firmware relocated this image. RIP minus this names an RVA
+    /// the local build can resolve, which is the whole reason to keep it.
+    pub image_base: u64,
+    pub image_size: u64,
 }
 
 #[repr(C)]

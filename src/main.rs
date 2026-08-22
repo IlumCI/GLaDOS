@@ -96,6 +96,48 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     (bs.set_watchdog_timer)(0, 0, 0, ptr::null_mut());
     serial_println!("glados: watchdog disarmed");
 
+    // Where the firmware put us. Every fault RIP is meaningless without this:
+    // RIP minus the base is an offset into the binary sitting in target/, and
+    // a disassembly of that names the faulting function.
+    //
+    // The Loaded Image protocol is asked first, but it cannot be trusted on
+    // every path: one firmware reported revision fine and image_base as zero,
+    // so the answer is confirmed against the image itself -- walking page-
+    // aligned addresses down from our own entry point until one carries an
+    // MZ header whose PE signature lands where e_lfanew says. Identity
+    // mapping makes the read legal; 64 MiB of scan bounds a corrupt map.
+    let mut li_ptr: *mut c_void = ptr::null_mut();
+    let mut base = 0u64;
+    if !is_error((bs.handle_protocol)(image, &LOADED_IMAGE_PROTOCOL_GUID, &mut li_ptr))
+        && !li_ptr.is_null()
+    {
+        let li = unsafe { &*(li_ptr as *mut LoadedImageProtocol) };
+        serial_println!(
+            "glados: loaded_image reports base {:#x} size {:#x} rev {:#x}",
+            li.image_base,
+            li.image_size,
+            li.revision
+        );
+        base = li.image_base;
+    }
+    if base == 0 {
+        let mut probe = efi_main as usize & !0xFFF;
+        for _ in 0..(64 * 1024 * 1024 / 0x1000) {
+            unsafe {
+                if *(probe as *const u16) == 0x5A4D {
+                    let lfanew = *((probe + 0x3C) as *const u32) as usize;
+                    if lfanew < 0x400 && *((probe + lfanew) as *const u32) == 0x0000_4550 {
+                        base = probe as u64;
+                        break;
+                    }
+                }
+            }
+            probe -= 0x1000;
+        }
+    }
+    cpu::idt::IMAGE_BASE.store(base, Ordering::Relaxed);
+    serial_println!("glados: image base {:#x}", base);
+
     // --- Graphics Output Protocol ---
     let mut gop_ptr: *mut c_void = ptr::null_mut();
     let s = (bs.locate_protocol)(

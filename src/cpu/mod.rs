@@ -226,6 +226,22 @@ pub fn enable_simd() -> Features {
         } else {
             write_cr4(cr4);
         }
+
+        // And pin MXCSR, which was the one SIMD register still inherited.
+        // 0x1F80 masks all six x87/SSE exceptions; int8 dequantisation
+        // produces subnormal products freely, so a vCPU handed over with
+        // those unmasked takes #XM on the first vmulps. That is exactly what
+        // QEMU's WHPX accelerator does, while TCG and bare-metal firmware
+        // both happen to mask them -- the crash therefore looked like an
+        // accelerator bug when it was an assumption of ours. This function's
+        // own rule is set the bits regardless, and now it applies here too.
+        let mxcsr: u32 = 0x1F80;
+        core::arch::asm!(
+            "ldmxcsr [{}]",
+            in(reg) &mxcsr,
+            options(nostack, preserves_flags)
+        );
+
         *FEATURES.get() = f;
     }
     f

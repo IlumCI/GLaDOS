@@ -264,7 +264,9 @@ pub fn selftest() -> bool {
     // Each case is here for a specific clause: `(x` for a non-space word lead,
     // `'t` for case-insensitive contractions, `a1b2` for one-digit-at-a-time,
     // `.\n` for punctuation swallowing newlines, and the double space for a run
-    // that leaves its last character to the following word.
+    // that leaves its last character to the following word. The last pair
+    // exercises the Qwen3.5 marks clauses: a combining mark ends a punctuation
+    // run and then stands alone via lead backtracking.
     const SPLITS: [(&str, &[&str]); 7] = [
         ("println(x)", &["println", "(x", ")"]),
         ("Don't STOP", &["Don", "'t", " STOP"]),
@@ -277,7 +279,7 @@ pub fn selftest() -> bool {
     let mut splits_ok = true;
     for (text, want) in SPLITS {
         let mut spans: Vec<(usize, usize)> = Vec::new();
-        tokenizer::pretokenize_cl100k(text, &mut spans);
+        tokenizer::pretokenize_cl100k(text, false, &mut spans);
         let got = spans.len() == want.len()
             && spans.iter().zip(want.iter()).all(|(&(a, b), w)| &&text[a..b] == w);
         if !got {
@@ -288,6 +290,29 @@ pub fn selftest() -> bool {
         }
     }
     all &= check("cl100k pre-tokenizer", splits_ok, "7 cases, Qwen3 clauses");
+
+    // The marks variant. U+0301 after the full stop must end the punctuation
+    // run (plain cl100k would swallow it) and then form its own piece through
+    // lead backtracking; Devanagari keeps its vowel signs through NFC, so a
+    // word run carries marks mid-stream.
+    const MARK_SPLITS: [(&str, &[&str]); 2] = [
+        ("end.\u{0301}go", &["end", ".", "\u{0301}", "go"]),
+        ("हिन्दी!", &["हिन्दी", "!"]),
+    ];
+    let mut marks_ok = true;
+    for (text, want) in MARK_SPLITS {
+        let mut spans: Vec<(usize, usize)> = Vec::new();
+        tokenizer::pretokenize_cl100k(text, true, &mut spans);
+        let got = spans.len() == want.len()
+            && spans.iter().zip(want.iter()).all(|(&(a, b), w)| &&text[a..b] == w);
+        if !got {
+            marks_ok = false;
+            console::set_color(LTRED);
+            kprintln!("    {:?} split into {} pieces, wanted {}", text, spans.len(), want.len());
+            console::set_color(WHITE);
+        }
+    }
+    all &= check("cl100km pre-tokenizer", marks_ok, "2 cases, Qwen3.5 marks");
 
     all
 }

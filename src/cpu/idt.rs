@@ -23,6 +23,7 @@ use crate::gfx::console;
 use crate::sync::Racy;
 use crate::{kprintln, serial_println};
 use core::arch::asm;
+use core::sync::atomic::{AtomicU64, Ordering};
 use core::mem::size_of;
 
 /// What the CPU pushes on entry to an interrupt gate, in long mode.
@@ -77,6 +78,12 @@ impl Entry {
 
 static IDT: Racy<[Entry; 256]> = Racy::new([Entry::missing(); 256]);
 
+/// The address the firmware loaded this kernel at, captured from the Loaded
+/// Image protocol before boot services exit. RIP alone names nothing under a
+/// relocated load; `rip - IMAGE_BASE` is an RVA that the build tree's
+/// disassembly resolves directly.
+pub static IMAGE_BASE: AtomicU64 = AtomicU64::new(0);
+
 /// Shared reporting path for every fatal exception.
 fn fault(frame: &InterruptStackFrame, vector: u8, name: &str, err: Option<u64>) -> ! {
     // Copy out of the packed/borrowed frame before formatting.
@@ -113,6 +120,13 @@ fn fault(frame: &InterruptStackFrame, vector: u8, name: &str, err: Option<u64>) 
         kprintln!("  cr2   {:#018x}", cr2);
     }
     kprintln!("  cr3   {:#018x}", cr3);
+    let base = IMAGE_BASE.load(Ordering::Relaxed);
+    if base != 0 {
+        // The firmware relocated the kernel, so RIP names nothing by itself.
+        // Relative to the load base it is an offset into the very binary in
+        // the build tree, and a disassembly answers which function it is.
+        kprintln!("  rva   {:#018x}   <-- rip - image base", rip.wrapping_sub(base));
+    }
     kprintln!("\n  halted.");
 
     super::halt()
