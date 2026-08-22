@@ -985,6 +985,10 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             // the goal verbatim after them. Read-only by default: the grammar
             // the loop decodes under simply does not contain the mutating
             // applets unless full trust is asked for by name.
+            if rest.trim() == "stop" {
+                kprintln!("  {}", crate::ai::agent::request_abort());
+                return;
+            }
             let mut max_steps = 6usize;
             let mut trust = crate::ai::harness::Trust::ReadOnly;
             let mut parts = rest.trim();
@@ -1069,7 +1073,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             kprintln!("  mem uptime tasks cpu acpi pci video date reboot");
             kprintln!("  fault         deliberately dereference null");
             kprintln!("  clear refresh echo <text>");
-            kprintln!("  paint write [path] mines oracle   desktop programs; todo   the checklist");
+            kprintln!("  paint write [path] mines oracle agentlog   desktop programs; todo   the checklist");
             kprintln!("  typewriter    output pacing, in us per character");
 
             console::set_color(YELLOW);
@@ -1106,7 +1110,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             console::set_color(WHITE);
             kprintln!("  gen <prompt>  generate text     ask <prompt>  chat turn");
             kprintln!("  think <p>     run it in the background, off the shell");
-            kprintln!("  agent [-n n] [--trust full] <goal>   act-observe-repeat, bounded");
+            kprintln!("  agent [-n n] [--trust full] <goal>   act-observe-repeat; 'agent stop' cancels");
             kprintln!("  act <task>    choose an applet by constrained decoding");
             kprintln!("  route <task>  choose one with the probe -- no transformer");
             kprintln!("  teach <applet> <task>   add an example ('teach file <path>' for many)");
@@ -1421,6 +1425,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             }
         }
         "mines" | "minesweeper" => crate::gfx::desk::open_mines(),
+        "agentlog" => crate::gfx::desk::open_agentlog(),
         "todo" => {
             // No args opens the runbook window -- what someone clicking the
             // icon wants. `-p` prints it to the terminal for a serial run;

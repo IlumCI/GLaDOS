@@ -398,6 +398,11 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     if ai::engine_ready() && ai::spawn_mind() {
         kprintln!("  mind spawned -- 'think <prompt>' runs in the background");
     }
+    // The agent task is resident for the same reason; it does nothing until
+    // an episode is queued, and shares the mind's engine-ownership rule.
+    if ai::engine_ready() && ai::spawn_agent() {
+        kprintln!("  agent ready -- 'agent <goal>' queues an episode");
+    }
 
     gfx::splash::stage("ready");
     gfx::splash::finish();

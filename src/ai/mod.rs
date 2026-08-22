@@ -609,9 +609,10 @@ pub fn with_engine<R>(f: impl FnOnce(&mut Engine) -> R) -> Option<R> {
     if mind_busy() && current != MIND_TASK.load(Ordering::Acquire) {
         return None;
     }
-    // Same rule for the agent loop, which holds the engine across a whole
-    // episode rather than one generation.
-    if agent_busy() && current != AGENT_TASK.load(Ordering::Acquire) {
+    // Same rule for the agent task, which holds the engine for whole
+    // episodes. The id is recorded once at spawn and lives as long as the
+    // task does; whether an episode is actually running is the flag.
+    if agent::episode_busy() && current != AGENT_TASK.load(Ordering::Acquire) {
         return None;
     }
     unsafe { ENGINE.get().as_mut().map(f) }
@@ -1335,24 +1336,46 @@ pub fn spawn_mind() -> bool {
     }
 }
 
-/// The task currently running an agent episode, if any. The episode executes
-/// on the calling (shell) task, so ownership is claimed around `agent::run`
-/// rather than at spawn time -- same single-owner rule as the mind, different
-/// lifetime.
+/// The agent task's id, recorded at spawn. The task is resident like the
+/// mind; what gates the engine is `agent::episode_busy`, not the id alone.
 static AGENT_TASK: AtomicUsize = AtomicUsize::new(usize::MAX);
 
-/// True while an agent episode holds the engine.
+/// True while an episode is executing.
 pub fn agent_busy() -> bool {
-    AGENT_TASK.load(Ordering::Acquire) != usize::MAX
+    agent::episode_busy()
 }
 
-/// Shell entry point for an episode. Claims engine ownership for the calling
-/// task, runs to completion or budget, releases. Mutual exclusion with the
-/// mind is enforced at both command sites: whichever is asked second refuses.
+/// Shell entry point: queue an episode on the resident task and return. The
+/// shell stays live; output arrives from the agent task as it works, and the
+/// prompt returns once more when the episode finishes.
+///
+/// Mutual exclusion with the mind is enforced at both command sites:
+/// whichever is asked second refuses, because both would fight over the
+/// engine otherwise.
 pub fn agent_run(goal: &str, trust: harness::Trust, max_steps: usize) {
-    AGENT_TASK.store(crate::task::current(), Ordering::Release);
-    agent::run(goal, trust, max_steps);
-    AGENT_TASK.store(usize::MAX, Ordering::Release);
+    if agent::queue_episode(goal, trust, max_steps) {
+        console::set_color(LTGREEN);
+        kprintln!("  queued -- the shell stays yours; 'agent stop' cancels");
+        console::set_color(LTGRAY);
+    } else {
+        console::set_color(YELLOW);
+        kprintln!("  an episode is already pending or running");
+        console::set_color(LTGRAY);
+    }
+}
+
+/// Spawn the resident agent task. Called once at boot beside `spawn_mind`.
+pub fn spawn_agent() -> bool {
+    match crate::task::spawn("agent", agent::agent_task) {
+        Some(id) => {
+            // Recorded before the task can possibly claim an episode, so the
+            // ownership test in `with_engine` is never consulted against a
+            // stale id -- the same ordering argument as the mind's spawn.
+            AGENT_TASK.store(id, Ordering::Release);
+            true
+        }
+        None => false,
+    }
 }
 
 /// Run a raw token sequence and print the top logits.

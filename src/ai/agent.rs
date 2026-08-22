@@ -28,10 +28,12 @@ use super::harness::{self, Trust};
 use super::{sample, with_engine};
 use crate::gfx::console::{self, LTCYAN, LTGRAY, LTGREEN, LTRED, YELLOW};
 use crate::kprintln;
+use crate::sync::Racy;
 use crate::sysbox;
 use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 /// The pseudo-applet that ends an episode. It travels in the same grammar as
 /// the real names, so stopping is a choice the model makes under the same
@@ -48,6 +50,121 @@ const ARGS_CLIP_BYTES: usize = 96;
 
 /// Tokens the model may spend on arguments before being cut off.
 const ARGS_TOKEN_BUDGET: usize = 16;
+
+// --- shared episode log ---------------------------------------------------
+//
+// The console transcript is the serial channel's view. The desktop window
+// needs the same stream without owning the console, so every event is
+// appended here as well -- a ring, because an episode that never ends must
+// not grow memory without bound.
+
+static LOG: Racy<Vec<String>> = Racy::new(Vec::new());
+const LOG_CAP: usize = 240;
+
+fn elog(line: String) {
+    unsafe {
+        let log = LOG.get();
+        log.push(line);
+        let excess = log.len().saturating_sub(LOG_CAP);
+        log.drain(..excess);
+    }
+}
+
+/// Snapshot for a drawing window. A copy, because the agent task appends
+/// while the desktop draws; the line count is small enough not to care.
+pub fn log_snapshot() -> Vec<String> {
+    unsafe { LOG.get().clone() }
+}
+
+// --- abort ----------------------------------------------------------------
+
+static ABORT: AtomicBool = AtomicBool::new(false);
+
+/// Ask the running episode to stop at its next boundary (per step, and
+/// between argument tokens). Also cancels a queued-but-not-started episode,
+/// which is what `agent stop` mostly means in practice -- the queue returns
+/// to the shell faster than anyone can type.
+pub fn request_abort() -> &'static str {
+    ABORT.store(true, Ordering::Release);
+    if take_request().is_some() {
+        crate::shell::reprompt();
+        return "queued episode cancelled";
+    }
+    if episode_busy() {
+        "stopping after the current step"
+    } else {
+        ABORT.store(false, Ordering::Release);
+        "(no episode is running)"
+    }
+}
+
+fn aborted() -> bool {
+    ABORT.load(Ordering::Acquire)
+}
+
+// --- the request queue ----------------------------------------------------
+//
+// One queued episode at a time, mirroring how `think` queues one prompt.
+// The task itself is spawned once at boot and lives forever, exactly like
+// the mind; ownership of the engine follows the task id, which mod.rs
+// records at spawn before the task can possibly run.
+
+struct EpisodeReq {
+    goal: String,
+    trust: Trust,
+    steps: usize,
+}
+
+static REQUEST: Racy<Option<EpisodeReq>> = Racy::new(None);
+
+/// True while an episode is executing (as opposed to merely queued). mod.rs
+/// owns the flag; the queue here only needs to know the difference for
+/// `request_abort`'s message.
+pub(crate) fn set_busy(on: bool) {
+    BUSY.store(on, Ordering::Release);
+}
+
+static BUSY: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn episode_busy() -> bool {
+    BUSY.load(Ordering::Acquire)
+}
+
+/// Queue an episode. False when one is already pending or running -- the
+/// caller turns that into a refusal, since two episodes would fight over
+/// both the engine and the namespace cursor.
+pub fn queue_episode(goal: &str, trust: Trust, steps: usize) -> bool {
+    crate::cpu::without_interrupts(|| unsafe {
+        if REQUEST.get().is_some() || episode_busy() {
+            return false;
+        }
+        *REQUEST.get() = Some(EpisodeReq {
+            goal: String::from(goal),
+            trust,
+            steps,
+        });
+        true
+    })
+}
+
+fn take_request() -> Option<EpisodeReq> {
+    crate::cpu::without_interrupts(|| unsafe { REQUEST.get().take() })
+}
+
+/// The resident agent task. Spawned once; never returns.
+pub fn agent_task() {
+    loop {
+        let Some(req) = take_request() else {
+            crate::task::yield_now();
+            continue;
+        };
+        set_busy(true);
+        run(&req.goal, req.trust, req.steps);
+        ABORT.store(false, Ordering::Release);
+        set_busy(false);
+        crate::shell::reprompt();
+    }
+}
 
 struct Step {
     /// Rendered action, e.g. `ls /sys` -- what the transcript and the next
@@ -210,7 +327,8 @@ fn propose(goal: &str, steps: &[Step], trust: Trust) -> Option<(String, String)>
 }
 
 /// Run one episode to completion: bounded steps, live printing, transcript
-/// written to /ai/episodes/. Synchronous by design -- see the module header.
+/// written to /ai/episodes/. Executes on the resident agent task -- the
+/// shell returned to its caller the moment this episode was queued.
 pub fn run(goal: &str, trust: Trust, max_steps: usize) {
     console::set_color(YELLOW);
     kprintln!("[agent]");
@@ -224,11 +342,13 @@ pub fn run(goal: &str, trust: Trust, max_steps: usize) {
         },
         max_steps
     );
+    elog(format!("[agent] goal: {}", goal));
 
     if with_engine(|_| ()).is_none() {
         console::set_color(LTRED);
         kprintln!("  no model loaded");
         console::set_color(LTGRAY);
+        elog(String::from("no model loaded"));
         return;
     }
 
@@ -236,6 +356,12 @@ pub fn run(goal: &str, trust: Trust, max_steps: usize) {
     let mut outcome = "step budget reached";
 
     for i in 0..max_steps {
+        // Checked at every step boundary and between argument tokens; an
+        // abort lands within one step of the request, never mid-applet.
+        if aborted() {
+            outcome = "aborted by operator";
+            break;
+        }
         let Some((name, args)) = propose(goal, &steps, trust) else {
             outcome = "decode did not settle";
             break;
@@ -246,6 +372,7 @@ pub fn run(goal: &str, trust: Trust, max_steps: usize) {
             console::set_color(LTGREEN);
             kprintln!("  {}. done", i + 1);
             console::set_color(LTGRAY);
+            elog(format!("{}. done", i + 1));
             break;
         }
 
@@ -273,8 +400,12 @@ pub fn run(goal: &str, trust: Trust, max_steps: usize) {
         console::set_color(if ok { LTCYAN } else { LTRED });
         kprintln!("  {}. {}", i + 1, action);
         console::set_color(LTGRAY);
+        elog(format!("{}. {}{}", i + 1, if ok { "" } else { "[rejected] " }, action));
         for line in observation.lines().take(4) {
             kprintln!("     | {}", line);
+        }
+        for line in clip(observation.lines().take(4).collect::<Vec<_>>().join(" / ").as_str(), 110).lines() {
+            elog(format!("   | {}", line));
         }
 
         steps.push(Step {
@@ -282,11 +413,16 @@ pub fn run(goal: &str, trust: Trust, max_steps: usize) {
             ok,
             observation: clip(&observation, OBS_CLIP),
         });
+
+        // The window repaints through the diffed present, so refreshing per
+        // step costs only what actually changed.
+        crate::gfx::desk::draw();
     }
 
     console::set_color(YELLOW);
     kprintln!("  [agent] {} after {} step(s)", outcome, steps.len());
     console::set_color(LTGRAY);
+    elog(format!("-- {} after {} step(s) --", outcome, steps.len()));
 
     // Transcript into the namespace. Content-addressed like everything else:
     // an episode can be hashed, diffed against its siblings, and snapshotted
@@ -296,7 +432,9 @@ pub fn run(goal: &str, trust: Trust, max_steps: usize) {
     let path = format!("/ai/episodes/{:04}.txt", idx);
     if sysbox::write_text(&path, &report) {
         kprintln!("  transcript at {}", path);
+        elog(format!("transcript at {}", path));
     }
+    crate::gfx::desk::draw();
 }
 
 fn render(goal: &str, outcome: &str, steps: &[Step]) -> String {

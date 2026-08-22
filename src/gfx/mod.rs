@@ -18,6 +18,7 @@ pub mod theme;
 pub mod todo;
 pub mod ui;
 pub mod desk;
+pub mod agentwin;
 
 /// A program that owns a window's client area.
 ///

@@ -734,6 +734,20 @@ pub fn open_oracle(premise: &str) {
     open_app("Oracle", ICO_ORACLE, Box::new(super::oracle::Oracle::new(premise)), w, h);
 }
 
+/// The agent transcript, live. Shares the Oracle's icon because both are
+/// instruments pointed at what the machine is thinking.
+///
+/// Focus returns to the terminal immediately: this window is a view, it
+/// consumes no keys, and a viewer that held the keyboard would eat every
+/// serial command typed after opening it -- the desktop answers declined
+/// keys with "handled" all the same, which is exactly how Minesweeper once
+/// swallowed a whole test script.
+pub fn open_agentlog() {
+    let (w, h) = super::agentwin::AgentLog::preferred();
+    open_app("Agent", ICO_ORACLE, Box::new(super::agentwin::AgentLog::new()), w, h);
+    focus_terminal();
+}
+
 /// Open Enternet, optionally at a URL.
 pub fn open_browser(url: &str) {
     let mut b = Browser::new();
