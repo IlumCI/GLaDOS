@@ -972,11 +972,67 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
         "think" => {
             if rest.is_empty() {
                 kprintln!("  usage: think <prompt>   (runs in the background)");
+            } else if crate::ai::agent_busy() {
+                kprintln!("  an agent episode is running -- 'think' waits");
             } else if crate::ai::think(rest) {
                 kprintln!("  queued -- the shell stays yours while it runs");
             } else {
                 kprintln!("  a request is already pending");
             }
+        }
+        "agent" => {
+            // `agent [-n steps] [--trust full] goal words...` -- flags first,
+            // the goal verbatim after them. Read-only by default: the grammar
+            // the loop decodes under simply does not contain the mutating
+            // applets unless full trust is asked for by name.
+            let mut max_steps = 6usize;
+            let mut trust = crate::ai::harness::Trust::ReadOnly;
+            let mut parts = rest.trim();
+            loop {
+                let mut w = parts.splitn(3, ' ');
+                let flag = w.next().unwrap_or("");
+                match flag {
+                    "-n" => {
+                        let v = w.next().unwrap_or("");
+                        let tail = w.next().unwrap_or("");
+                        match v.parse::<usize>() {
+                            Ok(n) if n > 0 && n <= 32 => max_steps = n,
+                            _ => {
+                                kprintln!("  -n wants 1..32");
+                                return;
+                            }
+                        }
+                        parts = tail;
+                    }
+                    "--trust" => {
+                        let v = w.next().unwrap_or("");
+                        let tail = w.next().unwrap_or("");
+                        if v == "full" {
+                            trust = crate::ai::harness::Trust::Full;
+                        } else {
+                            kprintln!("  --trust wants 'full' (default is read-only)");
+                            return;
+                        }
+                        parts = tail;
+                    }
+                    _ => break,
+                }
+            }
+            if crate::ai::mind_busy() {
+                kprintln!("  the mind is busy -- wait for it to finish first");
+                return;
+            }
+            if !crate::sysbox::is_ready() {
+                kprintln!("  no namespace to act on");
+                return;
+            }
+            if parts.is_empty() {
+                kprintln!(
+                    "  usage: agent [-n steps] [--trust full] <goal>   (read-only unless told otherwise)"
+                );
+                return;
+            }
+            crate::ai::agent_run(parts, trust, max_steps);
         }
         "gen" => {
             // `gen -t 0 once upon a time` -- flags first, everything after is
@@ -1050,6 +1106,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             console::set_color(WHITE);
             kprintln!("  gen <prompt>  generate text     ask <prompt>  chat turn");
             kprintln!("  think <p>     run it in the background, off the shell");
+            kprintln!("  agent [-n n] [--trust full] <goal>   act-observe-repeat, bounded");
             kprintln!("  act <task>    choose an applet by constrained decoding");
             kprintln!("  route <task>  choose one with the probe -- no transformer");
             kprintln!("  teach <applet> <task>   add an example ('teach file <path>' for many)");

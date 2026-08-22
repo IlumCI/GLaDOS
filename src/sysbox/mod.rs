@@ -25,6 +25,7 @@ use crate::gfx::console::{self, LTCYAN, LTGREEN, LTGRAY, LTRED, WHITE, YELLOW};
 use crate::kprintln;
 use crate::store::{self, cas};
 use crate::sync::Racy;
+use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use tree::{Node, Written};
@@ -259,6 +260,61 @@ pub fn dispatch(cmd: &str, rest: &str) -> bool {
 
 pub fn is_ready() -> bool {
     unsafe { BOX.get().is_some() }
+}
+
+/// Shape-check arguments against the applet's declared usage, before dispatch.
+///
+/// This is the boundary the agent loop hands free generated text across. The
+/// grammar guarantees the *name*; nothing yet has guaranteed the arguments,
+/// and an applet that never runs is a poor answer compared to one that is
+/// told its arguments were wrong before anything executed. What is checked
+/// is shape only -- arity and the declared types. Whether a path exists is
+/// deliberately left to the applet itself, because "no such path" is a
+/// useful observation for a model to reason over, while "wrong number of
+/// words" is merely noise to dispatch.
+pub fn check_args(name: &str, rest: &str) -> Result<(), String> {
+    let Some(a) = APPLETS.iter().find(|a| a.name == name) else {
+        return Err(format!("'{}' is not an applet", name));
+    };
+    let spec: Vec<&str> = a.args.split_whitespace().collect();
+    let words: Vec<&str> = rest.split_whitespace().collect();
+
+    // A trailing <text> absorbs everything after it: `write <path> <text>`
+    // takes two words minimum but any number beyond that.
+    let text_tail = spec.last() == Some(&"<text>");
+    let required = spec.iter().filter(|s| s.starts_with('<')).count();
+
+    if text_tail {
+        if words.len() < required {
+            return Err(format!(
+                "'{}' wants at least {} argument(s), got {}: usage {}",
+                name,
+                required,
+                words.len(),
+                a.args
+            ));
+        }
+    } else if words.len() < required || words.len() > spec.len() {
+        return Err(format!(
+            "'{}' wants {} argument(s), got {}: usage {}",
+            name,
+            required,
+            words.len(),
+            a.args
+        ));
+    }
+
+    // Typed checks where the usage names a type. Only exact-arity forms are
+    // checked positionally; the optional-bearing specs (`[seq]`) are left to
+    // the applet, which reports its own errors legibly enough.
+    if !spec.contains(&"[seq]") && !spec.contains(&"[path]") && !spec.contains(&"[path|-]") {
+        for (w, sp) in words.iter().zip(spec.iter()) {
+            if *sp == "<seq>" && w.parse::<u64>().is_err() {
+                return Err(format!("<seq> must be a number, got '{}'", w));
+            }
+        }
+    }
+    Ok(())
 }
 
 // --- programmatic access ------------------------------------------------

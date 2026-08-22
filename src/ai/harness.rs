@@ -46,7 +46,7 @@ use alloc::vec::Vec;
 /// step of every choice.
 static ALPHABET: Racy<Option<Alphabet>> = Racy::new(None);
 
-fn with_alphabet<R>(f: impl FnOnce(&Alphabet) -> R) -> Option<R> {
+pub(crate) fn with_alphabet<R>(f: impl FnOnce(&Alphabet) -> R) -> Option<R> {
     unsafe {
         if ALPHABET.get().is_none() {
             let built = with_engine(|e| Alphabet::new(&e.tok))?;
@@ -54,6 +54,18 @@ fn with_alphabet<R>(f: impl FnOnce(&Alphabet) -> R) -> Option<R> {
         }
         ALPHABET.get().as_ref().map(f)
     }
+}
+
+/// The applet names one trust level reaches. The agent loop builds its own
+/// grammar from this -- its list carries the `done` sentinel besides -- but
+/// the admission rule stays here so there is exactly one definition of what
+/// each trust level may name.
+pub(crate) fn admitted(trust: Trust) -> Vec<&'static str> {
+    sysbox::APPLETS
+        .iter()
+        .filter(|a| trust.admits(a))
+        .map(|a| a.name)
+        .collect()
 }
 
 /// Which applets the model is allowed to reach for.
@@ -479,7 +491,7 @@ fn feature_hidden(e: &mut super::Engine, task: &str) -> Option<Vec<f32>> {
 ///
 /// Only reachable with `feature hidden`; the default pooled features never
 /// touch the model at all.
-fn invalidate_conversation(e: &mut super::Engine) {
+pub(crate) fn invalidate_conversation(e: &mut super::Engine) {
     e.pos = 0;
     e.last_token = super::tokenizer::BOS;
 }

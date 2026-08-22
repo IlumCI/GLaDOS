@@ -1,5 +1,6 @@
 //! Machine learning primitives.
 
+pub mod agent;
 pub mod constrain;
 pub mod corpus;
 pub mod futures;
@@ -604,7 +605,13 @@ static MIND_TASK: AtomicUsize = AtomicUsize::new(usize::MAX);
 /// Checking the task id rather than a flag is what lets the mind keep working
 /// while everyone else is turned away.
 pub fn with_engine<R>(f: impl FnOnce(&mut Engine) -> R) -> Option<R> {
-    if mind_busy() && crate::task::current() != MIND_TASK.load(Ordering::Acquire) {
+    let current = crate::task::current();
+    if mind_busy() && current != MIND_TASK.load(Ordering::Acquire) {
+        return None;
+    }
+    // Same rule for the agent loop, which holds the engine across a whole
+    // episode rather than one generation.
+    if agent_busy() && current != AGENT_TASK.load(Ordering::Acquire) {
         return None;
     }
     unsafe { ENGINE.get().as_mut().map(f) }
@@ -1326,6 +1333,26 @@ pub fn spawn_mind() -> bool {
         }
         None => false,
     }
+}
+
+/// The task currently running an agent episode, if any. The episode executes
+/// on the calling (shell) task, so ownership is claimed around `agent::run`
+/// rather than at spawn time -- same single-owner rule as the mind, different
+/// lifetime.
+static AGENT_TASK: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+/// True while an agent episode holds the engine.
+pub fn agent_busy() -> bool {
+    AGENT_TASK.load(Ordering::Acquire) != usize::MAX
+}
+
+/// Shell entry point for an episode. Claims engine ownership for the calling
+/// task, runs to completion or budget, releases. Mutual exclusion with the
+/// mind is enforced at both command sites: whichever is asked second refuses.
+pub fn agent_run(goal: &str, trust: harness::Trust, max_steps: usize) {
+    AGENT_TASK.store(crate::task::current(), Ordering::Release);
+    agent::run(goal, trust, max_steps);
+    AGENT_TASK.store(usize::MAX, Ordering::Release);
 }
 
 /// Run a raw token sequence and print the top logits.
