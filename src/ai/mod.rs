@@ -644,7 +644,7 @@ pub fn init(model_blob: Option<Blob>, tok_blob: Option<Blob>) {
             console::set_color(LTRED);
             match e {
                 model::LoadError::Truncated { want, have } => {
-                    kprintln!("  checkpoint truncated: header wants {} floats, file has {}", want, have)
+                    kprintln!("  checkpoint truncated: header wants {} bytes, file has {}", want, have)
                 }
                 other => kprintln!("  checkpoint rejected: {:?}", other),
             }
@@ -673,17 +673,93 @@ pub fn init(model_blob: Option<Blob>, tok_blob: Option<Blob>) {
         return;
     };
 
-    // The vocabulary size is not in the tokenizer file, so a mismatched pair
-    // parses as far as it can and then runs off the end. Failing here almost
-    // always means the two files came from different models.
-    let Some(tok) = tokenizer::Tokenizer::from_bytes(tb.as_slice(), c.vocab_size) else {
-        console::set_color(LTRED);
-        kprintln!("  tokenizer does not match a {}-token vocabulary", c.vocab_size);
-        console::set_color(LTGRAY);
-        return;
+    // The vocabulary size is not in the v2 header's contract with the model,
+    // so a mismatched pair used to parse cleanly and then feed the model ids
+    // that name different rows of the embedding -- fluent nonsense, no error.
+    // The parser now holds both counts against each other and says which
+    // failed and by how much.
+    let tok = match tokenizer::Tokenizer::from_bytes(tb.as_slice(), c.vocab_size) {
+        Ok(t) => t,
+        Err(e) => {
+            console::set_color(LTRED);
+            match e {
+                tokenizer::TokError::VocabMismatch { have, want } => {
+                    kprintln!(
+                        "  tokenizer produces ids up to {}; this model's embedding has {} rows",
+                        have, want
+                    );
+                    kprintln!("  (the two files are from different checkpoints)");
+                }
+                tokenizer::TokError::Truncated => {
+                    kprintln!("  tokenizer file ends before its own structure does -- the copy to the ESP was incomplete");
+                }
+                tokenizer::TokError::BadVersion => {
+                    kprintln!("  tokenizer version field is not one of ours");
+                }
+            }
+            console::set_color(LTGRAY);
+            return;
+        }
     };
 
+    // The state -- KV cache, RoPE tables, recurrent state -- is sized before
+    // it is allocated, because an allocation that fails here must be a line
+    // of red text rather than a panic with the boot half-finished. The margin
+    // covers the router head, the corpus and whatever else [ai] builds after.
+    let state_bytes = model::State::requirement(&c);
+    let margin = 64 * 1024 * 1024;
+    let (heap_used, heap_total) = crate::mem::heap::HEAP.stats();
+    let heap_free = heap_total.saturating_sub(heap_used);
+    if state_bytes + margin > heap_free {
+        console::set_color(LTRED);
+        kprintln!(
+            "  context needs {} MiB of state but only {} MiB of heap is free --",
+            state_bytes / (1024 * 1024),
+            heap_free / (1024 * 1024)
+        );
+        kprintln!("  re-convert with a smaller --seq, or boot with more RAM");
+        console::set_color(LTGRAY);
+        return;
+    }
+
+    // Padding versus wrong checkpoint. Checkpoints round their vocabulary up
+    // for alignment -- q35 pairs 248070 pieces with 248320 rows, 0.1% spare.
+    // A tokenizer from another model is not that: SmolLM2's 49k beside this
+    // embedding is 80% missing, loads without complaint, and generates
+    // confidently from rows it was never meant to address. One percent of
+    // slack separates the two cases.
+    const VOCAB_SLACK_PCT: usize = 1;
+    if tok.vocab_size() != c.vocab_size && c.vocab_size >= 100 {
+        let missing = c.vocab_size - tok.vocab_size();
+        if missing > (c.vocab_size / 100) * VOCAB_SLACK_PCT {
+            console::set_color(LTRED);
+            kprintln!(
+                "  tokenizer covers {} of {} embedding rows -- {} short is not padding;",
+                tok.vocab_size(),
+                c.vocab_size,
+                missing
+            );
+            kprintln!("  (the two files are from different checkpoints)");
+            console::set_color(LTGRAY);
+            return;
+        }
+        kprintln!(
+            "  note  tokenizer covers {} of {} embedding rows (the rest are padding)",
+            tok.vocab_size(),
+            c.vocab_size
+        );
+    }
+
     let state = model::State::new(&c);
+    let live_bytes = state.bytes(&c);
+    if live_bytes != state_bytes {
+        console::set_color(YELLOW);
+        kprintln!(
+            "  note  state estimate {} != actual {} bytes -- State::requirement has drifted",
+            state_bytes, live_bytes
+        );
+        console::set_color(LTGRAY);
+    }
     kprintln!(
         "  tokenizer {} tokens, longest {} bytes; state {} KiB",
         tok.vocab_size(),
@@ -719,6 +795,45 @@ pub fn init(model_blob: Option<Blob>, tok_blob: Option<Blob>) {
             last_token: tokenizer::BOS,
         })
     };
+
+    // One real forward pass before the system trusts these weights. Every
+    // failure class above is structural and loud; this one is numeric and
+    // silent -- a corrupt scale, a bad dequant table or a wrong RoPE length
+    // produces logits that are NaN, infinite, or flat, and a model that
+    // samples confidently from whatever that is. The state is rewound after,
+    // so nothing downstream sees the probe.
+    let probe = with_engine(|e| {
+        e.model.forward(&mut e.state, tokenizer::UNK, 0);
+        let mut min = f32::INFINITY;
+        let mut max = f32::NEG_INFINITY;
+        let mut finite = true;
+        for v in e.state.logits.iter() {
+            if !v.is_finite() {
+                finite = false;
+                break;
+            }
+            if *v < min {
+                min = *v;
+            }
+            if *v > max {
+                max = *v;
+            }
+        }
+        e.pos = 0;
+        e.last_token = tokenizer::BOS;
+        (finite, max > min)
+    })
+    .unwrap_or((false, false));
+    if probe.0 && probe.1 {
+        kprintln!("  ok   first-token logits finite and non-degenerate");
+    } else {
+        console::set_color(LTRED);
+        kprintln!(
+            "  FAIL first-token probe: {} -- weights or tables are corrupt",
+            if !probe.0 { "non-finite logits" } else { "flat logits" }
+        );
+        console::set_color(LTGRAY);
+    }
 
     // The corpus lives in the namespace, so it is restored along with
     // everything else; only seed it when there is nothing there.
@@ -1229,10 +1344,26 @@ pub fn logits_for(ids: &[usize]) {
         kprintln!("  usage: logits <id> [id ...]");
         return;
     }
+    // Ids are row indexes into the embedding. The sampler cannot produce one
+    // past the end, but this command accepts numbers typed by a human, and an
+    // unchecked id reads garbage -- or faults -- instead of being refused.
+    let vocab = with_engine(|e| e.tok.vocab_size()).unwrap_or(0);
+    let mut checked = Vec::with_capacity(ids.len());
+    for &id in ids {
+        if id < vocab {
+            checked.push(id);
+        } else {
+            kprintln!("  dropping id {} -- vocabulary is {} tokens", id, vocab);
+        }
+    }
+    if checked.is_empty() {
+        return;
+    }
+
     let done = with_engine(|e| {
         let cap = e.model.cfg.seq_len;
         let t0 = crate::time::rdtsc();
-        for (pos, &t) in ids.iter().enumerate() {
+        for (pos, &t) in checked.iter().enumerate() {
             if pos >= cap {
                 break;
             }
@@ -1252,7 +1383,7 @@ pub fn logits_for(ids: &[usize]) {
                 }
             }
         }
-        (top, elapsed, ids.len())
+        (top, elapsed, checked.len())
     });
 
     let Some((top, elapsed, n)) = done else {

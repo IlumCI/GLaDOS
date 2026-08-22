@@ -232,7 +232,10 @@ def main():
     if "--memory" in argv:
         i = argv.index("--memory")
         memory = argv[i + 1]
+        memory_given = True
         del argv[i:i + 2]
+    else:
+        memory_given = False
     # An override for checking a checkpoint the default staging cannot hold.
     # The port of Qwen3.5 needs a *hybrid* to exercise at all, and the real one
     # is 723 MB against VVFAT's 516; `tools/hybtest.py` builds a small one
@@ -257,6 +260,16 @@ def main():
     # meanings and an explicit --model still wins.
     if stage_iso is not None and not model_given:
         model_src = stage_iso
+    # A staged checkpoint has to fit in guest RAM beside the firmware, the
+    # heap ladder and the KV cache. Forgetting --memory reads as "no model at
+    # \GLADOS\model.bin" because the pool allocation fails first, which is a
+    # message about the wrong thing. Size for it here: weights plus ~2.3 GiB
+    # of everything else, rounded up to a whole GiB.
+    if stage_iso is not None and not memory_given:
+        mb = model_src.stat().st_size / (1024 * 1024)
+        gib = max(3, int(mb / 1024) + 3)
+        memory = f"{gib * 1024}M"
+        print(f"[drive] model is {mb:.0f} MB; guest RAM auto-set to {memory}")
     commands = argv
 
     # A QEMU-only ESP, assembled here rather than borrowing esp/.
@@ -343,12 +356,23 @@ def main():
             cluster *= 2
 
         esp_offset = 24 * mkiso.ISO_SECTOR
+        expected = None
         with open(out_iso, 'wb') as fh:
             fh.write(b'\x00' * esp_offset)
             size = mkiso.build_fat(root, fh, cluster)
             tail = fh.tell() % mkiso.ISO_SECTOR
             if tail:
                 fh.write(b'\x00' * (mkiso.ISO_SECTOR - tail))
+            expected = fh.tell()
+        # A short write means the host disk filled underneath us, and the
+        # firmware's complaint about such an image ("Not Found") names
+        # nothing resembling the cause.
+        actual = out_iso.stat().st_size
+        if actual != expected:
+            raise SystemExit(
+                f"{out_iso} is {actual} bytes, wanted {expected} -- "
+                "the write did not complete; check free disk space"
+            )
         mkiso.build_iso(out_iso, esp_offset, size, 'GLADOS')
         print(f"[drive] staged {total / 1024 / 1024:.0f} MB as {out_iso}")
         iso = out_iso

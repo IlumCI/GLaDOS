@@ -11,6 +11,7 @@
 
 #![allow(dead_code)]
 
+use crate::serial_println;
 use core::ffi::c_void;
 
 pub type Status = usize;
@@ -476,6 +477,15 @@ pub fn read_file(bs: &BootServices, image: Handle, path: &str) -> Option<Blob> {
 
     let mut buf: *mut u8 = core::ptr::null_mut();
     if is_error((bs.allocate_pool)(MemoryType::LoaderData, size as usize, &mut buf)) {
+        // Distinct from "not there": the file exists and was measured, but
+        // the firmware had no contiguous pool this large. Reads as a missing
+        // model otherwise, which sends the operator chasing a copy that
+        // succeeded.
+        serial_println!(
+            "glados: {} is {} KiB but the firmware pool could not hold it",
+            path,
+            size / 1024
+        );
         unsafe { ((*file).close)(file) };
         return None;
     }
@@ -488,6 +498,12 @@ pub fn read_file(bs: &BootServices, image: Handle, path: &str) -> Option<Blob> {
         let mut want = total - done;
         let st = unsafe { ((*file).read)(file, &mut want, buf.add(done)) };
         if is_error(st) || want == 0 {
+            serial_println!(
+                "glados: {} read ended at {}/{} bytes",
+                path,
+                done,
+                total
+            );
             unsafe { ((*file).close)(file) };
             let _ = (bs.free_pool)(buf);
             return None;

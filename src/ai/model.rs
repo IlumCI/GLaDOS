@@ -916,6 +916,41 @@ impl State {
                 + self.moe_gu.len());
         4 * floats + cache + recur + scratch
     }
+
+    /// What `new` will allocate for this config, computable before anything
+    /// is allocated. The heap pre-flight needs the number first; `bytes` on
+    /// a live state stays the ground truth, so init compares the two once
+    /// per boot -- if a future field lands in one and not the other, that is
+    /// a printed warning rather than a panic on whatever machine had least
+    /// room to spare.
+    pub fn requirement(cfg: &Config) -> usize {
+        let kv = cfg.kv_dim();
+        let cap = cfg.live_cap();
+        let hyb = cfg.hybrid();
+        let floats = cfg.dim * 2
+            + cfg.dim.max(cfg.q_dim())
+            + cfg.q_dim()
+            + cfg.hidden_dim * 2
+            + kv * 2
+            + cfg.n_heads * cap
+            + cfg.vocab_size
+            + cap * kv
+            + cap * cfg.head_dim;
+        let cache = 2 * cfg.n_full_layers()
+            * (cap * kv + cap * kv.div_ceil(KV_BLOCK) * 4);
+        let recur = 4 * cfg.n_linear_layers() * (cfg.lin_state_len() + cfg.conv_ring_len());
+        let scratch = 4
+            * ((if hyb { cfg.conv_dim() } else { 0 })
+                + (if hyb { cfg.lin_v_dim() } else { 0 })
+                + (if hyb { cfg.lin_v_heads } else { 0 })
+                + (if hyb { cfg.lin_v_heads } else { 0 })
+                + (if hyb { cfg.lin_v_dim() } else { 0 })
+                + (if hyb { cfg.lin_v_head } else { 0 })
+                + (if hyb { 2 * cfg.q_dim() } else { 0 })
+                + cfg.n_experts
+                + (if cfg.n_experts > 0 { 2 * cfg.hidden_dim } else { 0 }));
+        4 * floats + cache + recur + scratch
+    }
 }
 
 /// Size of the llama2.c legacy header: seven i32.

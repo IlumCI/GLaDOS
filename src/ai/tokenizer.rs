@@ -37,6 +37,24 @@ pub const FLAG_INDIVIDUAL_DIGITS: u32 = 1 << 1;
 pub const FLAG_SPLIT_CL100K: u32 = 1 << 2;
 pub const FLAG_SPLIT_CL100KM: u32 = 1 << 3;
 
+/// Why a tokenizer file was refused. The distinction matters at boot: a
+/// truncated file means the copy to the ESP failed, while a vocabulary
+/// mismatch means two files from different checkpoints were staged together.
+/// Both used to be the same `None`, which read as whichever failure the
+/// operator was not having.
+#[derive(Clone, Copy, Debug)]
+pub enum TokError {
+    /// The file ends before its own structure says it should.
+    Truncated,
+    /// A v2 file whose version field is not ours.
+    BadVersion,
+    /// The vocabulary parses, but is not the one this model was trained
+    /// with. Carries both counts, because "151936 vs 248320" names the
+    /// mistake -- someone staged the wrong checkpoint's tokenizer -- where
+    /// "rejected" does not.
+    VocabMismatch { have: usize, want: usize },
+}
+
 /// `\p{M}` -- general categories Mn, Mc and Me -- as a sorted table of
 /// inclusive codepoint ranges. Rust's `core` has no per-character general
 /// category, so this carries the one class the marks pre-tokenizer needs.
@@ -148,61 +166,83 @@ pub struct Tokenizer {
 impl Tokenizer {
     /// Parse either format. v2 announces itself; the legacy llama2.c layout
     /// has no magic and starts straight into an i32.
-    pub fn from_bytes(data: &[u8], vocab_size: usize) -> Option<Self> {
+    ///
+    /// `vocab_size` is the model's, and the parsed vocabulary is held to it.
+    /// The v2 header carries its own count, so nothing forces the two to
+    /// agree -- a tokenizer from a different checkpoint parses cleanly and
+    /// then hands the model ids that name different rows of the embedding,
+    /// or ids past it entirely. Both are fluent nonsense rather than errors.
+    pub fn from_bytes(data: &[u8], vocab_size: usize) -> Result<Self, TokError> {
         if data.len() >= 8 && &data[0..8] == V2_MAGIC {
-            Self::from_v2(data)
+            Self::from_v2(data, vocab_size)
         } else {
             Self::from_legacy(data, vocab_size)
         }
     }
 
-    fn from_v2(data: &[u8]) -> Option<Self> {
+    fn from_v2(data: &[u8], vocab_size: usize) -> Result<Self, TokError> {
         let u32_at = |o: usize| -> Option<u32> {
             if o + 4 > data.len() {
                 return None;
             }
             Some(u32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]))
         };
-        if u32_at(8)? != V2_VERSION {
-            return None;
+        if u32_at(8).ok_or(TokError::Truncated)? != V2_VERSION {
+            return Err(TokError::BadVersion);
         }
-        let size = u32_at(12)? as usize;
-        let max_token_length = u32_at(16)? as usize;
-        let flags = u32_at(20)?;
-        let bos_id = u32_at(24)? as usize;
-        let eos_id = u32_at(28)? as usize;
-        let _unk = u32_at(32)? as usize;
+        let size = u32_at(12).ok_or(TokError::Truncated)? as usize;
+        let max_token_length = u32_at(16).ok_or(TokError::Truncated)? as usize;
+        let flags = u32_at(20).ok_or(TokError::Truncated)?;
+        let bos_id = u32_at(24).ok_or(TokError::Truncated)? as usize;
+        let eos_id = u32_at(28).ok_or(TokError::Truncated)? as usize;
+        let _unk = u32_at(32).ok_or(TokError::Truncated)? as usize;
+
+        // The check that used to be missing. A v2 file carried its own count
+        // and was believed. Only one direction is dangerous: ids past the
+        // model's vocabulary read outside the embedding. The other direction
+        // is ordinary -- checkpoints pad their vocabulary up round numbers,
+        // and q35 pairs 248070 pieces with 248320 rows -- so it passes with
+        // a note at init rather than a refusal here.
+        if size > vocab_size {
+            return Err(TokError::VocabMismatch { have: size, want: vocab_size });
+        }
 
         let mut o = 36;
         let mut byte_table = Vec::new();
-        byte_table.try_reserve_exact(256).ok()?;
+        byte_table.try_reserve_exact(256).ok().ok_or(TokError::Truncated)?;
         for i in 0..256 {
-            byte_table.push(u32_at(o + i * 4)?);
+            byte_table.push(u32_at(o + i * 4).ok_or(TokError::Truncated)?);
         }
         o += 256 * 4;
 
-        let n_specials = u32_at(o)? as usize;
+        let n_specials = u32_at(o).ok_or(TokError::Truncated)? as usize;
         o += 4;
+        // A corrupt count must not become an allocation request. The largest
+        // real vocabulary here is under 250k entries of four bytes; anything
+        // asking for more than the whole file could hold is truncation.
+        if n_specials > data.len() / 4 + 1 {
+            return Err(TokError::Truncated);
+        }
         let mut specials = Vec::new();
-        specials.try_reserve_exact(n_specials).ok()?;
+        specials.try_reserve_exact(n_specials).ok().ok_or(TokError::Truncated)?;
         for i in 0..n_specials {
-            specials.push(u32_at(o + i * 4)?);
+            specials.push(u32_at(o + i * 4).ok_or(TokError::Truncated)?);
         }
         o += n_specials * 4;
 
         let mut vocab = Vec::new();
         let mut scores = Vec::new();
-        vocab.try_reserve_exact(size).ok()?;
-        scores.try_reserve_exact(size).ok()?;
+        vocab.try_reserve_exact(size).ok().ok_or(TokError::Truncated)?;
+        scores.try_reserve_exact(size).ok().ok_or(TokError::Truncated)?;
         for _ in 0..size {
             if o + 8 > data.len() {
-                return None;
+                return Err(TokError::Truncated);
             }
             let score = f32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]);
             let len = u32::from_le_bytes([data[o + 4], data[o + 5], data[o + 6], data[o + 7]]) as usize;
             o += 8;
             if o + len > data.len() {
-                return None;
+                return Err(TokError::Truncated);
             }
             vocab.push(data[o..o + len].to_vec());
             scores.push(score);
@@ -212,7 +252,7 @@ impl Tokenizer {
         let mut sorted: Vec<u32> = (0..size as u32).collect();
         sorted.sort_by(|a, b| vocab[*a as usize].cmp(&vocab[*b as usize]));
 
-        Some(Self {
+        Ok(Self {
             vocab,
             scores,
             sorted,
@@ -226,9 +266,9 @@ impl Tokenizer {
         })
     }
 
-    fn from_legacy(data: &[u8], vocab_size: usize) -> Option<Self> {
+    fn from_legacy(data: &[u8], vocab_size: usize) -> Result<Self, TokError> {
         if data.len() < 4 {
-            return None;
+            return Err(TokError::Truncated);
         }
         let max_token_length =
             i32::from_le_bytes([data[0], data[1], data[2], data[3]]).max(0) as usize;
@@ -238,17 +278,17 @@ impl Tokenizer {
         let mut o = 4usize;
         for _ in 0..vocab_size {
             if o + 8 > data.len() {
-                return None;
+                return Err(TokError::Truncated);
             }
             let score = f32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]);
             let len = i32::from_le_bytes([data[o + 4], data[o + 5], data[o + 6], data[o + 7]]);
             o += 8;
             if len < 0 {
-                return None;
+                return Err(TokError::Truncated);
             }
             let len = len as usize;
             if o + len > data.len() {
-                return None;
+                return Err(TokError::Truncated);
             }
             vocab.push(data[o..o + len].to_vec());
             scores.push(score);
@@ -258,7 +298,7 @@ impl Tokenizer {
         let mut sorted: Vec<u32> = (0..vocab_size as u32).collect();
         sorted.sort_by(|a, b| vocab[*a as usize].cmp(&vocab[*b as usize]));
 
-        Some(Self {
+        Ok(Self {
             vocab,
             scores,
             sorted,
