@@ -1,0 +1,165 @@
+/* Layout taken from linux.org as it stood in 2005: a coloured masthead, a thin
+   navigation bar under it, a left column of boxed sections, and a white content
+   well. The GLaDOS site uses the same skeleton in Aperture orange; that palette
+   belongs to the operating system, so this one is the blue-grey the kernel and
+   Debian sites wore in the same period.
+
+   Fluid rather than the original's fixed 850px. That width existed because
+   screens were 1024x768. Reproducing it on a modern display is not period
+   accuracy, it is a narrow strip of text between two fields of grey. */
+
+body {
+  background: #e6e8ec;
+  color: #000;
+  margin: 0;
+  padding: 0;
+  font-family: Verdana, Arial, sans-serif;
+  font-size: 15px;
+  line-height: 1.62;
+}
+
+a { color: #22437f; }
+a:visited { color: #55366b; }
+a:hover { color: #c1440e; }
+
+#page {
+  width: 100%;
+  background: #fff;
+}
+
+#masthead {
+  background: #33507a;
+  padding: 13px 18px;
+  overflow: hidden;
+}
+#masthead .name {
+  color: #fff;
+  font-size: 26px;
+  font-weight: bold;
+  text-decoration: none;
+}
+#masthead .sub {
+  color: #c9d5e8;
+  font-size: 14px;
+  display: block;
+  margin-top: 2px;
+}
+
+#bar {
+  background: #dde3ec;
+  border-top: 1px solid #33507a;
+  border-bottom: 1px solid #33507a;
+  padding: 5px 18px;
+  font-size: 13px;
+}
+#bar a { text-decoration: none; }
+#bar a:hover { text-decoration: underline; }
+
+#body { overflow: hidden; padding: 14px 18px 26px; }
+#sidebar { float: left; width: 210px; }
+/* 48em is about 90 characters at this size. The 2005 originals ran narrower
+   still, at 850px fixed for a 1024x768 screen; this is that measure without the
+   fixed pixel width. */
+#content { margin-left: 230px; max-width: 48em; }
+
+/* Sidebar boxes: coloured caption, tinted body, one hairline border. */
+.box { margin-bottom: 10px; }
+.box .t {
+  background: #33507a;
+  color: #fff;
+  font-size: 13px;
+  font-weight: bold;
+  padding: 3px 7px;
+}
+.box ul {
+  margin: 0;
+  padding: 6px 6px 7px 24px;
+  background: #eef1f6;
+  border: 1px solid #b9c2d0;
+  border-top: 0;
+  font-size: 13px;
+  list-style: square;
+}
+.box li { margin: 3px 0; }
+.box a { text-decoration: none; }
+.box a:hover { text-decoration: underline; }
+.box ul.plain { list-style: none; padding-left: 8px; }
+
+h1 {
+  font-size: 22px;
+  font-weight: bold;
+  color: #33507a;
+  border-bottom: 1px solid #b9c2d0;
+  margin: 26px 0 10px;
+  padding-bottom: 3px;
+}
+#content h1:first-child { margin-top: 2px; }
+
+p { margin: 0 0 12px; }
+
+p.lead {
+  background: #eef1f6;
+  border-left: 4px solid #33507a;
+  padding: 7px 10px;
+  margin-bottom: 12px;
+}
+
+#content ul { margin: 0 0 12px; padding-left: 22px; list-style: square; }
+#content li { margin: 6px 0; }
+
+code {
+  font-family: "Courier New", Courier, monospace;
+  font-size: 14px;
+  background: #f2f4f8;
+  padding: 0 2px;
+}
+
+/* Definition-style table: a label column that stays narrow, prose to its right.
+   A table rather than a <dl> because the 2005 web used tables and because this
+   one is genuinely two columns of data. */
+table.facts {
+  border-collapse: collapse;
+  margin: 0 0 14px;
+  width: 100%;
+}
+table.facts th {
+  text-align: left;
+  vertical-align: top;
+  font-weight: bold;
+  white-space: nowrap;
+  background: #eef1f6;
+  border: 1px solid #b9c2d0;
+  padding: 5px 9px;
+  width: 1%;
+  font-size: 14px;
+}
+table.facts td {
+  vertical-align: top;
+  border: 1px solid #b9c2d0;
+  padding: 5px 9px;
+  font-size: 14px;
+}
+
+p.tail {
+  margin-top: 20px;
+  padding-top: 10px;
+  border-top: 1px solid #d5dae2;
+  color: #4a4a4a;
+  font-size: 13px;
+}
+
+#foot {
+  background: #dde3ec;
+  border-top: 1px solid #33507a;
+  padding: 8px 18px;
+  font-size: 12px;
+  color: #333;
+}
+
+/* One breakpoint. Below it the sidebar stops being a column and becomes a
+   header block, which is all a phone can do with 210 pixels of navigation. */
+@media (max-width: 700px) {
+  #sidebar { float: none; width: auto; }
+  #content { margin-left: 0; }
+  #bar { line-height: 2; }
+}

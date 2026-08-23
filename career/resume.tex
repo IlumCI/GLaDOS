@@ -1,0 +1,163 @@
+% Arron Leilion -- resume.
+%
+% Build:  pdflatex resume.tex   (run it twice; hyperref wants a second pass)
+% Overleaf: upload this file alone and hit recompile. Every package used here
+% ships with a stock TeX Live, and none of them is a CV template -- moderncv and
+% altacv are recognisable at a glance and a large share of the applicant pool
+% arrives wearing one.
+%
+% Editing: the content is all in the body below. \entry takes
+% {role}{organisation}{location}{dates} and \project takes {name}{url}{what it
+% is}; nothing needs tabular alignment by hand.
+%
+% Per-application emphasis: the order of the \project entries is the only thing
+% worth changing between applications. Systems and Rust roles want GLaDOS first
+% (it already is). Agent and orchestration roles want CR-CA and the Swarms
+% bullets read first, so move the projects block below Experience and lead the
+% summary with the 89%.
+
+\documentclass[10pt,a4paper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{charter}
+\usepackage[a4paper,top=13mm,bottom=12mm,left=16mm,right=16mm]{geometry}
+\usepackage{xcolor}
+\usepackage[hidelinks]{hyperref}
+
+\definecolor{rule}{gray}{0.72}
+\definecolor{muted}{gray}{0.35}
+
+\pagestyle{empty}
+\setlength{\parindent}{0pt}
+\linespread{1.02}
+
+% Headings and list spacing are hand-rolled rather than done with titlesec and
+% enumitem. Both are ordinary packages, but a resume that compiles on a bare
+% texlive-latex-base is one less thing to debug at the wrong moment.
+% Bold rather than small caps: pdftotext pulls a small-caps heading out as
+% "E XPERIENCE", and section detection is one of the few things an ATS parser
+% genuinely does.
+\newcommand{\sect}[1]{%
+  \vspace{9pt}{\normalsize\bfseries #1}\par
+  \vspace{2pt}{\color{rule}\hrule height 0.5pt}\vspace{5pt}}
+
+\newenvironment{bullets}%
+  {\begin{list}{\textbullet}{%
+     \setlength{\leftmargin}{11pt}\setlength{\labelwidth}{7pt}%
+     \setlength{\labelsep}{4pt}\setlength{\itemsep}{1.2pt}%
+     \setlength{\parsep}{0pt}\setlength{\topsep}{2pt}%
+     \setlength{\partopsep}{0pt}}}%
+  {\end{list}}
+
+% One line: bold left, muted right, no tabular.
+\newcommand{\headline}[2]{%
+  \textbf{#1}\hfill{\color{muted}#2}\par}
+
+\newcommand{\entry}[4]{%
+  \headline{#1, #2}{#4}%
+  {\color{muted}#3}\par\vspace{2pt}}
+
+% Charter sets "C++" with a visible gap between the plusses; kern them back in.
+\newcommand{\cpp}{C\kern-.06em\raisebox{.12ex}{+}\kern-.12em\raisebox{.12ex}{+}}
+
+\newcommand{\project}[3]{%
+  \textbf{#1}\enspace{\color{muted}\href{https://#2}{#2}}\par
+  #3\par\vspace{3.5pt}}
+
+\begin{document}
+
+%% ---------------------------------------------------------------- header ----
+{\LARGE\bfseries Arron Leilion}\par\vspace{3pt}
+{\small
+Vilnius, Lithuania \quad\textbullet\quad +370 665 14109 \quad\textbullet\quad
+\href{mailto:a.leilion@euroswarms.eu}{a.leilion@euroswarms.eu}\par\vspace{1pt}
+\href{https://github.com/IlumCI}{github.com/IlumCI} \quad\textbullet\quad
+\href{https://www.linkedin.com/in/arron-leilion-37a699350/}{linkedin.com/in/arron-leilion} \quad\textbullet\quad
+\href{https://euroswarms.eu/}{euroswarms.eu}\par}
+\vspace{4pt}
+{\color{rule}\hrule height 0.6pt}
+\vspace{2pt}
+
+%% --------------------------------------------------------------- summary ----
+Systems and AI engineer. A year on multi-agent orchestration at Swarms
+Corporation, where routing and orchestration work cut inference spend by 89\%
+and took workflow execution to 118$\times$ its previous speed; since then, a
+ring-0 operating system in Rust with a language model running inside the kernel
+and every layer under it written from scratch. Equally at home in model
+internals and in the machine underneath them.
+
+%% ------------------------------------------------------------ experience ----
+\sect{Experience}
+
+\entry{AI/ML Engineer}{Swarms Corporation}{Remote}{Aug 2025 -- Jul 2026}
+\begin{bullets}
+  \item Cut large-scale API and inference spend by 89\%, through routing
+        optimisation, an orchestration redesign, and efficiency work at the
+        infrastructure level.
+  \item Took multi-agent workflow execution to 118$\times$ its previous speed
+        while bringing running cost to 21\% of the original baseline.
+  \item Designed reasoning architectures and orchestration methods for
+        multi-agent systems, and landed them in the shipping framework rather
+        than leaving them as prototypes.
+  \item Turned arXiv papers into working systems and internal tooling.
+\end{bullets}
+\vspace{4pt}
+
+\headline{Independent systems and AI research}{Aug 2026 -- present}
+{\color{muted}Vilnius}\par\vspace{2pt}
+Full time on the work below: an operating system, a local inference runtime, and
+CPU inference for models too large to hold in memory at once.
+
+%% -------------------------------------------------------------- projects ----
+\sect{Selected work}
+
+\project{GLaDOS}{github.com/IlumCI/GLaDOS}{%
+Ring-0 operating system in Rust for one specific laptop. No Unix inheritance,
+no syscalls, no user/kernel split: a tool call from the model is a function
+call. Qwen3-0.6B runs int8 in kernel space. Everything beneath it is written
+from scratch as well: TLS 1.3, X25519, ChaCha20, ECDSA over P-256, a TCP/IP
+stack, NVMe, a content-addressed store, and a composited window manager. The
+cryptography is checked against published RFC vectors on every boot. 40,000
+lines; the only borrowed code is 509 hardware constants no datasheet publishes.}
+
+\project{RustLMHub}{github.com/IlumCI/RustLMHub}{%
+Inference and training engine in Rust on the premise that a model should only
+have to fit on the drive, not in memory: FFN weights stream from NVMe through
+\texttt{O\_DIRECT} while attention stays resident. GGUF k-quants, dense and MoE,
+CPU only, nothing borrowed from PyTorch or llama.cpp. Int8 activation kernels
+(2.3--2.55$\times$ on matmul), speculative decoding off the model's own
+multi-token head, and activation sparsity that skips up to 27.6\% of neurons
+only where the result is provably unchanged. 267 tests, differential against
+reference implementations. Fine-tunes a 27B model on 16 GB of RAM.}
+
+\project{kimi-k3-in-rust}{github.com/IlumCI/kimi-k3-in-rust}{%
+Runs Kimi K3, 2.78 trillion parameters and 1.56 TB of weights, on one CPU with
+8.24 GB of RAM. Routing leaves 96.3\% of experts dormant per token, so they live
+on disk behind an LRU cache instead of in memory. Output is byte-identical from
+8 GB to 224 GB; only the seconds per token move. Portable C99, no BLAS, no GPU.}
+
+\project{CR-CA and Stable Cognition}{github.com/IlumCI}{%
+Research frameworks: causal inference with counterfactual analysis for
+autonomous agents, and a long-context reasoning architecture built to be
+extended rather than retrained.}
+
+{\color{muted}138 public repositories; 387 merged pull requests across
+open-source and commercial work.}
+
+%% ---------------------------------------------------------------- skills ----
+\sect{Technical skills}
+\textbf{Languages:} Rust, Python, C, \cpp, Go, TypeScript, SQL\par\vspace{1pt}
+\textbf{Models:} transformer internals (attention geometry, RoPE, RMSNorm,
+tokenizers), int8 quantisation, KV-cache budgeting, constrained decoding,
+inference optimisation, multi-agent orchestration, PyTorch\par\vspace{1pt}
+\textbf{Systems:} \texttt{no\_std} and UEFI, x86-64, memory management, TCP/IP,
+applied cryptography, NVMe and PCIe, Linux, FastAPI, distributed
+infrastructure\par
+
+%% ------------------------------------------------------------- education ----
+\sect{Education}
+\headline{Vilnius ``Vy\v{c}io'' Gymnasium}{Vilnius, Lithuania}
+{\color{muted}Secondary education completed.}
+
+\end{document}

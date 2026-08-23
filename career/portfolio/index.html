@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Arron Leilion</title>
+<meta name="description" content="Arron Leilion, systems and AI engineer in Vilnius. Operating systems in Rust, language models where they are not supposed to fit, multi-agent orchestration.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="page">
+
+  <div id="masthead">
+    <a class="name" href="index.html">Arron Leilion</a>
+    <span class="sub">systems and AI engineer &nbsp;/&nbsp; Vilnius, Lithuania</span>
+  </div>
+
+  <div id="bar">
+    <a href="#overview">Overview</a> &nbsp;|&nbsp;
+    <a href="#glados">GLaDOS</a> &nbsp;|&nbsp;
+    <a href="#inference">Inference</a> &nbsp;|&nbsp;
+    <a href="#swarms">Orchestration</a> &nbsp;|&nbsp;
+    <a href="#method">How it gets built</a> &nbsp;|&nbsp;
+    <a href="#contact">Contact</a>
+  </div>
+
+  <div id="body">
+
+    <div id="sidebar">
+      <div class="box">
+        <div class="t">Contents</div>
+        <ul>
+          <li><a href="#overview">Overview</a></li>
+          <li><a href="#glados">GLaDOS</a></li>
+          <li><a href="#inference">Inference on hardware that should not fit it</a></li>
+          <li><a href="#swarms">Orchestration at Swarms</a></li>
+          <li><a href="#method">How it gets built</a></li>
+          <li><a href="#contact">Contact</a></li>
+        </ul>
+      </div>
+
+      <div class="box">
+        <div class="t">Elsewhere</div>
+        <ul>
+          <li><a href="https://github.com/IlumCI">github.com/IlumCI</a></li>
+          <li><a href="https://www.linkedin.com/in/arron-leilion-37a699350/">LinkedIn</a></li>
+          <li><a href="https://euroswarms.eu/">euroswarms.eu</a></li>
+          <li><a href="resume.pdf">Resume (PDF)</a></li>
+        </ul>
+      </div>
+
+      <div class="box">
+        <div class="t">At a glance</div>
+        <ul class="plain">
+          <li>Rust, Python, C, C++, Go, TypeScript</li>
+          <li>Kernels, inference engines, agent systems</li>
+          <li>138 public repositories</li>
+          <li>387 merged pull requests</li>
+          <li>Available now, remote or Vilnius</li>
+        </ul>
+      </div>
+    </div>
+
+    <div id="content">
+
+      <h1 id="overview">Overview</h1>
+
+      <p>I write systems software and I work on language models, and the
+      interesting part is where those two stop being separate jobs. In the last
+      year that has meant an operating system in Rust with a model running
+      inside the kernel, an inference engine that streams weights off an SSD so
+      that a 2.78-trillion-parameter model runs on a laptop, and a year of
+      multi-agent orchestration work that took one company's inference bill
+      down by 89 percent.</p>
+
+      <p>Nothing on this page is a plan or a proposal. Every claim below has a
+      repository behind it, and where there is a number it was measured rather
+      than estimated.</p>
+
+      <table class="facts">
+        <tr><th>Now</th><td>Independent systems and AI research, Vilnius. Open to work.</td></tr>
+        <tr><th>Aug 2025 &ndash; Jul 2026</th><td>AI/ML Engineer, Swarms Corporation (remote).</td></tr>
+        <tr><th>Languages</th><td>Rust, Python, C, C++, Go, TypeScript, SQL.</td></tr>
+        <tr><th>Comfortable in</th><td><code>no_std</code> and UEFI, x86-64, transformer internals, quantisation, TCP/IP, applied cryptography.</td></tr>
+      </table>
+
+      <h1 id="glados">GLaDOS</h1>
+      <p class="lead"><a href="https://github.com/IlumCI/GLaDOS">github.com/IlumCI/GLaDOS</a>
+      &nbsp;&middot;&nbsp; a ring-0 operating system in Rust, built around a
+      language model that lives inside the kernel.</p>
+
+      <p>GLaDOS is not a Unix. There is no user/kernel split, no syscall
+      boundary, no process isolation and one address space. That sounds like a
+      shortcut and is the opposite of one: it is the arrangement in which a tool
+      call from the model is a function call, with no marshalling and nothing to
+      cross. The model does not sit on top of the operating system. It is a
+      component of it, on the same footing as the scheduler.</p>
+
+      <p>Because there is no libc and no Unix to inherit from, everything below
+      the model is also mine:</p>
+
+      <ul>
+        <li><b>Inference in kernel space.</b> Qwen3-0.6B, int8, referenced in
+        place in the firmware pool rather than copied to the heap, because
+        570&nbsp;MB copied twice is 570&nbsp;MB you do not have. Qwen3.5
+        hybrids load too, through a separate checkpoint format that carries the
+        layer schedule explicitly instead of inferring it.</li>
+
+        <li><b>Cryptography from scratch.</b> TLS 1.3, X25519, ChaCha20-Poly1305,
+        SHA-2, ECDSA over P-256 and P-384, RSA. Primitives were chosen for how
+        checkable they are rather than how fashionable: ChaCha20 over AES-GCM
+        because it has no key-dependent table lookups. Eleven sets of published
+        RFC vectors run at every boot, because this is the one area where
+        writing it yourself is a liability, not a virtue. A broken
+        implementation here produces output that works perfectly and is not
+        secure.</li>
+
+        <li><b>A network stack.</b> Ethernet, ARP, IPv4, TCP, UDP, DHCP, DNS,
+        drivers for e1000 and RTL8168, and a WPA2 supplicant verified against
+        the IEEE vectors. The polling layer queues rather than dispatching,
+        because a state machine driven from inside <code>poll</code> can
+        re-enter its own control block while a borrow is still live.</li>
+
+        <li><b>Storage.</b> NVMe, and a content-addressed object store where
+        files are named by the SHA-256 of their contents and assembled into
+        Merkle trees, so a copy is O(1) and a snapshot is one hash. Writes are
+        locked by default and every error path re-locks; a safety mechanism you
+        can leave open is decoration.</li>
+
+        <li><b>A desktop.</b> Composited window manager, a full pointer, and
+        three applications, drawn to a look borrowed from Windows 98, Windows
+        3.1 and the sign over the Aperture Science door. The scene is repainted
+        whole and then diffed against a shadow buffer, so correctness is
+        obvious and only changed rows reach the framebuffer.</li>
+      </ul>
+
+      <p>It is about 40,000 lines of Rust across 93 files. The only code in it
+      that I did not write is Rust's <code>core</code> and 509 hardware
+      initialisation constants for one wireless chipset, transcribed from Linux
+      because no datasheet publishes them, in one file that says so at the top.</p>
+
+      <h1 id="inference">Inference on hardware that should not fit it</h1>
+
+      <p class="lead"><a href="https://github.com/IlumCI/RustLMHub">RustLMHub</a>
+      &nbsp;&middot;&nbsp; if a model fits on the drive, it should run.</p>
+
+      <p>An inference and training engine in Rust with nothing underneath it:
+      no PyTorch, no llama.cpp, no CUDA, no BLAS. Feed-forward weights stream
+      from NVMe through <code>O_DIRECT</code>, bypassing the page cache, while
+      attention and embeddings stay resident. On the reference machine, an
+      i7-12650H with 16&nbsp;GB, that resident set is about 5.7&nbsp;GB and the
+      rest of the model is on the disk where it belongs.</p>
+
+      <p>What is in it, with the measurements that justified each piece:</p>
+      <ul>
+        <li>An int8 activation kernel: 2.3 to 2.55&times; on matmul.</li>
+        <li>Speculative decoding through the model's own multi-token-prediction
+        head, verified in a single forward pass: 1.23 to 1.28&times; on measured
+        prompts.</li>
+        <li>Certified activation sparsity, skipping up to 27.6 percent of
+        neurons only where the output is provably byte-identical.</li>
+        <li>LUT-GEMM for 4-bit weights on AVX2.</li>
+        <li>Fine-tuning a 27B model on 16&nbsp;GB by streaming frozen weights
+        and training adapters only.</li>
+        <li>267 tests, differential and bit-exact against reference
+        implementations.</li>
+      </ul>
+
+      <p class="lead"><a href="https://github.com/IlumCI/kimi-k3-in-rust">kimi-k3-in-rust</a>
+      &nbsp;&middot;&nbsp; 2.78 trillion parameters on 8&nbsp;GB of RAM.</p>
+
+      <p>Kimi K3's checkpoint is 1.56&nbsp;TB. Routing activates 16 experts of
+      896 per layer per token, which leaves 96.3 percent of the weights dormant
+      at any moment, which means they can be on disk behind an LRU cache
+      instead of in memory. The dense trunk is pinned as far as the memory
+      budget allows and streamed beyond it.</p>
+
+      <p>The property worth having is not the speed, it is that output is
+      byte-identical from 8&nbsp;GB to 224&nbsp;GB. More memory buys seconds per
+      token (26.5 down to 5.6) and buys nothing else. Portable C99, no
+      frameworks, no GPU.</p>
+
+      <h1 id="swarms">Orchestration at Swarms</h1>
+
+      <p>A year at Swarms Corporation, remote, on multi-agent orchestration:</p>
+      <ul>
+        <li>Large-scale API and inference spend down 89 percent, through
+        routing optimisation, an orchestration redesign, and efficiency work at
+        the infrastructure level.</li>
+        <li>Multi-agent workflow execution at 118&times; its previous speed,
+        with running cost at 21 percent of the original baseline.</li>
+        <li>Reasoning architectures and orchestration methods for multi-agent
+        systems, landed in the shipping framework rather than left as
+        prototypes.</li>
+        <li>arXiv papers turned into working systems and internal tooling.</li>
+      </ul>
+
+      <p>The research side of that continued on its own: <a
+      href="https://github.com/IlumCI">CR-CA</a> for causal inference and
+      counterfactual analysis in autonomous agents, and Stable Cognition for
+      long-context reasoning built to be extended rather than retrained.</p>
+
+      <h1 id="method">How it gets built</h1>
+
+      <p>Most of this is written with coding agents driving, and I would rather
+      say so on my own page than have someone work it out. Forty thousand lines
+      of kernel Rust in three weeks is not a typing speed I have. What it does
+      require is knowing what to ask for, reading everything that comes back,
+      and having an answer to the question the agent cannot answer: how would I
+      know if this were wrong?</p>
+
+      <p>That question is most of the work, because the failures in this
+      territory are quiet. GLaDOS spent weeks with its rotary position
+      embeddings pairing dimension <i>i</i> with <i>2i</i> instead of with
+      <i>i + d/2</i>. Both are norm-preserving rotations by the same angles, so
+      there was no NaN, no drift, no error and no crash. The model stayed
+      fluent and simply attended by a scrambled notion of distance, which is
+      indistinguishable from a small model being small. It cost the difference
+      between <i>"The capital of France."</i> and <i>"The capital of France is
+      Paris."</i> Nothing caught it but a numeric oracle in NumPy that the
+      kernel was made to agree with, token by token.</p>
+
+      <p>So the practices that matter here are not opinions:</p>
+      <ul>
+        <li><b>Every subsystem has an oracle.</b> The crypto has RFC vectors.
+        The model has a reference implementation in NumPy that reads the same
+        converted checkpoint, so a conversion bug shows up there too and only a
+        kernel bug shows as a mismatch. The tokenizer is diffed against the
+        reference library rather than eyeballed, because a tokenizer that is
+        subtly wrong produces text that still looks like text.</li>
+        <li><b>Selftests run at boot and print pass or fail per line.</b> There
+        is no host test runner for a UEFI binary, so the boot log is the test
+        suite. An ECDSA break sat visible in it for an entire debugging cycle
+        while I was slicing that output away, which is its own lesson about
+        what "we have tests" is worth.</li>
+        <li><b>Negative results stay in the tree.</b> Training an adapter head
+        hurt at this data scale. The Product-of-Experts council did not improve
+        accuracy. Both are still there, because the reason to know them is the
+        reason they were worth measuring.</li>
+        <li><b>Measurement gets designed before it gets trusted.</b> The
+        evaluation harness exists because the measurement was got wrong three
+        separate times: a grid sweep scored on the test set, cross-validation
+        folded by template family, and a test set that moved whenever the
+        corpus was appended to. Three splits now, validation spent freely, the
+        test slice read once.</li>
+      </ul>
+
+      <p>An agent will happily hand you a confident wrong answer at speed. The
+      job is to build the thing that disagrees with it.</p>
+
+      <h1 id="contact">Contact</h1>
+
+      <table class="facts">
+        <tr><th>Email</th><td><a href="mailto:a.leilion@euroswarms.eu">a.leilion@euroswarms.eu</a></td></tr>
+        <tr><th>Phone</th><td>+370 665 14109</td></tr>
+        <tr><th>GitHub</th><td><a href="https://github.com/IlumCI">github.com/IlumCI</a></td></tr>
+        <tr><th>LinkedIn</th><td><a href="https://www.linkedin.com/in/arron-leilion-37a699350/">arron-leilion</a></td></tr>
+        <tr><th>Location</th><td>Vilnius, Lithuania. Remote, hybrid, or relocation.</td></tr>
+      </table>
+
+      <p class="tail">Hand-written HTML and CSS. No JavaScript, no framework, no
+      build step, nothing loaded from anywhere else. I am not a frontend
+      developer and saw no reason to pretend otherwise; the layout is
+      linux.org as it stood in 2005, which was fine then and loads instantly
+      now.</p>
+
+    </div>
+  </div>
+
+  <div id="foot">
+    Arron Leilion &nbsp;&middot;&nbsp; Vilnius &nbsp;&middot;&nbsp;
+    <a href="mailto:a.leilion@euroswarms.eu">a.leilion@euroswarms.eu</a>
+  </div>
+
+</div>
+</body>
+</html>
