@@ -1,313 +1,296 @@
-/* Arron Leilion. One page, hand-set, no JavaScript.
+/* Arron Leilion, one page, no JavaScript.
 
-   The page is laid out as a printed technical document rather than as a
-   landing page: a centred sheet on a grey field, a masthead block, an
-   identification table, numbered sections with their numbers and margin notes
-   in a narrow left column, figures with plate numbers, data in real tables, and
-   a colophon at the end. That form was chosen because the alternative -- a
-   hero sentence, a row of oversized statistics, a sticky navigation bar and a
-   call to action -- is the shape every generated portfolio has, and this page
-   is meant to look like it was set by the person it describes.
+   The layout is linux.org as it stood in July 2005: a fixed-width frame in one
+   strong colour centred on a cream field, a logotype block at the top left, a
+   narrow left column of stacked navigation buttons with a plate and a small
+   table under them, and a white content well holding a two-column opening
+   block, then section headers with rules under them, bulleted lists, and small
+   data tables. That site used a dark red frame and 850 pixels; this one uses
+   Orange Box orange and 860, because the extra ten pixels are the difference
+   between 340-pixel columns and columns that fit.
 
-   Colour is the Orange Box: flat orange, black, paper. Orange never carries
-   text at body size (white on it fails contrast and black on it at small sizes
-   vibrates); it is a field for the masthead, a rule, and the section numerals.
-   One European blue, for links. */
+   Everything else follows from the period: Verdana at 13px, real tables, hard
+   edges, no rounded corners, no shadows, no gradients. The one deliberate
+   anachronism is that the frame reflows below 820px, because a 2005 site would
+   simply have overflowed the phone. */
 
 :root {
-  --orange: #f26522;
-  --orange-dk: #b8410d;
-  --ink: #14120f;
-  --paper: #fdfcfa;
-  --field: #d9d5cd;
-  --rule: #cbc5ba;
-  --rule-hard: #14120f;
-  --quiet: #5c564d;
-  --eu: #1b3f9c;
-
-  --text: Charter, "Bitstream Charter", "Sitka Text", Cambria, Georgia, serif;
-  --sans: "Helvetica Neue", Helvetica, Arial, "Liberation Sans", sans-serif;
-  --mono: ui-monospace, "SF Mono", Menlo, Consolas, "DejaVu Sans Mono", monospace;
+  --frame: #a8390a;     /* the dark field, where the red was */
+  --orange: #f26522;    /* buttons, rules, header underlines */
+  --orange-lt: #ffb27a; /* small text on the dark field */
+  --cream: #f4f1bc;     /* the page behind the frame, straight from the original */
+  --ink: #000;
+  --quiet: #666;
+  --hair: #c8c8c8;
+  --sans: Verdana, Geneva, Arial, Helvetica, sans-serif;
+  --head: Arial, Helvetica, sans-serif;
+  --mono: "Courier New", Courier, monospace;
 }
 
 * { box-sizing: border-box; }
 
 body {
   margin: 0;
-  padding: 34px 20px 60px;
-  background: var(--field);
+  padding: 16px 10px 28px;
+  background: var(--cream);
   color: var(--ink);
-  font-family: var(--text);
-  font-size: 17px;
-  line-height: 1.58;
+  font-family: var(--sans);
+  font-size: 13px;
+  line-height: 1.55;
   -webkit-text-size-adjust: 100%;
 }
 
-.sheet {
-  max-width: 900px;
+#frame {
+  width: 860px;
+  max-width: 100%;
   margin: 0 auto;
-  background: var(--paper);
-  border: 1px solid #b9b2a6;
-  padding: 0 0 34px;
+  background: var(--frame);
 }
 
-a { color: var(--eu); text-decoration: underline; text-underline-offset: 2px; }
-a:hover { color: var(--orange-dk); }
+a { color: #1a4f9c; }
+a:visited { color: #5a2d7a; }
+a:hover { color: #b8410d; }
 
-/* ------------------------------------------------------------- masthead -- */
+/* ------------------------------------------------------------- logotype -- */
 
-.masthead {
+#logo { padding: 14px 16px 12px; }
+#logo a {
+  display: block;
+  font-family: var(--head);
+  font-size: 40px;
+  line-height: 1;
+  font-weight: bold;
+  letter-spacing: -0.03em;
+  color: #fff;
+  text-decoration: none;
+}
+#logo a:hover { color: var(--orange-lt); }
+#logo span {
+  display: block;
+  margin-top: 5px;
+  font-size: 12px;
+  color: var(--orange-lt);
+  letter-spacing: 0.04em;
+}
+
+#cols { display: flex; align-items: stretch; }
+
+/* ------------------------------------------------------- navigation rail -- */
+
+#nav {
+  width: 150px;
+  flex: none;
+  padding: 0 10px 16px;
+  border-top: 1px solid var(--orange);
+}
+#nav a {
+  display: block;
+  width: 130px;
+  margin: 2px 0 0;
+  padding: 4px 8px;
   background: var(--orange);
   color: var(--ink);
-  padding: 30px 40px 26px;
-  border-bottom: 3px solid var(--ink);
-}
-h1 {
-  font-family: var(--sans);
-  font-size: clamp(34px, 5.4vw, 52px);
-  line-height: 1;
-  letter-spacing: -0.035em;
-  font-weight: 700;
-  margin: 0;
-}
-.masthead .sub {
-  margin: 12px 0 0;
-  max-width: 46ch;
-  font-size: 18px;
-  line-height: 1.4;
-}
-
-/* Identification block, set the way a datasheet sets one: label, value, twice
-   across, hairlines between. */
-table.ident {
-  width: 100%;
-  border-collapse: collapse;
-  font-family: var(--mono);
-  font-size: 13px;
-  border-bottom: 1px solid var(--rule);
-}
-table.ident th,
-table.ident td {
-  text-align: left;
-  vertical-align: baseline;
-  padding: 8px 14px;
-  border-top: 1px solid var(--rule);
-  font-weight: normal;
-}
-table.ident th {
-  width: 78px;
-  color: var(--quiet);
-  text-transform: uppercase;
-  letter-spacing: 0.09em;
-  font-size: 11px;
-  white-space: nowrap;
-}
-table.ident td { width: 42%; }
-table.ident tr > th:first-child { padding-left: 40px; }
-table.ident tr > td:last-child { padding-right: 40px; }
-
-table.ident.bottom {
-  border-top: 1px solid var(--rule);
-  margin-top: 18px;
-}
-table.ident.bottom tr > th:first-child { padding-left: 0; }
-table.ident.bottom tr > td:last-child { padding-right: 0; }
-
-/* ------------------------------------------------------------------ toc -- */
-
-nav.toc { padding: 22px 40px 4px; }
-nav.toc ol { list-style: none; margin: 0; padding: 0; }
-nav.toc li { border-bottom: 1px dotted var(--rule); }
-nav.toc a {
-  display: flex;
-  gap: 16px;
-  align-items: baseline;
-  padding: 7px 0;
-  text-decoration: none;
-  color: var(--ink);
-  font-size: 16px;
-}
-nav.toc a:hover { color: var(--orange-dk); }
-nav.toc span {
-  font-family: var(--mono);
+  font-family: var(--head);
   font-size: 12px;
-  color: var(--orange-dk);
-  width: 18px;
-  flex: none;
+  font-weight: bold;
+  text-decoration: none;
+  border: 1px solid #7a2a06;
 }
+#nav a:hover { background: var(--ink); color: var(--orange); }
+#nav .gap { height: 12px; }
 
-/* -------------------------------------------------------------- sections -- */
-
-.sec {
-  display: grid;
-  grid-template-columns: 116px minmax(0, 1fr);
-  gap: 0 30px;
-  padding: 34px 40px 6px;
-  scroll-margin-top: 20px;
-}
-.lede { padding-top: 4px; }
-.num {
+/* Where the 2005 original put a book cover, a screenshot with a caption. */
+#nav .plate { width: 130px; margin: 16px 0 0; }
+#nav .plate img { display: block; width: 130px; height: auto; border: 1px solid #000; }
+#nav .plate span {
   display: block;
-  font-family: var(--mono);
-  font-size: 30px;
-  line-height: 1;
-  color: var(--orange);
-  border-top: 3px solid var(--orange);
-  padding-top: 8px;
-}
-.note {
-  font-family: var(--mono);
-  font-size: 11.5px;
-  line-height: 1.55;
-  color: var(--quiet);
-  margin: 14px 0 0;
+  margin-top: 4px;
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--orange-lt);
 }
 
-.body > *:first-child { margin-top: 0; }
+#nav .vitals { width: 130px; margin: 16px 0 0; }
+#nav .vitals b {
+  display: block;
+  font-family: var(--head);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #fff;
+  border-bottom: 1px solid var(--orange);
+  padding-bottom: 2px;
+  margin-bottom: 4px;
+}
+#nav .vitals table { width: 100%; border-collapse: collapse; font-size: 10px; }
+#nav .vitals td { padding: 1px 0; color: var(--orange-lt); vertical-align: top; }
+#nav .vitals td + td { text-align: right; color: #fff; }
+#nav .vitals td.hot { color: #fff; background: var(--orange); padding: 0 3px; }
+
+/* ----------------------------------------------------------- content well -- */
+
+#main {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: #fff;
+  border-top: 1px solid var(--orange);
+  padding: 12px 16px 22px;
+}
 
 h2 {
-  font-family: var(--sans);
-  font-size: 27px;
-  line-height: 1.15;
-  letter-spacing: -0.022em;
-  font-weight: 700;
-  margin: 0 0 6px;
-  padding-top: 6px;
+  font-family: var(--head);
+  font-size: 15px;
+  font-weight: bold;
+  color: #a8390a;
+  margin: 22px 0 8px;
+  padding-bottom: 2px;
+  border-bottom: 2px solid var(--orange);
+  scroll-margin-top: 8px;
 }
+#main > .two:first-child h2:first-child,
+#main > h2:first-child { margin-top: 2px; }
+
 h3 {
-  font-family: var(--sans);
-  font-size: 19px;
-  letter-spacing: -0.015em;
-  margin: 34px 0 2px;
-  padding-top: 16px;
-  border-top: 1px solid var(--rule-hard);
-}
-p { margin: 0 0 15px; max-width: 66ch; }
-p.src {
-  font-family: var(--mono);
-  font-size: 12.5px;
-  color: var(--quiet);
-  margin: 0 0 18px;
-}
-.q { font-style: italic; }
-code {
-  font-family: var(--mono);
-  font-size: 0.88em;
-  background: #efeae1;
-  padding: 0 3px;
-}
-
-/* Definition lists carry the subsystem descriptions. Term in the sans, body in
-   the text face, one hairline per entry and nothing else. */
-dl { margin: 22px 0 24px; max-width: 66ch; }
-dt {
-  font-family: var(--sans);
+  font-family: var(--head);
   font-size: 13px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  border-top: 1px solid var(--rule);
-  padding-top: 12px;
-  margin-top: 14px;
+  font-weight: bold;
+  margin: 18px 0 2px;
+  padding-top: 8px;
+  border-top: 1px solid var(--hair);
 }
-dd { margin: 5px 0 0; }
 
-/* --------------------------------------------------------------- figures -- */
+p { margin: 0 0 10px; }
+p.src { font-size: 11px; color: var(--quiet); margin: 0 0 10px; }
+p.more { font-size: 11px; margin-top: 6px; }
 
-figure { margin: 24px 0; }
-figure img {
-  display: block;
-  width: 100%;
-  height: auto;
-  border: 1px solid var(--ink);
-  background: #000;
+code { font-family: var(--mono); font-size: 12px; background: #f0efe6; padding: 0 2px; }
+
+/* Two columns, the way the original opened: What is Linux beside the news. */
+.two { display: flex; gap: 20px; }
+.two .col { flex: 1 1 0; min-width: 0; }
+
+/* Bulleted lists with a square where bullet.gif went. */
+ul.bul { list-style: none; margin: 10px 0 12px; padding: 0; }
+ul.bul li { position: relative; padding: 0 0 8px 14px; }
+ul.bul li::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 7px;
+  width: 6px;
+  height: 6px;
+  background: var(--orange);
 }
-figcaption {
-  font-family: var(--mono);
-  font-size: 11.5px;
-  line-height: 1.6;
+
+/* News list: headline, then the date small and grey behind it. */
+ul.news { list-style: none; margin: 6px 0 0; padding: 0; }
+ul.news li { padding: 0 0 6px 14px; position: relative; }
+ul.news li::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 7px;
+  width: 6px;
+  height: 6px;
+  background: var(--orange);
+}
+/* The original ran the date inline after the headline in a smaller face, which
+   is denser than putting it on its own line. */
+ul.news span { font-size: 10px; color: var(--quiet); }
+ul.news span::before { content: ", "; }
+
+/* ---------------------------------------------------------------- tables -- */
+
+table.kv { border-collapse: collapse; width: 100%; margin: 4px 0 10px; }
+table.kv td { padding: 3px 8px 3px 0; vertical-align: top; border-bottom: 1px solid #eee; }
+table.kv td:first-child {
+  width: 84px;
+  font-family: var(--head);
+  font-size: 11px;
+  font-weight: bold;
   color: var(--quiet);
-  margin-top: 8px;
-  max-width: 72ch;
+  white-space: nowrap;
 }
-figcaption b { color: var(--orange-dk); font-weight: 700; }
-
-.plates { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
-.plates figure { margin: 8px 0 24px; }
-
-/* ----------------------------------------------------------------- data --- */
+table.kv.wide td:first-child { width: 96px; }
 
 table.data {
   border-collapse: collapse;
   width: 100%;
-  max-width: 66ch;
-  margin: 20px 0 24px;
-  font-size: 15px;
+  margin: 10px 0 12px;
+  font-size: 12px;
 }
-table.data th,
-table.data td {
+table.data th {
   text-align: left;
-  vertical-align: top;
-  padding: 9px 16px 9px 0;
-  border-bottom: 1px solid var(--rule);
-}
-table.data thead th {
-  font-family: var(--sans);
+  font-family: var(--head);
   font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.09em;
-  text-transform: uppercase;
-  color: var(--quiet);
-  border-bottom: 2px solid var(--rule-hard);
+  background: var(--orange);
+  color: #000;
+  padding: 4px 8px;
+  border: 1px solid #7a2a06;
 }
-table.data tbody td + td {
-  font-family: var(--mono);
-  font-size: 13.5px;
+table.data td {
+  padding: 4px 8px;
+  border: 1px solid var(--hair);
+  vertical-align: top;
 }
+table.data tr:nth-child(even) td { background: #faf8f2; }
 
-/* --------------------------------------------------------------- footer --- */
+/* -------------------------------------------------------------- pictures -- */
 
-footer {
-  margin: 34px 40px 0;
-  border-top: 3px solid var(--orange);
-  padding-top: 14px;
-}
-footer p {
-  font-size: 14px;
-  line-height: 1.55;
+.shot { margin: 12px 0 14px; }
+.shot img { display: block; width: 100%; height: auto; border: 1px solid #000; }
+.shot p {
+  font-size: 11px;
+  line-height: 1.5;
   color: var(--quiet);
-  max-width: 78ch;
-  margin: 0;
+  margin: 5px 0 0;
 }
-footer b { font-family: var(--sans); font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink); }
+.shot p b { color: #a8390a; }
+.two.shots { gap: 16px; }
+
+/* ---------------------------------------------------------------- footer -- */
+
+#foot {
+  border-top: 1px solid var(--orange);
+  padding: 10px 16px 14px;
+  font-size: 10px;
+  line-height: 1.6;
+  color: var(--orange-lt);
+}
+#foot a { color: #fff; }
+#foot a:visited { color: #fff; }
+#foot a:hover { color: var(--orange); }
+#foot br { margin-bottom: 2px; }
 
 /* --------------------------------------------------------- narrow screens -- */
 
-@media (max-width: 780px) {
-  body { padding: 0 0 30px; font-size: 16px; }
-  .sheet { border: 0; }
-  .masthead { padding: 24px 20px 20px; }
-  table.ident tr > th:first-child { padding-left: 20px; }
-  table.ident tr > td:last-child { padding-right: 20px; }
-  table.ident th, table.ident td { display: block; width: auto; padding: 6px 20px; border-top: 0; }
-  table.ident th { padding-bottom: 0; }
-  table.ident tr { display: block; border-top: 1px solid var(--rule); }
-  nav.toc { padding: 18px 20px 2px; }
-  .sec { grid-template-columns: 1fr; padding: 26px 20px 4px; gap: 0; }
-  .lede { display: flex; align-items: baseline; gap: 16px; }
-  .num { border-top: 0; padding-top: 0; font-size: 22px; }
-  .note { margin: 0; }
-  .plates { grid-template-columns: 1fr; }
-  footer { margin: 26px 20px 0; }
+@media (max-width: 820px) {
+  body { padding: 0 0 20px; }
+  #frame { width: 100%; }
+  #cols { display: block; }
+  #nav {
+    width: auto;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    padding: 8px 10px 10px;
+  }
+  #nav a { width: auto; margin: 0; }
+  #nav .gap { display: none; }
+  #nav .plate { display: none; }
+  #nav .vitals { width: 100%; max-width: 260px; margin-top: 8px; }
+  .two { display: block; }
+  .two .col + .col { margin-top: 14px; }
+  #logo a { font-size: 30px; }
 }
 
-/* Someone will print this. Take the field away, keep the rules. */
 @media print {
-  body { background: #fff; padding: 0; font-size: 10.5pt; }
-  .sheet { border: 0; max-width: none; }
-  .masthead { background: none; border-bottom: 2pt solid #000; padding-left: 0; padding-right: 0; }
-  nav.toc, .sec, footer { padding-left: 0; padding-right: 0; margin-left: 0; margin-right: 0; }
-  .num { color: #000; border-top-color: #000; }
-  a { color: #000; }
-  figure, table { break-inside: avoid; }
+  body { background: #fff; padding: 0; }
+  #frame { width: auto; background: #fff; }
+  #logo a, #logo span { color: #000; }
+  #nav { display: none; }
+  #main { border-top: 2px solid #000; padding: 0; }
+  #foot { color: #333; border-top: 1px solid #000; padding-left: 0; }
+  #foot a { color: #000; }
+  .shot, table { break-inside: avoid; }
 }

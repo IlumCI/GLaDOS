@@ -8,7 +8,7 @@ deleted without touching anything else.
 | --- | --- |
 | `resume.tex` | The resume. Source of truth, edited here rather than in a PDF. |
 | `resume.pdf` | Built from it by `build.sh`. One page, A4. |
-| `portfolio/index.html`, `portfolio/style.css` | Standalone page for euroswarms.eu or GitHub Pages. Hand-written HTML and CSS, no JavaScript, no external requests, no build step. Laid out as a printed technical document rather than a landing page: masthead, identification table, numbered sections with margin notes, numbered figure plates, data tables, colophon. |
+| `portfolio/index.html`, `portfolio/style.css` | Standalone page for euroswarms.eu or GitHub Pages. Hand-written HTML and CSS, no JavaScript, no external requests, no build step. Laid out as linux.org stood in July 2005: a fixed 860px frame on a cream field, a logotype block, a left rail of navigation buttons with a plate and a vitals table, and a white content well with a two-column opening, ruled section headers, square bullets and small data tables. Orange Box orange where that site used dark red. |
 | `portfolio/img/` | Screenshots of GLaDOS running under QEMU, copied from `docs/img/`. Unretouched. |
 | `portfolio/resume.pdf` | Copy of the built PDF, so `portfolio/` can be uploaded on its own with its download link intact. `build.sh` refreshes it. |
 | `jobs.md` | Shortlist of openings verified on 23 Aug 2026, with what to lead with for each. Re-check the links before writing anything long. |
