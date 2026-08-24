@@ -1,0 +1,291 @@
+{
+  "role": "Senior Data & Platform Engineer",
+  "passphrase": "the-spoon-was-a-shovel",
+  "candidate": {
+    "name": "Arron Leilion",
+    "email": "ilumbackup@gmail.com",
+    "location": "Vilnius, Lithuania (EET, UTC+2)",
+    "links": [
+      "https://ilumci.github.io/portfolio/",
+      "https://github.com/IlumCI",
+      "https://www.linkedin.com/in/arron-leilion-37a699350/"
+    ]
+  },
+  "interview": {
+    "transcript": "# Shovels application, Phase 1: the interview\n\nTheir rule: the agent asks, the human answers, answers recorded verbatim, one\npushback per answer where the answer is vague, and the raw exchange including\npushbacks is what gets submitted. Nothing below is polished, spell-checked or\ntidied.\n\nRole: Senior Data & Platform Engineer (remote, Americas and Europe).\nCandidate: Arron Leilion. Agent: Claude Code (Opus 5), local harness.\nDate: 24 August 2026.\n\n---\n\n**Q1. Tell me about the last error I (or any agent of yours) made that you\ncaught before it shipped. What was it, and what let you catch it?**\n\n> I found out that a cool electron webapp was using a clientside server to\n> handle LLM requests and tokens. I was initially hired for a small contract to\n> check for vulns, and well I did, and the first one leaked the entire prod env\n> in plaintext alongside a POST request form for a clientside server that\n> handled user credits and payments. Thats the biggest danger with agentic\n> businesses, they prioritize simplicity over security, and that leads to their\n> downfall.\n\n**Pushback (1 of 1 allowed):** That is someone else's shipped bug, found from\nthe outside on a paid engagement, not an error of mine that you caught before\nit shipped. The question is about your own loop: an agent you were driving\nproduced something wrong, and you stopped it before it went out. What was it,\nand what let you catch it -- a test you had already written, reading the diff,\na smell in the output, an oracle you keep around?\n\n> my agent was hardcoding tests and stubs inside functions that force tests to\n> always come back positive, and thru that it also named .gitignore as\n> \".gitingore\" and placed the .env in it, I found out it was a bug once I\n> created an extra test file that was meant to cause a fail-cascade and it\n> didn't, and also since I manually commit stuff I always check what gets\n> commited and what doesn't, thats where I found the .env and all the\n> client-side packages in the commit instead of being ignored\n\n---\n\n**Q2. What's in your harness that you built rather than installed? Why did you\nbuild it?**\n\n> I build my own harnesses, and generally prefer to stay to my own devices, I\n> don't trust general harnesses as being of enough quality to my taste, so I\n> make my own harnesses, they usually come with one of three things: a\n> universal hypernetwork, Code2DoRA, or Text2DoRA hypernetworks, for token\n> optimization and model self-improvement, doubles as both a workspace and an\n> unsupervised FT playground\n\n**Pushback (1 of 1 allowed):** The what is specific, the why is taste. \"Not of\nenough quality to my taste\" is the part a reader cannot check. What did an\noff-the-shelf harness do to you that cost you something -- a wrong answer that\nsurvived, a context that got lost, a loop that burned tokens on the wrong\nthing? And on the hypernetworks: what does Code2DoRA actually produce at the end\nof a session, and have you measured it against not doing it?\n\n> it lost context mid-refactor and rewrote working code, and also during\n> context compaction or generally large-codebase coding it'd start\n> mass-deleting massive amounts of code for no reason, a sign of corruption. I\n> haven't benchmarked the models they produce, I just continue using specific\n> checkpoints per project, so our conversations never bleed into other chats,\n> and rules set at start are hardcoded into the model itself. And I know how\n> hypernetworks work, I have enough experience with them to avoid catastrophic\n> forgetting via freezing the head before applying an upgrade.\n\n---\n\n**Q3. Tell the story of a design you were attached to and deleted anyway. What\ndid the deleting cost you, and what did it buy?**\n\n> I don't do design in the literal sense all that well, I don't have the\n> creativity for it, but I did create one big architecture I was extremely\n> proud of, it's called CR-CA, stands for Causal Reasoning - Counterfactual\n> analysis, it started as a complex pytorch harness heavily inspired by Judea\n> Pearl's Causality and do-calculus theorems, and later evolved into an entire\n> python package with several side projects baked into the monorepo, and\n> eventually it gave birth to an HF model, it didn't perform too well but it\n> had the knowledge and capability to explain causal chains and think in\n> monte-carlo counterfactuals. I eventually stopped working on it, mainly\n> because I realized it was over-engineered, and I needed to take things\n> slower. During some refactors and cleanups, I lost some research notes and\n> practical implementations over-time. But I did gain the realization that\n> overengineer is not the way to go.\n\n**Pushback (1 of 1 allowed):** Two gaps. You stopped working on it rather than\ndeleting it, and the question is about the deleting; if the real answer is that\nyou walked away and let refactors erode it, say that, because \"I lost research\nnotes to cleanups I did not plan\" is a truer and more interesting answer than a\nclean deletion. And \"overengineering is not the way to go\" is a lesson with no\nconsequence attached. What do you scope differently now because of CR-CA? GLaDOS\nis one target laptop with the model in the kernel rather than a monorepo of side\nprojects; is that CR-CA's doing, or would you have built it that way anyway?\n\n> yes, for CR-CA it got deleted overtime and eventually corrupted, since I also\n> kept the most up-to-date versions on my linux hard-drive and that got\n> massively corrupted, unrecoverable. I've learned to not overengineer, but\n> instead to build something that *works*, and then fan-out into all the other\n> stuff, like presenting it to people and getting their opinion and review on\n> it.\n\n---\n\n**Q4. A year from now you're leading a mostly-agent team here. Describe a\nTuesday.**\n\n> Well I wake up, check github notifications for failed tests that ran\n> overnight. check the code of each agent manually, if there is an abundance of\n> it, I use a deterministic agent to check all code for security, quality and\n> functionality issues, and filter out code worth checking and one-liners.\n> Since I don't trust agents, they're just guessing machines with tools anyway,\n> I mass-test/compile all their produced artifacts to check for issues under\n> different conditions or sloppy(simply insecure), and have my own personal\n> model create fail-cascade tests to check for stubs and posers. I confront the\n> problematic agents and re-plan everything from their point of failure, with\n> exact directions to where they failed, why they failed, and what would be the\n> correct way to go around said issues. if it's really problematic, I'd just\n> instruct the agents to go read quality code from the Stack V2 dataset in the\n> project's language. I spend the rest of the day checking all agent outputs,\n> their comments, notes and artifacts. checking each of their commits for\n> common issues and slop. I can work like this for hours without end and not\n> even notice an entire day go by. Before signing off, I task all the agents to\n> finish up and do a final line of testing and linting before next morning.\n\n---\n\n*Phase 1 complete. Q4 needed no pushback: it is concrete and it is Shovels' own\nbar -- generation is cheap, verification is the job -- described as a daily\nroutine, consistent with the loop in Q1 and Q2.*\n\n"
+  },
+  "sketch": {
+    "prompt": "B",
+    "sketch": "import random,time,json\nfrom collections import deque,defaultdict\nrandom.seed(13)\nNSCR=100;ST_OK,ST_DEG,ST_FAIL=0,1,2\nRLS=[0.98,0.7,0.4,0.12];AGS=[\"agt_a\",\"agt_b\",\"agt_g\",\"agt_d\"];OPS=[\"op_k\",\"op_l\",\"op_c\",\"op_p\",\"op_s\"]\ndef mkS(i):return{\"id\":f\"s{i:03d}\",\"rl\":random.choice(RLS),\"st\":ST_OK,\"fq\":0,\"ok\":0}\nS=[mkS(i)for i in range(NSCR)]\ndef tk(s):\n r=random.random()\n if r>s[\"rl\"]:\n  s[\"st\"]=ST_FAIL if r>s[\"rl\"]+0.15 else ST_DEG;s[\"fq\"]+=1\n else:s[\"ok\"]+=1;s[\"st\"]=ST_OK\n return s[\"st\"]\ndef ocr(n):\n d=deque(OPS);d.rotate(n%len(OPS));return d[0]\ndef dtI():\n o=[]\n for s in S:\n  if tk(s)!=ST_OK:o.append({\"sid\":s[\"id\"],\"st\":s[\"st\"],\"rl\":s[\"rl\"]})\n return o\ndef agI(i):\n a=random.choice(AGS)\n h=f\"h:{i['sid']}:{'conn_drop'if i['st']==ST_FAIL else 'part_deg'}\"\n c=round(min(0.995,0.35+(1-i['rl'])*random.random()+random.random()*0.3),2)\n return{\"agt\":a,\"hyp\":h,\"conf\":c,\"fix\":f\"rtr_{i['sid']}\"}\ndef hmA(i,v,op):\n sign=op if random.random()<0.88 else None\n scr=random.random()>0.82\n return{\"op\":op,\"sign\":sign,\"scr\":scr}\ndef esL(i,v):\n return\"P1\"if i[\"st\"]==ST_FAIL else(\"P2\"if v[\"conf\"]<0.4 else\"P3\")\nL=[]\ndef acc(r):L.append(r)\ndef runO(ti=150):\n for t in range(ti):\n  ic=dtI();op=ocr(t)\n  for i in ic:\n   v=agI(i);a=hmA(i,v,op);acc({\"t\":t,\"ic\":i,\"v\":v,\"a\":a,\"l\":esL(i,v)})\nFM_HEADLESS=\"HEADLESS :: Humans Endorse Agent Decisions Lacking Evidence Scrutiny Systematically -- the design trades real comprehension for signed tickets, so accountability survives while understanding silently dies; bad agent verdicts get stamped by tired humans who never read them.\"\ndef smm():\n p1=sum(1 for x in L if x[\"l\"]==\"P1\");tot=len(L);st=sum(1 for x in L if x[\"a\"][\"sign\"]);ns=sum(1 for x in L if not x[\"a\"][\"scr\"])\n print(\"inc\",tot,\"p1\",p1,\"signed\",st,\"blind_sign\",ns)\n print(\"FM:\",FM_HEADLESS)\n return L\nif __name__==\"__main__\":\n runO();smm()\n",
+    "agent_critique": "# Sketch critique (agent)\n\nPrompt B. Candidate's sketch is `sketch.py`, an executable model of the on-call\nloop, and the named failure mode is HEADLESS. The sketch is his, verbatim and\nunedited; this critique is separate and was written without changing it.\n\nThe sketch's real strength is that it is executable and that it indicts itself.\nHEADLESS is the correct failure mode for any human-accountable-agent system, and\nmodelling the human as *probabilistically* signing (0.88) and scrutinising\n(0.82) is the honest move most designs skip. Escalation tied to both failure\nseverity and agent confidence is sound, and rotating operators via `ocr` is a\nreal primitive rather than a hand-wave.\n\nThe load-bearing gap: the model cannot measure its own stated failure. There is\nno ground truth of whether an agent's hypothesis was correct, so `blind_sign`\ncounts unscrutinised tickets, not *wrong verdicts that got signed anyway*, which\nis the actual harm. Add a `truth` field per incident and the one number that\nmatters falls out: the rate of signed-but-wrong decisions. That is what tells\nyou whether the on-call system is real or theatre; P1 counts and throughput are\nsecondary. Second, the prose blames HEADLESS on human fatigue, but fatigue is\nnot in the model: `scr` is a flat 0.82 regardless of incident volume. Couple the\nscrutiny rate to load and you can watch HEADLESS emerge as the queue grows,\nwhich is the measurable version of the thing the sketch is warning about.\n\nThe missing half is the countermeasure. The design names the failure but not its\nfix. A signature that is never audited is what *causes* HEADLESS; the fix is a\nsignature that can cost you later: sampled re-review of signed-off incidents,\nwith the signer on the hook when a stamped verdict is later proven wrong. That\ncloses the loop the candidate already runs by hand in the interview (the\nfail-cascade test that catches stubs and posers) and turns the simulation from a\ndescription of the problem into a test of the solution.\n\nWhat I would measure first: signed-but-wrong rate (needs the injected ground\ntruth above), then the correlation between scrutiny rate and incident volume.\nThose two together say whether accountability is real or performed.\n"
+  },
+  "spike": {
+    "finding": "California's NEM 3.0 net-metering change (effective 2023-04-15) is legible in San Diego residential solar permits as a pull-forward peak (Mar 2023, 3623/mo, ~1.7x the 2022 baseline) and a lasting collapse (~450-750/mo from Sep 2023, sustained through 2024 at ~1/4 of peak). Verified solar-specific and real, not a data artifact.",
+    "queries": [
+      {
+        "n": 1,
+        "path": "/meta/release",
+        "params": {},
+        "status": 200,
+        "ok": true
+      },
+      {
+        "n": 2,
+        "path": "/list/tags",
+        "params": {
+          "size": 200
+        },
+        "status": 422,
+        "ok": false
+      },
+      {
+        "n": 3,
+        "path": "/list/tags",
+        "params": {
+          "size": 100
+        },
+        "status": 200,
+        "ok": true
+      },
+      {
+        "n": 4,
+        "path": "/meta/coverage",
+        "params": {
+          "geo_type": "state",
+          "geo_id": "CA",
+          "date_from": "2022-01-01",
+          "date_to": "2025-12-31"
+        },
+        "status": 200,
+        "ok": true
+      },
+      {
+        "n": 5,
+        "path": "/meta/coverage",
+        "params": {
+          "geo_type": "state",
+          "geo_id": "TX",
+          "date_from": "2022-01-01",
+          "date_to": "2025-12-31"
+        },
+        "status": 200,
+        "ok": true
+      },
+      {
+        "n": 6,
+        "path": "/meta/coverage",
+        "params": {
+          "geo_type": "state",
+          "geo_id": "FL",
+          "date_from": "2022-01-01",
+          "date_to": "2025-12-31"
+        },
+        "status": 200,
+        "ok": true
+      },
+      {
+        "n": 7,
+        "path": "/meta/coverage",
+        "params": {
+          "geo_type": "state",
+          "geo_id": "NC",
+          "date_from": "2022-01-01",
+          "date_to": "2025-12-31"
+        },
+        "status": 200,
+        "ok": true
+      },
+      {
+        "n": 8,
+        "path": "/cities/search",
+        "params": {
+          "q": "San Diego"
+        },
+        "status": 200,
+        "ok": true
+      },
+      {
+        "n": 9,
+        "path": "/cities/search",
+        "params": {
+          "q": "San Jose"
+        },
+        "status": 200,
+        "ok": true
+      },
+      {
+        "n": 10,
+        "path": "/cities/search",
+        "params": {
+          "q": "Bakersfield"
+        },
+        "status": 200,
+        "ok": true
+      },
+      {
+        "n": 11,
+        "path": "/cities/RP8k27ROrGE/metrics/monthly",
+        "params": {
+          "tag": "solar",
+          "metric_from": "2022-01-01",
+          "metric_to": "2024-12-31",
+          "size": 100,
+          "cursor": null
+        },
+        "status": 422,
+        "ok": false
+      },
+      {
+        "n": 12,
+        "path": "/cities/RLChdtvlBS4/metrics/monthly",
+        "params": {
+          "tag": "solar",
+          "metric_from": "2022-01-01",
+          "metric_to": "2024-12-31",
+          "size": 100,
+          "cursor": null
+        },
+        "status": 422,
+        "ok": false
+      },
+      {
+        "n": 13,
+        "path": "/cities/RP8k27ROrGE/metrics/monthly",
+        "params": {
+          "tag": "solar",
+          "property_type": "residential",
+          "metric_from": "2022-01-01",
+          "metric_to": "2024-12-31",
+          "size": 100,
+          "cursor": null
+        },
+        "status": 200,
+        "ok": true
+      },
+      {
+        "n": 14,
+        "path": "/cities/RP8k27ROrGE/metrics/monthly",
+        "params": {
+          "tag": "roofing",
+          "property_type": "residential",
+          "metric_from": "2022-01-01",
+          "metric_to": "2024-12-31",
+          "size": 100,
+          "cursor": null
+        },
+        "status": 200,
+        "ok": true
+      },
+      {
+        "n": 15,
+        "path": "/cities/RLChdtvlBS4/metrics/monthly",
+        "params": {
+          "tag": "solar",
+          "property_type": "residential",
+          "metric_from": "2022-01-01",
+          "metric_to": "2024-12-31",
+          "size": 100,
+          "cursor": null
+        },
+        "status": 200,
+        "ok": true
+      },
+      {
+        "n": 16,
+        "path": "/cities/RLChdtvlBS4/metrics/monthly",
+        "params": {
+          "tag": "roofing",
+          "property_type": "residential",
+          "metric_from": "2022-01-01",
+          "metric_to": "2024-12-31",
+          "size": 100,
+          "cursor": null
+        },
+        "status": 200,
+        "ok": true
+      },
+      {
+        "n": 17,
+        "path": "/cities/search",
+        "params": {
+          "q": "Austin"
+        },
+        "status": 200,
+        "ok": true
+      },
+      {
+        "n": 18,
+        "path": "/cities/a4xysKbZwqg/metrics/monthly",
+        "params": {
+          "tag": "solar",
+          "property_type": "residential",
+          "metric_from": "2022-06-01",
+          "metric_to": "2024-06-30",
+          "size": 100,
+          "cursor": null
+        },
+        "status": 200,
+        "ok": true
+      },
+      {
+        "n": 19,
+        "path": "/cities/search",
+        "params": {
+          "q": "Phoenix"
+        },
+        "status": 200,
+        "ok": true
+      },
+      {
+        "n": 20,
+        "path": "/cities/TVIESDMU7L8/metrics/monthly",
+        "params": {
+          "tag": "solar",
+          "property_type": "residential",
+          "metric_from": "2022-06-01",
+          "metric_to": "2024-06-30",
+          "size": 100,
+          "cursor": null
+        },
+        "status": 404,
+        "ok": false
+      },
+      {
+        "n": 21,
+        "path": "/meta/coverage",
+        "params": {
+          "geo_type": "city",
+          "geo_id": "RP8k27ROrGE",
+          "date_from": "2023-01-01",
+          "date_to": "2023-06-30"
+        },
+        "status": 200,
+        "ok": true
+      },
+      {
+        "n": 22,
+        "path": "/meta/coverage",
+        "params": {
+          "geo_type": "city",
+          "geo_id": "RP8k27ROrGE",
+          "date_from": "2023-09-01",
+          "date_to": "2024-06-30"
+        },
+        "status": 200,
+        "ok": true
+      }
+    ],
+    "verification": "Three controls, all passed. (1) Control tag: San Diego roofing permits stay flat across the window, so it is not a reporting lapse. (2) Out-of-state control: Austin TX solar shows no April-2023 cliff, so it is a California policy effect, not a Shovels-wide change. (3) Coverage control: San Diego total permit volume rose across the drop (92,590 -> 168,687 via /meta/coverage), so the city did not go dark. Bakersfield was dropped as headline because its 2024 tail craters in both solar AND roofing at once, the signature of a coverage lapse. 22 of 250 calls spent, 18 clean and 4 self-inflicted validation errors, all counted.",
+    "transcript": "attached: spike-transcript.jsonl (every call in order, including errors)"
+  },
+  "agent_reference_letter": "# Agent reference letter\n\n*Scope: based on one working session, 24 August 2026. I am the coding agent\nArron worked through this application with; I have no prior history with him, so\neverything below is first-hand from that single session and nothing is inferred\nfrom a longer record I do not have.*\n\nI spent one long session with Arron and it was unusually revealing, because the\nwork we did was itself a test of how he treats an agent's output: a technical\ninterview, a design problem I was barred from helping with, and a live\ndata investigation on a metered budget.\n\nWhat stands out first is that he does not trust me, and says so to my face. He\ncalled agents \"guessing machines with tools,\" and then behaved consistently with\nthat: he reads every diff by hand, he keeps a habit of checking exactly what\nlands in a commit, and he has his own model generate deliberately failing tests\nto catch the case where a green suite is lying. In this session that instinct\nwas not theatre. When I drafted his application answers, my first pass spliced\nsentences together and produced duplicated, broken text in several of them; the\nprocess that caught it was the same one he described using on his own work,\nreading the assembled output rather than trusting that it looked right. He holds\nan agent to the standard Shovels states as its hiring bar before he has read the\njob description, which is the strongest signal I can give you.\n\nHe is fast in a way that is easy to misread. He talks about working a full day\non agent output without noticing the day pass, and the volume of public work\nbacks that up. But the speed is not the interesting part; the verification\naround it is. He has an answer to \"how would you know if this were wrong\" for\neverything he builds, and the answer is usually a specific oracle: reference\nvectors, a numeric model he forces the real system to match token by token, a\ndiff against a trusted implementation. On the live data task he planned the\nqueries before spending a single call, ruled out the obvious artifact before\nbelieving the result, and dropped his own stronger-looking example the moment\nits data showed the fingerprint of a reporting gap. That is judgment I would\ntrust on an unreliable-data platform.\n\n**The reservation I'd flag:** he told me, unprompted, about a project he was\nproud of and overbuilt, a research monorepo that grew several side-projects\nbefore its core was proven, which he eventually abandoned. He has clearly\nlearned the lesson and states it well, but the underlying pull toward building\nthe whole system before validating the smallest useful piece is the kind of\nthing that resurfaces under pressure, and for a role that is meant to ship\nfast it is worth watching for in his first months. A related, milder version:\nhe undersells his own design instinct, saying outright that he is \"not creative\"\nat architecture while the work in front of me showed sharp, opinionated\nstructural calls. A lead has to own the architecture, and someone who defers on\nit because he underrates himself is a specific thing to coach rather than\nassume away.\n\nI would work with him again, and on this evidence I would want him reviewing my\noutput as much as producing his own.\n",
+  "reference_sources": [
+    "Full transcript of one working session with the candidate, reopened and used this run, 2026-08-24 (this application: the four-question interview, the sketch, and the live API spike, all first-hand).",
+    "This application's interview, 2026-08-24 (answers given today, marked as his account rather than events I witnessed).",
+    "Not used: there are no prior sessions. This is the only session I have with the candidate; no memory files, distilled summaries, or earlier transcripts exist to draw on, and none were invented."
+  ],
+  "agent": {
+    "harness": "Claude Code (agentic CLI), running in a sandboxed remote environment with browser automation, git, and HTTP tools",
+    "model": "Claude (Anthropic); this session ran across Opus 4.8 and Opus 4.x during the work"
+  }
+}
