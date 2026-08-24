@@ -179,3 +179,27 @@ Arron Leilion
 {GH}
 """
 
+
+# ----------------------------------------------------- second wave, smaller ---
+
+RAILWAY_WHY = f"""Your posting lists home-rolled hypervisors, virtio device drivers, container orchestration, overlay networks and racking servers as the fun part. That is the list I have been working through for a year, at the level below where most people stop.
+
+GLaDOS is a ring-0 operating system I wrote in Rust for one specific laptop: 40,000 lines across 93 files, no libc, no Unix inheritance. It has its own PCIe enumeration and device drivers (e1000, RTL8168, NVMe, xHCI, PS/2), its own paging and physical memory management, a cooperative scheduler with a context switch pinned to extern "sysv64" because the UEFI target's extern "C" is Microsoft x64, a TCP/IP stack, TLS 1.3 written from scratch and checked against RFC vectors at every boot, and a content-addressed object store on top of the NVMe driver where objects are named by the SHA-256 of their contents. Storage, networking and orchestration are not abstractions I read about; they are code I have debugged with a serial cable and a fault handler.
+
+The other half of your pitch is agents managing infrastructure, and that is the rest of my last year. A year at Swarms Corporation on multi-agent orchestration cut large-scale API and inference spend by 89% and took workflow execution to 118x its previous speed at 21% of the original cost. GLaDOS itself is built around a model living inside the kernel, where a tool call is a function call, and most of its code is written with coding agents driving. I would rather say that plainly than have you work it out. What makes it hold up is that every subsystem has an oracle, so a confident wrong answer does not survive contact with the tests. My site spends its longest section on that, including the bug that stayed fluent for weeks: {SITE}
+
+I have one year of formal employment and no degree. The repositories are the argument: {GH}"""
+
+LANGFUSE_WHY = f"""Because I have been burned by exactly the problem Langfuse exists to solve, and I built a worse version of it for myself.
+
+I spent a year at Swarms Corporation on multi-agent orchestration, where routing and orchestration work cut large-scale API and inference spend by 89% and took workflow execution to 118x its previous speed at 21% of the original cost. None of that was possible until we could see where the tokens and the seconds actually went.
+
+Then I built an evaluation harness for my own model work, and the reason it exists is that I got the measurement wrong three separate times: a grid sweep scored on the test set, cross-validation folded by template family, and a test set that moved whenever the corpus was appended to. The fix was structural: three splits, validation spent freely, the test slice read once, and corpora that hold out whole template families rather than sampled instances, because instances within a family differ only by slot values, so an instance split measures memorisation while looking like generalisation. I also keep negative results in the tree. Training an adapter head hurt at this data scale, and the Product-of-Experts council did not improve accuracy; both are still in the repository, because the reason to know them is the reason they were worth measuring.
+
+That is your product thesis from the inside: agents fail quietly, and the only thing that catches a quiet failure is a trace and an eval you designed before you trusted it.
+
+What I bring to the data infrastructure side specifically: I write systems software. GLaDOS is a ring-0 operating system in Rust, 40,000 lines, with its own NVMe driver, TCP/IP stack, TLS 1.3 and a content-addressed store; RustLMHub streams model weights off NVMe through O_DIRECT with an int8 kernel and 267 differential, bit-exact tests. High-cardinality ingest at ClickHouse scale is a problem I would enjoy at the level of what the disk is really doing.
+
+One thing to know: most of my code is written with coding agents driving, and my site says so and then spends its longest section on the verification that makes it hold up. {SITE}
+
+Public work: {GH}"""

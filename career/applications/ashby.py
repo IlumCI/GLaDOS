@@ -45,6 +45,33 @@ FORMS = {
             ("upload", "#_systemfield_resume", A.RESUME),
         ],
     },
+    "railway": {
+        "url": "https://jobs.ashbyhq.com/Railway/b8072f95-043f-404d-a313-f0bdf8dd3c81/application",
+        "steps": [
+            ("fill", "#_systemfield_name", A.NAME),
+            ("fill", "#_systemfield_email", A.EMAIL),
+            ("upload", "#_systemfield_resume", A.RESUME),
+            ("fill", "#5c63d3c5-aea4-4b0e-8bd0-2269a6ea82a0", A.RAILWAY_WHY),
+        ],
+    },
+    "langfuse": {
+        "url": "https://jobs.ashbyhq.com/langfuse/1225fa3d-d590-41d2-b798-ef927320fb2e/application",
+        "steps": [
+            ("fill", "#_systemfield_name", A.NAME),
+            ("fill", "#_systemfield_email", A.EMAIL),
+            ("fill", "#c6e170d0-680d-4c99-ab1d-f7d6e775b9e5", A.LI),
+            ("fill", "#2954f201-bc86-4321-8a03-90274d4d1656", A.PHONE),
+            ("upload", "#_systemfield_resume", A.RESUME),
+            ("fill", "#aadeca94-b755-4545-8fec-bdb5e55d626f", "Vilnius, Lithuania (EET, UTC+2)"),
+            ("yesno", "1feb9825-c2dc-4053-a5dc-899dd54a4f01", "yes"),
+            # Their posted band for this role is EUR 90-160k, so the answer is
+            # the lower half of it rather than the generic 70-100k.
+            ("fill", "#1560799e-d88c-4468-a1ca-06674b87bbc2",
+             "EUR 90,000-110,000, guided by your published EUR 90-160k band"),
+            ("date", "input[placeholder='Pick date...']", "2026-09-01"),
+            ("fill", "#4f27e354-9c37-4c7e-a01b-a02a1b3b0467", A.LANGFUSE_WHY),
+        ],
+    },
     "lovable": {
         "url": "https://jobs.ashbyhq.com/lovable/3b6525b4-8229-4b7e-a307-a550646d0483/application",
         "steps": [
@@ -95,6 +122,10 @@ def run(name, submit=False):
                     pg.wait_for_timeout(1800)
                     pg.keyboard.press("ArrowDown")
                     pg.keyboard.press("Enter")
+                elif kind == "date":
+                    pg.click(sel)
+                    pg.type(sel, val, delay=45)
+                    pg.keyboard.press("Escape")
                 elif kind == "radio":
                     pg.click(f'label:has-text("{sel}") >> nth=0')
                 elif kind == "yesno":

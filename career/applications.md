@@ -21,6 +21,8 @@ Standing answers, kept identical across every form so the facts cannot drift:
 | Date | Company | Role | Route | Evidence |
 | --- | --- | --- | --- | --- |
 | 24 Aug 2026 | Zed Industries | Open Source Engineer | email to jobs@zed.dev | Gmail message `1a0332d131fc4f5c` |
+| 24 Aug 2026 | Proxybase | Backend Systems Engineer (Rust), remote global | email to jobs@proxybase.xyz | Gmail message `1a03333878e12d7a` |
+| 24 Aug 2026 | Aqora Quantum | Sr Full-Stack Engineer (Rust + React), Paris or EU remote, EUR 70-90k | email to jannes@aqora.io | Gmail message `1a03333ec92c202c` |
 
 ## Filled, waiting on Arron to say submit
 
@@ -38,6 +40,8 @@ reviewed.
 | Lovable | Software Engineer, Platform (Runtime) | Stockholm, on-site | Ashby | Right to work yes, sponsorship no, start immediately, EUR 70-100k, three essays, relocation to Stockholm stated in the third. |
 | Hugging Face | Low-level Senior SWE, Xet Storage | EMEA remote | Workable | Three required essays. First one opens with the exact phrase the job description asks for, "GPU-poor and proud". Says plainly that the 8-year requirement is not met. |
 | Hugging Face | Wild Card | Remote | Workable | Two essays: why Hugging Face, and hf-xet or candle as the first three months. Phone field would not accept input; it is optional. |
+| Railway | Infrastructure Engineer | Remote worldwide | Ashby | One question, "Why Railway?", answered with the driver-and-scheduler half of GLaDOS against their own list: hypervisors, virtio drivers, orchestration, overlay networks. |
+| Langfuse | Senior Backend Engineer (Data Infrastructure) | Europe, EUR 90-160k posted | Ashby | Salary answered inside their published band rather than the generic 70-100k. Start date 1 Sep 2026. The essay is the evaluation-harness story: three splits, family-level holdout, negative results kept. |
 
 ## Considered and not applied
 
@@ -47,6 +51,16 @@ reviewed.
 | Cursor | Agent Harness; Model Routing & Inference | The best content fit found anywhere, and both are San Francisco. US work authorisation would need sponsorship. Worth a decision rather than an assumption. |
 | Baseten, Ollama | inference and runtime roles | San Francisco and Palo Alto, US only, same sponsorship problem. Baseten publishes $165-330k. |
 | Vilnius employers | Novian, Ignitis, NFQ, Nord Security, Oxylabs | Held for a second wave. Local hiring reads employment history first, so these are better sent after the remote-EU replies land. |
+
+## Needs Arron, not me
+
+| Company | Role | What it needs |
+| --- | --- | --- |
+| **Shovels** | Senior Data & Platform Engineer, remote (Americas and Europe) | The closest fit found anywhere: "an engineer who runs a team of AI agents", and their shipping bar is "you may only ship work, yours or an agent's, whose errors you could have caught". Their careers page is gated to agents on purpose and hands the agent a five-phase application skill. It needs him for four of the five phases: a verbatim interview, a design sketch with no AI help at all, a data spike against their live API on a 250-call trial key, and the send itself. I write the reference letter and may not have it edited. |
+| Cogram | Product Engineer, remote CET+/-3 | Apply by mail to r+hnhiring@cogram.com with a note including "your current agentic-coding setup", and they say plainly: no AI-generated emails. So he writes it. Facts to use are in this file. |
+| Pango | Founding Software Engineer, Stockholm hybrid, sponsorship possible | lukasz@pango.ai, and the post says "Please don't use AI to write the initial message". He writes it. |
+| Hatchet | Product Engineer, remote US and EU | Applications go through `ssh hatchet-jobs.com`. There is no ssh binary in this container, so this one is his to run, and it is the kind of door he will enjoy. |
+| Kadoa | Senior Software Engineer, remote | Google Form, <https://forms.gle/JRYUvcbkcdMNejzG9>. Fillable, but the founder says his inbox is drowning in AI-generated applications, so this one is worth his own hand. |
 
 ## Notes worth keeping
 
