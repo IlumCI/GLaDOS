@@ -89,6 +89,16 @@ structural: the Gated DeltaNet recurrent state is continuous memory the
 model reads and writes every token, and the episode loop is the iteration.
 `--latent` stays in the tool, defaulting to 0, with this result attached.
 
+**The globular field, three variants: dead, for structural reasons.** A
+full post-mortem is in `design/globular.md`. Short form: the latent-field
+variant reads 0% because its fitness position is structurally blind (the
+routing signal is multi-positional); latent re-entry to recover it is the
+destructive result above; and population-over-decodes with logprob
+selection realises none of its +3.3pp oracle headroom because logprob
+cannot rank candidates (6.7% against a 36.7% oracle). The selector is the
+missing organ, and the kernel's probe -- 54.7%, measured -- is the
+candidate for it. See the post-mortem for the fork-and-verify follow-up.
+
 ## What would actually move the numbers
 
 The backbone is frozen; the system's measured task-completion is the thing
