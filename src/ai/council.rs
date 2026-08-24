@@ -67,6 +67,43 @@ pub struct Bayes {
 }
 
 impl Bayes {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(8 + (self.logp.len() + self.log_prior.len()) * 4);
+        out.extend_from_slice(&(self.classes as u32).to_le_bytes());
+        out.extend_from_slice(&(self.features as u32).to_le_bytes());
+        for v in &self.logp {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        for v in &self.log_prior {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out
+    }
+
+    pub fn from_bytes(data: &[u8]) -> Option<Self> {
+        if data.len() < 8 {
+            return None;
+        }
+        let classes = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+        let features = u32::from_le_bytes([data[4], data[5], data[6], data[7]]) as usize;
+        let need = 8 + (classes * features + classes) * 4;
+        if classes == 0 || features == 0 || data.len() < need {
+            return None;
+        }
+        let mut o = 8;
+        let mut logp = Vec::with_capacity(classes * features);
+        for _ in 0..classes * features {
+            logp.push(f32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]));
+            o += 4;
+        }
+        let mut log_prior = Vec::with_capacity(classes);
+        for _ in 0..classes {
+            log_prior.push(f32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]));
+            o += 4;
+        }
+        Some(Self { classes, features, logp, log_prior })
+    }
+
     pub fn fit(
         docs: &[Vec<(u32, f32)>],
         labels: &[usize],
@@ -184,6 +221,43 @@ pub struct Council {
 }
 
 impl Council {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(b"GLADOSCN");
+        out.extend_from_slice(&(self.lex_vocab.len() as u32).to_le_bytes());
+        for v in &self.lex_vocab {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out.extend_from_slice(&self.lexical.to_bytes());
+        out.extend_from_slice(&self.character.to_bytes());
+        out
+    }
+
+    pub fn from_bytes(data: &[u8]) -> Option<Self> {
+        if data.len() < 12 || &data[0..8] != b"GLADOSCN" {
+            return None;
+        }
+        let n = u32::from_le_bytes([data[8], data[9], data[10], data[11]]) as usize;
+        let mut o = 12;
+        if data.len() < o + n * 4 {
+            return None;
+        }
+        let mut lex_vocab = Vec::with_capacity(n);
+        for _ in 0..n {
+            lex_vocab.push(u32::from_le_bytes([
+                data[o], data[o + 1], data[o + 2], data[o + 3],
+            ]));
+            o += 4;
+        }
+        let lexical = Bayes::from_bytes(&data[o..])?;
+        o += 8 + (lexical.classes * lexical.features + lexical.classes) * 4;
+        if data.len() < o {
+            return None;
+        }
+        let character = Bayes::from_bytes(&data[o..])?;
+        Some(Self { lex_vocab, lexical, character })
+    }
+
     /// `texts` and `labels` are the corpus; the semantic probe is fitted
     /// separately and passed to `vote`.
     pub fn fit(

@@ -288,6 +288,24 @@ fn prompt_for(goal: &str, steps: &[Step], ctx: &EpisodeCtx, names: &[&str]) -> S
 /// is what lets the arguments be a genuine continuation of the chosen tool
 /// rather than a fresh guess.
 fn propose(goal: &str, steps: &[Step], ctx: &EpisodeCtx, trust: Trust) -> Option<(String, String)> {
+    // Gate first. The fitted router with all three cores agreeing is the
+    // measured 90%-right path and costs microseconds; the sampler costs a
+    // hundred forward passes and measures ~33% on this corpus. A split -- or
+    // no fitted router, which at boot means `fit` has never run -- falls
+    // through to the decode. The grammar still guards whatever the decode
+    // does; the router's answer is checked against the same admission list.
+    let mut routed: Option<String> = None;
+    if harness::ensure_router() {
+        if let Some((choice, verdict)) = harness::route_verdict(goal, trust) {
+            if verdict.agreement >= 3 && harness::admitted(trust).contains(&choice.applet) {
+                routed = Some(String::from(choice.applet));
+                console::set_color(LTGREEN);
+                kprintln!("     (routed by 3-core agreement)");
+                console::set_color(LTGRAY);
+            }
+        }
+    }
+
     let mut names = harness::admitted(trust);
     names.push(DONE);
     let grammar = Grammar::new(names.iter().copied());
@@ -298,6 +316,53 @@ fn propose(goal: &str, steps: &[Step], ctx: &EpisodeCtx, trust: Trust) -> Option
     // alphabet/engine layer -- leaving the decode's own Option as the result.
     let wrapped = harness::with_alphabet(|alphabet| {
         with_engine(|e| {
+            if let Some(name) = routed.clone() {
+                // Routed step. No args needed: act at once. Args needed:
+                // a two-line prompt is prefilled and the arguments generated
+                // greedily -- a fraction of the full decode's cost, with the
+                // routed choice already made.
+                if sysbox::check_args(&name, "").is_ok() {
+                    harness::invalidate_conversation(e);
+                    return Some((name, String::new()));
+                }
+                let prompt = format!("Task: {}\n{}", goal, name);
+                let tokens = e.tok.encode(&prompt, true, false);
+                let mut pos = 0usize;
+                let limit = e.model.cfg.seq_len;
+                for &t in tokens.iter() {
+                    if pos >= limit {
+                        break;
+                    }
+                    e.model.forward(&mut e.state, t, pos);
+                    pos += 1;
+                }
+                let mut raw: Vec<u8> = Vec::new();
+                let eos = e.tok.eos();
+                for _ in 0..ARGS_TOKEN_BUDGET {
+                    if pos >= limit || raw.len() >= ARGS_CLIP_BYTES {
+                        break;
+                    }
+                    let vocab = e.tok.vocab_size();
+                    let all: Vec<u32> = (0..vocab as u32).collect();
+                    let next =
+                        sample::sample_among(&e.state.logits, &all, 0.0, 0.0, &mut e.rng)?;
+                    if next == eos {
+                        break;
+                    }
+                    let piece = e.tok.token_bytes(next).to_vec();
+                    let nl = piece.iter().position(|&b| b == b'\n');
+                    raw.extend_from_slice(&piece[..nl.unwrap_or(piece.len())]);
+                    let done = nl.is_some() || raw.len() >= ARGS_CLIP_BYTES;
+                    e.model.forward(&mut e.state, next, pos);
+                    pos += 1;
+                    if done {
+                        break;
+                    }
+                }
+                harness::invalidate_conversation(e);
+                return Some((name, String::from_utf8_lossy(&raw).into_owned()));
+            }
+
             let prompt = prompt_for(goal, steps, ctx, &names);
             let tokens = e.tok.encode(&prompt, true, false);
 

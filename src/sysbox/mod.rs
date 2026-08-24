@@ -345,6 +345,18 @@ fn cmd_run(path: &str) {
     let _ = ran;
 }
 
+/// The content address of a namespace path, for callers that want to compare
+/// rather than print. `print_hash` is the operator's view; this is the
+/// programmatic one, and it is what makes a fitted probe verifiable against
+/// the corpus it was fitted on.
+pub fn hash_of(path: &str) -> Option<[u8; 32]> {
+    with(|s| {
+        let p = parse(&s.cwd, path);
+        tree::resolve(&s.root, &p).map(tree::content_hash)
+    })
+    .flatten()
+}
+
 /// The skills the namespace holds: /ai/tools/*.l with their first comment
 /// line as a description. This is what episode prompts and `agent skills`
 /// render, so the model can know what it (or the operator) has written.

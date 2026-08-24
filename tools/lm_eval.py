@@ -549,7 +549,7 @@ def run_niah(backend, hf, tok, contexts, limit):
     return hits / len(results)
 
 
-def run_route(backend, hf, tok, alphabet, limit):
+def run_route(backend, hf, tok, alphabet, limit, shots=0):
     d = ROOT / "out" / "traces.jsonl"
     if not d.exists():
         raise SystemExit("no out/traces.jsonl -- run tools/traces.py first")
@@ -557,6 +557,20 @@ def run_route(backend, hf, tok, alphabet, limit):
     test = [e for e in items if e.get("split") == "test"][: limit or 100]
     if not test:
         test = items[: limit or 100]
+    # Few-shot exemplars come from the train split, whole traces including
+    # their actions -- the model sees the mapping it is asked to perform, not
+    # just the format. Fixed selection: first N distinct actions.
+    prefix = ""
+    if shots:
+        picked, seen = [], set()
+        for e in items:
+            if e.get("split") != "train" or e["action"] in seen:
+                continue
+            picked.append(e)
+            seen.add(e["action"])
+            if len(picked) >= shots:
+                break
+        prefix = "".join(p["text"] + "\n" for p in picked)
     # The corpus's action space is the shell's command set plus the sysbox
     # applets -- not evaluate.NAMES, which is applets only and would exclude
     # the right answer for every trace that reaches a bare command.
@@ -575,7 +589,7 @@ def run_route(backend, hf, tok, alphabet, limit):
         cut = text.rfind("</think>")
         if cut != -1:
             text = text[: cut + len("</think>") + 1]
-        ids = hf.encode(text, add_special_tokens=False).ids
+        ids = hf.encode(prefix + text, add_special_tokens=False).ids
         logits = backend.feed(ids)
         got = constrained_pick(backend, tok, alphabet, names, logits)
         right += got == e["action"]
@@ -596,6 +610,7 @@ def main():
     ap.add_argument("tokenizer")
     ap.add_argument("--task", default="", choices=["", "mmlu", "gsm8k", "niah", "route"])
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--shots", type=int, default=0)
     ap.add_argument("--max-new", type=int, default=64)
     ap.add_argument("--contexts", type=int, nargs="+", default=[512, 1024, 2048])
     ap.add_argument("--check", action="store_true",
@@ -633,6 +648,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 

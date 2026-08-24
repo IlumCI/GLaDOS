@@ -108,6 +108,56 @@ impl Probe {
         self.w.len() + self.mean.len()
     }
 
+    /// Serialise for the namespace. The probe is ~12k parameters -- kilobytes
+    /// -- and fitting costs one forward pass per corpus example, which is
+    /// minutes on the GF63 and hopeless at every boot. So it is fitted once
+    /// and kept, like any other content-addressed object; the corpus hash
+    /// travels beside it (written by the caller) so a stale probe against a
+    /// grown corpus is detected rather than trusted.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(16 + (self.w.len() + self.mean.len()) * 4);
+        out.extend_from_slice(b"GLADOSPR");
+        out.extend_from_slice(&(self.dim as u32).to_le_bytes());
+        out.extend_from_slice(&(self.classes as u32).to_le_bytes());
+        for v in &self.w {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        for v in &self.mean {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out
+    }
+
+    pub fn from_bytes(data: &[u8]) -> Option<Self> {
+        if data.len() < 16 || &data[0..8] != b"GLADOSPR" {
+            return None;
+        }
+        let dim = u32::from_le_bytes([data[8], data[9], data[10], data[11]]) as usize;
+        let classes = u32::from_le_bytes([data[12], data[13], data[14], data[15]]) as usize;
+        let need = 16 + (classes * dim + dim) * 4;
+        if dim == 0 || classes == 0 || data.len() < need {
+            return None;
+        }
+        let mut o = 16;
+        let mut w = Vec::with_capacity(classes * dim);
+        for _ in 0..classes * dim {
+            w.push(f32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]));
+            o += 4;
+        }
+        let mut mean = Vec::with_capacity(dim);
+        for _ in 0..dim {
+            mean.push(f32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]));
+            o += 4;
+        }
+        Some(Self { dim, classes, w, mean })
+    }
+
+    /// Byte length of `to_bytes()` -- the caller needs it to find where the
+    /// probe ends inside a combined blob without re-parsing twice.
+    pub fn byte_len(&self) -> usize {
+        16 + (self.classes * self.dim + self.dim) * 4
+    }
+
     /// Fit from features and integer labels.
     ///
     /// `lambda` trades fitting the training set against generalising. Measured

@@ -37,6 +37,7 @@ use crate::gfx::console::{self, LTCYAN, LTGRAY, LTGREEN, LTRED, WHITE, YELLOW};
 use crate::sysbox;
 use crate::{kprintln, sync::Racy};
 use alloc::string::String;
+use alloc::format;
 use alloc::vec::Vec;
 
 /// Decoded token bytes, built once from the loaded tokenizer.
@@ -878,6 +879,23 @@ pub fn fit_probe(lambda: f32) {
             0
         };
 
+        // Persist the fitted router beside its corpus hash, so the next boot
+        // loads it instead of paying a forward pass per example again. A
+        // stale blob -- corpus grown or changed since the fit -- is detected
+        // by the hash and refused at load, never silently trusted.
+        if let (Some(p), Some(c)) = (e.probe.as_ref(), e.council.as_ref()) {
+            if let Some(hash) = crate::sysbox::hash_of(super::vocab::CORPUS) {
+                let mut blob = Vec::with_capacity(8 + 64 + p.to_bytes().len() + c.to_bytes().len());
+                blob.extend_from_slice(b"GLADOSRT");
+                for b in hash {
+                    blob.extend_from_slice(&format!("{:02x}", b).into_bytes());
+                }
+                blob.extend_from_slice(&p.to_bytes());
+                blob.extend_from_slice(&c.to_bytes());
+                crate::sysbox::write_blob(ROUTER_PATH, blob);
+            }
+        }
+
         Some((tr_ok, tr_n, te_ok, te_n, params, classes, council_params))
     })
     .flatten();
@@ -957,6 +975,53 @@ pub fn route(task: &str, trust: Trust) -> Option<Choice> {
 /// where all three agree the answer is right 90.3% of the time, and where they
 /// split, 50%.
 ///
+/// Where the fitted router is kept. Content-addressed by the corpus hash it
+/// was fitted against, stored as an ordinary namespace object.
+const ROUTER_PATH: &str = "/ai/router.bin";
+
+/// Load the persisted router if it is present and its corpus hash still
+/// matches. Idempotent: a live probe is left alone. Returns whether the
+/// engine now has a fitted router -- the gate-first path in the agent loop
+/// refuses to act without one, because an unfitted head's answer is not a
+/// measurement, it is a guess with a number attached.
+pub fn ensure_router() -> bool {
+    let fitted = with_engine(|e| e.probe.is_some());
+    if fitted == Some(true) {
+        return true;
+    }
+    let Some(blob) = crate::sysbox::read_blob(ROUTER_PATH) else {
+        return false;
+    };
+    if blob.len() < 8 + 64 || &blob[0..8] != b"GLADOSRT" {
+        return false;
+    }
+    let Some(hash) = crate::sysbox::hash_of(super::vocab::CORPUS) else {
+        return false;
+    };
+    let hex: Vec<u8> = hash.iter().flat_map(|b| format!("{:02x}", b).into_bytes()).collect();
+    if blob[8..72] != hex[..] {
+        return false;
+    }
+    let rest = &blob[72..];
+    // The probe's length is not stored; from_bytes is self-delimiting by
+    // dims, and the council follows it. Parse the probe first, then the
+    // council from the remainder.
+    let p = match super::probe::Probe::from_bytes(rest) {
+        Some(p) => p,
+        None => return false,
+    };
+    let plen = p.byte_len();
+    let c = match super::council::Council::from_bytes(&rest[plen..]) {
+        Some(c) => c,
+        None => return false,
+    };
+    with_engine(|e| {
+        e.probe = Some(p);
+        e.council = Some(c);
+    })
+    .is_some()
+}
+
 /// So the cores are consulted for corroboration and never for content. Their
 /// verdict changes what is *said* about the answer, not the answer.
 pub fn route_verdict(task: &str, trust: Trust) -> Option<(Choice, super::council::Verdict)> {
@@ -1330,3 +1395,4 @@ pub fn search_report() {
     }
     kprintln!("  a configuration is adopted only when measured better, never argued better");
 }
+
