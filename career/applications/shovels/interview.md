@@ -70,4 +70,27 @@ of a session, and have you measured it against not doing it?
 **Q3. Tell the story of a design you were attached to and deleted anyway. What
 did the deleting cost you, and what did it buy?**
 
+> I don't do design in the literal sense all that well, I don't have the
+> creativity for it, but I did create one big architecture I was extremely
+> proud of, it's called CR-CA, stands for Causal Reasoning - Counterfactual
+> analysis, it started as a complex pytorch harness heavily inspired by Judea
+> Pearl's Causality and do-calculus theorems, and later evolved into an entire
+> python package with several side projects baked into the monorepo, and
+> eventually it gave birth to an HF model, it didn't perform too well but it
+> had the knowledge and capability to explain causal chains and think in
+> monte-carlo counterfactuals. I eventually stopped working on it, mainly
+> because I realized it was over-engineered, and I needed to take things
+> slower. During some refactors and cleanups, I lost some research notes and
+> practical implementations over-time. But I did gain the realization that
+> overengineer is not the way to go.
+
+**Pushback (1 of 1 allowed):** Two gaps. You stopped working on it rather than
+deleting it, and the question is about the deleting; if the real answer is that
+you walked away and let refactors erode it, say that, because "I lost research
+notes to cleanups I did not plan" is a truer and more interesting answer than a
+clean deletion. And "overengineering is not the way to go" is a lesson with no
+consequence attached. What do you scope differently now because of CR-CA? GLaDOS
+is one target laptop with the model in the kernel rather than a monorepo of side
+projects; is that CR-CA's doing, or would you have built it that way anyway?
+
 > _(awaiting answer)_
