@@ -6,7 +6,7 @@ pushbacks is what gets submitted. Nothing below is polished, spell-checked or
 tidied.
 
 Role: Senior Data & Platform Engineer (remote, Americas and Europe).
-Candidate: Arron Leilion. Agent: Claude Code (Opus 5), local harness.
+Candidate: Arron Leilion. Agent: Claude Code (Anthropic, Opus 4.8), local harness.
 Date: 24 August 2026.
 
 ---
