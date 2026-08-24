@@ -105,4 +105,27 @@ projects; is that CR-CA's doing, or would you have built it that way anyway?
 **Q4. A year from now you're leading a mostly-agent team here. Describe a
 Tuesday.**
 
-> _(awaiting answer)_
+> Well I wake up, check github notifications for failed tests that ran
+> overnight. check the code of each agent manually, if there is an abundance of
+> it, I use a deterministic agent to check all code for security, quality and
+> functionality issues, and filter out code worth checking and one-liners.
+> Since I don't trust agents, they're just guessing machines with tools anyway,
+> I mass-test/compile all their produced artifacts to check for issues under
+> different conditions or sloppy(simply insecure), and have my own personal
+> model create fail-cascade tests to check for stubs and posers. I confront the
+> problematic agents and re-plan everything from their point of failure, with
+> exact directions to where they failed, why they failed, and what would be the
+> correct way to go around said issues. if it's really problematic, I'd just
+> instruct the agents to go read quality code from the Stack V2 dataset in the
+> project's language. I spend the rest of the day checking all agent outputs,
+> their comments, notes and artifacts. checking each of their commits for
+> common issues and slop. I can work like this for hours without end and not
+> even notice an entire day go by. Before signing off, I task all the agents to
+> finish up and do a final line of testing and linting before next morning.
+
+---
+
+*Phase 1 complete. Q4 needed no pushback: it is concrete and it is Shovels' own
+bar -- generation is cheap, verification is the job -- described as a daily
+routine, consistent with the loop in Q1 and Q2.*
+
