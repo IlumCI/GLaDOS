@@ -449,11 +449,18 @@ def main():
                 buf += chunk
                 sys.stdout.write(chunk.decode("utf-8", "replace"))
                 sys.stdout.flush()
+                # Fresh output means the guest is still working. Without this
+                # the idle counter survives from the post-queue prompt of an
+                # async command -- 'agent' returns its prompt immediately --
+                # and the next quiet moment ends the session in the middle of
+                # the episode it was supposed to be watching.
+                idle_prompts = 0
 
             # The shell echoes a prompt when it is ready for the next line.
             if buf.endswith(PROMPT) or (not chunk and buf.rstrip().endswith(PROMPT.strip())):
                 if queue:
                     line = queue.pop(0)
+                    print(f"[drive] sent: {line}")
                     sock.sendall(line.encode() + b"\r")
                     buf.clear()
                     time.sleep(0.2)

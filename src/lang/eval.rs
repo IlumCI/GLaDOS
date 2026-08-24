@@ -289,6 +289,48 @@ impl Interp {
                 Ok(Value::Int(used as i64))
             }
 
+            // --- namespace ---
+            //
+            // These are what make a program in /ai/tools a skill rather than
+            // a calculator: the ability to look at the namespace and change
+            // it. The exposure is exactly the `cat`/`ls`/`write` applets',
+            // reached through one more indirection; `run` is classified as
+            // mutating, so the read-only grammar never reaches any of this.
+            "read" => {
+                need(args, 1, "read")?;
+                let path = args[0].render();
+                match crate::sysbox::read_blob(&path) {
+                    Some(bytes) => Ok(Value::Str(String::from_utf8_lossy(&bytes).into_owned())),
+                    None => Err(format!("read: no such file '{}'", path)),
+                }
+            }
+            "exists" => {
+                need(args, 1, "exists")?;
+                let path = args[0].render();
+                let yes =
+                    crate::sysbox::is_dir(&path) || crate::sysbox::read_blob(&path).is_some();
+                Ok(Value::Int(yes as i64))
+            }
+            "ls" => {
+                need(args, 1, "ls")?;
+                let path = args[0].render();
+                if !crate::sysbox::is_dir(&path) {
+                    return Err(format!("ls: '{}' is not a directory", path));
+                }
+                let names = crate::sysbox::children(&path);
+                Ok(Value::Str(names.join("\n")))
+            }
+            "write" => {
+                need(args, 2, "write")?;
+                let path = args[0].render();
+                let text = args[1].render();
+                if crate::sysbox::write_text(&path, &text) {
+                    Ok(Value::Int(text.len() as i64))
+                } else {
+                    Err(format!("write: could not write '{}'", path))
+                }
+            }
+
             // --- graphics ---
             "width" => Ok(Value::Int(gfx::primary().map(|f| f.width()).unwrap_or(0) as i64)),
             "height" => Ok(Value::Int(gfx::primary().map(|f| f.height()).unwrap_or(0) as i64)),
@@ -400,6 +442,7 @@ impl Interp {
 /// Names the shell offers in `words`.
 pub const BUILTINS: &[&str] = &[
     "print", "println", "hex", "cls", "color", "ticks", "hz", "tasks", "heap",
+    "read", "exists", "ls", "write",
     "width", "height", "pixel", "rect", "text",
     "peek8", "peek16", "peek32", "peek64", "poke8", "poke32", "poke64",
     "inb", "outb", "inl", "outl",

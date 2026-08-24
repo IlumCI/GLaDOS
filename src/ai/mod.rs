@@ -873,6 +873,15 @@ pub fn init(model_blob: Option<Blob>, tok_blob: Option<Blob>) {
     console::set_color(LTGRAY);
     harness::selftest();
 
+    // The loop, driven by script rather than by the sampler. Everything
+    // mechanical about an episode -- admission, argument rejection, capture,
+    // termination -- checked here in milliseconds, so that a real episode's
+    // only open question is whether the model chose well.
+    console::set_color(LTGREEN);
+    kprintln!("\n[selftest] agent loop:");
+    console::set_color(LTGRAY);
+    agent::selftest();
+
     console::set_color(LTGREEN);
     kprintln!("\n[selftest] linear probe:");
     console::set_color(LTGRAY);

@@ -989,6 +989,17 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
                 kprintln!("  {}", crate::ai::agent::request_abort());
                 return;
             }
+            if rest.trim() == "skills" {
+                let skills = crate::sysbox::skills();
+                if skills.is_empty() {
+                    kprintln!("  no skills in /ai/tools -- write one and 'run' it");
+                } else {
+                    for (name, desc) in skills {
+                        kprintln!("  {} -- {}", name, desc);
+                    }
+                }
+                return;
+            }
             let mut max_steps = 6usize;
             let mut trust = crate::ai::harness::Trust::ReadOnly;
             let mut parts = rest.trim();

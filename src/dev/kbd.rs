@@ -178,17 +178,33 @@ pub fn pop() -> Option<u8> {
 /// arrives as CR and Backspace as DEL. Translating here rather than in
 /// `serial::read_byte` keeps the keyboard's own DELETE key, which is a
 /// different key that happens to share the 0x7F code, distinguishable.
-pub fn pop_any() -> Option<u8> {
-    if let Some(k) = pop() {
-        return Some(k);
+    pub fn pop_any() -> Option<u8> {
+        if let Some(k) = pop() {
+            return Some(k);
+        }
+        let b = crate::serial::read_byte()?;
+        // Drain the UART FIFO into the ring while it has data, not one byte
+        // per poll. The shell polls at its own cadence -- hlt woken by the
+        // 100 Hz timer -- and a 45-character command arrives in a burst the
+        // 16-byte FIFO cannot hold across ten-millisecond gaps. One byte per
+        // poll lost the tail of exactly those bursts, intermittently, and
+        // only when the line followed other output; reading until empty
+        // closes the window entirely. The ring is the buffer it always
+        // should have been.
+        let mut guard = 0;
+        while guard < 64 {
+            guard += 1;
+            match crate::serial::read_byte() {
+                Some(next) => push(next),
+                None => break,
+            }
+        }
+        Some(match b {
+            b'\r' => b'\n',
+            0x7F => 8,
+            other => other,
+        })
     }
-    let b = crate::serial::read_byte()?;
-    Some(match b {
-        b'\r' => b'\n',
-        0x7F => 8,
-        other => other,
-    })
-}
 
 pub fn has_input() -> bool {
     TAIL.load(Ordering::Relaxed) != HEAD.load(Ordering::Acquire)

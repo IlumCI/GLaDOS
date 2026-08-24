@@ -31,7 +31,7 @@ use crate::kprintln;
 use crate::sync::Racy;
 use crate::sysbox;
 use alloc::format;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -174,6 +174,42 @@ struct Step {
     observation: String,
 }
 
+/// What the operator (or a previous episode) has put in /ai/agent and
+/// /ai/tools, injected into every step prompt. This is the self-modification
+/// surface made ordinary: the loop reads its own policy the way it reads the
+/// applet table, and editing the files is just `write`.
+struct EpisodeCtx {
+    policy: String,
+    notes: String,
+    skills: Vec<(String, String)>,
+}
+
+const POLICY_CLIP: usize = 240;
+const NOTES_CLIP: usize = 160;
+const SKILLS_MAX: usize = 6;
+const SKILL_DESC_CLIP: usize = 48;
+
+impl EpisodeCtx {
+    fn load() -> Self {
+        let read = |p: &str, cap: usize| {
+            crate::sysbox::read_blob(p)
+                .map(|b| String::from_utf8_lossy(&b).into_owned())
+                .map(|t| clip(t.trim(), cap))
+                .unwrap_or_default()
+        };
+        let mut skills = crate::sysbox::skills();
+        skills.truncate(SKILLS_MAX);
+        for (_, d) in skills.iter_mut() {
+            *d = clip(d, SKILL_DESC_CLIP);
+        }
+        Self {
+            policy: read("/ai/agent/policy", POLICY_CLIP),
+            notes: read("/ai/agent/notes", NOTES_CLIP),
+            skills,
+        }
+    }
+}
+
 fn clip(s: &str, max: usize) -> String {
     if s.len() <= max {
         return String::from(s);
@@ -194,10 +230,30 @@ fn clip(s: &str, max: usize) -> String {
 /// few steps with clipped observations, because a prompt that grows with the
 /// episode would spend the context window retelling it and leave nothing for
 /// thinking.
-fn prompt_for(goal: &str, steps: &[Step], names: &[&str]) -> String {
+fn prompt_for(goal: &str, steps: &[Step], ctx: &EpisodeCtx, names: &[&str]) -> String {
     let mut s = String::from("Goal: ");
     s.push_str(goal);
     s.push('\n');
+    if !ctx.policy.is_empty() {
+        s.push_str("Policy: ");
+        s.push_str(&ctx.policy);
+        s.push('\n');
+    }
+    if !ctx.notes.is_empty() {
+        s.push_str("Notes: ");
+        s.push_str(&ctx.notes);
+        s.push('\n');
+    }
+    if !ctx.skills.is_empty() {
+        s.push_str("Skills:");
+        for (name, desc) in &ctx.skills {
+            s.push_str("\n- /ai/tools/");
+            s.push_str(name);
+            s.push_str(" -- ");
+            s.push_str(desc);
+        }
+        s.push('\n');
+    }
     if steps.is_empty() {
         s.push_str("(nothing done yet)\n");
     } else {
@@ -231,7 +287,7 @@ fn prompt_for(goal: &str, steps: &[Step], names: &[&str]) -> String {
 /// The name tokens are advanced into the cache as they are committed, which
 /// is what lets the arguments be a genuine continuation of the chosen tool
 /// rather than a fresh guess.
-fn propose(goal: &str, steps: &[Step], trust: Trust) -> Option<(String, String)> {
+fn propose(goal: &str, steps: &[Step], ctx: &EpisodeCtx, trust: Trust) -> Option<(String, String)> {
     let mut names = harness::admitted(trust);
     names.push(DONE);
     let grammar = Grammar::new(names.iter().copied());
@@ -242,7 +298,7 @@ fn propose(goal: &str, steps: &[Step], trust: Trust) -> Option<(String, String)>
     // alphabet/engine layer -- leaving the decode's own Option as the result.
     let wrapped = harness::with_alphabet(|alphabet| {
         with_engine(|e| {
-            let prompt = prompt_for(goal, steps, &names);
+            let prompt = prompt_for(goal, steps, ctx, &names);
             let tokens = e.tok.encode(&prompt, true, false);
 
             let mut pos = 0usize;
@@ -352,6 +408,68 @@ pub fn run(goal: &str, trust: Trust, max_steps: usize) {
         return;
     }
 
+    // Policy, notes and skills are loaded once per episode. Logged so an
+    // injection is visible in the transcript rather than assumed -- a prompt
+    // nobody can see is a prompt nobody can debug.
+    let ctx = EpisodeCtx::load();
+    if !ctx.policy.is_empty() {
+        console::set_color(LTCYAN);
+        kprintln!("  policy: {}", ctx.policy);
+        console::set_color(LTGRAY);
+        elog(format!("policy loaded ({} chars)", ctx.policy.len()));
+    }
+    if !ctx.notes.is_empty() {
+        console::set_color(LTCYAN);
+        kprintln!("  notes: {}", ctx.notes);
+        console::set_color(LTGRAY);
+        elog(format!("notes loaded ({} chars)", ctx.notes.len()));
+    }
+    if !ctx.skills.is_empty() {
+        console::set_color(LTCYAN);
+        kprintln!("  skills: {} available (run <path>)", ctx.skills.len());
+        console::set_color(LTGRAY);
+        elog(format!("skills listed ({})", ctx.skills.len()));
+    }
+
+    let (outcome, steps) = episode(goal, trust, max_steps, None, false);
+
+    console::set_color(YELLOW);
+    kprintln!("  [agent] {} after {} step(s)", outcome, steps.len());
+    console::set_color(LTGRAY);
+    elog(format!("-- {} after {} step(s) --", outcome, steps.len()));
+
+    // Transcript into the namespace. Content-addressed like everything else:
+    // an episode can be hashed, diffed against its siblings, and snapshotted
+    // without any of it being special-cased.
+    let report = render(goal, &outcome, &steps);
+    let idx = sysbox::children("/ai/episodes").len() + 1;
+    let path = format!("/ai/episodes/{:04}.txt", idx);
+    if sysbox::write_text(&path, &report) {
+        kprintln!("  transcript at {}", path);
+        elog(format!("transcript at {}", path));
+    }
+    crate::gfx::desk::draw();
+}
+
+/// The loop itself, factored out of `run` so it can be driven two ways:
+/// actions sampled by the model, or actions read from a script. A scripted
+/// episode exercises every mechanical organ -- admission, argument
+/// validation, dispatch, observation capture, budgets, abort -- with no
+/// forward passes at all, which is what makes it a boot selftest rather
+/// than a twenty-minute QEMU vigil.
+///
+/// `quiet` suppresses per-step printing and the transcript: the selftest
+/// asserts on returned values and should not pollute /ai/episodes on every
+/// boot.
+fn episode(
+    goal: &str,
+    trust: Trust,
+    max_steps: usize,
+    script: Option<&[String]>,
+    quiet: bool,
+) -> (String, Vec<Step>) {
+    let _ = goal;
+    let ctx = EpisodeCtx::load();
     let mut steps: Vec<Step> = Vec::new();
     let mut outcome = "step budget reached";
 
@@ -362,23 +480,49 @@ pub fn run(goal: &str, trust: Trust, max_steps: usize) {
             outcome = "aborted by operator";
             break;
         }
-        let Some((name, args)) = propose(goal, &steps, trust) else {
-            outcome = "decode did not settle";
+
+        // Two sources of action. The sampled path can only name what the
+        // grammar admits; the scripted path bypasses the sampler, so the
+        // admission rule is applied by hand below -- same list, same rule,
+        // or a script could reach what a model never could.
+        let picked = match script {
+            Some(lines) => lines.get(i).map(|line| {
+                let (a, r) = match line.split_once(' ') {
+                    Some((a, r)) => (a.trim(), r.trim()),
+                    None => (line.trim(), ""),
+                };
+                (String::from(a), String::from(r))
+            }),
+            None => propose(goal, &steps, &ctx, trust),
+        };
+        let Some((name, args)) = picked else {
+            outcome = if script.is_some() { "script exhausted" } else { "decode did not settle" };
             break;
         };
 
         if name == DONE {
             outcome = "model called done";
-            console::set_color(LTGREEN);
-            kprintln!("  {}. done", i + 1);
-            console::set_color(LTGRAY);
-            elog(format!("{}. done", i + 1));
+            if !quiet {
+                console::set_color(LTGREEN);
+                kprintln!("  {}. done", i + 1);
+                console::set_color(LTGRAY);
+                elog(format!("{}. done", i + 1));
+            }
             break;
         }
 
         // Shape-check before dispatch. Rejection is an observation, not an
         // error: the model gets to read why and choose differently.
-        let checked = sysbox::check_args(&name, &args);
+        let admitted = script.is_none()
+            || harness::admitted(trust).iter().any(|n| *n == name);
+        let checked = if !admitted {
+            Err(format!(
+                "'{}' is not reachable at this trust level",
+                name
+            ))
+        } else {
+            sysbox::check_args(&name, &args)
+        };
         let (ok, observation) = match checked {
             Err(why) => (false, format!("invalid arguments: {}", why)),
             Ok(()) => {
@@ -397,15 +541,20 @@ pub fn run(goal: &str, trust: Trust, max_steps: usize) {
         } else {
             format!("{} {}", name, args)
         };
-        console::set_color(if ok { LTCYAN } else { LTRED });
-        kprintln!("  {}. {}", i + 1, action);
-        console::set_color(LTGRAY);
-        elog(format!("{}. {}{}", i + 1, if ok { "" } else { "[rejected] " }, action));
-        for line in observation.lines().take(4) {
-            kprintln!("     | {}", line);
-        }
-        for line in clip(observation.lines().take(4).collect::<Vec<_>>().join(" / ").as_str(), 110).lines() {
-            elog(format!("   | {}", line));
+        if !quiet {
+            console::set_color(if ok { LTCYAN } else { LTRED });
+            kprintln!("  {}. {}", i + 1, action);
+            console::set_color(LTGRAY);
+            elog(format!("{}. {}{}", i + 1, if ok { "" } else { "[rejected] " }, action));
+            for line in observation.lines().take(4) {
+                kprintln!("     | {}", line);
+            }
+            for line in clip(observation.lines().take(4).collect::<Vec<_>>().join(" / ").as_str(), 110).lines() {
+                elog(format!("   | {}", line));
+            }
+            // The window repaints through the diffed present, so refreshing
+            // per step costs only what actually changed.
+            crate::gfx::desk::draw();
         }
 
         steps.push(Step {
@@ -413,28 +562,48 @@ pub fn run(goal: &str, trust: Trust, max_steps: usize) {
             ok,
             observation: clip(&observation, OBS_CLIP),
         });
-
-        // The window repaints through the diffed present, so refreshing per
-        // step costs only what actually changed.
-        crate::gfx::desk::draw();
     }
 
-    console::set_color(YELLOW);
-    kprintln!("  [agent] {} after {} step(s)", outcome, steps.len());
-    console::set_color(LTGRAY);
-    elog(format!("-- {} after {} step(s) --", outcome, steps.len()));
+    (String::from(outcome), steps)
+}
 
-    // Transcript into the namespace. Content-addressed like everything else:
-    // an episode can be hashed, diffed against its siblings, and snapshotted
-    // without any of it being special-cased.
-    let report = render(goal, outcome, &steps);
-    let idx = sysbox::children("/ai/episodes").len() + 1;
-    let path = format!("/ai/episodes/{:04}.txt", idx);
-    if sysbox::write_text(&path, &report) {
-        kprintln!("  transcript at {}", path);
-        elog(format!("transcript at {}", path));
-    }
-    crate::gfx::desk::draw();
+/// The loop's mechanical properties, checked at every boot with no model in
+/// the way. Each line exists because its absence would be a silent failure:
+/// a read-only applet really runs and its output lands in the observation;
+/// a mutating applet is unreachable under ReadOnly trust even when named
+/// outright by a script; bad arguments are rejected as observations rather
+/// than dispatched; and `done` ends the episode inside the budget.
+pub fn selftest() -> bool {
+    let script = alloc::vec![
+        String::from("ls /sys"),
+        String::from("rm /sys/readme"),
+        String::from("cat"),
+        String::from("done"),
+    ];
+    let (outcome, steps) = episode("boot selftest", Trust::ReadOnly, 8, Some(&script), true);
+
+    let mut ok = true;
+    let mut check = |what: &str, pass: bool| {
+        console::set_color(if pass { LTGREEN } else { LTRED });
+        kprintln!("  {}  {}", if pass { "ok  " } else { "FAIL" }, what);
+        console::set_color(LTGRAY);
+        ok &= pass;
+    };
+
+    check("read-only applet ran, output captured as the observation", {
+        steps.first().map(|s| s.ok && s.observation.contains("readme")).unwrap_or(false)
+    });
+    check("mutating applet named outright is still unreachable", {
+        steps.get(1).map(|s| !s.ok && s.observation.contains("not reachable")).unwrap_or(false)
+    });
+    check("bad arguments rejected before dispatch", {
+        steps.get(2).map(|s| !s.ok && s.observation.contains("invalid arguments")).unwrap_or(false)
+    });
+    check("done ends the episode", {
+        outcome == "model called done" && steps.len() == 3
+    });
+
+    ok
 }
 
 fn render(goal: &str, outcome: &str, steps: &[Step]) -> String {

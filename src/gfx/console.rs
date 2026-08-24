@@ -468,7 +468,15 @@ pub fn _print(args: fmt::Arguments) {
     use fmt::Write;
     unsafe {
         if let Some(buf) = CAPTURE.get().as_mut() {
-            let _ = buf.write_fmt(args);
+            // Capped. A capture wraps arbitrary applet output, and an applet
+            // that prints forever -- a tool with a bad loop, a tree of a deep
+            // namespace -- would otherwise grow memory without bound while
+            // its caller is waiting on the capture to end. The cap is larger
+            // than any legitimate observation and smaller than a heap.
+            const CAPTURE_MAX: usize = 64 * 1024;
+            if buf.len() < CAPTURE_MAX {
+                let _ = buf.write_fmt(args);
+            }
             return;
         }
     }

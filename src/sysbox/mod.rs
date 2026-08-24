@@ -23,6 +23,7 @@ pub mod tree;
 
 use crate::gfx::console::{self, LTCYAN, LTGREEN, LTGRAY, LTRED, WHITE, YELLOW};
 use crate::kprintln;
+use crate::lang;
 use crate::store::{self, cas};
 use crate::sync::Racy;
 use alloc::format;
@@ -63,6 +64,11 @@ pub const APPLETS: &[Applet] = &[
     Applet { name: "cp",     args: "<a> <b>",      help: "copy; constant time at any size", mutates: true },
     Applet { name: "snap",   args: "",             help: "commit the working tree as a snapshot", mutates: true },
     Applet { name: "back",   args: "<seq>",        help: "load a past snapshot into the working tree", mutates: true },
+    // Always mutating, by construction rather than by inspection: a program
+    // can reach `write`, and `write` mutates, so no static analysis of the
+    // source may claim otherwise. The read-only grammar therefore never
+    // carries it, whatever the tool's text says.
+    Applet { name: "run",    args: "<path>",       help: "execute a lang program from the namespace", mutates: true },
 ];
 
 pub fn is_applet(name: &str) -> bool {
@@ -82,6 +88,21 @@ pub struct Sysbox {
 
 static BOX: Racy<Option<Sysbox>> = Racy::new(None);
 
+/// The interpreter tools run on.
+///
+/// Deliberately not the shell's REPL session: a skill must not reach the
+/// variables the operator was playing with, and the operator's session must
+/// not inherit a tool's leftovers. State persists across invocations within
+/// a boot, so a tool can keep a workspace the way a REPL does -- and the
+/// interpreter's own step budget is what stops a model-written `while (1)`
+/// from wedging the agent task, since the loop's abort check only fires
+/// between steps.
+static TOOLS: Racy<Option<lang::Interp>> = Racy::new(None);
+
+fn with_tools<R>(f: impl FnOnce(&mut lang::Interp) -> R) -> Option<R> {
+    unsafe { TOOLS.get().as_mut().map(f) }
+}
+
 /// Build the initial namespace.
 ///
 /// It exists in RAM whether or not there is a disk. A store does not create the
@@ -100,7 +121,25 @@ pub fn init() {
           type 'sysbox' for the applet list.\n".to_vec()));
     let _ = tree::put(&mut sb.root, &path_of("/tmp/.keep"), Node::Blob(Vec::new()));
     let _ = tree::put(&mut sb.root, &path_of("/ai/.keep"), Node::Blob(Vec::new()));
-    unsafe { *BOX.get() = Some(sb) };
+    seed_tools(&mut sb);
+    unsafe {
+        *BOX.get() = Some(sb);
+        *TOOLS.get() = Some(lang::Interp::new());
+    }
+}
+
+/// The starter skills. Shipped rather than documented, so the convention is
+/// demonstrated by working examples the first time anything lists /ai/tools.
+/// Re-seeded after a snapshot restore, because a snapshot taken before these
+/// existed would otherwise come back without them -- the same reasoning the
+/// corpus seeding in ai::init follows.
+fn seed_tools(sb: &mut Sysbox) {
+    let _ = tree::put(&mut sb.root, &path_of("/ai/tools/hello.l"), Node::Blob(
+        b"// says hello; the smallest working skill\n\
+          println(\"hello from a tool\")\n".to_vec()));
+    let _ = tree::put(&mut sb.root, &path_of("/ai/tools/status.l"), Node::Blob(
+        b"// one-line status card: ticks and task count\n\
+          println(\"ticks\", ticks(), \"tasks\", tasks())\n".to_vec()));
 }
 
 /// Adopt the newest snapshot as the working tree, if there is one.
@@ -125,6 +164,11 @@ pub fn restore_latest() {
                 // seeding this, the first snap after a boot would rewrite the
                 // entire tree it just finished reading.
                 let _ = store::with(|st| index_written(st, s));
+                // A snapshot older than the starter skills restores without
+                // them; put them back so the convention survives reboots.
+                if children("/ai/tools").is_empty() {
+                    seed_tools(s);
+                }
             });
             console::set_color(LTGREEN);
             kprintln!("  restored snapshot {} ({} files)", seq, files);
@@ -253,9 +297,72 @@ pub fn dispatch(cmd: &str, rest: &str) -> bool {
         "back" => cmd_back(a1),
         "diff" => cmd_diff(a1, a2),
         "fsck" => cmd_fsck(),
+        "run" => cmd_run(a1),
         _ => {}
     }
     true
+}
+
+/// Execute a lang program from the namespace, line by line, on the tool
+/// interpreter.
+///
+/// Lines, not the whole file at once: the REPL is line-oriented and skills
+/// are written to the same shape, so a tool reads like the code it is. The
+/// first failing line stops the tool and names itself -- an error an agent
+/// can read and react to beats a half-explained silence. The value of each
+/// expression line is printed, because a tool's intermediate results are
+/// exactly what an episode's observation wants to contain.
+fn cmd_run(path: &str) {
+    if path.is_empty() {
+        kprintln!("  usage: run <path>");
+        return;
+    }
+    let Some(bytes) = read_blob(path) else {
+        kprintln!("  run: no such file '{}'", path);
+        return;
+    };
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    let ran = with_tools(|tools| {
+        for (i, line) in text.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            match lang::eval_line(tools, line) {
+                Ok(v) => {
+                    if !matches!(v, lang::Value::Nil) {
+                        kprintln!("  = {}", v.render());
+                    }
+                }
+                Err(e) => {
+                    kprintln!("  run: line {}: {}", i + 1, e);
+                    return false;
+                }
+            }
+        }
+        true
+    });
+    let _ = ran;
+}
+
+/// The skills the namespace holds: /ai/tools/*.l with their first comment
+/// line as a description. This is what episode prompts and `agent skills`
+/// render, so the model can know what it (or the operator) has written.
+pub fn skills() -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for name in children("/ai/tools") {
+        if !name.ends_with(".l") {
+            continue;
+        }
+        let desc = read_blob(&format!("/ai/tools/{}", name))
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .and_then(|t| t.lines().next().map(String::from))
+            .unwrap_or_default();
+        // Strip the comment marker: `// says hello` becomes `says hello`.
+        let desc = desc.trim_start_matches('/').trim().to_string();
+        out.push((name, desc));
+    }
+    out
 }
 
 pub fn is_ready() -> bool {
