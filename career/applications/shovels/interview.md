@@ -93,4 +93,16 @@ consequence attached. What do you scope differently now because of CR-CA? GLaDOS
 is one target laptop with the model in the kernel rather than a monorepo of side
 projects; is that CR-CA's doing, or would you have built it that way anyway?
 
+> yes, for CR-CA it got deleted overtime and eventually corrupted, since I also
+> kept the most up-to-date versions on my linux hard-drive and that got
+> massively corrupted, unrecoverable. I've learned to not overengineer, but
+> instead to build something that *works*, and then fan-out into all the other
+> stuff, like presenting it to people and getting their opinion and review on
+> it.
+
+---
+
+**Q4. A year from now you're leading a mostly-agent team here. Describe a
+Tuesday.**
+
 > _(awaiting answer)_
