@@ -23,25 +23,29 @@ Standing answers, kept identical across every form so the facts cannot drift:
 | 24 Aug 2026 | Zed Industries | Open Source Engineer | email to jobs@zed.dev | Gmail message `1a0332d131fc4f5c` |
 | 24 Aug 2026 | Proxybase | Backend Systems Engineer (Rust), remote global | email to jobs@proxybase.xyz | Gmail message `1a03333878e12d7a` |
 | 24 Aug 2026 | Aqora Quantum | Sr Full-Stack Engineer (Rust + React), Paris or EU remote, EUR 70-90k | email to jannes@aqora.io | Gmail message `1a03333ec92c202c` |
+| 24 Aug 2026 | Shovels | Senior Data & Platform Engineer, remote (Americas/Europe) | email to luka@shovels.ai + attachments | Gmail message `1a033a626651a19c` |
+| 24 Aug 2026 | Poolside | Member of Engineering, Inference Infrastructure, EMEA remote | Ashby form | "successfully submitted" confirmation |
+| 24 Aug 2026 | Prime Intellect | Member of Technical Staff, Inference, remote | Ashby form | "successfully submitted" confirmation |
+| 24 Aug 2026 | Railway | Infrastructure Engineer, worldwide remote | Ashby form | "successfully submitted" confirmation |
+| 24 Aug 2026 | Lovable | Software Engineer, Platform (Runtime), Stockholm | Ashby form | "application was received" confirmation |
 
-## Filled, waiting on Arron to say submit
+## Filled but blocked by anti-bot gates: needs Arron to finish
 
-Each of these is filled end to end, with the résumé attached and a screenshot
-taken. None has been submitted. The browser session does not survive between
-runs, so submitting means re-running the filler with the submit step enabled;
-the text is stored in `answers.py` so the re-run puts back exactly what was
-reviewed.
+These four are filled end to end with the correct answers (all in `answers.py`
+and `drafts.md`), but the final submit is gated by a human-verification or
+bot-detection control that must not be evaded. Arron opens each URL, re-enters
+or pastes from `drafts.md`, clears the gate, and submits.
 
-| Company | Role | Where | Form | What it says |
-| --- | --- | --- | --- | --- |
-| Poolside | Member of Engineering, Inference Infrastructure | Remote (EMEA) | Ashby | Cover letter leading with kimi-k3, then RustLMHub, then the Swarms numbers. Answered yes to hands-on inference-serving experience. |
-| Modal | Member of Technical Staff, Systems | Stockholm | Ashby | Name, mail, résumé, and yes to working from the Stockholm office. No free-text field exists on this one. |
-| Prime Intellect | Member of Technical Staff, Inference | Remote | Ashby | Three answers: what I have built, what I optimise for (the RoPE bug and oracles), why Prime Intellect. |
-| Lovable | Software Engineer, Platform (Runtime) | Stockholm, on-site | Ashby | Right to work yes, sponsorship no, start immediately, EUR 70-100k, three essays, relocation to Stockholm stated in the third. |
-| Hugging Face | Low-level Senior SWE, Xet Storage | EMEA remote | Workable | Three required essays. First one opens with the exact phrase the job description asks for, "GPU-poor and proud". Says plainly that the 8-year requirement is not met. |
-| Hugging Face | Wild Card | Remote | Workable | Two essays: why Hugging Face, and hf-xet or candle as the first three months. Phone field would not accept input; it is optional. |
-| Railway | Infrastructure Engineer | Remote worldwide | Ashby | One question, "Why Railway?", answered with the driver-and-scheduler half of GLaDOS against their own list: hypervisors, virtio drivers, orchestration, overlay networks. |
-| Langfuse | Senior Backend Engineer (Data Infrastructure) | Europe, EUR 90-160k posted | Ashby | Salary answered inside their published band rather than the generic 70-100k. Start date 1 Sep 2026. The essay is the evaluation-harness story: three splits, family-level holdout, negative results kept. |
+| Company | Role | Gate | URL |
+| --- | --- | --- | --- |
+| Modal | MTS, Systems, Stockholm | Ashby flagged the automated submit as "possible spam" | jobs.ashbyhq.com/modal/3b3c6c42-326e-40c5-b78d-9f556739513b/application |
+| Langfuse | Senior Backend Engineer (Data Infra), Europe | Ashby "possible spam" flag | jobs.ashbyhq.com/langfuse/1225fa3d-d590-41d2-b798-ef927320fb2e/application |
+| Hugging Face | Low-level Senior SWE, Xet Storage, EMEA remote | Cloudflare "verify you are human" checkbox | apply.workable.com/huggingface/j/F4C096B22E/apply/ |
+| Hugging Face | Wild Card, remote | Cloudflare "verify you are human" checkbox | apply.workable.com/huggingface/j/0BD8C06DB3/apply/ |
+
+The two Hugging Face forms should carry Arron's own words anyway, since that
+form asks him to confirm the application is true and his own.
+
 
 ## Considered and not applied
 
@@ -75,5 +79,12 @@ reviewed.
 - **Chromium in this container cannot make TLS 1.3 connections through the
   egress proxy.** Capping at TLS 1.2 (`--ssl-version-max=tls1.2`) is what makes
   the form automation work at all; certificate verification stays on.
-- Every form carries a reCAPTCHA. They did not block filling. Whether they block
-  an automated submit is not known until the first submit is attempted.
+- **Form automation, what worked and what did not.** Ashby fields are
+  React-controlled: `fill()` sets the DOM value but validation reads React
+  state, so text fields must be replayed right before submit and yes/no and
+  radio controls must be committed by clicking a decoy option then the target
+  (a single click leaves React desynced). The resume "autofill" also overwrites
+  fields a few seconds after upload, so the upload runs first and a full replay
+  of every field happens just before submit. With that, four Ashby forms
+  submitted cleanly. The anti-bot gates (Ashby spam flag, Cloudflare Turnstile)
+  are a hard stop and correctly so: they are left for Arron to clear by hand.
