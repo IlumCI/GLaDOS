@@ -91,6 +91,7 @@ class Hybrid35:
                     "ring": np.zeros((kern - 1, qkv_dim), dtype=np.float32),
                 }
         self._rope = {}
+        self.latent_k = 0
 
     def w(self, name):
         return np.asarray(self.t[self.pre + name], dtype=np.float32)
@@ -123,22 +124,14 @@ class Hybrid35:
         eps = cfg["rms_norm_eps"]
         x = np.asarray(self.t[self.pre + "embed_tokens.weight"][token],
                        dtype=np.float32).copy()
-        for i, kind in enumerate(cfg["layer_types"]):
-            lp = f"layers.{i}."
-            # The mixer sees the *normed* stream; the residual stays raw.
-            # Omitting this was wrong from layer 0 with no downstream
-            # complaint -- the exact failure mode the fixture exists for.
-            xn = ref35.rms_norm(x[None, :],
-                                self.w(lp + "input_layernorm.weight"), eps)[0]
-            if kind == "full_attention":
-                x = x + self._full(xn, lp, i)
-            else:
-                x = x + self._linear(xn, lp, i)
-            xb = ref35.rms_norm(x[None, :],
-                                self.w(lp + "post_attention_layernorm.weight"), eps)[0]
-            h1 = (ref35.silu(xb @ self.w(lp + "mlp.gate_proj.weight").T)
-                  * (xb @ self.w(lp + "mlp.up_proj.weight").T))
-            x = x + h1 @ self.w(lp + "mlp.down_proj.weight").T
+        x = self._body(x, commit=True)
+        # Coconut-flavoured, training-free: K extra passes over the body with
+        # the last hidden state as the input -- no token decoded, position not
+        # advanced, recurrent state and KV prefix frozen. The refinement
+        # happens in the continuous stream only. Whether an untrained
+        # backbone benefits is exactly what the measurement is for.
+        for _ in range(self.latent_k):
+            x = self._body(x, commit=False)
         # Advance once per token, after every layer has used the position.
         # Without this each token attended at position 0 and the KV cache
         # wrote over itself -- fluent nonsense, in the usual way.
@@ -151,7 +144,28 @@ class Hybrid35:
         # flat vocabulary row.
         return (h @ W.T)[0]
 
-    def _full(self, h, lp, li):
+    def _body(self, x, commit):
+        cfg = self.cfg
+        eps = cfg["rms_norm_eps"]
+        for i, kind in enumerate(cfg["layer_types"]):
+            lp = f"layers.{i}."
+            # The mixer sees the *normed* stream; the residual stays raw.
+            # Omitting this was wrong from layer 0 with no downstream
+            # complaint -- the exact failure mode the fixture exists for.
+            xn = ref35.rms_norm(x[None, :],
+                                self.w(lp + "input_layernorm.weight"), eps)[0]
+            if kind == "full_attention":
+                x = x + self._full(xn, lp, i, commit)
+            else:
+                x = x + self._linear(xn, lp, i, commit)
+            xb = ref35.rms_norm(x[None, :],
+                                self.w(lp + "post_attention_layernorm.weight"), eps)[0]
+            h1 = (ref35.silu(xb @ self.w(lp + "mlp.gate_proj.weight").T)
+                  * (xb @ self.w(lp + "mlp.up_proj.weight").T))
+            x = x + h1 @ self.w(lp + "mlp.down_proj.weight").T
+        return x
+
+    def _full(self, h, lp, li, commit=True):
         cfg = self.cfg
         hd = cfg["head_dim"]
         nq = cfg["num_attention_heads"]
@@ -172,7 +186,8 @@ class Hybrid35:
         k = ref35.apply_rope(k[None, :, :], cos, sin)[0]
 
         kc, vc = self.full_cache[li]
-        kc[self.pos], vc[self.pos] = k, v
+        if commit:
+            kc[self.pos], vc[self.pos] = k, v
         n = self.pos + 1
 
         groups = nq // nkv
@@ -189,7 +204,7 @@ class Hybrid35:
         ogate = out.reshape(nq * hd) * ref35.sigmoid(gate)
         return ogate @ w("self_attn.o_proj.weight").T
 
-    def _linear(self, h, lp, li):
+    def _linear(self, h, lp, li, commit=True):
         cfg = self.cfg
         hk = cfg["linear_key_head_dim"]
         hv = cfg["linear_value_head_dim"]
@@ -213,8 +228,11 @@ class Hybrid35:
             conv += row * cw[:, j]
         conv = ref35.silu(conv)
         # The current row joins the ring for the token after this one.
-        st["ring"][:-1] = st["ring"][1:]
-        st["ring"][-1] = qkv
+        # Frozen during latent passes: refinement reads the context, it
+        # does not move it.
+        if commit:
+            st["ring"][:-1] = st["ring"][1:]
+            st["ring"][-1] = qkv
 
         q = conv[:kdim].reshape(nk, hk)
         k = conv[kdim:2 * kdim].reshape(nk, hk)
@@ -239,7 +257,10 @@ class Hybrid35:
         state = st["state"] * gt
         kv_mem = (state * kt[:, :, None]).sum(axis=1)
         delta = (vt - kv_mem) * bt
-        st["state"] = state + kt[:, :, None] * delta[:, None, :]
+        new_state = state + kt[:, :, None] * delta[:, None, :]
+        if commit:
+            st["state"] = new_state
+        state = new_state
         out = (st["state"] * q.astype(np.float64)[:, :, None]).sum(axis=1)
 
         core = out.reshape(nv, hv).astype(np.float32)
@@ -611,6 +632,8 @@ def main():
     ap.add_argument("--task", default="", choices=["", "mmlu", "gsm8k", "niah", "route"])
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--shots", type=int, default=0)
+    ap.add_argument("--latent", type=int, default=0,
+                    help="Coconut-style frozen-state refinement passes per token (hybrid only)")
     ap.add_argument("--max-new", type=int, default=64)
     ap.add_argument("--contexts", type=int, nargs="+", default=[512, 1024, 2048])
     ap.add_argument("--check", action="store_true",
@@ -634,6 +657,10 @@ def main():
     max_len = {"mmlu": 2048, "gsm8k": 1024, "niah": max(args.contexts) + 64,
                "route": 2048}[args.task]
     backend, note = make_backend(args.model, max_len)
+    if hasattr(backend, "latent_k"):
+        backend.latent_k = args.latent
+        if args.latent:
+            note += f", latent x{args.latent}"
     print(f"[lm_eval] {Path(args.model).name}: {note}, task {args.task}")
 
     if args.task == "mmlu":
@@ -648,6 +675,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 

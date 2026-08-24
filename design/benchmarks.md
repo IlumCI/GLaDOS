@@ -69,6 +69,43 @@ is exactly the alternative to pretending the backbone will improve.
   space (shell commands + applets, 78 names), prompts cut at `</think>` so
   the decode is the choice rather than a continuation of the answer.
 
+## Negative results, kept
+
+**Few-shot route exemplars: no effect.** 3 whole-trace exemplars from the
+train split moved q35's route score not at all (33.3% before and after,
+n=30). The grammar already forces the format, so exemplars can only teach
+the mapping, and three examples across 78 actions teach nothing. `--shots`
+stays in the tool with this result attached.
+
+**Coconut-style latent iteration, training-free: actively harmful.** K=2
+frozen-state refinement passes -- re-running the transformer body on its own
+final hidden state, position and recurrent state frozen -- took route from
+33.3% to **0.0%** on the same 15 items. The stream leaves its trained
+distribution after the first untrained re-entry and the argmax collapses.
+Coconut's gains came from *training* the model to reason in continuous
+space; without that training the trick is not neutral, it is destructive.
+The kernel-side version of latent reasoning that does work is already
+structural: the Gated DeltaNet recurrent state is continuous memory the
+model reads and writes every token, and the episode loop is the iteration.
+`--latent` stays in the tool, defaulting to 0, with this result attached.
+
+## What would actually move the numbers
+
+The backbone is frozen; the system's measured task-completion is the thing
+that improves. In order of expected yield, all measurable on these rails:
+
+1. **Gate-first routing (landed).** The loop now acts on the router's
+   3-core-agreement answer -- the measured 90.3%-right path -- and only
+   spends tokens on a split. The 33.3% constrained-decode figure is the
+   *floor* for loop steps; agreement-routed steps run at 90.3%-class
+   accuracy for microseconds.
+2. **Tool-augmented arithmetic.** GSM8K is 0.0 because tokens cannot do
+   arithmetic; the loop's `run` applet can, exactly. The bottleneck becomes
+   number extraction, not computation.
+3. **The ratchet.** Episodes that succeed write skills; skills are reused
+   without regeneration. Task-completion improves without weight changes --
+   the E-track's actual thesis, now measurable against this file's numbers.
+
 ## Known staleness found on the way
 
 `tools/evaluate.py` has not kept up with `reference.py` (load arity, rmsnorm
