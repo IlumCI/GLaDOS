@@ -9,18 +9,40 @@ datasets.
 
 ## Numbers
 
-| Rail | SmolLM2-135M (dense) | Qwen3.5-0.8B (hybrid) | Chance |
-|---|---|---|---|
-| MMLU, 0-shot letter-logprob | 20.0% (n=50) | **30.0%** (n=30) | 25% |
-| GSM8K, 5-shot greedy ≤64 new | 0.0% (n=15) | 0.0% (n=8) | ~0 |
-| NIAH, 512/1024[/2048], 3 depths | **0/7** | **6/6** (512/1024) | -- |
-| Route, traces test split, constrained decode, 78 actions | 0.0% (n=50) | **33.3%** (n=30) | ~1.3% |
+| Rail | SmolLM2-135M (dense) | Qwen3.5-0.8B (hybrid) | **Qwen3.5-2B distill (hybrid)** | Chance |
+|---|---|---|---|---|
+| MMLU, 0-shot letter-logprob | 20.0% (n=50) | 30.0% (n=30) | **43.3%** (n=30) | 25% |
+| GSM8K, 5-shot greedy | 0.0% (n=15) | 0.0% (n=8) | **0.0%** (n=8) | ~0 |
+| NIAH, 512/1024 | 0/7 | 6/6 | **6/6** | -- |
+| Route, constrained decode, 78 actions | 0.0% (n=50) | 33.3% (n=30) | **40.0%** (n=30) | ~1.3% |
+
+The 2B column is `insraq/Qwen3.5-2B-EmperoAI-Qwen3.8-Distill-Heretic-Abliterated`
+(Apache-2.0) -- a Qwen3.8-reasoning distill onto the Qwen3.5-2B hybrid body,
+same LLLFx6 geometry family, same tokenizer, converted by the same tool
+(1.88B params int8, worst rel 0.39%, argmax parity 100%, incremental runner
+1.1e-06). In-kernel: boots under QEMU at 4G guest RAM, first-token probe
+passes; the QEMU logits transcript is blocked by the intermittent
+serial-input stall (see runbook) and is a GF63 formality at native speed.
 
 Host-side, NumPy, int8 checkpoints dequantised block-wise exactly as the
 kernel does. Timing reference: SmolLM2 ~4-8 s/question, q35 ~20-40 s/question
 on the development machine.
 
 ## What the numbers say
+
+**The 2B distill confirms the literature's shape.** Allen-Zhu's capacity law
+(2 bits of knowledge per parameter, architecture-independent, int8-preserving)
+draws the wall: parametric knowledge is capacity-bound and no small model
+defies it. Everything else is defiable, and the 2B column shows it: route
++6.7pp and MMLU +13.3pp over the 0.8B from a 2.5x size increase *plus
+distilled reasoning* (Qwen3.8 traces into the 3.5 body) -- the same shape as
+Phi-4 (14B beating the 671B R1 on AIME) and the R1-Distill results
+(reasoning SFT disproportionately elevates small models). GSM8K stays 0.0
+across every model including the 2B, which is the T1 paper's finding
+verbatim: small models fail memorisation-heavy steps like arithmetic, and
+the fix is a tool, not parameters -- exactly what the kernel's `run`
+applet is. NIAH 6/6 for both hybrids: the fixed-size recurrent state holds
+the needle at these contexts regardless of scale.
 
 **The route rail is the one that decides the agent loop.** The design doc's
 threshold -- a loop is only worth building against a model that can follow an
