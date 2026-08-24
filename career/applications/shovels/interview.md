@@ -42,4 +42,18 @@ a smell in the output, an oracle you keep around?
 **Q2. What's in your harness that you built rather than installed? Why did you
 build it?**
 
+> I build my own harnesses, and generally prefer to stay to my own devices, I
+> don't trust general harnesses as being of enough quality to my taste, so I
+> make my own harnesses, they usually come with one of three things: a
+> universal hypernetwork, Code2DoRA, or Text2DoRA hypernetworks, for token
+> optimization and model self-improvement, doubles as both a workspace and an
+> unsupervised FT playground
+
+**Pushback (1 of 1 allowed):** The what is specific, the why is taste. "Not of
+enough quality to my taste" is the part a reader cannot check. What did an
+off-the-shelf harness do to you that cost you something -- a wrong answer that
+survived, a context that got lost, a loop that burned tokens on the wrong
+thing? And on the hypernetworks: what does Code2DoRA actually produce at the end
+of a session, and have you measured it against not doing it?
+
 > _(awaiting answer)_
