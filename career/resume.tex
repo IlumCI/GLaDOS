@@ -108,6 +108,13 @@ internals and in the machine underneath them.
 {\color{muted}Vilnius}\par\vspace{2pt}
 Full time on the work below: an operating system, a local inference runtime, and
 CPU inference for models too large to hold in memory at once.
+\vspace{4pt}
+
+\headline{Security engineer, contract}{2026}
+{\color{muted}Summer Engine (AI-native game engine)}\par\vspace{2pt}
+Application security review. Found a leak that exposed the full production
+environment in plaintext, alongside a client-side endpoint handling user credits
+and payments, and reported both with fixes.
 
 %% -------------------------------------------------------------- projects ----
 \sect{Selected work}
@@ -126,10 +133,9 @@ Inference and training engine in Rust on the premise that a model should only
 have to fit on the drive, not in memory: FFN weights stream from NVMe through
 \texttt{O\_DIRECT} while attention stays resident. GGUF k-quants, dense and MoE,
 CPU only, nothing borrowed from PyTorch or llama.cpp. Int8 activation kernels
-(2.3--2.55$\times$ on matmul), speculative decoding off the model's own
-multi-token head, and activation sparsity that skips up to 27.6\% of neurons
-only where the result is provably unchanged. 267 tests, differential against
-reference implementations. Fine-tunes a 27B model on 16 GB of RAM.}
+(2.3--2.55$\times$ on matmul), speculative decoding, and activation sparsity
+that skips up to 27.6\% of neurons only where the result is provably unchanged.
+267 differential tests. Fine-tunes a 27B model on 16 GB of RAM.}
 
 \project{kimi-k3-in-rust}{github.com/IlumCI/kimi-k3-in-rust}{%
 Runs Kimi K3, 2.78 trillion parameters and 1.56 TB of weights, on one CPU with
@@ -139,8 +145,7 @@ on disk behind an LRU cache instead of in memory. Output is byte-identical from
 
 \project{CR-CA and Stable Cognition}{github.com/IlumCI}{%
 Research frameworks: causal inference with counterfactual analysis for
-autonomous agents, and a long-context reasoning architecture built to be
-extended rather than retrained.}
+autonomous agents, and a long-context reasoning architecture.}
 
 {\color{muted}138 public repositories; 387 merged pull requests across
 open-source and commercial work.}

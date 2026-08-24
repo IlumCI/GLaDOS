@@ -1,0 +1,22 @@
+{"n": 1, "path": "/meta/release", "params": {}, "status": 200, "ok": true}
+{"n": 2, "path": "/list/tags", "params": {"size": 200}, "status": 422, "ok": false}
+{"n": 3, "path": "/list/tags", "params": {"size": 100}, "status": 200, "ok": true}
+{"n": 4, "path": "/meta/coverage", "params": {"geo_type": "state", "geo_id": "CA", "date_from": "2022-01-01", "date_to": "2025-12-31"}, "status": 200, "ok": true}
+{"n": 5, "path": "/meta/coverage", "params": {"geo_type": "state", "geo_id": "TX", "date_from": "2022-01-01", "date_to": "2025-12-31"}, "status": 200, "ok": true}
+{"n": 6, "path": "/meta/coverage", "params": {"geo_type": "state", "geo_id": "FL", "date_from": "2022-01-01", "date_to": "2025-12-31"}, "status": 200, "ok": true}
+{"n": 7, "path": "/meta/coverage", "params": {"geo_type": "state", "geo_id": "NC", "date_from": "2022-01-01", "date_to": "2025-12-31"}, "status": 200, "ok": true}
+{"n": 8, "path": "/cities/search", "params": {"q": "San Diego"}, "status": 200, "ok": true}
+{"n": 9, "path": "/cities/search", "params": {"q": "San Jose"}, "status": 200, "ok": true}
+{"n": 10, "path": "/cities/search", "params": {"q": "Bakersfield"}, "status": 200, "ok": true}
+{"n": 11, "path": "/cities/RP8k27ROrGE/metrics/monthly", "params": {"tag": "solar", "metric_from": "2022-01-01", "metric_to": "2024-12-31", "size": 100, "cursor": null}, "status": 422, "ok": false}
+{"n": 12, "path": "/cities/RLChdtvlBS4/metrics/monthly", "params": {"tag": "solar", "metric_from": "2022-01-01", "metric_to": "2024-12-31", "size": 100, "cursor": null}, "status": 422, "ok": false}
+{"n": 13, "path": "/cities/RP8k27ROrGE/metrics/monthly", "params": {"tag": "solar", "property_type": "residential", "metric_from": "2022-01-01", "metric_to": "2024-12-31", "size": 100, "cursor": null}, "status": 200, "ok": true}
+{"n": 14, "path": "/cities/RP8k27ROrGE/metrics/monthly", "params": {"tag": "roofing", "property_type": "residential", "metric_from": "2022-01-01", "metric_to": "2024-12-31", "size": 100, "cursor": null}, "status": 200, "ok": true}
+{"n": 15, "path": "/cities/RLChdtvlBS4/metrics/monthly", "params": {"tag": "solar", "property_type": "residential", "metric_from": "2022-01-01", "metric_to": "2024-12-31", "size": 100, "cursor": null}, "status": 200, "ok": true}
+{"n": 16, "path": "/cities/RLChdtvlBS4/metrics/monthly", "params": {"tag": "roofing", "property_type": "residential", "metric_from": "2022-01-01", "metric_to": "2024-12-31", "size": 100, "cursor": null}, "status": 200, "ok": true}
+{"n": 17, "path": "/cities/search", "params": {"q": "Austin"}, "status": 200, "ok": true}
+{"n": 18, "path": "/cities/a4xysKbZwqg/metrics/monthly", "params": {"tag": "solar", "property_type": "residential", "metric_from": "2022-06-01", "metric_to": "2024-06-30", "size": 100, "cursor": null}, "status": 200, "ok": true}
+{"n": 19, "path": "/cities/search", "params": {"q": "Phoenix"}, "status": 200, "ok": true}
+{"n": 20, "path": "/cities/TVIESDMU7L8/metrics/monthly", "params": {"tag": "solar", "property_type": "residential", "metric_from": "2022-06-01", "metric_to": "2024-06-30", "size": 100, "cursor": null}, "status": 404, "ok": false}
+{"n": 21, "path": "/meta/coverage", "params": {"geo_type": "city", "geo_id": "RP8k27ROrGE", "date_from": "2023-01-01", "date_to": "2023-06-30"}, "status": 200, "ok": true}
+{"n": 22, "path": "/meta/coverage", "params": {"geo_type": "city", "geo_id": "RP8k27ROrGE", "date_from": "2023-09-01", "date_to": "2024-06-30"}, "status": 200, "ok": true}
