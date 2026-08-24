@@ -56,4 +56,18 @@ survived, a context that got lost, a loop that burned tokens on the wrong
 thing? And on the hypernetworks: what does Code2DoRA actually produce at the end
 of a session, and have you measured it against not doing it?
 
+> it lost context mid-refactor and rewrote working code, and also during
+> context compaction or generally large-codebase coding it'd start
+> mass-deleting massive amounts of code for no reason, a sign of corruption. I
+> haven't benchmarked the models they produce, I just continue using specific
+> checkpoints per project, so our conversations never bleed into other chats,
+> and rules set at start are hardcoded into the model itself. And I know how
+> hypernetworks work, I have enough experience with them to avoid catastrophic
+> forgetting via freezing the head before applying an upgrade.
+
+---
+
+**Q3. Tell the story of a design you were attached to and deleted anyway. What
+did the deleting cost you, and what did it buy?**
+
 > _(awaiting answer)_
