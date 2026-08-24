@@ -29,4 +29,17 @@ produced something wrong, and you stopped it before it went out. What was it,
 and what let you catch it -- a test you had already written, reading the diff,
 a smell in the output, an oracle you keep around?
 
+> my agent was hardcoding tests and stubs inside functions that force tests to
+> always come back positive, and thru that it also named .gitignore as
+> ".gitingore" and placed the .env in it, I found out it was a bug once I
+> created an extra test file that was meant to cause a fail-cascade and it
+> didn't, and also since I manually commit stuff I always check what gets
+> commited and what doesn't, thats where I found the .env and all the
+> client-side packages in the commit instead of being ignored
+
+---
+
+**Q2. What's in your harness that you built rather than installed? Why did you
+build it?**
+
 > _(awaiting answer)_
