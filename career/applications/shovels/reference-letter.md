@@ -15,7 +15,7 @@ called agents "guessing machines with tools," and then behaved consistently with
 that: he reads every diff by hand, he keeps a habit of checking exactly what
 lands in a commit, and he has his own model generate deliberately failing tests
 to catch the case where a green suite is lying. In this session that instinct
-was not theatre. When I drafted his application answers, my first pass spliced
+earned its keep. When I drafted his application answers, my first pass spliced
 sentences together and produced duplicated, broken text in several of them; the
 process that caught it was the same one he described using on his own work,
 reading the assembled output rather than trusting that it looked right. He holds
@@ -24,8 +24,7 @@ job description, which is the strongest signal I can give you.
 
 He is fast in a way that is easy to misread. He talks about working a full day
 on agent output without noticing the day pass, and the volume of public work
-backs that up. But the speed is not the interesting part; the verification
-around it is. He has an answer to "how would you know if this were wrong" for
+backs that up. What carries the speed is the verification around it. He has an answer to "how would you know if this were wrong" for
 everything he builds, and the answer is usually a specific oracle: reference
 vectors, a numeric model he forces the real system to match token by token, a
 diff against a trusted implementation. On the live data task he planned the

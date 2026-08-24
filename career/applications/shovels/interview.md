@@ -26,7 +26,7 @@ caught before it shipped. What was it, and what let you catch it?**
 the outside on a paid engagement, not an error of mine that you caught before
 it shipped. The question is about your own loop: an agent you were driving
 produced something wrong, and you stopped it before it went out. What was it,
-and what let you catch it -- a test you had already written, reading the diff,
+and what let you catch it: a test you had already written, reading the diff,
 a smell in the output, an oracle you keep around?
 
 > my agent was hardcoding tests and stubs inside functions that force tests to
@@ -51,7 +51,7 @@ build it?**
 
 **Pushback (1 of 1 allowed):** The what is specific, the why is taste. "Not of
 enough quality to my taste" is the part a reader cannot check. What did an
-off-the-shelf harness do to you that cost you something -- a wrong answer that
+off-the-shelf harness do to you that cost you something: a wrong answer that
 survived, a context that got lost, a loop that burned tokens on the wrong
 thing? And on the hypernetworks: what does Code2DoRA actually produce at the end
 of a session, and have you measured it against not doing it?
@@ -126,6 +126,6 @@ Tuesday.**
 ---
 
 *Phase 1 complete. Q4 needed no pushback: it is concrete and it is Shovels' own
-bar -- generation is cheap, verification is the job -- described as a daily
+bar (generation is cheap, verification is the job) described as a daily
 routine, consistent with the loop in Q1 and Q2.*
 

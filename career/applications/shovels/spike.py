@@ -49,7 +49,7 @@ def main():
         print("No SHOVELS_KEY in environment. Create a trial key at "
               "https://app.shovels.ai and export SHOVELS_KEY before running.")
         return
-    # Tier 0 — orient
+    # Tier 0, orient
     rel = get("/meta/release")
     print("  release:", json.dumps(rel)[:120])
     tags = get("/list/tags", size=200)

@@ -1,4 +1,4 @@
-# Phase 3 spike — finding
+# Phase 3 spike: finding
 
 **Calls spent: 22 (of 250). Successful: 18. Errors: 4, all mine, all mid-plan validation mistakes, each one counted against the budget below.**
 Data release: 2026-08-20. Transcript: `spike-transcript.jsonl` (every call, in order).
@@ -32,13 +32,13 @@ its pre-NEM-3.0 rate, having briefly run at nearly double it in the rush.
    across 2022-2024 with no April-2023 inflection. The cliff is a California
    policy effect, not a Shovels-wide change in how solar is tagged or ingested.
 3. **Coverage control.** San Diego's total permit volume **rose** across the
-   drop -- 92,590 permits in 2023 H1 vs 168,687 in 2023 H2-2024 H1 (`/meta/coverage`).
+   drop, 92,590 permits in 2023 H1 vs 168,687 in 2023 H2-2024 H1 (`/meta/coverage`).
    The city was reporting more, not less, so the solar collapse is real activity.
 
 ## Honest limitations
 
 - **Bakersfield, CA** showed the same 2023 hump but its late-2024 numbers crater
-  in *both* solar and roofing (63/35/46 solar, 19/13/23 roofing) -- the classic
+  in *both* solar and roofing (63/35/46 solar, 19/13/23 roofing), the classic
   both-tags-together signature of a **reporting lapse**, so its 2024 tail is
   unreliable and it was dropped as the headline case. Noticing that is the
   reason San Diego is the example and Bakersfield is a footnote.
@@ -55,4 +55,4 @@ Diego in two windows; `/cities/search` for San Diego, Bakersfield, Austin;
 `/cities/{geo_id}/metrics/monthly?tag=solar|roofing&property_type=residential`
 for each. One 404 (Phoenix resolved to Phoenix, IL, not AZ) and three early
 422s (`size=200` over the 100 cap; `property_type` is required though the
-spec marks it optional) -- all counted, none retried blindly.
+spec marks it optional), all counted, none retried blindly.

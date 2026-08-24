@@ -1,4 +1,4 @@
-# Phase 3 spike — query plan (written before spending a single call)
+# Phase 3 spike: query plan (written before spending a single call)
 
 Budget: **250 API calls, errors included.** This plan spends well under 100 and
 leaves the rest as margin, because the budget is part of what they grade. Every
@@ -27,29 +27,29 @@ policy-relevant on its own.
 
 ## Tiers
 
-**Tier 0 — orient (3 calls).**
-1. `/meta/release` — data freshness date, so the window we pick ends where the
+**Tier 0, orient (3 calls).**
+1. `/meta/release`, data freshness date, so the window we pick ends where the
    data actually ends.
-2. `/list/tags` — confirm the real tag strings (solar, ev_charger, etc.) rather
+2. `/list/tags`, confirm the real tag strings (solar, ev_charger, etc.) rather
    than guessing names that would waste calls on empty filters.
-3. `/meta/coverage?geo_type=state&geo_id=<ST>` for one candidate state — read
+3. `/meta/coverage?geo_type=state&geo_id=<ST>` for one candidate state, read
    `fill_pct` per field before trusting anything from that state.
 
-**Tier 1 — locate (5-10 calls).**
+**Tier 1, locate (5-10 calls).**
 4. `/cities/search?q=...` to resolve `geo_id` for a small set (3-4) of
    comparable cities in a well-covered state.
 5. `/meta/coverage` per candidate city over the analysis window. **Any city
    whose coverage is patchy across the window is dropped now**, before it can
    masquerade as a finding.
 
-**Tier 2 — the signal (10-20 calls).**
+**Tier 2, the signal (10-20 calls).**
 6. `/cities/{geo_id}/metrics/monthly?tag=<tag>&metric_from=&metric_to=` for each
-   surviving city — the time series that carries the effect.
+   surviving city, the time series that carries the effect.
 7. `/decisions/search?geo_id=&decision_from=&decision_to=&category=` (or
    `decision_q=`) to find the policy event that lines up with a move in the
    series. Decisions are the "before it's built" half; permits are the "after".
 
-**Tier 3 — kill the artifact (10-20 calls).**
+**Tier 3, kill the artifact (10-20 calls).**
 8. Re-pull `/meta/coverage` for the exact geo and window of the finding: prove
    `fill_pct` is flat across the drop/spike, so the move is real activity and not
    the jurisdiction going dark.
@@ -61,12 +61,12 @@ policy-relevant on its own.
 
 "We could not verify this" is the only wrong answer, so if Tier 3 dissolves the
 finding, the honest write-up is that the apparent effect was a coverage artifact
-and here is the coverage series that proves it — that is itself a good result and
+and here is the coverage series that proves it, that is itself a good result and
 exactly the discipline they screen for.
 
 ## What gets saved
 
-- `spike-transcript.jsonl` — every call: endpoint, params, status, call number.
-- `spike-finding.md` — the claim, the queries that found it, the three artifact
+- `spike-transcript.jsonl`, every call: endpoint, params, status, call number.
+- `spike-finding.md`, the claim, the queries that found it, the three artifact
   controls, and the final call count.
 Both are produced by the harness as it runs, not reconstructed afterwards.

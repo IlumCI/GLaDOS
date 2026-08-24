@@ -91,7 +91,7 @@ LOVABLE_IMPRESSIVE = f"""Writing an operating system, in Rust, from nothing, wit
 
 {GLADOS} No user/kernel split and no syscall boundary, because in that arrangement a tool call from the model is a function call. The only code in the tree I did not write is Rust's core and 509 hardware constants transcribed from Linux because no datasheet publishes them.
 
-The part I am actually proud of is not the size, it is the checking. There is no host test runner for a UEFI binary, so the boot log is the test suite: heap, clock, namespace, crypto against eleven sets of RFC vectors, constrained decoding and the linear probe, pass or fail per line, every boot. The model path is verified against a NumPy oracle reading the same converted checkpoint, token by token, because a wrong attention implementation still writes fluent sentences."""
+What I am proud of is the checking, more than the size. There is no host test runner for a UEFI binary, so the boot log is the test suite: heap, clock, namespace, crypto against eleven sets of RFC vectors, constrained decoding and the linear probe, pass or fail per line, every boot. The model path is verified against a NumPy oracle reading the same converted checkpoint, token by token, because a wrong attention implementation still writes fluent sentences."""
 
 LOVABLE_ELSE = f"""Three things worth saying plainly.
 

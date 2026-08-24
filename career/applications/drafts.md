@@ -6,7 +6,7 @@ refill and submit. Nothing here has been sent.
 
 ---
 
-## Poolside — Member of Engineering (Inference Infrastructure)
+## Poolside: Member of Engineering (Inference Infrastructure)
 
 *Remote (EMEA). Fields: name, email, links, resume, location, cover letter, one yes/no.*
 
@@ -21,7 +21,7 @@ refill and submit. Nothing here has been sent.
 > Vilnius, Lithuania
 
 
-**Do you have hands-on experience optimizing inference request serving?**
+**Hands-on experience optimizing inference request serving?**
 
 > Yes
 
@@ -43,9 +43,9 @@ refill and submit. Nothing here has been sent.
 
 ---
 
-## Modal — Member of Technical Staff, Systems
+## Modal: Member of Technical Staff, Systems
 
-*Stockholm, $140-200k published. The form has no free-text field at all.*
+*Stockholm, $140-200k published. No free-text field.*
 
 
 **Name / Email / Resume**
@@ -53,14 +53,14 @@ refill and submit. Nothing here has been sent.
 > Arron Leilion / ilumbackup@gmail.com / resume.pdf
 
 
-**Are you excited and able to work from our Stockholm office?**
+**Excited and able to work from our Stockholm office?**
 
 > Yes
 
 
 ---
 
-## Prime Intellect — Member of Technical Staff, Inference
+## Prime Intellect: Member of Technical Staff, Inference
 
 *Remote.*
 
@@ -94,7 +94,7 @@ refill and submit. Nothing here has been sent.
 
 ---
 
-## Lovable — Software Engineer, Platform (Runtime)
+## Lovable: Software Engineer, Platform (Runtime)
 
 *Stockholm, on-site.*
 
@@ -131,7 +131,7 @@ refill and submit. Nothing here has been sent.
 >
 > GLaDOS is a ring-0 operating system in Rust with Qwen3 running int8 inside the kernel: 40,000 lines across 93 files, its own TLS 1.3, TCP/IP stack, NVMe driver, content-addressed store and window manager, with the cryptography checked against published RFC vectors at every boot. No user/kernel split and no syscall boundary, because in that arrangement a tool call from the model is a function call. The only code in the tree I did not write is Rust's core and 509 hardware constants transcribed from Linux because no datasheet publishes them.
 >
-> The part I am actually proud of is not the size, it is the checking. There is no host test runner for a UEFI binary, so the boot log is the test suite: heap, clock, namespace, crypto against eleven sets of RFC vectors, constrained decoding and the linear probe, pass or fail per line, every boot. The model path is verified against a NumPy oracle reading the same converted checkpoint, token by token, because a wrong attention implementation still writes fluent sentences.
+> What I am proud of is the checking, more than the size. There is no host test runner for a UEFI binary, so the boot log is the test suite: heap, clock, namespace, crypto against eleven sets of RFC vectors, constrained decoding and the linear probe, pass or fail per line, every boot. The model path is verified against a NumPy oracle reading the same converted checkpoint, token by token, because a wrong attention implementation still writes fluent sentences.
 
 
 **Is there anything else you'd like us to know about you?**
@@ -152,9 +152,9 @@ refill and submit. Nothing here has been sent.
 
 ---
 
-## Hugging Face — Low-level Senior Software Engineer, Xet Storage
+## Hugging Face: Low-level Senior Software Engineer, Xet Storage
 
-*EMEA remote. THE ONE TO REWRITE: they ask you to confirm the application is 'true and your own' and say they read every answer.*
+*EMEA remote. THE ONE TO REWRITE: they ask you to confirm it is true and your own, and say they read every answer.*
 
 
 **Eligible to work in the country you are applying?**
@@ -162,17 +162,17 @@ refill and submit. Nothing here has been sent.
 > YES
 
 
-**Everything in this application is true and your own?**
+**Everything true and your own?**
 
 > YES
 
 
-**Did you start your first written answer with the exact phrase from the job description?**
+**Did you start your first answer with the exact phrase from the job description?**
 
 > YES
 
 
-**Hands-on experience in low-level software engineering, scaling distributed systems, storage, or networking infrastructure?**
+**Hands-on low-level / distributed systems / storage / networking experience?**
 
 > YES
 
@@ -182,7 +182,7 @@ refill and submit. Nothing here has been sent.
 > Systems engineer in Vilnius. I wrote a ring-0 operating system in Rust with a content-addressed store and an NVMe driver in it, and an inference engine that streams weights off disk so a 2.78-trillion-parameter model runs on 8.24 GB of RAM. Both are the shape of xet-core's problem from the other side. Everything is public: https://ilumci.github.io/portfolio/
 
 
-**Why Hugging Face, and where would you make the biggest difference in this role?**
+**Why Hugging Face, and where would you make the biggest difference?**
 
 > GPU-poor and proud 🤗 That line is not a joke to me: everything I have built in the last year runs on one laptop with 16 GB of RAM and no GPU, on purpose.
 >
@@ -225,7 +225,7 @@ refill and submit. Nothing here has been sent.
 
 ---
 
-## Hugging Face — Wild Card
+## Hugging Face: Wild Card
 
 *Remote. Also worth your own pass.*
 
@@ -250,7 +250,7 @@ refill and submit. Nothing here has been sent.
 
 ---
 
-## Railway — Infrastructure Engineer
+## Railway: Infrastructure Engineer
 
 *Remote worldwide. One question only.*
 
@@ -268,9 +268,9 @@ refill and submit. Nothing here has been sent.
 
 ---
 
-## Langfuse — Senior Backend Engineer (Data Infrastructure)
+## Langfuse: Senior Backend Engineer (Data Infrastructure)
 
-*Europe. They publish EUR 90-160k, which is above the 70-100k band you gave me; the answer below uses the lower half of theirs.*
+*Europe. They publish EUR 90-160k, above the 70-100k you gave me; the answer below uses the lower half of theirs.*
 
 
 **Currently located**
