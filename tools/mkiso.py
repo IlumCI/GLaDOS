@@ -439,13 +439,15 @@ def main():
     # volume is FAT16 and firmware that trusts the count misparses everything.
     # So the cluster size sets a floor on the image: 4 KiB clusters cannot
     # produce a volume smaller than ~256 MB, which for a kernel-only image is
-    # 255 MB of zeroes. Pick the smallest cluster the payload actually needs
-    # instead of defaulting large.
+    # 255 MB of zeroes. Take the largest cluster whose floor still fits
+    # inside the data: past that bound a bigger cluster only trips the floor
+    # and pads the image, while below it the data itself sets the size and a
+    # bigger cluster merely shrinks the FAT tables.
     cluster = args.cluster
     if not cluster:
         total = efi.stat().st_size + payload_bytes
         cluster = 512
-        while cluster < 32768 and total > 60000 * cluster:
+        while cluster < 32768 and 65525 * cluster * 2 <= total:
             cluster *= 2
 
     out = Path(args.output)
