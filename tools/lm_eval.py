@@ -119,6 +119,26 @@ class Hybrid35:
             st["ring"][:] = 0
         self._rope.clear()
 
+    def snapshot(self):
+        """Fork point: everything the state needs to explore a candidate and
+        come back. Full layers copy their live KV prefix; linear layers copy
+        the fixed-size state and ring. This is the kernel's mind-forking,
+        host-side."""
+        full = {i: (kc[: self.pos].copy(), vc[: self.pos].copy())
+                for i, (kc, vc) in self.full_cache.items()}
+        lin = {i: (st["state"].copy(), st["ring"].copy())
+               for i, st in self.lin.items()}
+        return (full, lin, self.pos)
+
+    def restore(self, snap):
+        full, lin, pos = snap
+        for i, (kc, vc) in self.full_cache.items():
+            k, v = full[i]
+            kc[:pos], vc[:pos] = k, v
+        for i, st in self.lin.items():
+            st["state"], st["ring"] = lin[i][0].copy(), lin[i][1].copy()
+        self.pos = pos
+
     def _step(self, token):
         cfg = self.cfg
         eps = cfg["rms_norm_eps"]

@@ -186,6 +186,11 @@ def capture(dest):
 
 
 def main():
+    # The serial stream is UTF-8, and a multibyte character split across a
+    # socket read decodes to U+FFFD under errors="replace" -- which the
+    # default cp1252 stdout then refuses to encode when output is redirected
+    # to a file, killing the session mid-run.
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     argv = sys.argv[1:]
     timeout = 240
     memory = "2048M"
@@ -436,6 +441,7 @@ def main():
     queue = list(commands)
     sent_all = not queue
     idle_prompts = 0
+    pending = None
 
     try:
         while time.time() < deadline:
@@ -456,6 +462,66 @@ def main():
                 # the episode it was supposed to be watching.
                 idle_prompts = 0
 
+            # Acknowledgement watch: the guest's Enter-echo is the receipt.
+            if pending:
+                if len(buf) > pending["mark"]:
+                    pending = None  # the guest saw the bytes
+                elif time.time() - pending["at"] > 8.0:
+                    if pending["retries"] < 3:
+                        pending["retries"] += 1
+                        pending["at"] = time.time()
+                        print(f"[drive] no echo -- resending "
+                              f"(attempt {pending['retries']}): {pending['line']}")
+                        # One screendump at first retry: the taskbar clock
+                        # ticks every second, so two dumps tell alive from
+                        # dead without touching the guest.
+                        if pending["retries"] == 1:
+                            try:
+                                mon = socket.create_connection(
+                                    ("127.0.0.1", MONITOR_PORT), timeout=5)
+                                mon.settimeout(2.0)
+                                mon.sendall(b"screendump .qemu/stall1.ppm\n")
+                                time.sleep(1.0)
+                                mon.close()
+                                print("[drive] stall screendump 1")
+                            except OSError:
+                                pass
+                        if pending["retries"] == 2:
+                            try:
+                                mon = socket.create_connection(
+                                    ("127.0.0.1", MONITOR_PORT), timeout=5)
+                                mon.settimeout(2.0)
+                                mon.sendall(b"info chardev\n")
+                                time.sleep(0.5)
+                                info = b""
+                                while True:
+                                    try:
+                                        info += mon.recv(4096)
+                                    except socket.timeout:
+                                        break
+                                print("[drive] info chardev:",
+                                      info.decode("utf-8", "replace")[:400])
+                                mon.sendall(b"sendkey h\n")
+                                time.sleep(0.3)
+                                mon.sendall(b"screendump .qemu/stall2.ppm\n")
+                                time.sleep(1.0)
+                                mon.close()
+                                a = Path(".qemu/stall1.ppm").read_bytes()
+                                b = Path(".qemu/stall2.ppm").read_bytes()
+                                print(f"[drive] stall screendump 2 (after "
+                                      f"sendkey h); frames identical: "
+                                      f"{a == b} (True = shell deaf to "
+                                      f"keyboard too -> loop stuck; "
+                                      f"False = shell alive, UART wedged)")
+                            except OSError:
+                                pass
+                        sock.sendall(pending["line"].encode() + b"\r")
+                        pending["mark"] = len(buf)
+                    else:
+                        print(f"[drive] giving up on: {pending['line']}",
+                              file=sys.stderr)
+                        pending = None
+
             # The shell echoes a prompt when it is ready for the next line.
             if buf.endswith(PROMPT) or (not chunk and buf.rstrip().endswith(PROMPT.strip())):
                 if queue:
@@ -463,6 +529,14 @@ def main():
                     print(f"[drive] sent: {line}")
                     sock.sendall(line.encode() + b"\r")
                     buf.clear()
+                    # The wire loses whole commands intermittently -- bytes
+                    # arrive at the guest UART and never come out, more often
+                    # after a long silent boot. The guest's own Enter-echo is
+                    # the acknowledgement: if it has not appeared within 8s,
+                    # the command is gone, and resending is the only honest
+                    # recovery. Capped, and reset by any fresh output.
+                    pending = {"line": line, "at": time.time(),
+                               "retries": 0, "mark": len(buf)}
                     time.sleep(0.2)
                 else:
                     idle_prompts += 1
