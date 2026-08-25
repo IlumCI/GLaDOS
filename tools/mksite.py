@@ -177,7 +177,7 @@ page(
              ["Storage", "NVMe driver, content-addressed store, Merkle trees, snapshots"],
              ["Network", "ARP, IPv4, ICMP, UDP, TCP, DHCP, DNS, TLS 1.3 with chain validation"],
              ["Crypto", "SHA-1/256/384, HMAC, AES, ChaCha20-Poly1305, X25519, RSA, ECDSA"],
-             ["Model", "Qwen3-0.6B or SmolLM2-135M, int8, inference in kernel"],
+             ["Model", "Qwen3.5-2B, Qwen3-0.6B or SmolLM2-135M, int8, inference in kernel"],
              ["Language", "Lexer, parser, interpreter with kernel builtins"]]),
         h3("Known limits"),
         ul("Wireless does not work. The laptop's card is CNVi, which means the MAC "
@@ -230,28 +230,35 @@ page(
 page(
     "download/index",
     "Download GLaDOS ISO. Bootable AI operating system images",
-    "Download the GLaDOS OS ISO. Bootable UEFI images from 33 MB to 575 MB, with "
+    "Download the GLaDOS OS ISO. Bootable UEFI images from 33 MB to 1.8 GB, with "
     "an in-kernel language model included. Flash with Rufus, balenaEtcher or dd.",
     ["GLaDOS ISO", "GLaDOS download", "AI OS ISO", "Rust OS ISO", "bootable ISO",
      "Aperture Science OS download"],
     kind="download",
     blocks=[
-        p("Three images, all bootable UEFI ISOs. Each one is a FAT32 EFI System "
+        p("Four images, all bootable UEFI ISOs. Each one is a FAT32 EFI System "
           "Partition wrapped in an ISO 9660 filesystem with an El Torito boot "
-          "entry pointing at it, and all three layers are written by "
-          "<a href=\"../wiki/iso-el-torito.html\">this project's own ISO writer</a>, not by <code>mkisofs</code>. "
+          "entry pointing at it, and all three layers come from "
+          "<a href=\"../wiki/iso-el-torito.html\">this project's own ISO writer</a>. "
           "The difference is invisible to your "
           "firmware and was not invisible to write."),
         ("downloads", [
+            ("glados-qwen35-2b.iso", "1.8 GB", REL + "glados-qwen35-2b.iso",
+             "The flagship: kernel plus Qwen3.5-2B, distilled and quantised to "
+             "int8. Three layers in four run as linear attention, which keeps the "
+             "KV cache small enough for a laptop at a 512-token context window. "
+             "Host-side it measures 40% on routing and 43.3% on MMLU. The weights "
+             "are read whole before ExitBootServices, so it wants a machine with "
+             "8 GB of RAM."),
             ("glados-qwen3-0.6b.iso", "575 MB", REL + "glados-qwen3-0.6b.iso",
-             "The full system: kernel plus Qwen3-0.6B quantised to int8, with a "
-             "512-token context window. Take this one unless you have a reason not "
-             "to. It needs real hardware; QEMU cannot serve a disk this size."),
-            ("glados-smollm2-135m.iso", "257 MB", REL + "glados-smollm2-135m.iso",
-             "Kernel plus SmolLM2-135M. Four times faster per token because "
-             "generation is bound by how many bytes of weights get read, and small "
-             "enough to fit QEMU's 516 MB disk ceiling, which makes it the image to "
-             "develop against."),
+             "Kernel plus Qwen3-0.6B quantised to int8, with a 512-token context "
+             "window. The middle size: small enough to be quick, large enough to "
+             "write coherent sentences. Give the guest or the laptop 2 GB of RAM."),
+            ("glados-smollm2-135m.iso", "132 MB", REL + "glados-smollm2-135m.iso",
+             "Kernel plus SmolLM2-135M. Four times faster per token than Qwen3 "
+             "because generation is bound by how many bytes of weights get read, "
+             "and small enough to fit QEMU's 516 MB disk ceiling, which makes it "
+             "the image to develop against."),
             ("glados-nomodel.iso", "33 MB", REL + "glados-nomodel.iso",
              "Kernel only. Boots to a desktop, reports that it has no model, and "
              "everything except inference works. Drop a converted checkpoint on the "
@@ -268,7 +275,7 @@ page(
         p("Write the image to a USB stick. It is a hybrid image, so any of these "
           "work:"),
         code("# Linux / macOS. Check the device name first, this overwrites it\n"
-             "sudo dd if=glados-qwen3-0.6b.iso of=/dev/sdX bs=4M status=progress oflag=sync",
+             "sudo dd if=glados-qwen35-2b.iso of=/dev/sdX bs=4M status=progress oflag=sync",
              "bash"),
         ul("On Windows, Rufus in DD mode.",
            "Anywhere, balenaEtcher handles the ISO directly."),
@@ -297,7 +304,12 @@ page(
           "<code>if</code> lists interfaces, <code>dhcp</code> takes a lease, "
           "<code>dns</code> resolves a name and <code>https example.com /</code> "
           "fetches a page over a TLS 1.3 connection that this kernel negotiated "
-          "itself, down to the X25519 key exchange. <code>crypto</code>, "
+          "itself, down to the X25519 key exchange. <code>agent</code> hands the "
+          "model a goal and a step budget: it picks an applet through a grammar "
+          "that makes wrong names unreachable, reads what the applet prints, and "
+          "writes a transcript to <code>/ai/episodes</code>. <code>think</code> "
+          "poses a question to the same mind while the shell stays yours. "
+          "<code>crypto</code>, "
           "<code>tensor</code> and <code>model</code> re-run the self-tests on "
           "demand, and <code>help</code> lists the rest."),
         h2("Hardware support, honestly"),
@@ -414,7 +426,7 @@ page(
             ("Architecture", "x86-64, UEFI"),
             ("Privilege", "Ring 0 only"),
             ("Address spaces", "One"),
-            ("Model", "Qwen3-0.6B, int8"),
+            ("Model", "Qwen3.5-2B, Qwen3-0.6B or SmolLM2-135M, int8"),
             ("Source", "89 files, ~36,000 lines"),
             ("Target machine", "MSI Thin GF63 12UC"),
             ("Licence", "All rights reserved"),
