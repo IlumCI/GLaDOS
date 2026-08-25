@@ -2,6 +2,7 @@
 
 pub mod agent;
 pub mod constrain;
+pub mod deliberate;
 pub mod corpus;
 pub mod futures;
 pub mod godbits;
@@ -64,7 +65,6 @@ use crate::gfx::console::{self, LTCYAN, LTGRAY, LTGREEN, LTRED, WHITE, YELLOW};
 use crate::sync::Racy;
 use crate::uefi::Blob;
 use crate::{kprint, kprintln};
-use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -298,7 +298,7 @@ pub fn selftest() -> bool {
     // word run carries marks mid-stream.
     const MARK_SPLITS: [(&str, &[&str]); 2] = [
         ("end.\u{0301}go", &["end", ".", "\u{0301}", "go"]),
-        ("हिन्दी!", &["हिन्दी", "!"]),
+        ("Ã Â¤Â¹Ã Â¤Â¿Ã Â¤Â¨Ã Â¥ÂÃ Â¤Â¦Ã Â¥â‚¬!", &["Ã Â¤Â¹Ã Â¤Â¿Ã Â¤Â¨Ã Â¥ÂÃ Â¤Â¦Ã Â¥â‚¬", "!"]),
     ];
     let mut marks_ok = true;
     for (text, want) in MARK_SPLITS {
@@ -1420,14 +1420,12 @@ pub fn logits_for(ids: &[usize]) {
     }
 
     let done = with_engine(|e| {
-        let cap = e.model.cfg.seq_len;
         let t0 = crate::time::rdtsc();
-        for (pos, &t) in checked.iter().enumerate() {
-            if pos >= cap {
-                break;
-            }
-            e.model.forward(&mut e.state, t, pos);
-        }
+        // Through `prefill` rather than a per-token loop: this command is the
+        // standing check on that path's numerics against tools/reference.py,
+        // which is handed the same ids.
+        let end = e.model.prefill(&mut e.state, &checked, 0);
+        e.pos = end;
         let elapsed = crate::time::rdtsc() - t0;
 
         // Top 5 by logit, found without sorting 49152 entries.
@@ -1573,3 +1571,5 @@ pub fn window_report() {
         pos
     );
 }
+
+

@@ -424,6 +424,13 @@ fn offsets(cfg: &Config, legacy_rope_tables: bool) -> Offsets {
 /// `tools/reference.py`, which is where the number was chosen.
 const KV_BLOCK: usize = 32;
 
+/// Prompt positions fed per weight pass in `prefill`.
+///
+/// Bounds the chunk scratch (about 3 MiB at Qwen3's wide heads) while
+/// amortising each weight byte over two orders of magnitude more work than a
+/// single token. Must never exceed the window ring; `prefill` clamps.
+const PRE_FILL_CHUNK: usize = 64;
+
 /// One layer's keys or values, int8 with a scale per block.
 ///
 /// The cache is the largest thing the system allocates and it dominates how
@@ -447,6 +454,7 @@ const KV_BLOCK: usize = 32;
 /// that 0.41, only keys costs 0.35. A key goes through a dot product and then a
 /// softmax, where error is amplified; a value is only averaged. Both are
 /// quantised anyway, because halving the saving would defeat the purpose.
+#[derive(Clone)]
 struct KvLayer {
     data: Vec<i8>,
     scales: Vec<f32>,
@@ -515,6 +523,7 @@ impl KvLayer {
 /// enormous and each entry is read once per token; this is small and is
 /// **read and written every step**, so quantisation error would compound
 /// through the recurrence rather than average out across it.
+#[derive(Clone)]
 struct LinearState {
     /// `[v_heads][k_head_dim][v_head_dim]`. Independent of context length --
     /// this is 1 MiB per layer at token 32 and 1 MiB per layer at token
@@ -606,6 +615,7 @@ impl Window {
 ///
 /// Allocated once and reused. Allocating per token would put the heap
 /// allocator in the inner loop of generation for no reason.
+#[derive(Clone)]
 pub struct State {
     x: Vec<f32>,
     xb: Vec<f32>,
@@ -682,9 +692,19 @@ pub struct State {
 }
 
 impl State {
+    /// A copy of the live state, for deliberation: fork the mind, explore
+    /// one candidate each way, keep the survivor. Every field here is an
+    /// owned buffer -- KV cache, recurrent states, scratch, logits -- so a
+    /// clone is a complete mind at this instant, pos travelling with it.
+    /// The cost is one memcpy of the largest allocation in the system,
+    /// which is why forks are budgeted by the caller and taken only when
+    /// the cheap tiers were not confident enough to answer alone.
+    pub fn fork(&self) -> Self {
+        self.clone()
+    }
+
     pub fn new(cfg: &Config) -> Self {
-        let kv = cfg.kv_dim();
-        // Half the *rotated* width, not half the head. They are equal for
+        let kv = cfg.kv_dim();        // Half the *rotated* width, not half the head. They are equal for
         // everything before Qwen3.5, which rotates 64 of 256 and leaves the
         // rest alone, so the table is a quarter the size and the loop below
         // is the one it always was.
@@ -1831,7 +1851,7 @@ impl Model {
             s.value_cache[l].store(here, &s.vbuf);
 
             self.rope_q(s, &w);
-            self.rope_keys(s, &w, l, kv_dim);
+            self.rope_keys(s, &w, l, kv_dim, w.live);
             self.attend(s, &w, l, kv_dim, kv_mul);
 
             self.wo(l).matvec(&mut s.xb2, &s.xb);
@@ -1853,6 +1873,215 @@ impl Model {
         self.classifier().matvec(&mut s.logits, &s.xb);
     }
 
+    /// Feed a prompt so every weight matrix streams once per chunk instead of
+    /// once per token.
+    ///
+    /// Sequential prefill costs a full pass over the weights per prompt
+    /// token: one agent decision was measured at ~15 minutes under QEMU's
+    /// TCG, where the price is re-translating the same 132 MiB working set
+    /// 116 times, and would be a large fraction of a second of pure DRAM
+    /// bandwidth on hardware. Per output element nothing changes -- same
+    /// norms, same RoPE pairing, additions ascending into one accumulator --
+    /// so results are bit-identical to feeding the tokens one at a time.
+    ///
+    /// Returns the absolute position after the last token actually fed,
+    /// clipped at `seq_len` exactly the way the callers' old loops clipped.
+    pub fn prefill(&self, s: &mut State, tokens: &[usize], start_pos: usize) -> usize {
+        if self.cfg.hybrid() {
+            // The delta net carries recurrent state with no batch axis; until
+            // a batched recurrence exists the hybrid keeps the honest loop.
+            // Correctness is unaffected and the hybrid models that fit in
+            // QEMU are small, so only speed waits here.
+            let mut pos = start_pos;
+            for &t in tokens {
+                if pos >= self.cfg.seq_len {
+                    break;
+                }
+                self.forward(s, t, pos);
+                pos += 1;
+            }
+            return pos;
+        }
+
+        let c = &self.cfg;
+        let d = c.dim;
+        let qd = c.q_dim();
+        let kvd = c.kv_dim();
+        let hd = c.hidden_dim;
+        let eps = c.norm_eps;
+        let head_size = c.head_size();
+        let kv_mul = c.kv_mul();
+        let cap = s.cap;
+
+        // A chunk may never exceed the window ring: its queries assume they
+        // occupy the contiguous tail of the live range, which eviction in the
+        // middle of a chunk would break.
+        let ring = cap - c.attn_sinks.min(cap);
+        let n_max = PRE_FILL_CHUNK.min(ring.max(1));
+
+        // Chunk scratch, allocated here and dropped at return. It must not
+        // live in `State`: `fork()` clones that wholesale, and multi-MiB
+        // scratch would tax every deliberation fork for nothing.
+        let mut x = vec![0.0f32; n_max * d];
+        let mut xn = vec![0.0f32; n_max * d];
+        let mut qb = vec![0.0f32; n_max * qd];
+        let mut kb = vec![0.0f32; n_max * kvd];
+        let mut vb = vec![0.0f32; n_max * kvd];
+        let mut ao = vec![0.0f32; n_max * qd];
+        let mut xo = vec![0.0f32; n_max * d];
+        let mut h1 = vec![0.0f32; n_max * hd];
+        let mut h3 = vec![0.0f32; n_max * hd];
+
+        let embed = self.embed_mat();
+        let inv_scale = 1.0 / tensor::sqrtf(head_size as f32);
+        let mut pos = start_pos;
+        let mut ci = 0usize;
+
+        while pos < c.seq_len && ci < tokens.len() {
+            let n = (tokens.len() - ci).min(n_max).min(c.seq_len - pos);
+
+            for t in 0..n {
+                let tok = tokens[ci + t].min(c.vocab_size - 1);
+                embed.row_into(tok, &mut x[t * d..(t + 1) * d]);
+            }
+
+            for l in 0..c.n_layers {
+                // --- attention ---
+                for t in 0..n {
+                    tensor::rmsnorm_eps(
+                        &mut xn[t * d..(t + 1) * d],
+                        &x[t * d..(t + 1) * d],
+                        self.rms_att_w(l),
+                        eps,
+                    );
+                }
+                self.wq(l).matvec_batch(&mut qb, &xn, n);
+                self.wk(l).matvec_batch(&mut kb, &xn, n);
+                self.wv(l).matvec_batch(&mut vb, &xn, n);
+
+                // QK-Norm before anything is cached, per head per row, the
+                // order the single-token pass established.
+                if c.qk_norm {
+                    let qn = self.q_norm_w(l);
+                    for t in 0..n {
+                        for hh in 0..c.n_heads {
+                            let o = t * qd + hh * head_size;
+                            tensor::rmsnorm_inplace(&mut qb[o..o + head_size], qn, eps);
+                        }
+                    }
+                    let kn = self.k_norm_w(l);
+                    for t in 0..n {
+                        for hh in 0..c.n_kv_heads {
+                            let o = t * kvd + hh * head_size;
+                            tensor::rmsnorm_inplace(&mut kb[o..o + head_size], kn, eps);
+                        }
+                    }
+                }
+
+                // Keys cached normed and unrotated, values raw -- the point
+                // where reference.py applies its round-trip, now one row per
+                // position just like the single-token pass.
+                for t in 0..n {
+                    let wr = Window::new(c, cap, pos + t);
+                    let here = wr.slot_of(wr.live - 1);
+                    s.key_cache[l].store(here, &kb[t * kvd..(t + 1) * kvd]);
+                    s.value_cache[l].store(here, &vb[t * kvd..(t + 1) * kvd]);
+                }
+
+                // The chunk's queries are the newest entries, so they occupy
+                // the tail of the live range contiguously -- guaranteed by
+                // the ring bound on `n`.
+                let wend = Window::new(c, cap, pos + n - 1);
+                let base_j = wend.live - n;
+                self.rope_keys(s, &wend, l, kvd, wend.live);
+                let (cos, sin) = (&s.rope_cos, &s.rope_sin);
+                for t in 0..n {
+                    self.rope_row(cos, sin, &mut qb[t * qd..(t + 1) * qd], base_j + t);
+                }
+
+                // Causal attention: query t sees live keys 0..=base_j+t and
+                // nothing later. Scores ascend over j, head dims accumulate
+                // ascending -- the same order `attend` established.
+                for hh in 0..c.n_heads {
+                    let qo = hh * head_size;
+                    let hoff = (hh / kv_mul) * head_size;
+                    for t in 0..n {
+                        let qi = base_j + t;
+                        for j in 0..=qi {
+                            let ko = j * kvd + hoff;
+                            let mut score = 0.0f32;
+                            for i in 0..head_size {
+                                score += qb[t * qd + qo + i] * s.krot[ko + i];
+                            }
+                            s.att[hh * cap + j] = score * inv_scale;
+                        }
+                        tensor::softmax(&mut s.att[hh * cap..hh * cap + qi + 1]);
+                        for i in 0..head_size {
+                            ao[t * qd + qo + i] = 0.0;
+                        }
+                        let vc = &s.value_cache[l];
+                        for j in 0..=qi {
+                            let vslot = wend.slot_of(j);
+                            let a = s.att[hh * cap + j];
+                            for i in 0..head_size {
+                                ao[t * qd + qo + i] += a * vc.at(vslot, hoff + i);
+                            }
+                        }
+                    }
+                }
+
+                self.wo(l).matvec_batch(&mut xo, &ao, n);
+                for t in 0..n {
+                    for i in 0..d {
+                        x[t * d + i] += xo[t * d + i];
+                    }
+                }
+
+                // --- feed forward ---
+                for t in 0..n {
+                    tensor::rmsnorm_eps(
+                        &mut xn[t * d..(t + 1) * d],
+                        &x[t * d..(t + 1) * d],
+                        self.rms_ffn_w(l),
+                        eps,
+                    );
+                }
+                self.w1(l).matvec_batch(&mut h1, &xn, n);
+                self.w3(l).matvec_batch(&mut h3, &xn, n);
+                for t in 0..n {
+                    tensor::swiglu(&mut h1[t * hd..(t + 1) * hd], &h3[t * hd..(t + 1) * hd]);
+                }
+                self.w2(l).matvec_batch(&mut xo, &h1, n);
+                for t in 0..n {
+                    for i in 0..d {
+                        x[t * d + i] += xo[t * d + i];
+                    }
+                }
+            }
+
+            pos += n;
+            ci += n;
+        }
+
+        let fed = pos - start_pos;
+        if fed > 0 {
+            // Only the last row's classifier matters: decode samples the next
+            // token from here, and every earlier row's logits were thrown
+            // away by the old loop too -- it just also computed them.
+            let last = (fed - 1) % n_max;
+            tensor::rmsnorm_eps(
+                &mut s.xb[..d],
+                &x[last * d..(last + 1) * d],
+                self.rms_final_w(),
+                eps,
+            );
+            self.classifier().matvec(&mut s.logits, &s.xb);
+            // Parity with `forward`: the final hidden stays in `x`.
+            s.x[..d].copy_from_slice(&x[last * d..(last + 1) * d]);
+        }
+        pos
+    }
+
     /// Rotate the query at the position it will occupy in the cache.
     ///
     /// Only the first `rot_dim` dimensions of each head move. For everything
@@ -1861,23 +2090,34 @@ impl Model {
     /// untouched, which is a property of the *tables* being narrower rather
     /// than of any test in here.
     fn rope_q(&self, s: &mut State, w: &Window) {
+        let qpos = w.live.saturating_sub(1);
+        let qd = self.cfg.q_dim();
+        let (cos, sin) = (&s.rope_cos, &s.rope_sin);
+        self.rope_row(cos, sin, &mut s.q[..qd], qpos);
+    }
+
+    /// Rotate one query row of `q_dim` values for the live index it occupies.
+    ///
+    /// Shared by the single-token pass and the batched prefill so this
+    /// arithmetic exists exactly once -- it is the code whose silent variant
+    /// already cost SmolLM2 its geography once.
+    fn rope_row(&self, cos: &[f32], sin: &[f32], row: &mut [f32], live_idx: usize) {
         let c = &self.cfg;
         let head_size = c.head_size();
         let half = c.rot_dim() / 2;
-        let qpos = w.live.saturating_sub(1);
         for h in 0..c.n_heads {
             let base = h * head_size;
             for p in 0..half {
-                let fcr = s.rope_cos[qpos * half + p];
-                let fci = s.rope_sin[qpos * half + p];
+                let fcr = cos[live_idx * half + p];
+                let fci = sin[live_idx * half + p];
                 let (i, j) = if c.rope_interleaved {
                     (base + 2 * p, base + 2 * p + 1)
                 } else {
                     (base + p, base + p + half)
                 };
-                let (a, b) = (s.q[i], s.q[j]);
-                s.q[i] = a * fcr - b * fci;
-                s.q[j] = a * fci + b * fcr;
+                let (a, b) = (row[i], row[j]);
+                row[i] = a * fcr - b * fci;
+                row[j] = a * fci + b * fcr;
             }
         }
     }
@@ -1888,12 +2128,12 @@ impl Model {
     /// Done once per layer rather than once per head: grouped-query attention
     /// shares each key across `kv_mul` heads, so rotating per head would redo
     /// the same work three times.
-    fn rope_keys(&self, s: &mut State, w: &Window, cache: usize, kv_dim: usize) {
+    fn rope_keys(&self, s: &mut State, w: &Window, cache: usize, kv_dim: usize, upto: usize) {
         let c = &self.cfg;
         let head_size = c.head_size();
         let half = c.rot_dim() / 2;
         let kc = &s.key_cache[cache];
-        for j in 0..w.live {
+        for j in 0..upto {
             let src = w.slot_of(j);
             let dst = j * kv_dim;
             for h in 0..c.n_kv_heads {
@@ -2052,7 +2292,7 @@ impl Model {
         s.value_cache[cache].store(w.slot_of(w.live - 1), &s.vbuf);
 
         self.rope_q(s, w);
-        self.rope_keys(s, w, cache, kv_dim);
+        self.rope_keys(s, w, cache, kv_dim, w.live);
         self.attend(s, w, cache, kv_dim, c.kv_mul());
 
         // The gate multiplies the concatenated head outputs, before `wo` and
@@ -2219,3 +2459,8 @@ impl Model {
         self.embed_mat().row_into(t, out);
     }
 }
+
+
+
+
+

@@ -330,6 +330,35 @@ impl Interp {
                     Err(format!("write: could not write '{}'", path))
                 }
             }
+            "applet" => {
+                // The program calls the OS. One string in -- "name args" --
+                // the applet's captured output out as a string. This is what
+                // turns a skill from a calculation into a script: a program
+                // that can ls, cat, write and snap its way through the
+                // namespace, compose applets, and hand the composed result
+                // back to whoever ran it. Trust travels through `run`, which
+                // is classified mutating regardless of program text, so the
+                // read-only grammar never reaches this.
+                need(args, 1, "applet")?;
+                let line = args[0].render();
+                let (cmd, rest) = match line.split_once(' ') {
+                    Some((c, r)) => (c, r),
+                    None => (line.as_str(), ""),
+                };
+                if !crate::sysbox::is_ready() {
+                    return Err("applet: namespace not initialised".into());
+                }
+                if !crate::sysbox::is_applet(cmd) {
+                    return Err(format!("applet: '{}' is not an applet", cmd));
+                }
+                console::begin_capture();
+                let ran = crate::sysbox::dispatch(cmd, rest);
+                let out = console::end_capture().unwrap_or_default();
+                if !ran {
+                    return Err(format!("applet: '{}' did not run", cmd));
+                }
+                Ok(Value::Str(out.trim_end().to_string()))
+            }
 
             // --- graphics ---
             "width" => Ok(Value::Int(gfx::primary().map(|f| f.width()).unwrap_or(0) as i64)),
@@ -442,7 +471,7 @@ impl Interp {
 /// Names the shell offers in `words`.
 pub const BUILTINS: &[&str] = &[
     "print", "println", "hex", "cls", "color", "ticks", "hz", "tasks", "heap",
-    "read", "exists", "ls", "write",
+    "read", "exists", "ls", "write", "applet",
     "width", "height", "pixel", "rect", "text",
     "peek8", "peek16", "peek32", "peek64", "poke8", "poke32", "poke64",
     "inb", "outb", "inl", "outl",

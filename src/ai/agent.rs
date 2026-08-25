@@ -23,10 +23,10 @@
 //! deterministic -- there is no second task whose interleaving with the shell
 //! has to be reasoned about while the loop itself is still being judged.
 
-use super::constrain::{step_bound, Cursor, Grammar, MAX_LEADING_SPACES};
+use super::deliberate;
 use super::harness::{self, Trust};
 use super::{sample, with_engine};
-use crate::gfx::console::{self, LTCYAN, LTGRAY, LTGREEN, LTRED, YELLOW};
+use crate::gfx::console::{self, LTCYAN, LTGRAY, LTGREEN, LTRED, WHITE, YELLOW};
 use crate::kprintln;
 use crate::sync::Racy;
 use crate::sysbox;
@@ -38,7 +38,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 /// The pseudo-applet that ends an episode. It travels in the same grammar as
 /// the real names, so stopping is a choice the model makes under the same
 /// constraints as acting -- not a special token smuggled past the sampler.
-const DONE: &str = "done";
+pub const DONE: &str = "done";
 
 /// Longest observation fed back per step. The transcript stays bounded no
 /// matter how chatty an applet is; `tree` on a deep namespace would eat the
@@ -51,6 +51,11 @@ const ARGS_CLIP_BYTES: usize = 96;
 /// Tokens the model may spend on arguments before being cut off.
 const ARGS_TOKEN_BUDGET: usize = 16;
 
+/// Forked candidates explored when the reflex tier is not confident enough.
+/// Three forks at 0.9 temperature cover the neighbourhood of the pulse
+/// answer; the probe ranks, so the budget buys selection rather than noise.
+const DELIBERATE_FORKS: usize = 3;
+
 // --- shared episode log ---------------------------------------------------
 //
 // The console transcript is the serial channel's view. The desktop window
@@ -60,6 +65,13 @@ const ARGS_TOKEN_BUDGET: usize = 16;
 
 static LOG: Racy<Vec<String>> = Racy::new(Vec::new());
 const LOG_CAP: usize = 240;
+
+/// The last episode's successful actions, in order -- the ratchet's raw
+/// material. A trajectory that worked is a procedure; `agent learn` compiles
+/// it into a replayable skill so the next episode can run it instead of
+/// re-deriving it. This is procedural memory written by the agent itself.
+static LAST_TRAJECTORY: Racy<Vec<String>> = Racy::new(Vec::new());
+static LAST_GOAL: Racy<Option<String>> = Racy::new(None);
 
 fn elog(line: String) {
     unsafe {
@@ -279,137 +291,53 @@ fn prompt_for(goal: &str, steps: &[Step], ctx: &EpisodeCtx, names: &[&str]) -> S
     s
 }
 
-/// One decision: prefill the step prompt, decode an applet name under the
-/// grammar, then continue generating its arguments greedily until a newline,
-/// end-of-sequence, or budget. Returns None when there is no engine, no
-/// alphabet, or the decode never settles -- all reported by the caller.
+/// One decision, through the deliberation controller. The tiers live in
+/// `deliberate::decide` -- reflex, pulse, fork-and-rank -- and this wrapper
+/// owns what surrounds a choice: the step prompt, argument generation, and
+/// the state contract that argument generation depends on.
 ///
-/// The name tokens are advanced into the cache as they are committed, which
-/// is what lets the arguments be a genuine continuation of the chosen tool
-/// rather than a fresh guess.
+/// Arguments are free text, greedy, continuing the cache the chosen branch
+/// left behind -- a routed choice with required arguments gets a two-line
+/// prompt instead, since a reflex has no branch context to continue.
 fn propose(goal: &str, steps: &[Step], ctx: &EpisodeCtx, trust: Trust) -> Option<(String, String)> {
-    // Gate first. The fitted router with all three cores agreeing is the
-    // measured 90%-right path and costs microseconds; the sampler costs a
-    // hundred forward passes and measures ~33% on this corpus. A split -- or
-    // no fitted router, which at boot means `fit` has never run -- falls
-    // through to the decode. The grammar still guards whatever the decode
-    // does; the router's answer is checked against the same admission list.
-    let mut routed: Option<String> = None;
-    if harness::ensure_router() {
-        if let Some((choice, verdict)) = harness::route_verdict(goal, trust) {
-            if verdict.agreement >= 3 && harness::admitted(trust).contains(&choice.applet) {
-                routed = Some(String::from(choice.applet));
-                console::set_color(LTGREEN);
-                kprintln!("     (routed by 3-core agreement)");
-                console::set_color(LTGRAY);
-            }
-        }
+    let names = harness::admitted(trust);
+    let prompt_of = || {
+        let mut all = names.clone();
+        all.push(DONE);
+        prompt_for(goal, steps, ctx, &all)
+    };
+        let _alphabet_guard = 0; // alphabet is captured by deliberate's own with_alphabet
+
+    let decision = deliberate::decide(goal, &prompt_of, trust, DELIBERATE_FORKS)?;
+    let name = decision.applet;
+    console::set_color(LTGRAY);
+    kprintln!("     (tier: {})", decision.tier.label());
+    console::set_color(WHITE);
+
+    if name == DONE {
+        return Some((name, String::new()));
     }
 
-    let mut names = harness::admitted(trust);
-    names.push(DONE);
-    let grammar = Grammar::new(names.iter().copied());
-    let bound = step_bound(&grammar);
+    // Reflex choices carry no branch context; everything else left the
+    // engine positioned right after the chosen name's tokens.
+    let from_context = decision.tier != deliberate::Tier::Reflex;
+    if !from_context && sysbox::check_args(&name, "").is_ok() {
+        return Some((name, String::new()));
+    }
 
-    // The closure returns Option; with_engine and with_alphabet each add one
-    // layer around it. The match at the bottom removes exactly one -- the
-    // alphabet/engine layer -- leaving the decode's own Option as the result.
-    let wrapped = harness::with_alphabet(|alphabet| {
+    let args = harness::with_alphabet(|_alphabet| {
         with_engine(|e| {
-            if let Some(name) = routed.clone() {
-                // Routed step. No args needed: act at once. Args needed:
-                // a two-line prompt is prefilled and the arguments generated
-                // greedily -- a fraction of the full decode's cost, with the
-                // routed choice already made.
-                if sysbox::check_args(&name, "").is_ok() {
-                    harness::invalidate_conversation(e);
-                    return Some((name, String::new()));
-                }
-                let prompt = format!("Task: {}\n{}", goal, name);
-                let tokens = e.tok.encode(&prompt, true, false);
-                let mut pos = 0usize;
-                let limit = e.model.cfg.seq_len;
-                for &t in tokens.iter() {
-                    if pos >= limit {
-                        break;
-                    }
-                    e.model.forward(&mut e.state, t, pos);
-                    pos += 1;
-                }
-                let mut raw: Vec<u8> = Vec::new();
-                let eos = e.tok.eos();
-                for _ in 0..ARGS_TOKEN_BUDGET {
-                    if pos >= limit || raw.len() >= ARGS_CLIP_BYTES {
-                        break;
-                    }
-                    let vocab = e.tok.vocab_size();
-                    let all: Vec<u32> = (0..vocab as u32).collect();
-                    let next =
-                        sample::sample_among(&e.state.logits, &all, 0.0, 0.0, &mut e.rng)?;
-                    if next == eos {
-                        break;
-                    }
-                    let piece = e.tok.token_bytes(next).to_vec();
-                    let nl = piece.iter().position(|&b| b == b'\n');
-                    raw.extend_from_slice(&piece[..nl.unwrap_or(piece.len())]);
-                    let done = nl.is_some() || raw.len() >= ARGS_CLIP_BYTES;
-                    e.model.forward(&mut e.state, next, pos);
-                    pos += 1;
-                    if done {
-                        break;
-                    }
-                }
-                harness::invalidate_conversation(e);
-                return Some((name, String::from_utf8_lossy(&raw).into_owned()));
-            }
-
-            let prompt = prompt_for(goal, steps, ctx, &names);
-            let tokens = e.tok.encode(&prompt, true, false);
-
-            let mut pos = 0usize;
-            let limit = e.model.cfg.seq_len;
-            for &t in tokens.iter() {
-                if pos >= limit {
-                    break;
-                }
-                e.model.forward(&mut e.state, t, pos);
-                pos += 1;
-            }
-
-            // Constrained choice, mirroring the harness decode exactly.
-            let mut cursor = Cursor::new(&grammar);
-            let mut used = 0usize;
-            let mut idle = 0usize;
-            let picked = loop {
-                if used >= bound || idle > MAX_LEADING_SPACES || pos >= limit {
-                    break None;
-                }
-                let candidates = cursor.candidates(alphabet);
-                let next =
-                    sample::sample_among(&e.state.logits, &candidates, 0.0, 0.0, &mut e.rng)?;
-                if cursor.push(alphabet, next) {
-                    used += 1;
-                } else {
-                    idle += 1;
-                }
-                if let Some(idx) = cursor.finished() {
-                    break Some(idx);
-                }
-                e.model.forward(&mut e.state, next, pos);
-                pos += 1;
-            };
-
-            let idx = picked?;
-            let name = names[idx];
-            if name == DONE {
-                harness::invalidate_conversation(e);
-                return Some((String::from(name), String::new()));
-            }
-
-            // Free-text arguments, greedy, continuing the cache the decode
-            // left behind so they are a continuation of the chosen tool.
             let mut raw: Vec<u8> = Vec::new();
             let eos = e.tok.eos();
+            let limit = e.model.cfg.seq_len;
+            let mut pos = e.pos;
+            if !from_context {
+                // Targeted prompt: the routed name is known, only its
+                // arguments are wanted.
+                let p = format!("Task: {}\n{} ", goal, name);
+                let tokens = e.tok.encode(&p, true, false);
+                pos = e.model.prefill(&mut e.state, &tokens, pos);
+            }
             for _ in 0..ARGS_TOKEN_BUDGET {
                 if pos >= limit || raw.len() >= ARGS_CLIP_BYTES {
                     break;
@@ -431,20 +359,18 @@ fn propose(goal: &str, steps: &[Step], ctx: &EpisodeCtx, trust: Trust) -> Option
                     break;
                 }
             }
-
             harness::invalidate_conversation(e);
-            Some((String::from(name), String::from_utf8_lossy(&raw).into_owned()))
+            Some(String::from_utf8_lossy(&raw).into_owned())
         })
     });
-    // Two wrappers, two layers: with_engine and with_alphabet each add one
-    // around the closure's own Option. The inner layer is the decode failing
-    // to settle; the outer ones mean no engine or no alphabet, which run()
-    // has already excluded before calling here. Either way the caller gets
-    // one flat Option.
-    match wrapped {
-        Some(Some(decode)) => decode,
-        _ => None,
-    }
+    let args = match args {
+        // Same three layers as every with_alphabet/with_engine call: the
+        // closure's Option plus one wrapper each. The innermost is what the
+        // greedy argument walk produced.
+        Some(Some(Some(a))) => a,
+        _ => String::new(),
+    };
+    Some((name, args))
 }
 
 /// Run one episode to completion: bounded steps, live printing, transcript
@@ -502,6 +428,17 @@ pub fn run(goal: &str, trust: Trust, max_steps: usize) {
     kprintln!("  [agent] {} after {} step(s)", outcome, steps.len());
     console::set_color(LTGRAY);
     elog(format!("-- {} after {} step(s) --", outcome, steps.len()));
+
+    // Record the trajectory for `agent learn`: every step that executed
+    // cleanly, in order. A failed step is not procedure, it is a note.
+    unsafe {
+        let t = LAST_TRAJECTORY.get();
+        t.clear();
+        for s in steps.iter().filter(|s| s.ok) {
+            t.push(s.action.clone());
+        }
+        *LAST_GOAL.get() = Some(String::from(goal));
+    }
 
     // Transcript into the namespace. Content-addressed like everything else:
     // an episode can be hashed, diffed against its siblings, and snapshotted
@@ -671,6 +608,46 @@ pub fn selftest() -> bool {
     ok
 }
 
+/// Compile the last successful trajectory into a replayable skill.
+///
+/// The ratchet, mechanically: an episode that worked becomes a lang program
+/// whose lines call the same applets with the same arguments, via the
+/// `applet` builtin. Running it reproduces the procedure -- and because it
+/// is a program, the next run can read its composed output, branch on it,
+/// or hand it to another tool. Returns the skill's path, or the reason
+/// there is nothing to learn from.
+pub fn learn(name: Option<&str>) -> Result<String, &'static str> {
+    let (goal, actions) = unsafe {
+        let g = LAST_GOAL.get().clone();
+        let a = LAST_TRAJECTORY.get().clone();
+        (g, a)
+    };
+    if actions.is_empty() {
+        return Err("no successful trajectory to learn -- run an episode first");
+    }
+    let mut program = String::from("// replay: ");
+    program.push_str(goal.as_deref().unwrap_or("(unnamed goal)"));
+    program.push_str("\n// compiled by 'agent learn' from a successful episode\n");
+    for a in &actions {
+        program.push_str(&format!("println(applet(\"{}\"))\n", a.replace('"', "\\\"")));
+    }
+
+    let idx = crate::sysbox::children("/ai/tools")
+        .iter()
+        .filter(|n| n.starts_with("replay-"))
+        .count()
+        + 1;
+    let skill = match name {
+        Some(n) => format!("/ai/tools/{}.l", n.trim().replace(".l", "")),
+        None => format!("/ai/tools/replay-{:04}.l", idx),
+    };
+    if crate::sysbox::write_text(&skill, &program) {
+        Ok(skill)
+    } else {
+        Err("could not write the skill")
+    }
+}
+
 fn render(goal: &str, outcome: &str, steps: &[Step]) -> String {
     let mut s = format!("goal: {}\noutcome: {}\nsteps: {}\n\n", goal, outcome, steps.len());
     for (i, st) in steps.iter().enumerate() {
@@ -682,3 +659,6 @@ fn render(goal: &str, outcome: &str, steps: &[Step]) -> String {
     }
     s
 }
+
+
+

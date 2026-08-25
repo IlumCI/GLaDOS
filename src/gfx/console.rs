@@ -447,27 +447,35 @@ pub fn cols() -> usize {
 //
 // Serial still receives everything. A capture is about what the operator sees,
 // not about hiding output from the debug channel.
+//
+// The capture is a stack, not a flag. A lang program run by the agent loop
+// can itself call `applet(...)`, which dispatches and captures in turn --
+// with a single flag the inner begin would discard the outer episode's
+// collection mid-flight. Nesting is the difference between a tool that can
+// call the OS and one that cannot.
 
-static CAPTURE: Racy<Option<alloc::string::String>> = Racy::new(None);
+static CAPTURE: Racy<alloc::vec::Vec<alloc::string::String>> =
+    Racy::new(alloc::vec::Vec::new());
 
 pub fn begin_capture() {
-    unsafe { *CAPTURE.get() = Some(alloc::string::String::new()) };
+    unsafe { CAPTURE.get().push(alloc::string::String::new()) };
 }
 
-/// Stop capturing and return what was collected.
+/// Stop the innermost capture and return what it collected.
 pub fn end_capture() -> Option<alloc::string::String> {
-    unsafe { CAPTURE.get().take() }
+    unsafe { CAPTURE.get().pop() }
 }
 
 pub fn capturing() -> bool {
-    unsafe { CAPTURE.get().is_some() }
+    unsafe { !CAPTURE.get().is_empty() }
 }
 
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
     use fmt::Write;
     unsafe {
-        if let Some(buf) = CAPTURE.get().as_mut() {
+        let stack = CAPTURE.get();
+        if let Some(buf) = stack.last_mut() {
             // Capped. A capture wraps arbitrary applet output, and an applet
             // that prints forever -- a tool with a bad loop, a tree of a deep
             // namespace -- would otherwise grow memory without bound while

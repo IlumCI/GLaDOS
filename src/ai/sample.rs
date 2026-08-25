@@ -20,6 +20,7 @@ use alloc::vec::Vec;
 use core::cmp::Ordering;
 
 /// xorshift64*, the same generator the synthetic weights use.
+#[derive(Clone)]
 pub struct Rng(u64);
 
 impl Rng {

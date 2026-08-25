@@ -76,6 +76,43 @@ impl Mat<'_> {
             }
         }
     }
+
+    /// `out[t*rows + r] = row r . xs[t*cols ..]` for `tc` input rows.
+    ///
+    /// The whole point of this shape is what crosses the memory bus once:
+    /// prefilled as `tc` separate matvecs, a prompt of N tokens streams every
+    /// weight byte N times, which under TCG means re-translating the same
+    /// 132 MiB of working set N times and on hardware means paying DRAM
+    /// bandwidth N times for weights that were already in cache the second
+    /// time around. Row-major outer order streams each weight row once and
+    /// reuses it against every input row while it is hot; per output element
+    /// the additions still run over `j` ascending into one accumulator, so
+    /// results are bit-identical to calling `matvec` per position.
+    pub fn matvec_batch(&self, out: &mut [f32], xs: &[f32], tc: usize) {
+        match self {
+            Mat::F32 { data, rows, cols } => {
+                // Flat checkpoints are the tiny llama2.c test models; their
+                // f32 path never got a weight-stationary kernel because there
+                // was nothing for it to save. Per-position reuse keeps one
+                // code path for the arithmetic.
+                for t in 0..tc {
+                    let x = &xs[t * *cols..(t + 1) * *cols];
+                    let o = &mut out[t * *rows..(t + 1) * *rows];
+                    tensor::matmul(o, x, data, *cols, *rows);
+                }
+            }
+            Mat::Q8 { data, scales, rows, cols } => {
+                let f = crate::cpu::detected();
+                // Same gate as `matvec`: AVX2 is not optional (see above), and
+                // `avx_enabled` means the OS actually enabled the state.
+                if f.avx_enabled && f.avx2 && f.fma {
+                    unsafe { q8_matvec_batch_avx2(out, xs, data, scales, *rows, *cols, tc) }
+                } else {
+                    q8_matvec_batch_scalar(out, xs, data, scales, *rows, *cols, tc)
+                }
+            }
+        }
+    }
 }
 
 pub fn q8_matvec_scalar(
@@ -153,5 +190,89 @@ pub unsafe fn q8_matvec_avx2(
         }
 
         out[r] = total * f32_at(scales, r);
+    }
+}
+
+/// Weight-stationary batch of [`q8_matvec_scalar`]: row-major outer loop, one
+/// accumulator per input position, additions over `j` ascending -- the same
+/// order, so the same bits, as the per-position kernel.
+pub fn q8_matvec_batch_scalar(
+    out: &mut [f32],
+    xs: &[f32],
+    data: &[i8],
+    scales: &[u8],
+    rows: usize,
+    cols: usize,
+    tc: usize,
+) {
+    for r in 0..rows {
+        let row = &data[r * cols..(r + 1) * cols];
+        let scale = f32_at(scales, r);
+        for t in 0..tc {
+            let x = &xs[t * cols..(t + 1) * cols];
+            let mut acc = 0.0f32;
+            for j in 0..cols {
+                acc += row[j] as f32 * x[j];
+            }
+            out[t * rows + r] = acc * scale;
+        }
+    }
+}
+
+/// Weight-stationary batch of [`q8_matvec_avx2`].
+///
+/// The lane structure per (row, position) is exactly the single-position
+/// kernel's -- two accumulators over 16-wide chunks, horizontal add, ragged
+/// tail -- so results match it bit for bit. What is hoisted is nothing that
+/// changes that order: the weight bytes are walked once per row instead of
+/// once per row per position.
+///
+/// # Safety
+/// Requires AVX2 and FMA. Callers check `cpu::detected()`.
+#[target_feature(enable = "avx2,fma")]
+pub unsafe fn q8_matvec_batch_avx2(
+    out: &mut [f32],
+    xs: &[f32],
+    data: &[i8],
+    scales: &[u8],
+    rows: usize,
+    cols: usize,
+    tc: usize,
+) {
+    use core::arch::x86_64::*;
+
+    for r in 0..rows {
+        let row = &data[r * cols..(r + 1) * cols];
+        let scale = f32_at(scales, r);
+        let chunks = cols / 16;
+        for t in 0..tc {
+            let x = &xs[t * cols..(t + 1) * cols];
+            let mut acc0 = _mm256_setzero_ps();
+            let mut acc1 = _mm256_setzero_ps();
+
+            for c in 0..chunks {
+                let base = c * 16;
+                let packed = _mm_loadu_si128(row.as_ptr().add(base) as *const __m128i);
+                let lo = _mm256_cvtepi8_epi32(packed);
+                let hi = _mm256_cvtepi8_epi32(_mm_srli_si128(packed, 8));
+                let lof = _mm256_cvtepi32_ps(lo);
+                let hif = _mm256_cvtepi32_ps(hi);
+                let x0 = _mm256_loadu_ps(x.as_ptr().add(base));
+                let x1 = _mm256_loadu_ps(x.as_ptr().add(base + 8));
+                acc0 = _mm256_fmadd_ps(lof, x0, acc0);
+                acc1 = _mm256_fmadd_ps(hif, x1, acc1);
+            }
+
+            let sum = _mm256_add_ps(acc0, acc1);
+            let mut lanes = [0.0f32; 8];
+            _mm256_storeu_ps(lanes.as_mut_ptr(), sum);
+            let mut total = lanes.iter().sum::<f32>();
+
+            for j in chunks * 16..cols {
+                total += row[j] as f32 * x[j];
+            }
+
+            out[t * rows + r] = total * scale;
+        }
     }
 }

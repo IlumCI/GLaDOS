@@ -489,12 +489,16 @@ fn feature_hidden(e: &mut super::Engine, task: &str) -> Option<Vec<f32>> {
 /// makes the next generation start clean, which is the honest outcome, and is
 /// cheap next to snapshotting a cache purely to restore something the operator
 /// was probably not still using.
-///
-/// Only reachable with `feature hidden`; the default pooled features never
-/// touch the model at all.
 pub(crate) fn invalidate_conversation(e: &mut super::Engine) {
     e.pos = 0;
     e.last_token = super::tokenizer::BOS;
+}
+
+/// The probe's feature vector for a task. The deliberation tier ranks
+/// candidate choices with the same features the router was fitted on;
+/// exposing the private helper to in-crate callers is the whole change.
+pub(crate) fn feature_for(e: &mut super::Engine, task: &str) -> Option<Vec<f32>> {
+    feature(e, task)
 }
 
 /// Shorter than the grammar prompt: with applet tokens there is no need to
@@ -1395,4 +1399,5 @@ pub fn search_report() {
     }
     kprintln!("  a configuration is adopted only when measured better, never argued better");
 }
+
 

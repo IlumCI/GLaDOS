@@ -1000,6 +1000,17 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
                 }
                 return;
             }
+            if let Some(name) = rest.trim().strip_prefix("learn") {
+                let n = name.trim();
+                match crate::ai::agent::learn(if n.is_empty() { None } else { Some(n) }) {
+                    Ok(path) => {
+                        kprintln!("  learned -> {}", path);
+                        kprintln!("  'run {}' replays the procedure", path);
+                    }
+                    Err(why) => kprintln!("  {}", why),
+                }
+                return;
+            }
             let mut max_steps = 6usize;
             let mut trust = crate::ai::harness::Trust::ReadOnly;
             let mut parts = rest.trim();
