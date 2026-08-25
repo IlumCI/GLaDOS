@@ -372,11 +372,13 @@ WIKI = [
     ("uefi-kernel", "UEFI as the kernel", "No bootloader: the UEFI application is the OS"),
     ("llm-in-kernel", "A language model in the kernel", "Inference with no allocator, no OS, no libm"),
     ("qwen3", "Qwen3 in 570 MB", "Head width, QK-norm, and two bugs that never threw an error"),
+    ("qwen35", "Qwen3.5 and the 2B distill", "Hybrid attention, a walk-checked format, and the 1.8 GB flagship"),
     ("rope", "RoPE", "Rotary embeddings, and the convention that cost months"),
     ("kv-cache", "The int8 KV cache", "Quantising attention memory, and why keys hurt more"),
     ("tokenizer", "Tokenizers", "BPE, pre-tokenizer regexes, and 12% silent divergence"),
     ("constrained-decoding", "Constrained decoding", "Making invalid output unreachable"),
     ("routing", "Tool routing", "Why a 1960 regression beats the transformer"),
+    ("agent", "The agent loop", "Goal in, applet calls out, tiers in between"),
     ("gui", "The Windows 3.1 desktop", "Bevels, a window manager, and painting from scratch"),
     ("network-stack", "The network stack", "ARP to TLS 1.3, written by hand"),
     ("tls", "TLS 1.3 from scratch", "Certificate chains, and why this is the dangerous part"),
@@ -962,7 +964,9 @@ page(
           "quantised to int8 and executed inside the kernel's address space. It is "
           "not a service and not a process. The forward pass is a function that the "
           "shell, the router or the fault handler could all call directly, and the "
-          "same page tables are in effect throughout."),
+          "same page tables are in effect throughout. The Qwen3.5 family loads "
+          "through the same interface with hybrid layers and all; "
+          "<a href=\"qwen35.html\">the 2B distill</a> is the current flagship."),
         h2("What is missing at ring 0"),
         p("Inference code normally assumes an enormous amount of infrastructure: an "
           "allocator, threads, a BLAS library, libm, and an operating system to "
@@ -999,6 +1003,13 @@ page(
           "count. That is why the 570 MB Qwen3 checkpoint costs about 4.4 times as long per token as the 135 MB SmolLM2 one, almost exactly the "
           "size ratio, "
           "which is the signature of a bandwidth-bound workload."),
+        p("Prompt ingestion gets the same analysis applied. Feeding N prompt "
+          "tokens one at a time reads every weight N times although only the "
+          "last position's logits are kept. The prefill pass walks the prompt in "
+          "64-row chunks through which every weight matrix streams once, keeping "
+          "per-element arithmetic identical to single-token feeding, so results "
+          "match bit for bit and prompts cost roughly one weight pass per "
+          "chunk."),
         p("Around 155 MB of that 570 is the output classifier: one matrix multiply "
           "against the full vocabulary, performed once per token, to produce logits "
           "that are then mostly thrown away. When "
@@ -1026,7 +1037,7 @@ page(
              "well-behaved and writes fluent text. There is no error to catch. The "
              "only things that settle them are a reference implementation to diff "
              "against, or output that is supposed to contain a known fact."),
-        ("seealso", ["qwen3", "rope", "kv-cache", "constrained-decoding", "routing"]),
+        ("seealso", ["qwen3", "qwen35", "rope", "kv-cache", "constrained-decoding", "routing", "agent"]),
     ],
 )
 
@@ -1131,6 +1142,62 @@ page(
           "checkpoint and the real model is only exercised on the GF63, or "
           "numerically against the reference implementation."),
         ("seealso", ["llm-in-kernel", "rope", "tokenizer", "kv-cache"]),
+    ],
+)
+
+page(
+    "wiki/qwen35",
+    "Qwen3.5 and the 2B distill",
+    "Hybrid attention in a kernel: linear-attention layers beside full attention, "
+    "a checkpoint format with no names in it, and the 1.8 GB flagship model.",
+    ["Qwen3.5", "linear attention", "hybrid architecture", "model distillation",
+     "int8 quantisation", "gated attention"],
+    blocks=[
+        p("The kernel's forward pass grew a second kind of layer for the Qwen3.5 "
+          "family, and with it the current flagship: a 2B distill quantised to "
+          "int8, 1.8 GB on disk, shipped as the largest bootable image. Host-side "
+          "it measures 40% on routing and 43.3% on MMLU through the evaluation "
+          "harness."),
+        h2("Three layers in four"),
+        p("Qwen3.5 interleaves two mixers. Three layers out of four run linear "
+          "attention: a short convolution ring feeds a recurrence whose state has "
+          "a fixed size, so those layers carry no cache at all and their memory "
+          "stays flat as context grows. The fourth runs ordinary attention with "
+          "grouped queries over shared key-value heads, a partial rotary embedding "
+          "that rotates 64 of each head's dimensions, and an output gate applied "
+          "before the projection mixes heads."),
+        p("Only the full-attention layers own KV slots. On the 0.8B sibling that "
+          "is six caches for twenty-four layers, which is most of the point of the "
+          "architecture: cache memory stops scaling with depth. Norms on these "
+          "models scale by one plus the weight, and the query projection is twice "
+          "as wide as its head count would suggest, carrying a gate alongside "
+          "every query."),
+        h2("A format with no names in it"),
+        p("The v4 checkpoint body holds tensors laid out layer by layer, with no "
+          "names, shapes or lengths written down anywhere. Two consequences "
+          "follow. The reader walks from the first byte to the last and asserts "
+          "it landed on the final byte, so a disagreement about one dimension "
+          "cannot leave everything after it valid-looking and wrong. And the "
+          "layer schedule, which kinds occupy which positions, travels as an "
+          "explicit bitmap in the 160-byte header; a checkpoint breaking the "
+          "pattern refuses to load."),
+        p("The converter enforces the same contract in reverse: every tensor in "
+          "the source is written or explicitly skipped, and anything else is an "
+          "error."),
+        h2("Checking a hybrid without the hardware"),
+        p("The 2B model does not fit the development machine's emulator budget, "
+          "so correctness is checked against purpose-built tools. One constructs "
+          "a tiny hybrid shaped to exercise both mixer types, packed cache "
+          "indexing, partial rotation, grouped queries and an untied classifier, "
+          "then prints what the logits should be. A second reads v4 files back "
+          "and round-trips itself. A third compares a converted checkpoint "
+          "against captured reference activations within a stated tolerance."),
+        h2("Where it runs"),
+        p("The weights are read whole before <code>ExitBootServices</code>, so "
+          "the 2B image wants roughly 8 GB of RAM on the host machine. "
+          "Development against smaller checkpoints continues under emulation; "
+          "the flagship is a hardware experience."),
+        ("seealso", ["qwen3", "llm-in-kernel", "agent", "kv-cache", "tokenizer"]),
     ],
 )
 
@@ -1303,13 +1370,23 @@ page(
         p("The int8 encoding and the sink-plus-window scheme are therefore both "
           "answers to the same question: how to keep the cache, given that doing without one is not an "
           "option."),
+        h2("The cache as bytes"),
+        p("A context can leave the process that built it. <code>export_kv</code> "
+          "writes the used prefix of every cached layer as plain f32 values, "
+          "layer major, behind an eight-byte magic with the layer count, the row "
+          "width and the position in front; <code>import_kv</code> restores one "
+          "and reports where it left off. The unused tail of the allocation is "
+          "never written, so two identical mental states serialise to identical "
+          "bytes. That property is what lets a context live in the "
+          "content-addressed store: snapshots, copies and rollbacks of attention "
+          "state come from machinery that never learns what the bytes mean."),
         note("Memory stops being the binding constraint before speed does. Attention "
              "is linear in the number of live positions, so at 32k tokens it comes "
              "to roughly 3.8 GMAC per token on top of the model's own 0.6 GMAC, which is several seconds "
              "per token at full context. That is a perfectly good "
              "rate for reading one long document once, and an unpleasant one for a "
              "conversation."),
-        ("seealso", ["llm-in-kernel", "qwen3", "rope"]),
+        ("seealso", ["llm-in-kernel", "qwen3", "rope", "agent", "storage"]),
     ],
 )
 
@@ -1570,6 +1647,17 @@ page(
           "it is guessing can ask, escalate or refuse. One that is silently 78% "
           "accurate cannot, and that is worth considerably more than the point or "
           "two the ensemble was supposed to buy."),
+        h2("Answering before the sampler runs"),
+        p("Agreement turned out strong enough to act on directly. When the probe "
+          "and both counting cores name the same applet, the call dispatches "
+          "immediately and the sampler never starts; a 12,672-parameter "
+          "regression has answered a question the transformer would have spent a "
+          "forward pass on. When they split, the request falls through to the "
+          "constrained decoder, which weighs the choice with everything the "
+          "model knows."),
+        p("That division of labour is the first tier of "
+          "<a href=\"agent.html\">the agent loop</a>: routed requests resolve in "
+          "microseconds, unrouted ones get the full model."),
         h2("Measurement discipline"),
         p("This project got its evaluation wrong three separate times before it "
           "settled, and each failure is worth naming because each one produced "
@@ -1587,7 +1675,81 @@ page(
              "council does not improve accuracy. Both are kept, because the reason "
              "to know them is the same reason they were worth measuring, and because "
              "a deleted experiment gets repeated."),
-        ("seealso", ["constrained-decoding", "llm-in-kernel", "glados-os"]),
+         ("seealso", ["constrained-decoding", "agent", "llm-in-kernel", "glados-os"]),
+    ],
+)
+
+page(
+    "wiki/agent",
+    "The agent loop. Goal in, applet calls out",
+    "How GLaDOS runs an episode: the model picks an applet under a grammar, the "
+    "kernel runs it, the observation returns as text, and three tiers decide how "
+    "much thought a step deserves.",
+    ["AI agent loop", "tool use", "LLM agent", "agentic operating system",
+     "constrained tool calling", "agent skills"],
+    blocks=[
+        p("Typing <code>agent list the files in /sys</code> queues an episode. The "
+          "shell keeps its prompt and a step budget counts down. Each step follows "
+          "the same shape: the model reads the goal, the transcript so far and the "
+          "applets it may call; something decides which applet fits; the kernel "
+          "dispatches it as an ordinary function call; whatever the applet prints "
+          "becomes the next step's observation. When the model judges the goal met "
+          "it names <code>done</code>, and the episode lands as a transcript under "
+          "<code>/ai/episodes</code>."),
+        p("Trust works the way it does everywhere else in the system. At read-only "
+          "trust the mutating applets are absent from the grammar entirely, so no "
+          "decision sequence can reach them; at full trust everything is "
+          "reachable. Enforcement lives in the sampler, ahead of any choice."),
+        h2("Three tiers, spent in order"),
+        p("A step does not always need the transformer. The cheapest tier answers "
+          "first and the expensive ones run only when confidence is missing:"),
+        ul("<strong>Reflex.</strong> The ridge router scores every applet from one "
+           "hidden state and the two counting cores corroborate it. Where all "
+           "three name the same applet they measure 90% right, so that answer "
+           "dispatches immediately and no token is generated.",
+           "<strong>Pulse.</strong> One greedy walk under the grammar at "
+           "temperature zero: a single pass over a handful of tokens, handling "
+           "everything the reflex has no opinion about.",
+           "<strong>Deliberation.</strong> The engine state is captured, cache "
+           "included; candidates are then sampled at temperature and ranked by "
+           "the router's scores. The winning candidate's keys stay in the cache, "
+           "which is exactly the context wanted for decoding that applet's "
+           "arguments."),
+        p("Forks are budgeted by the caller because each one copies the KV cache, "
+          "the largest allocation in the system. The ladder exists so that copy "
+          "is only ever paid for when the cheap tiers had nothing confident to "
+          "say."),
+        h2("Skills"),
+        p("A successful episode can be frozen into a skill with "
+          "<code>agent learn &lt;name&gt;</code>: the transcript's decisions "
+          "become a program under <code>/ai/tools</code>, and <code>run</code> "
+          "replays it whenever a matching request arrives. Skills are ordinary "
+          "programs in the kernel's little language, and their trust level comes "
+          "from what they call: a script invoking <code>write</code> makes every "
+          "grammar admitting that script a full-trust grammar."),
+        p("One builtin makes this composition useful. "
+          "<code>applet(\"ls /sys\")</code> calls the OS from inside a program "
+          "and returns the captured output as a string. Captures nest, because a "
+          "skill may call an applet that itself runs a skill, so the capture is "
+          "a stack and each call collects into its own frame."),
+        h2("Prefill made episodes affordable"),
+        p("Every step rebuilds its context, and feeding a prompt token by token "
+          "reads every weight once per token. The prefill pass now walks the "
+          "prompt in 64-row chunks through which each weight matrix streams "
+          "once, with per-element arithmetic unchanged, so results match "
+          "single-token feeding bit for bit. Under full emulation an episode "
+          "step fell from more than half an hour to about two minutes."),
+        p("The same change tightened a subtlety worth stating: the position "
+          "marker now travels with the cache through every path, including fork "
+          "capture and restore, so a resumed walk always continues exactly the "
+          "context it started from."),
+        note("<strong>The transcript is the interface.</strong> Everything above "
+             "is readable: <code>cat /ai/episodes/0001.txt</code> shows the "
+             "goal, the tier each choice came from, the applet calls and their "
+             "observations. The desktop's <code>agentlog</code> window tails the "
+             "same stream."),
+        ("seealso", ["routing", "constrained-decoding", "llm-in-kernel", "qwen35",
+                     "storage"]),
     ],
 )
 

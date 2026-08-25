@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Qwen3.5 and the 2B distill</title>
+<meta name="description" content="Hybrid attention in a kernel: linear-attention layers beside full attention, a checkpoint format with no names in it, and the 1.8 GB flagship model.">
+<meta name="keywords" content="Qwen3.5, linear attention, hybrid architecture, model distillation, int8 quantisation, gated attention">
+<link rel="canonical" href="https://ilumci.github.io/GLaDOS/wiki/qwen35.html">
+<meta name="robots" content="index,follow,max-image-preview:large">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="GLaDOS">
+<meta property="og:title" content="Qwen3.5 and the 2B distill">
+<meta property="og:description" content="Hybrid attention in a kernel: linear-attention layers beside full attention, a checkpoint format with no names in it, and the 1.8 GB flagship model.">
+<meta property="og:url" content="https://ilumci.github.io/GLaDOS/wiki/qwen35.html">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="Qwen3.5 and the 2B distill">
+<meta name="twitter:description" content="Hybrid attention in a kernel: linear-attention layers beside full attention, a checkpoint format with no names in it, and the 1.8 GB flagship model.">
+<meta property="og:image" content="https://ilumci.github.io/GLaDOS/img/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="The GLaDOS aperture mark">
+<meta name="twitter:image" content="https://ilumci.github.io/GLaDOS/img/og.png">
+<link rel="stylesheet" href="../style.css">
+<link rel="icon" type="image/svg+xml" href="../img/logo.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="../img/icon-32.png">
+<link rel="apple-touch-icon" sizes="180x180" href="../img/icon-180.png">
+<link rel="manifest" href="../site.webmanifest">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://ilumci.github.io/GLaDOS/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://ilumci.github.io/GLaDOS/wiki/"},{"@type":"ListItem","position":3,"name":"Qwen3.5 and the 2B distill","item":"https://ilumci.github.io/GLaDOS/wiki/qwen35.html"}]}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Qwen3.5 and the 2B distill","description":"Hybrid attention in a kernel: linear-attention layers beside full attention, a checkpoint format with no names in it, and the 1.8 GB flagship model.","url":"https://ilumci.github.io/GLaDOS/wiki/qwen35.html","dateModified":"2026-08-14","keywords":"Qwen3.5, linear attention, hybrid architecture, model distillation, int8 quantisation, gated attention","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<div id="page">
+
+<div id="masthead">
+  <img src="../img/logo.svg" alt="" width="34" height="34">
+  <a class="name" href="../">GLaDOS</a>
+  <span class="sub">An operating system in Rust, with a language model in the kernel</span>
+</div>
+
+<div id="bar"><a href="../">Home</a> | <a href="../download/">Download</a> | <a href="../wiki/">Wiki</a> | <a href="../screenshots/">Screenshots</a> | <a href="../archive/">Archive</a> | <a href="https://github.com/IlumCI/GLaDOS" rel="noopener">Source code</a></div>
+
+<div id="body">
+<div id="sidebar"><div class="box"><div class="t">Navigation</div><ul><li><a href="../">Home</a></li><li><a href="../download/">Download</a></li><li><a href="../wiki/">Wiki</a></li><li><a href="../screenshots/">Screenshots</a></li><li><a href="../archive/">Archive</a></li><li><a href="https://github.com/IlumCI/GLaDOS">Source code</a></li></ul></div><div class="box"><div class="t">Get it</div><ul><li><a href="../download/">Download the ISO</a></li><li><a href="https://github.com/IlumCI/GLaDOS/releases/latest/download/SHA256SUMS">Checksums</a></li></ul></div><div class="box"><div class="t">The system</div><ul><li><a href="../wiki/glados-os.html">GLaDOS OS</a></li><li><a href="../wiki/aperture-science.html">Aperture Science</a></li><li><a href="../wiki/portal-os.html">Portal OS</a></li><li><a href="../wiki/rust-os.html">Writing an OS in Rust</a></li><li><a href="../wiki/ring-0.html">Ring 0</a></li><li><a href="../wiki/uefi-kernel.html">UEFI as the kernel</a></li><li><a href="../wiki/llm-in-kernel.html">A language model in the kernel</a></li><li><a href="../wiki/qwen3.html">Qwen3 in 570 MB</a></li></ul></div><div class="box"><div class="t">Internals</div><ul><li><a href="../wiki/qwen35.html">Qwen3.5 and the 2B distill</a></li><li><a href="../wiki/rope.html">RoPE</a></li><li><a href="../wiki/kv-cache.html">The int8 KV cache</a></li><li><a href="../wiki/tokenizer.html">Tokenizers</a></li><li><a href="../wiki/constrained-decoding.html">Constrained decoding</a></li><li><a href="../wiki/routing.html">Tool routing</a></li><li><a href="../wiki/agent.html">The agent loop</a></li><li><a href="../wiki/gui.html">The Windows 3.1 desktop</a></li></ul></div><div class="box"><div class="t">Hardware</div><ul><li><a href="../wiki/network-stack.html">The network stack</a></li><li><a href="../wiki/tls.html">TLS 1.3 from scratch</a></li><li><a href="../wiki/storage.html">Content-addressed storage</a></li><li><a href="../wiki/usb-xhci.html">The USB stack</a></li><li><a href="../wiki/usb-wifi-driver.html">USB WiFi</a></li><li><a href="../wiki/iso-el-torito.html">How the ISO is built</a></li><li><a href="../wiki/templeos.html">TempleOS</a></li><li><a href="../wiki/testing.html">Testing without a test runner</a></li></ul></div></div>
+<div id="content">
+<div class="crumbs"><a href="../">GLaDOS</a> / <a href="../wiki/">Wiki</a> / Qwen3.5 and the 2B distill</div>
+<div id="main">
+<h1>Qwen3.5 and the 2B distill</h1>
+<p>The kernel's forward pass grew a second kind of layer for the Qwen3.5 family, and with it the current flagship: a 2B distill quantised to int8, 1.8 GB on disk, shipped as the largest bootable image. Host-side it measures 40% on routing and 43.3% on MMLU through the evaluation harness.</p>
+<h2 id="three-layers-in-four">Three layers in four</h2>
+<p>Qwen3.5 interleaves two mixers. Three layers out of four run linear attention: a short convolution ring feeds a recurrence whose state has a fixed size, so those layers carry no cache at all and their memory stays flat as context grows. The fourth runs ordinary attention with grouped queries over shared key-value heads, a partial rotary embedding that rotates 64 of each head's dimensions, and an output gate applied before the projection mixes heads.</p>
+<p>Only the full-attention layers own KV slots. On the 0.8B sibling that is six caches for twenty-four layers, which is most of the point of the architecture: cache memory stops scaling with depth. Norms on these models scale by one plus the weight, and the query projection is twice as wide as its head count would suggest, carrying a gate alongside every query.</p>
+<h2 id="a-format-with-no-names-in-it">A format with no names in it</h2>
+<p>The v4 checkpoint body holds tensors laid out layer by layer, with no names, shapes or lengths written down anywhere. Two consequences follow. The reader walks from the first byte to the last and asserts it landed on the final byte, so a disagreement about one dimension cannot leave everything after it valid-looking and wrong. And the layer schedule, which kinds occupy which positions, travels as an explicit bitmap in the 160-byte header; a checkpoint breaking the pattern refuses to load.</p>
+<p>The converter enforces the same contract in reverse: every tensor in the source is written or explicitly skipped, and anything else is an error.</p>
+<h2 id="checking-a-hybrid-without-the-hardware">Checking a hybrid without the hardware</h2>
+<p>The 2B model does not fit the development machine's emulator budget, so correctness is checked against purpose-built tools. One constructs a tiny hybrid shaped to exercise both mixer types, packed cache indexing, partial rotation, grouped queries and an untied classifier, then prints what the logits should be. A second reads v4 files back and round-trips itself. A third compares a converted checkpoint against captured reference activations within a stated tolerance.</p>
+<h2 id="where-it-runs">Where it runs</h2>
+<p>The weights are read whole before <code>ExitBootServices</code>, so the 2B image wants roughly 8 GB of RAM on the host machine. Development against smaller checkpoints continues under emulation; the flagship is a hardware experience.</p>
+<div class="seealso"><b>See also:</b> <a href="../wiki/qwen3.html">Qwen3 in 570 MB</a>, <a href="../wiki/llm-in-kernel.html">A language model in the kernel</a>, <a href="../wiki/agent.html">The agent loop</a>, <a href="../wiki/kv-cache.html">The int8 KV cache</a>, <a href="../wiki/tokenizer.html">Tokenizers</a></div>
+</div>
+</div>
+</div>
+
+<div id="footer">
+  <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This is an independent, non-commercial homage and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
+  <p>Copyright 2026. All rights reserved. The source is published to be read
+  rather than reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is
+  GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are
+  other people's and are listed on <a href="../credits.html">the
+  credits page</a>.</p>
+  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-14.</p>
+</div>
+
+</div>
+</body>
+</html>
