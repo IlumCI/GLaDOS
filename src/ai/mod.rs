@@ -1,7 +1,9 @@
 //! Machine learning primitives.
 
 pub mod agent;
+pub mod aixi;
 pub mod constrain;
+pub mod context;
 pub mod deliberate;
 pub mod corpus;
 pub mod futures;
@@ -891,6 +893,18 @@ pub fn init(model_blob: Option<Blob>, tok_blob: Option<Blob>) {
     } else {
         console::set_color(LTRED);
         kprintln!("  FAIL the probe does not solve a problem with a known answer");
+    }
+    console::set_color(LTGRAY);
+
+    console::set_color(LTGREEN);
+    kprintln!("\n[selftest] situation planner:");
+    console::set_color(LTGRAY);
+    if aixi::selftest() {
+        console::set_color(LTGREEN);
+        kprintln!("  ok   the fitted model is good enough to plan against a synthetic machine");
+    } else {
+        console::set_color(LTRED);
+        kprintln!("  FAIL the planner misreads a machine with known dynamics");
     }
     console::set_color(LTGRAY);
 }

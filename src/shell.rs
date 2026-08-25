@@ -1446,6 +1446,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
                 _ => crate::gfx::desk::open_oracle(rest.trim()),
             }
         }
+        "plan" => crate::ai::aixi::report(),
         "mines" | "minesweeper" => crate::gfx::desk::open_mines(),
         "agentlog" => crate::gfx::desk::open_agentlog(),
         "todo" => {

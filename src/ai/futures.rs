@@ -34,7 +34,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 pub const NVARS: usize = 4;
 pub const VAR_NAMES: [&str; NVARS] = ["heap KiB", "switch/s", "touch/s", "tasks"];
 /// The control variable's index: the operator's touch rate.
-const CTRL: usize = 2;
+pub(crate) const CTRL: usize = 2;
 
 #[derive(Clone, Copy)]
 pub struct Snap {
@@ -107,7 +107,7 @@ pub fn snapshot_now() -> Snap {
 }
 
 /// History oldest-first, for the solid part of the graph and for fitting.
-fn history() -> Vec<Snap> {
+pub(crate) fn history() -> Vec<Snap> {
     let n = FILLED.load(Ordering::Relaxed).min(HIST);
     let head = HEAD.load(Ordering::Relaxed);
     let mut out = Vec::new();
