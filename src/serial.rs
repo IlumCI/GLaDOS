@@ -48,7 +48,15 @@ pub fn init() {
         outb(COM1 + 0, 0x01); // divisor low  = 1 -> 115200 baud
         outb(COM1 + 1, 0x00); // divisor high = 0
         outb(COM1 + 3, 0x03); // DLAB off, 8 bits, no parity, 1 stop
-        outb(COM1 + 2, 0xC7); // enable + clear FIFOs, 14-byte trigger
+        // FIFOs OFF. The 14-byte trigger was meant for interrupt-driven
+        // guests; this kernel polls, and QEMU's serial model was observed
+        // holding received bytes in the FIFO without ever setting LSR bit 0
+        // for a polling reader -- the firmware shell (interrupt-driven)
+        // received fine, our polled reader did not, same QEMU same wire.
+        // Without the FIFO every byte lands in the holding register and
+        // LSR bit 0 sets immediately, which is the contract a polling
+        // driver actually needs.
+        outb(COM1 + 2, 0x00);
         outb(COM1 + 4, 0x0B); // DTR, RTS, OUT2
 
         // Presence check via the scratch register, which exists on a 16550 and
