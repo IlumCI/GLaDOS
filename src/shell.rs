@@ -1447,6 +1447,52 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             }
         }
         "plan" => crate::ai::aixi::report(),
+        "mind" => {
+            use crate::gfx::console::{self, LTGRAY, YELLOW};
+            let (ticks, acts, episodes, suppressed, enabled, seen, tenths) =
+                crate::ai::initiative::status();
+            console::set_color(YELLOW);
+            kprintln!("[mind]");
+            console::set_color(LTGRAY);
+            kprintln!(
+                "  initiative {} -- {} ticks: {} acted, {} episodes queued, {} stood down",
+                if enabled { "on" } else { "off" },
+                ticks,
+                acts,
+                episodes,
+                suppressed
+            );
+            kprintln!(
+                "  loop: {} iterations seen, timer at {}.{}s",
+                seen,
+                tenths / 10,
+                tenths % 10
+            );
+            let tail = crate::ai::initiative::journal_tail(8);
+            if tail.is_empty() {
+                kprintln!("  the journal is empty; 'initiative now' forces a tick");
+            }
+            for line in tail {
+                kprintln!("  {}", line);
+            }
+        }
+        "initiative" => match rest.trim() {
+            "off" | "quiet" => {
+                crate::ai::initiative::set_enabled(false);
+                kprintln!("[initiative] off -- the machine will wait to be asked");
+            }
+            "on" => {
+                crate::ai::initiative::set_enabled(true);
+                kprintln!("[initiative] on -- resident mind active");
+            }
+            "now" => {
+                // The headless handle: one full perceive-decide-act cycle,
+                // past silence and cooldown but never past busy or disabled.
+                crate::ai::initiative::force_tick();
+                kprintln!("[initiative] ticked -- see 'mind'");
+            }
+            other => kprintln!("  usage: initiative on|off|now (got '{}')", other),
+        },
         "mines" | "minesweeper" => crate::gfx::desk::open_mines(),
         "agentlog" => crate::gfx::desk::open_agentlog(),
         "todo" => {

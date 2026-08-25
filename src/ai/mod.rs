@@ -4,6 +4,7 @@ pub mod agent;
 pub mod aixi;
 pub mod constrain;
 pub mod context;
+pub mod initiative;
 pub mod deliberate;
 pub mod corpus;
 pub mod futures;
@@ -905,6 +906,18 @@ pub fn init(model_blob: Option<Blob>, tok_blob: Option<Blob>) {
     } else {
         console::set_color(LTRED);
         kprintln!("  FAIL the planner misreads a machine with known dynamics");
+    }
+    console::set_color(LTGRAY);
+
+    console::set_color(LTGREEN);
+    kprintln!("\n[selftest] initiative policy:");
+    console::set_color(LTGRAY);
+    if initiative::selftest() {
+        console::set_color(LTGREEN);
+        kprintln!("  ok   the resident mind stands down for you and acts only on evidence");
+    } else {
+        console::set_color(LTRED);
+        kprintln!("  FAIL the initiative gates misorder");
     }
     console::set_color(LTGRAY);
 }

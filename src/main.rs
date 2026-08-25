@@ -403,6 +403,12 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     if ai::engine_ready() && ai::spawn_agent() {
         kprintln!("  agent ready -- 'agent <goal>' queues an episode");
     }
+    // The initiative loop is the resident mind: it perceives, journals, and
+    // occasionally gives itself a small read-only goal. It stands down while
+    // the operator is present; 'initiative off' quiets it entirely.
+    if ai::engine_ready() && ai::initiative::spawn() {
+        kprintln!("  initiative resident -- the machine thinks between your commands");
+    }
 
     gfx::splash::stage("ready");
     gfx::splash::finish();
