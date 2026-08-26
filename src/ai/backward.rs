@@ -12,9 +12,117 @@
 //! which is indistinguishable from a bad week until the eval says so weeks
 //! later. The gradcheck says so immediately.
 
+use super::tensor;
 use super::weights::{f32_at, Mat};
 use alloc::vec;
 use alloc::vec::Vec;
+
+// ---------------------------------------------------------------------
+// activation adjoints
+// ---------------------------------------------------------------------
+
+/// Adjoint of [`super::tensor::rmsnorm_eps`]: `y = w . x . s`, where
+/// `s = (mean(x^2) + eps)^(-1/2)`.
+///
+/// `dL/dx_j = s.(g_j.w_j) - (s^3/n).x_j.(sum_i g_i.w_i.x_i)` -- the direct
+/// term through each element's own scale, minus the coupling term through
+/// every element's contribution to the norm.
+pub fn rmsnorm_backward(gx: &mut [f32], gy: &[f32], x: &[f32], w: &[f32], eps: f32) {
+    let n = x.len();
+    let mut ss = 0.0f32;
+    for v in x.iter().take(n) {
+        ss += v * v;
+    }
+    let s = 1.0 / tensor::sqrtf(ss / n as f32 + eps);
+    let mut dot = 0.0f32;
+    for i in 0..n {
+        dot += gy[i] * w[i] * x[i];
+    }
+    for j in 0..n {
+        gx[j] = s * gy[j] * w[j] - (s * s * s / n as f32) * x[j] * dot;
+    }
+}
+
+/// Adjoints of [`super::tensor::swiglu`], which computes `h = silu(u) . v`.
+/// `gu` receives `dL/du`, `gv` receives `dL/dv`.
+pub fn swiglu_backward(gu: &mut [f32], gv: &mut [f32], gh: &[f32], u: &[f32], v: &[f32]) {
+    for i in 0..gh.len() {
+        let sig = tensor::sigmoid(u[i]);
+        // d silu / du = sig + u.sig.(1-sig).
+        let dsilu = sig + u[i] * sig * (1.0 - sig);
+        gu[i] = gh[i] * v[i] * dsilu;
+        gv[i] = gh[i] * tensor::silu(u[i]);
+    }
+}
+
+/// Backward through one head of scaled causal attention,
+/// `o_i = sum_{j<=i} p_ij . v_j`, `p = softmax(q.k' . scale)`.
+///
+/// Single-head over plain contiguous arrays: the live path's cache
+/// indirection (`krot`, slot mapping, GQA fan-out) composes around this
+/// core, and the core is what has to be provably correct first.
+/// `dq`, `dk`, `dv` are accumulated into, so callers can chain heads
+/// without a temporary.
+pub fn attention_backward(
+    dq: &mut [f32],
+    dk: &mut [f32],
+    dv: &mut [f32],
+    dy: &[f32],
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    n: usize,
+    d: usize,
+    scale: f32,
+) {
+    let mut p = vec![0.0f32; n];
+    for i in 0..n {
+        // Scores and softmax, recomputed exactly as the forward did.
+        for j in 0..=i {
+            let mut s = 0.0f32;
+            for t in 0..d {
+                s += q[i * d + t] * k[j * d + t];
+            }
+            p[j] = s * scale;
+        }
+        tensor::softmax(&mut p[..=i]);
+
+        // Softmax Jacobian needs the whole prefix's dot before any ds is
+        // final: c = sum_j p_j . dp_j.
+        let mut c = 0.0f32;
+        for j in 0..=i {
+            let dp = dy[i * d..(i + 1) * d]
+                .iter()
+                .zip(v[j * d..(j + 1) * d].iter())
+                .map(|(a, b)| a * b)
+                .sum::<f32>();
+            c += p[j] * dp;
+        }
+        for j in 0..=i {
+            let dp = dy[i * d..(i + 1) * d]
+                .iter()
+                .zip(v[j * d..(j + 1) * d].iter())
+                .map(|(a, b)| a * b)
+                .sum::<f32>();
+            let ds = p[j] * (dp - c);
+            for t in 0..d {
+                dq[i * d + t] += scale * ds * k[j * d + t];
+                dk[j * d + t] += scale * ds * q[i * d + t];
+            }
+            dv[j * d..(j + 1) * d]
+                .iter_mut()
+                .zip(dy[i * d..(i + 1) * d].iter())
+                .for_each(|(dvj, dyi)| *dvj += p[j] * dyi);
+        }
+    }
+}
+
+/// Transpose of one RoPE 2D rotation. Rotations are orthogonal, so the
+/// adjoint is rotation by the opposite angle: same pairing, sine sign
+/// flipped.
+pub fn rope_pair_backward(a: f32, b: f32, c: f32, s: f32) -> (f32, f32) {
+    (a * c + b * s, -a * s + b * c)
+}
 
 /// `out[k] = sum_r W[r,k] * g[r]` through an int8 block-quantized weight.
 ///
@@ -306,5 +414,162 @@ pub fn selftest() -> bool {
         if lora_ok { "ok " } else { "FAIL" }
     );
 
-    q8_ok && f32_ok && fd_ok && lora_ok
+    // --- rmsnorm adjoint ----------------------------------------------
+    let (n2, eps) = (20usize, 1e-5f32);
+    let xr: Vec<f32> = (0..n2).map(|_| rng.f32()).collect();
+    let wr: Vec<f32> = (0..n2).map(|_| rng.f32()).collect();
+    let gyr: Vec<f32> = (0..n2).map(|_| rng.f32()).collect();
+    let mut gxm = vec![0.0f32; n2];
+    rmsnorm_backward(&mut gxm, &gyr, &xr, &wr, eps);
+    let loss_rn = |x: &[f32]| -> f32 {
+        let mut o = vec![0.0f32; n2];
+        tensor::rmsnorm_eps(&mut o, x, &wr, eps);
+        o.iter().zip(&gyr).map(|(a, b)| a * b).sum::<f32>()
+    };
+    let rn_ok = check_grads(&loss_rn, &xr, &gxm, 1e-3, 3e-2);
+    crate::kprintln!(
+        "  {}  rmsnorm adjoint passes finite differences",
+        if rn_ok { "ok " } else { "FAIL" }
+    );
+
+    // --- swiglu adjoint -------------------------------------------------
+    let nh = 14usize;
+    let u: Vec<f32> = (0..nh).map(|_| rng.f32() * 2.0).collect();
+    let v: Vec<f32> = (0..nh).map(|_| rng.f32()).collect();
+    let gh: Vec<f32> = (0..nh).map(|_| rng.f32()).collect();
+    let mut gu = vec![0.0f32; nh];
+    let mut gv = vec![0.0f32; nh];
+    swiglu_backward(&mut gu, &mut gv, &gh, &u, &v);
+    let flat_uv: Vec<f32> = u.iter().chain(v.iter()).copied().collect();
+    let flat_g: Vec<f32> = gu.iter().chain(gv.iter()).copied().collect();
+    let loss_sw = |flat: &[f32]| -> f32 {
+        let uu = &flat[..nh];
+        let vv = &flat[nh..];
+        uu.iter()
+            .zip(vv)
+            .zip(&gh)
+            .map(|((uu, vv), gh)| tensor::silu(*uu) * vv * gh)
+            .sum::<f32>()
+    };
+    let sw_ok = check_grads(&loss_sw, &flat_uv, &flat_g, 1e-3, 3e-2);
+    crate::kprintln!(
+        "  {}  swiglu adjoint passes finite differences",
+        if sw_ok { "ok " } else { "FAIL" }
+    );
+
+    // --- causal attention adjoint ---------------------------------------
+    let (an, ad) = (6usize, 4usize);
+    let asc = 1.0 / tensor::sqrtf(ad as f32);
+    let q: Vec<f32> = (0..an * ad).map(|_| rng.f32()).collect();
+    let k: Vec<f32> = (0..an * ad).map(|_| rng.f32()).collect();
+    let v: Vec<f32> = (0..an * ad).map(|_| rng.f32()).collect();
+    let dy: Vec<f32> = (0..an * ad).map(|_| rng.f32()).collect();
+    let mut dqa = vec![0.0f32; an * ad];
+    let mut dka = vec![0.0f32; an * ad];
+    let mut dva = vec![0.0f32; an * ad];
+    attention_backward(&mut dqa, &mut dka, &mut dva, &dy, &q, &k, &v, an, ad, asc);
+    let flat_qkv: Vec<f32> = q.iter().chain(&k).chain(&v).copied().collect();
+    let flat_gqkv: Vec<f32> =
+        dqa.iter().chain(&dka).chain(&dva).copied().collect();
+
+    fn attend_fwd(
+        flat: &[f32],
+        dy: &[f32],
+        n: usize,
+        d: usize,
+        scale: f32,
+    ) -> f32 {
+        let q = &flat[..n * d];
+        let k = &flat[n * d..2 * n * d];
+        let v = &flat[2 * n * d..];
+        let mut total = 0.0f32;
+        let mut p = vec![0.0f32; n];
+        let mut o = vec![0.0f32; d];
+        for i in 0..n {
+            for j in 0..=i {
+                let mut s = 0.0f32;
+                for t in 0..d {
+                    s += q[i * d + t] * k[j * d + t];
+                }
+                p[j] = s * scale;
+            }
+            tensor::softmax(&mut p[..=i]);
+            for t in 0..d {
+                o[t] = 0.0;
+                for j in 0..=i {
+                    o[t] += p[j] * v[j * d + t];
+                }
+                total += o[t] * dy[i * d + t];
+            }
+        }
+        total
+    }
+    let att_ok = check_grads(
+        &|flat: &[f32]| attend_fwd(flat, &dy, an, ad, asc),
+        &flat_qkv,
+        &flat_gqkv,
+        1e-3,
+        3e-2,
+    );
+    crate::kprintln!(
+        "  {}  causal attention adjoint passes finite differences",
+        if att_ok { "ok " } else { "FAIL" }
+    );
+
+    // --- RoPE transpose --------------------------------------------------
+    // The claim has two halves: algebraic (applying the backward after the
+    // forward returns the original pair exactly) and numeric (finite
+    // differences through the rotation agree with the transposed grads).
+    let half = 4usize;
+    let z: Vec<f32> = (0..2 * half).map(|_| rng.f32()).collect();
+    let cs: Vec<f32> = (0..half).map(|i| tensor::cosf(i as f32 * 0.7)).collect();
+    let sn: Vec<f32> = (0..half).map(|i| tensor::sinf(i as f32 * 0.7)).collect();
+    let rot = |zz: &[f32]| -> Vec<f32> {
+        let mut out = zz.to_vec();
+        for p in 0..half {
+            let (a, b) = (zz[p], zz[p + half]);
+            out[p] = a * cs[p] - b * sn[p];
+            out[p + half] = a * sn[p] + b * cs[p];
+        }
+        out
+    };
+    let rr = rot(&z);
+    let rz: Vec<f32> = (0..2 * half).map(|i| rng.f32() + 0.5).collect();
+    let mut ana_z = vec![0.0f32; 2 * half];
+    for p in 0..half {
+        let (ga, gb) =
+            rope_pair_backward(rz[p], rz[p + half], cs[p], sn[p]);
+        ana_z[p] = ga;
+        ana_z[p + half] = gb;
+    }
+    let loss_ro = |zz: &[f32]| -> f32 {
+        rot(zz)
+            .iter()
+            .zip(&rz)
+            .map(|(a, b)| a * b)
+            .sum::<f32>()
+    };
+    // Defining adjoint property rather than a rotation-twice claim (which
+    // would be rotation by twice the angle -- the first version of this
+    // check asserted exactly that falsehood).
+    let identity_ok = {
+        let lhs: f32 = rot(&z)
+            .iter()
+            .zip(&rz)
+            .map(|(a, b)| a * b)
+            .sum();
+        let rhs: f32 = z
+            .iter()
+            .zip(&ana_z)
+            .map(|(a, b)| a * b)
+            .sum();
+        (lhs - rhs).abs() < 1e-4
+    };
+    let rope_ok = identity_ok && check_grads(&loss_ro, &z, &ana_z, 1e-3, 3e-2);
+    crate::kprintln!(
+        "  {}  rope transpose is its adjoint and passes differences",
+        if rope_ok { "ok " } else { "FAIL" }
+    );
+
+    q8_ok && f32_ok && fd_ok && lora_ok && rn_ok && sw_ok && att_ok && rope_ok
 }
