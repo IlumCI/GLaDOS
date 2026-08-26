@@ -15,8 +15,8 @@ bootloader, no ELF loading, no relocation and no handoff ABI. The model,
 tokenizer and root certificates are read before `ExitBootServices`, because
 that call is the last moment a filesystem exists.
 
-89 files of Rust, about 36,000 lines. TempleOS is the obvious ancestor, and the
-identity map here exists for the reason Terry Davis gave for his.
+108 files of Rust, about 50,000 lines. TempleOS is the obvious ancestor, and
+the identity map here exists for the reason Terry Davis gave for his.
 
 ---
 
@@ -33,28 +33,112 @@ Works, and verified:
 |---|---|
 | Boot | UEFI application, own page tables, GDT/IDT, APIC timer, i8042 keyboard |
 | Memory | Physical frame allocator, identity paging to 4 GiB, coalescing heap |
-| Tasks | Cooperative + preemptive at 100 Hz, `sysv64` context switch |
+| Tasks | Cooperative and preemptive at 100 Hz, `sysv64` context switch |
 | Graphics | GOP framebuffer, Windows-3.1-styled desktop, window manager, taskbar |
 | Storage | NVMe, content-addressed object store, Merkle trees, snapshots |
 | Network | ARP, IPv4, ICMP, UDP, TCP, DHCP, DNS, TLS 1.3 with chain validation |
 | Drivers | e1000, RTL8168, xHCI (USB 3), CDC-ECM USB Ethernet |
 | Crypto | SHA-1/256/384, HMAC/HKDF, AES, ChaCha20-Poly1305, X25519, RSA, ECDSA |
-| Model | Qwen3-0.6B or SmolLM2-135M, int8, in-kernel inference |
+| Model | Qwen3, Qwen3.5 hybrids and SmolLM2, int8, in-kernel inference |
+| Routing | Constrained decoding over the live applet table, plus a closed-form probe |
+| Agent | Propose, validate, execute, observe, with the grammar as the permission system |
+| Initiative | A resident task that decides for itself when to act and when to stay quiet |
+| Training | Gradients, Adam and a QDoRA adapter over the classifier, all in-kernel |
+| Self-modification | Variant lineage, a judge council, an append-only ledger, O(1) rollback |
 | Language | Lexer, parser, tree-walking interpreter with kernel builtins |
+| Mining | Midstate-cached SHA-256d with an honest scoreboard |
 
 Does not work yet:
 
 - Wireless. The built-in card is CNVi, so the MAC lives in the PCH and the M.2
   module is only a radio, reachable through an undocumented signed-firmware
-  protocol. The WPA2 supplicant is complete and checked against IEEE 802.11i
+  protocol. Our WPA2 supplicant is complete and checked against IEEE 802.11i
   vectors at every boot, and has never had hardware to run on. A USB dongle
   driver (RTL8188EU) has its register layer and power-on sequence, and stops
   short of PHY, radio and firmware upload.
 - SMP. Single core. `sync::Racy<T>` gives interior mutability with no locking
   of any kind, and carries that name so one grep finds every place that assumed
   a single core on the day one stops being enough.
-- The agent loop. The model proposes and a keystroke adopts. Given the name
-  over the door, this is the one feature the project is in no hurry to add.
+- Entropy. TLS private keys and the two client random values are derived from
+  the TSC, which is a counter started at power-on. We name this as a genuine
+  weakness: an attacker who can guess the boot time narrows the key. The
+  keyboard and mouse interrupt handlers already deposit timing jitter into an
+  entropy ring, and wiring that into a proper DRBG is open work.
+- Attention-path training. The adapter moves the classifier. Every activation
+  adjoint needed to go deeper exists and is checked at boot, and nothing yet
+  composes them into a backward pass through the layers.
+
+---
+
+## The machine that changes itself
+
+The three capabilities above that are newest deserve a paragraph each, because
+together they are the point of the project.
+
+**The model trains inside the kernel.** `train adapter` fits a QDoRA adapter
+over the classifier from the corpus in the namespace. The base weights stay
+frozen, so every hidden state is a constant and gets cached once per example;
+an epoch after that costs no forward passes at all. Restricted cross-entropy
+zeroes the gradient outside the grammar's candidate set, so the only rows that
+move are ones the decoder can reach. On SmolLM2 that is 132 rows out of 49,152,
+which is what makes the whole exercise affordable on this hardware. Real-corpus
+training refuses to run without AVX2, because scalar emulation would turn every
+hyperparameter judgement into a judgement about the clock.
+
+**A trained adapter is an object in the namespace.** `adapter save` writes a
+`GLADOSA1` blob holding the adapter alone, never the checkpoint. Rows are
+stored sparsely, because they are sparse in fact: on the measured decision
+layer that is 23.7 KB against 1.79 MB dense, a factor of 75. Save, detach,
+reload and save again reproduces the file byte for byte, which we check by
+comparing content addresses. `tools/adapter.py` reads the format on the host.
+
+**Self-modification runs on certificates.** Schmidhuber's Gödel machine adopts
+a rewrite once it can prove the rewrite raises expected utility, and it carries
+a theorem prover to do it. We have no theorem prover and could not build one
+for a quantised transformer's future reward. What we substitute is a
+certificate that is cheaper to refute than it was to produce, over
+content-addressed inputs, so any later run re-derives the same verdict bit for
+bit. That is affordable here for one specific reason: producing a variant costs
+a forward pass per example, and checking somebody else's claim about one costs
+a dot product per cached decision. Four orders of magnitude between making a
+claim and testing it is the asymmetry a proof system provides, reached by
+another road.
+
+Four judges have to agree, each covering a different way a variant can be bad:
+
+- **J1, margin.** Both variants answer the same cached decisions, so the
+  comparison is paired and McNemar's test applies. Nine repairs against two
+  breaks scores 3.27 and fails the bar; twelve against one scores 7.69 and
+  passes. Comparing two percentages would call both of those a win.
+- **J2, its own goals.** The four goals the machine sets itself are cached
+  along the path the frozen baseline walks for them. A variant that reroutes
+  "list the files in /tmp" toward something that mutates the disk is
+  catastrophic, and aggregate accuracy would never show it.
+- **J3, structure.** Finite factors, positive scales, finite logits across
+  every cached decision. This catches the variant whose validation accuracy
+  improved while carrying a scale that overflows on the first unfamiliar
+  prompt.
+- **J4, cost.** Rank and resident bytes. The heap is one physically contiguous
+  allocation on a ladder, so a lineage that grows with every adoption is a
+  lineage that eventually fails to boot.
+
+Adoption is a pointer swap and the parent stays addressed, so rollback costs a
+pointer write. Every trial appends a line to `/ai/godel/ledger.txt` whether it
+was adopted or rejected, with all four judges' numbers in it.
+
+Two details we consider load-bearing. The test slice carries a budget that
+lives in the ledger, because a loop that improves itself forever reads the
+held-out set forever and each read makes the reported figure more optimistic;
+past the budget a test number is printed as stale and marked unquotable. And
+before the judges run, the machine records whether training-set gain predicted
+a win, so the ledger accumulates an answer to a question we actually want
+settled. Nothing acts on that prediction, and at the current sample size it
+means nothing, which the ledger says out loud.
+
+Trials run when two independent facts agree: the real-time clock says the hour
+falls inside a quiet window, and the entropy ring says no key or pointer
+interrupt has fired. A clock alone does not know somebody is working late, and
+silence at noon is a coffee break.
 
 ---
 
@@ -70,7 +154,7 @@ memory-map handling has been tuned against one firmware. Expect a shell and a
 working model on other hardware, and treat your disk and your network card as
 open questions.
 
-**The boot disk on the development machine is counterfeit**: it advertises
+**The boot disk on our development machine is counterfeit**: it advertises
 976 GB and holds 14.67. That is why the layout tooling uses MBR, a GPT backup
 header having no real flash to land in, and why it carries a `SafeLimitGB`.
 
@@ -78,9 +162,9 @@ header having no real flash to land in, and why it carries a `SafeLimitGB`.
 
 ## Getting a model
 
-The model is not in this repository. It is around 570 MB, it is not this
-project's work, and a git repository is the wrong place for it. The ISO ships
-with one; building from source means supplying your own.
+The model is not in this repository. It is around 570 MB, it is not our work,
+and a git repository is the wrong place for it. The ISO ships with one;
+building from source means supplying your own.
 
 The kernel reads three files from the EFI System Partition:
 
@@ -101,18 +185,26 @@ python tools/convert.py tools/qwen3 esp/GLADOS/model.bin --seq 512
 python tools/tokenizer.py tools/qwen3/tokenizer.json esp/GLADOS/tokenizer.bin --verify
 ```
 
-`--seq` sets the context window, and what bounds it is KV cache size and not
+`--seq` sets the context window, and what bounds it is KV cache size instead of
 the model. Qwen3-0.6B costs 112 MiB of kernel heap at 512 tokens, and
 `convert.py` prints that figure so the decision gets made where `--seq` is
-chosen, instead of surfacing as an allocation failure at boot.
+chosen, before it can surface as an allocation failure at boot.
 
 **Always pass `--verify` to `tokenizer.py`.** It reimplements the kernel's
 algorithm and diffs it against the reference `tokenizers` library, token for
 token. A tokenizer that is subtly wrong produces text that still looks like
 text, so nothing downstream will catch it for you.
 
+Three families load. `convert.py` dispatches on `model_type`: `llama`, `qwen2`
+and `qwen3` take the dense path and produce a v3 file, while `qwen3_5` produces
+a v4 file with a layer-major body, because three layers in four hold a gated
+DeltaNet mixer and the fourth holds full attention. Qwen3.5-MoE is refused at
+load with `LoadError::Unsupported`, since the smallest published one is 71.9 GB
+and nothing that size reaches a UEFI pool on this laptop; a forward pass for it
+could never be run and contradicted, so we decline to write one.
+
 SmolLM2-135M also works, and it is the checkpoint to reach for under QEMU,
-which cannot host the larger one (see below).
+which cannot host the larger ones (see below).
 
 ---
 
@@ -136,10 +228,18 @@ python tools/drive.py "tensor" "model" "ask -n 20 hello"
 the shell over a serial socket. It assembles its own ESP from the small
 checkpoint, so it never disturbs deploy staging.
 
+Two things to know before a session goes sideways. Pass `initiative off` as the
+first command: the resident task wakes fifteen seconds in and holds the engine
+for a whole episode, which presents as a timeout with commands unsent. And pass
+`--qemu-extra "-cpu max"` for anything that trains, since the default `qemu64`
+model hides every SIMD extension and the trainer declines without AVX2.
+
 QEMU cannot run the 0.6B model. Its VVFAT is FAT16 on a fixed geometry and the
 whole disk is 516 MB. `fat:32:` raises that in principle, but QEMU says its
 FAT32 is untested and the firmware cannot read the directory it produces. So
-Qwen3 runs only on real hardware, and QEMU work uses SmolLM2.
+Qwen3 runs only on real hardware, and QEMU work uses SmolLM2. The same cap
+applies to the hybrids, so `tools/hybtest.py` builds a small one shaped to hit
+every path the real one does and prints what the logits should say.
 
 ### Deploying to hardware
 
@@ -181,16 +281,22 @@ python tools/drive.py --iso glados.iso "ls /"
 **There is no `cargo test`.** This is a `no_std` UEFI binary with no host test
 runner, so verification is the boot selftests plus driving QEMU.
 
-At boot the system runs heap, timer, clock, namespace, crypto (11 vector sets
-from published RFCs and FIPS documents), constrained-decoding and probe
-selftests, printing `ok` or `FAIL` per line. **That output is the test suite.**
-It is easy to scroll past and it does catch real bugs: an ECDSA break sat
-visible in `[selftest] crypto` for an entire debugging cycle while the log was
-being sliced down to look at something else.
+At boot the system runs eighteen selftest sections carrying seventy-one
+individual claims, printing `ok` or `FAIL` per line: heap, timer, clock, the
+namespace's Merkle addressing, fifteen sets of published cipher vectors, fault
+handling, constrained decoding, the agent loop, the linear probe, the situation
+planner, the initiative policy, the self-modification gate, corpus bundles,
+QDoRA adapters, the backward kernels, and the trainer's arithmetic.
 
-`tools/reference.py` is a NumPy oracle for the model. It reads the *converted*
-file, so a `convert.py` bug shows up there too and only a Rust bug shows up as
-a mismatch.
+**That output is the test suite.** It is easy to scroll past and it does catch
+real bugs. An ECDSA break sat visible in `[selftest] crypto` for an entire
+debugging cycle while the log was being sliced down to look at something else,
+and while writing the adapter format we shipped a failing sparsity claim for
+one commit by doing exactly the same thing.
+
+`tools/reference.py` is a NumPy oracle for the dense models and `tools/v4.py`
+for the hybrids. Both read the *converted* file, so a `convert.py` bug shows up
+there too and only a Rust bug shows up as a mismatch.
 
 ---
 
@@ -220,6 +326,13 @@ applet, 50% where they split. That gap is what the gate acts on, and a router
 that knows when it is guessing is worth more than the point the ensemble was
 supposed to buy.
 
+Freezing the base is what makes training affordable. A frozen weight means a
+hidden state is a constant, a constant can be cached, and a cached decision can
+be replayed against any number of candidate adapters for the price of a dot
+product. Every capability above rests on that one property, including the
+judging: it is why a verdict this machine reaches at three in the morning can
+be re-checked by anybody, later, for almost nothing.
+
 The content hash covers content only, never block locations. Otherwise moving a
 block would rename an object.
 
@@ -243,28 +356,35 @@ data scale, and the Product-of-Experts council does not improve accuracy. Both
 are kept, because the reason to know them is the reason they were worth
 measuring, and because a deleted experiment gets repeated.
 
+The measurements we have are small, and we say so where they appear. The
+adapter trainer has been exercised on subsamples of a few dozen decisions
+because a full-corpus pass is a forward pass per example, which is seconds on
+the laptop and most of a day under emulation. Those runs establish that the
+machinery composes. They establish nothing about how much it helps, and no
+figure from them belongs in a claim.
+
 ---
 
 ## Copyright
 
 **Copyright © 2026. All rights reserved.**
 
-No licence is granted. This source is published to be read, not to be reused.
-You may not copy, modify, redistribute or create derivative works from it
-without written permission.
+No licence is granted. This source is published to be read and not to be
+reused. You may not copy, modify, redistribute or create derivative works from
+it without written permission.
 
-### One exception, and it is not mine to reserve
+### One exception, and it is not ours to reserve
 
 `src/dev/rtl8188eu_tables.rs` contains 509 hardware initialisation constants
 transcribed from `drivers/net/wireless/realtek/rtl8xxxu/8188e.c` in the Linux
-kernel, which is **GPL-2.0**. Those values are not this project's work and the
-reservation above does not apply to them. They are isolated in that one file,
-marked at the top, and nothing else in the tree is copied from anywhere.
+kernel, which is **GPL-2.0**. Those values are not our work and the reservation
+above does not apply to them. They are isolated in that one file, marked at the
+top, and nothing else in the tree is copied from anywhere.
 
-If you intend to reuse anything here, that file's licence is Linux's, not mine.
+If you intend to reuse anything here, that file's licence is Linux's.
 
 ### Model weights
 
 Model weights are not distributed in this repository. The ISO includes a
-converted Qwen3-0.6B, which is **Apache-2.0** and belongs to Alibaba Cloud, not
-to this project. Its licence travels with it.
+converted Qwen3-0.6B, which is **Apache-2.0** and belongs to Alibaba Cloud. Its
+licence travels with it.

@@ -1,20 +1,21 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code (claude.ai/code) when working with
+code in this repository.
 
 ## What this is
 
 GLaDOS: a from-scratch, non-Unix, ring-0 operating system in Rust for one
 specific laptop (MSI Thin GF63 12UC, board MS-16R8), built around a language
-model that lives *inside* the kernel rather than on top of it. No user/kernel
-split, no syscalls, no process isolation, one address space. A tool call from
-the model is a function call.
+model that lives *inside* the kernel. No user/kernel split, no syscalls, no
+process isolation, one address space. A tool call from the model is a function
+call.
 
-The only code in the kernel this project did not write is Rust `core` — and
-`src/dev/rtl8188eu_tables.rs`, which is 509 hardware initialisation constants
-transcribed from Linux's GPL-2.0 rtl8xxxu driver because there is no other
-source for them. It is one file, marked as such at the top, and nothing else in
-the tree is copied from anywhere.
+108 files, roughly 50,000 lines. The only code in the kernel we did not write
+is Rust `core`, and `src/dev/rtl8188eu_tables.rs`, which is 509 hardware
+initialisation constants transcribed from Linux's GPL-2.0 rtl8xxxu driver
+because there is no other source for them. It is one file, marked as such at
+the top, and nothing else in the tree is copied from anywhere.
 
 ## Commands
 
@@ -27,12 +28,17 @@ Build and run under QEMU:
 .\scripts\run.ps1 -TraceFaults    # log every exception; finds triple faults
 ```
 
-Cargo directly (rustup lives under scoop, not on PATH by default):
+Cargo directly (rustup lives under scoop, absent from PATH by default):
 
 ```powershell
 $env:PATH = "$env:USERPROFILE\scoop\persist\rustup-msvc\.cargo\bin;$env:PATH"
 cargo build            # or --release
 ```
+
+**`drive.py` prefers the release artifact.** It stages
+`target/x86_64-unknown-uefi/release/glados.efi` when one exists and falls back
+to debug otherwise, so a `cargo build` alone leaves a stale release binary in
+place and the change under test never boots. Build `--release` before driving.
 
 Deploy to the USB SSD, then reboot and hold **F11**:
 
@@ -46,7 +52,7 @@ nothing.
 
 ### Python tooling
 
-Use the project venv — there is no Python on PATH:
+Use the project venv, since there is no Python on PATH:
 
 ```powershell
 .\tools\venv\Scripts\python.exe tools\traces.py out\traces.jsonl --count 40000 --per-family 300
@@ -55,62 +61,34 @@ Use the project venv — there is no Python on PATH:
 .\tools\venv\Scripts\python.exe tools\tokenizer.py tools\qwen3\tokenizer.json esp\GLADOS\tokenizer.bin --verify
 ```
 
-`dataset.py --blobs` writes the same examples a second way: a `GLADOSC1`
-bundle holding the corpus in the shape `/ai/train` actually stores it, so a
-corpus can be replaced on a *running* machine instead of only at build time.
-The kernel side is `teach bundle`, and the transfer is whatever puts the file
-in the namespace:
-
-```powershell
-.\tools\venv\Scripts\python.exe tools\dataset.py out\corpus.json --blobs out\corpus.bin
-.\tools\venv\Scripts\python.exe tools\mkfat.py .qemu\nvme.img out\corpus.bin
-.\tools\venv\Scripts\python.exe tools\drive.py "initiative off" "fat get /CORPUS.BIN /tmp/corpus.bin" "teach bundle /tmp/corpus.bin"
-```
-
-Under QEMU the ESP is VVFAT on a different device than the one `fat` scans, so
-the bundle travels in the NVMe test image; on the GF63 the ESP is a partition
-on the same disk and `fat get` reads it directly from `esp\GLADOS\`.
-
-**`teach bundle` replaces the corpus, and it must.** The bundle carries split
-*positions* in its header, and the kernel takes its held-out boundaries from
-those (`vocab::splits`) rather than from the compiled `SEED_TRAIN` /
-`SEED_VAL_END` once one has been imported. Appending instead of replacing
-would leave the boundaries describing a corpus that no longer exists -- the
-same "test set that moved" failure the three-way split exists to prevent,
-arriving by a different route. `teach` on a live system still appends, and
-anything past the recorded length trains.
-
-Also: **`initiative off` first when driving QEMU.** The resident mind wakes
-fifteen seconds in and takes the engine for a whole episode, which reads as
-`drive.py` timing out with commands unsent.
-
 `tools/qwen3/` and `tools/hf/` hold safetensors checkpoints. `convert.py <src>
 <dst> [--f32] [--seq N]` flattens one into the `GLADOSM3` layout
 `ai::model::offsets` indexes by arithmetic. `--seq` sets the context window and
-is bounded by **KV cache size, not by the model**: Qwen3-0.6B costs 112 MiB of
-kernel heap at 512, and convert.py prints that figure so it is decided where
-`--seq` is chosen rather than discovered as an allocation failure at boot.
+is bounded by **KV cache size instead of by the model**: Qwen3-0.6B costs
+112 MiB of kernel heap at 512, and convert.py prints that figure so it is
+decided where `--seq` is chosen, before it can surface as an allocation failure
+at boot.
 
 Always run `tokenizer.py` with `--verify`. It reimplements the kernel's
 algorithm and diffs it against the reference `tokenizers` library; a tokenizer
 that is subtly wrong produces text that still looks like text.
 
-**Qwen3.5 writes v4, not v3.** `convert.py` dispatches on `model_type`:
+**Qwen3.5 writes v4.** `convert.py` dispatches on `model_type`:
 `llama`/`qwen2`/`qwen3` take the dense path and still produce a byte-identical
 v3 file, while `qwen3_5`/`qwen3_5_moe` take `convert_hybrid` and produce a
-160-byte header plus a **layer-major** body — three layers in four hold
+160-byte header plus a **layer-major** body. Three layers in four hold
 `linear_attn.*` and the fourth holds `self_attn.*`, so there is no single
 stride to multiply and grouping by tensor stops being possible. The layer
-schedule travels as an explicit bitmap rather than being derived from
+schedule travels as an explicit bitmap instead of being derived from
 `full_attention_interval`, so a checkpoint that breaks the pattern fails
-instead of loading and running wrong.
+loudly.
 
 The kernel runs the hybrid, `Arch::Qwen35`. **MoE is refused at load**
-(`LoadError::Unsupported`) rather than half-implemented: the smallest published
-one is 71.9 GB, nothing that size reaches a UEFI pool on the GF63, so a forward
-pass for it could never be run and contradicted.
+(`LoadError::Unsupported`) instead of being half-implemented: the smallest
+published one is 71.9 GB, nothing that size reaches a UEFI pool on the GF63, so
+a forward pass for it could never be run and contradicted.
 
-**QEMU cannot run Qwen3.5-0.8B either** -- 723 MB against VVFAT's 516 -- so the
+**QEMU cannot run Qwen3.5-0.8B either**, 723 MB against VVFAT's 516, so the
 kernel port is checked against a *small* hybrid instead of deferring every bug
 to hardware. `tools/hybtest.py` builds one shaped to hit every path the real
 one does (both layer kinds, packed cache indices, partial RoPE, 4 value heads
@@ -140,17 +118,45 @@ disagreement about one dimension leaves everything after it as perfectly valid
 float32 garbage. Both readers therefore **walk and never seek**, and assert
 they land on the last byte. `convert_hybrid` makes the same bargain on input:
 every tensor must be written or explicitly skipped, and anything else is an
-error rather than a silent omission.
+error instead of a silent omission.
+
+### The corpus, and getting one into a running machine
+
+`/ai/train` holds the routing corpus as one blob per example, `applet<tab>task`.
+It is seeded at boot from `src/ai/corpus.rs` (465 examples, compiled in so the
+system can route before anything is mounted) and `teach` appends to it.
+
+`dataset.py --blobs` writes the same examples a second way, as a `GLADOSC1`
+bundle in the shape `/ai/train` actually stores, so a corpus can be replaced on
+a running machine. The kernel side is `teach bundle`:
+
+```powershell
+.\tools\venv\Scripts\python.exe tools\dataset.py out\corpus.json --blobs out\corpus.bin
+.\tools\venv\Scripts\python.exe tools\mkfat.py .qemu\nvme.img out\corpus.bin
+.\tools\venv\Scripts\python.exe tools\drive.py "initiative off" "fat get /CORPUS.BIN /tmp/corpus.bin" "teach bundle /tmp/corpus.bin"
+```
+
+Under QEMU the ESP is VVFAT on a different device from the one `fat` scans, so
+the bundle travels in the NVMe test image; on the GF63 the ESP is a partition
+on the same disk and `fat get` reads it directly from `esp\GLADOS\`.
+
+**`teach bundle` replaces the corpus, and it has to.** The bundle carries split
+*positions* in its header, and the kernel takes its held-out boundaries from
+those (`vocab::splits`) once one has been imported. Appending would leave the
+boundaries describing a corpus that no longer exists, which is the same
+"test set that moved" failure the three-way split exists to prevent, arriving
+by a different route. `teach` on a live system still appends, and anything past
+the recorded length trains.
 
 ### Training the model's own decision layer
 
-Two different things in this tree are called training and confusing them makes
+Two different things in this tree are called training, and confusing them makes
 every number ambiguous:
 
-- **`fit` / `train [epochs]`** move the linear probe and its head. Closed-form
+- **`fit` and `train [epochs]`** move the linear probe and its head. Closed-form
   ridge regression over hidden states; the checkpoint is never touched.
-- **`train adapter`** moves a QDoRA adapter over the model's *classifier*.
-  This is the model learning, in the only sense the word applies here.
+- **`train adapter`** moves a QDoRA adapter over the model's *classifier*. This
+  is the model learning, in the only sense the word applies here.
 
 ```
 train adapter [-e epochs] [-n examples] [-ms budget] [-r rank] [-lr rate]
@@ -163,35 +169,43 @@ every hyperparameter judgement made from the run would be about the clock. So
 under QEMU it needs `--qemu-extra "-cpu max"`; the default `qemu64` model hides
 every SIMD extension and the command declines with the reason printed.
 
-Three things make it affordable in-kernel, and each is exact rather than an
-approximation -- they are stated in `src/ai/train.rs` and worth knowing before
+Three facts make it affordable in a kernel, and each is exact instead of
+approximate. They are stated in `src/ai/train.rs` and worth knowing before
 changing anything there:
 
 - Only the classifier is adapted, so the hidden state at every decision is a
-  constant and is cached once per example. An epoch after that costs no
-  forward passes at all.
+  constant and is cached once per example. An epoch after that costs no forward
+  passes at all.
 - Restricted cross-entropy zeroes the gradient outside the grammar's candidate
   set, so only rows the decoder can reach ever move. Measured on SmolLM2:
-  **132 rows out of 49,152**. The trainer dequantises exactly those into an
-  f32 scratch and never touches the int8 classifier again.
+  **132 rows out of 49,152**. The trainer dequantises exactly those into an f32
+  scratch and never touches the int8 classifier again.
 - Teacher forcing keeps the whole spelling cacheable, and the chain of
-  candidate sets is a property of the applet name rather than of the task -- so
-  the vocabulary scan that finds them runs 21 times, not once per example.
+  candidate sets is a property of the applet name instead of the task, so the
+  vocabulary scan that finds them runs 21 times per trial.
 
-`-n` **strides** through the corpus rather than taking a prefix. The splits are
+`-n` **strides** through the corpus instead of taking a prefix. The splits are
 positional, so the first N examples are all training examples and a short run
 would report held-out accuracy over an empty set.
 
 **Prep dominates, and only under QEMU.** Building the chains and dequantising
 the rows is a fixed cost; caching the features is a forward pass per example,
-which under TCG is around a minute each. The report splits the two so it is
-obvious which number `-n` moves. A full-corpus run is a GF63 activity.
+which under TCG is around three minutes each. The report splits the two so it
+is obvious which number `-n` moves. A full-corpus run is a GF63 activity, and
+has not been done: every training figure recorded so far comes from subsamples
+of a few dozen decisions and establishes that the machinery composes, nothing
+more.
+
+`Trial` in `src/ai/train.rs` is the reusable object underneath all of this.
+`prepare` builds it (expensive, once), and `score`, `paired`, `train`,
+`scatter`, `gather` and `guards_hold` all run against it without touching the
+model again.
 
 ### Adapters on disk
 
-`adapter save` writes a `GLADOSA1` blob into the namespace -- the adapter
-alone, never the checkpoint. `tools/adapter.py` is the host-side reader, and
-the format is documented there in full:
+`adapter save` writes a `GLADOSA1` blob into the namespace, the adapter alone
+and never the checkpoint. `tools/adapter.py` is the host-side reader, and the
+format is documented there in full:
 
 ```powershell
 .\tools\venv\Scripts\python.exe tools\adapter.py --selftest
@@ -200,19 +214,63 @@ the format is documented there in full:
 ```
 
 Rows are stored **sparsely**, because they are sparse in fact: a row with a
-zero low-rank factor and a default magnitude is bit-identical to no adapter.
-On the measured decision layer that is 23.7 KB against 1.79 MB dense, 75x.
-`s` is never stored -- it is `m/|W0 + BA|`, derived from a frozen weight the
-file does not contain, and storing it would let a file and a checkpoint
-disagree about a value with exactly one correct answer.
+zero low-rank factor and a default magnitude is bit-identical to no adapter. On
+the measured decision layer that is 23.7 KB against 1.79 MB dense, 75x. `s` is
+never stored, being `m/|W0 + BA|`, derived from a frozen weight the file does
+not contain; storing it would let a file and a checkpoint disagree about a
+value with exactly one correct answer.
 
 The layout follows RustLMHub's `FfnLora::save` in every decision that could
-have gone either way -- magic first and refused rather than guessed at, dims in
+have gone either way: a magic first and refused instead of guessed at, dims in
 the header checked for exact equality, flat little-endian f32, no base weights
-in the file. It is not byte-compatible and could not be: LoAA is LoRA over
-gate/up/down, this is DoRA over the attention path and the classifier, and
+in the file. Byte compatibility was never available, since LoAA is LoRA over
+gate/up/down while this is DoRA over the attention path and the classifier, and
 every site here carries per-row magnitudes LoAA has nowhere to put.
 `--export-lora` bridges the gap for one site and prints what it dropped.
+
+### Self-modification
+
+`godel` is the loop that lets the machine change itself, and `src/ai/godel.rs`
+opens with why it departs from Schmidhuber's construction. The short version:
+we have no theorem prover and could not build one for this, so proof is
+replaced by a certificate cheaper to refute than to produce, over
+content-addressed inputs, re-derivable bit for bit by any later run.
+
+```
+godel [status|now [n]|ledger [n]|rollback|on|off]
+```
+
+Four judges, unanimity required, each a different failure mode:
+
+- **J1** is paired (McNemar) over the same cached decisions both variants
+  answer, which is what a comparison of two percentages cannot be.
+- **J2** replays the machine's own curiosity goals along the path the frozen
+  baseline walks, and is never subsampled by `-n`.
+- **J3** is structural: finite factors, positive scales, finite logits.
+- **J4** is cost: rank and resident bytes, because `HEAP_LADDER` is one
+  physically contiguous allocation that comes down a rung when the memory map
+  cannot satisfy it.
+
+Trials run only when the RTC hour falls in the quiet window (02:00 to 06:00)
+**and** `godbits::felt()` shows no hardware input. `initiative::tick` fires one
+from its sleep branch at most hourly, bounded to 24 examples and 20 s of
+optimiser time, because the mind task holds the engine for the whole of a trial
+and an unbounded one would take the terminal away.
+
+Adoption is a pointer swap; the parent stays addressed and `godel rollback`
+costs a pointer write. `/ai/godel/ledger.txt` gets a line per trial either way.
+
+**The test slice carries a budget.** It is consulted only after a variant has
+already won on validation, never to decide whether it won, and the ledger
+counts the reads. Past three, a test figure is printed as stale and marked
+unquotable. A loop that improves itself forever reads the held-out set forever,
+and this tree's measurement discipline does not survive that unless somebody
+counts.
+
+`Variant.lambda`, `Variant.rule` and `Variant.skills` are hashed into the node
+identity and nothing varies them yet. They are hooks for widening the search
+space beyond "retrain the same thing", which is the current limitation: the DAG
+will be a chain until something varies more than the random seed.
 
 Root certificate bundle, built from the host's store:
 
@@ -222,34 +280,51 @@ Root certificate bundle, built from the host's store:
 
 ### Testing
 
-There is no `cargo test` — this is a `no_std` UEFI binary with no host test
-runner. **Verification is the boot selftests plus driving QEMU.** At boot the
-system runs heap, timer, clock, namespace, crypto (11 RFC vector sets),
-constrained-decoding and probe selftests, and prints `ok` / `FAIL` per line.
-Read that output; it is the test suite.
+There is no `cargo test`. This is a `no_std` UEFI binary with no host test
+runner, so **verification is the boot selftests plus driving QEMU.**
 
-Shell commands that re-run tests on demand: `tensor`, `model`, `crypto`,
+At boot the system runs **eighteen selftest sections carrying seventy-one
+claims**, printing `ok` or `FAIL` per line: heap, timer, clock, the namespace's
+Merkle addressing, fifteen sets of published cipher vectors, fault handling,
+constrained decoding, the agent loop, the linear probe, the situation planner,
+the initiative policy, the self-modification gate, corpus bundles, QDoRA
+adapters, the backward kernels, and the trainer's arithmetic. Read that output;
+it is the test suite.
+
+Shell commands that re-run checks on demand: `tensor`, `model`, `crypto`,
 `trust verify`, `fit`, `gate`, `search`, `wpa2`, `video bars`. `tensor` and
-`model` are **not** part of the boot sequence and hold the checks for the
+`model` are **absent from the boot sequence** and hold the checks for the
 pre-tokenizer and the wide-head attention geometry.
 
 `tools/drive.py` boots QEMU and drives the shell over a serial socket:
 
 ```powershell
-.\tools\venv\Scripts\python.exe tools\drive.py "tensor" "model" "ask -n 20 hello"
+.\tools\venv\Scripts\python.exe tools\drive.py "initiative off" "tensor" "model" "ask -n 20 hello"
 ```
 
 It stages `BOOTX64.EFI`, resets NVRAM to pristine (a stale boot entry sends the
-firmware to the UEFI shell, which looks like the system not booting), and
-attaches serial as TCP — QEMU's Windows stdio chardev reads console handles,
-not redirected files, so piping a script into it silently does nothing.
+firmware to the UEFI shell, which looks like the system failing to boot), and
+attaches serial as TCP, because QEMU's Windows stdio chardev reads console
+handles and ignores redirected files, so piping a script into it silently does
+nothing.
+
+Three things worth knowing before a session goes sideways:
+
+- **`initiative off` first.** The resident mind wakes fifteen seconds in and
+  holds the engine for a whole episode, which presents as `drive.py` timing out
+  with commands unsent.
+- **`--qemu-extra "-cpu max"` for anything that trains.** The default `qemu64`
+  model hides every SIMD extension and `train::hardware_ok` declines.
+- **Build `--release`.** `drive.py` prefers the release artifact, so a debug
+  build alone leaves a stale binary staged and the change under test never runs.
 
 **QEMU cannot run the real model.** VVFAT is FAT16 on a fixed geometry and the
 whole disk is 516 MB; `fat:32:` raises that in principle but QEMU says its
 FAT32 is untested and the firmware cannot read the directory it produces. So
 Qwen3-0.6B is only runnable on the GF63, and QEMU work uses the SmolLM2
 checkpoint in `out/`. Guest RAM must also cover the weights, which are read
-whole into a pool before `ExitBootServices` — `run.ps1 -Memory` defaults to 2G.
+whole into a pool before `ExitBootServices`, and `run.ps1 -Memory` defaults
+to 2G.
 
 `tools/reference.py` is the numeric oracle and the way to check the real model
 without hardware. It reads the *converted* file, so a `convert.py` bug shows up
@@ -265,276 +340,349 @@ attention path is wired correctly writes real sentences.
 
 **Boot selftest output is easy to skip past and it does catch real bugs.** An
 ECDSA break was visible in `[selftest] crypto` for a whole debugging cycle
-while the output was being sliced away.
+while the output was being sliced away. It happened again while the adapter
+format was being written: a sparsity claim that compared a whole file against
+only the part sparsity can shrink failed for one commit, on an encoding that
+was working correctly, because the log was being grepped down to the section
+under active work. Read the whole thing, or grep for `FAIL` across all of it.
 
 ## Architecture
 
 ### Graphics and the desktop
 
-Rendering is composed, then diffed. `desk::draw` repaints everything --
-wallpaper, icons, every window back to front -- into `gfx::compose`'s heap
-back buffer, and `present()` writes to the framebuffer only the row spans
-that differ from the shadow of what is already on screen. Total repaint keeps
-the window manager obviously correct; the diff is why nothing flashes and why
-hover feedback on pointer motion is affordable. The console bypasses the next
-present through `compose::flush_rect` so shell output stays immediate; both
-paths update the shadow, so they cannot disagree about what is on screen.
+Rendering is composed, then diffed. `desk::draw` repaints everything
+(wallpaper, icons, every window back to front) into `gfx::compose`'s heap back
+buffer, and `present()` writes to the framebuffer only the row spans that
+differ from the shadow of what is already on screen. Total repaint keeps the
+window manager obviously correct; the diff is why nothing flashes and why hover
+feedback on pointer motion is affordable. The console bypasses the next present
+through `compose::flush_rect` so shell output stays immediate; both paths
+update the shadow, so they cannot disagree about what is on screen.
 
 The pointer's whole vocabulary lives in `desk::press_at`, and every layout it
 hit-tests (`task_layout`, `chrome`, `Panel::rects`, `Browser::metrics`,
-`dropdown_rows`) is the same function the paint pass draws from -- a control
-that highlights in one place and presses in another is the class of bug that
-split forbids. Everything the pointer does a keystroke also does, because
-serial cannot inject PS/2 packets and `win keys` is how the desktop gets
-tested headlessly. Screenshots come from `drive.py --screenshot out/x.png`,
-pointer events from `--mouse "mouse_move dx dy"` / `--mouse "mouse_button 1"`
-(QEMU monitor, relative moves from (0,0) at boot).
+`dropdown_rows`) is the same function the paint pass draws from. A control that
+highlights in one place and presses in another is the class of bug that split
+forbids. Everything the pointer does a keystroke also does, because serial
+cannot inject PS/2 packets and `win keys` is how the desktop gets tested
+headlessly. Screenshots come from `drive.py --screenshot out/x.png`, pointer
+events from `--mouse "mouse_move dx dy"` and `--mouse "mouse_button 1"` (QEMU
+monitor, relative moves from (0,0) at boot).
 
-The look is 98 + 3.1 + Aperture: icons and Start and gradient titles from 98,
-bevels and dialogs that hug their content from 3.1, the palette from the sign
-over the door. `todo` (shell) and the ToDo window share one list -- it is the
-hand-off note for what to test at the GF63, since the machine that builds
-this is not the machine that runs it.
+The look is 98 plus 3.1 plus the palette from the sign over our door: icons and
+Start and gradient titles from 98, bevels and dialogs that hug their content
+from 3.1. `todo` (shell) and the ToDo window share one list. It is the hand-off
+note for what to test at the GF63, since the machine that builds this is a
+different machine from the one that runs it.
 
 **Apps are `Content::App(Box<dyn DeskApp>)`** (`gfx/mod.rs`): a window whose
-client area belongs to a program -- Paintbrush (`paint.rs`), Write
-(`write.rs`), Minesweeper (`mines.rs`). Six methods (draw, key, press,
+client area belongs to a program, being Paintbrush (`paint.rs`), Write
+(`write.rs`) and Minesweeper (`mines.rs`). Six methods (draw, key, press,
 right_press, drag, release/wheel); every handler returns whether it consumed
-the event so unclaimed keys fall through to the window manager. `draw_in`
-takes `&self`; layout facts discovered while drawing go in `Cell`s, the
-Browser's pattern. Held-button motion is forwarded to the pressed app
-(`APP_PRESS` in desk.rs) -- that is what a brush stroke is -- and the second
-button goes to the app before it means the system menu, which is how
-Minesweeper flags.
+the event so unclaimed keys fall through to the window manager. `draw_in` takes
+`&self`; layout facts discovered while drawing go in `Cell`s, the Browser's
+pattern. Held-button motion is forwarded to the pressed app (`APP_PRESS` in
+desk.rs), which is what a brush stroke is, and the second button goes to the app
+before it means the system menu, which is how Minesweeper flags.
 
-Three lessons already paid for, do not relearn them:
+Four lessons already paid for. Do not relearn them:
 
-- **`open_app` returns focus to the terminal**, like `open` and
-  `open_browser`. The desktop takes *every* key while a non-terminal window
-  has focus, so an app that kept focus ate the next serial command line --
-  Minesweeper consumed `echo after-mines` a byte at a time and flagged a
-  cell on the `f`.
-- **Alt-Tab is a swap of the top two, not a rotation.** Rotating made a
-  second Alt-Tab land on a third window; scripts (and habit) need over-and-
-  back to be two presses. Headless recipe: every `win keys` line that drives
-  an app must be self-contained -- `alttab,...,alttab` -- because between
-  commands the focused app would swallow the next line.
-- **QEMU monitor `mouse_move` deltas must stay within +-255 per axis.**
-  Bigger deltas set the PS/2 overflow bit and the driver (correctly)
-  discards the packet -- the pointer simply does not move, which reads as a
-  dead drag rather than a clamped one.
-- **`font::GLYPH_H` is 8, not 16** (glyphs are 8x8, doubled by
-  `CHROME_SCALE`). `TITLE_H` is therefore 24, and the caption buttons are
-  12x12 at the bar's right end. Choreographing clicks from remembered
-  metrics instead of a `[desk] press` trace cost two full test cycles
-  aimed 40 pixels left of the close box.
+- **`open_app` returns focus to the terminal**, like `open` and `open_browser`.
+  The desktop takes *every* key while a non-terminal window has focus, so an
+  app that kept focus ate the next serial command line. Minesweeper consumed
+  `echo after-mines` a byte at a time and flagged a cell on the `f`.
+- **Alt-Tab swaps the top two and does not rotate.** Rotating made a second
+  Alt-Tab land on a third window; scripts and habit both need over-and-back to
+  be two presses. Headless recipe: every `win keys` line that drives an app must
+  be self-contained, as in `alttab,...,alttab`, because between commands the
+  focused app would swallow the next line.
+- **QEMU monitor `mouse_move` deltas must stay within +-255 per axis.** Bigger
+  deltas set the PS/2 overflow bit and the driver correctly discards the
+  packet, so the pointer simply does not move, which reads as a dead drag
+  instead of a clamped one.
+- **`font::GLYPH_H` is 8 and not 16** (glyphs are 8x8, doubled by
+  `CHROME_SCALE`). `TITLE_H` is therefore 24, and the caption buttons are 12x12
+  at the bar's right end. Choreographing clicks from remembered metrics instead
+  of a `[desk] press` trace cost two full test cycles aimed 40 pixels left of
+  the close box.
 
 `write` is two things told apart by shape: with `<path> <text>` it is the
 sysbox applet, with at most a path it opens the editor (decided in
-`shell::execute` *before* sysbox dispatch, which would otherwise claim the
-bare form and print usage). Paint saves `/draw/painting.ppm` (P6);
-`tree::put` creates parent directories, so no mkdir ceremony.
+`shell::execute` *before* sysbox dispatch, which would otherwise claim the bare
+form and print usage). Paint saves `/draw/painting.ppm` (P6); `tree::put`
+creates parent directories, so no mkdir ceremony.
 
 ### The Oracle (God Says, made honest)
 
-`src/ai/futures.rs` + `src/gfx/oracle.rs` are the TempleOS "God Says" descendant.
-Terry drew uniform words from Vocab.DD seeded by `KbdMsEvtTime` -- the timing
-of the operator's own hands. The entropy is kept (`src/ai/godbits.rs`: every
-keyboard and mouse ISR deposits `rdtsc() >> GOD_BAD_BITS`, folded into the
-sampler) and the subject is changed from hallucinated words to the one future
-that is actually knowable: this machine's.
+`src/ai/futures.rs` and `src/gfx/oracle.rs` are the TempleOS "God Says"
+descendant. Terry drew uniform words from Vocab.DD seeded by `KbdMsEvtTime`,
+the timing of the operator's own hands. We keep the entropy (`src/ai/godbits.rs`:
+every keyboard and mouse ISR deposits `rdtsc() >> GOD_BAD_BITS`, folded into the
+sampler) and change the subject from hallucinated words to the one future that
+is actually knowable, which is this machine's.
 
 `futures::sample()` runs once a second from the clock task, recording heap,
 task-switch rate, the operator's touch rate and task count into a ring. On
 consult, a linear dynamical model `v_next = a + b*v + c*u` is fitted per
 variable by the router's own Cholesky (`probe::ridge_solve`), and the state is
-rolled forward under three interventions -- `do(activity := 0 / mean / high)`,
-the counterfactual "left alone / carried on / put under load". The window
-plots forked timelines: solid white history to the `now` line, three coloured
-projections after. It is genuinely causal (a controlled linear system fitted
-from real telemetry), never prophecy; the word-prophecy first draft was scrapped
-for exactly that reason.
+rolled forward under three interventions: `do(activity := 0 / mean / high)`,
+the counterfactual "left alone, carried on, put under load". The window plots
+forked timelines, solid white history to the `now` line and three coloured
+projections after. It is genuinely causal, being a controlled linear system
+fitted from real telemetry, and it is never prophecy. The word-prophecy first
+draft was scrapped for exactly that reason.
 
 Two gotchas paid for here:
-- **`lapic::ticks()` is the timer-interrupt count at `TIMER_HZ` (100/s), not
-  `lapic::timer_hz()`** (the calibrated APIC frequency, in the millions).
-  Dividing uptime by the latter put every reading at 0s. `mem`/`uptime` use
+
+- **`lapic::ticks()` is the timer-interrupt count at `TIMER_HZ` (100/s)**, and
+  is not `lapic::timer_hz()` (the calibrated APIC frequency, in the millions).
+  Dividing uptime by the latter put every reading at 0s. `mem` and `uptime` use
   `TIMER_HZ`; so must anything converting ticks to seconds.
-- **`win keys` bypasses the hardware ISR**, so scripted keystrokes do NOT feed
-  the entropy ring -- only real hardware events do. Correct (entropy IS
-  hardware timing), but it means headless tests show "fed by ~1 touches"; the
-  ring lights up on the GF63.
+- **`win keys` bypasses the hardware ISR**, so scripted keystrokes do not feed
+  the entropy ring. Only real hardware events do. That is correct, since the
+  entropy *is* hardware timing, and it means headless tests show "fed by ~1
+  touches" while the ring lights up on the GF63.
 
 ### Boot
 
 UEFI already delivers long mode, CPL 0 and an identity map, so this UEFI
-application *is* the kernel — no ELF loading, relocation or handoff ABI.
-`main.rs` reads the model, tokenizer and root bundle **before**
+application *is* the kernel. There is no ELF loading, relocation or handoff
+ABI. `main.rs` reads the model, tokenizer and root bundle **before**
 `ExitBootServices`, because that is the only moment a filesystem exists.
 Everything after runs on our own page tables.
 
 `gfx::splash` owns the framebuffer during boot; the console writes to its RAM
 shadow grid without painting, and `finish()` repaints the whole log. Anything
 that draws during boot must check `splash::active()`, and the fault reporter
-and panic handler call `splash::abandon()` first — on the GF63 the framebuffer
-is the only diagnostic channel there is.
+and panic handler call `splash::abandon()` first, because on the GF63 the
+framebuffer is the only diagnostic channel there is.
 
 ### Concurrency
 
-`sync::Racy<T>` is **not a lock** — it is single-core interior mutability and
+`sync::Racy<T>` is **not a lock.** It is single-core interior mutability and
 the designated grep target for the day SMP arrives.
 
-`task::yield_now` disables interrupts across the context switch. This is not
-optional: `schedule()` stores `CURRENT` and *then* switches stacks, so a timer
+`task::yield_now` disables interrupts across the context switch. This is
+required: `schedule()` stores `CURRENT` and *then* switches stacks, so a timer
 tick landing between them saves the outgoing stack pointer into the wrong slot
 and one task becomes unresumable. The interrupt path is safe because a gate
 clears IF for it.
+
+Long-running work in a resident task is fine and does not freeze the machine,
+since the scheduler preempts at 100 Hz. What it does do is hold the engine, and
+`with_engine` refuses every other task while one holds it. That is why the
+trial the initiative loop runs at night is bounded to a small budget: an
+unbounded one would leave the shell answering "another task holds it" for the
+length of it.
 
 ### Networking (`src/net/`)
 
 Interfaces live in `iface`: `lo`, `eth0`, `wlan0`. A driver implements
 `iface::Nic`; `net::init` tries e1000 (QEMU) then rtl8168 (the GF63's real
 card, `10ec:8168`). Routing picks an interface by destination, and every layer
-above asks for a source address rather than assuming one exists.
+above asks for a source address instead of assuming one exists.
 
-**`poll` never dispatches into a transport state machine — it queues.**
-Sending calls `send_ipv4` → `resolve`, and `resolve` calls `poll` while waiting
-for ARP. Running a state machine from there would let a connection re-enter its
-own control block while an earlier borrow is live. TCP and UDP drain their own
+**`poll` never dispatches into a transport state machine. It queues.** Sending
+calls `send_ipv4` then `resolve`, and `resolve` calls `poll` while waiting for
+ARP. Running a state machine from there would let a connection re-enter its own
+control block while an earlier borrow is live. TCP and UDP drain their own
 inboxes.
 
 TCP advances only while the shell is idle (`tcp::service` from the idle loop)
 or inside a blocking call. There is no interrupt-driven receive.
 
-The wireless card is CNVi — the MAC is in the PCH and the M.2 module is a
+The wireless card is CNVi, so the MAC is in the PCH and the M.2 module is a
 radio. `net/wifi.rs` identifies hardware and refuses to pretend; the WPA2
-supplicant in `net/wpa2.rs` is complete and verified against IEEE vectors but
+supplicant in `net/wpa2.rs` is complete and verified against IEEE vectors and
 has nothing to run on.
 
 ### Crypto (`src/crypto/`)
 
 Written from scratch, and this is the one place where that is a liability
-rather than a virtue: a bug here produces output that works perfectly and is
-not secure. Primitives were chosen for checkability — ChaCha20 over AES-GCM
-(no key-dependent table lookups), X25519 over a NIST curve. Every one is
-checked against published RFC vectors at boot.
+instead of a virtue: a bug here produces output that works perfectly and is not
+secure. Primitives were chosen for checkability, ChaCha20 over AES-GCM (no
+key-dependent table lookups) and X25519 over a NIST curve. Every one is checked
+against published RFC vectors at boot.
 
 ECDSA uses **Jacobian** coordinates. Affine cost an inversion per point
-operation — a full modexp — which for P-384 meant ~460,000 allocating
+operation, a full modexp, which for P-384 meant around 460,000 allocating
 multiplies per signature and exhausted the heap. `Mont::inv_prime` takes and
 returns *ordinary* values; passing it something already in Montgomery form
 computes the wrong thing silently. Use `Curve::inv_m`.
 
-TLS 1.3 validates the chain, the transcript signature, dates and name — and
-**reports** rather than enforces. A caller that cares must check
-`identity.ok()`. No revocation. Key material still comes from the TSC, not
-`RDRAND`.
+TLS 1.3 validates the chain, the transcript signature, dates and name, then
+**reports** instead of enforcing. A caller that cares must check
+`identity.ok()`. There is no revocation. Key material still comes from the TSC,
+which `src/net/tls.rs` names in place as a genuine weakness: a counter started
+at power-on is not a random number generator, and an attacker who can guess the
+boot time narrows the key.
 
 ### The model (`src/ai/`)
 
-Qwen3-0.6B, int8, ~570 MB on the ESP, referenced in place in the LoaderData
-pool rather than copied to the heap. SmolLM2-135M still loads and is the small
-checkpoint to reach for when something needs to run under QEMU.
+Qwen3-0.6B, int8, around 570 MB on the ESP, referenced in place in the
+LoaderData pool instead of being copied to the heap. SmolLM2-135M still loads
+and is the small checkpoint to reach for when something needs to run under
+QEMU. Qwen3.5 hybrids load through the v4 path.
 
-**Qwen3 is not a Llama, and neither difference fails loudly.** Its head width
-is *stated* (128) rather than derived (1024/16 = 64), so `wq` is `[2048, 1024]`
-and the attention path is wider than the residual stream; and it RMSNorms each
-head's query and key before RoPE. Ignore either and the model loads, runs, and
-generates confident nonsense. `Config::head_dim` and `Config::qk_norm` carry
-them, and the `GLADOSM3` header (v3) records them per checkpoint. v2 files still
-load: their defaults are exactly the Llama ones.
+The module map, since `src/ai/` is now twenty-three files:
 
-**RoPE pairs `i` with `i + head_dim/2`, not `2i` with `2i+1`.** This is
-`rotate_half` in HuggingFace's modeling code, and therefore what every
-checkpoint trained through transformers expects -- Qwen3 and SmolLM2 alike.
-The kernel used the interleaved convention for a long time and nothing looked
-broken, because both are norm-preserving rotations by the same angles: no NaN,
-no drift, no error. The model stays fluent and attends by a scrambled notion of
-distance, which is indistinguishable from a small model being small. It cost
-SmolLM2 `"The capital of France."` followed by blank lines where the corrected
-path gives `"The capital of France is Paris. Paris is a city known for..."`.
-`Config::rope_interleaved` is true only for genuine llama2.c checkpoints.
+| | |
+|---|---|
+| `model.rs` `weights.rs` `tensor.rs` | The forward pass, `Mat`, and the kernels |
+| `tokenizer.rs` `vocab.rs` `corpus.rs` | Text in, and the routing corpus |
+| `constrain.rs` `harness.rs` `sample.rs` | The grammar, the decode loop, the splits |
+| `probe.rs` `council.rs` `deliberate.rs` | The closed-form router and its confidence |
+| `agent.rs` `context.rs` `initiative.rs` | Episodes, situation, the resident mind |
+| `aixi.rs` `futures.rs` `godbits.rs` | Planning over fitted dynamics, and the Oracle |
+| `adapter.rs` `backward.rs` `train.rs` | QDoRA, the adjoints, and the trainer |
+| `godel.rs` | Variants, judges, ledger, adoption |
 
-Generation is memory-bandwidth bound -- bytes read per token is roughly the
-model size -- so 570 MB against 135 MB is about 4.4x the time per token. The
+**Qwen3 differs from Llama in two ways and neither fails loudly.** Its head
+width is *stated* (128) instead of derived (1024/16 = 64), so `wq` is
+`[2048, 1024]` and the attention path is wider than the residual stream; and it
+RMSNorms each head's query and key before RoPE. Ignore either and the model
+loads, runs, and generates confident nonsense. `Config::head_dim` and
+`Config::qk_norm` carry them, and the `GLADOSM3` header (v3) records them per
+checkpoint. v2 files still load, their defaults being exactly the Llama ones.
+
+**RoPE pairs `i` with `i + head_dim/2`.** The interleaved convention, `2i` with
+`2i+1`, is wrong for anything trained through transformers, where the reference
+is `rotate_half`. The kernel used interleaved for a long time and nothing
+looked broken, because both are norm-preserving rotations by the same angles:
+no NaN, no drift, no error. The model stays fluent and attends by a scrambled
+notion of distance, which is indistinguishable from a small model being small.
+It cost SmolLM2 `"The capital of France."` followed by blank lines where the
+corrected path gives `"The capital of France is Paris. Paris is a city known
+for..."`. `Config::rope_interleaved` is true only for genuine llama2.c
+checkpoints.
+
+Generation is memory-bandwidth bound, since bytes read per token is roughly the
+model size, so 570 MB against 135 MB is about 4.4x the time per token. The
 classifier is 155 MB of that, and constrained decoding only ever needs logits
 for the reachable set, so restricting that matvec is the obvious win when it
-matters.
+matters. `train.rs` takes exactly that win: it dequantises the 132 reachable
+rows once and never reads the int8 classifier again.
 
 `ask` closes the `<think>` block itself unless given `-t`. Qwen3 left alone
 reasons at length, which is the model working as designed and useless at a
 64-token budget. `has_think_token()` decides by asking whether the tokenizer
-knows `<think>` as one token -- a property of the vocabulary rather than a
-guess from a name.
+knows `<think>` as one token, a property of the vocabulary instead of a guess
+from a name.
 
 The tokenizer carries which pre-tokenizer regex the checkpoint trained with.
 SmolLM2 is the GPT-2 pattern; Qwen3 spells out the cl100k one, where a word may
 be led by any non-alphanumeric (`(x` is one piece), digits come one at a time,
-and punctuation swallows following newlines. Using the wrong one moved ~12% of
-tokens on the training corpus -- again with no error, just a model fed
+and punctuation swallows following newlines. Using the wrong one moved around
+12% of tokens on the training corpus, again with no error, just a model fed
 sequences it never saw.
 
-Two routing paths, and the interesting result is that the older one wins:
-`act` decodes an applet name token-by-token under a grammar; `route` reads one
-hidden state and hands it to a closed-form ridge regression (Widrow-Hoff, 1960)
-solved by Cholesky in-kernel — 12,672 parameters, ~1.6 ms, **no transformer
+Two routing paths, and the interesting result is that the older one wins. `act`
+decodes an applet name token-by-token under a grammar; `route` reads one hidden
+state and hands it to a closed-form ridge regression (Widrow-Hoff, 1960) solved
+by Cholesky in-kernel, 12,672 parameters, around 1.6 ms, **no transformer
 forward pass**, and better held-out accuracy.
 
-**Constrained decoding makes invalid output unreachable, not improbable.** The
-grammar is built from the live applet table; read-only mode works by removing
-mutating applets from the reachable set *before* sampling, not by checking
-after.
+**Constrained decoding makes invalid output unreachable, where merely making
+it improbable would leave it reachable.** The grammar is built from the live applet table; read-only mode
+works by removing mutating applets from the reachable set *before* sampling,
+and never by checking after.
 
 Three "cores" vote (probe, hashed-n-gram Bayes, lexical). Their *agreement* is
-the signal, not their vote: 90% right when all three agree against 61% when
-they split. That gap is what `gate` acts on.
+the signal instead of their vote: 90% right when all three agree against 61%
+when they split. That gap is what `gate` acts on.
+
+**The frozen base is the load-bearing property.** Nothing above the adapter
+moves, so a hidden state is a constant, a constant can be cached, and a cached
+decision can be replayed against any number of candidate adapters for the price
+of a dot product. Training is affordable because of it, judging is nearly free
+because of it, and any verdict the machine reaches can be re-checked later for
+almost nothing because of it. Anything that proposes to train the attention
+path is proposing to give this up, which is a real trade and worth naming
+before it is made.
 
 ### Storage (`src/store/`, `src/sysbox/`)
 
 Content-addressed: objects named by SHA-256 of their contents, assembled into
 Merkle trees. A copy is O(1), a snapshot is one root hash. **The content hash
-covers content only and never block locations** — otherwise moving a block
+covers content only and never block locations**, since otherwise moving a block
 would rename an object.
+
+Directory entries are kept sorted, so `children()` returns lexicographic order.
+That is why `vocab::record` zero-pads blob names to four digits: sorted order
+becomes insertion order, and every positional split boundary depends on it.
+Past 9999 the padding truncates and the property fails silently, which is why
+`dataset.py` refuses to emit a larger bundle.
 
 NVMe writes are locked by default. `store::init` unlocks only after
 `find_store_region` names a target, and `Store::format` re-checks. On a disk
-fully allocated to Windows there is no such region and init fails — that is the
+fully allocated to Windows there is no such region and init fails, which is the
 intended outcome. Every error path re-locks; leaving it open is how a safety
 mechanism becomes decorative.
 
 ## Evaluation discipline
 
-This project measures rather than argues, and the harness exists because the
+This project measures instead of arguing, and the harness exists because the
 measurement was got wrong three separate times: a grid sweep scored on the test
 set, cross-validation folded by template family, and a test set that *moved*
 whenever the corpus was appended to.
 
-There are **three** splits (`SEED_TRAIN` / `SEED_VAL_END` / test). Validation
-is spent freely; the test slice is read once. `search` adopts a configuration
-only when measured better.
+There are **three** splits, and `vocab::splits()` is the single place anything
+asks for them. It returns the compiled `SEED_TRAIN` and `SEED_VAL_END` until a
+bundle is imported over the corpus, and the imported boundaries after. Reading
+the constants directly is the bug that arrangement exists to prevent.
+Validation is spent freely; the test slice is read once. `search` adopts a
+configuration only when measured better.
 
-Corpora hold out **whole template families**, never sampled instances —
+Corpora hold out **whole template families** and never sampled instances, since
 instances within a family differ only by slot values, so an instance split
 measures memorisation while looking like generalisation.
+
+**A loop breaks this, and `godel` is a loop.** A machine that improves itself
+every night reads the held-out set every night, and each read makes the
+reported figure more optimistic. So the test slice carries a budget in
+`/ai/godel/test-budget`, it is consulted only after a variant has already won
+on validation, and past three reads the figure prints as stale and marked
+unquotable. Any future loop that touches the test slice must go through
+`godel::read_test` for the same reason.
 
 Negative results stay in the tree. Training the adapter head *hurts* at this
 data scale; the Product-of-Experts council does not improve accuracy. Both are
 kept because the reason to know them is the reason they were worth measuring.
 
 `tools/traces.py` reports what it could **not** produce and the per-family
-imbalance unprompted — a generator asked for 20,000 that quietly returns 54
+imbalance unprompted. A generator asked for 20,000 that quietly returns 54
 near-duplicates yields a corpus that trains a model to recite.
+
+Sample sizes get stated wherever a figure appears. The adapter trainer has been
+exercised on subsamples of a few dozen decisions, which establishes that the
+machinery composes and establishes nothing about how much it helps. Numbers
+from those runs do not belong in a claim.
 
 ## Gotchas that have already cost time
 
-- **`extern "C"` on `x86_64-unknown-uefi` is Microsoft x64, not System V.** The
-  context switch is pinned to `extern "sysv64"` explicitly.
+- **`extern "C"` on `x86_64-unknown-uefi` is Microsoft x64 and not System V.**
+  The context switch is pinned to `extern "sysv64"` explicitly.
 - **Do not take the max over every UEFI memory descriptor.** OVMF describes
   `Reserved` space to 1 TiB; using it as a map limit exceeds one PDPT and the
-  identity map silently fails, falling back to firmware tables that map page 0
-  — which made the null-dereference selftest pass without faulting.
+  identity map silently fails, falling back to firmware tables that map page 0,
+  which made the null-dereference selftest pass without faulting.
 - **A guarded match arm placed after the arms it guards is unreachable.** The
-  compiler said so in a warning nobody read, for several commits.
+  compiler said so in a warning nobody read, for several commits. Anything
+  added to `shell::execute` with a guard goes *before* the bare arm.
+- **`prefill` and `forward` must agree about adapters.** For a long time
+  `prefill` ignored them entirely, so an adapted model prefilled its prompt
+  through the frozen weights and decoded through the adapted ones. The same
+  position computed two different things depending on which path reached it,
+  with nothing faulting and no logit going non-finite. It was unreachable until
+  the first adapter anybody would keep got attached.
+- **`drive.py` prefers the release artifact.** A `cargo build` alone leaves a
+  stale release binary staged and the change under test never boots, which
+  presents as a change that mysteriously did nothing.
+- **A `debug_assert` is only checked in debug builds, and this tree is driven
+  in release.** `Dora::refresh` asserted `k * r == b.len()` where `b` is
+  `out * r`, so every debug build attaching any Qwen3 q/k/v site would have
+  panicked on a claim about the wrong dimension. It never fired because nothing
+  runs debug under QEMU.
 - **Ethernet pads frames to 60 bytes**, so a bare 40-byte ACK carries garbage.
   IPv4 payloads must be trimmed to the length the header declares.
 - **A feature gate must test the feature the code needs.** The AVX2 kernel was
@@ -547,7 +695,7 @@ near-duplicates yields a corpus that trains a model to recite.
   no error to catch, so the only thing that settles any of them is comparing
   against `tools/reference.py` or reading generated output that is supposed to
   contain a known fact.
-- **The kernel heap is a ladder, not a constant** (`HEAP_LADDER`). It is one
+- **The kernel heap is a ladder and not a constant** (`HEAP_LADDER`). It is one
   physically contiguous allocation, the GF63 cannot be tested from here, and a
   fixed size its memory map cannot satisfy is an unbootable system. Boot prints
   the size it got and says when it had to come down a rung.
@@ -558,12 +706,13 @@ near-duplicates yields a corpus that trains a model to recite.
 ## Conventions
 
 Comments explain *why*, and specifically why an obvious alternative was
-rejected — several record measurements that overturned a confident assumption.
-Match that register; do not add narration of what the code plainly does.
+rejected. Several of them record measurements that overturned a confident
+assumption. Match that register, and do not add narration of what the code
+plainly does.
 
 Commit messages follow the same shape: what changed, what it cost to find out,
-and what is still not verified. State plainly when something is untested — the
-RTL8168 driver cannot be exercised in QEMU (which emulates the 8139), and says
+and what is still unverified. State plainly when something is untested. The
+RTL8168 driver cannot be exercised in QEMU (which emulates the 8139) and says
 so in its own commit.
 
 Git identity is not configured in this repo. Every commit needs it passed
@@ -573,5 +722,6 @@ explicitly, matching the existing author:
 git -c user.name=glados -c user.email=research@euroswarms.eu commit ...
 ```
 
-Note the enclosing `C:\` drive is itself a git repo — confirm the working
-directory before staging.
+Note the enclosing `C:\` drive is itself a git repository. Confirm the working
+directory before staging, because `git add` from the wrong one stages a
+different tree entirely.
