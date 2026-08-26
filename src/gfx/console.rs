@@ -503,6 +503,10 @@ macro_rules! kprint {
     ($($arg:tt)*) => {{
         $crate::gfx::console::_print(format_args!($($arg)*));
         $crate::serial::_print(format_args!($($arg)*));
+        // The third sink. The console keeps one screen and the serial port
+        // needs somebody listening on the other end; neither survives a boot
+        // on the laptop, which is the machine whose boot lines matter.
+        $crate::log::_record(format_args!($($arg)*));
     }};
 }
 

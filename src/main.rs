@@ -24,6 +24,7 @@ mod edit;
 mod gfx;
 mod json;
 mod lang;
+mod log;
 mod mem;
 mod mine;
 mod net;
