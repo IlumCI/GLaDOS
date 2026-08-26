@@ -440,6 +440,19 @@ pub fn run(goal: &str, trust: Trust, max_steps: usize) {
         *LAST_GOAL.get() = Some(String::from(goal));
     }
 
+    // What the kernel watched happen, structurally, before the prose.
+    //
+    // The transcript below is for a person. This is the row: appended to one
+    // file so that whatever eventually learns from experience has something
+    // to read that is not paragraphs. It records validity and progress and
+    // says nothing about whether the goal was met, because nothing here can
+    // observe that.
+    let signal = Outcome::observe(goal, max_steps, &outcome, &steps);
+    signal.append();
+    console::set_color(LTGRAY);
+    kprintln!("  [agent] {}", signal.render());
+    unsafe { *LAST_OUTCOME.get() = Some(signal) };
+
     // Transcript into the namespace. Content-addressed like everything else:
     // an episode can be hashed, diffed against its siblings, and snapshotted
     // without any of it being special-cased.
@@ -451,6 +464,206 @@ pub fn run(goal: &str, trust: Trust, max_steps: usize) {
         elog(format!("transcript at {}", path));
     }
     crate::gfx::desk::draw();
+}
+
+
+// --- the episode outcome signal ------------------------------------------
+//
+// Every episode already knew how it went and threw it away. `Step::ok` says
+// whether an action was dispatched or refused, and `outcome` says how the
+// loop ended, and both were rendered into prose and discarded. Nothing
+// accumulated, nothing could be compared, and three separate things were
+// blocked on the absence: the agent had no way to score its own behaviour,
+// the corpus had no way to grow from experience, and the planner had nothing
+// to plan toward.
+//
+// **What this signal is, and what it is careful not to be.** It measures
+// validity and progress. It does not measure whether the goal was achieved,
+// because nothing on this machine can observe that: the dispatcher knows an
+// applet ran and produced output, and it does not know whether `ls /tmp`
+// answered the question somebody meant by "list the files in /tmp". Anything
+// claiming otherwise would be the model grading its own homework, which is
+// the feedback loop that amplifies its own errors and the reason self-
+// labelled data is dangerous here.
+//
+// So the fields below are all things the kernel watched happen. `score` puts
+// a number on them, and that number is a stated convention rather than a
+// measurement, which is why the weights are named constants and why nothing
+// reads it yet. Recorded now, acted on when there is an n worth acting on --
+// the same discipline the godel ledger's calibration record works under.
+
+/// How an episode stopped.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum End {
+    /// The model judged itself finished.
+    Done,
+    /// Out of steps. Says nothing about whether it was close.
+    Budget,
+    /// The operator asked it to stop.
+    Aborted,
+    /// The constrained decode could not settle on anything.
+    Stuck,
+    /// A scripted episode ran out of lines.
+    Script,
+}
+
+impl End {
+    pub fn tag(self) -> &'static str {
+        match self {
+            End::Done => "done",
+            End::Budget => "budget",
+            End::Aborted => "aborted",
+            End::Stuck => "stuck",
+            End::Script => "script",
+        }
+    }
+
+    fn from_outcome(s: &str) -> End {
+        match s {
+            "model called done" => End::Done,
+            "aborted by operator" => End::Aborted,
+            "decode did not settle" => End::Stuck,
+            "script exhausted" => End::Script,
+            _ => End::Budget,
+        }
+    }
+}
+
+/// What the kernel watched an episode do.
+#[derive(Clone)]
+pub struct Outcome {
+    pub goal: String,
+    pub budget: usize,
+    pub steps: usize,
+    /// Passed validation and reached an applet.
+    pub dispatched: usize,
+    /// Refused before dispatch: bad arguments, or a name this trust level
+    /// cannot reach. Refusal is an observation the model gets to read, so it
+    /// is a step taken and not an error.
+    pub rejected: usize,
+    /// Dispatched, ran, and produced nothing to observe. Distinct from a
+    /// rejection: the action was legal and told the machine nothing.
+    pub barren: usize,
+    /// Identical to an action earlier in the same episode. The cheapest
+    /// available signal that a loop is going in circles.
+    pub repeated: usize,
+    pub end: End,
+}
+
+/// Where the outcome of every episode is appended, one line each.
+///
+/// Beside the transcripts rather than inside one, because a transcript is
+/// prose for a person and this is a row for whatever eventually learns from
+/// it. In the namespace, so `snap` versions it with everything else.
+pub const OUTCOMES: &str = "/ai/episodes/outcomes.txt";
+
+impl Outcome {
+    fn observe(goal: &str, budget: usize, outcome: &str, steps: &[Step]) -> Outcome {
+        let mut seen: Vec<&str> = Vec::new();
+        let (mut dispatched, mut rejected, mut barren, mut repeated) = (0, 0, 0, 0);
+        for s in steps {
+            if s.ok {
+                dispatched += 1;
+                // "(applet did not run)" is what the loop substitutes when a
+                // dispatch produced no output at all.
+                if s.observation.trim().is_empty() || s.observation.starts_with("(applet did not run)") {
+                    barren += 1;
+                }
+            } else {
+                rejected += 1;
+            }
+            if seen.iter().any(|a| *a == s.action.as_str()) {
+                repeated += 1;
+            }
+            seen.push(&s.action);
+        }
+        Outcome {
+            goal: String::from(goal),
+            budget,
+            steps: steps.len(),
+            dispatched,
+            rejected,
+            barren,
+            repeated,
+            end: End::from_outcome(outcome),
+        }
+    }
+
+    /// One number, by a stated convention.
+    ///
+    /// The weights below are a judgement and not a finding. They say that
+    /// reaching an applet is worth something, that being refused costs about
+    /// as much as dispatching gains, that going in circles is worse than
+    /// either, and that stopping because the model thought it was finished is
+    /// worth more than stopping because the budget ran out. Every one of those
+    /// is arguable, which is exactly why they are named constants sitting in
+    /// the open instead of arithmetic buried in a caller.
+    ///
+    /// Nothing acts on this. It is recorded so that when there are enough
+    /// episodes to check the convention against something, the check is
+    /// possible; a weighting adopted before that would be a guess wearing a
+    /// number's clothes.
+    pub fn score(&self) -> f32 {
+        const W_DISPATCH: f32 = 1.0;
+        const W_REJECT: f32 = -1.0;
+        const W_BARREN: f32 = -0.25;
+        const W_REPEAT: f32 = -1.5;
+        const W_DONE: f32 = 2.0;
+        const W_STUCK: f32 = -2.0;
+
+        let mut s = self.dispatched as f32 * W_DISPATCH
+            + self.rejected as f32 * W_REJECT
+            + self.barren as f32 * W_BARREN
+            + self.repeated as f32 * W_REPEAT;
+        s += match self.end {
+            End::Done => W_DONE,
+            End::Stuck => W_STUCK,
+            _ => 0.0,
+        };
+        s
+    }
+
+    /// One line, appended to `OUTCOMES`.
+    pub fn render(&self) -> String {
+        format!(
+            "{} steps={}/{} ok={} rej={} barren={} rep={} score={:+.2} goal={}",
+            self.end.tag(),
+            self.steps,
+            self.budget,
+            self.dispatched,
+            self.rejected,
+            self.barren,
+            self.repeated,
+            self.score(),
+            clip(&self.goal, 60)
+        )
+    }
+
+    fn append(&self) {
+        let mut text = sysbox::read_blob(OUTCOMES)
+            .and_then(|b| String::from_utf8(b).ok())
+            .unwrap_or_default();
+        text.push_str(&self.render());
+        text.push('\n');
+        sysbox::write_text(OUTCOMES, &text);
+    }
+}
+
+/// The last episode's outcome, for anything that wants it without reading
+/// the namespace back.
+static LAST_OUTCOME: Racy<Option<Outcome>> = Racy::new(None);
+
+pub fn last_outcome() -> Option<Outcome> {
+    unsafe { (*LAST_OUTCOME.get()).clone() }
+}
+
+/// Every outcome recorded this boot, newest last.
+pub fn outcomes(n: usize) -> Vec<String> {
+    let Some(bytes) = sysbox::read_blob(OUTCOMES) else { return Vec::new() };
+    let Ok(text) = String::from_utf8(bytes) else { return Vec::new() };
+    let all: Vec<&str> = text.lines().filter(|l| !l.is_empty()).collect();
+    let start = all.len().saturating_sub(n);
+    all[start..].iter().map(|s| String::from(*s)).collect()
 }
 
 /// The loop itself, factored out of `run` so it can be driven two ways:
@@ -591,6 +804,51 @@ pub fn selftest() -> bool {
         console::set_color(LTGRAY);
         ok &= pass;
     };
+
+    // --- the outcome signal ------------------------------------------
+    //
+    // Counted against the same scripted episode the checks above assert on,
+    // whose shape is known exactly: `ls /sys` dispatches, `rm /sys/readme` is
+    // refused by trust, `cat` is refused for arity, and `done` ends it. So the
+    // arithmetic has a right answer rather than a plausible one.
+    let signal = Outcome::observe("boot selftest", 8, &outcome, &steps);
+    check("the outcome counts what the loop actually did", {
+        signal.dispatched == 1
+            && signal.rejected == 2
+            && signal.steps == 3
+            && signal.end == End::Done
+    });
+
+    // A refusal is a step the model got to read, so it counts as a step and
+    // not as an error, and `done` is not a step at all. Both are easy to get
+    // wrong in a way no reader would notice.
+    check("done is not a step, and a refusal is", {
+        steps.len() == 3 && signal.budget == 8
+    });
+
+    // Repetition is the cheapest signal that a loop is going in circles, and
+    // it has to count the second occurrence rather than both.
+    let looped = alloc::vec![
+        Step { action: String::from("ls /sys"), ok: true, observation: String::from("x") },
+        Step { action: String::from("ls /sys"), ok: true, observation: String::from("x") },
+        Step { action: String::from("ls /sys"), ok: true, observation: String::from("x") },
+    ];
+    let spin = Outcome::observe("spin", 8, "step budget reached", &looped);
+    check("going in circles is counted, and the first time is not circling", {
+        spin.repeated == 2 && spin.end == End::Budget
+    });
+
+    // An applet that runs and says nothing is legal and uninformative, which
+    // is a different thing from being refused.
+    let quiet_step = alloc::vec![Step {
+        action: String::from("ls /empty"),
+        ok: true,
+        observation: String::from("(applet did not run)"),
+    }];
+    let barren = Outcome::observe("quiet", 8, "step budget reached", &quiet_step);
+    check("a legal action that observed nothing is barren and not rejected", {
+        barren.barren == 1 && barren.rejected == 0 && barren.dispatched == 1
+    });
 
     check("read-only applet ran, output captured as the observation", {
         steps.first().map(|s| s.ok && s.observation.contains("readme")).unwrap_or(false)

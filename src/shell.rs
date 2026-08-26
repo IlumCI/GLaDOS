@@ -998,6 +998,53 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
         // never written, which is what makes saving one cheap enough to do
         // before every change rather than after the interesting ones.
         // `godel` -- the self-modification loop, its ledger, and the way back.
+        // `log` -- everything the machine has printed since power-on.
+        //
+        // The console keeps one screen, so this is the only place a line that
+        // has scrolled past still exists. `log save` puts it in the namespace,
+        // where `snap` can commit it to a store if one is provisioned.
+        "log" => {
+            use crate::gfx::console::{self, LTGRAY, YELLOW};
+            let mut words = rest.split_whitespace();
+            let (held, total, lost) = crate::log::stats();
+            match words.next().unwrap_or("") {
+                "save" => {
+                    let path = words.next().unwrap_or(crate::log::PATH);
+                    match crate::log::save(path) {
+                        Some(n) => {
+                            kprintln!("  {} bytes -> {}", n, path);
+                            if lost > 0 {
+                                console::set_color(YELLOW);
+                                kprintln!("  {} earlier bytes had already wrapped out", lost);
+                                console::set_color(LTGRAY);
+                            }
+                            if crate::store::mounted() {
+                                kprintln!("  'snap' commits it to the store");
+                            } else {
+                                console::set_color(YELLOW);
+                                kprintln!("  no store mounted: this survives until power-off and no longer");
+                                console::set_color(LTGRAY);
+                            }
+                        }
+                        None => kprintln!("  could not write {}", path),
+                    }
+                }
+                "" | "status" => {
+                    console::set_color(YELLOW);
+                    kprintln!("[log]");
+                    console::set_color(LTGRAY);
+                    kprintln!("  {} bytes held of {} printed, {} wrapped out", held, total, lost);
+                    kprintln!("  'log all' to print it, 'log save [path]' to keep it");
+                }
+                "all" => {
+                    // Straight to the console without going back through
+                    // kprintln, which would record the log into itself.
+                    let bytes = crate::log::contents();
+                    console::with(|c| c.write_bytes(&bytes));
+                }
+                _ => kprintln!("  usage: log [status|all|save [path]]"),
+            }
+        }
         "godel" => {
             use crate::ai::godel;
             let mut words = rest.split_whitespace();
@@ -1215,6 +1262,27 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
                 kprintln!("  {}", crate::ai::agent::request_abort());
                 return;
             }
+            // What the machine watched its own episodes do. Validity and
+            // progress, and never whether the goal was met, because nothing
+            // here can observe that.
+            if rest.trim_start().starts_with("outcomes") {
+                use crate::gfx::console::{self, LTGRAY, YELLOW};
+                let n = rest.split_whitespace().nth(1)
+                    .and_then(|w| w.parse().ok())
+                    .unwrap_or(16);
+                let rows = crate::ai::agent::outcomes(n);
+                console::set_color(YELLOW);
+                kprintln!("[agent outcomes]");
+                console::set_color(LTGRAY);
+                if rows.is_empty() {
+                    kprintln!("  none recorded this boot");
+                }
+                for r in rows.iter() {
+                    kprintln!("  {}", r);
+                }
+                kprintln!("  score is a stated convention, and nothing acts on it yet");
+                return;
+            }
             if rest.trim() == "skills" {
                 let skills = crate::sysbox::skills();
                 if skills.is_empty() {
@@ -1321,6 +1389,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             kprintln!("  mem uptime tasks cpu acpi pci video date reboot");
             kprintln!("  fault         deliberately dereference null");
             kprintln!("  clear refresh echo <text>");
+            kprintln!("  log [all|save]  everything printed since power-on; the console keeps one screen");
             kprintln!("  paint write [path] mines oracle agentlog   desktop programs; todo   the checklist");
             kprintln!("  typewriter    output pacing, in us per character");
 
@@ -1360,6 +1429,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             kprintln!("  gen <prompt>  generate text     ask <prompt>  chat turn");
             kprintln!("  think <p>     run it in the background, off the shell");
             kprintln!("  agent [-n n] [--trust full] <goal>   act-observe-repeat; 'agent stop' cancels");
+            kprintln!("  agent outcomes [n]      what episodes did: dispatched, refused, circling");
             kprintln!("  act <task>    choose an applet by constrained decoding");
             kprintln!("  route <task>  choose one with the probe -- no transformer");
             kprintln!("  teach <applet> <task>   add an example ('teach file <path>' for many)");
