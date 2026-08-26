@@ -50,6 +50,18 @@ const TICK_SECS: u64 = 15;
 const QUIET_AFTER_INPUT_S: u64 = 8;
 /// Minimum spacing between self-set goals, however interesting things look.
 const EPISODE_GAP_S: u64 = 240;
+/// Minimum spacing between self-modification trials. An hour: a trial is
+/// minutes of forward passes, and the value of running one more tonight is
+/// far below the value of the machine still answering if somebody wakes up.
+const GODEL_GAP_S: u64 = 3600;
+/// Corpus examples per nightly trial. Small, and it is the honest tradeoff:
+/// the judges get less evidence per trial in exchange for the machine staying
+/// responsive, and the ledger accumulates across nights rather than within
+/// one.
+const GODEL_EXAMPLES: usize = 24;
+/// Wall-clock ceiling on the optimiser half of a nightly trial.
+const GODEL_MS: u64 = 20_000;
+
 /// Journal length cap. Old lines fall off the top; the namespace keeps the
 /// snapshots either way.
 const JOURNAL_MAX: usize = 48;
@@ -67,6 +79,7 @@ static LAST_TICKED_SEC: AtomicU64 = AtomicU64::new(u64::MAX);
 /// whole loop down on its very first live tick.
 static PREV_TICK_TOUCHED: Racy<bool> = Racy::new(false);
 static LAST_EPISODE_AT: Racy<u64> = Racy::new(0);
+static LAST_GODEL_AT: Racy<u64> = Racy::new(0);
 static EPOCH_SEEDED: AtomicBool = AtomicBool::new(false);
 static JOURNAL: Racy<Vec<String>> = Racy::new(Vec::new());
 
@@ -78,7 +91,7 @@ const REPORT_PATH: &str = "/ai/mind/report.txt";
 /// their value is not the answer but the exercise -- every successful
 /// transcript is material the router can be taught from, so curiosity here
 /// widens reflex coverage later.
-const CURIOSITY: [&str; 4] = [
+pub(crate) const CURIOSITY: [&str; 4] = [
     "list the files in /sys",
     "list the files in /tmp",
     "list the files in /ai",
@@ -123,6 +136,18 @@ fn decide(
     match proposal {
         Some(goal) => Decision::Episode(String::from(goal)),
         None => Decision::Sleep("nothing proposed"),
+    }
+}
+
+/// Seconds since the last trial. Zero-at-boot means "never", which is
+/// eligibility rather than a cooldown in force -- the same reading
+/// `since_episode` gives its own clock.
+fn since_godel(now_s: u64) -> u64 {
+    let last = unsafe { *LAST_GODEL_AT.get() };
+    if last == 0 {
+        GODEL_GAP_S
+    } else {
+        now_s.saturating_sub(last)
     }
 }
 
@@ -243,6 +268,51 @@ pub fn tick() {
                 planner_ready,
                 situation_line(&sit)
             ));
+
+            // Sleeping is when the machine may change itself, and only then.
+            //
+            // Two independent facts have to agree: the RTC says the operator
+            // has gone to bed, and the entropy ring says no key or pointer
+            // interrupt has fired. `quiet_now` checks both and names which
+            // one refused, which is what the journal records.
+            //
+            // The budget is deliberately small. A trial is a forward pass per
+            // example, and the mind task holds the engine for the whole of
+            // one -- so a full-corpus run here would turn "the machine thinks
+            // between your commands" into "the machine will not answer for
+            // twenty minutes". Bounded, it is a few examples an hour, every
+            // hour of the night, and the ledger accumulates.
+            if let Ok(hour) = super::godel::quiet_now() {
+                if since_godel(now_s) >= GODEL_GAP_S {
+                    unsafe { *LAST_GODEL_AT.get() = now_s };
+                    let b = super::train::Budget {
+                        examples: GODEL_EXAMPLES,
+                        millis: GODEL_MS,
+                        ..Default::default()
+                    };
+                    let verdict = super::with_engine(|e| super::godel::trial(e, &b));
+                    let line = match verdict {
+                        None => String::from("engine held by another task"),
+                        Some(Err(_)) => String::from("trainer refused"),
+                        Some(Ok(c)) => format!(
+                            "variant {} {} (fixed {}, broke {}, goals {}/{})",
+                            super::godel::short_hex(&c.variant),
+                            if c.adopted { "ADOPTED" } else { "rejected" },
+                            c.fixed,
+                            c.broke,
+                            c.goals_held,
+                            c.goals_total
+                        ),
+                    };
+                    journal_push(format!(
+                        "[t{} +{}s] godel: hour {}, {}",
+                        TICKS.load(Ordering::Relaxed),
+                        now_s,
+                        hour,
+                        line
+                    ));
+                }
+            }
         }
         Decision::Act(why) => {
             ACTS.fetch_add(1, Ordering::Relaxed);

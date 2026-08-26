@@ -997,6 +997,112 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
         // namespace. The blob is the adapter alone; the frozen checkpoint is
         // never written, which is what makes saving one cheap enough to do
         // before every change rather than after the interesting ones.
+        // `godel` -- the self-modification loop, its ledger, and the way back.
+        "godel" => {
+            use crate::ai::godel;
+            let mut words = rest.split_whitespace();
+            match words.next().unwrap_or("") {
+                "" | "status" => {
+                    let (trials, adoptions, reads) = godel::counts();
+                    let (used, cap, fresh) = godel::test_status();
+                    console::set_color(YELLOW);
+                    kprintln!("[godel]");
+                    console::set_color(LTGRAY);
+                    // The RTC hour is printed beside the window because they
+                    // are compared directly and nothing here knows the offset
+                    // between that clock and the wall. Under QEMU it is UTC;
+                    // on a machine that dual-boots Windows it is usually local.
+                    let (from, until) = godel::window();
+                    kprintln!(
+                        "  {}, quiet window {:02}:00-{:02}:00 by the rtc",
+                        if godel::enabled() { "armed" } else { "off" },
+                        from,
+                        until
+                    );
+                    match godel::rtc_hour() {
+                        Some(h) => kprintln!("  the rtc says hour {:02}  ('godel window <from> <until>' to align)", h),
+                        None => kprintln!("  no rtc, so no window and no trials"),
+                    }
+                    match godel::quiet_now() {
+                        Ok(h) => kprintln!("  eligible now (hour {}, no hardware input)", h),
+                        Err(why) => kprintln!("  not eligible: {}", why),
+                    }
+                    kprintln!("  {} trial(s), {} adopted", trials, adoptions);
+                    // The test slice is the one resource a self-improving loop
+                    // spends without noticing, so its balance is status, not
+                    // a footnote.
+                    kprintln!(
+                        "  test slice read {}/{} times{}",
+                        used,
+                        cap,
+                        if fresh { "" } else { "  -- any test figure is now stale" }
+                    );
+                    let _ = reads;
+                    let line = godel::lineage(8);
+                    match godel::head() {
+                        None => kprintln!("  head: none (the frozen model is the variant)"),
+                        Some(_) => {
+                            kprintln!("  lineage, newest first:");
+                            for (h, a) in line.iter() {
+                                kprintln!(
+                                    "    {}  adapter {}",
+                                    godel::short_hex(h),
+                                    a.map(|x| godel::short_hex(&x))
+                                        .unwrap_or(alloc::string::String::from("none"))
+                                );
+                            }
+                        }
+                    }
+                }
+                "now" => {
+                    // Forced, so the quiet window does not apply: the operator
+                    // asking for a trial *is* the consent the window stands in
+                    // for the rest of the time.
+                    let mut b = crate::ai::train::Budget::default();
+                    for w in words.clone() {
+                        if let Ok(v) = w.parse::<usize>() {
+                            b.examples = v;
+                        }
+                    }
+                    godel::report_trial(&b);
+                }
+                "ledger" => {
+                    let n = words.next().and_then(|w| w.parse().ok()).unwrap_or(12);
+                    let tail = godel::ledger_tail(n);
+                    if tail.is_empty() {
+                        kprintln!("  nothing recorded yet");
+                    }
+                    for l in tail.iter() {
+                        kprintln!("  {}", l);
+                    }
+                }
+                "rollback" => match crate::ai::with_engine(|e| godel::rollback(e)) {
+                    None => kprintln!("  no engine, or another task holds it"),
+                    Some(Err(why)) => kprintln!("  cannot roll back: {}", why),
+                    Some(Ok(None)) => kprintln!("  back to the frozen model"),
+                    Some(Ok(Some(h))) => kprintln!("  head is now {}", godel::short_hex(&h)),
+                },
+                "window" => {
+                    let f = words.next().and_then(|w| w.parse::<u8>().ok());
+                    let u = words.next().and_then(|w| w.parse::<u8>().ok());
+                    match (f, u) {
+                        (Some(f), Some(u)) if godel::set_window(f, u) => {
+                            kprintln!("  quiet window is now {:02}:00-{:02}:00 by the rtc", f, u)
+                        }
+                        _ => kprintln!("  usage: godel window <from-hour> <until-hour>   (0-23)"),
+                    }
+                }
+                "on" => {
+                    godel::set_enabled(true);
+                    kprintln!("  armed -- trials may run inside the quiet window");
+                }
+                "off" => {
+                    godel::set_enabled(false);
+                    kprintln!("  off -- nothing will change itself");
+                }
+                _ => kprintln!("  usage: godel [status|now [n]|ledger [n]|window <f> <u>|rollback|on|off]"),
+            }
+        }
         "adapter" => {
             const DEFAULT: &str = "/ai/adapter.bin";
             let mut words = rest.split_whitespace();
@@ -1259,6 +1365,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             kprintln!("  teach bundle <path>     replace the whole corpus from one blob");
             kprintln!("  train adapter [-e N]    train the model's own decision layer (needs AVX2)");
             kprintln!("  adapter [save|load|off] what is attached, and moving it in and out");
+            kprintln!("  godel [now|ledger|rollback]  the machine changing itself, on evidence");
             kprintln!("  fit [lambda]  refit the probe and the council on what it knows");
             kprintln!("  gate search   how often agreement is right; the config search");
             kprintln!("  ctx cont window logits probe feature zeroshot train");

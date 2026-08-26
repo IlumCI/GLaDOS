@@ -11,6 +11,7 @@ pub mod train;
 pub mod deliberate;
 pub mod corpus;
 pub mod futures;
+pub mod godel;
 pub mod godbits;
 pub mod council;
 pub mod harness;
@@ -921,6 +922,17 @@ pub fn init(model_blob: Option<Blob>, tok_blob: Option<Blob>) {
     } else {
         console::set_color(LTRED);
         kprintln!("  FAIL the initiative gates misorder");
+    }
+    console::set_color(LTGRAY);
+
+    console::set_color(LTGREEN);
+    kprintln!("\n[selftest] godel machine:");
+    console::set_color(LTGRAY);
+    if godel::selftest() {
+        console::set_color(LTGRAY);
+    } else {
+        console::set_color(LTRED);
+        kprintln!("  FAIL -- the gate on self-modification is not sound");
     }
     console::set_color(LTGRAY);
 

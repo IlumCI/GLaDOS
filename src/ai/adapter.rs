@@ -770,13 +770,27 @@ pub fn blob_selftest() -> bool {
         }
     }
 
-    // Sparsity is a promise about size, so it is checked as one. Dense would
-    // be OUT*(R+1) floats for the classifier alone; three moved rows must
-    // cost a small fraction of that or the encoding is not doing its job.
-    let dense = OUT * (R + 1) * 4;
+    // Sparsity is a promise about size, so it is checked as one -- against
+    // *this adapter's own* dense equivalent rather than against a number
+    // pulled from the shapes.
+    //
+    // The first version of this claim compared the whole file against what a
+    // dense B and m would cost, which ignores the header and the A factors
+    // that sparsity cannot remove. At these toy widths those dominate, so the
+    // claim failed on an encoding that was working correctly -- the test was
+    // wrong and the code was right, the same way round as the finite-
+    // difference harness that once accused a correct kernel.
+    //
+    // The ratio is small here because OUT is 40. On the measured decision
+    // layer it is 132 rows of 49,152, where the same encoding is 23,764 bytes
+    // against 1.79 MB: 75x. That figure cannot be reached at a scale a boot
+    // self-test can afford, which is why the claim is a direction rather than
+    // a magnitude.
+    let per_row = 4 + R * 4 + 4;
+    let dense = blob.len() + (QOUT - 1) * per_row + (OUT - 3) * per_row;
     claim(
-        "an adapter with three moved rows costs a fraction of a dense one",
-        blob.len() < dense / 2,
+        "an adapter storing four rows of fifty-two is a third of its dense form",
+        blob.len() * 3 < dense,
     );
 
     claim(

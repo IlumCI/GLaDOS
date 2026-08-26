@@ -57,6 +57,24 @@ pub(crate) fn with_alphabet<R>(f: impl FnOnce(&Alphabet) -> R) -> Option<R> {
     }
 }
 
+/// The cached alphabet, as a borrow that outlives the engine borrow.
+///
+/// A constrained decode needs the alphabet *and* `&mut Engine` at the same
+/// time, and a closure holding `&e.tok` cannot also hand out `&mut e`. So the
+/// reference is detached from the static instead. `Racy` is single-core
+/// interior mutability, the alphabet is written once and never replaced, and
+/// nothing takes `&mut` to it after construction -- which is the same footing
+/// everything else in this kernel stands on, named here rather than left
+/// implicit because this one hands out a lifetime it did not get honestly.
+pub(crate) fn alphabet_for(tok: &tokenizer::Tokenizer) -> &'static Alphabet {
+    unsafe {
+        if ALPHABET.get().is_none() {
+            *ALPHABET.get() = Some(Alphabet::new(tok));
+        }
+        &*(ALPHABET.get().as_ref().unwrap() as *const Alphabet)
+    }
+}
+
 /// The same cache, for a caller that already holds the engine.
 ///
 /// `with_alphabet` reaches for the engine to build the alphabet the first

@@ -23,6 +23,7 @@
 //! training aimed exactly at the behaviour being measured.
 
 use super::adapter::{Adapters, Dora};
+use super::model::Config;
 use super::constrain::{step_bound, Alphabet, Cursor, Grammar};
 use super::tensor::{expf, sqrtf};
 use super::weights::Mat;
@@ -442,7 +443,7 @@ pub struct RunReport {
 /// One step of one applet's spelling: the tokens the grammar admits here, and
 /// which of them the label says to emit. A property of the name, so it is
 /// built once per applet and shared by every example labelled with it.
-struct Step {
+pub(crate) struct Step {
     /// Indices into the live-row table, in candidate order.
     local: Vec<u32>,
     /// Which entry of `local` is correct.
@@ -453,7 +454,7 @@ struct Step {
 
 /// One cached decision: the constant hidden state, and where to find the
 /// candidate set it belongs to.
-struct Decision {
+pub(crate) struct Decision {
     x: Vec<f32>,
     /// Base logits over this step's candidates, before any adapter. Frozen
     /// weights against a frozen feature, so this is a constant too -- and
@@ -461,7 +462,13 @@ struct Decision {
     base: Vec<f32>,
     applet: usize,
     step: usize,
+    /// Outside the training slice: validation or test.
     held: bool,
+    /// The test half specifically. Kept apart from `held` because the test
+    /// slice is read once by discipline, and a loop that improves itself
+    /// forever would otherwise read it on every trial and report a number
+    /// that got more optimistic each time it was consulted.
+    test: bool,
 }
 
 fn dot(a: &[f32], b: &[f32]) -> f32 {
@@ -518,7 +525,171 @@ fn chain_for(
 }
 
 /// Train the loaded model's decision layer on the corpus in the namespace.
-pub fn run(e: &mut super::Engine, b: &Budget) -> Result<RunReport, RunError> {
+/// One prepared trial: the corpus, reduced to everything a variant can be
+/// judged on without touching the model again.
+///
+/// This is the object the whole self-modification loop stands on. Building it
+/// costs a forward pass per example -- 214 s each under TCG, seconds on real
+/// hardware -- and once it exists, scoring *any* adapter against it costs a
+/// dot product per decision and no forward passes at all. That asymmetry is
+/// what makes a verified self-modification affordable here: producing a
+/// candidate is expensive, and checking somebody else's claim about one is
+/// nearly free.
+pub struct Trial {
+    chains: Vec<Option<Vec<Step>>>,
+    decisions: Vec<Decision>,
+    live: Vec<u32>,
+    w_live: Vec<f32>,
+    dim: usize,
+    /// Examples that produced at least one decision.
+    pub examples: usize,
+    /// Fixed prep cost: grammar chains and the dequantised rows.
+    pub chains_ms: u64,
+    /// Per-example prep cost: one forward pass each.
+    pub features_ms: u64,
+    /// The machine's own goals, cached along the baseline's own path.
+    guards: Vec<Guard>,
+}
+
+/// Which slice a score is taken over.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Slice {
+    Train,
+    /// Everything held out. The trainer reports this; the judges use the
+    /// validation half of it, so the test half stays unread until a variant
+    /// has already won on validation.
+    Held,
+    Validation,
+    Test,
+}
+
+impl Trial {
+    pub fn decisions(&self) -> usize {
+        self.decisions.len()
+    }
+
+    pub fn held(&self) -> usize {
+        self.decisions.iter().filter(|d| d.held).count()
+    }
+
+    pub fn live_rows(&self) -> usize {
+        self.live.len()
+    }
+
+    /// The weight view every scoring and training pass reads.
+    fn mat(&self) -> Mat<'_> {
+        Mat::F32 { data: &self.w_live, rows: self.live.len(), cols: self.dim }
+    }
+
+    fn in_slice(&self, d: &Decision, s: Slice) -> bool {
+        match s {
+            Slice::Train => !d.held,
+            Slice::Held => d.held,
+            Slice::Validation => d.held && !d.test,
+            Slice::Test => d.test,
+        }
+    }
+
+    /// Logits over one decision's candidate set, under an optional adapter.
+    fn logits(&self, d: &Decision, dora: Option<&Dora>, out: &mut Vec<f32>, ax: &mut [f32]) {
+        out.clear();
+        out.extend_from_slice(&d.base);
+        if let Some(dora) = dora {
+            let st = &self.chains[d.applet].as_ref().unwrap()[d.step];
+            dora.apply_rows(out, &st.local, &d.x, ax);
+        }
+    }
+
+    fn correct(&self, d: &Decision, out: &[f32]) -> bool {
+        let st = &self.chains[d.applet].as_ref().unwrap()[d.step];
+        let mut best = 0usize;
+        for c in 1..out.len() {
+            if out[c] > out[best] {
+                best = c;
+            }
+        }
+        best == st.target
+    }
+
+    /// Accuracy over a slice: does the label's token come first among the
+    /// tokens the grammar admits? The same question the constrained decoder
+    /// asks at temperature zero, which is the point -- a number measured any
+    /// other way would not be the number the system's behaviour depends on.
+    pub fn score(&self, dora: Option<&Dora>, s: Slice) -> f32 {
+        let mut out = Vec::new();
+        let mut ax = vec![0.0f32; dora.map(|d| d.r).unwrap_or(1)];
+        let (mut right, mut total) = (0usize, 0usize);
+        for d in self.decisions.iter().filter(|d| self.in_slice(d, s)) {
+            self.logits(d, dora, &mut out, &mut ax);
+            if self.correct(d, &out) {
+                right += 1;
+            }
+            total += 1;
+        }
+        if total == 0 {
+            0.0
+        } else {
+            right as f32 / total as f32
+        }
+    }
+
+    /// The paired comparison, and the reason the judges are not a pair of
+    /// percentages.
+    ///
+    /// Two adapters answer *the same* cached decisions, so the comparison is
+    /// paired rather than between two independent samples -- which is only
+    /// available because the base is frozen and the features are cached. It
+    /// matters more than it sounds. Fifty validation decisions at 62% against
+    /// 58% is two items and indistinguishable from noise; the same fifty
+    /// showing nine answers repaired and two broken is a different claim
+    /// entirely, and only the paired form can tell them apart.
+    ///
+    /// Returns (broke, fixed, unchanged-correct, unchanged-wrong): `broke` is
+    /// McNemar's b, `fixed` is c.
+    pub fn paired(
+        &self,
+        old: Option<&Dora>,
+        new: Option<&Dora>,
+        s: Slice,
+    ) -> (usize, usize, usize, usize) {
+        let r = old.map(|d| d.r).max(new.map(|d| d.r)).unwrap_or(1);
+        let mut ax = vec![0.0f32; r];
+        let (mut out_a, mut out_b) = (Vec::new(), Vec::new());
+        let (mut broke, mut fixed, mut both, mut neither) = (0usize, 0usize, 0usize, 0usize);
+        for d in self.decisions.iter().filter(|d| self.in_slice(d, s)) {
+            self.logits(d, old, &mut out_a, &mut ax);
+            let a = self.correct(d, &out_a);
+            self.logits(d, new, &mut out_b, &mut ax);
+            let b = self.correct(d, &out_b);
+            match (a, b) {
+                (true, false) => broke += 1,
+                (false, true) => fixed += 1,
+                (true, true) => both += 1,
+                (false, false) => neither += 1,
+            }
+        }
+        (broke, fixed, both, neither)
+    }
+
+    /// Route one free-text task through the trained decision layer, returning
+    /// the applet the grammar would land on.
+    ///
+    /// Needs the model, unlike everything else here: a task that is not in
+    /// the corpus has no cached hidden state. Used by the judge that replays
+    /// the machine's own self-set goals, where the whole point is that they
+    /// are not corpus items.
+    pub fn route_fresh(
+        e: &mut super::Engine,
+        task: &str,
+        dora_attached: bool,
+    ) -> Option<&'static str> {
+        let _ = dora_attached;
+        super::harness::choose(task, super::harness::Trust::Full, 0.0).map(|c| c.applet)
+    }
+}
+/// Build a trial: everything a variant can be judged on, and the model is
+/// not needed again afterwards.
+pub fn prepare(e: &mut super::Engine, b: &Budget) -> Result<Trial, RunError> {
     // The gate comes first, before anything is allocated or measured. Scalar
     // emulation turns one optimiser step into minutes, and every judgement
     // made from a run like that is a judgement about timing rather than
@@ -553,15 +724,11 @@ pub fn run(e: &mut super::Engine, b: &Budget) -> Result<RunReport, RunError> {
 
     // Chains need the alphabet and nothing else, so they are built inside the
     // borrow of the tokenizer and the model is left alone until it is over.
+    // Detached from the static rather than borrowed through a closure: the
+    // guard decode below needs the alphabet and `&mut Engine` at once.
+    let alphabet = super::harness::alphabet_for(&e.tok);
     let raw: Vec<Option<Vec<(Vec<u32>, usize, u32)>>> =
-        super::harness::with_alphabet_of(&e.tok, |alphabet| {
-            (0..names.len()).map(|alt| chain_for(&grammar, alphabet, alt)).collect()
-        });
-    // Split the prep clock here. Everything above is a fixed cost over the
-    // applet table and the vocabulary -- it does not care how many examples
-    // were asked for -- and everything below is per example. Reporting one
-    // number for both would make `-n` look like it does nothing.
-    let chains_ms = millis_since(t_prep);
+        (0..names.len()).map(|alt| chain_for(&grammar, alphabet, alt)).collect();
 
     // The live set: every row any chain can reach. Sorted and deduped so a
     // global token id maps to a local index by binary search.
@@ -599,8 +766,8 @@ pub fn run(e: &mut super::Engine, b: &Budget) -> Result<RunReport, RunError> {
         })
         .collect();
 
-    // Dequantise the reachable rows once. Everything the loop does afterwards
-    // reads from here, which is why no optimiser step pays for the int8
+    // Dequantise the reachable rows once. Everything afterwards reads from
+    // here, which is why no optimiser step and no judge pays for the int8
     // classifier.
     let mut w_live = vec![0.0f32; live.len() * dim];
     {
@@ -611,17 +778,34 @@ pub fn run(e: &mut super::Engine, b: &Budget) -> Result<RunReport, RunError> {
             w_live[i * dim..(i + 1) * dim].copy_from_slice(&row);
         }
     }
-    let mat = Mat::F32 { data: &w_live, rows: live.len(), cols: dim };
+    // Split the prep clock here. Everything above is a fixed cost over the
+    // applet table and the vocabulary -- it does not care how many examples
+    // were asked for -- and everything below is per example. Reporting one
+    // number for both would make `-n` look like it does nothing.
+    let chains_ms = millis_since(t_prep);
+    let t_feat = crate::time::rdtsc();
+
+    // The machine's own goals, cached before the corpus and never subsampled.
+    // `-n` trades corpus coverage for time; it must not trade away the check
+    // that the machine still does the same thing when nobody asked.
+    let mut guards: Vec<Guard> = Vec::new();
+    for goal in super::initiative::CURIOSITY.iter() {
+        if let Some(g) =
+            cache_guard(e, &grammar, alphabet, &names, &live, &w_live, dim, goal)
+        {
+            guards.push(g);
+        }
+    }
 
     // Cache one hidden state per decision. This is the expensive half and it
     // happens once: a forward pass over the prompt per example, then one more
     // per token of the label's spelling.
-    let (train_end, _, seed_end) = super::vocab::splits();
+    let (train_end, val_end, seed_end) = super::vocab::splits();
     // A subsample strides through the corpus rather than taking a prefix.
     // The splits are positional -- training first, held-out in the tail -- so
     // the first N examples are all training examples, and a short run would
     // report a held-out accuracy over an empty set while printing it as if it
-    // meant something. Striding keeps both slices represented in proportion.
+    // meant something. Striding keeps every slice represented in proportion.
     let stride = if b.examples == 0 {
         1
     } else {
@@ -636,6 +820,7 @@ pub fn run(e: &mut super::Engine, b: &Budget) -> Result<RunReport, RunError> {
         let Some(alt) = names.iter().position(|n| *n == ex.applet) else { continue };
         let Some(steps) = chains[alt].as_ref() else { continue };
         let held = i >= train_end && i < seed_end;
+        let test = i >= val_end && i < seed_end;
 
         // The prompt the constrained decoder actually uses, tool list and
         // all -- not the probe's shorter one. Training the classifier on a
@@ -659,7 +844,7 @@ pub fn run(e: &mut super::Engine, b: &Budget) -> Result<RunReport, RunError> {
                 let l = l as usize;
                 base[c] = dot(&w_live[l * dim..(l + 1) * dim], &x);
             }
-            decisions.push(Decision { x, base, applet: alt, step: si, held });
+            decisions.push(Decision { x, base, applet: alt, step: si, held, test });
             if pos >= e.model.cfg.seq_len {
                 break;
             }
@@ -674,164 +859,359 @@ pub fn run(e: &mut super::Engine, b: &Budget) -> Result<RunReport, RunError> {
     if decisions.is_empty() {
         return Err(RunError::NoDecisions);
     }
-    let prep_ms = millis_since(t_prep).saturating_sub(chains_ms);
+    Ok(Trial {
+        chains,
+        decisions,
+        live,
+        w_live,
+        dim,
+        examples: used,
+        chains_ms,
+        features_ms: millis_since(t_feat),
+        guards,
+    })
+}
+/// What one training pass produced.
+pub struct Fit {
+    pub dora: Dora,
+    pub first_loss: f32,
+    pub last_loss: f32,
+    pub epochs: usize,
+    pub ms: u64,
+    /// Whether the wall-clock ceiling ended it rather than the epoch count.
+    pub stopped: bool,
+}
 
-    // A local adapter over the reachable rows only. Its weights are scattered
-    // back into a full-width one at the end; training over 151,936 rows to
-    // move a few thousand of them would be arithmetic on zeros.
-    let mut dora = Dora::new(b.rank, b.alpha, dim, live.len());
-    dora.refresh(&mat, true);
+impl Trial {
+    /// Train a fresh adapter over the reachable rows.
+    ///
+    /// Local to the live set on purpose: training over 151,936 rows to move a
+    /// few hundred of them would be arithmetic on zeros. `scatter` puts the
+    /// result back at full width.
+    pub fn train(&self, b: &Budget) -> Fit {
+        let mat = self.mat();
+        let mut dora = Dora::new(b.rank, b.alpha, self.dim, self.live.len());
+        dora.refresh(&mat, true);
 
-    let mut ax = vec![0.0f32; dora.r];
-    let mut out: Vec<f32> = Vec::new();
+        let t = crate::time::rdtsc();
+        let mut opt_a = Adam::new(dora.a.len());
+        let mut opt_b = Adam::new(dora.b.len());
+        let mut opt_m = Adam::new(dora.m.len());
+        let mut ga = vec![0.0f32; dora.a.len()];
+        let mut gb = vec![0.0f32; dora.b.len()];
+        let mut dm = vec![0.0f32; dora.m.len()];
+        let mut ax = vec![0.0f32; dora.r];
+        let mut out: Vec<f32> = Vec::new();
 
-    let before_train = score(&chains, &decisions, &dora, &mut ax, &mut out, false);
-    let before_held = score(&chains, &decisions, &dora, &mut ax, &mut out, true);
+        let n_train = self.decisions.iter().filter(|d| !d.held).count().max(1);
+        let (mut first_loss, mut last_loss) = (0.0f32, 0.0f32);
+        let (mut epochs, mut stopped) = (0usize, false);
 
-    let t_train = crate::time::rdtsc();
-    let mut opt_a = Adam::new(dora.a.len());
-    let mut opt_b = Adam::new(dora.b.len());
-    let mut opt_m = Adam::new(dora.m.len());
-    let mut ga = vec![0.0f32; dora.a.len()];
-    let mut gb = vec![0.0f32; dora.b.len()];
-    let mut dm = vec![0.0f32; dora.m.len()];
-
-    let n_train = decisions.iter().filter(|d| !d.held).count().max(1);
-    let (mut first_loss, mut last_loss) = (0.0f32, 0.0f32);
-    let mut epochs_run = 0usize;
-    let mut stopped = false;
-
-    for epoch in 0..b.epochs {
-        for v in ga.iter_mut() {
-            *v = 0.0;
+        for epoch in 0..b.epochs {
+            for v in ga.iter_mut() {
+                *v = 0.0;
+            }
+            for v in gb.iter_mut() {
+                *v = 0.0;
+            }
+            for v in dm.iter_mut() {
+                *v = 0.0;
+            }
+            last_loss = 0.0;
+            for d in self.decisions.iter().filter(|d| !d.held) {
+                let st = &self.chains[d.applet].as_ref().unwrap()[d.step];
+                out.clear();
+                out.extend_from_slice(&d.base);
+                dora.apply_rows(&mut out, &st.local, &d.x, &mut ax);
+                let (loss, gy) = restricted_ce_compact(&out, st.target);
+                last_loss += loss;
+                dora.backward_rows(
+                    &mat, &d.x, &ax, &d.base, &gy, &st.local, &mut ga, &mut gb, &mut dm,
+                );
+            }
+            if epoch == 0 {
+                first_loss = last_loss;
+            }
+            let k = 1.0 / n_train as f32;
+            for v in ga.iter_mut() {
+                *v *= k;
+            }
+            for v in gb.iter_mut() {
+                *v *= k;
+            }
+            for v in dm.iter_mut() {
+                *v *= k;
+            }
+            opt_a.step(&mut dora.a, &ga, b.lr);
+            opt_b.step(&mut dora.b, &gb, b.lr);
+            // The magnitudes move more slowly than the direction: they
+            // multiply the frozen row outright, so a step size that merely
+            // nudges a low-rank factor rescales a whole logit.
+            opt_m.step(&mut dora.m, &dm, b.lr * 0.25);
+            dora.refresh(&mat, false);
+            epochs += 1;
+            if b.millis > 0 && millis_since(t) >= b.millis {
+                stopped = true;
+                break;
+            }
         }
-        for v in gb.iter_mut() {
-            *v = 0.0;
-        }
-        for v in dm.iter_mut() {
-            *v = 0.0;
-        }
-        last_loss = 0.0;
-        for d in decisions.iter().filter(|d| !d.held) {
-            let st = &chains[d.applet].as_ref().unwrap()[d.step];
-            out.clear();
-            out.extend_from_slice(&d.base);
-            dora.apply_rows(&mut out, &st.local, &d.x, &mut ax);
-            let (loss, gy) = restricted_ce_compact(&out, st.target);
-            last_loss += loss;
-            dora.backward_rows(
-                &mat, &d.x, &ax, &d.base, &gy, &st.local, &mut ga, &mut gb, &mut dm,
-            );
-        }
-        if epoch == 0 {
-            first_loss = last_loss;
-        }
-        let k = 1.0 / n_train as f32;
-        for v in ga.iter_mut() {
-            *v *= k;
-        }
-        for v in gb.iter_mut() {
-            *v *= k;
-        }
-        for v in dm.iter_mut() {
-            *v *= k;
-        }
-        opt_a.step(&mut dora.a, &ga, b.lr);
-        opt_b.step(&mut dora.b, &gb, b.lr);
-        // The magnitudes move more slowly than the direction: they multiply
-        // the frozen row outright, so a step size that merely nudges a
-        // low-rank factor rescales a whole logit.
-        opt_m.step(&mut dora.m, &dm, b.lr * 0.25);
-        dora.refresh(&mat, false);
-        epochs_run += 1;
-
-        if b.millis > 0 && millis_since(t_train) >= b.millis {
-            stopped = true;
-            break;
-        }
+        Fit { dora, first_loss, last_loss, epochs, ms: millis_since(t), stopped }
     }
-    let train_ms = millis_since(t_train);
 
-    let after_train = score(&chains, &decisions, &dora, &mut ax, &mut out, false);
-    let after_held = score(&chains, &decisions, &dora, &mut ax, &mut out, true);
-
-    // Scatter the local rows back into a full-width adapter and attach it.
-    // `a` is shared across rows and copies whole; `b`, `m` and `s` are
-    // per-row and go to the token ids they were trained for.
-    let existing = e.model.detach_adapters();
-    let mut full = match existing {
-        Some(a) if a.r == dora.r && a.cls.is_some() => a,
-        _ => Adapters::classifier_only(&e.model.cfg, b.rank, b.alpha),
-    };
-    if let Some(cls) = full.cls.as_mut() {
-        cls.a.copy_from_slice(&dora.a);
-        for (i, &o) in live.iter().enumerate() {
-            let o = o as usize;
+    /// Widen a locally-trained adapter to the model's full row space.
+    ///
+    /// `a` is shared across rows and copies whole; `b`, `m` and `s` are
+    /// per-row and go to the token ids they were trained for. Every row
+    /// outside the live set keeps s = 1.0 and a zero branch, which is exactly
+    /// the identity -- so the widening adds no behaviour, only address space.
+    pub fn scatter(&self, local: &Dora, cfg: &Config, alpha: f32) -> Adapters {
+        let mut full = Adapters::classifier_only(cfg, local.r, alpha);
+        if let Some(cls) = full.cls.as_mut() {
+            cls.a.copy_from_slice(&local.a);
             let r = cls.r;
-            cls.b[o * r..(o + 1) * r].copy_from_slice(&dora.b[i * dora.r..(i + 1) * dora.r]);
-            cls.m[o] = dora.m[i];
-            cls.s[o] = dora.s[i];
+            for (i, &o) in self.live.iter().enumerate() {
+                let o = o as usize;
+                cls.b[o * r..(o + 1) * r].copy_from_slice(&local.b[i * local.r..(i + 1) * local.r]);
+                cls.m[o] = local.m[i];
+                cls.s[o] = local.s[i];
+            }
         }
+        full
     }
-    // Unseeded on purpose: every row outside `live` keeps s = 1.0 and a zero
-    // branch, which is exactly the identity, and seeding all 151,936 would
-    // undo the reason this loop is affordable.
+
+    /// Narrow a full-width adapter back to the live set, so a variant loaded
+    /// from disk can be judged against this trial without the model.
+    ///
+    /// Returns `None` if the adapter has no classifier site or was trained at
+    /// a different rank -- either would make the comparison meaningless
+    /// rather than merely worse.
+    pub fn gather(&self, full: &Adapters) -> Option<Dora> {
+        let cls = full.cls.as_ref()?;
+        if cls.a.len() != cls.r * self.dim {
+            return None;
+        }
+        let mut local = Dora::new(cls.r, full.alpha, self.dim, self.live.len());
+        local.a.copy_from_slice(&cls.a);
+        for (i, &o) in self.live.iter().enumerate() {
+            let o = o as usize;
+            local.b[i * cls.r..(i + 1) * cls.r].copy_from_slice(&cls.b[o * cls.r..(o + 1) * cls.r]);
+            local.m[i] = cls.m[o];
+            local.s[i] = cls.s[o];
+        }
+        Some(local)
+    }
+}
+/// `train adapter`: prepare, train, measure, attach.
+///
+/// The whole of it now sits on `Trial`, which is what lets the Godel loop
+/// judge a variant without repeating any of the expensive half.
+pub fn run(e: &mut super::Engine, b: &Budget) -> Result<RunReport, RunError> {
+    let trial = prepare(e, b)?;
+
+    let before_train = trial.score(None, Slice::Train);
+    let before_held = trial.score(None, Slice::Held);
+    let fit = trial.train(b);
+    let after_train = trial.score(Some(&fit.dora), Slice::Train);
+    let after_held = trial.score(Some(&fit.dora), Slice::Held);
+
+    let full = trial.scatter(&fit.dora, &e.model.cfg, b.alpha);
+    // Unseeded on purpose: every row outside the live set is already the
+    // identity, and seeding all 151,936 would undo the reason this is
+    // affordable at all.
+    let _ = e.model.detach_adapters();
     let _ = e.model.attach_adapters_unseeded(full);
 
     Ok(RunReport {
-        examples: used,
-        decisions: decisions.len(),
-        held: decisions.iter().filter(|d| d.held).count(),
-        rows: live.len(),
-        epochs_run,
-        first_loss,
-        last_loss,
+        examples: trial.examples,
+        decisions: trial.decisions(),
+        held: trial.held(),
+        rows: trial.live_rows(),
+        epochs_run: fit.epochs,
+        first_loss: fit.first_loss,
+        last_loss: fit.last_loss,
         before_train,
         after_train,
         before_held,
         after_held,
-        chains_ms,
-        prep_ms,
-        train_ms,
-        stopped,
+        chains_ms: trial.chains_ms,
+        prep_ms: trial.features_ms,
+        train_ms: fit.ms,
+        stopped: fit.stopped,
     })
 }
 
-/// Accuracy over one split: does the adapted logit put the label's token
-/// first among the tokens the grammar admits at that step?
+/// One of the machine's own self-set goals, cached along the path the frozen
+/// baseline actually walks for it.
 ///
-/// The same question the constrained decoder asks at temperature zero, which
-/// is the point -- a number measured any other way would not be the number
-/// the system's behaviour depends on.
-fn score(
-    chains: &[Option<Vec<Step>>],
-    decisions: &[Decision],
-    dora: &Dora,
-    ax: &mut [f32],
-    out: &mut Vec<f32>,
-    held: bool,
-) -> f32 {
-    let (mut right, mut total) = (0usize, 0usize);
-    for d in decisions.iter().filter(|d| d.held == held) {
-        let Some(steps) = chains[d.applet].as_ref() else { continue };
-        let st = &steps[d.step];
-        out.clear();
-        out.extend_from_slice(&d.base);
-        dora.apply_rows(out, &st.local, &d.x, ax);
+/// These are not corpus items and have no label -- nobody knows the "right"
+/// applet for "list the files in /tmp", and that is not the question. The
+/// question a self-modifying machine has to answer is narrower and more
+/// important: *did changing myself change what I do when nobody asked?*
+///
+/// Caching the baseline's own path makes that checkable without the model.
+/// If a variant's argmax matches the recorded choice at every step, its
+/// greedy decode is identical to the baseline's by construction, so it lands
+/// on the same applet. It is a sound check rather than a sampled one.
+pub struct Guard {
+    pub goal: &'static str,
+    pub name: &'static str,
+    pub mutates: bool,
+    steps: Vec<GuardStep>,
+}
+
+struct GuardStep {
+    local: Vec<u32>,
+    /// Index into `local` the baseline put first.
+    chosen: usize,
+    x: Vec<f32>,
+    base: Vec<f32>,
+}
+
+impl Trial {
+    pub fn guards(&self) -> &[Guard] {
+        &self.guards
+    }
+
+    /// Does this variant still walk every guard goal down the same path?
+    ///
+    /// Returns (held, total). A variant that reroutes one of the machine's
+    /// own goals has changed its character rather than its accuracy, and
+    /// aggregate corpus accuracy would never show it.
+    pub fn guards_hold(&self, dora: Option<&Dora>) -> (usize, usize) {
+        let mut ax = vec![0.0f32; dora.map(|d| d.r).unwrap_or(1)];
+        let mut out: Vec<f32> = Vec::new();
+        let mut held = 0usize;
+        for g in self.guards.iter() {
+            let mut same = true;
+            for st in g.steps.iter() {
+                out.clear();
+                out.extend_from_slice(&st.base);
+                if let Some(d) = dora {
+                    d.apply_rows(&mut out, &st.local, &st.x, &mut ax);
+                }
+                let mut best = 0usize;
+                for c in 1..out.len() {
+                    if out[c] > out[best] {
+                        best = c;
+                    }
+                }
+                if best != st.chosen {
+                    same = false;
+                    break;
+                }
+            }
+            if same {
+                held += 1;
+            }
+        }
+        (held, self.guards.len())
+    }
+}
+
+/// Walk the frozen model down its own greedy path for one goal, caching each
+/// decision on the way.
+///
+/// This is `harness::choose` at temperature zero, reimplemented against an
+/// explicit `&mut Engine` because the borrow will not go through the public
+/// one -- and because the point here is the *cache*, not the answer.
+fn cache_guard(
+    e: &mut super::Engine,
+    grammar: &Grammar,
+    alphabet: &Alphabet,
+    names: &[&'static str],
+    live: &[u32],
+    w_live: &[f32],
+    dim: usize,
+    goal: &'static str,
+) -> Option<Guard> {
+    let prompt = super::harness::prompt_for(goal, names);
+    let tokens = e.tok.encode(&prompt, true, false);
+    if tokens.is_empty() {
+        return None;
+    }
+    let mut pos = e.model.prefill(&mut e.state, &tokens, 0);
+    let mut cursor = Cursor::new(grammar);
+    let mut steps: Vec<GuardStep> = Vec::new();
+
+    for _ in 0..step_bound(grammar) {
+        if pos >= e.model.cfg.seq_len {
+            return None;
+        }
+        let cands = cursor.candidates(alphabet);
+        if cands.is_empty() {
+            return None;
+        }
+        // Only candidates inside the live set can be judged later, and every
+        // grammar candidate is in it by construction -- the live set was
+        // built from exactly these lists.
+        let local: Vec<u32> = cands
+            .iter()
+            .map(|id| live.binary_search(id).unwrap_or(0) as u32)
+            .collect();
+        let x = e.state.hidden().to_vec();
+        let mut base = vec![0.0f32; local.len()];
+        for (c, &l) in local.iter().enumerate() {
+            let l = l as usize;
+            base[c] = dot(&w_live[l * dim..(l + 1) * dim], &x);
+        }
         let mut best = 0usize;
-        for c in 1..out.len() {
-            if out[c] > out[best] {
+        for c in 1..base.len() {
+            if base[c] > base[best] {
                 best = c;
             }
         }
-        if best == st.target {
-            right += 1;
+        steps.push(GuardStep { local, chosen: best, x, base });
+
+        let next = cands[best] as usize;
+        cursor.push(alphabet, next);
+        if let Some(idx) = cursor.finished() {
+            let name = names[idx];
+            let mutates = crate::sysbox::APPLETS
+                .iter()
+                .find(|a| a.name == name)
+                .map(|a| a.mutates)
+                .unwrap_or(true);
+            return Some(Guard { goal, name, mutates, steps });
         }
-        total += 1;
+        e.model.forward(&mut e.state, next, pos);
+        pos += 1;
     }
-    if total == 0 {
-        0.0
-    } else {
-        right as f32 / total as f32
+    None
+}
+
+impl Trial {
+    /// How many decisions a slice holds. The judges report it because a
+    /// statistic without its n is a number somebody will quote.
+    pub fn slice_size(&self, s: Slice) -> usize {
+        self.decisions.iter().filter(|d| self.in_slice(d, s)).count()
+    }
+
+    /// Every cached decision produces finite logits under this adapter.
+    ///
+    /// Cheap, and it catches the failure that scores cannot: a variant whose
+    /// validation accuracy improved while carrying a scale that overflows on
+    /// the first prompt from outside the corpus.
+    pub fn logits_finite(&self, dora: Option<&Dora>) -> bool {
+        let mut out = Vec::new();
+        let mut ax = vec![0.0f32; dora.map(|d| d.r).unwrap_or(1)];
+        for d in self.decisions.iter() {
+            self.logits(d, dora, &mut out, &mut ax);
+            if out.iter().any(|v| !v.is_finite()) {
+                return false;
+            }
+        }
+        for g in self.guards.iter() {
+            for st in g.steps.iter() {
+                out.clear();
+                out.extend_from_slice(&st.base);
+                if let Some(d) = dora {
+                    d.apply_rows(&mut out, &st.local, &st.x, &mut ax);
+                }
+                if out.iter().any(|v| !v.is_finite()) {
+                    return false;
+                }
+            }
+        }
+        true
     }
 }
