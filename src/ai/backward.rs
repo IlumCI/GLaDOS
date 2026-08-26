@@ -571,5 +571,72 @@ pub fn selftest() -> bool {
         if rope_ok { "ok " } else { "FAIL" }
     );
 
-    q8_ok && f32_ok && fd_ok && lora_ok && rn_ok && sw_ok && att_ok && rope_ok
+    // --- full QDoRA site gradient: norm terms included ------------------
+    // The forward under test is the composition training actually uses:
+    // set parameters, refresh cached scales against the frozen weight,
+    // apply onto the fixed base matvec. Analytic gradients come from
+    // Dora::backward, which carries the route through s that LoRA-only
+    // checks never see.
+    {
+        let (r3, k3, o3) = (3usize, 8usize, 6usize);
+        let wf: Vec<f32> = (0..o3 * k3).map(|_| rng.f32()).collect();
+        let mat = Mat::F32 { data: &wf, rows: o3, cols: k3 };
+        let mut dd = super::adapter::Dora::new(r3, 8.0, k3, o3);
+        for v in dd.a.iter_mut() {
+            *v = rng.f32();
+        }
+        for v in dd.b.iter_mut() {
+            *v = rng.f32();
+        }
+        dd.refresh(&mat, true);
+        let x3: Vec<f32> = (0..k3).map(|_| rng.f32()).collect();
+        let gy3: Vec<f32> = (0..o3).map(|_| rng.f32()).collect();
+        let mut base = vec![0.0f32; o3];
+        mat.matvec(&mut base, &x3);
+        let mut ax0 = vec![0.0f32; r3];
+        {
+            let mut outp = base.clone();
+            dd.apply(&mut outp, &x3, &mut ax0);
+        }
+
+        let mut ga = vec![0.0f32; r3 * k3];
+        let mut gb = vec![0.0f32; o3 * r3];
+        let mut dm = vec![0.0f32; o3];
+        dd.backward(&mat, &x3, &ax0, &base, &gy3, &mut ga, &mut gb, &mut dm);
+
+        let flat0: Vec<f32> = dd
+            .a
+            .iter()
+            .chain(&dd.b)
+            .chain(&dd.m)
+            .copied()
+            .collect();
+
+        let loss_d = |flat: &[f32]| -> f32 {
+            let mut probe = super::adapter::Dora::new(r3, 8.0, k3, o3);
+            probe.a.copy_from_slice(&flat[..r3 * k3]);
+            probe.b.copy_from_slice(&flat[r3 * k3..r3 * k3 + o3 * r3]);
+            probe.m.copy_from_slice(&flat[r3 * k3 + o3 * r3..]);
+            probe.refresh(&mat, false);
+            let mut out = base.clone();
+            let mut scratch = vec![0.0f32; r3];
+            probe.apply(&mut out, &x3, &mut scratch);
+            out.iter().zip(&gy3).map(|(a, b)| a * b).sum::<f32>()
+        };
+        let analytic: Vec<f32> = ga.iter().chain(&gb).chain(&dm).copied().collect();
+        let dora_ok = check_grads(&loss_d, &flat0, &analytic, 1e-3, 4e-2);
+        crate::kprintln!(
+            "  {}  full qdora site gradients pass finite differences",
+            if dora_ok { "ok " } else { "FAIL" }
+        );
+        q8_ok
+            && f32_ok
+            && fd_ok
+            && lora_ok
+            && rn_ok
+            && sw_ok
+            && att_ok
+            && rope_ok
+            && dora_ok
+    }
 }

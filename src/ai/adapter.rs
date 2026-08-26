@@ -205,8 +205,94 @@ impl Adapters {
     }
 }
 
+impl Dora {
+    /// Exact gradients of the wrapped site, norm terms included.
+    ///
+    /// The wrapper's output is
+    ///     y_r = s_r . base_r + scale . sum_j B[r,j] . ax[j],
+    ///     s_r = m_r / sqrt(N_r),  N_r = |C_r|^2,  C_r = W0_r + (BA)_r,
+    /// so A and B influence y twice: through the explicit low-rank branch,
+    /// and through s via N. Dropping the second route would train a model
+    /// whose forward and backward disagree about what the magnitudes mean --
+    /// exactly the silent-wrong-gradient class this file exists to prevent.
+    ///
+    /// Reconstructing C's rows costs one dequant pass over the frozen
+    /// weight, which is why this lives at training cadence, never on the
+    /// decode path. `ax` and `base` are the forward's own intermediates.
+    #[allow(clippy::too_many_arguments)]
+    pub fn backward(
+        &self,
+        w: &Mat<'_>,
+        x: &[f32],
+        ax: &[f32],
+        base: &[f32],
+        gy: &[f32],
+        ga: &mut [f32],
+        gb: &mut [f32],
+        dm: &mut [f32],
+    ) {
+        let (rows, k) = match w {
+            Mat::F32 { rows, cols, .. } => (*rows, *cols),
+            Mat::Q8 { rows, cols, .. } => (*rows, *cols),
+        };
+        debug_assert_eq!(rows, self.m.len());
+        debug_assert_eq!(k, x.len());
+        let mut c_row = vec![0.0f32; k];
+        for o in 0..rows {
+            w.row_into(o, &mut c_row);
+            // C[o] = W0[o] + sum_j B[o,j] * A[j,:].
+            for j in 0..self.r {
+                let bj = self.b[o * self.r + j];
+                if bj != 0.0 {
+                    let arow = &self.a[j * k..(j + 1) * k];
+                    for i in 0..k {
+                        c_row[i] += bj * arow[i];
+                    }
+                }
+            }
+            let n = c_row.iter().map(|v| v * v).sum::<f32>().max(1e-12);
+
+            // Explicit branch (as in the LoRA-only case)... including its
+            // A-side gradient, which the first draft of this function forgot
+            // entirely -- the finite-difference gate caught it on the first
+            // boot, which is the arrangement working as designed.
+            for j in 0..self.r {
+                gb[o * self.r + j] += self.scale() * gy[o] * ax[j];
+                let bcoef_branch = self.scale() * gy[o] * self.b[o * self.r + j];
+                if bcoef_branch != 0.0 {
+                    for kk in 0..k {
+                        ga[j * k + kk] += bcoef_branch * x[kk];
+                    }
+                }
+            }
+
+            // ...and the hidden route through s. ds/dtheta = -s.(2N)^{-1}.dN,
+            // multiplied by base gives the correction term; dm rides the
+            // same chain but through ds/dm = s/m.
+            let coef = -gy[o] * base[o] * self.s[o] / (2.0 * n);
+            dm[o] += gy[o] * base[o] * self.s[o] / self.m[o].max(1e-12);
+            for j in 0..self.r {
+                let mut dn_bj = 0.0f32;
+                let arow = &self.a[j * k..(j + 1) * k];
+                for kk in 0..k {
+                    dn_bj += c_row[kk] * arow[kk];
+                }
+                gb[o * self.r + j] += coef * 2.0 * dn_bj;
+                // dN/dA[j,k] = 2.C[o,k].B[o,j], scattered across k.
+                let bcoef = coef * 2.0 * self.b[o * self.r + j];
+                if bcoef != 0.0 {
+                    for kk in 0..k {
+                        ga[j * k + kk] += bcoef * c_row[kk];
+                    }
+                }
+            }
+        }
+        let _ = x;
+    }
+}
+
 /// Boot self-test, run against whatever engine is loaded. Three claims,
-/// each checked rather than argued:
+///
 ///
 /// 1. a freshly attached adapter is bit-identical to no adapter (B zero,
 ///    m seeded to the frozen row norms so every cached scale is exactly 1);
