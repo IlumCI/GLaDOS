@@ -81,19 +81,85 @@ pub const STEPS: &[Step] = &[
     Step {
         title: "Record the [boot] phys line",
         place: Place::Glados,
-        cmd: "read the boot log (it scrolls past; the terminal keeps it)",
+        cmd: "log all   (or 'log save' and read it back later)",
         expect: "'[boot] phys N MiB free, largest contiguous region M MiB'. \
-                 Write down M -- it has never been captured on this machine.",
+                 M has never been captured on this machine. It used to have \
+                 to be copied off the screen by hand before it scrolled; the \
+                 log now keeps every byte printed since power-on.",
         fail: "no such line -> the heap ladder came down a rung; note which \
                size it reports getting. M is what decides whether 4B fits.",
     },
     Step {
         title: "Boot selftests: every line ok",
         place: Place::Glados,
-        cmd: "read the [selftest] lines (crypto, heap, timer, probe, ...)",
-        expect: "every line says ok. Crypto is 11 published vector sets.",
-        fail: "any FAIL -> photograph the exact line and send it. An ECDSA \
-               break once hid in [selftest] crypto for a whole debug cycle.",
+        cmd: "log all   then look for FAIL anywhere in it",
+        expect: "eighteen sections, seventy-nine claims, every line ok. \
+                 Crypto is fifteen published vector sets.",
+        fail: "any FAIL -> 'log save' and send the file. An ECDSA break \
+               once hid in [selftest] crypto for a whole debug cycle, and a \
+               sparsity claim shipped failing for one commit, both because \
+               the output was being sliced to the section under active work. \
+               Search the whole log, not the part you came for.",
+    },
+    Step {
+        title: "Save the boot log before anything else",
+        place: Place::Glados,
+        cmd: "log save",
+        expect: "'N bytes -> /sys/boot.log'. Everything printed since power-on, \
+                 including the lines that scrolled away. 'log all' prints it, 'log' \
+                 says how much is held.",
+        fail: "'no store mounted' after it saves is expected until the next step \
+               is done: the log is in the namespace, the namespace lives in RAM, \
+               so it survives until power-off and no longer.",
+    },
+    Step {
+        title: "Provision a store region, or nothing leaves this machine",
+        place: Place::Host,
+        cmd: "carve a small partition on the internal nvme with the GLaDOS type \
+              guid b7e1f4a2-9c3d-4e58-a061-2f8d7c4b93e5",
+        expect: "next boot prints '[store] store at lba N', and then 'store unlock' \
+                 plus 'snap' commit the namespace to it.",
+        fail: "the 3 GiB region was deleted on 2026-08-15 and merged into \
+               nvme0n1p4, so the kernel finds none today. Until one exists the \
+               ESP is on the usb stick, which no driver here can write, and the \
+               boot log cannot be got off the machine at all.",
+    },
+    Step {
+        title: "Does the entropy pool actually fill?",
+        place: Place::Glados,
+        cmd: "rng then type for a while then rng",
+        expect: "'N deposits: X from input, Y from storage'. Under emulation only \
+                 one input deposit ever arrives, qemu's i8042 probe blip, so real \
+                 typing is the first exercise the keyboard source has had. 256 bits \
+                 before key material is answered.",
+        fail: "input stays at 1 while typing -> the isr is not reaching \
+               godbits::ins. Storage stays 0 -> nvme completions are not being \
+               harvested. Capture rng and nvme.",
+    },
+    Step {
+        title: "Train the decision layer at full corpus",
+        place: Place::Glados,
+        cmd: "train adapter",
+        expect: "the corpus at full size. A forward-pass group is 1.8 s \
+                 under whpx and should be well under that here, so the \
+                 whole 465-example run is minutes either way. Held-out \
+                 accuracy is the only number that means anything.",
+        fail: "'refused: no AVX2/FMA path' -> cpu detection regressed, capture \
+               cpu. Note the two prep timings it prints separately; only the \
+               second answers to -n.",
+    },
+    Step {
+        title: "A godel trial where J1 can actually pass",
+        place: Place::Glados,
+        cmd: "godel now then godel ledger",
+        expect: "the margin judge needs six repaired validation \
+                 decisions with none broken, so it needs a subsample big \
+                 enough to reach the held-out slice. Adopted and rejected \
+                 are both results; a veto on thin evidence is the gate \
+                 working.",
+        fail: "'no engine' -> run 'initiative off' then 'agent stop' first. 'no \
+               validation decisions' -> the subsample never reached the held-out \
+               slice, so ask for more examples.",
     },
     Step {
         title: "Swap Qwen3.5 in for Qwen3",

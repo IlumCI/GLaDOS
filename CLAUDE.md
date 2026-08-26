@@ -188,13 +188,16 @@ changing anything there:
 positional, so the first N examples are all training examples and a short run
 would report held-out accuracy over an empty set.
 
-**Prep dominates, and only under QEMU.** Building the chains and dequantising
-the rows is a fixed cost; caching the features is a forward pass per example,
-which under TCG is around three minutes each. The report splits the two so it
-is obvious which number `-n` moves. A full-corpus run is a GF63 activity, and
-has not been done: every training figure recorded so far comes from subsamples
-of a few dozen decisions and establishes that the machinery composes, nothing
-more.
+**Prep dominates.** Building the chains and dequantising the rows is a fixed
+cost; caching the features is a forward pass per example. The report splits the
+two so it is obvious which number `-n` moves.
+
+Measured, with `-accel whpx -cpu max`: the fixed half is 401 ms and a
+forward-pass group is about 1.8 s, so the whole 465-example corpus plus its
+four guard goals is roughly fourteen minutes. Under TCG the same group took
+286 s, which is where the belief that a full run needed the GF63 came from.
+That belief was wrong and it shaped a lot of decisions before anybody tested
+it.
 
 `Trial` in `src/ai/train.rs` is the reusable object underneath all of this.
 `prepare` builds it (expensive, once), and `score`, `paired`, `train`,
@@ -243,7 +246,9 @@ godel [status|now [n]|ledger [n]|rollback|on|off]
 Four judges, unanimity required, each a different failure mode:
 
 - **J1** is paired (McNemar) over the same cached decisions both variants
-  answer, which is what a comparison of two percentages cannot be.
+  answer, which is what a comparison of two percentages cannot be. It needs
+  roughly six repaired validation decisions with none broken, so it needs a
+  corpus subsample large enough to reach the held-out slice at all.
 - **J2** replays the machine's own curiosity goals along the path the frozen
   baseline walks, and is never subsampled by `-n`.
 - **J3** is structural: finite factors, positive scales, finite logits.
@@ -310,11 +315,29 @@ nothing.
 
 Three things worth knowing before a session goes sideways:
 
-- **`initiative off` first.** The resident mind wakes fifteen seconds in and
-  holds the engine for a whole episode, which presents as `drive.py` timing out
-  with commands unsent.
-- **`--qemu-extra "-cpu max"` for anything that trains.** The default `qemu64`
-  model hides every SIMD extension and `train::hardware_ok` declines.
+- **`initiative off` then `agent stop`, in that order, first.** The resident
+  mind wakes fifteen seconds in and holds the engine for a whole episode, which
+  presents as `drive.py` timing out with commands unsent, or as every engine
+  command answering "another task holds it".
+  `initiative off` stops future ticks and does not cancel the one already in
+  flight, and under emulation the first tick and the first shell prompt arrive
+  together: boot takes around 150 s of guest time, the tick fires at 150 s, and
+  an episode is queued in the same moment the prompt appears. Two constrained
+  decodes then run for minutes, and `agent stop` is what actually clears it.
+- **`--qemu-extra "-accel whpx -cpu max"`, always.** WHPX is the Windows
+  hypervisor and it is roughly **160x** faster than TCG on this workload:
+  a forward-pass group measured 286,370 ms under TCG and 1,795 ms under WHPX,
+  and a boot plus four cheap commands went from over 24 minutes to 61 seconds.
+  Everything this project treated as "too slow to test here" was an untested
+  assumption about the emulator, for months.
+  `-cpu max` is needed alongside it: WHPX alone reports `avx2=0 fma=0` and
+  `train::hardware_ok` declines. Together they report `avx2=1 fma=1 avx
+  enabled=1`.
+  Two things to know. WHPX raises unmasked SSE exceptions faithfully where TCG
+  does not, so it surfaces real `#XM` faults that TCG hides; the first one it
+  found was a genuine kernel bug in `task::alloc_fpu_area`. And at WHPX speed
+  `drive.py`'s serial pacing races, so two commands can arrive concatenated on
+  one line. Put a cheap command between anything that must not merge.
 - **Build `--release`.** `drive.py` prefers the release artifact, so a debug
   build alone leaves a stale binary staged and the change under test never runs.
 

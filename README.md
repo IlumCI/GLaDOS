@@ -231,11 +231,15 @@ python tools/drive.py "tensor" "model" "ask -n 20 hello"
 the shell over a serial socket. It assembles its own ESP from the small
 checkpoint, so it never disturbs deploy staging.
 
-Two things to know before a session goes sideways. Pass `initiative off` as the
-first command: the resident task wakes fifteen seconds in and holds the engine
-for a whole episode, which presents as a timeout with commands unsent. And pass
-`--qemu-extra "-cpu max"` for anything that trains, since the default `qemu64`
-model hides every SIMD extension and the trainer declines without AVX2.
+Pass `--qemu-extra "-accel whpx -cpu max"`. WHPX is the Windows hypervisor and
+it is about 160 times faster than TCG on this workload; `-cpu max` alongside it
+is what exposes AVX2, without which the trainer declines. It also raises
+unmasked SSE exceptions faithfully where TCG does not, which is how we found a
+real bug in our own per-task FPU initialisation.
+
+Pass `initiative off` and then `agent stop` as the first commands: the resident
+task wakes fifteen seconds in and holds the engine for a whole episode, and
+stopping future ticks does not cancel the one already in flight.
 
 QEMU cannot run the 0.6B model. Its VVFAT is FAT16 on a fixed geometry and the
 whole disk is 516 MB. `fat:32:` raises that in principle, but QEMU says its
@@ -360,11 +364,15 @@ are kept, because the reason to know them is the reason they were worth
 measuring, and because a deleted experiment gets repeated.
 
 The measurements we have are small, and we say so where they appear. The
-adapter trainer has been exercised on subsamples of a few dozen decisions
-because a full-corpus pass is a forward pass per example, which is seconds on
-the laptop and most of a day under emulation. Those runs establish that the
-machinery composes. They establish nothing about how much it helps, and no
-figure from them belongs in a claim.
+adapter trainer has been exercised on subsamples of a few dozen decisions,
+which establishes that the machinery composes and establishes nothing about
+how much it helps.
+
+For most of that time we believed a full-corpus pass needed the laptop, because
+a forward-pass group took 286 s under emulation. It took 1.8 s the first time
+anybody tried the hypervisor accelerator instead of the interpreter, and the
+whole corpus is a quarter of an hour. The belief was never measured, and it
+shaped which questions we thought were answerable.
 
 ---
 

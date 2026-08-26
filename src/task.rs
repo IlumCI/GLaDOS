@@ -109,6 +109,30 @@ fn alloc_fpu_area() -> *mut u8 {
     let p = unsafe { alloc(layout) };
     if !p.is_null() {
         unsafe { core::ptr::write_bytes(p, 0, size) };
+        // Zero is not a legal resting state for the two control words, and
+        // this is the second half of the fix `cpu::enable_simd` documents.
+        //
+        // That function pins MXCSR to 0x1F80 so int8 dequantisation's
+        // subnormals do not raise #XM. It pins the *register*. The first
+        // context switch into a new task issues `xrstor` from this buffer,
+        // and XRSTOR loads MXCSR from the memory image regardless of
+        // XSTATE_BV, so a zeroed area unmasks all six SSE exceptions again
+        // the moment the task first runs. Every spawned task was therefore
+        // executing with the exact configuration enable_simd exists to
+        // prevent, and `clock_task` calls `ai::fpu_guard` on its first pass.
+        //
+        // Invisible under TCG, which does not raise unmasked SSE exceptions
+        // faithfully, and fatal under WHPX, which does. On the GF63 it is
+        // latent for the same reason it was here: nothing has yet made a
+        // subnormal on a spawned task's first floating-point instruction.
+        //
+        // Offsets are the legacy FXSAVE header: FCW at 0, MXCSR at 24.
+        // 0x037F masks the x87 exceptions and 0x1F80 masks the SSE ones,
+        // which are the values the architecture calls the initial state.
+        unsafe {
+            core::ptr::write_unaligned(p as *mut u16, 0x037F);
+            core::ptr::write_unaligned(p.add(24) as *mut u32, 0x1F80);
+        }
     }
     p
 }
