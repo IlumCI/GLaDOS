@@ -18,9 +18,10 @@
 //! belongs outside the loop. One multiply per output element instead of one
 //! per weight.
 
+use super::adapter::Dora;
 use super::tensor;
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub enum Mat<'a> {
     /// Row-major f32, `rows * cols` values.
     F32 { data: &'a [f32], rows: usize, cols: usize },
@@ -35,6 +36,14 @@ pub fn f32_at(bytes: &[u8], i: usize) -> f32 {
 }
 
 impl Mat<'_> {
+    /// Frozen matvec followed by the site's QDoRA wrapper. Kept beside
+    /// `matvec` so an adapted projection reads as one operation at every
+    /// call site, and so the two halves cannot drift apart silently.
+    pub fn wrap_matvec(&self, d: &Dora, x: &[f32], ax: &mut [f32], out: &mut [f32]) {
+        self.matvec(out, x);
+        d.apply(out, x, ax);
+    }
+
     /// `out = self * x`. `out` must have `rows` entries, `x` must have `cols`.
     pub fn matvec(&self, out: &mut [f32], x: &[f32]) {
         match self {

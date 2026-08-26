@@ -679,6 +679,9 @@ pub struct State {
     dbuf: Vec<f32>,
     /// Query and gate, which leave a hybrid's `wq` together.
     qg: Vec<f32>,
+    /// Adapter rank scratch, shared by every adapted site within one token.
+    /// Single core means single ownership; sized once by [`State::new`].
+    la: Vec<f32>,
     /// Router logits and the expert bank's doubled output. Empty unless MoE.
     router: Vec<f32>,
     moe_gu: Vec<f32>,
@@ -766,6 +769,7 @@ impl State {
             core: vec![0.0; if hyb { cfg.lin_v_dim() } else { 0 }],
             dbuf: vec![0.0; if hyb { cfg.lin_v_head } else { 0 }],
             qg: vec![0.0; if hyb { 2 * cfg.q_dim() } else { 0 }],
+            la: vec![0.0; super::adapter::MAX_RANK],
             router: vec![0.0; cfg.n_experts],
             moe_gu: vec![0.0; if cfg.n_experts > 0 { 2 * cfg.hidden_dim } else { 0 }],
             dim: cfg.dim,
@@ -1146,6 +1150,10 @@ pub struct Model {
     pub cfg: Config,
     src: Source,
     o: Offsets,
+    /// QDoRA adapters attached after load. `None` costs nothing anywhere:
+    /// every hot-path check is a pointer test, and an unattached model runs
+    /// the exact instruction stream it always ran.
+    pub adapters: Option<super::adapter::Adapters>,
 }
 
 impl Model {
@@ -1173,7 +1181,7 @@ impl Model {
         }
 
         let o = offsets(&cfg, false);
-        Some(Self { cfg, src: Source::Flat(w), o })
+        Some(Self { cfg, src: Source::Flat(w), o, adapters: None })
     }
 
     /// Load a llama2.c checkpoint.
@@ -1255,7 +1263,7 @@ impl Model {
         }
 
         let o = offsets(&cfg, true);
-        Ok(Self { cfg, src: Source::Flat(w), o })
+        Ok(Self { cfg, src: Source::Flat(w), o, adapters: None })
     }
 
     /// Load a GLADOSM2 checkpoint, referencing the blob in place.
@@ -1499,7 +1507,7 @@ impl Model {
             }
         }
 
-        Ok(Self { cfg, src: Source::Blob { bytes: data, off, norms }, o: Offsets::default() })
+        Ok(Self { cfg, src: Source::Blob { bytes: data, off, norms }, o: Offsets::default(), adapters: None })
     }
 
     /// Walk a v4 body and record where every tensor of every layer starts.
@@ -1595,6 +1603,7 @@ impl Model {
             cfg,
             src: Source::Hybrid { bytes: data, f, layers, embed, rms_final, wcls },
             o: Offsets::default(),
+            adapters: None,
         })
     }
 
@@ -1818,9 +1827,36 @@ impl Model {
             // Keys and values go through a staging buffer rather than into the
             // cache directly: quantisation needs a whole block before it knows
             // the scale, and QK-Norm has to run on the f32 projection anyway.
-            self.wq(l).matvec(&mut s.q, &s.xb);
-            self.wk(l).matvec(&mut s.kbuf, &s.xb);
-            self.wv(l).matvec(&mut s.vbuf, &s.xb);
+            // Each site runs through its QDoRA wrapper when adapted; the
+            // mem::take dance splits State's borrows so the frozen-weight
+            // matvec can read `xb` while rank scratch is mutated.
+            match self.adapters.as_ref().and_then(|a| a.qkv[l][0].as_ref()) {
+                Some(d) => {
+                    let xb = &s.xb;
+                    let mut la = core::mem::take(&mut s.la);
+                    self.wq(l).wrap_matvec(d, xb, &mut la, &mut s.q);
+                    s.la = la;
+                }
+                None => self.wq(l).matvec(&mut s.q, &s.xb),
+            }
+            match self.adapters.as_ref().and_then(|a| a.qkv[l][1].as_ref()) {
+                Some(d) => {
+                    let xb = &s.xb;
+                    let mut la = core::mem::take(&mut s.la);
+                    self.wk(l).wrap_matvec(d, xb, &mut la, &mut s.kbuf);
+                    s.la = la;
+                }
+                None => self.wk(l).matvec(&mut s.kbuf, &s.xb),
+            }
+            match self.adapters.as_ref().and_then(|a| a.qkv[l][2].as_ref()) {
+                Some(d) => {
+                    let xb = &s.xb;
+                    let mut la = core::mem::take(&mut s.la);
+                    self.wv(l).wrap_matvec(d, xb, &mut la, &mut s.vbuf);
+                    s.la = la;
+                }
+                None => self.wv(l).matvec(&mut s.vbuf, &s.xb),
+            }
 
             // QK-Norm, before RoPE and before anything is cached.
             //
@@ -1870,7 +1906,49 @@ impl Model {
         // was a heap allocation on every single token, in the one loop that
         // runs most often.
         tensor::rmsnorm_eps(&mut s.xb[..c.dim], &s.x, self.rms_final_w(), eps);
-        self.classifier().matvec(&mut s.logits, &s.xb);
+        match self.adapters.as_ref().and_then(|a| a.cls.as_ref()) {
+            Some(d) => {
+                let xb = &s.xb;
+                let mut la = core::mem::take(&mut s.la);
+                self.classifier().wrap_matvec(d, xb, &mut la, &mut s.logits);
+                s.la = la;
+            }
+            None => self.classifier().matvec(&mut s.logits, &s.xb),
+        }
+    }
+
+    /// Attach QDoRA adapters and seed their DoRA magnitudes against the
+    /// frozen weights. One pass over every adapted weight, so this is
+    /// attachment-cadence work; afterwards the per-token path pays only the
+    /// cached scales and the low-rank branch.
+    ///
+    /// Hybrid models are refused for now: their gated, partially-rotated
+    /// projections deserve a verified backward pass of their own rather than
+    /// a rushed alias to the dense sites.
+    pub fn attach_adapters(
+        &mut self,
+        mut ad: super::adapter::Adapters,
+    ) -> Result<(), &'static str> {
+        if self.cfg.hybrid() {
+            return Err("hybrid adapters are not supported yet");
+        }
+        {
+            let me = &*self;
+            ad.refresh_all(
+                me.cfg.n_layers,
+                |l| me.wq(l),
+                |l| me.wk(l),
+                |l| me.wv(l),
+                || me.classifier(),
+                true,
+            );
+        }
+        self.adapters = Some(ad);
+        Ok(())
+    }
+
+    pub fn detach_adapters(&mut self) -> Option<super::adapter::Adapters> {
+        self.adapters.take()
     }
 
     /// Feed a prompt so every weight matrix streams once per chunk instead of

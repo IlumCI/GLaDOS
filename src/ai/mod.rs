@@ -1,7 +1,9 @@
 //! Machine learning primitives.
 
 pub mod agent;
+pub mod adapter;
 pub mod aixi;
+pub mod backward;
 pub mod constrain;
 pub mod context;
 pub mod initiative;
@@ -918,6 +920,28 @@ pub fn init(model_blob: Option<Blob>, tok_blob: Option<Blob>) {
     } else {
         console::set_color(LTRED);
         kprintln!("  FAIL the initiative gates misorder");
+    }
+    console::set_color(LTGRAY);
+
+    console::set_color(LTGREEN);
+    kprintln!("\n[selftest] qdora adapters:");
+    console::set_color(LTGRAY);
+    if adapter::selftest() {
+        console::set_color(LTGRAY);
+    } else {
+        console::set_color(LTRED);
+        kprintln!("  FAIL -- see the line above for which claim broke");
+    }
+    console::set_color(LTGRAY);
+
+    console::set_color(LTGREEN);
+    kprintln!("\n[selftest] backward kernels:");
+    console::set_color(LTGRAY);
+    if backward::selftest() {
+        console::set_color(LTGRAY);
+    } else {
+        console::set_color(LTRED);
+        kprintln!("  FAIL -- a gradient does not match its forward");
     }
     console::set_color(LTGRAY);
 }
