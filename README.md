@@ -59,11 +59,14 @@ Does not work yet:
 - SMP. Single core. `sync::Racy<T>` gives interior mutability with no locking
   of any kind, and carries that name so one grep finds every place that assumed
   a single core on the day one stops being enough.
-- Entropy. TLS private keys and the two client random values are derived from
-  the TSC, which is a counter started at power-on. We name this as a genuine
-  weakness: an attacker who can guess the boot time narrows the key. The
-  keyboard and mouse interrupt handlers already deposit timing jitter into an
-  entropy ring, and wiring that into a proper DRBG is open work.
+- A hardware entropy source. The generator is a fast-key-erasure ChaCha20
+  DRBG fed by keyboard and mouse interrupt timing and by NVMe completion
+  latency, and it refuses to answer for key material until it has seen enough
+  events. That refusal is correct and it is also a limitation: a machine that
+  boots, touches no disk and shuts down with no key pressed never seeds, and
+  TLS then falls back to timing-derived keys and says so during the
+  handshake. The CPU has RDRAND and we do not use it, because trusting an
+  opaque instruction is a different argument from trusting interrupt timing.
 - Attention-path training. The adapter moves the classifier. Every activation
   adjoint needed to go deeper exists and is checked at boot, and nothing yet
   composes them into a backward pass through the layers.

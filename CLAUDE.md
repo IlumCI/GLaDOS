@@ -512,10 +512,30 @@ computes the wrong thing silently. Use `Curve::inv_m`.
 
 TLS 1.3 validates the chain, the transcript signature, dates and name, then
 **reports** instead of enforcing. A caller that cares must check
-`identity.ok()`. There is no revocation. Key material still comes from the TSC,
-which `src/net/tls.rs` names in place as a genuine weakness: a counter started
-at power-on is not a random number generator, and an attacker who can guess the
-boot time narrows the key.
+`identity.ok()`. There is no revocation.
+
+Key material comes from `src/rng`, a fast-key-erasure ChaCha20 DRBG built over
+the `chacha::apply` the boot selftest already checks against RFC 8439. One
+64-byte block per step: the first 32 bytes overwrite the key and only the last
+32 leave the module, so the state that produced an output is gone before the
+caller sees it. That is the only way a kernel with one address space and no
+process isolation gets backtracking resistance.
+
+Two entropy sources, and the second exists because the first has a blind spot.
+Keyboard and mouse interrupt timing arrives through `godbits::ins`; NVMe
+completion latency arrives through `rng::add_device_entropy`, which is
+deliberately **not** routed through `godbits`. That function also feeds
+`godbits::felt`, which `initiative` and `godel` read to decide whether a person
+is present, so disk traffic going through it would make an unattended machine
+look occupied and stand down the loop that only runs when nobody is there.
+
+One bit is credited per event whatever the source, and 256 events are needed
+before `fill_secret` will answer. That figure is an assumption and not a
+measurement, and it is the weakest link in the module. `fill` still answers
+below the threshold for anything that wants unpredictability without depending
+on it; key material takes `fill_secret`, which refuses, because a generator
+that quietly degrades for a private key is the failure this section exists to
+warn about.
 
 ### The model (`src/ai/`)
 
@@ -716,11 +736,13 @@ RTL8168 driver cannot be exercised in QEMU (which emulates the 8139) and says
 so in its own commit.
 
 Git identity is not configured in this repo. Every commit needs it passed
-explicitly, matching the existing author:
+explicitly:
 
 ```bash
-git -c user.name=glados -c user.email=research@euroswarms.eu commit ...
+git -c user.name=IlumCI -c user.email=ilumbackup@gmail.com commit ...
 ```
+
+Nothing else goes in the trailer. No co-author lines, no tool attribution.
 
 Note the enclosing `C:\` drive is itself a git repository. Confirm the working
 directory before staging, because `git add` from the wrong one stages a
