@@ -201,6 +201,9 @@ impl Nvme {
         q.sq_tail = (q.sq_tail + 1) % q.len;
         let (qid, tail) = (q.id, q.sq_tail as u32);
         let db = self.doorbell(qid, false);
+        // Stamped across the doorbell so the delta below is the controller's
+        // own latency and not this function's bookkeeping.
+        let issued = crate::time::rdtsc();
         unsafe { self.w32(db, tail) };
 
         // Poll the completion queue for an entry whose phase bit differs from
@@ -224,6 +227,22 @@ impl Nvme {
                 let (qid, head) = (q.id, q.cq_head as u32);
                 let db = self.doorbell(qid, true);
                 unsafe { self.w32(db, head) };
+
+                // How long the controller took, into the entropy pool.
+                //
+                // NAND timing, internal scheduling and wear levelling all
+                // land in this number, and none of them is predictable from
+                // outside the machine. It matters because the other source is
+                // keyboard and mouse: a machine left running overnight sees
+                // none of those, and this is the one thing that still arrives
+                // while nobody is present.
+                //
+                // Only on a real completion. The timeout path below is two
+                // hundred million spins and says more about this loop than
+                // about the device.
+                crate::rng::add_device_entropy(
+                    crate::time::rdtsc().wrapping_sub(issued),
+                );
                 return if status == 0 { Ok(c.result) } else { Err(status) };
             }
 

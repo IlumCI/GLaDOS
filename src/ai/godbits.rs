@@ -50,6 +50,10 @@ pub fn ins(tsc: u64) {
     let h = HEAD.fetch_add(1, Ordering::Relaxed) % RING;
     unsafe { (*SAMPLES.get())[h] = good };
     FELT.fetch_add(1, Ordering::Relaxed);
+    // The same event, to the generator. Terry's ring keeps the timing the
+    // Oracle reports on; the pool keeps the jitter nobody outside the machine
+    // can predict. One deposit, two consumers, and neither reads the other.
+    crate::rng::add_entropy(tsc);
 }
 
 /// How many touches the machine has felt since boot.

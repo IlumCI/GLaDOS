@@ -29,6 +29,7 @@ mod mine;
 mod net;
 mod pkg;
 mod recovery;
+mod rng;
 mod serial;
 mod shell;
 mod store;
@@ -938,6 +939,19 @@ fn selftest() {
     // nothing to point at -- crypto is the one place where wrong code still
     // produces perfectly plausible output.
     crypto::selftest();
+
+    // Straight after the ciphers, and deliberately so: the generator is a
+    // construction over the ChaCha20 checked one line above, so its claims
+    // only mean anything if that one passed.
+    console::set_color(LTGREEN);
+    kprintln!("\n[selftest] random:");
+    console::set_color(LTGRAY_IDX);
+    if !rng::selftest() {
+        console::set_color(LTRED);
+        kprintln!("  FAIL -- key material would look fine and be predictable");
+        console::set_color(LTGRAY_IDX);
+    }
+
     if json::selftest() {
         console::set_color(LTGREEN);
         kprintln!("  ok     json      parse, escapes, snowflakes, depth bound");

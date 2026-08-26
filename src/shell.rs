@@ -1348,6 +1348,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             kprintln!("  https <host>[:port] [/path]  the same, over TLS 1.3");
             kprintln!("  wlan          what wireless hardware is present");
             kprintln!("  crypto        re-run the cipher test vectors");
+            kprintln!("  rng [n]       random bytes, and what the pool thinks of itself");
             console::set_color(YELLOW);
             kprintln!("  <host> is a name or an address, anywhere one is taken");
             kprintln!("  https encrypts but does NOT verify the server -- see net/tls.rs");
@@ -1694,6 +1695,59 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
                 _ => {
                     let secs = if n == 0 { 3 } else { n };
                     kprintln!("[mine] {}", crate::mine::bench(secs));
+                }
+            }
+        }
+        // `rng` -- bytes from the kernel generator, and what it thinks of
+        // itself. The status line is the interesting half: an estimate below
+        // the threshold means `fill_secret` is refusing, which is what a TLS
+        // handshake will report if one is attempted now.
+        "rng" => {
+            use crate::gfx::console::{self, LTGRAY, LTGREEN, YELLOW};
+            let (deposits, bits, seeded) = crate::rng::status();
+            match rest.trim().split_whitespace().next() {
+                None | Some("") | Some("status") => {
+                    console::set_color(YELLOW);
+                    kprintln!("[rng]");
+                    console::set_color(LTGRAY);
+                    // Split by source, because a pool filled by a night of
+                    // disk traffic is a different situation from one filled
+                    // by somebody typing, and an operator deciding whether to
+                    // trust a key wants to know which happened.
+                    let dev = crate::rng::device_deposits();
+                    kprintln!(
+                        "  {} deposit(s): {} from input, {} from storage",
+                        deposits,
+                        deposits.saturating_sub(dev),
+                        dev
+                    );
+                    kprintln!("  {} of {} bits credited", bits, crate::rng::SEEDED_BITS);
+                    if seeded {
+                        console::set_color(LTGREEN);
+                        kprintln!("  seeded -- key material will be answered");
+                    } else {
+                        console::set_color(YELLOW);
+                        kprintln!("  not seeded -- key material is refused, type at it");
+                    }
+                    console::set_color(LTGRAY);
+                    kprintln!("  one bit credited per event, which is an assumption and not a measurement");
+                }
+                Some(w) => {
+                    let n: usize = w.parse().unwrap_or(16).min(64);
+                    let mut buf = [0u8; 64];
+                    crate::rng::fill(&mut buf[..n]);
+                    let mut hex = alloc::string::String::with_capacity(n * 2);
+                    const D: &[u8; 16] = b"0123456789abcdef";
+                    for b in buf.iter().take(n) {
+                        hex.push(D[(b >> 4) as usize] as char);
+                        hex.push(D[(b & 15) as usize] as char);
+                    }
+                    kprintln!("  {}", hex);
+                    if !seeded {
+                        console::set_color(YELLOW);
+                        kprintln!("  unpredictable by timing, and below the bar for a secret");
+                        console::set_color(LTGRAY);
+                    }
                 }
             }
         }

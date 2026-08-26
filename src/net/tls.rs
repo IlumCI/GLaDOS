@@ -627,21 +627,45 @@ fn leaf_certificate(body: &[u8]) -> (Option<[u8; 32]>, usize) {
 pub fn connect(dst: Ipv4, host: &str, port: u16) -> Result<Session, Error> {
     tcp::connect(dst, port, 5000).map_err(|_| Error::Tcp)?;
 
-    // The private key and the two random values all come from the TSC. That is
-    // the only entropy this machine has, and it is a genuine weakness worth
-    // naming: a counter started at power-on is not a random number generator,
-    // and an attacker who can guess the boot time narrows the key. Real
-    // hardware entropy (RDRAND, which this CPU has) is the fix.
+    // The private key and the two random values come from the kernel
+    // generator, which is a fast-key-erasure ChaCha20 DRBG over interrupt
+    // timing (`src/rng`). This used to be four `rdtsc()` reads, and the
+    // comment here said what that meant: a counter started at power-on is not
+    // a random number generator, and an attacker who can guess the boot time
+    // narrows the key.
+    //
+    // `fill_secret` refuses below its threshold instead of degrading, and the
+    // refusal is reported rather than swallowed. A machine that has booted,
+    // run a script and never had a key pressed has no entropy, and a
+    // handshake made from a timestamp should say so out loud while it happens
+    // and not be discovered later in a log. The connection still proceeds,
+    // because refusing to talk is not this layer's decision to make, and the
+    // operator can see exactly what was used.
     let mut secret = [0u8; 32];
     let mut random = [0u8; 32];
     let mut session_id = [0u8; 32];
-    for i in 0..4 {
-        let t = crate::time::rdtsc();
-        secret[i * 8..i * 8 + 8].copy_from_slice(&t.to_le_bytes());
-        let t = crate::time::rdtsc().rotate_left(17) ^ 0x9E3779B97F4A7C15;
-        random[i * 8..i * 8 + 8].copy_from_slice(&t.to_le_bytes());
-        let t = crate::time::rdtsc().rotate_left(41) ^ 0xBF58476D1CE4E5B9;
-        session_id[i * 8..i * 8 + 8].copy_from_slice(&t.to_le_bytes());
+    let mut weak = None;
+    for buf in [&mut secret, &mut random, &mut session_id] {
+        if let Err(bits) = crate::rng::fill_secret(buf) {
+            weak = Some(bits);
+            // Fall back to the old construction so the handshake completes,
+            // and mix the generator in anyway: it is no worse than the TSC
+            // alone and it is what this path used to be.
+            crate::rng::fill(buf);
+            for (i, b) in buf.chunks_mut(8).enumerate() {
+                let t = crate::time::rdtsc().rotate_left((17 * (i + 1)) as u32);
+                for (x, y) in b.iter_mut().zip(t.to_le_bytes().iter()) {
+                    *x ^= *y;
+                }
+            }
+        }
+    }
+    if let Some(bits) = weak {
+        crate::kprintln!(
+            "  [tls] WARNING: {} of {} entropy bits. Keys for this handshake are              timing-derived, not random.",
+            bits,
+            crate::rng::SEEDED_BITS
+        );
     }
     let pubkey = x25519::public_key(&secret);
 
