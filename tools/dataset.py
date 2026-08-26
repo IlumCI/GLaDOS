@@ -579,12 +579,137 @@ def emit_rust(path, train, test):
     print(f"  wrote {path}")
 
 
+# --- the namespace bundle -----------------------------------------------
+#
+# `emit_rust` above compiles the corpus into the kernel, which is what lets the
+# system route before anything is mounted. This writes the same examples in the
+# shape `/ai/train` actually holds -- one blob per example, "applet<tab>task" --
+# so a corpus can be *replaced* on a running machine rather than only at build
+# time. That is what the adapter trainer needs: a corpus it can grow without a
+# rebuild, snapshotted by `snap` and undone by `back` like everything else in
+# the namespace.
+#
+# One file rather than one file per example, because the kernel pulls host
+# files in with `fat get <esp-path> <namespace-path>`, one command each. Four
+# hundred examples would be four hundred commands over a serial line; the
+# bundle is that transfer once, unpacked in the kernel.
+#
+# The header carries the split boundaries, and has to. The kernel's held-out
+# number comes from positional constants compiled from *this* generator
+# (SEED_TRAIN, SEED_VAL_END), so importing a corpus of a different size without
+# moving them would report a score measured over the wrong slice -- the "test
+# set that moved" failure the three-way split exists to prevent, arriving by a
+# new route.
+
+BUNDLE_MAGIC = b"GLADOSC1"
+BUNDLE_HEADER = 24
+# `vocab::record` names blobs with exactly four digits and truncates silently
+# past that, so sorted order stops being insertion order at 10000 and every
+# positional split boundary becomes a lie. Refuse rather than wrap.
+BUNDLE_MAX = 10000
+
+
+def bundle_bytes(train, test):
+    """Serialise train + test as one GLADOSC1 bundle.
+
+    Layout -- all integers little-endian u32:
+
+        0    8   magic "GLADOSC1"
+        8    4   count
+        12   4   train     -- records [0, train) are training examples
+        16   4   val_end   -- [train, val_end) validate, [val_end, count) test
+        20   4   reserved, zero
+        24       count records of: name_len, name, body_len, body
+
+    Names are leaf names and never paths: the importer joins each onto a
+    destination directory it was given. A bundle able to name
+    `/ai/agent/policy` would be a corpus file with write access to the rest of
+    the namespace, and no corpus has a reason to want one.
+
+    Length-prefixed throughout and read by walking, never seeking -- the same
+    bargain `v4.py` makes, for the same reason. There are no names or shapes in
+    the body to disagree about, so a writer/reader mismatch about one length
+    leaves everything after it as perfectly valid records of the wrong text.
+    """
+    records = [(f"{i:04d}", f"{e['applet']}\t{e['task']}")
+               for i, e in enumerate(train + test)]
+    if len(records) >= BUNDLE_MAX:
+        raise SystemExit(
+            f"  {len(records)} examples exceeds the {BUNDLE_MAX}-blob naming "
+            f"width the kernel uses; widen vocab::record first")
+
+    val_end = len(train) + len(test) // 2
+    out = bytearray(BUNDLE_MAGIC)
+    for v in (len(records), len(train), val_end, 0):
+        out += v.to_bytes(4, "little")
+    for name, body in records:
+        nb, bb = name.encode("utf-8"), body.encode("utf-8")
+        out += len(nb).to_bytes(4, "little") + nb
+        out += len(bb).to_bytes(4, "little") + bb
+    return bytes(out)
+
+
+def read_bundle(blob):
+    """Walk a bundle back. Returns (records, count, train, val_end).
+
+    The mirror of the kernel's importer, and the reason `--blobs` verifies
+    rather than trusting: a bundle is opaque bytes on both sides of the ESP,
+    and the first moment a length error would otherwise surface is as a
+    training corpus quietly full of shifted text.
+    """
+    if len(blob) < BUNDLE_HEADER or blob[:8] != BUNDLE_MAGIC:
+        raise ValueError("not a GLADOSC1 bundle")
+
+    def u32(off):
+        return int.from_bytes(blob[off:off + 4], "little")
+
+    count, train, val_end = u32(8), u32(12), u32(16)
+    if not (train <= val_end <= count):
+        raise ValueError(f"split boundaries out of order: {train}/{val_end}/{count}")
+
+    records, off = [], BUNDLE_HEADER
+    for i in range(count):
+        fields = []
+        for _ in range(2):
+            if off + 4 > len(blob):
+                raise ValueError(f"record {i}: truncated length prefix")
+            n = u32(off)
+            off += 4
+            if off + n > len(blob):
+                raise ValueError(f"record {i}: length {n} runs past the end")
+            fields.append(blob[off:off + n].decode("utf-8"))
+            off += n
+        records.append(tuple(fields))
+    # Landing anywhere else means a length was written that nothing read.
+    if off != len(blob):
+        raise ValueError(f"{len(blob) - off} trailing bytes after {count} records")
+    return records, count, train, val_end
+
+
+def emit_bundle(path, train, test):
+    blob = bundle_bytes(train, test)
+    Path(path).write_bytes(blob)
+
+    records, count, tr, ve = read_bundle(blob)
+    expect = [(f"{i:04d}", f"{e['applet']}\t{e['task']}")
+              for i, e in enumerate(train + test)]
+    if records != expect:
+        raise SystemExit("  bundle did not survive its own round trip")
+    print(f"  wrote {path}  ({len(blob)} bytes, {count} blobs, "
+          f"train [0,{tr}) val [{tr},{ve}) test [{ve},{count}))")
+    print(f"  import it with: fat get <esp-path> /tmp/corpus.bin"
+          f" ; teach bundle /tmp/corpus.bin")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("out", type=Path)
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--test-families", type=int, default=1)
     ap.add_argument("--rust", type=Path, default=None)
+    ap.add_argument("--blobs", type=Path, default=None,
+                    help="also write a GLADOSC1 bundle of /ai/train blobs, "
+                         "importable on a running kernel with 'teach bundle'")
     args = ap.parse_args()
 
     train, test = build(args.seed, args.test_families)
@@ -594,6 +719,9 @@ def main():
     )
     if args.rust:
         emit_rust(args.rust, train, test)
+    if args.blobs:
+        args.blobs.parent.mkdir(parents=True, exist_ok=True)
+        emit_bundle(args.blobs, train, test)
 
     classes = sorted(FAMILIES)
     print(f"  {len(classes)} applets")

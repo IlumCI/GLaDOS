@@ -55,6 +55,35 @@ Use the project venv — there is no Python on PATH:
 .\tools\venv\Scripts\python.exe tools\tokenizer.py tools\qwen3\tokenizer.json esp\GLADOS\tokenizer.bin --verify
 ```
 
+`dataset.py --blobs` writes the same examples a second way: a `GLADOSC1`
+bundle holding the corpus in the shape `/ai/train` actually stores it, so a
+corpus can be replaced on a *running* machine instead of only at build time.
+The kernel side is `teach bundle`, and the transfer is whatever puts the file
+in the namespace:
+
+```powershell
+.\tools\venv\Scripts\python.exe tools\dataset.py out\corpus.json --blobs out\corpus.bin
+.\tools\venv\Scripts\python.exe tools\mkfat.py .qemu\nvme.img out\corpus.bin
+.\tools\venv\Scripts\python.exe tools\drive.py "initiative off" "fat get /CORPUS.BIN /tmp/corpus.bin" "teach bundle /tmp/corpus.bin"
+```
+
+Under QEMU the ESP is VVFAT on a different device than the one `fat` scans, so
+the bundle travels in the NVMe test image; on the GF63 the ESP is a partition
+on the same disk and `fat get` reads it directly from `esp\GLADOS\`.
+
+**`teach bundle` replaces the corpus, and it must.** The bundle carries split
+*positions* in its header, and the kernel takes its held-out boundaries from
+those (`vocab::splits`) rather than from the compiled `SEED_TRAIN` /
+`SEED_VAL_END` once one has been imported. Appending instead of replacing
+would leave the boundaries describing a corpus that no longer exists -- the
+same "test set that moved" failure the three-way split exists to prevent,
+arriving by a different route. `teach` on a live system still appends, and
+anything past the recorded length trains.
+
+Also: **`initiative off` first when driving QEMU.** The resident mind wakes
+fifteen seconds in and takes the engine for a whole episode, which reads as
+`drive.py` timing out with commands unsent.
+
 `tools/qwen3/` and `tools/hf/` hold safetensors checkpoints. `convert.py <src>
 <dst> [--f32] [--seq N]` flattens one into the `GLADOSM3` layout
 `ai::model::offsets` indexes by arithmetic. `--seq` sets the context window and

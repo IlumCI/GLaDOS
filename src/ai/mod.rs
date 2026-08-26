@@ -925,6 +925,17 @@ pub fn init(model_blob: Option<Blob>, tok_blob: Option<Blob>) {
     console::set_color(LTGRAY);
 
     console::set_color(LTGREEN);
+    kprintln!("\n[selftest] corpus bundles:");
+    console::set_color(LTGRAY);
+    if vocab::bundle_selftest() {
+        console::set_color(LTGRAY);
+    } else {
+        console::set_color(LTRED);
+        kprintln!("  FAIL -- a corpus transfer would land as valid-looking wrong text");
+    }
+    console::set_color(LTGRAY);
+
+    console::set_color(LTGREEN);
     kprintln!("\n[selftest] qdora adapters:");
     console::set_color(LTGRAY);
     if adapter::selftest() {

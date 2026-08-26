@@ -803,6 +803,36 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
         // time. Whitespace-separated rather than tab-separated: a tab is
         // awkward to type in a modal editor, and the applet name never
         // contains a space.
+        // `teach bundle <path>` replaces the whole corpus from one blob --
+        // the transfer `fat get` leaves in the namespace. Replacing rather
+        // than appending, because the bundle carries split *positions* and a
+        // merge would leave them describing a corpus that no longer exists.
+        "teach" if rest.starts_with("bundle ") => {
+            let path = rest[7..].trim();
+            match crate::sysbox::read_blob(path) {
+                None => kprintln!("  no such file: {}", path),
+                Some(bytes) => {
+                    let n = bytes.len();
+                    match crate::ai::vocab::import_bundle(crate::ai::vocab::CORPUS, &bytes) {
+                        Err(e) => kprintln!("  {}: {:?} -- corpus untouched", path, e),
+                        Ok(count) => {
+                            let (train, val_end, len) = crate::ai::vocab::splits();
+                            kprintln!(
+                                "  {} examples from {} bytes -> {}",
+                                count,
+                                n,
+                                crate::ai::vocab::CORPUS
+                            );
+                            kprintln!(
+                                "  train [0,{})  validation [{},{})  test [{},{})",
+                                train, train, val_end, val_end, len
+                            );
+                            kprintln!("  'fit' to rebuild the router from them");
+                        }
+                    }
+                }
+            }
+        }
         "teach" if rest.starts_with("file ") => {
             let path = rest[5..].trim();
             match crate::sysbox::read_blob(path) {

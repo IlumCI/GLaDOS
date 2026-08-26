@@ -530,8 +530,12 @@ pub struct TrainReport {
 /// training items into the test set and report memorisation as generalisation.
 /// Anything appended later by `teach` lands past the seed and trains.
 fn is_held_out(i: usize) -> bool {
-    let seed = super::corpus::SEED.len();
-    i >= super::corpus::SEED_TRAIN && i < seed
+    // Boundaries rather than constants: `vocab::splits` returns the compiled
+    // ones until a bundle is imported over the corpus, and the imported ones
+    // after. Reading the constants directly here would have measured a new
+    // corpus against the old corpus's positions.
+    let (train, _, seed) = vocab::splits();
+    i >= train && i < seed
 }
 
 pub fn train(epochs: usize, lr: f32) -> Option<TrainReport> {
@@ -1246,10 +1250,10 @@ impl Rule {
 }
 
 fn split_of(i: usize) -> u8 {
-    let seed = super::corpus::SEED.len();
-    if i < super::corpus::SEED_TRAIN {
+    let (train, val_end, seed) = vocab::splits();
+    if i < train {
         0 // train
-    } else if i < super::corpus::SEED_VAL_END {
+    } else if i < val_end {
         1 // validation
     } else if i < seed {
         2 // test

@@ -373,3 +373,312 @@ pub fn examples() -> Vec<Example> {
     out
 }
 
+
+// --- corpus bundles -----------------------------------------------------
+//
+// `teach` records one example at a time and `corpus.rs` compiles a fixed set
+// in at build time. Neither lets a corpus be *replaced* on a running machine,
+// which is what adapter training needs: the trainer's material has to be able
+// to grow without a rebuild, and to be snapshotted and undone like everything
+// else in the namespace.
+//
+// A bundle is that transfer, in one file. The kernel pulls host files in with
+// `fat get <esp-path> <namespace-path>`, one command each -- four hundred
+// examples one at a time is four hundred commands over a serial line -- so the
+// examples travel as one blob and are unpacked here.
+//
+// Written by `tools/dataset.py --blobs`. The format is documented there in
+// full; the invariants worth restating on this side are that every field is
+// length-prefixed, that the reader *walks and never seeks*, and that it must
+// land exactly on the last byte. There are no names or shapes in the body to
+// disagree about, so one length read wrongly leaves everything after it as
+// perfectly valid records of the wrong text -- the same bargain `v4.rs` makes
+// about checkpoints, for the same reason.
+
+/// Split boundaries for an imported corpus, as text: `train val_end count`.
+///
+/// A sibling of the corpus directory rather than a member of it, because
+/// `children(CORPUS)` *is* the example list and a boundary file living inside
+/// it would be read back as an example whose applet is "357".
+pub const SPLITS: &str = "/ai/train.split";
+
+const BUNDLE_MAGIC: &[u8; 8] = b"GLADOSC1";
+const BUNDLE_HEADER: usize = 24;
+
+pub struct Bundle {
+    pub records: Vec<(String, Vec<u8>)>,
+    /// Records `[0, train)` train, `[train, val_end)` validate, the rest test.
+    pub train: usize,
+    pub val_end: usize,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum BundleError {
+    NotABundle,
+    /// A length prefix ran off the end, at this record index.
+    Truncated(usize),
+    /// A field claimed more bytes than the blob has, at this record index.
+    Overrun(usize),
+    /// Bytes left over after the declared record count.
+    Trailing(usize),
+    /// `train <= val_end <= count` does not hold.
+    Boundaries,
+    /// A name that is not a single namespace leaf, at this record index.
+    BadName(usize),
+}
+
+/// Parse a bundle without touching the namespace.
+///
+/// Kept separate from `import_bundle` so the boot self-test can drive every
+/// rejection path without writing a corpus into the live tree to do it.
+pub fn parse_bundle(blob: &[u8]) -> Result<Bundle, BundleError> {
+    if blob.len() < BUNDLE_HEADER || &blob[..8] != BUNDLE_MAGIC {
+        return Err(BundleError::NotABundle);
+    }
+    let u32_at = |o: usize| {
+        u32::from_le_bytes([blob[o], blob[o + 1], blob[o + 2], blob[o + 3]]) as usize
+    };
+    let (count, train, val_end) = (u32_at(8), u32_at(12), u32_at(16));
+    if !(train <= val_end && val_end <= count) {
+        return Err(BundleError::Boundaries);
+    }
+
+    let mut records: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut off = BUNDLE_HEADER;
+    for i in 0..count {
+        let mut field: [&[u8]; 2] = [&[], &[]];
+        for f in field.iter_mut() {
+            if off + 4 > blob.len() {
+                return Err(BundleError::Truncated(i));
+            }
+            let n = u32_at(off);
+            off += 4;
+            if off + n > blob.len() {
+                return Err(BundleError::Overrun(i));
+            }
+            *f = &blob[off..off + n];
+            off += n;
+        }
+        let Ok(name) = core::str::from_utf8(field[0]) else {
+            return Err(BundleError::BadName(i));
+        };
+        // A leaf name, never a path. The alternative -- letting a bundle name
+        // its own destinations -- is a corpus file with write access to the
+        // whole namespace, and no corpus has a reason to want one.
+        if name.is_empty() || name.contains('/') || name == "." || name == ".." {
+            return Err(BundleError::BadName(i));
+        }
+        records.push((String::from(name), field[1].to_vec()));
+    }
+    if off != blob.len() {
+        return Err(BundleError::Trailing(blob.len() - off));
+    }
+    Ok(Bundle { records, train, val_end })
+}
+
+/// Unpack a bundle into `dir`, replacing whatever was there, and write the
+/// split boundaries beside it.
+///
+/// Replacing rather than appending is the only coherent choice: the boundaries
+/// are *positions*, so a bundle merged into an existing corpus would describe
+/// a slice of a corpus that no longer exists, and the held-out number would be
+/// computed over the wrong examples while still looking like a number.
+pub fn import_bundle(dir: &str, blob: &[u8]) -> Result<usize, BundleError> {
+    let b = parse_bundle(blob)?;
+
+    for name in sysbox::children(dir) {
+        let mut path = String::from(dir);
+        path.push('/');
+        path.push_str(&name);
+        sysbox::detach(&path);
+    }
+
+    let mut n = 0usize;
+    for (name, body) in b.records {
+        let mut path = String::from(dir);
+        path.push('/');
+        path.push_str(&name);
+        if sysbox::write_blob(&path, body) {
+            n += 1;
+        }
+    }
+
+    let mut splits = String::new();
+    write_usize(&mut splits, b.train);
+    splits.push(' ');
+    write_usize(&mut splits, b.val_end);
+    splits.push(' ');
+    write_usize(&mut splits, n);
+    splits.push('\n');
+    let mut spath = String::from(dir);
+    spath.push_str(".split");
+    sysbox::write_text(&spath, &splits);
+
+    Ok(n)
+}
+
+fn write_usize(out: &mut String, mut v: usize) {
+    if v == 0 {
+        out.push('0');
+        return;
+    }
+    let mut digits = [0u8; 20];
+    let mut n = 0;
+    while v > 0 {
+        digits[n] = b'0' + (v % 10) as u8;
+        v /= 10;
+        n += 1;
+    }
+    while n > 0 {
+        n -= 1;
+        out.push(digits[n] as char);
+    }
+}
+
+/// The corpus split boundaries: `(train, val_end, len)`.
+///
+/// The compiled constants unless a bundle has been imported over the corpus,
+/// in which case the boundaries that came with it. Everything past `len`
+/// trains, which is what makes `teach` on a live system safe: an appended
+/// example can only ever join the training slice, never silently enter the
+/// one number that is supposed to be read once.
+///
+/// The stored boundaries are used only while they still describe the corpus
+/// that is actually present. A recorded count *larger* than the directory
+/// means the two have diverged -- somebody detached examples by hand -- and a
+/// stale boundary is worse than a conservative one, so it is discarded.
+pub fn splits() -> (usize, usize, usize) {
+    let n = sysbox::children(CORPUS).len();
+    if let Some(bytes) = sysbox::read_blob(SPLITS) {
+        if let Ok(text) = core::str::from_utf8(&bytes) {
+            let mut it = text.split_whitespace().filter_map(|w| w.parse::<usize>().ok());
+            if let (Some(t), Some(v), Some(c)) = (it.next(), it.next(), it.next()) {
+                if t <= v && v <= c && c <= n {
+                    return (t, v, c);
+                }
+            }
+        }
+    }
+    (
+        super::corpus::SEED_TRAIN,
+        super::corpus::SEED_VAL_END,
+        super::corpus::SEED.len(),
+    )
+}
+
+/// Boot self-test for the bundle reader. Five claims.
+///
+/// Claim 1 is the one that matters and it is deliberately not a round trip
+/// through a writer on this side. The writer is `tools/dataset.py` and the
+/// reader is here, so a Rust writer checked against the Rust reader would
+/// prove only that two halves of the same misunderstanding agree. The fixture
+/// below is bytes that generator actually produced, pasted in, which makes the
+/// claim "these two tools agree about the format" rather than "this file is
+/// self-consistent".
+///
+/// The rest are the rejections. Every one of them is a length or a name read
+/// wrongly, and none of them would announce itself at training time: a corpus
+/// shifted by four bytes is still a corpus of valid-looking strings.
+pub fn bundle_selftest() -> bool {
+    use crate::kprintln;
+
+    // tools/dataset.py: bundle_bytes([ls/list the files, cat/show me /ai/notes],
+    // [mv/rename a to b]) -- two training records, one test, val_end == train
+    // because a single test record halves to zero.
+    const FIXTURE: &[u8] = &[
+        0x47, 0x4c, 0x41, 0x44, 0x4f, 0x53, 0x43, 0x31, 0x03, 0x00, 0x00, 0x00,
+        0x02, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x04, 0x00, 0x00, 0x00, 0x30, 0x30, 0x30, 0x30, 0x11, 0x00, 0x00, 0x00,
+        0x6c, 0x73, 0x09, 0x6c, 0x69, 0x73, 0x74, 0x20, 0x74, 0x68, 0x65, 0x20,
+        0x66, 0x69, 0x6c, 0x65, 0x73, 0x04, 0x00, 0x00, 0x00, 0x30, 0x30, 0x30,
+        0x31, 0x15, 0x00, 0x00, 0x00, 0x63, 0x61, 0x74, 0x09, 0x73, 0x68, 0x6f,
+        0x77, 0x20, 0x6d, 0x65, 0x20, 0x2f, 0x61, 0x69, 0x2f, 0x6e, 0x6f, 0x74,
+        0x65, 0x73, 0x04, 0x00, 0x00, 0x00, 0x30, 0x30, 0x30, 0x32, 0x10, 0x00,
+        0x00, 0x00, 0x6d, 0x76, 0x09, 0x72, 0x65, 0x6e, 0x61, 0x6d, 0x65, 0x20,
+        0x61, 0x20, 0x74, 0x6f, 0x20, 0x62,
+    ];
+
+    let mut ok = true;
+    let mut claim = |what: &str, pass: bool| {
+        if !pass {
+            ok = false;
+        }
+        kprintln!("  {}  {}", if pass { "ok " } else { "FAIL" }, what);
+    };
+
+    match parse_bundle(FIXTURE) {
+        Ok(b) => {
+            let shape = b.records.len() == 3 && b.train == 2 && b.val_end == 2;
+            let names = b.records[0].0 == "0000"
+                && b.records[1].0 == "0001"
+                && b.records[2].0 == "0002";
+            let bodies = b.records[0].1 == b"ls\tlist the files"
+                && b.records[1].1 == b"cat\tshow me /ai/notes"
+                && b.records[2].1 == b"mv\trename a to b";
+            claim("a bundle from tools/dataset.py parses to what it was built from",
+                  shape && names && bodies);
+        }
+        Err(e) => {
+            claim("a bundle from tools/dataset.py parses", false);
+            kprintln!("    {:?}", e);
+        }
+    }
+
+    // One byte short: the last body claims more than remains.
+    claim(
+        "one byte short is caught rather than read as a shorter example",
+        parse_bundle(&FIXTURE[..FIXTURE.len() - 1]).err() == Some(BundleError::Overrun(2)),
+    );
+
+    // One byte long: every record parsed and something is still left.
+    let mut long = Vec::from(FIXTURE);
+    long.push(0);
+    claim(
+        "a byte past the last record is caught",
+        parse_bundle(&long).err() == Some(BundleError::Trailing(1)),
+    );
+
+    claim(
+        "a blob that is not a bundle is refused",
+        parse_bundle(b"GLADOSM3 not this one either").err() == Some(BundleError::NotABundle),
+    );
+
+    // A name that is a path rather than a leaf. Assembled here by hand from
+    // the documented layout, because the generator will not write one.
+    let mut escape: Vec<u8> = Vec::new();
+    escape.extend_from_slice(BUNDLE_MAGIC);
+    for v in [1u32, 1, 1, 0] {
+        escape.extend_from_slice(&v.to_le_bytes());
+    }
+    let name = b"../agent/policy";
+    escape.extend_from_slice(&(name.len() as u32).to_le_bytes());
+    escape.extend_from_slice(name);
+    escape.extend_from_slice(&3u32.to_le_bytes());
+    escape.extend_from_slice(b"own");
+    claim(
+        "a record naming a path outside its directory is refused",
+        parse_bundle(&escape).err() == Some(BundleError::BadName(0)),
+    );
+
+    // The write side, in a scratch directory so the live corpus is untouched.
+    const SCRATCH: &str = "/tmp/bundle-selftest";
+    let imported = import_bundle(SCRATCH, FIXTURE);
+    let landed = sysbox::children(SCRATCH).len();
+    let split = sysbox::read_blob("/tmp/bundle-selftest.split")
+        .and_then(|b| core::str::from_utf8(&b).ok().map(String::from))
+        .unwrap_or_default();
+    claim(
+        "importing writes every blob and the boundaries beside them",
+        imported.ok() == Some(3) && landed == 3 && split.trim() == "2 2 3",
+    );
+    for name in sysbox::children(SCRATCH) {
+        let mut p = String::from(SCRATCH);
+        p.push('/');
+        p.push_str(&name);
+        sysbox::detach(&p);
+    }
+    sysbox::detach(SCRATCH);
+    sysbox::detach("/tmp/bundle-selftest.split");
+
+    ok
+}
