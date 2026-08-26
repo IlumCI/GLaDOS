@@ -162,13 +162,16 @@ pub const STEPS: &[Step] = &[
                slice, so ask for more examples.",
     },
     Step {
-        title: "Swap Qwen3.5 in for Qwen3",
+        title: "Qwen3.5-2B is already staged",
         place: Place::Glados,
-        cmd: "on S:\\GLADOS: rename model.bin -> q3.bin, then q35.bin -> model.bin",
-        expect: "next boot's [ai] line shows dim 1024, 24 layers, the hybrid. \
-                 Keep both files -- do not overwrite.",
-        fail: "[ai] still shows dim 576 -> the rename did not take; check you \
-               edited the ESP (S:) and not a stale copy.",
+        cmd: "(nothing to run -- model.bin on the stick is the 2B)",
+        expect: "the [ai] line shows dim 2048, 24 layers, vocab 248320, \
+                 the hybrid. q3.bin and q3-tokenizer.bin hold the working \
+                 0.6B; two renames put it back. q35.bin is the 0.8B.",
+        fail: "[ai] shows dim 576 or 1024 -> the stick has an older \
+               model.bin; re-run deploy.ps1. Out of memory reading the \
+               checkpoint -> the 1.8 GB pool is read before \
+               ExitBootServices and needs the ram to be there.",
     },
     Step {
         title: "Verify Qwen3.5 logits vs the oracle",
