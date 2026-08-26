@@ -629,6 +629,42 @@ pub fn selftest() -> bool {
             "  {}  full qdora site gradients pass finite differences",
             if dora_ok { "ok " } else { "FAIL" }
         );
+
+        // --- claim 10: the row-restricted backward is the same function ---
+        //
+        // The trainer walks a few dozen classifier rows instead of 151,936,
+        // and that is only sound because every term in the row loop carries
+        // gy[o] as a factor -- restricted cross-entropy zeroes gy outside the
+        // candidate set, so a skipped row contributes exactly zero. The two
+        // paths share one per-row body, so this is checking that the sharing
+        // still holds and that the row indices line up, not that two
+        // implementations of the same maths agree.
+        //
+        // Bit-exact rather than approximate. Both paths accumulate the same
+        // terms in the same order, so anything other than equality is a
+        // defect rather than drift.
+        let touched: Vec<u32> = alloc::vec![1, 3, 5];
+        let mut gy_sparse = vec![0.0f32; o3];
+        for &o in touched.iter() {
+            gy_sparse[o as usize] = gy3[o as usize];
+        }
+        let (mut ga_f, mut gb_f, mut dm_f) =
+            (vec![0.0f32; r3 * k3], vec![0.0f32; o3 * r3], vec![0.0f32; o3]);
+        dd.backward(&mat, &x3, &ax0, &base, &gy_sparse, &mut ga_f, &mut gb_f, &mut dm_f);
+
+        let base_rows: Vec<f32> = touched.iter().map(|&o| base[o as usize]).collect();
+        let gy_rows: Vec<f32> = touched.iter().map(|&o| gy3[o as usize]).collect();
+        let (mut ga_r, mut gb_r, mut dm_r) =
+            (vec![0.0f32; r3 * k3], vec![0.0f32; o3 * r3], vec![0.0f32; o3]);
+        dd.backward_rows(
+            &mat, &x3, &ax0, &base_rows, &gy_rows, &touched, &mut ga_r, &mut gb_r, &mut dm_r,
+        );
+        let rows_ok = ga_f == ga_r && gb_f == gb_r && dm_f == dm_r;
+        crate::kprintln!(
+            "  {}  restricted backward equals the full walk on the rows that matter",
+            if rows_ok { "ok " } else { "FAIL" }
+        );
+
         q8_ok
             && f32_ok
             && fd_ok
@@ -638,5 +674,6 @@ pub fn selftest() -> bool {
             && att_ok
             && rope_ok
             && dora_ok
+            && rows_ok
     }
 }

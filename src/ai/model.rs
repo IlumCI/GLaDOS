@@ -1727,7 +1727,7 @@ impl Model {
             _ => self.mat(self.o.token_embedding, self.blob_off().embed, 0, v, d),
         }
     }
-    fn classifier(&self) -> Mat<'_> {
+    pub(crate) fn classifier(&self) -> Mat<'_> {
         let (d, v) = (self.cfg.dim, self.cfg.vocab_size);
         if self.cfg.shared_classifier {
             return self.embed_mat();
@@ -1947,6 +1947,142 @@ impl Model {
         Ok(())
     }
 
+    /// Attach without the seeding pass over every adapted row.
+    ///
+    /// An unseeded row is already the identity -- `s` starts at 1.0 and the
+    /// low-rank branch starts at zero -- so this changes no output. What the
+    /// seeding pass adds is `m` set to the frozen row norm, which only
+    /// matters for a row that is about to receive a gradient, and the caller
+    /// that knows which rows those are can seed them itself with
+    /// `Dora::refresh_rows`.
+    ///
+    /// That distinction is the difference between a classifier fine-tune
+    /// being possible in this kernel and not: seeding 151,936 rows is a
+    /// dequant pass over 155 MB, and the decision layer reaches a few dozen
+    /// of them.
+    pub fn attach_adapters_unseeded(
+        &mut self,
+        ad: super::adapter::Adapters,
+    ) -> Result<(), &'static str> {
+        if self.cfg.hybrid() {
+            return Err("hybrid adapters are not supported yet");
+        }
+        self.adapters = Some(ad);
+        Ok(())
+    }
+
+    /// Write every attached adapter to a namespace path.
+    ///
+    /// The blob is the adapter alone. Reloading it against a different
+    /// checkpoint is refused rather than reinterpreted, and the frozen
+    /// weights are neither read nor written here.
+    pub fn save_adapters(&self, path: &str) -> Option<usize> {
+        let blob = self.adapters.as_ref()?.to_blob();
+        let n = blob.len();
+        if crate::sysbox::write_blob(path, blob) {
+            Some(n)
+        } else {
+            None
+        }
+    }
+
+    /// Read an adapter back and attach it.
+    ///
+    /// Shapes are checked against this model's config before anything is
+    /// built: an adapter trained for another geometry is an error, not a
+    /// reshape, because the alternative is a model that loads, runs, stays
+    /// numerically well-behaved and means something else.
+    ///
+    /// `s` is recomputed rather than read, for the rows the file actually
+    /// carries. It is a function of the frozen weight, which the file does
+    /// not contain -- so recomputing is the only way for the two to be
+    /// guaranteed to agree, and every row the file leaves out is already the
+    /// identity at s = 1.0.
+    pub fn load_adapters(&mut self, blob: &[u8]) -> Result<usize, super::adapter::AdapterError> {
+        use super::adapter::{AdapterError, Adapters, Dora};
+
+        if self.cfg.hybrid() {
+            return Err(AdapterError::Hybrid);
+        }
+        let parsed = super::adapter::parse_adapter(blob)?;
+        if parsed.n_layers != self.cfg.n_layers {
+            return Err(AdapterError::Shape(parsed.n_layers, self.cfg.n_layers));
+        }
+
+        let mut ad = Adapters {
+            r: parsed.r,
+            alpha: parsed.alpha,
+            qkv: (0..self.cfg.n_layers).map(|_| [None, None, None]).collect(),
+            cls: None,
+        };
+
+        let mut touched: Vec<(u32, usize, Vec<u32>)> = Vec::new();
+        for (i, site) in parsed.sites.iter().enumerate() {
+            let want_in = self.cfg.dim;
+            let want_out = match site.kind {
+                0 => self.cfg.q_dim(),
+                1 | 2 => self.cfg.kv_dim(),
+                3 => self.cfg.vocab_size,
+                k => return Err(AdapterError::UnknownSite(k)),
+            };
+            if site.k_in != want_in {
+                return Err(AdapterError::Shape(site.k_in, want_in));
+            }
+            if site.out != want_out {
+                return Err(AdapterError::Shape(site.out, want_out));
+            }
+            if site.kind < 3 && site.layer >= self.cfg.n_layers {
+                return Err(AdapterError::Row(i));
+            }
+
+            let mut d = Dora::new(parsed.r, parsed.alpha, site.k_in, site.out);
+            d.a.copy_from_slice(&site.a);
+            let mut rows = Vec::with_capacity(site.rows.len());
+            for (o, brow, m) in site.rows.iter() {
+                let o = *o as usize;
+                d.b[o * parsed.r..(o + 1) * parsed.r].copy_from_slice(brow);
+                d.m[o] = *m;
+                rows.push(o as u32);
+            }
+            touched.push((site.kind, site.layer, rows));
+            match site.kind {
+                0 => ad.qkv[site.layer][0] = Some(d),
+                1 => ad.qkv[site.layer][1] = Some(d),
+                2 => ad.qkv[site.layer][2] = Some(d),
+                _ => ad.cls = Some(d),
+            }
+        }
+
+        // Recompute the cached scales, for the stored rows only. `false`
+        // because the magnitudes came from the file: seeding here would
+        // overwrite what was trained with the frozen row norm and quietly
+        // undo the run that produced this adapter.
+        {
+            let me = &*self;
+            for (kind, layer, rows) in touched.iter() {
+                let w = match kind {
+                    0 => me.wq(*layer),
+                    1 => me.wk(*layer),
+                    2 => me.wv(*layer),
+                    _ => me.classifier(),
+                };
+                let slot = match kind {
+                    0 => ad.qkv[*layer][0].as_mut(),
+                    1 => ad.qkv[*layer][1].as_mut(),
+                    2 => ad.qkv[*layer][2].as_mut(),
+                    _ => ad.cls.as_mut(),
+                };
+                if let Some(d) = slot {
+                    d.refresh_rows(&w, rows, false);
+                }
+            }
+        }
+
+        let n = parsed.sites.len();
+        self.adapters = Some(ad);
+        Ok(n)
+    }
+
     pub fn detach_adapters(&mut self) -> Option<super::adapter::Adapters> {
         self.adapters.take()
     }
@@ -2036,6 +2172,36 @@ impl Model {
                 self.wq(l).matvec_batch(&mut qb, &xn, n);
                 self.wk(l).matvec_batch(&mut kb, &xn, n);
                 self.wv(l).matvec_batch(&mut vb, &xn, n);
+
+                // The adapted sites, row by row over the batch.
+                //
+                // This pass used to be missing, and it was missing silently:
+                // an adapted model prefilled its prompt through the frozen
+                // weights and then decoded through the adapted ones, so the
+                // same position computed two different things depending on
+                // which path reached it. Nothing faults, no logit is
+                // non-finite, and the model stays fluent -- the failure mode
+                // this whole subsystem is built to refuse. `wrap_matvec` is
+                // deliberately not reused here: it recomputes the base, and
+                // the base for the whole batch has just been computed above.
+                if let Some(ad) = self.adapters.as_ref() {
+                    let mut ax = [0.0f32; super::adapter::MAX_RANK];
+                    for (site, out, width) in [
+                        (0usize, &mut qb, qd),
+                        (1, &mut kb, kvd),
+                        (2, &mut vb, kvd),
+                    ] {
+                        let Some(dora) = ad.qkv[l][site].as_ref() else { continue };
+                        for t in 0..n {
+                            let xrow = &xn[t * d..(t + 1) * d];
+                            dora.apply(
+                                &mut out[t * width..(t + 1) * width],
+                                xrow,
+                                &mut ax[..dora.r],
+                            );
+                        }
+                    }
+                }
 
                 // QK-Norm before anything is cached, per head per row, the
                 // order the single-token pass established.
@@ -2153,7 +2319,15 @@ impl Model {
                 self.rms_final_w(),
                 eps,
             );
-            self.classifier().matvec(&mut s.logits, &s.xb);
+            match self.adapters.as_ref().and_then(|a| a.cls.as_ref()) {
+                Some(dora) => {
+                    let xb = &s.xb;
+                    let mut la = core::mem::take(&mut s.la);
+                    self.classifier().wrap_matvec(dora, xb, &mut la, &mut s.logits);
+                    s.la = la;
+                }
+                None => self.classifier().matvec(&mut s.logits, &s.xb),
+            }
             // Parity with `forward`: the final hidden stays in `x`.
             s.x[..d].copy_from_slice(&x[last * d..(last + 1) * d]);
         }

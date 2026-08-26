@@ -938,7 +938,11 @@ pub fn init(model_blob: Option<Blob>, tok_blob: Option<Blob>) {
     console::set_color(LTGREEN);
     kprintln!("\n[selftest] qdora adapters:");
     console::set_color(LTGRAY);
-    if adapter::selftest() {
+    // Both run, and neither short-circuits the other: a failure in one is
+    // not a reason to stop reporting the other's claims.
+    let sites_ok = adapter::selftest();
+    let blob_ok = adapter::blob_selftest();
+    if sites_ok && blob_ok {
         console::set_color(LTGRAY);
     } else {
         console::set_color(LTRED);

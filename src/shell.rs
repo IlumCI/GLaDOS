@@ -993,11 +993,101 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             }
         }
         "zeroshot" => crate::ai::harness::zero_shot_report(if rest.is_empty() { "diff" } else { rest }),
+        // `adapter` -- what is attached, and moving it in and out of the
+        // namespace. The blob is the adapter alone; the frozen checkpoint is
+        // never written, which is what makes saving one cheap enough to do
+        // before every change rather than after the interesting ones.
+        "adapter" => {
+            const DEFAULT: &str = "/ai/adapter.bin";
+            let mut words = rest.split_whitespace();
+            let verb = words.next().unwrap_or("");
+            let path = words.next().unwrap_or(DEFAULT);
+            match verb {
+                "save" => match crate::ai::with_engine(|e| e.model.save_adapters(path)) {
+                    None => kprintln!("  no engine, or another task holds it"),
+                    Some(None) => kprintln!("  nothing attached to save"),
+                    Some(Some(n)) => {
+                        kprintln!("  {} bytes -> {}", n, path);
+                        kprintln!("  'snap' versions it like anything else here");
+                    }
+                },
+                "load" => {
+                    let blob = crate::sysbox::read_blob(path);
+                    match blob {
+                        None => kprintln!("  no such file: {}", path),
+                        Some(b) => match crate::ai::with_engine(|e| e.model.load_adapters(&b)) {
+                            None => kprintln!("  no engine, or another task holds it"),
+                            Some(Err(e)) => {
+                                kprintln!("  {}: {:?} -- nothing attached", path, e)
+                            }
+                            Some(Ok(n)) => {
+                                kprintln!("  {} site(s) attached from {}", n, path)
+                            }
+                        },
+                    }
+                }
+                "off" | "detach" => match crate::ai::with_engine(|e| e.model.detach_adapters()) {
+                    None => kprintln!("  no engine, or another task holds it"),
+                    Some(None) => kprintln!("  nothing was attached"),
+                    Some(Some(_)) => kprintln!("  detached -- the frozen model is what runs now"),
+                },
+                "" | "status" => match crate::ai::with_engine(|e| {
+                    e.model.adapters.as_ref().map(|a| {
+                        let sites = a.qkv.iter().flatten().filter(|s| s.is_some()).count()
+                            + a.cls.is_some() as usize;
+                        (a.r, a.alpha, sites, a.resident_bytes())
+                    })
+                }) {
+                    None => kprintln!("  no engine, or another task holds it"),
+                    Some(None) => kprintln!("  none attached ('train adapter', or 'adapter load')"),
+                    Some(Some((r, alpha, sites, bytes))) => {
+                        kprintln!("  rank {}, alpha {}, {} site(s), {} KiB resident", r, alpha as u32, sites, bytes / 1024);
+                    }
+                },
+                _ => kprintln!("  usage: adapter [status|save|load|off] [path]"),
+            }
+        }
         "train" => {
-            let epochs: usize = rest.split_whitespace().next()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(20);
-            crate::ai::harness::train_report(epochs);
+            // Two trainers behind one verb, told apart by the first word.
+            // `train [epochs]` is the linear probe's head, unchanged; `train
+            // adapter ...` is the QDoRA run against the model's own
+            // classifier. Dispatched inside the arm rather than as a second
+            // guarded arm, because a guard placed after the arms it guards is
+            // unreachable and this file has already paid for that once.
+            let mut words = rest.split_whitespace();
+            match words.next() {
+                Some("adapter") => {
+                    let mut b = crate::ai::train::Budget::default();
+                    let mut bad: Option<&str> = None;
+                    while let Some(flag) = words.next() {
+                        let value = words.next().unwrap_or("");
+                        match (flag, value.parse::<u64>()) {
+                            ("-e", Ok(v)) => b.epochs = v as usize,
+                            ("-n", Ok(v)) => b.examples = v as usize,
+                            ("-ms", Ok(v)) => b.millis = v,
+                            ("-r", Ok(v)) => b.rank = v as usize,
+                            ("-lr", _) => match value.parse::<f32>() {
+                                Ok(v) => b.lr = v,
+                                Err(_) => bad = Some(value),
+                            },
+                            _ => bad = Some(flag),
+                        }
+                    }
+                    match bad {
+                        Some(w) => {
+                            kprintln!("  unrecognised: {}", w);
+                            kprintln!("  usage: train adapter [-e epochs] [-n examples] [-ms budget] [-r rank] [-lr rate]");
+                        }
+                        None => crate::ai::harness::adapter_train_report(&b),
+                    }
+                }
+                _ => {
+                    let epochs: usize = rest.split_whitespace().next()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(20);
+                    crate::ai::harness::train_report(epochs);
+                }
+            }
         }
         "think" => {
             if rest.is_empty() {
@@ -1166,6 +1256,9 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             kprintln!("  act <task>    choose an applet by constrained decoding");
             kprintln!("  route <task>  choose one with the probe -- no transformer");
             kprintln!("  teach <applet> <task>   add an example ('teach file <path>' for many)");
+            kprintln!("  teach bundle <path>     replace the whole corpus from one blob");
+            kprintln!("  train adapter [-e N]    train the model's own decision layer (needs AVX2)");
+            kprintln!("  adapter [save|load|off] what is attached, and moving it in and out");
             kprintln!("  fit [lambda]  refit the probe and the council on what it knows");
             kprintln!("  gate search   how often agreement is right; the config search");
             kprintln!("  ctx cont window logits probe feature zeroshot train");

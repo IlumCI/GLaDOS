@@ -136,6 +136,38 @@ impl<'a> Cursor<'a> {
         })
     }
 
+    /// Does `id` move the string toward alternative `alt` in particular?
+    ///
+    /// `candidates` asks whether *some* alternative stays reachable, which is
+    /// the question sampling needs. Teacher forcing needs the stronger one:
+    /// the trainer already knows which applet the example is labelled with,
+    /// and has to feed the token that spells it rather than whichever token
+    /// the untrained model would have picked.
+    ///
+    /// Leading-whitespace no-ops answer false. They are legal to sample and
+    /// carry no decision, so training on one would teach the model to spend a
+    /// step saying nothing.
+    pub fn advances_toward(&self, alphabet: &Alphabet, id: usize, alt: usize) -> bool {
+        let piece = alphabet.piece(id);
+        if piece.is_empty() {
+            return false;
+        }
+        if !self.started && piece.iter().all(|b| *b == b' ') {
+            return false;
+        }
+        let piece = self.trim_lead(piece);
+        if piece.is_empty() {
+            return false;
+        }
+        let Some(a) = self.grammar.alternatives.get(alt) else {
+            return false;
+        };
+        let n = self.produced.len();
+        a.len() >= n + piece.len()
+            && a.starts_with(&self.produced[..])
+            && a[n..].starts_with(piece)
+    }
+
     /// Token ids that may be sampled next. Empty means the decode is stuck,
     /// which the caller must treat as failure rather than sampling freely.
     pub fn candidates(&self, alphabet: &Alphabet) -> Vec<u32> {

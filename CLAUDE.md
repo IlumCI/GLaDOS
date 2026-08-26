@@ -142,6 +142,78 @@ they land on the last byte. `convert_hybrid` makes the same bargain on input:
 every tensor must be written or explicitly skipped, and anything else is an
 error rather than a silent omission.
 
+### Training the model's own decision layer
+
+Two different things in this tree are called training and confusing them makes
+every number ambiguous:
+
+- **`fit` / `train [epochs]`** move the linear probe and its head. Closed-form
+  ridge regression over hidden states; the checkpoint is never touched.
+- **`train adapter`** moves a QDoRA adapter over the model's *classifier*.
+  This is the model learning, in the only sense the word applies here.
+
+```
+train adapter [-e epochs] [-n examples] [-ms budget] [-r rank] [-lr rate]
+adapter [status|save|load|off] [path]
+```
+
+**It refuses to run without AVX2/FMA** (`train::hardware_ok`). The scalar
+kernels are correct and would produce the same adapter, slowly enough that
+every hyperparameter judgement made from the run would be about the clock. So
+under QEMU it needs `--qemu-extra "-cpu max"`; the default `qemu64` model hides
+every SIMD extension and the command declines with the reason printed.
+
+Three things make it affordable in-kernel, and each is exact rather than an
+approximation -- they are stated in `src/ai/train.rs` and worth knowing before
+changing anything there:
+
+- Only the classifier is adapted, so the hidden state at every decision is a
+  constant and is cached once per example. An epoch after that costs no
+  forward passes at all.
+- Restricted cross-entropy zeroes the gradient outside the grammar's candidate
+  set, so only rows the decoder can reach ever move. Measured on SmolLM2:
+  **132 rows out of 49,152**. The trainer dequantises exactly those into an
+  f32 scratch and never touches the int8 classifier again.
+- Teacher forcing keeps the whole spelling cacheable, and the chain of
+  candidate sets is a property of the applet name rather than of the task -- so
+  the vocabulary scan that finds them runs 21 times, not once per example.
+
+`-n` **strides** through the corpus rather than taking a prefix. The splits are
+positional, so the first N examples are all training examples and a short run
+would report held-out accuracy over an empty set.
+
+**Prep dominates, and only under QEMU.** Building the chains and dequantising
+the rows is a fixed cost; caching the features is a forward pass per example,
+which under TCG is around a minute each. The report splits the two so it is
+obvious which number `-n` moves. A full-corpus run is a GF63 activity.
+
+### Adapters on disk
+
+`adapter save` writes a `GLADOSA1` blob into the namespace -- the adapter
+alone, never the checkpoint. `tools/adapter.py` is the host-side reader, and
+the format is documented there in full:
+
+```powershell
+.\tools\venv\Scripts\python.exe tools\adapter.py --selftest
+.\tools\venv\Scripts\python.exe tools\adapter.py out\adapter.bin
+.\tools\venv\Scripts\python.exe tools\adapter.py out\adapter.bin --export-lora out\dir.bin
+```
+
+Rows are stored **sparsely**, because they are sparse in fact: a row with a
+zero low-rank factor and a default magnitude is bit-identical to no adapter.
+On the measured decision layer that is 23.7 KB against 1.79 MB dense, 75x.
+`s` is never stored -- it is `m/|W0 + BA|`, derived from a frozen weight the
+file does not contain, and storing it would let a file and a checkpoint
+disagree about a value with exactly one correct answer.
+
+The layout follows RustLMHub's `FfnLora::save` in every decision that could
+have gone either way -- magic first and refused rather than guessed at, dims in
+the header checked for exact equality, flat little-endian f32, no base weights
+in the file. It is not byte-compatible and could not be: LoAA is LoRA over
+gate/up/down, this is DoRA over the attention path and the classifier, and
+every site here carries per-row magnitudes LoAA has nowhere to put.
+`--export-lora` bridges the gap for one site and prints what it dropped.
+
 Root certificate bundle, built from the host's store:
 
 ```powershell

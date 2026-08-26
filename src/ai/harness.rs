@@ -57,6 +57,29 @@ pub(crate) fn with_alphabet<R>(f: impl FnOnce(&Alphabet) -> R) -> Option<R> {
     }
 }
 
+/// The same cache, for a caller that already holds the engine.
+///
+/// `with_alphabet` reaches for the engine to build the alphabet the first
+/// time, which a caller already holding `&mut Engine` cannot do -- a second
+/// `&mut Engine` is undefined behaviour rather than a race, and this module
+/// has the scar tissue to prove it. Handing the tokenizer in instead lets the
+/// trainer share the decoder's alphabet rather than deriving 151,936 token
+/// texts of its own, which matters for more than time: the claim that
+/// training moves the decision the decoder makes is only true if both are
+/// looking at the same vocabulary.
+pub(crate) fn with_alphabet_of<R>(
+    tok: &tokenizer::Tokenizer,
+    f: impl FnOnce(&Alphabet) -> R,
+) -> R {
+    unsafe {
+        if ALPHABET.get().is_none() {
+            *ALPHABET.get() = Some(Alphabet::new(tok));
+        }
+        // Just built if it was absent, so the unwrap cannot fire.
+        f(ALPHABET.get().as_ref().unwrap())
+    }
+}
+
 /// The applet names one trust level reaches. The agent loop builds its own
 /// grammar from this -- its list carries the `done` sentinel besides -- but
 /// the admission rule stays here so there is exactly one definition of what
@@ -104,7 +127,7 @@ fn grammar_for(trust: Trust) -> (Grammar, Vec<&'static str>) {
 /// module is guaranteed by construction; this is the part that is merely
 /// hoped for. It is measurably the weak link -- the probe in `probe.rs`, which
 /// never reads this prompt at all, routes better than decoding against it.
-fn prompt_for(task: &str, names: &[&'static str]) -> String {
+pub(crate) fn prompt_for(task: &str, names: &[&'static str]) -> String {
     let mut s = String::from("Tools:");
     for (i, n) in names.iter().enumerate() {
         if i > 0 {
@@ -504,7 +527,7 @@ pub(crate) fn feature_for(e: &mut super::Engine, task: &str) -> Option<Vec<f32>>
 /// Shorter than the grammar prompt: with applet tokens there is no need to
 /// list the tools, because the candidate set is imposed by the scoring rather
 /// than described in words.
-fn prompt_for_task(task: &str) -> String {
+pub(crate) fn prompt_for_task(task: &str) -> String {
     let mut s = String::from("Task: ");
     s.push_str(task);
     s.push_str(". Tool:");
@@ -607,6 +630,83 @@ pub fn train(epochs: usize, lr: f32) -> Option<TrainReport> {
             after_test,
         }
     })
+}
+
+/// `train adapter` -- the QDoRA decision-layer run against the loaded model.
+///
+/// Separate from `train_report` above, which fits the linear probe's head and
+/// has nothing to do with the model's own weights. Two different things are
+/// called training here and confusing them would make every number ambiguous:
+/// this one moves an adapter over the classifier, and `fit`/`train` move a
+/// closed-form router that never touches the checkpoint at all.
+pub fn adapter_train_report(b: &super::train::Budget) {
+    use super::train::{RunError, RunReport};
+
+    console::set_color(YELLOW);
+    kprintln!("[train adapter]");
+    console::set_color(LTGRAY);
+
+    let outcome = super::with_engine(|e| super::train::run(e, b));
+    let r: RunReport = match outcome {
+        None => {
+            kprintln!("  no engine, or another task holds it");
+            return;
+        }
+        Some(Err(RunError::Hardware)) => {
+            console::set_color(LTRED);
+            kprintln!("  refused: this machine has no AVX2/FMA path");
+            console::set_color(LTGRAY);
+            // Said in full rather than as a flag, because the refusal is the
+            // interesting part: the scalar kernels are correct and would
+            // produce the same adapter, just slowly enough that every
+            // judgement made from the run would be about the clock.
+            kprintln!("  scalar emulation would make each step minutes; nothing was trained");
+            return;
+        }
+        Some(Err(RunError::Hybrid)) => {
+            kprintln!("  refused: hybrid checkpoints have no verified backward yet");
+            return;
+        }
+        Some(Err(RunError::NoCorpus)) => {
+            kprintln!("  no corpus at {}", super::vocab::CORPUS);
+            return;
+        }
+        Some(Err(RunError::NoDecisions)) => {
+            kprintln!("  the grammar could not spell a single applet from this vocabulary");
+            return;
+        }
+        Some(Ok(r)) => r,
+    };
+
+    kprintln!(
+        "  {} examples -> {} decisions ({} held out), {} reachable classifier rows",
+        r.examples, r.decisions, r.held, r.rows
+    );
+    kprintln!("  grammar + rows {} ms, features {} ms (per example)", r.chains_ms, r.prep_ms);
+    kprintln!("  trained {} epochs in {} ms", r.epochs_run, r.train_ms);
+    if r.stopped {
+        console::set_color(YELLOW);
+        kprintln!("  stopped on the wall-clock budget, not on the epoch count");
+        console::set_color(LTGRAY);
+    }
+    kprintln!("  loss      {:.3} -> {:.3}", r.first_loss, r.last_loss);
+    kprintln!(
+        "  seen      {}% -> {}%",
+        (r.before_train * 100.0) as u32,
+        (r.after_train * 100.0) as u32
+    );
+    // Same rule as everywhere else in this file: training accuracy is what
+    // memorisation looks like, and only the held-out number can move for a
+    // reason worth having.
+    let up = r.after_held > r.before_held;
+    console::set_color(if up { LTGREEN } else { YELLOW });
+    kprintln!(
+        "  held out  {}% -> {}%   <- the one that counts",
+        (r.before_held * 100.0) as u32,
+        (r.after_held * 100.0) as u32
+    );
+    console::set_color(LTGRAY);
+    kprintln!("  adapter attached; 'act <task>' now decodes through it");
 }
 
 /// Score a description that belongs to no applet in the table.
