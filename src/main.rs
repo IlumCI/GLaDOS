@@ -25,6 +25,7 @@ mod gfx;
 mod json;
 mod lang;
 mod mem;
+mod mine;
 mod net;
 mod pkg;
 mod recovery;

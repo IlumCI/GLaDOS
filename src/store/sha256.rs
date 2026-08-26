@@ -27,6 +27,11 @@ const H0: [u32; 8] = [
     0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
 ];
 
+/// Clonable because midstate snapshots are the whole trick of header
+/// mining: the immutable prefix of a block template is absorbed once, and
+/// every nonce attempt starts from the cloned state instead of re-hashing
+/// 64 bytes it has already seen.
+#[derive(Clone)]
 pub struct Sha256 {
     h: [u32; 8],
     buf: [u8; 64],
@@ -43,6 +48,17 @@ impl Default for Sha256 {
 impl Sha256 {
     pub fn new() -> Self {
         Self { h: H0, buf: [0; 64], buflen: 0, total_bits: 0 }
+    }
+
+    /// Frozen absorb-state for midstyle resumption: everything fed so far
+    /// is compressed into `h` (buffer empty), and `from_snapshot` resumes
+    /// as if the same bytes had been streamed again.
+    pub fn snapshot(&self) -> ([u32; 8], u64) {
+        (self.h, self.total_bits)
+    }
+
+    pub fn from_snapshot(h: [u32; 8], total_bits: u64) -> Self {
+        Self { h, buf: [0; 64], buflen: 0, total_bits }
     }
 
     fn compress(&mut self, block: &[u8; 64]) {

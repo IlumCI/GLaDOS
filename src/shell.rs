@@ -1447,6 +1447,26 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             }
         }
         "plan" => crate::ai::aixi::report(),
+        "mine" => {
+            // Lottery mining: the economics are printed with every run so
+            // nobody gets to forget them. `bench` measures; `btc` sweeps a
+            // synthetic template at a difficulty chosen to actually hit.
+            let mut it = rest.trim().split_whitespace();
+            let sub = it.next().unwrap_or("bench");
+            let n: u64 = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+            match (sub, n) {
+                ("btc", secs) => {
+                    let secs = if secs == 0 { 10 } else { secs };
+                    if crate::mine::lotto(secs, 24).is_none() {
+                        kprintln!("[mine] no qualifying hash this round");
+                    }
+                }
+                _ => {
+                    let secs = if n == 0 { 3 } else { n };
+                    kprintln!("[mine] {}", crate::mine::bench(secs));
+                }
+            }
+        }
         "mind" => {
             use crate::gfx::console::{self, LTGRAY, YELLOW};
             let (ticks, acts, episodes, suppressed, enabled, seen, tenths) =
