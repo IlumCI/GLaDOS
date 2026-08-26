@@ -7,6 +7,7 @@ pub mod backward;
 pub mod constrain;
 pub mod context;
 pub mod initiative;
+pub mod train;
 pub mod deliberate;
 pub mod corpus;
 pub mod futures;
@@ -942,6 +943,17 @@ pub fn init(model_blob: Option<Blob>, tok_blob: Option<Blob>) {
     } else {
         console::set_color(LTRED);
         kprintln!("  FAIL -- a gradient does not match its forward");
+    }
+    console::set_color(LTGRAY);
+
+    console::set_color(LTGREEN);
+    kprintln!("\n[selftest] trainer arithmetic:");
+    console::set_color(LTGRAY);
+    if train::selftest() {
+        console::set_color(LTGRAY);
+    } else {
+        console::set_color(LTRED);
+        kprintln!("  FAIL -- adam + cross-entropy failed to memorise a known sheet");
     }
     console::set_color(LTGRAY);
 }
