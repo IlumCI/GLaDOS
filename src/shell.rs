@@ -93,8 +93,22 @@ fn redraw(line: &str, cursor: usize) {
     });
 }
 
+static INTERACTIVE: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Whether the shell has reached its prompt at least once.
+///
+/// The resident mind waits on this rather than on a stopwatch. Boot takes
+/// about 150 s under TCG and about 55 s under the hypervisor accelerator, so
+/// any fixed grace period is a guess that is wrong on one of them; what the
+/// mind actually needs to know is that a person could have typed by now.
+pub fn interactive() -> bool {
+    INTERACTIVE.load(core::sync::atomic::Ordering::Acquire)
+}
+
 pub fn run(boot: &BootInfo, acpi: &Option<Acpi>) -> ! {
     console::set_color(LTCYAN);
+    INTERACTIVE.store(true, core::sync::atomic::Ordering::Release);
     kprintln!("\ninteractive. type 'help', or just type code.");
     console::set_color(WHITE);
 

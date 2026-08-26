@@ -46,6 +46,31 @@ static SUPPRESSED: AtomicU32 = AtomicU32::new(0);
 /// daemon never appears in a profile and fast enough that "the machine
 /// noticed" stays true within a human sense of noticed.
 const TICK_SECS: u64 = 15;
+/// Uptime before the first evaluation, whatever the tick spacing.
+///
+/// The machine should not set itself a goal before the operator has seen a
+/// prompt. Under emulation that was true by accident: a boot took about 150 s
+/// of guest time, so the first tick at 15 s had long passed by the time
+/// anybody could type. Under the hypervisor accelerator a boot is around 20 s
+/// and the first tick lands *during* it, so the resident mind queued an
+/// episode before the boot log had finished printing and held the engine
+/// against the first command the operator sent.
+///
+/// The floor is a minute and the real gate is `shell::interactive`, which
+/// says a prompt has been printed and a person could have typed. A fixed
+/// period alone is a guess: sixty seconds is long past the prompt under TCG
+/// and lands exactly on it under the hypervisor accelerator, which is how
+/// the race was found. Both are required.
+///
+/// Not a workaround for a test. A mind that starts acting before anyone could
+/// have told it not to has no business calling the restraint below
+/// load-bearing.
+const FIRST_TICK_AFTER_S: u64 = 60;
+/// And this long after the prompt itself, whichever is later.
+const SETTLE_SECS: u64 = 30;
+
+/// Uptime at which a prompt was first seen. Zero means never.
+static SAW_PROMPT_AT: Racy<u64> = Racy::new(0);
 /// Hardware input inside this window defers all initiative.
 const QUIET_AFTER_INPUT_S: u64 = 8;
 /// Minimum spacing between self-set goals, however interesting things look.
@@ -179,8 +204,29 @@ fn situation_line(s: &context::Situation) -> String {
 /// One evaluation of the loop. Called on the second boundary from the
 /// resident task every TICK_SECS, and directly by `initiative now`.
 pub fn tick() {
-    TICKS.fetch_add(1, Ordering::Relaxed);
     let now_s = crate::dev::lapic::ticks() / crate::TIMER_HZ as u64;
+    // Settle time measured from the prompt, not from power-on.
+    //
+    // A floor alone is not enough even with the interactivity gate: boot ends
+    // around 55 s under the hypervisor accelerator and the floor is 60, so
+    // there was a five-second window in which the operator's first command
+    // and the mind's first tick raced, and the mind won often enough to eat
+    // it. Anchoring the wait to the moment a prompt appeared removes the
+    // coincidence instead of moving it.
+    if !crate::shell::interactive() {
+        return;
+    }
+    let seen = unsafe { *SAW_PROMPT_AT.get() };
+    if seen == 0 {
+        unsafe { *SAW_PROMPT_AT.get() = now_s.max(1) };
+        return;
+    }
+    if now_s.saturating_sub(seen) < SETTLE_SECS || now_s < FIRST_TICK_AFTER_S {
+        // Counted as a tick that did not happen rather than skipped silently,
+        // so `mind` shows the grace period rather than looking asleep.
+        return;
+    }
+    TICKS.fetch_add(1, Ordering::Relaxed);
     // First evaluation is always eligible: zero here means no goal has ever
     // run, which is readiness rather than a cooldown in force.
     let since_episode = if !EPOCH_SEEDED.swap(true, Ordering::Relaxed) {

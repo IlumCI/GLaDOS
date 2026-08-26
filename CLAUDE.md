@@ -192,12 +192,17 @@ would report held-out accuracy over an empty set.
 cost; caching the features is a forward pass per example. The report splits the
 two so it is obvious which number `-n` moves.
 
-Measured, with `-accel whpx -cpu max`: the fixed half is 401 ms and a
-forward-pass group is about 1.8 s, so the whole 465-example corpus plus its
-four guard goals is roughly fourteen minutes. Under TCG the same group took
-286 s, which is where the belief that a full run needed the GF63 came from.
-That belief was wrong and it shaped a lot of decisions before anybody tested
-it.
+Measured, with `-accel whpx -cpu max`, on the whole corpus: the fixed half is
+739 ms and the 465 examples plus four guard goals took 1,301,778 ms, so a
+forward-pass group is about 2.8 s and a full run is twenty-two minutes.
+
+A 25-example run gives 1.8 s per group, and extrapolating that to 469 groups
+predicted fourteen minutes. It was out by 55%. Small-sample extrapolation is
+the same error this file warns about for accuracy figures, and it is just as
+wrong about time.
+
+Under TCG the same group took 286 s. That is where the belief a full run
+needed the GF63 came from, and the belief was never measured.
 
 `Trial` in `src/ai/train.rs` is the reusable object underneath all of this.
 `prepare` builds it (expensive, once), and `score`, `paired`, `train`,

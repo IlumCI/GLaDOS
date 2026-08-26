@@ -461,13 +461,36 @@ def main():
                 # and the next quiet moment ends the session in the middle of
                 # the episode it was supposed to be watching.
                 idle_prompts = 0
+                # It also means the command was not lost, so the resend clock
+                # starts again. The Enter-echo only appears when the *shell*
+                # reads the line, and the shell can be busy for a long time:
+                # an agent episode holds the engine while it runs. Under TCG
+                # the boot was slow enough that this never collided, and under
+                # whpx the first command lands while the resident mind is
+                # still in its first episode, gets no echo for eight seconds,
+                # and is resent into a UART buffer that already holds it. The
+                # result is 'initiative offinitiative offecho aecho aecho a'
+                # on one line, which reads as a guest fault and is a driver
+                # bug the emulator's slowness was hiding.
+                if pending:
+                    pending["at"] = time.time()
 
             # Acknowledgement watch: the guest's Enter-echo is the receipt.
             if pending:
                 if len(buf) > pending["mark"]:
                     pending = None  # the guest saw the bytes
-                elif time.time() - pending["at"] > 8.0:
-                    if pending["retries"] < 3:
+                elif time.time() - pending["at"] > 25.0:
+                    # Twenty-five seconds and one retry, raised from eight and
+                    # three. The wire loss this recovers from was observed
+                    # under TCG, where a boot was slow enough that a quiet
+                    # eight seconds meant something was wrong. Under the
+                    # hypervisor accelerator the guest is often legitimately
+                    # silent for longer than that -- the shell has printed a
+                    # prompt and is busy, or an episode holds the engine --
+                    # and a resend into a UART buffer that already holds the
+                    # line concatenates the two. A duplicated command is worse
+                    # than a lost one, because a lost one is visible.
+                    if pending["retries"] < 1:
                         pending["retries"] += 1
                         pending["at"] = time.time()
                         print(f"[drive] no echo -- resending "
