@@ -2032,6 +2032,35 @@ fn sys_action(d: &mut Desktop, f: usize, item: usize, screen: Rect) {
     }
 }
 
+/// Put the keyboard back where a person would expect it.
+///
+/// The desktop takes *every* key while it is in a menu mode, which is correct
+/// when somebody opened the menu and catastrophic when nobody did. QEMU's
+/// i8042 probe emits scancodes at boot -- the entropy ring already counts one
+/// of them as a phantom touch -- and under the hypervisor accelerator that
+/// probe was leaving the machine sitting in the Start menu before the shell
+/// had printed its prompt. Every byte arriving over the serial line then fed
+/// the menu instead of the command line, so a driven session looked like a
+/// guest that had stopped reading its UART.
+///
+/// Called when the shell announces it is interactive. Nothing a controller
+/// does while nobody is at the keyboard should decide where the next
+/// keystroke goes.
+pub fn dismiss_menus() {
+    if !ready() {
+        return;
+    }
+    let changed = with(|d| {
+        let was = !matches!(d.mode, Mode::Normal);
+        d.mode = Mode::Normal;
+        was
+    })
+    .unwrap_or(false);
+    if changed {
+        draw();
+    }
+}
+
 pub fn key(k: u8) -> Route {
     if !ready() {
         return Route::Shell(k);

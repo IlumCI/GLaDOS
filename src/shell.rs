@@ -109,6 +109,7 @@ pub fn interactive() -> bool {
 pub fn run(boot: &BootInfo, acpi: &Option<Acpi>) -> ! {
     console::set_color(LTCYAN);
     INTERACTIVE.store(true, core::sync::atomic::Ordering::Release);
+    crate::gfx::desk::dismiss_menus();
     kprintln!("\ninteractive. type 'help', or just type code.");
     console::set_color(WHITE);
 
