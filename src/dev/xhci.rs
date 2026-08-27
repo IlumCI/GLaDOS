@@ -204,6 +204,18 @@ pub fn usb_wireless() -> Option<Option<(u16, u16, &'static str)>> {
     unsafe { *USB_WIRELESS.get() }
 }
 
+/// The USB ethernet adapter driving `eth0`, if one is.
+///
+/// Recorded for the same reason as the wireless one and with more urgency: on
+/// a machine with no PCI network card this is the part carrying every packet,
+/// and a hardware inventory that omitted it listed nothing while the operator
+/// was reading it over the network.
+static USB_ETHERNET: crate::sync::Racy<Option<(u16, u16)>> = crate::sync::Racy::new(None);
+
+pub fn usb_ethernet() -> Option<(u16, u16)> {
+    unsafe { *USB_ETHERNET.get() }
+}
+
 /// A scan is starting: forget what the last one found.
 fn usb_scan_begin() {
     unsafe { *USB_WIRELESS.get() = Some(None) };
@@ -1277,8 +1289,10 @@ pub fn probe_net(ecam: u64) -> Result<UsbNet, &'static str> {
                 }
             }
             ctl.configure_bulk(&mut dev, ep_in, ep_out)?;
+            let (vid, pid) = (dev.vid, dev.pid);
             let nic = UsbNet::new(ctl, dev, mac).ok_or("out of memory")?;
             unsafe { *CLAIMED.get() = true };
+            unsafe { *USB_ETHERNET.get() = Some((vid, pid)) };
             return Ok(nic);
         }
     }

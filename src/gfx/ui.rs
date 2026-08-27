@@ -792,6 +792,32 @@ fn adapter_rows() -> Vec<Widget> {
     out
 }
 
+/// Every network part the machine has, and what drives it.
+///
+/// Separate from the adapter rows above, which describe the three interface
+/// slots the stack offers. This describes the silicon. They differ in exactly
+/// the case worth showing: a wireless part that is present, named, and bound
+/// to nothing.
+fn hardware_rows() -> Vec<Widget> {
+    let hw = crate::net::wifi::hardware();
+    if hw.is_empty() {
+        return alloc::vec![note("No network controller found on PCI. USB is only listed after an enumeration.")];
+    }
+    let mut out = Vec::new();
+    for h in &hw {
+        let (value, tone) = match h.driver {
+            Some(d) => (alloc::format!("{}  ({})", h.what, d), Tone::Ok),
+            None => (alloc::format!("{}  no driver", h.what), Tone::Warn),
+        };
+        out.push(Widget::Status {
+            name: alloc::format!("{} {:04x}:{:04x}", h.bus, h.vendor, h.device),
+            value,
+            tone,
+        });
+    }
+    out
+}
+
 /// The wireless page.
 ///
 /// Built from what `wifi::scan` actually answers. When it can list networks
@@ -981,6 +1007,9 @@ pub fn settings(page: &str) -> Panel {
             v.push(Widget::Sep);
             v.push(Widget::Heading(String::from("Adapters")));
             v.append(&mut adapter_rows());
+            v.push(Widget::Sep);
+            v.push(Widget::Heading(String::from("Hardware")));
+            v.append(&mut hardware_rows());
             v.push(Widget::Sep);
             v.push(Widget::Heading(String::from("Actions")));
             v.push(Widget::Button {

@@ -28,15 +28,30 @@
 //! ### What is here, and what is deliberately not
 //!
 //! Here: device matching, the register file over vendor control transfers,
-//! chip identification, the power-on sequence, and the MAC register table.
-//! `bring_up` runs the first two of those and stops. The PHY, AGC and radio
-//! tables are transcribed in `rtl8188eu_tables` but nothing applies them yet.
+//! chip identification, and initialisation as far as the baseband.
+//! `bring_up` runs the power sequence and then the MAC, PHY and AGC tables.
 //!
-//! **Not here: the datapath.** No frame is transmitted or received by this
-//! module -- it never touches a bulk endpoint -- and no channel is ever set.
-//! That is what scanning needs, because scanning is sending probe requests and
-//! reading beacons, so a chip brought this far still cannot find a network.
-//! The efuse layout and the firmware blob are also absent.
+//! **Not here: the radio, and the datapath.** `RADIOA_INIT` is transcribed
+//! next door and is not applied, because an RF table is addressed by register
+//! index on the radio's own serial bus and those indices collide with the MAC
+//! power-control registers -- writing it as direct register writes puts radio
+//! values into the power sequencer, and every one of them returns success.
+//! Reaching the radio needs the LSSI parameter registers and the index
+//! encoding that goes into them, which have to be transcribed the way the
+//! tables were. `apply_bb` refuses any table addressed below the baseband so
+//! that mistake cannot be made by accident.
+//!
+//! Missing alongside it: the LLT page table, the receive FIFO boundary that
+//! `CR_INIT` deliberately leaves the TX and RX enables waiting on, the efuse
+//! layout, the firmware blob, and the datapath itself -- no bulk endpoint is
+//! ever touched here, so not one frame goes out or comes in. Scanning is
+//! sending probe requests and reading beacons, so a chip brought this far
+//! still cannot find a network.
+//!
+//! The frames themselves are not the missing part. `net::ieee80211` builds
+//! probe requests and parses beacons, and is checked at every boot against
+//! frames it constructs on the spot. When something can carry bytes to and
+//! from the air, the layer above it is already written and already tested.
 //!
 //! The tables that are here were transcribed rather than recalled, and the
 //! ones that are missing must be too. A plausible-looking power sequence with
@@ -286,8 +301,48 @@ impl Regs<'_> {
     /// first and the RF writes go through a serial interface rather than
     /// straight to a register, neither of which is written yet. Applying them
     /// anyway would half-configure the chip, which is worse than not starting.
+    /// Baseband registers start here. Everything below is the MAC control
+    /// area, which is why the guard below exists rather than being paranoia.
+    const BB_BASE: u16 = 0x800;
+
+    /// Apply a baseband table, refusing anything that is not one.
+    ///
+    /// The radio's table is addressed by register *index* on the RF serial
+    /// bus -- 0x00, 0x08, 0x18 -- and those indices collide with the MAC
+    /// power-control registers. Writing `RADIOA_INIT` through this path would
+    /// put radio values into the power sequencer, and the chip would take
+    /// every write and report success. The tables are all `&[(u16, u32)]` and
+    /// nothing in the type distinguishes them, so the address range is the
+    /// only thing that can, and it is checked rather than remembered.
+    fn apply_bb(&mut self, table: &[(u16, u32)]) -> Result<(), &'static str> {
+        if table.iter().any(|(r, _)| *r < Self::BB_BASE) {
+            return Err("not a baseband table -- refusing to write it as direct registers");
+        }
+        self.apply32(table)
+    }
+
+    /// Power on and initialise as far as this driver honestly can.
+    ///
+    /// Power sequence, MAC registers, then the baseband: PHY first because
+    /// AGC writes tune what PHY set up, and AGC's table writes one register
+    /// 130 times with the index carried in the value, so its order is its
+    /// content.
+    ///
+    /// It stops before the radio. `RADIOA_INIT` is transcribed and sitting
+    /// next door, and applying it needs the RF serial interface -- the LSSI
+    /// parameter registers and the index encoding that goes into them --
+    /// which is not written here and would have to be transcribed like the
+    /// tables were. Between here and a working radio there is also the LLT
+    /// page table, the receive FIFO boundary that `CR_INIT` deliberately
+    /// leaves the TX and RX enables waiting on, and the whole datapath.
+    ///
+    /// So: this brings the chip up. It does not make it a radio, and the
+    /// difference is worth stating because every register write below returns
+    /// success either way.
     pub fn bring_up(&mut self) -> Result<(), &'static str> {
         self.power_on()?;
-        self.apply8(super::rtl8188eu_tables::MAC_INIT)
+        self.apply8(super::rtl8188eu_tables::MAC_INIT)?;
+        self.apply_bb(super::rtl8188eu_tables::PHY_INIT)?;
+        self.apply_bb(super::rtl8188eu_tables::AGC_INIT)
     }
 }

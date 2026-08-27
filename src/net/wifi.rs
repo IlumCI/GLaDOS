@@ -107,6 +107,114 @@ pub fn probe(ecam: u64) -> Probe {
     }
 }
 
+/// Every piece of networking hardware on the machine, and what drives it.
+///
+/// The probe below answers one question -- is there a wireless part -- and
+/// stops at the first thing it finds. That was enough while wireless was the
+/// only open question, and it is not enough to describe a machine: a laptop
+/// with a wired card, a wireless card and a dongle plugged in has three, only
+/// one of them is carrying traffic, and an operator asking why they have no
+/// network needs to see all three and which is which.
+///
+/// PCI class 0x02 is the network controller class. Subclass 0x00 is ethernet
+/// and 0x80 is "other", where essentially every wireless part lands, so both
+/// are collected rather than filtering to the one this file used to care
+/// about.
+pub struct Hardware {
+    pub vendor: u16,
+    pub device: u16,
+    /// Where it lives, for an operator who has to go and unplug it.
+    pub bus: &'static str,
+    pub what: alloc::string::String,
+    /// The driver in this tree that claims this part, if one does. `None` is
+    /// the honest answer for hardware we can see and cannot use, which is most
+    /// of the wireless in this machine.
+    pub driver: Option<&'static str>,
+}
+
+/// Ethernet parts this tree can actually drive, by id.
+///
+/// Duplicated from the two drivers on purpose. The alternative is each driver
+/// exporting its id list, and a probe that says "supported" while the driver
+/// that would claim it fails for another reason is worse than a short list
+/// that is easy to check against the two `SUPPORTED` arrays it mirrors.
+fn ethernet_driver(vendor: u16, device: u16) -> Option<&'static str> {
+    match vendor {
+        0x8086 if [0x100E, 0x1533, 0x10D3, 0x153A].contains(&device) => Some("e1000"),
+        0x10EC if [0x8168, 0x8161, 0x8167, 0x8136].contains(&device) => Some("rtl8168"),
+        _ => None,
+    }
+}
+
+fn describe_ethernet(vendor: u16, device: u16) -> &'static str {
+    match (vendor, device) {
+        (0x8086, 0x100E) => "Intel 82540EM gigabit (QEMU's e1000)",
+        (0x8086, _) => "Intel gigabit ethernet",
+        // The GF63's wired port. 8168 and 8111 are the same silicon under two
+        // marketing names, which is why the id list and not the name matches.
+        (0x10EC, 0x8168) => "Realtek RTL8168/8111 gigabit",
+        (0x10EC, _) => "Realtek ethernet",
+        _ => "ethernet controller",
+    }
+}
+
+/// Walk both buses and describe everything that carries packets.
+pub fn hardware() -> alloc::vec::Vec<Hardware> {
+    let mut out = alloc::vec::Vec::new();
+    if let Some(ecam) = crate::net::ecam() {
+        pci::scan(ecam, 255, |d| {
+            if d.class != CLASS_NETWORK {
+                return;
+            }
+            let (bus, what, driver) = match d.subclass {
+                0x00 => (
+                    "PCI",
+                    alloc::string::String::from(describe_ethernet(d.vendor, d.device)),
+                    ethernet_driver(d.vendor, d.device),
+                ),
+                SUBCLASS_OTHER => (
+                    "PCI",
+                    alloc::string::String::from(describe(d.vendor, d.device)),
+                    None,
+                ),
+                // Token ring, FDDI, ATM and friends. Named rather than hidden:
+                // an unrecognised network device is still a fact about the
+                // machine, and hiding it is how a report starts lying by
+                // omission.
+                _ => (
+                    "PCI",
+                    alloc::format!("network controller, subclass {:02x}", d.subclass),
+                    None,
+                ),
+            };
+            out.push(Hardware { vendor: d.vendor, device: d.device, bus, what, driver });
+        });
+    }
+    // USB, from what the last enumeration recorded. Not enumerated here: doing
+    // so resets the controller and drops whatever link is on it.
+    if let Some((vendor, device)) = crate::dev::xhci::usb_ethernet() {
+        out.push(Hardware {
+            vendor,
+            device,
+            bus: "USB",
+            what: alloc::string::String::from("CDC ethernet adapter"),
+            driver: Some("usb-ecm"),
+        });
+    }
+    if let Some(Some((vendor, device, what))) = crate::dev::xhci::usb_wireless() {
+        out.push(Hardware {
+            vendor,
+            device,
+            bus: "USB",
+            what: alloc::string::String::from(what),
+            // Recognised, brought up, and unable to carry a frame. Naming the
+            // driver here would claim more than is true.
+            driver: None,
+        });
+    }
+    out
+}
+
 /// One network as a scan would report it.
 ///
 /// Nothing constructs this yet. It is here so the settings page is written

@@ -49,6 +49,7 @@ pub mod css;
 pub mod dhcp;
 pub mod dns;
 pub mod html;
+pub mod ieee80211;
 pub mod iface;
 pub mod tcp;
 pub mod tls;
@@ -265,6 +266,10 @@ pub fn init(ecam: u64, roots: Option<&[u8]>) {
             kprintln!("         10.0.2.15 via 10.0.2.2  ('dhcp' to ask, 'if' to see)");
         }
     }
+
+    // After the interfaces are bound, so what is listed as driven is what
+    // actually got claimed rather than what might have been.
+    report_hardware(false);
 
     match wifi::probe(ecam) {
         wifi::Probe::None => {}
@@ -738,7 +743,43 @@ pub fn report() {
     if let Some((name, ip)) = dns::cached() {
         kprintln!("  resolver last saw {} at {}.{}.{}.{}", name, ip[0], ip[1], ip[2], ip[3]);
     }
+
+    report_hardware(true);
     let _ = LTCYAN;
+}
+
+/// The silicon, under the interfaces.
+///
+/// The interface list says what the stack is offering. This says what the
+/// machine actually contains, and the two differ in exactly the case an
+/// operator needs to see: a network part that is present, named, and bound to
+/// nothing at all. Printed at boot as well as on demand, because "why is there
+/// no network" is asked before anybody thinks to run a command, and the answer
+/// is usually already on the screen behind them.
+pub fn report_hardware(heading: bool) {
+    let hw = wifi::hardware();
+    if heading {
+        console::set_color(YELLOW);
+        kprintln!("[hardware]");
+    }
+    console::set_color(LTGRAY);
+    if hw.is_empty() {
+        kprintln!("  no network controller on PCI");
+        kprintln!("  USB is listed only after an enumeration ('usb' to run one)");
+    }
+    for h in &hw {
+        match h.driver {
+            Some(d) => {
+                console::set_color(LTGREEN);
+                kprintln!("  {}  {:04x}:{:04x}  {}  -- {}", h.bus, h.vendor, h.device, h.what, d);
+            }
+            None => {
+                console::set_color(YELLOW);
+                kprintln!("  {}  {:04x}:{:04x}  {}  -- no driver", h.bus, h.vendor, h.device, h.what);
+            }
+        }
+        console::set_color(LTGRAY);
+    }
 }
 
 /// Parse "10.0.2.2" into four octets.
