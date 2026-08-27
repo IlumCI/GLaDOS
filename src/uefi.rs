@@ -475,19 +475,51 @@ pub fn read_file(bs: &BootServices, image: Handle, path: &str) -> Option<Blob> {
         return None;
     }
 
+    // Pool first, then pages.
+    //
+    // `allocate_pool` is the firmware's small-object allocator and plenty of
+    // implementations will not hand out a gigabyte from it, whatever the
+    // memory map says is free. `allocate_pages` goes at the map directly, so
+    // a checkpoint the pool refuses often allocates fine one page-granular
+    // request later. Qwen3.5-2B is 1.8 GB and is exactly the case that made
+    // this necessary: the file was present, measured correctly, and reported
+    // as "no model" because one allocator said no and nothing tried the other.
+    //
+    // Nothing is freed on the way out of boot anyway. ExitBootServices hands
+    // the whole map over and the kernel keeps the LoaderData region for the
+    // life of the machine, so the two paths differ only in which allocator
+    // was asked.
     let mut buf: *mut u8 = core::ptr::null_mut();
     if is_error((bs.allocate_pool)(MemoryType::LoaderData, size as usize, &mut buf)) {
-        // Distinct from "not there": the file exists and was measured, but
-        // the firmware had no contiguous pool this large. Reads as a missing
-        // model otherwise, which sends the operator chasing a copy that
-        // succeeded.
+        let pages = ((size as usize) + 0xFFF) / 0x1000;
+        let mut addr: u64 = 0;
+        if is_error((bs.allocate_pages)(
+            AllocateType::AnyPages,
+            MemoryType::LoaderData,
+            pages,
+            &mut addr,
+        )) || addr == 0
+        {
+            // Distinct from "not there": the file exists and was measured, and
+            // neither allocator could hold it. Reads as a missing model
+            // otherwise, which sends the operator chasing a copy that
+            // succeeded.
+            serial_println!(
+                "glados: {} is {} KiB and neither pool nor {} pages could hold it",
+                path,
+                size / 1024,
+                pages
+            );
+            unsafe { ((*file).close)(file) };
+            return None;
+        }
         serial_println!(
-            "glados: {} is {} KiB but the firmware pool could not hold it",
+            "glados: {} took {} pages; the pool refused {} KiB",
             path,
+            pages,
             size / 1024
         );
-        unsafe { ((*file).close)(file) };
-        return None;
+        buf = addr as *mut u8;
     }
 
     // Read() is permitted to return fewer bytes than asked for, so this loops.

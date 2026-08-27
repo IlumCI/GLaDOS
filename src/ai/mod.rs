@@ -640,7 +640,19 @@ pub fn init(model_blob: Option<Blob>, tok_blob: Option<Blob>) {
     console::set_color(LTGRAY);
 
     let Some(mb) = model_blob else {
-        kprintln!("  no checkpoint on the boot volume ({})", crate::MODEL_PATH);
+        // Not "no checkpoint on the boot volume", which is what this said and
+        // which sends the operator looking for a file that is usually sitting
+        // right there. The blob is missing from *memory*, and the commonest
+        // reason on this laptop is that the firmware had no contiguous pool
+        // large enough: a 1.8 GB checkpoint asks for a single allocation that
+        // plenty of firmware cannot satisfy, and the read path says so
+        // precisely at a point in boot 89 lines before `console::init`, into
+        // a serial port nothing is listening to.
+        console::set_color(LTRED);
+        kprintln!("  no checkpoint in memory ({})", crate::MODEL_PATH);
+        console::set_color(LTGRAY);
+        kprintln!("  the file may be absent, or too large for the firmware's pool");
+        kprintln!("  'log all' carries the reason: it is printed before the screen exists");
         kprintln!("  'model' still works against synthetic weights");
         return;
     };

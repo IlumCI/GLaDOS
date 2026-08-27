@@ -140,7 +140,26 @@ pub fn _print(args: fmt::Arguments) {
 
 #[macro_export]
 macro_rules! serial_print {
-    ($($arg:tt)*) => { $crate::serial::_print(format_args!($($arg)*)) };
+    ($($arg:tt)*) => {{
+        $crate::serial::_print(format_args!($($arg)*));
+        // Into the boot log as well, because everything printed before
+        // `console::init` can only come out here.
+        //
+        // The model, the tokenizer and the root bundle are read at line 206 of
+        // main.rs and the console is initialised at 295: they have to be,
+        // since a filesystem exists only before ExitBootServices. So every
+        // diagnostic about why a model failed to load is emitted 89 lines
+        // before there is a screen to emit it to, and on a machine with
+        // nothing listening on the serial port it is emitted into nowhere.
+        // A firmware that could not find a contiguous pool for a 1.8 GB model
+        // says so precisely, and the operator sees a system that boots and
+        // reports no model, with the reason discarded.
+        //
+        // The ring is a static array and needs no initialisation, so it can
+        // take these from the first instruction of efi_main. `log all` after
+        // boot now includes the part of boot that happens before the screen.
+        $crate::log::_record(format_args!($($arg)*));
+    }};
 }
 
 #[macro_export]
