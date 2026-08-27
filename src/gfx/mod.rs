@@ -55,6 +55,19 @@ pub trait DeskApp {
     fn wheel(&mut self, _notches: i32) -> bool {
         false
     }
+
+    /// The smallest client area this program stays usable in.
+    ///
+    /// The window manager asks before letting a resize continue, because the
+    /// program is the only thing that knows. A board that does not reflow and
+    /// a canvas that does not shrink both have a floor, and a frame dragged
+    /// under it hides their content with no way back except maximising.
+    ///
+    /// The default is small enough not to obstruct anything that genuinely
+    /// reflows, and large enough that a window cannot be lost.
+    fn min_size(&self) -> (u32, u32) {
+        (240, 120)
+    }
 }
 
 use crate::sync::Racy;

@@ -278,6 +278,13 @@ fn swatch_rects(client: Rect) -> Vec<(Rect, u8)> {
 }
 
 impl DeskApp for Paint {
+    /// The canvas is a fixed pixel buffer and the palette sits beside it,
+    /// so neither shrinks. Dragging under this would hide the drawing behind
+    /// the frame.
+    fn min_size(&self) -> (u32, u32) {
+        (CW as u32 + 24, CH as u32 + 96)
+    }
+
     fn draw_in(&self, fb: &Framebuffer, client: Rect, focused: bool) {
         theme::panel(fb, client);
 

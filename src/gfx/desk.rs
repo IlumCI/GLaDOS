@@ -152,7 +152,7 @@ pub enum Mode {
     /// its corner to the pointer on the first packet.
     Drag { dx: u32, dy: u32, from: Rect },
     /// The pointer is resizing it by the bottom-right corner.
-    DragSize { from: Rect },
+    DragSize { from: Rect, edges: u8 },
     /// The Start menu is open above the taskbar.
     Start { item: usize },
 }
@@ -687,7 +687,23 @@ pub fn open(title: &str, panel: Panel) {
 pub fn open_app(title: &str, icon: usize, app: Box<dyn DeskApp>, w: u32, h: u32) {
     let Some(fb) = super::primary() else { return };
     let screen = screen_rect(&fb);
-    let (w, h) = (w.min(screen.w), h.min(screen.h));
+
+    // Open no smaller than the program says it needs.
+    //
+    // The caller passes a preferred size and those were being clamped to the
+    // screen and nothing else, so a program whose preferred size was stale or
+    // whose chrome had grown since opened cropped, with the missing part
+    // unreachable: the only resize was a 14-pixel corner grip nobody found.
+    // Asking the program for its floor and honouring it here means a window
+    // is born usable, and the edge dragging added alongside means it stays
+    // that way.
+    let inner = app.min_size();
+    let need_w = inner.0 + theme::FRAME * 2;
+    let need_h = inner.1 + theme::TITLE_H + theme::FRAME * 2;
+    let (w, h) = (
+        w.max(need_w).min(screen.w),
+        h.max(need_h).min(screen.h),
+    );
     with(|d| {
         let n = d.windows.len() as u32;
         let off = (n % 5) * 32;
@@ -808,6 +824,149 @@ const CURSOR: [&str; 17] = [
 const CUR_W: u32 = 11;
 const CUR_H: u32 = 17;
 
+/// What the pointer is currently saying it will do.
+///
+/// A frame edge is six pixels of nothing until the pointer changes shape over
+/// it. That change is the entire discoverability of resizing: there is no
+/// visible grip to aim at, and an operator who has only ever used Windows
+/// looks for the double arrow and nothing else. Held in a static because the
+/// cursor is repainted on every mouse packet anyway, so switching bitmaps
+/// costs a branch and no redraw.
+pub const SHAPE_ARROW: u8 = 0;
+const SHAPE_H: u8 = 1;
+const SHAPE_V: u8 = 2;
+const SHAPE_NWSE: u8 = 3;
+const SHAPE_NESW: u8 = 4;
+static SHAPE: Racy<u8> = Racy::new(SHAPE_ARROW);
+
+/// The resize glyphs, on the same eleven by seventeen canvas as the arrow so
+/// that saving and restoring the pixels underneath does not change with the
+/// shape. Drawn as solid figures and outlined at paint time, because a thin
+/// dark glyph vanishes on a dark title bar and a thin light one vanishes on
+/// the wall; the halo makes each one legible on both.
+const CUR_H_BITS: [&str; 17] = [
+    "           ",
+    "           ",
+    "           ",
+    "           ",
+    "           ",
+    "           ",
+    "   X   X   ",
+    "  XX   XX  ",
+    " XXXXXXXXX ",
+    "  XX   XX  ",
+    "   X   X   ",
+    "           ",
+    "           ",
+    "           ",
+    "           ",
+    "           ",
+    "           ",
+];
+const CUR_V_BITS: [&str; 17] = [
+    "           ",
+    "           ",
+    "           ",
+    "     X     ",
+    "    XXX    ",
+    "   XXXXX   ",
+    "     X     ",
+    "     X     ",
+    "     X     ",
+    "     X     ",
+    "     X     ",
+    "   XXXXX   ",
+    "    XXX    ",
+    "     X     ",
+    "           ",
+    "           ",
+    "           ",
+];
+const CUR_NWSE_BITS: [&str; 17] = [
+    "           ",
+    "           ",
+    "           ",
+    " XXXXXX    ",
+    " XXXXX     ",
+    " XXXX      ",
+    " XXX       ",
+    " XX        ",
+    " X         ",
+    "         X ",
+    "        XX ",
+    "       XXX ",
+    "      XXXX ",
+    "     XXXXX ",
+    "    XXXXXX ",
+    "           ",
+    "           ",
+];
+const CUR_NESW_BITS: [&str; 17] = [
+    "           ",
+    "           ",
+    "           ",
+    "    XXXXXX ",
+    "     XXXXX ",
+    "      XXXX ",
+    "       XXX ",
+    "        XX ",
+    "         X ",
+    " X         ",
+    " XX        ",
+    " XXX       ",
+    " XXXX      ",
+    " XXXXX     ",
+    " XXXXXX    ",
+    "           ",
+    "           ",
+];
+
+fn bitmap(shape: u8) -> &'static [&'static str; 17] {
+    match shape {
+        SHAPE_H => &CUR_H_BITS,
+        SHAPE_V => &CUR_V_BITS,
+        SHAPE_NWSE => &CUR_NWSE_BITS,
+        SHAPE_NESW => &CUR_NESW_BITS,
+        _ => &CURSOR,
+    }
+}
+
+/// Which glyph a set of held edges asks for. Two adjacent edges is a corner,
+/// and a corner drags along one of the two diagonals.
+fn shape_for(e: u8) -> u8 {
+    let l = e & edge::LEFT != 0;
+    let r = e & edge::RIGHT != 0;
+    let t = e & edge::TOP != 0;
+    let b = e & edge::BOTTOM != 0;
+    match (l, r, t, b) {
+        (true, _, true, _) | (_, true, _, true) => SHAPE_NWSE,
+        (_, true, true, _) | (true, _, _, true) => SHAPE_NESW,
+        (true, _, _, _) | (_, true, _, _) => SHAPE_H,
+        (_, _, true, _) | (_, _, _, true) => SHAPE_V,
+        _ => SHAPE_ARROW,
+    }
+}
+
+/// The glyph the pointer should wear at a point, given no drag is running.
+///
+/// Deliberately asks the same two questions the press path asks, in the same
+/// order, so that the shape shown and the action taken cannot disagree: a
+/// pointer that promises a resize where a click would move the window is
+/// worse than no pointer feedback at all.
+fn resize_shape_at(x: i32, y: i32) -> u8 {
+    let Some(i) = window_at(x, y) else {
+        return SHAPE_ARROW;
+    };
+    with(|d| {
+        let w = &d.windows[i];
+        if w.state == WinState::Maximised {
+            return SHAPE_ARROW;
+        }
+        shape_for(edges_at(w.rect, x, y))
+    })
+    .unwrap_or(SHAPE_ARROW)
+}
+
 /// Pixels the cursor is currently covering, and where.
 ///
 /// Saved and restored rather than repainted. The desktop redraws everything
@@ -835,18 +994,53 @@ pub fn cursor_hide(fb: &Framebuffer) {
 
 pub fn cursor_show(fb: &Framebuffer, x: u32, y: u32) {
     cursor_hide(fb);
+    let shape = unsafe { *SHAPE.get() };
+    let bits = bitmap(shape);
     let saved = unsafe { &mut *SAVED.get() };
+    // Save the whole box before painting anything. The halo pass writes
+    // pixels the figure never covers, and restoring is only correct if every
+    // pixel that might be written was read first.
     for row in 0..CUR_H {
-        let line = CURSOR[row as usize].as_bytes();
+        for col in 0..CUR_W {
+            let (px, py) = (x + col, y + row);
+            if px < fb.width() && py < fb.height() {
+                saved[(row * CUR_W + col) as usize] = fb.get(px, py);
+            }
+        }
+    }
+    let set = |r: i32, c: i32| -> bool {
+        if r < 0 || c < 0 || r >= CUR_H as i32 || c >= CUR_W as i32 {
+            return false;
+        }
+        matches!(bits[r as usize].as_bytes().get(c as usize), Some(b'X') | Some(b'.'))
+    };
+    for row in 0..CUR_H {
+        let line = bits[row as usize].as_bytes();
         for col in 0..CUR_W {
             let (px, py) = (x + col, y + row);
             if px >= fb.width() || py >= fb.height() {
                 continue;
             }
-            saved[(row * CUR_W + col) as usize] = fb.get(px, py);
             match line.get(col as usize) {
-                Some(b'X') => fb.put(px, py, fb.raw(theme::TEXT)),
+                // The arrow carries its own outline in the bitmap.
+                Some(b'X') if shape == SHAPE_ARROW => fb.put(px, py, fb.raw(theme::TEXT)),
                 Some(b'.') => fb.put(px, py, fb.raw(theme::HILIGHT)),
+                Some(b'X') => fb.put(px, py, fb.raw(theme::HILIGHT)),
+                _ if shape != SHAPE_ARROW => {
+                    // Blank, but touching the figure: this is the halo.
+                    let (r, c) = (row as i32, col as i32);
+                    let near = set(r - 1, c)
+                        || set(r + 1, c)
+                        || set(r, c - 1)
+                        || set(r, c + 1)
+                        || set(r - 1, c - 1)
+                        || set(r - 1, c + 1)
+                        || set(r + 1, c - 1)
+                        || set(r + 1, c + 1);
+                    if near {
+                        fb.put(px, py, fb.raw(theme::TEXT));
+                    }
+                }
                 _ => {}
             }
         }
@@ -897,6 +1091,12 @@ pub fn poll_mouse() {
     }
     if released_left && dragging {
         with(|d| d.mode = Mode::Normal);
+        // The resulting rectangle, not just the fact that a drag ended. A
+        // resize that silently does nothing and a resize that ran and was
+        // clamped back look identical from outside; the numbers separate them.
+        if let Some(Some(r)) = with(|d| d.focus().map(|f| d.windows[f].rect)) {
+            crate::serial_println!("[desk] drag end {}x{}+{}+{}", r.w, r.h, r.x, r.y);
+        }
         trace("drag end");
         draw();
     }
@@ -913,6 +1113,14 @@ pub fn poll_mouse() {
     if !s.left {
         update_hover(x, y);
     }
+    // Pick the glyph after the event has been acted on, so a press that
+    // started a resize is already reflected in the mode.
+    let want = match with(|d| d.mode) {
+        Some(Mode::DragSize { edges, .. }) => shape_for(edges),
+        Some(Mode::Drag { .. }) => SHAPE_ARROW,
+        _ => resize_shape_at(x, y),
+    };
+    unsafe { *SHAPE.get() = want };
     cursor_show(&fb, x as u32, y as u32);
 }
 
@@ -980,6 +1188,111 @@ fn menu_label_at(menus: &[Menu], bar: Rect, x: i32, y: i32) -> Option<usize> {
         lx += w;
     }
     None
+}
+
+/// Which sides of a frame a resize drag has hold of.
+///
+/// A bitmask rather than an enum of nine cases, because a corner is genuinely
+/// two edges at once and the arithmetic that moves them is the same code
+/// twice.
+pub mod edge {
+    pub const NONE: u8 = 0;
+    pub const LEFT: u8 = 1 << 0;
+    pub const RIGHT: u8 = 1 << 1;
+    pub const TOP: u8 = 1 << 2;
+    pub const BOTTOM: u8 = 1 << 3;
+}
+
+/// How close to a border counts as grabbing it.
+///
+/// Six pixels is what the desktops this imitates used, and it is the number a
+/// hand trained on them expects to find. The corner zones are wider because a
+/// corner is the only way to change both dimensions at once, and hunting for
+/// a 6x6 square is the difference between a window manager that resizes and
+/// one that appears not to.
+const BORDER: i32 = 6;
+const CORNER: i32 = 16;
+
+/// Which borders the pointer is over, if any.
+///
+/// The whole frame edge, not one corner grip. A 14x14 square in the
+/// bottom-right was the only way to resize anything, which is discoverable if
+/// you already know it is there and invisible otherwise -- the operator's
+/// report was that windows could not be resized at all, only maximised.
+fn edges_at(frame: Rect, x: i32, y: i32) -> u8 {
+    let (l, t) = (frame.x as i32, frame.y as i32);
+    let (r, b) = (l + frame.w as i32, t + frame.h as i32);
+    // Outside the frame, or far enough inside that this is content.
+    if x < l - 1 || x > r + 1 || y < t - 1 || y > b + 1 {
+        return edge::NONE;
+    }
+
+    let mut e = edge::NONE;
+    // Corners first: within CORNER of two borders claims both, so the
+    // diagonal drag is available along a usable stretch of each side.
+    let near_l = (x - l).abs() <= CORNER;
+    let near_r = (r - x).abs() <= CORNER;
+    let near_t = (y - t).abs() <= CORNER;
+    let near_b = (b - y).abs() <= CORNER;
+    let corner_h = (x - l).abs() <= BORDER || (r - x).abs() <= BORDER;
+    let corner_v = (y - t).abs() <= BORDER || (b - y).abs() <= BORDER;
+
+    if corner_h && near_t && near_b {
+        // A window shorter than two corner zones: prefer the nearer edge.
+        if y - t < b - y {
+            e |= edge::TOP;
+        } else {
+            e |= edge::BOTTOM;
+        }
+    } else if corner_h && near_t {
+        e |= edge::TOP;
+    } else if corner_h && near_b {
+        e |= edge::BOTTOM;
+    }
+    if corner_v && near_l && near_r {
+        if x - l < r - x {
+            e |= edge::LEFT;
+        } else {
+            e |= edge::RIGHT;
+        }
+    } else if corner_v && near_l {
+        e |= edge::LEFT;
+    } else if corner_v && near_r {
+        e |= edge::RIGHT;
+    }
+
+    // Plain edges, for the long stretch between the corners.
+    if (x - l).abs() <= BORDER {
+        e |= edge::LEFT;
+    }
+    if (r - x).abs() <= BORDER {
+        e |= edge::RIGHT;
+    }
+    if (y - t).abs() <= BORDER {
+        e |= edge::TOP;
+    }
+    if (b - y).abs() <= BORDER {
+        e |= edge::BOTTOM;
+    }
+    e
+}
+
+/// The smallest a window may be dragged to.
+///
+/// Asked of the program inside it, because the program is the only thing that
+/// knows. Minesweeper's board does not reflow and Paint's canvas does not
+/// shrink; a window manager that let either be dragged to 160 pixels wide
+/// would be hiding their content behind a frame the operator cannot undo
+/// without maximising.
+fn min_size_of(w: &Window) -> (u32, u32) {
+    let inner = match &w.content {
+        Content::App(a) => a.min_size(),
+        _ => (240, 120),
+    };
+    (
+        inner.0 + theme::FRAME * 2,
+        inner.1 + theme::TITLE_H + theme::FRAME * 2,
+    )
 }
 
 /// The bottom-right corner that resizes, generous enough to hit.
@@ -1100,10 +1413,13 @@ fn press_at(x: i32, y: i32) {
         return;
     }
 
-    if state != WinState::Maximised && contains(size_grip(frame), x, y) {
-        with(|d| d.mode = Mode::DragSize { from: frame });
-        draw();
-        return;
+    if state != WinState::Maximised {
+        let e = edges_at(frame, x, y);
+        if e != edge::NONE {
+            with(|d| d.mode = Mode::DragSize { from: frame, edges: e });
+            draw();
+            return;
+        }
     }
 
     if let Some(bar) = menubar {
@@ -1399,13 +1715,40 @@ fn drag_to(x: i32, y: i32) {
                     r.h,
                 )
             }
-            Mode::DragSize { .. } => Rect::new(
-                r.x,
-                r.y,
-                ((x - r.x as i32).max(160) as u32).min(screen.x + screen.w - r.x),
-                ((y - r.y as i32).max((theme::TITLE_H * 3) as i32) as u32)
-                    .min(screen.y + screen.h - r.y),
-            ),
+            Mode::DragSize { from, edges } => {
+                // Each held edge moves to the pointer; the opposite side stays
+                // where it was. Left and top change the origin as well as the
+                // extent, which is why the arithmetic is not symmetric.
+                let (min_w, min_h) = min_size_of(&d.windows[f]);
+                let (mut nx, mut ny) = (from.x, from.y);
+                let (mut nw, mut nh) = (from.w, from.h);
+                let right = from.x + from.w;
+                let bottom = from.y + from.h;
+
+                if edges & edge::LEFT != 0 {
+                    let want = x.max(screen.x as i32) as u32;
+                    nx = want.min(right.saturating_sub(min_w));
+                    nw = right - nx;
+                }
+                if edges & edge::RIGHT != 0 {
+                    let lim = screen.x + screen.w;
+                    let want = (x.max(0) as u32).min(lim);
+                    nw = want.saturating_sub(from.x).max(min_w);
+                    nw = nw.min(lim.saturating_sub(from.x));
+                }
+                if edges & edge::TOP != 0 {
+                    let want = y.max(screen.y as i32) as u32;
+                    ny = want.min(bottom.saturating_sub(min_h));
+                    nh = bottom - ny;
+                }
+                if edges & edge::BOTTOM != 0 {
+                    let lim = screen.y + screen.h;
+                    let want = (y.max(0) as u32).min(lim);
+                    nh = want.saturating_sub(from.y).max(min_h);
+                    nh = nh.min(lim.saturating_sub(from.y));
+                }
+                Rect::new(nx, ny, nw.max(min_w), nh.max(min_h))
+            }
             _ => return false,
         };
         let moved = new.x != r.x || new.y != r.y || new.w != r.w || new.h != r.h;
@@ -2292,7 +2635,7 @@ pub fn key(k: u8) -> Route {
         // can only abandon it. Anything else mid-drag is swallowed, because a
         // window that responds to typing while it is being dragged is two
         // interfaces fighting over one object.
-        Mode::Drag { from, .. } | Mode::DragSize { from } => {
+        Mode::Drag { from, .. } | Mode::DragSize { from, .. } => {
             if k == 27 {
                 with(|d| {
                     if let Some(f) = d.focus() {

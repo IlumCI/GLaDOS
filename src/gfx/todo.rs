@@ -344,6 +344,12 @@ impl Todo {
 }
 
 impl DeskApp for Todo {
+    /// Wide enough for a step's command line and tall enough for the
+    /// expected/fail pair beneath it, which is the unit a reader needs whole.
+    fn min_size(&self) -> (u32, u32) {
+        (420, 260)
+    }
+
     fn draw_in(&self, fb: &Framebuffer, client: Rect, focused: bool) {
         theme::panel(fb, client);
         let (head, list, detail) = Self::layout(client);

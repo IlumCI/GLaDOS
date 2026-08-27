@@ -171,6 +171,11 @@ impl Writer {
 }
 
 impl DeskApp for Writer {
+    /// Text reflows, so this is only a floor against losing the window.
+    fn min_size(&self) -> (u32, u32) {
+        (280, 160)
+    }
+
     fn draw_in(&self, fb: &Framebuffer, client: Rect, focused: bool) {
         theme::panel(fb, client);
         let (well, body) = Self::metrics(client);

@@ -255,6 +255,12 @@ fn count_color(n: u8) -> Color {
 }
 
 impl DeskApp for Mines {
+    /// The board does not reflow: nine cells of thirty pixels plus the
+    /// header is the whole program, and anything narrower crops it.
+    fn min_size(&self) -> (u32, u32) {
+        (W as u32 * CELL + PAD * 2, H as u32 * CELL + HEAD + PAD * 3)
+    }
+
     fn draw_in(&self, fb: &Framebuffer, client: Rect, focused: bool) {
         theme::panel(fb, client);
 

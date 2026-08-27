@@ -120,6 +120,12 @@ impl Oracle {
 }
 
 impl DeskApp for Oracle {
+    /// The plot needs a history axis worth reading; below this the forked
+    /// projections overlap into a single line.
+    fn min_size(&self) -> (u32, u32) {
+        (420, 300)
+    }
+
     fn draw_in(&self, fb: &Framebuffer, client: Rect, focused: bool) {
         theme::panel(fb, client);
         let (tabs, graph, legend) = Self::layout(client);

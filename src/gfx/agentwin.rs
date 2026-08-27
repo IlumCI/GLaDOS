@@ -34,6 +34,12 @@ impl AgentLog {
 }
 
 impl DeskApp for AgentLog {
+    /// A transcript line plus its observation, which is what one step of an
+    /// episode looks like.
+    fn min_size(&self) -> (u32, u32) {
+        (400, 220)
+    }
+
     fn draw_in(&self, fb: &Framebuffer, client: Rect, _focused: bool) {
         theme::panel(fb, client);
         let lh = theme::text_h();
