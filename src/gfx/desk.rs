@@ -220,7 +220,7 @@ const ICONS: [(&str, &str); 10] = [
 /// The Start menu, bottom of the bar upward -- the 98 half of the ancestry.
 /// Same entries as the icons plus the one thing that belongs behind a second
 /// look, exactly where 98 kept it.
-const START_ITEMS: [(&str, &str); 11] = [
+const START_ITEMS: [(&str, &str); 12] = [
     ("Terminal", "term"),
     ("Programs", "win open programs"),
     ("Files", "win open files"),
@@ -232,6 +232,7 @@ const START_ITEMS: [(&str, &str); 11] = [
     ("Oracle", "oracle"),
     ("Settings", "win open settings"),
     ("Reboot", "reboot"),
+    ("Shut down", "shutdown"),
 ];
 
 /// Run what an icon or Start entry names.

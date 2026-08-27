@@ -311,7 +311,66 @@ pub unsafe fn xrstor_from(area: *const u8) {
 /// triple-faulting by loading a zero-length IDT and raising an interrupt. The
 /// CPU cannot find a handler, cannot find a double-fault handler either, and
 /// resets. Inelegant, universally effective.
+/// The firmware's runtime table, kept from boot.
+///
+/// `ExitBootServices` retires the boot services and leaves these alone, and
+/// nothing here calls `SetVirtualAddressMap`, so the pointer stays valid and
+/// the identity map keeps it reachable. It is the only way back to firmware
+/// once the kernel owns the machine.
+static RUNTIME: crate::sync::Racy<usize> = crate::sync::Racy::new(0);
+
+pub fn set_runtime(rt: *mut core::ffi::c_void) {
+    unsafe { *RUNTIME.get() = rt as usize };
+}
+
+fn runtime() -> Option<&'static crate::uefi::RuntimeServices> {
+    let p = unsafe { *RUNTIME.get() };
+    if p == 0 {
+        return None;
+    }
+    Some(unsafe { &*(p as *const crate::uefi::RuntimeServices) })
+}
+
+/// Ask the firmware to turn the machine off.
+///
+/// There was no way to do this at all, which is why the only shutdown anybody
+/// had was holding the power button. ACPI S5 by hand means parsing the DSDT
+/// for `\_S5` and writing PM1a/PM1b, an AML interpreter's worth of work for
+/// something the firmware already knows how to do on this exact board.
+///
+/// Returns only if the call is unavailable or the firmware declines, which is
+/// why the caller still has to park the core afterwards.
+pub fn shutdown() -> ! {
+    if let Some(rt) = runtime() {
+        (rt.reset_system)(
+            crate::uefi::ResetType::Shutdown,
+            0,
+            0,
+            core::ptr::null(),
+        );
+    }
+    crate::kprintln!("  the firmware would not power down; hold the button");
+    halt()
+}
+
 pub fn reboot() -> ! {
+    // The firmware first. It knows this board's quirks, and a cold reset
+    // through it is the same path every other operating system on the machine
+    // takes. The keyboard-controller pulse and the triple fault below are
+    // what to do when there is no firmware left to ask, and they stay because
+    // the recovery console may need them when nothing else is standing.
+    if let Some(rt) = runtime() {
+        (rt.reset_system)(
+            crate::uefi::ResetType::Cold,
+            0,
+            0,
+            core::ptr::null(),
+        );
+    }
+    reboot_the_hard_way()
+}
+
+fn reboot_the_hard_way() -> ! {
     unsafe {
         for _ in 0..16 {
             let mut spins = 0;

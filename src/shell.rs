@@ -1412,7 +1412,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             console::set_color(YELLOW);
             kprintln!("machine");
             console::set_color(WHITE);
-            kprintln!("  mem uptime tasks cpu acpi pci video date reboot");
+            kprintln!("  mem uptime tasks cpu acpi pci video date reboot shutdown");
             kprintln!("  fault         deliberately dereference null");
             kprintln!("  clear refresh echo <text>");
             kprintln!("  log [all|save]  everything printed since power-on; the console keeps one screen");
@@ -1754,8 +1754,15 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
         }
         "reboot" => {
             console::set_color(YELLOW);
-            kprintln!("  resetting...");
+            kprintln!("  asking the firmware for a cold reset...");
+            console::set_color(LTGRAY);
             crate::cpu::reboot();
+        }
+        "shutdown" | "poweroff" | "halt" => {
+            console::set_color(YELLOW);
+            kprintln!("  asking the firmware to power down...");
+            console::set_color(LTGRAY);
+            crate::cpu::shutdown();
         }
         "enternet" => {
             // Named for the dial-up software, and it browses about as much of

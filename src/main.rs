@@ -203,6 +203,11 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     // 1 MiB model perturbs the map, and ExitBootServices rejects a stale key.
     // Loading afterwards would mean re-reading the map, which is exactly the
     // retry loop below and not worth entangling.
+    // Keep the runtime table before the boot-services era closes. It is what
+    // `reboot` and `shutdown` call, and after ExitBootServices there is no
+    // other way to reach the firmware.
+    cpu::set_runtime(unsafe { (*st).runtime_services });
+
     let model = uefi::read_file(bs, image, MODEL_PATH);
     let tokenizer = uefi::read_file(bs, image, TOKENIZER_PATH);
     // The root bundle comes off the same volume for the same reason: this is

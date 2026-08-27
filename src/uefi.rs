@@ -95,6 +95,42 @@ pub struct ConfigurationTable {
     pub vendor_table: *mut c_void,
 }
 
+/// What `ResetSystem` is being asked for.
+#[repr(u32)]
+pub enum ResetType {
+    Cold = 0,
+    Warm = 1,
+    Shutdown = 2,
+}
+
+/// The runtime half of the firmware, which survives `ExitBootServices`.
+///
+/// Every field before `reset_system` is a function pointer we do not call, and
+/// they are present because the offset of the one we do call is defined by
+/// their count. The layout is fixed by the specification, so this is a
+/// transcription rather than a design.
+///
+/// Calling into it works here for a reason specific to this kernel: nothing
+/// ever calls `SetVirtualAddressMap`, so the firmware's pointers stay
+/// physical, and the identity map to 4 GiB keeps them addressable. A kernel
+/// that relocated the runtime would have to convert these first.
+#[repr(C)]
+pub struct RuntimeServices {
+    pub hdr: TableHeader,
+    pub get_time: usize,
+    pub set_time: usize,
+    pub get_wakeup_time: usize,
+    pub set_wakeup_time: usize,
+    pub set_virtual_address_map: usize,
+    pub convert_pointer: usize,
+    pub get_variable: usize,
+    pub get_next_variable_name: usize,
+    pub set_variable: usize,
+    pub get_next_high_monotonic_count: usize,
+    pub reset_system:
+        extern "efiapi" fn(ResetType, Status, usize, *const c_void) -> !,
+}
+
 #[repr(C)]
 pub struct SystemTable {
     pub hdr: TableHeader,
