@@ -164,6 +164,18 @@ pub struct Framebuffer {
     /// thing to be able to recognise on sight.
     stride: u32,
     format: Format,
+    /// True when `base` is the firmware's aperture, false when it is heap the
+    /// compositor owns.
+    ///
+    /// Worth a whole field because it is the difference between a fill the
+    /// compiler may vectorise and a million stores it may not. Writes to the
+    /// aperture have to be volatile: nothing in this program reads them, and
+    /// the optimiser will delete a screen-fill loop as dead stores if allowed
+    /// to. Writes to the back buffer have no such need -- it is ordinary
+    /// memory that `present` reads straight afterwards -- and paying the
+    /// volatile price there made every rectangle in the interface cost one
+    /// un-mergeable store per pixel.
+    mmio: bool,
 }
 
 // Single core, ring 0, one owner. There is no other CPU to race with yet.
@@ -181,7 +193,64 @@ impl Framebuffer {
         stride: u32,
         format: Format,
     ) -> Self {
-        Self { base: base as *mut u32, width, height, stride, format }
+        Self { base: base as *mut u32, width, height, stride, format, mmio: true }
+    }
+
+    /// A framebuffer over memory this program owns.
+    ///
+    /// # Safety
+    /// Same as `new`, and additionally `base` must be an allocation this
+    /// kernel owns for as long as the returned value lives, not a device
+    /// aperture. Getting that wrong loses writes rather than corrupting
+    /// memory, which is why the two constructors are separate rather than a
+    /// boolean argument at the call site.
+    pub const unsafe fn over_ram(
+        base: u64,
+        width: u32,
+        height: u32,
+        stride: u32,
+        format: Format,
+    ) -> Self {
+        Self { base: base as *mut u32, width, height, stride, format, mmio: false }
+    }
+
+    /// One row as a slice, clipped to the surface.
+    ///
+    /// Only for RAM surfaces. The aperture is kept write-only by discipline
+    /// everywhere else here, and handing out a slice of it would be an
+    /// invitation to read it back.
+    #[inline]
+    fn row_mut(&self, y: u32, x: u32, w: u32) -> Option<&mut [u32]> {
+        if self.mmio || y >= self.height || x >= self.width {
+            return None;
+        }
+        let w = w.min(self.width - x) as usize;
+        if w == 0 {
+            return None;
+        }
+        let off = (y as usize) * (self.stride as usize) + (x as usize);
+        Some(unsafe { core::slice::from_raw_parts_mut(self.base.add(off), w) })
+    }
+
+    /// Copy a run of pixels into one row.
+    ///
+    /// The fast path under `present`, which used to write the changed span of
+    /// every row a pixel at a time through `put` -- two bounds checks and a
+    /// volatile store each, for something that is a memcpy.
+    pub fn blit_span(&self, x: u32, y: u32, src: &[u32]) {
+        if let Some(dst) = self.row_mut(y, x, src.len() as u32) {
+            let n = dst.len();
+            dst.copy_from_slice(&src[..n]);
+            return;
+        }
+        if y >= self.height || x >= self.width {
+            return;
+        }
+        let n = (src.len() as u32).min(self.width - x) as usize;
+        let off = (y as usize) * (self.stride as usize) + (x as usize);
+        for (i, v) in src[..n].iter().enumerate() {
+            unsafe { write_volatile(self.base.add(off + i), *v) }
+        }
     }
 
     #[inline]
@@ -268,10 +337,7 @@ impl Framebuffer {
     fn fill_rows(&self, y: u32, count: u32, raw: u32) {
         let end = y.saturating_add(count).min(self.height);
         for row in y..end {
-            let off = (row as usize) * (self.stride as usize);
-            for x in 0..self.width as usize {
-                unsafe { write_volatile(self.base.add(off + x), raw) }
-            }
+            self.fill_span(0, row, self.width, raw);
         }
     }
 
@@ -350,17 +416,27 @@ impl Framebuffer {
     }
 
     fn fill_span(&self, x: u32, y: u32, w: u32, raw: u32) {
-        for dx in 0..w {
-            self.put(x + dx, y, raw);
+        // Clip once for the whole run rather than once per pixel, which is
+        // what going through `put` used to cost.
+        if let Some(dst) = self.row_mut(y, x, w) {
+            dst.fill(raw);
+            return;
+        }
+        if y >= self.height || x >= self.width {
+            return;
+        }
+        let n = w.min(self.width - x) as usize;
+        let off = (y as usize) * (self.stride as usize) + (x as usize);
+        for i in 0..n {
+            unsafe { write_volatile(self.base.add(off + i), raw) }
         }
     }
 
     pub fn rect(&self, x: u32, y: u32, w: u32, h: u32, c: Color) {
         let raw = self.encode(c);
-        for dy in 0..h {
-            for dx in 0..w {
-                self.put(x + dx, y + dy, raw);
-            }
+        let end = y.saturating_add(h).min(self.height);
+        for row in y..end {
+            self.fill_span(x, row, w, raw);
         }
     }
 
@@ -569,4 +645,50 @@ impl Framebuffer {
             self.put(x + w - 1, y + dy, raw);
         }
     }
+}
+
+/// Where the drawing time actually goes.
+///
+/// Written because "the desktop feels slow" is not a number and cannot be
+/// optimised against. Each figure is microseconds for one operation at the
+/// real screen size, taken from the TSC, and the point is the ratio between
+/// them rather than any absolute: a fill that costs more than the diff that
+/// follows it says the compositor is not the problem.
+pub fn bench() {
+    use crate::kprintln;
+    let Some(fb) = primary() else {
+        kprintln!("  no framebuffer");
+        return;
+    };
+    let mhz = crate::time::tsc_mhz().max(1);
+    let us = |t: u64| t / mhz;
+
+    let target = compose::target().unwrap_or_else(|| fb.clone());
+    let (w, h) = (target.width(), target.height());
+    kprintln!("  {}x{}  {} pixels", w, h, w as u64 * h as u64);
+
+    let t = crate::time::rdtsc();
+    target.rect(0, 0, w, h, theme::DESKTOP);
+    let fill = crate::time::rdtsc() - t;
+    kprintln!("  full-screen rect      {:>8} us", us(fill));
+
+    let t = crate::time::rdtsc();
+    desk::draw();
+    let full = crate::time::rdtsc() - t;
+    kprintln!("  desk::draw + present  {:>8} us", us(full));
+
+    // A present with nothing changed: the diff alone, which is the floor for
+    // any repaint that turns out to be a no-op.
+    let t = crate::time::rdtsc();
+    compose::present();
+    let clean = crate::time::rdtsc() - t;
+    kprintln!("  present, no change    {:>8} us", us(clean));
+
+    // ...and one where every row differs, which is the worst case.
+    let t = crate::time::rdtsc();
+    target.rect(0, 0, w, h, theme::APERTURE);
+    compose::present();
+    let dirty = crate::time::rdtsc() - t;
+    kprintln!("  fill + present, all   {:>8} us", us(dirty));
+    desk::draw();
 }

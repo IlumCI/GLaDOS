@@ -81,7 +81,7 @@ pub fn target() -> Option<Framebuffer> {
             // Safety: the pointer is a live heap allocation of exactly
             // `w * h` u32s that lives for the kernel's lifetime (the
             // compositor is never dropped), and stride == width.
-            Framebuffer::new(
+            Framebuffer::over_ram(
                 c.back.as_mut_ptr() as u64,
                 c.w,
                 c.h,
@@ -114,9 +114,7 @@ pub fn present() {
             .zip(seen.iter().rev())
             .position(|(b, s)| b != s)
             .unwrap_or(0);
-        for x in a..b {
-            fb.put(x as u32, y as u32, row[x]);
-        }
+        fb.blit_span(a as u32, y as u32, &row[a..b]);
         seen[a..b].copy_from_slice(&row[a..b]);
     }
 }
@@ -136,12 +134,25 @@ pub fn flush_rect(x: u32, y: u32, rw: u32, rh: u32) {
     let y1 = ((y + rh) as usize).min(c.h as usize);
     for row in y0..y1 {
         let base = row * w;
-        for col in x0..x1 {
-            let v = c.back[base + col];
-            if c.shadow[base + col] != v {
-                c.shadow[base + col] = v;
-                fb.put(col as u32, row as u32, v);
-            }
+        let back = &c.back[base + x0..base + x1];
+        let seen = &mut c.shadow[base + x0..base + x1];
+        if back == seen {
+            continue;
         }
+        // The same one-span-per-row rule `present` uses, and for the same
+        // reason: a line of console output changes one run of pixels, and
+        // writing that run once beats writing each differing pixel on its
+        // own. This is the path every typed character takes, so the constant
+        // factor here is what typing feels like.
+        let a = back.iter().zip(seen.iter()).position(|(b, s)| b != s).unwrap_or(0);
+        let b = back.len()
+            - back
+                .iter()
+                .rev()
+                .zip(seen.iter().rev())
+                .position(|(b, s)| b != s)
+                .unwrap_or(0);
+        fb.blit_span((x0 + a) as u32, row as u32, &back[a..b]);
+        seen[a..b].copy_from_slice(&back[a..b]);
     }
 }

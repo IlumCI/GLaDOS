@@ -2008,6 +2008,10 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
                 boot.fb.stride(),
                 boot.fb.format()
             );
+            if rest.trim() == "bench" {
+                crate::gfx::bench();
+                return;
+            }
             if rest.trim() == "bars" {
                 // Deferred from boot because the splash owned the screen.
                 // Swapped red and blue mean the firmware's reported pixel
