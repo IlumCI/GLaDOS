@@ -49,6 +49,13 @@ pub const DESKTOP_GRID: Color = Color::new(0x1C, 0x22, 0x2C);
 pub const WALL_MARK: Color = Color::new(0x4A, 0x2E, 0x12);
 pub const TEXT: Color = Color::new(0x00, 0x00, 0x00);
 pub const TEXT_DIM: Color = Color::new(0x80, 0x80, 0x80);
+/// The close button under the pointer.
+///
+/// The one control on a window that cannot be undone, and the one an operator
+/// coming from Windows identifies by colour before they read the glyph. Every
+/// other button here answers hover with a ring; this one answers with red,
+/// because "this is the destructive one" is worth saying twice.
+pub const CLOSE_HOT: Color = Color::new(0xC4, 0x28, 0x28);
 
 // --- Aperture ------------------------------------------------------------
 
@@ -210,8 +217,8 @@ const FACE_INSET: u32 = FRAME;
 /// button that highlights in one place and presses in another is the bug
 /// that duplicated layout always becomes.
 pub fn caption_buttons(bar: Rect) -> [Rect; 3] {
-    let s = bar.h.saturating_sub(12);
-    let y = bar.y + 6;
+    let s = bar.h.saturating_sub(8);
+    let y = bar.y + 4;
     let close_x = bar.x + bar.w.saturating_sub(s + 6);
     // The close button sits apart from the pair, as it has since 95 -- the
     // one you reach for blind should not share an edge with the one that
@@ -272,44 +279,47 @@ pub fn title_bar(
     // the same inner ring every other button here uses for "the next press
     // lands here".
     for (i, b) in btns.iter().enumerate() {
-        fb.rect(b.x, b.y, b.w, b.h, FACE);
+        let hot = hot_caption == Some(i);
+        let danger = hot && i == 2;
+        fb.rect(b.x, b.y, b.w, b.h, if danger { CLOSE_HOT } else { FACE });
         bevel(fb, *b, true);
-        if hot_caption == Some(i) {
+        if hot && !danger {
             let f = b.shrink(2);
             if !f.is_empty() {
                 fb.frame(f.x, f.y, f.w, f.h, DARKEDGE);
             }
         }
-        let g = b.shrink(6);
+        let ink = if danger { HILIGHT } else { TEXT };
+        let g = b.shrink(4);
         if g.is_empty() {
             continue;
         }
         match i {
             // Minimise: the bar along the bottom.
-            0 => fb.rect(g.x, g.y + g.h.saturating_sub(3), g.w, 3, TEXT),
+            0 => fb.rect(g.x, g.y + g.h.saturating_sub(3), g.w, 3, ink),
             // Maximise, or restore when already maximised: one frame with a
             // thick lid, or two overlapping ones.
             1 => {
                 if maximised {
                     let s = g.w.saturating_sub(4);
-                    fb.frame(g.x + 4, g.y, s, s, TEXT);
-                    fb.rect(g.x + 4, g.y, s, 2, TEXT);
+                    fb.frame(g.x + 4, g.y, s, s, ink);
+                    fb.rect(g.x + 4, g.y, s, 2, ink);
                     fb.rect(g.x, g.y + 4, s, s, FACE);
-                    fb.frame(g.x, g.y + 4, s, s, TEXT);
-                    fb.rect(g.x, g.y + 4, s, 2, TEXT);
+                    fb.frame(g.x, g.y + 4, s, s, ink);
+                    fb.rect(g.x, g.y + 4, s, 2, ink);
                 } else {
-                    fb.frame(g.x, g.y, g.w, g.h, TEXT);
-                    fb.rect(g.x, g.y, g.w, 2, TEXT);
+                    fb.frame(g.x, g.y, g.w, g.h, ink);
+                    fb.rect(g.x, g.y, g.w, 2, ink);
                 }
             }
             // Close: the cross, two pixels wide so it reads at this size.
             _ => {
                 let (x0, y0) = (g.x as i32, g.y as i32);
                 let (x1, y1) = ((g.x + g.w) as i32 - 1, (g.y + g.h) as i32 - 1);
-                fb.line(x0, y0, x1, y1, TEXT);
-                fb.line(x0 + 1, y0, x1, y1 - 1, TEXT);
-                fb.line(x0, y1, x1, y0, TEXT);
-                fb.line(x0 + 1, y1, x1, y0 + 1, TEXT);
+                fb.line(x0, y0, x1, y1, ink);
+                fb.line(x0 + 1, y0, x1, y1 - 1, ink);
+                fb.line(x0, y1, x1, y0, ink);
+                fb.line(x0 + 1, y1, x1, y0 + 1, ink);
             }
         }
     }
