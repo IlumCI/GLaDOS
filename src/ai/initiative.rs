@@ -205,6 +205,14 @@ fn situation_line(s: &context::Situation) -> String {
 /// One evaluation of the loop. Called on the second boundary from the
 /// resident task every TICK_SECS, and directly by `initiative now`.
 pub fn tick() {
+    // Everything this decides and announces is the machine reasoning about
+    // itself on its own schedule, which is the definition of the executive
+    // console. It used to arrive in the middle of whatever the operator was
+    // typing.
+    crate::gfx::console::on_channel(crate::gfx::console::EXEC, tick_inner)
+}
+
+fn tick_inner() {
     let now_s = crate::dev::lapic::ticks() / crate::TIMER_HZ as u64;
     // Settle time measured from the prompt, not from power-on.
     //

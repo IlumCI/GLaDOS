@@ -136,6 +136,19 @@ struct EpisodeReq {
 
 static REQUEST: Racy<Option<EpisodeReq>> = Racy::new(None);
 
+/// True while the agent task is inside an episode nobody asked for.
+///
+/// Read by the console to decide which grid a line belongs on. Checked
+/// against the task as well as the flag, because the flag is global and the
+/// shell task can be preempted into the middle of one: an operator's command
+/// printing during an autonomous episode belongs on the operator's console,
+/// and only output from the task actually running that episode does not.
+static AUTONOMOUS: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+pub fn printing_in_background() -> bool {
+    AUTONOMOUS.load(Ordering::Acquire) && crate::task::current() == super::agent_task_id()
+}
+
 /// True while an episode is executing (as opposed to merely queued). mod.rs
 /// owns the flag; the queue here only needs to know the difference for
 /// `request_abort`'s message.
@@ -197,9 +210,9 @@ pub fn agent_task() {
         // console. It is still on the serial port, still in the log ring and
         // still in the agent window; it just does not arrive in the middle of
         // whatever is being typed.
-        crate::gfx::console::diverted(req.autonomous, || {
-            run(&req.goal, req.trust, req.steps);
-        });
+        AUTONOMOUS.store(req.autonomous, Ordering::Release);
+        run(&req.goal, req.trust, req.steps);
+        AUTONOMOUS.store(false, Ordering::Release);
         ABORT.store(false, Ordering::Release);
         set_busy(false);
         // Unconditional, including for episodes nobody asked for. It was

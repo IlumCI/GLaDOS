@@ -52,7 +52,8 @@ use alloc::vec::Vec;
 pub enum Content {
     /// The character grid. Exactly one window holds it -- there is one console
     /// -- and that is true by construction rather than checked.
-    Terminal,
+    /// A console grid. The payload names which one.
+    Terminal(usize),
     Panel(Panel),
     /// Enternet. Its own variant rather than a Panel because a page is not a
     /// stack of widgets: it scrolls, it wraps to the window, and its links are
@@ -259,7 +260,7 @@ fn launch(cmd: &str) {
             if let Some(i) = d
                 .windows
                 .iter()
-                .position(|w| matches!(w.content, Content::Terminal))
+                .position(|w| matches!(w.content, Content::Terminal(c) if c == super::console::USER))
             {
                 // The icon is a way back for a minimised terminal besides
                 // its task button, so restoring and raising it here is wanted.
@@ -570,7 +571,7 @@ pub fn init() {
         state: WinState::Normal,
         snap_back: None,
         round: 0,
-        content: Content::Terminal,
+        content: Content::Terminal(super::console::USER),
         menus: alloc::vec![
             Menu {
                 label: String::from("File"),
@@ -613,9 +614,43 @@ pub fn init() {
         closable: false,
     };
 
+    // The executive console: the boot log, background tasks, and the episodes
+    // the machine decides to run on its own.
+    //
+    // Starts minimised. It carries everything printed before the shell
+    // existed, so it is worth having and worth being able to reach, and it is
+    // not what an operator wants filling half the screen the moment they sit
+    // down. The taskbar button is the affordance; the machine raises nothing
+    // by itself, because a window that appears on its own while somebody is
+    // typing is the problem this split was made to solve, arriving by a
+    // different route.
+    let executive = Window {
+        title: String::from("Executive"),
+        icon: ICO_TERM,
+        rect: Rect::new(
+            term_x + MARGIN,
+            screen.y + MARGIN,
+            term_w.saturating_sub(MARGIN * 2).max(320),
+            screen.h.saturating_sub(MARGIN * 4).max(200),
+        ),
+        state: WinState::Minimised,
+        snap_back: None,
+        round: 0,
+        content: Content::Terminal(super::console::EXEC),
+        menus: alloc::vec![Menu {
+            label: String::from("View"),
+            items: alloc::vec![
+                item("Clear", "exec clear"),
+                item("Save log", "log save /tmp/boot.txt"),
+                item("Redraw", "refresh"),
+            ],
+        }],
+        closable: true,
+    };
+
     unsafe {
         *DESK.get() = Some(Desktop {
-            windows: alloc::vec![pmw, terminal],
+            windows: alloc::vec![pmw, executive, terminal],
             mode: Mode::Normal,
             hover: Hover::None,
         })
@@ -625,7 +660,9 @@ pub fn init() {
     // output stays immediate between desktop draws.
     super::compose::init();
     if let Some(back) = super::compose::target() {
-        super::console::with(|c| c.retarget(back, true));
+        for ch in [super::console::USER, super::console::EXEC] {
+            super::console::with_ch(ch, |c| c.retarget(back.clone(), true));
+        }
     }
     draw();
 }
@@ -663,7 +700,7 @@ pub fn open(title: &str, panel: Panel) {
         let clear_of_terminal = d
             .windows
             .iter()
-            .find(|win| matches!(win.content, Content::Terminal))
+            .find(|win| matches!(win.content, Content::Terminal(c) if c == super::console::USER))
             .map(|win| win.rect.x + win.rect.w + MARGIN)
             .unwrap_or(screen.x);
         let x = screen
@@ -1244,6 +1281,31 @@ pub mod edge {
 const BORDER: i32 = 6;
 const CORNER: i32 = 16;
 
+/// Raise the executive console, restoring it if it is minimised.
+///
+/// Only ever called because somebody asked. Nothing in the system raises this
+/// window on its own: a window that appears while an operator is typing is
+/// the problem the split was made to solve, arriving by another route.
+pub fn show_executive() {
+    let ok = with(|d| {
+        let Some(i) = d
+            .windows
+            .iter()
+            .position(|w| matches!(w.content, Content::Terminal(c) if c == super::console::EXEC))
+        else {
+            return false;
+        };
+        d.windows[i].state = WinState::Normal;
+        let last = d.windows.len() - 1;
+        d.windows.swap(i, last);
+        true
+    })
+    .unwrap_or(false);
+    if ok {
+        draw();
+    }
+}
+
 /// Round the focused window's corners, or square them again with zero.
 pub fn set_round(r: u32) -> bool {
     let ok = with(|d| {
@@ -1527,7 +1589,7 @@ fn press_at(x: i32, y: i32) {
             }
         }
         // A press in the terminal is focus, which raising already did.
-        Content::Terminal => ui::Step::Idle,
+        Content::Terminal(_) => ui::Step::Idle,
     })
     .unwrap_or(ui::Step::Idle);
     act_on(step);
@@ -2313,15 +2375,19 @@ pub fn draw() {
                 }
 
                 match &win.content {
-                    Content::Terminal => {
+                    Content::Terminal(ch) => {
                         let well = client.shrink(2);
                         theme::well(&fb, well, theme::SCREEN);
                         let grid = well.shrink(3);
-                        super::console::with(|c| {
+                        // Each grid reflows into its own window. They are
+                        // different sizes and hold different text, so asking
+                        // for "the console" here would paint one of them
+                        // twice and the other never.
+                        super::console::with_ch(*ch, |c| {
                             c.set_visible(true);
                             c.reflow(grid.x, grid.y, grid.w, grid.h);
                         });
-                        super::console::redraw();
+                        super::console::redraw_ch(*ch);
                     }
                     Content::Panel(p) => {
                         theme::panel(&fb, client);
@@ -2439,7 +2505,7 @@ fn dropdown<'a>(
 
 pub fn focus_is_terminal() -> bool {
     with(|d| match d.focus() {
-        Some(f) => matches!(d.windows[f].content, Content::Terminal),
+        Some(f) => matches!(d.windows[f].content, Content::Terminal(c) if c == super::console::USER),
         // No window at all: the shell has the keyboard. The terminal is an
         // application over a shell that never stops, so with every window
         // minimised, typing types at the prompt -- invisibly, but a command
@@ -2851,7 +2917,7 @@ pub fn focus_terminal() {
         if let Some(i) = d
             .windows
             .iter()
-            .position(|w| matches!(w.content, Content::Terminal))
+            .position(|w| matches!(w.content, Content::Terminal(c) if c == super::console::USER))
         {
             // Deliberately does *not* un-minimise. The terminal is an
             // application: it keeps running while closed, and a shell that
@@ -2883,7 +2949,7 @@ pub fn redraw_over_terminal() {
         let Some(ti) = d
             .windows
             .iter()
-            .position(|w| matches!(w.content, Content::Terminal))
+            .position(|w| matches!(w.content, Content::Terminal(c) if c == super::console::USER))
         else {
             return false;
         };

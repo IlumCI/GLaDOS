@@ -421,6 +421,10 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     gfx::splash::stage("ready");
     gfx::splash::finish();
 
+    // Everything up to here was the machine reporting on itself and belongs
+    // on the executive console. From here the operator is driving, and what
+    // they type and what it answers belongs on theirs.
+    gfx::console::set_default_channel(gfx::console::USER);
     shell::run(&boot, &acpi);
 }
 

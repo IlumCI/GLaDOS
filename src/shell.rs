@@ -2065,6 +2065,28 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
         }
         "echo" => kprintln!("  {}", rest),
         "clear" => console::with(|c| c.clear()),
+        // The executive console, from the operator's. It is an output grid
+        // with no prompt of its own, so the only way to act on it is from
+        // here.
+        "exec" => {
+            let mut w = rest.split_whitespace();
+            match w.next().unwrap_or("") {
+                "clear" => {
+                    console::with_ch(console::EXEC, |c| c.clear());
+                    kprintln!("  executive console cleared");
+                }
+                "show" => {
+                    crate::gfx::desk::show_executive();
+                    kprintln!("  executive console raised");
+                }
+                _ => {
+                    kprintln!("  exec clear   empty the executive console");
+                    kprintln!("  exec show    raise its window");
+                    kprintln!("  the boot log and anything the machine runs on");
+                    kprintln!("  its own land there rather than here");
+                }
+            }
+        }
         "fault" => {
             console::set_color(LTRED);
             kprintln!("  this will halt the machine.");

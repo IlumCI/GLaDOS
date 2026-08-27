@@ -1451,6 +1451,12 @@ pub fn spawn_mind() -> bool {
 /// mind; what gates the engine is `agent::episode_busy`, not the id alone.
 static AGENT_TASK: AtomicUsize = AtomicUsize::new(usize::MAX);
 
+/// The task that runs episodes, for anything that needs to tell its output
+/// apart from the operator's.
+pub fn agent_task_id() -> usize {
+    AGENT_TASK.load(Ordering::Acquire)
+}
+
 /// True while an episode is executing.
 pub fn agent_busy() -> bool {
     agent::episode_busy()

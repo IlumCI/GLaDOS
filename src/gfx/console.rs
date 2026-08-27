@@ -352,24 +352,106 @@ impl fmt::Write for Console {
     }
 }
 
-static CONSOLE: Racy<Option<Console>> = Racy::new(None);
+/// The operator's console: the prompt, and what commands print.
+pub const USER: usize = 0;
+/// The machine's console: boot, background tasks, and episodes it decided to
+/// run on its own.
+///
+/// Split because they were one, and being one is what "the desktop freezes"
+/// mostly turned out to mean. `initiative` wakes on its own schedule and
+/// everything its episode printed arrived between a prompt and a half-typed
+/// command, scrolling the answer to the last question off the top. Nothing was
+/// frozen; two things were talking into the same grid.
+///
+/// Two grids and not two terminals-with-shells: this one is output. What would
+/// it accept? Every command already runs as the operator, there being no user
+/// or kernel to be root of, so an "executive" prompt would be the same prompt
+/// against the same namespace with a different frame around it. It is named
+/// for what it carries rather than for a privilege this system does not have.
+pub const EXEC: usize = 1;
+const NCONSOLE: usize = 2;
 
-/// Install the global console. Call once, after `ExitBootServices`.
+static CONSOLES: Racy<[Option<Console>; NCONSOLE]> = Racy::new([None, None]);
+
+/// Where `kprint!` lands when nothing more specific applies.
+///
+/// Starts on the executive console, because everything before the shell exists
+/// -- the memory map, the selftests, the model load -- is the machine
+/// reporting on itself, and that is exactly what the executive console is for.
+/// `shell::run` moves it to the operator's.
+static CURRENT: Racy<usize> = Racy::new(EXEC);
+
+/// Install both consoles. Call once, after `ExitBootServices`.
 pub fn init(fb: Framebuffer, scale: u32, bg: Color) {
-    let mut console = Console::new(fb, scale, bg);
-    console.clear();
-    unsafe { *CONSOLE.get() = Some(console) }
+    let all = unsafe { &mut *CONSOLES.get() };
+    for slot in all.iter_mut() {
+        let mut console = Console::new(fb.clone(), scale, bg);
+        console.clear();
+        *slot = Some(console);
+    }
 }
 
 pub fn is_ready() -> bool {
-    unsafe { CONSOLE.get().is_some() }
+    unsafe { (*CONSOLES.get())[USER].is_some() }
+}
+
+/// Which console `kprint!` is writing to right now.
+///
+/// Asked per line rather than latched, because the answer depends on which
+/// task is running and that changes under preemption. An episode the machine
+/// chose to run is the whole reason this function is not simply `CURRENT`.
+pub fn channel() -> usize {
+    if let Some((task, ch)) = unsafe { *FORCE.get() } {
+        if crate::task::current() == task {
+            return ch;
+        }
+    }
+    if crate::ai::agent::printing_in_background() {
+        return EXEC;
+    }
+    unsafe { *CURRENT.get() }
+}
+
+/// A channel override for the duration of `f`.
+///
+/// For code that is the machine talking to itself but does not run on the
+/// agent task -- `initiative::tick` is the one that matters, since it
+/// announces every decision it makes and those announcements are what an
+/// operator was reading between their own commands.
+///
+/// Records the task that asked as well as the channel, and applies only to
+/// that task.
+///
+/// It was global first, on the reasoning that the window was one `kprint!`
+/// wide. It is not: `initiative::tick` holds the override across everything it
+/// decides and queues, and the shell task preempted into the middle of that
+/// sent an operator's command output to the executive grid, where it looked
+/// exactly like the command having silently done nothing. Scoping it to the
+/// task costs one comparison and makes preemption a non-event.
+static FORCE: Racy<Option<(usize, usize)>> = Racy::new(None);
+
+pub fn on_channel<R>(ch: usize, f: impl FnOnce() -> R) -> R {
+    let prev = unsafe { *FORCE.get() };
+    unsafe { *FORCE.get() = Some((crate::task::current(), ch)) };
+    let r = f();
+    unsafe { *FORCE.get() = prev };
+    r
+}
+
+/// Move the default channel. Called once, when the shell takes over.
+pub fn set_default_channel(ch: usize) {
+    unsafe { *CURRENT.get() = ch.min(NCONSOLE - 1) };
+}
+
+pub fn with_ch<F: FnOnce(&mut Console)>(ch: usize, f: F) {
+    if let Some(c) = unsafe { (*CONSOLES.get()).get_mut(ch).and_then(|s| s.as_mut()) } {
+        f(c);
+    }
 }
 
 /// Run `f` against the global console if it exists.
 pub fn with<F: FnOnce(&mut Console)>(f: F) {
-    if let Some(c) = unsafe { CONSOLE.get().as_mut() } {
-        f(c);
-    }
+    with_ch(channel(), f)
 }
 
 // --- pacing -------------------------------------------------------------
@@ -423,6 +505,10 @@ pub fn redraw() {
     with(|c| c.redraw_all());
 }
 
+pub fn redraw_ch(ch: usize) {
+    with_ch(ch, |c| c.redraw_all());
+}
+
 pub fn set_color(fg: u8) {
     with(|c| c.set_color(fg));
 }
@@ -471,33 +557,6 @@ pub fn capturing() -> bool {
 }
 
 #[doc(hidden)]
-/// When set, output skips the visible console.
-///
-/// The machine talks to itself. `initiative` wakes on its own schedule, runs
-/// an episode, and everything that episode prints used to land in the same
-/// console the operator is typing into -- arriving between a prompt and a
-/// half-typed command, scrolling the answer to the last question off the top.
-/// That is what "the desktop freezes" turned out to mean most of the time:
-/// nothing was frozen, the machine was talking over the person using it.
-///
-/// The other two sinks are untouched. `kprint!` writes to the serial port and
-/// the log ring separately, so a diverted episode is still on the wire, still
-/// in `log`, and still readable in the agent window. It is only kept off the
-/// screen the operator owns.
-static DIVERT: Racy<bool> = Racy::new(false);
-
-/// Route console output away from the screen for the duration of `f`.
-///
-/// Restores the previous setting rather than clearing, so an operator-run
-/// episode nested inside anything already diverted stays diverted.
-pub fn diverted<R>(on: bool, f: impl FnOnce() -> R) -> R {
-    let prev = unsafe { *DIVERT.get() };
-    unsafe { *DIVERT.get() = on || prev };
-    let r = f();
-    unsafe { *DIVERT.get() = prev };
-    r
-}
-
 pub fn _print(args: fmt::Arguments) {
     use fmt::Write;
     unsafe {
@@ -514,9 +573,6 @@ pub fn _print(args: fmt::Arguments) {
             }
             return;
         }
-    }
-    if unsafe { *DIVERT.get() } {
-        return;
     }
     with(|c| {
         let _ = c.write_fmt(args);
