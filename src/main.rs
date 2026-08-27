@@ -642,6 +642,11 @@ fn init_keyboard(acpi: &Option<acpi::Acpi>) {
         return;
     };
 
+    match serial::attach_irq(a, dev::lapic::id()) {
+        Some(gsi) => kprintln!("  serial   interrupt on gsi {}", gsi),
+        None => kprintln!("  serial   polled -- no ioapic route"),
+    }
+
     let report = dev::kbd::init(a, dev::lapic::id());
     let mouse = dev::mouse::init(a, dev::lapic::id());
     if let Some(fb) = gfx::primary() {

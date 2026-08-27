@@ -2065,6 +2065,20 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
         }
         "echo" => kprintln!("  {}", rest),
         "clear" => console::with(|c| c.clear()),
+        // Whether the serial port is delivering by interrupt, and what it has
+        // lost. Exists because the last attempt at interrupt-driven receive
+        // could not be told apart from a port that was simply quiet, and a
+        // guess was made instead of a measurement.
+        "serial" => {
+            let (held, irqs, overruns, spills) = crate::serial::rx_stats();
+            kprintln!(
+                "  {}  {} handler runs  {} waiting",
+                if crate::serial::irq_live() { "interrupt-driven" } else { "polled" },
+                irqs,
+                held
+            );
+            kprintln!("  {} hardware overruns, {} ring spills", overruns, spills);
+        }
         // The executive console, from the operator's. It is an output grid
         // with no prompt of its own, so the only way to act on it is from
         // here.

@@ -11,7 +11,8 @@
 
 use core::arch::asm;
 use core::fmt;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use crate::sync::Racy;
 
 const COM1: u16 = 0x3F8;
 
@@ -41,9 +42,160 @@ unsafe fn inb(port: u16) -> u8 {
 static PRESENT: AtomicBool = AtomicBool::new(false);
 
 /// Configure COM1 for 115200 8N1.
+/// Bytes the handler has taken off the port and nothing has read yet.
+///
+/// The port holds one byte with the FIFO off, which is the only configuration
+/// that works here (see `init`). Under QEMU that is survivable, because its
+/// 16550 will not hand over a byte until the guest has taken the last one --
+/// the emulator flow-controls us and an overrun cannot happen. Real hardware
+/// makes no such promise. A UART with a byte in the holding register and
+/// another arriving on the wire drops one, and this kernel can leave the shell
+/// unscheduled for a 10ms slice, which at 115200 is 114 bytes with nowhere to
+/// go.
+///
+/// So the ring is not for QEMU. It is for the machine this is actually for,
+/// where nothing is going to wait politely while a model finishes a forward
+/// pass.
+const RING: usize = 512;
+
+struct Rx {
+    buf: [u8; RING],
+    head: usize,
+    tail: usize,
+    /// Bytes the hardware says it lost, from the overrun bit in LSR.
+    ///
+    /// Counted and reportable rather than discarded. This class of failure is
+    /// invisible by nature -- a byte that never arrives leaves no trace --
+    /// and the previous input bug survived for months partly because nothing
+    /// anywhere said a number out loud.
+    overruns: u32,
+    /// Bytes dropped because this ring was full, which is our fault and not
+    /// the hardware's, and worth telling apart from an overrun.
+    spills: u32,
+}
+
+static RX: Racy<Rx> =
+    Racy::new(Rx { buf: [0; RING], head: 0, tail: 0, overruns: 0, spills: 0 });
+
+/// Times the handler has run. The one number that says whether any of this is
+/// working; without it, a silent port and a port whose interrupt never fires
+/// look identical, which is exactly the hole the last attempt fell into.
+static IRQS: AtomicU32 = AtomicU32::new(0);
+static IRQ_LIVE: AtomicBool = AtomicBool::new(false);
+
+fn rx_push(b: u8) {
+    let r = unsafe { &mut *RX.get() };
+    let next = (r.head + 1) % RING;
+    if next == r.tail {
+        r.spills = r.spills.saturating_add(1);
+        return;
+    }
+    r.buf[r.head] = b;
+    r.head = next;
+}
+
+fn rx_pop() -> Option<u8> {
+    let r = unsafe { &mut *RX.get() };
+    if r.head == r.tail {
+        return None;
+    }
+    let b = r.buf[r.tail];
+    r.tail = (r.tail + 1) % RING;
+    Some(b)
+}
+
+/// Waiting bytes, handler runs, hardware overruns, ring spills.
+pub fn rx_stats() -> (usize, u32, u32, u32) {
+    crate::cpu::without_interrupts(|| {
+        let r = unsafe { &*RX.get() };
+        let held = (r.head + RING - r.tail) % RING;
+        (held, IRQS.load(Ordering::Relaxed), r.overruns, r.spills)
+    })
+}
+
+pub fn irq_live() -> bool {
+    IRQ_LIVE.load(Ordering::Acquire)
+}
+
+/// Take everything the port has, into the ring.
+///
+/// Loops rather than taking one byte. With the FIFO off there is only ever
+/// one, but the loop costs a register read and means this is still correct if
+/// the FIFO is ever turned on -- and leaving a byte behind is how an
+/// edge-triggered line stops asserting, which the keyboard driver documents
+/// one file over at length.
+fn drain() {
+    unsafe {
+        loop {
+            let lsr = inb(COM1 + 5);
+            if lsr & 0x02 != 0 {
+                let r = &mut *RX.get();
+                r.overruns = r.overruns.saturating_add(1);
+            }
+            if lsr & 0x01 == 0 {
+                return;
+            }
+            let b = inb(COM1);
+            rx_push(b);
+        }
+    }
+}
+
+extern "x86-interrupt" fn serial_isr(_frame: crate::cpu::idt::InterruptStackFrame) {
+    IRQS.fetch_add(1, Ordering::Relaxed);
+    drain();
+    crate::dev::lapic::eoi();
+}
+
+/// Route COM1's interrupt, once ACPI can say where it goes.
+///
+/// Separate from `init` because `init` runs long before there is an ACPI table
+/// to ask, and the port has to carry the whole boot log regardless. Until this
+/// runs, and if it fails, reading falls back to polling exactly as before.
+pub fn attach_irq(acpi: &crate::acpi::Acpi, apic_id: u8) -> Option<u32> {
+    if !is_present() {
+        return None;
+    }
+    let (gsi, flags) = acpi.gsi_for_irq(4);
+    let io = acpi.primary_ioapic()?;
+    unsafe {
+        crate::cpu::idt::set_handler(crate::dev::VECTOR_SERIAL, serial_isr as *const (), 0)
+    };
+    if !crate::dev::ioapic::route(&io, gsi, crate::dev::VECTOR_SERIAL, apic_id, flags) {
+        return None;
+    }
+
+    unsafe {
+        // The FIFO stays off, and this is not an oversight.
+        //
+        // Turning it on with a one-byte trigger reads as obviously right --
+        // sixteen bytes of buffering, data-ready still immediate -- and it
+        // stopped the port receiving anything at all, by interrupt or by
+        // poll, with no characters even echoing. The observation `init`
+        // already records, that QEMU holds bytes in the FIFO without raising
+        // data-ready for a reader shaped like this one, survived the
+        // experiment meant to overturn it. Buffering comes from the ring
+        // above instead, which is ours and behaves.
+        outb(COM1 + 2, 0x00);
+        // Received Data Available only. Transmit-holding-empty would fire
+        // continuously against a driver that writes by polling, which is what
+        // `write_byte` does and should keep doing -- boot output must work
+        // before any of this exists.
+        outb(COM1 + 1, 0x01);
+    }
+    IRQ_LIVE.store(true, Ordering::Release);
+
+    // Drain after the line is live, never before. A byte that arrived while
+    // the redirection entry was masked leaves no edge behind, and with an
+    // edge-triggered source that byte is the last one ever delivered. The
+    // keyboard driver lost its first keystroke to precisely this.
+    crate::cpu::without_interrupts(drain);
+    Some(gsi)
+}
+
 pub fn init() {
     unsafe {
-        outb(COM1 + 1, 0x00); // interrupts off -- we poll
+        outb(COM1 + 1, 0x00); // interrupts off until attach_irq
         outb(COM1 + 3, 0x80); // DLAB on, so 0/1 become the divisor latch
         outb(COM1 + 0, 0x01); // divisor low  = 1 -> 115200 baud
         outb(COM1 + 1, 0x00); // divisor high = 0
@@ -82,13 +234,29 @@ pub fn read_byte() -> Option<u8> {
     if !is_present() {
         return None;
     }
-    unsafe {
-        // Line Status Register bit 0: data ready.
-        if inb(COM1 + 5) & 0x01 == 0 {
-            return None;
+    // Interrupts off across both halves so the handler cannot be taking the
+    // same byte concurrently. That race is the reason these are not two
+    // independent checks.
+    crate::cpu::without_interrupts(|| {
+        if let Some(b) = rx_pop() {
+            return Some(b);
         }
-        Some(inb(COM1))
-    }
+        // The poll stays, and stays even once the interrupt is routed. When
+        // the handler is working this finds nothing, because it has already
+        // taken everything. When the interrupt is routed and never fires --
+        // which is a real possibility on a machine nobody here can test --
+        // this is the difference between a working console and a dead one.
+        // Removing it, on the reasoning that the interrupt now owned the
+        // port, is what made the port stop working the first time this was
+        // attempted.
+        unsafe {
+            // Line Status Register bit 0: data ready.
+            if inb(COM1 + 5) & 0x01 == 0 {
+                return None;
+            }
+            Some(inb(COM1))
+        }
+    })
 }
 
 #[inline]

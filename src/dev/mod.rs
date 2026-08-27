@@ -22,4 +22,5 @@ pub mod xhci;
 pub const VECTOR_TIMER: u8 = 0x20;
 pub const VECTOR_KEYBOARD: u8 = 0x21;
 pub const VECTOR_MOUSE: u8 = 0x22;
+pub const VECTOR_SERIAL: u8 = 0x23;
 pub const VECTOR_SPURIOUS: u8 = 0xFF;
