@@ -99,6 +99,11 @@ static ABORT: AtomicBool = AtomicBool::new(false);
 pub fn request_abort() -> &'static str {
     ABORT.store(true, Ordering::Release);
     if take_request().is_some() {
+        // Cleared again: the queued episode is gone, nothing is running, and
+        // leaving the flag set would abort the *next* episode the moment it
+        // started -- one silent death, arriving much later than the command
+        // that caused it.
+        ABORT.store(false, Ordering::Release);
         crate::shell::reprompt();
         return "queued episode cancelled";
     }
@@ -125,6 +130,8 @@ struct EpisodeReq {
     goal: String,
     trust: Trust,
     steps: usize,
+    /// The machine asked for this one, not the operator.
+    autonomous: bool,
 }
 
 static REQUEST: Racy<Option<EpisodeReq>> = Racy::new(None);
@@ -145,7 +152,21 @@ pub(crate) fn episode_busy() -> bool {
 /// Queue an episode. False when one is already pending or running -- the
 /// caller turns that into a refusal, since two episodes would fight over
 /// both the engine and the namespace cursor.
+/// Queue an episode the machine asked for itself.
+///
+/// Separate entry point rather than a boolean at every call site, because
+/// there are two callers and they mean different things: one is the operator
+/// asking, the other is the machine deciding. Only the second is kept off the
+/// operator's console.
+pub fn queue_autonomous(goal: &str, trust: Trust, steps: usize) -> bool {
+    queue_inner(goal, trust, steps, true)
+}
+
 pub fn queue_episode(goal: &str, trust: Trust, steps: usize) -> bool {
+    queue_inner(goal, trust, steps, false)
+}
+
+fn queue_inner(goal: &str, trust: Trust, steps: usize, autonomous: bool) -> bool {
     crate::cpu::without_interrupts(|| unsafe {
         if REQUEST.get().is_some() || episode_busy() {
             return false;
@@ -154,6 +175,7 @@ pub fn queue_episode(goal: &str, trust: Trust, steps: usize) -> bool {
             goal: String::from(goal),
             trust,
             steps,
+            autonomous,
         });
         true
     })
@@ -171,9 +193,22 @@ pub fn agent_task() {
             continue;
         };
         set_busy(true);
-        run(&req.goal, req.trust, req.steps);
+        // An episode the machine chose to run stays off the operator's
+        // console. It is still on the serial port, still in the log ring and
+        // still in the agent window; it just does not arrive in the middle of
+        // whatever is being typed.
+        crate::gfx::console::diverted(req.autonomous, || {
+            run(&req.goal, req.trust, req.steps);
+        });
         ABORT.store(false, Ordering::Release);
         set_busy(false);
+        // Unconditional, including for episodes nobody asked for. It was
+        // briefly conditional -- reprinting the prompt under a half-typed
+        // line is a real annoyance -- and that stalled every headless run:
+        // the prompt is not decoration, it is how anything driving the shell
+        // over the serial port knows it may send the next command. The
+        // annoyance is worth fixing in the line editor, not by withholding
+        // the signal.
         crate::shell::reprompt();
     }
 }

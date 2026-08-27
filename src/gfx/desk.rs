@@ -120,6 +120,15 @@ pub struct Window {
     /// use: an edge that swallows a window's proportions permanently is a
     /// trap, not a shortcut.
     pub snap_back: Option<Rect>,
+    /// Corner radius, when this window is not a plain rectangle.
+    ///
+    /// Stored as the radius rather than as the outline so that a resize does
+    /// not have to remember how the outline was asked for. The outline itself
+    /// is rebuilt from it during the paint, and cached against the size it was
+    /// built for, because the arithmetic is a square root per row of the arc
+    /// and doing it sixty times a second for a shape that has not changed is
+    /// the sort of waste that turns into "the desktop feels slow".
+    pub round: u32,
     pub content: Content,
     pub menus: Vec<Menu>,
     pub closable: bool,
@@ -560,6 +569,7 @@ pub fn init() {
         rect: Rect::new(term_x, screen.y, term_w, screen.h),
         state: WinState::Normal,
         snap_back: None,
+        round: 0,
         content: Content::Terminal,
         menus: alloc::vec![
             Menu {
@@ -597,6 +607,7 @@ pub fn init() {
         rect: Rect::new(pm_x, screen.y, pm_w, pm_h.min(screen.h)),
         state: WinState::Normal,
         snap_back: None,
+        round: 0,
         content: Content::Panel(pm),
         menus: Vec::new(),
         closable: false,
@@ -669,6 +680,7 @@ pub fn open(title: &str, panel: Panel) {
             rect: Rect::new(x, y, w, h),
             state: WinState::Normal,
         snap_back: None,
+        round: 0,
             content: Content::Panel(panel),
             menus: Vec::new(),
             closable: true,
@@ -728,6 +740,7 @@ pub fn open_app(title: &str, icon: usize, app: Box<dyn DeskApp>, w: u32, h: u32)
             rect: Rect::new(x, y, w, h),
             state: WinState::Normal,
         snap_back: None,
+        round: 0,
             content: Content::App(app),
             menus: Vec::new(),
             closable: true,
@@ -797,6 +810,7 @@ pub fn open_browser(url: &str) {
             rect: Rect::new(x, y, w, h),
             state: WinState::Normal,
         snap_back: None,
+        round: 0,
             content: Content::Browser(b),
             menus: Vec::new(),
             closable: true,
@@ -1229,6 +1243,50 @@ pub mod edge {
 /// one that appears not to.
 const BORDER: i32 = 6;
 const CORNER: i32 = 16;
+
+/// Round the focused window's corners, or square them again with zero.
+pub fn set_round(r: u32) -> bool {
+    let ok = with(|d| {
+        let Some(f) = d.focus() else { return false };
+        d.windows[f].round = r;
+        true
+    })
+    .unwrap_or(false);
+    if ok {
+        draw();
+    }
+    ok
+}
+
+/// The outline for the window being painted, kept between frames.
+///
+/// One entry, not one per window: `draw` paints windows one at a time and
+/// asks for each outline in turn, so a single slot serves as long as it
+/// records what it was built for. Two windows with different radii alternate
+/// and rebuild each time, which is two square roots per row of an arc and
+/// still nothing next to the paint it is wrapping.
+static SHAPE_CACHE: Racy<Option<(u32, u32, u32)>> = Racy::new(None);
+static OUTLINE: Racy<Option<super::Shape>> = Racy::new(None);
+
+/// Paint `f` clipped to this window's outline, or straight through when the
+/// window is an ordinary rectangle.
+fn with_window_shape<R>(w: &Window, frame: Rect, f: impl FnOnce() -> R) -> R {
+    if w.round == 0 {
+        return f();
+    }
+    let key = (frame.w, frame.h, w.round);
+    let stale = unsafe { *SHAPE_CACHE.get() } != Some(key);
+    if stale {
+        unsafe {
+            *OUTLINE.get() = Some(super::Shape::round_rect(frame.w, frame.h, w.round));
+            *SHAPE_CACHE.get() = Some(key);
+        }
+    }
+    let Some(shape) = (unsafe { (*OUTLINE.get()).as_ref() }) else {
+        return f();
+    };
+    super::with_shape(shape, frame.x as i32, frame.y as i32, f)
+}
 
 /// Which borders the pointer is over, if any.
 ///
@@ -2205,70 +2263,79 @@ pub fn draw() {
                 Hover::Caption { win, which } if win == i => Some(which),
                 _ => None,
             };
-            let mut client = theme::window(
-                &fb,
-                frame,
-                &win.title,
-                active,
-                win.state == WinState::Maximised,
-                hot,
-            );
-            if client.is_empty() {
-                continue;
-            }
-
-            if !win.menus.is_empty() {
-                let bar = Rect::new(client.x, client.y, client.w, MENU_H);
-                theme::panel(&fb, bar);
-                let open = match d.mode {
-                    Mode::Menu { menu, .. } if active => Some(menu),
-                    _ => None,
-                };
-                let mut x = bar.x + 6;
-                for (mi, m) in win.menus.iter().enumerate() {
-                    let w = theme::text_w(m.label.len()) + 12;
-                    let hot = Some(mi) == open
-                        || d.hover == Hover::MenuLabel { win: i, menu: mi };
-                    let (fg, bg) = if hot {
-                        (theme::SELECT_TEXT, theme::SELECT)
-                    } else {
-                        (theme::TEXT, theme::FACE)
-                    };
-                    fb.rect(x, bar.y + 2, w, bar.h - 4, bg);
-                    theme::text(&fb, x + 6, bar.y + 5, &m.label, fg, bg);
-                    x += w;
-                }
-                client = Rect::new(
-                    client.x,
-                    client.y + MENU_H,
-                    client.w,
-                    client.h.saturating_sub(MENU_H),
+            // Confine this window's paint to its own outline. A rectangular
+            // window costs a load and a branch for the whole frame; a shaped
+            // one simply does not write outside itself, and whatever the
+            // back-to-front repaint already put there shows through.
+            with_window_shape(win, frame, || {
+                let mut client = theme::window(
+                    &fb,
+                    frame,
+                    &win.title,
+                    active,
+                    win.state == WinState::Maximised,
+                    hot,
                 );
-            }
-
-            match &win.content {
-                Content::Terminal => {
-                    let well = client.shrink(2);
-                    theme::well(&fb, well, theme::SCREEN);
-                    let grid = well.shrink(3);
-                    super::console::with(|c| {
-                        c.set_visible(true);
-                        c.reflow(grid.x, grid.y, grid.w, grid.h);
-                    });
-                    super::console::redraw();
+                if client.is_empty() {
+                    // Nothing left to draw inside the frame; the chrome is
+                    // already painted. `return` and not `continue`, because
+                    // this is the shape closure and not the loop.
+                    return;
                 }
-                Content::Panel(p) => {
-                    theme::panel(&fb, client);
-                    let hov = match d.hover {
-                        Hover::Widget { win, idx } if win == i => Some(idx),
+
+                if !win.menus.is_empty() {
+                    let bar = Rect::new(client.x, client.y, client.w, MENU_H);
+                    theme::panel(&fb, bar);
+                    let open = match d.mode {
+                        Mode::Menu { menu, .. } if active => Some(menu),
                         _ => None,
                     };
-                    p.draw_in(&fb, client, active, hov);
+                    let mut x = bar.x + 6;
+                    for (mi, m) in win.menus.iter().enumerate() {
+                        let w = theme::text_w(m.label.len()) + 12;
+                        let hot = Some(mi) == open
+                            || d.hover == Hover::MenuLabel { win: i, menu: mi };
+                        let (fg, bg) = if hot {
+                            (theme::SELECT_TEXT, theme::SELECT)
+                        } else {
+                            (theme::TEXT, theme::FACE)
+                        };
+                        fb.rect(x, bar.y + 2, w, bar.h - 4, bg);
+                        theme::text(&fb, x + 6, bar.y + 5, &m.label, fg, bg);
+                        x += w;
+                    }
+                    client = Rect::new(
+                        client.x,
+                        client.y + MENU_H,
+                        client.w,
+                        client.h.saturating_sub(MENU_H),
+                    );
                 }
-                Content::Browser(b) => b.draw_in(&fb, client, active),
-                Content::App(a) => a.draw_in(&fb, client, active),
+
+                match &win.content {
+                    Content::Terminal => {
+                        let well = client.shrink(2);
+                        theme::well(&fb, well, theme::SCREEN);
+                        let grid = well.shrink(3);
+                        super::console::with(|c| {
+                            c.set_visible(true);
+                            c.reflow(grid.x, grid.y, grid.w, grid.h);
+                        });
+                        super::console::redraw();
+                    }
+                    Content::Panel(p) => {
+                        theme::panel(&fb, client);
+                        let hov = match d.hover {
+                            Hover::Widget { win, idx } if win == i => Some(idx),
+                            _ => None,
+                        };
+                        p.draw_in(&fb, client, active, hov);
+                    }
+                    Content::Browser(b) => b.draw_in(&fb, client, active),
+                    Content::App(a) => a.draw_in(&fb, client, active),
+                }
+            });
             }
-        }
 
         // Popups last, over everything, because that is what a popup is.
         if let Some(f) = focus {

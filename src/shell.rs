@@ -1948,6 +1948,18 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             match it.next().unwrap_or("") {
                 "" | "list" => {}
                 "next" => desk::cycle(false),
+                // `win round [n]` -- the focused window's corner radius, 0 for
+                // a plain rectangle. Exposed on the shell rather than settled
+                // in the theme because whether rounded corners belong on a
+                // desktop that otherwise looks like 98 is a taste question,
+                // and the mechanism should not depend on the answer.
+                "round" => {
+                    let r: u32 = it.next().and_then(|w| w.parse().ok()).unwrap_or(12);
+                    match desk::set_round(r) {
+                        true => kprintln!("  corner radius {}", r),
+                        false => kprintln!("  no focused window"),
+                    }
+                }
                 "open" => {
                     let what = it.next().unwrap_or("status");
                     match crate::gfx::ui::panel_named(what) {

@@ -154,6 +154,129 @@ pub enum Format {
     Bgrx,
 }
 
+/// A window silhouette, as one horizontal span per row.
+///
+/// Kolibri gives every pixel on the screen a byte naming the window that owns
+/// it, which makes an arbitrary outline free at draw time and costs a
+/// screen-sized array rebuilt whenever anything moves. That trade is right for
+/// a compositor that writes straight to the screen and has to clip every pixel
+/// anyway. It is the wrong one here, where drawing is already a back-to-front
+/// repaint into a buffer: a shaped window only has to *not write* outside its
+/// outline, and whatever was painted before it shows through by itself.
+///
+/// One span per row instead of one byte per pixel makes the check per span
+/// rather than per pixel, which matters because the span fills are what the
+/// last round of work made fast. It costs the ability to describe a window
+/// with a hole in it, which nothing wants, and describes every rounded
+/// corner, circle and ellipse anybody does.
+///
+/// Spans are `[x0, x1)` in window-local coordinates. An empty span is a row
+/// the window does not occupy at all.
+pub struct Shape {
+    rows: alloc::vec::Vec<(u32, u32)>,
+    w: u32,
+}
+
+impl Shape {
+    /// A rectangle with its corners rounded off.
+    ///
+    /// Computed once when the window is sized rather than per frame: the
+    /// arithmetic is a square root per row of the corner arc, which is
+    /// nothing once and noticeable sixty times a second.
+    pub fn round_rect(w: u32, h: u32, r: u32) -> Shape {
+        let r = r.min(w / 2).min(h / 2);
+        let mut rows = alloc::vec::Vec::with_capacity(h as usize);
+        for y in 0..h {
+            // Distance from the nearer horizontal edge, inside the corner
+            // band. Outside it the row is the full width.
+            let dy = if y < r {
+                Some(r - 1 - y)
+            } else if y >= h - r {
+                Some(y - (h - r))
+            } else {
+                None
+            };
+            match dy {
+                None => rows.push((0, w)),
+                Some(d) => {
+                    // How far in the arc has come at this row: r - sqrt(r^2 - d^2).
+                    let rr = (r * r) as i32;
+                    let dd = (d * d) as i32;
+                    let inset = r - isqrt((rr - dd).max(0) as u32);
+                    let x0 = inset.min(w / 2);
+                    rows.push((x0, w.saturating_sub(x0)));
+                }
+            }
+        }
+        Shape { rows, w }
+    }
+
+    /// The span this row occupies, or `None` for a row outside the shape.
+    #[inline]
+    pub fn span(&self, y: u32) -> Option<(u32, u32)> {
+        let (a, b) = *self.rows.get(y as usize)?;
+        if a >= b {
+            return None;
+        }
+        Some((a, b))
+    }
+
+    pub fn width(&self) -> u32 {
+        self.w
+    }
+
+    pub fn height(&self) -> u32 {
+        self.rows.len() as u32
+    }
+}
+
+/// The silhouette drawing is currently confined to, and where its origin sits
+/// on screen.
+///
+/// A static rather than a field on `Framebuffer`, because every widget, panel
+/// and application in this tree takes `&Framebuffer` and a field would have to
+/// be threaded through all of them to reach the one place it is read. Single
+/// core, set around one window's paint and cleared after, which is the same
+/// bargain `Racy` is everywhere else here.
+///
+/// The pointer is borrowed for the duration of that paint and never outlives
+/// it; `with_shape` is the only way to set it and restores the previous value,
+/// so a nested paint cannot leave someone else's outline installed.
+static CLIP: Racy<Option<(*const Shape, i32, i32)>> = Racy::new(None);
+
+/// Draw `f` confined to `shape`, positioned with its top-left at `(x, y)`.
+pub fn with_shape<R>(shape: &Shape, x: i32, y: i32, f: impl FnOnce() -> R) -> R {
+    let prev = unsafe { *CLIP.get() };
+    unsafe { *CLIP.get() = Some((shape as *const Shape, x, y)) };
+    let r = f();
+    unsafe { *CLIP.get() = prev };
+    r
+}
+
+/// Intersect a horizontal run with the active silhouette.
+///
+/// Returns the part of `[x, x+w)` on row `y` that may be written, or `None`
+/// when the row is outside the shape entirely. With no shape installed this
+/// is a load and a branch, which is what keeps it off the cost of the span
+/// fills everything else depends on.
+#[inline]
+fn clip_run(y: u32, x: u32, w: u32) -> Option<(u32, u32)> {
+    let Some((sp, ox, oy)) = (unsafe { *CLIP.get() }) else {
+        return Some((x, w));
+    };
+    let ly = (y as i64) - (oy as i64);
+    if ly < 0 {
+        return None;
+    }
+    let (a, b) = unsafe { (*sp).span(ly as u32) }?;
+    let lo = (a as i64 + ox as i64).max(x as i64);
+    let hi = (b as i64 + ox as i64).min(x as i64 + w as i64);
+    if hi <= lo {
+        return None;
+    }
+    Some((lo as u32, (hi - lo) as u32))
+}
+
 #[derive(Clone, Copy)]
 pub struct Framebuffer {
     base: *mut u32,
@@ -238,6 +361,15 @@ impl Framebuffer {
     /// every row a pixel at a time through `put` -- two bounds checks and a
     /// volatile store each, for something that is a memcpy.
     pub fn blit_span(&self, x: u32, y: u32, src: &[u32]) {
+        // A shaped blit has to drop the same pixels from the source as from
+        // the destination, so the offset into `src` moves with the clip.
+        let (x, src) = match clip_run(y, x, src.len() as u32) {
+            None => return,
+            Some((cx, cw)) => {
+                let skip = (cx - x) as usize;
+                (cx, &src[skip..(skip + cw as usize).min(src.len())])
+            }
+        };
         if let Some(dst) = self.row_mut(y, x, src.len() as u32) {
             let n = dst.len();
             dst.copy_from_slice(&src[..n]);
@@ -291,6 +423,9 @@ impl Framebuffer {
     #[inline]
     pub fn put(&self, x: u32, y: u32, raw: u32) {
         if x >= self.width || y >= self.height {
+            return;
+        }
+        if clip_run(y, x, 1).is_none() {
             return;
         }
         let off = (y as usize) * (self.stride as usize) + (x as usize);
@@ -416,6 +551,7 @@ impl Framebuffer {
     }
 
     fn fill_span(&self, x: u32, y: u32, w: u32, raw: u32) {
+        let Some((x, w)) = clip_run(y, x, w) else { return };
         // Clip once for the whole run rather than once per pixel, which is
         // what going through `put` used to cost.
         if let Some(dst) = self.row_mut(y, x, w) {

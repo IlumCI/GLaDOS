@@ -386,7 +386,7 @@ pub fn tick() {
             EPISODES.fetch_add(1, Ordering::Relaxed);
             unsafe { *LAST_EPISODE_AT.get() = now_s };
             let queued =
-                super::agent::queue_episode(&goal, super::harness::Trust::ReadOnly, 2);
+                super::agent::queue_autonomous(&goal, super::harness::Trust::ReadOnly, 2);
             journal_push(format!(
                 "[t{} +{}s] episode: \"{}\" {}",
                 TICKS.load(Ordering::Relaxed),

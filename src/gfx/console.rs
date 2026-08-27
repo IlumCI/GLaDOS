@@ -471,6 +471,33 @@ pub fn capturing() -> bool {
 }
 
 #[doc(hidden)]
+/// When set, output skips the visible console.
+///
+/// The machine talks to itself. `initiative` wakes on its own schedule, runs
+/// an episode, and everything that episode prints used to land in the same
+/// console the operator is typing into -- arriving between a prompt and a
+/// half-typed command, scrolling the answer to the last question off the top.
+/// That is what "the desktop freezes" turned out to mean most of the time:
+/// nothing was frozen, the machine was talking over the person using it.
+///
+/// The other two sinks are untouched. `kprint!` writes to the serial port and
+/// the log ring separately, so a diverted episode is still on the wire, still
+/// in `log`, and still readable in the agent window. It is only kept off the
+/// screen the operator owns.
+static DIVERT: Racy<bool> = Racy::new(false);
+
+/// Route console output away from the screen for the duration of `f`.
+///
+/// Restores the previous setting rather than clearing, so an operator-run
+/// episode nested inside anything already diverted stays diverted.
+pub fn diverted<R>(on: bool, f: impl FnOnce() -> R) -> R {
+    let prev = unsafe { *DIVERT.get() };
+    unsafe { *DIVERT.get() = on || prev };
+    let r = f();
+    unsafe { *DIVERT.get() = prev };
+    r
+}
+
 pub fn _print(args: fmt::Arguments) {
     use fmt::Write;
     unsafe {
@@ -487,6 +514,9 @@ pub fn _print(args: fmt::Arguments) {
             }
             return;
         }
+    }
+    if unsafe { *DIVERT.get() } {
+        return;
     }
     with(|c| {
         let _ = c.write_fmt(args);
