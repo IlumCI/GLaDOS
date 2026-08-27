@@ -1,4 +1,4 @@
-//! RTL8188EU initialisation tables, transcribed from Linux.
+//! RTL8188EU initialisation tables and register constants, from Linux.
 //!
 //! **Provenance: these are not this project's work.** Every value below comes
 //! from `drivers/net/wireless/realtek/rtl8xxxu/8188e.c` in the Linux kernel,
@@ -20,6 +20,16 @@
 //! Order is content. The AGC table writes the same register 130 times and the
 //! value carries its own index, so sorting or deduplicating any of these
 //! produces a different table that still looks reasonable.
+//!
+//! The register and descriptor constants appended at the end came later and by
+//! the same rule, from `regs.h` and `rtl8xxxu.h` in the same directory, via
+//! `tools/rtlconv.py`. That converter exists rather than a grep because a grep
+//! is wrong here: `TXDESC_OWN` is defined twice, the first inside an `#if 0`,
+//! and the dead one is BIT(31) against a live BIT(7). It strips dead branches
+//! before matching, refuses any name it finds twice with different values, and
+//! computes the receive descriptor's bitfield offsets from the declaration
+//! rather than trusting anyone to count them. Two cross-checks it cannot pass
+//! by accident are asserted at the end of the run.
 
 /// MAC initialisation: 8-bit registers, written in order.
 pub const MAC_INIT: &[(u16, u8)] = &[
@@ -202,3 +212,63 @@ pub const RADIOA_INIT: &[(u16, u32)] = &[
     (0x0fe, 0x0000), (0x0fe, 0x0000), (0x01e, 0x0001),
     (0x01f, 0x80000), (0x000, 0x33e60),
 ];
+
+// --- RF serial interface, path A -------------------------------------
+//
+// Same provenance as the tables above: Linux, rtl8xxxu, regs.h and
+// rtl8xxxu.h, extracted by tools/rtlconv.py rather than retyped.
+//
+// The radio is not memory mapped. Its registers are reached by writing
+// an address and a value together into one baseband register, which is
+// why RADIOA_INIT cannot be applied the way MAC_INIT is.
+pub const REG_FPGA0_XA_HSSI_PARM1: u32 = 0x820;
+pub const REG_FPGA0_XA_HSSI_PARM2: u32 = 0x824;
+pub const REG_FPGA0_XA_LSSI_PARM: u32 = 0x840;
+pub const REG_FPGA0_XA_LSSI_READBACK: u32 = 0x8A0;
+pub const REG_HSPI_XA_READBACK: u32 = 0x8B8;
+pub const FPGA0_HSSI_PARM1_PI: u32 = 0x100;
+pub const FPGA0_HSSI_PARM2_ADDR_SHIFT: u32 = 0x17;
+pub const FPGA0_HSSI_PARM2_ADDR_MASK: u32 = 0x7F800000;
+pub const FPGA0_HSSI_PARM2_EDGE_READ: u32 = 0x80000000;
+pub const FPGA0_LSSI_PARM_ADDR_SHIFT: u32 = 0x14;
+pub const FPGA0_LSSI_PARM_DATA_MASK: u32 = 0xFFFFF;
+
+// --- TX descriptor ---------------------------------------------------
+//
+// The 8188EU uses the 32-byte descriptor (rtl8xxxu_txdesc32). Word 0 is
+// pkt_size as a little-endian u16, then pkt_offset and txdw0 as single
+// bytes, so the flags below are bits of a *byte* and OWN is bit 7.
+// rtl8xxxu.h defines OWN twice; the BIT(31) form is inside an #if 0 and
+// is not this one.
+pub const TXDESC_OWN: u32 = 0x80;
+pub const TXDESC_FIRST_SEGMENT: u32 = 0x8;
+pub const TXDESC_LAST_SEGMENT: u32 = 0x4;
+pub const TXDESC_BROADMULTICAST: u32 = 0x1;
+pub const TXDESC_QUEUE_SHIFT: u32 = 0x8;
+pub const TXDESC_QUEUE_MASK: u32 = 0x1F00;
+pub const TXDESC_QUEUE_MGNT: u32 = 0x12;
+pub const TXDESC_QUEUE_BEACON: u32 = 0x10;
+pub const TXDESC_QUEUE_BE: u32 = 0x0;
+pub const TXDESC_QUEUE_VO: u32 = 0x7;
+pub const TXDESC32_SEQ_SHIFT: u32 = 0x10;
+pub const TXDESC32_USE_DRIVER_RATE: u32 = 0x100;
+pub const TXDESC32_RETRY_LIMIT_ENABLE: u32 = 0x20000;
+pub const TXDESC32_RETRY_LIMIT_SHIFT: u32 = 0x12;
+
+// --- RX descriptor ---------------------------------------------------
+//
+// A C bitfield in the original, so these offsets appear nowhere in the
+// source as numbers: under little-endian the first member takes the
+// least significant bits, and the rest follow. Computed, not counted.
+//
+// Each entry is (word, shift, width).
+pub const RXDESC_PKTLEN: (u32, u32, u32) = (0, 0, 14);
+pub const RXDESC_CRC32: (u32, u32, u32) = (0, 14, 1);
+pub const RXDESC_ICVERR: (u32, u32, u32) = (0, 15, 1);
+pub const RXDESC_DRVINFO_SZ: (u32, u32, u32) = (0, 16, 4);
+pub const RXDESC_SHIFT: (u32, u32, u32) = (0, 24, 2);
+pub const RXDESC_PHY_STATS: (u32, u32, u32) = (0, 26, 1);
+
+/// Bytes of RX descriptor before the frame. `drvinfo_sz` is counted in
+/// eight-byte units and `shift` is a byte count, both added on top.
+pub const RXDESC16_SIZE: usize = 24;

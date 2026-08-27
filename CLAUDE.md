@@ -12,10 +12,12 @@ process isolation, one address space. A tool call from the model is a function
 call.
 
 108 files, roughly 50,000 lines. The only code in the kernel we did not write
-is Rust `core`, and `src/dev/rtl8188eu_tables.rs`, which is 509 hardware
-initialisation constants transcribed from Linux's GPL-2.0 rtl8xxxu driver
-because there is no other source for them. It is one file, marked as such at
-the top, and nothing else in the tree is copied from anywhere.
+is Rust `core`, and `src/dev/rtl8188eu_tables.rs`, which is the RTL8188EU
+initialisation tables plus the RF and descriptor register constants, taken
+from Linux's GPL-2.0 rtl8xxxu driver because there is no other source for
+them. It is one file, marked as such at the top, and nothing else in the tree
+is copied from anywhere. `tools/rtlconv.py` regenerates the second half from
+a checkout and states its provenance; the tables came the same way.
 
 ## Commands
 
@@ -293,7 +295,7 @@ Root certificate bundle, built from the host's store:
 There is no `cargo test`. This is a `no_std` UEFI binary with no host test
 runner, so **verification is the boot selftests plus driving QEMU.**
 
-At boot the system runs **eighteen selftest sections carrying seventy-one
+At boot the system runs **eighteen selftest sections carrying seventy-three
 claims**, printing `ok` or `FAIL` per line: heap, timer, clock, the namespace's
 Merkle addressing, fifteen sets of published cipher vectors, fault handling,
 constrained decoding, the agent loop, the linear probe, the situation planner,
@@ -524,9 +526,19 @@ TCP advances only while the shell is idle (`tcp::service` from the idle loop)
 or inside a blocking call. There is no interrupt-driven receive.
 
 The wireless card is CNVi, so the MAC is in the PCH and the M.2 module is a
-radio. `net/wifi.rs` identifies hardware and refuses to pretend; the WPA2
-supplicant in `net/wpa2.rs` is complete and verified against IEEE vectors and
-has nothing to run on.
+radio. `net/wifi.rs` identifies hardware and refuses to pretend; `hardware()`
+lists every network part on PCI and USB with what drives each, and boot prints
+it.
+
+For the USB dongle, everything above the transport is finished and checked at
+boot: `net/ieee80211.rs` builds probe requests and parses beacons,
+`dev/rtl8188eu.rs::desc` builds and reads the TX and RX descriptors, and
+`net/wpa2.rs` runs the handshake. `bring_up` applies all four initialisation
+tables including the radio, over the serial interface the radio actually needs.
+What is missing is the transport in between: LLT, the FIFO boundary that gates
+the MAC TX/RX enables, channel selection, efuse, firmware, and handing a
+descriptor to a bulk endpoint. None of the chip-facing half can be exercised
+here, since QEMU has no model of the part.
 
 ### Crypto (`src/crypto/`)
 
