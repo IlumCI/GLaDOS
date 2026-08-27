@@ -349,8 +349,12 @@ Three things worth knowing before a session goes sideways:
 **QEMU cannot run the real model.** VVFAT is FAT16 on a fixed geometry and the
 whole disk is 516 MB; `fat:32:` raises that in principle but QEMU says its
 FAT32 is untested and the firmware cannot read the directory it produces. So
-Qwen3-0.6B is only runnable on the GF63, and QEMU work uses the SmolLM2
-checkpoint in `out/`. Guest RAM must also cover the weights, which are read
+the VVFAT path cannot stage a checkpoint larger than the disk, and SmolLM2
+in `out/` is what fits. `--stage-iso` has no such cap: it builds a one-shot
+El Torito image and boots that instead, which is how any large checkpoint
+reaches QEMU. Saying the big models were "only runnable on the GF63" was
+wrong on both halves, since the ISO path existed and the hypervisor
+accelerator made it fast enough to matter. Guest RAM must also cover the weights, which are read
 whole into a pool before `ExitBootServices`, and `run.ps1 -Memory` defaults
 to 2G.
 

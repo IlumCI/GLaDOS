@@ -185,14 +185,19 @@ pub const STEPS: &[Step] = &[
                and send them; that is a real bug, not a rounding wobble.",
     },
     Step {
-        title: "q35 is LOGITS ONLY, not text",
+        title: "q35 text works; the note saying otherwise was wrong",
         place: Place::Glados,
-        cmd: "(nothing to run -- a fact to remember)",
-        expect: "trust `logits`. Do NOT trust `gen`/`ask` text with q35 loaded: \
-                 its tokenizer's split pattern is not implemented, so decoding \
-                 its 248k vocab is undefined and the words are garbage.",
-        fail: "if the text looks wrong, that is expected here, not a fault. The \
-               tokenizer is the next upgrade on the dev side.",
+        cmd: "gen -n 24 The capital of France is",
+        expect: "real sentences. this step used to assert the split \
+                 pattern was unimplemented and the words were garbage. \
+                 checked under qemu with the 2B staged by iso, and it \
+                 answered with a grammatical, spaced and punctuated \
+                 continuation about capital cities. a broken split \
+                 pattern gives mojibake or byte-fallback escapes, not \
+                 english.",
+        fail: "so act, route, train adapter and godel are all available \
+               on the 2B, and logits was never the only trustworthy \
+               command. 1259 ms/token under whpx; expect better here.",
     },
     Step {
         title: "Time generation, both models",
