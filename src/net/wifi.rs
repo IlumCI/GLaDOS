@@ -131,26 +131,67 @@ pub fn bars(rssi: i16) -> u8 {
     }
 }
 
+/// The wireless adapter this machine has, wherever it lives.
+///
+/// PCI and USB are separate questions with separate answers. A dongle is
+/// behind the xHCI controller, which appears on PCI as a USB controller and
+/// not as a network device, so a PCI walk looking for class 02:80 will never
+/// see it. Asking only PCI and reporting "no wireless controller" is how a
+/// machine with an adapter plugged into it gets told it has none.
+pub enum Adapter {
+    /// A USB device the id list recognises.
+    Usb { vendor: u16, device: u16, what: &'static str },
+    /// Something on PCI, which nothing here can drive.
+    Pci { vendor: u16, device: u16, what: &'static str },
+    /// Both buses have been looked at and neither has one.
+    None,
+    /// PCI has none, and USB has not been enumerated, so it is not known.
+    /// Distinct from `None` on purpose: an unasked question is not a no.
+    PciOnlyChecked,
+}
+
+pub fn adapter() -> Adapter {
+    // USB first. It is the bus something usable could actually be on, and a
+    // dongle is the answer to the PCI part being undriveable.
+    if let Some(Some((vendor, device, what))) = crate::dev::xhci::usb_wireless() {
+        return Adapter::Usb { vendor, device, what };
+    }
+    let pci = crate::net::ecam().map(probe);
+    if let Some(Probe::Unsupported { vendor, device, what }) = pci {
+        return Adapter::Pci { vendor, device, what };
+    }
+    match crate::dev::xhci::usb_wireless() {
+        Some(None) => Adapter::None,
+        None => Adapter::PciOnlyChecked,
+        _ => Adapter::None,
+    }
+}
+
 /// Ask the wireless hardware what it can hear.
 ///
 /// The error arm is the whole point of this function today. An operator who
 /// opens a wireless page and sees an empty list concludes their router is off;
-/// one who sees why there is no list can act on it. Both arms are real
-/// answers, and neither is an empty list standing in for a missing driver.
+/// one who sees why there is no list can act on it. Every arm is a real
+/// answer, and none of them is an empty list standing in for a missing driver.
 pub fn scan() -> Result<alloc::vec::Vec<Network>, &'static str> {
-    let Some(ecam) = crate::net::ecam() else {
-        return Err("The PCI bus has not been enumerated, so no wireless hardware has been looked for yet.");
-    };
-    match probe(ecam) {
-        Probe::None => Err(
-            "No wireless controller is present on this machine. A wired connection or a supported USB adapter is the way on to a network.",
+    match adapter() {
+        // The driver powers this chip on and loads its MAC registers, and the
+        // PHY, AGC and radio tables are transcribed. What is missing is the
+        // rest: the radio tables are not applied yet, no channel is set, and
+        // there is no transmit or receive path at all -- not one frame goes
+        // out or comes in. Scanning is sending probe requests and reading
+        // beacons, so it needs exactly the part that is absent.
+        Adapter::Usb { .. } => Err(
+            "This adapter is recognised and its MAC can be brought up, but there is no transmit or receive path yet, so no probe request can be sent and no beacon can be read.",
         ),
-        // Every part this probe can recognise lands here. Nothing in tree can
-        // scan: the internal card on the target laptop is a CNVi part with no
-        // self-contained MAC, and the USB adapter driver stops at chip
-        // identification on purpose rather than guess at an init sequence.
-        Probe::Unsupported { .. } => Err(
-            "The wireless adapter in this machine cannot be driven. Scanning needs a driver that can put the radio into monitor mode, and none of the wireless parts recognised here has one.",
+        Adapter::Pci { .. } => Err(
+            "The wireless part in this machine cannot be driven. A supported USB adapter is the way on to a wireless network here.",
+        ),
+        Adapter::None => Err(
+            "No wireless adapter on either the PCI bus or USB. A wired connection or a supported USB adapter is the way on to a network.",
+        ),
+        Adapter::PciOnlyChecked => Err(
+            "No wireless controller on the PCI bus. USB has not been enumerated yet, so a plugged-in adapter would not have been seen: run the USB scan below.",
         ),
     }
 }

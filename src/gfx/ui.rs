@@ -800,26 +800,31 @@ fn adapter_rows() -> Vec<Widget> {
 /// which reads as "the router is off" and sends the operator to debug the
 /// wrong machine -- the exact struggle this page exists to end.
 fn wifi_rows() -> Vec<Widget> {
-    use crate::net::wifi;
+    use crate::net::wifi::{self, Adapter};
     let mut out = alloc::vec![Widget::Heading(String::from("Wireless"))];
-    match crate::net::ecam().map(wifi::probe) {
-        Some(wifi::Probe::Unsupported { vendor, device, what }) => {
-            out.push(Widget::Status {
-                name: String::from("Adapter"),
-                value: String::from(what),
-                tone: Tone::Plain,
-            });
-            out.push(Widget::Status {
-                name: String::from("PCI id"),
-                value: alloc::format!("{:04x}:{:04x}", vendor, device),
-                tone: Tone::Plain,
-            });
+
+    // Asked once. Both buses, in the order something usable could be on them.
+    let (bus, name, id) = match wifi::adapter() {
+        Adapter::Usb { vendor, device, what } => {
+            ("USB", String::from(what), Some((vendor, device)))
         }
-        _ => out.push(Widget::Status {
-            name: String::from("Adapter"),
-            value: String::from("none detected"),
+        Adapter::Pci { vendor, device, what } => {
+            ("PCI", String::from(what), Some((vendor, device)))
+        }
+        Adapter::None => ("", String::from("none on PCI or USB"), None),
+        Adapter::PciOnlyChecked => ("", String::from("USB not enumerated yet"), None),
+    };
+    out.push(Widget::Status {
+        name: String::from("Adapter"),
+        value: name,
+        tone: Tone::Plain,
+    });
+    if let Some((vendor, device)) = id {
+        out.push(Widget::Status {
+            name: String::from("Found on"),
+            value: alloc::format!("{}  {:04x}:{:04x}", bus, vendor, device),
             tone: Tone::Plain,
-        }),
+        });
     }
 
     match wifi::scan() {
@@ -866,8 +871,14 @@ fn wifi_rows() -> Vec<Widget> {
             out.push(Widget::Sep);
             out.push(Widget::Heading(String::from("What does work")));
             out.push(note(
-                "Wired ethernet, with an address from DHCP. WPA2 is implemented here and passes its own tests, so what is missing is the radio driver and not the security.",
+                "Wired ethernet, with an address from DHCP. WPA2 is implemented here and passes its own tests, so what is missing is the radio and not the security.",
             ));
+            // Offered on every arm, not just the not-yet-enumerated one: it is
+            // also how an adapter plugged in after boot gets noticed.
+            out.push(Widget::Button {
+                label: String::from("Scan USB"),
+                action: Action::Run(String::from("usb")),
+            });
             out.push(Widget::Button {
                 label: String::from("Wireless detail"),
                 action: Action::Run(String::from("wifi")),

@@ -27,18 +27,27 @@
 //!
 //! ### What is here, and what is deliberately not
 //!
-//! Here: device matching, the register file over vendor control transfers, and
-//! chip identification.
+//! Here: device matching, the register file over vendor control transfers,
+//! chip identification, the power-on sequence, and the MAC register table.
+//! `bring_up` runs the first two of those and stops. The PHY, AGC and radio
+//! tables are transcribed in `rtl8188eu_tables` but nothing applies them yet.
 //!
-//! **Not here: the power-on sequence, the RF/PHY initialisation tables, the
-//! efuse layout, and the firmware blob.** Those are several hundred specific
-//! register/value pairs that exist in Realtek's vendor driver and in Linux's
-//! `rtl8xxxu_8188e.c`, and they are not reproduced from memory on purpose. A
-//! plausible-looking power sequence with three wrong values yields a chip that
-//! accepts every write, reports sensible-looking registers, and never
-//! transmits -- which is precisely the failure mode this project keeps getting
-//! bitten by and now refuses to manufacture. They have to be transcribed from
-//! the source, and until they are this driver identifies hardware and stops.
+//! **Not here: the datapath.** No frame is transmitted or received by this
+//! module -- it never touches a bulk endpoint -- and no channel is ever set.
+//! That is what scanning needs, because scanning is sending probe requests and
+//! reading beacons, so a chip brought this far still cannot find a network.
+//! The efuse layout and the firmware blob are also absent.
+//!
+//! The tables that are here were transcribed rather than recalled, and the
+//! ones that are missing must be too. A plausible-looking power sequence with
+//! three wrong values yields a chip that accepts every write, reports
+//! sensible-looking registers, and never transmits -- precisely the failure
+//! mode this project keeps getting bitten by and refuses to manufacture.
+//!
+//! Keep this section honest. It was stale once already: it claimed the driver
+//! stopped at chip identification long after the power sequence and MAC table
+//! had landed, and a settings page written from it told an operator the wrong
+//! thing about their own hardware.
 //!
 //! ### Testing
 //!

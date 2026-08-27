@@ -184,6 +184,38 @@ pub fn probe(ecam: u64) -> Result<Caps, InitError> {
 /// enough for the single-controller case this machine actually has.
 static CLAIMED: crate::sync::Racy<bool> = crate::sync::Racy::new(false);
 
+/// What the last USB enumeration saw in the way of wireless hardware.
+///
+/// Recorded when a scan happens rather than looked up when asked, because
+/// asking costs a bus reset: enumerating the controller drops whatever link
+/// is running on it. A settings page rebuilt on every navigation cannot pay
+/// that, so the enumeration that already happens at boot leaves its answer
+/// here for anything that wants to know.
+///
+/// The two layers of `Option` are the whole point. The outer `None` means no
+/// enumeration has ever run, so nothing is known. `Some(None)` means one ran
+/// and found no wireless device. Those are different claims, and a page that
+/// collapses them tells an operator with an adapter plugged in that they have
+/// no adapter.
+static USB_WIRELESS: crate::sync::Racy<Option<Option<(u16, u16, &'static str)>>> =
+    crate::sync::Racy::new(None);
+
+pub fn usb_wireless() -> Option<Option<(u16, u16, &'static str)>> {
+    unsafe { *USB_WIRELESS.get() }
+}
+
+/// A scan is starting: forget what the last one found.
+fn usb_scan_begin() {
+    unsafe { *USB_WIRELESS.get() = Some(None) };
+}
+
+/// One enumerated device, checked against the wireless id list.
+fn usb_note(vid: u16, pid: u16) {
+    if let Some(name) = super::rtl8188eu::identify(vid, pid) {
+        unsafe { *USB_WIRELESS.get() = Some(Some((vid, pid, name))) };
+    }
+}
+
 /// What `usb` prints.
 pub fn report(ecam: u64) {
     use crate::gfx::console::{self, LTGRAY, LTGREEN, LTRED, WHITE, YELLOW};
@@ -240,6 +272,7 @@ pub fn report(ecam: u64) {
                 }
             };
             let ports = ctl.connected();
+            usb_scan_begin();
             if ports.is_empty() {
                 kprintln!("  running; no devices attached");
                 return;
@@ -259,6 +292,7 @@ pub fn report(ecam: u64) {
                 console::set_color(LTGRAY);
                 // A vendor-specific interface has no class code to key off, so
                 // the id list is the whole of the detection.
+                usb_note(dev.vid, dev.pid);
                 if let Some(name) = super::rtl8188eu::identify(dev.vid, dev.pid) {
                     kprintln!("    {} -- wireless", name);
                     // One register read is the whole point of getting this far:
@@ -1212,8 +1246,12 @@ impl crate::net::iface::Nic for UsbNet {
 pub fn probe_net(ecam: u64) -> Result<UsbNet, &'static str> {
     let caps = probe(ecam).map_err(|_| "no xHCI controller")?;
     let mut ctl = Controller::start(&caps).map_err(|_| "controller did not start")?;
+    usb_scan_begin();
     for port in ctl.connected() {
         let Ok(mut dev) = ctl.enumerate(port) else { continue };
+        // This walk already visits every attached device, so noting the
+        // wireless ones costs a comparison and saves a second bus reset.
+        usb_note(dev.vid, dev.pid);
         for i in 0..dev.num_configs {
             let Ok((buf, total)) = ctl.config_descriptor(&mut dev, i) else { break };
             let c = parse_config(buf, total);
