@@ -46,6 +46,8 @@ const ROW_H: u32 = TEXT_H + 8;
 const BTN_H: u32 = TEXT_H + 16;
 const GAP: u32 = 6;
 const PAD: u32 = 10;
+/// Character column the value in a `Status` row starts at.
+const STATUS_COL: usize = 13;
 
 /// What activating a control does.
 ///
@@ -69,9 +71,77 @@ pub enum Action {
     None,
 }
 
+/// How a status line should read at a glance.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Tone {
+    /// Working.
+    Ok,
+    /// Works, but not the way it should.
+    Warn,
+    /// Will not work, and no amount of retrying changes that.
+    Bad,
+    /// A fact with no verdict attached.
+    Plain,
+}
+
+impl Tone {
+    fn color(self) -> super::Color {
+        match self {
+            Tone::Ok => theme::OK_TEXT,
+            Tone::Warn => theme::WARN_TEXT,
+            Tone::Bad => theme::BAD_TEXT,
+            Tone::Plain => theme::TEXT,
+        }
+    }
+}
+
+/// Columns a `Note` wraps to.
+///
+/// A fixed count rather than the panel width, for the reason given on the
+/// variant. Sized so the default settings window shows a full line and a
+/// wider one merely leaves margin, which is the failure worth having.
+const NOTE_COLS: usize = 44;
+
+/// Wrap prose into a `Note`, breaking on spaces and never mid-word.
+pub fn note(text: &str) -> Widget {
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for word in text.split(' ') {
+        if !cur.is_empty() && cur.chars().count() + 1 + word.chars().count() > NOTE_COLS {
+            lines.push(core::mem::take(&mut cur));
+        }
+        if !cur.is_empty() {
+            cur.push(' ');
+        }
+        cur.push_str(word);
+    }
+    if !cur.is_empty() {
+        lines.push(cur);
+    }
+    Widget::Note(lines)
+}
+
 pub enum Widget {
     Label(String),
     Sep,
+    /// A section title. Structure a page rather than running its controls
+    /// together: an operator scanning for "the wireless part" finds a heading
+    /// long before they find the third button down.
+    Heading(String),
+    /// One fact about the machine, as it is right now: a name, a value, and
+    /// how worried to be.
+    ///
+    /// Read when the panel is built, never stored. Panels are rebuilt whole on
+    /// every navigation, so this is a reading and not a cache -- the rule that
+    /// keeps a settings window from showing a value the system stopped
+    /// believing an hour ago.
+    Status { name: String, value: String, tone: Tone },
+    /// Explanatory prose, pre-wrapped, dimmed.
+    ///
+    /// Wrapped when the widget is made rather than when it is drawn, because
+    /// height has to be known before a width is: the layout pass asks every
+    /// widget how tall it is and only then hands out rectangles.
+    Note(Vec<String>),
     List { items: Vec<(String, Action)>, sel: usize },
     /// An editable line. `cursor` is a byte index, which is the same thing the
     /// shell's own editor tracks.
@@ -89,6 +159,9 @@ impl Widget {
         match self {
             Widget::Label(_) => TEXT_H + GAP,
             Widget::Sep => GAP * 2,
+            Widget::Heading(_) => TEXT_H + GAP + 6,
+            Widget::Status { .. } => TEXT_H + 4,
+            Widget::Note(lines) => lines.len() as u32 * TEXT_H + GAP,
             Widget::List { items, .. } => items.len() as u32 * ROW_H + 8,
             Widget::Field { .. } => TEXT_H + 14,
             Widget::Button { .. } => BTN_H,
@@ -105,6 +178,11 @@ impl Widget {
         match self {
             Widget::Label(t) => (mark, t.as_str(), 0),
             Widget::Sep => (mark, "----", 0),
+            Widget::Heading(t) => (mark, t.as_str(), 0),
+            // The value, not the name: what a headless run needs to assert on
+            // is what the machine reported, and the name is in the source.
+            Widget::Status { value, .. } => (mark, value.as_str(), 0),
+            Widget::Note(lines) => (mark, lines.first().map(|l| l.as_str()).unwrap_or(""), lines.len()),
             Widget::List { items, sel } => {
                 (mark, items.get(*sel).map(|i| i.0.as_str()).unwrap_or(""), *sel)
             }
@@ -403,6 +481,23 @@ impl Panel {
                     theme::text(fb, x, y, t, theme::TEXT, theme::FACE);
                 }
                 Widget::Sep => theme::separator(fb, x, y + GAP / 2, w),
+                Widget::Heading(t) => {
+                    theme::text(fb, x, y + 4, t, theme::TEXT, theme::FACE);
+                    let uw = theme::text_w(t.chars().count()).min(w);
+                    fb.rect(x, y + 4 + TEXT_H + 2, uw, 2, theme::APERTURE);
+                }
+                Widget::Status { name, value, tone } => {
+                    theme::text(fb, x, y, name, theme::TEXT_DIM, theme::FACE);
+                    // One column for every row on the page, so the values line
+                    // up and can be read down rather than hunted for.
+                    let col = theme::text_w(STATUS_COL).min(w / 2);
+                    theme::text(fb, x + col, y, value, tone.color(), theme::FACE);
+                }
+                Widget::Note(lines) => {
+                    for (j, line) in lines.iter().enumerate() {
+                        theme::text(fb, x, y + j as u32 * TEXT_H, line, theme::TEXT_DIM, theme::FACE);
+                    }
+                }
                 Widget::List { items, sel } => {
                     let r = Rect::new(x, y, w, h);
                     theme::well(fb, r, theme::FACE);
@@ -540,6 +635,11 @@ impl Panel {
                 // A field wants room to type in, not just room for its caption.
                 Widget::Field { name, .. } => name.len() + 28,
                 Widget::Button { label, .. } => label.len() + 4,
+                Widget::Heading(t) => t.len(),
+                // Both columns, so a long value widens the window instead of
+                // being clipped by it.
+                Widget::Status { value, .. } => STATUS_COL + value.len(),
+                Widget::Note(lines) => lines.iter().map(|l| l.len()).max().unwrap_or(0),
             };
             text_cols = text_cols.max(cols);
         }
@@ -572,7 +672,14 @@ pub fn panel_named(name: &str) -> Option<Panel> {
         "programs" => Some(program_manager()),
         "status" => Some(status_panel()),
         "files" => Some(file_browser("/")),
-        "settings" => Some(settings("net")),
+        "settings" | "network" => Some(settings("net")),
+        // The settings pages by name, so the shell can open any of them
+        // directly. `win open wifi` is the one that matters: a page whose
+        // whole job is explaining why something does not work is useless if
+        // reaching it needs three keystrokes nobody documented.
+        "wifi" | "wireless" => Some(settings("wifi")),
+        "model" => Some(settings("model")),
+        "system" => Some(settings("sys")),
         _ => None,
     }
 }
@@ -600,10 +707,181 @@ pub fn panel_for_route(route: &str) -> Option<(String, Panel)> {
 /// Values are shown by *running* the relevant command into the terminal rather
 /// than mirrored into labels. Mirroring means a cache, and a settings window
 /// showing a stale value is worse than one showing none.
+fn ip_text(a: crate::net::Ipv4) -> String {
+    alloc::format!("{}.{}.{}.{}", a[0], a[1], a[2], a[3])
+}
+
+/// The interface carrying the default route, if anything is.
+fn default_iface() -> Option<usize> {
+    crate::net::route([8, 8, 8, 8])
+}
+
+/// Live status rows for the connection an operator actually has.
+///
+/// Read here, at build time, and never stored. Panels are rebuilt whole on
+/// every navigation, so this is a reading rather than a cache, and the rule
+/// that a settings window must not show a value the system stopped believing
+/// still holds.
+fn connection_rows() -> Vec<Widget> {
+    let mut out = Vec::new();
+    let Some(n) = default_iface() else {
+        out.push(Widget::Status {
+            name: String::from("Status"),
+            value: String::from("Not connected"),
+            tone: Tone::Bad,
+        });
+        out.push(note(
+            "No interface has a route off this machine. Attach a cable, then renew DHCP below.",
+        ));
+        return out;
+    };
+    let ifaces = crate::net::ifaces();
+    let usable = ifaces[n].usable();
+    let i = &ifaces[n];
+    let kind = i.nic.as_ref().map(|d| d.kind().name()).unwrap_or("unknown");
+    out.push(Widget::Status {
+        name: String::from("Status"),
+        value: String::from(if usable { "Connected" } else { "Link down" }),
+        tone: if usable { Tone::Ok } else { Tone::Bad },
+    });
+    out.push(Widget::Status {
+        name: String::from("Adapter"),
+        value: alloc::format!("{} ({})", i.name, kind),
+        tone: Tone::Plain,
+    });
+    let bits: u32 = i.netmask.iter().map(|b| b.count_ones()).sum();
+    out.push(Widget::Status {
+        name: String::from("Address"),
+        value: alloc::format!("{}/{}", ip_text(i.ip), bits),
+        tone: if i.ip == crate::net::UNSPECIFIED { Tone::Warn } else { Tone::Plain },
+    });
+    out.push(Widget::Status {
+        name: String::from("Gateway"),
+        value: ip_text(i.gateway),
+        tone: Tone::Plain,
+    });
+    out.push(Widget::Status {
+        name: String::from("DNS"),
+        value: ip_text(i.dns),
+        tone: if i.dns == crate::net::UNSPECIFIED { Tone::Warn } else { Tone::Plain },
+    });
+    out
+}
+
+/// Every adapter slot, present or not.
+fn adapter_rows() -> Vec<Widget> {
+    let mut out = Vec::new();
+    let def = default_iface();
+    let ifaces = crate::net::ifaces();
+    for n in 0..ifaces.len() {
+        let present = ifaces[n].present();
+        let usable = ifaces[n].usable();
+        let i = &ifaces[n];
+        let (value, tone) = if !present {
+            (String::from("not present"), Tone::Plain)
+        } else if usable {
+            let mark = if def == Some(n) { "  (default route)" } else { "" };
+            (alloc::format!("up{}", mark), Tone::Ok)
+        } else if i.up {
+            (String::from("no link"), Tone::Warn)
+        } else {
+            (String::from("down"), Tone::Warn)
+        };
+        out.push(Widget::Status { name: String::from(i.name), value, tone });
+    }
+    out
+}
+
+/// The wireless page.
+///
+/// Built from what `wifi::scan` actually answers. When it can list networks
+/// this renders the list, the password field and the connect button; when it
+/// cannot, it renders the reason. What it never does is render an empty list,
+/// which reads as "the router is off" and sends the operator to debug the
+/// wrong machine -- the exact struggle this page exists to end.
+fn wifi_rows() -> Vec<Widget> {
+    use crate::net::wifi;
+    let mut out = alloc::vec![Widget::Heading(String::from("Wireless"))];
+    match crate::net::ecam().map(wifi::probe) {
+        Some(wifi::Probe::Unsupported { vendor, device, what }) => {
+            out.push(Widget::Status {
+                name: String::from("Adapter"),
+                value: String::from(what),
+                tone: Tone::Plain,
+            });
+            out.push(Widget::Status {
+                name: String::from("PCI id"),
+                value: alloc::format!("{:04x}:{:04x}", vendor, device),
+                tone: Tone::Plain,
+            });
+        }
+        _ => out.push(Widget::Status {
+            name: String::from("Adapter"),
+            value: String::from("none detected"),
+            tone: Tone::Plain,
+        }),
+    }
+
+    match wifi::scan() {
+        Ok(nets) => {
+            out.push(Widget::Status {
+                name: String::from("State"),
+                value: alloc::format!("{} found", nets.len()),
+                tone: Tone::Ok,
+            });
+            out.push(Widget::Sep);
+            out.push(Widget::Heading(String::from("Networks")));
+            let items: Vec<(String, Action)> = nets
+                .iter()
+                .map(|n| {
+                    let mut label = alloc::format!("{}  ", n.ssid);
+                    for b in 0..4 {
+                        label.push(if b < wifi::bars(n.rssi) { '|' } else { '.' });
+                    }
+                    if n.secured {
+                        label.push_str("  secured");
+                    }
+                    (label, Action::Apply(alloc::format!("wifi join {}", n.ssid)))
+                })
+                .collect();
+            out.push(Widget::List { items, sel: 0 });
+            out.push(Widget::Field {
+                name: String::from("password"),
+                text: String::new(),
+                cursor: 0,
+                submit: Action::Apply(String::from("wifi join")),
+            });
+            out.push(Widget::Button {
+                label: String::from("Connect"),
+                action: Action::Apply(String::from("wifi join")),
+            });
+        }
+        Err(why) => {
+            out.push(Widget::Status {
+                name: String::from("State"),
+                value: String::from("Cannot scan"),
+                tone: Tone::Bad,
+            });
+            out.push(note(why));
+            out.push(Widget::Sep);
+            out.push(Widget::Heading(String::from("What does work")));
+            out.push(note(
+                "Wired ethernet, with an address from DHCP. WPA2 is implemented here and passes its own tests, so what is missing is the radio driver and not the security.",
+            ));
+            out.push(Widget::Button {
+                label: String::from("Wireless detail"),
+                action: Action::Run(String::from("wifi")),
+            });
+        }
+    }
+    out
+}
+
 pub fn settings(page: &str) -> Panel {
     let nav = |sel: usize| Widget::List {
         items: alloc::vec![
             (String::from("Network"), Action::Browse(String::from("set:net"))),
+            (String::from("Wi-Fi"), Action::Browse(String::from("set:wifi"))),
             (String::from("Model"), Action::Browse(String::from("set:model"))),
             (String::from("System"), Action::Browse(String::from("set:sys"))),
             (String::from("Programs"), Action::Browse(String::from("programs:"))),
@@ -612,10 +890,12 @@ pub fn settings(page: &str) -> Panel {
     };
 
     let (sel, mut body) = match page {
+        "wifi" => (1usize, wifi_rows()),
         "model" => (
-            1usize,
+            2usize,
             alloc::vec![
-                Widget::Label(String::from("Attention: sinks and recent")),
+                Widget::Heading(String::from("Attention")),
+                note("Sinks kept from the start of the context and recent tokens kept from the end. Everything between them is dropped."),
                 Widget::Field {
                     name: String::from("window"),
                     text: String::from("4 512"),
@@ -627,6 +907,7 @@ pub fn settings(page: &str) -> Panel {
                     action: Action::Apply(String::from("window")),
                 },
                 Widget::Sep,
+                Widget::Heading(String::from("Inspect")),
                 Widget::Button {
                     label: String::from("Model status"),
                     action: Action::Run(String::from("win open status")),
@@ -646,9 +927,9 @@ pub fn settings(page: &str) -> Panel {
             ],
         ),
         "sys" => (
-            2usize,
+            3usize,
             alloc::vec![
-                Widget::Label(String::from("Snapshots, memory, power")),
+                Widget::Heading(String::from("State")),
                 Widget::Button {
                     label: String::from("Snapshot now"),
                     action: Action::Run(String::from("snap")),
@@ -670,46 +951,53 @@ pub fn settings(page: &str) -> Panel {
                     action: Action::Run(String::from("store")),
                 },
                 Widget::Sep,
+                Widget::Heading(String::from("Power")),
+                note("Both ask the firmware first, and reset the machine directly if it declines."),
                 Widget::Button {
-                    label: String::from("Reboot"),
+                    label: String::from("Restart"),
                     action: Action::Run(String::from("reboot")),
+                },
+                Widget::Button {
+                    label: String::from("Shut down"),
+                    action: Action::Run(String::from("shutdown")),
                 },
             ],
         ),
         // Network is the default: it is the page most likely to be wrong.
-        _ => (
-            0usize,
-            alloc::vec![
-                Widget::Label(String::from("Interfaces, DHCP, names, trust")),
-                Widget::Field {
-                    name: String::from("host"),
-                    text: String::from("discord.com"),
-                    cursor: 11,
-                    submit: Action::Apply(String::from("dns")),
-                },
-                Widget::Button {
-                    label: String::from("Resolve"),
-                    action: Action::Apply(String::from("dns")),
-                },
-                Widget::Sep,
-                Widget::Button {
-                    label: String::from("Interfaces"),
-                    action: Action::Run(String::from("net")),
-                },
-                Widget::Button {
-                    label: String::from("Renew DHCP"),
-                    action: Action::Run(String::from("dhcp")),
-                },
-                Widget::Button {
-                    label: String::from("Wireless"),
-                    action: Action::Run(String::from("wifi")),
-                },
-                Widget::Button {
-                    label: String::from("Certificates"),
-                    action: Action::Run(String::from("trust")),
-                },
-            ],
-        ),
+        _ => {
+            let mut v = alloc::vec![Widget::Heading(String::from("Connection"))];
+            v.append(&mut connection_rows());
+            v.push(Widget::Sep);
+            v.push(Widget::Heading(String::from("Adapters")));
+            v.append(&mut adapter_rows());
+            v.push(Widget::Sep);
+            v.push(Widget::Heading(String::from("Actions")));
+            v.push(Widget::Button {
+                label: String::from("Renew DHCP"),
+                action: Action::Run(String::from("dhcp")),
+            });
+            v.push(Widget::Button {
+                label: String::from("Interface detail"),
+                action: Action::Run(String::from("net")),
+            });
+            v.push(Widget::Button {
+                label: String::from("Certificates"),
+                action: Action::Run(String::from("trust")),
+            });
+            v.push(Widget::Sep);
+            v.push(Widget::Heading(String::from("Name lookup")));
+            v.push(Widget::Field {
+                name: String::from("host"),
+                text: String::from("discord.com"),
+                cursor: 11,
+                submit: Action::Apply(String::from("dns")),
+            });
+            v.push(Widget::Button {
+                label: String::from("Resolve"),
+                action: Action::Apply(String::from("dns")),
+            });
+            (0usize, v)
+        }
     };
 
     let mut widgets = alloc::vec![nav(sel), Widget::Sep];

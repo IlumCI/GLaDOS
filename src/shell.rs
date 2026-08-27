@@ -1951,7 +1951,14 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
                 "open" => {
                     let what = it.next().unwrap_or("status");
                     match crate::gfx::ui::panel_named(what) {
-                        Some(p) => desk::open(what, p),
+                        // The panel names its own window. `win open wifi`
+                        // asked for a page, not for a window called "wifi",
+                        // and a title bar that echoes the command word tells
+                        // the operator nothing they did not just type.
+                        Some(p) => {
+                            let title = p.title.clone();
+                            desk::open(&title, p)
+                        }
                         None => {
                             kprintln!("  no such panel: {}", what);
                             kprintln!("  try: status, programs");

@@ -57,6 +57,16 @@ pub const TEXT_DIM: Color = Color::new(0x80, 0x80, 0x80);
 /// because "this is the destructive one" is worth saying twice.
 pub const CLOSE_HOT: Color = Color::new(0xC4, 0x28, 0x28);
 
+/// Status text on a panel face: working, needs attention, will not work.
+///
+/// Three colours and no more. A settings page that reports state in prose
+/// makes the operator read every line to find the one that is wrong; a colour
+/// lets them find it first and read it second. Chosen dark enough to stay
+/// legible on FACE rather than picked for vividness.
+pub const OK_TEXT: Color = Color::new(0x0A, 0x64, 0x0A);
+pub const WARN_TEXT: Color = Color::new(0x8A, 0x55, 0x00);
+pub const BAD_TEXT: Color = Color::new(0xA0, 0x1C, 0x1C);
+
 // --- Aperture ------------------------------------------------------------
 
 pub const APERTURE: Color = Color::new(0xF2, 0x8C, 0x1E);

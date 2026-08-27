@@ -107,6 +107,54 @@ pub fn probe(ecam: u64) -> Probe {
     }
 }
 
+/// One network as a scan would report it.
+///
+/// Nothing constructs this yet. It is here so the settings page is written
+/// against the shape a scan returns rather than against the absence of one,
+/// and so the day a driver can associate, the UI above it already works.
+pub struct Network {
+    pub ssid: alloc::string::String,
+    /// dBm, as the radio reports it. Negative, closer to zero is stronger.
+    pub rssi: i16,
+    /// False for an open network, which the UI has to say out loud.
+    pub secured: bool,
+}
+
+/// Signal as a count out of four, the way every operator already reads it.
+pub fn bars(rssi: i16) -> u8 {
+    match rssi {
+        r if r >= -55 => 4,
+        r if r >= -67 => 3,
+        r if r >= -75 => 2,
+        r if r >= -85 => 1,
+        _ => 0,
+    }
+}
+
+/// Ask the wireless hardware what it can hear.
+///
+/// The error arm is the whole point of this function today. An operator who
+/// opens a wireless page and sees an empty list concludes their router is off;
+/// one who sees why there is no list can act on it. Both arms are real
+/// answers, and neither is an empty list standing in for a missing driver.
+pub fn scan() -> Result<alloc::vec::Vec<Network>, &'static str> {
+    let Some(ecam) = crate::net::ecam() else {
+        return Err("The PCI bus has not been enumerated, so no wireless hardware has been looked for yet.");
+    };
+    match probe(ecam) {
+        Probe::None => Err(
+            "No wireless controller is present on this machine. A wired connection or a supported USB adapter is the way on to a network.",
+        ),
+        // Every part this probe can recognise lands here. Nothing in tree can
+        // scan: the internal card on the target laptop is a CNVi part with no
+        // self-contained MAC, and the USB adapter driver stops at chip
+        // identification on purpose rather than guess at an init sequence.
+        Probe::Unsupported { .. } => Err(
+            "The wireless adapter in this machine cannot be driven. Scanning needs a driver that can put the radio into monitor mode, and none of the wireless parts recognised here has one.",
+        ),
+    }
+}
+
 /// Print what is known, and what it would take.
 pub fn report() {
     use crate::gfx::console::{self, LTGRAY, YELLOW};
