@@ -112,6 +112,14 @@ pub struct Window {
     /// exact rather than approximate.
     pub rect: Rect,
     pub state: WinState,
+    /// Geometry from before the window was snapped to an edge, if it was.
+    ///
+    /// A snapped window has lost the size the operator chose for it, and the
+    /// only record of that size is here. Dragging back off the edge restores
+    /// it, which is the half of snapping that makes the other half safe to
+    /// use: an edge that swallows a window's proportions permanently is a
+    /// trap, not a shortcut.
+    pub snap_back: Option<Rect>,
     pub content: Content,
     pub menus: Vec<Menu>,
     pub closable: bool,
@@ -551,6 +559,7 @@ pub fn init() {
         icon: ICO_TERM,
         rect: Rect::new(term_x, screen.y, term_w, screen.h),
         state: WinState::Normal,
+        snap_back: None,
         content: Content::Terminal,
         menus: alloc::vec![
             Menu {
@@ -587,6 +596,7 @@ pub fn init() {
         icon: ICO_PROGRAMS,
         rect: Rect::new(pm_x, screen.y, pm_w, pm_h.min(screen.h)),
         state: WinState::Normal,
+        snap_back: None,
         content: Content::Panel(pm),
         menus: Vec::new(),
         closable: false,
@@ -658,6 +668,7 @@ pub fn open(title: &str, panel: Panel) {
             icon: panel_icon(title),
             rect: Rect::new(x, y, w, h),
             state: WinState::Normal,
+        snap_back: None,
             content: Content::Panel(panel),
             menus: Vec::new(),
             closable: true,
@@ -716,6 +727,7 @@ pub fn open_app(title: &str, icon: usize, app: Box<dyn DeskApp>, w: u32, h: u32)
             icon,
             rect: Rect::new(x, y, w, h),
             state: WinState::Normal,
+        snap_back: None,
             content: Content::App(app),
             menus: Vec::new(),
             closable: true,
@@ -784,6 +796,7 @@ pub fn open_browser(url: &str) {
             icon: ICO_NET,
             rect: Rect::new(x, y, w, h),
             state: WinState::Normal,
+        snap_back: None,
             content: Content::Browser(b),
             menus: Vec::new(),
             closable: true,
@@ -1090,7 +1103,11 @@ pub fn poll_mouse() {
         app_drag_to(x, y);
     }
     if released_left && dragging {
+        let was_move = matches!(with(|d| d.mode), Some(Mode::Drag { .. }));
         with(|d| d.mode = Mode::Normal);
+        if was_move {
+            snap_release(x, y);
+        }
         // The resulting rectangle, not just the fact that a drag ended. A
         // resize that silently does nothing and a resize that ran and was
         // clamped back look identical from outside; the numbers separate them.
@@ -1695,6 +1712,81 @@ fn menu_press(fb: &Framebuffer, x: i32, y: i32, screen: Rect) -> bool {
         launch(&cmd);
     }
     true
+}
+
+/// How close to a screen edge a move has to end to count as a snap.
+const SNAP: i32 = 8;
+
+/// Finish a window move: snap to an edge, or come back off one.
+///
+/// The gesture an operator arriving from Windows tries first, and the reason
+/// half-screen tiling is worth having at all -- two windows side by side
+/// without measuring either. Left and right edges take half the screen, the
+/// top maximises.
+///
+/// Deliberately decided at release rather than while the pointer is moving.
+/// A window that resizes itself under a drag has to re-anchor the grab
+/// mid-gesture, and getting that wrong makes the window jump away from the
+/// pointer. Releasing is the moment the operator has committed.
+fn snap_release(x: i32, y: i32) {
+    let Some(fb) = super::primary() else { return };
+    let screen = screen_rect(&fb);
+    let (l, t) = (screen.x as i32, screen.y as i32);
+    let r = l + screen.w as i32;
+    let half_w = screen.w / 2;
+
+    let changed = with(|d| {
+        let Some(f) = d.focus() else { return false };
+        let w = &mut d.windows[f];
+        let here = w.rect;
+
+        if y <= t + SNAP {
+            // The top edge maximises, using the state the caption button and
+            // the system menu already use, so there is one maximised window
+            // and not two ideas of one.
+            if w.state != WinState::Maximised {
+                w.snap_back = w.snap_back.or(Some(here));
+                w.state = WinState::Maximised;
+                return true;
+            }
+            return false;
+        }
+
+        let side = if x <= l + SNAP {
+            Some(screen.x)
+        } else if x >= r - SNAP {
+            Some(screen.x + screen.w - half_w)
+        } else {
+            None
+        };
+
+        if let Some(nx) = side {
+            w.snap_back = w.snap_back.or(Some(here));
+            w.state = WinState::Normal;
+            w.rect = Rect::new(nx, screen.y, half_w, screen.h);
+            return true;
+        }
+
+        // Off the edge, and the window is carrying a size it did not choose:
+        // give it back, around the place it was dropped rather than the place
+        // it came from.
+        if let Some(back) = w.snap_back.take() {
+            if w.state != WinState::Maximised {
+                let cx = here.x + here.w / 2;
+                let nx = cx
+                    .saturating_sub(back.w / 2)
+                    .min(screen.x + screen.w.saturating_sub(back.w))
+                    .max(screen.x);
+                w.rect = Rect::new(nx, here.y, back.w, back.h);
+                return true;
+            }
+        }
+        false
+    })
+    .unwrap_or(false);
+    if changed {
+        draw();
+    }
 }
 
 /// Pointer motion while the title bar or the size grip is held.
