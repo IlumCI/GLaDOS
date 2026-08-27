@@ -98,10 +98,11 @@ static INTERACTIVE: core::sync::atomic::AtomicBool =
 
 /// Whether the shell has reached its prompt at least once.
 ///
-/// The resident mind waits on this rather than on a stopwatch. Boot takes
-/// about 150 s under TCG and about 55 s under the hypervisor accelerator, so
-/// any fixed grace period is a guess that is wrong on one of them; what the
-/// mind actually needs to know is that a person could have typed by now.
+/// The resident mind waits on this rather than on a stopwatch. `uptime` at
+/// the first prompt reads 21 s under the hypervisor accelerator against about
+/// 150 s under TCG, so any fixed grace period is a guess that is wrong on one
+/// of them by a factor of seven; what the mind actually needs to know is that
+/// a person could have typed by now.
 pub fn interactive() -> bool {
     INTERACTIVE.load(core::sync::atomic::Ordering::Acquire)
 }
@@ -168,9 +169,19 @@ pub fn run(boot: &BootInfo, acpi: &Option<Acpi>) -> ! {
         // key when a window other than the terminal has focus -- which is what
         // makes the terminal a window on the desktop rather than the desktop a
         // thing the terminal occasionally draws.
-        let key = match crate::gfx::desk::key(raw) {
-            crate::gfx::desk::Route::Handled => continue,
-            crate::gfx::desk::Route::Shell(k) => k,
+        // The desktop gets first refusal only for keys a person actually
+        // pressed. A byte off the serial line is by definition addressed to
+        // the shell, and letting the desktop swallow it means a driven session
+        // that ends up in a menu can never leave one: the bytes that would
+        // dismiss it are eaten by it. `win keys` remains the way to drive the
+        // desktop headlessly, and it comes through here as a command.
+        let key = if crate::dev::kbd::last_was_serial() {
+            raw
+        } else {
+            match crate::gfx::desk::key(raw) {
+                crate::gfx::desk::Route::Handled => continue,
+                crate::gfx::desk::Route::Shell(k) => k,
+            }
         };
 
         match key {

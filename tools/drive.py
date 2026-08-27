@@ -223,6 +223,22 @@ def main():
     # qemu64 CPU model hides every SIMD extension, which costs an order of
     # magnitude on the int8 kernels; "-cpu max" exposes what the host has,
     # and "-accel whpx" swaps TCG for the Windows hypervisor where available.
+    # Resending is off by default now, and `--resend` puts it back.
+    #
+    # It was added for genuine wire loss: bytes arriving at the guest UART and
+    # never coming out, more often after a long silent boot. Every instance of
+    # that was under TCG. Under the hypervisor accelerator the guest is
+    # frequently and legitimately quiet -- the shell has printed a prompt and
+    # is busy, or an episode holds the engine -- and the resend then puts a
+    # second copy of the line into a buffer that already holds the first. The
+    # result is `agent stopwin listwin list` on one line, which reads as a
+    # guest fault and is this script's doing.
+    #
+    # A lost command is visible: the session times out naming it. A duplicated
+    # one is not: it runs as garbage and the operator debugs the kernel.
+    resend = "--resend" in argv
+    if resend:
+        argv.remove("--resend")
     qemu_extra = []
     if "--qemu-extra" in argv:
         i = argv.index("--qemu-extra")
@@ -479,7 +495,7 @@ def main():
             if pending:
                 if len(buf) > pending["mark"]:
                     pending = None  # the guest saw the bytes
-                elif time.time() - pending["at"] > 25.0:
+                elif resend and time.time() - pending["at"] > 25.0:
                     # Twenty-five seconds and one retry, raised from eight and
                     # three. The wire loss this recovers from was observed
                     # under TCG, where a boot was slow enough that a quiet

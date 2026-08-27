@@ -178,11 +178,29 @@ pub fn pop() -> Option<u8> {
 /// arrives as CR and Backspace as DEL. Translating here rather than in
 /// `serial::read_byte` keeps the keyboard's own DELETE key, which is a
 /// different key that happens to share the 0x7F code, distinguishable.
+    /// Whether the byte `pop_any` last returned arrived over the serial line.
+    ///
+    /// The desktop takes every key while a menu is open, which is right for
+    /// somebody at the keyboard and wrong for a line that can only ever be
+    /// talking to the shell. A driven session that lands in a menu has no way
+    /// out: every byte it sends afterwards feeds the menu, including the ones
+    /// meant to close it, and the machine looks like it has stopped reading
+    /// its UART. `win keys` is the documented way to drive the desktop
+    /// headlessly and goes through the shell, so nothing is lost by keeping
+    /// raw serial bytes out of the desktop's hands.
+    static FROM_SERIAL: AtomicBool = AtomicBool::new(false);
+
+    pub fn last_was_serial() -> bool {
+        FROM_SERIAL.load(Ordering::Relaxed)
+    }
+
     pub fn pop_any() -> Option<u8> {
         if let Some(k) = pop() {
+            FROM_SERIAL.store(false, Ordering::Relaxed);
             return Some(k);
         }
         let b = crate::serial::read_byte()?;
+        FROM_SERIAL.store(true, Ordering::Relaxed);
         // Drain the UART FIFO into the ring while it has data, not one byte
         // per poll. The shell polls at its own cadence -- hlt woken by the
         // 100 Hz timer -- and a 45-character command arrives in a burst the

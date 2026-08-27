@@ -58,9 +58,10 @@ const TICK_SECS: u64 = 15;
 ///
 /// The floor is a minute and the real gate is `shell::interactive`, which
 /// says a prompt has been printed and a person could have typed. A fixed
-/// period alone is a guess: sixty seconds is long past the prompt under TCG
-/// and lands exactly on it under the hypervisor accelerator, which is how
-/// the race was found. Both are required.
+/// period alone is a guess: the prompt arrives at 150 s under TCG and at 21 s
+/// under the hypervisor accelerator, so no single number sits after both.
+/// Both conditions are required, and the settle time is measured from the
+/// prompt rather than from power-on.
 ///
 /// Not a workaround for a test. A mind that starts acting before anyone could
 /// have told it not to has no business calling the restraint below
