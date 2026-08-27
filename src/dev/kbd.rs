@@ -194,6 +194,32 @@ pub fn pop() -> Option<u8> {
         FROM_SERIAL.load(Ordering::Relaxed)
     }
 
+    /// One byte off the wire, in the terms the rest of the system uses.
+    ///
+    /// A terminal sends carriage return for Enter and this kernel's line
+    /// editor reads newline, so this is not cosmetic: an untranslated byte is
+    /// a line that never ends.
+    ///
+    /// It is a function because it was not, and the drain loop below pushed
+    /// its bytes raw while only the first byte of a burst was translated. A
+    /// command typed slowly arrives a byte at a time, takes the first-byte
+    /// path every time, and works. The same command sent as one burst -- which
+    /// is every command from a script, and any command at all once the machine
+    /// is busy enough that bytes queue up behind it -- had its carriage return
+    /// pushed raw. So it echoed on screen and then never ran, and the next
+    /// command concatenated onto the line it left behind.
+    ///
+    /// That is the whole of what looked like the serial port dropping input.
+    /// Nothing was dropped. One byte in each burst was translated and the rest
+    /// were not.
+    fn translate(b: u8) -> u8 {
+        match b {
+            b'\r' => b'\n',
+            0x7F => 8,
+            other => other,
+        }
+    }
+
     pub fn pop_any() -> Option<u8> {
         if let Some(k) = pop() {
             FROM_SERIAL.store(false, Ordering::Relaxed);
@@ -213,15 +239,11 @@ pub fn pop() -> Option<u8> {
         while guard < 64 {
             guard += 1;
             match crate::serial::read_byte() {
-                Some(next) => push(next),
+                Some(next) => push(translate(next)),
                 None => break,
             }
         }
-        Some(match b {
-            b'\r' => b'\n',
-            0x7F => 8,
-            other => other,
-        })
+        Some(translate(b))
     }
 
 pub fn has_input() -> bool {
