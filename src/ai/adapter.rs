@@ -85,6 +85,86 @@ impl Dora {
         }
     }
 
+    /// Gradient with respect to this site's **input**.
+    ///
+    /// Nothing produced this before, and its absence is exactly why the loop
+    /// could adapt the routing head and nothing else. `backward` and
+    /// `backward_rows` answer the parameters and stop; without dL/dx there is
+    /// no way to carry a gradient below an adapted site, so a classifier
+    /// adapter is trainable and a q/k/v adapter is not -- which is the whole
+    /// difference between improving *which* answer is chosen and improving the
+    /// network that proposes it.
+    ///
+    /// The forward is
+    ///
+    /// ```text
+    /// y[o] = s[o] * (W0.x)[o] + scale * (B.A.x)[o]
+    /// ```
+    ///
+    /// so the input gradient is two terms:
+    ///
+    /// ```text
+    /// dL/dx = W0^T (gy * s)  +  scale * A^T (B^T gy)
+    /// ```
+    ///
+    /// `s` multiplies the incoming gradient rather than contributing a term of
+    /// its own, because during a token's forward it is a cached constant --
+    /// `refresh` recomputes it after an optimiser step, not per token. The
+    /// magnitude's own gradient is `backward`'s business and is unaffected.
+    ///
+    /// **Accumulates.** Three sites (q, k, v) read the same normed input, so
+    /// their gradients have to sum; a version that overwrote would silently
+    /// keep only the last one. The frozen term goes through a scratch because
+    /// `Mat::wt_matvec` zeroes its output before writing.
+    ///
+    /// Allocates, deliberately. This is training cadence, not the decode path,
+    /// and threading two scratch buffers through every caller to save an
+    /// allocation per site per token of a training step is a trade this does
+    /// not need to make yet.
+    pub fn backward_x(&self, w: &Mat<'_>, gy: &[f32], gx: &mut [f32]) {
+        let (rows, k) = match w {
+            Mat::F32 { rows, cols, .. } => (*rows, *cols),
+            Mat::Q8 { rows, cols, .. } => (*rows, *cols),
+        };
+
+        // The frozen branch, scaled per row.
+        let mut gs = vec![0.0f32; rows];
+        for (o, v) in gs.iter_mut().enumerate() {
+            *v = gy[o] * self.s[o];
+        }
+        let mut frozen = vec![0.0f32; k];
+        w.wt_matvec(&mut frozen, &gs);
+        for (i, v) in frozen.iter().enumerate().take(k) {
+            gx[i] += *v;
+        }
+
+        // The low-rank branch. B^T gy first, which is r values, then A^T of
+        // that -- the other association would build a k-by-r intermediate for
+        // no reason.
+        let mut bg = vec![0.0f32; self.r];
+        for o in 0..rows {
+            let brow = &self.b[o * self.r..(o + 1) * self.r];
+            let g = gy[o];
+            if g == 0.0 {
+                continue;
+            }
+            for (j, bv) in brow.iter().enumerate() {
+                bg[j] += bv * g;
+            }
+        }
+        let sc = self.scale();
+        for j in 0..self.r {
+            let g = bg[j] * sc;
+            if g == 0.0 {
+                continue;
+            }
+            let arow = &self.a[j * k..(j + 1) * k];
+            for (i, av) in arow.iter().enumerate().take(k) {
+                gx[i] += av * g;
+            }
+        }
+    }
+
     pub fn scale(&self) -> f32 {
         self.alpha / self.r as f32
     }
@@ -837,7 +917,106 @@ pub fn blob_selftest() -> bool {
 /// 2. perturbing one trained weight moves the logits (the wrapper is not a
 ///    silent no-op in the other direction either);
 /// 3. detaching restores the original logits exactly.
+/// The input gradient, against finite differences.
+///
+/// A gradient nobody differenced is a gradient nobody knows. An analytic
+/// backward that is subtly wrong does not fault and does not diverge -- it
+/// trains, slowly, toward the wrong thing, and every judge downstream reports
+/// honestly that the variant did not help. That failure is indistinguishable
+/// from "this idea does not work", which is the worst way to lose a year.
+///
+/// Central differences, because a forward difference is O(h) and the error it
+/// leaves is the same order as the discrepancy being looked for.
+fn backward_x_selftest() -> bool {
+    use crate::ai::weights::Mat;
+
+    // A frozen weight with structure rather than noise, so a transposition
+    // error cannot pass by symmetry.
+    let (rows, k, r) = (7usize, 5usize, 3usize);
+    let w: alloc::vec::Vec<f32> = (0..rows * k)
+        .map(|i| ((i % 11) as f32 - 5.0) * 0.13 + (i / 7) as f32 * 0.021)
+        .collect();
+    let mat = Mat::F32 { data: &w, rows, cols: k };
+
+    let mut d = Dora::new(r, 2.0 * r as f32, k, rows);
+    // Non-zero B, or the low-rank branch is zero and the test only exercises
+    // the frozen half -- which is the half most likely to be right.
+    for (i, v) in d.a.iter_mut().enumerate() {
+        *v = ((i % 7) as f32 - 3.0) * 0.09;
+    }
+    for (i, v) in d.b.iter_mut().enumerate() {
+        *v = ((i % 5) as f32 - 2.0) * 0.11;
+    }
+    d.refresh(&mat, true);
+
+    let x: alloc::vec::Vec<f32> = (0..k).map(|i| ((i % 3) as f32 - 1.0) * 0.7 + 0.2).collect();
+    // A fixed non-uniform output gradient. All-ones would hide any error that
+    // is antisymmetric across rows.
+    let gy: alloc::vec::Vec<f32> =
+        (0..rows).map(|o| ((o % 4) as f32 - 1.5) * 0.31).collect();
+
+    // L(x) = sum_o gy[o] * y[o], so dL/dy is exactly gy.
+    let loss = |xv: &[f32]| -> f32 {
+        let mut out = alloc::vec![0.0f32; rows];
+        mat.matvec(&mut out, xv);
+        let mut ax = alloc::vec![0.0f32; r];
+        d.apply(&mut out, xv, &mut ax);
+        out.iter().zip(gy.iter()).map(|(y, g)| y * g).sum()
+    };
+
+    let mut gx = alloc::vec![0.0f32; k];
+    d.backward_x(&mat, &gy, &mut gx);
+
+    let h = 1e-3f32;
+    for i in 0..k {
+        let mut up = x.clone();
+        let mut dn = x.clone();
+        up[i] += h;
+        dn[i] -= h;
+        let numeric = (loss(&up) - loss(&dn)) / (2.0 * h);
+        let diff = (numeric - gx[i]).abs();
+        // Relative where the gradient is large, absolute where it is small.
+        if diff > 1e-2 * gx[i].abs().max(1.0) {
+            crate::kprintln!(
+                "  backward_x[{}]: analytic {} vs numeric {}",
+                i,
+                gx[i],
+                numeric
+            );
+            return false;
+        }
+    }
+
+    // It accumulates rather than overwriting, which is what three sites
+    // reading one normed input depend on.
+    let mut twice = alloc::vec![0.0f32; k];
+    d.backward_x(&mat, &gy, &mut twice);
+    d.backward_x(&mat, &gy, &mut twice);
+    for i in 0..k {
+        if (twice[i] - 2.0 * gx[i]).abs() > 1e-4 * gx[i].abs().max(1.0) {
+            return false;
+        }
+    }
+
+    // A zero output gradient moves nothing. Cheap, and it catches a scratch
+    // buffer that was not cleared between calls.
+    let mut zero = alloc::vec![0.0f32; k];
+    d.backward_x(&mat, &alloc::vec![0.0f32; rows], &mut zero);
+    zero.iter().all(|v| v.abs() < 1e-6)
+}
+
 pub fn selftest() -> bool {
+    // Reported rather than merely enforced: the boot log is this system's test
+    // suite, and a claim that only speaks when it fails is a claim nobody
+    // knows is being made.
+    let gx_ok = backward_x_selftest();
+    crate::kprintln!(
+        "  {}  the input gradient matches finite differences",
+        if gx_ok { "ok " } else { "FAIL" }
+    );
+    if !gx_ok {
+        return false;
+    }
     use super::model::State;
     use crate::kprintln;
 
