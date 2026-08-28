@@ -497,12 +497,12 @@ impl Progress {
 
 static PROGRESS: crate::sync::Racy<Option<Progress>> = crate::sync::Racy::new(None);
 
-/// Ask the run to stop at its next step boundary.
-static STOP: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-
-pub fn request_stop() {
-    STOP.store(true, core::sync::atomic::Ordering::Release);
-}
+// Stopping is `agent::request_abort`, not a flag of our own.
+//
+// A private one existed for as long as writing ran inline on whichever task
+// asked. Once it joined the agent queue there were two ways to say "stop",
+// gating two things that cannot both be running -- and two stop flags is how
+// an operator ends up pressing the wrong one and watching nothing happen.
 
 pub fn progress() -> Option<Progress> {
     unsafe { (*PROGRESS.get()).clone() }
@@ -1101,15 +1101,12 @@ fn compose(w: &Work, p: &str) -> Option<String> {
 
 /// Run the loop with the model deciding, releasing the engine each step.
 pub fn generate(w: &mut Work, budget: usize) -> Report {
-    // Cleared at the start, not at the end. A stop that arrived after the last
-    // run finished would otherwise kill the next one the moment it began --
-    // one silent death, arriving long after the click that caused it, which is
-    // the failure `agent::request_abort` already had and fixed.
-    STOP.store(false, core::sync::atomic::Ordering::Release);
     publish(w, budget, true);
     crate::gfx::desk::draw();
     while w.steps < budget {
-        if STOP.load(core::sync::atomic::Ordering::Acquire) {
+        // The same flag the episode loop checks, cleared by the agent task
+        // when the job ends.
+        if crate::ai::agent::aborted() {
             w.last = Some(String::from("stopped"));
             break;
         }

@@ -239,7 +239,7 @@ impl DeskApp for AuthorWin {
             && py >= r.y as i32
             && py < (r.y + r.h) as i32
         {
-            crate::ai::author::request_stop();
+            crate::ai::agent::request_abort();
             return true;
         }
         false

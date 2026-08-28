@@ -620,7 +620,7 @@ pub fn with_engine<R>(f: impl FnOnce(&mut Engine) -> R) -> Option<R> {
     // Same rule for the agent task, which holds the engine for whole
     // episodes. The id is recorded once at spawn and lives as long as the
     // task does; whether an episode is actually running is the flag.
-    if agent::episode_busy() && current != AGENT_TASK.load(Ordering::Acquire) {
+    if agent::busy() && current != AGENT_TASK.load(Ordering::Acquire) {
         return None;
     }
     unsafe { ENGINE.get().as_mut().map(f) }
@@ -1449,7 +1449,7 @@ pub fn spawn_mind() -> bool {
 }
 
 /// The agent task's id, recorded at spawn. The task is resident like the
-/// mind; what gates the engine is `agent::episode_busy`, not the id alone.
+/// mind; what gates the engine is `agent::busy`, not the id alone.
 static AGENT_TASK: AtomicUsize = AtomicUsize::new(usize::MAX);
 
 /// The task that runs episodes, for anything that needs to tell its output
@@ -1460,7 +1460,7 @@ pub fn agent_task_id() -> usize {
 
 /// True while an episode is executing.
 pub fn agent_busy() -> bool {
-    agent::episode_busy()
+    agent::busy()
 }
 
 /// Shell entry point: queue an episode on the resident task and return. The

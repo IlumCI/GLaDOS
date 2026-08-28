@@ -171,7 +171,7 @@ pub fn gather() -> Situation {
         load_stability: stability,
         heap_trend_mib_s: trend,
         operator,
-        episode_running: agent::episode_busy(),
+        episode_running: agent::busy(),
         store_mounted: crate::store::mounted(),
         nets,
     }

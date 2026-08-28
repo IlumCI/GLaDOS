@@ -368,7 +368,7 @@ fn tick_inner(forced: bool) {
         QUIET_AFTER_INPUT_S
     };
 
-    let busy = super::agent::episode_busy();
+    let busy = super::agent::busy();
 
     // The planner is consulted only often enough to stay honest about its
     // own confidence; its verdict is the expensive part of the tick and
@@ -455,6 +455,15 @@ fn tick_inner(forced: bool) {
                 // Claimed for the whole block, not per job. Both are expensive
                 // and both hold the engine; the question "is the machine
                 // already doing something unattended" has one answer.
+                // Not while the resident task has work. See `agent::idle`.
+                if !super::agent::idle() {
+                    journal_push(format!(
+                        "[t{} +{}s] quiet: the agent is working, stood down",
+                        TICKS.load(Ordering::Relaxed),
+                        now_s
+                    ));
+                    return;
+                }
                 if NIGHT_BUSY.swap(true, Ordering::Acquire) {
                     journal_push(format!(
                         "[t{} +{}s] quiet: already working, stood down",
@@ -534,17 +543,22 @@ fn tick_inner(forced: bool) {
                             name
                         )),
                         Some((name, goal)) => {
+                            // Queued rather than run here. This task wakes on
+                            // second boundaries to decide things; writing an
+                            // application takes minutes, and doing it inline
+                            // meant the loop that is supposed to be watching
+                            // the machine stopped watching it for the whole of
+                            // one. The outcome lands in the log ring and the
+                            // ledger, which is where a run nobody saw belongs.
                             AUTHORED.fetch_add(1, Ordering::Relaxed);
-                            let (w, report) =
-                                super::author::commission(name, goal, AUTHOR_STEPS);
-                            super::author::record(&w, &report, "unattended");
+                            let ok = super::agent::queue_author(name, goal, AUTHOR_STEPS, true);
                             journal_push(format!(
-                                "[t{} +{}s] author: hour {}, {} -- {}",
+                                "[t{} +{}s] author: hour {}, {} {}",
                                 TICKS.load(Ordering::Relaxed),
                                 now_s,
                                 hour,
                                 name,
-                                super::author::describe(&report)
+                                if ok { "queued" } else { "REFUSED by queue" }
                             ));
                         }
                     }

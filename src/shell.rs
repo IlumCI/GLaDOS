@@ -2209,45 +2209,44 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             }
             // The keyboard half of the progress window's Stop button.
             //
-            // Not a convenience. Everything the pointer does here a keystroke
-            // must also do, because serial cannot inject PS/2 packets and a
-            // control with no typed equivalent is a control that never gets
-            // tested. It reaches the unattended run in particular, which is
-            // the one nobody is sitting in front of when it starts.
+            // Everything the pointer does here a keystroke must also do,
+            // because serial cannot inject PS/2 packets and a control with no
+            // typed equivalent never gets tested. `agent stop` is the same
+            // thing and always was -- there is one queue and one abort flag --
+            // so this is an alias that says so rather than a second mechanism.
             if name == "stop" {
-                match author::progress() {
-                    Some(p) if p.running => {
-                        author::request_stop();
-                        kprintln!("  asked '{}' to stop at its next step", p.name);
-                    }
-                    _ => kprintln!("  nothing is being written"),
-                }
+                kprintln!("  {}", crate::ai::agent::request_abort());
+                kprintln!("  ('agent stop' is the same thing)");
                 return;
             }
             if !crate::ai::engine_ready() {
                 kprintln!("  no model loaded, so there is nothing to ask");
                 return;
             }
-            // The engine is held for a whole episode by the resident mind, and
-            // `with_engine` answers None to everyone else for its duration. A
-            // run that quietly did nothing because of that looks exactly like a
-            // model that could not decide.
-            if crate::ai::with_engine(|_| ()).is_none() {
-                kprintln!("  another task holds the model -- 'agent stop' and try again");
-                return;
-            }
             let goal = if goal.is_empty() { name } else { goal };
-            kprintln!(
-                "  writing {} -- up to {} steps",
-                name,
-                AUTHOR_STEPS
-            );
-            let (w, report) = author::commission(name, goal, AUTHOR_STEPS);
-            author::record(&w, &report, "operator");
-            console::set_color(if report.clean { LTGREEN } else { YELLOW });
-            kprintln!("  {}", author::describe(&report));
-            console::set_color(LTGRAY);
-            kprintln!("  draft at /draft/{} -- 'app try {}'", name, name);
+            // Queued, not run here.
+            //
+            // It used to run inline, which held the shell for the minutes the
+            // model took -- so the Stop button the run had just drawn could
+            // not be reached from a keyboard that was busy waiting for the run
+            // to end. Now the resident task does the work and the prompt comes
+            // straight back, which is what `agent <goal>` has always done.
+            if crate::ai::agent::queue_author(name, goal, AUTHOR_STEPS, false) {
+                console::set_color(LTGREEN);
+                kprintln!(
+                    "  queued -- up to {} steps; the shell stays yours, 'agent stop' cancels",
+                    AUTHOR_STEPS
+                );
+                console::set_color(LTGRAY);
+                // Future tense: the draft does not exist yet. Printing the
+                // path as though it did would send somebody to `app try` on
+                // nothing, and read as the run having failed instantly.
+                kprintln!("  it will leave /draft/{} -- then 'app try {}'", name, name);
+            } else {
+                console::set_color(YELLOW);
+                kprintln!("  something is already pending or running");
+                console::set_color(LTGRAY);
+            }
         }
         // Applications. `app list`, `app show <name>`, and otherwise
         // `app <name> <fn> [args]`, which is the form a panel's own buttons

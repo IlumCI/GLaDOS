@@ -275,6 +275,22 @@ mind and the shell's `initiative now` -- and a local flag is not a rule. The
 journal caught that: two entries under one tick number with clocks fifty-four
 seconds apart.
 
+**One queue, one busy flag, one abort, one task.** `agent::Job` is either an
+episode or an application to write, and both run on the resident agent task.
+That is not tidiness: `with_engine` gates on `agent::busy()` and the agent
+task's id, so a second task running a second kind of work needs a second entry
+in that check -- the stale-call-site failure its own doc comment warns about,
+where the failure is two forward passes interleaving in one KV cache rather
+than an error message. `agent stop` therefore cancels either kind without
+knowing which, and `author` returns to the prompt immediately.
+
+One gap remains and is older than the queue: the godel trial runs inline on the
+initiative task and holds the engine without setting any flag, so `with_engine`
+cannot see it. `agent::idle()` stops the nightly block starting while the
+resident task works; the other direction -- queueing a job *during* a trial --
+is still reachable, and the real fix is one recorded engine holder rather than
+a flag per task.
+
 A run publishes `author::Progress` and calls `desk::draw()` per step, which the
 "Writing" window shows: step N of M, clauses met, and the last verdict
 verbatim. **No progress bar and no estimate** -- a step can be a skeleton that

@@ -92,10 +92,15 @@ pub fn log_snapshot() -> Vec<String> {
 
 static ABORT: AtomicBool = AtomicBool::new(false);
 
-/// Ask the running episode to stop at its next boundary (per step, and
-/// between argument tokens). Also cancels a queued-but-not-started episode,
-/// which is what `agent stop` mostly means in practice -- the queue returns
-/// to the shell faster than anyone can type.
+/// Ask the running job to stop at its next boundary -- per step for an
+/// episode, and between argument tokens; per step for an application. Also
+/// cancels a queued-but-not-started one, which is what `agent stop` mostly
+/// means in practice, since the queue returns to the shell faster than anyone
+/// can type.
+///
+/// One flag for both kinds. The alternative was `author stop` beside `agent
+/// stop`, and an operator watching the machine work should not have to know
+/// which kind of work it is to make it stop.
 pub fn request_abort() -> &'static str {
     ABORT.store(true, Ordering::Release);
     if take_request().is_some() {
@@ -105,17 +110,17 @@ pub fn request_abort() -> &'static str {
         // that caused it.
         ABORT.store(false, Ordering::Release);
         crate::shell::reprompt();
-        return "queued episode cancelled";
+        return "queued job cancelled";
     }
-    if episode_busy() {
+    if busy() {
         "stopping after the current step"
     } else {
         ABORT.store(false, Ordering::Release);
-        "(no episode is running)"
+        "(nothing is running)"
     }
 }
 
-fn aborted() -> bool {
+pub(crate) fn aborted() -> bool {
     ABORT.load(Ordering::Acquire)
 }
 
@@ -126,15 +131,49 @@ fn aborted() -> bool {
 // the mind; ownership of the engine follows the task id, which mod.rs
 // records at spawn before the task can possibly run.
 
-struct EpisodeReq {
-    goal: String,
-    trust: Trust,
-    steps: usize,
+/// A unit of work for the resident task.
+///
+/// One enum rather than a queue per kind, and the reason is `with_engine`. It
+/// gates on `agent::busy()` and the agent task's id, so a second task running
+/// a second kind of work would need a second entry in that check -- which is
+/// exactly the stale-call-site failure its own doc comment warns about, and
+/// the failure would be two forward passes interleaving in one KV cache rather
+/// than an error message.
+///
+/// One queue also means `agent stop` cancels whatever is running without
+/// knowing what that is, and the operator does not have to learn which command
+/// stops which kind of work.
+enum Job {
+    Episode {
+        goal: String,
+        trust: Trust,
+        steps: usize,
+    },
+    /// Write an application, leaving a draft.
+    Author {
+        name: String,
+        goal: String,
+        budget: usize,
+    },
+}
+
+impl Job {
+    /// What to call this while it runs.
+    fn what(&self) -> &'static str {
+        match self {
+            Job::Episode { .. } => "episode",
+            Job::Author { .. } => "application",
+        }
+    }
+}
+
+struct Req {
+    job: Job,
     /// The machine asked for this one, not the operator.
     autonomous: bool,
 }
 
-static REQUEST: Racy<Option<EpisodeReq>> = Racy::new(None);
+static REQUEST: Racy<Option<Req>> = Racy::new(None);
 
 /// True while the agent task is inside an episode nobody asked for.
 ///
@@ -149,8 +188,8 @@ pub fn printing_in_background() -> bool {
     AUTONOMOUS.load(Ordering::Acquire) && crate::task::current() == super::agent_task_id()
 }
 
-/// True while an episode is executing (as opposed to merely queued). mod.rs
-/// owns the flag; the queue here only needs to know the difference for
+/// True while a job is executing (as opposed to merely queued). mod.rs owns
+/// the flag; the queue here only needs to know the difference for
 /// `request_abort`'s message.
 pub(crate) fn set_busy(on: bool) {
     BUSY.store(on, Ordering::Release);
@@ -158,9 +197,25 @@ pub(crate) fn set_busy(on: bool) {
 
 static BUSY: AtomicBool = AtomicBool::new(false);
 
-pub(crate) fn episode_busy() -> bool {
+/// Whether the resident task is working, whatever it is working on.
+///
+/// Renamed from `episode_busy` when authoring joined the queue. The old name
+/// was the one `with_engine` gates on, and a check called "is an episode
+/// running" that also has to mean "is an application being written" is a check
+/// somebody eventually reads literally and adds a second one beside.
+pub(crate) fn busy() -> bool {
     BUSY.load(Ordering::Acquire)
 }
+
+/// What the resident task is doing, or `None` when it is idle.
+pub fn doing() -> Option<&'static str> {
+    if !busy() {
+        return None;
+    }
+    Some(unsafe { *DOING.get() })
+}
+
+static DOING: Racy<&'static str> = Racy::new("");
 
 /// Queue an episode. False when one is already pending or running -- the
 /// caller turns that into a refusal, since two episodes would fight over
@@ -172,29 +227,59 @@ pub(crate) fn episode_busy() -> bool {
 /// asking, the other is the machine deciding. Only the second is kept off the
 /// operator's console.
 pub fn queue_autonomous(goal: &str, trust: Trust, steps: usize) -> bool {
-    queue_inner(goal, trust, steps, true)
+    queue(Job::Episode { goal: String::from(goal), trust, steps }, true)
 }
 
 pub fn queue_episode(goal: &str, trust: Trust, steps: usize) -> bool {
-    queue_inner(goal, trust, steps, false)
+    queue(Job::Episode { goal: String::from(goal), trust, steps }, false)
 }
 
-fn queue_inner(goal: &str, trust: Trust, steps: usize, autonomous: bool) -> bool {
+/// Queue an application to be written.
+///
+/// The operator's `author` and the machine's own nightly run go through the
+/// same door, differing only in `autonomous` -- which decides nothing but
+/// which console the output lands on.
+pub fn queue_author(name: &str, goal: &str, budget: usize, autonomous: bool) -> bool {
+    queue(
+        Job::Author {
+            name: String::from(name),
+            goal: String::from(goal),
+            budget,
+        },
+        autonomous,
+    )
+}
+
+fn queue(job: Job, autonomous: bool) -> bool {
     crate::cpu::without_interrupts(|| unsafe {
-        if REQUEST.get().is_some() || episode_busy() {
+        if REQUEST.get().is_some() || busy() {
             return false;
         }
-        *REQUEST.get() = Some(EpisodeReq {
-            goal: String::from(goal),
-            trust,
-            steps,
-            autonomous,
-        });
+        *REQUEST.get() = Some(Req { job, autonomous });
         true
     })
 }
 
-fn take_request() -> Option<EpisodeReq> {
+/// Nothing queued and nothing running.
+///
+/// Asked before the nightly block starts anything of its own. The godel trial
+/// runs inline on the initiative task and holds the engine for the whole of
+/// it, and `with_engine` does not know that -- it gates on the mind's flag and
+/// this one, neither of which the initiative task sets. Two tasks in the
+/// engine at once is undefined behaviour rather than a race, so the trial must
+/// not begin while the resident task has work.
+///
+/// This closes the direction the queue made reachable. It does not close the
+/// other one: the shell can still queue a job *during* an inline trial, and
+/// the resident task will start it. That was true before authoring joined the
+/// queue -- `agent <goal>` did the same -- and the real fix is one recorded
+/// engine holder rather than a flag per task, which is a change to
+/// `with_engine` and belongs on its own.
+pub fn idle() -> bool {
+    crate::cpu::without_interrupts(|| unsafe { REQUEST.get().is_none() }) && !busy()
+}
+
+fn take_request() -> Option<Req> {
     crate::cpu::without_interrupts(|| unsafe { REQUEST.get().take() })
 }
 
@@ -206,12 +291,30 @@ pub fn agent_task() {
             continue;
         };
         set_busy(true);
-        // An episode the machine chose to run stays off the operator's
-        // console. It is still on the serial port, still in the log ring and
-        // still in the agent window; it just does not arrive in the middle of
-        // whatever is being typed.
+        unsafe { *DOING.get() = req.job.what() };
+        // Work the machine chose to do stays off the operator's console. It is
+        // still on the serial port, still in the log ring and still in the
+        // window; it just does not arrive in the middle of whatever is being
+        // typed.
         AUTONOMOUS.store(req.autonomous, Ordering::Release);
-        run(&req.goal, req.trust, req.steps);
+        match req.job {
+            Job::Episode { goal, trust, steps } => run(&goal, trust, steps),
+            // Writing runs here rather than on whichever task asked, which is
+            // the point of the queue. It used to run inline: the operator's
+            // `author` held the shell for minutes, so the Stop button it drew
+            // could not be reached from the keyboard that was busy waiting for
+            // it, and the nightly run held the initiative task for the same
+            // minutes.
+            Job::Author { name, goal, budget } => {
+                let (w, report) = super::author::commission(&name, &goal, budget);
+                super::author::record(
+                    &w,
+                    &report,
+                    if req.autonomous { "unattended" } else { "operator" },
+                );
+                elog(alloc::format!("wrote {} -- {}", name, super::author::describe(&report)));
+            }
+        }
         AUTONOMOUS.store(false, Ordering::Release);
         ABORT.store(false, Ordering::Release);
         set_busy(false);
