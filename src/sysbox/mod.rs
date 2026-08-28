@@ -23,7 +23,7 @@ pub mod tree;
 
 use crate::gfx::console::{self, LTCYAN, LTGREEN, LTGRAY, LTRED, WHITE, YELLOW};
 use crate::kprintln;
-use crate::lang;
+use crate::aiksi;
 use crate::store::{self, cas};
 use crate::sync::Racy;
 use alloc::format;
@@ -123,9 +123,9 @@ static BOX: Racy<Option<Sysbox>> = Racy::new(None);
 /// interpreter's own step budget is what stops a model-written `while (1)`
 /// from wedging the agent task, since the loop's abort check only fires
 /// between steps.
-static TOOLS: Racy<Option<lang::Interp>> = Racy::new(None);
+static TOOLS: Racy<Option<aiksi::Interp>> = Racy::new(None);
 
-fn with_tools<R>(f: impl FnOnce(&mut lang::Interp) -> R) -> Option<R> {
+fn with_tools<R>(f: impl FnOnce(&mut aiksi::Interp) -> R) -> Option<R> {
     unsafe { TOOLS.get().as_mut().map(f) }
 }
 
@@ -151,7 +151,16 @@ pub fn init() {
     seed_apps(&mut sb);
     unsafe {
         *BOX.get() = Some(sb);
-        *TOOLS.get() = Some(lang::Interp::new());
+        *TOOLS.get() = Some(aiksi::Interp::new());
+    }
+    // After the namespace exists and before anything looks for a program.
+    // A restored snapshot can be older than the rename, so this is not a
+    // one-time upgrade step that can be deleted next week -- it runs whenever
+    // a store is mounted, and costs a directory listing when there is nothing
+    // to do.
+    let moved = crate::app::migrate_extension();
+    if moved > 0 {
+        kprintln!("  [app] carried {} program(s) to code.ai&xi", moved);
     }
 }
 
@@ -178,7 +187,7 @@ rows\trows\n\
 sep\n\
 button\trun app todo clear\tClear all\n\
 button\tclose\tClose\n".to_vec()));
-    let _ = tree::put(&mut sb.root, &path_of("/app/todo/code.l"), Node::Blob(
+    let _ = tree::put(&mut sb.root, &path_of("/app/todo/code.ai&xi"), Node::Blob(
         b"// a list you can add to and tick off\n\
 fn file() { return \"/app/todo/items\" }\n\
 fn all() {\n\
@@ -462,17 +471,17 @@ fn cmd_run(path: &str) {
     // and `parse` already consumes statements until end of input, so a file
     // has always been a legal program -- the loop was the only thing insisting
     // otherwise. Nothing noticed because every seeded tool is one line and
-    // every case in `lang::selftest` was a single-line string.
+    // every case in `aiksi::selftest` was a single-line string.
     //
     // The cost is the per-line `= value` echo, and the line number in a parse
     // error. Programs that want output call `println`, which the replay
     // programs `agent learn` writes already do.
-    let out = with_tools(|tools| lang::eval_line(tools, &text));
+    let out = with_tools(|tools| aiksi::eval_line(tools, &text));
     RUNNING.store(false, Ordering::Release);
     match out {
         None => kprintln!("  run: no interpreter"),
         Some(Ok(v)) => {
-            if !matches!(v, lang::Value::Nil) {
+            if !matches!(v, aiksi::Value::Nil) {
                 kprintln!("  = {}", v.render());
             }
         }

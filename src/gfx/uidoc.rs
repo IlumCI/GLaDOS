@@ -12,7 +12,7 @@
 //!
 //! TAB is the separator because it is the one byte nothing else in this system
 //! can produce in an operand. `Panel::key` admits only `0x20..=0x7E`, so no
-//! field can contain one; `lang::lex` treats it as whitespace, so no program
+//! field can contain one; `aiksi::lex` treats it as whitespace, so no program
 //! can carry one through; and `shell::split_pipeline` ignores it. `|` was the
 //! obvious choice and would have been a trap: `split_pipeline` splits a command
 //! line on the *last* `|` or `>`, so an action payload as ordinary as

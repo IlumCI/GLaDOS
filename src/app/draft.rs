@@ -6,7 +6,7 @@
 //! ```text
 //! /draft/<name>/plan.txt   what it is meant to do, one clause per line
 //! /draft/<name>/panel.ui   under construction
-//! /draft/<name>/code.l     under construction
+//! /draft/<name>/code.ai&xi     under construction
 //! /draft/<name>/log.txt    what happened while it was written
 //! ```
 //!
@@ -48,7 +48,7 @@ fn text_at(path: &str) -> Option<String> {
 }
 
 pub fn exists(name: &str) -> bool {
-    text_at(&p(name, "code.l")).is_some()
+    text_at(&p(name, "code.ai&xi")).is_some()
 }
 
 pub fn names() -> Vec<String> {
@@ -60,7 +60,7 @@ pub fn panel(name: &str) -> Option<String> {
 }
 
 pub fn code(name: &str) -> Option<String> {
-    text_at(&p(name, "code.l"))
+    text_at(&p(name, "code.ai&xi"))
 }
 
 pub fn plan(name: &str) -> Option<String> {
@@ -72,7 +72,7 @@ pub fn set_panel(name: &str, text: &str) -> bool {
 }
 
 pub fn set_code(name: &str, text: &str) -> bool {
-    sysbox::write_text(&p(name, "code.l"), text)
+    sysbox::write_text(&p(name, "code.ai&xi"), text)
 }
 
 pub fn set_plan(name: &str, text: &str) -> bool {
@@ -144,7 +144,7 @@ pub fn adopt(name: &str) -> Result<[u8; 32], String> {
     }
 
     sysbox::write_text(&alloc::format!("{}/{}/panel.ui", super::ROOT, name), &panel);
-    sysbox::write_text(&alloc::format!("{}/{}/code.l", super::ROOT, name), &code);
+    sysbox::write_text(&alloc::format!("{}/{}/code.ai&xi", super::ROOT, name), &code);
     let Some(m) = manifest::current(name) else {
         return Err(String::from("adopted, but could not describe what was adopted"));
     };

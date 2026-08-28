@@ -60,7 +60,7 @@ const PASSES: usize = 8;
 /// Put right what can be put right, and say what was done.
 pub fn fix(name: &str) -> Outcome {
     let panel_path = alloc::format!("{}/{}/panel.ui", ROOT, name);
-    let code_path = alloc::format!("{}/{}/code.l", ROOT, name);
+    let code_path = alloc::format!("{}/{}/code.ai&xi", ROOT, name);
     let mut out =
         Outcome { repairs: Vec::new(), before: 0, after: 0, adopted: None };
 

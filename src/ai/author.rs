@@ -3,7 +3,7 @@
 //! Plan, act, check, revise. The shape is ReAct's and the debt is SWE-Agent's,
 //! with one substitution that matters: **the observation is a machine check,
 //! not the model's opinion of its own work.** SWE-Agent gets a test suite; this
-//! gets `uidoc::parse`, `lang::eval_line` and `check_refs`, which are exact,
+//! gets `uidoc::parse`, `aiksi::eval_line` and `check_refs`, which are exact,
 //! instant, need no forward pass, and answer with a line number.
 //!
 //! `agent.rs` already argues the negative case in code -- a model grading its

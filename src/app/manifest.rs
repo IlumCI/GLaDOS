@@ -31,7 +31,7 @@
 //!
 //! Nobody writes a manifest. `current` computes one from the files on disk, so
 //! a manifest cannot describe an application that is not there, and editing a
-//! byte of `code.l` renames the node whether or not anyone remembered to say
+//! byte of `code.ai&xi` renames the node whether or not anyone remembered to say
 //! so. That is the property the grant depends on.
 
 use crate::store::sha256;
@@ -220,7 +220,7 @@ fn file_hash(path: &str) -> Option<[u8; 32]> {
 
 /// Whether an application asks for the operator's capabilities.
 ///
-/// Declared by a file rather than a line inside `code.l`, so asking is visible
+/// Declared by a file rather than a line inside `code.ai&xi`, so asking is visible
 /// in a directory listing and cannot be buried three hundred lines into a
 /// program somebody skimmed.
 fn asks_raw(name: &str) -> bool {
@@ -235,7 +235,7 @@ fn asks_raw(name: &str) -> bool {
 /// and no grant would ever match twice.
 pub fn current(name: &str) -> Option<Manifest> {
     let panel = file_hash(&alloc::format!("{}/{}/panel.ui", ROOT, name))?;
-    let code = file_hash(&alloc::format!("{}/{}/code.l", ROOT, name))?;
+    let code = file_hash(&alloc::format!("{}/{}/code.ai&xi", ROOT, name))?;
     let raw = asks_raw(name);
     let head = head(name);
     if let Some(h) = head {
@@ -293,7 +293,7 @@ pub fn rollback(name: &str) -> Option<[u8; 32]> {
         return None;
     };
     sysbox::write_blob(&alloc::format!("{}/{}/panel.ui", ROOT, name), panel);
-    sysbox::write_blob(&alloc::format!("{}/{}/code.l", ROOT, name), code);
+    sysbox::write_blob(&alloc::format!("{}/{}/code.ai&xi", ROOT, name), code);
     sysbox::write_text(&head_path(name), &alloc::format!("{}\n", hex32(&parent)));
     ledger(name, "rollback", &parent);
     Some(parent)
@@ -305,7 +305,7 @@ pub fn rollback(name: &str) -> Option<[u8; 32]> {
 /// returned to. Write-if-absent, so a version adopted twice is stored once --
 /// which is the whole reason the name is the hash.
 pub fn preserve(name: &str) {
-    for file in ["panel.ui", "code.l"] {
+    for file in ["panel.ui", "code.ai&xi"] {
         let path = alloc::format!("{}/{}/{}", ROOT, name, file);
         if let Some(bytes) = sysbox::read_blob(&path) {
             let h = sha256::hash(&bytes);

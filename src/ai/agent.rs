@@ -966,8 +966,8 @@ pub fn learn(name: Option<&str>) -> Result<String, &'static str> {
     // broken string literal and the skill is written anyway, to be discovered
     // whenever somebody runs it. A parse is free and exact.
     {
-        let mut probe = crate::lang::Interp::new();
-        if let Err(e) = crate::lang::eval_line(&mut probe, &program) {
+        let mut probe = crate::aiksi::Interp::new();
+        if let Err(e) = crate::aiksi::eval_line(&mut probe, &program) {
             crate::kprintln!("  learn: the compiled program does not parse: {}", e);
             return Err("compiled a program that does not parse");
         }

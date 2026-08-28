@@ -238,7 +238,7 @@ pub fn kinds() -> Vec<&'static str> {
     SKELETONS.iter().map(|s| s.kind).collect()
 }
 
-/// Fill the holes. Returns `(panel.ui, code.l)`.
+/// Fill the holes. Returns `(panel.ui, code.ai&xi)`.
 ///
 /// `name` also becomes part of every action, so it must be the identifier the
 /// application is stored under -- a mismatch produces a panel whose buttons

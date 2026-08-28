@@ -55,7 +55,7 @@ pub fn selftest() -> bool {
         ("wpa2      IEEE 802.11i pmk and ptk", crate::net::wpa2::selftest),
         ("802.11    beacons parse, probe requests build", crate::net::ieee80211::selftest),
         ("8188eu    tx/rx descriptor bit layout", crate::dev::rtl8188eu::desc::selftest),
-        ("lang      functions, lists, scope, whole programs", crate::lang::selftest),
+        ("aiksi     functions, lists, scope, whole programs", crate::aiksi::selftest),
         ("uidoc     panels round-trip as text, bad ones refused", crate::gfx::uidoc::selftest),
         ("app       manifests identify, and lineage is in the hash", crate::app::manifest::selftest),
         ("appcheck  a panel naming a missing function is caught", crate::app::check::selftest),

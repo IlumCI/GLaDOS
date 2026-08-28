@@ -32,7 +32,7 @@
 //! success.
 
 use crate::gfx::uidoc;
-use crate::lang;
+use crate::aiksi;
 use crate::sysbox;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -72,8 +72,8 @@ pub fn check_panel(text: &str) -> Verdict {
 /// program runs its top level, and a top level with a loop in it would
 /// otherwise hang the check rather than fail it.
 pub fn check_code(src: &str, jail: &str) -> Verdict {
-    let mut it = lang::Interp::sandboxed(jail).with_step_budget(lang::eval::DRAW_BUDGET);
-    match lang::eval_line(&mut it, src) {
+    let mut it = aiksi::Interp::sandboxed(jail).with_step_budget(aiksi::eval::DRAW_BUDGET);
+    match aiksi::eval_line(&mut it, src) {
         Ok(_) => Verdict::ok("program loads"),
         Err(e) => Verdict::bad(e),
     }
@@ -86,15 +86,15 @@ pub fn check_code(src: &str, jail: &str) -> Verdict {
 /// written across two lines; the parser already knows, exactly, and is the same
 /// parser that will run it.
 pub fn functions(src: &str) -> Vec<(String, usize)> {
-    let Ok(toks) = lang::lex::lex(src) else {
+    let Ok(toks) = aiksi::lex::lex(src) else {
         return Vec::new();
     };
-    let Ok(prog) = lang::parse::parse(toks) else {
+    let Ok(prog) = aiksi::parse::parse(toks) else {
         return Vec::new();
     };
     prog.iter()
         .filter_map(|s| match s {
-            lang::parse::Stmt::Fn(name, params, _) => Some((name.clone(), params.len())),
+            aiksi::parse::Stmt::Fn(name, params, _) => Some((name.clone(), params.len())),
             _ => None,
         })
         .collect()
@@ -196,7 +196,7 @@ fn call_in(action: &str) -> Option<(&str, usize)> {
 pub fn smoke(root: &str, name: &str) -> Vec<Verdict> {
     let mut out = Vec::new();
     let panel_path = alloc::format!("{}/{}/panel.ui", root, name);
-    let code_path = alloc::format!("{}/{}/code.l", root, name);
+    let code_path = alloc::format!("{}/{}/code.ai&xi", root, name);
     let (Some(panel), Some(code)) = (
         sysbox::read_blob(&panel_path).map(|b| String::from_utf8_lossy(&b).into_owned()),
         sysbox::read_blob(&code_path).map(|b| String::from_utf8_lossy(&b).into_owned()),
@@ -214,12 +214,12 @@ pub fn smoke(root: &str, name: &str) -> Vec<Verdict> {
             continue;
         };
         let mut it =
-            lang::Interp::sandboxed(&jail).with_step_budget(lang::eval::DRAW_BUDGET);
-        if let Err(e) = lang::eval_line(&mut it, &code) {
+            aiksi::Interp::sandboxed(&jail).with_step_budget(aiksi::eval::DRAW_BUDGET);
+        if let Err(e) = aiksi::eval_line(&mut it, &code) {
             out.push(Verdict::bad(e));
             return out;
         }
-        if let Err(e) = lang::eval_line(&mut it, &expr) {
+        if let Err(e) = aiksi::eval_line(&mut it, &expr) {
             out.push(Verdict::bad(alloc::format!("{} failed: {}", expr, e)));
         }
     }
@@ -243,7 +243,7 @@ pub fn smoke(root: &str, name: &str) -> Vec<Verdict> {
 /// Splice `rows` lines the way the desktop does, so the check sees what the
 /// operator would.
 fn expand(root: &str, name: &str, panel: &str) -> String {
-    let code_path = alloc::format!("{}/{}/code.l", root, name);
+    let code_path = alloc::format!("{}/{}/code.ai&xi", root, name);
     let code = sysbox::read_blob(&code_path)
         .map(|b| String::from_utf8_lossy(&b).into_owned())
         .unwrap_or_default();
@@ -257,9 +257,9 @@ fn expand(root: &str, name: &str, panel: &str) -> String {
             }
             Some(func) => {
                 let mut it =
-                    lang::Interp::sandboxed(&jail).with_step_budget(lang::eval::DRAW_BUDGET);
-                let rows = lang::eval_line(&mut it, &code)
-                    .and_then(|_| lang::eval_line(&mut it, &alloc::format!("{}()", func.trim())))
+                    aiksi::Interp::sandboxed(&jail).with_step_budget(aiksi::eval::DRAW_BUDGET);
+                let rows = aiksi::eval_line(&mut it, &code)
+                    .and_then(|_| aiksi::eval_line(&mut it, &alloc::format!("{}()", func.trim())))
                     .map(|v| v.render())
                     .unwrap_or_default();
                 out.push_str(&rows);
@@ -275,7 +275,7 @@ fn expand(root: &str, name: &str, panel: &str) -> String {
 /// Every check, cheapest first, over one application.
 pub fn check_all(root: &str, name: &str) -> Vec<Verdict> {
     let panel_path = alloc::format!("{}/{}/panel.ui", root, name);
-    let code_path = alloc::format!("{}/{}/code.l", root, name);
+    let code_path = alloc::format!("{}/{}/code.ai&xi", root, name);
     let (Some(panel), Some(code)) = (
         sysbox::read_blob(&panel_path).map(|b| String::from_utf8_lossy(&b).into_owned()),
         sysbox::read_blob(&code_path).map(|b| String::from_utf8_lossy(&b).into_owned()),

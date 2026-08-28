@@ -46,6 +46,72 @@ pub fn selftest() -> bool {
         }
     }
 
+    // --- the gate ---------------------------------------------------------
+    //
+    // Checked by name and never by calling. Half this table pokes memory,
+    // writes I/O ports or paints over the screen, and a test suite that
+    // exercises every row would be a test suite that scribbles on the machine
+    // to prove it can.
+    {
+        use eval::{Caps, Touch, BUILTINS};
+
+        // No two rows may claim the same name. A duplicate means the first
+        // silently decides the class, and if they disagree the stricter one is
+        // the one that never runs.
+        for (i, (n, ..)) in BUILTINS.iter().enumerate() {
+            if BUILTINS.iter().skip(i + 1).any(|(m, ..)| m == n) {
+                return false;
+            }
+        }
+
+        // A name absent from the table is refused before dispatch. This is the
+        // property the whole inversion rests on: reaching the match at all
+        // requires a row, so an arm added without one is dead code rather than
+        // an ungated builtin.
+        let mut op = eval::Interp::new();
+        if eval_line(&mut op, "nosuchbuiltin(1)").is_ok() {
+            return false;
+        }
+
+        // Everything a stored program may not do is refused for a stored
+        // program, and every row is covered rather than a chosen few.
+        let mut jailed = eval::Interp::sandboxed("/app/t");
+        for (name, touch, lo, _) in BUILTINS {
+            if *touch == Touch::Pure || *touch == Touch::Read || *touch == Touch::Write {
+                continue;
+            }
+            let args = alloc::vec!["0"; *lo].join(", ");
+            let src = alloc::format!("{}({})", name, args);
+            match eval_line(&mut jailed, &src) {
+                Err(e) if e.contains("may not") => {}
+                // Anything else means it ran, or failed for the wrong reason.
+                _ => return false,
+            }
+        }
+
+        // ...and the ones it may do are not refused by the gate. `read` of a
+        // path that does not exist fails on the path, which is the arm
+        // answering rather than the gate.
+        if eval::available(Caps::Sandbox).len() >= BUILTINS.len() {
+            return false;
+        }
+        if !eval::available(Caps::Operator).contains(&"poke8") {
+            return false;
+        }
+        if eval::available(Caps::Sandbox).contains(&"poke8") {
+            return false;
+        }
+
+        // Arity is enforced from the table, before the arm sees the arguments.
+        if eval_line(&mut op, "hex()").is_ok() || eval_line(&mut op, "hex(1, 2)").is_ok() {
+            return false;
+        }
+        // A variadic row accepts none and many.
+        if eval_line(&mut op, "list()").is_err() || eval_line(&mut op, "list(1,2,3,4,5)").is_err() {
+            return false;
+        }
+    }
+
     // Functions: definition, call, arguments, and a value coming back out.
     if !int("fn add(a, b) { return a + b } add(2, 3)", 5) {
         return false;

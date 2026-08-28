@@ -1,7 +1,7 @@
 //! Applications: a panel document, a program, and nothing else.
 //!
 //! An application here is two blobs in the namespace. `panel.ui` is what it
-//! looks like, in the format `gfx::uidoc` reads. `code.l` is what it does, in
+//! looks like, in the format `gfx::uidoc` reads. `code.ai&xi` is what it does, in
 //! the language the shell already runs. Both are text, both are addressed by
 //! the hash of their own bytes, and neither needs the model present to work.
 //!
@@ -13,7 +13,7 @@
 //!
 //! ### Each action re-runs the program
 //!
-//! `call` loads `code.l` into a **fresh** interpreter every time and throws it
+//! `call` loads `code.ai&xi` into a **fresh** interpreter every time and throws it
 //! away afterwards. That is deliberate and it is the expensive-looking choice.
 //! A resident interpreter would make an app's behaviour depend on every action
 //! taken since boot, which is exactly what makes a bug in one unreproducible.
@@ -31,9 +31,9 @@
 //!
 //! ### What an application may do
 //!
-//! `code.l` runs in a sandboxed interpreter: no raw memory, no I/O ports, no
+//! `code.ai&xi` runs in a sandboxed interpreter: no raw memory, no I/O ports, no
 //! drawing outside a window, no applet that changes anything, and writes only
-//! under `/app/<name>`. The gate is in `lang::Interp` rather than here, because
+//! under `/app/<name>`. The gate is in `aiksi::Interp` rather than here, because
 //! the raw builtins are also reachable from a bare expression at the prompt and
 //! from any program `run` executes -- a check anywhere else would have a hole
 //! shaped like the path it did not cover.
@@ -57,7 +57,7 @@ pub mod skel;
 
 use crate::gfx::ui::Panel;
 use crate::gfx::uidoc;
-use crate::lang;
+use crate::aiksi;
 use crate::sysbox;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -66,7 +66,7 @@ use alloc::vec::Vec;
 pub const ROOT: &str = "/app";
 
 fn code_path(name: &str) -> String {
-    alloc::format!("{}/{}/code.l", ROOT, name)
+    alloc::format!("{}/{}/code.ai&xi", ROOT, name)
 }
 
 fn panel_path(name: &str) -> String {
@@ -83,6 +83,38 @@ pub const RESERVED: &[&str] = &[
     "take", "drop",
 ];
 
+/// Carry applications written before the language had its name across.
+///
+/// The extension changed with the rename, and an application is identified by
+/// the *contents* of its two files, so moving the bytes under a new name leaves
+/// every manifest hash, every grant and every lineage pointer exactly as it
+/// was. Without this the store would still hold the programs and nothing would
+/// be able to find them -- which is not a broken application, it is a
+/// disappeared one, and that is worse.
+///
+/// Runs once per boot over both roots. Cheap when there is nothing to do: a
+/// directory listing and a miss.
+pub fn migrate_extension() -> usize {
+    let mut moved = 0;
+    for root in [ROOT, crate::app::draft::ROOT] {
+        for name in sysbox::children(root) {
+            let old = alloc::format!("{}/{}/code.l", root, name);
+            let new = alloc::format!("{}/{}/code.ai&xi", root, name);
+            if sysbox::read_blob(&new).is_some() {
+                continue;
+            }
+            let Some(bytes) = sysbox::read_blob(&old) else {
+                continue;
+            };
+            if sysbox::write_blob(&new, bytes) {
+                sysbox::detach(&old);
+                moved += 1;
+            }
+        }
+    }
+    moved
+}
+
 pub fn exists(name: &str) -> bool {
     sysbox::read_blob(&code_path(name)).is_some()
 }
@@ -95,7 +127,7 @@ pub fn names() -> Vec<String> {
 /// Evaluate an expression in an application's own program.
 ///
 /// The program is loaded whole and then the expression is evaluated against it,
-/// which is why `code.l` must parse as a program and not as a sequence of
+/// which is why `code.ai&xi` must parse as a program and not as a sequence of
 /// independent lines.
 pub fn call(name: &str, expr: &str) -> Result<String, String> {
     let Some(bytes) = sysbox::read_blob(&code_path(name)) else {
@@ -113,9 +145,9 @@ pub fn call(name: &str, expr: &str) -> Result<String, String> {
         .map(|m| m.raw && manifest::granted(&m.hash()))
         .unwrap_or(false);
     let mut it = if trusted {
-        lang::Interp::new()
+        aiksi::Interp::new()
     } else {
-        lang::Interp::sandboxed(&alloc::format!("{}/{}", ROOT, name))
+        aiksi::Interp::sandboxed(&alloc::format!("{}/{}", ROOT, name))
     }
     // Bounded, because the desktop calls this. `document` runs the
     // application's row function on every repaint, and the full budget is
@@ -123,9 +155,9 @@ pub fn call(name: &str, expr: &str) -> Result<String, String> {
     // manager feel broken while the symptom points at the compositor. A
     // program that needs more than this to build a list is a program that
     // should say so.
-    .with_step_budget(lang::eval::DRAW_BUDGET);
-    lang::eval_line(&mut it, &src)?;
-    let v = lang::eval_line(&mut it, expr)?;
+    .with_step_budget(aiksi::eval::DRAW_BUDGET);
+    aiksi::eval_line(&mut it, &src)?;
+    let v = aiksi::eval_line(&mut it, expr)?;
     Ok(v.render())
 }
 

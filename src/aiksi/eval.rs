@@ -127,21 +127,148 @@ pub enum Caps {
     Sandbox,
 }
 
-/// Builtins that reach the machine directly.
+/// What a builtin touches.
 ///
-/// Checked as a list before the dispatch rather than one guard per arm,
-/// because a per-arm check is a list that gets forgotten the next time a
-/// builtin lands -- and the one that gets forgotten is the one that matters.
-const RAW: &[&str] = &[
-    "peek8", "peek16", "peek32", "peek64", "poke8", "poke32", "poke64", "inb", "outb", "inl",
-    "outl",
+/// Every builtin declares one, and `BUILTINS` is the only way to reach the
+/// dispatch, so a builtin that is added without saying what it touches is not
+/// callable at all. That inversion is the whole point.
+///
+/// It replaced two denylists. Those were correct for eleven raw builtins and
+/// three drawing ones, and they stopped being correct the moment the language
+/// was wired to the rest of the kernel: a denylist grants by default, so every
+/// builtin anyone forgot to list -- sockets included -- would have been
+/// reachable from a program the machine wrote for itself. The old comment said
+/// as much about per-arm checks and the same argument finished the list off.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Touch {
+    /// Values in, values out. Nothing outside the interpreter is read.
+    Pure,
+    /// Reads state that is not secret: the clock, the heap figure, the
+    /// namespace, which interfaces exist.
+    Read,
+    /// Writes, and a sandboxed program may only write inside its own subtree.
+    /// `may_write` is what enforces that; this only says a write happens.
+    Write,
+    /// Talks to the network.
+    Net,
+    /// Runs the model.
+    Model,
+    /// Paints outside any window.
+    Draw,
+    /// Reaches the machine directly, or changes the system.
+    Raw,
+}
+
+impl Touch {
+    /// Whether a stored program may do this unasked.
+    ///
+    /// Three classes and not a grant matrix. `manifest::Manifest` carries one
+    /// bit for the same reason it gives: an operator approving a request has to
+    /// hold the whole of it in their head, and "may write outside itself but
+    /// not open sockets" is a sentence nobody can check against a program.
+    /// Sandboxed or trusted is a question with an answer.
+    fn sandboxable(self) -> bool {
+        matches!(self, Touch::Pure | Touch::Read | Touch::Write)
+    }
+
+    fn why(self) -> &'static str {
+        match self {
+            Touch::Net => "talks to the network",
+            Touch::Model => "runs the model",
+            Touch::Draw => "draws outside any window",
+            Touch::Raw => "reaches the machine directly",
+            _ => "changes the system",
+        }
+    }
+}
+
+/// Every builtin, what it touches, and how many arguments it takes.
+///
+/// The single source of truth. `builtin` refuses anything absent from here
+/// before it dispatches, so an arm added to the match without a row is dead
+/// code and a row without an arm is a boot selftest failure. Neither can be
+/// half-done, which is the property the old denylists could not offer.
+///
+/// Arity is `(min, max)`; `usize::MAX` for max means variadic.
+pub const BUILTINS: &[(&str, Touch, usize, usize)] = &[
+    // --- values -----------------------------------------------------------
+    ("here", Touch::Pure, 0, 0),
+    ("int", Touch::Pure, 1, 1),
+    ("hex", Touch::Pure, 1, 1),
+    ("list", Touch::Pure, 0, usize::MAX),
+    ("len", Touch::Pure, 1, 1),
+    ("get", Touch::Pure, 2, 2),
+    ("push", Touch::Pure, 2, 2),
+    ("set", Touch::Pure, 3, 3),
+    // Transient: the console scrolls and nothing outlives the call.
+    ("print", Touch::Pure, 0, usize::MAX),
+    ("println", Touch::Pure, 0, usize::MAX),
+
+    // --- reading the machine ----------------------------------------------
+    ("ticks", Touch::Read, 0, 0),
+    ("hz", Touch::Read, 0, 0),
+    ("tasks", Touch::Read, 0, 0),
+    ("heap", Touch::Read, 0, 0),
+    ("width", Touch::Read, 0, 0),
+    ("height", Touch::Read, 0, 0),
+    ("read", Touch::Read, 1, 1),
+    ("exists", Touch::Read, 1, 1),
+    ("ls", Touch::Read, 1, 1),
+    // Read, and then narrowed again per call by `applet_mutates`: the applet
+    // table already answers "does this change anything", and asking it is
+    // exact where a second list here would drift from it.
+    ("applet", Touch::Read, 1, 1),
+
+    // --- writing ----------------------------------------------------------
+    // Sandboxed writes are confined by `may_write`, which resolves the path
+    // first. The class says a write happens; the jail says where.
+    ("write", Touch::Write, 2, 2),
+
+    // --- the operator's terminal ------------------------------------------
+    // Not sandboxable, and this is a tightening. The colour outlives the call
+    // and the clear takes the operator's scrollback, so an application
+    // repainting its rows could wipe the terminal underneath it. Nothing
+    // stored uses either; the prompt runs with Operator caps and keeps both.
+    ("cls", Touch::Raw, 0, 0),
+    ("color", Touch::Raw, 1, 1),
+
+    // --- drawing ----------------------------------------------------------
+    ("pixel", Touch::Draw, 3, 3),
+    ("rect", Touch::Draw, 5, 5),
+    ("text", Touch::Draw, 4, 4),
+
+    // --- the machine itself -----------------------------------------------
+    ("peek8", Touch::Raw, 1, 1),
+    ("peek16", Touch::Raw, 1, 1),
+    ("peek32", Touch::Raw, 1, 1),
+    ("peek64", Touch::Raw, 1, 1),
+    ("poke8", Touch::Raw, 2, 2),
+    ("poke32", Touch::Raw, 2, 2),
+    ("poke64", Touch::Raw, 2, 2),
+    ("inb", Touch::Raw, 1, 1),
+    ("outb", Touch::Raw, 2, 2),
+    ("inl", Touch::Raw, 1, 1),
+    ("outl", Touch::Raw, 2, 2),
 ];
 
-/// Drawing builtins, which paint straight at `gfx::primary()` with no idea
-/// which window is asking. A sandboxed application using one would paint over
-/// the whole desktop, so they are the operator's until there is a windowed way
-/// to offer them. A panel application has no need for them.
-const DRAWS: &[&str] = &["pixel", "rect", "text"];
+/// What a builtin touches, or `None` if there is no such builtin.
+pub fn touch_of(name: &str) -> Option<Touch> {
+    BUILTINS.iter().find(|(n, ..)| *n == name).map(|(_, t, ..)| *t)
+}
+
+/// Is this a builtin at all?
+pub fn is_builtin(name: &str) -> bool {
+    touch_of(name).is_some()
+}
+
+/// Every builtin a program with these capabilities may call.
+pub fn available(caps: Caps) -> Vec<&'static str> {
+    BUILTINS
+        .iter()
+        .filter(|(_, t, ..)| caps == Caps::Operator || t.sandboxable())
+        .map(|(n, ..)| *n)
+        .collect()
+}
 
 pub struct Interp {
     /// Innermost scope last. A name is looked up from the top down and
@@ -473,18 +600,37 @@ impl Interp {
     }
 
     fn builtin(&mut self, name: &str, args: &[Value]) -> Result<Value, String> {
-        // One gate, before anything is dispatched.
+        // One gate, before anything is dispatched, and it opens only for a
+        // builtin the table names. An unknown name cannot fall through to the
+        // match: the match is unreachable without a row, so adding an arm and
+        // forgetting the row produces dead code rather than an ungated builtin.
+        let Some(touch) = touch_of(name) else {
+            return Err(format!("no builtin called '{}'", name));
+        };
+        let (lo, hi) = BUILTINS
+            .iter()
+            .find(|(n, ..)| *n == name)
+            .map(|(_, _, lo, hi)| (*lo, *hi))
+            .unwrap_or((0, usize::MAX));
+        if args.len() < lo || args.len() > hi {
+            return Err(if lo == hi {
+                format!("{} takes {} argument(s), got {}", name, lo, args.len())
+            } else if hi == usize::MAX {
+                format!("{} takes at least {}, got {}", name, lo, args.len())
+            } else {
+                format!("{} takes {} to {} arguments, got {}", name, lo, hi, args.len())
+            });
+        }
         if self.caps == Caps::Sandbox {
-            if RAW.contains(&name) {
+            if !touch.sandboxable() {
                 return Err(format!(
-                    "'{}' reaches the machine directly and a stored program may not",
-                    name
-                ));
-            }
-            if DRAWS.contains(&name) {
-                return Err(format!(
-                    "'{}' draws outside any window and a stored program may not",
-                    name
+                    "'{}' {} and a stored program may not -- 'app trust {}' if that is what you want",
+                    name,
+                    touch.why(),
+                    self.jail
+                        .as_deref()
+                        .and_then(|j| j.rsplit('/').next())
+                        .unwrap_or("<app>")
                 ));
             }
             if name == "write" {
@@ -838,12 +984,7 @@ impl Interp {
     }
 }
 
-/// Names the shell offers in `words`.
-pub const BUILTINS: &[&str] = &[
-    "print", "println", "hex", "cls", "color", "ticks", "hz", "tasks", "heap",
-    "read", "exists", "ls", "write", "applet",
-    "list", "len", "get", "set", "push", "here", "int",
-    "width", "height", "pixel", "rect", "text",
-    "peek8", "peek16", "peek32", "peek64", "poke8", "poke32", "poke64",
-    "inb", "outb", "inl", "outl",
-];
+// The list the shell offers used to live here as a second array of names,
+// hand-kept beside the match. It is gone: `BUILTINS` above is the one list,
+// and `words` reads it. A name that appears in one place cannot disagree with
+// itself.

@@ -9,7 +9,7 @@ use crate::acpi::Acpi;
 use crate::cpu::idt;
 use crate::dev::{kbd, lapic};
 use crate::gfx::console::{self, LTCYAN, LTGRAY, LTGREEN, LTRED, WHITE, YELLOW};
-use crate::lang;
+use crate::aiksi;
 use crate::mem;
 use crate::BootInfo;
 use crate::{kprint, kprintln, serial_println};
@@ -134,7 +134,7 @@ pub fn run(boot: &BootInfo, acpi: &Option<Acpi>) -> ! {
     kprintln!("\ninteractive. type 'help', or just type code.");
     console::set_color(WHITE);
 
-    let mut interp = lang::Interp::new();
+    let mut interp = aiksi::Interp::new();
     let mut history: Vec<String> = Vec::new();
     let mut line = String::new();
     let mut cursor = 0usize;
@@ -557,7 +557,7 @@ fn store_cmd(rest: &str) {
     }
 }
 
-fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::Interp) {
+fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi::Interp) {
     let mut parts = line.splitn(2, ' ');
     let cmd = parts.next().unwrap_or("");
     let rest = parts.next().unwrap_or("").trim();
@@ -2619,16 +2619,42 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             console::set_color(YELLOW);
             kprintln!("builtins");
             console::set_color(WHITE);
-            let mut col = 0;
-            for w in lang::eval::BUILTINS {
-                kprint!("  {:<10}", w);
-                col += 1;
-                if col % 5 == 0 {
+            // Grouped by what each one touches, because that is the fact an
+            // operator needs before writing anything a stored program will
+            // run: the three classes on top are the ones the sandbox allows,
+            // and the rest need `app trust`.
+            use crate::aiksi::eval::Touch;
+            for (label, want) in [
+                ("values", Touch::Pure),
+                ("reads the machine", Touch::Read),
+                ("writes", Touch::Write),
+                ("network", Touch::Net),
+                ("the model", Touch::Model),
+                ("draws", Touch::Draw),
+                ("the machine itself", Touch::Raw),
+            ] {
+                let names: alloc::vec::Vec<&str> = aiksi::eval::BUILTINS
+                    .iter()
+                    .filter(|(_, t, ..)| *t == want)
+                    .map(|(n, ..)| *n)
+                    .collect();
+                if names.is_empty() {
+                    continue;
+                }
+                console::set_color(YELLOW);
+                kprintln!("  {}", label);
+                console::set_color(WHITE);
+                let mut col = 0;
+                for w in names {
+                    kprint!("  {:<11}", w);
+                    col += 1;
+                    if col % 5 == 0 {
+                        kprintln!();
+                    }
+                }
+                if col % 5 != 0 {
                     kprintln!();
                 }
-            }
-            if col % 5 != 0 {
-                kprintln!();
             }
         }
         "vars" => {
@@ -2644,8 +2670,8 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             // Not a command, so it is code. This is the point of the whole
             // exercise: there is no boundary between using the machine and
             // programming it.
-            match lang::eval_line(interp, line) {
-                Ok(lang::Value::Nil) => {}
+            match aiksi::eval_line(interp, line) {
+                Ok(aiksi::Value::Nil) => {}
                 Ok(v) => {
                     console::set_color(LTCYAN);
                     kprintln!("  {}", v.render());
@@ -2842,7 +2868,7 @@ fn capture(
     cmd: &str,
     boot: &BootInfo,
     acpi: &Option<Acpi>,
-    interp: &mut lang::Interp,
+    interp: &mut aiksi::Interp,
 ) -> alloc::string::String {
     console::begin_capture();
     execute(cmd, boot, acpi, interp);
@@ -2854,7 +2880,7 @@ pub fn run_pipeline(
     line: &str,
     boot: &BootInfo,
     acpi: &Option<Acpi>,
-    interp: &mut lang::Interp,
+    interp: &mut aiksi::Interp,
 ) -> bool {
     let Some((head, op, tail)) = split_pipeline(line) else {
         return false;
