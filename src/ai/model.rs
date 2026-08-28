@@ -779,6 +779,16 @@ impl Tape {
         self.filled
     }
 
+    /// Ready for another sequence without another allocation.
+    ///
+    /// Only `filled` needs clearing. Stale rows past it are never read --
+    /// `entering` and `final_normed` both refuse a position at or beyond it --
+    /// so zeroing megabytes to hide values nothing can reach would be work
+    /// done for the look of it.
+    pub fn reset(&mut self) {
+        self.filled = 0;
+    }
+
     /// The stream entering layer `l` at position `t`.
     /// `l == n_layers` is the stream leaving the last layer, which is what the
     /// final norm consumed.

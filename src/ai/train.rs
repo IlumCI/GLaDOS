@@ -503,12 +503,28 @@ pub fn train_full(
     let mut epochs = 0usize;
     let mut stopped = false;
 
+    // One state and one tape for the whole run.
+    //
+    // A fresh `State` per example allocates the entire KV cache each time --
+    // 112 MiB at Qwen3-0.6B's trained context -- so a run of six examples over
+    // four epochs would allocate and free it twenty-four times, which would
+    // dominate the very measurement this exists to produce and fragment a heap
+    // that is one physically contiguous block.
+    //
+    // Reuse is safe without clearing the cache. Every example starts at
+    // position 0, and attention reads only `live` slots, which is `pos + 1`
+    // when nothing is windowed -- so a slot left by a previous example is
+    // overwritten before it could be read. `Tape::reset` is needed because
+    // `filled` is the one piece of state that would otherwise carry over.
+    let longest = set.iter().map(|(t, _)| t.len()).max().unwrap_or(1);
+    let mut st = super::model::State::new(&cfg);
+    let mut tape = super::model::Tape::new(&cfg, longest);
+
     for epoch in 0..b.epochs {
         grads.clear();
         last_loss = 0.0;
         for (toks, target) in set.iter() {
-            let mut st = super::model::State::new(&cfg);
-            let mut tape = super::model::Tape::new(&cfg, toks.len());
+            tape.reset();
             for (i, &t) in toks.iter().enumerate() {
                 if !e.model.forward_taped(&mut st, t, i, &mut tape) {
                     return None;
