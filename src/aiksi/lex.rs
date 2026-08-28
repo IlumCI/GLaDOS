@@ -39,6 +39,13 @@ pub enum Tok {
     Shr,
 
     Assign,
+    /// Field access. Aiksi has no floats, so a `.` can never be part of a
+    /// number and needs no lookahead to tell the two apart.
+    Dot,
+    /// Type annotations, and only there. Not a statement separator and not a
+    /// map literal, so a `:` outside a declaration is a parse error rather
+    /// than something with a second meaning.
+    Colon,
     LParen,
     RParen,
     LBrace,
@@ -188,6 +195,8 @@ pub fn lex(src: &str) -> Result<Vec<Tok>, String> {
             b'^' => Tok::Caret,
             b'~' => Tok::Tilde,
             b'=' => Tok::Assign,
+            b'.' => Tok::Dot,
+            b':' => Tok::Colon,
             b'(' => Tok::LParen,
             b')' => Tok::RParen,
             b'{' => Tok::LBrace,

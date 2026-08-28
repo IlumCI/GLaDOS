@@ -193,6 +193,130 @@ pub fn selftest() -> bool {
         return false;
     }
 
+    // --- records ----------------------------------------------------------
+    //
+    // A declaration, a constructor, a field read, a field write, and the
+    // rendering all of those are read through.
+    if !int("rec Host { name, port } h = Host(\"a\", 80) h.port", 80) {
+        return false;
+    }
+    if !text("rec Host { name, port } h = Host(\"a\", 80) h.name", "a") {
+        return false;
+    }
+    if run("rec Host { name, port } h = Host(\"a\", 80) h.nope = 1").is_some() {
+        return false;
+    }
+    if !int("rec Host { name, port } h = Host(\"a\", 80) h.port = 443 h.port", 443) {
+        return false;
+    }
+    if !text("rec P { x, y } P(1, 2)", "P{x: 1, y: 2}") {
+        return false;
+    }
+    // Values, not references: a copy taken before the write keeps the old
+    // field. This is the property that means nothing has to be said about
+    // aliasing, so it is worth a test rather than a comment.
+    if !int("rec P { x } a = P(1) b = a a.x = 9 b.x", 1) {
+        return false;
+    }
+    // Records nest, and reading through two levels works.
+    if !int("rec In { v } rec Out { i } o = Out(In(7)) o.i.v", 7) {
+        return false;
+    }
+    // Constructor arity comes from the declaration.
+    if run("rec P { x, y } P(1)").is_some() || run("rec P { x, y } P(1, 2, 3)").is_some() {
+        return false;
+    }
+    // A field that was never declared is not readable.
+    if run("rec P { x } P(1).y").is_some() {
+        return false;
+    }
+    // Reading a field off something that is not a record is a mistake in the
+    // program, not a Nil to carry forward.
+    if run("(1).x").is_some() || run("\"s\".x").is_some() {
+        return false;
+    }
+    // A record may not take a builtin's name, because it would install a
+    // constructor and leave `len(x)` ambiguous to a reader.
+    if run("rec len { a }").is_some() {
+        return false;
+    }
+    // Two fields with one name is a declaration nobody can index.
+    if run("rec P { x, x }").is_some() {
+        return false;
+    }
+
+    // --- types --------------------------------------------------------------
+    //
+    // Optional. A function that says nothing behaves as it always did, which
+    // is what every application already written depends on.
+    if !int("fn f(a) { return a } f(1)", 1) {
+        return false;
+    }
+    if !int("fn f(a: int): int { return a + 1 } f(1)", 2) {
+        return false;
+    }
+    // The mistake is caught at the call, where the caller is, and not
+    // wherever the value happened to be used.
+    if run("fn f(a: int) { return a } f(\"x\")").is_some() {
+        return false;
+    }
+    // A return type is checked too, which is the half that catches a function
+    // falling off its end when it was supposed to answer something.
+    if run("fn f(): int { return \"x\" } f()").is_some() {
+        return false;
+    }
+    if run("fn f(): int { } f()").is_some() {
+        return false;
+    }
+    // `any` is explicit as well as default.
+    if !text("fn f(a: any): any { return a } f(\"x\")", "x") {
+        return false;
+    }
+    // Record types are usable as annotations, and are checked by name.
+    if !int("rec P { x } fn f(p: P): int { return p.x } f(P(4))", 4) {
+        return false;
+    }
+    if run("rec P { x } rec Q { x } fn f(p: P) { return 1 } f(Q(1))").is_some() {
+        return false;
+    }
+    // Field annotations hold at construction and at assignment, or the
+    // annotation would be a comment.
+    if run("rec P { x: int } P(\"s\")").is_some() {
+        return false;
+    }
+    if run("rec P { x: int } p = P(1) p.x = \"s\"").is_some() {
+        return false;
+    }
+    // A list is a type like any other.
+    if !int("fn f(l: list): int { return len(l) } f(list(1, 2))", 2) {
+        return false;
+    }
+
+    // --- use ----------------------------------------------------------------
+    //
+    // The file half needs a namespace and is driven under QEMU. What is
+    // checkable here is the refusal, which is the part that matters: a
+    // sandboxed program's imports are confined so that what it depends on can
+    // be found in one place.
+    {
+        let mut jailed = eval::Interp::sandboxed("/app/t");
+        match eval_line(&mut jailed, "use \"/ai/godel/HEAD\"") {
+            Err(e) if e.contains("may only use") => {}
+            _ => return false,
+        }
+        // Its own subtree is allowed to get as far as looking for the file.
+        match eval_line(&mut jailed, "use \"/app/t/helper\"") {
+            Err(e) if e.contains("no such program") => {}
+            _ => return false,
+        }
+        // An operator is not confined, and gets the same honest miss.
+        let mut op2 = eval::Interp::new();
+        match eval_line(&mut op2, "use \"/nowhere/at/all\"") {
+            Err(e) if e.contains("no such program") => {}
+            _ => return false,
+        }
+    }
+
     // Functions: definition, call, arguments, and a value coming back out.
     if !int("fn add(a, b) { return a + b } add(2, 3)", 5) {
         return false;

@@ -52,6 +52,66 @@ pub enum Expr {
     Bin(BinOp, Box<Expr>, Box<Expr>),
     Call(String, Vec<Expr>),
     Assign(String, Box<Expr>),
+    /// `h.port`
+    Field(Box<Expr>, String),
+    /// `h.port = 443`
+    ///
+    /// The target is an expression rather than a name so that `a.b.c = 1`
+    /// parses, and the evaluator rebuilds the chain outward -- records are
+    /// values, so there is no shared object to mutate and the only way to
+    /// change a nested field is to rebuild every record above it. That is the
+    /// same bargain `push` already makes for lists, and it is why neither
+    /// needs anything said about aliasing.
+    SetField(Box<Expr>, String, Box<Expr>),
+}
+
+/// What a value is allowed to be, where somebody has said.
+///
+/// Optional everywhere. A program that says nothing gets `Any` and behaves
+/// exactly as it did before types existed, which matters because every
+/// application already written is such a program.
+///
+/// Checked when a value crosses a boundary somebody annotated -- a call, a
+/// return, a record field -- and never inferred. Inference would mean a type
+/// system with a solver in it, and the thing worth having here is much
+/// smaller: a model that passes a string where a number belongs should get a
+/// sentence naming the function and the parameter, instead of `int()` quietly
+/// answering 0 four calls later.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Type {
+    Any,
+    Int,
+    Str,
+    List,
+    Nil,
+    /// A declared record, by name. Resolved when it is checked rather than
+    /// when it is parsed, so a function may take a record declared further
+    /// down the file.
+    Rec(String),
+}
+
+impl Type {
+    pub fn parse(name: &str) -> Type {
+        match name {
+            "any" => Type::Any,
+            "int" => Type::Int,
+            "str" => Type::Str,
+            "list" => Type::List,
+            "nil" => Type::Nil,
+            other => Type::Rec(String::from(other)),
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        match self {
+            Type::Any => "any",
+            Type::Int => "int",
+            Type::Str => "str",
+            Type::List => "list",
+            Type::Nil => "nil",
+            Type::Rec(n) => n,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -66,8 +126,23 @@ pub enum Stmt {
     /// environments and a garbage collector's worth of questions. A program
     /// that can name a procedure and call it is enough to write an
     /// application, and that is what this is for.
-    Fn(String, Vec<String>, Vec<Stmt>),
+    Fn(String, Vec<(String, Type)>, Type, Vec<Stmt>),
     Return(Option<Expr>),
+    /// `rec Host { name: str, port: int }`
+    ///
+    /// Declaration and constructor in one: the name becomes callable with the
+    /// fields in order. A separate `new` keyword would be a second thing to
+    /// learn for no gain, and this way the arity of the constructor is the
+    /// arity of the declaration by construction rather than by agreement.
+    Rec(String, Vec<(String, Type)>),
+    /// `use "/lib/text"`
+    ///
+    /// Evaluates another program into this interpreter, so its functions and
+    /// records become available here. Not a namespace: there are no modules to
+    /// qualify against, and a prefix would have to be invented, spelled and
+    /// then explained. What it is instead is textual inclusion that happens
+    /// once -- see `Interp::import`.
+    Use(String),
 }
 
 pub struct Parser {
@@ -149,24 +224,56 @@ impl Parser {
                 _ => return Err("a name after 'fn'".to_string()),
             };
             self.expect(&Tok::LParen, "'(' after the function name")?;
-            let mut params = Vec::new();
-            if !self.at(&Tok::RParen) {
-                loop {
-                    match self.peek().clone() {
-                        Tok::Ident(pname) => {
-                            self.bump();
-                            params.push(pname);
-                        }
-                        _ => return Err("a parameter name".to_string()),
-                    }
-                    if !self.eat(&Tok::Comma) {
-                        break;
-                    }
-                }
-            }
+            let params = self.fields(&Tok::RParen)?;
             self.expect(&Tok::RParen, "')' after the parameters")?;
+            // `fn f(): int { ... }`. Absent means `any`, so every function
+            // written before types existed still parses and still means what
+            // it meant.
+            let ret = if self.eat(&Tok::Colon) {
+                self.type_name()?
+            } else {
+                Type::Any
+            };
             let body = self.block()?;
-            return Ok(Stmt::Fn(name, params, body));
+            return Ok(Stmt::Fn(name, params, ret, body));
+        }
+
+        if self.keyword("rec") {
+            self.bump();
+            let name = match self.peek().clone() {
+                Tok::Ident(n) => {
+                    self.bump();
+                    n
+                }
+                _ => return Err("a name after 'rec'".to_string()),
+            };
+            self.expect(&Tok::LBrace, "'{' after the record name")?;
+            let fields = self.fields(&Tok::RBrace)?;
+            self.expect(&Tok::RBrace, "'}' after the fields")?;
+            if fields.is_empty() {
+                // A record with no fields is a constructor that returns
+                // nothing useful and a type nothing can fail to be. Refusing
+                // it here means the evaluator never has to describe one.
+                return Err(format!("record '{}' has no fields", name));
+            }
+            return Ok(Stmt::Rec(name, fields));
+        }
+
+        if self.keyword("use") {
+            self.bump();
+            let path = match self.peek().clone() {
+                Tok::Str(p) => {
+                    self.bump();
+                    p
+                }
+                // A bare word would have to be resolved against a search path
+                // that does not exist, and a variable would make what a
+                // program imports depend on what it computed -- which is a
+                // thing no checker could read off the source.
+                _ => return Err("a quoted path after 'use'".to_string()),
+            };
+            let _ = self.eat(&Tok::Semi);
+            return Ok(Stmt::Use(path));
         }
 
         if self.keyword("return") {
@@ -211,6 +318,50 @@ impl Parser {
 
     // --- expressions ---
 
+    /// `a, b: int, c: Host` -- used by both `fn` parameters and `rec` fields.
+    ///
+    /// One function because the two are the same grammar, and because they
+    /// drifting apart is how a language ends up with parameters that accept a
+    /// record type and fields that do not.
+    fn fields(&mut self, end: &Tok) -> Result<Vec<(String, Type)>, String> {
+        let mut out = Vec::new();
+        if self.at(end) {
+            return Ok(out);
+        }
+        loop {
+            let name = match self.peek().clone() {
+                Tok::Ident(n) => {
+                    self.bump();
+                    n
+                }
+                _ => return Err("a name".to_string()),
+            };
+            let ty = if self.eat(&Tok::Colon) {
+                self.type_name()?
+            } else {
+                Type::Any
+            };
+            if out.iter().any(|(n, _): &(String, Type)| n == &name) {
+                return Err(format!("'{}' is named twice", name));
+            }
+            out.push((name, ty));
+            if !self.eat(&Tok::Comma) {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    fn type_name(&mut self) -> Result<Type, String> {
+        match self.peek().clone() {
+            Tok::Ident(n) => {
+                self.bump();
+                Ok(Type::parse(&n))
+            }
+            _ => Err("a type after ':'".to_string()),
+        }
+    }
+
     fn expression(&mut self) -> Result<Expr, String> {
         self.assignment()
     }
@@ -223,7 +374,8 @@ impl Parser {
             let rhs = self.assignment()?;
             return match lhs {
                 Expr::Var(name) => Ok(Expr::Assign(name, Box::new(rhs))),
-                _ => Err("left of '=' must be a variable".to_string()),
+                Expr::Field(target, field) => Ok(Expr::SetField(target, field, Box::new(rhs))),
+                _ => Err("left of '=' must be a variable or a field".to_string()),
             };
         }
         Ok(lhs)
@@ -370,7 +522,27 @@ impl Parser {
         if self.eat(&Tok::Tilde) {
             return Ok(Expr::Unary(UnOp::BitNot, Box::new(self.unary()?)));
         }
-        self.primary()
+        self.postfix()
+    }
+
+    /// `expr.field`, repeated.
+    ///
+    /// A loop rather than recursion into `primary`, because `a.b.c` is one
+    /// expression with two accesses and not an access whose target happens to
+    /// be another. Binds tighter than any operator, so `-h.port` negates the
+    /// field and `h.port + 1` adds to it.
+    fn postfix(&mut self) -> Result<Expr, String> {
+        let mut e = self.primary()?;
+        while self.eat(&Tok::Dot) {
+            match self.peek().clone() {
+                Tok::Ident(field) => {
+                    self.bump();
+                    e = Expr::Field(Box::new(e), field);
+                }
+                _ => return Err("a field name after '.'".to_string()),
+            }
+        }
+        Ok(e)
     }
 
     fn primary(&mut self) -> Result<Expr, String> {

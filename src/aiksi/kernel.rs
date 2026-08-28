@@ -270,28 +270,40 @@ pub fn call(it: &mut Interp, name: &str, args: &[Value]) -> Result<Value, String
         // structured values would be better and this language has no record
         // type; `split` over the lines is what a program does instead, and
         // saying so is better than pretending the shape is richer than it is.
+        // A list of `Device` records, not lines of text.
+        //
+        // It answered text until records existed, and every caller then wrote
+        // the same fragile `split` to take the fields back apart -- which is
+        // the thing a record is for. The shape is `eval::KERNEL_RECS`, so an
+        // annotation checks against it.
+        //
+        // `scan` is a visitor rather than an iterator, because it walks config
+        // space and there is nowhere to hold the result but the callback. ECAM
+        // comes from `net`, which is the module that found it; a machine with
+        // no ECAM lists nothing rather than guessing at the legacy ports.
         "pci_list" => {
-            let mut out = String::new();
-            // `scan` is a visitor rather than an iterator, because it walks
-            // config space and there is nowhere to hold the result but the
-            // callback. ECAM comes from `net`, which is the module that found
-            // it; a machine with no ECAM lists nothing rather than guessing at
-            // the legacy ports.
+            let mut out = Vec::new();
             if let Some(ecam) = crate::net::ecam() {
                 crate::dev::pci::scan(ecam, 255, |d| {
-                    out.push_str(&format!(
-                        "{:02x}:{:02x}.{} {:04x}:{:04x} {}
-",
-                        d.bus,
-                        d.dev,
-                        d.func,
-                        d.vendor,
-                        d.device,
-                        crate::dev::pci::class_name(d.class, d.subclass)
+                    out.push(Value::Rec(
+                        String::from("Device"),
+                        alloc::vec![
+                            (String::from("bus"), Value::Int(d.bus as i64)),
+                            (String::from("dev"), Value::Int(d.dev as i64)),
+                            (String::from("func"), Value::Int(d.func as i64)),
+                            (String::from("vendor"), Value::Int(d.vendor as i64)),
+                            (String::from("device"), Value::Int(d.device as i64)),
+                            (
+                                String::from("class"),
+                                Value::Str(
+                                    crate::dev::pci::class_name(d.class, d.subclass).to_string(),
+                                ),
+                            ),
+                        ],
                     ));
                 });
             }
-            Ok(Value::Str(out.trim_end().to_string()))
+            Ok(Value::List(out))
         }
 
         // --- crate::net ------------------------------------------------

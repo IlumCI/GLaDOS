@@ -94,7 +94,7 @@ pub fn functions(src: &str) -> Vec<(String, usize)> {
     };
     prog.iter()
         .filter_map(|s| match s {
-            aiksi::parse::Stmt::Fn(name, params, _) => Some((name.clone(), params.len())),
+            aiksi::parse::Stmt::Fn(name, params, _, _) => Some((name.clone(), params.len())),
             _ => None,
         })
         .collect()

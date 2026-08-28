@@ -399,6 +399,55 @@ Source -> tokens -> AST -> tree-walking evaluation, in `lex.rs`, `parse.rs`,
 against the same AST and checked against the same results, which is much easier
 than debugging a code generator with nothing to compare against.
 
+**Records, types and `use`.**
+
+```
+use "/lib/text"
+
+rec Host { name: str, port: int }
+
+fn reachable(h: Host): int {
+  if (tcp_connect(h.name, h.port, 600)) { tcp_close() return 1 }
+  return 0
+}
+```
+
+A record is a declaration and a constructor in one: the name becomes callable
+with the fields in order, so the constructor's arity is the declaration's by
+construction rather than by agreement. Records are **values**, like lists --
+`b = a` copies, and `a.x = 9` afterwards leaves `b` alone. That is why nothing
+in this language has to explain aliasing. It is also why `a.b.c = 1` is refused
+rather than silently discarded: there is no shared object to reach through, so
+only a plain variable can be assigned back to.
+
+Types are **optional and never inferred**. Absent means `any`, so every
+application written before they existed still means what it meant. They are
+checked where a value crosses a boundary somebody annotated -- a call, a
+return, a record field at construction and at assignment. Inference would mean
+a solver; the thing worth having is much smaller, which is that a model passing
+a string where a number belongs gets `f wants int for 'a', got str` instead of
+`int()` quietly answering 0 and the wrong number appearing four calls later.
+
+`use` is textual inclusion that happens once, not a module system. There is
+nothing to qualify against, and inventing a prefix would mean inventing a
+spelling and then explaining it. **The imported program runs with the
+importer's capabilities**, which is the security property: caps live on the
+interpreter and there is one interpreter, so an import can never be an
+escalation. The jail on it -- a sandboxed program may `use` only its own files
+or `/lib` -- is therefore about legibility, not safety: it keeps a stored
+program's dependencies somewhere a person can find them. Cycles terminate
+because a path is marked imported *before* it is evaluated, and running out of
+stack in ring 0 with no guard page is a triple fault rather than an error
+message.
+
+`eval::KERNEL_RECS` declares the record types the kernel itself returns, and
+they are registered in every interpreter at construction so an annotation
+checks against something real. `pci_list` answers a list of `Device` rather
+than lines of text -- it answered text only because there was nowhere to put a
+field, and every caller then wrote the same fragile `split` to take it apart. A
+program may not redeclare one of these: a builtin would go on returning the
+kernel's shape while every annotation checked a different one of the same name.
+
 **Builtin naming is a rule, not a taste.** A builtin is named after the Rust
 path it calls, flattened: `crate::net::tcp::connect` is `tcp_connect`,
 `crate::dev::rtc::now` is `rtc_now`. The audience is a 0.6B model and whoever
@@ -439,6 +488,11 @@ trim/starts/ends/contains/chr/ord/repeat/pad/hexenc/hexdec), integer arithmetic
 (rtc_now/rtc_unix/uptime/tsc/tsc_mhz/ticks/hz), tasks and memory, `pci_list`,
 network status, sockets (dns_resolve/tcp_*/http_get/https_get/udp_send/ping),
 the model (`ask`), the framebuffer, and raw memory and I/O ports.
+
+`pci_list` returns records; the rest still answer scalars, strings or lists.
+Converting a builtin to a record is a matter of adding its shape to
+`KERNEL_RECS` and building one in the arm, and is worth doing wherever a
+caller would otherwise `split` a line back into fields.
 
 Three bounds worth knowing before changing anything there. `range` and `repeat`
 are capped at 65,536 because they are the easiest way for a generated program

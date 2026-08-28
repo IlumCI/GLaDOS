@@ -11,7 +11,8 @@
 //! way. It is also exactly how you shoot yourself -- a bad `peek` faults, and
 //! the M2 reporter prints the address. That is a feature.
 
-use super::parse::{BinOp, Expr, Stmt, UnOp};
+use super::parse::{BinOp, Expr, Stmt, Type, UnOp};
+use alloc::collections::BTreeSet;
 use crate::gfx::console::{self, PALETTE};
 use crate::gfx::{self};
 use crate::{kprint, kprintln};
@@ -34,15 +35,59 @@ pub enum Value {
     /// means. It copies, and a copy of a list that fits on a screen is
     /// nothing.
     List(Vec<Value>),
+    /// A record: its type name, and its fields in declared order.
+    ///
+    /// The names are carried in the value rather than looked up in the type
+    /// table. It costs a string per field per instance and buys something
+    /// worth more: a value that can be rendered, compared and read without
+    /// the interpreter that made it. `render` is called from the desktop, from
+    /// `check`, and from a shell that has no `Interp` in hand.
+    ///
+    /// A value like every other value here. Assigning one copies it, and there
+    /// is no aliasing to explain to whoever -- or whatever -- is writing the
+    /// program. That is the same bargain `List` already made.
+    Rec(String, Vec<(String, Value)>),
     Nil,
 }
 
 impl Value {
+    /// Whether a value is allowed where this type was declared.
+    ///
+    /// `Any` admits everything, including `Nil`, because a program that says
+    /// nothing about a parameter should behave exactly as it did before types
+    /// existed.
+    pub fn fits(&self, t: &crate::aiksi::parse::Type) -> bool {
+        use crate::aiksi::parse::Type;
+        match (t, self) {
+            (Type::Any, _) => true,
+            (Type::Int, Value::Int(_)) => true,
+            (Type::Str, Value::Str(_)) => true,
+            (Type::List, Value::List(_)) => true,
+            (Type::Nil, Value::Nil) => true,
+            (Type::Rec(want), Value::Rec(have, _)) => want == have,
+            _ => false,
+        }
+    }
+
+    /// What this value is, for an error message.
+    pub fn type_name(&self) -> &str {
+        match self {
+            Value::Int(_) => "int",
+            Value::Str(_) => "str",
+            Value::List(_) => "list",
+            Value::Rec(n, _) => n,
+            Value::Nil => "nil",
+        }
+    }
+
     pub fn truthy(&self) -> bool {
         match self {
             Value::Int(v) => *v != 0,
             Value::Str(s) => !s.is_empty(),
             Value::List(v) => !v.is_empty(),
+            // A record always exists, and one with no fields cannot be
+            // declared, so there is nothing for it to be empty of.
+            Value::Rec(..) => true,
             Value::Nil => false,
         }
     }
@@ -52,6 +97,7 @@ impl Value {
             Value::Int(v) => Ok(*v),
             Value::Str(_) => Err("expected a number, found a string".to_string()),
             Value::List(_) => Err("expected a number, found a list".to_string()),
+            Value::Rec(n, _) => Err(format!("expected a number, found a {}", n)),
             Value::Nil => Err("expected a number, found nothing".to_string()),
         }
     }
@@ -60,6 +106,23 @@ impl Value {
         match self {
             Value::Int(v) => format!("{}", v),
             Value::Str(s) => s.clone(),
+            // `Host{name: "x", port: 80}`, which is how it was written apart
+            // from the type name leading instead of calling. Legible in a
+            // window, in a log and in a verdict, which is where these are read.
+            Value::Rec(name, fields) => {
+                let mut out = String::from(name.as_str());
+                out.push('{');
+                for (i, (k, v)) in fields.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    out.push_str(k);
+                    out.push_str(": ");
+                    out.push_str(&v.render());
+                }
+                out.push('}');
+                out
+            }
             Value::List(items) => {
                 let mut out = String::from("[");
                 for (i, v) in items.iter().enumerate() {
@@ -96,7 +159,8 @@ pub const DRAW_BUDGET: u64 = 200_000;
 /// A named procedure: its parameters and its body.
 #[derive(Clone)]
 struct Func {
-    params: Vec<String>,
+    params: Vec<(String, Type)>,
+    ret: Type,
     body: Vec<Stmt>,
 }
 
@@ -126,6 +190,29 @@ pub enum Caps {
     /// confined to its own subtree.
     Sandbox,
 }
+
+/// Record types the kernel itself hands back.
+///
+/// A builtin returning structured data used to have nowhere to put it, so
+/// `pci_list` answered lines of text and every caller wrote the same fragile
+/// `split` to take them apart. Now that records exist the kernel declares its
+/// own, and they are registered in every interpreter at construction so an
+/// annotation like `fn f(d: Device)` checks against something real rather than
+/// against a name nobody declared.
+///
+/// Declared here rather than emitted by the arm that builds one, so that the
+/// shape is written down in exactly one place and `words` could list it.
+pub const KERNEL_RECS: &[(&str, &[(&str, Type)])] = &[(
+    "Device",
+    &[
+        ("bus", Type::Int),
+        ("dev", Type::Int),
+        ("func", Type::Int),
+        ("vendor", Type::Int),
+        ("device", Type::Int),
+        ("class", Type::Str),
+    ],
+)];
 
 /// What a builtin touches.
 ///
@@ -397,6 +484,15 @@ pub struct Interp {
     jail: Option<String>,
     /// Scratch between builtins. See `set_note`.
     notes: BTreeMap<String, String>,
+    /// Declared record types, by name, with their fields in order.
+    recs: BTreeMap<String, Vec<(String, Type)>>,
+    /// Programs already imported, by resolved path.
+    ///
+    /// This is what makes `use` idempotent and what makes a cycle terminate:
+    /// two files that import each other each find the other already present
+    /// the second time round. A depth counter would also stop it and would
+    /// stop it by failing; this stops it by being finished.
+    imported: BTreeSet<String>,
 }
 
 impl Default for Interp {
@@ -417,6 +513,16 @@ impl Interp {
             caps: Caps::Operator,
             jail: None,
             notes: BTreeMap::new(),
+            recs: KERNEL_RECS
+                .iter()
+                .map(|(n, fs)| {
+                    (
+                        String::from(*n),
+                        fs.iter().map(|(f, t)| (String::from(*f), t.clone())).collect(),
+                    )
+                })
+                .collect(),
+            imported: BTreeSet::new(),
         }
     }
 
@@ -525,7 +631,7 @@ impl Interp {
         Ok(())
     }
 
-    fn call_user(&mut self, f: &Func, args: &[Value]) -> Result<Value, String> {
+    fn call_user(&mut self, name: &str, f: &Func, args: &[Value]) -> Result<Value, String> {
         if args.len() != f.params.len() {
             return Err(format!(
                 "expected {} argument(s), got {}",
@@ -537,7 +643,21 @@ impl Interp {
             return Err("call nesting too deep (runaway recursion?)".to_string());
         }
         let mut frame = BTreeMap::new();
-        for (p, a) in f.params.iter().zip(args.iter()) {
+        for ((p, ty), a) in f.params.iter().zip(args.iter()) {
+            // Checked on the way in, where the caller's mistake is, rather
+            // than wherever the value is first used. A string passed where an
+            // int belongs otherwise reaches `int()`, which answers 0 by design,
+            // and the program computes a wrong number four calls later with
+            // nothing having failed.
+            if !a.fits(ty) {
+                return Err(format!(
+                    "{} wants {} for '{}', got {}",
+                    name,
+                    ty.name(),
+                    p,
+                    a.type_name()
+                ));
+            }
             frame.insert(p.clone(), a.clone());
         }
         self.scopes.push(frame);
@@ -548,7 +668,89 @@ impl Interp {
         r?;
         // A function that falls off its end yields nothing, which is what a
         // procedure called for its effect should say.
-        Ok(self.returning.take().unwrap_or(Value::Nil))
+        let out = self.returning.take().unwrap_or(Value::Nil);
+        if !out.fits(&f.ret) {
+            return Err(format!(
+                "{} returns {}, got {}",
+                name,
+                f.ret.name(),
+                out.type_name()
+            ));
+        }
+        Ok(out)
+    }
+
+    /// Where a sandboxed program may import from, besides its own subtree.
+    ///
+    /// One shared, operator-curated directory. A stored application's
+    /// dependencies are then either its own files or something visible in one
+    /// place, which is what makes "what does this program use" a question with
+    /// an answer.
+    const LIB: &'static str = "/lib";
+
+    /// Evaluate another program into this interpreter.
+    ///
+    /// Textual inclusion, not a module system. There is nothing to qualify
+    /// against -- no namespaces, no exports -- and inventing a prefix would
+    /// mean inventing a spelling for it and then explaining it. What `use`
+    /// buys is that a function written once can be called from a second
+    /// program, which is the whole of what the applications here need.
+    ///
+    /// **The imported program runs with the importer's capabilities**, and
+    /// that is the security property. A sandboxed application importing a file
+    /// from `/lib` does not gain what `/lib` could do if the operator ran it;
+    /// caps live on the interpreter, and there is one interpreter. So an
+    /// import can never be an escalation, and the jail below is about
+    /// legibility rather than safety: it keeps a stored program's dependencies
+    /// somewhere a person can find them.
+    pub fn import(&mut self, path: &str) -> Result<(), String> {
+        // The extension is optional at the call site, because `use "/lib/text"`
+        // reads better than the alternative and there is only one kind of file
+        // this could mean.
+        let with_ext = if path.contains('.') {
+            String::from(path)
+        } else {
+            format!("{}.ai&xi", path)
+        };
+        let full = crate::sysbox::resolve_path(&with_ext);
+        if self.caps == Caps::Sandbox {
+            let own = self.jail.clone().unwrap_or_default();
+            let inside = |root: &str| {
+                !root.is_empty() && (full == root || full.starts_with(&format!("{}/", root)))
+            };
+            if !inside(Self::LIB) && !inside(&own) {
+                return Err(format!(
+                    "a stored program may only use its own files or {}, not {}",
+                    Self::LIB,
+                    full
+                ));
+            }
+        }
+        // Already here. Not an error: two programs importing the same helper
+        // is the normal case, and a cycle terminates because the second visit
+        // finds this rather than recursing.
+        if self.imported.contains(&full) {
+            return Ok(());
+        }
+        let Some(bytes) = crate::sysbox::read_blob(&full) else {
+            return Err(format!("use: no such program '{}'", full));
+        };
+        // Marked before evaluating, not after, or a file that imports itself
+        // recurses until the stack runs out -- and running out of stack in
+        // ring 0 with no guard page is a triple fault, not an error message.
+        self.imported.insert(full.clone());
+        let src = String::from_utf8_lossy(&bytes).into_owned();
+        let toks = super::lex::lex(&src).map_err(|e| format!("{}: {}", full, e))?;
+        let prog = super::parse::parse(toks).map_err(|e| format!("{}: {}", full, e))?;
+        // Through `stmt` rather than `run`, because `run` resets the step
+        // counter -- an import would otherwise be a way to buy an unbounded
+        // budget one file at a time.
+        for st in &prog {
+            self.stmt(st).map_err(|e| format!("{}: {}", full, e))?;
+        }
+        // An imported file's trailing `return` is not this program's.
+        self.returning = None;
+        Ok(())
     }
 
     /// Run a program, returning the value of the last expression statement.
@@ -577,11 +779,36 @@ impl Interp {
         self.tick()?;
         match s {
             Stmt::Expr(e) => self.expr(e),
-            Stmt::Fn(name, params, body) => {
+            Stmt::Fn(name, params, ret, body) => {
                 self.funcs.insert(
                     name.clone(),
-                    Func { params: params.clone(), body: body.clone() },
+                    Func { params: params.clone(), ret: ret.clone(), body: body.clone() },
                 );
+                Ok(Value::Nil)
+            }
+            Stmt::Rec(name, fields) => {
+                // A record may not take a builtin's name. A user *function*
+                // may, deliberately -- a program that defines `rect` means its
+                // own -- but that shadowing is per-call and reversible by
+                // reading the program. A record additionally installs a
+                // constructor, and `rec len { ... }` would leave `len(x)`
+                // meaning something that depends on which of the two the
+                // reader remembered.
+                if super::eval::is_builtin(name) {
+                    return Err(format!("'{}' is a builtin and cannot be a record", name));
+                }
+                // Nor may a program redeclare one the kernel hands back. A
+                // builtin would then return a `Device` with the kernel's
+                // fields while every annotation in the program checked against
+                // a different shape of the same name.
+                if KERNEL_RECS.iter().any(|(n, _)| *n == name) {
+                    return Err(format!("'{}' is a record the kernel returns", name));
+                }
+                self.recs.insert(name.clone(), fields.clone());
+                Ok(Value::Nil)
+            }
+            Stmt::Use(path) => {
+                self.import(path)?;
                 Ok(Value::Nil)
             }
             Stmt::Return(e) => {
@@ -643,6 +870,78 @@ impl Interp {
                 }
             }
             Expr::Bin(op, l, r) => self.binary(*op, l, r),
+            Expr::Field(target, field) => {
+                let v = self.expr(target)?;
+                match &v {
+                    Value::Rec(ty, fields) => fields
+                        .iter()
+                        .find(|(n, _)| n == field)
+                        .map(|(_, v)| v.clone())
+                        .ok_or_else(|| format!("{} has no field '{}'", ty, field)),
+                    // Not Nil. Reading a field off a number is a mistake in the
+                    // program, and answering nothing would let it run on and
+                    // fail somewhere that has nothing to do with the cause.
+                    other => Err(format!(
+                        "'.{}' wants a record, got {}",
+                        field,
+                        other.type_name()
+                    )),
+                }
+            }
+            Expr::SetField(target, field, value) => {
+                let v = self.expr(value)?;
+                let updated = {
+                    let base = self.expr(target)?;
+                    let Value::Rec(ty, fields) = base else {
+                        return Err(format!(
+                            "'.{} =' wants a record, got {}",
+                            field,
+                            base.type_name()
+                        ));
+                    };
+                    // The declared type of the field still holds. A record
+                    // whose fields could be replaced by anything after
+                    // construction would make the annotation a comment.
+                    if let Some(want) = self
+                        .recs
+                        .get(&ty)
+                        .and_then(|fs| fs.iter().find(|(n, _)| n == field))
+                        .map(|(_, t)| t.clone())
+                    {
+                        if !v.fits(&want) {
+                            return Err(format!(
+                                "{}.{} wants {}, got {}",
+                                ty,
+                                field,
+                                want.name(),
+                                v.type_name()
+                            ));
+                        }
+                    }
+                    let mut out = fields.clone();
+                    match out.iter_mut().find(|(n, _)| n == field) {
+                        Some(slot) => slot.1 = v.clone(),
+                        None => return Err(format!("{} has no field '{}'", ty, field)),
+                    }
+                    Value::Rec(ty, out)
+                };
+                // Records are values, so there is nothing shared to mutate:
+                // the new record has to be put back where the old one was.
+                // Only a plain variable can be assigned back to, which means
+                // `f(x).y = 1` is refused rather than silently discarded.
+                match &**target {
+                    Expr::Var(name) => {
+                        self.assign(name, updated.clone());
+                        Ok(updated)
+                    }
+                    Expr::Field(..) => Err(
+                        "assigning through a nested field is not supported -- \
+                         take the inner record into a variable first"
+                            .to_string(),
+                    ),
+                    _ => Err("left of '=' must be a variable or a field".to_string()),
+                }
+            }
             Expr::Call(name, args) => {
                 let mut vals = Vec::with_capacity(args.len());
                 for a in args {
@@ -653,7 +952,35 @@ impl Interp {
                 // name was reserved is worse than losing access to a builtin
                 // the program chose to replace.
                 if let Some(f) = self.funcs.get(name).cloned() {
-                    return self.call_user(&f, &vals);
+                    return self.call_user(name, &f, &vals);
+                }
+                // A record's name is its constructor. Between user functions
+                // and builtins: a program may still define a function with the
+                // record's name and mean it, and no builtin can be shadowed
+                // because `rec` refuses a builtin's name outright.
+                if let Some(fields) = self.recs.get(name).cloned() {
+                    if vals.len() != fields.len() {
+                        return Err(format!(
+                            "{} takes {} field(s), got {}",
+                            name,
+                            fields.len(),
+                            vals.len()
+                        ));
+                    }
+                    let mut out = Vec::with_capacity(fields.len());
+                    for ((fname, ty), v) in fields.iter().zip(vals.iter()) {
+                        if !v.fits(ty) {
+                            return Err(format!(
+                                "{}.{} wants {}, got {}",
+                                name,
+                                fname,
+                                ty.name(),
+                                v.type_name()
+                            ));
+                        }
+                        out.push((fname.clone(), v.clone()));
+                    }
+                    return Ok(Value::Rec(name.clone(), out));
                 }
                 self.builtin(name, &vals)
             }
