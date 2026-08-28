@@ -312,6 +312,29 @@ pub const BUILTINS: &[(&str, Touch, usize, usize)] = &[
     ("net_gateway", Touch::Read, 0, 0),
     ("net_dns", Touch::Read, 0, 0),
 
+    // --- crate::net::dns, ::tcp, ::udp, ::tls -------------------------------
+    //
+    // The line between Read and Net is whether a packet leaves the machine.
+    // Everything here puts one on the wire, so none of it is reachable from a
+    // stored program without `app trust` -- which is the answer to "will it
+    // write me nmap": it can, and you have to say so first.
+    ("dns_resolve", Touch::Net, 1, 1),
+    ("tcp_connect", Touch::Net, 3, 3),
+    ("tcp_send", Touch::Net, 2, 2),
+    ("tcp_recv", Touch::Net, 1, 1),
+    ("tcp_close", Touch::Net, 0, 0),
+    ("tcp_state", Touch::Net, 0, 0),
+    ("tcp_error", Touch::Net, 0, 0),
+    ("http_get", Touch::Net, 3, 3),
+    ("https_get", Touch::Net, 3, 3),
+    ("https_identity", Touch::Net, 0, 0),
+    ("udp_send", Touch::Net, 4, 4),
+    ("ping", Touch::Net, 2, 2),
+
+    // --- crate::ai ----------------------------------------------------------
+    ("model_ready", Touch::Read, 0, 0),
+    ("ask", Touch::Model, 2, 2),
+
     // --- crate::sysbox, beyond read and write -------------------------------
     ("hash_of", Touch::Read, 1, 1),
     ("size", Touch::Read, 1, 1),
@@ -372,6 +395,8 @@ pub struct Interp {
     /// The subtree a sandboxed program may write into. Absolute, with no
     /// trailing slash.
     jail: Option<String>,
+    /// Scratch between builtins. See `set_note`.
+    notes: BTreeMap<String, String>,
 }
 
 impl Default for Interp {
@@ -391,6 +416,7 @@ impl Interp {
             budget: STEP_BUDGET,
             caps: Caps::Operator,
             jail: None,
+            notes: BTreeMap::new(),
         }
     }
 
@@ -420,6 +446,25 @@ impl Interp {
     ///
     /// The path is resolved first. A jail compared against what was typed is
     /// defeated by `../..`, which is the entire history of this kind of check.
+    /// A note one builtin leaves for another.
+    ///
+    /// `tcp_connect` answers 1 or 0 because a refused port is a result and not
+    /// an exception, and *why* it failed still has to reach `tcp_error`. A
+    /// static would work and would let two programs read each other's failure;
+    /// on the interpreter it dies with the interpreter, which for an
+    /// application is every repaint.
+    ///
+    /// Not reachable from Aiksi. There is no `note()` builtin, deliberately:
+    /// this is plumbing between arms, and a program that could write here
+    /// could forge the reason its own last call failed.
+    pub fn set_note(&mut self, key: &str, value: &str) {
+        self.notes.insert(String::from(key), String::from(value));
+    }
+
+    pub fn note(&self, key: &str) -> String {
+        self.notes.get(key).cloned().unwrap_or_default()
+    }
+
     /// `may_write` for the kernel arms, which live in another module and must
     /// not each grow their own idea of where the jail is.
     pub fn may_write_pub(&self, path: &str) -> bool {

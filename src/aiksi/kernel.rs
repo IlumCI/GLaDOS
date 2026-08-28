@@ -307,6 +307,162 @@ pub fn call(it: &mut Interp, name: &str, args: &[Value]) -> Result<Value, String
         "net_gateway" => Ok(Value::Str(fmt_ip(crate::net::config().gateway))),
         "net_dns" => Ok(Value::Str(fmt_ip(crate::net::config().dns))),
 
+        // --- crate::net::dns, ::tcp, ::udp, ::tls -----------------------
+        //
+        // Sockets, and the thing to know before writing anything against them:
+        // **there is one connection.** `tcp` holds a single TCB and `connect`
+        // aborts whatever was open before it. That is not a limitation to be
+        // worked around with a handle table bolted on here -- it is what the
+        // transport is, and a builtin handing back a fake descriptor would be
+        // lying about it. A program does one exchange at a time, in order.
+        //
+        // Every host argument goes through `dns::lookup`, which passes a
+        // dotted address through unchanged and resolves anything else. A
+        // program holding an address never pays for a query, and one holding a
+        // name does not have to know which it was given.
+        "dns_resolve" => Ok(Value::Str(
+            crate::net::dns::lookup(&text(args, 0)).map(fmt_ip).unwrap_or_default(),
+        )),
+        // Success as 1/0 rather than an error, because the failures here are
+        // answers: a port that refuses is the result a scanner wants, not an
+        // exception it has to catch. `tcp_error` carries the distinction --
+        // refused, timed out, reset -- for a program that needs it.
+        "tcp_connect" => {
+            let host = text(args, 0);
+            let Ok(ip) = crate::net::dns::lookup(&host) else {
+                return Err(alloc::format!("cannot resolve '{}'", host));
+            };
+            let port = int(args, 1)?.clamp(0, 65_535) as u16;
+            // Bounded, because an unbounded timeout in a repaint path hangs
+            // the desktop and the step budget cannot see a blocking call.
+            let ms = int(args, 2)?.clamp(1, 30_000) as u64;
+            match crate::net::tcp::connect(ip, port, ms) {
+                Ok(()) => {
+                    set_err(it, "");
+                    Ok(Value::Int(1))
+                }
+                Err(e) => {
+                    set_err(it, e.name());
+                    Ok(Value::Int(0))
+                }
+            }
+        }
+        "tcp_send" => {
+            let data = text(args, 0);
+            let ms = int(args, 1)?.clamp(1, 30_000) as u64;
+            match crate::net::tcp::send(data.as_bytes(), ms) {
+                Ok(()) => Ok(Value::Int(1)),
+                Err(e) => {
+                    set_err(it, e.name());
+                    Ok(Value::Int(0))
+                }
+            }
+        }
+        // Lossy UTF-8, because a program reading a protocol is reading text
+        // and one reading bytes has `hexenc` to make them legible. Refusing a
+        // response for not being valid UTF-8 would throw away the header that
+        // says what encoding it is.
+        "tcp_recv" => {
+            let ms = int(args, 0)?.clamp(1, 30_000) as u64;
+            let v = crate::net::tcp::recv(ms);
+            Ok(Value::Str(String::from_utf8_lossy(&v).into_owned()))
+        }
+        "tcp_close" => {
+            crate::net::tcp::close(2_000);
+            Ok(Value::Nil)
+        }
+        "tcp_state" => {
+            Ok(Value::Str(alloc::format!("{:?}", crate::net::tcp::state()).to_lowercase()))
+        }
+        "tcp_error" => Ok(Value::Str(last_err(it))),
+        "http_get" => {
+            let host = text(args, 0);
+            let Ok(ip) = crate::net::dns::lookup(&host) else {
+                return Err(alloc::format!("cannot resolve '{}'", host));
+            };
+            let port = int(args, 1)?.clamp(1, 65_535) as u16;
+            match crate::net::tcp::http_get(ip, &host, port, &text(args, 2)) {
+                Ok(v) => Ok(Value::Str(String::from_utf8_lossy(&v).into_owned())),
+                Err(e) => Err(alloc::format!("http_get: {}", e.name())),
+            }
+        }
+        // TLS here validates the chain, the transcript signature, dates and
+        // name and then *reports* rather than enforcing; `tls.rs` says so in
+        // its own header. So this answers the body and `https_identity`
+        // answers whether it was anyone in particular. One builtin returning
+        // only the body would make the unauthenticated case invisible, which
+        // is the exact failure that module spends its header warning about.
+        "https_get" => {
+            let host = text(args, 0);
+            let Ok(ip) = crate::net::dns::lookup(&host) else {
+                return Err(alloc::format!("cannot resolve '{}'", host));
+            };
+            let port = int(args, 1)?.clamp(1, 65_535) as u16;
+            match crate::net::tls::https_get(ip, &host, port, &text(args, 2)) {
+                Ok((body, _, _, id, _, _)) => {
+                    set_err(it, if id.ok() { "" } else { "unauthenticated" });
+                    Ok(Value::Str(String::from_utf8_lossy(&body).into_owned()))
+                }
+                Err(e) => Err(alloc::format!("https_get: {}", e.name())),
+            }
+        }
+        "https_identity" => Ok(Value::Int((last_err(it) != "unauthenticated") as i64)),
+        "udp_send" => {
+            let host = text(args, 0);
+            let Ok(ip) = crate::net::dns::lookup(&host) else {
+                return Err(alloc::format!("cannot resolve '{}'", host));
+            };
+            let dst = int(args, 1)?.clamp(0, 65_535) as u16;
+            let src = int(args, 2)?.clamp(0, 65_535) as u16;
+            Ok(Value::Int(
+                crate::net::udp::send(ip, dst, src, text(args, 3).as_bytes()) as i64,
+            ))
+        }
+        "ping" => {
+            let host = text(args, 0);
+            let Ok(ip) = crate::net::dns::lookup(&host) else {
+                return Err(alloc::format!("cannot resolve '{}'", host));
+            };
+            crate::net::ping(ip, int(args, 1)?.clamp(1, 16) as u16);
+            Ok(Value::Nil)
+        }
+
+        // --- crate::ai ---------------------------------------------------
+        //
+        // The model, from inside a program the model may have written. Less
+        // circular than it sounds, and worth being precise about why:
+        // `with_engine` refuses a second holder, so `ask` called from inside
+        // an authoring run answers "another task holds it" rather than
+        // decoding reentrantly. The refusal is the safety property and it is
+        // the existing one, not a new check bolted on here.
+        "model_ready" => Ok(Value::Int(crate::ai::engine_ready() as i64)),
+        "ask" => {
+            let prompt = text(args, 0);
+            let steps = int(args, 1)?.clamp(1, 512) as usize;
+            if !crate::ai::engine_ready() {
+                return Err("ask: no model is loaded".to_string());
+            }
+            // `generate` writes to the console, which is how every other
+            // caller consumes it. Capturing is what `applet` already does, and
+            // it keeps one implementation of generation rather than a second
+            // that returns a string and drifts from the first.
+            let opts = crate::ai::GenOpts {
+                steps,
+                echo_prompt: false,
+                ..Default::default()
+            };
+            crate::gfx::console::begin_capture();
+            crate::ai::generate(&prompt, &opts);
+            let out = crate::gfx::console::end_capture().unwrap_or_default();
+            // `generate` signs off with a rate line for whoever is watching the
+            // console. A program asked for an answer, and would otherwise have
+            // to know to strip a benchmark off the end of every one.
+            let body: alloc::vec::Vec<&str> =
+                out.lines().filter(|l| !l.trim_start().starts_with(|c: char| c.is_ascii_digit()) || !l.contains(" tokens in ")).collect();
+            Ok(Value::Str(body.join("
+").trim().to_string()))
+        }
+
         // --- the operator's namespace, beyond read/write ----------------
         // Hex, because that is how every other part of this system names a
         // node -- the ledgers, `app info`, the blob directory -- and a program
@@ -361,6 +517,19 @@ pub fn call(it: &mut Interp, name: &str, args: &[Value]) -> Result<Value, String
 
         other => Err(format!("'{}' is in the table with no implementation", other)),
     }
+}
+
+/// Why the last socket call failed.
+///
+/// Kept on the interpreter rather than in a static, so two programs cannot
+/// read each other's failure -- and so it is gone when the interpreter is,
+/// which for an application is every repaint.
+fn set_err(it: &mut Interp, why: &str) {
+    it.set_note("net_error", why);
+}
+
+fn last_err(it: &Interp) -> String {
+    it.note("net_error")
 }
 
 fn text(args: &[Value], i: usize) -> String {
