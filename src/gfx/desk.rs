@@ -212,6 +212,14 @@ pub struct Desktop {
     pub windows: Vec<Window>,
     pub mode: Mode,
     pub hover: Hover,
+    /// What has been typed into the Start menu's query row.
+    ///
+    /// Here rather than inside `Mode::Start`, because `Mode` is `Copy` and is
+    /// assigned by value all over this file -- a `String` in it would turn
+    /// every one of those into a move and the enum into something that has to
+    /// be cloned to be read. It lives as long as the menu is open and is
+    /// cleared when it closes, which is the same lifetime either way.
+    pub query: String,
 }
 
 static DESK: Racy<Option<Desktop>> = Racy::new(None);
@@ -255,10 +263,13 @@ const ICONS: [(&str, &str); 10] = [
 /// The Start menu, bottom of the bar upward -- the 98 half of the ancestry.
 /// Same entries as the icons plus the one thing that belongs behind a second
 /// look, exactly where 98 kept it.
-const START_ITEMS: [(&str, &str); 13] = [
-    // First, because it is the thing an operator reaches for when they do not
-    // already know which of the others they want.
-    ("Search...", "win open search"),
+const START_ITEMS: [(&str, &str); 12] = [
+    // "Search..." used to lead this list, opening a panel with one text field
+    // in it. The query row at the foot of this menu does the same job in the
+    // place a person already is, and dispatches through the same `open`, so
+    // the item became a second door to one room. The panel itself is still
+    // there -- `win open search`, and `open` still raises it to offer to write
+    // something that does not exist.
     ("Terminal", "term"),
     ("Programs", "win open programs"),
     ("Files", "win open files"),
@@ -337,11 +348,35 @@ fn start_rect(fb: &Framebuffer) -> Rect {
 /// Where the Start menu pops, directly above its button. The width formula is
 /// `dropdown`'s own, so the paint and the hit-test cannot disagree.
 fn start_menu_rect(fb: &Framebuffer) -> (Rect, usize) {
-    let n = START_ITEMS.len();
-    let w = theme::text_w(START_ITEMS.iter().map(|(l, _)| l.len()).max().unwrap_or(4)) + 24;
+    let n = start_rows();
+    // Wide enough for the longest label, and for a query worth typing. A menu
+    // sized only to its labels gives the search row about eleven characters,
+    // which is narrower than the thing being searched for.
+    let label_w = theme::text_w(START_ITEMS.iter().map(|(l, _)| l.len()).max().unwrap_or(4)) + 24;
+    let w = label_w.max(theme::text_w(QUERY_COLS) + 24);
     let h = n as u32 * MENU_H + 8;
     let bar = taskbar_rect(fb);
     (Rect::new(bar.x + 2, bar.y.saturating_sub(h), w, h), n)
+}
+
+/// How many characters wide the query row is sized for.
+const QUERY_COLS: usize = 22;
+
+/// Rows in the Start menu: every item, then the query.
+///
+/// The query is **last**, which is to say nearest the Start button, because
+/// this menu opens upwards out of the taskbar. Windows 7 put its search box in
+/// the same place for the same reason -- it is where the pointer already is
+/// after clicking Start, and where the eye goes. It also leaves every item
+/// index exactly as it was, so nothing that indexes `START_ITEMS` had to learn
+/// about an offset.
+fn start_rows() -> usize {
+    START_ITEMS.len() + 1
+}
+
+/// True when this row is the query rather than an item.
+fn is_query_row(item: usize) -> bool {
+    item >= START_ITEMS.len()
 }
 
 // --- desktop icons ---------------------------------------------------------
@@ -676,6 +711,7 @@ pub fn init() {
             windows: alloc::vec![pmw, executive, terminal],
             mode: Mode::Normal,
             hover: Hover::None,
+            query: String::new(),
         })
     };
     // The compositor needs the heap, which exists by now; the console then
@@ -1920,7 +1956,10 @@ fn task_press(fb: &Framebuffer, x: i32, y: i32) {
         with(|d| {
             d.mode = match d.mode {
                 Mode::Start { .. } => Mode::Normal,
-                _ => Mode::Start { item: 0 },
+                // Opens on the query row, because pressing Start and typing is
+                // the common case and arrowing up into the items is one key
+                // either way.
+                _ => Mode::Start { item: START_ITEMS.len() },
             }
         });
         return;
@@ -2017,8 +2056,16 @@ fn menu_press(fb: &Framebuffer, x: i32, y: i32, screen: Rect) -> bool {
         };
         match d.mode {
             Mode::Start { .. } => {
-                d.mode = Mode::Normal;
-                run = Some(String::from(START_ITEMS[item].1));
+                if is_query_row(item) {
+                    // Clicking the box puts the keyboard in it and leaves the
+                    // menu open. Closing on a click into a text field would be
+                    // the one interaction nobody expects.
+                    d.mode = Mode::Start { item };
+                } else {
+                    d.mode = Mode::Normal;
+                    d.query.clear();
+                    run = Some(String::from(START_ITEMS[item].1));
+                }
             }
             Mode::Menu { menu, .. } => {
                 d.mode = Mode::Normal;
@@ -2676,7 +2723,42 @@ pub fn draw() {
         }
         if let Mode::Start { item } = d.mode {
             let (r, _) = start_menu_rect(&fb);
-            dropdown(&fb, r.x, r.y, START_ITEMS.iter().map(|(l, _)| *l), item);
+            // The panel is drawn to the full height including the query row,
+            // then the items over it, then the query row last. `dropdown`
+            // sizes its own panel from its labels, so it is given the whole
+            // rectangle to paint and the rows are placed on top.
+            theme::panel(&fb, r);
+            if r.w >= 16 {
+                for (i, (label, _)) in START_ITEMS.iter().enumerate() {
+                    let row =
+                        Rect::new(r.x + 4, r.y + 4 + i as u32 * MENU_H, r.w - 8, MENU_H);
+                    theme::list_row(&fb, row, label, i == item, true);
+                }
+                let row = Rect::new(
+                    r.x + 4,
+                    r.y + 4 + START_ITEMS.len() as u32 * MENU_H,
+                    r.w - 8,
+                    MENU_H,
+                );
+                // A well, not a list row: it is a place to type, and it should
+                // not look like something that runs when pressed.
+                theme::well(&fb, row, theme::HILIGHT);
+                let shown = if d.query.is_empty() {
+                    alloc::string::String::from("Type to search")
+                } else {
+                    // The tail, so the end being typed stays visible rather
+                    // than the beginning that has already been read.
+                    let n = d.query.chars().count();
+                    d.query.chars().skip(n.saturating_sub(QUERY_COLS - 1)).collect()
+                };
+                let fg = if d.query.is_empty() { theme::TEXT_DIM } else { theme::TEXT };
+                theme::text(&fb, row.x + 4, row.y + 4, &shown, fg, theme::HILIGHT);
+                // A caret, so a selected empty box does not read as inert.
+                if is_query_row(item) {
+                    let cx = row.x + 4 + theme::text_w(shown.chars().count());
+                    fb.rect(cx, row.y + 4, 2, theme::text_h(), theme::TEXT);
+                }
+            }
         }
     });
     super::compose::present();
@@ -2855,6 +2937,19 @@ pub fn key(k: u8) -> Route {
     if k == kbd::KEY_ALTTAB {
         with(|d| d.mode = Mode::Normal);
         cycle(false);
+        return Route::Handled;
+    }
+    // Before the mode dispatch, like Alt-Tab, so there is no state the
+    // keyboard can get stuck in: pressing it again closes the menu.
+    if k == kbd::KEY_STARTMENU {
+        with(|d| {
+            d.mode = match d.mode {
+                Mode::Start { .. } => Mode::Normal,
+                _ => Mode::Start { item: START_ITEMS.len() },
+            };
+            d.query.clear();
+        });
+        draw();
         return Route::Handled;
     }
     if k == kbd::KEY_TASKBAR {
@@ -3043,7 +3138,7 @@ pub fn key(k: u8) -> Route {
         }
 
         Mode::Start { item } => {
-            let n = START_ITEMS.len();
+            let n = start_rows();
             match k {
                 kbd::KEY_DOWN => {
                     with(|d| d.mode = Mode::Start { item: (item + 1) % n });
@@ -3054,12 +3149,59 @@ pub fn key(k: u8) -> Route {
                     draw();
                 }
                 b'\n' | b'\r' => {
-                    with(|d| d.mode = Mode::Normal);
-                    launch(START_ITEMS[item].1);
+                    // The query row runs what was typed; every other row runs
+                    // its own command. `open` is the same dispatcher the search
+                    // panel uses, so a name means the same thing typed here as
+                    // typed there -- an application opens, a command runs, and
+                    // anything else offers to be written.
+                    let typed = with(|d| {
+                        let q = alloc::string::String::from(d.query.trim());
+                        d.mode = Mode::Normal;
+                        d.query.clear();
+                        q
+                    })
+                    .unwrap_or_default();
+                    if is_query_row(item) {
+                        if !typed.is_empty() {
+                            launch(&alloc::format!("open {}", typed));
+                        }
+                    } else {
+                        launch(START_ITEMS[item].1);
+                    }
                     draw();
                 }
                 27 => {
-                    with(|d| d.mode = Mode::Normal);
+                    with(|d| {
+                        d.mode = Mode::Normal;
+                        d.query.clear();
+                    });
+                    draw();
+                }
+                8 => {
+                    // Backspace edits the query wherever the selection is, and
+                    // moves to it. Typing is the reason the row exists; making
+                    // it reachable only by arrowing to it first would be a
+                    // search box that has to be found before it can be used.
+                    let moved = with(|d| {
+                        d.query.pop();
+                        d.mode = Mode::Start { item: START_ITEMS.len() };
+                        !d.query.is_empty()
+                    })
+                    .unwrap_or(false);
+                    let _ = moved;
+                    draw();
+                }
+                // Printable ASCII. Typing anywhere in the menu goes to the
+                // query and selects it, which is what Windows has done since
+                // Vista and is the only behaviour that makes the box worth
+                // having -- press Start, type, press Enter.
+                c if (0x20..0x7F).contains(&c) => {
+                    with(|d| {
+                        if d.query.chars().count() < 64 {
+                            d.query.push(c as char);
+                        }
+                        d.mode = Mode::Start { item: START_ITEMS.len() };
+                    });
                     draw();
                 }
                 _ => {}

@@ -582,7 +582,10 @@ pub fn parse_keys(spec: &str) -> Vec<u8> {
             "alttab" | "alt-tab" => kbd::KEY_ALTTAB,
             "sysmenu" | "alt-space" => kbd::KEY_SYSMENU,
             "menu" | "alt" => kbd::KEY_MENU,
-            "taskbar" | "ctrl-esc" | "start" => kbd::KEY_TASKBAR,
+            "taskbar" | "ctrl-esc" => kbd::KEY_TASKBAR,
+            // "start" moved here from the taskbar, where it was a lie: it
+            // focused the bar, and anybody typing it means the menu.
+            "start" | "startmenu" | "win" => kbd::KEY_STARTMENU,
             "up" => kbd::KEY_UP,
             "down" => kbd::KEY_DOWN,
             "left" => kbd::KEY_LEFT,

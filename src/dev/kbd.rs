@@ -323,6 +323,22 @@ pub const KEY_MENU: u8 = 0x8A;
 /// Esc is not a letter, so both would otherwise arrive as plain 27.
 pub const KEY_TASKBAR: u8 = 0x8B;
 
+/// Open the Start menu.
+///
+/// It had no key at all: `Mode::Start` was reachable only by clicking the
+/// Start button, so the menu could not be opened without a mouse and could not
+/// be driven headlessly at all. That breaks this desktop's own rule -- whatever
+/// the pointer does a keystroke must also do, because serial cannot inject
+/// PS/2 packets and `win keys` is the only way any of this gets tested.
+///
+/// Distinct from `KEY_TASKBAR` rather than replacing it. Ctrl-Esc opens Start
+/// on Windows and this one does not, which is a small infidelity bought
+/// deliberately: `Mode::Taskbar` walks the window buttons, and restoring a
+/// minimised window is the one thing only those buttons do -- `cycle` skips
+/// minimised windows, so taking that binding away would leave a minimised
+/// window unreachable from the keyboard.
+pub const KEY_STARTMENU: u8 = 0x8C;
+
 fn decode(scancode: u8) {
     // E0 introduces a two-byte sequence: arrows, navigation keys, and the
     // right-hand modifiers.

@@ -612,7 +612,13 @@ monitor, relative moves from (0,0) at boot).
 
 The look is 98 plus 3.1 plus the palette from the sign over our door: icons and
 Start and gradient titles from 98, bevels and dialogs that hug their content
-from 3.1. `todo` (shell) and the ToDo window share one list. It is the hand-off
+from 3.1. The Start menu has a query row at its foot -- nearest the Start button, where
+this menu opens upwards out of the taskbar and where Windows 7 put its search
+box. Typing anywhere in the menu goes to it; Enter runs `open <query>`, the same
+dispatcher the search panel uses. `KEY_STARTMENU` (`win keys start`) opens the
+menu, which previously had no key at all and so could not be driven headlessly.
+
+`todo` (shell) and the ToDo window share one list. It is the hand-off
 note for what to test at the GF63, since the machine that builds this is a
 different machine from the one that runs it.
 
