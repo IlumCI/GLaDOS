@@ -2849,15 +2849,111 @@ pub fn words_selftest() -> bool {
     }
     // And the two shapes agree about where they are.
     let mut n = Words::new("one two");
-    n.next() == Some("one") && n.rest() == "two"
+    if !(n.next() == Some("one") && n.rest() == "two") {
+        return false;
+    }
+
+    // Redirection, against the expressions that used to be eaten by it.
+    // A comparison is not a redirect, at any depth or spacing.
+    for src in [
+        "if (len(x) > 0) { println(1) }",
+        "uptime() > 5",
+        "a >= b",
+        "x <> y",
+        "count() > 0",
+        // Inside a string, where the old version happily split.
+        "println(\"a > b\")",
+        "split(t, \"|\")",
+        // Aiksi's or, not a pipe.
+        "a || b",
+    ] {
+        if split_pipeline(src).is_some() {
+            return false;
+        }
+    }
+    // ...and the real thing still works, including with an expression in front
+    // of it that contains both characters.
+    match split_pipeline("mem > /sys/boot.log") {
+        Some((h, '>', t)) if h == "mem" && t == "/sys/boot.log" => {}
+        _ => return false,
+    }
+    match split_pipeline("log | grep boot") {
+        Some((h, '|', t)) if h == "log" && t == "grep boot" => {}
+        _ => return false,
+    }
+    match split_pipeline("if (a > b) { println(2) } > /tmp/out") {
+        Some((_, '>', t)) if t == "/tmp/out" => {}
+        _ => return false,
+    }
+    true
 }
 
+/// Find the redirection or pipe in a command line, if there is one.
+///
+/// This used to take the last `|` or `>` anywhere in the string, which was
+/// fine while the prompt was mostly commands and became untenable when Aiksi
+/// grew into the language everything is written in. `>` is comparison and `||`
+/// is or, so `if (len(x) > 0)` typed at the prompt was silently redirected --
+/// the head ran, and 26 bytes went into a file named `0) { ... }`. Nothing
+/// failed and nothing said so.
+///
+/// Three rules, and each one exists because the naive version broke on it:
+///
+/// * **Not inside a string or brackets.** `split(t, "|")` is an argument, and
+///   `get(f, i) > 0` inside a call is a comparison.
+/// * **Not part of a longer operator.** `>=`, `>>`, `->` and `||` are all
+///   things Aiksi or the shell spells with these characters.
+/// * **A redirect target is an absolute path.** This is what actually
+///   separates `mem > /sys/boot.log` from `uptime() > 5`, because both are a
+///   bare `>` at depth zero with a one-word tail. Every redirect this system
+///   has ever documented writes into the namespace, so requiring the `/` costs
+///   nothing and makes the comparison unambiguous.
+///
+/// A pipe needs no such rule: Aiksi has no single `|` operator, so a bare one
+/// outside a string can only be a pipe.
 fn split_pipeline(line: &str) -> Option<(&str, char, &str)> {
+    let b = line.as_bytes();
     let mut found: Option<(usize, char)> = None;
-    for (i, c) in line.char_indices() {
-        if c == '|' || c == '>' {
-            found = Some((i, c));
+    let mut depth: i32 = 0;
+    let mut in_str = false;
+    let mut esc = false;
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if in_str {
+            if esc {
+                esc = false;
+            } else if c == b'\\' {
+                esc = true;
+            } else if c == b'"' {
+                in_str = false;
+            }
+            i += 1;
+            continue;
         }
+        match c {
+            b'"' => in_str = true,
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b'|' if depth == 0 => {
+                if b.get(i + 1) == Some(&b'|') {
+                    i += 2;
+                    continue;
+                }
+                found = Some((i, '|'));
+            }
+            b'>' if depth == 0 => {
+                let prev = if i > 0 { b[i - 1] } else { 0 };
+                let next = b.get(i + 1).copied().unwrap_or(0);
+                let part_of_operator =
+                    next == b'=' || next == b'>' || prev == b'-' || prev == b'>' || prev == b'<';
+                if !part_of_operator && line[i + 1..].trim().starts_with('/') {
+                    found = Some((i, '>'));
+                }
+            }
+            _ => {}
+        }
+        i += 1;
     }
     let (i, c) = found?;
     Some((line[..i].trim(), c, line[i + 1..].trim()))

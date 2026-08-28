@@ -113,11 +113,24 @@ impl Action {
 
 /// Function bodies the loop may add.
 ///
-/// Three, and no free-form bodies. `todo`'s `drop()` is twenty lines of string
-/// walking with index arithmetic; a model that writes it wrong writes something
-/// that parses, runs, and quietly loses an entry. A requirement no body here
-/// serves is reported unmet, which is a legible failure rather than a plausible
-/// wrong answer.
+/// No free-form bodies, and that has not changed with the language growing.
+/// `todo`'s `drop()` is twenty lines of string walking with index arithmetic;
+/// a model that writes it wrong writes something that parses, runs, and
+/// quietly loses an entry. A requirement no body here serves is reported
+/// unmet, which is a legible failure rather than a plausible wrong answer.
+///
+/// What did change is the reach of each body. Before Aiksi had `split`, `join`
+/// and `int`, a body could only return a whole file or append to one, so every
+/// application was a text box with a history. These are the same shape --
+/// filled in, checked, no arithmetic for the model to get wrong -- over a
+/// language that can now count, order and take things apart.
+///
+/// Nothing here touches the network or the model. A body is added to a program
+/// the sandbox will run unattended, and `Touch::Net` is refused there anyway;
+/// putting a socket in a skeleton would mean generated applications that only
+/// work once somebody has typed `app trust`, which is a confusing failure
+/// rather than a safe default. An operator writing Aiksi by hand has the whole
+/// table.
 pub const BODIES: &[(&str, &str)] = &[
     ("constant", "fn {NAME}() {\n  return \"\"\n}\n"),
     (
@@ -128,6 +141,32 @@ pub const BODIES: &[(&str, &str)] = &[
         "appender",
         "fn {NAME}(x) {\n  write(here() + \"/{NAME}\", x)\n  return \"\"\n}\n",
     ),
+    // One item per line, which is what `rows` wants and what `appender`
+    // already produces. Written out rather than left to the model because
+    // "read, split, drop the empties, join" is four calls in a fixed order and
+    // a model that reorders them gets a list with a blank row at the end.
+    (
+        "lines",
+        "fn {NAME}() {\n  t = \"\"\n  if (exists(here() + \"/{NAME}\")) { t = read(here() + \"/{NAME}\") }\n  out = list()\n  for_each = split(t, \"\\n\")\n  i = 0\n  while (i < len(for_each)) {\n    if (len(trim(get(for_each, i))) > 0) { out = push(out, trim(get(for_each, i))) }\n    i = i + 1\n  }\n  return join(out, \"\\n\")\n}\n",
+    ),
+    // Counting, which needed `int` to exist at all: `read` answers text and
+    // `+` on text concatenates, so the first counter written here went "0",
+    // "01", "011" with nothing failing anywhere.
+    (
+        "counter",
+        "fn {NAME}() {\n  n = 0\n  if (exists(here() + \"/{NAME}\")) { n = int(read(here() + \"/{NAME}\")) }\n  n = n + 1\n  write(here() + \"/{NAME}\", n)\n  return n\n}\n",
+    ),
+    // How many, without changing anything. A status row wants this and the
+    // counter above is wrong for it -- reading a count should not increment
+    // one, and a model asked to write "the same but without the += 1" is a
+    // model given the chance to get it backwards.
+    (
+        "tally",
+        "fn {NAME}() {\n  t = \"\"\n  if (exists(here() + \"/{NAME}\")) { t = read(here() + \"/{NAME}\") }\n  if (len(trim(t)) == 0) { return 0 }\n  return len(split(trim(t), \"\\n\"))\n}\n",
+    ),
+    // The clock, which is the one fact an application can show that is not
+    // about itself, and the cheapest way for a generated window to look alive.
+    ("clock", "fn {NAME}() {\n  return rtc_now()\n}\n"),
 ];
 
 pub fn body_kinds() -> Vec<&'static str> {
@@ -397,6 +436,31 @@ pub fn selftest() -> bool {
     }
     if Req::parse("nonsense x").is_some() || Req::parse("fn").is_some() {
         return false;
+    }
+
+    // Every body, filled in, is a program that parses and runs under the
+    // sandbox the generated application will run under.
+    //
+    // The defence `uidoc`'s wildcard-free `fixture_for` gives, in the one
+    // other place it matters: a body that cannot pass the gate a generated
+    // application passes is a bug waiting for whatever Tuesday somebody asks
+    // for that shape. It is cheap to hold -- a parse per body at boot -- and
+    // the failure it catches is otherwise invisible, because the loop reports
+    // an unmet clause and looks like a model that could not manage it.
+    for (kind, body) in BODIES {
+        let filled = body.replace("{NAME}", "thing");
+        let v = check::check_code(&filled, "/draft/selftest");
+        if !v.ok {
+            crate::kprintln!("  body '{}': {}", kind, v.why);
+            return false;
+        }
+        // ...and calling it does not fault, which a parse does not establish.
+        // Nothing is written: `here()` is the jail, the jail is a path nothing
+        // has created, and every body reads before it writes.
+        let mut it = crate::aiksi::Interp::sandboxed("/draft/selftest");
+        if crate::aiksi::eval_line(&mut it, &filled).is_err() {
+            return false;
+        }
     }
 
     // A whole run, with no forward passes anywhere in it: build from a

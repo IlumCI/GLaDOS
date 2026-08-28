@@ -296,7 +296,10 @@ There is no `cargo test`. This is a `no_std` UEFI binary with no host test
 runner, so **verification is the boot selftests plus driving QEMU.**
 
 At boot the system runs **eighteen selftest sections carrying seventy-three
-claims**, printing `ok` or `FAIL` per line: heap, timer, clock, the namespace's
+claims** (the `aiksi` section covers the capability gate by name and never by
+calling -- half that table pokes memory, drives I/O ports or paints over the
+screen, and a suite that called every row to prove it exists would be
+scribbling on the machine to do it), printing `ok` or `FAIL` per line: heap, timer, clock, the namespace's
 Merkle addressing, fifteen sets of published cipher vectors, fault handling,
 constrained decoding, the agent loop, the linear probe, the situation planner,
 the initiative policy, the self-modification gate, corpus bundles, QDoRA
@@ -381,6 +384,80 @@ was working correctly, because the log was being grepped down to the section
 under active work. Read the whole thing, or grep for `FAIL` across all of it.
 
 ## Architecture
+
+### Aiksi, the system language
+
+`src/aiksi/` is the language everything above the kernel is written in, and
+the intended relationship is C to Unix or HolyC to TempleOS: GLaDOS is written
+in Rust, and Aiksi is how anything that is not the kernel reaches it. A program
+is `code.ai&xi`. The extension is deliberately unusual and costs nothing --
+nothing on the host has it, the shell does not parse `&`, and the path resolver
+is a plain splitter.
+
+Source -> tokens -> AST -> tree-walking evaluation, in `lex.rs`, `parse.rs`,
+`eval.rs`. The single-pass code generator that replaces `eval` can be written
+against the same AST and checked against the same results, which is much easier
+than debugging a code generator with nothing to compare against.
+
+**Builtin naming is a rule, not a taste.** A builtin is named after the Rust
+path it calls, flattened: `crate::net::tcp::connect` is `tcp_connect`,
+`crate::dev::rtc::now` is `rtc_now`. The audience is a 0.6B model and whoever
+is reading the kernel source beside it, and both can apply a rule they were
+told once to a subsystem they have never seen. A hand-picked name per builtin
+reads better in isolation and has to be memorised one at a time, which is the
+cost that actually matters. Where the rule reads badly the rule still wins: one
+exception means every name has to be checked against a list again.
+
+`eval.rs` owns the gate, the arity check and the table; `kernel.rs` owns the
+arms that reach subsystems. The split keeps "what may a program do" to one
+screen, and means adding a subsystem cannot accidentally edit the gate.
+
+**`BUILTINS` is an allowlist and that is load-bearing.** Every row is
+`(name, Touch, min args, max args)`, and `builtin` refuses anything absent from
+it *before* dispatch. An arm added to the match without a row is unreachable --
+dead code rather than an ungated builtin -- and a row without an arm answers
+"no implementation", which is broken and not dangerous. It replaced two
+denylists that were correct for eleven raw builtins and stopped being correct
+the moment the language was wired to the network: a denylist grants by default,
+so the builtin anyone forgets is the one that matters.
+
+`Touch` has seven classes but **the sandbox question stays binary**:
+Pure/Read/Write are allowed to a stored program, everything else needs
+`app trust`. That follows `Manifest.raw`, which carries one bit for the reason
+it states -- an operator approving a request has to hold the whole of it in
+their head, and "may write outside itself but not open sockets" is a sentence
+nobody can check against a program. The line for Net is whether a packet leaves
+the machine, so `net_ifaces` is Read and `tcp_connect` is not.
+
+`words` prints the table grouped by class. It is the reference.
+
+What Aiksi reaches today: text (split/join/substr/find/replace/upper/lower/
+trim/starts/ends/contains/chr/ord/repeat/pad/hexenc/hexdec), integer arithmetic
+(no floats -- adding them for one builtin changes every arithmetic path), lists
+(sort/reverse/slice/index/remove/range/push/set/get/len), the namespace
+(read/write/ls/exists/rm/size/is_dir/hash_of/applet), the clock and counters
+(rtc_now/rtc_unix/uptime/tsc/tsc_mhz/ticks/hz), tasks and memory, `pci_list`,
+network status, sockets (dns_resolve/tcp_*/http_get/https_get/udp_send/ping),
+the model (`ask`), the framebuffer, and raw memory and I/O ports.
+
+Three bounds worth knowing before changing anything there. `range` and `repeat`
+are capped at 65,536 because they are the easiest way for a generated program
+to ask for a billion-element list, and this kernel has no OOM killer and one
+address space, so the step budget never sees the single call that takes the
+heap. Socket timeouts are clamped to 30 s because an unbounded one in a repaint
+path hangs the desktop and the step budget cannot see a blocking call. And
+`app::document` runs an application's `rows()` on **every repaint**, so that
+path takes `with_step_budget(DRAW_BUDGET)` rather than the full one.
+
+There is one TCP connection. `tcp` holds a single TCB and `connect` aborts
+whatever was open before it; the builtins expose that rather than handing back
+a descriptor that corresponds to nothing.
+
+`app::migrate_extension` carries programs written before the rename across by
+moving the bytes under the new name. Identity is the hash of the file contents,
+so manifests, grants and lineage survive untouched. It runs after every
+namespace init rather than once, because a restored snapshot can be older than
+the rename.
 
 ### Graphics and the desktop
 
