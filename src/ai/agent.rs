@@ -954,8 +954,11 @@ pub fn learn(name: Option<&str>) -> Result<String, &'static str> {
         .count()
         + 1;
     let skill = match name {
-        Some(n) => format!("/ai/tools/{}.l", n.trim().replace(".l", "")),
-        None => format!("/ai/tools/replay-{:04}.l", idx),
+        Some(n) => format!(
+            "/ai/tools/{}.ai&xi",
+            n.trim().trim_end_matches(".ai&xi").trim_end_matches(".l")
+        ),
+        None => format!("/ai/tools/replay-{:04}.ai&xi", idx),
     };
     // Parse it before storing it.
     //

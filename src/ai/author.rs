@@ -166,7 +166,14 @@ pub const BODIES: &[(&str, &str)] = &[
     ),
     // The clock, which is the one fact an application can show that is not
     // about itself, and the cheapest way for a generated window to look alive.
-    ("clock", "fn {NAME}() {\n  return rtc_now()\n}\n"),
+    // `rtc_now` answers a `Time` record, so the stamp is a field. Guarded,
+    // because a clock that cannot be read answers nothing and `.text` on
+    // nothing is an error -- which in a `rows` function is a window that
+    // renders a fault instead of a blank.
+    (
+        "clock",
+        "fn {NAME}(): str {\n  t = rtc_now()\n  if (t) { return t.text }\n  return \"\"\n}\n",
+    ),
 ];
 
 pub fn body_kinds() -> Vec<&'static str> {

@@ -489,10 +489,27 @@ trim/starts/ends/contains/chr/ord/repeat/pad/hexenc/hexdec), integer arithmetic
 network status, sockets (dns_resolve/tcp_*/http_get/https_get/udp_send/ping),
 the model (`ask`), the framebuffer, and raw memory and I/O ports.
 
-`pci_list` returns records; the rest still answer scalars, strings or lists.
-Converting a builtin to a record is a matter of adding its shape to
-`KERNEL_RECS` and building one in the arm, and is worth doing wherever a
-caller would otherwise `split` a line back into fields.
+Everything that is *actually a struct* answers a record: `pci_list` gives
+`Device`, `rtc_now` gives `Time`, `net_ifaces` gives `Iface`, plus `net_config`,
+`mem_stats`, `task_list`, `stat` and `tcp_status`. `ls` answers a list of names
+rather than newline-joined text.
+
+Atomic answers stayed atomic. `mem_used()` is not improved by becoming
+`mem_stats().used`, and converting scalars into records to be uniform would make
+the language worse to make a rule tidy. The test is whether a caller would
+otherwise re-parse: `substr(rtc_now(), 11, 2)` to get an hour, or a
+character-by-character line counter to count what `ls` reported -- the seeded
+`/ai/tools/count` tool contained exactly that, and now calls `len(ls(path))`.
+
+`kernel::rec` builds one by name and checks it against `KERNEL_RECS`, so an arm
+that adds a field without adding it to the shape, or gets the order wrong,
+fails there rather than handing back an `Iface` whose `.ip` is its netmask --
+a mistake invisible at a glance, because both are strings.
+
+Two shapes answer `nil` rather than a filled-in record: `rtc_now` when the clock
+cannot be read, and `stat` on a path that does not exist. A record whose fields
+all read as "absent" is indistinguishable from a real empty one, and a program
+checking existence would have to know which field to trust.
 
 Three bounds worth knowing before changing anything there. `range` and `repeat`
 are capped at 65,536 because they are the easiest way for a generated program

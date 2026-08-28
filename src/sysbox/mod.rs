@@ -242,10 +242,10 @@ fn rows() {\n\
 }
 
 fn seed_tools(sb: &mut Sysbox) {
-    let _ = tree::put(&mut sb.root, &path_of("/ai/tools/hello.l"), Node::Blob(
+    let _ = tree::put(&mut sb.root, &path_of("/ai/tools/hello.ai&xi"), Node::Blob(
         b"// says hello; the smallest working skill\n\
           println(\"hello from a tool\")\n".to_vec()));
-    let _ = tree::put(&mut sb.root, &path_of("/ai/tools/status.l"), Node::Blob(
+    let _ = tree::put(&mut sb.root, &path_of("/ai/tools/status.ai&xi"), Node::Blob(
         b"// one-line status card: ticks and task count\n\
           println(\"ticks\", ticks(), \"tasks\", tasks())\n".to_vec()));
     // A tool with a function in it, deliberately.
@@ -254,18 +254,21 @@ fn seed_tools(sb: &mut Sysbox) {
     // execute any file containing a function without anyone noticing: the
     // examples could not exercise the defect. One multi-line example makes the
     // whole path load-bearing at boot.
-    let _ = tree::put(&mut sb.root, &path_of("/ai/tools/count.l"), Node::Blob(
-        b"// counts what `ls` reports: run /ai/tools/count.l\n\
-          fn lines(text) {\n\
+    let _ = tree::put(&mut sb.root, &path_of("/ai/tools/count.ai&xi"), Node::Blob(
+        b"// what is in a directory, by kind: run /ai/tools/count.ai&xi\n\
+          fn tally(path: str): str {\n\
+            dirs = 0\n\
+            files = 0\n\
+            names = ls(path)\n\
             n = 0\n\
-            i = 0\n\
-            while (i < len(text)) {\n\
-              if (get(text, i) == \"\\n\") { n = n + 1 }\n\
-              i = i + 1\n\
+            while (n < len(names)) {\n\
+              s = stat(path + \"/\" + get(names, n))\n\
+              if (s.is_dir) { dirs = dirs + 1 } else { files = files + 1 }\n\
+              n = n + 1\n\
             }\n\
-            return n\n\
+            return files + \" file(s), \" + dirs + \" director(ies)\"\n\
           }\n\
-          println(\"lines from ls /ai/tools:\", lines(applet(\"ls /ai/tools\")))\n".to_vec()));
+          println(tally(\"/ai/tools\"))\n".to_vec()));
 }
 
 /// Adopt the newest snapshot as the working tree, if there is one.
@@ -501,13 +504,18 @@ pub fn hash_of(path: &str) -> Option<[u8; 32]> {
     .flatten()
 }
 
-/// The skills the namespace holds: /ai/tools/*.l with their first comment
-/// line as a description. This is what episode prompts and `agent skills`
-/// render, so the model can know what it (or the operator) has written.
+/// The skills the namespace holds, with their first comment line as a
+/// description. This is what episode prompts and `agent skills` render, so the
+/// model can know what it (or the operator) has written.
+///
+/// Both extensions are accepted. A store mounted from before the rename holds
+/// `.l` files until `migrate_extension` runs, and a filter that knew only the
+/// new spelling would answer "no skills" for a namespace full of them --
+/// silently, because an empty list is what a fresh system legitimately has.
 pub fn skills() -> Vec<(String, String)> {
     let mut out = Vec::new();
     for name in children("/ai/tools") {
-        if !name.ends_with(".l") {
+        if !name.ends_with(".ai&xi") && !name.ends_with(".l") {
             continue;
         }
         let desc = read_blob(&format!("/ai/tools/{}", name))

@@ -96,10 +96,26 @@ pub const RESERVED: &[&str] = &[
 /// directory listing and a miss.
 pub fn migrate_extension() -> usize {
     let mut moved = 0;
-    for root in [ROOT, crate::app::draft::ROOT] {
+    // `/ai/tools` as well as the application roots. The seeded skills are Aiksi
+    // programs like any other and were left behind by the first pass, which is
+    // the failure mode of a migration written against the roots somebody
+    // happened to be looking at.
+    for root in [ROOT, crate::app::draft::ROOT, "/ai/tools"] {
         for name in sysbox::children(root) {
-            let old = alloc::format!("{}/{}/code.l", root, name);
-            let new = alloc::format!("{}/{}/code.ai&xi", root, name);
+            // Two shapes: an application is a directory holding `code.l`,
+            // a skill is a file called `<name>.l`. One loop, because the move
+            // is the same and two would drift.
+            let (old, new) = if name.ends_with(".l") {
+                (
+                    alloc::format!("{}/{}", root, name),
+                    alloc::format!("{}/{}.ai&xi", root, name.trim_end_matches(".l")),
+                )
+            } else {
+                (
+                    alloc::format!("{}/{}/code.l", root, name),
+                    alloc::format!("{}/{}/code.ai&xi", root, name),
+                )
+            };
             if sysbox::read_blob(&new).is_some() {
                 continue;
             }

@@ -202,17 +202,98 @@ pub enum Caps {
 ///
 /// Declared here rather than emitted by the arm that builds one, so that the
 /// shape is written down in exactly one place and `words` could list it.
-pub const KERNEL_RECS: &[(&str, &[(&str, Type)])] = &[(
-    "Device",
-    &[
-        ("bus", Type::Int),
-        ("dev", Type::Int),
-        ("func", Type::Int),
-        ("vendor", Type::Int),
-        ("device", Type::Int),
-        ("class", Type::Str),
-    ],
-)];
+pub const KERNEL_RECS: &[(&str, &[(&str, Type)])] = &[
+    (
+        "Device",
+        &[
+            ("bus", Type::Int),
+            ("dev", Type::Int),
+            ("func", Type::Int),
+            ("vendor", Type::Int),
+            ("device", Type::Int),
+            ("class", Type::Str),
+        ],
+    ),
+    // The clock. `text` is the stamp `rtc_now` used to answer on its own, kept
+    // as a field rather than dropped: every caller that wanted to *show* the
+    // time had it, and taking it away would make each of them reimplement
+    // zero-padded formatting -- which is precisely the hand-rolled string work
+    // records exist to end. The numbers are what was missing; a program wanting
+    // the hour was reduced to `substr(rtc_now(), 11, 2)`.
+    (
+        "Time",
+        &[
+            ("year", Type::Int),
+            ("month", Type::Int),
+            ("day", Type::Int),
+            ("hour", Type::Int),
+            ("minute", Type::Int),
+            ("second", Type::Int),
+            ("text", Type::Str),
+        ],
+    ),
+    // An interface. `net_ifaces` answered a list of names, so everything else
+    // an interface knows -- its address, whether it is up, what it has carried
+    // -- was simply unreachable from Aiksi. This is the clearest case in the
+    // sweep: not a struct flattened into text, a struct discarded.
+    (
+        "Iface",
+        &[
+            ("name", Type::Str),
+            ("ip", Type::Str),
+            ("netmask", Type::Str),
+            ("gateway", Type::Str),
+            ("dns", Type::Str),
+            ("up", Type::Int),
+            ("rx_packets", Type::Int),
+            ("rx_bytes", Type::Int),
+            ("tx_packets", Type::Int),
+            ("tx_bytes", Type::Int),
+            ("tx_dropped", Type::Int),
+        ],
+    ),
+    (
+        "Config",
+        &[
+            ("ip", Type::Str),
+            ("gateway", Type::Str),
+            ("netmask", Type::Str),
+            ("dns", Type::Str),
+        ],
+    ),
+    // `HEAP.stats()` is a tuple, which is a struct that lost its field names on
+    // the way out. It reached Aiksi as two builtins that had to be called
+    // together to mean anything.
+    ("Mem", &[("used", Type::Int), ("total", Type::Int)]),
+    (
+        "Task",
+        &[
+            ("index", Type::Int),
+            ("name", Type::Str),
+            ("state", Type::Str),
+            ("switches", Type::Int),
+            // Whether this is the task asking. A program walking the list
+            // otherwise has to call `task_current()` and compare indices, which
+            // is the fragile join a record should remove.
+            ("current", Type::Int),
+        ],
+    ),
+    // What `ls` shows about one entry. `hash_of`, `size` and `is_dir` are three
+    // calls resolving the same path three times to answer one question.
+    (
+        "Stat",
+        &[
+            ("name", Type::Str),
+            ("hash", Type::Str),
+            ("size", Type::Int),
+            ("is_dir", Type::Int),
+        ],
+    ),
+    // `tcp_state` and `tcp_error` are one answer in two calls, and the pair can
+    // disagree: a program that reads the state, is preempted, and then reads
+    // the error gets two different moments.
+    ("Tcp", &[("state", Type::Str), ("error", Type::Str)]),
+];
 
 /// What a builtin touches.
 ///
@@ -398,6 +479,14 @@ pub const BUILTINS: &[(&str, Touch, usize, usize)] = &[
     ("net_ip", Touch::Read, 0, 0),
     ("net_gateway", Touch::Read, 0, 0),
     ("net_dns", Touch::Read, 0, 0),
+    // The record forms. The scalars above stay: `mem_used()` is not improved
+    // by becoming `mem_stats().used`, and a sweep that converted atomic
+    // answers into records to be uniform would be making the language worse to
+    // make a rule tidy. What gets a record is what is actually a struct.
+    ("net_config", Touch::Read, 0, 0),
+    ("mem_stats", Touch::Read, 0, 0),
+    ("task_list", Touch::Read, 0, 0),
+    ("stat", Touch::Read, 1, 1),
 
     // --- crate::net::dns, ::tcp, ::udp, ::tls -------------------------------
     //
@@ -412,6 +501,7 @@ pub const BUILTINS: &[(&str, Touch, usize, usize)] = &[
     ("tcp_close", Touch::Net, 0, 0),
     ("tcp_state", Touch::Net, 0, 0),
     ("tcp_error", Touch::Net, 0, 0),
+    ("tcp_status", Touch::Net, 0, 0),
     ("http_get", Touch::Net, 3, 3),
     ("https_get", Touch::Net, 3, 3),
     ("https_identity", Touch::Net, 0, 0),
@@ -1288,14 +1378,21 @@ impl Interp {
                     crate::sysbox::is_dir(&path) || crate::sysbox::read_blob(&path).is_some();
                 Ok(Value::Int(yes as i64))
             }
+            // A list, not newline-joined text. It answered text, so every
+            // caller began by splitting it back apart -- the seeded
+            // `/ai/tools/count` tool hand-wrote a character-by-character line
+            // counter to do exactly that, which is a fair summary of what the
+            // old shape cost. `applet("ls ...")` still answers the formatted
+            // listing for anything that wants to show one.
             "ls" => {
                 need(args, 1, "ls")?;
                 let path = args[0].render();
                 if !crate::sysbox::is_dir(&path) {
                     return Err(format!("ls: '{}' is not a directory", path));
                 }
-                let names = crate::sysbox::children(&path);
-                Ok(Value::Str(names.join("\n")))
+                Ok(Value::List(
+                    crate::sysbox::children(&path).into_iter().map(Value::Str).collect(),
+                ))
             }
             "write" => {
                 need(args, 2, "write")?;

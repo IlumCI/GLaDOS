@@ -117,6 +117,13 @@ pub fn selftest() -> bool {
         // Numbers as arguments, because a builtin wanting a string accepts one
         // (`render` never fails) while a builtin wanting a number rejects a
         // string -- so `0` is the argument that gets furthest into the arm.
+        //
+        // Captured, because `print`, `println` and `heap` are on this list and
+        // do what they say. The boot log is this system's test suite, and a
+        // stray "7120 B used of ..." in the middle of it is how a real FAIL
+        // three lines later gets skimmed past.
+        crate::gfx::console::begin_capture();
+        let mut missing = false;
         for (name, touch, lo, _) in BUILTINS {
             if *touch != Touch::Pure && *touch != Touch::Read {
                 continue;
@@ -124,9 +131,13 @@ pub fn selftest() -> bool {
             let args = alloc::vec!["0"; *lo].join(", ");
             if let Err(e) = eval_line(&mut op, &alloc::format!("{}({})", name, args)) {
                 if e.contains("no implementation") {
-                    return false;
+                    missing = true;
                 }
             }
+        }
+        let _ = crate::gfx::console::end_capture();
+        if missing {
+            return false;
         }
 
         // Arity is enforced from the table, before the arm sees the arguments.
@@ -290,6 +301,52 @@ pub fn selftest() -> bool {
     // A list is a type like any other.
     if !int("fn f(l: list): int { return len(l) } f(list(1, 2))", 2) {
         return false;
+    }
+
+    // --- the shapes the kernel hands back -----------------------------------
+    //
+    // By declaration rather than by calling, for the reason the gate check
+    // gives: these read live hardware and a boot suite should not depend on
+    // what the machine happens to have in it. What is worth pinning here is
+    // that every shape is well formed and that nothing in the table collides
+    // with a builtin -- both of which are how a record gets silently
+    // unreachable.
+    {
+        use eval::KERNEL_RECS;
+        for (i, (name, fields)) in KERNEL_RECS.iter().enumerate() {
+            if fields.is_empty() {
+                return false;
+            }
+            // A record whose name is a builtin could never be constructed by
+            // name, because the builtin is found first.
+            if eval::is_builtin(name) {
+                return false;
+            }
+            if KERNEL_RECS.iter().skip(i + 1).any(|(m, _)| m == name) {
+                return false;
+            }
+            // No duplicate field names: `.x` would answer whichever came
+            // first, and the other would be unreachable.
+            for (j, (f, _)) in fields.iter().enumerate() {
+                if fields.iter().skip(j + 1).any(|(g, _)| g == f) {
+                    return false;
+                }
+            }
+        }
+        // Registered in every interpreter, so an annotation names something
+        // real rather than a record the program forgot to declare.
+        let mut op3 = eval::Interp::new();
+        if eval_line(&mut op3, "rec Device { x }").is_ok() {
+            return false;
+        }
+        // `ls` answers a list now, not newline-joined text. `None` is allowed
+        // and is the usual case here: the boot selftests run before
+        // `sysbox::init`, so there is no namespace to list yet. What this
+        // pins is that when it does answer, it does not answer a string.
+        match run("ls(\"/\")") {
+            Some(eval::Value::List(_)) | None => {}
+            _ => return false,
+        }
     }
 
     // --- use ----------------------------------------------------------------

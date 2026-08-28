@@ -225,18 +225,32 @@ pub fn call(it: &mut Interp, name: &str, args: &[Value]) -> Result<Value, String
         }
 
         // --- crate::time, crate::dev::rtc, crate::dev::lapic ------------
+        // A `Time` record. It answered only the formatted stamp, so a program
+        // wanting the hour was reduced to `substr(rtc_now(), 11, 2)` -- the
+        // exact fragile re-parse a record exists to remove. The stamp survives
+        // as `.text`, so nothing that displayed the time lost anything.
         "rtc_now" => {
             // The clock can be unreadable -- no RTC, or a read that never
-            // settled -- and an empty string is the honest answer for that.
-            // Inventing an epoch date would be a timestamp a program would
-            // then store.
-            let Some(t) = crate::dev::rtc::now() else {
-                return Ok(Value::Str(String::new()));
+            // settled -- and nothing is the honest answer for that. Inventing
+            // an epoch date would be a timestamp a program would then store.
+            let Some(d) = crate::dev::rtc::now() else {
+                return Ok(Value::Nil);
             };
-            Ok(Value::Str(format!(
-                "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-                t.year, t.month, t.day, t.hour, t.minute, t.second
-            )))
+            rec(
+                "Time",
+                alloc::vec![
+                    i(d.year as i64),
+                    i(d.month as i64),
+                    i(d.day as i64),
+                    i(d.hour as i64),
+                    i(d.minute as i64),
+                    i(d.second as i64),
+                    Value::Str(format!(
+                        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+                        d.year, d.month, d.day, d.hour, d.minute, d.second
+                    )),
+                ],
+            )
         }
         "rtc_unix" => Ok(Value::Int(
             crate::dev::rtc::now().map(|t| crate::dev::rtc::unix_seconds(&t) as i64).unwrap_or(-1),
@@ -308,13 +322,104 @@ pub fn call(it: &mut Interp, name: &str, args: &[Value]) -> Result<Value, String
 
         // --- crate::net ------------------------------------------------
         "net_ready" => Ok(Value::Int(crate::net::ready() as i64)),
-        "net_ifaces" => Ok(Value::List(
-            crate::net::ifaces()
-                .iter()
-                .filter(|i| i.nic.is_some())
-                .map(|i| Value::Str(i.name.to_string()))
-                .collect(),
-        )),
+        // Was a list of names, which threw away everything else an interface
+        // knows: its address, whether it is up, what it has carried. Not a
+        // struct flattened into text -- a struct discarded -- which makes it
+        // the clearest case in the sweep.
+        "net_ifaces" => {
+            let mut out = alloc::vec::Vec::new();
+            for f in crate::net::ifaces().iter().filter(|f| f.nic.is_some()) {
+                out.push(rec(
+                    "Iface",
+                    alloc::vec![
+                        t(f.name),
+                        Value::Str(fmt_ip(f.ip)),
+                        Value::Str(fmt_ip(f.netmask)),
+                        Value::Str(fmt_ip(f.gateway)),
+                        Value::Str(fmt_ip(f.dns)),
+                        i(f.up as i64),
+                        i(f.stats.rx_packets as i64),
+                        i(f.stats.rx_bytes as i64),
+                        i(f.stats.tx_packets as i64),
+                        i(f.stats.tx_bytes as i64),
+                        i(f.stats.tx_dropped as i64),
+                    ],
+                )?);
+            }
+            Ok(Value::List(out))
+        }
+        "net_config" => {
+            let c = crate::net::config();
+            rec(
+                "Config",
+                alloc::vec![
+                    Value::Str(fmt_ip(c.ip)),
+                    Value::Str(fmt_ip(c.gateway)),
+                    Value::Str(fmt_ip(c.netmask)),
+                    Value::Str(fmt_ip(c.dns)),
+                ],
+            )
+        }
+        "mem_stats" => {
+            let (used, total) = crate::mem::heap::HEAP.stats();
+            rec("Mem", alloc::vec![i(used as i64), i(total as i64)])
+        }
+        "task_list" => {
+            let here = crate::task::current();
+            let mut out = alloc::vec::Vec::new();
+            for n in 0..crate::task::count() {
+                let Some(task) = crate::task::snapshot(n) else {
+                    continue;
+                };
+                out.push(rec(
+                    "Task",
+                    alloc::vec![
+                        i(n as i64),
+                        t(task.name),
+                        t(match task.state {
+                            crate::task::State::Ready => "ready",
+                            crate::task::State::Unused => "unused",
+                        }),
+                        i(task.switches as i64),
+                        i((n == here) as i64),
+                    ],
+                )?);
+            }
+            Ok(Value::List(out))
+        }
+        "stat" => {
+            let path = text(args, 0);
+            let dir = crate::sysbox::is_dir(&path);
+            // A miss is nothing, not a Stat full of zeroes. A record whose
+            // fields all read as "absent" is indistinguishable from an empty
+            // file, and a program checking existence would have to know which
+            // field to trust.
+            let blob = crate::sysbox::read_blob(&path);
+            if !dir && blob.is_none() {
+                return Ok(Value::Nil);
+            }
+            let hash = match crate::sysbox::hash_of(&path) {
+                Some(h) => {
+                    let mut out = String::new();
+                    for b in h {
+                        out.push_str(&format!("{:02x}", b));
+                    }
+                    out
+                }
+                None => String::new(),
+            };
+            rec(
+                "Stat",
+                alloc::vec![
+                    Value::Str(
+                        path.rsplit('/').next().unwrap_or(&path).to_string()
+                    ),
+                    Value::Str(hash),
+                    i(blob.map(|b| b.len() as i64).unwrap_or(0)),
+                    i(dir as i64),
+                ],
+            )
+        }
         "net_ip" => Ok(Value::Str(fmt_ip(crate::net::config().ip))),
         "net_gateway" => Ok(Value::Str(fmt_ip(crate::net::config().gateway))),
         "net_dns" => Ok(Value::Str(fmt_ip(crate::net::config().dns))),
@@ -387,6 +492,14 @@ pub fn call(it: &mut Interp, name: &str, args: &[Value]) -> Result<Value, String
             Ok(Value::Str(alloc::format!("{:?}", crate::net::tcp::state()).to_lowercase()))
         }
         "tcp_error" => Ok(Value::Str(last_err(it))),
+        // State and error in one answer. Read separately they can straddle a
+        // preemption and describe two different moments, which is a race a
+        // program has no way to see and no way to avoid.
+        "tcp_status" => {
+            let st = format!("{:?}", crate::net::tcp::state()).to_lowercase();
+            let why = last_err(it);
+            rec("Tcp", alloc::vec![Value::Str(st), Value::Str(why)])
+        }
         "http_get" => {
             let host = text(args, 0);
             let Ok(ip) = crate::net::dns::lookup(&host) else {
@@ -542,6 +655,49 @@ fn set_err(it: &mut Interp, why: &str) {
 
 fn last_err(it: &Interp) -> String {
     it.note("net_error")
+}
+
+/// Build one of `eval::KERNEL_RECS` by name.
+///
+/// The fields are passed in declaration order and checked against the
+/// declaration, so an arm that adds a field without adding it to the shape --
+/// or gets the order wrong -- fails here rather than handing back a record
+/// whose `.ip` is its netmask. That mistake is invisible at a glance and both
+/// values are strings.
+fn rec(name: &str, values: alloc::vec::Vec<Value>) -> Result<Value, String> {
+    let Some((_, shape)) = super::eval::KERNEL_RECS.iter().find(|(n, _)| *n == name) else {
+        return Err(format!("no kernel record '{}'", name));
+    };
+    if shape.len() != values.len() {
+        return Err(format!(
+            "{} has {} field(s), built with {}",
+            name,
+            shape.len(),
+            values.len()
+        ));
+    }
+    let mut out = alloc::vec::Vec::with_capacity(shape.len());
+    for ((fname, ty), v) in shape.iter().zip(values.into_iter()) {
+        if !v.fits(ty) {
+            return Err(format!(
+                "{}.{} wants {}, got {}",
+                name,
+                fname,
+                ty.name(),
+                v.type_name()
+            ));
+        }
+        out.push((String::from(*fname), v));
+    }
+    Ok(Value::Rec(String::from(name), out))
+}
+
+fn i(v: i64) -> Value {
+    Value::Int(v)
+}
+
+fn t(v: &str) -> Value {
+    Value::Str(String::from(v))
 }
 
 fn text(args: &[Value], i: usize) -> String {
