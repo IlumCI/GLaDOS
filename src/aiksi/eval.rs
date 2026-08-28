@@ -237,6 +237,89 @@ pub const BUILTINS: &[(&str, Touch, usize, usize)] = &[
     ("rect", Touch::Draw, 5, 5),
     ("text", Touch::Draw, 4, 4),
 
+    // --- text -------------------------------------------------------------
+    //
+    // A systems language whose only string operation is `+` cannot parse a
+    // header, split a path or read a config file, so every program that needed
+    // one grew a bad version of it in Aiksi. These are `str` and `char` in the
+    // Rust underneath, named for what they do rather than for the method.
+    ("upper", Touch::Pure, 1, 1),
+    ("lower", Touch::Pure, 1, 1),
+    ("trim", Touch::Pure, 1, 1),
+    ("split", Touch::Pure, 2, 2),
+    ("join", Touch::Pure, 2, 2),
+    ("substr", Touch::Pure, 3, 3),
+    ("find", Touch::Pure, 2, 2),
+    ("replace", Touch::Pure, 3, 3),
+    ("starts", Touch::Pure, 2, 2),
+    ("ends", Touch::Pure, 2, 2),
+    ("contains", Touch::Pure, 2, 2),
+    ("chr", Touch::Pure, 1, 1),
+    ("ord", Touch::Pure, 1, 1),
+    ("repeat", Touch::Pure, 2, 2),
+    ("pad", Touch::Pure, 2, 2),
+    ("hexenc", Touch::Pure, 1, 1),
+    ("hexdec", Touch::Pure, 1, 1),
+
+    // --- arithmetic --------------------------------------------------------
+    ("abs", Touch::Pure, 1, 1),
+    ("min", Touch::Pure, 2, 2),
+    ("max", Touch::Pure, 2, 2),
+    ("clamp", Touch::Pure, 3, 3),
+    ("sqrt", Touch::Pure, 1, 1),
+    ("pow", Touch::Pure, 2, 2),
+
+    // --- lists, beyond building one ----------------------------------------
+    ("sort", Touch::Pure, 1, 1),
+    ("reverse", Touch::Pure, 1, 1),
+    ("slice", Touch::Pure, 3, 3),
+    ("index", Touch::Pure, 2, 2),
+    ("remove", Touch::Pure, 2, 2),
+    ("range", Touch::Pure, 2, 2),
+
+    // --- crate::dev::rtc, crate::time, crate::dev::lapic --------------------
+    ("rtc_now", Touch::Read, 0, 0),
+    ("rtc_unix", Touch::Read, 0, 0),
+    ("uptime", Touch::Read, 0, 0),
+    ("tsc", Touch::Read, 0, 0),
+    ("tsc_mhz", Touch::Read, 0, 0),
+
+    // --- crate::task -------------------------------------------------------
+    ("task_count", Touch::Read, 0, 0),
+    ("task_current", Touch::Read, 0, 0),
+    ("task_switches", Touch::Read, 0, 0),
+    // Yielding is not a read, but it is not a way to reach anything either:
+    // the scheduler preempts at 100 Hz regardless, so this only gives up a
+    // slice early. A long loop in a repaint path is bounded by the step
+    // budget, not by whether it was polite.
+    ("task_yield", Touch::Read, 0, 0),
+
+    // --- crate::mem --------------------------------------------------------
+    ("mem_used", Touch::Read, 0, 0),
+    ("mem_total", Touch::Read, 0, 0),
+
+    // --- crate::dev::pci ---------------------------------------------------
+    ("pci_list", Touch::Read, 0, 0),
+
+    // --- crate::net --------------------------------------------------------
+    //
+    // Status only, so far. Reading which interfaces exist and what address
+    // this machine has tells a program about itself; it does not put a packet
+    // on the wire, which is why these are Read and the sockets are not.
+    ("net_ready", Touch::Read, 0, 0),
+    ("net_ifaces", Touch::Read, 0, 0),
+    ("net_ip", Touch::Read, 0, 0),
+    ("net_gateway", Touch::Read, 0, 0),
+    ("net_dns", Touch::Read, 0, 0),
+
+    // --- crate::sysbox, beyond read and write -------------------------------
+    ("hash_of", Touch::Read, 1, 1),
+    ("size", Touch::Read, 1, 1),
+    ("is_dir", Touch::Read, 1, 1),
+    // Removal is a write, and confined by the same jail: `may_write` resolves
+    // the path before comparing, so `../..` is not a way out of it.
+    ("rm", Touch::Write, 1, 1),
+
     // --- the machine itself -----------------------------------------------
     ("peek8", Touch::Raw, 1, 1),
     ("peek16", Touch::Raw, 1, 1),
@@ -337,6 +420,12 @@ impl Interp {
     ///
     /// The path is resolved first. A jail compared against what was typed is
     /// defeated by `../..`, which is the entire history of this kind of check.
+    /// `may_write` for the kernel arms, which live in another module and must
+    /// not each grow their own idea of where the jail is.
+    pub fn may_write_pub(&self, path: &str) -> bool {
+        self.may_write(path)
+    }
+
     fn may_write(&self, path: &str) -> bool {
         let Some(jail) = &self.jail else {
             return true;
@@ -979,7 +1068,10 @@ impl Interp {
                 Ok(Value::Nil)
             }
 
-            other => Err(format!("unknown function '{}'", other)),
+            // Everything that reaches a kernel subsystem. The gate and the
+            // arity check have already run, so this cannot be a way around
+            // either: a name only gets here by being in the table.
+            other => super::kernel::call(self, other, args),
         }
     }
 }

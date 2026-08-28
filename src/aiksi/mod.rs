@@ -8,6 +8,7 @@
 //! here does not change when that happens.
 
 pub mod eval;
+pub mod kernel;
 pub mod lex;
 pub mod parse;
 
@@ -102,6 +103,32 @@ pub fn selftest() -> bool {
             return false;
         }
 
+        // Every row that can be exercised without damaging anything has an
+        // implementation behind it. This is the other half of the inversion:
+        // the gate makes an arm without a row unreachable, and this makes a row
+        // without an arm a boot failure rather than something a program
+        // discovers at three in the morning.
+        //
+        // Pure and Read only. The rest write files, poke memory, drive I/O
+        // ports or paint over the screen, and a suite that called them to prove
+        // they exist would be scribbling on the machine to do it. Those rows
+        // are covered by the sandbox check above, which reaches every one.
+        //
+        // Numbers as arguments, because a builtin wanting a string accepts one
+        // (`render` never fails) while a builtin wanting a number rejects a
+        // string -- so `0` is the argument that gets furthest into the arm.
+        for (name, touch, lo, _) in BUILTINS {
+            if *touch != Touch::Pure && *touch != Touch::Read {
+                continue;
+            }
+            let args = alloc::vec!["0"; *lo].join(", ");
+            if let Err(e) = eval_line(&mut op, &alloc::format!("{}({})", name, args)) {
+                if e.contains("no implementation") {
+                    return false;
+                }
+            }
+        }
+
         // Arity is enforced from the table, before the arm sees the arguments.
         if eval_line(&mut op, "hex()").is_ok() || eval_line(&mut op, "hex(1, 2)").is_ok() {
             return false;
@@ -110,6 +137,60 @@ pub fn selftest() -> bool {
         if eval_line(&mut op, "list()").is_err() || eval_line(&mut op, "list(1,2,3,4,5)").is_err() {
             return false;
         }
+    }
+
+    // The text builtins, on the operations a program actually strings
+    // together: split a line, take a field, test it, put it back.
+    if !text("join(split(\"a:b:c\", \":\"), \"-\")", "a-b-c") {
+        return false;
+    }
+    if !int("find(\"hello\", \"ll\")", 2) {
+        return false;
+    }
+    if !int("find(\"hello\", \"z\")", -1) {
+        return false;
+    }
+    if !text("substr(\"hello\", 1, 3)", "ell") {
+        return false;
+    }
+    if !text("upper(trim(\"  ok  \"))", "OK") {
+        return false;
+    }
+    if !text("replace(\"a.b.c\", \".\", \"/\")", "a/b/c") {
+        return false;
+    }
+    // An empty separator splits into characters rather than looping forever.
+    if !int("len(split(\"abc\", \"\"))", 3) {
+        return false;
+    }
+    // Hex round-trips, which is what a program reading a stored hash needs.
+    if !text("hexdec(hexenc(\"hi\"))", "hi") {
+        return false;
+    }
+    if !text("hexenc(\"A\")", "41") {
+        return false;
+    }
+    // Lists: sort numerically rather than by spelling, which is the one a
+    // string sort gets wrong and nobody notices until there are ten rows.
+    if !text("join(sort(list(10, 9, 100)), \",\")", "9,10,100") {
+        return false;
+    }
+    if !int("index(list(\"a\", \"b\"), \"b\")", 1) {
+        return false;
+    }
+    if !int("len(range(0, 5))", 5) {
+        return false;
+    }
+    // Bounded, so a generated program cannot ask for a billion-element list
+    // in a repaint path and take the heap with it.
+    if !int("len(range(0, 999999999))", 65_536) {
+        return false;
+    }
+    if !int("len(repeat(\"x\", 999999999))", 65_536) {
+        return false;
+    }
+    if !int("sqrt(144)", 12) {
+        return false;
     }
 
     // Functions: definition, call, arguments, and a value coming back out.
