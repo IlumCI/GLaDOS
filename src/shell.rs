@@ -144,6 +144,7 @@ pub fn run(boot: &BootInfo, acpi: &Option<Acpi>) -> ! {
             line.clear();
             cursor = 0;
             prompt();
+            crate::gfx::desk::refresh_routed();
             crate::gfx::desk::redraw_over_terminal();
             continue;
         }
@@ -222,6 +223,11 @@ pub fn run(boot: &BootInfo, acpi: &Option<Acpi>) -> ! {
                 hist = history.len();
                 stash.clear();
                 prompt();
+                // A command is the only thing that changes what a routed
+                // window would show, so this is where they are rebuilt. Both
+                // paths need it: the typed one and the one a panel's own
+                // button takes.
+                crate::gfx::desk::refresh_routed();
                 // *After* the prompt, not before. Everything the console prints
                 // -- including the prompt itself -- lands in the terminal's
                 // rectangle without regard for what is drawn on top of it, so
@@ -1948,6 +1954,15 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             match it.next().unwrap_or("") {
                 "" | "list" => {}
                 "next" => desk::cycle(false),
+                // Focus the terminal without reaching for the mouse.
+                //
+                // `open` leaves the new window focused on purpose, which is
+                // right for a person and leaves a headless driver typing into
+                // whatever it just opened: the next line goes to the panel and
+                // its Enter presses whatever the panel had focused. That is
+                // how the first test of an application deleted the item it had
+                // just added.
+                "term" => desk::focus_terminal(),
                 // `win round [n]` -- the focused window's corner radius, 0 for
                 // a plain rectangle. Exposed on the shell rather than settled
                 // in the theme because whether rounded corners belong on a
@@ -1969,7 +1984,29 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
                         // the operator nothing they did not just type.
                         Some(p) => {
                             let title = p.title.clone();
-                            desk::open(&title, p)
+                            // A name that is a route keeps it, so the window
+                            // can be rebuilt when what it shows changes.
+                            if what.contains(':') {
+                                desk::open_routed(&title, p, what)
+                            } else {
+                                desk::open(&title, p)
+                            }
+                            // Opened from the prompt, so the operator is at
+                            // the keyboard typing commands: leave them there.
+                            //
+                            // `open` keeps focus on the new window, which is
+                            // right when it was opened by a click on an icon
+                            // or a menu -- attention is already on the window.
+                            // It is wrong here, and not only for a headless
+                            // driver: the desktop takes *every* key while a
+                            // non-terminal window has focus, so the next line
+                            // typed goes into the window that just appeared
+                            // and its Enter presses whatever that window had
+                            // focused. Opening a to-do list and typing the
+                            // next command added the command as an item, and
+                            // an earlier arrangement of the same panel deleted
+                            // one instead.
+                            desk::focus_terminal();
                         }
                         None => {
                             kprintln!("  no such panel: {}", what);
@@ -2065,6 +2102,51 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
         }
         "echo" => kprintln!("  {}", rest),
         "clear" => console::with(|c| c.clear()),
+        // Applications. `app list`, `app show <name>`, and otherwise
+        // `app <name> <fn> [args]`, which is the form a panel's own buttons
+        // use -- so everything a stored panel can invoke is a function in its
+        // own program and nothing in the shell's vocabulary.
+        "app" => {
+            let mut w = rest.splitn(3, ' ');
+            match w.next().unwrap_or("") {
+                "" => {
+                    kprintln!("  app list           applications on this machine");
+                    kprintln!("  app show <name>    its panel document, rows filled in");
+                    kprintln!("  app <name> <fn> [x]  call one of its functions");
+                }
+                "list" => {
+                    let names = crate::app::names();
+                    if names.is_empty() {
+                        kprintln!("  none");
+                    }
+                    for n in names {
+                        kprintln!("  {}", n);
+                    }
+                }
+                "show" => match w.next() {
+                    None => kprintln!("  usage: app show <name>"),
+                    Some(name) => match crate::app::document(name) {
+                        None => kprintln!("  no application '{}'", name),
+                        Some(d) => kprint!("{}", d),
+                    },
+                },
+                name => {
+                    let Some(func) = w.next() else {
+                        kprintln!("  usage: app {} <fn> [args]", name);
+                        return;
+                    };
+                    let arg = w.next().unwrap_or("");
+                    match crate::app::call_fn(name, func, arg) {
+                        Ok(v) => {
+                            if !v.is_empty() {
+                                kprintln!("  {}", v);
+                            }
+                        }
+                        Err(e) => kprintln!("  app: {}", e),
+                    }
+                }
+            }
+        }
         // Whether the serial port is delivering by interrupt, and what it has
         // lost. Exists because the last attempt at interrupt-driven receive
         // could not be told apart from a port that was simply quiet, and a

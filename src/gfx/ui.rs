@@ -680,6 +680,9 @@ pub fn panel_named(name: &str) -> Option<Panel> {
         "wifi" | "wireless" => Some(settings("wifi")),
         "model" => Some(settings("model")),
         "system" => Some(settings("sys")),
+        // `win open app:todo`. Guarded, so it goes before the bare arm it
+        // would otherwise sit behind and never be reached from.
+        n if n.starts_with("app:") => crate::app::panel(&n[4..]).map(|(_, p)| p),
         _ => None,
     }
 }
@@ -693,6 +696,9 @@ pub fn panel_for_route(route: &str) -> Option<(String, Panel)> {
         }
         "set" => Some((String::from("Settings"), settings(arg))),
         "programs" => Some((String::from("Program Manager"), program_manager())),
+        // An application, read from the namespace and parsed under the stored
+        // gate. This is the one route whose contents the machine may write.
+        "app" => crate::app::panel(arg),
         _ => None,
     }
 }

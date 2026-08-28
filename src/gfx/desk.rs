@@ -121,6 +121,14 @@ pub struct Window {
     /// use: an edge that swallows a window's proportions permanently is a
     /// trap, not a shortcut.
     pub snap_back: Option<Rect>,
+    /// The route this window's contents came from, when they came from one.
+    ///
+    /// A panel is a snapshot: it was built from something that has since
+    /// changed. Nothing rebuilt it, so pressing a button in an application ran
+    /// the command and left the window showing what was true before. Files has
+    /// the same defect and always has -- `write x` never updated an open
+    /// browser. Keeping the route is what makes rebuilding possible at all.
+    pub route: Option<String>,
     /// Corner radius, when this window is not a plain rectangle.
     ///
     /// Stored as the radius rather than as the outline so that a resize does
@@ -570,6 +578,7 @@ pub fn init() {
         rect: Rect::new(term_x, screen.y, term_w, screen.h),
         state: WinState::Normal,
         snap_back: None,
+        route: None,
         round: 0,
         content: Content::Terminal(super::console::USER),
         menus: alloc::vec![
@@ -608,6 +617,7 @@ pub fn init() {
         rect: Rect::new(pm_x, screen.y, pm_w, pm_h.min(screen.h)),
         state: WinState::Normal,
         snap_back: None,
+        route: None,
         round: 0,
         content: Content::Panel(pm),
         menus: Vec::new(),
@@ -635,6 +645,7 @@ pub fn init() {
         ),
         state: WinState::Minimised,
         snap_back: None,
+        route: None,
         round: 0,
         content: Content::Terminal(super::console::EXEC),
         menus: alloc::vec![Menu {
@@ -675,6 +686,54 @@ fn item(label: &str, cmd: &str) -> MenuItem {
 }
 
 /// Open a new window holding a panel.
+/// Open a panel, remembering the route it came from so it can be rebuilt.
+pub fn open_routed(title: &str, panel: Panel, route: &str) {
+    open(title, panel);
+    let route = String::from(route);
+    with(|d| {
+        if let Some(w) = d.windows.last_mut() {
+            w.route = Some(route);
+        }
+    });
+}
+
+/// Rebuild every window whose contents came from a route.
+///
+/// Called after a command runs, because a command is the only thing that
+/// changes what a route would produce. Cheap when nothing is open: a window
+/// without a route is skipped, and there is no route to resolve.
+pub fn refresh_routed() {
+    let routes: Vec<(usize, String)> = with(|d| {
+        d.windows
+            .iter()
+            .enumerate()
+            .filter_map(|(i, w)| w.route.clone().map(|r| (i, r)))
+            .collect()
+    })
+    .unwrap_or_default();
+    if routes.is_empty() {
+        return;
+    }
+    let mut any = false;
+    for (i, route) in routes {
+        // Built outside `with`, because building an application's panel runs
+        // its program, which reads the namespace -- and the desktop borrow is
+        // held for the whole closure.
+        let Some((_, panel)) = ui::panel_for_route(&route) else {
+            continue;
+        };
+        with(|d| {
+            if let Some(w) = d.windows.get_mut(i) {
+                w.content = Content::Panel(panel);
+                any = true;
+            }
+        });
+    }
+    if any {
+        draw();
+    }
+}
+
 pub fn open(title: &str, panel: Panel) {
     let Some(fb) = super::primary() else {
         return;
@@ -717,6 +776,7 @@ pub fn open(title: &str, panel: Panel) {
             rect: Rect::new(x, y, w, h),
             state: WinState::Normal,
         snap_back: None,
+        route: None,
         round: 0,
             content: Content::Panel(panel),
             menus: Vec::new(),
@@ -777,6 +837,7 @@ pub fn open_app(title: &str, icon: usize, app: Box<dyn DeskApp>, w: u32, h: u32)
             rect: Rect::new(x, y, w, h),
             state: WinState::Normal,
         snap_back: None,
+        route: None,
         round: 0,
             content: Content::App(app),
             menus: Vec::new(),
@@ -847,6 +908,7 @@ pub fn open_browser(url: &str) {
             rect: Rect::new(x, y, w, h),
             state: WinState::Normal,
         snap_back: None,
+        route: None,
         round: 0,
             content: Content::Browser(b),
             menus: Vec::new(),

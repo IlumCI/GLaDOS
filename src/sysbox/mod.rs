@@ -122,6 +122,7 @@ pub fn init() {
     let _ = tree::put(&mut sb.root, &path_of("/tmp/.keep"), Node::Blob(Vec::new()));
     let _ = tree::put(&mut sb.root, &path_of("/ai/.keep"), Node::Blob(Vec::new()));
     seed_tools(&mut sb);
+    seed_apps(&mut sb);
     unsafe {
         *BOX.get() = Some(sb);
         *TOOLS.get() = Some(lang::Interp::new());
@@ -133,6 +134,78 @@ pub fn init() {
 /// Re-seeded after a snapshot restore, because a snapshot taken before these
 /// existed would otherwise come back without them -- the same reasoning the
 /// corpus seeding in ai::init follows.
+/// The one application that ships with the system.
+///
+/// Hand-written, and that is the point of it: the format has to be shown to
+/// work with a program a person wrote before anything is asked to generate
+/// one. It is also the worked example -- a panel document with a live `rows`
+/// line, a program that keeps its state in the namespace, and actions that go
+/// back through `app` rather than through the shell's vocabulary.
+fn seed_apps(sb: &mut Sysbox) {
+    let _ = tree::put(&mut sb.root, &path_of("/app/todo/panel.ui"), Node::Blob(
+        b"panel\t1\n\
+title\tToDo\n\
+field\tnew\tapply app todo add\t\n\
+sep\n\
+heading\tTasks\n\
+rows\trows\n\
+sep\n\
+button\trun app todo clear\tClear all\n\
+button\tclose\tClose\n".to_vec()));
+    let _ = tree::put(&mut sb.root, &path_of("/app/todo/code.l"), Node::Blob(
+        b"// a list you can add to and tick off\n\
+fn file() { return \"/app/todo/items\" }\n\
+fn all() {\n\
+  if (exists(file())) { return read(file()) }\n\
+  return \"\"\n\
+}\n\
+fn add(what) {\n\
+  if (len(what) > 0) { write(file(), all() + what + \"\\n\") }\n\
+  return \"\"\n\
+}\n\
+fn clear() {\n\
+  write(file(), \"\")\n\
+  return \"\"\n\
+}\n\
+// remove the first line equal to `what`\n\
+fn drop(what) {\n\
+  text = all()\n\
+  out = \"\"\n\
+  line = \"\"\n\
+  gone = 0\n\
+  i = 0\n\
+  while (i < len(text)) {\n\
+    c = get(text, i)\n\
+    if (c == \"\\n\") {\n\
+      if (line == what) {\n\
+        if (gone == 1) { out = out + line + \"\\n\" }\n\
+        gone = 1\n\
+      } else { out = out + line + \"\\n\" }\n\
+      line = \"\"\n\
+    } else { line = line + c }\n\
+    i = i + 1\n\
+  }\n\
+  write(file(), out)\n\
+  return \"\"\n\
+}\n\
+// one panel line per item; pressing one drops it\n\
+fn rows() {\n\
+  text = all()\n\
+  out = \"\"\n\
+  line = \"\"\n\
+  i = 0\n\
+  while (i < len(text)) {\n\
+    c = get(text, i)\n\
+    if (c == \"\\n\") {\n\
+      out = out + \"item\\trun app todo drop \" + line + \"\\t\" + line + \"\\n\"\n\
+      line = \"\"\n\
+    } else { line = line + c }\n\
+    i = i + 1\n\
+  }\n\
+  return out\n\
+}\n".to_vec()));
+}
+
 fn seed_tools(sb: &mut Sysbox) {
     let _ = tree::put(&mut sb.root, &path_of("/ai/tools/hello.l"), Node::Blob(
         b"// says hello; the smallest working skill\n\
@@ -186,6 +259,7 @@ pub fn restore_latest() {
                 // them; put them back so the convention survives reboots.
                 if children("/ai/tools").is_empty() {
                     seed_tools(s);
+                    seed_apps(s);
                 }
             });
             console::set_color(LTGREEN);

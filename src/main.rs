@@ -17,6 +17,7 @@ extern crate alloc;
 
 mod acpi;
 mod ai;
+mod app;
 mod cpu;
 mod crypto;
 mod dev;
