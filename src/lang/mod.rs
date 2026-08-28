@@ -208,6 +208,31 @@ pub fn selftest() -> bool {
     // gate every time a row is added -- an app that could not write would not
     // work at all, which is a louder failure than an assertion here.
 
+    // A lowered budget stops a loop the full one would let run.
+    //
+    // The desktop calls an application's row function on every repaint, so a
+    // generated loop that runs for a second is a window manager that feels
+    // broken for reasons nobody can attribute. Twenty million steps is the
+    // operator's budget, where a long loop is visible and can be stopped.
+    {
+        let mut it = eval::Interp::new().with_step_budget(1000);
+        if eval_line(&mut it, "i = 0 while (i < 100000) { i = i + 1 } i").is_ok() {
+            return false;
+        }
+        // ...and something short still finishes inside it.
+        let mut it = eval::Interp::new().with_step_budget(1000);
+        if !matches!(eval_line(&mut it, "i = 0 while (i < 10) { i = i + 1 } i"),
+                     Ok(eval::Value::Int(10)))
+        {
+            return false;
+        }
+        // The budget cannot be raised past the default by asking.
+        let mut it = eval::Interp::new().with_step_budget(u64::MAX);
+        if eval_line(&mut it, "i = 0 while (i < 30000000) { i = i + 1 } i").is_ok() {
+            return false;
+        }
+    }
+
     // Runaway recursion is refused rather than being allowed to eat the
     // kernel stack, which has no guard page and would triple fault.
     if run("fn boom(n) { return boom(n + 1) } boom(0)").is_some() {

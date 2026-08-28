@@ -109,7 +109,14 @@ pub fn call(name: &str, expr: &str) -> Result<String, String> {
         lang::Interp::new()
     } else {
         lang::Interp::sandboxed(&alloc::format!("{}/{}", ROOT, name))
-    };
+    }
+    // Bounded, because the desktop calls this. `document` runs the
+    // application's row function on every repaint, and the full budget is
+    // twenty million steps -- enough for a generated loop to make the window
+    // manager feel broken while the symptom points at the compositor. A
+    // program that needs more than this to build a list is a program that
+    // should say so.
+    .with_step_budget(lang::eval::DRAW_BUDGET);
     lang::eval_line(&mut it, &src)?;
     let v = lang::eval_line(&mut it, expr)?;
     Ok(v.render())

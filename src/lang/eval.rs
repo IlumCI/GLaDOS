@@ -82,6 +82,17 @@ impl Value {
 /// where it could read a key.
 const STEP_BUDGET: u64 = 20_000_000;
 
+/// What a program gets when something other than a person is waiting for it.
+///
+/// The full budget is sized for the prompt, where the operator can see a long
+/// loop running and stop it. It is the wrong size for a program the desktop
+/// calls: `app::document` runs an application's `rows()` on **every repaint**,
+/// so a generated loop that takes a second makes the window manager feel
+/// broken, and the symptom points at the compositor rather than at the
+/// application. Small enough to bound a repaint, large enough that no
+/// reasonable list-building loop reaches it.
+pub const DRAW_BUDGET: u64 = 200_000;
+
 /// A named procedure: its parameters and its body.
 #[derive(Clone)]
 struct Func {
@@ -146,6 +157,7 @@ pub struct Interp {
     returning: Option<Value>,
     depth: usize,
     steps: u64,
+    budget: u64,
     caps: Caps,
     /// The subtree a sandboxed program may write into. Absolute, with no
     /// trailing slash.
@@ -166,6 +178,7 @@ impl Interp {
             returning: None,
             depth: 0,
             steps: 0,
+            budget: STEP_BUDGET,
             caps: Caps::Operator,
             jail: None,
         }
@@ -181,6 +194,12 @@ impl Interp {
         it.caps = Caps::Sandbox;
         it.jail = Some(String::from(jail.trim_end_matches('/')));
         it
+    }
+
+    /// Lower the step budget. Cannot be raised above the default.
+    pub fn with_step_budget(mut self, n: u64) -> Self {
+        self.budget = n.min(STEP_BUDGET);
+        self
     }
 
     pub fn caps(&self) -> Caps {
@@ -287,7 +306,7 @@ impl Interp {
 
     fn tick(&mut self) -> Result<(), String> {
         self.steps += 1;
-        if self.steps > STEP_BUDGET {
+        if self.steps > self.budget {
             return Err("execution budget exceeded (infinite loop?)".to_string());
         }
         Ok(())

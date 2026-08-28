@@ -397,7 +397,17 @@ fn propose(goal: &str, steps: &[Step], ctx: &EpisodeCtx, trust: Trust) -> Option
                 if next == eos {
                     break;
                 }
-                let piece = e.tok.token_bytes(next).to_vec();
+                // The decoded bytes, not the raw vocabulary entry.
+                //
+                // `token_bytes` returns what the vocabulary literally holds,
+                // and on a v1 sentencepiece checkpoint a newline is stored as
+                // the six-character text `<0x0A>`. The stop below then never
+                // fires and every argument runs the full token budget. It is
+                // right on SmolLM2, which is v2 and byte-level -- so the bug is
+                // invisible in QEMU and live on Qwen3, which is the worst shape
+                // a defect can have in this tree. `Alphabet` is the decoded
+                // form and is already built once per tokenizer.
+                let piece = harness::alphabet_for(&e.tok).piece(next).to_vec();
                 let nl = piece.iter().position(|&b| b == b'\n');
                 raw.extend_from_slice(&piece[..nl.unwrap_or(piece.len())]);
                 let done = nl.is_some() || raw.len() >= ARGS_CLIP_BYTES;
@@ -947,6 +957,21 @@ pub fn learn(name: Option<&str>) -> Result<String, &'static str> {
         Some(n) => format!("/ai/tools/{}.l", n.trim().replace(".l", "")),
         None => format!("/ai/tools/replay-{:04}.l", idx),
     };
+    // Parse it before storing it.
+    //
+    // This wrote a model-authored program with no check of any kind, on the
+    // reasoning that the actions came from steps that had already dispatched.
+    // That covers the applet names and not the program: the quoting below
+    // escapes quotes and not backslashes, so an action ending in one emits a
+    // broken string literal and the skill is written anyway, to be discovered
+    // whenever somebody runs it. A parse is free and exact.
+    {
+        let mut probe = crate::lang::Interp::new();
+        if let Err(e) = crate::lang::eval_line(&mut probe, &program) {
+            crate::kprintln!("  learn: the compiled program does not parse: {}", e);
+            return Err("compiled a program that does not parse");
+        }
+    }
     if crate::sysbox::write_text(&skill, &program) {
         Ok(skill)
     } else {
