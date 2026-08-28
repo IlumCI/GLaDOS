@@ -952,9 +952,77 @@ pub fn open_oracle(premise: &str) {
 /// serial command typed after opening it -- the desktop answers declined
 /// keys with "handled" all the same, which is exactly how Minesweeper once
 /// swallowed a whole test script.
+/// Move the most recently opened window clear of the terminal.
+///
+/// For windows that hand focus back. `open_app` centres, which is right for a
+/// program opened by a click -- it keeps focus and sits on top -- and wrong for
+/// one opened on the machine's own initiative, because handing the keyboard
+/// back also raises the terminal *over* it. The progress window opened
+/// underneath and showed a 225-pixel strip of its right edge: no title, no
+/// fields, and nothing to say it was working.
+///
+/// `desk::open` has carried this rule for panels since the same thing happened
+/// to them. There is a second reason beyond tidiness, given there: the console
+/// draws straight to the framebuffer on its own schedule with no idea which
+/// windows are above it, so an overlapping window gets its overlapping strip
+/// repainted with console output the moment anything is printed.
+///
+/// Best effort, and "best" means as far right as the screen allows rather than
+/// giving up. A window wider than the gap cannot clear the terminal entirely,
+/// and the first version of this declined to move one at all -- which left the
+/// progress window exactly where the bug had put it, hidden, because 520 did
+/// not fit in a 504-pixel gap. Sixteen pixels overlapped beats three hundred.
+fn clear_of_terminal() {
+    let Some(fb) = super::primary() else { return };
+    let screen = screen_rect(&fb);
+    with(|d| {
+        let Some(edge) = d
+            .windows
+            .iter()
+            .find(|w| matches!(w.content, Content::Terminal(c) if c == super::console::USER))
+            .map(|w| w.rect.x + w.rect.w + MARGIN)
+        else {
+            return;
+        };
+        if let Some(w) = d.windows.last_mut() {
+            let room = screen.x + screen.w.saturating_sub(w.rect.w);
+            w.rect.x = edge.min(room).max(screen.x);
+        }
+    });
+}
+
+/// Show the authoring loop, without taking the keyboard.
+///
+/// Opened by the run rather than by somebody asking, which is exactly the case
+/// where focus must not move: the desktop takes every key while a non-terminal
+/// window has focus, so a window appearing mid-command eats the rest of the
+/// line. Minesweeper consumed `echo after-mines` a byte at a time for this
+/// reason and flagged a cell on the `f`.
+///
+/// Idempotent. A second run must not stack a second window on the first.
+pub fn open_authoring() {
+    if has_window("Writing") {
+        draw();
+        return;
+    }
+    let (w, h) = super::agentwin::AuthorWin::preferred();
+    open_app("Writing", ICO_ORACLE, Box::new(super::agentwin::AuthorWin::new()), w, h);
+    clear_of_terminal();
+    focus_terminal();
+}
+
+/// Is a window with this title already open?
+pub fn has_window(title: &str) -> bool {
+    with(|d| d.windows.iter().any(|w| w.title == title)).unwrap_or(false)
+}
+
 pub fn open_agentlog() {
     let (w, h) = super::agentwin::AgentLog::preferred();
     open_app("Agent", ICO_ORACLE, Box::new(super::agentwin::AgentLog::new()), w, h);
+    // The same latent fault: it hands focus back, so it opened under the
+    // terminal too. Nobody noticed because a transcript is read after the
+    // fact, by which point the window has usually been moved.
+    clear_of_terminal();
     focus_terminal();
 }
 

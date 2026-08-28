@@ -275,6 +275,19 @@ mind and the shell's `initiative now` -- and a local flag is not a rule. The
 journal caught that: two entries under one tick number with clocks fifty-four
 seconds apart.
 
+A run publishes `author::Progress` and calls `desk::draw()` per step, which the
+"Writing" window shows: step N of M, clauses met, and the last verdict
+verbatim. **No progress bar and no estimate** -- a step can be a skeleton that
+lands instantly or a decode that takes seconds, and the loop ends when the
+checks pass rather than after a known amount of work. `godel.rs` already paid
+for that lesson. Stop is a button and also `author stop`, because serial cannot
+inject PS/2 packets and a control with no typed equivalent never gets tested.
+
+Windows that hand focus back must be placed clear of the terminal
+(`desk::clear_of_terminal`). `open_app` centres, which is right for something
+opened by a click and wrong for something opened on the machine's own
+initiative: handing the keyboard back also raises the terminal over it.
+
 `initiative now` bypasses the settle window and nothing else, which is what
 makes any of this testable; QEMU's `-rtc base=...T03:00:00` puts the guest
 inside the quiet window. Note the first forced tick is consumed recording when

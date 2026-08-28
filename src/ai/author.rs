@@ -458,6 +458,81 @@ pub fn run(w: &mut Work, script: &[Action], budget: usize) -> Report {
     })
 }
 
+/// What the loop is doing, for anything that wants to watch.
+///
+/// Published rather than logged. A transcript answers "what happened" and this
+/// answers "where is it now", and the second question is the one somebody
+/// staring at a window has -- a run is minutes long and holds the model for
+/// the whole of it, so a machine that looks identical to a hung one is a
+/// machine somebody reboots.
+#[derive(Clone)]
+pub struct Progress {
+    pub name: String,
+    pub step: usize,
+    pub budget: usize,
+    pub met: usize,
+    pub total: usize,
+    /// The last verdict, verbatim, with its line number if it had one.
+    ///
+    /// Verbatim and not summarised. The verdict is what the loop itself acts
+    /// on, and an operator reading a paraphrase of it cannot tell whether the
+    /// loop is stuck on something real or on something the paraphrase lost.
+    pub last: String,
+    pub running: bool,
+}
+
+impl Progress {
+    fn idle() -> Progress {
+        Progress {
+            name: String::new(),
+            step: 0,
+            budget: 0,
+            met: 0,
+            total: 0,
+            last: String::new(),
+            running: false,
+        }
+    }
+}
+
+static PROGRESS: crate::sync::Racy<Option<Progress>> = crate::sync::Racy::new(None);
+
+/// Ask the run to stop at its next step boundary.
+static STOP: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+pub fn request_stop() {
+    STOP.store(true, core::sync::atomic::Ordering::Release);
+}
+
+pub fn progress() -> Option<Progress> {
+    unsafe { (*PROGRESS.get()).clone() }
+}
+
+fn publish(w: &Work, budget: usize, running: bool) {
+    let (met, total) = tally(w);
+    unsafe {
+        *PROGRESS.get() = Some(Progress {
+            name: w.name.clone(),
+            step: w.steps,
+            budget,
+            met,
+            total,
+            last: w.last.clone().unwrap_or_else(|| String::from("nothing wrong so far")),
+            running,
+        });
+    }
+}
+
+/// Clauses met, and how many there are.
+///
+/// Through `met`, which is what `done` counts and what the final report
+/// prints. A second implementation here would be a progress window that
+/// disagrees with the verdict it is watching.
+fn tally(w: &Work) -> (usize, usize) {
+    let v = met(w);
+    (v.iter().filter(|x| x.ok).count(), v.len())
+}
+
 /// Write an application from a name and a goal, leaving a draft.
 ///
 /// The whole of what "author something" means, in one place. It was eight
@@ -487,7 +562,17 @@ pub fn commission(name: &str, goal: &str, budget: usize) -> (Work, Report) {
             }
         }
     }
+    // Opened before the run, not after: the whole point is watching it happen.
+    // It does not take focus -- `open_authoring` hands the keyboard back to
+    // the terminal, for the reason Minesweeper established, which is that a
+    // window holding focus eats the next serial command line a byte at a time.
+    crate::gfx::desk::open_authoring();
     let report = generate(&mut w, budget);
+    // Left on screen with `running` clear rather than closed. The result is
+    // what somebody who walked away came back for, and a window that vanishes
+    // when the work finishes is a window that only ever shows the boring part.
+    publish(&w, budget, false);
+    crate::gfx::desk::draw();
     crate::app::draft::set_panel(name, &panel_of(&w));
     crate::app::draft::set_code(name, &w.code);
     let mut plan = String::new();
@@ -1016,7 +1101,18 @@ fn compose(w: &Work, p: &str) -> Option<String> {
 
 /// Run the loop with the model deciding, releasing the engine each step.
 pub fn generate(w: &mut Work, budget: usize) -> Report {
+    // Cleared at the start, not at the end. A stop that arrived after the last
+    // run finished would otherwise kill the next one the moment it began --
+    // one silent death, arriving long after the click that caused it, which is
+    // the failure `agent::request_abort` already had and fixed.
+    STOP.store(false, core::sync::atomic::Ordering::Release);
+    publish(w, budget, true);
+    crate::gfx::desk::draw();
     while w.steps < budget {
+        if STOP.load(core::sync::atomic::Ordering::Acquire) {
+            w.last = Some(String::from("stopped"));
+            break;
+        }
         let Some(a) = propose(w) else { break };
         // Everything between decodes runs with the engine free, so the shell
         // and the desktop are locked out for one decode at a time rather than
@@ -1024,6 +1120,11 @@ pub fn generate(w: &mut Work, budget: usize) -> Report {
         let stop = matches!(a, Action::Done);
         let script = alloc::vec![a];
         run(w, &script, budget);
+        // The window repaints through the diffed present, so refreshing per
+        // step costs only what actually changed -- the same bargain the
+        // episode transcript makes.
+        publish(w, budget, true);
+        crate::gfx::desk::draw();
         crate::task::yield_now();
         if stop || done(w).is_some() {
             break;

@@ -2203,7 +2203,25 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             let goal = a.next().unwrap_or("").trim();
             if name.is_empty() {
                 kprintln!("  usage: author <name> <what it should do>");
+                kprintln!("  author stop          ask a run to stop at its next step");
                 kprintln!("  leaves a draft; 'app try' checks it, 'app take' adopts it");
+                return;
+            }
+            // The keyboard half of the progress window's Stop button.
+            //
+            // Not a convenience. Everything the pointer does here a keystroke
+            // must also do, because serial cannot inject PS/2 packets and a
+            // control with no typed equivalent is a control that never gets
+            // tested. It reaches the unattended run in particular, which is
+            // the one nobody is sitting in front of when it starts.
+            if name == "stop" {
+                match author::progress() {
+                    Some(p) if p.running => {
+                        author::request_stop();
+                        kprintln!("  asked '{}' to stop at its next step", p.name);
+                    }
+                    _ => kprintln!("  nothing is being written"),
+                }
                 return;
             }
             if !crate::ai::engine_ready() {
