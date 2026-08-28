@@ -369,7 +369,7 @@ pub const USER: usize = 0;
 /// against the same namespace with a different frame around it. It is named
 /// for what it carries rather than for a privilege this system does not have.
 pub const EXEC: usize = 1;
-const NCONSOLE: usize = 2;
+pub const NCONSOLE: usize = 2;
 
 static CONSOLES: Racy<[Option<Console>; NCONSOLE]> = Racy::new([None, None]);
 

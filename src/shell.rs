@@ -1173,8 +1173,31 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             .flatten();
             match out {
                 None => {
+                    // Which of the four, not a list of them. The first run of
+                    // this on hardware printed all four and left the operator
+                    // to guess, when the machine knows perfectly well: a
+                    // checkpoint's architecture and the CPU's feature bits are
+                    // both sitting right there.
+                    let f = crate::cpu::detected();
+                    let why = crate::ai::with_engine(|e| {
+                        if e.model.cfg.hybrid() {
+                            "the checkpoint is a hybrid -- q/k/v adapters need a dense one"
+                        } else if e.model.cfg.streams() {
+                            "the cache is windowed, so a live index is not a position"
+                        } else {
+                            "no corpus, or nothing in the training slice"
+                        }
+                    })
+                    .unwrap_or("no model is loaded");
                     console::set_color(LTRED);
-                    kprintln!("  refused -- no AVX2/FMA, a hybrid, a windowed cache, or no corpus");
+                    if !(f.avx_enabled && f.avx2 && f.fma) {
+                        kprintln!(
+                            "  refused -- avx enabled={} avx2={} fma={}",
+                            f.avx_enabled, f.avx2, f.fma
+                        );
+                    } else {
+                        kprintln!("  refused -- {}", why);
+                    }
                     console::set_color(LTGRAY);
                 }
                 Some(r) => {
@@ -1705,6 +1728,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             kprintln!("  godel [now|space|ledger|rollback]  the machine changing itself, on evidence");
             kprintln!("  core [list|judge|install]    a council voter the machine wrote");
             kprintln!("  deeptrain [-n N -e E -r R]   train q/k/v as well as the head");
+            kprintln!("  simd                         what the CPU has, and what is enabled");
             kprintln!("  fit [lambda]  refit the probe and the council on what it knows");
             kprintln!("  gate search   how often agreement is right; the config search");
             kprintln!("  ctx cont window logits probe feature zeroshot train");
@@ -2824,6 +2848,26 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             kprintln!("  this will halt the machine.");
             console::set_color(LTGRAY);
             idt::trigger_page_fault();
+        }
+        // What the CPU offers and what the kernel turned on.
+        //
+        // Printed at boot and then twenty selftest sections scroll it away,
+        // which on hardware means it is gone -- and it is the line that decides
+        // whether every kernel in the system is the vectorised one or the
+        // scalar fallback. Worth being able to ask for.
+        "simd" => {
+            let f = crate::cpu::detected();
+            kprintln!(
+                "  sse2={} sse4.1={} avx={} avx2={} fma={} f16c={} avx512f={}",
+                f.sse2, f.sse41, f.avx, f.avx2, f.fma, f.f16c, f.avx512f
+            );
+            console::set_color(if f.avx_enabled { LTGREEN } else { LTRED });
+            kprintln!("  xsave={}  avx enabled={}", f.xsave, f.avx_enabled);
+            console::set_color(LTGRAY);
+            if !f.avx_enabled {
+                kprintln!("  the OS has not enabled the state, so every avx kernel");
+                kprintln!("  falls back to scalar -- this is a ~10x factor, not a rounding one");
+            }
         }
         "words" => {
             console::set_color(YELLOW);

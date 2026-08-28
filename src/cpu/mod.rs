@@ -162,6 +162,17 @@ impl Features {
     }
 }
 
+/// What CPUID advertises, and **not** what the OS has turned on.
+///
+/// `avx_enabled` is hardcoded false here because this function does not read
+/// XCR0 -- it cannot, it is a pure CPUID query. The value that reflects the
+/// OSXSAVE/XCR0 handshake is the one `enable_simd` caches, and it is read back
+/// through [`detected`].
+///
+/// Ask for `detected()` unless you specifically want the raw advertisement.
+/// A diagnostic built on this one reported "avx enabled=false" on a machine
+/// where every AVX kernel was running perfectly well, which was very nearly
+/// acted on.
 pub fn features() -> Features {
     let f1 = cpuid(1, 0);
     let f7 = cpuid(7, 0);

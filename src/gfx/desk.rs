@@ -2573,6 +2573,23 @@ pub fn draw() {
         };
         taskbar(&fb, d, sel);
 
+        // Every console starts this pass unpainted, and the loop below turns
+        // back on the ones it actually draws.
+        //
+        // A minimised window is skipped by the `continue` below, so its console
+        // was never reflowed *and* never told it was hidden: it kept the origin
+        // and the visible flag from the last time it was drawn, and the next
+        // line written to it went straight to the framebuffer at that stale
+        // position -- over the desktop, outside any window. The Executive does
+        // this on its own schedule, so minimising it and waiting produced
+        // `[mind t16] disabled` painted on the wallpaper.
+        //
+        // Nothing is lost by hiding one. An invisible console still updates its
+        // shadow grid, and `redraw_ch` repaints the whole log when its window
+        // comes back.
+        for ch in 0..super::console::NCONSOLE {
+            super::console::with_ch(ch, |c| c.set_visible(false));
+        }
         for (i, win) in d.windows.iter().enumerate() {
             if win.state == WinState::Minimised {
                 continue;
