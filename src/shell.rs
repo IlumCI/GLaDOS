@@ -1010,9 +1010,13 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             crate::ai::logits_for(&ids);
         }
         "fit" => {
+            // Defaults to whatever `search` adopted, not to 1.0. Refitting
+            // with the old default would silently undo the search's choice,
+            // which is a thing an operator does by typing `fit` to see the
+            // numbers.
             let lambda: f32 = rest.split_whitespace().next()
                 .and_then(|s| s.parse().ok())
-                .unwrap_or(1.0);
+                .unwrap_or_else(crate::ai::harness::default_lambda);
             crate::ai::harness::fit_probe(lambda);
         }
         "route" => {

@@ -820,7 +820,11 @@ fn test_reads() -> u32 {
         .unwrap_or(0)
 }
 
-fn spend_test_read() -> u32 {
+/// Spend one read of the held-out test slice and answer the new count.
+///
+/// Public because `search` reads it too and used not to count. One counter for
+/// every path that touches the slice, or the budget is decorative.
+pub fn spend_test_read() -> u32 {
     let n = test_reads() + 1;
     let mut s = String::new();
     push_u32(&mut s, n);

@@ -1169,21 +1169,35 @@ pub fn route_verdict(task: &str, trust: Trust) -> Option<(Choice, super::council
         };
         let (lexical, character) = c.corroborate(task, &e.tok, &allowed)?;
 
-        // Majority, ties to the probe.
+        // Whatever `search` last adopted, defaulting to majority with ties to
+        // the probe.
         //
-        // The first version had the probe answer alone and the cores only
-        // corroborate, on the grounds that a *product* of the three scored
-        // 76.9% against the probe's 77.8%. That reasoning did not transfer:
-        // a majority vote is a different rule, and it scores 80.6%. The
-        // difference lives in the eight items where the probe stands alone
-        // against the other two, where the probe is right 25% of the time and
-        // the pair 62.5% -- so being outvoted is genuine evidence, and the
-        // measurement that dismissed it was of something else.
-        let winner = if lexical == character && lexical != probe_idx {
-            lexical
-        } else {
-            probe_idx
-        };
+        // It was that majority, hardcoded -- so the search swept three rules,
+        // spent part of the test budget choosing between them, announced an
+        // adoption, and the router went on doing the same thing regardless.
+        // The chosen rule had never reached a single routing decision. Going
+        // through `decide` means the search and the router cannot disagree
+        // about what a rule *is*, which is the second half of the same fault.
+        //
+        // The default is the old behaviour, so a machine that has never
+        // searched routes exactly as it did.
+        //
+        // On the rule itself: the first version had the probe answer alone and
+        // the cores only corroborate, on the grounds that a *product* of the
+        // three scored 76.9% against the probe's 77.8%. That reasoning did not
+        // transfer -- a majority vote is a different rule, and it scores
+        // 80.6%. The difference lives in the eight items where the probe
+        // stands alone against the other two, where the probe is right 25% of
+        // the time and the pair 62.5%, so being outvoted is genuine evidence
+        // and the measurement that dismissed it was of something else.
+        let winner = decide(
+            rule_in_force(),
+            probe_idx,
+            Some(c),
+            &e.tok,
+            task,
+            &allowed,
+        );
 
         let agreement = usize::from(winner == probe_idx)
             + usize::from(winner == lexical)
@@ -1228,6 +1242,14 @@ pub fn route_report(task: &str, trust: Trust) {
         kprintln!("  no probe fitted -- run 'fit' first");
         return;
     };
+
+    // Which rule answered. Worth a line because it is now variable: `search`
+    // adopts one and the router honours it, where before the router did
+    // majority regardless of what the search had chosen.
+    kprintln!("  rule {} ({})", rule_in_force().name(), match load_config() {
+        Some(_) => "adopted",
+        None => "default",
+    });
 
     if v.confident() {
         console::set_color(LTGREEN);
@@ -1380,56 +1402,282 @@ fn split_of(i: usize) -> u8 {
     }
 }
 
-/// Score one configuration on a split, having fitted it on train.
-fn evaluate(e: &mut super::Engine, cfg: Config, split: u8) -> Option<(usize, usize)> {
+/// The corpus, featurised once.
+///
+/// `evaluate` used to do all of this per configuration, and `feature` is a
+/// forward pass. Nine configurations therefore cost nine passes over the whole
+/// corpus to compute values that cannot differ between them: the base is
+/// frozen, so a hidden state is a function of the text alone. That is the same
+/// observation `train.rs` is built on -- "the hidden state at every decision is
+/// a constant and is cached once per example" -- applied to the one search that
+/// was not using it.
+///
+/// The council is cached for a stronger reason: `Council::fit` does not take a
+/// `Config` at all, so refitting it per configuration recomputed a value that
+/// was provably identical each time.
+struct Featurised {
+    xs: Vec<Vec<f32>>,
+    ys: Vec<usize>,
+    texts: Vec<String>,
+    /// `(split, feature, wanted class, text)` for everything not in train.
+    ev: Vec<(u8, Vec<f32>, usize, String)>,
+    classes: usize,
+}
+
+fn featurise(e: &mut super::Engine) -> Option<Featurised> {
     let examples = vocab::examples();
     let classes = e.head.len();
-
-    let mut xs: Vec<Vec<f32>> = Vec::new();
-    let mut ys: Vec<usize> = Vec::new();
-    let mut texts: Vec<&str> = Vec::new();
+    let mut out = Featurised {
+        xs: Vec::new(),
+        ys: Vec::new(),
+        texts: Vec::new(),
+        ev: Vec::new(),
+        classes,
+    };
     for (i, ex) in examples.iter().enumerate() {
-        if split_of(i) != 0 {
-            continue;
-        }
         let Some(y) = e.head.index_of(&ex.applet) else { continue };
         let Some(x) = feature(e, &ex.task) else { continue };
-        xs.push(x);
-        ys.push(y);
-        texts.push(&ex.task);
+        let split = split_of(i);
+        if split == 0 {
+            out.xs.push(x);
+            out.ys.push(y);
+            out.texts.push(ex.task.clone());
+        } else {
+            out.ev.push((split, x, y, ex.task.clone()));
+        }
     }
-    if xs.is_empty() {
+    if out.xs.is_empty() {
         return None;
     }
+    Some(out)
+}
 
-    let probe = super::probe::Probe::fit(&xs, &ys, classes, cfg.lambda)?;
-    let council = super::council::Council::fit(&texts, &ys, classes, &e.tok);
-    let all: Vec<usize> = (0..classes).collect();
+/// Everything a configuration needs that a configuration does not change.
+struct Fitted {
+    council: Option<super::council::Council>,
+    /// One probe per distinct lambda, in the order they were asked for.
+    probes: Vec<(f32, super::probe::Probe)>,
+}
 
+fn fit_all(e: &super::Engine, f: &Featurised, lambdas: &[f32]) -> Fitted {
+    let texts: Vec<&str> = f.texts.iter().map(|t| t.as_str()).collect();
+    let mut probes = Vec::new();
+    for &lambda in lambdas {
+        if let Some(p) = super::probe::Probe::fit(&f.xs, &f.ys, f.classes, lambda) {
+            probes.push((lambda, p));
+        }
+    }
+    Fitted {
+        council: super::council::Council::fit(&texts, &f.ys, f.classes, &e.tok),
+        probes,
+    }
+}
+
+/// What one configuration answers for one decision.
+///
+/// Lifted out of the scoring loop so the rule has exactly one implementation.
+/// It was written inline in `evaluate`, which is fine while there is one
+/// caller and is how a second caller ends up with a rule that has quietly
+/// drifted from the first.
+fn decide(
+    rule: Rule,
+    probe_says: usize,
+    council: Option<&super::council::Council>,
+    tok: &super::tokenizer::Tokenizer,
+    text: &str,
+    all: &[usize],
+) -> usize {
+    match (rule, council) {
+        (Rule::ProbeOnly, _) | (_, None) => probe_says,
+        (Rule::Majority, Some(c)) => match c.corroborate(text, tok, all) {
+            Some((l, ch)) if l == ch && l != probe_says => l,
+            _ => probe_says,
+        },
+        (Rule::LexicalOnly, Some(c)) => match c.corroborate(text, tok, all) {
+            Some((l, _)) => l,
+            None => probe_says,
+        },
+    }
+}
+
+/// Score one configuration on a split, against the cached fit.
+fn score_cfg(
+    e: &super::Engine,
+    f: &Featurised,
+    fitted: &Fitted,
+    cfg: Config,
+    split: u8,
+) -> Option<(usize, usize)> {
+    let probe = fitted
+        .probes
+        .iter()
+        .find(|(l, _)| *l == cfg.lambda)
+        .map(|(_, p)| p)?;
+    let all: Vec<usize> = (0..f.classes).collect();
     let (mut right, mut total) = (0usize, 0usize);
-    for (i, ex) in examples.iter().enumerate() {
-        if split_of(i) != split {
+    for (sp, x, want, text) in &f.ev {
+        if *sp != split {
             continue;
         }
-        let Some(want) = e.head.index_of(&ex.applet) else { continue };
-        let Some(x) = feature(e, &ex.task) else { continue };
-        let p = probe.predict(&x);
-
-        let got = match (cfg.rule, council.as_ref()) {
-            (Rule::ProbeOnly, _) | (_, None) => p,
-            (Rule::Majority, Some(c)) => match c.corroborate(&ex.task, &e.tok, &all) {
-                Some((l, ch)) if l == ch && l != p => l,
-                _ => p,
-            },
-            (Rule::LexicalOnly, Some(c)) => match c.corroborate(&ex.task, &e.tok, &all) {
-                Some((l, _)) => l,
-                None => p,
-            },
-        };
+        let got = decide(
+            cfg.rule,
+            probe.predict(x),
+            fitted.council.as_ref(),
+            &e.tok,
+            text,
+            &all,
+        );
         total += 1;
-        right += usize::from(got == want);
+        right += usize::from(got == *want);
     }
     Some((right, total))
+}
+
+/// Where the adopted routing configuration lives.
+///
+/// It lived nowhere. `search_report` fitted `e.probe` and `e.council` in memory
+/// and wrote nothing, so a search that spent part of the test budget to choose
+/// a configuration forgot the choice at the next boot -- the machine improved
+/// itself and lost it by morning. Persisting it is what makes the search a
+/// self-modification rather than a report.
+pub const CONFIG: &str = "/ai/config";
+
+pub fn save_config(cfg: Config) -> bool {
+    let mut s = String::from("config 1\nlambda ");
+    // Tenths, matching how every message about lambda already prints it.
+    push_u32_local(&mut s, (cfg.lambda * 10.0) as u32);
+    s.push_str("\nrule ");
+    s.push_str(cfg.rule.name());
+    s.push('\n');
+    unsafe { *IN_FORCE.get() = Some(cfg) };
+    crate::sysbox::write_text(CONFIG, &s)
+}
+
+/// The configuration in force, cached.
+///
+/// Read on the routing path, which runs for every decision, so the blob is
+/// read once and remembered rather than parsed per route. `save_config`
+/// refreshes it, so adopting a configuration takes effect immediately rather
+/// than at the next boot.
+///
+/// A failed load leaves the cache empty rather than caching the failure, so a
+/// configuration written after the first miss is still picked up. Editing the
+/// blob by hand *after* a successful load is the one case that goes unseen
+/// until the next boot; `search` is the supported way to change it.
+static IN_FORCE: crate::sync::Racy<Option<Config>> = crate::sync::Racy::new(None);
+
+/// What the router should do, defaulting to what it did before it could be
+/// told: majority of three, ties to the probe.
+///
+/// The default matters. A machine that has never run `search` must behave
+/// exactly as it did, or this change would silently alter routing on every
+/// system that never asked for anything.
+pub fn rule_in_force() -> Rule {
+    if let Some(cfg) = unsafe { *IN_FORCE.get() } {
+        return cfg.rule;
+    }
+    match load_config() {
+        Some(cfg) => cfg.rule,
+        None => Rule::Majority,
+    }
+}
+
+/// The lambda a bare `fit` should use: whatever was last adopted, or 1.0.
+pub fn default_lambda() -> f32 {
+    if let Some(cfg) = unsafe { *IN_FORCE.get() } {
+        return cfg.lambda;
+    }
+    load_config().map(|c| c.lambda).unwrap_or(1.0)
+}
+
+pub fn load_config() -> Option<Config> {
+    let bytes = crate::sysbox::read_blob(CONFIG)?;
+    let text = core::str::from_utf8(&bytes).ok()?;
+    let mut lambda = None;
+    let mut rule = None;
+    for line in text.lines() {
+        let mut w = line.split_whitespace();
+        match (w.next(), w.next()) {
+            (Some("lambda"), Some(v)) => {
+                lambda = v.parse::<u32>().ok().map(|t| t as f32 / 10.0)
+            }
+            (Some("rule"), Some("probe")) => rule = Some(Rule::ProbeOnly),
+            (Some("rule"), Some("majority")) => rule = Some(Rule::Majority),
+            (Some("rule"), Some("lexical")) => rule = Some(Rule::LexicalOnly),
+            _ => {}
+        }
+    }
+    let cfg = Config { lambda: lambda?, rule: rule? };
+    unsafe { *IN_FORCE.get() = Some(cfg) };
+    Some(cfg)
+}
+
+fn push_u32_local(s: &mut String, v: u32) {
+    if v >= 10 {
+        push_u32_local(s, v / 10);
+    }
+    s.push((b'0' + (v % 10) as u8) as char);
+}
+
+// There is deliberately no `apply_stored_config`. One was written and taken
+// out: refitting from the stored configuration needs features, and a feature
+// is a forward pass, so honouring the configuration at boot would have added
+// several hundred of them to every start. The probe is fitted on demand
+// anyway -- `probe: None` at construction, `fit` or `search` fills it -- so
+// persistence is carried by `default_lambda` and `rule_in_force` instead,
+// which cost a blob read once and nothing thereafter.
+
+/// The configuration round-trip, and the default that protects every machine
+/// that has never searched.
+///
+/// Checked without a namespace, which the boot selftests run before: the
+/// parse is exercised against text rather than against a file, and the default
+/// is exercised by asking for it with no cache and no blob.
+pub fn config_selftest() -> bool {
+    // The default is the old hardcoded behaviour. If this ever stops being
+    // `Majority`, every machine that never ran `search` silently starts
+    // routing differently.
+    if rule_in_force() != Rule::Majority {
+        return false;
+    }
+    if default_lambda() != 1.0 {
+        return false;
+    }
+
+    // Every rule name survives being written and read. A name that renders but
+    // does not parse would make an adopted configuration fall back to the
+    // default at the next boot, silently -- which is the failure this whole
+    // change is about, arriving one layer down.
+    for rule in [Rule::ProbeOnly, Rule::Majority, Rule::LexicalOnly] {
+        let cfg = Config { lambda: 1.0, rule };
+        let mut text = String::from("config 1\nlambda 10\nrule ");
+        text.push_str(cfg.rule.name());
+        text.push('\n');
+        let mut got = None;
+        for line in text.lines() {
+            let mut w = line.split_whitespace();
+            if let (Some("rule"), Some(v)) = (w.next(), w.next()) {
+                got = match v {
+                    "probe" => Some(Rule::ProbeOnly),
+                    "majority" => Some(Rule::Majority),
+                    "lexical" => Some(Rule::LexicalOnly),
+                    _ => None,
+                };
+            }
+        }
+        if got != Some(rule) {
+            return false;
+        }
+    }
+
+    // Every rule name is distinct, or two configurations would be one.
+    let names = [Rule::ProbeOnly.name(), Rule::Majority.name(), Rule::LexicalOnly.name()];
+    for (i, a) in names.iter().enumerate() {
+        if names.iter().skip(i + 1).any(|b| b == a) {
+            return false;
+        }
+    }
+    true
 }
 
 /// Search the configuration space, adopt the winner, then report on test.
@@ -1443,13 +1691,16 @@ pub fn search_report() {
 
     let t0 = crate::time::rdtsc();
     let outcome = with_engine(|e| {
+        // Once, not once per configuration. See `Featurised`.
+        let f = featurise(e)?;
+        let fitted = fit_all(e, &f, &lambdas);
         let mut best: Option<(Config, usize, usize)> = None;
         let mut tried = 0usize;
 
         for &lambda in lambdas.iter() {
             for &rule in rules.iter() {
                 let cfg = Config { lambda, rule };
-                let Some((ok, n)) = evaluate(e, cfg, 1) else { continue };
+                let Some((ok, n)) = score_cfg(e, &f, &fitted, cfg, 1) else { continue };
                 tried += 1;
                 console::set_color(LTGRAY);
                 kprintln!(
@@ -1468,34 +1719,28 @@ pub fn search_report() {
         }
 
         let (cfg, vok, vn) = best?;
-        // Read once, after the choice is already made.
-        let (tok_, tn) = evaluate(e, cfg, 2)?;
+        // Read once, after the choice is already made -- and spent against the
+        // same budget the self-modification loop spends.
+        //
+        // It was not. `evaluate(e, cfg, 2)` read the test slice directly, so
+        // every `search` burned a read that nobody counted, while `godel`
+        // carefully budgeted its own three. A loop that improves itself reads
+        // the held-out set forever unless somebody counts, and counting in one
+        // of the two places that read it is not counting.
+        let reads = super::godel::spend_test_read();
+        let (tok_, tn) = score_cfg(e, &f, &fitted, cfg, 2)?;
 
-        // Adopt: refit on train and install, so the engine is left holding the
-        // configuration that won rather than whichever was tried last.
-        let examples = vocab::examples();
-        let classes = e.head.len();
-        let mut xs = Vec::new();
-        let mut ys = Vec::new();
-        let mut texts: Vec<&str> = Vec::new();
-        for (i, ex) in examples.iter().enumerate() {
-            if split_of(i) != 0 {
-                continue;
-            }
-            let Some(y) = e.head.index_of(&ex.applet) else { continue };
-            let Some(x) = feature(e, &ex.task) else { continue };
-            xs.push(x);
-            ys.push(y);
-            texts.push(&ex.task);
-        }
-        e.probe = super::probe::Probe::fit(&xs, &ys, classes, cfg.lambda);
-        e.council = super::council::Council::fit(&texts, &ys, classes, &e.tok);
+        // Adopt: install the winner and write it down, so it survives a boot.
+        let texts: Vec<&str> = f.texts.iter().map(|t| t.as_str()).collect();
+        e.probe = super::probe::Probe::fit(&f.xs, &f.ys, f.classes, cfg.lambda);
+        e.council = super::council::Council::fit(&texts, &f.ys, f.classes, &e.tok);
+        let saved = save_config(cfg);
 
-        Some((cfg, vok, vn, tok_, tn, tried))
+        Some((cfg, vok, vn, tok_, tn, tried, reads, saved))
     })
     .flatten();
 
-    let Some((cfg, vok, vn, tok_, tn, tried)) = outcome else {
+    let Some((cfg, vok, vn, tok_, tn, tried, reads, saved)) = outcome else {
         console::set_color(LTRED);
         kprintln!("  no model, or no corpus to search against");
         console::set_color(LTGRAY);
@@ -1510,10 +1755,33 @@ pub fn search_report() {
         cfg.rule.name()
     );
     console::set_color(LTGRAY);
+    if !saved {
+        console::set_color(LTRED);
+        kprintln!("  COULD NOT WRITE {} -- this choice dies at the next boot", CONFIG);
+        console::set_color(LTGRAY);
+    }
     kprintln!("  {} configurations tried, chosen on {} validation items", tried, vn);
     kprintln!("  validation {}%  (spent -- selected on, so optimistic)", pct(vok, vn));
-    console::set_color(LTCYAN);
-    kprintln!("  test       {}%  ({} items, read once)", pct(tok_, tn), tn);
+    let (_, cap, _) = super::godel::test_status();
+    if reads <= cap {
+        console::set_color(LTCYAN);
+        kprintln!(
+            "  test       {}%  ({} items, read {} of {})",
+            pct(tok_, tn),
+            tn,
+            reads,
+            cap
+        );
+    } else {
+        console::set_color(YELLOW);
+        kprintln!(
+            "  test       {}%  ({} items) -- STALE, read {} of {}, do not quote",
+            pct(tok_, tn),
+            tn,
+            reads,
+            cap
+        );
+    }
     console::set_color(LTGRAY);
     let mhz = crate::time::tsc_mhz();
     if mhz > 0 {

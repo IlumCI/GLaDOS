@@ -930,7 +930,11 @@ asks for them. It returns the compiled `SEED_TRAIN` and `SEED_VAL_END` until a
 bundle is imported over the corpus, and the imported boundaries after. Reading
 the constants directly is the bug that arrangement exists to prevent.
 Validation is spent freely; the test slice is read once. `search` adopts a
-configuration only when measured better.
+configuration only when measured better, writes it to `/ai/config`, and spends
+one read against `godel`'s test budget like anything else that touches the
+slice. The router honours what it adopted through `harness::decide`, which is
+the one implementation of a rule; `rule_in_force()` defaults to `Majority`, so
+a machine that has never searched routes exactly as it did.
 
 Corpora hold out **whole template families** and never sampled instances, since
 instances within a family differ only by slot values, so an instance split
