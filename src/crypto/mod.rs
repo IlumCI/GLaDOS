@@ -41,7 +41,7 @@ pub fn selftest() -> bool {
     console::set_color(YELLOW);
     kprintln!("\n[selftest] crypto:");
 
-    let checks: [(&str, fn() -> bool); 13] = [
+    let checks: [(&str, fn() -> bool); 14] = [
         ("sha-256   NIST vectors", crate::store::sha256::selftest),
         ("hmac/hkdf RFC 4231 and RFC 5869", hkdf::selftest),
         ("sha-384   FIPS 180-4", sha512::selftest),
@@ -55,6 +55,7 @@ pub fn selftest() -> bool {
         ("wpa2      IEEE 802.11i pmk and ptk", crate::net::wpa2::selftest),
         ("802.11    beacons parse, probe requests build", crate::net::ieee80211::selftest),
         ("8188eu    tx/rx descriptor bit layout", crate::dev::rtl8188eu::desc::selftest),
+        ("lang      functions, lists, scope, whole programs", crate::lang::selftest),
     ];
 
     let mut all = true;

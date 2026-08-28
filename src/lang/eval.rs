@@ -24,6 +24,16 @@ use alloc::vec::Vec;
 pub enum Value {
     Int(i64),
     Str(String),
+    /// A sequence, and the only compound value there is.
+    ///
+    /// Applications hold collections -- rows in a list, cells on a board,
+    /// lines in a document -- and a language with no way to hold one can only
+    /// write calculators. Values, not references: `push` returns a new list
+    /// rather than mutating a shared one, so there is no aliasing to reason
+    /// about and no question of what two names pointing at the same list
+    /// means. It copies, and a copy of a list that fits on a screen is
+    /// nothing.
+    List(Vec<Value>),
     Nil,
 }
 
@@ -32,6 +42,7 @@ impl Value {
         match self {
             Value::Int(v) => *v != 0,
             Value::Str(s) => !s.is_empty(),
+            Value::List(v) => !v.is_empty(),
             Value::Nil => false,
         }
     }
@@ -40,6 +51,7 @@ impl Value {
         match self {
             Value::Int(v) => Ok(*v),
             Value::Str(_) => Err("expected a number, found a string".to_string()),
+            Value::List(_) => Err("expected a number, found a list".to_string()),
             Value::Nil => Err("expected a number, found nothing".to_string()),
         }
     }
@@ -48,6 +60,17 @@ impl Value {
         match self {
             Value::Int(v) => format!("{}", v),
             Value::Str(s) => s.clone(),
+            Value::List(items) => {
+                let mut out = String::from("[");
+                for (i, v) in items.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    out.push_str(&v.render());
+                }
+                out.push(']');
+                out
+            }
             Value::Nil => String::new(),
         }
     }
@@ -59,8 +82,35 @@ impl Value {
 /// where it could read a key.
 const STEP_BUDGET: u64 = 20_000_000;
 
+/// A named procedure: its parameters and its body.
+#[derive(Clone)]
+struct Func {
+    params: Vec<String>,
+    body: Vec<Stmt>,
+}
+
+/// How deep calls may nest before it is called a runaway.
+///
+/// Recursion is not the reason. The step budget already stops a program that
+/// loops forever, but it does not stop one that recurses forever, because
+/// every frame is a fresh allocation and the kernel runs out of stack long
+/// before twenty million steps -- and running out of stack in ring 0 with no
+/// guard page is a triple fault, not an error message.
+const MAX_DEPTH: usize = 64;
+
 pub struct Interp {
-    vars: BTreeMap<String, Value>,
+    /// Innermost scope last. A name is looked up from the top down and
+    /// assigned wherever it is already bound, so a function can read and
+    /// update a global without ceremony, and a parameter shadows one without
+    /// destroying it.
+    scopes: Vec<BTreeMap<String, Value>>,
+    funcs: BTreeMap<String, Func>,
+    /// Set by `return`, and checked after every statement in a block. A
+    /// sentinel rather than a control-flow type threaded through every
+    /// signature, which for a tree-walker this size is the same thing with
+    /// less to read.
+    returning: Option<Value>,
+    depth: usize,
     steps: u64,
 }
 
@@ -72,20 +122,92 @@ impl Default for Interp {
 
 impl Interp {
     pub fn new() -> Self {
-        Self { vars: BTreeMap::new(), steps: 0 }
+        Self {
+            scopes: alloc::vec![BTreeMap::new()],
+            funcs: BTreeMap::new(),
+            returning: None,
+            depth: 0,
+            steps: 0,
+        }
     }
 
+    /// The global scope, which is what `vars` at the prompt means: a function's
+    /// locals exist only while it is running and there is nothing to show.
     pub fn var_count(&self) -> usize {
-        self.vars.len()
+        self.scopes[0].len()
     }
 
     pub fn vars(&self) -> impl Iterator<Item = (&String, &Value)> {
-        self.vars.iter()
+        self.scopes[0].iter()
+    }
+
+    pub fn fn_names(&self) -> impl Iterator<Item = &String> {
+        self.funcs.keys()
+    }
+
+    fn lookup(&self, name: &str) -> Option<&Value> {
+        self.scopes.iter().rev().find_map(|s| s.get(name))
+    }
+
+    /// Bind a name where it already lives, or in the innermost scope if it is
+    /// new. So a function updating a global updates the global, and one
+    /// introducing a name keeps it to itself.
+    fn assign(&mut self, name: &str, v: Value) {
+        for scope in self.scopes.iter_mut().rev() {
+            if let Some(slot) = scope.get_mut(name) {
+                *slot = v;
+                return;
+            }
+        }
+        if let Some(top) = self.scopes.last_mut() {
+            top.insert(String::from(name), v);
+        }
+    }
+
+    /// Run a block, stopping early if something inside it returned.
+    fn body(&mut self, stmts: &[Stmt]) -> Result<(), String> {
+        for st in stmts {
+            self.stmt(st)?;
+            if self.returning.is_some() {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    fn call_user(&mut self, f: &Func, args: &[Value]) -> Result<Value, String> {
+        if args.len() != f.params.len() {
+            return Err(format!(
+                "expected {} argument(s), got {}",
+                f.params.len(),
+                args.len()
+            ));
+        }
+        if self.depth >= MAX_DEPTH {
+            return Err("call nesting too deep (runaway recursion?)".to_string());
+        }
+        let mut frame = BTreeMap::new();
+        for (p, a) in f.params.iter().zip(args.iter()) {
+            frame.insert(p.clone(), a.clone());
+        }
+        self.scopes.push(frame);
+        self.depth += 1;
+        let r = self.body(&f.body);
+        self.scopes.pop();
+        self.depth -= 1;
+        r?;
+        // A function that falls off its end yields nothing, which is what a
+        // procedure called for its effect should say.
+        Ok(self.returning.take().unwrap_or(Value::Nil))
     }
 
     /// Run a program, returning the value of the last expression statement.
     pub fn run(&mut self, prog: &[Stmt]) -> Result<Value, String> {
         self.steps = 0;
+        // A `return` typed at the prompt has nothing to return from. Cleared
+        // here so it cannot sit armed and silently truncate the next block
+        // that runs.
+        self.returning = None;
         let mut last = Value::Nil;
         for s in prog {
             last = self.stmt(s)?;
@@ -105,23 +227,42 @@ impl Interp {
         self.tick()?;
         match s {
             Stmt::Expr(e) => self.expr(e),
+            Stmt::Fn(name, params, body) => {
+                self.funcs.insert(
+                    name.clone(),
+                    Func { params: params.clone(), body: body.clone() },
+                );
+                Ok(Value::Nil)
+            }
+            Stmt::Return(e) => {
+                let v = match e {
+                    Some(x) => self.expr(x)?,
+                    None => Value::Nil,
+                };
+                self.returning = Some(v);
+                Ok(Value::Nil)
+            }
             Stmt::If(cond, then, otherwise) => {
                 if self.expr(cond)?.truthy() {
-                    for st in then {
-                        self.stmt(st)?;
-                    }
+                    self.body(then)?;
                 } else if let Some(els) = otherwise {
-                    for st in els {
-                        self.stmt(st)?;
-                    }
+                    self.body(els)?;
                 }
                 Ok(Value::Nil)
             }
             Stmt::While(cond, body) => {
                 while self.expr(cond)?.truthy() {
                     self.tick()?;
-                    for st in body {
-                        self.stmt(st)?;
+                    self.body(body)?;
+                    // A `return` inside the loop leaves the function, not
+                    // just this iteration. Running the body through `body`
+                    // stops the iteration; this stops the loop. Missing this
+                    // is silent: the loop simply runs to completion and
+                    // whatever it returned is overwritten by whatever comes
+                    // after it, so the function answers the wrong thing
+                    // rather than failing.
+                    if self.returning.is_some() {
+                        break;
                     }
                 }
                 Ok(Value::Nil)
@@ -135,13 +276,12 @@ impl Interp {
             Expr::Int(v) => Ok(Value::Int(*v)),
             Expr::Str(s) => Ok(Value::Str(s.clone())),
             Expr::Var(name) => self
-                .vars
-                .get(name)
+                .lookup(name)
                 .cloned()
                 .ok_or_else(|| format!("undefined variable '{}'", name)),
             Expr::Assign(name, rhs) => {
                 let v = self.expr(rhs)?;
-                self.vars.insert(name.clone(), v.clone());
+                self.assign(name, v.clone());
                 Ok(v)
             }
             Expr::Unary(op, inner) => {
@@ -157,6 +297,13 @@ impl Interp {
                 let mut vals = Vec::with_capacity(args.len());
                 for a in args {
                     vals.push(self.expr(a)?);
+                }
+                // User functions shadow builtins deliberately. A program that
+                // defines `rect` means its own `rect`, and finding out that a
+                // name was reserved is worse than losing access to a builtin
+                // the program chose to replace.
+                if let Some(f) = self.funcs.get(name).cloned() {
+                    return self.call_user(&f, &vals);
                 }
                 self.builtin(name, &vals)
             }
@@ -232,6 +379,10 @@ impl Interp {
         Ok(Value::Int(v))
     }
 
+    fn arg<'v>(args: &'v [Value], n: usize) -> Result<&'v Value, String> {
+        args.get(n).ok_or_else(|| format!("missing argument {}", n + 1))
+    }
+
     fn builtin(&mut self, name: &str, args: &[Value]) -> Result<Value, String> {
         fn need(args: &[Value], n: usize, name: &str) -> Result<(), String> {
             if args.len() != n {
@@ -248,6 +399,64 @@ impl Interp {
         }
 
         match name {
+            // --- lists ---------------------------------------------------
+            //
+            // Values, not references. `push` returns a new list rather than
+            // changing one in place, so two names can never disagree about
+            // what a list contains and nothing has to explain aliasing to
+            // whoever -- or whatever -- is writing the program.
+            "list" => Ok(Value::List(args.to_vec())),
+            "len" => match args.first() {
+                Some(Value::List(v)) => Ok(Value::Int(v.len() as i64)),
+                Some(Value::Str(t)) => Ok(Value::Int(t.chars().count() as i64)),
+                _ => Err("len wants a list or a string".to_string()),
+            },
+            "get" => {
+                let (l, i) = (Self::arg(args, 0)?, Self::arg(args, 1)?.as_int()?);
+                match l {
+                    Value::List(v) => {
+                        // Out of range is nothing, not a fault. A program
+                        // walking a list it did not write should be able to
+                        // ask past the end without dying.
+                        Ok(v.get(i as usize).cloned().unwrap_or(Value::Nil))
+                    }
+                    Value::Str(t) => Ok(t
+                        .chars()
+                        .nth(i as usize)
+                        .map(|c| Value::Str(c.to_string()))
+                        .unwrap_or(Value::Nil)),
+                    _ => Err("get wants a list or a string".to_string()),
+                }
+            }
+            "push" => {
+                let l = Self::arg(args, 0)?;
+                let v = Self::arg(args, 1)?;
+                match l {
+                    Value::List(items) => {
+                        let mut out = items.clone();
+                        out.push(v.clone());
+                        Ok(Value::List(out))
+                    }
+                    _ => Err("push wants a list".to_string()),
+                }
+            }
+            "set" => {
+                let l = Self::arg(args, 0)?;
+                let i = Self::arg(args, 1)?.as_int()?;
+                let v = Self::arg(args, 2)?;
+                match l {
+                    Value::List(items) => {
+                        let mut out = items.clone();
+                        let i = i as usize;
+                        if i >= out.len() {
+                            return Err("set past the end of the list".to_string());
+                        }
+                        out[i] = v.clone();
+                        Ok(Value::List(out))
+                    }
+                    _ => Err("set wants a list".to_string()),
+                }
+            }
             "print" => {
                 for (i, a) in args.iter().enumerate() {
                     if i > 0 {
@@ -472,6 +681,7 @@ impl Interp {
 pub const BUILTINS: &[&str] = &[
     "print", "println", "hex", "cls", "color", "ticks", "hz", "tasks", "heap",
     "read", "exists", "ls", "write", "applet",
+    "list", "len", "get", "set", "push",
     "width", "height", "pixel", "rect", "text",
     "peek8", "peek16", "peek32", "peek64", "poke8", "poke32", "poke64",
     "inb", "outb", "inl", "outl",

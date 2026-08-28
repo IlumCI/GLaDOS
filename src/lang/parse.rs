@@ -59,6 +59,15 @@ pub enum Stmt {
     Expr(Expr),
     If(Expr, Vec<Stmt>, Option<Vec<Stmt>>),
     While(Expr, Vec<Stmt>),
+    /// `fn name(a, b) { ... }`
+    ///
+    /// A statement rather than an expression because there are no first-class
+    /// functions here and inventing them would mean closures, captured
+    /// environments and a garbage collector's worth of questions. A program
+    /// that can name a procedure and call it is enough to write an
+    /// application, and that is what this is for.
+    Fn(String, Vec<String>, Vec<Stmt>),
+    Return(Option<Expr>),
 }
 
 pub struct Parser {
@@ -128,6 +137,48 @@ impl Parser {
                 otherwise = Some(self.block()?);
             }
             return Ok(Stmt::If(cond, then, otherwise));
+        }
+
+        if self.keyword("fn") {
+            self.bump();
+            let name = match self.peek().clone() {
+                Tok::Ident(n) => {
+                    self.bump();
+                    n
+                }
+                _ => return Err("a name after 'fn'".to_string()),
+            };
+            self.expect(&Tok::LParen, "'(' after the function name")?;
+            let mut params = Vec::new();
+            if !self.at(&Tok::RParen) {
+                loop {
+                    match self.peek().clone() {
+                        Tok::Ident(pname) => {
+                            self.bump();
+                            params.push(pname);
+                        }
+                        _ => return Err("a parameter name".to_string()),
+                    }
+                    if !self.eat(&Tok::Comma) {
+                        break;
+                    }
+                }
+            }
+            self.expect(&Tok::RParen, "')' after the parameters")?;
+            let body = self.block()?;
+            return Ok(Stmt::Fn(name, params, body));
+        }
+
+        if self.keyword("return") {
+            self.bump();
+            // A bare `return` is legal and yields nothing, which is what a
+            // procedure called for its effect wants to say.
+            if self.eat(&Tok::Semi) || self.at(&Tok::RBrace) || self.at(&Tok::Eof) {
+                return Ok(Stmt::Return(None));
+            }
+            let e = self.expression()?;
+            let _ = self.eat(&Tok::Semi);
+            return Ok(Stmt::Return(Some(e)));
         }
 
         if self.keyword("while") {
