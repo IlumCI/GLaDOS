@@ -51,6 +51,7 @@
 
 pub mod check;
 pub mod draft;
+pub mod fix;
 pub mod manifest;
 pub mod skel;
 
@@ -78,8 +79,8 @@ fn panel_path(name: &str) -> String {
 /// called `list` would take the word away. Reserved rather than escaped: there
 /// are two of them and renaming an app is free.
 pub const RESERVED: &[&str] = &[
-    "list", "show", "check", "info", "trust", "adopt", "rollback", "draft", "try", "take",
-    "drop",
+    "list", "show", "check", "fix", "info", "trust", "adopt", "rollback", "draft", "try",
+    "take", "drop",
 ];
 
 pub fn exists(name: &str) -> bool {

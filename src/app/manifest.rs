@@ -45,6 +45,8 @@ use super::ROOT;
 const NODES: &str = "/app/manifests";
 const GRANTS: &str = "/app/grants";
 const LEDGER: &str = "/app/ledger.txt";
+/// Where a version's actual bytes live, addressed by their own hash.
+const BLOBS: &str = "/app/blobs";
 
 pub fn hex32(h: &[u8; 32]) -> String {
     let mut s = String::with_capacity(64);
@@ -257,6 +259,11 @@ pub fn head(name: &str) -> Option<[u8; 32]> {
 
 /// Record a version as the one in use. A pointer write, and nothing else moves.
 pub fn adopt(name: &str, h: &[u8; 32]) -> bool {
+    // Before the pointer moves, so the version being adopted can be returned to
+    // later. Doing this at adoption rather than at rollback is what makes undo
+    // possible at all: by the time somebody wants to go back, the bytes are
+    // gone unless they were kept on the way past.
+    preserve(name);
     let ok = sysbox::write_text(&head_path(name), &alloc::format!("{}\n", hex32(h)));
     if ok {
         ledger(name, "adopt", h);
@@ -271,9 +278,47 @@ pub fn adopt(name: &str, h: &[u8; 32]) -> bool {
 pub fn rollback(name: &str) -> Option<[u8; 32]> {
     let h = head(name)?;
     let parent = Manifest::load(&h)?.parent?;
+    let m = Manifest::load(&parent)?;
+    // The files come back, not just the pointer.
+    //
+    // Moving `HEAD` alone was the first version of this, and it was worse than
+    // doing nothing: the application would still have been the new one while
+    // its recorded identity named the old, so every later hash comparison would
+    // have been about a version that was not on disk. Anything claiming to undo
+    // a change has to actually undo it.
+    let (Some(panel), Some(code)) = (blob(&m.panel), blob(&m.code)) else {
+        // Refused rather than half-done. A parent whose bytes were never kept
+        // cannot be returned to, and saying so beats leaving content and
+        // identity disagreeing.
+        return None;
+    };
+    sysbox::write_blob(&alloc::format!("{}/{}/panel.ui", ROOT, name), panel);
+    sysbox::write_blob(&alloc::format!("{}/{}/code.l", ROOT, name), code);
     sysbox::write_text(&head_path(name), &alloc::format!("{}\n", hex32(&parent)));
     ledger(name, "rollback", &parent);
     Some(parent)
+}
+
+/// Keep the bytes of what is on disk now, addressed by their own hash.
+///
+/// Called before adopting anything, so the version being replaced can still be
+/// returned to. Write-if-absent, so a version adopted twice is stored once --
+/// which is the whole reason the name is the hash.
+pub fn preserve(name: &str) {
+    for file in ["panel.ui", "code.l"] {
+        let path = alloc::format!("{}/{}/{}", ROOT, name, file);
+        if let Some(bytes) = sysbox::read_blob(&path) {
+            let h = sha256::hash(&bytes);
+            let at = alloc::format!("{}/{}", BLOBS, hex32(&h));
+            if sysbox::read_blob(&at).is_none() {
+                sysbox::write_blob(&at, bytes);
+            }
+        }
+    }
+}
+
+fn blob(h: &[u8; 32]) -> Option<alloc::vec::Vec<u8>> {
+    sysbox::read_blob(&alloc::format!("{}/{}", BLOBS, hex32(h)))
 }
 
 /// Has the operator approved this exact manifest?

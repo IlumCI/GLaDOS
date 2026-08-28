@@ -41,7 +41,7 @@ pub fn selftest() -> bool {
     console::set_color(YELLOW);
     kprintln!("\n[selftest] crypto:");
 
-    let checks: [(&str, fn() -> bool); 19] = [
+    let checks: [(&str, fn() -> bool); 21] = [
         ("sha-256   NIST vectors", crate::store::sha256::selftest),
         ("hmac/hkdf RFC 4231 and RFC 5869", hkdf::selftest),
         ("sha-384   FIPS 180-4", sha512::selftest),
@@ -61,6 +61,8 @@ pub fn selftest() -> bool {
         ("appcheck  a panel naming a missing function is caught", crate::app::check::selftest),
         ("skeleton  every skeleton fills and passes the same gate", crate::app::skel::selftest),
         ("author    a scripted run repairs, drops, and refuses empty", crate::ai::author::selftest),
+        ("words     command arguments are taken, never re-split", crate::shell::words_selftest),
+        ("appfix    a repair removes the line it meant to remove", crate::app::fix::selftest),
     ];
 
     let mut all = true;

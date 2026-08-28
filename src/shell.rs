@@ -2179,12 +2179,13 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
         // use -- so everything a stored panel can invoke is a function in its
         // own program and nothing in the shell's vocabulary.
         "app" => {
-            let mut w = rest.splitn(3, ' ');
+            let mut w = Words::new(rest);
             match w.next().unwrap_or("") {
                 "" => {
                     kprintln!("  app list             applications on this machine");
                     kprintln!("  app show <name>      its panel document, rows filled in");
                     kprintln!("  app check <name>     what can be known without running it");
+                    kprintln!("  app fix [name]       repair what can be repaired, or all of them");
                     kprintln!("  app draft <n> <kind> start one from a skeleton");
                     kprintln!("  app try <name>       check a draft, running it too");
                     kprintln!("  app take <name>      adopt a draft into /app");
@@ -2250,8 +2251,8 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
                     // `rest` was already split three ways, so the name and the
                     // hash are the next two pieces -- splitting again here
                     // would look at the name and find no hash in it.
-                    let name = w.next().unwrap_or("");
-                    let typed = w.next().unwrap_or("").trim();
+                    let name = w.word();
+                    let typed = w.word();
                     match man::current(name) {
                         None => kprintln!("  no application '{}'", name),
                         Some(m) => {
@@ -2317,10 +2318,9 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
                     // `rest` was already split three ways, so the name is the
                     // next piece and everything after it is the third. Splitting
                     // the name again finds no kind in it.
-                    let name = w.next().unwrap_or("");
-                    let mut a = w.next().unwrap_or("").splitn(2, ' ');
-                    let kind = a.next().unwrap_or("");
-                    let title = a.next().unwrap_or("");
+                    let name = w.word();
+                    let kind = w.word();
+                    let title = w.rest();
                     if name.is_empty() {
                         kprintln!("  usage: app draft <name> <kind> [title]");
                         kprintln!("  skeletons:");
@@ -2392,6 +2392,56 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
                         }
                     }
                 },
+                // Put right what can be put right, rather than describing it.
+                //
+                // `app fix` with no name sweeps everything, which is the shape
+                // an operator actually wants: they know something is wrong and
+                // not which application it is in.
+                "fix" => {
+                    use crate::gfx::console::{LTGREEN, LTRED, YELLOW};
+                    let one = w.word();
+                    let names: Vec<String> = if one.is_empty() {
+                        crate::app::names()
+                    } else {
+                        alloc::vec![String::from(one)]
+                    };
+                    if names.is_empty() {
+                        kprintln!("  no applications to look at");
+                        return;
+                    }
+                    let mut touched = 0;
+                    let mut left = 0;
+                    for n in &names {
+                        let o = crate::app::fix::fix(n);
+                        if o.repairs.is_empty() && o.before == 0 {
+                            continue;
+                        }
+                        kprintln!("  {}", n);
+                        for r in &o.repairs {
+                            console::set_color(if r.done { LTGREEN } else { YELLOW });
+                            kprintln!("    {} {}", if r.done { "fixed " } else { "left  " }, r.what);
+                        }
+                        console::set_color(if o.after == 0 { LTGREEN } else { LTRED });
+                        kprintln!("    {} fault(s) before, {} after", o.before, o.after);
+                        console::set_color(LTGRAY);
+                        if let Some(h) = o.adopted {
+                            touched += 1;
+                            kprintln!(
+                                "    now {}  ('app rollback {}' undoes this)",
+                                &crate::app::manifest::hex32(&h)[..12],
+                                n
+                            );
+                        }
+                        left += o.after;
+                    }
+                    if touched == 0 && left == 0 {
+                        kprintln!("  nothing to repair in {} application(s)", names.len());
+                    } else if left > 0 {
+                        kprintln!("  {} fault(s) need a person: only removals are automatic,", left);
+                        kprintln!("  because writing a function or repointing an action would");
+                        kprintln!("  change what the application does rather than tidy it.");
+                    }
+                }
                 // Everything that can be known about an application without
                 // being told what it is for.
                 "check" => match w.next() {
@@ -2430,7 +2480,9 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
                         kprintln!("  usage: app {} <fn> [args]", name);
                         return;
                     };
-                    let arg = w.next().unwrap_or("");
+                    // The rest, not one word: `app todo add buy milk` has to
+                    // keep its spaces, and the parent no longer glues them on.
+                    let arg = w.rest();
                     match crate::app::call_fn(name, func, arg) {
                         Ok(v) => {
                             if !v.is_empty() {
@@ -2607,6 +2659,94 @@ fn apply_filter(text: &str, spec: &str) -> alloc::string::String {
 /// Last rather than first, so `grep >` reads as a filter argument rather than
 /// as a redirection -- the trailing operator is the one that applies to
 /// everything before it.
+/// A command line taken one word at a time, with the remainder still available.
+///
+/// Exists because the obvious thing went wrong three times in a row. An arm
+/// would do `rest.splitn(3, ' ')`, a sub-arm would take one of those pieces and
+/// split it again, and the second split looked at a piece whose shape the first
+/// had already fixed -- so `app trust <name> <hash>` found no hash and
+/// `app draft <name> <kind>` found no kind. Both failed by doing nothing and
+/// saying nothing, which is the worst way to fail an operator.
+///
+/// The fix is not to count more carefully, it is to stop counting. A sub-arm
+/// asks for the next word, asks for the rest when it wants free text, and never
+/// needs to know how many pieces anything above it made. There is no argument
+/// count anywhere for a later arm to disagree with.
+///
+/// `next` keeps the `Option` shape so that arms which already read well as a
+/// `match` do not have to be rewritten to gain the property.
+pub struct Words<'a> {
+    s: &'a str,
+}
+
+impl<'a> Words<'a> {
+    pub fn new(s: &'a str) -> Words<'a> {
+        Words { s: s.trim_start() }
+    }
+
+    /// The next word, or `None` when the line is spent.
+    pub fn next(&mut self) -> Option<&'a str> {
+        if self.s.is_empty() {
+            return None;
+        }
+        Some(self.word())
+    }
+
+    /// The next word, or `""` when the line is spent.
+    pub fn word(&mut self) -> &'a str {
+        let s = self.s;
+        match s.find(' ') {
+            None => {
+                self.s = "";
+                s
+            }
+            Some(i) => {
+                self.s = s[i + 1..].trim_start();
+                &s[..i]
+            }
+        }
+    }
+
+    /// Everything not yet taken, verbatim. Free text keeps its spaces.
+    pub fn rest(&self) -> &'a str {
+        self.s
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.s.is_empty()
+    }
+}
+
+pub fn words_selftest() -> bool {
+    let mut w = Words::new("  trust todo abc123 ");
+    if w.word() != "trust" || w.word() != "todo" || w.word() != "abc123" {
+        return false;
+    }
+    if !w.is_empty() {
+        return false;
+    }
+    // Running off the end answers empty for ever rather than repeating the last
+    // word, which is what would let an arm act on a stale argument.
+    let mut e = Words::new("");
+    if e.next().is_some() || !e.word().is_empty() {
+        return false;
+    }
+    // Free text keeps its spaces, so `app todo add buy milk` still adds two
+    // words and not one.
+    let mut g = Words::new("todo add buy milk");
+    if g.word() != "todo" || g.word() != "add" || g.rest() != "buy milk" {
+        return false;
+    }
+    // Runs of spaces do not produce empty words.
+    let mut m = Words::new("a    b");
+    if m.word() != "a" || m.word() != "b" || !m.is_empty() {
+        return false;
+    }
+    // And the two shapes agree about where they are.
+    let mut n = Words::new("one two");
+    n.next() == Some("one") && n.rest() == "two"
+}
+
 fn split_pipeline(line: &str) -> Option<(&str, char, &str)> {
     let mut found: Option<(usize, char)> = None;
     for (i, c) in line.char_indices() {
