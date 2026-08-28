@@ -140,6 +140,24 @@ fn seed_tools(sb: &mut Sysbox) {
     let _ = tree::put(&mut sb.root, &path_of("/ai/tools/status.l"), Node::Blob(
         b"// one-line status card: ticks and task count\n\
           println(\"ticks\", ticks(), \"tasks\", tasks())\n".to_vec()));
+    // A tool with a function in it, deliberately.
+    //
+    // Every seeded tool was one line, and that is how `run` shipped unable to
+    // execute any file containing a function without anyone noticing: the
+    // examples could not exercise the defect. One multi-line example makes the
+    // whole path load-bearing at boot.
+    let _ = tree::put(&mut sb.root, &path_of("/ai/tools/count.l"), Node::Blob(
+        b"// counts what `ls` reports: run /ai/tools/count.l\n\
+          fn lines(text) {\n\
+            n = 0\n\
+            i = 0\n\
+            while (i < len(text)) {\n\
+              if (get(text, i) == \"\\n\") { n = n + 1 }\n\
+              i = i + 1\n\
+            }\n\
+            return n\n\
+          }\n\
+          println(\"lines from ls /ai/tools:\", lines(applet(\"ls /ai/tools\")))\n".to_vec()));
 }
 
 /// Adopt the newest snapshot as the working tree, if there is one.
@@ -312,6 +330,16 @@ pub fn dispatch(cmd: &str, rest: &str) -> bool {
 /// can read and react to beats a half-explained silence. The value of each
 /// expression line is printed, because a tool's intermediate results are
 /// exactly what an episode's observation wants to contain.
+/// True while `cmd_run` is executing a program.
+///
+/// A program can reach `applet("run other")` through the interpreter's own
+/// `applet` builtin, and that path comes back here. `with_tools` would then
+/// take a second `&mut` to the one interpreter through `Racy`, which is the
+/// single-core interior mutability `src/sync.rs` grants on the understanding
+/// that nothing re-enters. Refused rather than nested: a second borrow is
+/// undefined behaviour, and the only honest fix at this depth is to say no.
+static RUNNING: AtomicBool = AtomicBool::new(false);
+
 fn cmd_run(path: &str) {
     if path.is_empty() {
         kprintln!("  usage: run <path>");
@@ -321,28 +349,35 @@ fn cmd_run(path: &str) {
         kprintln!("  run: no such file '{}'", path);
         return;
     };
+    if RUNNING.swap(true, Ordering::Acquire) {
+        kprintln!("  run: already running a program -- a program cannot run another");
+        return;
+    }
     let text = String::from_utf8_lossy(&bytes).into_owned();
-    let ran = with_tools(|tools| {
-        for (i, line) in text.lines().enumerate() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            match lang::eval_line(tools, line) {
-                Ok(v) => {
-                    if !matches!(v, lang::Value::Nil) {
-                        kprintln!("  = {}", v.render());
-                    }
-                }
-                Err(e) => {
-                    kprintln!("  run: line {}: {}", i + 1, e);
-                    return false;
-                }
+    // The whole file at once, not a line at a time.
+    //
+    // It was a line at a time, and that made a multi-line program impossible:
+    // `fn add(a, b) {` is not a statement, so any file containing a function
+    // failed on its first line. `lex` already treats a newline as whitespace
+    // and `parse` already consumes statements until end of input, so a file
+    // has always been a legal program -- the loop was the only thing insisting
+    // otherwise. Nothing noticed because every seeded tool is one line and
+    // every case in `lang::selftest` was a single-line string.
+    //
+    // The cost is the per-line `= value` echo, and the line number in a parse
+    // error. Programs that want output call `println`, which the replay
+    // programs `agent learn` writes already do.
+    let out = with_tools(|tools| lang::eval_line(tools, &text));
+    RUNNING.store(false, Ordering::Release);
+    match out {
+        None => kprintln!("  run: no interpreter"),
+        Some(Ok(v)) => {
+            if !matches!(v, lang::Value::Nil) {
+                kprintln!("  = {}", v.render());
             }
         }
-        true
-    });
-    let _ = ran;
+        Some(Err(e)) => kprintln!("  run: {}", e),
+    }
 }
 
 /// The content address of a namespace path, for callers that want to compare

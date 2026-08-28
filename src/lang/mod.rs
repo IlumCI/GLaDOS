@@ -113,6 +113,35 @@ pub fn selftest() -> bool {
         return false;
     }
 
+    // A program spread over real lines, which is what a stored one is.
+    //
+    // Every case above is a single-line string, and that is exactly how the
+    // language shipped for months looking fine while `run` could not execute
+    // any file containing a function: `sysbox::cmd_run` fed the blob to
+    // `eval_line` one line at a time, and `fn total(xs) {` on its own is not a
+    // statement. The lexer has always treated a newline as whitespace, so the
+    // defect was never here -- but nothing here could have caught it either.
+    // It can now.
+    if !int(
+        "fn total(xs) {\n    \
+             s = 0\n    \
+             i = 0\n    \
+             while (i < len(xs)) {\n        \
+                 s = s + get(xs, i)\n        \
+                 i = i + 1\n    \
+             }\n    \
+             return s\n\
+         }\n\
+         total(list(1, 2, 3, 4))",
+        10,
+    ) {
+        return false;
+    }
+    // Comments and blank lines between statements, which any authored file has.
+    if !int("// a program\n\nfn one() {\n  return 1\n}\n\n// call it\none()", 1) {
+        return false;
+    }
+
     // Runaway recursion is refused rather than being allowed to eat the
     // kernel stack, which has no guard page and would triple fault.
     if run("fn boom(n) { return boom(n + 1) } boom(0)").is_some() {
