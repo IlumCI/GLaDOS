@@ -2197,7 +2197,6 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
         // accepts it, which keeps a person between the machine's output and the
         // launcher.
         "author" => {
-            use crate::ai::author;
             let mut a = rest.splitn(2, ' ');
             let name = a.next().unwrap_or("").trim();
             let goal = a.next().unwrap_or("").trim();

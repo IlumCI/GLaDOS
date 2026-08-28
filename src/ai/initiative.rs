@@ -455,7 +455,14 @@ fn tick_inner(forced: bool) {
                 // Claimed for the whole block, not per job. Both are expensive
                 // and both hold the engine; the question "is the machine
                 // already doing something unattended" has one answer.
-                // Not while the resident task has work. See `agent::idle`.
+                // Not while the resident task has work.
+                //
+                // The engine is no longer the reason -- `with_engine` claims,
+                // so a trial and a job cannot both hold it whichever order
+                // they start in. This is now about the operator: two
+                // multi-minute jobs at once make the machine unresponsive for
+                // twice as long, and the second gets nothing done anyway
+                // because every decode it tries answers None.
                 if !super::agent::idle() {
                     journal_push(format!(
                         "[t{} +{}s] quiet: the agent is working, stood down",

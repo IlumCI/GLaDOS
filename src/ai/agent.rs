@@ -159,10 +159,12 @@ enum Job {
 
 impl Job {
     /// What to call this while it runs.
+    /// A phrase, not a noun: it is printed inside "the model is busy ...", and
+    /// a bare noun there reads as a category rather than as what is happening.
     fn what(&self) -> &'static str {
         match self {
-            Job::Episode { .. } => "episode",
-            Job::Author { .. } => "application",
+            Job::Episode { .. } => "running an episode",
+            Job::Author { .. } => "writing an application",
         }
     }
 }
@@ -292,6 +294,13 @@ pub fn agent_task() {
         };
         set_busy(true);
         unsafe { *DOING.get() = req.job.what() };
+        // For the whole job, for the reason the mind's is: an episode and an
+        // authoring run are both conversations spanning many calls, and a
+        // decode interleaved between two of them corrupts the cache rather
+        // than faulting. `busy` still says *that* work is happening, for the
+        // console and the shell's messages; the claim is what actually keeps
+        // the engine.
+        let _claim = super::claim_engine();
         // Work the machine chose to do stays off the operator's console. It is
         // still on the serial port, still in the log ring and still in the
         // window; it just does not arrive in the middle of whatever is being
@@ -553,10 +562,11 @@ pub fn run(goal: &str, trust: Trust, max_steps: usize) {
     elog(format!("[agent] goal: {}", goal));
 
     if with_engine(|_| ()).is_none() {
+        let why = super::engine_refusal();
         console::set_color(LTRED);
-        kprintln!("  no model loaded");
+        kprintln!("  {}", why);
         console::set_color(LTGRAY);
-        elog(String::from("no model loaded"));
+        elog(why);
         return;
     }
 

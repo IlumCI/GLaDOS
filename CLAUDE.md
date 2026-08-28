@@ -277,19 +277,35 @@ seconds apart.
 
 **One queue, one busy flag, one abort, one task.** `agent::Job` is either an
 episode or an application to write, and both run on the resident agent task.
-That is not tidiness: `with_engine` gates on `agent::busy()` and the agent
-task's id, so a second task running a second kind of work needs a second entry
-in that check -- the stale-call-site failure its own doc comment warns about,
-where the failure is two forward passes interleaving in one KV cache rather
-than an error message. `agent stop` therefore cancels either kind without
-knowing which, and `author` returns to the prompt immediately.
+That is not tidiness: a second task running a second kind of work would need a
+second entry in the engine's exclusion check, which is the stale-call-site
+failure that check's own doc comment warns about, and there the failure is two
+forward passes interleaving in one KV cache rather than an error message.
+`agent stop` therefore cancels either kind without knowing which, and `author`
+returns to the prompt immediately.
 
-One gap remains and is older than the queue: the godel trial runs inline on the
-initiative task and holds the engine without setting any flag, so `with_engine`
-cannot see it. `agent::idle()` stops the nightly block starting while the
-resident task works; the other direction -- queueing a job *during* a trial --
-is still reachable, and the real fix is one recorded engine holder rather than
-a flag per task.
+**The engine has one holder.** `HOLDER` records the task, `with_engine`
+*claims* it for the length of a call rather than consulting somebody else's
+busy flag, and `claim_engine()` returns an RAII `EngineClaim` for work spanning
+many calls. That distinction is the point: two `&mut Engine` at once is
+undefined behaviour and the per-call claim prevents it with nobody having to
+remember a flag; somebody else decoding *between* two of your calls is not UB
+but corrupts the KV cache, `pos` and `last_token`, and produces confident
+nonsense -- so the mind and the agent task each hold a claim for a whole
+episode or authoring run.
+
+It replaced a flag-and-id pair per task, which is why a third holder was
+invisible: the nightly `godel` trial runs on the initiative task, set neither
+flag, and `with_engine` handed a second `&mut Engine` to anyone who asked
+during its twenty seconds. Adding a third pair would have made the next
+omission just as quiet. The claim is reentrant within a task, deliberately:
+nesting is still forbidden, but a claim that refused its own holder would turn
+any nesting that does exist into a silent `None`.
+
+`engine_refusal()` says which of the two reasons a borrow failed. Every caller
+used to print "no model loaded" for both, which became actively misleading once
+`author` started returning to the prompt immediately -- the next `ask` reported
+the model absent while it was loaded and working.
 
 A run publishes `author::Progress` and calls `desk::draw()` per step, which the
 "Writing" window shows: step N of M, clauses met, and the last verdict

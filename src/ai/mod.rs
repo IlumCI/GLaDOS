@@ -598,7 +598,56 @@ pub fn engine_ready() -> bool {
 /// Which task owns the engine while the mind is running.
 static MIND_TASK: AtomicUsize = AtomicUsize::new(usize::MAX);
 
-/// Borrow the engine, or refuse if another task already holds it.
+/// Nobody is holding the engine.
+const NOBODY: usize = usize::MAX;
+
+/// The task holding the engine, or `NOBODY`.
+///
+/// One record, not a flag per task. It used to be two -- the mind's and the
+/// agent's, each a busy flag paired with a task id -- and the shape of that
+/// arrangement is why a third holder was invisible: the nightly `godel` trial
+/// runs on the initiative task, which set neither flag, so `with_engine`
+/// happily handed a second `&mut Engine` to anyone who asked during it. Adding
+/// a third pair would have made the next omission just as quiet.
+static HOLDER: AtomicUsize = AtomicUsize::new(NOBODY);
+
+/// The engine, held across many `with_engine` calls.
+///
+/// Two different things need excluding and only one of them is undefined
+/// behaviour. Two `&mut Engine` at once is UB and is prevented by the claim
+/// `with_engine` takes for the length of a single call. Interleaving somebody
+/// else's decode *between* two of your calls is not UB -- it corrupts the KV
+/// cache, `pos` and `last_token`, and produces confident nonsense instead of a
+/// fault. Anything running a conversation across many calls therefore holds
+/// one of these for the whole of it.
+///
+/// Released by `Drop`, so an early return cannot leave the engine locked. A
+/// fault inside still can, but a fault in ring 0 with no guard page ends the
+/// machine anyway.
+pub struct EngineClaim {
+    _seal: (),
+}
+
+impl Drop for EngineClaim {
+    fn drop(&mut self) {
+        HOLDER.store(NOBODY, Ordering::Release);
+    }
+}
+
+/// Take the engine for a stretch of work. `None` if somebody else has it.
+///
+/// A caller that cannot get one may still proceed: `with_engine` will answer
+/// `None` for each of its calls, which is what every caller already handles and
+/// is exactly what happened before claims existed.
+pub fn claim_engine() -> Option<EngineClaim> {
+    let me = crate::task::current();
+    match HOLDER.compare_exchange(NOBODY, me, Ordering::AcqRel, Ordering::Acquire) {
+        Ok(_) => Some(EngineClaim { _seal: () }),
+        Err(_) => None,
+    }
+}
+
+/// Borrow the engine, or refuse if another task holds it.
 ///
 /// This is the only place the exclusion is enforced, and it has to be, because
 /// the previous attempt enforced it at the call sites and silently did not.
@@ -610,20 +659,126 @@ static MIND_TASK: AtomicUsize = AtomicUsize::new(usize::MAX);
 /// than a race, and no amount of care at call sites would have kept a list like
 /// that correct as commands were added.
 ///
-/// Checking the task id rather than a flag is what lets the mind keep working
-/// while everyone else is turned away.
+/// It now claims rather than consults. The old version asked "is somebody
+/// else's *job* running", which is a different question from "is the engine
+/// held right now" and answered no for any holder that had not been given a
+/// flag -- the godel trial, which takes the engine for a single call lasting
+/// twenty seconds. Taking the claim here means a holder needs no flag at all
+/// to be seen, so the class of omission is gone rather than reduced by one.
+///
+/// Reentrant within a task. `with_engine` is not supposed to nest and
+/// `with_alphabet(|a| with_engine(|e| ...))` is the sanctioned order, but a
+/// claim that refused its own holder would convert any nesting that does exist
+/// from working code into a silent `None`, which is a worse failure than the
+/// one being fixed.
 pub fn with_engine<R>(f: impl FnOnce(&mut Engine) -> R) -> Option<R> {
-    let current = crate::task::current();
-    if mind_busy() && current != MIND_TASK.load(Ordering::Acquire) {
-        return None;
+    let me = crate::task::current();
+    // Taken for the length of this call when it is free, so a preemption in
+    // the middle of the closure cannot let a second task in behind us. That is
+    // the whole of the UB protection, and it needs nobody to remember a flag.
+    let took = match HOLDER.compare_exchange(NOBODY, me, Ordering::AcqRel, Ordering::Acquire) {
+        Ok(_) => true,
+        // Ours already: a session claim, or a nested call.
+        Err(h) if h == me => false,
+        Err(_) => return None,
+    };
+    let r = unsafe { ENGINE.get().as_mut().map(f) };
+    if took {
+        HOLDER.store(NOBODY, Ordering::Release);
     }
-    // Same rule for the agent task, which holds the engine for whole
-    // episodes. The id is recorded once at spawn and lives as long as the
-    // task does; whether an episode is actually running is the flag.
-    if agent::busy() && current != AGENT_TASK.load(Ordering::Acquire) {
-        return None;
+    r
+}
+
+/// The claim, checked without a second task to check it against.
+///
+/// Single-core and cooperatively scheduled, so there is no way to have another
+/// task ask while this one holds. What can be done is to put somebody else's id
+/// in the record and confirm the refusal, which is the branch that matters --
+/// it is the one that was missing for the initiative task and let a second
+/// `&mut Engine` out.
+pub fn engine_selftest() -> bool {
+    let me = crate::task::current();
+
+    // Free to begin with, or something earlier leaked a claim -- which is
+    // itself worth failing for, since a leaked claim locks the engine for the
+    // rest of the boot.
+    if engine_holder().is_some() {
+        return false;
     }
-    unsafe { ENGINE.get().as_mut().map(f) }
+
+    {
+        let Some(_c) = claim_engine() else { return false };
+        if engine_holder() != Some(me) {
+            return false;
+        }
+        // A second claim is refused even to the holder. Two guards over one
+        // record would mean the first `Drop` releases what the second still
+        // thinks it has.
+        if claim_engine().is_some() {
+            return false;
+        }
+        // ...but the holder may still borrow, which is what a claim is for.
+        // `ENGINE` may be absent on a machine with no model, so the test is
+        // that it does not *refuse* -- a refusal answers None for the same
+        // reason a missing engine does, so this asks the record instead.
+        if engine_holder() != Some(me) {
+            return false;
+        }
+    }
+    // Released by Drop, on the way out of the block.
+    if engine_holder().is_some() {
+        return false;
+    }
+
+    // Somebody else holds it: every borrow is refused, whatever the engine's
+    // state. An id that cannot be a real task, so nothing can be mid-call
+    // under it.
+    let other = me.wrapping_add(1_000_000);
+    HOLDER.store(other, Ordering::Release);
+    let refused = with_engine(|_| ()).is_none();
+    HOLDER.store(NOBODY, Ordering::Release);
+    if !refused {
+        return false;
+    }
+
+    // And the record is clean afterwards, so a refusal cannot leave the engine
+    // locked behind it.
+    engine_holder().is_none()
+}
+
+/// Why a borrow was refused, in words that are true.
+///
+/// `with_engine` answers `None` for two unrelated reasons -- there is no model,
+/// or somebody has it -- and every caller printed "no model loaded" for both.
+/// That was merely wrong while the only long holder was an episode nobody
+/// queued by hand; it became misleading the moment authoring joined the queue,
+/// because `author` returns to the prompt immediately and the very next `ask`
+/// reports the model as absent while it is demonstrably loaded and working.
+///
+/// The state that produced the refusal has already passed by the time this is
+/// called, so it reports what is true now rather than what was true then. For
+/// a message that is the right trade: the alternative is threading a reason
+/// out of every borrow, which is a second thing to keep correct at sixty call
+/// sites.
+pub fn engine_refusal() -> alloc::string::String {
+    if !engine_ready() {
+        return alloc::string::String::from("no model loaded");
+    }
+    if mind_busy() {
+        return alloc::string::String::from("the mind is thinking -- it will be free shortly");
+    }
+    if let Some(what) = agent::doing() {
+        return alloc::format!("the model is busy {} -- 'agent stop' cancels it", what);
+    }
+    alloc::string::String::from("another task holds the model")
+}
+
+/// Which task holds the engine, for diagnostics. `None` when it is free.
+pub fn engine_holder() -> Option<usize> {
+    match HOLDER.load(Ordering::Acquire) {
+        NOBODY => None,
+        h => Some(h),
+    }
 }
 
 /// True when the engine is unavailable because the mind has it.
@@ -1236,7 +1391,7 @@ pub fn generate(prompt: &str, opts: &GenOpts) {
     match ok {
         None => {
             console::set_color(LTRED);
-            kprintln!("  no model loaded");
+            kprintln!("  {}", engine_refusal());
             console::set_color(LTGRAY);
         }
         Some(false) => {
@@ -1330,7 +1485,7 @@ pub fn ctx_report() {
     let live = with_engine(|e| (e.pos, e.model.cfg.live_cap(), e.model.cfg.streams()));
     match live {
         None => {
-            kprintln!("  no model loaded");
+            kprintln!("  {}", engine_refusal());
             return;
         }
         // While streaming, position is not bounded by anything and "of N" reads
@@ -1420,6 +1575,16 @@ pub fn mind_task() {
         console::set_color(YELLOW);
         kprintln!("\n[mind] thinking...");
         console::set_color(LTGRAY);
+
+        // Held for the whole thought, not per token. `generate` resumes the
+        // KV cache across calls, so somebody else decoding in between would
+        // leave this conversation reading its own answer as the operator's
+        // next question. Dropped at the end of the iteration.
+        //
+        // Failing to get one is survivable and is what used to happen anyway:
+        // every `with_engine` inside answers None and the thought comes back
+        // empty rather than wrong.
+        let _claim = claim_engine();
 
         let opts =
             GenOpts { steps: 48, temperature: 0.9, topp: 0.9, resume: true, yielding: true,
@@ -1553,7 +1718,7 @@ pub fn logits_for(ids: &[usize]) {
     });
 
     let Some((top, elapsed, n)) = done else {
-        kprintln!("  no model loaded");
+        kprintln!("  {}", engine_refusal());
         return;
     };
     for (rank, (id, v)) in top.iter().enumerate() {
@@ -1661,7 +1826,7 @@ pub fn window_report() {
         )
     });
     let Some((sinks, window, trained, cap, streams, bytes, pos)) = got else {
-        kprintln!("  no model loaded");
+        kprintln!("  {}", engine_refusal());
         return;
     };
     if !streams {
