@@ -49,6 +49,7 @@
 //! files and the request, so approval cannot survive an edit or be inherited
 //! by a later version. See `manifest`.
 
+pub mod check;
 pub mod manifest;
 
 use crate::gfx::ui::Panel;
@@ -74,7 +75,8 @@ fn panel_path(name: &str) -> String {
 /// `app list` and `app show x` have to mean something, and an application
 /// called `list` would take the word away. Reserved rather than escaped: there
 /// are two of them and renaming an app is free.
-pub const RESERVED: &[&str] = &["list", "show", "info", "trust", "adopt", "rollback"];
+pub const RESERVED: &[&str] =
+    &["list", "show", "check", "info", "trust", "adopt", "rollback"];
 
 pub fn exists(name: &str) -> bool {
     sysbox::read_blob(&code_path(name)).is_some()

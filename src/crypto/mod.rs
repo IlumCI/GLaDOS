@@ -41,7 +41,7 @@ pub fn selftest() -> bool {
     console::set_color(YELLOW);
     kprintln!("\n[selftest] crypto:");
 
-    let checks: [(&str, fn() -> bool); 16] = [
+    let checks: [(&str, fn() -> bool); 17] = [
         ("sha-256   NIST vectors", crate::store::sha256::selftest),
         ("hmac/hkdf RFC 4231 and RFC 5869", hkdf::selftest),
         ("sha-384   FIPS 180-4", sha512::selftest),
@@ -58,6 +58,7 @@ pub fn selftest() -> bool {
         ("lang      functions, lists, scope, whole programs", crate::lang::selftest),
         ("uidoc     panels round-trip as text, bad ones refused", crate::gfx::uidoc::selftest),
         ("app       manifests identify, and lineage is in the hash", crate::app::manifest::selftest),
+        ("appcheck  a panel naming a missing function is caught", crate::app::check::selftest),
     ];
 
     let mut all = true;

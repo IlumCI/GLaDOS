@@ -2112,6 +2112,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
                 "" => {
                     kprintln!("  app list             applications on this machine");
                     kprintln!("  app show <name>      its panel document, rows filled in");
+                    kprintln!("  app check <name>     what can be known without running it");
                     kprintln!("  app info <name>      what it is, by hash, and what it may do");
                     kprintln!("  app trust <name> <h> approve exactly that version");
                     kprintln!("  app adopt <name>     record what is on disk as in use");
@@ -2229,6 +2230,32 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
                         match man::rollback(name) {
                             None => kprintln!("  nothing to roll back to"),
                             Some(p) => kprintln!("  {} back to {}", name, man::hex32(&p)),
+                        }
+                    }
+                },
+                // Everything that can be known about an application without
+                // being told what it is for.
+                "check" => match w.next() {
+                    None => kprintln!("  usage: app check <name>"),
+                    Some(name) => {
+                        use crate::gfx::console::{LTGREEN, LTRED};
+                        let v = crate::app::check::check_all("/app", name);
+                        let mut bad = 0;
+                        for r in &v {
+                            console::set_color(if r.ok { LTGREEN } else { LTRED });
+                            match r.line {
+                                Some(l) => kprintln!("  {}  line {}: {}",
+                                    if r.ok { "ok  " } else { "FAIL" }, l, r.why),
+                                None => kprintln!("  {}  {}",
+                                    if r.ok { "ok  " } else { "FAIL" }, r.why),
+                            }
+                            if !r.ok { bad += 1; }
+                        }
+                        console::set_color(LTGRAY);
+                        if bad == 0 {
+                            kprintln!("  nothing wrong with its form.");
+                            kprintln!("  form is not function: these cannot tell whether it does");
+                            kprintln!("  anything, only that what it does is well shaped.");
                         }
                     }
                 },
