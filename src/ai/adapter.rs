@@ -59,13 +59,32 @@ impl Dora {
         4 * (self.a.len() + self.b.len() + self.m.len() + self.s.len())
     }
 
+    /// The input width this site was built for.
+    ///
+    /// Read from `a`, which was sized `r * k_in` at construction, and never
+    /// from the caller's slice. The difference is not academic: `State::xb` is
+    /// allocated `dim.max(q_dim)` because it also holds the attention output,
+    /// so on a model whose head_dim is not `dim / n_heads` -- Qwen3-0.6B, with
+    /// dim 1024 and q_dim 2048 -- the buffer handed to `apply` is twice the
+    /// width of the projection's actual input. `Mat::matvec` tolerates that
+    /// and reads `x[..cols]`; inferring `k` from `x.len()` did not, and walked
+    /// straight off the end of `a` on the first token.
+    ///
+    /// This never fired under test because every model the adapter paths had
+    /// ever run on -- SmolLM2-135M and the synthetic fixtures -- has
+    /// `q_dim == dim`, which makes the wrong answer identical to the right one.
+    #[inline]
+    pub fn k_in(&self) -> usize {
+        if self.r == 0 { 0 } else { self.a.len() / self.r }
+    }
+
     /// Apply to a freshly-computed base matvec result in `out`.
     ///
     /// `base` produced `out = W0.x`; this adds the low-rank branch and then
     /// the cached per-row scale. Called on every token for adapted sites, so
     /// it allocates nothing: `ax` is the caller's rank-sized scratch.
     pub fn apply(&self, out: &mut [f32], x: &[f32], ax: &mut [f32]) {
-        let k = x.len();
+        let k = self.k_in().min(x.len());
         for j in 0..self.r {
             let row = &self.a[j * k..(j + 1) * k];
             let mut acc = 0.0f32;
@@ -339,7 +358,10 @@ impl Dora {
             Mat::Q8 { rows, cols, .. } => (*rows, *cols),
         };
         debug_assert_eq!(rows, self.m.len());
-        debug_assert_eq!(k, x.len());
+        // `>=`, not `==`: a caller may pass a scratch buffer wider than the
+        // projection, and the weight width is the authority on how much of
+        // it is input. See `Dora::k_in`.
+        debug_assert!(x.len() >= k);
         let mut c_row = vec![0.0f32; k];
         for o in 0..rows {
             self.row_backward(w, x, ax, base[o], gy[o], o, &mut c_row, ga, gb, dm);
@@ -699,7 +721,7 @@ impl Dora {
     /// rather than by row id, because the caller computing 78 base values
     /// out of 151,936 has no reason to carry the other 151,858.
     pub fn apply_rows(&self, out: &mut [f32], rows: &[u32], x: &[f32], ax: &mut [f32]) {
-        let k = x.len();
+        let k = self.k_in().min(x.len());
         for j in 0..self.r {
             let arow = &self.a[j * k..(j + 1) * k];
             let mut acc = 0.0f32;
@@ -766,7 +788,10 @@ impl Dora {
             Mat::F32 { cols, .. } => *cols,
             Mat::Q8 { cols, .. } => *cols,
         };
-        debug_assert_eq!(k, x.len());
+        // `>=`, not `==`: a caller may pass a scratch buffer wider than the
+        // projection, and the weight width is the authority on how much of
+        // it is input. See `Dora::k_in`.
+        debug_assert!(x.len() >= k);
         let mut c_row = vec![0.0f32; k];
         for (i, &o) in rows.iter().enumerate() {
             self.row_backward(w, x, ax, base[i], gy[i], o as usize, &mut c_row, ga, gb, dm);

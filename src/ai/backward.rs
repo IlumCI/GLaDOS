@@ -665,7 +665,55 @@ pub fn selftest() -> bool {
             if rows_ok { "ok " } else { "FAIL" }
         );
 
+        // --- claim: a site reads its own width, not the buffer's -----------
+        //
+        // The regression for the panic that took the 0.6B down at boot.
+        // `State::xb` is `dim.max(q_dim)` because it doubles as the attention
+        // output, so on Qwen3-0.6B -- dim 1024, head_dim 128, q_dim 2048 --
+        // `apply` was handed a 2048-wide buffer for a 1024-wide projection and
+        // indexed `a` at twice its length on the second rank row.
+        //
+        // Every model these paths had run on has `q_dim == dim`, which is why
+        // nothing caught it: the wrong width and the right one were the same
+        // number. This fixture makes them different on purpose, and needs no
+        // model at all, so it runs on every boot whatever is staged.
+        let shape_ok = {
+            let (kin, outr, r) = (3usize, 5usize, 2usize);
+            let mut d = super::adapter::Dora::new(r, 2.0, kin, outr);
+            for (i, v) in d.a.iter_mut().enumerate() {
+                *v = 0.1 + i as f32 * 0.03;
+            }
+            for (i, v) in d.b.iter_mut().enumerate() {
+                *v = 0.2 - i as f32 * 0.02;
+            }
+            for v in d.s.iter_mut() {
+                *v = 1.0;
+            }
+            let x: Vec<f32> = alloc::vec![0.7, -0.4, 0.25];
+            // The same input in an oversized buffer. The tail is deliberately
+            // large: if any of it were read the answers could not agree.
+            let mut wide = x.clone();
+            wide.extend_from_slice(&[9.0e3, -7.0e3, 5.0e3, 3.0e3]);
+
+            let (mut tight_out, mut wide_out) = (alloc::vec![1.0f32; outr], alloc::vec![1.0f32; outr]);
+            let mut ax = alloc::vec![0.0f32; r];
+            d.apply(&mut tight_out, &x, &mut ax);
+            d.apply(&mut wide_out, &wide, &mut ax);
+
+            let rows: Vec<u32> = alloc::vec![0, 3];
+            let (mut tr, mut wr) = (alloc::vec![1.0f32; rows.len()], alloc::vec![1.0f32; rows.len()]);
+            d.apply_rows(&mut tr, &rows, &x, &mut ax);
+            d.apply_rows(&mut wr, &rows, &wide, &mut ax);
+
+            tight_out == wide_out && tr == wr
+        };
+        crate::kprintln!(
+            "  {}  a site reads its declared input width, not the caller's buffer",
+            if shape_ok { "ok " } else { "FAIL" }
+        );
+
         q8_ok
+            && shape_ok
             && f32_ok
             && fd_ok
             && lora_ok
