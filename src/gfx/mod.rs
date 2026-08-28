@@ -17,6 +17,7 @@ pub mod font;
 pub mod theme;
 pub mod todo;
 pub mod ui;
+pub mod uidoc;
 pub mod desk;
 pub mod agentwin;
 
