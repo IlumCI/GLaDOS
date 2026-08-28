@@ -98,6 +98,40 @@ struct Func {
 /// guard page is a triple fault, not an error message.
 const MAX_DEPTH: usize = 64;
 
+/// What a program is allowed to reach.
+///
+/// The gate lives here and not in `sysbox` or the shell for one reason: the
+/// raw builtins are reachable from a bare expression at the prompt and from
+/// any stored program `run` executes, so a check anywhere else has a hole
+/// shaped like the other path. This is the only place both go through.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Caps {
+    /// The operator's own interpreter. Everything, including `poke` and the
+    /// I/O ports, which is the point of a ring-0 system with one address
+    /// space: the prompt is a hardware debugger with nothing in the way.
+    Operator,
+    /// A stored application. No raw memory, no ports, no drawing outside its
+    /// window, applets limited to those that do not mutate, and writes
+    /// confined to its own subtree.
+    Sandbox,
+}
+
+/// Builtins that reach the machine directly.
+///
+/// Checked as a list before the dispatch rather than one guard per arm,
+/// because a per-arm check is a list that gets forgotten the next time a
+/// builtin lands -- and the one that gets forgotten is the one that matters.
+const RAW: &[&str] = &[
+    "peek8", "peek16", "peek32", "peek64", "poke8", "poke32", "poke64", "inb", "outb", "inl",
+    "outl",
+];
+
+/// Drawing builtins, which paint straight at `gfx::primary()` with no idea
+/// which window is asking. A sandboxed application using one would paint over
+/// the whole desktop, so they are the operator's until there is a windowed way
+/// to offer them. A panel application has no need for them.
+const DRAWS: &[&str] = &["pixel", "rect", "text"];
+
 pub struct Interp {
     /// Innermost scope last. A name is looked up from the top down and
     /// assigned wherever it is already bound, so a function can read and
@@ -112,6 +146,10 @@ pub struct Interp {
     returning: Option<Value>,
     depth: usize,
     steps: u64,
+    caps: Caps,
+    /// The subtree a sandboxed program may write into. Absolute, with no
+    /// trailing slash.
+    jail: Option<String>,
 }
 
 impl Default for Interp {
@@ -128,7 +166,39 @@ impl Interp {
             returning: None,
             depth: 0,
             steps: 0,
+            caps: Caps::Operator,
+            jail: None,
         }
+    }
+
+    /// An interpreter for a stored program, confined to one subtree.
+    ///
+    /// Every existing caller keeps `new` and keeps everything, which is what
+    /// makes this safe to add: the prompt, the shell's session and the model's
+    /// own tools are unchanged, and only code that opts in is confined.
+    pub fn sandboxed(jail: &str) -> Self {
+        let mut it = Self::new();
+        it.caps = Caps::Sandbox;
+        it.jail = Some(String::from(jail.trim_end_matches('/')));
+        it
+    }
+
+    pub fn caps(&self) -> Caps {
+        self.caps
+    }
+
+    /// True if a sandboxed program may write here.
+    ///
+    /// The path is resolved first. A jail compared against what was typed is
+    /// defeated by `../..`, which is the entire history of this kind of check.
+    fn may_write(&self, path: &str) -> bool {
+        let Some(jail) = &self.jail else {
+            return true;
+        };
+        let full = crate::sysbox::resolve_path(path);
+        // The subtree, and not merely the prefix: `/app/todo-evil` must not
+        // pass a jail of `/app/todo`.
+        full == *jail || full.starts_with(&alloc::format!("{}/", jail))
     }
 
     /// The global scope, which is what `vars` at the prompt means: a function's
@@ -384,6 +454,44 @@ impl Interp {
     }
 
     fn builtin(&mut self, name: &str, args: &[Value]) -> Result<Value, String> {
+        // One gate, before anything is dispatched.
+        if self.caps == Caps::Sandbox {
+            if RAW.contains(&name) {
+                return Err(format!(
+                    "'{}' reaches the machine directly and a stored program may not",
+                    name
+                ));
+            }
+            if DRAWS.contains(&name) {
+                return Err(format!(
+                    "'{}' draws outside any window and a stored program may not",
+                    name
+                ));
+            }
+            if name == "write" {
+                // Checked here rather than inside the arm, so the arm cannot
+                // be rewritten later without noticing the check.
+                let path = args.first().map(|v| v.render()).unwrap_or_default();
+                if !self.may_write(&path) {
+                    return Err(format!("a stored program may not write to {}", path));
+                }
+            }
+            if name == "applet" {
+                let line = args.first().map(|v| v.render()).unwrap_or_default();
+                let cmd = line.split(' ').next().unwrap_or("");
+                match crate::sysbox::applet_mutates(cmd) {
+                    None => return Err(format!("no applet '{}'", cmd)),
+                    Some(true) => {
+                        return Err(format!(
+                            "'{}' changes the system and a stored program may not call it",
+                            cmd
+                        ))
+                    }
+                    Some(false) => {}
+                }
+            }
+        }
+
         fn need(args: &[Value], n: usize, name: &str) -> Result<(), String> {
             if args.len() != n {
                 Err(format!("{} takes {} argument(s), got {}", name, n, args.len()))

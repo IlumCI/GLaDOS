@@ -142,6 +142,72 @@ pub fn selftest() -> bool {
         return false;
     }
 
+    // --- capabilities ---------------------------------------------------
+    //
+    // The operator keeps everything and a stored program does not. Each of
+    // these is a way an application that was written by something other than a
+    // person could reach past its own subtree, and each is refused rather than
+    // merely discouraged: a check that produces a warning is a check that gets
+    // ignored by whatever is generating the program.
+    fn boxed(src: &str) -> Option<eval::Value> {
+        let mut it = eval::Interp::sandboxed("/app/demo");
+        eval_line(&mut it, src).ok()
+    }
+    // Raw memory and the I/O ports. A hallucinated port write on real hardware
+    // is not something the machine recovers from.
+    if boxed("poke64(4096, 1)").is_some() || boxed("peek32(0)").is_some() {
+        return false;
+    }
+    if boxed("outb(112, 0)").is_some() || boxed("inb(112)").is_some() {
+        return false;
+    }
+    // Drawing, which goes straight at the framebuffer with no window in the
+    // way, so a sandboxed program could paint over the whole desktop.
+    if boxed("rect(0, 0, 10, 10, 1)").is_some() || boxed("pixel(0, 0, 1)").is_some() {
+        return false;
+    }
+    // ...and the operator still has all of it.
+    if run("hex(255)").is_none() {
+        return false;
+    }
+    // Writes outside the program's own subtree, including by the route every
+    // jail is defeated through. The check runs on the *resolved* path, so
+    // `..` is spent before the comparison rather than after it.
+    if boxed("write(\"/ai/godel/HEAD\", \"x\")").is_some() {
+        return false;
+    }
+    if boxed("write(\"/app/demo/../../ai/godel/HEAD\", \"x\")").is_some() {
+        return false;
+    }
+    // A neighbour whose name merely begins the same way is outside the jail:
+    // `/app/demo-evil` is not under `/app/demo`, and a prefix test alone would
+    // have said it was.
+    if boxed("write(\"/app/demo-evil/x\", \"y\")").is_some() {
+        return false;
+    }
+    // Applets that change something. The flag consulted is the one
+    // `harness::Trust::ReadOnly` filters the model's grammar with, so "safe to
+    // call" has a single definition in this tree rather than two that drift.
+    if boxed("applet(\"write /ai/godel/HEAD x\")").is_some() {
+        return false;
+    }
+    if boxed("applet(\"rm /ai/tools/hello.l\")").is_some() {
+        return false;
+    }
+    // `run` is classified mutating whatever the program text says, so a
+    // sandboxed program cannot launder its way out through another one.
+    if boxed("applet(\"run /ai/tools/hello.l\")").is_some() {
+        return false;
+    }
+    if boxed("applet(\"nosuchapplet\")").is_some() {
+        return false;
+    }
+    // Everything a sandbox is *allowed* to do needs a namespace, and this runs
+    // before `sysbox::init`. Those are proved by the seeded application
+    // instead, which writes its items under its own subtree through this same
+    // gate every time a row is added -- an app that could not write would not
+    // work at all, which is a louder failure than an assertion here.
+
     // Runaway recursion is refused rather than being allowed to eat the
     // kernel stack, which has no guard page and would triple fault.
     if run("fn boom(n) { return boom(n + 1) } boom(0)").is_some() {

@@ -29,14 +29,24 @@
 //! State goes in the namespace, under the app's own subtree, where `cat` can
 //! see it and a snapshot captures it.
 //!
-//! ### Not yet
+//! ### What an application may do
 //!
-//! There is no capability gate here yet: `code.l` runs with the same
-//! interpreter powers a person has at the prompt, which includes `poke` and
-//! `outb`. That is fine while every app in the tree was written by hand and is
-//! not fine the moment one is generated. The gate belongs in `lang::Interp`,
-//! and it is the next piece. Until it exists, nothing should install an app it
-//! did not read.
+//! `code.l` runs in a sandboxed interpreter: no raw memory, no I/O ports, no
+//! drawing outside a window, no applet that changes anything, and writes only
+//! under `/app/<name>`. The gate is in `lang::Interp` rather than here, because
+//! the raw builtins are also reachable from a bare expression at the prompt and
+//! from any program `run` executes -- a check anywhere else would have a hole
+//! shaped like the path it did not cover.
+//!
+//! Reads are not restricted. This is one address space with no process
+//! isolation and `cat` is available to anything that can call an applet, so
+//! pretending otherwise would be a fence with nothing behind it. What is
+//! restricted is everything that *changes* something.
+//!
+//! No application has asked for more than this yet, and the mechanism for
+//! granting it -- a request in a manifest, approved once against a specific
+//! hash -- is not built. Until it is, an application either fits inside the
+//! sandbox or does not run.
 
 use crate::gfx::ui::Panel;
 use crate::gfx::uidoc;
@@ -82,7 +92,10 @@ pub fn call(name: &str, expr: &str) -> Result<String, String> {
         return Err(alloc::format!("no application '{}'", name));
     };
     let src = String::from_utf8_lossy(&bytes).into_owned();
-    let mut it = lang::Interp::new();
+    // Confined to its own subtree, with no raw memory, no ports, no drawing
+    // outside a window, and no mutating applet. An application keeps its state
+    // under itself and has no business anywhere else.
+    let mut it = lang::Interp::sandboxed(&alloc::format!("{}/{}", ROOT, name));
     lang::eval_line(&mut it, &src)?;
     let v = lang::eval_line(&mut it, expr)?;
     Ok(v.render())

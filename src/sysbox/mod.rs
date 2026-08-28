@@ -71,6 +71,32 @@ pub const APPLETS: &[Applet] = &[
     Applet { name: "run",    args: "<path>",       help: "execute a lang program from the namespace", mutates: true },
 ];
 
+/// Resolve a path the way every applet does, against the working directory.
+///
+/// Public because a capability check has to run on the *resolved* path. A jail
+/// tested against what was typed is defeated by `../..`, and the resolution is
+/// already here -- duplicating it in the caller is how the two drift apart and
+/// the check starts passing things the write then puts somewhere else.
+pub fn resolve_path(path: &str) -> String {
+    if let Some(r) = with(|s| show(&parse(&s.cwd, path))) {
+        return r;
+    }
+    // No namespace yet -- the boot selftests run before `init`. An absolute
+    // path does not need a working directory to resolve, and answering "/" for
+    // one would make a capability check refuse something it should allow.
+    show(&path_of(path))
+}
+
+/// Whether an applet can change persistent content, or `None` if there is no
+/// such applet.
+///
+/// The same flag `harness::Trust::ReadOnly` filters the model's grammar with,
+/// so "safe to call" has one definition in this tree rather than two that
+/// drift.
+pub fn applet_mutates(name: &str) -> Option<bool> {
+    APPLETS.iter().find(|a| a.name == name).map(|a| a.mutates)
+}
+
 pub fn is_applet(name: &str) -> bool {
     APPLETS.iter().any(|a| a.name == name)
 }
