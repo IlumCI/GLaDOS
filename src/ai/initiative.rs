@@ -494,13 +494,22 @@ fn tick_inner(forced: bool) {
                 if super::godel::enabled() && since_godel(now_s) >= GODEL_GAP_S {
                     spent = true;
                     unsafe { *LAST_GODEL_AT.get() = now_s };
-                    let b = super::train::Budget {
-                        examples: GODEL_EXAMPLES,
-                        millis: GODEL_MS,
-                        ..Default::default()
+                    // The knobs come from the frontier now. They used to be
+                    // `Default::default()` here and at the prompt, which meant
+                    // every trial trained the identical adapter and every one
+                    // after the first was rejected against itself.
+                    let verdict = match super::godel::frontier() {
+                        None => None,
+                        Some(p) => {
+                            let b = p.budget(GODEL_EXAMPLES, GODEL_MS);
+                            super::with_engine(|e| super::godel::trial(e, &b, &p))
+                        }
                     };
-                    let verdict = super::with_engine(|e| super::godel::trial(e, &b));
                     let line = match verdict {
+                        None if super::godel::frontier().is_none() => {
+                            let (seen, all) = super::godel::explored();
+                            format!("search space exhausted, {} of {} tried", seen, all)
+                        }
                         None => String::from("engine held by another task"),
                         Some(Err(_)) => String::from("trainer refused"),
                         Some(Ok(c)) => format!(

@@ -1165,6 +1165,28 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     }
                     godel::report_trial(&b);
                 }
+                // What the loop has left to try, which is the question the
+                // status line could not answer before there was a search.
+                "space" => {
+                    let (seen, all) = godel::explored();
+                    kprintln!("  {} of {} point(s) tried", seen, all);
+                    match godel::frontier() {
+                        Some(p) => kprintln!(
+                            "  next: lr {}, rank {}, alpha {}, epochs {}, rule {}",
+                            p.lr, p.rank, p.alpha, p.epochs, p.rule
+                        ),
+                        None => {
+                            kprintln!("  nothing left -- every point has been trained and judged");
+                            kprintln!("  'godel forget' walks the grid again; the nodes stay");
+                        }
+                    }
+                }
+                "forget" => {
+                    let n = godel::forget();
+                    kprintln!("  {} marker(s) cleared -- the grid will be walked again", n);
+                    kprintln!("  the nodes and the ledger are untouched, so a rediscovered");
+                    kprintln!("  point lands on the hash it landed on before");
+                }
                 "ledger" => {
                     let n = words.next().and_then(|w| w.parse().ok()).unwrap_or(12);
                     let tail = godel::ledger_tail(n);
@@ -1488,7 +1510,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             kprintln!("  teach bundle <path>     replace the whole corpus from one blob");
             kprintln!("  train adapter [-e N]    train the model's own decision layer (needs AVX2)");
             kprintln!("  adapter [save|load|off] what is attached, and moving it in and out");
-            kprintln!("  godel [now|ledger|rollback]  the machine changing itself, on evidence");
+            kprintln!("  godel [now|space|ledger|rollback]  the machine changing itself, on evidence");
             kprintln!("  fit [lambda]  refit the probe and the council on what it knows");
             kprintln!("  gate search   how often agreement is right; the config search");
             kprintln!("  ctx cont window logits probe feature zeroshot train");

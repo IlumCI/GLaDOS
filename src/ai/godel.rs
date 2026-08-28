@@ -100,6 +100,230 @@ pub const BUDGET: &str = "/ai/godel/test-budget";
 /// Where a runtime window override lives, as text: `from until`.
 pub const WINDOW: &str = "/ai/godel/window";
 
+/// Proposals already attempted, one empty marker per hash.
+///
+/// Keyed on the *proposal* and not on the variant, because a variant's hash
+/// covers the adapter it produced and that is not known until the trial has
+/// already run. Asking "have I tried this?" has to be answerable before paying
+/// for the answer.
+pub const TRIED: &str = "/ai/godel/tried";
+
+/// What to try, as opposed to what came out.
+///
+/// The loop had no such thing. `trial` took a `Budget` and both callers passed
+/// `Budget::default()`, so every knob was a constant: `lr` 0.02, `rank` 8,
+/// `alpha` 16.0, `epochs` 20. Training starts from `Dora::new`, which is all
+/// zeros, there is no RNG anywhere in the path, and `scatter` builds a
+/// classifier-only adapter so the cached features do not move either. Same
+/// inputs, no randomness: **the same adapter came out every night**, with the
+/// same content hash, and after the first adoption every later trial compared
+/// it against itself -- nothing repaired, nothing broken, J1 answering "no net
+/// repair", rejected, forever. The lineage could never hold more than two
+/// nodes.
+///
+/// The fix is emphatically *not* to randomise training. Determinism is what
+/// lets any later run re-derive a verdict bit for bit, which is the claim this
+/// whole module rests on; randomness would buy variety and sell that. So a
+/// trial stays a function of its inputs and gains an input.
+#[derive(Clone, Copy, PartialEq)]
+pub struct Proposal {
+    pub lr: f32,
+    pub rank: usize,
+    pub alpha: f32,
+    pub epochs: usize,
+    /// How the council combines its cores. Carried here so the search space
+    /// has somewhere to put it; `trial` records it in the variant, and nothing
+    /// varies it yet -- see `GRID`.
+    pub rule: u8,
+}
+
+impl Proposal {
+    pub fn budget(&self, examples: usize, millis: u64) -> Budget {
+        Budget {
+            epochs: self.epochs,
+            millis,
+            examples,
+            lr: self.lr,
+            rank: self.rank,
+            alpha: self.alpha,
+        }
+    }
+
+    /// The text that names this point in the space.
+    ///
+    /// Rendered rather than packed, for the reason `Variant::render` is: a
+    /// hash over a struct layout changes when the struct does, and a ledger
+    /// full of hashes nobody can reproduce is a ledger of nothing.
+    pub fn render(&self) -> String {
+        let mut s = String::from("proposal 1\n");
+        s.push_str("lambda ");
+        push_f6(&mut s, self.lr);
+        s.push_str("\nrank ");
+        push_u32(&mut s, self.rank as u32);
+        s.push_str("\nalpha ");
+        push_f6(&mut s, self.alpha);
+        s.push_str("\nepochs ");
+        push_u32(&mut s, self.epochs as u32);
+        s.push_str("\nrule ");
+        push_u32(&mut s, self.rule as u32);
+        s.push('\n');
+        s
+    }
+
+    pub fn hash(&self) -> [u8; 32] {
+        sha256::hash(self.render().as_bytes())
+    }
+
+    fn tried(&self) -> bool {
+        let mut path = String::from(TRIED);
+        path.push('/');
+        path.push_str(&hex32(&self.hash()));
+        sysbox::read_blob(&path).is_some()
+    }
+
+    /// Record that this point has been visited, whatever the verdict was.
+    ///
+    /// Written before the trial rather than after. A trial that faults or is
+    /// interrupted has still spent the night on this point, and a marker
+    /// written only on success would send the loop back to the same failing
+    /// place every time.
+    pub fn mark(&self) {
+        let mut path = String::from(TRIED);
+        path.push('/');
+        path.push_str(&hex32(&self.hash()));
+        sysbox::write_text(&path, &self.render());
+    }
+}
+
+/// The declared search space, in the order it is walked.
+///
+/// A fixed table and not a random draw, so the whole search is re-derivable
+/// from the ledger: given the markers, the next point is a function and not a
+/// coin. First row is today's configuration, so the first trial after this
+/// lands reproduces the behaviour that came before it and the comparison is
+/// against a known quantity.
+///
+/// Only the training knobs vary here. `rule` is in `Proposal` and stays 0
+/// throughout, because the judges cannot yet see it: J1 is a paired test over
+/// routing decisions and the rule changes `Verdict::confident`, which is about
+/// how much the council is willing to claim rather than about what it answers.
+/// Varying it without a judge that measures it would be search without
+/// selection, which is drift.
+const GRID: &[Proposal] = &[
+    Proposal { lr: 0.02, rank: 8, alpha: 16.0, epochs: 20, rule: 0 },
+    Proposal { lr: 0.05, rank: 8, alpha: 16.0, epochs: 20, rule: 0 },
+    Proposal { lr: 0.01, rank: 8, alpha: 16.0, epochs: 40, rule: 0 },
+    Proposal { lr: 0.02, rank: 16, alpha: 32.0, epochs: 20, rule: 0 },
+    Proposal { lr: 0.05, rank: 16, alpha: 32.0, epochs: 20, rule: 0 },
+    Proposal { lr: 0.01, rank: 4, alpha: 8.0, epochs: 40, rule: 0 },
+    Proposal { lr: 0.08, rank: 8, alpha: 16.0, epochs: 12, rule: 0 },
+    Proposal { lr: 0.02, rank: 32, alpha: 64.0, epochs: 20, rule: 0 },
+];
+
+/// The search space itself, checked without running anything.
+///
+/// This is the test that would have caught the bug it was written for. The
+/// loop trained one adapter and re-derived it nightly forever, and nothing
+/// failed -- every trial "worked", the ledger filled with rejections, and the
+/// rejections were correct: an adapter compared against itself repairs
+/// nothing. What was missing was any claim that two successive trials *differ*.
+///
+/// It runs before `sysbox::init`, so no marker can be read and the frontier
+/// always answers the first row. What is checkable here is the space, which is
+/// where the failure actually lives.
+pub fn space_selftest() -> bool {
+    if GRID.is_empty() {
+        return false;
+    }
+
+    // Every point is distinct. Two identical rows are two nights spent
+    // deriving the same weights, which is the whole defect in miniature.
+    for (i, a) in GRID.iter().enumerate() {
+        for b in GRID.iter().skip(i + 1) {
+            if a.hash() == b.hash() {
+                return false;
+            }
+        }
+    }
+
+    // Every field the trainer reads reaches the hash. A knob that changes the
+    // weights and not the identity means two different variants collapse to
+    // one node, which is the same failure from the other side.
+    let base = GRID[0];
+    let vary = [
+        Proposal { lr: base.lr + 0.01, ..base },
+        Proposal { rank: base.rank + 1, ..base },
+        Proposal { alpha: base.alpha + 1.0, ..base },
+        Proposal { epochs: base.epochs + 1, ..base },
+        Proposal { rule: base.rule + 1, ..base },
+    ];
+    for v in vary {
+        if v.hash() == base.hash() {
+            return false;
+        }
+    }
+
+    // Rendering is stable: the same point twice is the same hash, which is
+    // what makes "have I tried this?" answerable at all.
+    if base.hash() != GRID[0].hash() {
+        return false;
+    }
+
+    // Learning rates an order of magnitude apart at the small end stay apart.
+    // `push_f2` renders both 3e-4 and 2e-4 as "0.00"; a proposal is identified
+    // by its rendering alone, so that would silently merge two points.
+    let a = Proposal { lr: 0.0003, ..base };
+    let b = Proposal { lr: 0.0002, ..base };
+    if a.hash() == b.hash() {
+        return false;
+    }
+
+    // The budget carries the point through unchanged. `trial` reads the
+    // budget, not the proposal, so a field that fails to cross here is a knob
+    // that silently keeps its default -- which is exactly what every trial was
+    // doing before.
+    let bud = base.budget(24, 20_000);
+    bud.lr == base.lr
+        && bud.rank == base.rank
+        && bud.alpha == base.alpha
+        && bud.epochs == base.epochs
+        && bud.examples == 24
+        && bud.millis == 20_000
+}
+
+/// The next point nobody has tried, or `None` when the space is exhausted.
+///
+/// Exhaustion is a real answer and is reported rather than papered over by
+/// wrapping. A loop that silently restarts its grid spends every night
+/// re-deriving adapters it already has, which is the failure this replaces.
+pub fn frontier() -> Option<Proposal> {
+    GRID.iter().copied().find(|p| !p.tried())
+}
+
+/// Throw away every marker, so the grid is walked from the start again.
+///
+/// Not an undo: the nodes and the ledger stay, so a re-walk rediscovers
+/// variants it already has and their hashes prove it. That is the honest
+/// behaviour -- content addressing means a rediscovered point costs a trial
+/// and no storage, and the ledger showing the same variant twice is a true
+/// statement about what happened.
+pub fn forget() -> usize {
+    let names = sysbox::children(TRIED);
+    let n = names.len();
+    for name in names {
+        let mut path = String::from(TRIED);
+        path.push('/');
+        path.push_str(&name);
+        sysbox::detach(&path);
+    }
+    n
+}
+
+/// How much of the space has been visited.
+pub fn explored() -> (usize, usize) {
+    (GRID.iter().filter(|p| p.tried()).count(), GRID.len())
+}
+
 /// The quiet window, as hours the RTC will report.
 ///
 /// **These are RTC hours and not necessarily local ones.** The clock this
@@ -275,6 +499,41 @@ fn push_f2(s: &mut String, v: f32) {
     let frac = scaled % 100;
     s.push((b'0' + (frac / 10) as u8) as char);
     s.push((b'0' + (frac % 10) as u8) as char);
+}
+
+/// Six decimal places, for values where two are not enough to tell two things
+/// apart.
+///
+/// `push_f2` renders a learning rate of 3e-4 and one of 2e-4 both as "0.00".
+/// For `Variant` that is cosmetic -- the adapter's own hash is in the identity,
+/// so two runs at different rates are still different nodes -- but for a
+/// `Proposal` it would be fatal: proposals are identified by their rendering
+/// alone, so two distinct points in the space would collide, the frontier
+/// would skip one, and the ledger would report a rate that was never used.
+///
+/// `Variant::render` deliberately keeps `push_f2`. Changing it would re-address
+/// every node already stored and leave `head` and the ledger pointing at
+/// hashes nothing can produce again.
+fn push_f6(s: &mut String, v: f32) {
+    if v < 0.0 {
+        s.push('-');
+        push_f6(s, -v);
+        return;
+    }
+    // Via f64 because 1e6 * an f32 loses the low digits to the mantissa, which
+    // is the collision this exists to prevent, arriving one decimal later.
+    let scaled = ((v as f64) * 1_000_000.0 + 0.5) as u64;
+    push_u32(s, (scaled / 1_000_000) as u32);
+    s.push('.');
+    let mut frac = scaled % 1_000_000;
+    let mut digits = [b'0'; 6];
+    for d in digits.iter_mut().rev() {
+        *d = b'0' + (frac % 10) as u8;
+        frac /= 10;
+    }
+    for d in digits {
+        s.push(d as char);
+    }
 }
 
 impl Variant {
@@ -710,7 +969,15 @@ fn ensure_head(e: &mut super::Engine) -> Option<[u8; 32]> {
 /// Everything after it is dot products over cached state, which is what makes
 /// the judging affordable and what makes any later re-check of this verdict
 /// nearly free.
-pub fn trial(e: &mut super::Engine, b: &Budget) -> Result<Certificate, super::train::RunError> {
+pub fn trial(
+    e: &mut super::Engine,
+    b: &Budget,
+    p: &Proposal,
+) -> Result<Certificate, super::train::RunError> {
+    // Marked before the work, not after: a trial that faults or is interrupted
+    // has still spent the night here, and a marker written only on success
+    // sends the loop back to the same failing point forever.
+    p.mark();
     let t = super::train::prepare(e, b)?;
     TRIALS.fetch_add(1, Ordering::Relaxed);
 
@@ -802,7 +1069,10 @@ pub fn trial(e: &mut super::Engine, b: &Budget) -> Result<Certificate, super::tr
         lambda: b.lr,
         rank: fit.dora.r as u8,
         epochs: fit.epochs as u32,
-        rule: 0,
+        // From the proposal rather than hardcoded. It changes the identity,
+        // which is the point: two variants that combine their cores
+        // differently are different objects even when the weights match.
+        rule: p.rule,
         born: crate::dev::rtc::now().map(|d| crate::dev::rtc::unix_seconds(&d)).unwrap_or(0),
     };
     let vhash = variant.hash();
@@ -1018,7 +1288,26 @@ pub fn report_trial(b: &Budget) {
     kprintln!("[godel] trial");
     console::set_color(LTGRAY);
 
-    let outcome = super::with_engine(|e| trial(e, b));
+    let Some(p) = frontier() else {
+        let (seen, all) = explored();
+        kprintln!("  the search space is exhausted -- {} of {} points tried", seen, all);
+        kprintln!("  widen GRID, or 'godel forget' to walk it again");
+        return;
+    };
+    let (seen, all) = explored();
+    kprintln!(
+        "  point {} of {}: lr {}, rank {}, alpha {}, epochs {}",
+        seen + 1,
+        all,
+        p.lr,
+        p.rank,
+        p.alpha,
+        p.epochs
+    );
+    // The examples and the wall clock come from the caller; everything that
+    // decides what the weights become comes from the proposal.
+    let b = &p.budget(b.examples, b.millis);
+    let outcome = super::with_engine(|e| trial(e, b, &p));
     let c = match outcome {
         None => {
             kprintln!("  no engine, or another task holds it");

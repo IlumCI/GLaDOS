@@ -338,10 +338,32 @@ unquotable. A loop that improves itself forever reads the held-out set forever,
 and this tree's measurement discipline does not survive that unless somebody
 counts.
 
-`Variant.lambda`, `Variant.rule` and `Variant.skills` are hashed into the node
-identity and nothing varies them yet. They are hooks for widening the search
-space beyond "retrain the same thing", which is the current limitation: the DAG
-will be a chain until something varies more than the random seed.
+**There is no random seed, and that was the bug.** `Dora::new` starts at all
+zeros, nothing in the training path is random, and `scatter` builds a
+classifier-only adapter so the cached features do not move either. Both callers
+passed `Budget::default()`, so every trial trained a bit-identical adapter with
+the same content hash, and after the first adoption each later one was compared
+against itself: nothing repaired, nothing broken, rejected, forever.
+
+The fix is not randomness -- determinism is what lets any later run re-derive a
+verdict, which is the claim the module rests on. Instead `trial` takes a
+`Proposal` naming every knob, and `frontier()` walks a declared `GRID` in a
+fixed order, skipping points marked in `/ai/godel/tried`. The search is
+therefore re-derivable rather than merely repeatable: the next point is a
+function of the markers, not a coin. `godel space` shows what is left,
+`godel forget` walks it again.
+
+`Proposal::render` uses six decimal places where `Variant::render` uses two.
+A proposal is identified by its rendering alone, so 3e-4 and 2e-4 rendered at
+two places would be one point; a variant carries its adapter's hash as well, so
+there the imprecision is cosmetic. `Variant::render` keeps `push_f2` because
+changing it would re-address every node already stored.
+
+`Variant.rule` and `Variant.skills` are still hooks. `rule` reaches the variant
+from the proposal now but nothing varies it, because J1 is a paired test over
+routing decisions and the rule changes `Verdict::confident` -- how much the
+council will claim, not what it answers. Varying it without a judge that
+measures it would be search without selection.
 
 Root certificate bundle, built from the host's store:
 
