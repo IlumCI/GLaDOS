@@ -615,6 +615,112 @@ impl Window {
 ///
 /// Allocated once and reused. Allocating per token would put the heap
 /// allocator in the inner loop of generation for no reason.
+/// What a backward pass needs kept from a forward one.
+///
+/// Only the residual stream entering each layer, and the normed hidden state
+/// the classifier saw. Everything else a layer computes -- the normed input,
+/// q, the attention output, the two FFN branches -- is a function of that
+/// entering stream and the frozen weights, so it is **recomputed** during the
+/// backward walk rather than stored.
+///
+/// The alternative was measured on paper first. Keeping every intermediate for
+/// Qwen3-0.6B costs about 53 KB per layer per position -- 95 MB for a
+/// 64-token prompt. Keeping only the entering stream costs 4 KB, so 7 MB for
+/// the same prompt, in exchange for roughly one extra forward per layer during
+/// the backward. In a kernel whose heap is one physically contiguous
+/// allocation on a ladder, trading compute for a factor of thirteen in memory
+/// is not a close call.
+///
+/// `backward.rs` was already written this way: `attention_backward` recomputes
+/// scores and softmax rather than reading a saved tape. Nobody writes that
+/// unless the intention was to recompute.
+///
+/// The keys and values are not here because they are already in the KV cache,
+/// which is what a KV cache is. They are stored quantised, so a gradient taken
+/// through them carries the cache's quantisation error -- true of any training
+/// against a quantised cache, and worth knowing before a result is read as
+/// noise.
+pub struct Tape {
+    pub dim: usize,
+    pub n_layers: usize,
+    pub seq: usize,
+    /// `(l * seq + t) * dim` -- the residual stream entering layer `l` at
+    /// position `t`.
+    x: Vec<f32>,
+    /// The final normed hidden state per position, which is what the
+    /// classifier consumed and where the loss enters.
+    final_xb: Vec<f32>,
+    /// How many positions were actually written, so a short sequence cannot
+    /// be read as a full one of stale values.
+    filled: usize,
+}
+
+impl Tape {
+    pub fn new(cfg: &Config, seq: usize) -> Tape {
+        Tape {
+            dim: cfg.dim,
+            n_layers: cfg.n_layers,
+            seq,
+            x: vec![0.0; cfg.n_layers * seq * cfg.dim],
+            final_xb: vec![0.0; seq * cfg.dim],
+            filled: 0,
+        }
+    }
+
+    /// Bytes held, for anything deciding whether a sequence fits.
+    pub fn bytes(&self) -> usize {
+        4 * (self.x.len() + self.final_xb.len())
+    }
+
+    pub fn filled(&self) -> usize {
+        self.filled
+    }
+
+    /// The stream entering layer `l` at position `t`.
+    pub fn entering(&self, l: usize, t: usize) -> Option<&[f32]> {
+        if l >= self.n_layers || t >= self.filled {
+            return None;
+        }
+        let o = (l * self.seq + t) * self.dim;
+        Some(&self.x[o..o + self.dim])
+    }
+
+    /// What the classifier saw at position `t`.
+    pub fn final_normed(&self, t: usize) -> Option<&[f32]> {
+        if t >= self.filled {
+            return None;
+        }
+        let o = t * self.dim;
+        Some(&self.final_xb[o..o + self.dim])
+    }
+
+    /// Out of range writes nothing rather than panicking. This runs in ring 0
+    /// with no guard page, and a tape sized for one prompt being handed a
+    /// longer one should lose the tail, not the machine.
+    fn put(buf: &mut [f32], o: usize, v: &[f32]) {
+        if o + v.len() <= buf.len() {
+            buf[o..o + v.len()].copy_from_slice(v);
+        }
+    }
+
+    fn record_layer(&mut self, l: usize, t: usize, x: &[f32]) {
+        if l >= self.n_layers || t >= self.seq {
+            return;
+        }
+        let o = (l * self.seq + t) * self.dim;
+        Self::put(&mut self.x, o, &x[..self.dim.min(x.len())]);
+    }
+
+    fn record_final(&mut self, t: usize, xb: &[f32]) {
+        if t >= self.seq {
+            return;
+        }
+        let o = t * self.dim;
+        Self::put(&mut self.final_xb, o, &xb[..self.dim.min(xb.len())]);
+        self.filled = self.filled.max(t + 1);
+    }
+}
+
 #[derive(Clone)]
 pub struct State {
     x: Vec<f32>,
@@ -1720,6 +1826,17 @@ impl Model {
         let (d, h) = (self.cfg.dim, self.cfg.hidden_dim);
         self.mat(self.o.w3, self.blob_off().w3, l, h, d)
     }
+    /// One row of the embedding table, dequantised.
+    ///
+    /// The forward reads this into `State.x` as its first act, so it is what
+    /// layer 0 of a `Tape` must contain -- the one tape entry whose value is
+    /// known without trusting the forward, and therefore the one that can
+    /// catch a wrong layer stride.
+    pub fn embed_row(&self, token: usize, out: &mut [f32]) {
+        let tok = token.min(self.cfg.vocab_size - 1);
+        self.embed_mat().row_into(tok, out);
+    }
+
     fn embed_mat(&self) -> Mat<'_> {
         let (d, v) = (self.cfg.dim, self.cfg.vocab_size);
         match &self.src {
@@ -1798,11 +1915,37 @@ impl Model {
         if self.cfg.hybrid() {
             self.forward_hybrid(s, token, pos)
         } else {
-            self.forward_dense(s, token, pos)
+            self.forward_dense(s, token, pos, None)
         }
     }
 
-    fn forward_dense(&self, s: &mut State, token: usize, pos: usize) {
+    /// A forward that keeps what a backward pass needs.
+    ///
+    /// The same function, given somewhere to write. Not a second forward:
+    /// two implementations of a transformer that are supposed to agree do not
+    /// stay agreeing, and the one that drifts is the one nobody decodes with,
+    /// so the drift shows up as a training run that quietly optimises a
+    /// slightly different model than the one being served.
+    ///
+    /// Hybrids are refused, matching `attach_adapters` -- their gated,
+    /// partially-rotated projections need a verified backward of their own
+    /// rather than an alias to the dense sites.
+    pub fn forward_taped(
+        &self,
+        s: &mut State,
+        token: usize,
+        pos: usize,
+        tape: &mut Tape,
+    ) -> bool {
+        if self.cfg.hybrid() {
+            return false;
+        }
+        self.forward_dense(s, token, pos, Some(tape));
+        true
+    }
+
+    fn forward_dense(&self, s: &mut State, token: usize, pos: usize, tape: Option<&mut Tape>) {
+        let mut tape = tape;
         let c = &self.cfg;
         let kv_dim = c.kv_dim();
         let kv_mul = c.kv_mul();
@@ -1821,6 +1964,13 @@ impl Model {
         self.embed_mat().row_into(tok, &mut s.x);
 
         for l in 0..c.n_layers {
+            // The residual stream as it enters this layer. Everything the
+            // layer goes on to compute is a function of this and the frozen
+            // weights, which is why nothing else is kept.
+            if let Some(t) = tape.as_mut() {
+                t.record_layer(l, pos, &s.x);
+            }
+
             // --- attention ---
             tensor::rmsnorm_eps(&mut s.xb[..c.dim], &s.x, self.rms_att_w(l), eps);
 
@@ -1906,6 +2056,14 @@ impl Model {
         // was a heap allocation on every single token, in the one loop that
         // runs most often.
         tensor::rmsnorm_eps(&mut s.xb[..c.dim], &s.x, self.rms_final_w(), eps);
+        // Where the loss enters. Recorded after the final norm and before the
+        // classifier, which is exactly the vector the classifier's own
+        // gradient is taken against -- and the same vector `train.rs` already
+        // caches as a feature, which is why classifier-only training needed no
+        // tape at all.
+        if let Some(t) = tape.as_mut() {
+            t.record_final(pos, &s.xb);
+        }
         match self.adapters.as_ref().and_then(|a| a.cls.as_ref()) {
             Some(d) => {
                 let xb = &s.xb;

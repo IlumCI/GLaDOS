@@ -917,6 +917,90 @@ pub fn blob_selftest() -> bool {
 /// 2. perturbing one trained weight moves the logits (the wrapper is not a
 ///    silent no-op in the other direction either);
 /// 3. detaching restores the original logits exactly.
+/// The tape, against the forward it was taken from.
+///
+/// Two claims, and the first is the one that would be invisible if it broke.
+///
+/// **Taping must not change the forward.** The recording sits inside the one
+/// `forward_dense` rather than in a copy of it, precisely so a training run
+/// cannot end up optimising a slightly different model than the one being
+/// served -- but "must not change it" is a claim, and an identical-logits
+/// check is what makes it one that can fail. Bitwise, not approximate: a
+/// `copy_from_slice` cannot perturb arithmetic, so anything other than
+/// bit-identical means the recording is reading the wrong buffer or at the
+/// wrong moment.
+///
+/// **The tape must hold what the backward will read.** Layer 0's entering
+/// stream is the token embedding, which is checkable without any of the
+/// backward machinery existing yet.
+fn tape_selftest(e: &mut super::Engine) -> bool {
+    use super::model::{State, Tape};
+
+    if e.model.cfg.hybrid() {
+        // Refused by `forward_taped` for the same reason `attach_adapters`
+        // refuses them, and a selftest that quietly passed on a hybrid would
+        // be reporting on a path that never ran.
+        return true;
+    }
+
+    let toks: alloc::vec::Vec<usize> = alloc::vec![1usize, 5, 9, 2];
+    let cfg = e.model.cfg.clone();
+
+    let mut plain = State::new(&cfg);
+    for (i, &t) in toks.iter().enumerate() {
+        e.model.forward(&mut plain, t, i);
+    }
+
+    let mut taped = State::new(&cfg);
+    let mut tape = Tape::new(&cfg, toks.len());
+    for (i, &t) in toks.iter().enumerate() {
+        if !e.model.forward_taped(&mut taped, t, i, &mut tape) {
+            return false;
+        }
+    }
+
+    if taped.logits != plain.logits {
+        crate::kprintln!("  tape: logits differ with recording on");
+        return false;
+    }
+    if tape.filled() != toks.len() {
+        return false;
+    }
+
+    // Layer 0 sees the embedding, unmodified. This is the one entry whose
+    // value is known independently of the forward, so it is the one that can
+    // catch an off-by-one in the layer stride.
+    let mut want = alloc::vec![0.0f32; cfg.dim];
+    for (i, &t) in toks.iter().enumerate() {
+        e.model.embed_row(t, &mut want);
+        let Some(got) = tape.entering(0, i) else { return false };
+        if got != &want[..] {
+            crate::kprintln!("  tape: layer 0 at {} is not the embedding", i);
+            return false;
+        }
+    }
+
+    // Later layers hold something else. Without this, a tape that recorded
+    // the same buffer for every layer would pass everything above.
+    if cfg.n_layers > 1 {
+        let a = tape.entering(0, 0).map(|v| v.to_vec());
+        let b = tape.entering(cfg.n_layers - 1, 0).map(|v| v.to_vec());
+        match (a, b) {
+            (Some(a), Some(b)) if a != b => {}
+            _ => {
+                crate::kprintln!("  tape: every layer recorded the same stream");
+                return false;
+            }
+        }
+    }
+
+    // Reading past what was written answers nothing rather than stale zeros
+    // that would look like a real activation.
+    tape.entering(0, toks.len()).is_none()
+        && tape.entering(cfg.n_layers, 0).is_none()
+        && tape.final_normed(toks.len()).is_none()
+}
+
 /// The input gradient, against finite differences.
 ///
 /// A gradient nobody differenced is a gradient nobody knows. An analytic
@@ -1023,6 +1107,16 @@ pub fn selftest() -> bool {
     let result = super::with_engine(|e| {
         let cfg = e.model.cfg.clone();
         if cfg.hybrid() {
+            return None;
+        }
+        // Needs the engine, so it lives here rather than beside the pure
+        // checks above.
+        let tape_ok = tape_selftest(e);
+        kprintln!(
+            "  {}  the tape matches the forward it was taken from",
+            if tape_ok { "ok " } else { "FAIL" }
+        );
+        if !tape_ok {
             return None;
         }
         let toks = [9707usize, 1576, 29817, 3303];
