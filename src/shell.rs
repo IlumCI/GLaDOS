@@ -2110,8 +2110,12 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
             let mut w = rest.splitn(3, ' ');
             match w.next().unwrap_or("") {
                 "" => {
-                    kprintln!("  app list           applications on this machine");
-                    kprintln!("  app show <name>    its panel document, rows filled in");
+                    kprintln!("  app list             applications on this machine");
+                    kprintln!("  app show <name>      its panel document, rows filled in");
+                    kprintln!("  app info <name>      what it is, by hash, and what it may do");
+                    kprintln!("  app trust <name> <h> approve exactly that version");
+                    kprintln!("  app adopt <name>     record what is on disk as in use");
+                    kprintln!("  app rollback <name>  back to what it replaced");
                     kprintln!("  app <name> <fn> [x]  call one of its functions");
                 }
                 "list" => {
@@ -2123,6 +2127,111 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
                         kprintln!("  {}", n);
                     }
                 }
+                // What this application is, by hash, and what it may do.
+                "info" => match w.next() {
+                    None => kprintln!("  usage: app info <name>"),
+                    Some(name) => {
+                        use crate::app::manifest as man;
+                        match man::current(name) {
+                            None => kprintln!("  no application '{}'", name),
+                            Some(m) => {
+                                let h = m.hash();
+                                kprintln!("  manifest {}", man::hex32(&h));
+                                match m.parent {
+                                    None => kprintln!("  parent   none"),
+                                    Some(p) => kprintln!("  parent   {}", man::hex32(&p)),
+                                }
+                                kprintln!("  panel    {}", man::hex32(&m.panel));
+                                kprintln!("  code     {}", man::hex32(&m.code));
+                                kprintln!(
+                                    "  asks raw {}   granted {}",
+                                    if m.raw { "yes" } else { "no" },
+                                    if man::granted(&h) { "yes" } else { "no" }
+                                );
+                                match man::head(name) {
+                                    None => kprintln!("  adopted  never"),
+                                    Some(hd) => kprintln!(
+                                        "  adopted  {}{}",
+                                        man::hex32(&hd),
+                                        if hd == h { "  (this one)" } else { "  (a different version)" }
+                                    ),
+                                }
+                            }
+                        }
+                    }
+                },
+                // Approve one manifest to run with the operator's capabilities.
+                //
+                // The hash has to be typed back. An approval that could be
+                // given without naming what is being approved would be given
+                // to whatever happened to be on disk at the time, which is the
+                // one thing a grant must not be -- the point is that it names
+                // a specific artifact and stops applying the moment that
+                // artifact changes.
+                "trust" => {
+                    use crate::app::manifest as man;
+                    // `rest` was already split three ways, so the name and the
+                    // hash are the next two pieces -- splitting again here
+                    // would look at the name and find no hash in it.
+                    let name = w.next().unwrap_or("");
+                    let typed = w.next().unwrap_or("").trim();
+                    match man::current(name) {
+                        None => kprintln!("  no application '{}'", name),
+                        Some(m) => {
+                            let h = m.hash();
+                            let full = man::hex32(&h);
+                            if typed.len() < 8 || !full.starts_with(typed) {
+                                kprintln!("  this application is {}", full);
+                                kprintln!("  asks for raw access: {}", if m.raw { "yes" } else { "no" });
+                                kprintln!("  to approve exactly this version:");
+                                kprintln!("    app trust {} {}", name, &full[..12]);
+                                if !m.raw {
+                                    kprintln!("  (it is not asking for anything, so this would do nothing)");
+                                }
+                            } else {
+                                m.store();
+                                let g = man::grant(name, &h);
+                                let ad = man::adopt(name, &h);
+                                kprintln!(
+                                    "  {} trusted: grant {}, adopted {}",
+                                    name,
+                                    if g { "yes" } else { "failed" },
+                                    if ad { "yes" } else { "failed" }
+                                );
+                            }
+                        }
+                    }
+                }
+                // Record what is on disk as the version in use, without
+                // approving anything. This is how a change is accepted when it
+                // asks for nothing.
+                "adopt" => match w.next() {
+                    None => kprintln!("  usage: app adopt <name>"),
+                    Some(name) => {
+                        use crate::app::manifest as man;
+                        match man::current(name) {
+                            None => kprintln!("  no application '{}'", name),
+                            Some(m) => {
+                                let h = m.store();
+                                kprintln!(
+                                    "  {} now at {}",
+                                    name,
+                                    if man::adopt(name, &h) { man::hex32(&h) } else { String::from("(failed)") }
+                                );
+                            }
+                        }
+                    }
+                },
+                "rollback" => match w.next() {
+                    None => kprintln!("  usage: app rollback <name>"),
+                    Some(name) => {
+                        use crate::app::manifest as man;
+                        match man::rollback(name) {
+                            None => kprintln!("  nothing to roll back to"),
+                            Some(p) => kprintln!("  {} back to {}", name, man::hex32(&p)),
+                        }
+                    }
+                },
                 "show" => match w.next() {
                     None => kprintln!("  usage: app show <name>"),
                     Some(name) => match crate::app::document(name) {

@@ -43,10 +43,13 @@
 //! pretending otherwise would be a fence with nothing behind it. What is
 //! restricted is everything that *changes* something.
 //!
-//! No application has asked for more than this yet, and the mechanism for
-//! granting it -- a request in a manifest, approved once against a specific
-//! hash -- is not built. Until it is, an application either fits inside the
-//! sandbox or does not run.
+//! An application may ask for more, by having a `raw` file beside its other
+//! two. That is a request and not a grant: `app trust` is the only thing that
+//! approves one, it approves a single manifest hash, and the hash covers both
+//! files and the request, so approval cannot survive an edit or be inherited
+//! by a later version. See `manifest`.
+
+pub mod manifest;
 
 use crate::gfx::ui::Panel;
 use crate::gfx::uidoc;
@@ -71,7 +74,7 @@ fn panel_path(name: &str) -> String {
 /// `app list` and `app show x` have to mean something, and an application
 /// called `list` would take the word away. Reserved rather than escaped: there
 /// are two of them and renaming an app is free.
-pub const RESERVED: &[&str] = &["list", "show"];
+pub const RESERVED: &[&str] = &["list", "show", "info", "trust", "adopt", "rollback"];
 
 pub fn exists(name: &str) -> bool {
     sysbox::read_blob(&code_path(name)).is_some()
@@ -92,10 +95,21 @@ pub fn call(name: &str, expr: &str) -> Result<String, String> {
         return Err(alloc::format!("no application '{}'", name));
     };
     let src = String::from_utf8_lossy(&bytes).into_owned();
-    // Confined to its own subtree, with no raw memory, no ports, no drawing
-    // outside a window, and no mutating applet. An application keeps its state
-    // under itself and has no business anywhere else.
-    let mut it = lang::Interp::sandboxed(&alloc::format!("{}/{}", ROOT, name));
+    // Sandboxed unless this exact version has been approved for more.
+    //
+    // "This exact version" is the whole mechanism: the manifest hash covers
+    // both files and the request itself, so an approval cannot follow an edit
+    // and cannot be inherited by the next version. An application that asks and
+    // has not been granted simply runs sandboxed -- refusing to run at all
+    // would make an unapproved request indistinguishable from a broken app.
+    let trusted = manifest::current(name)
+        .map(|m| m.raw && manifest::granted(&m.hash()))
+        .unwrap_or(false);
+    let mut it = if trusted {
+        lang::Interp::new()
+    } else {
+        lang::Interp::sandboxed(&alloc::format!("{}/{}", ROOT, name))
+    };
     lang::eval_line(&mut it, &src)?;
     let v = lang::eval_line(&mut it, expr)?;
     Ok(v.render())
