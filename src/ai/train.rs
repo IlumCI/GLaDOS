@@ -389,6 +389,244 @@ pub fn selftest() -> bool {
 /// that can run arbitrarily long while looking like it is working, and the
 /// shell is single-threaded: a run that cannot be bounded is a run that can
 /// take the terminal away with no way to ask for it back.
+/// What a full-network run did.
+pub struct FullReport {
+    pub examples: usize,
+    pub epochs: usize,
+    pub first_loss: f32,
+    pub last_loss: f32,
+    pub ms: u64,
+    /// Stopped by the wall clock rather than by finishing its epochs.
+    pub stopped: bool,
+}
+
+/// One Adam state per tensor of one adapted site.
+struct SiteOpt {
+    a: Adam,
+    b: Adam,
+    m: Adam,
+}
+
+impl SiteOpt {
+    fn like(d: &super::adapter::Dora) -> SiteOpt {
+        SiteOpt {
+            a: Adam::new(d.a.len()),
+            b: Adam::new(d.b.len()),
+            m: Adam::new(d.m.len()),
+        }
+    }
+}
+
+/// Train every adapted site, not just the classifier.
+///
+/// The other trainer -- `Trial::train` -- rests on the base being frozen
+/// *below the classifier*: a hidden state is then a constant, is cached once
+/// per example, and an epoch after that costs no forward passes at all. That
+/// is what makes it affordable, and it is exactly what adapting q, k and v
+/// gives up. Move a projection in layer three and every hidden state after it
+/// moves, so there is nothing to cache and every epoch pays a forward pass per
+/// example.
+///
+/// This is therefore a different function rather than a flag on that one. The
+/// two share an optimiser and nothing else, and folding them together would
+/// hide which of the two economics a given run is paying.
+///
+/// ### The objective, and how it is weaker than the other one
+///
+/// Full-vocabulary cross-entropy on the **first token of the applet name**.
+/// `Trial` does better: it scores every step of the spelling under a grammar
+/// that has already removed unreachable applets, so its gradient is restricted
+/// to candidates the decoder could actually emit. Doing that here needs the
+/// chain machinery threaded through a taped forward per step, which is a
+/// larger piece; the first token is where most of the discrimination lives --
+/// it separates most of the twenty-two applets outright -- and it is exactly
+/// the loss whose gradient `adapter::walk_selftest` differences.
+///
+/// Said plainly so a comparison between the two is not read as a comparison of
+/// what the sites can learn.
+pub fn train_full(
+    e: &mut super::Engine,
+    b: &Budget,
+    limit: usize,
+) -> Option<FullReport> {
+    if !hardware_ok() {
+        return None;
+    }
+    let cfg = e.model.cfg.clone();
+    if cfg.hybrid() || cfg.streams() {
+        return None;
+    }
+    let ad = e.model.adapters.as_ref()?;
+    let mut grads = super::model::Grads::new(ad);
+
+    // Optimisers, shaped from the attached adapters so an unadapted site has
+    // none rather than an empty one nobody notices is idle.
+    let mut opts: Vec<[Option<SiteOpt>; 3]> = ad
+        .qkv
+        .iter()
+        .map(|t| {
+            [
+                t[0].as_ref().map(SiteOpt::like),
+                t[1].as_ref().map(SiteOpt::like),
+                t[2].as_ref().map(SiteOpt::like),
+            ]
+        })
+        .collect();
+    let mut cls_opt = ad.cls.as_ref().map(SiteOpt::like);
+
+    // Build the training set once: prompt tokens in, target token out.
+    let (train_end, _, _) = super::vocab::splits();
+    let mut set: Vec<(Vec<usize>, usize)> = Vec::new();
+    for (i, ex) in super::vocab::examples().iter().enumerate() {
+        if i >= train_end || set.len() >= limit.max(1) {
+            continue;
+        }
+        let prompt = super::harness::prompt_for_task(&ex.task);
+        let toks = e.tok.encode(&prompt, true, false);
+        // The label is the applet's name as the decoder would begin to spell
+        // it. A leading space, because that is how it follows "Tool:" in the
+        // prompt and therefore how the tokenizer saw it during every decode.
+        let mut label = alloc::string::String::from(" ");
+        label.push_str(&ex.applet);
+        let lt = e.tok.encode(&label, false, false);
+        let (Some(&first), false) = (lt.first(), toks.is_empty()) else { continue };
+        set.push((toks, first));
+    }
+    if set.is_empty() {
+        return None;
+    }
+
+    let t0 = crate::time::rdtsc();
+    let mhz = crate::time::tsc_mhz().max(1);
+    let mut first_loss = 0.0f32;
+    let mut last_loss = 0.0f32;
+    let mut epochs = 0usize;
+    let mut stopped = false;
+
+    for epoch in 0..b.epochs {
+        grads.clear();
+        last_loss = 0.0;
+        for (toks, target) in set.iter() {
+            let mut st = super::model::State::new(&cfg);
+            let mut tape = super::model::Tape::new(&cfg, toks.len());
+            for (i, &t) in toks.iter().enumerate() {
+                if !e.model.forward_taped(&mut st, t, i, &mut tape) {
+                    return None;
+                }
+            }
+            let at = toks.len() - 1;
+            let (loss, gl) = softmax_ce(&st.logits, *target);
+            last_loss += loss;
+            if !e.model.backward(&tape, &gl, at, &mut grads) {
+                return None;
+            }
+        }
+        if epoch == 0 {
+            first_loss = last_loss;
+        }
+        epochs = epoch + 1;
+
+        // Mean over the set, so the step size means the same thing whatever
+        // `limit` was.
+        let k = 1.0 / set.len() as f32;
+        scale_grads(&mut grads, k);
+
+        if let Some(ad) = e.model.adapters.as_mut() {
+            for (l, t) in ad.qkv.iter_mut().enumerate() {
+                for (i, site) in t.iter_mut().enumerate() {
+                    let (Some(d), Some(o)) = (site.as_mut(), opts[l][i].as_mut()) else {
+                        continue;
+                    };
+                    o.a.step(&mut d.a, &grads.qkv[l][i].ga, b.lr);
+                    o.b.step(&mut d.b, &grads.qkv[l][i].gb, b.lr);
+                    o.m.step(&mut d.m, &grads.qkv[l][i].dm, b.lr);
+                }
+            }
+            if let (Some(d), Some(o)) = (ad.cls.as_mut(), cls_opt.as_mut()) {
+                o.a.step(&mut d.a, &grads.cls.ga, b.lr);
+                o.b.step(&mut d.b, &grads.cls.gb, b.lr);
+                o.m.step(&mut d.m, &grads.cls.dm, b.lr);
+            }
+        }
+        // The per-row scales are stale the moment a or b moves, and every
+        // forward after this reads them. Refreshing is a pass over each
+        // adapted weight, which is why it is here and not in the inner loop.
+        refresh_all(e);
+
+        if b.millis > 0 && (crate::time::rdtsc() - t0) / mhz / 1000 >= b.millis {
+            stopped = true;
+            break;
+        }
+    }
+
+    Some(FullReport {
+        examples: set.len(),
+        epochs,
+        first_loss: first_loss / set.len() as f32,
+        last_loss: last_loss / set.len() as f32,
+        ms: (crate::time::rdtsc() - t0) / mhz / 1000,
+        stopped,
+    })
+}
+
+/// Cross-entropy over the whole vocabulary, and its gradient.
+///
+/// The gradient is `softmax - onehot`, which is what `Model::backward` expects
+/// and what the walk's own check differences against.
+fn softmax_ce(logits: &[f32], target: usize) -> (f32, Vec<f32>) {
+    let m = logits.iter().fold(f32::MIN, |a, v| a.max(*v));
+    let mut z = 0.0f32;
+    for v in logits {
+        z += super::tensor::expf(v - m);
+    }
+    let inv = 1.0 / z.max(1e-30);
+    let mut g = vec![0.0f32; logits.len()];
+    for (o, v) in logits.iter().enumerate() {
+        g[o] = super::tensor::expf(v - m) * inv;
+    }
+    let ti = target.min(g.len().saturating_sub(1));
+    let p = g[ti].max(1e-30);
+    g[ti] -= 1.0;
+    (-logf(p), g)
+}
+
+fn scale_grads(g: &mut super::model::Grads, k: f32) {
+    for t in g.qkv.iter_mut() {
+        for s in t.iter_mut() {
+            for v in s.ga.iter_mut().chain(s.gb.iter_mut()).chain(s.dm.iter_mut()) {
+                *v *= k;
+            }
+        }
+    }
+    for v in g.cls.ga.iter_mut().chain(g.cls.gb.iter_mut()).chain(g.cls.dm.iter_mut()) {
+        *v *= k;
+    }
+}
+
+/// Recompute every adapted site's cached scales against its frozen weight.
+fn refresh_all(e: &mut super::Engine) {
+    // Taken out and put back, because the frozen weight and the adapter live
+    // in the same struct: `frozen_site` borrows the model to hand back a view
+    // of a weight, and refreshing needs the adapter mutably at the same time.
+    // Moving the adapters aside for the duration splits the borrow without
+    // copying anything.
+    let Some(mut ad) = e.model.adapters.take() else { return };
+    let n = e.model.cfg.n_layers;
+    for l in 0..n {
+        for i in 0..3 {
+            let w = e.model.frozen_site(l, i);
+            if let Some(d) = ad.qkv[l][i].as_mut() {
+                d.refresh(&w, false);
+            }
+        }
+    }
+    let w = e.model.frozen_cls();
+    if let Some(d) = ad.cls.as_mut() {
+        d.refresh(&w, false);
+    }
+    e.model.adapters = Some(ad);
+}
+
 pub struct Budget {
     /// Passes over the cached decisions.
     pub epochs: usize,

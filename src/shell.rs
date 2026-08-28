@@ -1124,6 +1124,88 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             }
         }
         // A council core the machine wrote, and the judges that let one in.
+        // Train more than the routing head.
+        //
+        // `train adapter` moves the classifier against cached features. This
+        // moves every q/k/v site too, which means no cached features and a
+        // forward pass per example per epoch -- a different cost, so a
+        // different command rather than a flag that hides which one is being
+        // paid.
+        "deeptrain" => {
+            use crate::ai::{adapter::Adapters, train};
+            let mut w = Words::new(rest);
+            let mut n = 8usize;
+            let mut ep = 4usize;
+            let mut rank = 4usize;
+            while let Some(a) = w.next() {
+                let v: usize = w.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+                match a {
+                    "-n" => n = v.max(1),
+                    "-e" => ep = v.max(1),
+                    "-r" => rank = v.max(1),
+                    _ => {}
+                }
+            }
+            if !crate::ai::engine_ready() {
+                kprintln!("  {}", crate::ai::engine_refusal());
+                return;
+            }
+            console::set_color(YELLOW);
+            kprintln!("[deeptrain]");
+            console::set_color(LTGRAY);
+            let out = crate::ai::with_engine(|e| {
+                let cfg = e.model.cfg.clone();
+                if e.model.adapters.is_none()
+                    && e.model
+                        .attach_adapters(Adapters::full(&cfg, rank, 2.0 * rank as f32))
+                        .is_err()
+                {
+                    return None;
+                }
+                let b = train::Budget {
+                    epochs: ep,
+                    millis: 0,
+                    examples: n,
+                    ..Default::default()
+                };
+                train::train_full(e, &b, n)
+            })
+            .flatten();
+            match out {
+                None => {
+                    console::set_color(LTRED);
+                    kprintln!("  refused -- no AVX2/FMA, a hybrid, a windowed cache, or no corpus");
+                    console::set_color(LTGRAY);
+                }
+                Some(r) => {
+                    kprintln!(
+                        "  {} example(s), {} epoch(s) in {} ms{}",
+                        r.examples,
+                        r.epochs,
+                        r.ms,
+                        if r.stopped { " (capped)" } else { "" }
+                    );
+                    console::set_color(if r.last_loss < r.first_loss { LTGREEN } else { YELLOW });
+                    kprintln!(
+                        "  loss {} -> {}",
+                        (r.first_loss * 1000.0) as i32 as f32 / 1000.0,
+                        (r.last_loss * 1000.0) as i32 as f32 / 1000.0
+                    );
+                    console::set_color(LTGRAY);
+                    kprintln!("  every q/k/v site moved, not just the classifier");
+                    // Said every time, because this is the one training path
+                    // in the system with no judge in front of it. `godel`
+                    // adopts nothing without four of them agreeing; this
+                    // changes the live model on the operator's say-so alone,
+                    // and a lower training loss is not evidence that routing
+                    // improved.
+                    console::set_color(YELLOW);
+                    kprintln!("  unjudged: this moved the live model directly");
+                    kprintln!("  'fit' then 'route' to see what it did; 'adapter off' to undo");
+                    console::set_color(LTGRAY);
+                }
+            }
+        }
         "core" => {
             use crate::ai::{harness, voter};
             let mut w = Words::new(rest);
@@ -1622,6 +1704,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             kprintln!("  adapter [save|load|off] what is attached, and moving it in and out");
             kprintln!("  godel [now|space|ledger|rollback]  the machine changing itself, on evidence");
             kprintln!("  core [list|judge|install]    a council voter the machine wrote");
+            kprintln!("  deeptrain [-n N -e E -r R]   train q/k/v as well as the head");
             kprintln!("  fit [lambda]  refit the probe and the council on what it knows");
             kprintln!("  gate search   how often agreement is right; the config search");
             kprintln!("  ctx cont window logits probe feature zeroshot train");

@@ -157,8 +157,24 @@ every number ambiguous:
 
 - **`fit` and `train [epochs]`** move the linear probe and its head. Closed-form
   ridge regression over hidden states; the checkpoint is never touched.
-- **`train adapter`** moves a QDoRA adapter over the model's *classifier*. This
-  is the model learning, in the only sense the word applies here.
+- **`train adapter`** moves a QDoRA adapter over the model's *classifier*.
+- **`deeptrain`** moves every q/k/v site as well, through `forward_taped` and
+  `Model::backward`. Different economics and therefore a different command:
+  `Trial::train` rests on hidden states being constants below the classifier,
+  so it caches them once and an epoch costs no forward passes; move a
+  projection in layer three and every state after it moves, so there is nothing
+  to cache and every epoch pays a forward pass per example. Measured under
+  QEMU on SmolLM2-135M: 24 forward-and-backward passes in 110 s. That figure is
+  from an emulator and is not evidence about the GF63.
+
+  Its objective is full-vocabulary cross-entropy on the applet name's first
+  token, which is weaker than `Trial`'s -- that scores every step of the
+  spelling under a grammar that has already removed unreachable applets.
+
+  **It is the one training path with no judge in front of it.** `godel` adopts
+  nothing without four of them agreeing; `deeptrain` changes the live model on
+  the operator's say-so, and a lower training loss is not evidence that routing
+  improved. `adapter off` is the way back.
 
 ```
 train adapter [-e epochs] [-n examples] [-ms budget] [-r rank] [-lr rate]
