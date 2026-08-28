@@ -107,6 +107,15 @@ pub fn interactive() -> bool {
     INTERACTIVE.load(core::sync::atomic::Ordering::Acquire)
 }
 
+/// How many steps an authoring run gets.
+///
+/// Each step is a prefill plus a few short decodes, and the engine is taken
+/// and released once per decode -- so the shell waits seconds at a time rather
+/// than for the whole run. Small, because a run that cannot finish in this many
+/// steps is one whose contract no skeleton serves, and saying so quickly is
+/// more use than grinding.
+const AUTHOR_STEPS: usize = 8;
+
 pub fn run(boot: &BootInfo, acpi: &Option<Acpi>) -> ! {
     console::set_color(LTCYAN);
     INTERACTIVE.store(true, core::sync::atomic::Ordering::Release);
@@ -2102,6 +2111,69 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
         }
         "echo" => kprintln!("  {}", rest),
         "clear" => console::with(|c| c.clear()),
+        // The machine writes an application.
+        //
+        // `author <name> <goal>` runs the loop and leaves a draft. Nothing is
+        // adopted: `app try <name>` says what it managed and `app take <name>`
+        // accepts it, which keeps a person between the machine's output and the
+        // launcher.
+        "author" => {
+            use crate::ai::author;
+            let mut a = rest.splitn(2, ' ');
+            let name = a.next().unwrap_or("").trim();
+            let goal = a.next().unwrap_or("").trim();
+            if name.is_empty() {
+                kprintln!("  usage: author <name> <what it should do>");
+                kprintln!("  leaves a draft; 'app try' checks it, 'app take' adopts it");
+                return;
+            }
+            if !crate::ai::engine_ready() {
+                kprintln!("  no model loaded, so there is nothing to ask");
+                return;
+            }
+            // The engine is held for a whole episode by the resident mind, and
+            // `with_engine` answers None to everyone else for its duration. A
+            // run that quietly did nothing because of that looks exactly like a
+            // model that could not decide.
+            if crate::ai::with_engine(|_| ()).is_none() {
+                kprintln!("  another task holds the model -- 'agent stop' and try again");
+                return;
+            }
+            let goal = if goal.is_empty() { name } else { goal };
+            let mut w = author::Work::new(name, goal);
+            // The contract. Two clauses is the floor, and one of them has to
+            // ask something of the program, or the empty application passes.
+            w.plan = alloc::vec![
+                author::Req::Title(String::from(name)),
+                author::Req::Rows,
+            ];
+            // Anything the operator already wrote into the draft's plan is
+            // added, so a contract can be as specific as somebody wants.
+            if let Some(t) = crate::app::draft::plan(name) {
+                for line in t.lines() {
+                    if let Some(r) = author::Req::parse(line) {
+                        if !w.plan.contains(&r) {
+                            w.plan.push(r);
+                        }
+                    }
+                }
+            }
+            kprintln!("  writing {} -- {} clause(s), up to {} steps", name, w.plan.len(), AUTHOR_STEPS);
+            let report = author::generate(&mut w, AUTHOR_STEPS);
+            crate::app::draft::set_panel(name, &author::panel_of(&w));
+            crate::app::draft::set_code(name, &w.code);
+            let mut plan = String::new();
+            for r in &w.plan {
+                plan.push_str(&r.render());
+                plan.push('\n');
+            }
+            crate::app::draft::set_plan(name, &plan);
+            crate::app::draft::note(name, &author::describe(&report));
+            console::set_color(if report.clean { LTGREEN } else { YELLOW });
+            kprintln!("  {}", author::describe(&report));
+            console::set_color(LTGRAY);
+            kprintln!("  draft at /draft/{} -- 'app try {}'", name, name);
+        }
         // Applications. `app list`, `app show <name>`, and otherwise
         // `app <name> <fn> [args]`, which is the form a panel's own buttons
         // use -- so everything a stored panel can invoke is a function in its
