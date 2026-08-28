@@ -146,12 +146,26 @@ static TAIL: AtomicUsize = AtomicUsize::new(0);
 /// acquire/release pairing is what makes it safe for an interrupt to preempt
 /// the reader mid-pop.
 fn push(byte: u8) {
+    push_from(byte, false)
+}
+
+/// Queue a byte, remembering whether it came off the wire.
+///
+/// The origin has to travel with the byte. A serial burst is drained into this
+/// ring all at once, and a byte that arrives as a keystroke and a byte that
+/// arrives from a terminal are routed to different places -- one to the focused
+/// window, one to the shell -- so a ring that forgets which is which splits a
+/// typed line between them.
+fn push_from(byte: u8, serial: bool) {
     let head = HEAD.load(Ordering::Relaxed);
     let next = (head + 1) % CAP;
     if next == TAIL.load(Ordering::Acquire) {
         return; // full: drop, rather than overwrite unread input
     }
-    unsafe { BUF.get()[head] = byte };
+    unsafe {
+        BUF.get()[head] = byte;
+        MARK.get()[head] = serial;
+    }
     HEAD.store(next, Ordering::Release);
 }
 
@@ -162,7 +176,9 @@ pub fn pop() -> Option<u8> {
         return None;
     }
     let byte = unsafe { BUF.get()[tail] };
+    let serial = unsafe { MARK.get()[tail] };
     TAIL.store((tail + 1) % CAP, Ordering::Release);
+    set_from_serial(serial);
     Some(byte)
 }
 
@@ -189,6 +205,21 @@ pub fn pop() -> Option<u8> {
     /// headlessly and goes through the shell, so nothing is lost by keeping
     /// raw serial bytes out of the desktop's hands.
     static FROM_SERIAL: AtomicBool = AtomicBool::new(false);
+
+    /// Whether the byte at each ring slot came off the wire.
+    ///
+    /// The flag above is about the byte `pop_any` last returned, and that was
+    /// enough while a burst was one byte. It is not: `pop_any` returns the
+    /// first byte of a burst directly and pushes the rest into the ring, where
+    /// they lost their origin and came back out looking like keystrokes. A
+    /// typed line was then split -- the first character to the shell, the rest
+    /// to whatever window had focus. `todo` became `t` for the shell and `odo`
+    /// for a panel, and the panel submitted it.
+    ///
+    /// Invisible for most of this tree's life because it only bites while a
+    /// window other than the terminal has focus, which headless sessions
+    /// mostly avoided.
+    static MARK: crate::sync::Racy<[bool; CAP]> = crate::sync::Racy::new([false; CAP]);
 
     pub fn last_was_serial() -> bool {
         FROM_SERIAL.load(Ordering::Relaxed)
@@ -220,9 +251,14 @@ pub fn pop() -> Option<u8> {
         }
     }
 
+    fn set_from_serial(v: bool) {
+        FROM_SERIAL.store(v, Ordering::Relaxed);
+    }
+
     pub fn pop_any() -> Option<u8> {
+        // `pop` reports the origin of what it hands back, because the ring
+        // holds both kinds and only it knows which slot this came from.
         if let Some(k) = pop() {
-            FROM_SERIAL.store(false, Ordering::Relaxed);
             return Some(k);
         }
         let b = crate::serial::read_byte()?;
@@ -239,7 +275,9 @@ pub fn pop() -> Option<u8> {
         while guard < 64 {
             guard += 1;
             match crate::serial::read_byte() {
-                Some(next) => push(translate(next)),
+                // Marked as serial, because it is: these are the rest of the
+                // same burst whose first byte is being returned below.
+                Some(next) => push_from(translate(next), true),
                 None => break,
             }
         }

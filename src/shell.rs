@@ -107,6 +107,17 @@ pub fn interactive() -> bool {
     INTERACTIVE.load(core::sync::atomic::Ordering::Acquire)
 }
 
+/// Shell commands `find` will run without being told they are commands.
+///
+/// Not every arm of `execute` -- only the ones somebody would plausibly type
+/// into a search box expecting something to happen. Anything not here and not
+/// an applet is treated as a request for an application that does not exist
+/// yet, which is the case worth being generous about.
+const KNOWN_COMMANDS: &[&str] = &[
+    "term", "todo", "paint", "write", "mines", "oracle", "enternet", "net", "dhcp", "mem",
+    "uptime", "tasks", "status", "help", "app", "author", "video", "serial", "log", "snap",
+];
+
 /// How many steps an authoring run gets.
 ///
 /// Each step is a prefill plus a few short decodes, and the engine is taken
@@ -1993,15 +2004,22 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
                         // the operator nothing they did not just type.
                         Some(p) => {
                             let title = p.title.clone();
+                            let typing = p.wants_typing();
                             // A name that is a route keeps it, so the window
                             // can be rebuilt when what it shows changes.
                             if what.contains(':') {
-                                desk::open_routed(&title, p, what)
+                                desk::open_routed(&title, p, what);
+                            } else if what == "search" {
+                                // Asking for the search box twice should give
+                                // the search box, not a second one beside it.
+                                desk::show_routed(&title, p, what);
                             } else {
-                                desk::open(&title, p)
+                                desk::open(&title, p);
                             }
                             // Opened from the prompt, so the operator is at
-                            // the keyboard typing commands: leave them there.
+                            // the keyboard typing commands: leave them there --
+                            // unless the panel is asking to be typed into, in
+                            // which case that *is* where they are.
                             //
                             // `open` keeps focus on the new window, which is
                             // right when it was opened by a click on an icon
@@ -2015,7 +2033,9 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
                             // next command added the command as an item, and
                             // an earlier arrangement of the same panel deleted
                             // one instead.
-                            desk::focus_terminal();
+                            if !typing {
+                                desk::focus_terminal();
+                            }
                         }
                         None => {
                             kprintln!("  no such panel: {}", what);
@@ -2111,6 +2131,65 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
         }
         "echo" => kprintln!("  {}", rest),
         "clear" => console::with(|c| c.clear()),
+        // `open`, not `find`: `find` is already a sysbox applet that searches
+        // the namespace, and sysbox is dispatched before this match, so an arm
+        // named `find` here is unreachable and says nothing about it. The same
+        // trap `exec` fell into. Anything added to this match should be checked
+        // against `sysbox::APPLETS` first.
+        //
+        // What a typed name means, in the order an operator expects.
+        //
+        // An application by that name opens. A command runs. Anything else is
+        // not an error -- it is the interesting case, and the machine offers to
+        // write it rather than doing so: writing holds the model for minutes,
+        // and a keystroke that starts that silently is one that gets regretted.
+        "open" => {
+            let q = rest.trim();
+            if q.is_empty() {
+                kprintln!("  usage: open <name>");
+                return;
+            }
+            let first = Words::new(q).word();
+            if crate::app::exists(first) {
+                kprintln!("  opening {}", first);
+                let route = alloc::format!("app:{}", first);
+                if let Some(p) = crate::gfx::ui::panel_named(&route) {
+                    let title = p.title.clone();
+                    crate::gfx::desk::open_routed(&title, p, &route);
+                    crate::gfx::desk::focus_terminal();
+                }
+                return;
+            }
+            // A command, including every sysbox applet. Run verbatim, so
+            // `find dhcp` does what typing `dhcp` does.
+            if crate::sysbox::is_applet(first) || KNOWN_COMMANDS.contains(&first) {
+                kprintln!("  running {}", q);
+                crate::gfx::desk::queue_command(q);
+                return;
+            }
+            // Nothing by that name. The offer goes into the same window the
+            // query was typed into, which is what makes this a search box
+            // rather than a window that spawns windows.
+            let route = alloc::format!("search:{}", q);
+            match crate::gfx::ui::panel_for_route(&route) {
+                None => kprintln!("  nothing called '{}', and no way to offer one", q),
+                Some((title, p)) => {
+                    // Left in front, unlike everything else the shell opens.
+                    //
+                    // This one is a question, and its buttons are the answer.
+                    // Handing focus back to the terminal raises the terminal
+                    // over it -- the panel is wider than the gap to the right
+                    // of the terminal, so the overlap covers exactly the left
+                    // edge where the buttons are, and the operator is asked
+                    // something they cannot see.
+                    //
+                    // The cost is the one this tree already knows: a headless
+                    // driver typing blind after this sends its next line into
+                    // the panel. `win term` is the way back.
+                    crate::gfx::desk::show_routed(&title, p, &route);
+                }
+            }
+        }
         // The machine writes an application.
         //
         // `author <name> <goal>` runs the loop and leaves a draft. Nothing is

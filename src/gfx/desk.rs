@@ -217,6 +217,15 @@ pub struct Desktop {
 static DESK: Racy<Option<Desktop>> = Racy::new(None);
 static PENDING: Racy<Option<String>> = Racy::new(None);
 
+/// Ask for a command to be run as though it had been typed.
+///
+/// The one way in from outside this module, so there stays exactly one path
+/// from "a command should run" to "a command ran" -- the property the panel
+/// dispatch was built around, and one a second setter would quietly end.
+pub fn queue_command(cmd: &str) {
+    unsafe { *PENDING.get() = Some(String::from(cmd)) };
+}
+
 const MARGIN: u32 = 8;
 const NUDGE: u32 = 16;
 const MENU_H: u32 = theme::TITLE_H;
@@ -246,7 +255,10 @@ const ICONS: [(&str, &str); 10] = [
 /// The Start menu, bottom of the bar upward -- the 98 half of the ancestry.
 /// Same entries as the icons plus the one thing that belongs behind a second
 /// look, exactly where 98 kept it.
-const START_ITEMS: [(&str, &str); 12] = [
+const START_ITEMS: [(&str, &str); 13] = [
+    // First, because it is the thing an operator reaches for when they do not
+    // already know which of the others they want.
+    ("Search...", "win open search"),
     ("Terminal", "term"),
     ("Programs", "win open programs"),
     ("Files", "win open files"),
@@ -732,6 +744,64 @@ pub fn refresh_routed() {
     if any {
         draw();
     }
+}
+
+/// Show a route in the window already showing that route's family, if there
+/// is one.
+///
+/// A search box is one surface whose contents change, not a pile of windows.
+/// Without this, asking twice left two windows with the same title and the
+/// operator no way to tell which one was live -- and the third, the offer, made
+/// three. Matching is on the route's verb, so `search` and `search:calc` are
+/// the same surface while `app:todo` is not.
+///
+/// Returns whether a window was reused, because the caller's focus decision
+/// differs: a reused window is already where the eye is.
+pub fn show_routed(title: &str, panel: Panel, route: &str) -> bool {
+    let verb = route.split(':').next().unwrap_or(route);
+    let found = with(|d| {
+        d.windows.iter().position(|w| {
+            w.route.as_deref().map(|r| r.split(':').next().unwrap_or(r)) == Some(verb)
+        })
+    })
+    .flatten();
+    let Some(i) = found else {
+        open_routed(title, panel, route);
+        return false;
+    };
+    // The two panels are different heights, so keeping the old rectangle would
+    // clip whichever is taller. Position stays: the window has not moved, only
+    // what is in it.
+    let Some(fb) = super::primary() else {
+        return false;
+    };
+    let screen = screen_rect(&fb);
+    let (pw, ph) = panel.preferred();
+    // Clamped and pulled back on screen. `open` does this for a new window and
+    // growing one in place has to do it too: the offer is wider than the query
+    // box, and at the cascade position the extra width went off the right edge
+    // -- taking the caption buttons and the right half of every line with it.
+    let (pw, ph) = (pw.min(screen.w), ph.min(screen.h));
+    let title = String::from(title);
+    let route = String::from(route);
+    with(|d| {
+        let Some(mut w) = (i < d.windows.len()).then(|| d.windows.remove(i)) else {
+            return;
+        };
+        w.title = title;
+        w.route = Some(route);
+        w.content = Content::Panel(panel);
+        if w.state == WinState::Normal {
+            w.rect.w = pw;
+            w.rect.h = ph;
+            w.rect.x = w.rect.x.min(screen.x + screen.w.saturating_sub(pw)).max(screen.x);
+            w.rect.y = w.rect.y.min(screen.y + screen.h.saturating_sub(ph)).max(screen.y);
+        }
+        // Last is front, and front is focused.
+        d.windows.push(w);
+    });
+    draw();
+    true
 }
 
 pub fn open(title: &str, panel: Panel) {
@@ -1748,19 +1818,30 @@ fn act_on(step: ui::Step) {
                 });
             }
         }
-        ui::Step::Close => {
-            with(|d| {
-                if let Some(f) = d.focus() {
-                    if d.windows[f].closable {
-                        d.windows.remove(f);
-                    } else {
-                        d.windows[f].state = WinState::Minimised;
-                    }
-                }
-            });
-        }
+        ui::Step::Close => close_focused(),
         _ => {}
     }
+}
+
+/// Close the focused window, or minimise it when it cannot be closed.
+///
+/// One function because there are two ways to press a Close button and they
+/// used to do different things: clicking it removed the window, while Enter on
+/// it (and Esc) fell to `cycle`, which alt-tabs -- so Cancel on a dialog left
+/// the dialog open, one place further back. The same control has to mean the
+/// same thing however it is pressed; that rule is why the pointer and the paint
+/// pass share their layout functions, and it applies to the keyboard too.
+pub fn close_focused() {
+    with(|d| {
+        if let Some(f) = d.focus() {
+            if d.windows[f].closable {
+                d.windows.remove(f);
+            } else {
+                d.windows[f].state = WinState::Minimised;
+            }
+        }
+    });
+    draw();
 }
 
 /// A press on the taskbar: the Start button, an app, or a window button.
@@ -2767,7 +2848,7 @@ pub fn key(k: u8) -> Route {
             });
             match step {
                 Some(ui::Step::Redraw) => draw(),
-                Some(ui::Step::Close) => cycle(false),
+                Some(ui::Step::Close) => close_focused(),
                 Some(ui::Step::Do(Action::Run(cmd))) => {
                     focus_terminal();
                     unsafe { *PENDING.get() = Some(cmd) };

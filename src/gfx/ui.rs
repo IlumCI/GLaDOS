@@ -345,6 +345,17 @@ impl Panel {
     }
 
     /// The text of the first field, for a panel that has one.
+    /// True when this panel opens with the caret in a text field.
+    ///
+    /// Such a panel exists to be typed into, so handing the keyboard back to
+    /// the terminal is wrong twice over: the operator types into the wrong
+    /// place, and raising the terminal covers the panel -- which for anything
+    /// wider than the gap beside the terminal hides exactly the left edge where
+    /// the buttons are.
+    pub fn wants_typing(&self) -> bool {
+        matches!(self.widgets.get(self.focus), Some(Widget::Field { .. }))
+    }
+
     pub fn field_text(&self) -> Option<&str> {
         self.widgets.iter().find_map(|w| match w {
             Widget::Field { text, .. } => Some(text.as_str()),
@@ -678,6 +689,7 @@ pub fn panel_named(name: &str) -> Option<Panel> {
         // whole job is explaining why something does not work is useless if
         // reaching it needs three keystrokes nobody documented.
         "wifi" | "wireless" => Some(settings("wifi")),
+        "search" => Some(search_panel()),
         "model" => Some(settings("model")),
         "system" => Some(settings("sys")),
         // `win open app:todo`. Guarded, so it goes before the bare arm it
@@ -699,8 +711,96 @@ pub fn panel_for_route(route: &str) -> Option<(String, Panel)> {
         // An application, read from the namespace and parsed under the stored
         // gate. This is the one route whose contents the machine may write.
         "app" => crate::app::panel(arg),
+        // One verb, because the query box and the offer are one surface. The
+        // arg is what was typed and empty means nothing has been yet, so
+        // `refresh_routed` rebuilds whichever of the two is showing without
+        // needing to know which.
+        "search" => Some((
+            String::from("Search"),
+            if arg.is_empty() { search_panel() } else { offer_panel(arg) },
+        )),
         _ => None,
     }
+}
+
+/// Type a name, press Enter.
+///
+/// A `Field` and nothing else. The whole path already exists --
+/// `Panel::substituted` appends what was typed, the action reaches `PENDING`,
+/// and the shell runs it -- so this needs no new hit-testing, which is the part
+/// of this tree that has cost the most to get wrong.
+///
+/// The in-menu query row that Windows actually has is a separate piece of work:
+/// it means `Mode::Start` grows a text row, `start_menu_rect` grows with it and
+/// `dropdown_item_at` offsets by one. Worth having, and worth landing on its
+/// own so that when something breaks it is obvious which half did it.
+pub fn search_panel() -> Panel {
+    Panel::new(
+        "Search",
+        alloc::vec![
+            Widget::Heading(String::from("What are you looking for?")),
+            Widget::Field {
+                name: String::from("name"),
+                text: String::new(),
+                cursor: 0,
+                submit: Action::Apply(String::from("open")),
+            },
+            Widget::Button {
+                label: String::from("Find"),
+                action: Action::Apply(String::from("open")),
+            },
+            note("An application opens. A command runs. Anything else, and the machine offers to write it."),
+            Widget::Sep,
+            Widget::Button { label: String::from("Close"), action: Action::Close },
+        ],
+    )
+}
+
+/// Nothing by that name exists. Offer to write one.
+///
+/// An offer and not an action, which is the one place this deliberately parts
+/// company with the demos it is answering. Writing an application holds the
+/// model for minutes, and a keystroke that silently starts that is a keystroke
+/// that gets regretted -- there is one engine here and one operator, and they
+/// are usually the same person waiting for both.
+pub fn offer_panel(query: &str) -> Panel {
+    let name: String = query
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if name.is_empty() {
+        return Panel::new(
+            "Search",
+            alloc::vec![
+                Widget::Heading(String::from("Nothing to look for")),
+                note("A name is letters, digits and dashes."),
+                Widget::Button { label: String::from("Close"), action: Action::Close },
+            ],
+        );
+    }
+    Panel::new(
+        "Search",
+        alloc::vec![
+            Widget::Heading(alloc::format!("No application called {}", name)),
+            note("The machine can write one. It holds the model for minutes, and leaves a draft rather than an installed program."),
+            Widget::Status {
+                name: String::from("then"),
+                value: alloc::format!("app try {}", name),
+                tone: Tone::Plain,
+            },
+            Widget::Sep,
+            // Cancel first, and not for tidiness: focus lands on the first
+            // focusable widget, the Enter that submitted the query is still
+            // under the operator's finger, and the other button holds the
+            // model for minutes. Reaching it should take a deliberate Tab.
+            Widget::Button { label: String::from("Cancel"), action: Action::Close },
+            Widget::Button {
+                label: String::from("Write it"),
+                action: Action::Run(alloc::format!("author {} {}", name, query)),
+            },
+        ],
+    )
 }
 
 /// Settings, one page at a time.
