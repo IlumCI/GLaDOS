@@ -2219,35 +2219,13 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 return;
             }
             let goal = if goal.is_empty() { name } else { goal };
-            let mut w = author::Work::new(name, goal);
-            // The contract. Two clauses is the floor, and one of them has to
-            // ask something of the program, or the empty application passes.
-            w.plan = alloc::vec![
-                author::Req::Title(String::from(name)),
-                author::Req::Rows,
-            ];
-            // Anything the operator already wrote into the draft's plan is
-            // added, so a contract can be as specific as somebody wants.
-            if let Some(t) = crate::app::draft::plan(name) {
-                for line in t.lines() {
-                    if let Some(r) = author::Req::parse(line) {
-                        if !w.plan.contains(&r) {
-                            w.plan.push(r);
-                        }
-                    }
-                }
-            }
-            kprintln!("  writing {} -- {} clause(s), up to {} steps", name, w.plan.len(), AUTHOR_STEPS);
-            let report = author::generate(&mut w, AUTHOR_STEPS);
-            crate::app::draft::set_panel(name, &author::panel_of(&w));
-            crate::app::draft::set_code(name, &w.code);
-            let mut plan = String::new();
-            for r in &w.plan {
-                plan.push_str(&r.render());
-                plan.push('\n');
-            }
-            crate::app::draft::set_plan(name, &plan);
-            crate::app::draft::note(name, &author::describe(&report));
+            kprintln!(
+                "  writing {} -- up to {} steps",
+                name,
+                AUTHOR_STEPS
+            );
+            let (w, report) = author::commission(name, goal, AUTHOR_STEPS);
+            author::record(&w, &report, "operator");
             console::set_color(if report.clean { LTGREEN } else { YELLOW });
             kprintln!("  {}", author::describe(&report));
             console::set_color(LTGRAY);

@@ -521,6 +521,19 @@ pub fn quiet_now() -> Result<u8, &'static str> {
     if !ENABLED.load(Ordering::Relaxed) {
         return Err("disabled");
     }
+    quiet_hours()
+}
+
+/// Whether this is a good hour to do something expensive, with no opinion
+/// about what.
+///
+/// Split out from `quiet_now` when a second unattended job appeared. Gating
+/// that job on `quiet_now` would have meant `godel off` silently stopping it
+/// too -- a command named after self-modification standing down an
+/// application writer, which is exactly the kind of coupling somebody
+/// discovers by wondering why nothing happened overnight. Each job now checks
+/// its own switch and shares only the question of whether anybody is here.
+pub fn quiet_hours() -> Result<u8, &'static str> {
     let Some(dt) = crate::dev::rtc::now() else {
         // No clock, no window, no self-modification. A machine that cannot
         // tell what time it is has no business deciding the operator is

@@ -131,53 +131,76 @@ impl Action {
 /// work once somebody has typed `app trust`, which is a confusing failure
 /// rather than a safe default. An operator writing Aiksi by hand has the whole
 /// table.
-pub const BODIES: &[(&str, &str)] = &[
-    ("constant", "fn {NAME}() {\n  return \"\"\n}\n"),
+pub const BODIES: &[(&str, &str, &str)] = &[
+    ("constant", "", "fn {NAME}(): str {\n  return \"\"\n}\n"),
     (
         "reader",
-        "fn {NAME}() {\n  if (exists(here() + \"/{NAME}\")) { return read(here() + \"/{NAME}\") }\n  return \"\"\n}\n",
+        "",
+        "fn {NAME}(): str {\n  if (exists(here() + \"/{NAME}\")) { return read(here() + \"/{NAME}\") }\n  return \"\"\n}\n",
     ),
     (
         "appender",
-        "fn {NAME}(x) {\n  write(here() + \"/{NAME}\", x)\n  return \"\"\n}\n",
+        "",
+        "fn {NAME}(x: str): str {\n  write(here() + \"/{NAME}\", x)\n  return \"\"\n}\n",
     ),
-    // One item per line, which is what `rows` wants and what `appender`
-    // already produces. Written out rather than left to the model because
-    // "read, split, drop the empties, join" is four calls in a fixed order and
-    // a model that reorders them gets a list with a blank row at the end.
     (
         "lines",
-        "fn {NAME}() {\n  t = \"\"\n  if (exists(here() + \"/{NAME}\")) { t = read(here() + \"/{NAME}\") }\n  out = list()\n  for_each = split(t, \"\\n\")\n  i = 0\n  while (i < len(for_each)) {\n    if (len(trim(get(for_each, i))) > 0) { out = push(out, trim(get(for_each, i))) }\n    i = i + 1\n  }\n  return join(out, \"\\n\")\n}\n",
+        "",
+        "fn {NAME}(): str {\n  t = \"\"\n  if (exists(here() + \"/{NAME}\")) { t = read(here() + \"/{NAME}\") }\n  \
+out = list()\n  rows = split(t, \"\\n\")\n  i = 0\n  while (i < len(rows)) {\n    \
+if (len(trim(get(rows, i))) > 0) { out = push(out, trim(get(rows, i))) }\n    i = i + 1\n  }\n  \
+return join(out, \"\\n\")\n}\n",
     ),
-    // Counting, which needed `int` to exist at all: `read` answers text and
-    // `+` on text concatenates, so the first counter written here went "0",
-    // "01", "011" with nothing failing anywhere.
     (
         "counter",
-        "fn {NAME}() {\n  n = 0\n  if (exists(here() + \"/{NAME}\")) { n = int(read(here() + \"/{NAME}\")) }\n  n = n + 1\n  write(here() + \"/{NAME}\", n)\n  return n\n}\n",
+        "",
+        "fn {NAME}(): int {\n  n = 0\n  if (exists(here() + \"/{NAME}\")) { n = int(read(here() + \"/{NAME}\")) }\n  \
+n = n + 1\n  write(here() + \"/{NAME}\", n)\n  return n\n}\n",
     ),
-    // How many, without changing anything. A status row wants this and the
-    // counter above is wrong for it -- reading a count should not increment
-    // one, and a model asked to write "the same but without the += 1" is a
-    // model given the chance to get it backwards.
     (
         "tally",
-        "fn {NAME}() {\n  t = \"\"\n  if (exists(here() + \"/{NAME}\")) { t = read(here() + \"/{NAME}\") }\n  if (len(trim(t)) == 0) { return 0 }\n  return len(split(trim(t), \"\\n\"))\n}\n",
+        "",
+        "fn {NAME}(): int {\n  t = \"\"\n  if (exists(here() + \"/{NAME}\")) { t = read(here() + \"/{NAME}\") }\n  \
+if (len(trim(t)) == 0) { return 0 }\n  return len(split(trim(t), \"\\n\"))\n}\n",
     ),
-    // The clock, which is the one fact an application can show that is not
-    // about itself, and the cheapest way for a generated window to look alive.
     // `rtc_now` answers a `Time` record, so the stamp is a field. Guarded,
     // because a clock that cannot be read answers nothing and `.text` on
     // nothing is an error -- which in a `rows` function is a window that
     // renders a fault instead of a blank.
     (
         "clock",
+        "",
         "fn {NAME}(): str {\n  t = rtc_now()\n  if (t) { return t.text }\n  return \"\"\n}\n",
+    ),
+    // The one body that declares a record, and it earns it rather than
+    // decorating with it.
+    //
+    // A stored line is two things -- whether it is done, and what it says --
+    // and every list application in this tree has so far carried that as a
+    // prefix somebody re-tests at each use. Naming the shape means the split
+    // happens once, in a function whose signature says what it answers, and
+    // the row builder reads `it.done` instead of re-deriving it.
+    //
+    // Two functions, deliberately. A record that never crosses a call boundary
+    // is two local variables wearing a hat; this way the `: Item` annotation
+    // is checked at every call and the loop's own `check_code` runs it.
+    (
+        "checklist",
+        "rec Item { done: int, text: str }\n\n",
+        "fn {NAME}_item(line: str): Item {\n  \
+if (starts(line, \"x \")) { return Item(1, trim(substr(line, 2, len(line)))) }\n  \
+return Item(0, line)\n}\n\n\
+fn {NAME}(): str {\n  raw = \"\"\n  if (exists(here() + \"/{NAME}\")) { raw = read(here() + \"/{NAME}\") }\n  \
+out = \"\"\n  rows = split(raw, \"\\n\")\n  n = 0\n  while (n < len(rows)) {\n    \
+line = trim(get(rows, n))\n    if (len(line) > 0) {\n      \
+it = {NAME}_item(line)\n      mark = \"[ ] \"\n      if (it.done) { mark = \"[x] \" }\n      \
+out = out + \"item\\tnone\\t\" + mark + it.text + \"\\n\"\n    }\n    n = n + 1\n  }\n  \
+return out\n}\n",
     ),
 ];
 
 pub fn body_kinds() -> Vec<&'static str> {
-    BODIES.iter().map(|(k, _)| *k).collect()
+    BODIES.iter().map(|(k, ..)| *k).collect()
 }
 
 /// The draft, in memory.
@@ -270,13 +293,20 @@ pub fn apply(w: &mut Work, a: &Action) -> Vec<check::Verdict> {
             w.repairs.clear();
         }
         Action::Fn(name, kind) => {
-            let Some((_, body)) = BODIES.iter().find(|(k, _)| k == kind) else {
+            let Some((_, pre, body)) = BODIES.iter().find(|(k, ..)| k == kind) else {
                 return alloc::vec![check::Verdict::bad(alloc::format!(
                     "no body called '{}' -- try one of: {}",
                     kind,
                     body_kinds().join(", ")
                 ))];
             };
+            // A record declaration is a top-level statement, so it cannot live
+            // inside the function that uses it. Emitted once: two functions
+            // asking for the same shape is the normal case, and a second `rec
+            // Item` would be a redeclaration the program does not need.
+            if !pre.is_empty() && !w.code.contains(*pre) {
+                w.code.push_str(pre);
+            }
             w.code.push_str(&body.replace("{NAME}", name));
         }
         Action::Done => {}
@@ -428,6 +458,80 @@ pub fn run(w: &mut Work, script: &[Action], budget: usize) -> Report {
     })
 }
 
+/// Write an application from a name and a goal, leaving a draft.
+///
+/// The whole of what "author something" means, in one place. It was eight
+/// steps inlined in the shell -- build the contract, merge anything the
+/// operator had already written into the draft's plan, generate, write the four
+/// files -- and the autonomous trigger needs exactly the same eight. Two copies
+/// of a sequence like that do not stay the same, and the half that drifts is
+/// whichever one nobody is watching, which here is the one that runs at three
+/// in the morning.
+///
+/// Leaves a draft and never adopts. Adoption is `app take`, and a machine that
+/// installed what it wrote overnight without anybody reading it would be
+/// answering a question nobody asked.
+pub fn commission(name: &str, goal: &str, budget: usize) -> (Work, Report) {
+    let mut w = Work::new(name, goal);
+    // The contract. Two clauses is the floor and one of them has to ask
+    // something of the program, or the empty application passes every check.
+    w.plan = alloc::vec![Req::Title(String::from(name)), Req::Rows];
+    // Anything already written into the draft's plan is added, so a contract
+    // can be as specific as somebody wants it to be.
+    if let Some(t) = crate::app::draft::plan(name) {
+        for line in t.lines() {
+            if let Some(r) = Req::parse(line) {
+                if !w.plan.contains(&r) {
+                    w.plan.push(r);
+                }
+            }
+        }
+    }
+    let report = generate(&mut w, budget);
+    crate::app::draft::set_panel(name, &panel_of(&w));
+    crate::app::draft::set_code(name, &w.code);
+    let mut plan = String::new();
+    for r in &w.plan {
+        plan.push_str(&r.render());
+        plan.push('\n');
+    }
+    crate::app::draft::set_plan(name, &plan);
+    crate::app::draft::note(name, &describe(&report));
+    (w, report)
+}
+
+/// One line per run, appended and never rewritten.
+///
+/// The widget count is the number that matters and is the reason this is not
+/// just a log line. Every check in this tree can be satisfied by a panel with a
+/// title and a close button, so a loop that has quietly settled on writing that
+/// reports success every time. If the median authored application has two
+/// widgets, the ledger says the loop is not working while the reports say it
+/// is.
+pub const LEDGER: &str = "/app/authored.txt";
+
+pub fn record(w: &Work, report: &Report, how: &str) {
+    let mut text = crate::sysbox::read_blob(LEDGER)
+        .map(|b| alloc::string::String::from_utf8_lossy(&b).into_owned())
+        .unwrap_or_default();
+    text.push_str(&alloc::format!(
+        "{}\t{}\t{} step(s)\t{} of {} clause(s)\t{} widget(s)\t{}\n",
+        crate::dev::rtc::now()
+            .map(|t| alloc::format!(
+                "{:04}-{:02}-{:02} {:02}:{:02}",
+                t.year, t.month, t.day, t.hour, t.minute
+            ))
+            .unwrap_or_else(|| alloc::string::String::from("-")),
+        w.name,
+        w.steps,
+        report.met,
+        report.total,
+        w.panel.len(),
+        how
+    ));
+    crate::sysbox::write_text(LEDGER, &text);
+}
+
 pub fn selftest() -> bool {
     // Contract clauses survive being written and read.
     for r in [
@@ -454,8 +558,8 @@ pub fn selftest() -> bool {
     // for that shape. It is cheap to hold -- a parse per body at boot -- and
     // the failure it catches is otherwise invisible, because the loop reports
     // an unmet clause and looks like a model that could not manage it.
-    for (kind, body) in BODIES {
-        let filled = body.replace("{NAME}", "thing");
+    for (kind, pre, body) in BODIES {
+        let filled = alloc::format!("{}{}", pre, body.replace("{NAME}", "thing"));
         let v = check::check_code(&filled, "/draft/selftest");
         if !v.ok {
             crate::kprintln!("  body '{}': {}", kind, v.why);

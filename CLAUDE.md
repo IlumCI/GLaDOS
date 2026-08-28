@@ -264,7 +264,21 @@ Four judges, unanimity required, each a different failure mode:
   cannot satisfy it.
 
 Trials run only when the RTC hour falls in the quiet window (02:00 to 06:00)
-**and** `godbits::felt()` shows no hardware input. `initiative::tick` fires one
+**and** `godbits::felt()` shows no hardware input.
+
+That question -- is anybody here -- is `quiet_hours()`, and it is shared with
+the other unattended job. `initiative::tick`'s sleep branch also writes an
+application from `WORKS`, leaving a draft it never adopts. Each job owns its own
+switch (`godel off` does not stand down the writer) and `NIGHT_BUSY` claims the
+whole block, because `tick_inner` is reentrant across two tasks -- the resident
+mind and the shell's `initiative now` -- and a local flag is not a rule. The
+journal caught that: two entries under one tick number with clocks fifty-four
+seconds apart.
+
+`initiative now` bypasses the settle window and nothing else, which is what
+makes any of this testable; QEMU's `-rtc base=...T03:00:00` puts the guest
+inside the quiet window. Note the first forced tick is consumed recording when
+the prompt appeared, so it takes two to get one. `initiative::tick` fires one
 from its sleep branch at most hourly, bounded to 24 examples and 20 s of
 optimiser time, because the mind task holds the engine for the whole of a trial
 and an unbounded one would take the terminal away.

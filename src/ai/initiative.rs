@@ -80,6 +80,43 @@ const EPISODE_GAP_S: u64 = 240;
 /// minutes of forward passes, and the value of running one more tonight is
 /// far below the value of the machine still answering if somebody wakes up.
 const GODEL_GAP_S: u64 = 3600;
+
+/// How long between attempts to write an application, unattended.
+///
+/// Its own gap rather than sharing the self-modification one. They are
+/// different costs -- a trial is bounded arithmetic over cached decisions,
+/// writing is a constrained decode per step -- and a shared timer would mean
+/// tuning one by breaking the other.
+const AUTHOR_GAP_S: u64 = 3600;
+
+/// Steps an unattended run gets.
+///
+/// Smaller than the operator's, and for a reason that is not timidity: nobody
+/// is watching. A run that stalls at the prompt is noticed in seconds and
+/// stopped; one that stalls at four in the morning holds the engine until the
+/// gap expires, and the first thing the operator meets is a machine that will
+/// not answer. Fewer steps is a worse application and a machine that is still
+/// there in the morning.
+const AUTHOR_STEPS: usize = 6;
+
+/// What the machine writes for itself when nobody is asking.
+///
+/// A fixed rotation, not a model-chosen subject. Choosing what to build is a
+/// second decode before the first useful one, and it is the decode with no
+/// check behind it -- `check_refs` can tell whether a program does what its
+/// panel claims and has nothing to say about whether the subject was worth
+/// picking. So the subjects are written down, and the loop's job is to build
+/// one of them.
+///
+/// Every one is something the body skeletons can actually serve. A goal no
+/// skeleton reaches fails honestly, reports unmet clauses, and does so again
+/// every hour of every night -- which is a loop that looks busy and is not.
+const WORKS: &[(&str, &str)] = &[
+    ("journal", "a list of notes it can add to"),
+    ("watchlist", "a checklist of things to keep an eye on"),
+    ("clockface", "the current time"),
+    ("visits", "a count of how often it has been opened"),
+];
 /// Corpus examples per nightly trial. Small, and it is the honest tradeoff:
 /// the judges get less evidence per trial in exchange for the machine staying
 /// responsive, and the ledger accumulates across nights rather than within
@@ -106,6 +143,30 @@ static LAST_TICKED_SEC: AtomicU64 = AtomicU64::new(u64::MAX);
 static PREV_TICK_TOUCHED: Racy<bool> = Racy::new(false);
 static LAST_EPISODE_AT: Racy<u64> = Racy::new(0);
 static LAST_GODEL_AT: Racy<u64> = Racy::new(0);
+static LAST_AUTHOR_AT: Racy<u64> = Racy::new(0);
+
+/// Claimed while an unattended job is in flight.
+///
+/// `tick_inner` is not reentrant and two tasks reach it: the resident mind on
+/// its own schedule, and the shell when somebody types `initiative now`. The
+/// first version of the one-job-per-tick rule was a local `spent` flag, which
+/// a concurrent tick simply has its own copy of -- and the journal caught it:
+///
+///     [t4 +75s] sleep: ...
+///     [t4 +21s] godel: hour 3, variant 31f4385b rejected
+///
+/// Two entries under one tick number with clocks fifty-four seconds apart,
+/// which one tick cannot produce. A trial begun at 21s was still running while
+/// a later tick wrote an application, so both expensive jobs held the machine
+/// at once -- the exact thing the rule exists to prevent.
+///
+/// `with_engine` would have kept it safe rather than correct: the second job
+/// gets None and reports "engine held by another task", which is a job that
+/// silently did nothing and said it was fine. An atomic claim is what makes
+/// the rule true. Single-core, so a swap cannot be split by preemption.
+static NIGHT_BUSY: AtomicBool = AtomicBool::new(false);
+/// How many unattended runs have finished, which is also what rotates `WORKS`.
+static AUTHORED: AtomicU64 = AtomicU64::new(0);
 static EPOCH_SEEDED: AtomicBool = AtomicBool::new(false);
 static JOURNAL: Racy<Vec<String>> = Racy::new(Vec::new());
 
@@ -168,6 +229,35 @@ fn decide(
 /// Seconds since the last trial. Zero-at-boot means "never", which is
 /// eligibility rather than a cooldown in force -- the same reading
 /// `since_episode` gives its own clock.
+fn since_author(now_s: u64) -> u64 {
+    let last = unsafe { *LAST_AUTHOR_AT.get() };
+    if last == 0 {
+        // Never run is readiness, not a cooldown in force -- the same reading
+        // the episode clock gives zero.
+        AUTHOR_GAP_S
+    } else {
+        now_s.saturating_sub(last)
+    }
+}
+
+/// The next subject that does not already exist.
+///
+/// Skipped rather than rewritten: an application the operator has kept, or a
+/// draft they have not looked at yet, is not something to overwrite at four in
+/// the morning. When every subject is taken there is nothing to do, and saying
+/// so is better than churning the last one.
+fn next_work() -> Option<(&'static str, &'static str)> {
+    let start = AUTHORED.load(Ordering::Relaxed) as usize;
+    for i in 0..WORKS.len() {
+        let (name, goal) = WORKS[(start + i) % WORKS.len()];
+        if crate::app::exists(name) || crate::app::draft::exists(name) {
+            continue;
+        }
+        return Some((name, goal));
+    }
+    None
+}
+
 fn since_godel(now_s: u64) -> u64 {
     let last = unsafe { *LAST_GODEL_AT.get() };
     if last == 0 {
@@ -209,10 +299,29 @@ pub fn tick() {
     // itself on its own schedule, which is the definition of the executive
     // console. It used to arrive in the middle of whatever the operator was
     // typing.
-    crate::gfx::console::on_channel(crate::gfx::console::EXEC, tick_inner)
+    crate::gfx::console::on_channel(crate::gfx::console::EXEC, || tick_inner(false))
 }
 
-fn tick_inner() {
+/// One cycle now, past the settle window.
+///
+/// `initiative now` has always been described as the headless handle that goes
+/// "past silence and cooldown but never past busy or disabled", and it did not:
+/// it called `tick`, which returns early for the first sixty seconds and for
+/// thirty seconds after the prompt appears. Those two gates exist so the mind
+/// does not race the operator's first command, which is a reason that does not
+/// apply when the operator is the one asking. So a forced tick skips them and
+/// nothing else -- busy, disabled, the cooldowns and the quiet window all still
+/// answer for themselves.
+///
+/// The practical consequence is that the resident mind is testable. Everything
+/// it does on its own is gated behind a minute of uptime and a clock reading
+/// somebody has gone to bed, and a loop that can only be observed by waiting
+/// for both is a loop nobody observes.
+pub fn force_tick() {
+    crate::gfx::console::on_channel(crate::gfx::console::EXEC, || tick_inner(true))
+}
+
+fn tick_inner(forced: bool) {
     let now_s = crate::dev::lapic::ticks() / crate::TIMER_HZ as u64;
     // Settle time measured from the prompt, not from power-on.
     //
@@ -230,7 +339,7 @@ fn tick_inner() {
         unsafe { *SAW_PROMPT_AT.get() = now_s.max(1) };
         return;
     }
-    if now_s.saturating_sub(seen) < SETTLE_SECS || now_s < FIRST_TICK_AFTER_S {
+    if !forced && (now_s.saturating_sub(seen) < SETTLE_SECS || now_s < FIRST_TICK_AFTER_S) {
         // Counted as a tick that did not happen rather than skipped silently,
         // so `mind` shows the grace period rather than looking asleep.
         return;
@@ -337,8 +446,37 @@ fn tick_inner() {
             // between your commands" into "the machine will not answer for
             // twenty minutes". Bounded, it is a few examples an hour, every
             // hour of the night, and the ledger accumulates.
-            if let Ok(hour) = super::godel::quiet_now() {
-                if since_godel(now_s) >= GODEL_GAP_S {
+            // `quiet_hours`, not `quiet_now`: the shared question is whether
+            // anybody is here, and each job below owns its own switch. Gating
+            // both on `quiet_now` would have let `godel off` stand down the
+            // application writer as well, which is a coupling somebody finds
+            // by wondering why nothing happened overnight.
+            if let Ok(hour) = super::godel::quiet_hours() {
+                // Claimed for the whole block, not per job. Both are expensive
+                // and both hold the engine; the question "is the machine
+                // already doing something unattended" has one answer.
+                if NIGHT_BUSY.swap(true, Ordering::Acquire) {
+                    journal_push(format!(
+                        "[t{} +{}s] quiet: already working, stood down",
+                        TICKS.load(Ordering::Relaxed),
+                        now_s
+                    ));
+                    return;
+                }
+                // One expensive job per quiet tick, and self-modification wins
+                // the tie.
+                //
+                // Both hold the engine for minutes. Running them in the same
+                // tick would double the window in which the machine cannot
+                // answer, and they compete for exactly the resource that makes
+                // either of them possible. The trial goes first because it is
+                // the one whose value decays -- it measures a variant against
+                // a corpus that grows, and a night skipped is a comparison not
+                // made -- where an application not written tonight is written
+                // an hour later with nothing lost.
+                let mut spent = false;
+                if super::godel::enabled() && since_godel(now_s) >= GODEL_GAP_S {
+                    spent = true;
                     unsafe { *LAST_GODEL_AT.get() = now_s };
                     let b = super::train::Budget {
                         examples: GODEL_EXAMPLES,
@@ -367,6 +505,51 @@ fn tick_inner() {
                         line
                     ));
                 }
+
+                // The machine writes an application for itself.
+                //
+                // Same two facts as the trial: the clock says the operator has
+                // gone to bed and the entropy ring says nobody has touched
+                // anything. `quiet_now` has already answered both.
+                //
+                // It leaves a draft and never adopts. A machine that installed
+                // what it wrote overnight, unread, would be answering a
+                // question nobody asked -- and `app try` exists precisely so
+                // the operator decides in the morning.
+                if !spent && since_author(now_s) >= AUTHOR_GAP_S {
+                    // The clock moves whether or not there was anything to
+                    // build, so an exhausted rotation costs one check an hour
+                    // rather than one every tick.
+                    unsafe { *LAST_AUTHOR_AT.get() = now_s };
+                    match next_work() {
+                        None => journal_push(format!(
+                            "[t{} +{}s] author: nothing left to write",
+                            TICKS.load(Ordering::Relaxed),
+                            now_s
+                        )),
+                        Some((name, _goal)) if !super::engine_ready() => journal_push(format!(
+                            "[t{} +{}s] author: {} deferred, no model loaded",
+                            TICKS.load(Ordering::Relaxed),
+                            now_s,
+                            name
+                        )),
+                        Some((name, goal)) => {
+                            AUTHORED.fetch_add(1, Ordering::Relaxed);
+                            let (w, report) =
+                                super::author::commission(name, goal, AUTHOR_STEPS);
+                            super::author::record(&w, &report, "unattended");
+                            journal_push(format!(
+                                "[t{} +{}s] author: hour {}, {} -- {}",
+                                TICKS.load(Ordering::Relaxed),
+                                now_s,
+                                hour,
+                                name,
+                                super::author::describe(&report)
+                            ));
+                        }
+                    }
+                }
+                NIGHT_BUSY.store(false, Ordering::Release);
             }
         }
         Decision::Act(why) => {
@@ -442,10 +625,6 @@ pub fn set_enabled(on: bool) {
 /// Force one policy evaluation now, past the silence and cooldown gates but
 /// never past busy or disabled. This is the headless handle: a script can
 /// watch a full perceive-decide-act cycle without pretending to type.
-pub fn force_tick() {
-    tick();
-}
-
 pub fn status() -> (u64, u32, u32, u32, bool, u64, u64) {
     (
         TICKS.load(Ordering::Relaxed),
