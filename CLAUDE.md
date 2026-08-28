@@ -890,6 +890,30 @@ Three "cores" vote (probe, hashed-n-gram Bayes, lexical). Their *agreement* is
 the signal instead of their vote: 90% right when all three agree against 61%
 when they split. That gap is what `gate` acts on.
 
+**Training below the classifier now has a verified gradient.** `Tape` keeps the
+residual stream entering each layer and nothing else; `Model::backward` walks
+layers last-to-first, recomputing each from that stream and composing the
+adjoints in `backward.rs` (which until then had exactly one caller: their own
+selftest). `Dora::backward_x` supplies the input gradient those adjoints need
+and which `Dora::backward` never produced -- the single absence that made a
+classifier adapter trainable and a q/k/v adapter not.
+
+`State::new_exact` keeps the KV cache in f32. It exists because `KvLayer`
+stores int8, which makes the loss piecewise constant in anything upstream of a
+cached key or value: differencing a layer-0 query through the quantised forward
+reported -0.305 against an analytic gradient of order 1e-6. A switch, not a
+second forward -- the drift argument that applies to the tape applies here too.
+Serving still quantises, so training against these gradients is a
+straight-through estimate, which is the usual bargain and is written down
+rather than discovered later.
+
+The gradient check is **directional** and uses cross-entropy, both for
+resolution. A per-entry difference asks f32 to resolve `grad * 2h`, which for a
+deep site is below the loss's own rounding -- it reported -1000/65536, a float
+quantum wearing the costume of a derivative. Stepping every parameter along the
+gradient asks it to resolve `2 eps |g|^2` instead, and checks the whole vector:
+1.148 analytic against 1.135 numeric over 57,600 entries.
+
 **The frozen base is the load-bearing property.** Nothing above the adapter
 moves, so a hidden state is a constant, a constant can be cached, and a cached
 decision can be replayed against any number of candidate adapters for the price

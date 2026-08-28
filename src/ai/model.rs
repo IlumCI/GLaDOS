@@ -458,6 +458,25 @@ const PRE_FILL_CHUNK: usize = 64;
 struct KvLayer {
     data: Vec<i8>,
     scales: Vec<f32>,
+    /// Unquantised values, when this cache was asked for exactly.
+    ///
+    /// A switch rather than a second forward. The reason a gradient check
+    /// wants one: `store` quantises to int8, so the loss is piecewise constant
+    /// in anything upstream of a cached key or value, and a finite difference
+    /// straddling a quantisation step reports an enormous slope for a
+    /// parameter whose real gradient is tiny. Differencing a layer-0 query
+    /// gave -0.305 against an analytic 1e-6 for exactly that reason.
+    ///
+    /// The alternative was a parallel f32 forward, and the argument against it
+    /// is the one already made for the tape: two implementations of a
+    /// transformer that are supposed to agree do not stay agreeing, and the
+    /// one that drifts is the one nobody decodes with. One forward with one
+    /// branch in the cache cannot drift from itself.
+    ///
+    /// `None` for every serving path, so nothing pays for it. Allocated only
+    /// when asked, because at full context this would be four times the
+    /// largest allocation in the system.
+    raw: Option<Vec<f32>>,
     kv_dim: usize,
     /// Scales per position. The last block is short when `kv_dim` is not a
     /// multiple of `KV_BLOCK`; no model here has that shape, which is exactly
@@ -466,18 +485,32 @@ struct KvLayer {
 }
 
 impl KvLayer {
-    fn new(cap: usize, kv_dim: usize) -> Self {
+    fn new(cap: usize, kv_dim: usize, exact: bool) -> Self {
         let blocks = kv_dim.div_ceil(KV_BLOCK);
         Self {
+            // The quantised buffers are still allocated in exact mode and go
+            // unused. Skipping them would make `data` and `scales` optional
+            // too, for a saving that only exists on a path taken by a
+            // selftest -- and three optionals where one will do is how the
+            // next reader gets it wrong.
             data: vec![0; cap * kv_dim],
             scales: vec![0.0; cap * blocks],
+            raw: if exact { Some(vec![0.0; cap * kv_dim]) } else { None },
             kv_dim,
             blocks,
         }
     }
 
-    /// Quantise one position into `slot`.
+    /// Quantise one position into `slot`, or keep it exactly.
     fn store(&mut self, slot: usize, src: &[f32]) {
+        if let Some(raw) = self.raw.as_mut() {
+            let base = slot * self.kv_dim;
+            let n = self.kv_dim.min(src.len());
+            if base + n <= raw.len() {
+                raw[base..base + n].copy_from_slice(&src[..n]);
+            }
+            return;
+        }
         let base = slot * self.kv_dim;
         let sbase = slot * self.blocks;
         for b in 0..self.blocks {
@@ -505,6 +538,9 @@ impl KvLayer {
     /// Dequantise one element of one position.
     #[inline]
     fn at(&self, slot: usize, i: usize) -> f32 {
+        if let Some(raw) = self.raw.as_ref() {
+            return raw[slot * self.kv_dim + i];
+        }
         self.data[slot * self.kv_dim + i] as f32
             * self.scales[slot * self.blocks + i / KV_BLOCK]
     }
@@ -882,6 +918,20 @@ impl State {
     }
 
     pub fn new(cfg: &Config) -> Self {
+        Self::with_cache(cfg, false)
+    }
+
+    /// A state whose KV cache keeps exact values instead of int8.
+    ///
+    /// For gradient checks and for measuring what the quantised cache costs.
+    /// Never for serving: at full context the shadow is four times the largest
+    /// allocation in the system, and the quantisation is there because that
+    /// allocation is the reason long context is possible at all.
+    pub fn new_exact(cfg: &Config) -> Self {
+        Self::with_cache(cfg, true)
+    }
+
+    fn with_cache(cfg: &Config, exact: bool) -> Self {
         let kv = cfg.kv_dim();        // Half the *rotated* width, not half the head. They are equal for
         // everything before Qwen3.5, which rotates 64 of 256 and leaves the
         // rest alone, so the table is a quarter the size and the loop below
@@ -929,8 +979,8 @@ impl State {
             // is every layer and this is the allocation it always was; for
             // Qwen3.5-0.8B it is 6 of 24, and allocating all 24 would throw
             // away the entire reason the hybrid is worth running.
-            key_cache: (0..cfg.n_full_layers()).map(|_| KvLayer::new(cap, kv)).collect(),
-            value_cache: (0..cfg.n_full_layers()).map(|_| KvLayer::new(cap, kv)).collect(),
+            key_cache: (0..cfg.n_full_layers()).map(|_| KvLayer::new(cap, kv, exact)).collect(),
+            value_cache: (0..cfg.n_full_layers()).map(|_| KvLayer::new(cap, kv, exact)).collect(),
             kbuf: vec![0.0; kv],
             vbuf: vec![0.0; kv],
             krot: vec![0.0; cap * kv],

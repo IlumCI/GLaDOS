@@ -999,111 +999,138 @@ fn walk_selftest(e: &mut super::Engine) -> bool {
         return false;
     }
 
-    // A fixed, non-uniform loss on the scored position's logits. dL/dlogits is
-    // then exactly this vector, so nothing about the loss can be wrong.
-    let gl: alloc::vec::Vec<f32> = (0..cfg.vocab_size)
-        .map(|o| if o % 97 == 0 { 0.5 - (o % 3) as f32 * 0.25 } else { 0.0 })
-        .collect();
+    // A real loss, not a synthetic one, and the reason is resolution.
+    //
+    // The first version scored `sum(gl * logits)` for a sparse fixed `gl`.
+    // That produces gradients of order 1e-6 to 1e-11, and a central difference
+    // cannot see them: with the loss around 1 the f32 ULP is about 1e-7, so a
+    // dL of 1e-13 rounds to either nothing or to exactly one representable
+    // step. It measured the latter and reported `numeric -0.015258788`, which
+    // is -1000/65536 -- a float quantum wearing the costume of a derivative.
+    //
+    // Cross-entropy on a target token gives `softmax - onehot`, which is O(1)
+    // across the whole vocabulary rather than sparse and small, and the
+    // gradients that follow are large enough to be measured.
+    let target = 3usize.min(cfg.vocab_size - 1);
+    let ce = |logits: &[f32]| -> f32 {
+        let m = logits.iter().fold(f32::MIN, |a, v| a.max(*v));
+        let mut z = 0.0f32;
+        for v in logits {
+            z += super::tensor::expf(v - m);
+        }
+        // log via the identity, since `tensor` exposes exp and not log and
+        // one more Newton loop here would be a numeric nobody else uses.
+        let mut lo = -60.0f32;
+        let mut hi = 60.0f32;
+        for _ in 0..60 {
+            let mid = 0.5 * (lo + hi);
+            if super::tensor::expf(mid) < z { lo = mid } else { hi = mid }
+        }
+        (m + 0.5 * (lo + hi)) - logits[target]
+    };
 
     let loss = |m: &super::model::Model| -> f32 {
-        let mut st = State::new(&cfg);
+        // Exact cache, so the loss is smooth in every parameter rather than a
+        // step function of anything upstream of a cached key or value.
+        let mut st = State::new_exact(&cfg);
         for (i, &t) in toks.iter().enumerate() {
             m.forward(&mut st, t, i);
         }
-        st.logits.iter().zip(gl.iter()).map(|(a, b)| a * b).sum()
+        ce(&st.logits)
     };
 
     let mut tape = Tape::new(&cfg, toks.len());
-    let mut st = State::new(&cfg);
+    let mut st = State::new_exact(&cfg);
     for (i, &t) in toks.iter().enumerate() {
         if !e.model.forward_taped(&mut st, t, i, &mut tape) {
             return false;
         }
     }
+    // dL/dlogits for cross-entropy.
+    let m = st.logits.iter().fold(f32::MIN, |a, v| a.max(*v));
+    let mut z = 0.0f32;
+    for v in st.logits.iter() {
+        z += super::tensor::expf(v - m);
+    }
+    let gl: alloc::vec::Vec<f32> = st
+        .logits
+        .iter()
+        .enumerate()
+        .map(|(o, v)| super::tensor::expf(v - m) / z - if o == target { 1.0 } else { 0.0 })
+        .collect();
+
     let mut g = Grads::new(&ad);
     if !e.model.backward(&tape, &gl, at, &mut g) {
         crate::kprintln!("  walk: backward refused");
         return false;
     }
 
-    // Differentiate one B entry at the last layer and one at the first. The
-    // last is the shortest chain; the first is the longest, and only it can
-    // catch a gradient that stops propagating partway down.
-    // Two step sizes, and the reason is the KV cache.
+    // A **directional** derivative, not a per-entry one.
     //
-    // Q is computed fresh for every token and used directly, so its derivative
-    // through the served forward is exact and a small step measures it.
-    // K and V are written into `KvLayer`, which stores int8 with a scale per
-    // block -- so a small perturbation to either rounds to the same integer,
-    // the loss does not move at all, and the first run of this test reported
-    // `analytic -0.136 vs numeric 0` for V. That zero is not a wrong gradient,
-    // it is the true derivative of a step function away from its steps.
-    //
-    // The larger step crosses enough quantisation levels for the secant to
-    // approximate the underlying smooth model, at the cost of curvature error
-    // -- hence the looser tolerance. What is being confirmed for K and V is
-    // the sign and the magnitude, not the last digit.
-    // **Only the last layer can be differenced through this forward**, and
-    // that is a property of the model rather than a gap in the test.
-    //
-    // `KvLayer` stores int8. A parameter in layer `l` reaches the loss through
-    // every layer below it, and each of those writes its keys and values into
-    // that cache -- so the loss is piecewise constant in the parameter, with a
-    // jump wherever a perturbation crosses a quantisation level. A central
-    // difference that straddles one reports an enormous slope: differencing a
-    // layer-0 query gave -0.305 against an analytic gradient of order 1e-6,
-    // and the analytic figure was the honest one.
-    //
-    // The last layer has nothing below it, so its path to the loss --
-    // attention, Wo, the final norm, the classifier -- touches no cache. That
-    // is what makes it measurable, and measuring it exercises every composed
-    // adjoint in the walk: rmsnorm, attention with GQA fan-out, RoPE, swiglu,
-    // both residual rejoins, and all three sites.
-    //
-    // Verifying the deeper layers needs a forward whose cache is not
-    // quantised. That is a switch on `KvLayer`, not a second forward, and it
-    // is the next piece. Until it exists, the deeper gradients are computed
-    // and unverified, which is written here rather than left for somebody to
-    // assume.
-    let last = cfg.n_layers - 1;
-    for (l, which) in [(last, 0usize), (last, 2usize), (last, 1usize)] {
-        let cached = which != 0;
-        let h = if cached { 6e-2f32 } else { 2e-3f32 };
-        let Some(site) = ad.qkv[l][which].as_ref() else { continue };
-        if site.b.is_empty() {
-            continue;
-        }
-        let idx = site.b.len() / 3;
-        let analytic = g.qkv[l][which].gb[idx];
-
-        let mut bump = |delta: f32| -> f32 {
-            let mut probe = ad.clone();
-            if let Some(d) = probe.qkv[l][which].as_mut() {
-                d.b[idx] += delta;
+    // Differencing one parameter asks the loss to resolve `grad * 2h`, which
+    // for a deep site is far below its own rounding. Stepping every parameter
+    // at once along the gradient asks it to resolve `2 * eps * |g|^2`, a sum
+    // over thousands of entries, which is measurable -- and it checks the
+    // whole gradient vector rather than a sample of it. A single wrong sign
+    // anywhere in the walk moves this number.
+    let mut norm2 = 0.0f64;
+    for t in g.qkv.iter() {
+        for site in t.iter() {
+            for v in site.gb.iter() {
+                norm2 += (*v as f64) * (*v as f64);
             }
-            let _ = e.model.attach_adapters_unseeded(probe);
-            loss(&e.model)
-        };
-        let up = bump(h);
-        let dn = bump(-h);
-        let numeric = (up - dn) / (2.0 * h);
-        let _ = e.model.attach_adapters_unseeded(ad.clone());
-
-        let tol = if cached {
-            (0.35 * analytic.abs()).max(0.05)
-        } else {
-            2e-2 * analytic.abs().max(1.0)
-        };
-        if (numeric - analytic).abs() > tol {
-            crate::kprintln!(
-                "  walk: layer {} site {} -- analytic {} vs numeric {}",
-                l,
-                which,
-                analytic,
-                numeric
-            );
-            return false;
         }
+    }
+    if norm2 <= 0.0 {
+        crate::kprintln!("  walk: the gradient is entirely zero");
+        return false;
+    }
+    let peak = g
+        .qkv
+        .iter()
+        .flat_map(|t| t.iter())
+        .flat_map(|s| s.gb.iter())
+        .fold(0.0f32, |a, v| a.max(v.abs()));
+    // Step the largest entry by about 1e-2, which is small enough to stay in
+    // the locally linear region and large enough to clear the noise floor.
+    let eps = (1e-2f32 / peak.max(1e-12)).min(1e6);
+
+    let mut walk_probe = |sign: f32| -> f32 {
+        let mut probe = ad.clone();
+        for (l, t) in probe.qkv.iter_mut().enumerate() {
+            for (i, site) in t.iter_mut().enumerate() {
+                if let Some(d) = site.as_mut() {
+                    for (k, v) in d.b.iter_mut().enumerate() {
+                        *v += sign * eps * g.qkv[l][i].gb[k];
+                    }
+                }
+            }
+        }
+        let _ = e.model.attach_adapters_unseeded(probe);
+        loss(&e.model)
+    };
+    let up = walk_probe(1.0);
+    let dn = walk_probe(-1.0);
+    let _ = e.model.attach_adapters_unseeded(ad.clone());
+
+    let numeric = ((up - dn) as f64) / (2.0 * eps as f64);
+    // Printed whether or not it passes. A check whose numbers nobody sees is
+    // a check nobody can tell is measuring anything -- and this one silently
+    // measured float rounding for two runs before the numbers were looked at.
+    crate::kprintln!(
+        "  [dbg] directional |g|^2 {} vs numeric {} over {} entries",
+        norm2 as f32,
+        numeric as f32,
+        g.qkv.iter().flat_map(|t| t.iter()).map(|s| s.gb.len()).sum::<usize>()
+    );
+    let rel = (numeric - norm2).abs() / norm2.abs().max(1e-30);
+    if rel > 0.05 {
+        crate::kprintln!(
+            "  walk: directional -- analytic |g|^2 {} vs numeric {}",
+            norm2 as f32,
+            numeric as f32
+        );
+        return false;
     }
 
     e.model.detach_adapters();
