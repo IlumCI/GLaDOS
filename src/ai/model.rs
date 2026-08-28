@@ -615,6 +615,69 @@ impl Window {
 ///
 /// Allocated once and reused. Allocating per token would put the heap
 /// allocator in the inner loop of generation for no reason.
+/// Somewhere to accumulate one adapted site's gradients.
+pub struct SiteGrad {
+    pub ga: Vec<f32>,
+    pub gb: Vec<f32>,
+    pub dm: Vec<f32>,
+}
+
+impl SiteGrad {
+    fn like(d: &super::adapter::Dora) -> SiteGrad {
+        SiteGrad {
+            ga: vec![0.0; d.a.len()],
+            gb: vec![0.0; d.b.len()],
+            dm: vec![0.0; d.m.len()],
+        }
+    }
+    fn empty() -> SiteGrad {
+        SiteGrad { ga: Vec::new(), gb: Vec::new(), dm: Vec::new() }
+    }
+    pub fn clear(&mut self) {
+        for v in self.ga.iter_mut().chain(self.gb.iter_mut()).chain(self.dm.iter_mut()) {
+            *v = 0.0;
+        }
+    }
+}
+
+/// Gradients for every adapted site in the model.
+///
+/// Shaped from the attached adapters rather than from the config, so a site
+/// that is not adapted has nowhere to write and cannot silently accumulate
+/// into a buffer nobody reads.
+pub struct Grads {
+    pub qkv: Vec<[SiteGrad; 3]>,
+    pub cls: SiteGrad,
+}
+
+impl Grads {
+    pub fn new(ad: &super::adapter::Adapters) -> Grads {
+        Grads {
+            qkv: ad
+                .qkv
+                .iter()
+                .map(|t| {
+                    [
+                        t[0].as_ref().map(SiteGrad::like).unwrap_or_else(SiteGrad::empty),
+                        t[1].as_ref().map(SiteGrad::like).unwrap_or_else(SiteGrad::empty),
+                        t[2].as_ref().map(SiteGrad::like).unwrap_or_else(SiteGrad::empty),
+                    ]
+                })
+                .collect(),
+            cls: ad.cls.as_ref().map(SiteGrad::like).unwrap_or_else(SiteGrad::empty),
+        }
+    }
+
+    pub fn clear(&mut self) {
+        for t in self.qkv.iter_mut() {
+            for s in t.iter_mut() {
+                s.clear();
+            }
+        }
+        self.cls.clear();
+    }
+}
+
 /// What a backward pass needs kept from a forward one.
 ///
 /// Only the residual stream entering each layer, and the normed hidden state
@@ -661,7 +724,11 @@ impl Tape {
             dim: cfg.dim,
             n_layers: cfg.n_layers,
             seq,
-            x: vec![0.0; cfg.n_layers * seq * cfg.dim],
+            // One row per layer, plus one for the stream *leaving* the last.
+            // The final norm's adjoint needs its own input, and that vector is
+            // not the input to any layer -- without it the walk cannot take
+            // its first step.
+            x: vec![0.0; (cfg.n_layers + 1) * seq * cfg.dim],
             final_xb: vec![0.0; seq * cfg.dim],
             filled: 0,
         }
@@ -677,8 +744,10 @@ impl Tape {
     }
 
     /// The stream entering layer `l` at position `t`.
+    /// `l == n_layers` is the stream leaving the last layer, which is what the
+    /// final norm consumed.
     pub fn entering(&self, l: usize, t: usize) -> Option<&[f32]> {
-        if l >= self.n_layers || t >= self.filled {
+        if l > self.n_layers || t >= self.filled {
             return None;
         }
         let o = (l * self.seq + t) * self.dim;
@@ -704,7 +773,7 @@ impl Tape {
     }
 
     fn record_layer(&mut self, l: usize, t: usize, x: &[f32]) {
-        if l >= self.n_layers || t >= self.seq {
+        if l > self.n_layers || t >= self.seq {
             return;
         }
         let o = (l * self.seq + t) * self.dim;
@@ -2062,6 +2131,10 @@ impl Model {
         // caches as a feature, which is why classifier-only training needed no
         // tape at all.
         if let Some(t) = tape.as_mut() {
+            // Both: the stream the final norm consumed, and the normed result
+            // the classifier consumed. The first is the norm's own adjoint
+            // input; the second is where the loss enters.
+            t.record_layer(c.n_layers, pos, &s.x);
             t.record_final(pos, &s.xb);
         }
         match self.adapters.as_ref().and_then(|a| a.cls.as_ref()) {
@@ -2072,6 +2145,437 @@ impl Model {
                 s.la = la;
             }
             None => self.classifier().matvec(&mut s.logits, &s.xb),
+        }
+    }
+
+    /// Gradients for every adapted site, from a loss on one position's logits.
+    ///
+    /// The layer walk. `backward.rs` has held the adjoints since before any of
+    /// this -- attention, rmsnorm, swiglu, rope, both transpose matvecs, all
+    /// selftested -- and `grep` found exactly one caller, its own selftest.
+    /// This is what calls them.
+    ///
+    /// ### What is recomputed, and why that is the cheap direction
+    ///
+    /// The tape holds only the residual stream entering each layer. Everything
+    /// else this needs -- the normed input, q, k, v, the attention output, both
+    /// FFN branches -- is recomputed here from that stream and the frozen
+    /// weights. It costs about one extra forward and saves thirteen times the
+    /// memory; `Tape`'s own comment has the arithmetic.
+    ///
+    /// ### The shape of the sequence
+    ///
+    /// `attention_backward` takes a whole head's sequence at once and handles
+    /// causality itself, accumulating dq, dk and dv across every position in
+    /// one call. That is why this walks layers rather than positions: the
+    /// cross-position coupling -- position t's query pulling gradient into
+    /// position j's key, for every j <= t -- lives inside that kernel instead
+    /// of in a hand-rolled reverse loop here.
+    ///
+    /// ### What it refuses
+    ///
+    /// A windowed cache. Once eviction has happened a live index no longer
+    /// equals a position, keys are rotated by where they now sit rather than
+    /// where they were, and the recompute below would silently rotate by the
+    /// wrong angle. Training sequences are short and this is checked rather
+    /// than assumed. Hybrids too, matching `attach_adapters`.
+    pub fn backward(
+        &self,
+        tape: &Tape,
+        glogits: &[f32],
+        at: usize,
+        g: &mut Grads,
+    ) -> bool {
+        let c = &self.cfg;
+        if c.hybrid() || c.streams() {
+            return false;
+        }
+        let Some(ad) = self.adapters.as_ref() else { return false };
+        let n = tape.filled();
+        if n == 0 || at >= n || tape.seq < n {
+            return false;
+        }
+        let d = c.dim;
+        let hs = c.head_size();
+        let half = c.rot_dim() / 2;
+        let qd = c.q_dim();
+        let kvd = c.kv_dim();
+        let kv_mul = c.kv_mul();
+        let eps = c.norm_eps;
+        let scale = 1.0 / tensor::sqrtf(hs as f32);
+
+        // dL/dx for the stream leaving the last layer, per position. Only the
+        // scored position has a loss; the rest earn gradient purely through
+        // attention, which is exactly the coupling this walk exists to carry.
+        let mut gx = vec![0.0f32; n * d];
+
+        // --- the classifier, and the final norm ---------------------------
+        {
+            let Some(xb) = tape.final_normed(at) else { return false };
+            let cls = self.classifier();
+            let mut gxb = vec![0.0f32; d];
+            match ad.cls.as_ref() {
+                Some(dora) => {
+                    let mut ax = vec![0.0f32; dora.r];
+                    let mut base = vec![0.0f32; c.vocab_size];
+                    cls.matvec(&mut base, xb);
+                    // ax is A.x, which `backward` wants alongside the frozen
+                    // pre-activation.
+                    for j in 0..dora.r {
+                        let row = &dora.a[j * d..(j + 1) * d];
+                        ax[j] = row.iter().zip(xb.iter()).map(|(a, b)| a * b).sum();
+                    }
+                    dora.backward(
+                        &cls, xb, &ax, &base, glogits,
+                        &mut g.cls.ga, &mut g.cls.gb, &mut g.cls.dm,
+                    );
+                    dora.backward_x(&cls, glogits, &mut gxb);
+                }
+                None => cls.wt_matvec(&mut gxb, glogits),
+            }
+            let Some(xin) = tape.entering(c.n_layers, at) else { return false };
+            let mut gout = vec![0.0f32; d];
+            super::backward::rmsnorm_backward(&mut gout, &gxb, xin, self.rms_final_w(), eps);
+            gx[at * d..(at + 1) * d].copy_from_slice(&gout);
+        }
+
+        // --- layers, last to first ----------------------------------------
+        let mut xb1 = vec![0.0f32; n * d];
+        let mut qs = vec![0.0f32; n * qd];
+        let mut ks = vec![0.0f32; n * kvd];
+        let mut vs = vec![0.0f32; n * kvd];
+        let mut xmid = vec![0.0f32; n * d];
+        let mut xb3 = vec![0.0f32; n * d];
+        let mut hb = vec![0.0f32; n * c.hidden_dim];
+        let mut hb2 = vec![0.0f32; n * c.hidden_dim];
+        let mut attn = vec![0.0f32; n * qd];
+
+        for l in (0..c.n_layers).rev() {
+            // ---- recompute this layer over the whole sequence ------------
+            for t in 0..n {
+                let Some(xin) = tape.entering(l, t) else { return false };
+                let o = t * d;
+                tensor::rmsnorm_eps(&mut xb1[o..o + d], xin, self.rms_att_w(l), eps);
+
+                let x1 = &xb1[o..o + d].to_vec();
+                self.site_forward(ad, l, 0, x1, &mut qs[t * qd..(t + 1) * qd]);
+                self.site_forward(ad, l, 1, x1, &mut ks[t * kvd..(t + 1) * kvd]);
+                self.site_forward(ad, l, 2, x1, &mut vs[t * kvd..(t + 1) * kvd]);
+
+                if c.qk_norm {
+                    let qn = self.q_norm_w(l);
+                    for h in 0..c.n_heads {
+                        let b = t * qd + h * hs;
+                        tensor::rmsnorm_inplace(&mut qs[b..b + hs], qn, eps);
+                    }
+                    let kn = self.k_norm_w(l);
+                    for h in 0..c.n_kv_heads {
+                        let b = t * kvd + h * hs;
+                        tensor::rmsnorm_inplace(&mut ks[b..b + hs], kn, eps);
+                    }
+                }
+                // Rotate by the position, which without a window is the live
+                // index. Both q and k, each by its own t.
+                self.rope_span(&mut qs[t * qd..(t + 1) * qd], c.n_heads, t, half, hs);
+                self.rope_span(&mut ks[t * kvd..(t + 1) * kvd], c.n_kv_heads, t, half, hs);
+            }
+
+            // attention forward, straight from the recomputed spans
+            for t in 0..n {
+                for h in 0..c.n_heads {
+                    let qo = t * qd + h * hs;
+                    let hoff = (h / kv_mul) * hs;
+                    let mut p = vec![0.0f32; t + 1];
+                    for (j, pj) in p.iter_mut().enumerate() {
+                        let ko = j * kvd + hoff;
+                        *pj = scale
+                            * qs[qo..qo + hs]
+                                .iter()
+                                .zip(ks[ko..ko + hs].iter())
+                                .map(|(a, b)| a * b)
+                                .sum::<f32>();
+                    }
+                    tensor::softmax(&mut p);
+                    for i in 0..hs {
+                        attn[qo + i] = 0.0;
+                    }
+                    for (j, pj) in p.iter().enumerate() {
+                        let vo = j * kvd + hoff;
+                        for i in 0..hs {
+                            attn[qo + i] += pj * vs[vo + i];
+                        }
+                    }
+                }
+            }
+
+            for t in 0..n {
+                let o = t * d;
+                let Some(xin) = tape.entering(l, t) else { return false };
+                let mut xb2 = vec![0.0f32; d];
+                self.wo(l).matvec(&mut xb2, &attn[t * qd..(t + 1) * qd]);
+                for i in 0..d {
+                    xmid[o + i] = xin[i] + xb2[i];
+                }
+                let mid = xmid[o..o + d].to_vec();
+                tensor::rmsnorm_eps(&mut xb3[o..o + d], &mid, self.rms_ffn_w(l), eps);
+                let x3 = xb3[o..o + d].to_vec();
+                self.w1(l).matvec(&mut hb[t * c.hidden_dim..(t + 1) * c.hidden_dim], &x3);
+                self.w3(l).matvec(&mut hb2[t * c.hidden_dim..(t + 1) * c.hidden_dim], &x3);
+            }
+
+            // ---- backward through this layer -----------------------------
+            let mut gattn = vec![0.0f32; n * qd];
+            let mut gxmid = vec![0.0f32; n * d];
+            for t in 0..n {
+                let o = t * d;
+                let ho = t * c.hidden_dim;
+                let gout = gx[o..o + d].to_vec();
+
+                // FFN. `swiglu` overwrites its first argument in the forward,
+                // so the pre-activation is recomputed above and used here
+                // rather than read back out of a buffer that no longer holds
+                // it.
+                let mut h = hb[ho..ho + c.hidden_dim].to_vec();
+                tensor::swiglu(&mut h, &hb2[ho..ho + c.hidden_dim]);
+                let mut gh = vec![0.0f32; c.hidden_dim];
+                self.w2(l).wt_matvec(&mut gh, &gout);
+                let mut gu = vec![0.0f32; c.hidden_dim];
+                let mut gv = vec![0.0f32; c.hidden_dim];
+                super::backward::swiglu_backward(
+                    &mut gu, &mut gv, &gh,
+                    &hb[ho..ho + c.hidden_dim], &hb2[ho..ho + c.hidden_dim],
+                );
+                let mut gx3 = vec![0.0f32; d];
+                let mut tmp = vec![0.0f32; d];
+                self.w1(l).wt_matvec(&mut gx3, &gu);
+                self.w3(l).wt_matvec(&mut tmp, &gv);
+                for i in 0..d {
+                    gx3[i] += tmp[i];
+                }
+                let mut gmid = vec![0.0f32; d];
+                super::backward::rmsnorm_backward(
+                    &mut gmid, &gx3, &xmid[o..o + d], self.rms_ffn_w(l), eps,
+                );
+                // The residual carries the outgoing gradient past the FFN.
+                for i in 0..d {
+                    gxmid[o + i] = gmid[i] + gout[i];
+                }
+                let mut ga = vec![0.0f32; qd];
+                self.wo(l).wt_matvec(&mut ga, &gxmid[o..o + d]);
+                gattn[t * qd..(t + 1) * qd].copy_from_slice(&ga);
+            }
+
+            // Attention, per head, whole sequence at once.
+            let mut gq = vec![0.0f32; n * qd];
+            let mut gk = vec![0.0f32; n * kvd];
+            let mut gv2 = vec![0.0f32; n * kvd];
+            for h in 0..c.n_heads {
+                let hoff = (h / kv_mul) * hs;
+                // `attention_backward` wants contiguous per-head sequences.
+                let mut qh = vec![0.0f32; n * hs];
+                let mut kh = vec![0.0f32; n * hs];
+                let mut vh = vec![0.0f32; n * hs];
+                let mut dy = vec![0.0f32; n * hs];
+                for t in 0..n {
+                    qh[t * hs..(t + 1) * hs]
+                        .copy_from_slice(&qs[t * qd + h * hs..t * qd + h * hs + hs]);
+                    kh[t * hs..(t + 1) * hs]
+                        .copy_from_slice(&ks[t * kvd + hoff..t * kvd + hoff + hs]);
+                    vh[t * hs..(t + 1) * hs]
+                        .copy_from_slice(&vs[t * kvd + hoff..t * kvd + hoff + hs]);
+                    dy[t * hs..(t + 1) * hs]
+                        .copy_from_slice(&gattn[t * qd + h * hs..t * qd + h * hs + hs]);
+                }
+                let mut dq = vec![0.0f32; n * hs];
+                let mut dk = vec![0.0f32; n * hs];
+                let mut dv = vec![0.0f32; n * hs];
+                super::backward::attention_backward(
+                    &mut dq, &mut dk, &mut dv, &dy, &qh, &kh, &vh, n, hs, scale,
+                );
+                // Several query heads share one kv head under GQA, so k and v
+                // gradients accumulate rather than assign.
+                for t in 0..n {
+                    for i in 0..hs {
+                        gq[t * qd + h * hs + i] += dq[t * hs + i];
+                        gk[t * kvd + hoff + i] += dk[t * hs + i];
+                        gv2[t * kvd + hoff + i] += dv[t * hs + i];
+                    }
+                }
+            }
+
+            // ---- back through rope, qk-norm, and the three sites ---------
+            for t in 0..n {
+                let o = t * d;
+                self.rope_span_backward(&mut gq[t * qd..(t + 1) * qd], c.n_heads, t, half, hs);
+                self.rope_span_backward(&mut gk[t * kvd..(t + 1) * kvd], c.n_kv_heads, t, half, hs);
+
+                if c.qk_norm {
+                    // The norm's adjoint needs its *input*, which rope has not
+                    // touched -- so it is recomputed from the pre-rope
+                    // projection rather than read from the rotated buffer.
+                    let x1 = xb1[o..o + d].to_vec();
+                    let mut qraw = vec![0.0f32; qd];
+                    let mut kraw = vec![0.0f32; kvd];
+                    self.site_forward(ad, l, 0, &x1, &mut qraw);
+                    self.site_forward(ad, l, 1, &x1, &mut kraw);
+                    let qn = self.q_norm_w(l);
+                    for h in 0..c.n_heads {
+                        let b = h * hs;
+                        let mut out = vec![0.0f32; hs];
+                        super::backward::rmsnorm_backward(
+                            &mut out, &gq[t * qd + b..t * qd + b + hs],
+                            &qraw[b..b + hs], qn, eps,
+                        );
+                        gq[t * qd + b..t * qd + b + hs].copy_from_slice(&out);
+                    }
+                    let kn = self.k_norm_w(l);
+                    for h in 0..c.n_kv_heads {
+                        let b = h * hs;
+                        let mut out = vec![0.0f32; hs];
+                        super::backward::rmsnorm_backward(
+                            &mut out, &gk[t * kvd + b..t * kvd + b + hs],
+                            &kraw[b..b + hs], kn, eps,
+                        );
+                        gk[t * kvd + b..t * kvd + b + hs].copy_from_slice(&out);
+                    }
+                }
+
+                let x1 = xb1[o..o + d].to_vec();
+                let mut gxb1 = vec![0.0f32; d];
+                self.site_backward(ad, l, 0, &x1, &gq[t * qd..(t + 1) * qd], &mut g.qkv[l][0], &mut gxb1);
+                self.site_backward(ad, l, 1, &x1, &gk[t * kvd..(t + 1) * kvd], &mut g.qkv[l][1], &mut gxb1);
+                self.site_backward(ad, l, 2, &x1, &gv2[t * kvd..(t + 1) * kvd], &mut g.qkv[l][2], &mut gxb1);
+
+                let Some(xin) = tape.entering(l, t) else { return false };
+                let mut gin = vec![0.0f32; d];
+                super::backward::rmsnorm_backward(&mut gin, &gxb1, xin, self.rms_att_w(l), eps);
+                // The other residual: the stream entering this layer also went
+                // straight past the attention block.
+                for i in 0..d {
+                    gx[o + i] = gin[i] + gxmid[o + i];
+                }
+            }
+        }
+        true
+    }
+
+    /// One q/k/v projection, frozen or adapted, into `out`.
+    fn site_forward(&self, ad: &super::adapter::Adapters, l: usize, which: usize, x: &[f32], out: &mut [f32]) {
+        let w = match which {
+            0 => self.wq(l),
+            1 => self.wk(l),
+            _ => self.wv(l),
+        };
+        w.matvec(out, x);
+        if let Some(dora) = ad.qkv[l][which].as_ref() {
+            let mut ax = vec![0.0f32; dora.r];
+            dora.apply(out, x, &mut ax);
+        }
+    }
+
+    /// Parameter gradients for one site, and its contribution to the input.
+    fn site_backward(
+        &self,
+        ad: &super::adapter::Adapters,
+        l: usize,
+        which: usize,
+        x: &[f32],
+        gy: &[f32],
+        into: &mut SiteGrad,
+        gx: &mut [f32],
+    ) {
+        let w = match which {
+            0 => self.wq(l),
+            1 => self.wk(l),
+            _ => self.wv(l),
+        };
+        match ad.qkv[l][which].as_ref() {
+            Some(dora) => {
+                let mut base = vec![0.0f32; gy.len()];
+                w.matvec(&mut base, x);
+                let mut ax = vec![0.0f32; dora.r];
+                let k = x.len();
+                for j in 0..dora.r {
+                    let row = &dora.a[j * k..(j + 1) * k];
+                    ax[j] = row.iter().zip(x.iter()).map(|(a, b)| a * b).sum();
+                }
+                dora.backward(&w, x, &ax, &base, gy, &mut into.ga, &mut into.gb, &mut into.dm);
+                dora.backward_x(&w, gy, gx);
+            }
+            None => {
+                // Unadapted, but gradient still has to pass through it to
+                // reach the layers below.
+                let mut tmp = vec![0.0f32; x.len()];
+                w.wt_matvec(&mut tmp, gy);
+                for (i, v) in tmp.iter().enumerate() {
+                    gx[i] += v;
+                }
+            }
+        }
+    }
+
+    /// The frozen weight behind one q/k/v site, for anything that has to seed
+    /// or differentiate against it.
+    pub fn frozen_site(&self, l: usize, which: usize) -> Mat<'_> {
+        match which {
+            0 => self.wq(l),
+            1 => self.wk(l),
+            _ => self.wv(l),
+        }
+    }
+
+    pub fn frozen_cls(&self) -> Mat<'_> {
+        self.classifier()
+    }
+
+    /// The rotation for one (position, pair), computed rather than looked up.
+    ///
+    /// `State` precomputes a table, and the backward walk has no `State` --
+    /// it works from a tape. Recomputing keeps the walk free of a borrow it
+    /// does not otherwise need, and the arithmetic is copied from the table's
+    /// own construction so the two cannot disagree about the exponent.
+    fn rope_at(&self, pos: usize, pair: usize) -> (f32, f32) {
+        let freq = 1.0
+            / tensor::powf(self.cfg.rope_theta, (pair * 2) as f32 / self.cfg.rot_dim() as f32);
+        let a = pos as f32 * freq;
+        (tensor::cosf(a), tensor::sinf(a))
+    }
+
+    /// Rotate a span of heads for one position.
+    fn rope_span(&self, row: &mut [f32], heads: usize, pos: usize, half: usize, hs: usize) {
+        let c = &self.cfg;
+        for h in 0..heads {
+            let base = h * hs;
+            for p in 0..half {
+                let (fcr, fci) = self.rope_at(pos, p);
+                let (i, j) = if c.rope_interleaved {
+                    (base + 2 * p, base + 2 * p + 1)
+                } else {
+                    (base + p, base + p + half)
+                };
+                let (a, b) = (row[i], row[j]);
+                row[i] = a * fcr - b * fci;
+                row[j] = a * fci + b * fcr;
+            }
+        }
+    }
+
+    /// Its adjoint: the same pairing, rotated the other way.
+    fn rope_span_backward(&self, row: &mut [f32], heads: usize, pos: usize, half: usize, hs: usize) {
+        let c = &self.cfg;
+        for h in 0..heads {
+            let base = h * hs;
+            for p in 0..half {
+                let (fcr, fci) = self.rope_at(pos, p);
+                let (i, j) = if c.rope_interleaved {
+                    (base + 2 * p, base + 2 * p + 1)
+                } else {
+                    (base + p, base + p + half)
+                };
+                let (a, b) = super::backward::rope_pair_backward(row[i], row[j], fcr, fci);
+                row[i] = a;
+                row[j] = b;
+            }
         }
     }
 

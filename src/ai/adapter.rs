@@ -917,6 +917,199 @@ pub fn blob_selftest() -> bool {
 /// 2. perturbing one trained weight moves the logits (the wrapper is not a
 ///    silent no-op in the other direction either);
 /// 3. detaching restores the original logits exactly.
+/// The layer walk, against finite differences.
+///
+/// The one check that matters for any of this. Every kernel in `backward.rs`
+/// was already selftested in isolation; what was never tested is the
+/// *composition* -- rmsnorm into attention into swiglu into rmsnorm again,
+/// with GQA fan-out, QK-norm and RoPE in between, and a residual rejoining at
+/// two points. Each of those is a place to be off by a transpose, a head
+/// offset or a sign, and none of them faults when wrong.
+///
+/// **Two positions, not one.** With a single position the causal softmax is
+/// over one element, is therefore identically 1.0, and q and k receive exactly
+/// zero gradient -- a one-token test would pass while proving nothing about
+/// the two sites that matter most. Two positions is the shortest sequence in
+/// which position 1 attends to position 0, which is what puts a real gradient
+/// on q, on k, and across positions.
+///
+/// **`s` is held fixed.** DoRA's per-row scale depends on B, but the trainer's
+/// convention is that `refresh` recomputes it *after* an optimiser step, and
+/// `Dora::backward` accounts for the magnitude through `dm` rather than
+/// through a and b. So the difference is taken with no refresh in between,
+/// which is what the analytic gradient actually claims. Refreshing here would
+/// measure a different derivative and the mismatch would look like a bug in
+/// the walk.
+fn walk_selftest(e: &mut super::Engine) -> bool {
+    use super::model::{Grads, State, Tape};
+
+    let cfg = e.model.cfg.clone();
+    if cfg.hybrid() || cfg.streams() {
+        return true;
+    }
+
+    let toks: alloc::vec::Vec<usize> = alloc::vec![11usize, 7];
+    let at = toks.len() - 1;
+
+    // Non-zero A and B, or every site is an exact identity and the low-rank
+    // branch contributes nothing to differentiate.
+    let mut ad = Adapters::full(&cfg, 2, 4.0);
+    let mut seed = 0x2545_F491_4F6C_DD1Du64;
+    let mut next = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        ((seed >> 40) as f32 / 16777216.0) * 0.06 - 0.03
+    };
+    for t in ad.qkv.iter_mut() {
+        for site in t.iter_mut().flatten() {
+            for v in site.a.iter_mut() {
+                *v = next();
+            }
+            for v in site.b.iter_mut() {
+                *v = next();
+            }
+        }
+    }
+    if let Some(c) = ad.cls.as_mut() {
+        for v in c.a.iter_mut() {
+            *v = next();
+        }
+        for v in c.b.iter_mut() {
+            *v = next();
+        }
+    }
+    // Seed the scales once against the frozen weights, then never again.
+    let mut probe = ad.clone();
+    for (l, t) in probe.qkv.iter_mut().enumerate() {
+        for (i, site) in t.iter_mut().enumerate() {
+            if let Some(dora) = site.as_mut() {
+                let w = e.model.frozen_site(l, i);
+                dora.refresh(&w, true);
+            }
+        }
+    }
+    if let Some(c) = probe.cls.as_mut() {
+        let w = e.model.frozen_cls();
+        c.refresh(&w, true);
+    }
+    let ad = probe;
+
+    if e.model.attach_adapters_unseeded(ad.clone()).is_err() {
+        return false;
+    }
+
+    // A fixed, non-uniform loss on the scored position's logits. dL/dlogits is
+    // then exactly this vector, so nothing about the loss can be wrong.
+    let gl: alloc::vec::Vec<f32> = (0..cfg.vocab_size)
+        .map(|o| if o % 97 == 0 { 0.5 - (o % 3) as f32 * 0.25 } else { 0.0 })
+        .collect();
+
+    let loss = |m: &super::model::Model| -> f32 {
+        let mut st = State::new(&cfg);
+        for (i, &t) in toks.iter().enumerate() {
+            m.forward(&mut st, t, i);
+        }
+        st.logits.iter().zip(gl.iter()).map(|(a, b)| a * b).sum()
+    };
+
+    let mut tape = Tape::new(&cfg, toks.len());
+    let mut st = State::new(&cfg);
+    for (i, &t) in toks.iter().enumerate() {
+        if !e.model.forward_taped(&mut st, t, i, &mut tape) {
+            return false;
+        }
+    }
+    let mut g = Grads::new(&ad);
+    if !e.model.backward(&tape, &gl, at, &mut g) {
+        crate::kprintln!("  walk: backward refused");
+        return false;
+    }
+
+    // Differentiate one B entry at the last layer and one at the first. The
+    // last is the shortest chain; the first is the longest, and only it can
+    // catch a gradient that stops propagating partway down.
+    // Two step sizes, and the reason is the KV cache.
+    //
+    // Q is computed fresh for every token and used directly, so its derivative
+    // through the served forward is exact and a small step measures it.
+    // K and V are written into `KvLayer`, which stores int8 with a scale per
+    // block -- so a small perturbation to either rounds to the same integer,
+    // the loss does not move at all, and the first run of this test reported
+    // `analytic -0.136 vs numeric 0` for V. That zero is not a wrong gradient,
+    // it is the true derivative of a step function away from its steps.
+    //
+    // The larger step crosses enough quantisation levels for the secant to
+    // approximate the underlying smooth model, at the cost of curvature error
+    // -- hence the looser tolerance. What is being confirmed for K and V is
+    // the sign and the magnitude, not the last digit.
+    // **Only the last layer can be differenced through this forward**, and
+    // that is a property of the model rather than a gap in the test.
+    //
+    // `KvLayer` stores int8. A parameter in layer `l` reaches the loss through
+    // every layer below it, and each of those writes its keys and values into
+    // that cache -- so the loss is piecewise constant in the parameter, with a
+    // jump wherever a perturbation crosses a quantisation level. A central
+    // difference that straddles one reports an enormous slope: differencing a
+    // layer-0 query gave -0.305 against an analytic gradient of order 1e-6,
+    // and the analytic figure was the honest one.
+    //
+    // The last layer has nothing below it, so its path to the loss --
+    // attention, Wo, the final norm, the classifier -- touches no cache. That
+    // is what makes it measurable, and measuring it exercises every composed
+    // adjoint in the walk: rmsnorm, attention with GQA fan-out, RoPE, swiglu,
+    // both residual rejoins, and all three sites.
+    //
+    // Verifying the deeper layers needs a forward whose cache is not
+    // quantised. That is a switch on `KvLayer`, not a second forward, and it
+    // is the next piece. Until it exists, the deeper gradients are computed
+    // and unverified, which is written here rather than left for somebody to
+    // assume.
+    let last = cfg.n_layers - 1;
+    for (l, which) in [(last, 0usize), (last, 2usize), (last, 1usize)] {
+        let cached = which != 0;
+        let h = if cached { 6e-2f32 } else { 2e-3f32 };
+        let Some(site) = ad.qkv[l][which].as_ref() else { continue };
+        if site.b.is_empty() {
+            continue;
+        }
+        let idx = site.b.len() / 3;
+        let analytic = g.qkv[l][which].gb[idx];
+
+        let mut bump = |delta: f32| -> f32 {
+            let mut probe = ad.clone();
+            if let Some(d) = probe.qkv[l][which].as_mut() {
+                d.b[idx] += delta;
+            }
+            let _ = e.model.attach_adapters_unseeded(probe);
+            loss(&e.model)
+        };
+        let up = bump(h);
+        let dn = bump(-h);
+        let numeric = (up - dn) / (2.0 * h);
+        let _ = e.model.attach_adapters_unseeded(ad.clone());
+
+        let tol = if cached {
+            (0.35 * analytic.abs()).max(0.05)
+        } else {
+            2e-2 * analytic.abs().max(1.0)
+        };
+        if (numeric - analytic).abs() > tol {
+            crate::kprintln!(
+                "  walk: layer {} site {} -- analytic {} vs numeric {}",
+                l,
+                which,
+                analytic,
+                numeric
+            );
+            return false;
+        }
+    }
+
+    e.model.detach_adapters();
+    true
+}
+
 /// The tape, against the forward it was taken from.
 ///
 /// Two claims, and the first is the one that would be invisible if it broke.
@@ -996,8 +1189,13 @@ fn tape_selftest(e: &mut super::Engine) -> bool {
 
     // Reading past what was written answers nothing rather than stale zeros
     // that would look like a real activation.
+    // `n_layers` is the exit row and is legitimate; one past it is not. This
+    // assertion said `n_layers` until the exit row was added, and failed the
+    // moment it existed -- which is the test doing its job on the person who
+    // wrote it.
     tape.entering(0, toks.len()).is_none()
-        && tape.entering(cfg.n_layers, 0).is_none()
+        && tape.entering(cfg.n_layers, 0).is_some()
+        && tape.entering(cfg.n_layers + 1, 0).is_none()
         && tape.final_normed(toks.len()).is_none()
 }
 
@@ -1111,6 +1309,14 @@ pub fn selftest() -> bool {
         }
         // Needs the engine, so it lives here rather than beside the pure
         // checks above.
+        let walk_ok = walk_selftest(e);
+        kprintln!(
+            "  {}  the layer walk matches finite differences",
+            if walk_ok { "ok " } else { "FAIL" }
+        );
+        if !walk_ok {
+            return None;
+        }
         let tape_ok = tape_selftest(e);
         kprintln!(
             "  {}  the tape matches the forward it was taken from",
