@@ -113,6 +113,28 @@ pub fn interactive() -> bool {
 /// into a search box expecting something to happen. Anything not here and not
 /// an applet is treated as a request for an application that does not exist
 /// yet, which is the case worth being generous about.
+/// Resolve a core by hash or by an unambiguous prefix of one.
+///
+/// Eight characters is what every other address in this system is printed as,
+/// so it has to be what one can be typed as. An ambiguous prefix resolves to
+/// nothing rather than to the first match -- installing the wrong core because
+/// two shared four bytes would be a very quiet mistake.
+fn find_core(want: &str) -> Option<[u8; 32]> {
+    if let Some(h) = crate::ai::voter::unhex(want) {
+        return Some(h);
+    }
+    let mut hit = None;
+    for name in crate::sysbox::children(crate::ai::voter::ROOT) {
+        if name.len() == 64 && name.starts_with(want) {
+            if hit.is_some() {
+                return None;
+            }
+            hit = crate::ai::voter::unhex(&name);
+        }
+    }
+    hit
+}
+
 const KNOWN_COMMANDS: &[&str] = &[
     "term", "todo", "paint", "write", "mines", "oracle", "enternet", "net", "dhcp", "mem",
     "uptime", "tasks", "status", "help", "app", "author", "video", "serial", "log", "snap",
@@ -1101,6 +1123,90 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 _ => kprintln!("  usage: log [status|all|save [path]]"),
             }
         }
+        // A council core the machine wrote, and the judges that let one in.
+        "core" => {
+            use crate::ai::{harness, voter};
+            let mut w = Words::new(rest);
+            match w.next().unwrap_or("") {
+                "" | "status" => {
+                    match voter::installed() {
+                        Some(c) => kprintln!("  installed: {}", &voter::hex(&c.hash)[..8]),
+                        None => kprintln!("  none installed -- the council is the three it shipped with"),
+                    }
+                    let names = crate::sysbox::children(voter::ROOT);
+                    let n = names.iter().filter(|n| n.len() == 64).count();
+                    kprintln!("  {} candidate(s) in {}", n, voter::ROOT);
+                    kprintln!("  core list | core write <path> | core judge <hash> | core install <hash> | core off");
+                }
+                "list" => {
+                    let names = crate::sysbox::children(voter::ROOT);
+                    let mut any = false;
+                    for name in names {
+                        if name.len() != 64 {
+                            continue;
+                        }
+                        any = true;
+                        kprintln!("  {}", &name[..8]);
+                    }
+                    if !any {
+                        kprintln!("  none");
+                    }
+                }
+                // Take an Aiksi program from the namespace and store it as a
+                // candidate. The operator's way in; the machine's is `author`.
+                "write" => match w.next() {
+                    None => kprintln!("  usage: core write <path-to-aiksi-program>"),
+                    Some(path) => match crate::sysbox::read_blob(path) {
+                        None => kprintln!("  no such file: {}", path),
+                        Some(bytes) => {
+                            let src = alloc::string::String::from_utf8_lossy(&bytes).into_owned();
+                            let h = voter::store(&src);
+                            match voter::load(&h) {
+                                Ok(_) => {
+                                    kprintln!("  stored {}", &voter::hex(&h)[..8]);
+                                    kprintln!("  'core judge {}' before it goes anywhere near a decision", &voter::hex(&h)[..8]);
+                                }
+                                Err(e) => kprintln!("  stored, but it is not a core: {}", e),
+                            }
+                        }
+                    },
+                },
+                "judge" | "install" => {
+                    let install = rest.starts_with("install");
+                    // With one candidate and no hash, mean that one. Addresses
+                    // here are sixty-four characters and printed as eight, so
+                    // requiring one to be retyped for the overwhelmingly
+                    // common case -- a machine that has written exactly one
+                    // core -- is ceremony that only ever produces typos.
+                    let picked = match w.next() {
+                        Some(want) => find_core(want),
+                        None => {
+                            let all: alloc::vec::Vec<alloc::string::String> =
+                                crate::sysbox::children(voter::ROOT)
+                                    .into_iter()
+                                    .filter(|n| n.len() == 64)
+                                    .collect();
+                            if all.len() == 1 { voter::unhex(&all[0]) } else { None }
+                        }
+                    };
+                    match picked {
+                        None => {
+                            kprintln!("  usage: core judge|install <hash>");
+                            kprintln!("  'core list' shows them; the hash may be shortened");
+                        }
+                        Some(h) => harness::core_report(&h, install),
+                    }
+                }
+                "off" => {
+                    if voter::uninstall() {
+                        kprintln!("  the written core is out of the decision path");
+                    } else {
+                        kprintln!("  none was installed");
+                    }
+                }
+                other => kprintln!("  no such action: {}", other),
+            }
+        }
         "godel" => {
             use crate::ai::godel;
             let mut words = rest.split_whitespace();
@@ -1515,6 +1621,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             kprintln!("  train adapter [-e N]    train the model's own decision layer (needs AVX2)");
             kprintln!("  adapter [save|load|off] what is attached, and moving it in and out");
             kprintln!("  godel [now|space|ledger|rollback]  the machine changing itself, on evidence");
+            kprintln!("  core [list|judge|install]    a council voter the machine wrote");
             kprintln!("  fit [lambda]  refit the probe and the council on what it knows");
             kprintln!("  gate search   how often agreement is right; the config search");
             kprintln!("  ctx cont window logits probe feature zeroshot train");

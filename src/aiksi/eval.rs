@@ -642,6 +642,35 @@ impl Interp {
     ///
     /// The path is resolved first. A jail compared against what was typed is
     /// defeated by `../..`, which is the entire history of this kind of check.
+    /// Call a function already defined in this interpreter, with values.
+    ///
+    /// Everything else that calls into Aiksi from Rust builds a source string
+    /// and re-parses it -- `app::call_fn` quotes its argument into a literal
+    /// and hands the lot back to the lexer. That is fine for a button press
+    /// and wrong for anything on a hot path: a council core votes once per
+    /// routing decision, and re-lexing a program to pass it a string would
+    /// cost more than the vote.
+    ///
+    /// It also removes the quoting entirely, and quoting is where this class
+    /// of bridge usually breaks.
+    pub fn invoke(&mut self, name: &str, args: &[Value]) -> Result<Value, String> {
+        let Some(f) = self.funcs.get(name).cloned() else {
+            return Err(format!("no function '{}'", name));
+        };
+        self.returning = None;
+        self.call_user(name, &f, args)
+    }
+
+    /// Whether a function of this name is defined.
+    pub fn has_fn(&self, name: &str) -> bool {
+        self.funcs.contains_key(name)
+    }
+
+    /// Steps taken since the last `run`. What a cost judge measures.
+    pub fn steps(&self) -> u64 {
+        self.steps
+    }
+
     /// A note one builtin leaves for another.
     ///
     /// `tcp_connect` answers 1 or 0 because a refused port is a result and not

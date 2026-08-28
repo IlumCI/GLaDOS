@@ -1190,13 +1190,15 @@ pub fn route_verdict(task: &str, trust: Trust) -> Option<(Choice, super::council
         // stands alone against the other two, where the probe is right 25% of
         // the time and the pair 62.5%, so being outvoted is genuine evidence
         // and the measurement that dismissed it was of something else.
+        let rule = rule_in_force();
         let winner = decide(
-            rule_in_force(),
+            rule,
             probe_idx,
             Some(c),
             &e.tok,
             task,
             &allowed,
+            core_vote(rule, task, &allowed),
         );
 
         let agreement = usize::from(winner == probe_idx)
@@ -1377,6 +1379,15 @@ pub enum Rule {
     /// Lexical core alone -- included so the search can discover that the
     /// expensive core is not pulling its weight, rather than being told.
     LexicalOnly,
+    /// Majority of the three corroborators, ties to the probe, where the third
+    /// is a core the machine wrote.
+    ///
+    /// Kept distinct from `Majority` rather than folded into it, so the search
+    /// compares "with the written core" against "without" as two points. With
+    /// no core installed the predicate reduces to `Majority` exactly -- two
+    /// voters, and "at least two agree" is "they agree" -- so the fallback
+    /// costs no special case.
+    WithCore,
 }
 
 impl Rule {
@@ -1385,7 +1396,16 @@ impl Rule {
             Rule::ProbeOnly => "probe",
             Rule::Majority => "majority",
             Rule::LexicalOnly => "lexical",
+            Rule::WithCore => "withcore",
         }
+    }
+
+    /// Whether answering under this rule needs the written core's vote.
+    ///
+    /// Asked before voting rather than inside `decide`, because a vote runs an
+    /// interpreter and the rules that ignore it should not pay for it.
+    pub fn needs_core(&self) -> bool {
+        matches!(self, Rule::WithCore)
     }
 }
 
@@ -1486,6 +1506,7 @@ fn decide(
     tok: &super::tokenizer::Tokenizer,
     text: &str,
     all: &[usize],
+    core_says: Option<usize>,
 ) -> usize {
     match (rule, council) {
         (Rule::ProbeOnly, _) | (_, None) => probe_says,
@@ -1497,7 +1518,43 @@ fn decide(
             Some((l, _)) => l,
             None => probe_says,
         },
+        // At least two of the corroborators agreeing on something the probe
+        // did not say carries it. The probe keeps ties and keeps everything
+        // else, which is what makes this an extension of `Majority` rather
+        // than a different system: with no core there are two corroborators
+        // and "at least two agree" is exactly "they agree".
+        (Rule::WithCore, Some(c)) => {
+            let Some((l, ch)) = c.corroborate(text, tok, all) else {
+                return probe_says;
+            };
+            let mut votes = alloc::vec![l, ch];
+            if let Some(k) = core_says {
+                votes.push(k);
+            }
+            let mut best = probe_says;
+            let mut best_n = 0;
+            for v in &votes {
+                if *v == probe_says {
+                    continue;
+                }
+                let n = votes.iter().filter(|x| *x == v).count();
+                if n >= 2 && n > best_n {
+                    best = *v;
+                    best_n = n;
+                }
+            }
+            best
+        }
     }
+}
+
+/// The written core's opinion, or `None` when the rule does not want one, no
+/// core is installed, or the core declined.
+fn core_vote(rule: Rule, text: &str, all: &[usize]) -> Option<usize> {
+    if !rule.needs_core() {
+        return None;
+    }
+    super::voter::installed()?.vote(text, all).0
 }
 
 /// Score one configuration on a split, against the cached fit.
@@ -1526,6 +1583,7 @@ fn score_cfg(
             &e.tok,
             text,
             &all,
+            core_vote(cfg.rule, text, &all),
         );
         total += 1;
         right += usize::from(got == *want);
@@ -1604,6 +1662,7 @@ pub fn load_config() -> Option<Config> {
             (Some("rule"), Some("probe")) => rule = Some(Rule::ProbeOnly),
             (Some("rule"), Some("majority")) => rule = Some(Rule::Majority),
             (Some("rule"), Some("lexical")) => rule = Some(Rule::LexicalOnly),
+            (Some("rule"), Some("withcore")) => rule = Some(Rule::WithCore),
             _ => {}
         }
     }
@@ -1648,7 +1707,7 @@ pub fn config_selftest() -> bool {
     // does not parse would make an adopted configuration fall back to the
     // default at the next boot, silently -- which is the failure this whole
     // change is about, arriving one layer down.
-    for rule in [Rule::ProbeOnly, Rule::Majority, Rule::LexicalOnly] {
+    for rule in [Rule::ProbeOnly, Rule::Majority, Rule::LexicalOnly, Rule::WithCore] {
         let cfg = Config { lambda: 1.0, rule };
         let mut text = String::from("config 1\nlambda 10\nrule ");
         text.push_str(cfg.rule.name());
@@ -1661,6 +1720,7 @@ pub fn config_selftest() -> bool {
                     "probe" => Some(Rule::ProbeOnly),
                     "majority" => Some(Rule::Majority),
                     "lexical" => Some(Rule::LexicalOnly),
+                    "withcore" => Some(Rule::WithCore),
                     _ => None,
                 };
             }
@@ -1671,13 +1731,213 @@ pub fn config_selftest() -> bool {
     }
 
     // Every rule name is distinct, or two configurations would be one.
-    let names = [Rule::ProbeOnly.name(), Rule::Majority.name(), Rule::LexicalOnly.name()];
+    let names = [
+        Rule::ProbeOnly.name(),
+        Rule::Majority.name(),
+        Rule::LexicalOnly.name(),
+        Rule::WithCore.name(),
+    ];
     for (i, a) in names.iter().enumerate() {
         if names.iter().skip(i + 1).any(|b| b == a) {
             return false;
         }
     }
     true
+}
+
+/// What a candidate core earned.
+pub struct CoreVerdict {
+    pub n: usize,
+    pub fixed: usize,
+    pub broke: usize,
+    pub chi: f32,
+    pub declined: usize,
+    pub disagreed: usize,
+    pub worst_steps: u64,
+    pub total_steps: u64,
+    pub j1: bool,
+    pub j5: bool,
+    pub j6: bool,
+}
+
+impl CoreVerdict {
+    pub fn passed(&self) -> bool {
+        self.j1 && self.j5 && self.j6
+    }
+}
+
+/// How much of the vote budget a core may actually use.
+///
+/// The budget stops a runaway; this is the far lower bar a core has to clear
+/// to be worth having in the decision path at all. A core that needs most of
+/// its ceiling for one short string will need all of it on a bad day, and the
+/// bad day is a routing decision that stalls.
+const CORE_STEP_CEILING: u64 = super::voter::VOTE_BUDGET / 4;
+
+/// Measure a candidate core against the validation slice.
+///
+/// Paired against the same council without it, on the same items, which is the
+/// only comparison that means anything -- two accuracy percentages over
+/// different runs would differ by noise and by the core, with no way to tell
+/// which. The statistic is `godel::mcnemar`, shared so a second judge cannot
+/// grow a second idea of significance.
+///
+/// Validation, never test. A core is *selected* here, and a slice you select
+/// on is a slice you have fitted.
+pub fn core_bench(hash: &[u8; 32]) -> Option<Result<CoreVerdict, String>> {
+    let core = match super::voter::load(hash) {
+        Ok(c) => c,
+        Err(e) => return Some(Err(e)),
+    };
+    with_engine(|e| {
+        let Some(f) = featurise(e) else {
+            return Err(String::from("no corpus to judge against"));
+        };
+        let lambda = default_lambda();
+        let fitted = fit_all(e, &f, &[lambda]);
+        let Some((_, probe)) = fitted.probes.first() else {
+            return Err(String::from("the probe would not fit"));
+        };
+        let all: Vec<usize> = (0..f.classes).collect();
+
+        let mut v = CoreVerdict {
+            n: 0,
+            fixed: 0,
+            broke: 0,
+            chi: 0.0,
+            declined: 0,
+            disagreed: 0,
+            worst_steps: 0,
+            total_steps: 0,
+            j1: false,
+            j5: false,
+            j6: false,
+        };
+
+        for (split, x, want, text) in &f.ev {
+            if *split != 1 {
+                continue;
+            }
+            let p = probe.predict(x);
+            let (says, steps) = core.vote(text, &all);
+            v.total_steps += steps;
+            v.worst_steps = v.worst_steps.max(steps);
+            if says.is_none() {
+                v.declined += 1;
+            }
+
+            let without = decide(Rule::Majority, p, fitted.council.as_ref(), &e.tok, text, &all, None);
+            let with = decide(Rule::WithCore, p, fitted.council.as_ref(), &e.tok, text, &all, says);
+
+            // Independence is measured against the lexical core, which is the
+            // one a written core is most likely to reinvent: both read the
+            // words. A voter that only ever repeats an existing one adds a
+            // vote and no information, and inflates agreement -- which is the
+            // signal this council is built on -- without earning it.
+            //
+            // J6 catches redundancy, not uselessness, and the two are not the
+            // same. A core that answers the same class every time differs from
+            // lexical almost always and sails through here; it is J1 that
+            // vetoes it, having found it repairs nothing. Neither judge is
+            // sufficient alone and neither is trying to be -- the first
+            // measured core to reach this gate passed J5 and J6 and was
+            // refused by J1, which is the pair working as intended.
+            if let (Some(k), Some((l, _))) = (says, fitted.council.as_ref().and_then(|c| c.corroborate(text, &e.tok, &all))) {
+                if k != l {
+                    v.disagreed += 1;
+                }
+            }
+
+            v.n += 1;
+            match (without == *want, with == *want) {
+                (false, true) => v.fixed += 1,
+                (true, false) => v.broke += 1,
+                _ => {}
+            }
+        }
+
+        if v.n == 0 {
+            return Err(String::from("nothing in validation to judge against"));
+        }
+        v.chi = super::godel::mcnemar(v.broke, v.fixed);
+        // J1, the same shape the adapter judge uses: a net repair above the
+        // floor and beyond the noise.
+        v.j1 = v.fixed > v.broke
+            && v.fixed - v.broke >= super::godel::MIN_FIXED
+            && v.chi >= super::godel::MCNEMAR_95;
+        // J5, cost.
+        v.j5 = v.worst_steps <= CORE_STEP_CEILING;
+        // J6, independence. A core that never differs from lexical is lexical.
+        v.j6 = v.disagreed > 0 && v.declined < v.n;
+        Ok(v)
+    })
+}
+
+/// Judge a candidate and wire it in if every judge passes.
+pub fn core_report(hash: &[u8; 32], install: bool) {
+    console::set_color(YELLOW);
+    kprintln!("[core] {}", &super::voter::hex(hash)[..8]);
+    console::set_color(LTGRAY);
+
+    let out = core_bench(hash);
+    let v = match out {
+        None => {
+            kprintln!("  {}", super::engine_refusal());
+            return;
+        }
+        Some(Err(e)) => {
+            console::set_color(LTRED);
+            kprintln!("  {}", e);
+            console::set_color(LTGRAY);
+            return;
+        }
+        Some(Ok(v)) => v,
+    };
+
+    let mark = |p: bool| if p { "pass" } else { "VETO" };
+    kprintln!("  judged on {} validation items", v.n);
+    kprintln!(
+        "  J1 margin    {}  {} repaired, {} broken, chi {}",
+        mark(v.j1),
+        v.fixed,
+        v.broke,
+        (v.chi * 100.0) as u32 as f32 / 100.0
+    );
+    kprintln!(
+        "  J5 cost      {}  worst {} steps of {} allowed, {} mean",
+        mark(v.j5),
+        v.worst_steps,
+        CORE_STEP_CEILING,
+        v.total_steps / v.n as u64
+    );
+    kprintln!(
+        "  J6 apart     {}  differs from lexical on {}, declined {}",
+        mark(v.j6),
+        v.disagreed,
+        v.declined
+    );
+
+    if !v.passed() {
+        console::set_color(YELLOW);
+        kprintln!("  not installed -- a core joins the council on evidence or not at all");
+        console::set_color(LTGRAY);
+        return;
+    }
+    if !install {
+        console::set_color(LTGREEN);
+        kprintln!("  every judge passes -- 'core install {}' to wire it in", &super::voter::hex(hash)[..8]);
+        console::set_color(LTGRAY);
+        return;
+    }
+    if super::voter::install(hash) {
+        console::set_color(LTGREEN);
+        kprintln!("  installed. 'search' will now compare withcore against the rest");
+        console::set_color(LTGRAY);
+    } else {
+        console::set_color(LTRED);
+        kprintln!("  could not write the pointer -- nothing changed");
+        console::set_color(LTGRAY);
+    }
 }
 
 /// Search the configuration space, adopt the winner, then report on test.
@@ -1687,7 +1947,7 @@ pub fn search_report() {
     console::set_color(LTGRAY);
 
     let lambdas = [0.1f32, 1.0, 10.0];
-    let rules = [Rule::ProbeOnly, Rule::Majority, Rule::LexicalOnly];
+    let rules = [Rule::ProbeOnly, Rule::Majority, Rule::LexicalOnly, Rule::WithCore];
 
     let t0 = crate::time::rdtsc();
     let outcome = with_engine(|e| {

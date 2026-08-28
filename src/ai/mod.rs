@@ -15,6 +15,7 @@ pub mod futures;
 pub mod godel;
 pub mod godbits;
 pub mod council;
+pub mod voter;
 pub mod harness;
 pub mod model;
 pub mod probe;

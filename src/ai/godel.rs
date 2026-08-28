@@ -383,7 +383,7 @@ const TEST_READS: u32 = 3;
 /// statistic is even consulted. Guards the case the statistic handles badly:
 /// three decisions, two repaired, none broken, which is arithmetically
 /// impressive and means nothing.
-const MIN_FIXED: usize = 4;
+pub const MIN_FIXED: usize = 4;
 
 static ENABLED: AtomicBool = AtomicBool::new(true);
 static TRIALS: AtomicU32 = AtomicU32::new(0);
@@ -735,7 +735,12 @@ impl Certificate {
 /// right, or both get wrong, say nothing about which is better -- which is
 /// exactly why the paired form is worth having and why a difference of
 /// percentages is not.
-fn mcnemar(broke: usize, fixed: usize) -> f32 {
+/// The paired statistic, shared with the core judge.
+///
+/// Public so a second judge cannot grow a second definition of "beyond the
+/// noise". Two thresholds that drift apart would let a change be significant
+/// to one loop and not to the other, with nothing saying so.
+pub fn mcnemar(broke: usize, fixed: usize) -> f32 {
     let n = broke + fixed;
     if n == 0 {
         return 0.0;
@@ -751,7 +756,7 @@ fn mcnemar(broke: usize, fixed: usize) -> f32 {
 /// spelled inline because it is a *decision*, not a constant: 3.84 is the
 /// conventional line and the ledger records the statistic itself, so a later
 /// reader can apply a different one to the same numbers.
-const MCNEMAR_95: f32 = 3.84;
+pub const MCNEMAR_95: f32 = 3.84;
 
 /// Is the wall clock inside the window where self-modification is allowed?
 ///
