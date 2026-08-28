@@ -35,6 +35,15 @@ use alloc::vec::Vec;
 /// be told apart from a corrupt one rather than guessed at.
 const VERSION: &str = "1";
 
+/// The verbs a document may use, in the order a decoder should see them.
+///
+/// Public because the authoring loop builds a grammar from exactly this list:
+/// a generated line whose verb came from here cannot be a verb `parse` will
+/// reject, which is the difference between making a mistake unreachable and
+/// catching it afterwards.
+pub const VERBS: &[&str] =
+    &["label", "sep", "heading", "status", "note", "item", "field", "button"];
+
 /// Longest an operand may be.
 ///
 /// `Panel::preferred` sizes a window from its text and `frame_for` clamps that
