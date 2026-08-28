@@ -50,7 +50,9 @@
 //! by a later version. See `manifest`.
 
 pub mod check;
+pub mod draft;
 pub mod manifest;
+pub mod skel;
 
 use crate::gfx::ui::Panel;
 use crate::gfx::uidoc;
@@ -75,8 +77,10 @@ fn panel_path(name: &str) -> String {
 /// `app list` and `app show x` have to mean something, and an application
 /// called `list` would take the word away. Reserved rather than escaped: there
 /// are two of them and renaming an app is free.
-pub const RESERVED: &[&str] =
-    &["list", "show", "check", "info", "trust", "adopt", "rollback"];
+pub const RESERVED: &[&str] = &[
+    "list", "show", "check", "info", "trust", "adopt", "rollback", "draft", "try", "take",
+    "drop",
+];
 
 pub fn exists(name: &str) -> bool {
     sysbox::read_blob(&code_path(name)).is_some()

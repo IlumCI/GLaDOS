@@ -2113,6 +2113,10 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
                     kprintln!("  app list             applications on this machine");
                     kprintln!("  app show <name>      its panel document, rows filled in");
                     kprintln!("  app check <name>     what can be known without running it");
+                    kprintln!("  app draft <n> <kind> start one from a skeleton");
+                    kprintln!("  app try <name>       check a draft, running it too");
+                    kprintln!("  app take <name>      adopt a draft into /app");
+                    kprintln!("  app drop <name>      throw a draft away");
                     kprintln!("  app info <name>      what it is, by hash, and what it may do");
                     kprintln!("  app trust <name> <h> approve exactly that version");
                     kprintln!("  app adopt <name>     record what is on disk as in use");
@@ -2230,6 +2234,89 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut lang::
                         match man::rollback(name) {
                             None => kprintln!("  nothing to roll back to"),
                             Some(p) => kprintln!("  {} back to {}", name, man::hex32(&p)),
+                        }
+                    }
+                },
+                // Drafts: an application being written, before anybody agrees
+                // to run it. `app draft <name> <kind> [title]` starts one from
+                // a skeleton, `app draft` alone lists the skeletons.
+                "draft" => {
+                    use crate::app::{draft, skel};
+                    // `rest` was already split three ways, so the name is the
+                    // next piece and everything after it is the third. Splitting
+                    // the name again finds no kind in it.
+                    let name = w.next().unwrap_or("");
+                    let mut a = w.next().unwrap_or("").splitn(2, ' ');
+                    let kind = a.next().unwrap_or("");
+                    let title = a.next().unwrap_or("");
+                    if name.is_empty() {
+                        kprintln!("  usage: app draft <name> <kind> [title]");
+                        kprintln!("  skeletons:");
+                        for sk in skel::SKELETONS {
+                            kprintln!("    {:<9} {}", sk.kind, sk.what);
+                        }
+                        let d = draft::names();
+                        if !d.is_empty() {
+                            kprintln!("  drafts in progress: {}", d.join(", "));
+                        }
+                    } else if kind.is_empty() {
+                        kprintln!("  usage: app draft {} <kind> [title]", name);
+                    } else {
+                        let title = if title.is_empty() { name } else { title };
+                        match draft::create(name, kind, title, "Items") {
+                            Err(e) => kprintln!("  {}", e),
+                            Ok(()) => {
+                                kprintln!("  drafted {}/{} from {}",
+                                    draft::ROOT, name, kind);
+                                kprintln!("  'app try {}' to check it, 'app take {}' to adopt",
+                                    name, name);
+                            }
+                        }
+                    }
+                }
+                // Everything that can be known about a draft, including the
+                // parts that need running it. Safe here and nowhere else: smoke
+                // testing writes state, and a draft's state is scratch.
+                "try" => match w.next() {
+                    None => kprintln!("  usage: app try <name>"),
+                    Some(name) => {
+                        use crate::gfx::console::{LTGREEN, LTRED};
+                        let v = crate::app::draft::verdicts(name);
+                        let mut bad = 0;
+                        for r in &v {
+                            console::set_color(if r.ok { LTGREEN } else { LTRED });
+                            match r.line {
+                                Some(l) => kprintln!("  {}  line {}: {}",
+                                    if r.ok { "ok  " } else { "FAIL" }, l, r.why),
+                                None => kprintln!("  {}  {}",
+                                    if r.ok { "ok  " } else { "FAIL" }, r.why),
+                            }
+                            if !r.ok { bad += 1; }
+                        }
+                        console::set_color(LTGRAY);
+                        kprintln!("  {} of {} checks failed", bad, v.len());
+                    }
+                },
+                // Adopt a draft into /app. Refuses unless every check passes.
+                "take" => match w.next() {
+                    None => kprintln!("  usage: app take <name>"),
+                    Some(name) => match crate::app::draft::adopt(name) {
+                        Err(e) => kprintln!("  {}", e),
+                        Ok(h) => {
+                            kprintln!("  {} adopted as {}",
+                                name, crate::app::manifest::hex32(&h));
+                            kprintln!("  'win open app:{}' to use it", name);
+                        }
+                    },
+                },
+                "drop" => match w.next() {
+                    None => kprintln!("  usage: app drop <name>"),
+                    Some(name) => {
+                        if crate::app::draft::abandon(name) {
+                            kprintln!("  draft {} thrown away", name);
+                            kprintln!("  anything ever adopted is addressed by hash and untouched");
+                        } else {
+                            kprintln!("  no draft called '{}'", name);
                         }
                     }
                 },

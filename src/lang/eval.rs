@@ -532,6 +532,40 @@ impl Interp {
             // changing one in place, so two names can never disagree about
             // what a list contains and nothing has to explain aliasing to
             // whoever -- or whatever -- is writing the program.
+            // Where this program is allowed to keep things.
+            //
+            // A stored program cannot hardcode its own path: the same files
+            // live at `/draft/<name>` while being written and `/app/<name>`
+            // once adopted, and a literal path would be outside the jail on
+            // one side of that move. Asking makes a program location
+            // independent, and the jail is the authority on the answer rather
+            // than a convention the program has to be told.
+            "here" => Ok(Value::Str(self.jail.clone().unwrap_or_default())),
+            // Text to number.
+            //
+            // `read` answers with what is in the file, which is text, and `+`
+            // on text concatenates. A program keeping a count in a file and
+            // adding one to it gets "01" and then "011", with nothing failing
+            // anywhere -- the first skeleton written here did exactly that.
+            // Anything unparseable is zero rather than an error: a counter
+            // whose file has been emptied should start again, not refuse to
+            // draw.
+            "int" => {
+                let t = Self::arg(args, 0)?.render();
+                let t = t.trim();
+                let (neg, digits) = match t.strip_prefix('-') {
+                    Some(rest) => (true, rest),
+                    None => (false, t),
+                };
+                let mut n: i64 = 0;
+                let mut any = false;
+                for c in digits.chars() {
+                    let Some(d) = c.to_digit(10) else { break };
+                    n = n.saturating_mul(10).saturating_add(d as i64);
+                    any = true;
+                }
+                Ok(Value::Int(if any && neg { -n } else if any { n } else { 0 }))
+            }
             "list" => Ok(Value::List(args.to_vec())),
             "len" => match args.first() {
                 Some(Value::List(v)) => Ok(Value::Int(v.len() as i64)),
@@ -808,7 +842,7 @@ impl Interp {
 pub const BUILTINS: &[&str] = &[
     "print", "println", "hex", "cls", "color", "ticks", "hz", "tasks", "heap",
     "read", "exists", "ls", "write", "applet",
-    "list", "len", "get", "set", "push",
+    "list", "len", "get", "set", "push", "here", "int",
     "width", "height", "pixel", "rect", "text",
     "peek8", "peek16", "peek32", "peek64", "poke8", "poke32", "poke64",
     "inb", "outb", "inl", "outl",
