@@ -664,6 +664,17 @@ fn init_smp(acpi: &Option<acpi::Acpi>) {
     if answered < a.cpus {
         kprintln!("  the rest stay parked; work still runs, just narrower");
     }
+    if started > 0 {
+        let ok = smp::selftest();
+        if !ok {
+            console::set_color(LTRED);
+        }
+        kprintln!(
+            "  {}  a split matvec equals a whole one, bit for bit",
+            if ok { "ok " } else { "FAIL" }
+        );
+        console::set_color(LTGRAY_IDX);
+    }
 }
 
 fn init_keyboard(acpi: &Option<acpi::Acpi>) {

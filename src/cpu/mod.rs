@@ -221,6 +221,14 @@ unsafe fn xsetbv(index: u32, value: u64) {
 ///
 /// UEFI leaves SSE enabled -- the x86_64 UEFI ABI requires it -- but we set
 /// the bits regardless rather than inherit an assumption.
+/// CPUID.01H:ECX bit 3 -- MONITOR/MWAIT.
+///
+/// Computed from CPUID rather than read out of the `FEATURES` static, so an
+/// application processor can ask without touching kernel state.
+pub fn has_monitor() -> bool {
+    cpuid(1, 0)[2] & (1 << 3) != 0
+}
+
 pub fn enable_simd() -> Features {
     let f = enable_simd_this_core();
     unsafe { *FEATURES.get() = f };

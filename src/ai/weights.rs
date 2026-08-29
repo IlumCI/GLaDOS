@@ -29,6 +29,55 @@ pub enum Mat<'a> {
     Q8 { data: &'a [i8], scales: &'a [u8], rows: usize, cols: usize },
 }
 
+/// One matvec, described by pointers so a core that owns none of it can run
+/// part of it.
+///
+/// Raw pointers rather than slices because this crosses to a core that has no
+/// borrow of anything. It is sound because `parallel_rows` does not return
+/// until every chunk has finished, so this struct -- which lives on the
+/// caller's stack -- outlives every read of it.
+#[derive(Clone, Copy)]
+struct RowJob {
+    q8: bool,
+    data: *const u8,
+    scales: *const u8,
+    x: *const f32,
+    out: *mut f32,
+    cols: usize,
+    avx: bool,
+}
+
+/// Rows `[lo, hi)` of the job at `ctx`.
+///
+/// # Safety
+/// `ctx` must point at a live `RowJob` whose buffers cover `[lo, hi)`, and no
+/// other core may hold the same range. `parallel_rows` guarantees both.
+unsafe fn matvec_rows(ctx: usize, lo: usize, hi: usize) {
+    let job = unsafe { *(ctx as *const RowJob) };
+    let n = hi - lo;
+    let out = unsafe { core::slice::from_raw_parts_mut(job.out.add(lo), n) };
+    let x = unsafe { core::slice::from_raw_parts(job.x, job.cols) };
+    if job.q8 {
+        let data = unsafe {
+            core::slice::from_raw_parts((job.data as *const i8).add(lo * job.cols), n * job.cols)
+        };
+        // Four bytes of little-endian f32 per row, so the scale offset is a
+        // row count times four and not times `cols`. Getting that wrong reads
+        // a scale from the middle of another row and is silent.
+        let scales = unsafe { core::slice::from_raw_parts(job.scales.add(lo * 4), n * 4) };
+        if job.avx {
+            unsafe { q8_matvec_avx2(out, x, data, scales, n, job.cols) }
+        } else {
+            q8_matvec_scalar(out, x, data, scales, n, job.cols)
+        }
+    } else {
+        let data = unsafe {
+            core::slice::from_raw_parts((job.data as *const f32).add(lo * job.cols), n * job.cols)
+        };
+        tensor::matmul(out, x, data, job.cols, n);
+    }
+}
+
 #[inline]
 pub fn f32_at(bytes: &[u8], i: usize) -> f32 {
     let o = i * 4;
@@ -45,7 +94,52 @@ impl Mat<'_> {
     }
 
     /// `out = self * x`. `out` must have `rows` entries, `x` must have `cols`.
+    ///
+    /// Split across every core when there is enough of it to be worth the
+    /// handshake. This one function is where a token's gigabyte of weights
+    /// actually gets read, so it is the whole of what the other cores are for:
+    /// every projection in every layer, plus the classifier, arrives here.
+    ///
+    /// Row-parallel, which needs no new arithmetic. `out[o]` depends on row
+    /// `o` of the weights and on all of `x`, and on nothing else -- so a core
+    /// handed rows `[lo, hi)` runs the *same* kernel over `data[lo*cols..]`
+    /// and `scales[lo*4..]` and writes `out[lo..hi]`. There is no reduction
+    /// and no shared accumulator, which is why this is worth doing and why it
+    /// needs no locking.
     pub fn matvec(&self, out: &mut [f32], x: &[f32]) {
+        let (rows, cols) = match self {
+            Mat::F32 { rows, cols, .. } => (*rows, *cols),
+            Mat::Q8 { rows, cols, .. } => (*rows, *cols),
+        };
+        let job = RowJob {
+            q8: matches!(self, Mat::Q8 { .. }),
+            data: match self {
+                Mat::F32 { data, .. } => data.as_ptr() as *const u8,
+                Mat::Q8 { data, .. } => data.as_ptr() as *const u8,
+            },
+            scales: match self {
+                Mat::F32 { .. } => core::ptr::null(),
+                Mat::Q8 { scales, .. } => scales.as_ptr(),
+            },
+            x: x.as_ptr(),
+            out: out.as_mut_ptr(),
+            cols,
+            // Decided here and carried, rather than read per chunk: an
+            // application processor reads no kernel state, and `detected()`
+            // is kernel state.
+            avx: {
+                let f = crate::cpu::detected();
+                f.avx_enabled && f.avx2 && f.fma
+            },
+        };
+        if crate::smp::parallel_rows(
+            &job as *const RowJob as usize,
+            matvec_rows,
+            rows,
+            cols,
+        ) {
+            return;
+        }
         match self {
             Mat::F32 { data, rows, cols } => {
                 tensor::matmul(&mut out[..*rows], &x[..*cols], data, *cols, *rows)

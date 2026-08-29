@@ -1729,6 +1729,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             kprintln!("  core [list|judge|install]    a council voter the machine wrote");
             kprintln!("  deeptrain [-n N -e E -r R]   train q/k/v as well as the head");
             kprintln!("  simd                         what the CPU has, and what is enabled");
+            kprintln!("  smp [bench]                  the other cores, and what they are worth");
             kprintln!("  fit [lambda]  refit the probe and the council on what it knows");
             kprintln!("  gate search   how often agreement is right; the config search");
             kprintln!("  ctx cont window logits probe feature zeroshot train");
@@ -2867,6 +2868,20 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             if !f.avx_enabled {
                 kprintln!("  the OS has not enabled the state, so every avx kernel");
                 kprintln!("  falls back to scalar -- this is a ~10x factor, not a rounding one");
+            }
+        }
+        // The other cores: how many answered, and what they are worth.
+        "smp" => {
+            let n = crate::smp::online();
+            kprintln!("  {} core(s) online", n);
+            if rest.starts_with("bench") {
+                // Runs on one core too, and reports the same number twice.
+                // That is the measurement worth having on its own: a machine
+                // with no helpers gives the honest serial figure, which is the
+                // baseline the parallel one has to be judged against.
+                crate::smp::bench();
+            } else if n > 1 {
+                kprintln!("  'smp bench' to time a 16 MiB matvec on one core against all of them");
             }
         }
         "words" => {

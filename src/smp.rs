@@ -36,7 +36,7 @@
 
 use crate::dev::lapic;
 use core::ptr::addr_of;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// Physical address the startup code is copied to.
 ///
@@ -184,11 +184,234 @@ extern "C" fn glados_ap_main() -> ! {
 
     ONLINE.fetch_add(1, Ordering::SeqCst);
 
-    // Parked. Interrupts stay masked: there is no per-core IDT, and the
-    // kernel's handlers would print, which is a shared console.
+    // Interrupts stay masked: there is no per-core IDT, and the kernel's
+    // handlers would print, which is a shared console. So a parked core cannot
+    // be woken by one, and has to be woken by the memory it is watching.
+    let sleeper = crate::cpu::has_monitor();
+    let mut seen = 0usize;
     loop {
+        let g = GEN.load(Ordering::Acquire);
+        if g != seen {
+            seen = g;
+            claim_and_run();
+            continue;
+        }
+        if sleeper {
+            unsafe {
+                // Arm on the generation counter, then check it *again* before
+                // sleeping. Without the recheck a job published between the
+                // load above and the MONITOR is a wake-up that already
+                // happened, and the core sleeps through its own work.
+                monitor(&GEN as *const AtomicUsize as usize);
+                if GEN.load(Ordering::Acquire) == seen {
+                    mwait();
+                }
+            }
+        } else {
+            core::hint::spin_loop();
+        }
+    }
+}
+
+/// Watch a cache line. A store to it ends the next `mwait`.
+#[inline]
+unsafe fn monitor(addr: usize) {
+    unsafe {
+        core::arch::asm!(
+            "monitor",
+            in("rax") addr,
+            in("rcx") 0usize,
+            in("rdx") 0usize,
+            options(nostack, preserves_flags)
+        );
+    }
+}
+
+/// Stop until the monitored line is written.
+///
+/// Idle cores that spin are not free. Seven of them halved this machine's
+/// single-threaded throughput under emulation, and on a laptop they are also
+/// a flat battery and a fan that never stops -- for cores that are, by
+/// definition, doing nothing. `mwait` is the instruction for exactly this and
+/// it wakes on the store that publishes the job, so dispatch stays immediate.
+///
+/// Gated on CPUID: without MONITOR support this is #UD, and an application
+/// processor has no IDT to take it on.
+#[inline]
+unsafe fn mwait() {
+    unsafe {
+        core::arch::asm!(
+            "mwait",
+            in("rax") 0usize,
+            in("rcx") 0usize,
+            options(nostack, preserves_flags)
+        );
+    }
+}
+
+// --- the work fabric -------------------------------------------------------
+//
+// One job at a time, claimed dynamically rather than divided up front.
+//
+// Static division would be the obvious thing and it is wrong on this laptop:
+// an i5-12450H has four performance cores and four efficiency cores, and an
+// equal split finishes when the slowest core finishes. Handing out small
+// chunks from a shared cursor lets a P-core take three while an E-core takes
+// one, which is the same total work in less wall time and needs no knowledge
+// of which core is which.
+
+/// Bumped to publish a job. A worker compares it against what it last ran.
+static GEN: AtomicUsize = AtomicUsize::new(0);
+/// The chunk function, as a raw pointer. Zero means no job.
+static FUNC: AtomicUsize = AtomicUsize::new(0);
+/// Opaque argument, handed back to `FUNC` unchanged.
+static CTX: AtomicUsize = AtomicUsize::new(0);
+/// Next chunk index nobody has claimed.
+static CURSOR: AtomicUsize = AtomicUsize::new(0);
+/// Chunks finished. The job is over when this reaches `NCHUNKS`.
+static DONE: AtomicUsize = AtomicUsize::new(0);
+static NCHUNKS: AtomicUsize = AtomicUsize::new(0);
+static CHUNK: AtomicUsize = AtomicUsize::new(0);
+static ROWS: AtomicUsize = AtomicUsize::new(0);
+/// Held for the length of one job, so a second caller falls back to serial
+/// rather than overwriting the slots a running job is reading.
+static BUSY: AtomicBool = AtomicBool::new(false);
+/// Cores currently inside `claim_and_run`.
+///
+/// The slots are reused by every job, so publishing the next one while a
+/// worker is still reading the last one is the whole hazard. It is not
+/// theoretical: a worker caches `NCHUNKS` on entry, and if the cursor is reset
+/// underneath it, its next claim returns an index that is valid for the new
+/// job and out of range for the cached one. It breaks out **without counting
+/// that chunk**, the new job's tally can never reach its target, and the
+/// bootstrap processor waits forever.
+///
+/// That is why this counter exists rather than a second generation check: it
+/// is the only way to know that nobody is looking any more.
+static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+
+/// What a worker runs: `(ctx, lo, hi)` over a half-open row range.
+pub type ChunkFn = unsafe fn(usize, usize, usize);
+
+fn claim_and_run() {
+    ACTIVE.fetch_add(1, Ordering::AcqRel);
+    claim_inner();
+    ACTIVE.fetch_sub(1, Ordering::AcqRel);
+}
+
+fn claim_inner() {
+    // Zero means the job is closed. A core that arrives late reads this and
+    // claims nothing, which is what makes it safe to publish the next job as
+    // soon as `ACTIVE` falls to zero.
+    let f = FUNC.load(Ordering::Acquire);
+    if f == 0 {
+        return;
+    }
+    let ctx = CTX.load(Ordering::Acquire);
+    let n = NCHUNKS.load(Ordering::Acquire);
+    let chunk = CHUNK.load(Ordering::Acquire);
+    let rows = ROWS.load(Ordering::Acquire);
+    let func: ChunkFn = unsafe { core::mem::transmute(f) };
+
+    loop {
+        let i = CURSOR.fetch_add(1, Ordering::Relaxed);
+        if i >= n {
+            break;
+        }
+        let lo = i * chunk;
+        let hi = ((i + 1) * chunk).min(rows);
+        if lo < hi {
+            unsafe { func(ctx, lo, hi) };
+        }
+        // Unconditional, including for an empty range: the bootstrap
+        // processor is counting chunks, not rows, and a chunk that was
+        // claimed and skipped still has to be accounted for or it waits
+        // forever.
+        DONE.fetch_add(1, Ordering::Release);
+    }
+}
+
+/// Split `rows` across every core and return when all of it has run.
+///
+/// Answers false without doing anything if there is nobody to help, if
+/// another job is in flight, or if the work is too small to be worth the
+/// handshake -- the caller then runs it serially, so this is an optimisation
+/// and never a requirement.
+///
+/// ## Why this is sound
+///
+/// `ctx` outlives the call because this function does not return until every
+/// chunk has completed, so a context on the caller's stack is still there for
+/// as long as anyone can read it. Chunks are disjoint half-open row ranges, so
+/// two cores never write the same output element. And `BUSY` means a caller
+/// preempted mid-job cannot have its slots rewritten underneath it: the second
+/// caller sees the flag and goes serial rather than waiting, which is also why
+/// there is no lock to deadlock on.
+pub fn parallel_rows(ctx: usize, func: ChunkFn, rows: usize, cols: usize) -> bool {
+    let helpers = ONLINE.load(Ordering::Relaxed);
+    if helpers == 0 || rows < 2 {
+        return false;
+    }
+    // Below this the handshake costs more than the arithmetic saves. Half a
+    // million multiply-accumulates is a few hundred microseconds of work,
+    // comfortably more than a cross-core round trip. Every projection in a
+    // 0.6B is above it -- q alone is 2048x1024 -- while a 22-row classifier
+    // head and the wide-head test fixture are below it and stay on one core.
+    if rows.saturating_mul(cols) < 1 << 19 {
+        return false;
+    }
+    if BUSY.swap(true, Ordering::Acquire) {
+        return false;
+    }
+
+    // More chunks than cores, so a slow core holds up one chunk and not one
+    // eighth of the matrix.
+    let want = (helpers + 1) * 4;
+    let chunk = rows.div_ceil(want).max(8);
+    let n = rows.div_ceil(chunk);
+
+    FUNC.store(func as usize, Ordering::Relaxed);
+    CTX.store(ctx, Ordering::Relaxed);
+    ROWS.store(rows, Ordering::Relaxed);
+    CHUNK.store(chunk, Ordering::Relaxed);
+    NCHUNKS.store(n, Ordering::Relaxed);
+    CURSOR.store(0, Ordering::Relaxed);
+    DONE.store(0, Ordering::Relaxed);
+    GEN.fetch_add(1, Ordering::Release);
+
+    // The bootstrap processor is a worker too. With one core idle and seven
+    // busy this is an eighth of the machine; it also means the job completes
+    // even if every AP is somehow wedged.
+    claim_and_run();
+
+    let mut spins = 0u64;
+    while DONE.load(Ordering::Acquire) < n {
+        core::hint::spin_loop();
+        spins += 1;
+        if spins > 20_000_000_000 {
+            // A core claimed a chunk and never finished it. Answer **false**,
+            // not true: some rows of `out` may never have been written, and
+            // saying the job is done would hand back a half-computed vector
+            // that looks like a model gone strange. False makes the caller run
+            // the whole thing serially, overwriting everything.
+            crate::kprintln!("[smp] a core did not finish its chunk -- fabric off");
+            ONLINE.store(0, Ordering::SeqCst);
+            FUNC.store(0, Ordering::Release);
+            BUSY.store(false, Ordering::Release);
+            return false;
+        }
+    }
+
+    // Close the job first, so a core entering from here on claims nothing,
+    // then wait for anyone still inside to leave. Only then are the slots free
+    // to be written again.
+    FUNC.store(0, Ordering::Release);
+    while ACTIVE.load(Ordering::Acquire) != 0 {
         core::hint::spin_loop();
     }
+
+    BUSY.store(false, Ordering::Release);
+    true
 }
 
 /// Busy-wait. There is no sleeping this early and nothing else to run.
@@ -287,4 +510,156 @@ pub fn init(acpi: &crate::acpi::Acpi) -> usize {
     }
 
     started
+}
+
+/// The fabric against one core, bit for bit.
+///
+/// Not "close enough": **identical**. Splitting by rows changes nothing about
+/// the arithmetic -- `out[o]` is the same dot product over the same row in the
+/// same order whether one core computes all of them or eight cores compute
+/// eighths -- so any difference at all means the chunking is wrong, not that
+/// floating point is unlucky. A tolerance here would hide exactly the bug this
+/// is looking for.
+///
+/// The likely mistake it catches: an int8 matrix carries four bytes of scale
+/// per *row*, so a core starting at row `lo` offsets its scales by `lo * 4`
+/// and its data by `lo * cols`. Confusing those two reads a scale from the
+/// middle of another row, which is wrong by a factor rather than by a fault.
+pub fn selftest() -> bool {
+    use crate::ai::weights::Mat;
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    if ONLINE.load(Ordering::Relaxed) == 0 {
+        return true;
+    }
+
+    // Big enough to clear the threshold in `parallel_rows`, and not a multiple
+    // of the chunk size, so the last chunk is short.
+    let (rows, cols) = (1029usize, 512usize);
+    let data: Vec<i8> = (0..rows * cols).map(|i| (i as u32).wrapping_mul(2654435761).to_le_bytes()[0] as i8).collect();
+    let scales: Vec<u8> = (0..rows)
+        .flat_map(|r| (0.5 + (r % 13) as f32 * 0.125).to_le_bytes())
+        .collect();
+    let x: Vec<f32> = (0..cols).map(|i| (i % 17) as f32 * 0.0625 - 0.5).collect();
+    let m = Mat::Q8 { data: &data, scales: &scales, rows, cols };
+
+    // One core, by taking the helpers away rather than by calling a different
+    // function: the reference has to go down the same path, or this compares
+    // two implementations instead of one implementation split two ways.
+    let saved = ONLINE.swap(0, Ordering::SeqCst);
+    let mut one = vec![0.0f32; rows];
+    m.matvec(&mut one, &x);
+    ONLINE.store(saved, Ordering::SeqCst);
+
+    // Run it many times, not once. A single job cannot reproduce the hazard
+    // that matters: the slots are shared, so the interesting case is the next
+    // job being published while a core is still inside the last one. Back to
+    // back is exactly what a model forward does -- every projection of every
+    // layer -- and it is how the first version of this deadlocked, after
+    // passing a one-shot check at boot.
+    let mut many = vec![0.0f32; rows];
+    for round in 0..64 {
+        for v in many.iter_mut() {
+            *v = f32::NAN;
+        }
+        m.matvec(&mut many, &x);
+        if one != many {
+            let bad = one.iter().zip(many.iter()).position(|(a, b)| a != b).unwrap_or(0);
+            crate::kprintln!(
+                "  round {} row {} -- one core {}, {} cores {}",
+                round,
+                bad,
+                one[bad],
+                saved + 1,
+                many[bad]
+            );
+            return false;
+        }
+    }
+    // And it has to have actually run in parallel, or this passes by testing
+    // the serial path twice.
+    many.iter().any(|v| *v != 0.0)
+}
+
+/// Time the same matvec on one core and on all of them.
+///
+/// In the kernel, on the real machine, because nothing else can measure this
+/// honestly. Under an emulator the host's scheduler decides when each virtual
+/// core runs, so a "parallel" pass is really eight threads competing for
+/// whatever the host has left -- the answer it gives is about the host, not
+/// about this kernel. A tight loop here has no such problem.
+pub fn bench() {
+    use crate::ai::weights::Mat;
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    // 16 MiB of weights, which is the point: this has to miss cache the way a
+    // real projection does, or it measures the L2 and not the memory bus.
+    let (rows, cols) = (4096usize, 4096usize);
+    let reps = 8;
+
+    crate::kprintln!("  building {} MiB...", rows * cols / (1024 * 1024));
+    let data: Vec<i8> = (0..rows * cols)
+        .map(|i| (i as u32).wrapping_mul(2654435761).to_le_bytes()[0] as i8)
+        .collect();
+    let scales: Vec<u8> = (0..rows)
+        .flat_map(|r| (0.5 + (r % 13) as f32 * 0.125).to_le_bytes())
+        .collect();
+    let x: Vec<f32> = (0..cols).map(|i| (i % 17) as f32 * 0.0625 - 0.5).collect();
+    let m = Mat::Q8 { data: &data, scales: &scales, rows, cols };
+    let mut out = vec![0.0f32; rows];
+
+    let mhz = crate::time::tsc_mhz().max(1);
+
+    // Every repetition gets a different input and every result is folded into
+    // a checksum. Both halves matter. Eight identical calls writing the same
+    // buffer are eight dead stores and one live one, and a release build is
+    // entitled to notice -- a benchmark that measures an optimised-away loop
+    // reports a beautiful number for no work. And the checksums let the two
+    // halves be compared, which is the only thing that makes the ratio mean
+    // anything: a parallel pass that skipped rows would also be very fast.
+    let mut run = |x: &mut Vec<f32>, out: &mut Vec<f32>| -> (u64, u64) {
+        let t0 = crate::time::rdtsc();
+        let mut sum = 0u64;
+        for r in 0..reps {
+            x[r % cols] = 0.25 + r as f32 * 0.03125;
+            m.matvec(out, x);
+            // Every element, not a sample. One element per repetition would
+            // be satisfied by a split pass that computed the first rows and
+            // left the rest -- which is precisely the failure that would also
+            // make it look fast.
+            for v in out.iter() {
+                sum = sum.wrapping_add(v.to_bits() as u64);
+            }
+        }
+        ((crate::time::rdtsc() - t0) / mhz, sum)
+    };
+
+    let mut x1 = x.clone();
+    let saved = ONLINE.swap(0, Ordering::SeqCst);
+    let (one, sum_one) = run(&mut x1, &mut out);
+    ONLINE.store(saved, Ordering::SeqCst);
+
+    let mut x2 = x.clone();
+    let (many, sum_many) = run(&mut x2, &mut out);
+
+    if sum_one != sum_many {
+        crate::kprintln!("  FAIL -- the split answer differs from the whole one");
+        return;
+    }
+
+    let bytes = (rows * cols * reps) as u64;
+    crate::kprintln!("  1 core    {} us   {} MB/s", one, bytes / one.max(1));
+    crate::kprintln!(
+        "  {} cores   {} us   {} MB/s",
+        saved + 1,
+        many,
+        bytes / many.max(1)
+    );
+    if many > 0 {
+        // Tenths, without floating point in a diagnostic.
+        let x10 = one * 10 / many;
+        crate::kprintln!("  {}.{}x", x10 / 10, x10 % 10);
+    }
 }
