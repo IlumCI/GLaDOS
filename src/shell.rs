@@ -1823,6 +1823,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             kprintln!("  skill [trust <hash>]         which skills keep operator powers");
             kprintln!("  sandbox [keep] <path>        run a program, see what it touched, undo it");
             kprintln!("  version                      what this build is");
+            kprintln!("  diag [all|<name>]            run the self-tests, remember the verdicts");
             kprintln!("  fit [lambda]  refit the probe and the council on what it knows");
             kprintln!("  gate search   how often agreement is right; the config search");
             kprintln!("  ctx cont window logits probe feature zeroshot train");
@@ -3110,6 +3111,60 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             // refused rather than guessed at when its version does not match,
             // so this is the map of what a new image may not silently change.
             kprintln!("  formats: checkpoint v2/v3/v4, app 1, GLADOSPK 1, GLADOSTR, GLADOSA1, GLADOSC1");
+        }
+        // Run the self-tests on demand and remember what they said.
+        //
+        // They all ran at boot and scrolled away. The question afterwards is
+        // whether the machine is still correct, which is a different question
+        // and needs a different surface.
+        "diag" => {
+            use crate::diag;
+            let want = rest.trim();
+            let run = |i: usize| {
+                let s = &diag::SUITES[i];
+                console::set_color(YELLOW);
+                kprintln!("[{}] {}", s.name, s.about);
+                console::set_color(LTGRAY);
+                match diag::run_one(i) {
+                    Some(true) => {
+                        console::set_color(LTGREEN);
+                        kprintln!("  {} passed", s.name);
+                    }
+                    _ => {
+                        console::set_color(LTRED);
+                        kprintln!("  {} FAILED", s.name);
+                    }
+                }
+                console::set_color(LTGRAY);
+            };
+            if want.is_empty() {
+                let (p, f, u) = diag::tally();
+                for (i, s) in diag::SUITES.iter().enumerate() {
+                    let (mark, col) = match diag::verdict(i) {
+                        diag::Verdict::Pass => ("pass", LTGREEN),
+                        diag::Verdict::Fail => ("FAIL", LTRED),
+                        diag::Verdict::Unknown => ("  - ", LTGRAY),
+                    };
+                    console::set_color(col);
+                    kprintln!("  {}  {:<8} {}", mark, s.name, s.about);
+                }
+                console::set_color(LTGRAY);
+                kprintln!("  {} passed, {} failed, {} not run", p, f, u);
+                kprintln!("  'diag all' runs everything, 'diag <name>' runs one");
+            } else if want == "all" {
+                for i in 0..diag::SUITES.len() {
+                    run(i);
+                }
+                let (p, f, _) = diag::tally();
+                console::set_color(if f == 0 { LTGREEN } else { LTRED });
+                kprintln!("  {} passed, {} failed", p, f);
+                console::set_color(LTGRAY);
+            } else {
+                match diag::find(want) {
+                    Some(i) => run(i),
+                    None => kprintln!("  no suite called '{}' -- 'diag' lists them", want),
+                }
+            }
         }
         "words" => {
             console::set_color(YELLOW);

@@ -709,6 +709,7 @@ pub fn panel_named(name: &str) -> Option<Panel> {
         "tasks" => Some(tasks_panel()),
         "storage" | "store" => Some(storage_panel()),
         "attention" | "window" => Some(attention_panel()),
+        "diag" | "diagnostics" => Some(diagnostics_panel()),
         "files" => Some(file_browser("/")),
         "settings" | "network" => Some(settings("net")),
         // The settings pages by name, so the shell can open any of them
@@ -742,6 +743,9 @@ pub fn panel_for_route(route: &str) -> Option<(String, Panel)> {
         "tasks" => Some((String::from("Tasks"), tasks_panel())),
         "storage" => Some((String::from("Storage"), storage_panel())),
         "attention" => Some((String::from("Attention"), attention_panel())),
+        // Routed, so running a suite from the window rebuilds it and the new
+        // verdict is on screen without anyone reopening anything.
+        "diag" => Some((String::from("Diagnostics"), diagnostics_panel())),
         // An application, read from the namespace and parsed under the stored
         // gate. This is the one route whose contents the machine may write.
         "app" => crate::app::panel(arg),
@@ -1117,15 +1121,15 @@ pub fn settings(page: &str) -> Panel {
                 },
                 Widget::Button {
                     label: String::from("Memory"),
-                    action: Action::Run(String::from("mem")),
+                    action: Action::Run(String::from("win open memory")),
                 },
                 Widget::Button {
                     label: String::from("Tasks"),
-                    action: Action::Run(String::from("tasks")),
+                    action: Action::Run(String::from("win open tasks")),
                 },
                 Widget::Button {
                     label: String::from("Storage"),
-                    action: Action::Run(String::from("store")),
+                    action: Action::Run(String::from("win open storage")),
                 },
                 Widget::Sep,
                 Widget::Heading(String::from("Power")),
@@ -1443,6 +1447,68 @@ pub fn attention_panel() -> Panel {
     Panel::new("Attention", ws)
 }
 
+/// Which self-tests exist, which have been run, and which are unhappy.
+///
+/// The detail stays in the terminal, because the detail is a log. What a log
+/// is bad at is exactly what this holds: the *set* of checks, and the state of
+/// each one at a glance.
+///
+/// A suite that has not been run reads "not run", never "pass". A board that
+/// is green because nobody looked is worse than no board.
+pub fn diagnostics_panel() -> Panel {
+    use crate::diag;
+    let (pass, fail, unrun) = diag::tally();
+    let mut ws = alloc::vec![Widget::Heading(String::from("Self-tests"))];
+    for (i, suite) in diag::SUITES.iter().enumerate() {
+        let (text, tone) = match diag::verdict(i) {
+            diag::Verdict::Pass => ("pass", Tone::Ok),
+            diag::Verdict::Fail => ("FAILED", Tone::Bad),
+            diag::Verdict::Unknown => ("not run", Tone::Plain),
+        };
+        ws.push(Widget::Status {
+            name: String::from(suite.name),
+            value: String::from(text),
+            tone,
+        });
+    }
+    ws.push(Widget::Sep);
+    ws.push(Widget::Status {
+        name: String::from("Summary"),
+        value: alloc::format!("{}/{} ok, {} fail", pass, diag::SUITES.len(), fail),
+        tone: if fail > 0 {
+            Tone::Bad
+        } else if unrun > 0 {
+            Tone::Plain
+        } else {
+            Tone::Ok
+        },
+    });
+    // One list rather than a button per suite: the names are the rows above,
+    // and a second copy of them as buttons would be the same list twice.
+    let items = diag::SUITES
+        .iter()
+        .map(|su| {
+            (
+                alloc::format!("Run {}", su.name),
+                Action::Run(alloc::format!("diag {}", su.name)),
+            )
+        })
+        .collect();
+    ws.push(Widget::List { items, sel: 0 });
+    ws.push(Widget::Button {
+        label: String::from("Run all"),
+        action: Action::Run(String::from("diag all")),
+    });
+    let _ = unrun;
+    ws.push(Widget::Note(alloc::vec![
+        String::from("Detail goes to the"),
+        String::from("terminal. This is the"),
+        String::from("scoreboard."),
+    ]));
+    ws.push(Widget::Button { label: String::from("Close"), action: Action::Close });
+    Panel::new("Diagnostics", ws)
+}
+
 pub fn program_manager() -> Panel {
     let run = |label: &str, cmd: &str| {
         (String::from(label), Action::Run(String::from(cmd)))
@@ -1478,6 +1544,7 @@ pub fn program_manager() -> Panel {
         run("Write", "write"),
         run("Minesweeper", "mines"),
         run("Oracle", "oracle"),
+        run("Diagnostics", "win open diag"),
         run("Settings", "win open settings"),
     ];
     Panel::new(

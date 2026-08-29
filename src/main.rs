@@ -20,6 +20,7 @@ mod ai;
 mod app;
 mod cpu;
 mod crypto;
+mod diag;
 mod dev;
 mod edit;
 mod gfx;

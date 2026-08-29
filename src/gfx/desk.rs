@@ -868,6 +868,24 @@ pub fn open(title: &str, panel: Panel) {
             .find(|win| matches!(win.content, Content::Terminal(c) if c == super::console::USER))
             .map(|win| win.rect.x + win.rect.w + MARGIN)
             .unwrap_or(screen.x);
+        // Narrow it rather than slide it under the terminal.
+        //
+        // A panel is as wide as its widest widget, so a page with one long
+        // line in it becomes a window wider than the gap beside the terminal
+        // -- and the placement below then puts it as far right as it fits,
+        // which is *underneath*, with its left half hidden behind console
+        // text that repaints on its own schedule. Three separate panels hit
+        // that while being written, each time looking like the window had
+        // failed to draw rather than like it had been placed badly.
+        //
+        // Clamping the width keeps the whole window reachable: the content
+        // clips at the frame, which is visible and fixable by dragging the
+        // edge, where a window two thirds behind another is neither.
+        // `MIN_CLEAR` is a floor, because a terminal wide enough to leave no
+        // usable gap should get an overlapping window rather than a sliver.
+        const MIN_CLEAR: u32 = 320;
+        let gap = (screen.x + screen.w).saturating_sub(clear_of_terminal);
+        let w = if gap >= MIN_CLEAR { w.min(gap) } else { w };
         let x = screen
             .x
             .max(screen.x + screen.w.saturating_sub(w))
