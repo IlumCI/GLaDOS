@@ -629,6 +629,17 @@ impl Variant {
                 "policy" => v.policy = from_hex32(val),
                 "skills" => v.skills = from_hex32(val),
                 "corpus" => v.corpus = from_hex32(val),
+                // Absent for a long time, and the omission was not cosmetic.
+                // A node read back got `lambda: 0.0` whatever was stored, so
+                // `Variant::load(h).render()` did not reproduce the text at
+                // `h` and re-hashed to a different address. Nothing re-rendered
+                // a loaded node, so it never surfaced -- but re-deriving a
+                // verdict from the DAG is the claim this whole module rests
+                // on, and it was false for any variant with a learning rate.
+                //
+                // `push_f2` writes exactly two decimals, and parsing that back
+                // and re-rendering it is exact, so the round trip holds.
+                "lambda" => v.lambda = val.parse().unwrap_or(0.0),
                 "rank" => v.rank = val.parse().unwrap_or(0),
                 "epochs" => v.epochs = val.parse().unwrap_or(0),
                 "rule" => v.rule = val.parse().unwrap_or(0),
@@ -1514,9 +1525,15 @@ pub fn selftest() -> bool {
     // corrupting the history it exists to protect.
     let stored = v1.store();
     let back = Variant::load(&stored);
-    let round = back.map_or(false, |b| {
+    let round = back.as_ref().map_or(false, |b| {
         b.parent == v1.parent && b.adapter == v1.adapter && b.rule == v1.rule
     });
+    // The identity, not a sample of the fields. Comparing three of them is
+    // what let the missing `lambda` arm live here: `v1` has a nonzero lambda,
+    // it read back as 0.0, and every checked field still matched. A node that
+    // does not re-hash to the address it was read from cannot be used to
+    // re-derive anything, which is the one property this module promises.
+    let readdressed = back.as_ref().map_or(false, |b| b.hash() == stored);
     let mut np = String::from(ROOT);
     np.push_str("/nodes/");
     np.push_str(&hex32(&stored));
@@ -1525,6 +1542,7 @@ pub fn selftest() -> bool {
     sysbox::detach(&np);
     sysbox::detach(&bp);
     claim("a stored variant reads back with its lineage intact", round);
+    claim("a stored variant re-hashes to the address it came from", readdressed);
 
     ok
 }
