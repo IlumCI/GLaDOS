@@ -1256,10 +1256,23 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     // changes the live model on the operator's say-so alone,
                     // and a lower training loss is not evidence that routing
                     // improved.
+                    // Write the node now, rather than leaving the next trial
+                    // to discover an adapter nobody recorded and describe it
+                    // as something it is not. Unjudged, and the node says so
+                    // by carrying the outside-arrival zeros -- but addressable,
+                    // so `godel rollback` can step back over it.
+                    let noted = crate::ai::with_engine(crate::ai::godel::record_current);
                     console::set_color(YELLOW);
                     kprintln!("  unjudged: this moved the live model directly");
-                    kprintln!("  'fit' then 'route' to see what it did; 'adapter off' to undo");
                     console::set_color(LTGRAY);
+                    match noted.flatten() {
+                        Some(h) => kprintln!(
+                            "  recorded as {} (deep) -- 'godel rollback' steps back over it",
+                            &crate::ai::godel::short_hex(&h)[..8]
+                        ),
+                        None => kprintln!("  (nothing attached to record)"),
+                    }
+                    kprintln!("  'fit' then 'route' to see what it did; 'adapter off' to undo");
                 }
             }
         }

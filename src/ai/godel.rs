@@ -436,6 +436,15 @@ pub struct Variant {
     /// judges and leave no trace in the lineage, no ledger line, and nothing
     /// for `rollback` to undo.
     pub core: Option<[u8; 32]>,
+    /// Whether the attention path moved, not only the classifier.
+    ///
+    /// `deeptrain` adapts every q/k/v site as well as the decision layer, and
+    /// the two are different objects with different economics -- a
+    /// classifier-only adapter leaves every hidden state a constant, which is
+    /// what makes cached features and cheap re-judging possible, and a deep
+    /// one gives that up. A node that does not say which it is describes the
+    /// wrong experiment.
+    pub deep: bool,
     pub born: u32,
 }
 
@@ -595,6 +604,12 @@ impl Variant {
             s.push_str(&hex32(&c));
             s.push('\n');
         }
+        // Conditional for the same reason `core` is: absent from the rendering
+        // when absent from the object, so every node written before this
+        // existed still renders to the bytes it was stored as.
+        if self.deep {
+            s.push_str("deep 1\n");
+        }
         s
     }
 
@@ -642,6 +657,7 @@ impl Variant {
             epochs: 0,
             rule: 0,
             core: None,
+            deep: false,
             born: 0,
         };
         for line in text.lines() {
@@ -665,6 +681,7 @@ impl Variant {
                 // and re-rendering it is exact, so the round trip holds.
                 "lambda" => v.lambda = val.parse().unwrap_or(0.0),
                 "core" => v.core = from_hex32(val),
+                "deep" => v.deep = val == "1",
                 "rank" => v.rank = val.parse().unwrap_or(0),
                 "epochs" => v.epochs = val.parse().unwrap_or(0),
                 "rule" => v.rule = val.parse().unwrap_or(0),
@@ -975,6 +992,14 @@ fn ensure_head(e: &mut super::Engine) -> Option<[u8; 32]> {
         return None;
     };
 
+    // What kind of adapter this actually is, read off the thing itself.
+    //
+    // `deeptrain` attaches a full q/k/v adapter and touches neither the head
+    // nor the ledger, so the next trial recorded it here -- as a
+    // classifier-only variant with unknown parameters, because that is what
+    // this function used to assume. The lineage then claimed a deep adapter
+    // was a shallow one, which is worse than claiming it was unknown.
+    let deep = ad.qkv.iter().any(|t| t.iter().any(|d| d.is_some()));
     let blob = ad.to_blob();
     let ah = sha256::hash(&blob);
     let current = head();
@@ -993,6 +1018,7 @@ fn ensure_head(e: &mut super::Engine) -> Option<[u8; 32]> {
         policy: sysbox::read_blob("/ai/agent/policy").map(|p| sha256::hash(&p)),
         skills: None,
         corpus: sysbox::hash_of(super::vocab::CORPUS),
+        deep,
         // What is actually installed, recorded rather than assumed -- the same
         // discipline as `policy` and `corpus`. A variant trained while a
         // machine-written core was voting is not the same object as one
@@ -1117,6 +1143,8 @@ pub fn trial(
         policy: sysbox::read_blob("/ai/agent/policy").map(|p| sha256::hash(&p)),
         skills: None,
         corpus: sysbox::hash_of(super::vocab::CORPUS),
+        // `scatter` builds a classifier-only adapter, always.
+        deep: false,
         // What is actually installed, recorded rather than assumed -- the same
         // discipline as `policy` and `corpus`. A variant trained while a
         // machine-written core was voting is not the same object as one
@@ -1245,6 +1273,22 @@ fn sanity(t: &Trial, d: &super::adapter::Dora) -> (bool, &'static str) {
 /// was never deleted and the parent node still names it. Undoing a
 /// self-modification costs a pointer write and a blob read, which is the
 /// property that makes adopting one defensible in the first place.
+/// Record whatever is attached right now as a node, and make it the head.
+///
+/// For changes that arrive from outside the loop -- `deeptrain`, `adapter
+/// load`, `train adapter`. None of them is judged, and this does not pretend
+/// otherwise: the node it writes carries the honest "arrived from outside"
+/// zeros, plus `deep` read off the adapter itself.
+///
+/// What it buys is that the change is *addressable*. Before this, `deeptrain`
+/// moved every q/k/v site and left no trace, so the lineage's account of the
+/// mind was silently wrong until the next trial happened to notice, and
+/// `godel rollback` had nothing to walk back to. `adapter off` was the only
+/// undo, and it discards everything rather than stepping back one change.
+pub fn record_current(e: &mut super::Engine) -> Option<[u8; 32]> {
+    ensure_head(e)
+}
+
 /// Judge a council core and, if it passes, adopt it into the lineage.
 ///
 /// The second kind of thing this loop can change, and the first that is not a
@@ -1293,6 +1337,9 @@ pub fn trial_core(e: &mut super::Engine, h: &[u8; 32]) -> Result<Certificate, &'
         epochs: 0,
         rule: super::harness::Rule::WithCore as u8,
         core: Some(*h),
+        // Carried from the incumbent: a core changes no weights, so whatever
+        // the parent was, this variant still is.
+        deep: parent.and_then(|p| Variant::load(&p)).map(|v| v.deep).unwrap_or(false),
         born: crate::dev::rtc::now().map(|d| crate::dev::rtc::unix_seconds(&d)).unwrap_or(0),
     };
     let vhash = variant.hash();
@@ -1661,6 +1708,7 @@ pub fn selftest() -> bool {
     // than a new one that behaves identically.
     let mk = |lambda: f32, born: u32| Variant {
         core: None,
+        deep: false,
         parent: Some(h),
         adapter: Some(sha256::hash(b"adapter")),
         policy: None,
