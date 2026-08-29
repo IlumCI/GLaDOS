@@ -48,6 +48,7 @@ pub fn turns() -> usize {
 /// Forget the conversation and start over.
 pub fn reset() {
     unsafe { *TURNS.get() = 0 };
+    unsafe { *SYS_LEN.get() = 0 };
     super::with_engine(|e| {
         e.pos = 0;
         e.last_token = 0;
@@ -96,15 +97,46 @@ fn system_turn() -> String {
     s
 }
 
-/// Attention sinks kept when the conversation starts evicting.
+/// Sinks to keep when nothing better is known.
 ///
 /// Four, from the StreamingLLM result: a handful of early tokens absorb a
 /// disproportionate share of attention, and dropping them is what makes a
-/// naively-windowed model fall apart rather than merely forget. They are the
-/// *first four tokens*, not the system turn -- the system turn's content
-/// scrolls out like anything else, and what survives is the model's ability to
-/// keep generating coherently.
-const SINKS: usize = 4;
+/// naively-windowed model fall apart rather than merely forget.
+const MIN_SINKS: usize = 4;
+
+/// How many positions the open conversation's system turn occupies.
+///
+/// Zero when there is no conversation, or when one was revived and this was
+/// not alongside it.
+static SYS_LEN: crate::sync::Racy<usize> = crate::sync::Racy::new(0);
+
+/// Where the length is parked, beside the cache it describes.
+const LIVE_SYS: &str = "live.sys";
+
+/// Sinks are *pinned slots*, so pinning the system turn is a matter of
+/// counting it.
+///
+/// `slot_of` returns `j` unchanged for `j < n_sinks` and wraps everything
+/// after into the ring. The sinks are therefore not merely privileged, they
+/// are never written over -- so if the sink count is the system turn's length
+/// rather than four, the system turn is what survives eviction, in its
+/// original positions and with its original RoPE angles.
+///
+/// Four sinks buy stability and nothing else: the model keeps generating
+/// coherently while the text that told it who it is has scrolled away. Pinning
+/// the whole turn keeps the instructions, the applet list and what it knows
+/// about the operator for as long as the conversation runs.
+///
+/// The cost is honest and worth stating: a pinned slot never recycles, so the
+/// recent window is shorter by exactly the system turn. At 512 with a ~120
+/// token system turn that is a fifth of the cache; at 8192 it is noise.
+/// Clamped to a third of the trained length, because a system turn large
+/// enough to crowd out the conversation is worse than one that scrolls.
+fn sink_count(trained: usize) -> usize {
+    let want = unsafe { *SYS_LEN.get() };
+    let ceiling = (trained / 3).max(MIN_SINKS);
+    want.clamp(MIN_SINKS, ceiling)
+}
 
 /// Start evicting this many positions before the wall.
 const MARGIN: usize = 64;
@@ -133,16 +165,23 @@ fn widen_if_near_the_wall() {
     }
     // The largest ring the trained length allows, so eviction starts as late
     // as possible and the conversation keeps as much of itself as it can.
-    let ring = trained.saturating_sub(SINKS + 1);
-    if ring == 0 || pos > SINKS + ring {
+    let sinks = sink_count(trained);
+    let ring = trained.saturating_sub(sinks + 1);
+    if ring == 0 || pos > sinks + ring {
         return;
     }
-    super::set_window(SINKS, ring);
+    super::set_window(sinks, ring);
     crate::kprintln!(
-        "  (the conversation reached {} of {} -- it now forgets its oldest turns rather than stopping)",
+        "  (reached {} of {} -- oldest turns now scroll; the first {} positions are pinned)",
         pos,
-        trained
+        trained,
+        sinks
     );
+    if sinks <= MIN_SINKS {
+        // Said out loud, because the difference is what the model still knows
+        // about itself twenty turns from now.
+        crate::kprintln!("  (the system turn is not pinned -- it will scroll out like any other)");
+    }
 }
 
 /// One turn of conversation. The first opens it; the rest continue it.
@@ -158,7 +197,15 @@ pub fn turn(message: &str, opts: &super::GenOpts) -> usize {
 
     let mut prompt = String::new();
     if opening {
-        prompt.push_str(&system_turn());
+        let sys = system_turn();
+        // Counted the way `generate` will encode it -- same BOS, same
+        // tokenizer -- so the sink count is the span the system turn actually
+        // occupies and not an estimate of it. An estimate that ran short would
+        // pin part of a turn and leave the rest to scroll, which is worse than
+        // pinning none of it.
+        let n = super::with_engine(|e| e.tok.encode(&sys, true, false).len()).unwrap_or(0);
+        unsafe { *SYS_LEN.get() = n };
+        prompt.push_str(&sys);
     } else {
         // Close the assistant's previous turn before opening the user's. The
         // cache ends mid-turn -- the model stopped generating, it did not emit
@@ -248,6 +295,15 @@ pub fn park() -> Parked {
     if super::ctx_save(LIVE).is_none() {
         return Parked::Failed;
     }
+    // Beside the cache rather than inside it: the context format has no field
+    // for this and adding one would make every context written before today
+    // unreadable, for eight bytes.
+    let n = unsafe { *SYS_LEN.get() };
+    let mut path = String::from(super::CTX_DIR);
+    path.push('/');
+    path.push_str(LIVE_SYS);
+    let _ = crate::sysbox::write_blob(&path, Vec::from(&n.to_le_bytes()[..]));
+
     if crate::store::mounted() {
         Parked::Durable
     } else {
@@ -266,5 +322,33 @@ pub fn revive() -> Option<usize> {
         return None;
     }
     unsafe { *TURNS.get() = 1 };
+
+    let mut path = String::from(super::CTX_DIR);
+    path.push('/');
+    path.push_str(LIVE_SYS);
+    let span = crate::sysbox::read_blob(&path)
+        .filter(|b| b.len() == 8)
+        .map(|b| {
+            let mut a = [0u8; 8];
+            a.copy_from_slice(&b);
+            usize::from_le_bytes(a)
+        })
+        .unwrap_or(0);
+    // A revived conversation whose span was not parked alongside it pins the
+    // default four. Silent, because it is only worse than the alternative once
+    // the cache fills, and `widen_if_near_the_wall` says so when it does.
+    unsafe { *SYS_LEN.get() = span };
+
     Some(p)
+}
+
+/// Positions the open conversation's system turn occupies, and how many of
+/// them would be pinned if the cache filled now.
+///
+/// Reportable so the pin can be checked without driving a conversation into
+/// eviction to find out. The first version of this was verified by reading
+/// fifteen turns of a 135M model's output, which is a slow way to learn a
+/// number the machine already knows.
+pub fn pinning(trained: usize) -> (usize, usize) {
+    (unsafe { *SYS_LEN.get() }, sink_count(trained))
 }

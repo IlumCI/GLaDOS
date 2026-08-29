@@ -1555,6 +1555,12 @@ pub fn ctx_report() {
     kprintln!("[ctx]");
     console::set_color(LTGRAY);
     let live = with_engine(|e| (e.pos, e.model.cfg.live_cap(), e.model.cfg.streams()));
+    if let Some(trained) = with_engine(|e| e.model.cfg.seq_len) {
+        let (span, pinned) = companion::pinning(trained);
+        if span > 0 {
+            kprintln!("  system turn spans {} positions; {} would be pinned", span, pinned);
+        }
+    }
     match live {
         None => {
             kprintln!("  {}", engine_refusal());

@@ -1037,6 +1037,23 @@ announcing "it now forgets its oldest turns" forgot *all* of them, position fell
 from 468 to 72, and the model carried on answering fluently. Only `ctx` showed
 it.
 
+**The system turn is pinned, and that is the same mechanism.** `slot_of`
+returns `j` unchanged for `j < n_sinks`, so a sink is not merely a privileged
+position -- it is a slot that never recycles. Setting the sink count to the
+system turn's *token length* therefore pins the instructions, the applet list
+and `/ai/about` for as long as the conversation runs, in their original slots
+and with their original RoPE angles. Four sinks buy stability; the whole turn
+buys memory of what the model is.
+
+The count is taken by encoding the system turn the way `generate` will (same
+BOS, same tokenizer), not estimated -- a count that ran short would pin part of
+a turn and leave the rest to scroll. It is clamped to a third of the trained
+length, and `ctx` prints span and pinned separately so a clamp shows up as the
+two disagreeing. The cost is that a pinned slot never recycles, so the recent
+window is shorter by exactly the system turn: a fifth of the cache at 512,
+noise at 8192. Measured: 120 positions with no `about`, 154 after adding a line
+to it.
+
 **`remember <text>` is an applet, not a parse of the model's prose.** It is in
 `sysbox::APPLETS`, so the decoding grammar carries it and the model reaches it
 by the same route as `ls` -- an answer that merely says it will remember cannot
