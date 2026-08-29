@@ -953,6 +953,30 @@ fn selftest() {
         kprintln!("  after drop: {} B LEAKED", used);
     }
 
+    // Version ordering, because an updater will decide on it.
+    //
+    // The interesting case is 0.10.0 against 0.9.0: compared as strings "0.1"
+    // sorts before "0.9", so the naive implementation installs an older image
+    // and reports success. Checked here rather than reasoned about, since the
+    // failure is silent and the consequence is a downgrade nobody asked for.
+    console::set_color(LTGREEN);
+    kprintln!("\n[selftest] version:");
+    console::set_color(LTGRAY_IDX);
+    let vok = version_newer("0.2.0", "0.1.0")
+        && version_newer("0.10.0", "0.9.0")
+        && !version_newer("0.9.0", "0.10.0")
+        && !version_newer(VERSION, VERSION)
+        && version_newer("1.0.0", "0.99.99");
+    if !vok {
+        console::set_color(LTRED);
+    }
+    kprintln!(
+        "  {}  this build is {}, and 0.10.0 is newer than 0.9.0",
+        if vok { "ok " } else { "FAIL" },
+        VERSION
+    );
+    console::set_color(LTGRAY_IDX);
+
     // The timer is the first thing in this kernel that runs without being
     // called. If ticks advance, the LAPIC, the IDT vector, the EOI path and
     // the calibration are all correct at once.
@@ -1057,9 +1081,40 @@ fn selftest() {
     // shell never starts.
 }
 
+/// What this build is.
+///
+/// A prerequisite for updating, not a nicety: an updater has to answer "is the
+/// staged image newer than the running one", and until now nothing in the
+/// binary could say what the running one *was*. The only version strings in
+/// the whole image were two hardcoded `User-Agent: glados/0.1` headers.
+///
+/// From `CARGO_PKG_VERSION` rather than a constant typed here, so the number
+/// in `Cargo.toml` and the number the machine reports cannot disagree. There
+/// is deliberately no `build.rs`: a git hash would make every build a
+/// different version and this tree has no CI to stamp one consistently.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Ordered comparison, for deciding whether an update goes backwards.
+///
+/// Dotted numbers, compared numerically field by field. String comparison
+/// would sort "0.10.0" before "0.9.0", which is the classic way an updater
+/// installs an older image and reports success.
+pub fn version_newer(candidate: &str, current: &str) -> bool {
+    let mut a = candidate.split('.');
+    let mut b = current.split('.');
+    for _ in 0..4 {
+        let x: u32 = a.next().unwrap_or("0").trim().parse().unwrap_or(0);
+        let y: u32 = b.next().unwrap_or("0").trim().parse().unwrap_or(0);
+        if x != y {
+            return x > y;
+        }
+    }
+    false
+}
+
 fn banner(boot: &BootInfo, acpi: &Option<acpi::Acpi>) {
     console::set_color(LTCYAN);
-    kprintln!("glados");
+    kprintln!("glados {}", VERSION);
     console::set_color(WHITE);
     kprintln!("a ring-0 kernel for MSI MS-16R8\n");
 

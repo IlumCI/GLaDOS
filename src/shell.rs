@@ -1822,6 +1822,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             kprintln!("  about [text]                 what the model should know about you");
             kprintln!("  skill [trust <hash>]         which skills keep operator powers");
             kprintln!("  sandbox [keep] <path>        run a program, see what it touched, undo it");
+            kprintln!("  version                      what this build is");
             kprintln!("  fit [lambda]  refit the probe and the council on what it knows");
             kprintln!("  gate search   how often agreement is right; the config search");
             kprintln!("  ctx cont window logits probe feature zeroshot train");
@@ -3099,6 +3100,16 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     }
                 }
             }
+        }
+        "version" | "uname" => {
+            console::set_color(LTCYAN);
+            kprintln!("  glados {}", crate::VERSION);
+            console::set_color(LTGRAY);
+            kprintln!("  a ring-0 kernel for MSI MS-16R8, one address space, no syscalls");
+            // The formats an update has to stay compatible with. Each is
+            // refused rather than guessed at when its version does not match,
+            // so this is the map of what a new image may not silently change.
+            kprintln!("  formats: checkpoint v2/v3/v4, app 1, GLADOSPK 1, GLADOSTR, GLADOSA1, GLADOSC1");
         }
         "words" => {
             console::set_color(YELLOW);
