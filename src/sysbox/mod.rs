@@ -69,6 +69,12 @@ pub const APPLETS: &[Applet] = &[
     // source may claim otherwise. The read-only grammar therefore never
     // carries it, whatever the tool's text says.
     Applet { name: "run",    args: "<path>",       help: "execute a lang program from the namespace", mutates: true },
+    // The model's own way to keep something. It is in this table rather than
+    // being a parse of the model's prose, because everything else it does goes
+    // through this table: the decoding grammar is built from it, so `remember`
+    // is reachable by the same route as `ls`, and an answer that merely *says*
+    // it will remember cannot be mistaken for one that did.
+    Applet { name: "remember", args: "<text>",     help: "keep a fact about the operator", mutates: true },
 ];
 
 /// Resolve a path the way every applet does, against the working directory.
@@ -428,6 +434,7 @@ pub fn dispatch(cmd: &str, rest: &str) -> bool {
         "diff" => cmd_diff(a1, a2),
         "fsck" => cmd_fsck(),
         "run" => cmd_run(a1),
+        "remember" => cmd_remember(rest),
         _ => {}
     }
     true
@@ -597,6 +604,39 @@ pub fn check_args(name: &str, rest: &str) -> Result<(), String> {
 
 pub fn write_text(path: &str, text: &str) -> bool {
     write_blob(path, text.as_bytes().to_vec())
+}
+
+/// Append a line to what the model knows about the operator.
+///
+/// Appends rather than sets: facts accumulate, and a setter would make every
+/// new one cost the old ones. Duplicates are refused because the file is read
+/// into the system turn of every conversation, so a fact repeated forty times
+/// is forty times the context for no more information.
+fn cmd_remember(text: &str) {
+    let text = text.trim();
+    if text.is_empty() {
+        crate::kprintln!("  usage: remember <text>");
+        return;
+    }
+    let path = crate::ai::companion::ABOUT;
+    let mut buf = read_blob(path).unwrap_or_default();
+    if let Ok(existing) = core::str::from_utf8(&buf) {
+        if existing.lines().any(|l| l.trim() == text) {
+            crate::kprintln!("  already known");
+            return;
+        }
+    }
+    if !buf.is_empty() && !buf.ends_with(b"\n") {
+        buf.push(b'\n');
+    }
+    buf.extend_from_slice(text.as_bytes());
+    buf.push(b'\n');
+    if write_blob(path, buf) {
+        crate::kprintln!("  kept: {}", text);
+        crate::kprintln!("  ('snap' to carry it past this boot)");
+    } else {
+        crate::kprintln!("  could not write {}", path);
+    }
 }
 
 pub fn write_blob(path: &str, data: Vec<u8>) -> bool {

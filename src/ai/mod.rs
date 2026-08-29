@@ -1658,10 +1658,19 @@ pub fn mind_task() {
         // empty rather than wrong.
         let _claim = claim_engine();
 
+        // Framed as a turn rather than spliced into the last one. The cache is
+        // shared with the operator's conversation and always was; what changes
+        // here is that the machine's own thought is labelled as its own, so
+        // neither the operator nor the model has to guess who said it.
+        let mut framed = companion::interject_frame(
+            "The following is your own thought, unprompted. The operator did not ask for it.",
+        );
+        framed.push_str(&prompt);
         let opts =
             GenOpts { steps: 48, temperature: 0.9, topp: 0.9, resume: true, yielding: true,
-                      ..Default::default() };
-        generate(&prompt, &opts);
+                      bos: false, echo_prompt: false, ..Default::default() };
+        generate(&framed, &opts);
+        companion::interjected();
 
         console::set_color(YELLOW);
         kprintln!("[mind] done");
@@ -1859,6 +1868,37 @@ pub fn set_window(sinks: usize, window: usize) {
         e.model.cfg.attn_window = window;
         let after = e.model.cfg.live_cap();
         if after == before {
+            return;
+        }
+
+        // One case survives the change, and it is the one worth having.
+        //
+        // Unwindowed, a position lives at the slot with its own number.
+        // Windowed, it lives at `sinks + (abs - sinks) % ring`. While
+        // `abs - sinks < ring` those are the same address -- so if the cache
+        // was not previously a ring, and the conversation has not yet run past
+        // `sinks + ring`, every entry already written is already where the new
+        // scheme will look for it. Nothing has to be re-seated because nothing
+        // moves.
+        //
+        // The buffers do not shrink either: they were allocated for the larger
+        // capacity and the new one indexes a subset, which wastes the
+        // difference and costs no correctness. That is the whole trick -- the
+        // general case really cannot be re-seated, and this case does not need
+        // to be.
+        //
+        // Getting this wrong is not loud. The first version of the caller
+        // enabled a window as the conversation approached the wall and this
+        // function cleared it, so a feature that announced "it now forgets its
+        // oldest turns" in fact forgot all of them, and position fell from 468
+        // to 72 while the model went on answering fluently.
+        let was_ring = before < e.model.cfg.seq_len;
+        if !was_ring && after <= before && e.pos <= after {
+            console::set_color(LTGRAY);
+            kprintln!(
+                "  cache now a ring of {} ({} positions kept)",
+                after, e.pos
+            );
             return;
         }
         // The cache is allocated for the window, so changing it changes every

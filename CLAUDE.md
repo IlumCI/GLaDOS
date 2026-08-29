@@ -1017,10 +1017,38 @@ Verified across two boots with a store mounted: `snapshot 2 root
 0216018537036ad6`, then `the conversation from last boot is still here (162
 tokens in)` and `about` reading back what was told to it.
 
-The context length is the limit on how long a conversation can run -- at
-SmolLM2's 512 that is about four turns, which is why `--seq`/`tools/reseq.py`
-matters more than it looks. `window <sinks> <recent>` trades exactness for an
-unbounded one.
+**The conversation does not end at the context wall.** Within 64 positions of
+the trained length it turns the cache into a ring (4 sinks, per StreamingLLM)
+and evicts its oldest turns instead of stopping. Measured: `cache now a ring of
+511 (468 positions kept)`, then `position 649, streaming through a 511-slot
+cache`.
+
+That is only safe because of a coincidence worth knowing. Unwindowed, a
+position lives at the slot with its own number; windowed, at
+`sinks + (abs - sinks) % ring`. Those are the same address while
+`abs - sinks < ring`, so switching *before* the ring would first wrap needs no
+entry re-seated, and the buffers are already larger than the new capacity.
+`set_window` takes that path only under those conditions and clears the cache
+otherwise, because the general case genuinely cannot be re-seated.
+
+The first version of this got it wrong in the loudest possible way and the
+output still looked fine: `set_window` cleared unconditionally, so a feature
+announcing "it now forgets its oldest turns" forgot *all* of them, position fell
+from 468 to 72, and the model carried on answering fluently. Only `ctx` showed
+it.
+
+**`remember <text>` is an applet, not a parse of the model's prose.** It is in
+`sysbox::APPLETS`, so the decoding grammar carries it and the model reaches it
+by the same route as `ls` -- an answer that merely says it will remember cannot
+be mistaken for one that did. It refuses duplicates, since the file is read into
+every system turn.
+
+**The resident mind speaks as a turn.** It always generated into this same KV
+cache (`resume: true`), but unframed: a thought it had on its own spliced into
+the middle of its last sentence to the operator, and the next question read as a
+continuation of it. `companion::interject_frame` closes the open turn and opens
+a labelled one, so neither the operator nor the model has to guess who said
+what.
 
 ### Storage (`src/store/`, `src/sysbox/`)
 

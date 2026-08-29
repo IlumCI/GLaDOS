@@ -96,12 +96,65 @@ fn system_turn() -> String {
     s
 }
 
+/// Attention sinks kept when the conversation starts evicting.
+///
+/// Four, from the StreamingLLM result: a handful of early tokens absorb a
+/// disproportionate share of attention, and dropping them is what makes a
+/// naively-windowed model fall apart rather than merely forget. They are the
+/// *first four tokens*, not the system turn -- the system turn's content
+/// scrolls out like anything else, and what survives is the model's ability to
+/// keep generating coherently.
+const SINKS: usize = 4;
+
+/// Start evicting this many positions before the wall.
+const MARGIN: usize = 64;
+
+/// Turn the cache into a ring before it fills, so the conversation does not
+/// simply stop.
+///
+/// **Why this is safe to do partway through, and only here.** Unwindowed, a
+/// position lives at the slot with its own number. Windowed, it lives at
+/// `sinks + (abs - sinks) % ring`. Those two agree exactly while
+/// `abs - sinks < ring` -- so every entry already written is already in the
+/// slot the windowed scheme will look for, provided the ring has not yet had
+/// cause to wrap. Enabling it *before* the cache fills is precisely that case.
+///
+/// Do it later and every existing entry is at the wrong address: the model
+/// would read a real key from the wrong position and stay perfectly fluent
+/// while doing it, which is this codebase's worst failure shape.
+fn widen_if_near_the_wall() {
+    let Some((pos, trained, already)) = super::with_engine(|e| {
+        (e.pos, e.model.cfg.seq_len, e.model.cfg.streams())
+    }) else {
+        return;
+    };
+    if already || pos + MARGIN < trained {
+        return;
+    }
+    // The largest ring the trained length allows, so eviction starts as late
+    // as possible and the conversation keeps as much of itself as it can.
+    let ring = trained.saturating_sub(SINKS + 1);
+    if ring == 0 || pos > SINKS + ring {
+        return;
+    }
+    super::set_window(SINKS, ring);
+    crate::kprintln!(
+        "  (the conversation reached {} of {} -- it now forgets its oldest turns rather than stopping)",
+        pos,
+        trained
+    );
+}
+
+/// One turn of conversation. The first opens it; the rest continue it.
 /// One turn of conversation. The first opens it; the rest continue it.
 ///
 /// Returns the position reached, so a caller can tell an opening turn from a
 /// continuing one without asking twice.
 pub fn turn(message: &str, opts: &super::GenOpts) -> usize {
     let opening = turns() == 0 || super::with_engine(|e| e.pos).unwrap_or(0) == 0;
+    if !opening {
+        widen_if_near_the_wall();
+    }
 
     let mut prompt = String::new();
     if opening {
@@ -144,6 +197,41 @@ pub enum Parked {
     /// when the machine is switched off.
     Volatile,
     Failed,
+}
+
+/// Frame something the machine thought of by itself as a turn in the
+/// conversation.
+///
+/// The resident mind already generated into this KV cache -- it passes
+/// `resume: true` and always has. What it did not do is *say whose turn it
+/// was*: raw text resumed mid-assistant-turn, so a thought the machine had on
+/// its own spliced into the middle of its last sentence to the operator, and
+/// the next question read as a continuation of that. Fluent, and wrong about
+/// who said what.
+///
+/// This closes the open turn and opens one that is labelled. The operator sees
+/// where a thought came from, and so does the model on every later turn, which
+/// is the part that actually matters: a conversation where the machine cannot
+/// tell its own words from yours is not a conversation.
+pub fn interject_frame(kind: &str) -> String {
+    let mut s = String::new();
+    if turns() > 0 {
+        s.push_str("<|im_end|>
+");
+    }
+    s.push_str("<|im_start|>system
+");
+    s.push_str(kind);
+    s.push_str("<|im_end|>
+<|im_start|>assistant
+");
+    s
+}
+
+/// Note that the machine has taken a turn, so the next operator turn closes
+/// this one properly.
+pub fn interjected() {
+    unsafe { *TURNS.get() += 1 };
 }
 
 /// Park the conversation.
