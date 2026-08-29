@@ -498,10 +498,30 @@ impl Panel {
                     fb.rect(x, y + 4 + TEXT_H + 2, uw, 2, theme::APERTURE);
                 }
                 Widget::Status { name, value, tone } => {
-                    theme::text(fb, x, y, name, theme::TEXT_DIM, theme::FACE);
                     // One column for every row on the page, so the values line
                     // up and can be read down rather than hunted for.
                     let col = theme::text_w(STATUS_COL).min(w / 2);
+                    // Clipped to its column, with a space kept.
+                    //
+                    // A name longer than the column used to run straight into
+                    // its own value: "Trained length" and "512 positions" drew
+                    // as "Trained lengt512 positions", which reads as a
+                    // corrupted number rather than as a layout that ran out of
+                    // room. Every panel shares this column, so the fix belongs
+                    // here and not in the labels -- otherwise the next long
+                    // name reintroduces it.
+                    let room = (col / theme::text_w(1)).saturating_sub(1) as usize;
+                    // By character boundary, not by byte. `&name[..room]`
+                    // panics if it lands mid-codepoint, and a panic in the
+                    // paint pass takes the desktop with it -- an expensive way
+                    // to discover that a label had an accent in it.
+                    let cut = name
+                        .char_indices()
+                        .nth(room)
+                        .map(|(i, _)| i)
+                        .unwrap_or(name.len());
+                    let shown: &str = &name[..cut];
+                    theme::text(fb, x, y, shown, theme::TEXT_DIM, theme::FACE);
                     theme::text(fb, x + col, y, value, tone.color(), theme::FACE);
                 }
                 Widget::Note(lines) => {
@@ -685,6 +705,10 @@ pub fn panel_named(name: &str) -> Option<Panel> {
     match name {
         "programs" => Some(program_manager()),
         "status" => Some(status_panel()),
+        "memory" | "mem" => Some(memory_panel()),
+        "tasks" => Some(tasks_panel()),
+        "storage" | "store" => Some(storage_panel()),
+        "attention" | "window" => Some(attention_panel()),
         "files" => Some(file_browser("/")),
         "settings" | "network" => Some(settings("net")),
         // The settings pages by name, so the shell can open any of them
@@ -711,6 +735,13 @@ pub fn panel_for_route(route: &str) -> Option<(String, Panel)> {
         }
         "set" => Some((String::from("Settings"), settings(arg))),
         "programs" => Some((String::from("Program Manager"), program_manager())),
+        // Routed as well as named, so each rebuilds itself when the window is
+        // refreshed. These are readings of live state -- a memory window that
+        // kept its first answer would be worse than no window.
+        "memory" => Some((String::from("Memory"), memory_panel())),
+        "tasks" => Some((String::from("Tasks"), tasks_panel())),
+        "storage" => Some((String::from("Storage"), storage_panel())),
+        "attention" => Some((String::from("Attention"), attention_panel())),
         // An application, read from the namespace and parsed under the stored
         // gate. This is the one route whose contents the machine may write.
         "app" => crate::app::panel(arg),
@@ -1247,6 +1278,171 @@ pub fn status_panel() -> Panel {
     )
 }
 
+/// Bytes, rendered the way a person reads them.
+fn human(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 * 1024 {
+        alloc::format!("{}.{} GiB", bytes / (1024 * 1024 * 1024), (bytes / (1024 * 1024) % 1024) * 10 / 1024)
+    } else if bytes >= 1024 * 1024 {
+        alloc::format!("{} MiB", bytes / (1024 * 1024))
+    } else if bytes >= 1024 {
+        alloc::format!("{} KiB", bytes / 1024)
+    } else {
+        alloc::format!("{} B", bytes)
+    }
+}
+
+fn stat(name: &str, value: String, tone: Tone) -> Widget {
+    Widget::Status { name: String::from(name), value, tone }
+}
+
+/// The heap, as it is right now.
+///
+/// `mem` printed these numbers into the terminal, which is a fine way to
+/// answer a question once and a poor way to watch something. A panel is
+/// rebuilt whole every time it is drawn, so this is a reading rather than a
+/// cache -- the same rule the settings pages keep.
+pub fn memory_panel() -> Panel {
+    let (used, total) = crate::mem::heap::HEAP.stats();
+    let free = total.saturating_sub(used);
+    // A heap this full is not an opinion: the ladder is one physically
+    // contiguous allocation and there is no second rung to fall to at runtime.
+    let tone = if total == 0 {
+        Tone::Bad
+    } else if used * 10 > total * 9 {
+        Tone::Bad
+    } else if used * 4 > total * 3 {
+        Tone::Warn
+    } else {
+        Tone::Ok
+    };
+    let pct = if total == 0 { 0 } else { used * 100 / total };
+    Panel::new(
+        "Memory",
+        alloc::vec![
+            Widget::Heading(String::from("Kernel heap")),
+            stat("In use", human(used as u64), tone),
+            stat("Free", human(free as u64), Tone::Plain),
+            stat("Total", human(total as u64), Tone::Plain),
+            stat("Used", alloc::format!("{}%", pct), tone),
+            Widget::Sep,
+            Widget::Note(alloc::vec![
+                String::from("One contiguous allocation,"),
+                String::from("chosen at boot from a ladder."),
+                String::from("No second rung once running."),
+            ]),
+            Widget::Button { label: String::from("Close"), action: Action::Close },
+        ],
+    )
+}
+
+/// Every task, what it is, and how often it has been scheduled.
+pub fn tasks_panel() -> Panel {
+    let here = crate::task::current();
+    let mut ws = alloc::vec![Widget::Heading(String::from("Tasks"))];
+    for n in 0..crate::task::count() {
+        let Some(t) = crate::task::snapshot(n) else { continue };
+        let running = n == here;
+        // Compact on purpose. A panel is as wide as its widest widget, and a
+        // window wider than the gap beside the terminal cannot be placed clear
+        // of it -- so verbose values here are paid for by every window that
+        // then opens underneath something else. "running" is the tone.
+        ws.push(stat(
+            t.name,
+            alloc::format!("{} sw", t.switches),
+            if running { Tone::Ok } else { Tone::Plain },
+        ));
+    }
+    ws.push(Widget::Sep);
+    ws.push(Widget::Note(alloc::vec![
+        String::from("Round robin at 100 Hz."),
+        String::from("No blocked state: every"),
+        String::from("task is schedulable."),
+    ]));
+    ws.push(Widget::Button { label: String::from("Close"), action: Action::Close });
+    Panel::new("Tasks", ws)
+}
+
+/// The disk, the store region, and whether it may be written to.
+pub fn storage_panel() -> Panel {
+    let mut ws = alloc::vec![Widget::Heading(String::from("Device"))];
+    match crate::dev::nvme::with(|n| (n.block_count, n.block_size, n.max_transfer_blocks)) {
+        Some((blocks, bs, mtb)) => {
+            ws.push(stat("Capacity", human(blocks * bs as u64), Tone::Plain));
+            ws.push(stat("Block size", alloc::format!("{} B", bs), Tone::Plain));
+            ws.push(stat("Max transfer", human(mtb as u64 * bs as u64), Tone::Plain));
+        }
+        None => ws.push(stat("NVMe", String::from("no controller"), Tone::Bad)),
+    }
+
+    ws.push(Widget::Sep);
+    ws.push(Widget::Heading(String::from("Store")));
+    match crate::store::with(|st| {
+        (st.sb.region_start, st.sb.region_blocks, st.sb.seq, st.free_blocks())
+    }) {
+        Some((start, blocks, seq, free)) => {
+            ws.push(stat("Region", alloc::format!("{}..{}", start, start + blocks), Tone::Plain));
+            ws.push(stat("Snapshots", alloc::format!("{}", seq), Tone::Plain));
+            ws.push(stat("Free blocks", alloc::format!("{}", free), if free < 1024 { Tone::Warn } else { Tone::Ok }));
+        }
+        None => ws.push(stat("Store", String::from("not mounted"), Tone::Warn)),
+    }
+    // The distinction that decides whether anything survives a reboot, said
+    // plainly rather than left to be discovered when a fact goes missing.
+    let unlocked = crate::dev::nvme::writes_unlocked();
+    ws.push(stat(
+        "Writes",
+        String::from(if unlocked { "unlocked" } else { "locked" }),
+        if unlocked { Tone::Warn } else { Tone::Ok },
+    ));
+    ws.push(Widget::Note(alloc::vec![
+        String::from("Mounting is read-only on"),
+        String::from("purpose. A snapshot is what"),
+        String::from("outlives the machine."),
+    ]));
+    ws.push(Widget::Button { label: String::from("Close"), action: Action::Close });
+    Panel::new("Storage", ws)
+}
+
+/// What the model is attending to, and how far the conversation has run.
+pub fn attention_panel() -> Panel {
+    let mut ws = alloc::vec![Widget::Heading(String::from("Attention"))];
+    match crate::ai::window_facts() {
+        None => ws.push(stat("Model", String::from("none loaded"), Tone::Bad)),
+        Some((sinks, window, trained, cap, streams, bytes, pos)) => {
+            ws.push(stat("Trained", alloc::format!("{} positions", trained), Tone::Plain));
+            ws.push(stat("Live cache", alloc::format!("{} positions", cap), Tone::Plain));
+            ws.push(stat("Position", alloc::format!("{}", pos), Tone::Plain));
+            ws.push(stat("Cache size", human(bytes as u64), Tone::Plain));
+            ws.push(Widget::Sep);
+            if streams {
+                ws.push(stat("Mode", alloc::format!("ring, {} pinned", sinks), Tone::Ok));
+                ws.push(stat("Recent", alloc::format!("{} positions", window), Tone::Plain));
+                ws.push(Widget::Note(alloc::vec![
+                    String::from("Oldest turns scroll away."),
+                    String::from("The pinned ones hold the"),
+                    String::from("system turn, so the model"),
+                    String::from("keeps knowing what it is."),
+                ]));
+            } else {
+                ws.push(stat("Mode", String::from("whole context kept"), Tone::Plain));
+                ws.push(Widget::Note(alloc::vec![
+                    String::from("Generation stops at the"),
+                    String::from("trained length. It becomes"),
+                    String::from("a ring on its own first."),
+                ]));
+            }
+        }
+    }
+    ws.push(Widget::Field {
+        name: String::from("sinks recent"),
+        text: String::new(),
+        cursor: 0,
+        submit: Action::Apply(String::from("window")),
+    });
+    ws.push(Widget::Button { label: String::from("Close"), action: Action::Close });
+    Panel::new("Attention", ws)
+}
+
 pub fn program_manager() -> Panel {
     let run = |label: &str, cmd: &str| {
         (String::from(label), Action::Run(String::from(cmd)))
@@ -1255,23 +1451,34 @@ pub fn program_manager() -> Panel {
     // such command and there never was -- the entry typed it into the
     // terminal, the shell said so, and the menu looked broken. Now it opens
     // the Model settings page, which is what the label promises.
+    // **Every entry opens a window.**
+    //
+    // Most of these used to type a command into the terminal: "Memory" ran
+    // `mem` and printed four lines into whatever the shell was doing. That is
+    // a fine way to answer a question once and a poor way to run a program --
+    // the output scrolled away, it landed in a window the operator was not
+    // looking at, and nothing about it could be kept open beside something
+    // else. A launcher whose entries are commands is a launcher of one
+    // program, the terminal.
+    //
+    // The panels are readings, rebuilt whole on every draw, so a window left
+    // open is a live view rather than a screenshot of when it was opened.
     let items = alloc::vec![
-        // `status` is a subcommand of `net`, not a command -- typed at the
-        // top level it falls through to the interpreter and reports an
-        // undefined variable. The System panel is what the label means.
         run("System status", "win open status"),
-        run("Memory", "mem"),
-        run("Network", "net"),
-        run("Storage", "store"),
-        run("Namespace", "tree /"),
-        (String::from("Model"), Action::Browse(String::from("set:model"))),
-        (String::from("ToDo list"), Action::Run(String::from("todo"))),
+        run("Memory", "win open memory"),
+        run("Tasks", "win open tasks"),
+        run("Network", "win open network"),
+        run("Storage", "win open storage"),
+        run("Files", "win open files"),
+        run("Attention", "win open attention"),
+        (String::from("Model"), Action::Run(String::from("win open model"))),
+        run("ToDo list", "todo"),
         run("Enternet", "enternet"),
         run("Paintbrush", "paint"),
         run("Write", "write"),
         run("Minesweeper", "mines"),
-        run("Attention window", "window"),
-        run("Self-test: tensor", "tensor"),
+        run("Oracle", "oracle"),
+        run("Settings", "win open settings"),
     ];
     Panel::new(
         "Aperture Program Manager",

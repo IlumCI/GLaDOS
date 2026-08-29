@@ -1941,11 +1941,15 @@ pub fn set_window(sinks: usize, window: usize) {
     });
 }
 
-pub fn window_report() {
-    console::set_color(YELLOW);
-    kprintln!("[window]");
-    console::set_color(LTGRAY);
-    let got = with_engine(|e| {
+/// Sinks, recent window, trained length, live capacity, whether it evicts,
+/// cache bytes, and how far the conversation has run.
+///
+/// Extracted so the command and the Attention window are one reading. Two
+/// copies of this tuple would eventually disagree, and the whole point of a
+/// panel being rebuilt on every draw is that it cannot show a number the
+/// system stopped believing.
+pub fn window_facts() -> Option<(usize, usize, usize, usize, bool, usize, usize)> {
+    with_engine(|e| {
         let c = e.model.cfg;
         (
             c.attn_sinks,
@@ -1956,8 +1960,14 @@ pub fn window_report() {
             e.state.bytes(&c),
             e.pos,
         )
-    });
-    let Some((sinks, window, trained, cap, streams, bytes, pos)) = got else {
+    })
+}
+
+pub fn window_report() {
+    console::set_color(YELLOW);
+    kprintln!("[window]");
+    console::set_color(LTGRAY);
+    let Some((sinks, window, trained, cap, streams, bytes, pos)) = window_facts() else {
         kprintln!("  {}", engine_refusal());
         return;
     };
