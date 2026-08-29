@@ -944,6 +944,13 @@ pub fn blob_selftest() -> bool {
 /// 3. detaching restores the original logits exactly.
 /// The layer walk, against finite differences.
 ///
+/// Takes a `Model` rather than the `Engine`, so it can be pointed at a
+/// synthetic geometry as well as at whatever checkpoint is staged. That is not
+/// tidying: this test only ever ran on the loaded model, every model it ever
+/// loaded had `q_dim == dim`, and the one that did not panicked at boot the
+/// first time it was tried. A test that can only run on what happens to be
+/// installed can only find bugs in what happens to be installed.
+///
 /// The one check that matters for any of this. Every kernel in `backward.rs`
 /// was already selftested in isolation; what was never tested is the
 /// *composition* -- rmsnorm into attention into swiglu into rmsnorm again,
@@ -965,10 +972,10 @@ pub fn blob_selftest() -> bool {
 /// which is what the analytic gradient actually claims. Refreshing here would
 /// measure a different derivative and the mismatch would look like a bug in
 /// the walk.
-fn walk_selftest(e: &mut super::Engine) -> bool {
+pub fn walk_selftest(mdl: &mut super::model::Model) -> bool {
     use super::model::{Grads, State, Tape};
 
-    let cfg = e.model.cfg.clone();
+    let cfg = mdl.cfg.clone();
     if cfg.hybrid() || cfg.streams() {
         return true;
     }
@@ -1009,18 +1016,18 @@ fn walk_selftest(e: &mut super::Engine) -> bool {
     for (l, t) in probe.qkv.iter_mut().enumerate() {
         for (i, site) in t.iter_mut().enumerate() {
             if let Some(dora) = site.as_mut() {
-                let w = e.model.frozen_site(l, i);
+                let w = mdl.frozen_site(l, i);
                 dora.refresh(&w, true);
             }
         }
     }
     if let Some(c) = probe.cls.as_mut() {
-        let w = e.model.frozen_cls();
+        let w = mdl.frozen_cls();
         c.refresh(&w, true);
     }
     let ad = probe;
 
-    if e.model.attach_adapters_unseeded(ad.clone()).is_err() {
+    if mdl.attach_adapters_unseeded(ad.clone()).is_err() {
         return false;
     }
 
@@ -1067,7 +1074,7 @@ fn walk_selftest(e: &mut super::Engine) -> bool {
     let mut tape = Tape::new(&cfg, toks.len());
     let mut st = State::new_exact(&cfg);
     for (i, &t) in toks.iter().enumerate() {
-        if !e.model.forward_taped(&mut st, t, i, &mut tape) {
+        if !mdl.forward_taped(&mut st, t, i, &mut tape) {
             return false;
         }
     }
@@ -1085,7 +1092,7 @@ fn walk_selftest(e: &mut super::Engine) -> bool {
         .collect();
 
     let mut g = Grads::new(&ad);
-    if !e.model.backward(&tape, &gl, at, &mut g) {
+    if !mdl.backward(&tape, &gl, at, &mut g) {
         crate::kprintln!("  walk: backward refused");
         return false;
     }
@@ -1131,12 +1138,12 @@ fn walk_selftest(e: &mut super::Engine) -> bool {
                 }
             }
         }
-        let _ = e.model.attach_adapters_unseeded(probe);
-        loss(&e.model)
+        let _ = mdl.attach_adapters_unseeded(probe);
+        loss(mdl)
     };
     let up = walk_probe(1.0);
     let dn = walk_probe(-1.0);
-    let _ = e.model.attach_adapters_unseeded(ad.clone());
+    let _ = mdl.attach_adapters_unseeded(ad.clone());
 
     let numeric = ((up - dn) as f64) / (2.0 * eps as f64);
     // Printed whether or not it passes. A check whose numbers nobody sees is
@@ -1158,7 +1165,7 @@ fn walk_selftest(e: &mut super::Engine) -> bool {
         return false;
     }
 
-    e.model.detach_adapters();
+    mdl.detach_adapters();
     true
 }
 
@@ -1361,7 +1368,7 @@ pub fn selftest() -> bool {
         }
         // Needs the engine, so it lives here rather than beside the pure
         // checks above.
-        let walk_ok = walk_selftest(e);
+        let walk_ok = walk_selftest(&mut e.model);
         kprintln!(
             "  {}  the layer walk matches finite differences",
             if walk_ok { "ok " } else { "FAIL" }

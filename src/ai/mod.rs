@@ -475,10 +475,15 @@ pub fn model_demo() {
             );
             // The probe reads this; on a wide-head model the buffer behind it is
             // longer than the residual stream and the tail is attention output.
-            ok &= check("hidden bounded to dim", ws.hidden().len() == wide.dim, "64 features");
+            ok &= check(
+                "hidden bounded to dim",
+                ws.hidden().len() == wide.dim,
+                "the residual stream, not the attention tail",
+            );
         }
         None => ok &= check("wide-head forward", false, "out of memory"),
     }
+
 
     // --- throughput ---
     let hz = crate::TIMER_HZ as u64;
@@ -1141,6 +1146,63 @@ pub fn init(model_blob: Option<Blob>, tok_blob: Option<Blob>) {
         kprintln!("  FAIL -- a gradient does not match its forward");
     }
     console::set_color(LTGRAY);
+
+    // --- a geometry no checkpoint on this machine has ----------------------
+    //
+    // `n_heads * head_dim` lands exactly on `dim` in every model this tree has
+    // ever loaded, so `q_dim == dim` and every buffer sized `dim.max(q_dim)`
+    // is just `dim`. Qwen3-0.6B is not like that -- 16 heads of 128 against
+    // dim 1024 makes q twice the residual stream -- and an adapter that took
+    // its stride from `x.len()` walked off the end of its own `a` on the first
+    // token. It panicked at boot the first time that checkpoint was staged,
+    // having passed everything the tree had.
+    //
+    // The fixture lives here, in the boot path, and not beside the other
+    // geometry checks behind the `model` command: a test that has to be asked
+    // for is a test that was not run. Two layers at dim 64 costs milliseconds,
+    // needs no checkpoint on disk, and puts the strongest gradient check in
+    // the system on the same 2:1 q-to-dim ratio as the part that broke.
+    console::set_color(LTGREEN);
+    kprintln!("\n[selftest] non-square q:");
+    console::set_color(LTGRAY);
+    {
+        let narrow = model::Config {
+            dim: 64,
+            hidden_dim: 176,
+            n_layers: 2,
+            n_heads: 4,
+            n_kv_heads: 2,
+            head_dim: 32,
+            vocab_size: 256,
+            seq_len: 64,
+            norm_eps: 1e-6,
+            qk_norm: true,
+            rope_interleaved: false,
+            shared_classifier: true,
+            rope_theta: 1_000_000.0,
+            attn_sinks: 0,
+            attn_window: usize::MAX,
+            rotary_dim: 32,
+            ..Default::default()
+        };
+        let geometry = narrow.q_dim() == 128 && narrow.dim == 64;
+        let walked = match model::Model::synthetic(narrow, 0x5EED_BEEF) {
+            Some(mut nm) => adapter::walk_selftest(&mut nm),
+            None => false,
+        };
+        if !(geometry && walked) {
+            console::set_color(LTRED);
+        }
+        kprintln!(
+            "  {}  q_dim 128 over a dim-64 residual stream",
+            if geometry { "ok " } else { "FAIL" }
+        );
+        kprintln!(
+            "  {}  the layer walk holds when q is not dim",
+            if walked { "ok " } else { "FAIL" }
+        );
+        console::set_color(LTGRAY);
+    }
 
     console::set_color(LTGREEN);
     kprintln!("\n[selftest] trainer arithmetic:");
