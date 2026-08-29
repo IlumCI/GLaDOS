@@ -34,6 +34,7 @@ mod recovery;
 mod rng;
 mod serial;
 mod shell;
+mod smp;
 mod store;
 mod sync;
 mod sysbox;
@@ -342,6 +343,7 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     banner(&boot, &acpi);
     gfx::splash::stage("interrupts and keyboard");
     init_interrupts(&acpi);
+    init_smp(&acpi);
     init_keyboard(&acpi);
     gfx::splash::stage("self-test");
     selftest();
@@ -631,6 +633,39 @@ fn init_interrupts(acpi: &Option<acpi::Acpi>) {
 pub const TIMER_HZ: u32 = 100;
 
 /// Bring up the i8042 and route its IRQ.
+/// Start the other cores.
+///
+/// After `init_interrupts`, which is not incidental: this needs the heap for
+/// AP stacks, the LAPIC to send INIT, and a calibrated TSC to time the pause
+/// between INIT and SIPI. All three land in or before that call.
+fn init_smp(acpi: &Option<acpi::Acpi>) {
+    console::set_color(LTGREEN);
+    kprintln!("\n[smp]");
+    console::set_color(LTGRAY_IDX);
+
+    let Some(a) = acpi else {
+        kprintln!("  no acpi tables -- staying on one core");
+        return;
+    };
+    if a.cpus <= 1 {
+        kprintln!("  firmware declares {} cpu -- nothing to start", a.cpus);
+        return;
+    }
+
+    let started = smp::init(a);
+    let answered = started + 1;
+    if answered == a.cpus {
+        console::set_color(LTGREEN);
+    } else {
+        console::set_color(YELLOW);
+    }
+    kprintln!("  {} of {} cores answered", answered, a.cpus);
+    console::set_color(LTGRAY_IDX);
+    if answered < a.cpus {
+        kprintln!("  the rest stay parked; work still runs, just narrower");
+    }
+}
+
 fn init_keyboard(acpi: &Option<acpi::Acpi>) {
     console::set_color(YELLOW);
     kprintln!("\n[i8042]");

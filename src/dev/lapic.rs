@@ -26,6 +26,10 @@ const APIC_GLOBAL_ENABLE: u64 = 1 << 11;
 const REG_ID: usize = 0x020;
 const REG_EOI: usize = 0x0B0;
 const REG_SVR: usize = 0x0F0;
+/// Interrupt Command Register. Two halves in xAPIC: write the high word
+/// (destination) first, then the low word, which is what actually sends.
+const REG_ICR_LO: usize = 0x300;
+const REG_ICR_HI: usize = 0x310;
 const REG_LVT_TIMER: usize = 0x320;
 const REG_TIMER_INIT: usize = 0x380;
 const REG_TIMER_CUR: usize = 0x390;
@@ -75,6 +79,39 @@ pub fn eoi() {
 
 pub fn id() -> u8 {
     (read(REG_ID) >> 24) as u8
+}
+
+/// Spin until the last IPI has been accepted.
+///
+/// Bit 12 of the low ICR word is Delivery Status. Writing a second IPI while
+/// it is set loses one of them silently, which in a startup sequence reads as
+/// "that core is dead" rather than as a dropped write.
+fn ipi_settle() {
+    for _ in 0..1_000_000 {
+        if read(REG_ICR_LO) & (1 << 12) == 0 {
+            return;
+        }
+        core::hint::spin_loop();
+    }
+}
+
+/// INIT: hold the target core in reset, ready for a startup vector.
+pub fn send_init(apic_id: u32) {
+    write(REG_ICR_HI, apic_id << 24);
+    // 0x4500 = INIT delivery mode, assert level, edge trigger.
+    write(REG_ICR_LO, 0x0000_4500);
+    ipi_settle();
+}
+
+/// SIPI: start the target core in real mode at `page << 12`.
+///
+/// The vector *is* the address: there are eight bits for it, so the
+/// trampoline has to live in a page below 1 MiB. That constraint is the only
+/// reason `mem::frame` refuses to hand out low memory.
+pub fn send_sipi(apic_id: u32, page: u8) {
+    write(REG_ICR_HI, apic_id << 24);
+    write(REG_ICR_LO, 0x0000_4600 | page as u32);
+    ipi_settle();
 }
 
 pub fn ticks() -> u64 {

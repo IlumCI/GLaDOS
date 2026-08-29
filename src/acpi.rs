@@ -64,6 +64,10 @@ pub struct OverrideInfo {
     pub flags: u16,
 }
 
+/// Enough for any laptop, and a bound rather than an allocation: the MADT is
+/// parsed before the heap exists.
+pub const MAX_CPUS: usize = 64;
+
 pub const MAX_IOAPICS: usize = 4;
 pub const MAX_OVERRIDES: usize = 24;
 
@@ -72,6 +76,14 @@ pub struct Acpi {
     pub revision: u8,
     pub lapic_addr: u64,
     pub cpus: usize,
+    /// The local APIC id of each enabled processor.
+    ///
+    /// The count alone was enough while there was one core; starting the other
+    /// seven needs to address them, and an APIC id is not its index -- on a
+    /// hybrid part the P-core threads and the E-cores are not numbered
+    /// contiguously, so guessing `0..cpus` sends INIT to ids that answer to
+    /// nobody.
+    pub apic_ids: [u32; MAX_CPUS],
     pub ioapics: [IoApicInfo; MAX_IOAPICS],
     pub ioapic_count: usize,
     pub overrides: [OverrideInfo; MAX_OVERRIDES],
@@ -89,6 +101,7 @@ impl Acpi {
             revision: 0,
             lapic_addr: 0xFEE0_0000,
             cpus: 0,
+            apic_ids: [0; MAX_CPUS],
             ioapics: [IoApicInfo { id: 0, addr: 0, gsi_base: 0 }; MAX_IOAPICS],
             ioapic_count: 0,
             overrides: [OverrideInfo { source: 0, gsi: 0, flags: 0 }; MAX_OVERRIDES],
@@ -230,6 +243,9 @@ unsafe fn parse_madt(t: *const u8, len: usize, acpi: &mut Acpi) {
                 // Processor Local APIC. Bit 0 of flags = enabled.
                 0 => {
                     if rd_u32(t, off + 4) & 1 != 0 {
+                        if acpi.cpus < MAX_CPUS {
+                            acpi.apic_ids[acpi.cpus] = rd_u8(t, off + 3) as u32;
+                        }
                         acpi.cpus += 1;
                     }
                 }
@@ -262,6 +278,9 @@ unsafe fn parse_madt(t: *const u8, len: usize, acpi: &mut Acpi) {
                 // Processor Local x2APIC.
                 9 => {
                     if rd_u32(t, off + 8) & 1 != 0 {
+                        if acpi.cpus < MAX_CPUS {
+                            acpi.apic_ids[acpi.cpus] = rd_u32(t, off + 4);
+                        }
                         acpi.cpus += 1;
                     }
                 }

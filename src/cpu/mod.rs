@@ -222,6 +222,20 @@ unsafe fn xsetbv(index: u32, value: u64) {
 /// UEFI leaves SSE enabled -- the x86_64 UEFI ABI requires it -- but we set
 /// the bits regardless rather than inherit an assumption.
 pub fn enable_simd() -> Features {
+    let f = enable_simd_this_core();
+    unsafe { *FEATURES.get() = f };
+    f
+}
+
+/// The register half of `enable_simd`, touching nothing shared.
+///
+/// CR4, XCR0 and MXCSR are per-core: a core that skips this handshake takes
+/// #UD on the first `vmulps` no matter what another core has already enabled.
+/// So every application processor must call this for itself -- and must call
+/// *this* rather than `enable_simd`, which additionally publishes to the
+/// `FEATURES` static. The APs are a compute fabric that writes no kernel
+/// state, and one benign-looking store is how that stops being true.
+pub fn enable_simd_this_core() -> Features {
     let mut f = features();
     unsafe {
         // CR4.OSFXSR (bit 9): fxsave/fxrstor, and enables SSE.
@@ -253,7 +267,6 @@ pub fn enable_simd() -> Features {
             options(nostack, preserves_flags)
         );
 
-        *FEATURES.get() = f;
     }
     f
 }
