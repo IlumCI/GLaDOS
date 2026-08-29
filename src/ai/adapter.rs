@@ -973,6 +973,26 @@ pub fn blob_selftest() -> bool {
 /// measure a different derivative and the mismatch would look like a bug in
 /// the walk.
 pub fn walk_selftest(mdl: &mut super::model::Model) -> bool {
+    // Shrink the context for the duration.
+    //
+    // The walk scores two positions. `State` allocates by `cfg.live_cap()`,
+    // which is the *trained* length when no window is set, and the exact
+    // cache is f32 -- so at Qwen3's 8192 that is about 1.9 GiB per `State`,
+    // and this builds several. It ran fine for as long as every checkpoint
+    // was converted at 512 and died with an allocation failure the first time
+    // one was not, which is a limit of the test and not of the machine.
+    //
+    // Safe because a GLADOSM2 weight offset is walked from dim, hidden,
+    // layers and vocab: `seq_len` sizes the cache and the RoPE table and
+    // nothing else, so lowering it changes what is allocated and no address.
+    let saved_seq = mdl.cfg.seq_len;
+    mdl.cfg.seq_len = 4;
+    let ok = walk_inner(mdl);
+    mdl.cfg.seq_len = saved_seq;
+    ok
+}
+
+fn walk_inner(mdl: &mut super::model::Model) -> bool {
     use super::model::{Grads, State, Tape};
 
     let cfg = mdl.cfg.clone();
@@ -1186,6 +1206,16 @@ pub fn walk_selftest(mdl: &mut super::model::Model) -> bool {
 /// stream is the token embedding, which is checkable without any of the
 /// backward machinery existing yet.
 fn tape_selftest(e: &mut super::Engine) -> bool {
+    // Same reason as `walk_selftest`: two `State`s over a handful of
+    // positions, sized by the trained context unless told otherwise.
+    let saved_seq = e.model.cfg.seq_len;
+    e.model.cfg.seq_len = 8;
+    let ok = tape_inner(e);
+    e.model.cfg.seq_len = saved_seq;
+    ok
+}
+
+fn tape_inner(e: &mut super::Engine) -> bool {
     use super::model::{State, Tape};
 
     if e.model.cfg.hybrid() {
