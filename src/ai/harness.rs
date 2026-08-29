@@ -1748,6 +1748,13 @@ pub fn config_selftest() -> bool {
 /// What a candidate core earned.
 pub struct CoreVerdict {
     pub n: usize,
+    /// How many of the `n` items the council *with* the core answered right.
+    ///
+    /// The paired counts say whether the core is an improvement; this says
+    /// what the thing actually scores. They answer different questions and a
+    /// certificate needs both -- "repairs four more than it breaks" is the
+    /// selection criterion, "gets 71% right" is the number a reader wants.
+    pub correct: usize,
     pub fixed: usize,
     pub broke: usize,
     pub chi: f32,
@@ -1785,11 +1792,34 @@ const CORE_STEP_CEILING: u64 = super::voter::VOTE_BUDGET / 4;
 /// Validation, never test. A core is *selected* here, and a slice you select
 /// on is a slice you have fitted.
 pub fn core_bench(hash: &[u8; 32]) -> Option<Result<CoreVerdict, String>> {
-    let core = match super::voter::load(hash) {
-        Ok(c) => c,
-        Err(e) => return Some(Err(e)),
-    };
-    with_engine(|e| {
+    with_engine(|e| core_bench_in(e, hash, VALIDATION))
+}
+
+/// The validation slice, and the test slice, by their numbers in `split_of`.
+pub const VALIDATION: u8 = 1;
+pub const TEST: u8 = 2;
+
+/// The same measurement, on an engine the caller is already holding.
+///
+/// Split out because `core_bench` claimed the engine itself, and
+/// `godel::trial_core` -- which is called from inside `with_engine` -- then
+/// re-entered it. `with_engine` hands the same task a second `&mut Engine`
+/// rather than refusing, so two live mutable references to one engine existed
+/// at once. That is undefined behaviour and not merely a race: `&mut` carries
+/// `noalias`, so the compiler is entitled to keep reads of `*e` across this
+/// call in registers, and `ensure_head` right after it reads the adapter
+/// tensors to decide what to record. The lineage could name a state the
+/// machine was not in.
+///
+/// Taking the engine as an argument makes the borrow the caller's, which is
+/// what it always was in fact.
+pub fn core_bench_in(
+    e: &mut super::Engine,
+    hash: &[u8; 32],
+    split_wanted: u8,
+) -> Result<CoreVerdict, String> {
+    let core = super::voter::load(hash)?;
+    {
         let Some(f) = featurise(e) else {
             return Err(String::from("no corpus to judge against"));
         };
@@ -1802,6 +1832,7 @@ pub fn core_bench(hash: &[u8; 32]) -> Option<Result<CoreVerdict, String>> {
 
         let mut v = CoreVerdict {
             n: 0,
+            correct: 0,
             fixed: 0,
             broke: 0,
             chi: 0.0,
@@ -1815,7 +1846,7 @@ pub fn core_bench(hash: &[u8; 32]) -> Option<Result<CoreVerdict, String>> {
         };
 
         for (split, x, want, text) in &f.ev {
-            if *split != 1 {
+            if *split != split_wanted {
                 continue;
             }
             let p = probe.predict(x);
@@ -1849,6 +1880,9 @@ pub fn core_bench(hash: &[u8; 32]) -> Option<Result<CoreVerdict, String>> {
             }
 
             v.n += 1;
+            if with == *want {
+                v.correct += 1;
+            }
             match (without == *want, with == *want) {
                 (false, true) => v.fixed += 1,
                 (true, false) => v.broke += 1,
@@ -1857,7 +1891,7 @@ pub fn core_bench(hash: &[u8; 32]) -> Option<Result<CoreVerdict, String>> {
         }
 
         if v.n == 0 {
-            return Err(String::from("nothing in validation to judge against"));
+            return Err(String::from("nothing in that slice to judge against"));
         }
         v.chi = super::godel::mcnemar(v.broke, v.fixed);
         // J1, the same shape the adapter judge uses: a net repair above the
@@ -1870,7 +1904,7 @@ pub fn core_bench(hash: &[u8; 32]) -> Option<Result<CoreVerdict, String>> {
         // J6, independence. A core that never differs from lexical is lexical.
         v.j6 = v.disagreed > 0 && v.declined < v.n;
         Ok(v)
-    })
+    }
 }
 
 /// Judge a candidate and wire it in if every judge passes.

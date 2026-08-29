@@ -400,6 +400,7 @@ static ADOPTIONS: AtomicU32 = AtomicU32::new(0);
 /// Stored as text rather than packed bytes. The namespace is browsable and
 /// `cat` is the debugger; a self-modification history nobody can read is a
 /// self-modification history nobody audits.
+#[derive(Clone)]
 pub struct Variant {
     pub parent: Option<[u8; 32]>,
     /// Content address of the adapter blob, or none for the frozen baseline.
@@ -436,6 +437,24 @@ pub struct Variant {
     /// judges and leave no trace in the lineage, no ledger line, and nothing
     /// for `rollback` to undo.
     pub core: Option<[u8; 32]>,
+    /// Whether this node actually *says* anything about a core.
+    ///
+    /// Not part of the identity -- it is a fact about the text, not about the
+    /// mind -- and so deliberately absent from `render` as a value. What it
+    /// controls is whether the `core` line is written at all.
+    ///
+    /// The distinction is load-bearing and its absence was a real defect.
+    /// `rollback` read `parent.core == None` as "the parent had no core" and
+    /// uninstalled. But every node written before this field existed also
+    /// parses as `None`, so rolling back an *adapter* on any older lineage
+    /// silently pulled a machine-written core out of the decision path, with
+    /// nothing printed. "Absent" and "none" are different claims and a format
+    /// that cannot tell them apart forces the reader to guess.
+    ///
+    /// Nodes this kernel writes always set it, so they always state the
+    /// answer; nodes it reads keep whatever the text said, so an old node
+    /// still renders to the exact bytes it was stored as.
+    pub core_seen: bool,
     /// Whether the attention path moved, not only the classifier.
     ///
     /// `deeptrain` adapts every q/k/v site as well as the decision layer, and
@@ -599,10 +618,20 @@ impl Variant {
         // broken by the very change meant to extend it. An unconditional
         // "core none" line would have done precisely that to every node in
         // every existing lineage.
-        if let Some(c) = self.core {
-            s.push_str("core ");
-            s.push_str(&hex32(&c));
-            s.push('\n');
+        //
+        // `core none` is written too, and only by nodes that know they have
+        // an answer to give. That is what lets `rollback` tell a node that
+        // says "no core" from one that says nothing at all -- see
+        // `core_seen`. An old node has `core_seen` clear, emits neither line,
+        // and re-renders byte-for-byte to the address it is stored under.
+        match (self.core, self.core_seen) {
+            (Some(c), _) => {
+                s.push_str("core ");
+                s.push_str(&hex32(&c));
+                s.push('\n');
+            }
+            (None, true) => s.push_str("core none\n"),
+            (None, false) => {}
         }
         // Conditional for the same reason `core` is: absent from the rendering
         // when absent from the object, so every node written before this
@@ -646,6 +675,15 @@ impl Variant {
         path.push_str(&hex32(h));
         let bytes = sysbox::read_blob(&path)?;
         let text = core::str::from_utf8(&bytes).ok()?;
+        Some(Variant::from_text(text))
+    }
+
+    /// Parse a node from its canonical rendering.
+    ///
+    /// Separate from `load` so the round trip -- the property the whole DAG
+    /// rests on -- can be checked without a store, a namespace, or a node
+    /// somebody has to remember to write first.
+    pub fn from_text(text: &str) -> Variant {
         let mut v = Variant {
             parent: None,
             adapter: None,
@@ -657,6 +695,10 @@ impl Variant {
             epochs: 0,
             rule: 0,
             core: None,
+            // Clear until a `core` line is actually seen below, which is the
+            // whole point: a node that does not mention a core must not be
+            // read as one that mentions having none.
+            core_seen: false,
             deep: false,
             born: 0,
         };
@@ -680,7 +722,12 @@ impl Variant {
                 // `push_f2` writes exactly two decimals, and parsing that back
                 // and re-rendering it is exact, so the round trip holds.
                 "lambda" => v.lambda = val.parse().unwrap_or(0.0),
-                "core" => v.core = from_hex32(val),
+                // `none` parses to `None`, and either way the node has now
+                // made a statement about its core.
+                "core" => {
+                    v.core = from_hex32(val);
+                    v.core_seen = true;
+                }
                 "deep" => v.deep = val == "1",
                 "rank" => v.rank = val.parse().unwrap_or(0),
                 "epochs" => v.epochs = val.parse().unwrap_or(0),
@@ -688,7 +735,7 @@ impl Variant {
                 _ => {}
             }
         }
-        Some(v)
+        v
     }
 }
 
@@ -1003,9 +1050,20 @@ fn ensure_head(e: &mut super::Engine) -> Option<[u8; 32]> {
     let blob = ad.to_blob();
     let ah = sha256::hash(&blob);
     let current = head();
+    // Whether the head still describes the *whole* mind, not just its weights.
+    //
+    // Testing the adapter alone was not enough. `core install` is still a live
+    // operator verb and touches neither the head nor the ledger, so a core
+    // could be swapped underneath a node that goes on claiming a different one
+    // -- and then `rollback`, which restores whatever the parent recorded,
+    // would put back a council the machine was never running. Comparing the
+    // core as well means an out-of-band install forces a new node, which is
+    // the same rule the adapter has always obeyed: record what is in force,
+    // never what was assumed.
+    let installed = super::voter::installed().map(|c| c.hash);
     let named = current
         .and_then(|h| Variant::load(&h))
-        .map(|v| v.adapter == Some(ah))
+        .map(|v| v.adapter == Some(ah) && v.core == installed)
         .unwrap_or(false);
     if named {
         return current;
@@ -1025,6 +1083,7 @@ fn ensure_head(e: &mut super::Engine) -> Option<[u8; 32]> {
         // trained without it, and a lineage that cannot tell them apart
         // describes the wrong experiment.
         core: super::voter::installed().map(|c| c.hash),
+        core_seen: true,
         // Zero throughout: it arrived from outside the loop and nothing here
         // knows how it was made. Recording a guess would be worse than
         // recording that it is unknown.
@@ -1151,6 +1210,7 @@ pub fn trial(
         // trained without it, and a lineage that cannot tell them apart
         // describes the wrong experiment.
         core: super::voter::installed().map(|c| c.hash),
+        core_seen: true,
         lambda: b.lr,
         rank: fit.dora.r as u8,
         epochs: fit.epochs as u32,
@@ -1312,10 +1372,17 @@ pub fn record_current(e: &mut super::Engine) -> Option<[u8; 32]> {
 /// economics behind one name, which is the mistake `deeptrain` was split out
 /// to avoid.
 pub fn trial_core(e: &mut super::Engine, h: &[u8; 32]) -> Result<Certificate, &'static str> {
-    let verdict = match super::harness::core_bench(h) {
-        None => return Err("no engine, or no probe to compare against"),
-        Some(Err(_)) => return Err("the core will not load, or scored nothing"),
-        Some(Ok(v)) => v,
+    // The engine this function was handed, not a second claim on it.
+    //
+    // `core_bench` opens `with_engine` itself, and `trial_core` is called from
+    // inside one -- so the old spelling produced two live `&mut Engine` at
+    // once. Undefined behaviour, and with teeth: the judging passes below
+    // mutate the KV cache and `e.pos` under a reference the compiler is
+    // allowed to assume nothing else touches, and `ensure_head` immediately
+    // afterwards reads the adapter through it to decide what to record.
+    let verdict = match super::harness::core_bench_in(e, h, super::harness::VALIDATION) {
+        Err(_) => return Err("the core will not load, or scored nothing"),
+        Ok(v) => v,
     };
     TRIALS.fetch_add(1, Ordering::Relaxed);
 
@@ -1337,6 +1404,7 @@ pub fn trial_core(e: &mut super::Engine, h: &[u8; 32]) -> Result<Certificate, &'
         epochs: 0,
         rule: super::harness::Rule::WithCore as u8,
         core: Some(*h),
+        core_seen: true,
         // Carried from the incumbent: a core changes no weights, so whatever
         // the parent was, this variant still is.
         deep: parent.and_then(|p| Variant::load(&p)).map(|v| v.deep).unwrap_or(false),
@@ -1382,7 +1450,7 @@ pub fn trial_core(e: &mut super::Engine, h: &[u8; 32]) -> Result<Certificate, &'
     cert.adopted = cert.unanimous();
 
     if cert.adopted {
-        let (acc, n, fresh) = read_test_core(h);
+        let (acc, n, fresh) = read_test_core(e, h);
         cert.test_acc = acc;
         cert.test_read = n;
         cert.test_fresh = fresh;
@@ -1412,45 +1480,137 @@ pub fn trial_core(e: &mut super::Engine, h: &[u8; 32]) -> Result<Certificate, &'
 /// adoption, counted against the same three reads, because a loop that
 /// improves itself forever reads the held-out set forever whichever axis it
 /// is searching.
-fn read_test_core(_h: &[u8; 32]) -> (f32, u32, bool) {
-    let n = spend_test_read();
-    (0.0, n, n <= TEST_READS)
+///
+/// **The read is spent only if it buys a measurement.** This function used to
+/// call `spend_test_read` and return `0.0` -- so three adopted cores exhausted
+/// the global held-out budget having looked at nothing, wrote `test_acc 0.00`
+/// into three certificates (which reads as "0% on test", not as "not
+/// measured"), and stamped every later adapter certificate `test_fresh
+/// false` permanently. The one number the loop is not allowed to overfit was
+/// being spent on a code path that never opened the data.
+fn read_test_core(e: &mut super::Engine, h: &[u8; 32]) -> (f32, u32, bool) {
+    match super::harness::core_bench_in(e, h, super::harness::TEST) {
+        Ok(v) if v.n > 0 => {
+            let n = spend_test_read();
+            (v.correct as f32 / v.n as f32, n, n <= TEST_READS)
+        }
+        // Nothing measurable in the test slice. Say so by leaving the budget
+        // alone: an unspent read is recoverable, a spent one never is.
+        _ => (0.0, test_reads(), false),
+    }
 }
 
+/// Take the installed core out of the decision path, if there is one.
+///
+/// `voter::uninstall` answers `false` both when the detach failed and when
+/// there was nothing to detach, and those are opposite facts: the second is
+/// the ordinary case and must not read as an error.
+fn drop_core() -> bool {
+    if super::voter::installed().is_none() {
+        return true;
+    }
+    super::voter::uninstall()
+}
+
+/// Undo the last adoption: put the parent's mind back and move the head to it.
+///
+/// **Everything is validated before anything is changed.** The old order swapped
+/// the core first and read the adapter blob afterwards, so a rollback whose
+/// adapter had been pruned returned an error having *already* changed which
+/// core was voting -- leaving the parent's core in force, the child's adapter
+/// attached, and the head still naming the child. That is precisely the "the
+/// pointer said one thing and the machine did another" state this function
+/// exists to prevent, relocated into its own failure path. Now the failable
+/// reads all happen first, and the mutations happen only once none of them can
+/// fail for a reason we could have seen coming.
 pub fn rollback(e: &mut super::Engine) -> Result<Option<[u8; 32]>, &'static str> {
     let Some(h) = head() else { return Err("no head to roll back from") };
     let Some(v) = Variant::load(&h) else { return Err("head names a node that is not stored") };
     let Some(parent) = v.parent else {
         // The root is the frozen model. Rolling back to it means detaching,
         // which is a real state rather than an error.
+        //
+        // The core belongs to that detachment. A root node can carry one --
+        // `trial_core` on a machine with no adapter attached gets `parent:
+        // None` from `ensure_head` and records `core: Some(..)` on it -- and
+        // this arm used to return `Ok(None)`, reporting a return to the frozen
+        // model while a machine-written core went on voting on every routing
+        // decision, with the head now deleted so nothing named it and a second
+        // rollback could not reach it either.
+        if v.core.is_some() && !drop_core() {
+            return Err("the adopted core will not detach");
+        }
         let _ = e.model.detach_adapters();
         sysbox::detach(HEAD);
         return Ok(None);
     };
     let Some(pv) = Variant::load(&parent) else { return Err("parent is not stored") };
-    // The core is part of the mind being restored. Without this, rolling back
-    // an adopted core left it installed and voting -- the pointer said one
-    // thing and the machine did another, which is the exact failure the
-    // lineage exists to make impossible.
-    match pv.core {
-        None => {
-            super::voter::uninstall();
+
+    // --- read and validate, changing nothing ---------------------------
+
+    let blob = match pv.adapter {
+        None => None,
+        Some(ab) => match sysbox::read_blob(&blob_path(&ab)) {
+            None => return Err("the parent's adapter blob is gone"),
+            Some(b) => Some(b),
+        },
+    };
+
+    // What to do about the core, decided before anything moves.
+    //
+    // `pv.core == None` is only an instruction to uninstall when the parent
+    // actually *said* so. Nodes written before the field existed parse the
+    // same way, and reading those as "the parent had no core" meant that
+    // rolling back an adapter on any older lineage quietly pulled a core out
+    // of the decision path -- a change to what the machine does, made as a
+    // side effect of undoing something else, and printed nowhere. When the
+    // parent is silent the only core this rollback owns is the one the node
+    // being left adopted; anything installed out of band is not ours to move.
+    enum Core {
+        Leave,
+        Drop,
+        Install([u8; 32]),
+    }
+    let want = if pv.core_seen {
+        match pv.core {
+            None => Core::Drop,
+            Some(c) => Core::Install(c),
         }
-        Some(c) => {
-            if !super::voter::install(&c) {
-                return Err("the parent's core will not install");
-            }
+    } else if v.core.is_some() {
+        Core::Drop
+    } else {
+        Core::Leave
+    };
+    if let Core::Install(c) = want {
+        if super::voter::load(&c).is_err() {
+            return Err("the parent's core will not load");
         }
     }
-    match pv.adapter {
+
+    // --- change things -------------------------------------------------
+
+    // The adapter first: it is the half that can still fail on bytes we have
+    // already proved are present, so a failure here leaves the machine exactly
+    // as it was rather than half-rolled-back.
+    match blob {
         None => {
             let _ = e.model.detach_adapters();
         }
-        Some(ab) => {
-            let Some(blob) = sysbox::read_blob(&blob_path(&ab)) else {
-                return Err("the parent's adapter blob is gone");
-            };
-            e.model.load_adapters(&blob).map_err(|_| "the parent's adapter will not load")?;
+        Some(b) => {
+            e.model.load_adapters(&b).map_err(|_| "the parent's adapter will not load")?;
+        }
+    }
+    match want {
+        Core::Leave => {}
+        Core::Drop => {
+            if !drop_core() {
+                return Err("the adapter was restored but the core will not detach");
+            }
+        }
+        Core::Install(c) => {
+            if !super::voter::install(&c) {
+                return Err("the adapter was restored but the parent's core will not install");
+            }
         }
     }
     set_head(&parent);
@@ -1706,8 +1866,11 @@ pub fn selftest() -> bool {
     // node, and `born` is deliberately outside the hash so that a variant
     // rediscovered tomorrow is recognisably the one already tried rather
     // than a new one that behaves identically.
+    // Shaped like a node from before the `core` field: it does not mention one
+    // at all, which is what the compatibility claims below are about.
     let mk = |lambda: f32, born: u32| Variant {
         core: None,
+        core_seen: false,
         deep: false,
         parent: Some(h),
         adapter: Some(sha256::hash(b"adapter")),
@@ -1730,6 +1893,43 @@ pub fn selftest() -> bool {
     claim(
         "a variant differing in a parameter is a different node",
         v1.hash() != v3.hash(),
+    );
+
+    // Re-derivability across the `core` field, both directions.
+    //
+    // The failure this guards is quiet and permanent: a node whose rendering
+    // does not reproduce is a node whose address does not reproduce, and the
+    // ledger stops being checkable from that point on. Both halves matter --
+    // a node written before the field existed must go on hashing to what it
+    // hashed to, and a node written now must be able to *say* it has no core,
+    // because `rollback` treats "said none" and "said nothing" differently and
+    // was quietly uninstalling live cores when it could not tell them apart.
+    let old_text = "variant 1\nparent none\nadapter none\npolicy none\nskills none\n\
+                    corpus none\nlambda 0.00\nrank 8\nepochs 20\nrule 0\n";
+    let old = Variant::from_text(old_text);
+    claim(
+        "a node written before the core field says nothing about one",
+        !old.core_seen && old.core.is_none(),
+    );
+    claim(
+        "and still renders to exactly the bytes it was stored as",
+        old.render() == old_text,
+    );
+    let mut says_none = old.clone();
+    says_none.core_seen = true;
+    claim(
+        "a node that says it has no core renders that, and is a different node",
+        says_none.render().contains("core none\n") && says_none.hash() != old.hash(),
+    );
+    claim(
+        "and reads back as having said it",
+        Variant::from_text(&says_none.render()).core_seen,
+    );
+    let with_core = Variant { core: Some(h), core_seen: true, ..old.clone() };
+    let back = Variant::from_text(&with_core.render());
+    claim(
+        "a node naming a core round-trips through its own rendering",
+        back.core == Some(h) && back.core_seen && back.hash() == with_core.hash(),
     );
 
     // The property the first two recorded trials violated. They trained the
@@ -1780,8 +1980,9 @@ pub fn selftest() -> bool {
     let no_core = mk(0.02, 1000);
     let mut with_core = mk(0.02, 1000);
     with_core.core = Some(sha256::hash(b"a council core"));
+    with_core.core_seen = true;
     claim(
-        "a variant with no core renders no core line",
+        "a variant that predates the core field renders no core line",
         !no_core.render().contains("core "),
     );
     claim(

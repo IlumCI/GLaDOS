@@ -119,6 +119,42 @@ pub fn present() {
     }
 }
 
+/// Whether there is a back buffer at all.
+pub fn active() -> bool {
+    unsafe { (*COMP.get()).is_some() }
+}
+
+/// Repaint one rectangle from the back buffer whatever the shadow believes.
+///
+/// `flush_rect` skips rows it thinks are already correct, which is right for
+/// everything that paints *through* the compositor and wrong for the one thing
+/// that does not: the mouse cursor writes the arrow straight to the aperture,
+/// so those pixels differ from the shadow without the shadow knowing. Asking
+/// for them back is how the cursor stops being a hole in the compositor's
+/// model of the screen.
+///
+/// Answers `false` when there is no compositor, which is the caller's signal
+/// to fall back to its own saved pixels.
+pub fn repaint_rect(x: u32, y: u32, rw: u32, rh: u32) -> bool {
+    let Some(fb) = super::primary() else { return false };
+    let Some(c) = (unsafe { (*COMP.get()).as_mut() }) else { return false };
+    let w = c.w as usize;
+    let x0 = (x as usize).min(w);
+    let x1 = ((x + rw) as usize).min(w);
+    let y0 = (y as usize).min(c.h as usize);
+    let y1 = ((y + rh) as usize).min(c.h as usize);
+    if x0 >= x1 {
+        return true;
+    }
+    for row in y0..y1 {
+        let base = row * w;
+        let back = &c.back[base + x0..base + x1];
+        fb.blit_span(x0 as u32, row as u32, back);
+        c.shadow[base + x0..base + x1].copy_from_slice(back);
+    }
+    true
+}
+
 /// Copy one rectangle straight through: back buffer to screen and shadow.
 ///
 /// The console's path. Its cells are painted into the back buffer as the

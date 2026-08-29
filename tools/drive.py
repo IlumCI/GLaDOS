@@ -181,7 +181,10 @@ def capture(dest):
         + chunk(b"IEND", b"")
     )
     dest.write_bytes(png)
-    ppm.unlink(missing_ok=True)
+    # Not when they are the same file. A destination named `.ppm` made this
+    # delete the PNG it had just written, and reported success doing it.
+    if ppm != dest:
+        ppm.unlink(missing_ok=True)
     print(f"[drive] screenshot {dest} ({w}x{h})")
 
 

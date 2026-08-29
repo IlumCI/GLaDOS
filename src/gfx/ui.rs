@@ -47,7 +47,15 @@ const BTN_H: u32 = TEXT_H + 16;
 const GAP: u32 = 6;
 const PAD: u32 = 10;
 /// Character column the value in a `Status` row starts at.
-const STATUS_COL: usize = 13;
+/// Characters reserved for a status row's name, before its value starts.
+///
+/// Fourteen and not thirteen because thirteen clipped `PCI 8086:100e` on the
+/// Settings/Network page to `PCI 8086:100` -- a row that had rendered
+/// correctly for as long as the page existed, made to show a wrong-looking
+/// three-digit device ID by the clipping added to stop names running into
+/// their values. The marker below is the belt to this braces: no clip may ever
+/// again read as a shorter number.
+const STATUS_COL: usize = 14;
 
 /// What activating a control does.
 ///
@@ -520,7 +528,23 @@ impl Panel {
                         .nth(room)
                         .map(|(i, _)| i)
                         .unwrap_or(name.len());
-                    let shown: &str = &name[..cut];
+                    // A clip says so. Silently dropping the tail turns
+                    // `PCI 8086:100e` into `PCI 8086:100`, which does not look
+                    // truncated -- it looks like a different device. One
+                    // character of the budget goes to admitting it.
+                    let mut clipped = String::new();
+                    let shown: &str = if cut < name.len() {
+                        let keep = name
+                            .char_indices()
+                            .nth(room.saturating_sub(1))
+                            .map(|(i, _)| i)
+                            .unwrap_or(cut);
+                        clipped.push_str(&name[..keep]);
+                        clipped.push('~');
+                        &clipped
+                    } else {
+                        &name[..cut]
+                    };
                     theme::text(fb, x, y, shown, theme::TEXT_DIM, theme::FACE);
                     theme::text(fb, x + col, y, value, tone.color(), theme::FACE);
                 }

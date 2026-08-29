@@ -546,7 +546,21 @@ pub fn write_file(bs: &BootServices, image: Handle, path: &str, data: &[u8]) -> 
     if !is_error(opened) && !old.is_null() {
         // `delete` closes the handle whether or not it succeeds, so there is
         // no close to pair with this.
-        unsafe { ((*old).delete)(old) };
+        //
+        // **The status is the whole point.** Firmware refuses this for real
+        // reasons -- a read-only attribute, a handle open elsewhere, a media
+        // warning -- and ignoring the refusal meant carrying on to open the
+        // existing file with `FILE_MODE_CREATE`, which does not truncate. A
+        // shorter image then landed on top of a longer one and this function
+        // answered `true`: exactly the "valid prefix of a valid binary
+        // followed by somebody else's bytes" the delete exists to prevent,
+        // reported as a successful update. On a boot image that is an
+        // unbootable machine and a caller that believes it is fine.
+        let deleted = unsafe { ((*old).delete)(old) };
+        if is_error(deleted) {
+            unsafe { ((*root).close)(root) };
+            return false;
+        }
     }
 
     let mut file: *mut FileProtocol = core::ptr::null_mut();

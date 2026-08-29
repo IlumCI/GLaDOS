@@ -1297,13 +1297,58 @@ static SHOWN: Racy<Option<(u32, u32)>> = Racy::new(None);
 /// this to put the arrow back after a repaint.
 static POS: Racy<Option<(u32, u32)>> = Racy::new(None);
 
+/// Held for as long as anything is touching `SAVED`, `SHOWN`, or the screen.
+///
+/// The cursor used to be safe by accident: `poll_mouse` was the only caller
+/// and it ran on the shell task, so nothing could interleave. `pump_cursor`
+/// broke that -- it runs from inside `generate`, which the agent task also
+/// runs, so a cursor move could land in the middle of the shell's `draw`.
+/// The interleaving is not a flicker: the arrow is painted after `present`,
+/// the pixels under it are saved from the *pre*-present frame, and the next
+/// hide stamps that stale block onto the screen and then saves it again as
+/// the new background -- so the damage is copied forward every frame, and in
+/// the worst ordering what gets saved is the arrow itself, leaving one
+/// permanent ghost per occurrence.
+static CUR_BUSY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Releases the claim however the holder leaves.
+struct Claim;
+
+impl Claim {
+    /// `None` when somebody else holds it. Never waits: every caller here has
+    /// something sensible to do with a refusal, and a spin would be spinning
+    /// against a task that only runs when this one yields.
+    fn take() -> Option<Claim> {
+        use core::sync::atomic::Ordering::{Acquire, Relaxed};
+        CUR_BUSY.compare_exchange(false, true, Acquire, Relaxed).ok().map(|_| Claim)
+    }
+}
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        CUR_BUSY.store(false, core::sync::atomic::Ordering::Release);
+    }
+}
+
 pub fn cursor_hide(fb: &Framebuffer) {
     let Some((x, y)) = (unsafe { *SHOWN.get() }) else { return };
-    let saved = unsafe { &*SAVED.get() };
-    for row in 0..CUR_H {
-        for col in 0..CUR_W {
-            if x + col < fb.width() && y + row < fb.height() {
-                fb.put(x + col, y + row, saved[(row * CUR_W + col) as usize]);
+    // Ask the compositor for those pixels back, rather than trusting a copy
+    // taken earlier.
+    //
+    // The back buffer is by definition what the screen is supposed to show, so
+    // restoring from it cannot be stale -- and staleness was the whole bug
+    // class here. `pump_cursor` runs between tokens while the console is
+    // streaming into the same region; every flushed line made `SAVED` describe
+    // a frame that no longer existed, and putting it back punched a 17x11
+    // block of old pixels into the answer text that nothing ever repaired,
+    // because the compositor believed those pixels were already correct.
+    if !super::compose::repaint_rect(x, y, CUR_W, CUR_H) {
+        let saved = unsafe { &*SAVED.get() };
+        for row in 0..CUR_H {
+            for col in 0..CUR_W {
+                if x + col < fb.width() && y + row < fb.height() {
+                    fb.put(x + col, y + row, saved[(row * CUR_W + col) as usize]);
+                }
             }
         }
     }
@@ -1314,15 +1359,20 @@ pub fn cursor_show(fb: &Framebuffer, x: u32, y: u32) {
     cursor_hide(fb);
     let shape = unsafe { *SHAPE.get() };
     let bits = bitmap(shape);
-    let saved = unsafe { &mut *SAVED.get() };
-    // Save the whole box before painting anything. The halo pass writes
-    // pixels the figure never covers, and restoring is only correct if every
-    // pixel that might be written was read first.
-    for row in 0..CUR_H {
-        for col in 0..CUR_W {
-            let (px, py) = (x + col, y + row);
-            if px < fb.width() && py < fb.height() {
-                saved[(row * CUR_W + col) as usize] = fb.get(px, py);
+    // Only needed when there is no compositor to ask. With one, this loop is
+    // 187 uncached reads off the aperture per mouse move -- on the path that
+    // runs between every generated token -- to fill a buffer nothing reads.
+    if !super::compose::active() {
+        let saved = unsafe { &mut *SAVED.get() };
+        // Save the whole box before painting anything. The halo pass writes
+        // pixels the figure never covers, and restoring is only correct if
+        // every pixel that might be written was read first.
+        for row in 0..CUR_H {
+            for col in 0..CUR_W {
+                let (px, py) = (x + col, y + row);
+                if px < fb.width() && py < fb.height() {
+                    saved[(row * CUR_W + col) as usize] = fb.get(px, py);
+                }
             }
         }
     }
@@ -1393,13 +1443,31 @@ pub fn pump_cursor() {
     // `peek` rather than `take`: the button edges belong to `poll_mouse`, and
     // consuming the packet here would swallow a click that arrived mid-answer.
     let Some((x, y)) = mouse::position() else { return };
-    let prev = unsafe { *POS.get() };
-    if prev == Some((x, y)) {
+    if unsafe { *POS.get() } == Some((x, y)) {
         return;
     }
-    unsafe { *POS.get() = Some((x, y)) };
-    let Some(fb) = super::primary() else { return };
-    cursor_show(&fb, x, y);
+    if move_cursor(x, y) {
+        unsafe { *POS.get() = Some((x, y)) };
+    }
+}
+
+/// Put the arrow somewhere, without letting anything else paint while it does.
+///
+/// Interrupts off for the whole of it, so the timer cannot switch tasks
+/// between the save and the paint -- the body is a few hundred pixels, and the
+/// alternative is a repaint landing inside it and saving the arrow's own
+/// pixels as the background it will later restore.
+///
+/// `false` when a repaint already owns the screen. Losing costs one frame of
+/// pointer lag and nothing else, so the caller leaves `POS` alone and tries
+/// again rather than recording a move it never drew.
+fn move_cursor(x: u32, y: u32) -> bool {
+    crate::cpu::without_interrupts(|| {
+        let Some(_claim) = Claim::take() else { return false };
+        let Some(fb) = super::primary() else { return false };
+        cursor_show(&fb, x, y);
+        true
+    })
 }
 
 pub fn poll_mouse() {
@@ -1411,7 +1479,11 @@ pub fn poll_mouse() {
     if !s.moved {
         return;
     }
-    let Some(fb) = super::primary() else { return };
+    // Still a precondition even though the framebuffer is no longer touched
+    // from here: `move_cursor` fetches its own, under the claim.
+    if super::primary().is_none() {
+        return;
+    }
     let (x, y) = (s.x.max(0), s.y.max(0));
     unsafe { *POS.get() = Some((x as u32, y as u32)) };
 
@@ -1478,7 +1550,10 @@ pub fn poll_mouse() {
         _ => resize_shape_at(x, y),
     };
     unsafe { *SHAPE.get() = want };
-    cursor_show(&fb, x as u32, y as u32);
+    // Same claim the pump takes. This runs on the shell task and the pump runs
+    // on whichever task is generating, so without it the two interleave in
+    // exactly the way the cursor statics cannot survive.
+    move_cursor(x as u32, y as u32);
 }
 
 static BUTTONS: Racy<(bool, bool)> = Racy::new((false, false));
@@ -2594,6 +2669,22 @@ pub fn clock_rect(fb: &Framebuffer) -> Rect {
 
 pub fn draw() {
     let Some(real) = super::primary() else {
+        return;
+    };
+    // One painter at a time, for the whole frame.
+    //
+    // The claim covers `cursor_hide` at the top through `cursor_show` at the
+    // bottom, because the window between them is the race: a cursor move that
+    // lands after the hide and before the present saves pixels from a frame
+    // that is about to be replaced. Holding it only around each cursor call
+    // would leave that gap wide open.
+    //
+    // It also makes `draw` single-writer, which it has never been -- the agent
+    // and author tasks both call it while the shell may be mid-frame, sharing
+    // the back buffer, the shadow and the cursor statics with no lock at all.
+    // Returning is the right answer to losing: the holder is painting the same
+    // desktop this call would have painted.
+    let Some(_claim) = Claim::take() else {
         return;
     };
     let screen = screen_rect(&real);

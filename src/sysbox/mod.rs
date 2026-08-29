@@ -593,15 +593,40 @@ fn cmd_run(path: &str) {
     } else {
         // Its own subtree, so two skills cannot reach each other's scratch,
         // and a fresh interpreter so nothing survives a run.
-        // Named after the skill without its extension, so the jail is a path
-        // somebody would guess: `/ai/tools/mk.ai&xi` writes under
-        // `/ai/tools/scratch/mk`. Leaving the extension on made the directory
-        // `scratch/mk.ai&xi`, which is both ugly and the sort of detail a
-        // program author gets wrong once and then works around.
-        let leaf = path.rsplit('/').next().unwrap_or("skill");
-        let stem = leaf.split('.').next().filter(|t| !t.is_empty()).unwrap_or(leaf);
-        let mut jail = String::from("/ai/tools/scratch/");
-        jail.push_str(stem);
+        //
+        // The jail mirrors the program's own resolved path under
+        // `/ai/tools/scratch`, so `/ai/tools/mk.ai&xi` writes under
+        // `/ai/tools/scratch/ai/tools/mk.ai&xi`. A mirror rather than a
+        // prettier name because the property being bought is that two
+        // different programs can never share a jail, and a bijection is the
+        // only way to have that for free.
+        //
+        // The name it replaces was the file's leaf with its extension
+        // stripped, taken off the raw argument, and it failed both ways.
+        // `run /ai/tools/evil.ai&xi/` still runs -- `parse` drops the trailing
+        // slash -- but `rsplit('/')` then saw an empty component, so the jail
+        // collapsed to `/ai/tools/scratch` itself, the parent of every other
+        // skill's scratch, and an untrusted program could read and overwrite
+        // the persisted state of every skill on the machine. Less
+        // dramatically, `mk.ai&xi`, `mk.bak` and `mk.old` all stemmed to `mk`,
+        // and `run` takes any namespace path, so `/app/report.ai&xi` and
+        // `/ai/tools/report.ai&xi` shared one too. Resolving first fixes the
+        // first; mirroring the whole path fixes the rest.
+        let parts = with(|s| parse(&s.cwd, path)).unwrap_or_default();
+        // A path that resolves to nothing is the root of the namespace, and
+        // the root is not a jail. `read_blob` succeeded above so this should
+        // be unreachable; refusing rather than trusting that is the difference
+        // between a bug and a hole.
+        if parts.is_empty() {
+            RUNNING.store(false, Ordering::Release);
+            kprintln!("  run: '{}' does not name a program", path);
+            return;
+        }
+        let mut jail = String::from("/ai/tools/scratch");
+        for part in &parts {
+            jail.push('/');
+            jail.push_str(part);
+        }
         let mut sandbox = aiksi::Interp::sandboxed(&jail).with_step_budget(SKILL_BUDGET);
         Some(aiksi::eval_line(&mut sandbox, &text))
     };
@@ -770,9 +795,38 @@ fn cmd_remember(text: &str) {
     }
 }
 
+/// One task's namespace writes, while a `shadow` is watching that task.
+///
+/// The identity is the task, not the tree, because the tree cannot tell who
+/// wrote to it. Five tasks share this namespace and three of them write to it
+/// unprompted; without a name on each write there is no way to undo a
+/// sandboxed program's changes without also undoing the agent's.
+struct Watch {
+    task: usize,
+    paths: Vec<Vec<String>>,
+}
+
+static WATCH: Racy<Option<Watch>> = Racy::new(None);
+
+/// Record a mutation against the run that made it, if anyone is watching.
+///
+/// Called from every function that changes the live tree. A mutation that
+/// reaches the tree without passing through here is one `shadow` cannot undo,
+/// which is why the call sits beside the mutation rather than at the callers.
+fn note(p: &[String]) {
+    unsafe {
+        if let Some(w) = (*WATCH.get()).as_mut() {
+            if w.task == crate::task::current() {
+                w.paths.push(p.to_vec());
+            }
+        }
+    }
+}
+
 pub fn write_blob(path: &str, data: Vec<u8>) -> bool {
     with(|s| {
         let p = parse(&s.cwd, path);
+        note(&p);
         tree::put(&mut s.root, &p, Node::Blob(data)).is_ok()
     })
     .unwrap_or(false)
@@ -793,6 +847,7 @@ pub fn read_blob(path: &str) -> Option<Vec<u8>> {
 pub fn detach(path: &str) -> bool {
     with(|s| {
         let p = parse(&s.cwd, path);
+        note(&p);
         tree::remove(&mut s.root, &p).is_some()
     })
     .unwrap_or(false)
@@ -938,6 +993,58 @@ pub fn selftest() -> bool {
         "add then remove returns to the original address",
         moved && tree::content_hash(&e) == before,
     );
+
+    // What `sandbox` promises: undo this run, and only this run.
+    //
+    // The foreign write below is not a contrivance. Three tasks write to this
+    // namespace unprompted, a sandboxed skill has five million steps and no
+    // yield point, so a run spans seconds during which the agent task is
+    // writing episode transcripts and the initiative task its journal. The
+    // first version of `shadow` restored the whole root and threw all of that
+    // away silently, reporting "discarded" as though only the program had
+    // been undone. A snapshot diff cannot tell the two apart -- both are
+    // changes -- so the test has to be that a write made under another task's
+    // name survives, which is exactly what is checked here.
+    //
+    // At boot the selftests run before a namespace is mounted, so there is
+    // nothing to shadow. Said out loud rather than skipped quietly -- an
+    // unrunnable claim that prints nothing is indistinguishable from one that
+    // passed, and `diag sysbox` runs this same suite once there is a tree.
+    if with(|_| ()).is_none() {
+        kprintln!("  --   a shadow undoes its own run only (no namespace yet: `diag sysbox`)");
+    } else if let Some(sh) = shadow(|| {
+        write_text("/tmp/.selftest-mine", "mine\n");
+        // A write by somebody else, which is precisely a write recorded
+        // against a different task id.
+        unsafe {
+            if let Some(w) = (*WATCH.get()).as_mut() {
+                w.task = w.task.wrapping_add(1);
+            }
+        }
+        write_text("/tmp/.selftest-theirs", "theirs\n");
+        unsafe {
+            if let Some(w) = (*WATCH.get()).as_mut() {
+                w.task = w.task.wrapping_sub(1);
+            }
+        }
+    }) {
+        ok &= check(
+            "a shadow reports only the paths the run itself wrote",
+            sh.changes == 1 && sh.touched.iter().any(|t| t.ends_with("/tmp/.selftest-mine")),
+        );
+        sh.discard();
+        ok &= check(
+            "discarding undoes the run's own write",
+            read_blob("/tmp/.selftest-mine").is_none(),
+        );
+        ok &= check(
+            "and leaves another task's write alone",
+            read_blob("/tmp/.selftest-theirs").is_some(),
+        );
+        detach("/tmp/.selftest-theirs");
+    } else {
+        ok &= check("a shadow can be taken", false);
+    }
 
     ok
 }
@@ -1211,6 +1318,7 @@ fn cmd_mkdir(arg: &str) {
             err("already exists");
             return;
         }
+        note(&p);
         match tree::put(&mut s.root, &p, Node::empty_dir()) {
             Ok(()) => kprintln!("  {}", show(&p)),
             Err(tree::PutError::TooDeep) => err("too deep"),
@@ -1231,6 +1339,7 @@ fn cmd_write(arg: &str, rest: &str) {
         let mut data = text.as_bytes().to_vec();
         data.push(b'\n');
         let n = data.len();
+        note(&p);
         match tree::put(&mut s.root, &p, Node::Blob(data)) {
             Ok(()) => kprintln!("  {}  {} B", show(&p), n),
             Err(tree::PutError::TooDeep) => err("too deep"),
@@ -1247,6 +1356,7 @@ fn cmd_rm(arg: &str) {
     }
     with(|s| {
         let p = parse(&s.cwd, arg);
+        note(&p);
         match tree::remove(&mut s.root, &p) {
             Some(n) => {
                 let h = tree::content_hash(&n);
@@ -1286,8 +1396,10 @@ fn cmd_move(a: &str, b: &str, detach: bool) {
             Some(n) => tree::clone_node(n),
         };
         if detach {
+            note(&pa);
             tree::remove(&mut s.root, &pa);
         }
+        note(&pb);
         match tree::put(&mut s.root, &pb, node) {
             Ok(()) => kprintln!("  {} -> {}", show(&pa), show(&pb)),
             Err(_) => err("could not place that path"),
@@ -1636,6 +1748,9 @@ fn mark(sign: &str, at: &[String]) {
 /// The namespace as it was, so a change can be put back.
 pub struct Shadow {
     before: Node,
+    /// The same paths as `touched`, kept resolved rather than formatted,
+    /// because `discard` has to walk them and a printed line is not a path.
+    undo: Vec<(char, Vec<String>)>,
     /// Every path the change touched, signed: `+` added, `-` removed,
     /// `~` altered.
     pub touched: Vec<String>,
@@ -1654,10 +1769,29 @@ pub struct Shadow {
 /// against the live tree and is undone afterwards; it is not confined to a
 /// copy. So a program that faults halfway leaves the tree as it was only
 /// because `discard` puts it back, and anything reading the namespace *during*
-/// the run sees the change. That is safe under the discipline the night loop
-/// already keeps -- `NIGHT_BUSY` claims the whole block and the engine has one
-/// holder -- and it would not be safe under concurrent writers, which do not
-/// exist here.
+/// the run sees the change.
+///
+/// **Concurrent writers do exist**, which was the flaw in the first version of
+/// this. A sandboxed skill gets five million steps and Aiksi has no yield
+/// point, so a run spans many seconds of wall clock, and the agent and
+/// initiative tasks go on writing episode transcripts, outcome lines, journal
+/// entries and freshly authored skills throughout it. `discard` restored the
+/// whole root, so every one of those writes was silently thrown away while the
+/// shell printed "discarded" as though only the sandboxed program had been
+/// undone -- and `touched` blamed the sandboxed program for them into the
+/// bargain, so the command answered its one question wrongly in both
+/// directions.
+///
+/// **So the writes are attributed, not diffed.** Comparing two snapshots
+/// cannot answer this: a change is a change whoever made it, so every
+/// background write lands in the diff and gets reverted and reported exactly
+/// like the run's own. What distinguishes them is *who*, and the tree does not
+/// record that -- so `note` does, against `task::current()`, at each mutation.
+/// A path this task did not write is a path this function neither reports nor
+/// undoes.
+///
+/// The snapshot is still taken, because knowing which paths changed is not
+/// knowing what they held before.
 ///
 /// The honest alternative is a read-through overlay with a namespace handle
 /// threaded through `with`, which every accessor in the kernel would have to
@@ -1667,31 +1801,92 @@ pub fn shadow<F: FnOnce()>(f: F) -> Option<Shadow> {
     // Cloned before, compared after. `clone_node` is a deep copy and this is
     // the expensive part -- acceptable for a test harness that runs once per
     // candidate, and not something to put on any hot path.
-    let before = with(|s| tree::clone_node(&s.root))?;
-    f();
-    let after = with(|s| tree::clone_node(&s.root))?;
+    // Interrupts off across each snapshot.
+    //
+    // `clone_node` is a long recursive walk holding `&mut Sysbox`, and a timer
+    // switch into a task that calls `write_text` takes a second `&mut` to the
+    // same `Racy` -- aliasing mutable references over a tree this one is in the
+    // middle of reading, and a directory's entry Vec can reallocate underneath
+    // the walk. Microseconds of lost tick against reading a freed buffer in the
+    // one address space with no guard pages.
+    let before =
+        crate::cpu::without_interrupts(|| with(|s| tree::clone_node(&s.root)))?;
 
+    // Watch this task for the duration. The previous watch is put back rather
+    // than cleared, so a nested run cannot silently end the outer one.
+    let mine = crate::task::current();
+    let prev = unsafe {
+        core::mem::replace(&mut *WATCH.get(), Some(Watch { task: mine, paths: Vec::new() }))
+    };
+    f();
+    let seen = unsafe { core::mem::replace(&mut *WATCH.get(), prev) };
+    let mut paths = seen.map(|w| w.paths).unwrap_or_default();
+    paths.sort();
+    paths.dedup();
+
+    // Classified against the tree as it stands, which is `after` without
+    // paying for a second deep copy of it.
     let mut touched = Vec::new();
+    let mut undo = Vec::new();
     let mut changes = 0u32;
-    diff_walk(
-        &before,
-        &after,
-        &mut Vec::new(),
-        &mut changes,
-        &mut |sign, at| {
+    with(|s| {
+        for p in &paths {
+            let was = tree::resolve(&before, p).map(tree::content_hash);
+            let now = tree::resolve(&s.root, p).map(tree::content_hash);
+            // Written back exactly as it was. A write is not a change.
+            if was == now {
+                continue;
+            }
+            let sign = match (was, now) {
+                (None, Some(_)) => '+',
+                (Some(_), None) => '-',
+                _ => '~',
+            };
+            changes += 1;
             let mut line = String::from(sign);
             line.push(' ');
-            line.push_str(&show(at));
+            line.push_str(&show(p));
             touched.push(line);
-        },
-    );
-    Some(Shadow { before, touched, changes })
+            undo.push((sign, p.clone()));
+        }
+    })?;
+    Some(Shadow { before, undo, touched, changes })
 }
 
 impl Shadow {
-    /// Put the namespace back as it was.
+    /// Put back exactly what the run changed, and nothing else.
+    ///
+    /// Path by path rather than by restoring the root, because the root
+    /// belongs to every task and this list belongs to one run. A file the
+    /// agent task wrote while the program was thinking was never recorded
+    /// against this run, so it is not in `undo`, so it survives.
+    ///
+    /// Sorted order matters in one case and is free: `/a` is undone before
+    /// `/a/b`, so removing a directory the run created cannot be followed by
+    /// re-creating a file inside it.
     pub fn discard(self) -> bool {
-        with(|s| s.root = self.before).is_some()
+        crate::cpu::without_interrupts(|| with(|s| {
+            for (sign, at) in &self.undo {
+                match sign {
+                    // The run created it. Take the name away again.
+                    '+' => {
+                        tree::remove(&mut s.root, at);
+                    }
+                    // The run removed or altered it. Whatever was there
+                    // before goes back; if it was not there before, the name
+                    // goes away.
+                    _ => match tree::resolve(&self.before, at) {
+                        Some(n) => {
+                            let _ = tree::put(&mut s.root, at, tree::clone_node(n));
+                        }
+                        None => {
+                            tree::remove(&mut s.root, at);
+                        }
+                    },
+                }
+            }
+        }))
+        .is_some()
     }
 
     /// Leave the change in place.
