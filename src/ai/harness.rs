@@ -1515,25 +1515,51 @@ fn decide(
     all: &[usize],
     core_says: Option<usize>,
 ) -> usize {
-    match (rule, council) {
-        (Rule::ProbeOnly, _) | (_, None) => probe_says,
-        (Rule::Majority, Some(c)) => match c.corroborate(text, tok, all) {
-            Some((l, ch)) if l == ch && l != probe_says => l,
-            _ => probe_says,
-        },
-        (Rule::LexicalOnly, Some(c)) => match c.corroborate(text, tok, all) {
-            Some((l, _)) => l,
-            None => probe_says,
-        },
+    if matches!(rule, Rule::ProbeOnly) {
+        return probe_says;
+    }
+    let pair = match council {
+        None => None,
+        Some(c) => c.corroborate(text, tok, all),
+    };
+    decide_with(rule, probe_says, pair, core_says)
+}
+
+/// The rule itself, once the corroborators have already spoken.
+///
+/// Split out because corroborating is the expensive half -- a tokenize and two
+/// Bayes predictions -- and every caller that needs more than one verdict for
+/// the same item was paying for it again each time. `core_bench_core` asks
+/// three questions per item (with the core, without it, and what the counters
+/// said) and so corroborated three times for one answer.
+///
+/// One definition, reached two ways, for the reason the census shares
+/// `core_bench_core` rather than counting separately: a second copy of this
+/// arithmetic would be a second opinion about what the council decides, and
+/// the two would eventually disagree about a verdict already in the ledger.
+pub fn decide_with(
+    rule: Rule,
+    probe_says: usize,
+    pair: Option<(usize, usize)>,
+    core_says: Option<usize>,
+) -> usize {
+    let Some((l, ch)) = pair else { return probe_says };
+    match rule {
+        Rule::ProbeOnly => probe_says,
+        Rule::Majority => {
+            if l == ch && l != probe_says {
+                l
+            } else {
+                probe_says
+            }
+        }
+        Rule::LexicalOnly => l,
         // At least two of the corroborators agreeing on something the probe
         // did not say carries it. The probe keeps ties and keeps everything
         // else, which is what makes this an extension of `Majority` rather
         // than a different system: with no core there are two corroborators
         // and "at least two agree" is exactly "they agree".
-        (Rule::WithCore, Some(c)) => {
-            let Some((l, ch)) = c.corroborate(text, tok, all) else {
-                return probe_says;
-            };
+        Rule::WithCore => {
             let mut votes = alloc::vec![l, ch];
             if let Some(k) = core_says {
                 votes.push(k);
@@ -1927,6 +1953,131 @@ pub fn last_prize() -> Option<usize> {
     Some(n)
 }
 
+/// What the cue pool could do, if the machine chose from it perfectly.
+///
+/// The producer's ceiling, the way `core_prize` is the judge's. Counting cues
+/// says how much the filter admits; this says how much of what it admits is
+/// worth anything -- and those are different questions, because a filter can
+/// double the table with words that never fire on a held-out item.
+pub struct CueVerdict {
+    pub cues: usize,
+    /// Would repair at least one validation item and break none.
+    pub usable: usize,
+    /// Would break at least one, whatever else it does.
+    pub harmful: usize,
+    /// Changes no decision either way. The common case, and not a failure:
+    /// under `WithCore` a core that answers where the counters agree is
+    /// arithmetically inert.
+    pub inert: usize,
+    /// The best single rule in the pool, and what it would score alone.
+    pub best_fixed: usize,
+    pub best_broke: usize,
+    pub best: String,
+    /// Items repaired by *some* rule in the pool -- the ceiling a multi-rule
+    /// core could approach, as opposed to what one rule reaches.
+    pub reach: usize,
+}
+
+/// Measure the cue pool against the validation slice.
+///
+/// **This reads validation, and that is a real cost.** It exists to answer
+/// whether loosening the producer's filter admits cues that can do anything,
+/// which cannot be answered from the training slice: a cue's value is whether
+/// it fires where the counters split and the probe is wrong, and that is a
+/// property of the slice being judged. So it is a diagnostic an operator runs,
+/// never something the producer or the night loop consults -- choosing the
+/// filter by what scores here would be fitting the slice J1 is computed on,
+/// and the difference between measuring a thing and selecting on it is the
+/// whole discipline of this module.
+///
+/// Corroborating is cached per item rather than per cue: the counters do not
+/// depend on the candidate, so a hundred cues cost one pass over the slice and
+/// then a substring test each.
+pub fn cue_oracle(
+    e: &mut super::Engine,
+    names: &[String],
+    purity: u32,
+    min_uses: u32,
+) -> Result<CueVerdict, String> {
+    let table = super::voter::cue_table_at(names, purity, min_uses);
+    let Some(f) = featurise(e) else {
+        return Err(String::from("no corpus to judge against"));
+    };
+    let lambda = default_lambda();
+    let fitted = fit_all(e, &f, &[lambda]);
+    let Some((_, probe)) = fitted.probes.first() else {
+        return Err(String::from("the probe would not fit"));
+    };
+    let all: Vec<usize> = (0..f.classes).collect();
+
+    // (lowered text, wanted class, what the probe said, what the counters said)
+    let mut items: Vec<(String, usize, usize, Option<(usize, usize)>)> = Vec::new();
+    for (split, x, want, text) in &f.ev {
+        if *split != VALIDATION {
+            continue;
+        }
+        let p = probe.predict(x);
+        let pair = fitted.council.as_ref().and_then(|c| c.corroborate(text, &e.tok, &all));
+        let lowered: String = text.chars().map(|c| c.to_ascii_lowercase()).collect();
+        items.push((lowered, *want, p, pair));
+    }
+    if items.is_empty() {
+        return Err(String::from("nothing in validation to judge against"));
+    }
+
+    let mut v = CueVerdict {
+        cues: table.len(),
+        usable: 0,
+        harmful: 0,
+        inert: 0,
+        best_fixed: 0,
+        best_broke: 0,
+        best: String::new(),
+        reach: 0,
+    };
+    // Which items *any* rule repairs, so the pool's ceiling is distinguishable
+    // from its best single rule.
+    let mut reached = alloc::vec![false; items.len()];
+
+    for (word, class, _) in &table {
+        let (mut fixed, mut broke) = (0usize, 0usize);
+        for (i, (text, want, p, pair)) in items.iter().enumerate() {
+            let says = if text.contains(word.as_str()) { Some(*class) } else { None };
+            if says.is_none() {
+                continue;
+            }
+            let without = decide_with(Rule::Majority, *p, *pair, None);
+            let with = decide_with(Rule::WithCore, *p, *pair, says);
+            match (without == *want, with == *want) {
+                (false, true) => {
+                    fixed += 1;
+                    reached[i] = true;
+                }
+                (true, false) => broke += 1,
+                _ => {}
+            }
+        }
+        if broke > 0 {
+            v.harmful += 1;
+        } else if fixed > 0 {
+            v.usable += 1;
+        } else {
+            v.inert += 1;
+        }
+        // Best by net repair, so a rule that fixes six and breaks four does
+        // not outrank one that fixes three cleanly.
+        let net = fixed as i32 - broke as i32;
+        let best_net = v.best_fixed as i32 - v.best_broke as i32;
+        if net > best_net {
+            v.best_fixed = fixed;
+            v.best_broke = broke;
+            v.best = word.clone();
+        }
+    }
+    v.reach = reached.iter().filter(|r| **r).count();
+    Ok(v)
+}
+
 pub fn core_bench_core(
     e: &mut super::Engine,
     core: &super::voter::Core,
@@ -1973,12 +2124,12 @@ pub fn core_bench_core(
                 v.declined += 1;
             }
 
-            let without = decide(Rule::Majority, p, fitted.council.as_ref(), &e.tok, text, &all, None);
-            let with = decide(Rule::WithCore, p, fitted.council.as_ref(), &e.tok, text, &all, says);
-
-            // The census. Computed from what the two counters said, which is
-            // the same call J6 makes below -- hoisted so it happens once.
+            // What the counters said, asked once and used three times: for the
+            // paired comparison, for the census, and for J6.
             let pair = fitted.council.as_ref().and_then(|c| c.corroborate(text, &e.tok, &all));
+            let without = decide_with(Rule::Majority, p, pair, None);
+            let with = decide_with(Rule::WithCore, p, pair, says);
+
             if let Some((l, ch)) = pair {
                 if l != ch {
                     v.contested += 1;

@@ -276,6 +276,34 @@ pub struct Clause {
 const MIN_CUE: usize = 3;
 /// Training examples of its own class a cue must appear in.
 const MIN_USES: u32 = 2;
+/// Percentage of a cue's training uses that must belong to the class it
+/// argues for.
+///
+/// **A hundred, and it stays a hundred because loosening it was measured.**
+/// The argument for loosening was good: under `decide` a core's answer carries
+/// only when it seconds one of the two counters, so a wrong answer looked
+/// inert rather than harmful, and purity looked like it was paying real
+/// coverage for a risk of about one in twenty-three. `core oracle` says
+/// otherwise, on 180 validation items:
+///
+///     purity  cues  usable  harmful  inert  repairable by the pool
+///       100    113     2       0      111            2
+///        67    122     2       1      119            2
+///        50    169     5       6      158            4
+///
+/// Loosening to 67% bought no extra reach and one harmful cue. Fifty per cent
+/// bought two more repairable items and *six* harmful cues -- more cues that
+/// break something than cues that fix anything.
+///
+/// The reasoning was wrong in one specific way, and it is worth writing down:
+/// a wrong core answer is not uniform over the classes. The core reads words
+/// and so does the lexical counter, so when a magnet word like "list" pulls
+/// the core to the wrong class it pulls the lexical core to the same wrong
+/// class, and two agreeing votes carry it. The two are correlated by
+/// construction. Purity is what stops the core from being a noisy copy of the
+/// counter it is supposed to be independent of -- which is also what J6 asks
+/// for, arriving at the same place from the other side.
+const CUE_PURITY: u32 = 100;
 /// Cues offered per class. A grammar the model cannot get through is a decode
 /// that spends its allowance and commits to nothing.
 const CUE_CAP: usize = 16;
@@ -346,6 +374,30 @@ fn words_of(task: &str) -> Vec<String> {
 /// index the core may return. Taking it as an argument rather than reading
 /// `sysbox::APPLETS` keeps that a fact rather than an assumption.
 pub fn cue_table(names: &[String]) -> Vec<(String, usize, u32)> {
+    cue_table_at(names, CUE_PURITY, MIN_USES)
+}
+
+/// The same table at a stated purity and support, so the setting can be
+/// measured rather than argued about.
+///
+/// `purity` is the percentage of a cue's training occurrences that must belong
+/// to the class it argues for. A hundred is the original rule -- the cue
+/// appears under one class and nowhere else. Below that it need only be the
+/// majority owner, and the remainder is how often it argues for a class that
+/// is not the one it was filed under.
+///
+/// It is a parameter because the answer was not obvious and had to be
+/// measured; see `CUE_PURITY` for what the measurement said and why the
+/// default stays at a hundred. It remains a parameter so the question can be
+/// asked again -- the answer is a property of this corpus and this council,
+/// and both change.
+///
+/// Note what the table does *not* tell you. Counting cues says how much the
+/// filter admits; it says nothing about how much of that is worth having.
+/// Support 1 nearly doubles the table with words used exactly once, which are
+/// perfectly pure and almost never fire on anything held out. `core oracle` is
+/// the question that matters and `core cues` is the one that is cheap.
+pub fn cue_table_at(names: &[String], purity: u32, min_uses: u32) -> Vec<(String, usize, u32)> {
     let ex = super::vocab::examples();
     let mut pairs: Vec<(String, usize)> = Vec::new();
     for (i, e) in ex.iter().enumerate() {
@@ -366,13 +418,34 @@ pub fn cue_table(names: &[String]) -> Vec<(String, usize, u32)> {
         while j < pairs.len() && pairs[j].0 == pairs[i].0 {
             j += 1;
         }
-        // One owner or none: a cue shared by two classes argues for both and
-        // so argues for neither.
-        let owner = pairs[i].1;
-        let exclusive = pairs[i..j].iter().all(|(_, c)| *c == owner);
-        let uses = (j - i) as u32;
-        if exclusive && uses >= MIN_USES {
-            out.push((pairs[i].0.clone(), owner, uses));
+        // Who the cue mostly belongs to, and how firmly.
+        //
+        // The sort groups equal classes inside each word, so the per-class
+        // counts are sub-runs. Ties keep the lowest class index, which is
+        // arbitrary and deterministic -- the second matters, the first does
+        // not.
+        let total = (j - i) as u32;
+        let (mut owner, mut owned) = (pairs[i].1, 0u32);
+        let mut k = i;
+        while k < j {
+            let mut m = k;
+            while m < j && pairs[m].1 == pairs[k].1 {
+                m += 1;
+            }
+            let n = (m - k) as u32;
+            if n > owned {
+                owned = n;
+                owner = pairs[k].1;
+            }
+            k = m;
+        }
+        // Support is the owner's own examples, not the word's total. Under the
+        // old exclusive rule those were the same number, and they stop being
+        // the same the moment a cue is allowed to appear elsewhere -- counting
+        // the total would let a common word qualify on other classes' uses of
+        // it.
+        if owned >= min_uses && owned * 100 >= total * purity {
+            out.push((pairs[i].0.clone(), owner, owned));
         }
         i = j;
     }

@@ -1352,6 +1352,104 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         Some(h) => harness::core_report(&h, install),
                     }
                 }
+                // What the producer has to write with, at a stated filter.
+                //
+                // Takes the setting as an argument so every candidate can be
+                // measured in one boot against one corpus. Recompiling per
+                // setting would compare numbers from different machines and
+                // call the difference an effect.
+                //
+                // Train slice only, and no verdict is computed here: choosing
+                // the filter by what scores best on validation would be
+                // fitting the slice the judges measure on, which is the one
+                // thing this whole module is arranged to prevent.
+                "cues" => {
+                    let purity: u32 = w.next().and_then(|s| s.parse().ok()).unwrap_or(100);
+                    let min_uses: u32 = w.next().and_then(|s| s.parse().ok()).unwrap_or(2);
+                    let names: Option<alloc::vec::Vec<alloc::string::String>> =
+                        crate::ai::with_engine(|e| {
+                            (0..e.head.len())
+                                .map(|i| alloc::string::String::from(e.head.name(i)))
+                                .collect()
+                        });
+                    match names {
+                        None => kprintln!("  {}", crate::ai::engine_refusal()),
+                        Some(names) => {
+                            let t = voter::cue_table_at(&names, purity, min_uses);
+                            let mut classes: alloc::vec::Vec<usize> = alloc::vec::Vec::new();
+                            for (_, c, _) in &t {
+                                if !classes.contains(c) {
+                                    classes.push(*c);
+                                }
+                            }
+                            kprintln!(
+                                "  purity {}%, support {}: {} cue(s) over {} of {} class(es)",
+                                purity,
+                                min_uses,
+                                t.len(),
+                                classes.len(),
+                                names.len()
+                            );
+                            // The cues themselves, because the number alone
+                            // cannot say whether loosening bought signal or
+                            // filler. A table full of "the" is a bigger table
+                            // and a worse one.
+                            for c in classes.iter().take(8) {
+                                let mut line = alloc::string::String::new();
+                                for (word, owner, n) in t.iter().filter(|(_, o, _)| o == c).take(6) {
+                                    if !line.is_empty() {
+                                        line.push(' ');
+                                    }
+                                    let _ = owner;
+                                    line.push_str(word);
+                                    line.push('/');
+                                    line.push_str(&alloc::format!("{}", n));
+                                }
+                                kprintln!("    {:8} {}", names[*c], line);
+                            }
+                            if classes.len() > 8 {
+                                kprintln!("    ... and {} more class(es)", classes.len() - 8);
+                            }
+                        }
+                    }
+                }
+                // What the cue pool could achieve if the machine chose from it
+                // perfectly. The producer's ceiling, beside the judge's.
+                "oracle" => {
+                    let purity: u32 = w.next().and_then(|s| s.parse().ok()).unwrap_or(100);
+                    let min_uses: u32 = w.next().and_then(|s| s.parse().ok()).unwrap_or(2);
+                    let names: Option<alloc::vec::Vec<alloc::string::String>> =
+                        crate::ai::with_engine(|e| {
+                            (0..e.head.len())
+                                .map(|i| alloc::string::String::from(e.head.name(i)))
+                                .collect()
+                        });
+                    let out = names.and_then(|names| {
+                        crate::ai::with_engine(|e| harness::cue_oracle(e, &names, purity, min_uses))
+                    });
+                    match out {
+                        None => kprintln!("  {}", crate::ai::engine_refusal()),
+                        Some(Err(e)) => kprintln!("  {}", e),
+                        Some(Ok(v)) => {
+                            kprintln!(
+                                "  purity {}%, support {}: {} cue(s)",
+                                purity, min_uses, v.cues
+                            );
+                            kprintln!("  {} usable, {} harmful, {} inert", v.usable, v.harmful, v.inert);
+                            kprintln!(
+                                "  best single rule: '{}' fixes {} breaks {}",
+                                v.best, v.best_fixed, v.best_broke
+                            );
+                            let need = crate::ai::godel::clean_fixes_needed();
+                            console::set_color(if v.reach >= need { LTGREEN } else { YELLOW });
+                            kprintln!(
+                                "  {} item(s) repairable by some rule in the pool ({} needed)",
+                                v.reach, need
+                            );
+                            console::set_color(LTGRAY);
+                        }
+                    }
+                }
                 // How much room a core has here, asked without one.
                 //
                 // The first question, and until now an unaskable one. A core
