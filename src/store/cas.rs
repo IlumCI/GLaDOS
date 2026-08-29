@@ -265,6 +265,46 @@ impl Store {
         Ok(data)
     }
 
+    /// Read part of a chunk, into a buffer the caller already owns.
+    ///
+    /// The whole point of streaming, and the reason it is cheap here: `put`
+    /// writes a blob to one contiguous run of blocks, so any range inside it
+    /// is a contiguous run too. Reading the middle of a 30 GiB model costs one
+    /// command, and the model never has to be resident to be read from.
+    ///
+    /// **Block-granular, and allocation-free, on purpose.** `get` calls `dma`,
+    /// which calls `alloc_zeroed` and hands back a `&'static mut [u8]` -- it
+    /// never frees. That is survivable for a manifest read at boot and fatal
+    /// for a path that runs once per layer per token, so this takes the
+    /// caller's buffer and allocates nothing. Page-align it (`nvme::alloc_dma`)
+    /// or pay an extra PRP per command.
+    ///
+    /// No hash is checked, and cannot be: the hash covers the whole blob. A
+    /// streamed weight is verified once when it is imported and trusted after
+    /// that, which is the trade streaming always makes.
+    pub fn read_blocks(
+        &self,
+        r: &ChunkRef,
+        first_block: u64,
+        blocks: u32,
+        buf: &mut [u8],
+    ) -> Result<(), Error> {
+        if blocks == 0 {
+            return Ok(());
+        }
+        // Past the end of the blob is a caller bug, not a short read: it would
+        // otherwise return whatever the next chunk holds, which is a plausible
+        // looking tensor belonging to something else.
+        let have = blocks_for(r.len).max(1);
+        if first_block + blocks as u64 > have {
+            return Err(Error::Io(block::Error::TooSmall));
+        }
+        if buf.len() < blocks as usize * bs() as usize {
+            return Err(Error::Io(block::Error::TooSmall));
+        }
+        block::read(r.lba + first_block, blocks, buf).map_err(Error::Io)
+    }
+
     /// Write a new checkpoint naming the current one as its predecessor.
     ///
     /// Order matters: the manifest chunk is written and its data is on disk
@@ -438,4 +478,67 @@ pub fn find_free_region(min_blocks: u64) -> Option<(u64, u64)> {
         return None;
     }
     Some((start, blocks))
+}
+
+/// A blob larger than one command, and a range out of the middle of it.
+///
+/// Both halves matter. The round trip proves a PRP-list transfer actually
+/// lands -- before the list existed anything over 8 KiB was refused outright,
+/// so a checkpoint could only ever be moved in two-page pieces. The ranged
+/// read proves the thing streaming is built on: that the middle of a blob can
+/// be fetched without the blob being resident, and that it is byte-for-byte
+/// what the whole-blob read would have given.
+pub fn stream_selftest() -> bool {
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    let Some(bs) = crate::dev::nvme::with(|n| n.block_size as usize) else {
+        return true;
+    };
+    // Comfortably past the old two-page ceiling and not a whole number of
+    // blocks, so the tail is short.
+    let n = 300 * 1024 + 7;
+    let data: Vec<u8> = (0..n)
+        .map(|i| ((i as u32).wrapping_mul(2654435761) >> 24) as u8)
+        .collect();
+
+    let mut ok = true;
+    crate::store::with(|s| {
+        let Ok(r) = s.put(&data) else {
+            crate::kprintln!("  could not store {} B", n);
+            ok = false;
+            return;
+        };
+        match s.get(&r) {
+            Ok(back) => {
+                if back != data {
+                    crate::kprintln!("  a {} B blob did not survive the round trip", n);
+                    ok = false;
+                    return;
+                }
+            }
+            Err(_) => {
+                ok = false;
+                return;
+            }
+        }
+        // Now the middle, by block, without reading the whole thing.
+        let first = 17u64;
+        let blocks = 40u32;
+        let Some(buf) = crate::dev::nvme::alloc_dma(blocks as usize * bs) else {
+            return;
+        };
+        let buf = unsafe { core::slice::from_raw_parts_mut(buf, blocks as usize * bs) };
+        if s.read_blocks(&r, first, blocks, buf).is_err() {
+            crate::kprintln!("  ranged read refused");
+            ok = false;
+            return;
+        }
+        let lo = first as usize * bs;
+        if buf[..blocks as usize * bs] != data[lo..lo + blocks as usize * bs] {
+            crate::kprintln!("  a ranged read disagreed with the whole-blob read");
+            ok = false;
+        }
+    });
+    ok
 }

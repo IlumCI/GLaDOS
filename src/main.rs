@@ -454,6 +454,12 @@ fn init_storage(acpi: &Option<acpi::Acpi>) -> bool {
                     n.block_size,
                     n.capacity_bytes() / (1024 * 1024)
                 );
+                // What one command can move. It was two pages, hardcoded,
+                // because MDTS was never read and a PRP list was never built.
+                kprintln!(
+                    "  max transfer {} KiB per command",
+                    n.max_transfer_blocks * n.block_size / 1024
+                );
             });
         }
         Err(e) => {

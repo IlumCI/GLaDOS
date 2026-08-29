@@ -84,7 +84,12 @@ struct Completion {
     status: u16,
 }
 
-/// Second PRP entry for a transfer, or 0 if one page suffices.
+/// Second PRP entry for a two-page transfer, or 0 if one page suffices.
+///
+/// Superseded by `Nvme::prp_for`, which handles any size. Kept because it is
+/// the readable statement of the rule the list obeys, and because a caller
+/// that knows it is under two pages need not touch the shared list page.
+#[allow(dead_code)]
 ///
 /// PRP1 may point anywhere within a page, but the controller will only fill to
 /// the end of that page; anything beyond needs PRP2. The size of the transfer
@@ -93,7 +98,6 @@ struct Completion {
 /// straddle a boundary, and the symptom is subtle: the leading bytes arrive
 /// correctly and the tail is silently left untouched, which reads as corrupt
 /// data rather than as a failed transfer.
-#[inline]
 fn prp2_for(buf: u64, bytes: usize) -> u64 {
     let page_off = buf & 0xFFF;
     let in_first_page = 4096 - page_off;
@@ -103,6 +107,44 @@ fn prp2_for(buf: u64, bytes: usize) -> u64 {
         0
     }
 }
+
+impl Nvme {
+    /// PRP2 for a transfer of any size.
+    ///
+    /// The NVMe rule: PRP1 is the buffer, which may start mid-page. If what is
+    /// left runs into a second page, PRP2 is that page. If it runs past two,
+    /// PRP2 becomes the address of a *list* of page addresses.
+    ///
+    /// Building that list is the part that is awkward on a normal OS -- the
+    /// pages must be pinned and each virtual address translated to a physical
+    /// one. Here the address space is identity-mapped, so a page's address is
+    /// already the address the controller wants, and the list is a loop.
+    fn prp_for(&mut self, buf: u64, bytes: usize) -> u64 {
+        let page_off = buf & 0xFFF;
+        let in_first = 4096 - page_off;
+        if bytes as u64 <= in_first {
+            return 0;
+        }
+        let rest = bytes as u64 - in_first;
+        let second = (buf - page_off) + 4096;
+        if rest <= 4096 {
+            return second;
+        }
+        let pages = rest.div_ceil(4096) as usize;
+        if self.prp_list.is_null() || pages > 4096 / 8 {
+            // No list to build, or more than one page can describe. The caller
+            // clamps to `max_transfer_blocks` so this should not be reachable;
+            // answering the two-page form keeps it a short read rather than a
+            // command that reads into memory nobody owns.
+            return second;
+        }
+        for i in 0..pages {
+            unsafe { self.prp_list.add(i).write_volatile(second + (i as u64) * 4096) };
+        }
+        self.prp_list as u64
+    }
+}
+
 
 /// Allocate page-aligned, zeroed DMA memory.
 ///
@@ -145,6 +187,12 @@ pub struct Nvme {
     admin: Queue,
     io: Option<Queue>,
     pub max_transfer_blocks: u32,
+    /// One page of PRP entries, allocated once and reused by every command.
+    ///
+    /// Not per-call: `dma_alloc` is `alloc_zeroed` and nothing here frees, so
+    /// a list allocated per read would leak a page per read. A single command
+    /// is in flight at a time, so one page is all that is ever needed.
+    prp_list: *mut u64,
     pub nsid: u32,
     pub block_size: u32,
     pub block_count: u64,
@@ -272,10 +320,10 @@ impl Nvme {
     /// transfers would need a PRP list, which is why callers chunk.
     pub fn read(&mut self, lba: u64, count: u16, buf: *mut u8) -> Result<(), u16> {
         let bytes = count as usize * self.block_size as usize;
-        if bytes > 8192 {
+        if count as u32 > self.max_transfer_blocks {
             return Err(0xFFFD);
         }
-        let prp2 = prp2_for(buf as u64, bytes);
+        let prp2 = self.prp_for(buf as u64, bytes);
         let cmd = Command {
             opc: OPC_IO_READ,
             nsid: self.nsid,
@@ -298,10 +346,10 @@ impl Nvme {
             return Err(0xFFFC);
         }
         let bytes = count as usize * self.block_size as usize;
-        if bytes > 8192 {
+        if count as u32 > self.max_transfer_blocks {
             return Err(0xFFFD);
         }
-        let prp2 = prp2_for(buf as u64, bytes);
+        let prp2 = self.prp_for(buf as u64, bytes);
         let cmd = Command {
             opc: OPC_IO_WRITE,
             nsid: self.nsid,
@@ -408,7 +456,8 @@ pub fn init(ecam: u64) -> Result<(), InitError> {
             id: 0,
         },
         io: None,
-        max_transfer_blocks: 8,
+        max_transfer_blocks: 16,
+        prp_list: core::ptr::null_mut(),
         nsid: 1,
         block_size: 512,
         block_count: 0,
@@ -470,11 +519,33 @@ pub fn init(ecam: u64) -> Result<(), InitError> {
 
     // Identify controller: model and serial live at fixed offsets.
     let idbuf = dma_alloc(4096).ok_or(InitError::Alloc)?;
+    let cap_for_mps = unsafe { n.r64(REG_CAP) };
     n.identify(1, 0, idbuf).map_err(InitError::Admin)?;
     unsafe {
         core::ptr::copy_nonoverlapping(idbuf.add(4), n.serial.as_mut_ptr(), 20);
         core::ptr::copy_nonoverlapping(idbuf.add(24), n.model.as_mut_ptr(), 40);
+
+        // MDTS: the largest transfer the controller will accept, as a power of
+        // two multiple of the minimum page size. It was never read, and the
+        // field that holds it was never used -- every transfer went through a
+        // hardcoded two-page cap instead, which is 16 blocks. Streaming a
+        // model's worth of weights at 8 KiB a command is tens of thousands of
+        // round trips for work a handful could do.
+        //
+        // Zero means "no limit", which is not an invitation: the PRP list
+        // below is one page, so the ceiling is what it can describe.
+        let mdts = read_volatile(idbuf.add(77));
+        let mps_min = 12 + ((cap_for_mps >> 48) & 0xF) as u32; // CAP.MPSMIN
+        let by_mdts = if mdts == 0 || mdts > 20 {
+            u32::MAX
+        } else {
+            (1u32 << mdts) << mps_min.saturating_sub(9)
+        };
+        // One page of 8-byte entries, each describing a 4 KiB page.
+        let by_list = (4096 / 8) * (4096 / 512);
+        n.max_transfer_blocks = by_mdts.min(by_list).max(16);
     }
+    n.prp_list = dma_alloc(4096).ok_or(InitError::Alloc)? as *mut u64;
 
     // Create the I/O completion queue before the submission queue: the SQ
     // creation names the CQ it reports into, so the CQ has to exist first.

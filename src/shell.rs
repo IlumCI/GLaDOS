@@ -365,6 +365,15 @@ fn store_cmd(rest: &str) {
             console::set_color(if sha_ok { LTGREEN } else { LTRED });
             kprintln!("  sha-256 vectors: {}", if sha_ok { "pass" } else { "FAIL" });
             console::set_color(WHITE);
+            if store::mounted() {
+                let st = store::cas::stream_selftest();
+                console::set_color(if st { LTGREEN } else { LTRED });
+                kprintln!(
+                    "  {}  a 300 KiB blob round-trips, and its middle reads without it",
+                    if st { "ok " } else { "FAIL" }
+                );
+                console::set_color(WHITE);
+            }
             if !store::mounted() {
                 kprintln!("  not mounted. 'store init' to format free space.");
                 return;

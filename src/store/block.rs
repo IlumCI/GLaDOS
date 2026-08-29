@@ -16,7 +16,14 @@ use alloc::vec::Vec;
 
 /// One NVMe command here covers two pages. Larger transfers would need a PRP
 /// list, so callers are chunked to this instead.
+/// Fallback when the device has not been asked yet. The real figure comes
+/// from `Nvme::max_transfer_blocks`, which is MDTS bounded by what one page of
+/// PRP entries can describe -- 2 MiB rather than the 8 KiB this used to be.
 const BLOCKS_PER_IO: u32 = 16;
+
+fn per_io() -> u32 {
+    crate::dev::nvme::with(|c| c.max_transfer_blocks).unwrap_or(BLOCKS_PER_IO).max(1)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Error {
@@ -46,7 +53,7 @@ pub fn read(lba: u64, blocks: u32, buf: &mut [u8]) -> Result<(), Error> {
     }
     let mut done = 0u32;
     while done < blocks {
-        let n = (blocks - done).min(BLOCKS_PER_IO);
+        let n = (blocks - done).min(per_io());
         let off = done as usize * bs;
         let ptr = unsafe { buf.as_mut_ptr().add(off) };
         nvme::with(|c| c.read(lba + done as u64, n as u16, ptr))
@@ -65,7 +72,7 @@ pub fn write(lba: u64, blocks: u32, buf: &[u8]) -> Result<(), Error> {
     }
     let mut done = 0u32;
     while done < blocks {
-        let n = (blocks - done).min(BLOCKS_PER_IO);
+        let n = (blocks - done).min(per_io());
         let off = done as usize * bs;
         let ptr = unsafe { buf.as_ptr().add(off) };
         nvme::with(|c| c.write(lba + done as u64, n as u16, ptr))
