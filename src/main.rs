@@ -670,7 +670,7 @@ fn init_smp(acpi: &Option<acpi::Acpi>) {
             console::set_color(LTRED);
         }
         kprintln!(
-            "  {}  a split matvec equals a whole one, bit for bit",
+            "  {}  a split matvec and its adjoint equal whole ones, bit for bit",
             if ok { "ok " } else { "FAIL" }
         );
         console::set_color(LTGRAY_IDX);

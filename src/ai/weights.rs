@@ -132,7 +132,7 @@ impl Mat<'_> {
                 f.avx_enabled && f.avx2 && f.fma
             },
         };
-        if crate::smp::parallel_rows(
+        if crate::smp::parallel_split(
             &job as *const RowJob as usize,
             matvec_rows,
             rows,

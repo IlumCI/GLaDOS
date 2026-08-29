@@ -167,9 +167,122 @@ pub fn f32_wt_matvec(out: &mut [f32], g: &[f32], w: &[f32], rows: usize, cols: u
     }
 }
 
+/// A column stripe of the int8 adjoint.
+///
+/// The adjoint accumulates *down* rows -- `out[c] += w[r][c] * g[r]` -- so
+/// splitting it by rows would give every core a partial sum of the same
+/// output and a reduction to finish. Splitting by **columns** does not: a core
+/// owns `out[lo..hi]` outright, and the stripe it reads out of each row is
+/// contiguous and read by nobody else, so the matrix is still read exactly
+/// once in total.
+pub fn q8_wt_cols(
+    out: &mut [f32],
+    g: &[f32],
+    data: &[i8],
+    scales: &[u8],
+    rows: usize,
+    cols: usize,
+    lo: usize,
+    hi: usize,
+) {
+    for v in out.iter_mut() {
+        *v = 0.0;
+    }
+    for r in 0..rows {
+        let row = &data[r * cols + lo..r * cols + hi];
+        let gr = g[r] * f32_at(scales, r);
+        for (o, w) in out.iter_mut().zip(row.iter()) {
+            *o += *w as f32 * gr;
+        }
+    }
+}
+
+/// f32 twin of [`q8_wt_cols`].
+pub fn f32_wt_cols(
+    out: &mut [f32],
+    g: &[f32],
+    w: &[f32],
+    rows: usize,
+    cols: usize,
+    lo: usize,
+    hi: usize,
+) {
+    for v in out.iter_mut() {
+        *v = 0.0;
+    }
+    for r in 0..rows {
+        let row = &w[r * cols + lo..r * cols + hi];
+        let gr = g[r];
+        for (o, v) in out.iter_mut().zip(row.iter()) {
+            *o += *v * gr;
+        }
+    }
+}
+
+/// One adjoint, described by pointers so a core that borrows none of it can
+/// run a stripe. See `weights::RowJob` for why this is sound.
+#[derive(Clone, Copy)]
+struct WtJob {
+    q8: bool,
+    data: *const u8,
+    scales: *const u8,
+    g: *const f32,
+    out: *mut f32,
+    rows: usize,
+    cols: usize,
+}
+
+/// Columns `[lo, hi)` of the adjoint at `ctx`.
+///
+/// # Safety
+/// `ctx` must point at a live `WtJob`, and no other core may hold the same
+/// column range. `smp::parallel_split` guarantees both.
+unsafe fn wt_cols(ctx: usize, lo: usize, hi: usize) {
+    let job = unsafe { *(ctx as *const WtJob) };
+    let out = unsafe { core::slice::from_raw_parts_mut(job.out.add(lo), hi - lo) };
+    let g = unsafe { core::slice::from_raw_parts(job.g, job.rows) };
+    let n = job.rows * job.cols;
+    if job.q8 {
+        let data = unsafe { core::slice::from_raw_parts(job.data as *const i8, n) };
+        let scales = unsafe { core::slice::from_raw_parts(job.scales, job.rows * 4) };
+        q8_wt_cols(out, g, data, scales, job.rows, job.cols, lo, hi);
+    } else {
+        let w = unsafe { core::slice::from_raw_parts(job.data as *const f32, n) };
+        f32_wt_cols(out, g, w, job.rows, job.cols, lo, hi);
+    }
+}
+
 impl Mat<'_> {
     /// Dispatching adjoint of [`super::weights::Mat::matvec`].
+    ///
+    /// Split across every core, by column. This runs seven times per layer on
+    /// the backward pass -- w1, w2, w3, wo, the classifier and both adapter
+    /// sites -- so on a training step it is most of the work, and it was the
+    /// last thing still running on one core.
     pub fn wt_matvec(&self, out: &mut [f32], g: &[f32]) {
+        let (rows, cols) = match self {
+            Mat::F32 { rows, cols, .. } => (*rows, *cols),
+            Mat::Q8 { rows, cols, .. } => (*rows, *cols),
+        };
+        let job = WtJob {
+            q8: matches!(self, Mat::Q8 { .. }),
+            data: match self {
+                Mat::F32 { data, .. } => data.as_ptr() as *const u8,
+                Mat::Q8 { data, .. } => data.as_ptr() as *const u8,
+            },
+            scales: match self {
+                Mat::F32 { .. } => core::ptr::null(),
+                Mat::Q8 { scales, .. } => scales.as_ptr(),
+            },
+            g: g.as_ptr(),
+            out: out.as_mut_ptr(),
+            rows,
+            cols,
+        };
+        // Columns are the items here, and a column costs `rows`.
+        if crate::smp::parallel_split(&job as *const WtJob as usize, wt_cols, cols, rows) {
+            return;
+        }
         match self {
             Mat::F32 { data, rows, cols } => {
                 f32_wt_matvec(&mut out[..*cols], &g[..*rows], data, *rows, *cols)

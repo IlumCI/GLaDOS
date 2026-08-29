@@ -331,7 +331,12 @@ fn claim_inner() {
     }
 }
 
-/// Split `rows` across every core and return when all of it has run.
+/// Split `count` independent items across every core and return when all of
+/// it has run.
+///
+/// `width` is how much work one item is, and is used only to decide whether
+/// the job is worth splitting at all. What an "item" means is the caller's
+/// business: a row of a forward matvec, a column of its adjoint.
 ///
 /// Answers false without doing anything if there is nobody to help, if
 /// another job is in flight, or if the work is too small to be worth the
@@ -347,9 +352,9 @@ fn claim_inner() {
 /// preempted mid-job cannot have its slots rewritten underneath it: the second
 /// caller sees the flag and goes serial rather than waiting, which is also why
 /// there is no lock to deadlock on.
-pub fn parallel_rows(ctx: usize, func: ChunkFn, rows: usize, cols: usize) -> bool {
+pub fn parallel_split(ctx: usize, func: ChunkFn, count: usize, width: usize) -> bool {
     let helpers = ONLINE.load(Ordering::Relaxed);
-    if helpers == 0 || rows < 2 {
+    if helpers == 0 || count < 2 {
         return false;
     }
     // Below this the handshake costs more than the arithmetic saves. Half a
@@ -357,7 +362,7 @@ pub fn parallel_rows(ctx: usize, func: ChunkFn, rows: usize, cols: usize) -> boo
     // comfortably more than a cross-core round trip. Every projection in a
     // 0.6B is above it -- q alone is 2048x1024 -- while a 22-row classifier
     // head and the wide-head test fixture are below it and stay on one core.
-    if rows.saturating_mul(cols) < 1 << 19 {
+    if count.saturating_mul(width) < 1 << 19 {
         return false;
     }
     if BUSY.swap(true, Ordering::Acquire) {
@@ -367,12 +372,12 @@ pub fn parallel_rows(ctx: usize, func: ChunkFn, rows: usize, cols: usize) -> boo
     // More chunks than cores, so a slow core holds up one chunk and not one
     // eighth of the matrix.
     let want = (helpers + 1) * 4;
-    let chunk = rows.div_ceil(want).max(8);
-    let n = rows.div_ceil(chunk);
+    let chunk = count.div_ceil(want).max(8);
+    let n = count.div_ceil(chunk);
 
     FUNC.store(func as usize, Ordering::Relaxed);
     CTX.store(ctx, Ordering::Relaxed);
-    ROWS.store(rows, Ordering::Relaxed);
+    ROWS.store(count, Ordering::Relaxed);
     CHUNK.store(chunk, Ordering::Relaxed);
     NCHUNKS.store(n, Ordering::Relaxed);
     CURSOR.store(0, Ordering::Relaxed);
@@ -577,9 +582,39 @@ pub fn selftest() -> bool {
             return false;
         }
     }
-    // And it has to have actually run in parallel, or this passes by testing
-    // the serial path twice.
-    many.iter().any(|v| *v != 0.0)
+    // The adjoint too, which splits by column rather than by row and is
+    // therefore a different piece of index arithmetic with the same
+    // consequences. It is bit-exact for the same reason: for a given column
+    // the accumulation runs over the same rows in the same order whether one
+    // core does every column or eight cores take a stripe each.
+    let g: Vec<f32> = (0..rows).map(|i| (i % 23) as f32 * 0.03125 - 0.25).collect();
+    let saved = ONLINE.swap(0, Ordering::SeqCst);
+    let mut wt_one = vec![0.0f32; cols];
+    m.wt_matvec(&mut wt_one, &g);
+    ONLINE.store(saved, Ordering::SeqCst);
+
+    let mut wt_many = vec![0.0f32; cols];
+    for _ in 0..64 {
+        for v in wt_many.iter_mut() {
+            *v = f32::NAN;
+        }
+        m.wt_matvec(&mut wt_many, &g);
+        if wt_one != wt_many {
+            let bad = wt_one.iter().zip(wt_many.iter()).position(|(a, b)| a != b).unwrap_or(0);
+            crate::kprintln!(
+                "  adjoint col {} -- one core {}, {} cores {}",
+                bad,
+                wt_one[bad],
+                saved + 1,
+                wt_many[bad]
+            );
+            return false;
+        }
+    }
+
+    // And both have to have actually computed something, or this passes by
+    // testing the serial path twice.
+    many.iter().any(|v| *v != 0.0) && wt_many.iter().any(|v| *v != 0.0)
 }
 
 /// Time the same matvec on one core and on all of them.
