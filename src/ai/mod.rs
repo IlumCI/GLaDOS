@@ -1425,6 +1425,20 @@ pub fn generate(prompt: &str, opts: &GenOpts) {
 
             if opts.yielding {
                 crate::task::yield_now();
+            } else {
+                // A foreground generation owns the shell task for its whole
+                // length, and `poll_mouse` lives in the shell's idle loop --
+                // so without this the pointer is dead for every token of an
+                // answer while the clock task, which has its own quantum and
+                // paints straight to the aperture, goes on ticking above it.
+                // That is the "windows freeze but the uptime moves" report,
+                // and it was never a slow renderer.
+                //
+                // Motion only; `pump_cursor` deliberately dispatches no
+                // clicks, so a press that lands mid-answer stays latched for
+                // `poll_mouse` rather than re-entering the desktop from
+                // inside a generation.
+                crate::gfx::desk::pump_cursor();
             }
         }
 

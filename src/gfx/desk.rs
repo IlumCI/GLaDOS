@@ -1349,6 +1349,41 @@ pub fn cursor_show(fb: &Framebuffer, x: u32, y: u32) {
 }
 
 /// Read the mouse and act on it. Called from the idle loop.
+/// Keep the pointer alive during work that owns the shell task.
+///
+/// The freeze this fixes is not a slow renderer. A foreground `ask` runs
+/// `generate` on the shell task with `yielding` clear, so for the whole of a
+/// generation -- seconds per token, minutes for an answer -- the shell is
+/// inside the command and `poll_mouse` is never reached. The clock task keeps
+/// its own quantum and goes on painting the uptime directly to the aperture,
+/// which is exactly the reported symptom: a moving clock above frozen windows.
+///
+/// **Motion only, deliberately.** This does not dispatch presses, drags,
+/// hover or the wheel. A click handled here would run `press_at`, which can
+/// open a window, close one, or start an app -- re-entering the desktop, and
+/// potentially the engine, from inside a generation that already holds it.
+/// Buttons stay latched in the mouse state and are acted on by `poll_mouse`
+/// when the command finishes, so nothing is lost but the ordering is safe.
+///
+/// Cheap enough to call between tokens: the cursor is 17x11, so a move is a
+/// few hundred pixels on the aperture and nothing on the compositor.
+pub fn pump_cursor() {
+    use crate::dev::mouse;
+    if !mouse::present() || !ready() {
+        return;
+    }
+    // `peek` rather than `take`: the button edges belong to `poll_mouse`, and
+    // consuming the packet here would swallow a click that arrived mid-answer.
+    let Some((x, y)) = mouse::position() else { return };
+    let prev = unsafe { *POS.get() };
+    if prev == Some((x, y)) {
+        return;
+    }
+    unsafe { *POS.get() = Some((x, y)) };
+    let Some(fb) = super::primary() else { return };
+    cursor_show(&fb, x, y);
+}
+
 pub fn poll_mouse() {
     use crate::dev::mouse;
     if !mouse::present() || !ready() {

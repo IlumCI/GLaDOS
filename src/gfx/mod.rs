@@ -381,9 +381,16 @@ impl Framebuffer {
         }
         let n = (src.len() as u32).min(self.width - x) as usize;
         let off = (y as usize) * (self.stride as usize) + (x as usize);
-        for (i, v) in src[..n].iter().enumerate() {
-            unsafe { write_volatile(self.base.add(off + i), *v) }
-        }
+        // One memcpy rather than `n` serialised volatile stores. This is the
+        // write half of `present`, so at 1920x1080 the old form was up to two
+        // million un-mergeable stores for a frame.
+        //
+        // Safe on this aperture specifically: it is mapped write-back (see
+        // `mem::paging`), and `copy_nonoverlapping` lowers to a memcpy call
+        // rather than to stores the optimiser can prove nobody reads. The
+        // check that it is not elided is empirical and immediate -- `video
+        // bars` paints nothing at all if this stops reaching the screen.
+        unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), self.base.add(off), n) };
     }
 
     #[inline]
@@ -430,9 +437,23 @@ impl Framebuffer {
             return;
         }
         let off = (y as usize) * (self.stride as usize) + (x as usize);
-        // Volatile: the compiler cannot see that anyone reads this memory, and
-        // would happily delete a whole screen-fill loop as dead stores.
-        unsafe { write_volatile(self.base.add(off), raw) }
+        // The same split `fill_span` and `blit_span` already make, and for the
+        // same reason -- this was the one primitive still paying the aperture's
+        // price on every surface. Volatile is required for the aperture, where
+        // nothing in this program reads the memory and the optimiser would
+        // delete a screen-fill as dead stores. The back buffer is ordinary heap
+        // that `present` reads immediately afterwards, so an ordinary store is
+        // both correct and mergeable.
+        //
+        // It matters because `put` is the glyph path: `console::draw_cell`
+        // writes 8*8*scale^2 = 256 pixels per character through here, and a
+        // full terminal redraw is around 1.2 million of them. Every one was an
+        // un-mergeable volatile store into RAM.
+        if self.mmio {
+            unsafe { write_volatile(self.base.add(off), raw) }
+        } else {
+            unsafe { *self.base.add(off) = raw }
+        }
     }
 
     /// Read a pixel back, raw.
@@ -791,6 +812,15 @@ impl Framebuffer {
 /// real screen size, taken from the TSC, and the point is the ratio between
 /// them rather than any absolute: a fill that costs more than the diff that
 /// follows it says the compositor is not the problem.
+/// Time the renderer, robustly enough to act on.
+///
+/// **Best of several, not one run.** The first version timed each operation
+/// once and the numbers were unusable: two consecutive `desk::draw` calls
+/// measured 2,679 us and 24,318 us on an idle machine. Under emulation the
+/// host's scheduler decides when the guest runs, so a single sample measures
+/// the host. Noise only ever *adds* time, so the minimum over a handful of
+/// runs is the honest estimate of what the code costs; the maximum is printed
+/// beside it so the spread is visible rather than hidden.
 pub fn bench() {
     use crate::kprintln;
     let Some(fb) = primary() else {
@@ -798,34 +828,47 @@ pub fn bench() {
         return;
     };
     let mhz = crate::time::tsc_mhz().max(1);
-    let us = |t: u64| t / mhz;
+    const RUNS: usize = 9;
+
+    // Answers (min, max) in microseconds.
+    let mut best_of = |f: &mut dyn FnMut()| -> (u64, u64) {
+        let (mut lo, mut hi) = (u64::MAX, 0u64);
+        for _ in 0..RUNS {
+            let t = crate::time::rdtsc();
+            f();
+            let d = (crate::time::rdtsc() - t) / mhz;
+            lo = lo.min(d);
+            hi = hi.max(d);
+        }
+        (lo, hi)
+    };
 
     let target = compose::target().unwrap_or_else(|| fb.clone());
     let (w, h) = (target.width(), target.height());
-    kprintln!("  {}x{}  {} pixels", w, h, w as u64 * h as u64);
+    kprintln!("  {}x{}  {} pixels, best of {}", w, h, w as u64 * h as u64, RUNS);
 
-    let t = crate::time::rdtsc();
-    target.rect(0, 0, w, h, theme::DESKTOP);
-    let fill = crate::time::rdtsc() - t;
-    kprintln!("  full-screen rect      {:>8} us", us(fill));
+    let (lo, hi) = best_of(&mut || target.rect(0, 0, w, h, theme::DESKTOP));
+    kprintln!("  full-screen rect      {:>7} us  (max {})", lo, hi);
 
-    let t = crate::time::rdtsc();
-    desk::draw();
-    let full = crate::time::rdtsc() - t;
-    kprintln!("  desk::draw + present  {:>8} us", us(full));
+    let (lo, hi) = best_of(&mut || desk::draw());
+    kprintln!("  desk::draw + present  {:>7} us  (max {})", lo, hi);
 
     // A present with nothing changed: the diff alone, which is the floor for
     // any repaint that turns out to be a no-op.
-    let t = crate::time::rdtsc();
-    compose::present();
-    let clean = crate::time::rdtsc() - t;
-    kprintln!("  present, no change    {:>8} us", us(clean));
+    let (lo, hi) = best_of(&mut || compose::present());
+    kprintln!("  present, no change    {:>7} us  (max {})", lo, hi);
 
     // ...and one where every row differs, which is the worst case.
-    let t = crate::time::rdtsc();
-    target.rect(0, 0, w, h, theme::APERTURE);
-    compose::present();
-    let dirty = crate::time::rdtsc() - t;
-    kprintln!("  fill + present, all   {:>8} us", us(dirty));
+    let (lo, hi) = best_of(&mut || {
+        target.rect(0, 0, w, h, theme::APERTURE);
+        compose::present();
+    });
+    kprintln!("  fill + present, all   {:>7} us  (max {})", lo, hi);
+
+    // The terminal's own cost, which is what a full `desk::draw` is mostly
+    // made of: every cell repainted through `put`.
+    let (lo, hi) = best_of(&mut || console::redraw());
+    kprintln!("  console redraw_all    {:>7} us  (max {})", lo, hi);
+
     desk::draw();
 }

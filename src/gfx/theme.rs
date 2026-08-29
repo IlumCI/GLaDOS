@@ -256,6 +256,12 @@ pub fn title_bar(
     // glance on a desktop of several.
     let (from, to) = if active { (APERTURE_DEEP, APERTURE) } else { (Color::new(0x50, 0x50, 0x50), TITLE_IDLE) };
     let w = r.w.max(1);
+    // The ramp is horizontal, so every row of it is the same row. Building it
+    // once and blitting it down costs `h` memcpys; the column-major form this
+    // replaces cost `w * h` single-pixel spans -- 30,000 of them for a
+    // 1250-pixel title bar, per window, per frame, in the worst possible order
+    // for a row-major buffer.
+    let mut row: alloc::vec::Vec<u32> = alloc::vec::Vec::with_capacity(w as usize);
     for i in 0..w {
         let lerp = |a: u8, b: u8| (a as u32 + (b as u32).abs_diff(a as u32) * i / w) as u8;
         let c = Color::new(
@@ -263,7 +269,11 @@ pub fn title_bar(
             if to.g >= from.g { lerp(from.g, to.g) } else { (from.g as u32 - (from.g - to.g) as u32 * i / w) as u8 },
             if to.b >= from.b { lerp(from.b, to.b) } else { (from.b as u32 - (from.b - to.b) as u32 * i / w) as u8 },
         );
-        fb.rect(r.x + i, r.y, 1, r.h, c);
+        row.push(fb.encode(c));
+    }
+    let bottom = r.y.saturating_add(r.h);
+    for y in r.y..bottom {
+        fb.blit_span(r.x, y, &row);
     }
 
     let pad = 6;

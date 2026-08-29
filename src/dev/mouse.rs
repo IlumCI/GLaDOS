@@ -88,6 +88,20 @@ pub fn take() -> State {
     out
 }
 
+/// Where the pointer is, without consuming anything.
+///
+/// `take` clears `moved` and the wheel because they describe what happened
+/// since the last look. A reader that only wants to draw the cursor must not
+/// do that -- it would swallow a click or a notch that the real handler has
+/// not seen yet. See `desk::pump_cursor`.
+pub fn position() -> Option<(u32, u32)> {
+    if !present() {
+        return None;
+    }
+    let s = unsafe { *STATE.get() };
+    Some((s.x.max(0) as u32, s.y.max(0) as u32))
+}
+
 pub fn set_bounds(w: i32, h: i32) {
     unsafe { *BOUNDS.get() = (w, h) };
     let s = unsafe { &mut *STATE.get() };
