@@ -1288,7 +1288,8 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     let names = crate::sysbox::children(voter::ROOT);
                     let n = names.iter().filter(|n| n.len() == 64).count();
                     kprintln!("  {} candidate(s) in {}", n, voter::ROOT);
-                    kprintln!("  core list | core write <path> | core judge <hash> | core trial <hash> | core off");
+                    kprintln!("  core prize | core list | core author | core write <path>");
+                    kprintln!("  core judge <hash> | core trial <hash> | core off");
                 }
                 "list" => {
                     let names = crate::sysbox::children(voter::ROOT);
@@ -1305,7 +1306,9 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     }
                 }
                 // Take an Aiksi program from the namespace and store it as a
-                // candidate. The operator's way in; the machine's is `author`.
+                // candidate. The operator's way in; `core author` is the
+                // machine's, and they meet at the same content address and the
+                // same judges.
                 "write" => match w.next() {
                     None => kprintln!("  usage: core write <path-to-aiksi-program>"),
                     Some(path) => match crate::sysbox::read_blob(path) {
@@ -1349,6 +1352,72 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         Some(h) => harness::core_report(&h, install),
                     }
                 }
+                // How much room a core has here, asked without one.
+                //
+                // The first question, and until now an unaskable one. A core
+                // only matters where the two counters disagree, so a slice
+                // where they mostly agree has nothing for any core to win --
+                // and that is a fact about the corpus and the judge, not about
+                // anything the machine might write.
+                "prize" | "room" => {
+                    match crate::ai::with_engine(|e| {
+                        harness::core_census(e, harness::VALIDATION)
+                    }) {
+                        None => kprintln!("  {}", crate::ai::engine_refusal()),
+                        Some(Err(e)) => kprintln!("  {}", e),
+                        Some(Ok(v)) => {
+                            let need = crate::ai::godel::clean_fixes_needed();
+                            kprintln!("  {} validation item(s) judged", v.n);
+                            kprintln!("  {} contested -- the two counters disagree", v.contested);
+                            kprintln!("  {} recoverable -- one of them is right", v.recoverable);
+                            kprintln!("  {} within reach -- and the probe is wrong", v.prize);
+                            console::set_color(if v.prize >= need { LTGREEN } else { YELLOW });
+                            kprintln!("  J1 needs {} clean repair(s)", need);
+                            if v.prize < need {
+                                kprintln!("  so no core can pass on this slice, however well written");
+                                console::set_color(LTGRAY);
+                                kprintln!("  a core seconds one counter against the other; it cannot");
+                                kprintln!("  answer where they already agree. more room comes from a");
+                                kprintln!("  wider validation slice or a rule that lets a core speak");
+                                kprintln!("  where they agree -- both are changes to the judged system");
+                            }
+                            console::set_color(LTGRAY);
+                        }
+                    }
+                }
+                // The machine writes one.
+                //
+                // Printed rather than judged, and deliberately two steps: the
+                // thesis of this whole module is that a core is a rule a
+                // person can argue with, and that is worth nothing if the
+                // first time anybody sees it is in a ledger line saying it was
+                // adopted. `core trial` is the next step and it is the
+                // operator's to take -- the night loop takes it unattended,
+                // which is what the judges are for.
+                "author" => match crate::ai::godel::write_core() {
+                    None => {
+                        kprintln!("  nothing written");
+                        kprintln!("  needs a model, a training corpus with cues to draw on,");
+                        kprintln!("  and a decode that commits -- 'godel status' and 'model' say which is missing");
+                    }
+                    Some(h) => {
+                        kprintln!("  wrote {}", &voter::hex(&h)[..8]);
+                        if let Some(src) = crate::sysbox::read_blob(&{
+                            let mut p = alloc::string::String::from(voter::ROOT);
+                            p.push('/');
+                            p.push_str(&voter::hex(&h));
+                            p
+                        }) {
+                            console::set_color(LTGRAY);
+                            for line in alloc::string::String::from_utf8_lossy(&src).lines() {
+                                kprintln!("    {}", line);
+                            }
+                        }
+                        console::set_color(YELLOW);
+                        kprintln!("  'core trial {}' to judge it and record what happened", &voter::hex(&h)[..8]);
+                        console::set_color(LTGRAY);
+                    }
+                },
                 // Judge it *and* keep a record of what happened.
                 //
                 // `core judge` prints a verdict and forgets it; `core install`
@@ -1371,9 +1440,15 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     match picked {
                         None => kprintln!("  usage: core trial <hash>"),
                         Some(h) => {
-                            match crate::ai::with_engine(|e| crate::ai::godel::trial_core(e, &h)) {
+                            // Through the dispatcher, so this leaves the same
+                            // marker the night loop reads. Judging a core here
+                            // and having the machine judge it again unprompted
+                            // at 3am is the ledger recording one event twice.
+                            let p = crate::ai::godel::Proposal::core(h);
+                            let b = p.budget(0, 0);
+                            match crate::ai::with_engine(|e| crate::ai::godel::run(e, &b, &p)) {
                                 None => kprintln!("  {}", crate::ai::engine_refusal()),
-                                Some(Err(why)) => kprintln!("  refused: {}", why),
+                                Some(Err(why)) => kprintln!("  refused: {}", why.why()),
                                 Some(Ok(c)) => {
                                     console::set_color(if c.adopted { LTGREEN } else { YELLOW });
                                     kprintln!(
@@ -1479,8 +1554,10 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                             p.lr, p.rank, p.alpha, p.epochs, p.rule
                         ),
                         None => {
-                            kprintln!("  nothing left -- every point has been trained and judged");
-                            kprintln!("  'godel forget' walks the grid again; the nodes stay");
+                            kprintln!("  the grid is spent -- every point has been trained and judged");
+                            kprintln!("  from here the night loop composes a core instead, which is");
+                            kprintln!("  a space it writes rather than one it was given");
+                            kprintln!("  'core author' to see one now; 'godel forget' re-walks the grid");
                         }
                     }
                 }

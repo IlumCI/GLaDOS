@@ -233,6 +233,225 @@ pub fn unhex(text: &str) -> Option<[u8; 32]> {
 /// that is the part no benchmark would notice: a core that tries to open a
 /// socket and is refused simply votes badly, and a benchmark reports a bad
 /// core rather than a stopped attack.
+// --- the machine writing one --------------------------------------------
+//
+// Everything above this line is about running a core somebody else wrote.
+// What follows is the machine writing its own, which is the difference
+// between a loop that searches numbers and one that searches code.
+//
+// ### The shape, and why it is this shape
+//
+// A core is *composed*, never emitted as text. The model picks from lists;
+// the kernel turns the picks into a program. That is `author.rs`'s whole
+// method -- "do not check afterwards for something that can be made
+// unreachable" -- applied here because the alternative is worse than usual: a
+// core that fails to parse is a wasted night, and a core that parses and does
+// something unintended runs on every routing decision until somebody notices.
+//
+// ### What the machine actually decides
+//
+// Said plainly, because the failure mode of a thing like this is theatre.
+// The kernel supplies the alternatives: which classes can be written about at
+// all, and which cues are usable for each. The model decides how many rules to
+// write, which class each one argues for, and which cue argues for it. That is
+// a real choice over a space the kernel does not rank -- but it is a choice
+// among prepared options, not authorship from nothing, and calling it more
+// than that would be the same overclaim this module refuses everywhere else.
+//
+// ### What makes a cue usable
+//
+// Two hard filters, both explainable, neither a learned weight:
+//
+//   * it is used by at least `MIN_USES` training examples of its class, so a
+//     word that appeared once by accident cannot become a routing rule;
+//   * it appears under **no other class** in the training slice, so a rule
+//     built on it cannot fire for a class it was not written for.
+//
+// The training slice only. `harness::split_of` is shared rather than copied
+// precisely so this cannot drift onto the slice the judge measures on -- a
+// producer that mined validation would not fail, it would simply score better
+// than it deserved, which is the hardest kind of mistake to notice.
+
+/// One rule: a surface cue, and the class it argues for.
+pub struct Clause {
+    pub cue: String,
+    pub class: usize,
+}
+
+/// Shortest cue worth having. Two letters match inside other words constantly.
+const MIN_CUE: usize = 3;
+/// Training examples of its own class a cue must appear in.
+const MIN_USES: u32 = 2;
+/// Cues offered per class. A grammar the model cannot get through is a decode
+/// that spends its allowance and commits to nothing.
+const CUE_CAP: usize = 16;
+/// Most rules one core may have. Each is two decodes, and a core is judged as
+/// a whole -- a long one fails for a reason spread over many rules.
+const MAX_CLAUSES: usize = 3;
+
+/// Alphanumeric runs of a task, lowercased.
+///
+/// Filtering to ASCII alphanumeric is not tidiness: these words are pasted
+/// into a double-quoted Aiksi literal, and a cue that could contain a quote or
+/// a backslash would be a way to write arbitrary program text through an
+/// option list. There is no escaping step here because there is nothing that
+/// can need escaping.
+fn words_of(task: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for ch in task.chars() {
+        if ch.is_ascii_alphanumeric() {
+            cur.push(ch.to_ascii_lowercase());
+        } else {
+            if cur.len() >= MIN_CUE && !out.contains(&cur) {
+                out.push(core::mem::take(&mut cur));
+            }
+            cur.clear();
+        }
+    }
+    if cur.len() >= MIN_CUE && !out.contains(&cur) {
+        out.push(cur);
+    }
+    out
+}
+
+/// Every usable cue in the training slice, with the class it belongs to and
+/// how many of that class's examples use it.
+///
+/// One pass and a sort rather than a scan per class: the naive shape is a
+/// membership test against every other class's vocabulary for every word, and
+/// on this corpus that is millions of string comparisons for a table that is
+/// a few hundred rows.
+///
+/// `names` is the class list *as the head orders it*, so an index here is an
+/// index the core may return. Taking it as an argument rather than reading
+/// `sysbox::APPLETS` keeps that a fact rather than an assumption.
+pub fn cue_table(names: &[String]) -> Vec<(String, usize, u32)> {
+    let ex = super::vocab::examples();
+    let mut pairs: Vec<(String, usize)> = Vec::new();
+    for (i, e) in ex.iter().enumerate() {
+        if super::harness::split_of(i) != 0 {
+            continue;
+        }
+        let Some(ci) = names.iter().position(|n| *n == e.applet) else { continue };
+        for w in words_of(&e.task) {
+            pairs.push((w, ci));
+        }
+    }
+    pairs.sort();
+
+    let mut out: Vec<(String, usize, u32)> = Vec::new();
+    let mut i = 0;
+    while i < pairs.len() {
+        let mut j = i;
+        while j < pairs.len() && pairs[j].0 == pairs[i].0 {
+            j += 1;
+        }
+        // One owner or none: a cue shared by two classes argues for both and
+        // so argues for neither.
+        let owner = pairs[i].1;
+        let exclusive = pairs[i..j].iter().all(|(_, c)| *c == owner);
+        let uses = (j - i) as u32;
+        if exclusive && uses >= MIN_USES {
+            out.push((pairs[i].0.clone(), owner, uses));
+        }
+        i = j;
+    }
+    // Commonest first within a class, ties by spelling. Deterministic, so the
+    // option list a decode saw is one any later reader can rebuild.
+    out.sort_by(|a, b| a.1.cmp(&b.1).then(b.2.cmp(&a.2)).then(a.0.cmp(&b.0)));
+    out
+}
+
+/// Render a core from its rules.
+///
+/// Ordered, and the order is the program's: the first rule that matches wins,
+/// and a rule that never matches costs one `contains` call. Worst case is
+/// `MAX_CLAUSES` calls plus one `lower`, which is three orders of magnitude
+/// under the J5 ceiling -- cost is not what refuses these.
+pub fn compose(clauses: &[Clause]) -> String {
+    let mut s = String::new();
+    s.push_str("// composed by the machine and judged before it votes\n");
+    s.push_str("fn vote(text: str, allowed: list): int {\n");
+    s.push_str("  t = lower(text)\n");
+    for c in clauses {
+        s.push_str("  if (contains(t, \"");
+        s.push_str(&c.cue);
+        s.push_str("\")) { return ");
+        s.push_str(&c.class.to_string());
+        s.push_str(" }\n");
+    }
+    // Declining is a real answer and the common one. A core that guesses when
+    // it has nothing to say is a core that breaks more than it repairs, and
+    // `decide` treats no opinion as no vote rather than as an abstention that
+    // costs something.
+    s.push_str("  return -1\n}\n");
+    s
+}
+
+/// Write one core, with the model making every choice the kernel does not.
+///
+/// **Runs outside `with_engine`.** Every `choose` claims the engine for its own
+/// decode and releases it, which is what keeps the shell answering during a
+/// long composition -- and what keeps this away from the re-entrancy that
+/// makes two live `&mut Engine` in one task. The caller must not be holding
+/// the engine when it calls this.
+pub fn author(names: &[String]) -> Option<String> {
+    let table = cue_table(names);
+    if table.is_empty() {
+        return None;
+    }
+
+    // Only classes that can actually be written about, for the same reason
+    // `author::applicable` offers only actions that can be carried out:
+    // choosing one that cannot be served ends the run having done nothing.
+    let mut writable: Vec<usize> = Vec::new();
+    for (_, c, _) in &table {
+        if !writable.contains(c) {
+            writable.push(*c);
+        }
+    }
+    let labels: Vec<&str> = writable.iter().map(|c| names[*c].as_str()).collect();
+
+    let counts: Vec<String> = (1..=MAX_CLAUSES).map(|n| n.to_string()).collect();
+    let count_refs: Vec<&str> = counts.iter().map(|s| s.as_str()).collect();
+    let want = 1 + super::author::choose(
+        "Writing a routing rule for the task classifier. How many rules?",
+        &count_refs,
+    )?;
+
+    let mut clauses: Vec<Clause> = Vec::new();
+    let mut spent: Vec<String> = Vec::new();
+    for _ in 0..want {
+        let li = super::author::choose(
+            "Which command should the next rule recognise?",
+            &labels,
+        )?;
+        let class = writable[li];
+        let cues: Vec<&str> = table
+            .iter()
+            .filter(|(w, c, _)| *c == class && !spent.iter().any(|s| s == w))
+            .map(|(w, _, _)| w.as_str())
+            .take(CUE_CAP)
+            .collect();
+        if cues.is_empty() {
+            continue;
+        }
+        let mut prompt = String::from("Which word in a task means '");
+        prompt.push_str(&names[class]);
+        prompt.push_str("'?");
+        let wi = super::author::choose(&prompt, &cues)?;
+        let cue = String::from(cues[wi]);
+        spent.push(cue.clone());
+        clauses.push(Clause { cue, class });
+    }
+
+    if clauses.is_empty() {
+        return None;
+    }
+    Some(compose(&clauses))
+}
+
 pub fn selftest() -> bool {
     let src = "fn vote(text: str, allowed: list): int { return get(allowed, 0) }\n";
     let h = sha256::hash(src.as_bytes());
@@ -288,5 +507,54 @@ pub fn selftest() -> bool {
     let stateful = "n = 0\nfn vote(text: str, allowed: list): int { n = n + 1 return get(allowed, n % 2) }\n";
     let hst = sha256::hash(stateful.as_bytes());
     let Ok(cst) = parse(&hst, stateful) else { return false };
-    cst.vote("x", &[0, 1]).0 == cst.vote("x", &[0, 1]).0
+    if cst.vote("x", &[0, 1]).0 != cst.vote("x", &[0, 1]).0 {
+        return false;
+    }
+
+    // What the machine composes is a program, and it does what the rules say.
+    //
+    // Checked here rather than only when one is authored, because authoring
+    // needs a model and a corpus and this needs neither -- so the property
+    // that a composed core parses, defines `vote`, and answers by its own
+    // rules is proved on every boot instead of on the nights a core happens
+    // to get written.
+    let written = compose(&[
+        Clause { cue: String::from("duplicate"), class: 2 },
+        Clause { cue: String::from("erase"), class: 5 },
+    ]);
+    let hw = sha256::hash(written.as_bytes());
+    let Ok(cw) = parse(&hw, written.as_str()) else { return false };
+    let all = [0usize, 1, 2, 3, 4, 5, 6];
+    // The first matching rule wins, and matching is case-insensitive because
+    // the program lowers the text before looking.
+    if cw.vote("please DUPLICATE the folder", &all).0 != Some(2) {
+        return false;
+    }
+    if cw.vote("erase it all", &all).0 != Some(5) {
+        return false;
+    }
+    // Order is the program's order: a task matching both takes the first.
+    if cw.vote("duplicate then erase", &all).0 != Some(2) {
+        return false;
+    }
+    // Nothing matched is no opinion, not a guess.
+    if cw.vote("something else entirely", &all).0.is_some() {
+        return false;
+    }
+    // A class outside the permitted set is still refused, composed or not.
+    if cw.vote("erase it all", &[0, 1, 2]).0.is_some() {
+        return false;
+    }
+
+    // Cues cannot carry a quote or a backslash out of the corpus and into the
+    // program text, because `words_of` keeps only alphanumerics. This is the
+    // claim that makes `compose` safe without an escaping step.
+    let hostile = words_of("rm \"; peek8(0) //\\ backslash");
+    if hostile.iter().any(|w| w.contains('"') || w.contains('\\')) {
+        return false;
+    }
+
+    // An empty rule list is not a core that always declines -- it is nothing
+    // worth judging, and `author` answers `None` rather than composing it.
+    true
 }

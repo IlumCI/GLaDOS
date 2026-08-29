@@ -1409,7 +1409,14 @@ impl Rule {
     }
 }
 
-fn split_of(i: usize) -> u8 {
+/// Which slice example `i` belongs to: 0 train, 1 validation, 2 test.
+///
+/// Public because anything that mines the corpus has to agree with the judge
+/// about where the boundary is. A second copy of this rule would drift, and
+/// the drift would be a producer taking its cues from the slice its verdict is
+/// measured on -- which is not a bug that announces itself, it is a number
+/// that is too good.
+pub fn split_of(i: usize) -> u8 {
     let (train, val_end, seed) = vocab::splits();
     if i < train {
         0 // train
@@ -1765,6 +1772,31 @@ pub struct CoreVerdict {
     pub j1: bool,
     pub j5: bool,
     pub j6: bool,
+
+    /// How much room a core has on this slice, measured while judging one.
+    ///
+    /// These three say nothing about the candidate and everything about
+    /// whether *any* candidate could win, which turns out to be the question
+    /// worth asking first. `decide` under `Rule::WithCore` carries a class
+    /// only when two of `[lexical, character, core]` agree on it against the
+    /// probe -- so when the two counters already agree, they carry it
+    /// themselves and the core is arithmetically inert. A core's entire
+    /// influence is the items where they *split*.
+    ///
+    ///   contested    the two counters disagree. Everywhere else is inert.
+    ///   recoverable  contested, and one of them is actually right. A core
+    ///                cannot introduce a third class, so this is the hard
+    ///                ceiling on what any core could ever repair.
+    ///   prize        recoverable, and the probe is wrong. This is `fixed`
+    ///                for a core that gets every one of them right, which is
+    ///                the honest upper bound on the judge's own statistic.
+    ///
+    /// Counted here because the loop already computes every term. Measuring it
+    /// separately would be a second pass over the corpus to learn something
+    /// this one knew.
+    pub contested: usize,
+    pub recoverable: usize,
+    pub prize: usize,
 }
 
 impl CoreVerdict {
@@ -1819,6 +1851,47 @@ pub fn core_bench_in(
     split_wanted: u8,
 ) -> Result<CoreVerdict, String> {
     let core = super::voter::load(hash)?;
+    core_bench_core(e, &core, split_wanted)
+}
+
+/// How much room a core has on a slice, without needing a core to ask with.
+///
+/// Measured by judging one that never answers. A core that always declines
+/// changes no decision, so every paired count comes back zero and what is left
+/// is the census: how often the two counters split, how often one of them is
+/// right when they do, and how often the probe is wrong there. That is the
+/// ceiling on `fixed` for any candidate whatsoever.
+///
+/// Written this way rather than as a second loop because a second loop is a
+/// second definition of "contested", and the two would eventually disagree
+/// about the number the whole question turns on.
+pub fn core_census(e: &mut super::Engine, split_wanted: u8) -> Result<CoreVerdict, String> {
+    let src = "fn vote(text: str, allowed: list): int { return -1 }\n";
+    let h = crate::store::sha256::hash(src.as_bytes());
+    let core = super::voter::parse(&h, src)?;
+    core_bench_core(e, &core, split_wanted)
+}
+
+/// The last census any bench measured, or `None` if none has run this boot.
+///
+/// Kept so the question "could a core win here at all" can be answered without
+/// paying for another pass over the corpus. Deliberately not persisted: it is
+/// a measurement of a fitted probe and a corpus that both change, and a stale
+/// answer to this question is worse than no answer.
+static LAST_PRIZE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(u32::MAX);
+
+pub fn last_prize() -> Option<usize> {
+    match LAST_PRIZE.load(core::sync::atomic::Ordering::Relaxed) {
+        u32::MAX => None,
+        n => Some(n as usize),
+    }
+}
+
+pub fn core_bench_core(
+    e: &mut super::Engine,
+    core: &super::voter::Core,
+    split_wanted: u8,
+) -> Result<CoreVerdict, String> {
     {
         let Some(f) = featurise(e) else {
             return Err(String::from("no corpus to judge against"));
@@ -1843,6 +1916,9 @@ pub fn core_bench_in(
             j1: false,
             j5: false,
             j6: false,
+            contested: 0,
+            recoverable: 0,
+            prize: 0,
         };
 
         for (split, x, want, text) in &f.ev {
@@ -1860,6 +1936,21 @@ pub fn core_bench_in(
             let without = decide(Rule::Majority, p, fitted.council.as_ref(), &e.tok, text, &all, None);
             let with = decide(Rule::WithCore, p, fitted.council.as_ref(), &e.tok, text, &all, says);
 
+            // The census. Computed from what the two counters said, which is
+            // the same call J6 makes below -- hoisted so it happens once.
+            let pair = fitted.council.as_ref().and_then(|c| c.corroborate(text, &e.tok, &all));
+            if let Some((l, ch)) = pair {
+                if l != ch {
+                    v.contested += 1;
+                    if l == *want || ch == *want {
+                        v.recoverable += 1;
+                        if p != *want {
+                            v.prize += 1;
+                        }
+                    }
+                }
+            }
+
             // Independence is measured against the lexical core, which is the
             // one a written core is most likely to reinvent: both read the
             // words. A voter that only ever repeats an existing one adds a
@@ -1873,7 +1964,7 @@ pub fn core_bench_in(
             // sufficient alone and neither is trying to be -- the first
             // measured core to reach this gate passed J5 and J6 and was
             // refused by J1, which is the pair working as intended.
-            if let (Some(k), Some((l, _))) = (says, fitted.council.as_ref().and_then(|c| c.corroborate(text, &e.tok, &all))) {
+            if let (Some(k), Some((l, _))) = (says, pair) {
                 if k != l {
                     v.disagreed += 1;
                 }
@@ -1903,6 +1994,12 @@ pub fn core_bench_in(
         v.j5 = v.worst_steps <= CORE_STEP_CEILING;
         // J6, independence. A core that never differs from lexical is lexical.
         v.j6 = v.disagreed > 0 && v.declined < v.n;
+        // Only the validation census answers "could a core win", because that
+        // is the slice J1 is computed on. A test-slice census is a different
+        // number about a different question.
+        if split_wanted == VALIDATION {
+            LAST_PRIZE.store(v.prize as u32, core::sync::atomic::Ordering::Relaxed);
+        }
         Ok(v)
     }
 }
@@ -1930,6 +2027,22 @@ pub fn core_report(hash: &[u8; 32], install: bool) {
 
     let mark = |p: bool| if p { "pass" } else { "VETO" };
     kprintln!("  judged on {} validation items", v.n);
+    // The room, before the verdict. A reader who sees a veto without this
+    // concludes the candidate was poor; more often the slice had nothing in
+    // it for any candidate to win.
+    let need = super::godel::clean_fixes_needed();
+    kprintln!(
+        "  room         {} contested, {} recoverable, {} within reach ({} needed)",
+        v.contested,
+        v.recoverable,
+        v.prize,
+        need
+    );
+    if v.prize < need {
+        console::set_color(YELLOW);
+        kprintln!("  no core of any construction can clear J1 on this slice");
+        console::set_color(LTGRAY);
+    }
     kprintln!(
         "  J1 margin    {}  {} repaired, {} broken, chi {}",
         mark(v.j1),

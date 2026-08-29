@@ -498,20 +498,47 @@ fn tick_inner(forced: bool) {
                     // `Default::default()` here and at the prompt, which meant
                     // every trial trained the identical adapter and every one
                     // after the first was rejected against itself.
-                    let verdict = match super::godel::frontier() {
+                    // The declared grid first; when it is spent, the machine
+                    // writes something of its own to judge.
+                    //
+                    // This is where the loop stops being an adapter search.
+                    // The grid is finite and always was, so "search space
+                    // exhausted" was the end of self-improvement -- eight
+                    // points, then nothing, every night, forever. Composing a
+                    // core is the one axis where the space is not enumerable
+                    // in advance, because the machine writes the candidate.
+                    // It goes second rather than first because the grid is a
+                    // declared experiment and a composed core is a guess.
+                    let picked = match super::godel::frontier() {
+                        Some(p) => Some(p),
+                        None => super::godel::author_core(),
+                    };
+                    let verdict = match picked {
                         None => None,
                         Some(p) => {
                             let b = p.budget(GODEL_EXAMPLES, GODEL_MS);
-                            super::with_engine(|e| super::godel::trial(e, &b, &p))
+                            super::with_engine(|e| super::godel::run(e, &b, &p))
                         }
                     };
                     let line = match verdict {
                         None if super::godel::frontier().is_none() => {
                             let (seen, all) = super::godel::explored();
-                            format!("search space exhausted, {} of {} tried", seen, all)
+                            match super::godel::core_room() {
+                                Some((prize, need)) if prize < need => format!(
+                                    "grid spent ({} of {}); no core can pass here -- {} \
+                                     validation item(s) within reach, {} needed",
+                                    seen, all, prize, need
+                                ),
+                                _ => format!(
+                                    "grid spent ({} of {}), nothing composed to judge",
+                                    seen, all
+                                ),
+                            }
                         }
                         None => String::from("engine held by another task"),
-                        Some(Err(_)) => String::from("trainer refused"),
+                        // Why, not just that. A journal line read in the
+                        // morning is the only account of a night nobody saw.
+                        Some(Err(e)) => format!("refused: {}", e.why()),
                         Some(Ok(c)) => format!(
                             "variant {} {} (fixed {}, broke {}, goals {}/{})",
                             super::godel::short_hex(&c.variant),

@@ -125,6 +125,36 @@ pub const TRIED: &str = "/ai/godel/tried";
 /// lets any later run re-derive a verdict bit for bit, which is the claim this
 /// whole module rests on; randomness would buy variety and sell that. So a
 /// trial stays a function of its inputs and gains an input.
+/// What kind of change is being proposed.
+///
+/// The loop began as an adapter search: every proposal was a set of training
+/// knobs, and the one other thing the machine could change -- a council core --
+/// reached adoption down a separate path with its own entry point. Two ways in
+/// meant two places for the bookkeeping to drift, and the second one had to
+/// grow its own copy of the lineage discipline before it was safe to use.
+///
+/// So the kind is in the proposal, and one dispatcher routes it. What that
+/// buys is not tidiness: it means the *scheduler* no longer has to know what
+/// kind of thing it is running. The night loop asks for the next proposal and
+/// runs it, and whether that turns out to be a learning rate or a program the
+/// machine wrote an hour ago is a fact about the proposal, not about the loop.
+///
+/// **A kind here must have a judge.** The obvious extensions -- deep training
+/// (J1-J4 exist, the routing does not), skills (no judge at all), the routing
+/// rule (needs a calibration judge before `rule` is searchable) -- are absent
+/// on purpose. A variant in this enum that `run` cannot judge would be a
+/// promise the type makes and the machine cannot keep, and an unjudged change
+/// adopted at three in the morning is exactly what this module exists to
+/// prevent.
+#[derive(Clone, Copy, PartialEq)]
+pub enum ProposalKind {
+    /// Train a classifier adapter with these knobs. Judged J1-J4.
+    Adapter,
+    /// Judge a council core already stored under its content address.
+    /// Judged J1/J5/J6 by `harness::core_bench_in`.
+    Core([u8; 32]),
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub struct Proposal {
     pub lr: f32,
@@ -135,9 +165,53 @@ pub struct Proposal {
     /// has somewhere to put it; `trial` records it in the variant, and nothing
     /// varies it yet -- see `GRID`.
     pub rule: u8,
+    pub kind: ProposalKind,
+}
+
+/// Why a proposal could not be run to a verdict.
+///
+/// Two error types met here: the trainer refuses for reasons about the machine
+/// and the corpus, the core judge for reasons about the program. Flattening
+/// them to a bool would lose the difference between "there was nothing to
+/// train on" and "the core will not load", which are the two facts a journal
+/// line at 3am has to carry.
+pub enum Refused {
+    Train(super::train::RunError),
+    Judge(&'static str),
+}
+
+impl Refused {
+    pub fn why(&self) -> &'static str {
+        match self {
+            Refused::Train(super::train::RunError::Hardware) => "the hardware check said no",
+            Refused::Train(super::train::RunError::NoCorpus) => "there is no corpus",
+            Refused::Train(super::train::RunError::Hybrid) => "the model is a hybrid the trainer will not touch",
+            Refused::Train(super::train::RunError::NoDecisions) => "the corpus produced no decisions",
+            Refused::Judge(w) => w,
+        }
+    }
 }
 
 impl Proposal {
+    /// A proposal to judge a stored council core.
+    ///
+    /// The training knobs are zero because a core is not trained -- it is a
+    /// program, already written, and the only question is whether it earns a
+    /// place in the decision path. They are still rendered, and still in the
+    /// hash, because a proposal is identified by its whole text: leaving them
+    /// out would make this a different kind of document and the marker
+    /// directory holds one kind.
+    pub fn core(h: [u8; 32]) -> Proposal {
+        Proposal {
+            lr: 0.0,
+            rank: 0,
+            alpha: 0.0,
+            epochs: 0,
+            rule: super::harness::Rule::WithCore as u8,
+            kind: ProposalKind::Core(h),
+        }
+    }
+
     pub fn budget(&self, examples: usize, millis: u64) -> Budget {
         Budget {
             epochs: self.epochs,
@@ -167,6 +241,19 @@ impl Proposal {
         s.push_str("\nrule ");
         push_u32(&mut s, self.rule as u32);
         s.push('\n');
+        // Emitted only when the kind is not the one every existing marker
+        // was written under.
+        //
+        // The same compatibility rule `Variant::render` follows, and here it
+        // guards something with teeth: `tried()` looks a proposal up by the
+        // hash of this text, so an unconditional `kind` line would re-address
+        // every marker in `/ai/godel/tried` at once and the grid would be
+        // walked from the beginning as though nothing had ever been measured.
+        if let ProposalKind::Core(h) = self.kind {
+            s.push_str("core ");
+            s.push_str(&hex32(&h));
+            s.push('\n');
+        }
         s
     }
 
@@ -210,14 +297,14 @@ impl Proposal {
 /// Varying it without a judge that measures it would be search without
 /// selection, which is drift.
 const GRID: &[Proposal] = &[
-    Proposal { lr: 0.02, rank: 8, alpha: 16.0, epochs: 20, rule: 0 },
-    Proposal { lr: 0.05, rank: 8, alpha: 16.0, epochs: 20, rule: 0 },
-    Proposal { lr: 0.01, rank: 8, alpha: 16.0, epochs: 40, rule: 0 },
-    Proposal { lr: 0.02, rank: 16, alpha: 32.0, epochs: 20, rule: 0 },
-    Proposal { lr: 0.05, rank: 16, alpha: 32.0, epochs: 20, rule: 0 },
-    Proposal { lr: 0.01, rank: 4, alpha: 8.0, epochs: 40, rule: 0 },
-    Proposal { lr: 0.08, rank: 8, alpha: 16.0, epochs: 12, rule: 0 },
-    Proposal { lr: 0.02, rank: 32, alpha: 64.0, epochs: 20, rule: 0 },
+    Proposal { lr: 0.02, rank: 8, alpha: 16.0, epochs: 20, rule: 0, kind: ProposalKind::Adapter },
+    Proposal { lr: 0.05, rank: 8, alpha: 16.0, epochs: 20, rule: 0, kind: ProposalKind::Adapter },
+    Proposal { lr: 0.01, rank: 8, alpha: 16.0, epochs: 40, rule: 0, kind: ProposalKind::Adapter },
+    Proposal { lr: 0.02, rank: 16, alpha: 32.0, epochs: 20, rule: 0, kind: ProposalKind::Adapter },
+    Proposal { lr: 0.05, rank: 16, alpha: 32.0, epochs: 20, rule: 0, kind: ProposalKind::Adapter },
+    Proposal { lr: 0.01, rank: 4, alpha: 8.0, epochs: 40, rule: 0, kind: ProposalKind::Adapter },
+    Proposal { lr: 0.08, rank: 8, alpha: 16.0, epochs: 12, rule: 0, kind: ProposalKind::Adapter },
+    Proposal { lr: 0.02, rank: 32, alpha: 64.0, epochs: 20, rule: 0, kind: ProposalKind::Adapter },
 ];
 
 /// The search space itself, checked without running anything.
@@ -269,6 +356,27 @@ pub fn space_selftest() -> bool {
         return false;
     }
 
+    // The kind reaches the hash, and only when it is not the default.
+    //
+    // Both halves are load-bearing and they pull against each other. If an
+    // adapter point rendered a `kind` line, every marker already in
+    // `/ai/godel/tried` would re-address at once and the grid would be walked
+    // again from the top as though nothing had ever been measured -- weeks of
+    // nights, silently repeated. If a core point did *not* render one, two
+    // different programs would share a marker and the second would never be
+    // judged.
+    if base.render().contains("core ") {
+        return false;
+    }
+    let c1 = Proposal::core(sha256::hash(b"one core"));
+    let c2 = Proposal::core(sha256::hash(b"another core"));
+    if !c1.render().contains("core ") || c1.hash() == c2.hash() {
+        return false;
+    }
+    if GRID.iter().any(|p| p.hash() == c1.hash()) {
+        return false;
+    }
+
     // Learning rates an order of magnitude apart at the small end stay apart.
     // `push_f2` renders both 3e-4 and 2e-4 as "0.00"; a proposal is identified
     // by its rendering alone, so that would silently merge two points.
@@ -298,6 +406,51 @@ pub fn space_selftest() -> bool {
 /// re-deriving adapters it already has, which is the failure this replaces.
 pub fn frontier() -> Option<Proposal> {
     GRID.iter().copied().find(|p| !p.tried())
+}
+
+/// Have the machine write a council core, and store it by content address.
+///
+/// **Claims the engine only briefly, and never while composing.** The class
+/// list is read under one short claim and released; every decode inside
+/// `voter::author` then takes its own. That is not an optimisation -- calling
+/// this from inside `with_engine` would hand the same task a second `&mut
+/// Engine`, which is undefined behaviour in this kernel and was a live defect
+/// in `trial_core` until recently.
+pub fn write_core() -> Option<[u8; 32]> {
+    let names: Vec<String> = super::with_engine(|e| {
+        (0..e.head.len()).map(|i| String::from(e.head.name(i))).collect()
+    })?;
+    let src = super::voter::author(&names)?;
+    Some(super::voter::store(&src))
+}
+
+/// A proposal for a core the machine has just written, if it is new.
+///
+/// `None` when nothing could be composed, or when this exact program has
+/// already been judged. The second case is the marker doing its job: the
+/// composition is a function of the corpus and the model's choices, so a
+/// machine that keeps making the same choices keeps writing the same program,
+/// and judging it nightly would fill the ledger with one result reported
+/// forever.
+pub fn author_core() -> Option<Proposal> {
+    // Do not spend a night writing something that cannot win.
+    //
+    // The census says how many validation items a core could repair even if it
+    // got every one of them right; J1 says how many it must. When the first is
+    // below the second, no program of any construction clears the judge on
+    // this slice, and composing one is a night spent producing a rejection
+    // that was arithmetic before it was a measurement. The number is whatever
+    // the last bench measured, so the first night still tries.
+    if let Some((prize, need)) = core_room() {
+        if prize < need {
+            return None;
+        }
+    }
+    let p = Proposal::core(write_core()?);
+    if p.tried() {
+        return None;
+    }
+    Some(p)
 }
 
 /// Throw away every marker, so the grid is walked from the start again.
@@ -852,6 +1005,32 @@ pub fn mcnemar(broke: usize, fixed: usize) -> f32 {
     num * num / n as f32
 }
 
+/// The smallest number of clean repairs -- repairs with nothing broken --
+/// that actually clears J1.
+///
+/// Derived rather than written down, because it is not `MIN_FIXED`. Yates'
+/// correction subtracts one from the difference before squaring, so four clean
+/// fixes score 2.25 and are refused by the very judge whose floor is four; the
+/// real bar on this configuration is six. Two constants that look like the
+/// answer and are not is exactly the arrangement in which somebody eventually
+/// quotes the wrong one, so the answer is computed from both.
+pub fn clean_fixes_needed() -> usize {
+    let mut f = MIN_FIXED;
+    while f < 1024 {
+        if mcnemar(0, f) >= MCNEMAR_95 {
+            return f;
+        }
+        f += 1;
+    }
+    f
+}
+
+/// What a core could win here, and what it would have to win, when both are
+/// known. `None` until something has been benched this boot.
+pub fn core_room() -> Option<(usize, usize)> {
+    super::harness::last_prize().map(|p| (p, clean_fixes_needed()))
+}
+
 /// Roughly the 95% threshold for one degree of freedom. Named rather than
 /// spelled inline because it is a *decision*, not a constant: 3.84 is the
 /// conventional line and the ledger records the statistic itself, so a later
@@ -1096,6 +1275,38 @@ fn ensure_head(e: &mut super::Engine) -> Option<[u8; 32]> {
     let vh = v.store();
     set_head(&vh);
     Some(vh)
+}
+
+/// Run whatever this proposal proposes, and answer with a certificate.
+///
+/// The one way in. Before this there were two entry points with two
+/// signatures and two error types, and the scheduler had to know which kind of
+/// change it was making in order to call the right one -- so widening the loop
+/// to a third kind meant editing the scheduler, the shell, and the journal
+/// together. Now the proposal carries its kind and the caller carries none.
+///
+/// **The economics stay separate even though the entry point is one.**
+/// Branching *inside* `trial` was the tempting shape and it is the wrong one:
+/// `trial` is a training run whose expensive half is a forward pass per
+/// example, and a core changes no weights and needs no training. Two costs
+/// behind one name is the mistake `deeptrain` was split out to avoid. This
+/// dispatches; it does not merge.
+///
+/// Marking happens here for every kind, so a proposal that faults still counts
+/// as visited -- for a core that is what stops the machine judging the same
+/// program it wrote every night for the rest of its life.
+pub fn run(
+    e: &mut super::Engine,
+    b: &Budget,
+    p: &Proposal,
+) -> Result<Certificate, Refused> {
+    match p.kind {
+        ProposalKind::Adapter => trial(e, b, p).map_err(Refused::Train),
+        ProposalKind::Core(h) => {
+            p.mark();
+            trial_core(e, &h).map_err(Refused::Judge)
+        }
+    }
 }
 
 /// Run one trial: train a candidate, judge it, record the certificate, and
@@ -1417,11 +1628,17 @@ pub fn trial_core(e: &mut super::Engine, h: &[u8; 32]) -> Result<Certificate, &'
         variant: vhash,
         decisions: verdict.n,
         validation: verdict.n,
-        // Nothing predicted it: there is no cheap training-set signal for a
-        // core the way there is for an adapter. Recorded as false rather than
-        // invented, since a prediction nobody made is not a prediction that
-        // was wrong.
-        predicted: false,
+        // There is a cheap signal after all, and it is a better one than the
+        // adapter path's.
+        //
+        // This used to be `false` with a comment saying no prediction existed.
+        // The census makes one: `prize` counts the validation items a core
+        // could repair if it answered every one of them correctly, so a prize
+        // below the bar is a prediction of failure that is not a guess -- it
+        // is arithmetic. The ledger accumulates these beside the outcomes, and
+        // a run of `predicted false / adopted false` is not a calibration
+        // failure here, it is the ceiling being reported honestly.
+        predicted: verdict.prize >= clean_fixes_needed(),
         fixed: verdict.fixed,
         broke: verdict.broke,
         mcnemar: verdict.chi,
