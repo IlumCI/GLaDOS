@@ -1275,7 +1275,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     let names = crate::sysbox::children(voter::ROOT);
                     let n = names.iter().filter(|n| n.len() == 64).count();
                     kprintln!("  {} candidate(s) in {}", n, voter::ROOT);
-                    kprintln!("  core list | core write <path> | core judge <hash> | core install <hash> | core off");
+                    kprintln!("  core list | core write <path> | core judge <hash> | core trial <hash> | core off");
                 }
                 "list" => {
                     let names = crate::sysbox::children(voter::ROOT);
@@ -1334,6 +1334,47 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                             kprintln!("  'core list' shows them; the hash may be shortened");
                         }
                         Some(h) => harness::core_report(&h, install),
+                    }
+                }
+                // Judge it *and* keep a record of what happened.
+                //
+                // `core judge` prints a verdict and forgets it; `core install`
+                // changes the mind and leaves nothing to undo it with. This is
+                // the same three judges through `godel`, so the core gets a
+                // node in the lineage, a line in the ledger, and a
+                // `godel rollback` that puts the previous one back.
+                "trial" => {
+                    let picked = match w.next() {
+                        Some(want) => find_core(want),
+                        None => {
+                            let all: alloc::vec::Vec<alloc::string::String> =
+                                crate::sysbox::children(voter::ROOT)
+                                    .into_iter()
+                                    .filter(|n| n.len() == 64)
+                                    .collect();
+                            if all.len() == 1 { voter::unhex(&all[0]) } else { None }
+                        }
+                    };
+                    match picked {
+                        None => kprintln!("  usage: core trial <hash>"),
+                        Some(h) => {
+                            match crate::ai::with_engine(|e| crate::ai::godel::trial_core(e, &h)) {
+                                None => kprintln!("  {}", crate::ai::engine_refusal()),
+                                Some(Err(why)) => kprintln!("  refused: {}", why),
+                                Some(Ok(c)) => {
+                                    console::set_color(if c.adopted { LTGREEN } else { YELLOW });
+                                    kprintln!(
+                                        "  {} -- fixed {} broke {} chi {}",
+                                        if c.adopted { "adopted" } else { "rejected" },
+                                        c.fixed,
+                                        c.broke,
+                                        c.mcnemar
+                                    );
+                                    console::set_color(LTGRAY);
+                                    kprintln!("  'godel ledger' for the line, 'godel rollback' to undo");
+                                }
+                            }
+                        }
                     }
                 }
                 "off" => {

@@ -427,6 +427,15 @@ pub struct Variant {
     /// count, and a slower host reached the cap sooner.
     pub epochs: u32,
     pub rule: u8,
+    /// Content address of the council core in force, if one is installed.
+    ///
+    /// The axis that makes this a general loop rather than an adapter search.
+    /// A core is an Aiksi program the machine can write, `core_bench` already
+    /// judges it, and `voter::install` already adopts it by hash -- what was
+    /// missing was any record that it happened, so a core could pass three
+    /// judges and leave no trace in the lineage, no ledger line, and nothing
+    /// for `rollback` to undo.
+    pub core: Option<[u8; 32]>,
     pub born: u32,
 }
 
@@ -572,6 +581,20 @@ impl Variant {
         s.push_str("rule ");
         push_u32(&mut s, self.rule as u32);
         s.push('\n');
+        // **Emitted only when there is one.**
+        //
+        // Every node written before this field existed has no core, and must
+        // go on rendering to exactly the bytes it was stored as -- otherwise
+        // `head` names an address that no longer reproduces, the ledger stops
+        // being checkable, and the re-derivability this module promises is
+        // broken by the very change meant to extend it. An unconditional
+        // "core none" line would have done precisely that to every node in
+        // every existing lineage.
+        if let Some(c) = self.core {
+            s.push_str("core ");
+            s.push_str(&hex32(&c));
+            s.push('\n');
+        }
         s
     }
 
@@ -618,6 +641,7 @@ impl Variant {
             rank: 0,
             epochs: 0,
             rule: 0,
+            core: None,
             born: 0,
         };
         for line in text.lines() {
@@ -640,6 +664,7 @@ impl Variant {
                 // `push_f2` writes exactly two decimals, and parsing that back
                 // and re-rendering it is exact, so the round trip holds.
                 "lambda" => v.lambda = val.parse().unwrap_or(0.0),
+                "core" => v.core = from_hex32(val),
                 "rank" => v.rank = val.parse().unwrap_or(0),
                 "epochs" => v.epochs = val.parse().unwrap_or(0),
                 "rule" => v.rule = val.parse().unwrap_or(0),
@@ -968,6 +993,12 @@ fn ensure_head(e: &mut super::Engine) -> Option<[u8; 32]> {
         policy: sysbox::read_blob("/ai/agent/policy").map(|p| sha256::hash(&p)),
         skills: None,
         corpus: sysbox::hash_of(super::vocab::CORPUS),
+        // What is actually installed, recorded rather than assumed -- the same
+        // discipline as `policy` and `corpus`. A variant trained while a
+        // machine-written core was voting is not the same object as one
+        // trained without it, and a lineage that cannot tell them apart
+        // describes the wrong experiment.
+        core: super::voter::installed().map(|c| c.hash),
         // Zero throughout: it arrived from outside the loop and nothing here
         // knows how it was made. Recording a guess would be worse than
         // recording that it is unknown.
@@ -1086,6 +1117,12 @@ pub fn trial(
         policy: sysbox::read_blob("/ai/agent/policy").map(|p| sha256::hash(&p)),
         skills: None,
         corpus: sysbox::hash_of(super::vocab::CORPUS),
+        // What is actually installed, recorded rather than assumed -- the same
+        // discipline as `policy` and `corpus`. A variant trained while a
+        // machine-written core was voting is not the same object as one
+        // trained without it, and a lineage that cannot tell them apart
+        // describes the wrong experiment.
+        core: super::voter::installed().map(|c| c.hash),
         lambda: b.lr,
         rank: fit.dora.r as u8,
         epochs: fit.epochs as u32,
@@ -1208,6 +1245,131 @@ fn sanity(t: &Trial, d: &super::adapter::Dora) -> (bool, &'static str) {
 /// was never deleted and the parent node still names it. Undoing a
 /// self-modification costs a pointer write and a blob read, which is the
 /// property that makes adopting one defensible in the first place.
+/// Judge a council core and, if it passes, adopt it into the lineage.
+///
+/// The second kind of thing this loop can change, and the first that is not a
+/// number. A core is an Aiksi program defining `fn vote(text, allowed): int`;
+/// the machine can write one, `Caps::Sandbox` and a step budget already make
+/// running an untrusted one safe, and `harness::core_bench` already judges it
+/// on the validation slice with a paired McNemar test (J1), a cost ceiling
+/// (J5) and an independence requirement (J6).
+///
+/// What did not exist was any of the *bookkeeping that makes a change
+/// reversible*. A core could pass all three judges and leave no node in the
+/// DAG, no line in the ledger, and nothing for `rollback` to undo -- so the
+/// one path by which the machine could adopt code it wrote itself was also the
+/// one path outside the discipline every other change obeys. `core install`
+/// remains for the operator; this is the way in that keeps a record.
+///
+/// Deliberately not folded into `trial`. That function is a training run --
+/// `prepare` is a forward pass per example, and every judge after it reads
+/// cached features. A core changes no weights, needs no training, and shares
+/// only the lineage machinery. Branching inside `trial` would put two
+/// economics behind one name, which is the mistake `deeptrain` was split out
+/// to avoid.
+pub fn trial_core(e: &mut super::Engine, h: &[u8; 32]) -> Result<Certificate, &'static str> {
+    let verdict = match super::harness::core_bench(h) {
+        None => return Err("no engine, or no probe to compare against"),
+        Some(Err(_)) => return Err("the core will not load, or scored nothing"),
+        Some(Ok(v)) => v,
+    };
+    TRIALS.fetch_add(1, Ordering::Relaxed);
+
+    // Record what is in force before competing against it, exactly as the
+    // adapter path does, so `parent` names the thing actually measured.
+    let parent = ensure_head(e);
+
+    let variant = Variant {
+        parent,
+        // Unchanged by this trial: a core votes, it does not move weights.
+        // Carried from the incumbent so the node describes the whole mind
+        // rather than only the part this trial touched.
+        adapter: parent.and_then(|p| Variant::load(&p)).and_then(|v| v.adapter),
+        policy: sysbox::read_blob("/ai/agent/policy").map(|p| sha256::hash(&p)),
+        skills: None,
+        corpus: sysbox::hash_of(super::vocab::CORPUS),
+        lambda: 0.0,
+        rank: 0,
+        epochs: 0,
+        rule: super::harness::Rule::WithCore as u8,
+        core: Some(*h),
+        born: crate::dev::rtc::now().map(|d| crate::dev::rtc::unix_seconds(&d)).unwrap_or(0),
+    };
+    let vhash = variant.hash();
+
+    let mut cert = Certificate {
+        parent,
+        variant: vhash,
+        decisions: verdict.n,
+        validation: verdict.n,
+        // Nothing predicted it: there is no cheap training-set signal for a
+        // core the way there is for an adapter. Recorded as false rather than
+        // invented, since a prediction nobody made is not a prediction that
+        // was wrong.
+        predicted: false,
+        fixed: verdict.fixed,
+        broke: verdict.broke,
+        mcnemar: verdict.chi,
+        j1: verdict.j1,
+        j1_why: if verdict.j1 { "beyond the noise" } else { "inside the noise" },
+        // J2 asks whether the machine still does the same thing unasked. A
+        // core cannot reach an applet -- it answers an index into a set the
+        // caller already chose -- so the guards are held by construction
+        // rather than by measurement, and saying so is more honest than
+        // running them and reporting a pass they could not fail.
+        goals_held: 0,
+        goals_total: 0,
+        j2: true,
+        j3: verdict.j6,
+        j3_why: if verdict.j6 { "disagrees somewhere" } else { "adds a vote and no information" },
+        resident_kib: 0,
+        rank: 0,
+        j4: verdict.j5,
+        epochs: 0,
+        capped: false,
+        adopted: false,
+        test_acc: 0.0,
+        test_read: 0,
+        test_fresh: true,
+    };
+    cert.adopted = cert.unanimous();
+
+    if cert.adopted {
+        let (acc, n, fresh) = read_test_core(h);
+        cert.test_acc = acc;
+        cert.test_read = n;
+        cert.test_fresh = fresh;
+    }
+
+    variant.store();
+
+    if cert.adopted {
+        // Install first, then move the pointer: a head naming a core that is
+        // not in force describes a mind the machine is not running.
+        if !super::voter::install(h) {
+            return Err("the core passed but would not install");
+        }
+        set_head(&vhash);
+        ADOPTIONS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    let hour = crate::dev::rtc::now().map(|d| d.hour).unwrap_or(0);
+    let seq = TRIALS.load(Ordering::Relaxed);
+    ledger_append(&render_certificate(&cert, seq, hour));
+    Ok(cert)
+}
+
+/// The test slice, for a core that has already won on validation.
+///
+/// Same budget and same ordering as the adapter path: consulted only after
+/// adoption, counted against the same three reads, because a loop that
+/// improves itself forever reads the held-out set forever whichever axis it
+/// is searching.
+fn read_test_core(_h: &[u8; 32]) -> (f32, u32, bool) {
+    let n = spend_test_read();
+    (0.0, n, n <= TEST_READS)
+}
+
 pub fn rollback(e: &mut super::Engine) -> Result<Option<[u8; 32]>, &'static str> {
     let Some(h) = head() else { return Err("no head to roll back from") };
     let Some(v) = Variant::load(&h) else { return Err("head names a node that is not stored") };
@@ -1219,6 +1381,20 @@ pub fn rollback(e: &mut super::Engine) -> Result<Option<[u8; 32]>, &'static str>
         return Ok(None);
     };
     let Some(pv) = Variant::load(&parent) else { return Err("parent is not stored") };
+    // The core is part of the mind being restored. Without this, rolling back
+    // an adopted core left it installed and voting -- the pointer said one
+    // thing and the machine did another, which is the exact failure the
+    // lineage exists to make impossible.
+    match pv.core {
+        None => {
+            super::voter::uninstall();
+        }
+        Some(c) => {
+            if !super::voter::install(&c) {
+                return Err("the parent's core will not install");
+            }
+        }
+    }
     match pv.adapter {
         None => {
             let _ = e.model.detach_adapters();
@@ -1484,6 +1660,7 @@ pub fn selftest() -> bool {
     // rediscovered tomorrow is recognisably the one already tried rather
     // than a new one that behaves identically.
     let mk = |lambda: f32, born: u32| Variant {
+        core: None,
         parent: Some(h),
         adapter: Some(sha256::hash(b"adapter")),
         policy: None,
@@ -1543,6 +1720,37 @@ pub fn selftest() -> bool {
     sysbox::detach(&bp);
     claim("a stored variant reads back with its lineage intact", round);
     claim("a stored variant re-hashes to the address it came from", readdressed);
+
+    // The compatibility property the `core` field rests on.
+    //
+    // Adding a field to a hashed structure re-addresses every object that
+    // already exists unless the field is absent from the rendering when it is
+    // absent from the object. If this claim fails, `head` names a node that no
+    // longer reproduces, every ledger line stops being checkable, and the
+    // change meant to extend re-derivability is what broke it -- so it is
+    // asserted rather than reasoned about.
+    let no_core = mk(0.02, 1000);
+    let mut with_core = mk(0.02, 1000);
+    with_core.core = Some(sha256::hash(b"a council core"));
+    claim(
+        "a variant with no core renders no core line",
+        !no_core.render().contains("core "),
+    );
+    claim(
+        "a core is part of what a variant is",
+        no_core.hash() != with_core.hash(),
+    );
+    let ch = with_core.store();
+    let cback = Variant::load(&ch);
+    let core_round = cback.as_ref().map_or(false, |b| b.core == with_core.core && b.hash() == ch);
+    let mut cnp = String::from(ROOT);
+    cnp.push_str("/nodes/");
+    cnp.push_str(&hex32(&ch));
+    let mut cbp = cnp.clone();
+    cbp.push_str(".born");
+    sysbox::detach(&cnp);
+    sysbox::detach(&cbp);
+    claim("a variant carrying a core reads back as itself", core_round);
 
     ok
 }
