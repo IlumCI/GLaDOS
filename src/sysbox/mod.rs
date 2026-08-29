@@ -459,6 +459,91 @@ pub fn dispatch(cmd: &str, rest: &str) -> bool {
 /// undefined behaviour, and the only honest fix at this depth is to say no.
 static RUNNING: AtomicBool = AtomicBool::new(false);
 
+/// Where the operator records the skills allowed to keep operator powers.
+///
+/// One hex hash per line, and the hash is of the file's *bytes*, so editing a
+/// skill revokes its trust by construction. That is the same property
+/// `app::manifest` gets by putting the `raw` bit inside the hash, and it is
+/// the reason trust cannot be inherited by a later version of a program.
+const TRUSTED: &str = "/ai/tools/.trusted";
+
+/// Steps a sandboxed skill may take.
+///
+/// Generous -- a skill that walks a directory tree does real work -- and
+/// bounded, because the loop's abort check only fires between steps and a
+/// machine-written `while (1)` would otherwise wedge whichever task ran it.
+/// `with_step_budget` clamps to `STEP_BUDGET`, so this can only ever narrow.
+const SKILL_BUDGET: u64 = 5_000_000;
+
+fn hex32_of(h: &[u8; 32]) -> String {
+    let mut s = String::new();
+    for b in h {
+        s.push(char::from_digit((b >> 4) as u32, 16).unwrap_or('0'));
+        s.push(char::from_digit((b & 0xF) as u32, 16).unwrap_or('0'));
+    }
+    s
+}
+
+/// Whether these exact bytes have been trusted by the operator.
+fn skill_trusted(h: &[u8; 32]) -> bool {
+    let want = hex32_of(h);
+    let Some(b) = read_blob(TRUSTED) else { return false };
+    let Ok(text) = core::str::from_utf8(&b) else { return false };
+    text.lines().any(|l| l.trim() == want)
+}
+
+pub fn skill_trust(prefix: &str) -> Option<String> {
+    // Resolve a prefix against what is actually in /ai/tools, so the operator
+    // types eight characters like everywhere else -- and so trusting a hash
+    // that names no file on disk is impossible.
+    let mut found: Option<String> = None;
+    for name in children("/ai/tools") {
+        let mut path = String::from("/ai/tools/");
+        path.push_str(&name);
+        let Some(b) = read_blob(&path) else { continue };
+        let h = hex32_of(&crate::store::sha256::hash(&b));
+        if h.starts_with(prefix) {
+            if found.is_some() {
+                return None; // ambiguous: refuse rather than trust the first
+            }
+            found = Some(h);
+        }
+    }
+    let h = found?;
+    let mut buf = read_blob(TRUSTED).unwrap_or_default();
+    if let Ok(t) = core::str::from_utf8(&buf) {
+        if t.lines().any(|l| l.trim() == h) {
+            return Some(h);
+        }
+    }
+    if !buf.is_empty() && !buf.ends_with(b"\n") {
+        buf.push(b'\n');
+    }
+    buf.extend_from_slice(h.as_bytes());
+    buf.push(b'\n');
+    if write_blob(TRUSTED, buf) { Some(h) } else { None }
+}
+
+pub fn skill_untrust_all() -> bool {
+    write_blob(TRUSTED, Vec::new())
+}
+
+/// Every skill, with its hash and whether it is trusted.
+pub fn skill_list() -> Vec<(String, String, bool)> {
+    let mut out = Vec::new();
+    for name in children("/ai/tools") {
+        if name.starts_with('.') {
+            continue;
+        }
+        let mut path = String::from("/ai/tools/");
+        path.push_str(&name);
+        let Some(b) = read_blob(&path) else { continue };
+        let h = crate::store::sha256::hash(&b);
+        out.push((name, hex32_of(&h), skill_trusted(&h)));
+    }
+    out
+}
+
 fn cmd_run(path: &str) {
     if path.is_empty() {
         kprintln!("  usage: run <path>");
@@ -486,7 +571,33 @@ fn cmd_run(path: &str) {
     // The cost is the per-line `= value` echo, and the line number in a parse
     // error. Programs that want output call `println`, which the replay
     // programs `agent learn` writes already do.
-    let out = with_tools(|tools| aiksi::eval_line(tools, &text));
+    // **A skill is not automatically the operator.**
+    //
+    // Every program under /ai/tools used to run on `TOOLS`, which is
+    // `Interp::new()` -- operator capabilities: raw memory, I/O ports, the
+    // network, the model, the framebuffer. An *app* has been jailed since
+    // `app::call` was written; a *tool* was not, and `agent learn` writes
+    // tools, and a shared skill from a stranger is a tool. That was the widest
+    // hole in the system and it was open by omission rather than by argument.
+    //
+    // The split follows `app::call` exactly: operator powers only for bytes
+    // the operator has named, everything else fresh and sandboxed. Identity is
+    // the hash of the file, so editing a trusted skill revokes its trust
+    // without anyone having to remember to.
+    let h = crate::store::sha256::hash(&bytes);
+    let out = if skill_trusted(&h) {
+        // The persistent session, deliberately: a trusted tool keeps a
+        // workspace across invocations, which is the whole reason `TOOLS` is
+        // not the shell's REPL.
+        with_tools(|tools| aiksi::eval_line(tools, &text))
+    } else {
+        // Its own subtree, so two skills cannot reach each other's scratch,
+        // and a fresh interpreter so nothing survives a run.
+        let mut jail = String::from("/ai/tools/scratch/");
+        jail.push_str(path.rsplit('/').next().unwrap_or("skill"));
+        let mut sandbox = aiksi::Interp::sandboxed(&jail).with_step_budget(SKILL_BUDGET);
+        Some(aiksi::eval_line(&mut sandbox, &text))
+    };
     RUNNING.store(false, Ordering::Release);
     match out {
         None => kprintln!("  run: no interpreter"),

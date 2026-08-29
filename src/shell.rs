@@ -1766,6 +1766,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             kprintln!("  smp [bench]                  the other cores, and what they are worth");
             kprintln!("  ask [-t] <question>          one continuing conversation; 'ask new' forgets");
             kprintln!("  about [text]                 what the model should know about you");
+            kprintln!("  skill [trust <hash>]         which skills keep operator powers");
             kprintln!("  fit [lambda]  refit the probe and the council on what it knows");
             kprintln!("  gate search   how often agreement is right; the config search");
             kprintln!("  ctx cont window logits probe feature zeroshot train");
@@ -2956,6 +2957,46 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     kprintln!("  takes effect on the next new conversation ('ask new')");
                 } else {
                     kprintln!("  could not write {}", path);
+                }
+            }
+        }
+        // Which skills may keep operator powers.
+        //
+        // Shell-only and never an applet, for the same reason `app trust` is:
+        // a model that could grant itself trust would have defeated the gate
+        // by using it. The hash has to be typed back, so approving one is a
+        // deliberate act about specific bytes.
+        "skill" => {
+            let mut it = rest.splitn(2, ' ');
+            match (it.next().unwrap_or(""), it.next().unwrap_or("").trim()) {
+                ("trust", p) if !p.is_empty() => match crate::sysbox::skill_trust(p) {
+                    Some(h) => {
+                        kprintln!("  trusted {}", &h[..16]);
+                        kprintln!("  it keeps operator powers until its bytes change");
+                    }
+                    None => kprintln!("  no single skill matches '{}' -- refusing", p),
+                },
+                ("untrust", _) => {
+                    if crate::sysbox::skill_untrust_all() {
+                        kprintln!("  every skill is sandboxed again");
+                    }
+                }
+                _ => {
+                    let all = crate::sysbox::skill_list();
+                    if all.is_empty() {
+                        kprintln!("  no skills in /ai/tools");
+                    }
+                    for (name, h, trusted) in all {
+                        console::set_color(if trusted { YELLOW } else { LTGRAY });
+                        kprintln!(
+                            "  {}  {}  {}",
+                            &h[..8],
+                            if trusted { "operator " } else { "sandboxed" },
+                            name
+                        );
+                    }
+                    console::set_color(LTGRAY);
+                    kprintln!("  'skill trust <hash>' to grant operator powers, 'skill untrust' to revoke all");
                 }
             }
         }

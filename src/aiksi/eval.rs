@@ -1203,14 +1203,25 @@ impl Interp {
         }
         if self.caps == Caps::Sandbox {
             if !touch.sandboxable() {
+                // Name the command that actually applies. The jail root says
+                // what kind of program this is: apps live under /app and are
+                // approved with `app trust`, skills live under /ai/tools and
+                // are approved with `skill trust`. Suggesting the wrong one is
+                // worse than suggesting none -- it sends the operator to a
+                // command that will not find their program.
+                let jail = self.jail.as_deref().unwrap_or("");
+                let leaf = jail.rsplit('/').next().unwrap_or("<program>");
+                let how = if jail.starts_with("/ai/tools") {
+                    "skill trust <hash>"
+                } else {
+                    "app trust"
+                };
                 return Err(format!(
-                    "'{}' {} and a stored program may not -- 'app trust {}' if that is what you want",
+                    "'{}' {} and a sandboxed program may not -- '{}' for {} if that is what you want",
                     name,
                     touch.why(),
-                    self.jail
-                        .as_deref()
-                        .and_then(|j| j.rsplit('/').next())
-                        .unwrap_or("<app>")
+                    how,
+                    leaf
                 ));
             }
             if name == "write" {
