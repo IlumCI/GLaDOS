@@ -513,6 +513,21 @@ fn tick_inner(forced: bool) {
                         Some(p) => Some(p),
                         None => super::godel::author_core(),
                     };
+                    // Whether there was anything to run, remembered rather
+                    // than re-derived afterwards.
+                    //
+                    // The reason used to be recovered from `frontier()` after
+                    // the fact, which was sound while the frontier was the
+                    // only source of proposals and stopped being sound the
+                    // moment a composed core became the second. With the grid
+                    // spent, `frontier()` is `None` whether the night found
+                    // nothing or composed a core and could not get the engine
+                    // to judge it -- so the journal reported "nothing
+                    // composed" for a core that had been written, decoded
+                    // choice by choice, and stored, and the arm that says the
+                    // engine was busy became unreachable in exactly the regime
+                    // that introduced it.
+                    let composed = picked.is_some();
                     let verdict = match picked {
                         None => None,
                         Some(p) => {
@@ -521,6 +536,9 @@ fn tick_inner(forced: bool) {
                         }
                     };
                     let line = match verdict {
+                        // Something was picked and never judged: that is the
+                        // engine, whatever the frontier says now.
+                        None if composed => String::from("engine held by another task"),
                         None if super::godel::frontier().is_none() => {
                             let (seen, all) = super::godel::explored();
                             match super::godel::core_room() {

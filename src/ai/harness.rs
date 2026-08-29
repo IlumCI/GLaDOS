@@ -1880,11 +1880,51 @@ pub fn core_census(e: &mut super::Engine, split_wanted: u8) -> Result<CoreVerdic
 /// answer to this question is worse than no answer.
 static LAST_PRIZE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(u32::MAX);
 
-pub fn last_prize() -> Option<usize> {
-    match LAST_PRIZE.load(core::sync::atomic::Ordering::Relaxed) {
-        u32::MAX => None,
-        n => Some(n as usize),
+/// What that number was measured against.
+///
+/// Not persisting it across boots was never the hazard -- the corpus and the
+/// split both change *while the machine is up*. `teach` appends an example,
+/// `teach bundle` rewrites `/ai/train.split`, and `vocab::splits` re-reads the
+/// file on every call, so a prize measured an hour ago can describe a slice
+/// that no longer exists. `author_core` refuses to compose when the prize is
+/// below the bar, so a stale low number is not a stale report: it is the
+/// nightly loop switched off for the rest of the boot, silently, on evidence
+/// about a corpus the operator has since grown. The number now carries its own
+/// provenance and goes back to "unknown" when that stops matching, which sends
+/// the loop back to measuring rather than to a confident wrong answer.
+static LAST_KEY: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// A fingerprint of the corpus and the split the census would be measured on.
+///
+/// Zero means "cannot tell", which is treated as never matching: with no
+/// corpus to hash there is nothing a remembered prize could still be true of.
+fn census_key() -> u64 {
+    let Some(h) = crate::sysbox::hash_of(super::vocab::CORPUS) else { return 0 };
+    let mut k = u64::from_le_bytes([h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]]);
+    let (train, val_end, n) = super::vocab::splits();
+    // The boundaries are part of the question, not just the content: the same
+    // examples partitioned differently give a different census.
+    for part in [train, val_end, n] {
+        k = k.rotate_left(17) ^ (part as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     }
+    // Never collide with the "nothing measured" sentinel.
+    if k == 0 {
+        1
+    } else {
+        k
+    }
+}
+
+pub fn last_prize() -> Option<usize> {
+    let n = match LAST_PRIZE.load(core::sync::atomic::Ordering::Relaxed) {
+        u32::MAX => return None,
+        n => n as usize,
+    };
+    let key = LAST_KEY.load(core::sync::atomic::Ordering::Relaxed);
+    if key == 0 || key != census_key() {
+        return None;
+    }
+    Some(n)
 }
 
 pub fn core_bench_core(
@@ -1998,6 +2038,10 @@ pub fn core_bench_core(
         // is the slice J1 is computed on. A test-slice census is a different
         // number about a different question.
         if split_wanted == VALIDATION {
+            // The key first, so a reader that sees a prize always sees one
+            // that has been stamped -- the reverse order leaves a window in
+            // which the new number is checked against the old corpus.
+            LAST_KEY.store(census_key(), core::sync::atomic::Ordering::Relaxed);
             LAST_PRIZE.store(v.prize as u32, core::sync::atomic::Ordering::Relaxed);
         }
         Ok(v)

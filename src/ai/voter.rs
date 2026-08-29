@@ -227,12 +227,6 @@ pub fn unhex(text: &str) -> Option<[u8; 32]> {
     Some(out)
 }
 
-/// The mechanism, without a corpus.
-///
-/// What is checked here is that a core cannot reach past its bounds, because
-/// that is the part no benchmark would notice: a core that tries to open a
-/// socket and is refused simply votes badly, and a benchmark reports a bad
-/// core rather than a stopped attack.
 // --- the machine writing one --------------------------------------------
 //
 // Everything above this line is about running a core somebody else wrote.
@@ -288,6 +282,31 @@ const CUE_CAP: usize = 16;
 /// Most rules one core may have. Each is two decodes, and a core is judged as
 /// a whole -- a long one fails for a reason spread over many rules.
 const MAX_CLAUSES: usize = 3;
+/// Draws allowed per decision before giving up on it.
+const DECODE_TRIES: usize = 3;
+
+/// `choose`, drawn again when the model does not commit.
+///
+/// A constrained decode is *sampled*, at 0.7, precisely so a model that prefers
+/// a whitespace token cannot sit on that preference forever -- `author::choose`
+/// says as much. The consequence is that failing to commit is a draw, not a
+/// verdict, and the first version of this treated it as a verdict: one
+/// unlucky decode among four alternatives returned `None`, `author` gave up,
+/// and the whole night's composition was abandoned. Measured, not reasoned
+/// about -- `core author` printed "no choice among 4 after 0 step(s)" and
+/// wrote nothing, on a machine where the same call had worked an hour before.
+///
+/// Bounded at three because a model that will not commit three times is not
+/// having bad luck, and an unbounded retry on the one path that runs
+/// unattended at three in the morning is a machine that never comes back.
+fn pick(prompt: &str, options: &[&str]) -> Option<usize> {
+    for _ in 0..DECODE_TRIES {
+        if let Some(i) = super::author::choose(prompt, options) {
+            return Some(i);
+        }
+    }
+    None
+}
 
 /// Alphanumeric runs of a task, lowercased.
 ///
@@ -415,7 +434,7 @@ pub fn author(names: &[String]) -> Option<String> {
 
     let counts: Vec<String> = (1..=MAX_CLAUSES).map(|n| n.to_string()).collect();
     let count_refs: Vec<&str> = counts.iter().map(|s| s.as_str()).collect();
-    let want = 1 + super::author::choose(
+    let want = 1 + pick(
         "Writing a routing rule for the task classifier. How many rules?",
         &count_refs,
     )?;
@@ -423,7 +442,7 @@ pub fn author(names: &[String]) -> Option<String> {
     let mut clauses: Vec<Clause> = Vec::new();
     let mut spent: Vec<String> = Vec::new();
     for _ in 0..want {
-        let li = super::author::choose(
+        let li = pick(
             "Which command should the next rule recognise?",
             &labels,
         )?;
@@ -440,7 +459,7 @@ pub fn author(names: &[String]) -> Option<String> {
         let mut prompt = String::from("Which word in a task means '");
         prompt.push_str(&names[class]);
         prompt.push_str("'?");
-        let wi = super::author::choose(&prompt, &cues)?;
+        let wi = pick(&prompt, &cues)?;
         let cue = String::from(cues[wi]);
         spent.push(cue.clone());
         clauses.push(Clause { cue, class });
