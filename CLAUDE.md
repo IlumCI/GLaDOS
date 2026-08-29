@@ -745,7 +745,56 @@ framebuffer is the only diagnostic channel there is.
 ### Concurrency
 
 `sync::Racy<T>` is **not a lock.** It is single-core interior mutability and
-the designated grep target for the day SMP arrives.
+the designated grep target for the day SMP arrives. **SMP has partly arrived
+and this is still true** -- see below for why.
+
+### The other cores
+
+`smp::init` starts every application processor the MADT declares, walks it up
+to long mode through a trampoline at physical 0x8000, and parks it. `smp` in
+the shell reports how many answered; `smp bench` times a 16 MiB matvec on one
+core against all of them.
+
+This is a **compute fabric, not general SMP**, and the distinction is the whole
+design. The extra cores never allocate, never take an interrupt, never print,
+and never touch anything a `Racy` guards. They wait on a generation counter
+with MONITOR/MWAIT, run a range of a matrix, and go back to sleep. Every
+decision and every byte of kernel state stays on the bootstrap processor, so
+`Racy`'s safety argument is untouched -- which is the point. General SMP means
+auditing several hundred `Racy` uses and inventing a lock discipline; this
+needed none of that, and it is where the time goes anyway.
+
+`smp::parallel_split(ctx, func, count, width)` is the whole interface. It
+answers false -- meaning "do it yourself" -- if there are no helpers, if
+another job is in flight, or if `count * width` is under 2^19. So it is always
+an optimisation and never a requirement, and every caller keeps a serial path
+that still works.
+
+Two things it is easy to get wrong, both already paid for:
+
+- **The slots are reused by every job.** A worker that caches the chunk count
+  and then has the cursor reset underneath it will claim an index valid for the
+  *next* job and out of range for the cached one, break out without counting
+  that chunk, and the next job's tally never completes. `ACTIVE` counts cores
+  inside the claim loop and the job is closed before that count is waited on.
+  One job cannot reproduce this; the selftest runs 64 back to back.
+- **Splitting changes no arithmetic, so the check is `==`.** A forward row and
+  a backward column are each computed over the same values in the same order
+  whichever core does them. Any difference at all is an index bug, and a
+  tolerance would hide exactly that. Note the int8 scale offset is `lo * 4`,
+  not `lo * cols`.
+
+What is split: `Mat::matvec` (every projection, forward) and `Mat::wt_matvec`
+(the adjoint, seven times per layer on a training step -- by column, because it
+accumulates down rows and a row split would need per-core partials and a
+reduction). What is **not**: `matvec_batch`, the prefill path, because it is
+weight-stationary and a per-token split would multiply memory traffic by the
+core count.
+
+Measuring this under QEMU does not work and the numbers say so: one core reads
+4570 MB/s alone and 3526 MB/s with seven cores merely *idling* beside it, so
+both halves of any comparison are contaminated by the host. `smp bench` exists
+to be run on the GF63.
 
 `task::yield_now` disables interrupts across the context switch. This is
 required: `schedule()` stores `CURRENT` and *then* switches stacks, so a timer
