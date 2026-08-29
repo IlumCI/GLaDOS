@@ -1005,6 +1005,25 @@ and landed back where it started.
 Nothing here is new machinery. `GenOpts::resume`, `ctx_save`/`ctx_load` and
 `set_window` all existed and were simply never joined up.
 
+**Autosnap is on by default and the conversation is deliberately not in it.**
+A fact told to the model (`remember`, `about`) is a few hundred bytes and is
+carried automatically. The KV context is not: parking it writes the whole cache
+as a blob, and this store is append-only -- `alloc_next` only rises, nothing
+reclaims -- so with autosnap running, two turns of a *512-slot* cache wrote
+16,375 then 19,625 blocks and took half a 27 MiB region. A 0.6B at 8k has a
+cache three orders of magnitude larger. There is no cadence that makes that
+affordable, so it is on request: `ctx save live`, which `revive` reads at boot.
+Removing the per-turn park took the same measurement from 16,375 blocks to
+**1**.
+
+Defaulting autosnap on is safe only because the *write* gate is separate and
+stays manual: mounting a store deliberately does not unlock it, so a machine
+nobody has run `store unlock` on behaves exactly as before. That also means
+`remember` has three outcomes and now says which -- no store, mounted but
+locked, or kept and written within the interval. Proven across two boots with
+**zero manual snaps**: `remember the passphrase is cathedral`, `[autosnap]
+snapshot 2, 1 block(s)`, reboot, `about` -> `the passphrase is cathedral`.
+
 **Durability is a snapshot, not a write.** `sysbox::write_blob` puts a blob in
 the working tree, which is memory; it survives a reboot only once `snap` has
 committed the tree, and only if a store is mounted at all. The first version of

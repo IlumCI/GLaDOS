@@ -1030,23 +1030,22 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 // the tokens of this turn and not of the whole exchange.
                 let n = crate::ai::companion::turns();
                 crate::ai::companion::turn(q, &opts);
-                // Park it after every turn rather than on request. A companion
-                // that forgets when the machine is switched off is a companion
-                // for one sitting.
+                // **Not** parked per turn, and the measurement is why.
+                //
+                // Parking writes the whole KV cache as a blob. The store is
+                // append-only -- `alloc_next` only rises and nothing reclaims
+                // -- so with autosnap running, two turns of a 512-slot cache
+                // wrote 16,375 then 19,625 blocks and took half a 27 MiB
+                // region. A 0.6B at 8k has a cache three orders of magnitude
+                // larger. There is no cadence that makes this affordable, so
+                // it is on request: `ctx save live`, which `revive` reads at
+                // boot.
+                //
+                // What survives on its own is what is small: `/ai/about` is a
+                // few hundred bytes and autosnap carries it, which is the part
+                // that actually has to be automatic.
                 if n == 0 {
-                    match crate::ai::companion::park() {
-                        crate::ai::companion::Parked::Durable => {
-                            kprintln!("  (parked -- 'snap' to carry it past this boot)")
-                        }
-                        crate::ai::companion::Parked::Volatile => kprintln!(
-                            "  (no store mounted -- this conversation ends with this boot)"
-                        ),
-                        crate::ai::companion::Parked::Failed => {
-                            kprintln!("  (could not park the conversation)")
-                        }
-                    }
-                } else {
-                    let _ = crate::ai::companion::park();
+                    kprintln!("  ('ctx save live' to carry this conversation past the reboot)");
                 }
             }
         }

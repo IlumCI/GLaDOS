@@ -633,7 +633,20 @@ fn cmd_remember(text: &str) {
     buf.push(b'\n');
     if write_blob(path, buf) {
         crate::kprintln!("  kept: {}", text);
-        crate::kprintln!("  ('snap' to carry it past this boot)");
+        // Say which of the three it is. "'snap' to carry it past this boot"
+        // was true before autosnap defaulted on and is now advice for a
+        // problem the machine has already solved -- and it was silent about
+        // the case that actually loses the fact, which is a store that is
+        // mounted but not writable.
+        if !crate::store::mounted() {
+            crate::kprintln!("  but there is no store -- it ends with this boot ('store init')");
+        } else if !crate::dev::nvme::writes_unlocked() {
+            crate::kprintln!("  but writes are locked -- 'store unlock' to keep it past the reboot");
+        } else if !autosnap_enabled() {
+            crate::kprintln!("  autosnap is off -- 'snap' to carry it past this boot");
+        } else {
+            crate::kprintln!("  it will be written within {} s", autosnap_interval());
+        }
     } else {
         crate::kprintln!("  could not write {}", path);
     }
@@ -1554,7 +1567,18 @@ fn verify(
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-static AUTOSNAP_ON: AtomicBool = AtomicBool::new(false);
+/// On by default.
+///
+/// Safe to default on only because the *write* gate is separate and stays
+/// manual: `autosnap_poll` refuses unless `writes_unlocked()`, and mounting a
+/// store deliberately does not unlock it. So this changes nothing at all until
+/// the operator has asked for writes, and a machine that has not been asked
+/// behaves exactly as it did before.
+///
+/// What it buys is that a fact the model was told -- `remember`, `about` -- is
+/// kept without anybody remembering to type `snap` afterwards. A companion
+/// whose memory depends on the operator running a command has not got one.
+static AUTOSNAP_ON: AtomicBool = AtomicBool::new(true);
 static AUTOSNAP_DUE: AtomicBool = AtomicBool::new(false);
 static AUTOSNAP_EVERY: AtomicU64 = AtomicU64::new(60);
 static LAST_SNAP_TICK: AtomicU64 = AtomicU64::new(0);
@@ -1613,20 +1637,27 @@ pub fn autosnap_poll() {
 
     let saved = with(|s| {
         crate::store::with(|st| {
+            let before = st.sb.alloc_next;
             let root = write_node(st, &s.root, &mut s.written).ok()?;
             let mut name = [0u8; cas::NAME_LEN];
             name[..4].copy_from_slice(b"root");
             let entry = cas::Entry { name, chunk: root };
-            st.commit(core::slice::from_ref(&entry)).ok().map(|_| st.sb.seq)
+            st.commit(core::slice::from_ref(&entry))
+                .ok()
+                .map(|_| (st.sb.seq, st.sb.alloc_next - before, st.free_blocks()))
         })
     })
     .flatten()
     .flatten();
 
-    if let Some(seq) = saved {
+    if let Some((seq, blocks, free)) = saved {
         unsafe { *LAST_ROOT.get() = Some(current) };
         console::set_color(LTGRAY);
-        kprintln!("\n[autosnap] snapshot {}", seq);
+        // The block count is not decoration. This store is append-only --
+        // `alloc_next` only ever goes up and nothing reclaims -- so anything
+        // large that changes often will fill it, and printing the cost each
+        // time is the only way to find out which thing that is.
+        kprintln!("\n[autosnap] snapshot {}, {} block(s), {} free", seq, blocks, free);
     }
 }
 
