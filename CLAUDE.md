@@ -988,6 +988,40 @@ almost nothing because of it. Anything that proposes to train the attention
 path is proposing to give this up, which is a real trade and worth naming
 before it is made.
 
+### The conversation
+
+`ask` is one continuing conversation, not a question asked into the void.
+`ask new` forgets it; `about <text>` appends to `/ai/about`, which is read into
+the system turn of every new conversation.
+
+**It resumes the KV cache instead of re-sending a transcript.** Every chat
+program re-sends its whole history each turn because the model is behind an API
+and the cache belongs to somebody else; here the cache is ours and it stays, so
+a turn costs the tokens of that turn and the tenth exchange is as cheap as the
+first. Measured under QEMU: position went 135 to 150 across two turns, growing
+by the new turn alone -- a rebuild would have re-fed the ~120-token system turn
+and landed back where it started.
+
+Nothing here is new machinery. `GenOpts::resume`, `ctx_save`/`ctx_load` and
+`set_window` all existed and were simply never joined up.
+
+**Durability is a snapshot, not a write.** `sysbox::write_blob` puts a blob in
+the working tree, which is memory; it survives a reboot only once `snap` has
+committed the tree, and only if a store is mounted at all. The first version of
+`park()` returned a bool, reported success for a RAM-only write, and lost the
+conversation at the next boot having said it was saved -- so it answers
+`Durable`/`Volatile`/`Failed` now. A companion that says it will remember and
+then does not is worse than one that admits it cannot.
+
+Verified across two boots with a store mounted: `snapshot 2 root
+0216018537036ad6`, then `the conversation from last boot is still here (162
+tokens in)` and `about` reading back what was told to it.
+
+The context length is the limit on how long a conversation can run -- at
+SmolLM2's 512 that is about four turns, which is why `--seq`/`tools/reseq.py`
+matters more than it looks. `window <sinks> <recent>` trades exactness for an
+unbounded one.
+
 ### Storage (`src/store/`, `src/sysbox/`)
 
 Content-addressed: objects named by SHA-256 of their contents, assembled into

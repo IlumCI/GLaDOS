@@ -14,6 +14,7 @@ pub mod corpus;
 pub mod futures;
 pub mod godel;
 pub mod godbits;
+pub mod companion;
 pub mod council;
 pub mod voter;
 pub mod harness;
@@ -1045,7 +1046,15 @@ pub fn init(model_blob: Option<Blob>, tok_blob: Option<Blob>) {
     }
 
     console::set_color(LTGREEN);
-    kprintln!("  ready -- 'gen <prompt>' to generate, 'act <task>' to choose an applet");
+    // Pick the conversation back up, if there was one. A machine that has
+    // never been spoken to should not announce that, so silence is the
+    // ordinary case here and not a failure.
+    if let Some(pos) = companion::revive() {
+        console::set_color(LTGREEN);
+        kprintln!("  the conversation from last boot is still here ({} tokens in)", pos);
+        console::set_color(LTGRAY);
+    }
+    kprintln!("  ready -- 'ask <question>' to talk, 'act <task>' to choose an applet");
     console::set_color(LTGRAY);
 
     kprintln!();

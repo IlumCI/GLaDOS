@@ -1020,8 +1020,34 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             if q.is_empty() {
                 kprintln!("  usage: ask [-t] [-n tokens] <question>");
                 kprintln!("     -t  let the model reason first, if it can");
+                kprintln!("     one conversation, continued -- 'ask new' to forget it");
+            } else if q == "new" {
+                crate::ai::companion::reset();
+                kprintln!("  forgotten. the next question starts a new conversation");
             } else {
-                crate::ai::chat(q, &opts);
+                // A turn of one conversation, not a question asked into the
+                // void. The cache already holds what was said, so this costs
+                // the tokens of this turn and not of the whole exchange.
+                let n = crate::ai::companion::turns();
+                crate::ai::companion::turn(q, &opts);
+                // Park it after every turn rather than on request. A companion
+                // that forgets when the machine is switched off is a companion
+                // for one sitting.
+                if n == 0 {
+                    match crate::ai::companion::park() {
+                        crate::ai::companion::Parked::Durable => {
+                            kprintln!("  (parked -- 'snap' to carry it past this boot)")
+                        }
+                        crate::ai::companion::Parked::Volatile => kprintln!(
+                            "  (no store mounted -- this conversation ends with this boot)"
+                        ),
+                        crate::ai::companion::Parked::Failed => {
+                            kprintln!("  (could not park the conversation)")
+                        }
+                    }
+                } else {
+                    let _ = crate::ai::companion::park();
+                }
             }
         }
         "repeat" => {
@@ -1739,6 +1765,8 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             kprintln!("  deeptrain [-n N -e E -r R]   train q/k/v as well as the head");
             kprintln!("  simd                         what the CPU has, and what is enabled");
             kprintln!("  smp [bench]                  the other cores, and what they are worth");
+            kprintln!("  ask [-t] <question>          one continuing conversation; 'ask new' forgets");
+            kprintln!("  about [text]                 what the model should know about you");
             kprintln!("  fit [lambda]  refit the probe and the council on what it knows");
             kprintln!("  gate search   how often agreement is right; the config search");
             kprintln!("  ctx cont window logits probe feature zeroshot train");
@@ -2891,6 +2919,45 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 crate::smp::bench();
             } else if n > 1 {
                 kprintln!("  'smp bench' to time a 16 MiB matvec on one core against all of them");
+            }
+        }
+        // What the model is told about the person it is talking to.
+        //
+        // A file rather than a setting, because it is prose and because the
+        // operator has to be able to correct it. It is read at the start of
+        // every conversation, so an edit takes effect on the next `ask new`.
+        "about" => {
+            let path = crate::ai::companion::ABOUT;
+            if rest.is_empty() {
+                match crate::sysbox::read_blob(path) {
+                    Some(b) if !b.is_empty() => {
+                        kprintln!("{}", alloc::string::String::from_utf8_lossy(&b))
+                    }
+                    _ => {
+                        kprintln!("  nothing recorded. 'about <text>' to add a line.");
+                        kprintln!("  it is read into the system turn of every new conversation.");
+                    }
+                }
+            } else if rest == "clear" {
+                if crate::sysbox::write_blob(path, alloc::vec::Vec::new()) {
+                    kprintln!("  cleared");
+                }
+            } else {
+                // Append. Facts accumulate; a setter that overwrote would make
+                // every new fact cost the operator the old ones.
+                let mut buf = crate::sysbox::read_blob(path).unwrap_or_default();
+                if !buf.is_empty() && !buf.ends_with(b"\n") {
+                    buf.push(b'\n');
+                }
+                buf.extend_from_slice(rest.as_bytes());
+                buf.push(b'\n');
+                let n = buf.len();
+                if crate::sysbox::write_blob(path, buf) {
+                    kprintln!("  {} B at {}", n, path);
+                    kprintln!("  takes effect on the next new conversation ('ask new')");
+                } else {
+                    kprintln!("  could not write {}", path);
+                }
             }
         }
         "words" => {
