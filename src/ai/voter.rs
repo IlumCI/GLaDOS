@@ -307,9 +307,21 @@ const CUE_PURITY: u32 = 100;
 /// Cues offered per class. A grammar the model cannot get through is a decode
 /// that spends its allowance and commits to nothing.
 const CUE_CAP: usize = 16;
-/// Most rules one core may have. Each is two decodes, and a core is judged as
-/// a whole -- a long one fails for a reason spread over many rules.
-const MAX_CLAUSES: usize = 3;
+/// Most rules one core may have.
+///
+/// Six, and the number is arithmetic rather than taste. J1 wants six clean
+/// repairs (see `godel::clean_fixes_needed`), and `core oracle` says the best
+/// single rule in the contested pool repairs two -- so a three-rule core could
+/// not clear the judge however well it chose, and raising the cap was the
+/// difference between a producer that might win and one that provably cannot.
+///
+/// Bounded well below what cost would allow. Each rule is one `contains` on a
+/// miss, so eight rules is about sixty interpreter steps against a J5 ceiling
+/// of five thousand; cost is nowhere near the constraint. What bounds it is
+/// that each rule is two decodes and every one is a chance to pick a cue that
+/// breaks something -- a longer core fails for reasons spread over more rules,
+/// and a judged whole is harder to learn from the longer it gets.
+const MAX_CLAUSES: usize = 6;
 /// Draws allowed per decision before giving up on it.
 const DECODE_TRIES: usize = 3;
 
@@ -343,7 +355,7 @@ fn pick(prompt: &str, options: &[&str]) -> Option<usize> {
 /// a backslash would be a way to write arbitrary program text through an
 /// option list. There is no escaping step here because there is nothing that
 /// can need escaping.
-fn words_of(task: &str) -> Vec<String> {
+pub fn words_of(task: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut cur = String::new();
     for ch in task.chars() {
@@ -488,8 +500,7 @@ pub fn compose(clauses: &[Clause]) -> String {
 /// long composition -- and what keeps this away from the re-entrancy that
 /// makes two live `&mut Engine` in one task. The caller must not be holding
 /// the engine when it calls this.
-pub fn author(names: &[String]) -> Option<String> {
-    let table = cue_table(names);
+pub fn author(names: &[String], table: &[(String, usize, u32)]) -> Option<String> {
     if table.is_empty() {
         return None;
     }
@@ -498,7 +509,7 @@ pub fn author(names: &[String]) -> Option<String> {
     // `author::applicable` offers only actions that can be carried out:
     // choosing one that cannot be served ends the run having done nothing.
     let mut writable: Vec<usize> = Vec::new();
-    for (_, c, _) in &table {
+    for (_, c, _) in table.iter() {
         if !writable.contains(c) {
             writable.push(*c);
         }

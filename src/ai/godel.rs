@@ -417,10 +417,18 @@ pub fn frontier() -> Option<Proposal> {
 /// Engine`, which is undefined behaviour in this kernel and was a live defect
 /// in `trial_core` until recently.
 pub fn write_core() -> Option<[u8; 32]> {
-    let names: Vec<String> = super::with_engine(|e| {
-        (0..e.head.len()).map(|i| String::from(e.head.name(i))).collect()
+    // One claim, and everything the decodes will need comes out of it.
+    //
+    // Mining needs the tokenizer, so it needs the engine -- but the decodes
+    // that follow each claim it themselves, so the mining has to finish and
+    // let go first. Owned data comes back; nothing borrowed escapes.
+    let (names, table) = super::with_engine(|e| {
+        let names: Vec<String> =
+            (0..e.head.len()).map(|i| String::from(e.head.name(i))).collect();
+        let table = super::harness::contested_cues(e, &names);
+        (names, table)
     })?;
-    let src = super::voter::author(&names)?;
+    let src = super::voter::author(&names, &table)?;
     Some(super::voter::store(&src))
 }
 

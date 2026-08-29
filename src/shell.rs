@@ -1416,7 +1416,13 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 // What the cue pool could achieve if the machine chose from it
                 // perfectly. The producer's ceiling, beside the judge's.
                 "oracle" => {
-                    let purity: u32 = w.next().and_then(|s| s.parse().ok()).unwrap_or(100);
+                    let first = w.next().unwrap_or("");
+                    // `core oracle contested` measures the pool the producer
+                    // actually draws on now; the numeric form measures the old
+                    // class-exclusive pool, which is kept precisely so the two
+                    // can be put side by side on one slice.
+                    let contested = first == "contested";
+                    let purity: u32 = first.parse().unwrap_or(100);
                     let min_uses: u32 = w.next().and_then(|s| s.parse().ok()).unwrap_or(2);
                     let names: Option<alloc::vec::Vec<alloc::string::String>> =
                         crate::ai::with_engine(|e| {
@@ -1425,7 +1431,15 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                                 .collect()
                         });
                     let out = names.and_then(|names| {
-                        crate::ai::with_engine(|e| harness::cue_oracle(e, &names, purity, min_uses))
+                        crate::ai::with_engine(|e| {
+                            if contested {
+                                let t = harness::contested_cues(e, &names);
+                                kprintln!("  contested pool: {} cue(s)", t.len());
+                                harness::cue_oracle_on(e, &t)
+                            } else {
+                                harness::cue_oracle(e, &names, purity, min_uses)
+                            }
+                        })
                     });
                     match out {
                         None => kprintln!("  {}", crate::ai::engine_refusal()),

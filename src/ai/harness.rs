@@ -1953,6 +1953,181 @@ pub fn last_prize() -> Option<usize> {
     Some(n)
 }
 
+/// Folds used to get the counters' opinion about training items they were not
+/// fitted on.
+///
+/// Ten because the fits are cheap -- `Council::fit` is counting and needs no
+/// forward pass, only the tokenizer -- and because each fold must leave enough
+/// behind to fit a usable council. It is not a tuned number and nothing here
+/// is sensitive to it.
+const FOLDS: usize = 10;
+
+/// Contested items a cue must carry before it counts as a cue.
+///
+/// **One, and it was two until it was measured.** The argument for two was the
+/// rule `voter::MIN_USES` already applies to the other pool, and a real
+/// motivating case: the first core composed from this pool was
+/// `contains("please") -> hash`, and "please" is in the corpus's own dressing
+/// phrases. It had carried exactly one contested item and damaged none, which
+/// on a set this size is indistinguishable from luck.
+///
+/// The cure was worse. The contested set is tens of items, not hundreds, so
+/// almost nothing carries two of them:
+///
+///     min carry  cues  usable  harmful  repairable by the pool
+///         1       143     8       10             9
+///         2        12     2        2             4
+///
+/// Requiring two took the pool below the six repairs J1 wants, which is the
+/// one thing it cannot afford to do. A fluke cue costs a night and a rejected
+/// certificate; a pool that cannot reach the bar costs every night. The judge
+/// is the defence against flukes and it is a better one than a threshold that
+/// also discards the evidence.
+const MIN_CARRY: u32 = 1;
+
+/// Cues mined from the items where the counters actually disagree.
+///
+/// ### Why the obvious mining does not work
+///
+/// The producer's first cue table asked "which words belong to one class and
+/// no other". That is a reasonable question and the wrong one, and the
+/// measurement said so: of 113 such cues, 111 changed no decision at all and
+/// the pool as a whole could repair two validation items against a bar of six.
+///
+/// The reason is `decide`. Under `Rule::WithCore` a class carries only when
+/// two of `[lexical, character, core]` agree on it against the probe. Where
+/// the two counters already agree they carry it themselves and the core is
+/// arithmetically inert -- it cannot help and it cannot hurt. A core's entire
+/// influence is the items where the counters *split*, and class-exclusive
+/// vocabulary has almost nothing to do with where that happens.
+///
+/// ### Why the folds are necessary
+///
+/// Fitted on the training slice and asked about the training slice, the two
+/// counters agree on essentially all of it -- they have memorised it, which is
+/// what makes them useful and what makes them useless as a source of disputes.
+/// Mining contested items in-sample finds an empty set. So the council is
+/// re-fitted `FOLDS` times, each time on the rest of the training slice, and
+/// asked about the part it did not see. That produces disagreements at about
+/// the rate held-out data does, which is the point: the cues are mined from a
+/// picture of where the council is weak, drawn without touching validation.
+///
+/// ### What a cue has to do
+///
+/// A rule `contains(w) -> C` can only ever repair an item by making the core
+/// second a counter that is right. So a cue is scored on the contested items
+/// alone:
+///
+///   carry   it fires, the gold class is `C`, and a counter said `C` too
+///   damage  it fires, a counter said `C`, and `C` is not the gold class
+///
+/// and only cues with no damage at all are kept. Nothing here consults the
+/// probe: an item where a counter is right converts to a repair exactly when
+/// the probe is wrong, and one where a counter is wrong converts to a break
+/// exactly when the probe is right. Requiring zero damage is the conservative
+/// side of that trade, and the probe is expensive to ask per fold while the
+/// counters are nearly free.
+///
+/// Training slice only, throughout. `split_of` decides, so this cannot drift
+/// onto the slice the judge measures on.
+pub fn contested_cues(e: &mut super::Engine, names: &[String]) -> Vec<(String, usize, u32)> {
+    let ex = super::vocab::examples();
+    let mut texts: Vec<String> = Vec::new();
+    let mut labels: Vec<usize> = Vec::new();
+    for (i, x) in ex.iter().enumerate() {
+        if split_of(i) != 0 {
+            continue;
+        }
+        let Some(ci) = names.iter().position(|n| *n == x.applet) else { continue };
+        texts.push(x.task.clone());
+        labels.push(ci);
+    }
+    if texts.len() < FOLDS * 2 {
+        return Vec::new();
+    }
+    let all: Vec<usize> = (0..names.len()).collect();
+
+    // What the counters say about items they were not fitted on.
+    //
+    // The fold is `i % FOLDS`, which is a deterministic partition and not a
+    // sample: the whole mining has to be re-derivable from the corpus, and a
+    // shuffled partition would make the cue table a function of a seed nobody
+    // recorded. The corpus was shuffled when it was generated, so position
+    // carries no class structure for this to trip over.
+    let mut oof: Vec<Option<(usize, usize)>> = alloc::vec![None; texts.len()];
+    for fold in 0..FOLDS {
+        let mut fit_texts: Vec<&str> = Vec::new();
+        let mut fit_labels: Vec<usize> = Vec::new();
+        for i in 0..texts.len() {
+            if i % FOLDS != fold {
+                fit_texts.push(texts[i].as_str());
+                fit_labels.push(labels[i]);
+            }
+        }
+        let Some(c) =
+            super::council::Council::fit(&fit_texts, &fit_labels, names.len(), &e.tok)
+        else {
+            continue;
+        };
+        for i in (fold..texts.len()).step_by(FOLDS) {
+            oof[i] = c.corroborate(&texts[i], &e.tok, &all);
+        }
+    }
+
+    // The contested items, lowered once so the scoring below matches what the
+    // composed program does (`lower(text)` then `contains`).
+    let mut split: Vec<(String, usize, usize, usize)> = Vec::new();
+    for i in 0..texts.len() {
+        let Some((l, ch)) = oof[i] else { continue };
+        if l == ch {
+            continue;
+        }
+        let lowered: String = texts[i].chars().map(|c| c.to_ascii_lowercase()).collect();
+        split.push((lowered, labels[i], l, ch));
+    }
+    if split.is_empty() {
+        return Vec::new();
+    }
+
+    // Candidates: every word of every contested item whose gold class a
+    // counter actually reached. A rule pointing anywhere else cannot carry.
+    let mut cand: Vec<(String, usize, u32)> = Vec::new();
+    for (text, gold, l, ch) in &split {
+        if gold != l && gold != ch {
+            continue;
+        }
+        for w in super::voter::words_of(text) {
+            match cand.iter_mut().find(|(c, k, _)| *c == w && k == gold) {
+                Some((_, _, n)) => *n += 1,
+                None => cand.push((w, *gold, 1)),
+            }
+        }
+    }
+
+    // Damage: the same rule firing on a contested item where the class it
+    // argues for is one a counter reached and is *not* the right answer.
+    let mut out: Vec<(String, usize, u32)> = Vec::new();
+    for (word, class, carry) in cand {
+        if carry < MIN_CARRY {
+            continue;
+        }
+        let mut damage = 0u32;
+        for (text, gold, l, ch) in &split {
+            if gold == &class {
+                continue;
+            }
+            if (l == &class || ch == &class) && text.contains(word.as_str()) {
+                damage += 1;
+            }
+        }
+        if damage == 0 {
+            out.push((word, class, carry));
+        }
+    }
+    out.sort_by(|a, b| a.1.cmp(&b.1).then(b.2.cmp(&a.2)).then(a.0.cmp(&b.0)));
+    out
+}
+
 /// What the cue pool could do, if the machine chose from it perfectly.
 ///
 /// The producer's ceiling, the way `core_prize` is the judge's. Counting cues
@@ -2000,6 +2175,18 @@ pub fn cue_oracle(
     min_uses: u32,
 ) -> Result<CueVerdict, String> {
     let table = super::voter::cue_table_at(names, purity, min_uses);
+    cue_oracle_on(e, &table)
+}
+
+/// The same measurement, on a pool the caller built.
+///
+/// Taking the table as an argument is what makes two ways of mining
+/// comparable: one judge, one slice, one definition of usable, and the only
+/// thing that differs between the numbers is the thing being compared.
+pub fn cue_oracle_on(
+    e: &mut super::Engine,
+    table: &[(String, usize, u32)],
+) -> Result<CueVerdict, String> {
     let Some(f) = featurise(e) else {
         return Err(String::from("no corpus to judge against"));
     };
@@ -2039,7 +2226,7 @@ pub fn cue_oracle(
     // from its best single rule.
     let mut reached = alloc::vec![false; items.len()];
 
-    for (word, class, _) in &table {
+    for (word, class, _) in table.iter() {
         let (mut fixed, mut broke) = (0usize, 0usize);
         for (i, (text, want, p, pair)) in items.iter().enumerate() {
             let says = if text.contains(word.as_str()) { Some(*class) } else { None };
