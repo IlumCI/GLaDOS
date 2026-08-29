@@ -423,17 +423,28 @@ pub struct FileProtocol {
         u64,
     ) -> Status,
     pub close: extern "efiapi" fn(*mut FileProtocol) -> Status,
-    pub delete: usize,
+    pub delete: extern "efiapi" fn(*mut FileProtocol) -> Status,
     pub read: extern "efiapi" fn(*mut FileProtocol, *mut usize, *mut u8) -> Status,
-    pub write: usize,
+    // Typed, at last. The write half of this protocol sat here as bare
+    // `usize` -- present in the layout so the offsets came out right, and
+    // uncallable -- because nothing in the system had ever written a file.
+    // An update has to, and the firmware's own FAT driver is the only writer
+    // that already exists: `store::fat` reads and deliberately does not write,
+    // on the grounds that a rescue tool which can half-write a disk is worse
+    // than one that cannot write at all.
+    pub write: extern "efiapi" fn(*mut FileProtocol, *mut usize, *const u8) -> Status,
     pub get_position: extern "efiapi" fn(*mut FileProtocol, *mut u64) -> Status,
     pub set_position: extern "efiapi" fn(*mut FileProtocol, u64) -> Status,
     pub get_info: usize,
     pub set_info: usize,
-    pub flush: usize,
+    pub flush: extern "efiapi" fn(*mut FileProtocol) -> Status,
 }
 
 pub const FILE_MODE_READ: u64 = 0x0000_0000_0000_0001;
+pub const FILE_MODE_WRITE: u64 = 0x0000_0000_0000_0002;
+/// Bit 63. Only meaningful together with read and write, and the reason a
+/// staged image can be laid down beside the one that is running.
+pub const FILE_MODE_CREATE: u64 = 0x8000_0000_0000_0000;
 
 /// Seeking here and asking where you landed is the documented way to get a
 /// file's size without the variable-length buffer dance `GetInfo` requires.
@@ -463,15 +474,20 @@ impl Blob {
 ///
 /// Returns `None` for every failure, including "not there". A missing model is
 /// a normal condition, not an error: the system has to boot without one.
-pub fn read_file(bs: &BootServices, image: Handle, path: &str) -> Option<Blob> {
-    // image handle -> the device it was loaded from
+/// The root directory of the volume this image was loaded from.
+///
+/// Extracted because writing needs the same three steps reading does --
+/// image handle to device, device to filesystem, filesystem to root -- and
+/// two copies of a protocol dance are two places for it to be got wrong.
+///
+/// The caller closes what comes back.
+fn open_root(bs: &BootServices, image: Handle) -> Option<*mut FileProtocol> {
     let mut iface: *mut c_void = core::ptr::null_mut();
     if is_error((bs.handle_protocol)(image, &LOADED_IMAGE_PROTOCOL_GUID, &mut iface)) {
         return None;
     }
     let device = unsafe { (*(iface as *mut LoadedImageProtocol)).device_handle };
 
-    // that device -> its filesystem -> the root directory
     let mut iface: *mut c_void = core::ptr::null_mut();
     if is_error((bs.handle_protocol)(device, &SIMPLE_FILE_SYSTEM_PROTOCOL_GUID, &mut iface)) {
         return None;
@@ -481,17 +497,99 @@ pub fn read_file(bs: &BootServices, image: Handle, path: &str) -> Option<Blob> {
     if is_error(unsafe { ((*sfs).open_volume)(sfs, &mut root) }) || root.is_null() {
         return None;
     }
+    Some(root)
+}
 
-    // UCS-2, null terminated. Bounded so a long path truncates rather than
-    // writing past the array.
+/// UCS-2, null terminated, by zero extension.
+///
+/// Correct for ASCII and wrong for anything else, which is why every path
+/// this system hands the firmware is ASCII. Bounded, so a long path answers
+/// `None` rather than writing past the array.
+fn widen(path: &str) -> Option<[u16; 128]> {
     let mut wide = [0u16; 128];
     if path.len() >= wide.len() {
-        unsafe { ((*root).close)(root) };
         return None;
     }
     for (i, b) in path.bytes().enumerate() {
         wide[i] = b as u16;
     }
+    Some(wide)
+}
+
+/// Replace a file on the volume this image was loaded from.
+///
+/// **Only before `ExitBootServices`.** This is the firmware's own FAT driver,
+/// and it is gone the moment the memory map is taken -- which is the whole
+/// reason a staged update is applied at the *start* of the next boot rather
+/// than at the end of this one. `store::fat` could in principle write from a
+/// running kernel, but it deliberately does not: allocating clusters and
+/// keeping two copies of the table consistent across a power cut is exactly
+/// the job a rescue tool must not do badly, and the firmware already does it.
+///
+/// Deletes first when the file exists, rather than opening and overwriting.
+/// `FILE_MODE_CREATE` on an existing file opens it without truncating, so a
+/// shorter image written over a longer one would leave the tail of the old
+/// one behind -- a file that is a valid prefix of a valid binary followed by
+/// somebody else's bytes, which is the worst possible shape for a boot image.
+pub fn write_file(bs: &BootServices, image: Handle, path: &str, data: &[u8]) -> bool {
+    let Some(root) = open_root(bs, image) else { return false };
+    let Some(wide) = widen(path) else {
+        unsafe { ((*root).close)(root) };
+        return false;
+    };
+
+    // Remove any existing file, so the result is exactly `data`.
+    let mut old: *mut FileProtocol = core::ptr::null_mut();
+    let opened = unsafe {
+        ((*root).open)(root, &mut old, wide.as_ptr(), FILE_MODE_READ | FILE_MODE_WRITE, 0)
+    };
+    if !is_error(opened) && !old.is_null() {
+        // `delete` closes the handle whether or not it succeeds, so there is
+        // no close to pair with this.
+        unsafe { ((*old).delete)(old) };
+    }
+
+    let mut file: *mut FileProtocol = core::ptr::null_mut();
+    let created = unsafe {
+        ((*root).open)(
+            root,
+            &mut file,
+            wide.as_ptr(),
+            FILE_MODE_CREATE | FILE_MODE_READ | FILE_MODE_WRITE,
+            0,
+        )
+    };
+    unsafe { ((*root).close)(root) };
+    if is_error(created) || file.is_null() {
+        return false;
+    }
+
+    // Short writes are legal: the protocol updates the count with what it
+    // took, and a caller that ignores it silently truncates the file.
+    let mut done = 0usize;
+    let mut ok = true;
+    while done < data.len() {
+        let mut n = data.len() - done;
+        let st = unsafe { ((*file).write)(file, &mut n, data.as_ptr().add(done)) };
+        if is_error(st) || n == 0 {
+            ok = false;
+            break;
+        }
+        done += n;
+    }
+    if ok {
+        ok = !is_error(unsafe { ((*file).flush)(file) });
+    }
+    unsafe { ((*file).close)(file) };
+    ok && done == data.len()
+}
+
+pub fn read_file(bs: &BootServices, image: Handle, path: &str) -> Option<Blob> {
+    let root = open_root(bs, image)?;
+    let Some(wide) = widen(path) else {
+        unsafe { ((*root).close)(root) };
+        return None;
+    };
 
     let mut file: *mut FileProtocol = core::ptr::null_mut();
     let opened = unsafe { ((*root).open)(root, &mut file, wide.as_ptr(), FILE_MODE_READ, 0) };

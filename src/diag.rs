@@ -70,6 +70,11 @@ pub const SUITES: &[Suite] = &[
         run: crate::smp::selftest,
     },
     Suite {
+        name: "update",
+        about: "the update signature verifier refuses what it should",
+        run: crate::update::selftest,
+    },
+    Suite {
         name: "model",
         about: "the forward pass and its geometry",
         run: crate::ai::selftest,
@@ -78,7 +83,8 @@ pub const SUITES: &[Suite] = &[
 
 /// One slot per suite. Indexed by position in `SUITES`, which is a constant,
 /// so the table cannot get out of step with the list.
-static RESULTS: [AtomicU8; 7] = [
+static RESULTS: [AtomicU8; 8] = [
+    AtomicU8::new(0),
     AtomicU8::new(0),
     AtomicU8::new(0),
     AtomicU8::new(0),
@@ -90,7 +96,7 @@ static RESULTS: [AtomicU8; 7] = [
 
 /// Checked here rather than trusted: a suite added to `SUITES` without a slot
 /// would silently never record a verdict.
-const _: () = assert!(SUITES.len() == 7);
+const _: () = assert!(SUITES.len() == 8);
 
 pub fn verdict(i: usize) -> Verdict {
     match RESULTS.get(i).map(|r| r.load(Ordering::Relaxed)) {

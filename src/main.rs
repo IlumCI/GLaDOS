@@ -42,6 +42,7 @@ mod sysbox;
 mod task;
 mod time;
 mod uefi;
+mod update;
 
 use core::sync::atomic::{AtomicU64, Ordering};
 

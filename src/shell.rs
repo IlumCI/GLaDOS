@@ -1824,6 +1824,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             kprintln!("  sandbox [keep] <path>        run a program, see what it touched, undo it");
             kprintln!("  version                      what this build is");
             kprintln!("  diag [all|<name>]            run the self-tests, remember the verdicts");
+            kprintln!("  update <image> [sig]         is a staged image signed by the update key");
             kprintln!("  fit [lambda]  refit the probe and the council on what it knows");
             kprintln!("  gate search   how often agreement is right; the config search");
             kprintln!("  ctx cont window logits probe feature zeroshot train");
@@ -3164,6 +3165,39 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     Some(i) => run(i),
                     None => kprintln!("  no suite called '{}' -- 'diag' lists them", want),
                 }
+            }
+        }
+        // Is the staged image one this machine will run?
+        //
+        // Verification only. Applying it is a pre-ExitBootServices step that
+        // does not exist yet, and a command that verified and then did nothing
+        // while sounding like it installed something would be worse than no
+        // command.
+        "update" => {
+            let mut w = Words::new(rest);
+            let img = match w.next() {
+                Some(a) if !a.is_empty() => alloc::string::String::from(a),
+                _ => alloc::string::String::from("/tmp/staged.efi"),
+            };
+            let sig = match w.next() {
+                Some(a) if !a.is_empty() => alloc::string::String::from(a),
+                _ => alloc::format!("{}.sig", img),
+            };
+            let (Some(image), Some(signature)) =
+                (crate::sysbox::read_blob(&img), crate::sysbox::read_blob(&sig))
+            else {
+                kprintln!("  usage: update <image> [signature]");
+                kprintln!("  reads both from the namespace ('fat get' brings them in)");
+                kprintln!("  looked for {} and {}", img, sig);
+                return;
+            };
+            let v = crate::update::verify(&image, &signature);
+            console::set_color(if v.ok() { LTGREEN } else { LTRED });
+            kprintln!("  {}", v.why());
+            console::set_color(LTGRAY);
+            kprintln!("  {} B image, {} B signature", image.len(), signature.len());
+            if v.ok() {
+                kprintln!("  this build is {} -- staging is not implemented yet", crate::VERSION);
             }
         }
         "words" => {
