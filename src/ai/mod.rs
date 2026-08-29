@@ -302,13 +302,42 @@ pub fn selftest() -> bool {
     }
     all &= check("cl100k pre-tokenizer", splits_ok, "7 cases, Qwen3 clauses");
 
-    // The marks variant. U+0301 after the full stop must end the punctuation
-    // run (plain cl100k would swallow it) and then form its own piece through
-    // lead backtracking; Devanagari keeps its vowel signs through NFC, so a
-    // word run carries marks mid-stream.
-    const MARK_SPLITS: [(&str, &[&str]); 2] = [
-        ("end.\u{0301}go", &["end", ".", "\u{0301}", "go"]),
-        ("Ã Â¤Â¹Ã Â¤Â¿Ã Â¤Â¨Ã Â¥ÂÃ Â¤Â¦Ã Â¥â‚¬!", &["Ã Â¤Â¹Ã Â¤Â¿Ã Â¤Â¨Ã Â¥ÂÃ Â¤Â¦Ã Â¥â‚¬", "!"]),
+    // The marks variant, every expectation taken from `tools/tokenizer.py`.
+    //
+    // **Written entirely as escapes, and that is the point.** The two cases
+    // this replaces carried literal UTF-8, and one arrived in the file
+    // double-mojibaked -- Devanagari encoded, read as Latin-1, encoded, read
+    // as Latin-1 again -- so the test fed the pre-tokenizer a string of
+    // accented Latin letters while its comment talked about vowel signs. It
+    // could never have passed, and the failure read as a tokenizer bug rather
+    // than a corrupted fixture. A source file is not a safe place to keep
+    // non-ASCII that has to survive tooling; an escape is.
+    //
+    // **The other case was wrong about the pattern.** It wanted
+    // "end.<0301>go" to split four ways, reasoning that a combining mark ends
+    // a punctuation run and then stands alone. The clause is
+    // `[^CRLF\p{L}\p{N}]? [\p{L}\p{M}]+`: a full stop is a legal lead and a
+    // combining mark is `\p{M}`, so lead and run join and it splits two ways.
+    // The reference said two, the kernel said two, and only the expectation
+    // said four -- the test was the broken thing, and it had been reporting a
+    // working implementation as failing.
+    const MARK_SPLITS: [(&str, &[&str]); 8] = [
+        // punctuation lead, then the mark joins the word run
+        ("end.\u{0301}go", &["end", ".\u{0301}go"]),
+        // devanagari keeps its vowel signs through the run
+        ("\u{0939}\u{093f}\u{0928}\u{094d}\u{0926}\u{0940}!", &["\u{0939}\u{093f}\u{0928}\u{094d}\u{0926}\u{0940}", "!"]),
+        // a leading mark starts a word run
+        ("\u{0301}abc", &["\u{0301}abc"]),
+        // a mark inside a word
+        ("a\u{0301}b", &["a\u{0301}b"]),
+        // a mark after a space
+        (" \u{0301}", &[" \u{0301}"]),
+        // a mark alone
+        ("\u{0301}", &["\u{0301}"]),
+        // a punctuation run meeting a mark
+        ("..\u{0301}", &["..", "\u{0301}"]),
+        // a mark then a spaced word
+        ("x\u{0301} y", &["x\u{0301}", " y"]),
     ];
     let mut marks_ok = true;
     for (text, want) in MARK_SPLITS {
@@ -323,7 +352,7 @@ pub fn selftest() -> bool {
             console::set_color(WHITE);
         }
     }
-    all &= check("cl100km pre-tokenizer", marks_ok, "2 cases, Qwen3.5 marks");
+    all &= check("cl100km pre-tokenizer", marks_ok, "8 cases against the reference");
 
     all
 }
