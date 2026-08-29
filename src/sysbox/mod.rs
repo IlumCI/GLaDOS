@@ -593,8 +593,15 @@ fn cmd_run(path: &str) {
     } else {
         // Its own subtree, so two skills cannot reach each other's scratch,
         // and a fresh interpreter so nothing survives a run.
+        // Named after the skill without its extension, so the jail is a path
+        // somebody would guess: `/ai/tools/mk.ai&xi` writes under
+        // `/ai/tools/scratch/mk`. Leaving the extension on made the directory
+        // `scratch/mk.ai&xi`, which is both ugly and the sort of detail a
+        // program author gets wrong once and then works around.
+        let leaf = path.rsplit('/').next().unwrap_or("skill");
+        let stem = leaf.split('.').next().filter(|t| !t.is_empty()).unwrap_or(leaf);
         let mut jail = String::from("/ai/tools/scratch/");
-        jail.push_str(path.rsplit('/').next().unwrap_or("skill"));
+        jail.push_str(stem);
         let mut sandbox = aiksi::Interp::sandboxed(&jail).with_step_budget(SKILL_BUDGET);
         Some(aiksi::eval_line(&mut sandbox, &text))
     };
@@ -1544,7 +1551,7 @@ fn cmd_diff(a: &str, b: &str) {
     };
 
     let mut changes = 0u32;
-    diff_walk(&left, &right, &mut Vec::new(), &mut changes);
+    diff_walk(&left, &right, &mut Vec::new(), &mut changes, &mut |sign, at| mark(sign, at));
     console::set_color(LTGRAY);
     if changes == 0 {
         kprintln!("  identical");
@@ -1557,7 +1564,18 @@ fn cmd_diff(a: &str, b: &str) {
 /// address, everything below them is equal and there is nothing to walk. A
 /// diff therefore costs time proportional to what changed rather than to how
 /// much exists.
-fn diff_walk(a: &Node, b: &Node, at: &mut Vec<String>, changes: &mut u32) {
+/// Walk two trees and report every difference to `sink`.
+///
+/// The sink exists so there is one walk rather than two. `diff` prints; the
+/// shadow sandbox collects. A second copy of this traversal would be a second
+/// place for the sorted-entry merge to be got wrong, and the two would drift.
+fn diff_walk(
+    a: &Node,
+    b: &Node,
+    at: &mut Vec<String>,
+    changes: &mut u32,
+    sink: &mut dyn FnMut(&str, &[String]),
+) {
     if tree::content_hash(a) == tree::content_hash(b) {
         return;
     }
@@ -1575,32 +1593,37 @@ fn diff_walk(a: &Node, b: &Node, at: &mut Vec<String>, changes: &mut u32) {
                 match ord {
                     core::cmp::Ordering::Equal => {
                         at.push(ea[i].0.clone());
-                        diff_walk(&ea[i].1, &eb[j].1, at, changes);
+                        diff_walk(&ea[i].1, &eb[j].1, at, changes, sink);
                         at.pop();
                         i += 1;
                         j += 1;
                     }
                     core::cmp::Ordering::Less => {
                         at.push(ea[i].0.clone());
-                        mark("-", at, changes);
+                        *changes += 1;
+                        sink("-", at);
                         at.pop();
                         i += 1;
                     }
                     core::cmp::Ordering::Greater => {
                         at.push(eb[j].0.clone());
-                        mark("+", at, changes);
+                        *changes += 1;
+                        sink("+", at);
                         at.pop();
                         j += 1;
                     }
                 }
             }
         }
-        _ => mark("~", at, changes),
+        _ => {
+            *changes += 1;
+            sink("~", at);
+        }
     }
 }
 
-fn mark(sign: &str, at: &[String], changes: &mut u32) {
-    *changes += 1;
+/// The printing sink, for `diff`.
+fn mark(sign: &str, at: &[String]) {
     match sign {
         "-" => console::set_color(LTRED),
         "+" => console::set_color(LTGREEN),
@@ -1608,6 +1631,75 @@ fn mark(sign: &str, at: &[String], changes: &mut u32) {
     }
     kprintln!("  {} {}", sign, show(at));
     console::set_color(LTGRAY);
+}
+
+/// The namespace as it was, so a change can be put back.
+pub struct Shadow {
+    before: Node,
+    /// Every path the change touched, signed: `+` added, `-` removed,
+    /// `~` altered.
+    pub touched: Vec<String>,
+    pub changes: u32,
+}
+
+/// Run something and find out exactly what it did to the namespace.
+///
+/// This is the shape the self-improvement loop needs before it adopts anything
+/// a model wrote: run it, see precisely which objects moved, then decide. The
+/// pieces were all here and unassembled -- the tree is a Merkle tree, so
+/// `content_hash` makes "did this subtree change" a single comparison, and
+/// `diff_walk` already skips every subtree that did not.
+///
+/// **Reversible, not isolated, and the difference matters.** The change runs
+/// against the live tree and is undone afterwards; it is not confined to a
+/// copy. So a program that faults halfway leaves the tree as it was only
+/// because `discard` puts it back, and anything reading the namespace *during*
+/// the run sees the change. That is safe under the discipline the night loop
+/// already keeps -- `NIGHT_BUSY` claims the whole block and the engine has one
+/// holder -- and it would not be safe under concurrent writers, which do not
+/// exist here.
+///
+/// The honest alternative is a read-through overlay with a namespace handle
+/// threaded through `with`, which every accessor in the kernel would have to
+/// learn. That is the right long-term shape and a much larger change; this
+/// buys the capability now, at the cost of a full tree copy per run.
+pub fn shadow<F: FnOnce()>(f: F) -> Option<Shadow> {
+    // Cloned before, compared after. `clone_node` is a deep copy and this is
+    // the expensive part -- acceptable for a test harness that runs once per
+    // candidate, and not something to put on any hot path.
+    let before = with(|s| tree::clone_node(&s.root))?;
+    f();
+    let after = with(|s| tree::clone_node(&s.root))?;
+
+    let mut touched = Vec::new();
+    let mut changes = 0u32;
+    diff_walk(
+        &before,
+        &after,
+        &mut Vec::new(),
+        &mut changes,
+        &mut |sign, at| {
+            let mut line = String::from(sign);
+            line.push(' ');
+            line.push_str(&show(at));
+            touched.push(line);
+        },
+    );
+    Some(Shadow { before, touched, changes })
+}
+
+impl Shadow {
+    /// Put the namespace back as it was.
+    pub fn discard(self) -> bool {
+        with(|s| s.root = self.before).is_some()
+    }
+
+    /// Leave the change in place.
+    ///
+    /// Named rather than implied by dropping, because "the default is to keep
+    /// it" and "the default is to undo it" are opposite safety properties and
+    /// a reader should not have to infer which one this is.
+    pub fn keep(self) {}
 }
 
 fn cmd_fsck() {

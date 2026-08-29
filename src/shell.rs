@@ -1821,6 +1821,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             kprintln!("  ask [-t] <question>          one continuing conversation; 'ask new' forgets");
             kprintln!("  about [text]                 what the model should know about you");
             kprintln!("  skill [trust <hash>]         which skills keep operator powers");
+            kprintln!("  sandbox [keep] <path>        run a program, see what it touched, undo it");
             kprintln!("  fit [lambda]  refit the probe and the council on what it knows");
             kprintln!("  gate search   how often agreement is right; the config search");
             kprintln!("  ctx cont window logits probe feature zeroshot train");
@@ -3051,6 +3052,51 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     }
                     console::set_color(LTGRAY);
                     kprintln!("  'skill trust <hash>' to grant operator powers, 'skill untrust' to revoke all");
+                }
+            }
+        }
+        // Run a program and find out what it would do, without keeping it.
+        //
+        // The step the self-improvement loop needs before adopting anything a
+        // model wrote: run it, see precisely which objects moved, decide. The
+        // program runs sandboxed like any other stored program, and the
+        // namespace is put back unless `keep` is asked for.
+        "sandbox" => {
+            let mut w = Words::new(rest);
+            let (verb, path) = (w.next().unwrap_or(""), w.next().unwrap_or(""));
+            let (keep, path) = match verb {
+                "keep" => (true, path),
+                _ => (false, if verb.is_empty() { "" } else { verb }),
+            };
+            if path.is_empty() {
+                kprintln!("  usage: sandbox [keep] <path>");
+                kprintln!("  runs it, reports every object it touched, then puts the tree back");
+                return;
+            }
+            let owned = alloc::string::String::from(path);
+            match crate::sysbox::shadow(|| { crate::sysbox::dispatch("run", &owned); }) {
+                None => kprintln!("  no namespace"),
+                Some(sh) => {
+                    if sh.changes == 0 {
+                        kprintln!("  touched nothing");
+                    } else {
+                        console::set_color(YELLOW);
+                        kprintln!("  {} object(s) touched:", sh.changes);
+                        console::set_color(LTGRAY);
+                        for line in sh.touched.iter().take(24) {
+                            kprintln!("    {}", line);
+                        }
+                        if sh.touched.len() > 24 {
+                            kprintln!("    ... and {} more", sh.touched.len() - 24);
+                        }
+                    }
+                    if keep {
+                        sh.keep();
+                        kprintln!("  kept");
+                    } else {
+                        sh.discard();
+                        kprintln!("  discarded -- 'sandbox keep <path>' to let it stand");
+                    }
                 }
             }
         }
