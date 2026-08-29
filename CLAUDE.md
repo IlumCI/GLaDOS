@@ -375,6 +375,35 @@ two places would be one point; a variant carries its adapter's hash as well, so
 there the imprecision is cosmetic. `Variant::render` keeps `push_f2` because
 changing it would re-address every node already stored.
 
+**A core is a proposal now, not only an operator command.** `core trial
+<hash>` runs `harness::core_bench`'s three judges and then does what `core
+install` never did: writes a node, a ledger line, and something `godel
+rollback` can undo. `Variant` gained `core`, and `rollback` restores it --
+without that, rolling back an adopted core left it installed and voting, so
+the pointer said one thing and the machine did another. Deliberately a
+sibling of `trial` rather than a branch inside it: `trial` is a training run
+whose judges read cached features, a core changes no weights, and folding
+two economics behind one name is what `deeptrain` was split out to avoid.
+
+**`deeptrain` records itself.** It moves every q/k/v site and used to touch
+neither head nor ledger, so `ensure_head` wrote a node describing a
+classifier-only variant -- not "unknown", which would have been honest, but
+*wrong*. `Variant.deep` is read off the adapter (`qkv.iter().any(...)`), so
+it cannot disagree with what is attached, and the node is written when the
+training happens rather than when the next trial notices. Still unjudged and
+it says so; what changed is that it is addressable, so `godel rollback` steps
+over it. Routing it through J1-J4 is **not** done and is not a small job:
+those judges rest on cached features and a deep adapter moves the features,
+so an honest judgement needs a second `prepare` -- a forward pass per example
+again.
+
+**Both new `Variant` fields render only when non-default.** Adding a field to
+a hashed structure re-addresses every object that already exists unless the
+rendering omits it when the object omits it. An unconditional line would have
+re-addressed every node in every lineage, making `head` name something that
+no longer reproduces -- the change meant to extend re-derivability breaking
+it instead. Three selftest claims assert this rather than trusting it.
+
 `Variant.rule` and `Variant.skills` are still hooks. `rule` reaches the variant
 from the proposal now but nothing varies it, because J1 is a paired test over
 routing decisions and the rule changes `Verdict::confident` -- how much the
@@ -796,6 +825,33 @@ Measuring this under QEMU does not work and the numbers say so: one core reads
 both halves of any comparison are contaminated by the host. `smp bench` exists
 to be run on the GF63.
 
+**A foreground generation pumps the pointer.** `poll_mouse` is reached from
+one place, the shell's idle loop, and `generate` only yields between tokens
+when `opts.yielding` is set -- which the mind task sets and a foreground `ask`
+does not. So for the whole of an answer the shell was inside the command and
+the pointer was never polled, while the clock task kept its own quantum and
+went on painting the uptime straight to the aperture. Frozen windows above a
+moving clock, and it was a scheduling bug wearing a rendering costume: the
+frame is 2.9 ms, measured.
+
+`desk::pump_cursor` is **motion only, deliberately**. A press handled there
+would run `press_at`, which can open or close a window or start an app --
+re-entering the desktop, and possibly the engine, from inside a generation
+that already holds it. Buttons stay latched for `poll_mouse` afterwards.
+
+`video bench` is **best of nine** and prints the maximum beside the minimum.
+It timed each operation once, and two consecutive `desk::draw` calls on an
+idle machine measured 2,679 us and 24,318 us -- under emulation a single
+sample measures the host's scheduler. It also times `console redraw_all`
+separately, which is what named the console as 41% of a frame.
+
+Two renderer changes that are correct and measured **flat**: `put` no longer
+goes volatile into RAM, and the title gradient is row-major rather than
+`w * h` one-pixel spans. Together 13% off the console path and nothing off
+the frame. Kept because they are strictly less work for identical output, and
+recorded because the survey that proposed them called volatile `put` "the
+single largest constant-factor loss" and the measurement disagreed.
+
 `task::yield_now` disables interrupts across the context switch. This is
 required: `schedule()` stores `CURRENT` and *then* switches stacks, so a timer
 tick landing between them saves the outgoing stack pointer into the wrong slot
@@ -1085,6 +1141,29 @@ the middle of its last sentence to the operator, and the next question read as a
 continuation of it. `companion::interject_frame` closes the open turn and opens
 a labelled one, so neither the operator nor the model has to guess who said
 what.
+
+### Skills, and who is allowed to be the operator
+
+Every program under `/ai/tools` used to run on `TOOLS`, which is
+`Interp::new()` -- operator capabilities: raw memory, I/O ports, the network,
+the model, the framebuffer. An *app* has been jailed since `app::call` was
+written; a *tool* was not, and `agent learn` writes tools, and a skill shared
+by a stranger is a tool. It was open by omission rather than by argument.
+
+`cmd_run` now follows `app::call` exactly: operator powers only for bytes the
+operator has named, everything else fresh and sandboxed in its own subtree
+under `SKILL_BUDGET`. Identity is the SHA-256 of the file, so **editing a
+trusted skill revokes its trust by construction** -- the same property
+`app::manifest` gets from putting `raw` inside the hash.
+
+`skill list|trust <hash>|untrust` is shell-only and never an applet, for the
+reason `app trust` is: a model that could grant itself trust would have
+defeated the gate by using it. An ambiguous prefix is refused, not resolved
+to the first match.
+
+The three seeded tools need only Pure and Read builtins and go on working
+sandboxed. Nothing that ships needs operator powers, and now nothing has them
+until asked.
 
 ### Storage (`src/store/`, `src/sysbox/`)
 
