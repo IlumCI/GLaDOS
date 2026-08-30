@@ -295,6 +295,52 @@ pub const KERNEL_RECS: &[(&str, &[(&str, Type)])] = &[
     ("Tcp", &[("state", Type::Str), ("error", Type::Str)]),
 ];
 
+/// One of the kernel's own record shapes, by name.
+///
+/// A linear scan over eight entries, which beats a map that has to be built:
+/// the map cost 49 allocations at every `Interp::new()` and this costs at
+/// most eight string comparisons at the one moment a record type is actually
+/// named. Nothing on the routing path names one at all.
+fn kernel_rec(name: &str) -> Option<&'static [(&'static str, Type)]> {
+    KERNEL_RECS.iter().find(|(n, _)| *n == name).map(|(_, fs)| *fs)
+}
+
+/// The fields of a record type, from whichever table declared it.
+///
+/// Two sources with two shapes -- a program's own `rec` owns its names, the
+/// kernel's are `&'static str` -- and unifying them would mean allocating one
+/// into the other's shape, which is the cost this split exists to remove. So
+/// the difference is carried in a borrow instead, and the three call sites
+/// read fields rather than hold the table.
+enum Fields<'a> {
+    Own(&'a [(String, Type)]),
+    Kernel(&'static [(&'static str, Type)]),
+}
+
+impl<'a> Fields<'a> {
+    fn len(&self) -> usize {
+        match self {
+            Fields::Own(fs) => fs.len(),
+            Fields::Kernel(fs) => fs.len(),
+        }
+    }
+
+    /// The name and declared type of field `i`. Callers check `len` first.
+    fn at(&self, i: usize) -> (&str, &Type) {
+        match self {
+            Fields::Own(fs) => (fs[i].0.as_str(), &fs[i].1),
+            Fields::Kernel(fs) => (fs[i].0, &fs[i].1),
+        }
+    }
+
+    fn find(&self, name: &str) -> Option<&Type> {
+        (0..self.len())
+            .map(|i| self.at(i))
+            .find(|(n, _)| *n == name)
+            .map(|(_, t)| t)
+    }
+}
+
 /// What a builtin touches.
 ///
 /// Every builtin declares one, and `BUILTINS` is the only way to reach the
@@ -574,7 +620,23 @@ pub struct Interp {
     jail: Option<String>,
     /// Scratch between builtins. See `set_note`.
     notes: BTreeMap<String, String>,
-    /// Declared record types, by name, with their fields in order.
+    /// Record types the *program* declared, by name, with fields in order.
+    ///
+    /// The ones the kernel returns are not copied in here. They used to be,
+    /// and construction paid for it: `KERNEL_RECS` is eight shapes with 49
+    /// names between them, so every `Interp::new()` allocated 49 `String`s
+    /// and did eight tree inserts to reproduce a table that is immutable
+    /// kernel data and identical in every interpreter ever built. On the
+    /// routing path that is a per-decision cost -- `Core::vote` builds a
+    /// fresh interpreter every time, deliberately -- and `core bench`
+    /// measured it as the largest single component of a vote.
+    ///
+    /// Lookup therefore consults two tables (`fields_of`), and they stay
+    /// disjoint because `Stmt::Rec` refuses a name the kernel returns. That
+    /// guard was tidiness when both lived in one map, where a redeclaration
+    /// would simply have overwritten; with two tables it is load-bearing,
+    /// since otherwise a shadowed name would resolve by whichever table is
+    /// searched first and nothing would say which.
     recs: BTreeMap<String, Vec<(String, Type)>>,
     /// Programs already imported, by resolved path.
     ///
@@ -603,17 +665,23 @@ impl Interp {
             caps: Caps::Operator,
             jail: None,
             notes: BTreeMap::new(),
-            recs: KERNEL_RECS
-                .iter()
-                .map(|(n, fs)| {
-                    (
-                        String::from(*n),
-                        fs.iter().map(|(f, t)| (String::from(*f), t.clone())).collect(),
-                    )
-                })
-                .collect(),
+            recs: BTreeMap::new(),
             imported: BTreeSet::new(),
         }
+    }
+
+    /// Where a record type is declared, program first.
+    ///
+    /// Order does not decide anything, because the two tables cannot hold the
+    /// same name: `Stmt::Rec` refuses one the kernel returns. Program first is
+    /// the cheaper miss anyway -- an empty `BTreeMap` answers without
+    /// comparing a byte, which is the common case, since most programs
+    /// declare no records and every interpreter now starts with none.
+    fn fields_of(&self, name: &str) -> Option<Fields<'_>> {
+        if let Some(fs) = self.recs.get(name) {
+            return Some(Fields::Own(fs));
+        }
+        kernel_rec(name).map(Fields::Kernel)
     }
 
     /// An interpreter for a stored program, confined to one subtree.
@@ -965,7 +1033,10 @@ impl Interp {
                 // Nor may a program redeclare one the kernel hands back. A
                 // builtin would then return a `Device` with the kernel's
                 // fields while every annotation in the program checked against
-                // a different shape of the same name.
+                // a different shape of the same name. This is also what keeps
+                // the two record tables disjoint now that they are two --
+                // without it, `fields_of` would resolve a shadowed name by
+                // search order and nothing would report that it had.
                 if KERNEL_RECS.iter().any(|(n, _)| *n == name) {
                     return Err(format!("'{}' is a record the kernel returns", name));
                 }
@@ -1068,10 +1139,8 @@ impl Interp {
                     // whose fields could be replaced by anything after
                     // construction would make the annotation a comment.
                     if let Some(want) = self
-                        .recs
-                        .get(&ty)
-                        .and_then(|fs| fs.iter().find(|(n, _)| n == field))
-                        .map(|(_, t)| t.clone())
+                        .fields_of(&ty)
+                        .and_then(|fs| fs.find(field).cloned())
                     {
                         if !v.fits(&want) {
                             return Err(format!(
@@ -1123,7 +1192,7 @@ impl Interp {
                 // and builtins: a program may still define a function with the
                 // record's name and mean it, and no builtin can be shadowed
                 // because `rec` refuses a builtin's name outright.
-                if let Some(fields) = self.recs.get(name).cloned() {
+                if let Some(fields) = self.fields_of(name) {
                     if vals.len() != fields.len() {
                         return Err(format!(
                             "{} takes {} field(s), got {}",
@@ -1133,7 +1202,8 @@ impl Interp {
                         ));
                     }
                     let mut out = Vec::with_capacity(fields.len());
-                    for ((fname, ty), v) in fields.iter().zip(vals.iter()) {
+                    for (i, v) in vals.iter().enumerate() {
+                        let (fname, ty) = fields.at(i);
                         if !v.fits(ty) {
                             return Err(format!(
                                 "{}.{} wants {}, got {}",
@@ -1143,7 +1213,7 @@ impl Interp {
                                 v.type_name()
                             ));
                         }
-                        out.push((fname.clone(), v.clone()));
+                        out.push((String::from(fname), v.clone()));
                     }
                     return Ok(Value::Rec(name.clone(), out));
                 }

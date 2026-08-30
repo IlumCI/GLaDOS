@@ -427,6 +427,24 @@ pub fn selftest() -> bool {
         if eval_line(&mut op3, "rec Device { x }").is_ok() {
             return false;
         }
+        // And reachable in every interpreter, which is the half that stopped
+        // being a `BTreeMap` lookup. `Interp::new` no longer copies
+        // `KERNEL_RECS` into the program's own table, so a kernel shape is
+        // found by a second search rather than by having been allocated 49
+        // strings at construction. These three claims are the ones that would
+        // have gone quiet if that second search were missed: the arity, the
+        // field names, and the declared type of a field on assignment. Every
+        // other record claim above exercises only a program's own `rec`, and
+        // all of them passed with the kernel half of the lookup unwritten.
+        if !text("t = Tcp(\"open\", \"\") t.state", "open") {
+            return false;
+        }
+        if run("Tcp(\"open\")").is_some() {
+            return false;
+        }
+        if run("t = Tcp(\"open\", \"\") t.state = 1").is_some() {
+            return false;
+        }
         // `ls` answers a list now, not newline-joined text. `None` is allowed
         // and is the usual case here: the boot selftests run before
         // `sysbox::init`, so there is no namespace to list yet. What this

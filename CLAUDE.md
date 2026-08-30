@@ -838,6 +838,30 @@ cannot be justified as an optimisation of this path. The plan's own text said
 so in advance -- "unless F0 shows the tree-walk itself is not the cost" -- and
 F0 showed exactly that.
 
+**The setup was `KERNEL_RECS`, and it is gone.** `Interp::new` copied the
+eight kernel record shapes into the program's own `recs` map at every
+construction: 49 `String` allocations and eight tree inserts to reproduce
+immutable kernel data, identical in every interpreter that has ever existed.
+Lookup consults two tables now (`fields_of`), which is safe because
+`Stmt::Rec` already refuses a name the kernel returns -- a guard that was
+tidiness when both lived in one map and is load-bearing now that they are
+two.
+
+    Interp::new()      2,132 ns -> 22 ns          one vote  5,658 -> 3,343 ns
+    build interpreter  1,757 ns -> 42 ns          setup       42% -> 19%
+
+The freshness the doc in `voter.rs` argues for is untouched, because only
+*program* state ever had to be fresh. What was being rebuilt per vote was the
+kernel's half.
+
+Two honesty notes on those figures. `arm` and `call vote` are unchanged by
+this work and the small movements in them are host noise -- the 20k-step loop
+moved 9% between the two boots while doing no calls at all, which is the size
+of the band. And `fields_of` adds up to eight string comparisons to every
+builtin call that misses, where the old map cost about three; measured flat
+against a 2,689 ns call, and recorded because it is a real regression on the
+call path even if nothing can see it.
+
 There is one TCP connection. `tcp` holds a single TCB and `connect` aborts
 whatever was open before it; the builtins expose that rather than handing back
 a descriptor that corresponds to nothing.
