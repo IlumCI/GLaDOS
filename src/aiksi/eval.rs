@@ -720,23 +720,69 @@ impl Interp {
         self.funcs.keys()
     }
 
+    /// This frame, then the global one. Never a caller's frame.
+    ///
+    /// **This walked the whole stack, and that was a live bug.** `call_user`
+    /// pushes the callee's frame on top of the caller's without popping it, so
+    /// `scopes` is the entire call chain -- and walking it innermost-first let
+    /// a callee reach into whichever caller up the live stack happened to use
+    /// the same name. Measured, at the prompt:
+    ///
+    /// ```text
+    ///     fn inner() { return x }
+    ///     fn outer() { x = 42 return inner() }
+    ///     outer()                                  -> 42
+    /// ```
+    ///
+    /// `inner` has no `x`. It read one belonging to a function that called it.
+    /// Nothing declared that relationship and nothing could see it: the name a
+    /// function resolves to depended on the dynamic call chain above it, which
+    /// is not a property any reader of `inner` could work out.
+    ///
+    /// Two levels is what the doc on `assign` always claimed and what
+    /// `selftest` always checked -- a parameter shadowing a global, a function
+    /// updating a global. Neither test ever asserted reach-through, so the
+    /// behaviour was incidental rather than intended.
+    ///
+    /// Blocks do not push scopes -- only `call_user` does -- so "this frame"
+    /// and "the global frame" are the whole of it.
     fn lookup(&self, name: &str) -> Option<&Value> {
-        self.scopes.iter().rev().find_map(|s| s.get(name))
+        let last = self.scopes.len().checked_sub(1)?;
+        if let Some(v) = self.scopes[last].get(name) {
+            return Some(v);
+        }
+        if last == 0 {
+            return None;
+        }
+        self.scopes[0].get(name)
     }
 
-    /// Bind a name where it already lives, or in the innermost scope if it is
-    /// new. So a function updating a global updates the global, and one
-    /// introducing a name keeps it to itself.
+    /// Bind a name where it already lives, or in this frame if it is new. So a
+    /// function updating a global updates the global, and one introducing a
+    /// name keeps it to itself.
+    ///
+    /// The second half of that sentence was false until the scope walk was
+    /// narrowed. A callee assigning `y` found a caller's `y` first and wrote
+    /// through to it:
+    ///
+    /// ```text
+    ///     fn poke() { y = 99 return 0 }
+    ///     fn host() { y = 1 poke() return y }
+    ///     host()                                   -> 99
+    /// ```
     fn assign(&mut self, name: &str, v: Value) {
-        for scope in self.scopes.iter_mut().rev() {
-            if let Some(slot) = scope.get_mut(name) {
+        let Some(last) = self.scopes.len().checked_sub(1) else { return };
+        if let Some(slot) = self.scopes[last].get_mut(name) {
+            *slot = v;
+            return;
+        }
+        if last != 0 {
+            if let Some(slot) = self.scopes[0].get_mut(name) {
                 *slot = v;
                 return;
             }
         }
-        if let Some(top) = self.scopes.last_mut() {
-            top.insert(String::from(name), v);
-        }
+        self.scopes[last].insert(String::from(name), v);
     }
 
     /// Run a block, stopping early if something inside it returned.

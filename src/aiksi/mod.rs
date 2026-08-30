@@ -431,6 +431,26 @@ pub fn selftest() -> bool {
         return false;
     }
 
+    // A function cannot see, or write, a caller's locals.
+    //
+    // Both of these passed for as long as the scope walk went all the way down
+    // the stack, and neither was ever asserted -- the two claims above check a
+    // parameter shadowing a global and a function updating a global, which
+    // hold under either rule. `call_user` pushes the callee's frame on top of
+    // the caller's without popping it, so walking innermost-first let a callee
+    // resolve a free name against whichever caller above it happened to use
+    // that name: the binding depended on the dynamic call chain, which no
+    // reader of the callee could work out.
+    //
+    // The read case answered 42 and the write case answered 99 at the prompt
+    // before this was narrowed.
+    if run("fn inner() { return x } fn outer() { x = 42 return inner() } outer()").is_some() {
+        return false;
+    }
+    if !int("fn poke() { y = 99 return 0 } fn host() { y = 1 poke() return y } host()", 1) {
+        return false;
+    }
+
     // A whole program of the shape an application has: state in a list, a
     // function over it, a loop driving them.
     if !int(
