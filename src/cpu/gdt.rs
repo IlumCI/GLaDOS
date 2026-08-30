@@ -95,6 +95,102 @@ fn tss_descriptor(base: u64) -> (u64, u64) {
     (low, base >> 32)
 }
 
+/// One core's tables, built by the bootstrap processor and loaded by the core
+/// itself.
+struct CoreTables {
+    gdt: [u64; 5],
+    tss: Tss,
+}
+
+/// Room for the same number of cores the scheduler knows about.
+const MAX_CPUS: usize = crate::task::MAX_CPUS;
+
+static TABLES: Racy<[*mut CoreTables; MAX_CPUS]> = Racy::new([core::ptr::null_mut(); MAX_CPUS]);
+
+/// Build tables for every core, on the bootstrap processor, before any of them
+/// starts.
+///
+/// **Nothing here may run on an application processor**, and that is the whole
+/// reason this is split from `adopt`. A core walks itself up from the
+/// trampoline with no interrupt table of its own, so between arriving and
+/// `idt::load_this_core` it has no handler for anything: a fault in that
+/// window is a triple fault and the core is simply gone. Allocating there was
+/// exactly that mistake, and it presented as the third core dying inside a
+/// 16 KiB allocation while the first two came up, with the hypervisor
+/// reporting an unexpected exit and nothing on the console at all.
+///
+/// So every allocation happens here, on a core that can report a fault, and
+/// what the application processor does is load registers.
+pub fn prepare(cores: usize) {
+    use alloc::boxed::Box;
+    for cpu in 0..cores.min(MAX_CPUS) {
+        // The interrupt stacks are allocated as slices rather than as a large
+        // value moved into a box, because the latter materialises sixteen
+        // kilobytes on the caller's stack before it ever reaches the heap.
+        let df = Box::leak(alloc::vec![0u8; STACK_SIZE].into_boxed_slice());
+        let pf = Box::leak(alloc::vec![0u8; STACK_SIZE].into_boxed_slice());
+
+        let t = Box::leak(Box::new(CoreTables { gdt: [0; 5], tss: Tss::new() }));
+        t.tss.ist[(IST_DOUBLE_FAULT - 1) as usize] =
+            (df.as_ptr() as u64 + STACK_SIZE as u64) & !0xF;
+        t.tss.ist[(IST_PAGE_FAULT - 1) as usize] =
+            (pf.as_ptr() as u64 + STACK_SIZE as u64) & !0xF;
+
+        t.gdt[0] = 0;
+        t.gdt[1] = DESC_KERNEL_CODE;
+        t.gdt[2] = DESC_KERNEL_DATA;
+        let (lo, hi) = tss_descriptor(&t.tss as *const Tss as u64);
+        t.gdt[3] = lo;
+        t.gdt[4] = hi;
+
+        unsafe { TABLES.get()[cpu] = t as *mut CoreTables };
+    }
+}
+
+/// Load the tables `prepare` built for this core. Allocates nothing.
+///
+/// The layout matches `init` exactly, selector for selector. That is not
+/// tidiness: the interrupt descriptor table is shared between all cores and
+/// its entries name a code selector, so a core whose table puts code anywhere
+/// else takes its first interrupt into whatever happens to be at that index.
+pub fn adopt(cpu: usize) -> bool {
+    let t = unsafe { TABLES.get().get(cpu).copied().unwrap_or(core::ptr::null_mut()) };
+    if t.is_null() {
+        return false;
+    }
+    unsafe {
+        let ptr = DescriptorTablePointer {
+            limit: (size_of::<[u64; 5]>() - 1) as u16,
+            base: (*t).gdt.as_ptr() as u64,
+        };
+        asm!("lgdt [{}]", in(reg) &ptr, options(readonly, nostack, preserves_flags));
+
+        asm!(
+            "push {sel}",
+            "lea {tmp}, [rip + 2f]",
+            "push {tmp}",
+            "retfq",
+            "2:",
+            sel = in(reg) KERNEL_CS as u64,
+            tmp = lateout(reg) _,
+            options(preserves_flags),
+        );
+
+        asm!(
+            "mov ds, {0:x}",
+            "mov es, {0:x}",
+            "mov ss, {0:x}",
+            "mov fs, {0:x}",
+            "mov gs, {0:x}",
+            in(reg) KERNEL_DS,
+            options(nostack, preserves_flags),
+        );
+
+        asm!("ltr {0:x}", in(reg) TSS_SEL, options(nostack, preserves_flags));
+    }
+    true
+}
+
 /// Install the GDT, reload every segment register, and load the task register.
 pub fn init() {
     unsafe {

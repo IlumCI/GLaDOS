@@ -719,7 +719,18 @@ fn init_smp(acpi: &Option<acpi::Acpi>) {
         return;
     }
 
+    // Core 0's own block first. Arming comes after every core has one, so
+    // nothing reads through a GS base that is still zero.
+    // Tables and per-core blocks for every core the firmware declares, built
+    // here where a fault is reportable, before any core is started.
+    cpu::gdt::prepare(a.cpus.min(task::MAX_CPUS));
+    cpu::percpu::prepare(a.cpus.min(task::MAX_CPUS));
+    cpu::percpu::adopt(0);
     let started = smp::init(a);
+    // Every core has its block now, so per-core storage may be read, and only
+    // then are the cores let go.
+    cpu::percpu::arm();
+    smp::release();
     let answered = started + 1;
     if answered == a.cpus {
         console::set_color(LTGREEN);

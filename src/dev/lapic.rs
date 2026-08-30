@@ -151,6 +151,20 @@ pub fn init(lapic_addr: u64) {
     write(REG_SVR, 0x100 | VECTOR_SPURIOUS as u32);
 }
 
+/// Enable this core's own local controller.
+///
+/// Each core has its own controller behind the same physical address, so the
+/// register writes are per-core even though the address is not. The handler
+/// registrations in `init` are global and are deliberately not repeated: an
+/// interrupt table entry is code, and every core wants the same code.
+pub fn init_this_core() {
+    unsafe {
+        let msr = cpu::rdmsr(IA32_APIC_BASE);
+        cpu::wrmsr(IA32_APIC_BASE, msr | APIC_GLOBAL_ENABLE);
+    }
+    write(REG_SVR, 0x100 | VECTOR_SPURIOUS as u32);
+}
+
 /// Measure APIC timer ticks per second against the PIT.
 ///
 /// Returns 0 if the PIT never signalled, which happens on hardware with no

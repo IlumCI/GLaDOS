@@ -58,6 +58,15 @@ const AP_STACK: usize = 64 * 1024;
 /// Cores that have reached Rust and enabled their own SIMD state.
 static ONLINE: AtomicUsize = AtomicUsize::new(0);
 
+/// Set once every core has its own descriptor tables, per-core block and idle
+/// task, and they may all begin scheduling. See `glados_ap_main`.
+static RELEASED: AtomicBool = AtomicBool::new(false);
+
+/// Let every core that is up start taking work.
+pub fn release() {
+    RELEASED.store(true, Ordering::Release);
+}
+
 core::arch::global_asm!(
     r#"
 .globl ap_tramp_start
@@ -183,6 +192,43 @@ extern "C" fn glados_ap_main() -> ! {
     crate::cpu::enable_simd_this_core();
 
     ONLINE.fetch_add(1, Ordering::SeqCst);
+
+    // Descriptor tables, then the interrupt table, then this core's own
+    // controller. In that order: the table entries name a code selector, so
+    // taking an interrupt before the descriptor table matches would enter
+    // whatever happens to sit at that index in the trampoline's table.
+    // Loads only. Everything these need was allocated by the bootstrap
+    // processor before this core was started, because a fault here has no
+    // interrupt table to land in.
+    let cpu = this_cpu() as usize;
+    crate::cpu::gdt::adopt(cpu);
+    crate::cpu::percpu::adopt(cpu);
+    crate::cpu::idt::load_this_core();
+    crate::dev::lapic::init_this_core();
+
+    // Adopt this stack as a task, so the core always has something to be
+    // running and something to return to. Without it, switching into work
+    // would abandon the stack this loop is standing on with nothing able to
+    // resume it.
+    let adopted = crate::task::adopt_idle(cpu);
+
+    // Wait for every core to finish coming up before any of them starts
+    // scheduling.
+    //
+    // Bringing them up one at a time while the earlier ones were already
+    // taking timer interrupts and contending for the heap hung the third core
+    // inside its own allocation. Whatever the precise interleaving was, a
+    // core initialising beside cores that are already scheduling is a race
+    // nobody needs: they are started once, at boot, and waiting costs
+    // milliseconds.
+    while !RELEASED.load(Ordering::Acquire) {
+        core::hint::spin_loop();
+    }
+    if adopted {
+        crate::dev::lapic::start_timer(crate::TIMER_HZ);
+        crate::task::join(cpu);
+        crate::cpu::enable_interrupts();
+    }
 
     // Interrupts stay masked: there is no per-core IDT, and the kernel's
     // handlers would print, which is a shared console. So a parked core cannot
@@ -731,7 +777,28 @@ pub fn selftest_mt() -> bool {
     );
     // A leak here is a lost block rather than a wrong answer, and it is the
     // failure a lock protects against on the free path specifically.
-    claim(&mut ok, after == before, "and the heap is exactly where it started");
+    //
+    // This asked for exact equality until tasks began running on more than one
+    // core, at which point it started failing: the mind and the clock allocate
+    // too, and they now do it *during* this measurement rather than only
+    // between reschedules on one core. The assumption was never written down,
+    // which is how it survived until the system stopped satisfying it.
+    //
+    // So the bound is on the leak rather than on the total. This churns about
+    // a hundred megabytes; losing even a thousandth of it would show as
+    // hundreds of kilobytes, while another task's allocations over a few
+    // milliseconds are a few kilobytes at most. The gap between those two is
+    // wide enough to be a real check.
+    const SLACK: usize = 64 * 1024;
+    let grew = after.saturating_sub(before);
+    claim(
+        &mut ok,
+        grew < SLACK,
+        "and the heap did not leak, allowing for what other cores allocated",
+    );
+    if grew >= SLACK {
+        crate::kprintln!("         grew by {} bytes", grew);
+    }
     ok
 }
 

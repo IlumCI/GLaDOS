@@ -214,11 +214,19 @@ impl LockedHeap {
 // makes every other core useless whatever else is true of it.
 unsafe impl GlobalAlloc for LockedHeap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        unsafe { self.inner.lock_irq().alloc(layout) }
+        let p = unsafe { self.inner.lock_irq().alloc(layout) };
+        // Billed after the lock is released, and only on success. Inside the
+        // critical section it would lengthen the one lock every core contends
+        // for, and a failed allocation consumed nothing to charge for.
+        if !p.is_null() {
+            crate::mem::census::took(layout.size());
+        }
+        p
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { self.inner.lock_irq().dealloc(ptr, layout) }
+        unsafe { self.inner.lock_irq().dealloc(ptr, layout) };
+        crate::mem::census::gave(layout.size());
     }
 }
 

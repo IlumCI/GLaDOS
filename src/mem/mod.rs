@@ -1,5 +1,6 @@
 //! Physical memory and address translation.
 
+pub mod census;
 pub mod frame;
 pub mod heap;
 pub mod paging;

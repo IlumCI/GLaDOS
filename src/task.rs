@@ -91,11 +91,23 @@ pub struct Task {
     pub switches: u64,
     /// The only core allowed to run this, or -1 for any of them.
     ///
-    /// Every core has an idle task pinned to it, which is what makes a core
-    /// with nothing to do still a core with something to run. Without pinning,
-    /// one core could pick up another's idle task and both would end up with
-    /// no stack of their own to return to.
+    /// **Every task this kernel spawns today is pinned to core 0, and that is
+    /// the safety property rather than a limitation of the mechanism.**
+    /// Preemption on one core means two tasks never execute at the same
+    /// instant; they interleave at switch points. On two cores they genuinely
+    /// overlap, so every `Racy` reachable from two different tasks stops being
+    /// a promise and becomes a race. There are 92 of those left, the namespace
+    /// tree among them, and unpinning a task before its state is audited buys
+    /// a kernel that passes every test and corrupts something later.
+    ///
+    /// So migration is opt-in per task, and the opt-in is an audit.
     pub pin: i16,
+    /// A place for a core to stand when there is nothing to do.
+    ///
+    /// Separate from `pin` because the two answer different questions. `pin`
+    /// is who *may* run this; `idle` is whether it should be run only when
+    /// nothing else can be. Conflating them starved the shell once already.
+    pub idle: bool,
     /// XSAVE/FXSAVE image for this task's x87, SSE and AVX state.
     ///
     /// Necessary because preemption breaks the assumption the rest of the
@@ -121,6 +133,7 @@ const EMPTY: Task = Task {
     entry: None,
     switches: 0,
     pin: -1,
+    idle: false,
     fpu: core::ptr::null_mut(),
 };
 
@@ -213,21 +226,140 @@ pub fn init(name: &'static str) {
             name,
             entry: None,
             switches: 0,
-            // Not pinned. It is where boot happened to be standing, and its
-            // stack is memory like any other in a single address space, so
-            // another core may resume it.
-            //
-            // Pinning it starved it. `schedule` prefers unpinned tasks so that
-            // a core does not settle into idling while work exists, which
-            // meant the shell became reachable only when nothing else was, and
-            // once the clock, mind and agent tasks existed that was never.
-            // Boot ran to the end of its selftests and no prompt appeared.
-            pin: -1,
+            // Core 0, with everything else this kernel spawns. See `pin`.
+            pin: 0,
+            idle: false,
             fpu,
         };
     }
     COUNT.store(1, Ordering::Release);
     CURRENT[0].store(0, Ordering::Release);
+}
+
+// --- proving migration works, without risking anything that matters -----
+
+static MIG_SEEN: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static MIG_LOOPS: AtomicUsize = AtomicUsize::new(0);
+static MIG_STOP: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// A task that touches nothing but its own atomics and records which cores ran
+/// it.
+///
+/// Deliberately barren. The point is to demonstrate that the scheduler will
+/// carry a task onto another core and back, and a task that touched kernel
+/// state would be demonstrating that plus an unaudited race.
+fn migrant() {
+    while !MIG_STOP.load(Ordering::Relaxed) {
+        let cpu = crate::smp::this_cpu();
+        if cpu < 32 {
+            MIG_SEEN.fetch_or(1 << cpu, Ordering::Relaxed);
+        }
+        MIG_LOOPS.fetch_add(1, Ordering::Relaxed);
+        yield_now();
+    }
+}
+
+/// Spawn the migrant, let it run, and report which cores it was seen on.
+pub fn migration_selftest() -> bool {
+    let mut ok = true;
+    fn claim(ok: &mut bool, good: bool, what: &str) {
+        crate::kprintln!("  {}   {}", if good { "ok " } else { "FAIL" }, what);
+        *ok &= good;
+    }
+
+    MIG_SEEN.store(0, Ordering::Relaxed);
+    MIG_LOOPS.store(0, Ordering::Relaxed);
+    MIG_STOP.store(false, Ordering::Relaxed);
+
+    let Some(idx) = spawn("migrant", migrant) else {
+        claim(&mut ok, false, "there was room for a task");
+        return false;
+    };
+    claim(&mut ok, !unpin(usize::MAX), "an index that is not a task cannot be unpinned");
+    claim(&mut ok, unpin(idx), "a real task can be");
+
+    // Wait rather than yield. Yielding here churns core 0's scheduler, and
+    // every other task on it gets a turn per yield: twenty thousand of them
+    // ran the resident mind three hundred times and buried the suite's own
+    // output. Another core is free to take the migrant while this one waits.
+    crate::time::delay_us(200_000);
+    MIG_STOP.store(true, Ordering::Relaxed);
+    crate::time::delay_us(50_000);
+
+    let seen = MIG_SEEN.load(Ordering::Relaxed);
+    let loops = MIG_LOOPS.load(Ordering::Relaxed);
+    let cores = seen.count_ones();
+    crate::kprintln!("  ran {} times, seen on {} core(s), mask {:#x}", loops, cores, seen);
+    claim(&mut ok, loops > 0, "the task ran at all");
+    // The claim that matters. One core means the scheduler carried it nowhere,
+    // whatever else is true, and saying so beats a suite that passes on a
+    // machine with the feature switched off.
+    claim(
+        &mut ok,
+        cores > 1 || crate::smp::online() == 0,
+        "and ran on more than one core, or there was only one",
+    );
+    ok
+}
+
+/// Let a task run on any core.
+///
+/// The caller is asserting that everything the task touches is either its own
+/// or behind a real lock. Nothing in this kernel calls it yet, which is the
+/// honest state of the audit rather than an oversight.
+pub fn unpin(index: usize) -> bool {
+    let mut t = TASKS.lock_irq();
+    if index >= MAX_TASKS || t[index].state == State::Unused || t[index].idle {
+        return false;
+    }
+    t[index].pin = -1;
+    true
+}
+
+/// Turn the stack this core is standing on into a task it owns.
+///
+/// An application processor arrives on a stack the bootstrap processor
+/// allocated for it and loops there. That loop has to *be* a task, or the
+/// first switch away from it abandons a stack nothing can resume, and the core
+/// can never come back to having nothing to do.
+///
+/// Pinned to its core, which is what the pin is for. An idle task is a place
+/// to stand rather than work to be done, so another core taking one would
+/// leave two cores with nowhere to return to.
+///
+/// Answers false when there is no room, in which case the caller must not join
+/// the scheduler.
+pub fn adopt_idle(cpu: usize) -> bool {
+    if cpu == 0 || cpu >= MAX_CPUS {
+        return false;
+    }
+    let fpu = alloc_fpu_area();
+    if fpu.is_null() {
+        return false;
+    }
+    let slot = COUNT.fetch_add(1, Ordering::AcqRel);
+    if slot >= MAX_TASKS {
+        COUNT.fetch_sub(1, Ordering::AcqRel);
+        return false;
+    }
+    {
+        let mut tasks = TASKS.lock_irq();
+        tasks[slot] = Task {
+            // Filled in by the first switch away from here, which is exactly
+            // when this stack pointer first means anything.
+            rsp: 0,
+            state: State::Running(cpu as u8),
+            name: "idle",
+            entry: None,
+            switches: 0,
+            pin: cpu as i16,
+            idle: true,
+            fpu,
+        };
+    }
+    CURRENT[cpu].store(slot, Ordering::Release);
+    true
 }
 
 /// Let this core take tasks. Called once per application processor, after its
@@ -289,7 +421,9 @@ pub fn spawn(name: &'static str, entry: fn()) -> Option<usize> {
             name,
             entry: Some(entry),
             switches: 0,
-            pin: -1,
+            // Core 0 until somebody has audited what this task touches.
+            pin: 0,
+            idle: false,
             fpu: alloc_fpu_area(),
         };
     }
@@ -412,11 +546,14 @@ fn schedule() {
                 if i == cur || t[i].state != State::Ready {
                     continue;
                 }
-                let pinned = t[i].pin >= 0;
-                if pass == 0 && pinned {
+                // Not this core's to run.
+                if t[i].pin >= 0 && t[i].pin != me as i16 {
                     continue;
                 }
-                if pinned && t[i].pin != me as i16 {
+                // Real work first. An idle task is somewhere to stand rather
+                // than something to do, so taking it in the same pass would
+                // let a core settle into it while something was runnable.
+                if (pass == 0) == t[i].idle {
                     continue;
                 }
                 next = i;
@@ -439,6 +576,9 @@ fn schedule() {
         // as `Running` also sees which core owns it.
         CURRENT[me].store(next, Ordering::Release);
         PENDING[me].store(cur, Ordering::Release);
+        // So the allocator knows who to bill without asking the interrupt
+        // controller which core it is on.
+        crate::cpu::percpu::set_task(next as u64);
 
         (&mut t[cur].rsp as *mut u64, t[next].rsp, t[cur].fpu, t[next].fpu)
     };

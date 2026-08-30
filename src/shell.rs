@@ -3219,6 +3219,15 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 }
             }
         }
+        // Who is using the memory.
+        "census" => {
+            if rest.trim() == "reset" {
+                crate::mem::census::reset();
+                kprintln!("  census cleared");
+            } else {
+                crate::mem::census::report();
+            }
+        }
         // Temperature, frequency, and the policy over both.
         "power" => {
             let mut w = rest.split_whitespace();

@@ -348,6 +348,23 @@ pub fn init() {
     serial_println!("glados: idt installed");
 }
 
+/// Point this core at the table `init` already built.
+///
+/// The table is shared and that is correct: a handler is code, and every core
+/// wants the same handlers. What must be per-core is the task-state segment
+/// the entries' IST indices resolve against, which `gdt::init_this_core`
+/// provides.
+pub fn load_this_core() {
+    unsafe {
+        let idt = IDT.get();
+        let ptr = gdt::DescriptorTablePointer {
+            limit: (size_of::<[Entry; 256]>() - 1) as u16,
+            base: idt.as_ptr() as u64,
+        };
+        asm!("lidt [{}]", in(reg) &ptr, options(readonly, nostack, preserves_flags));
+    }
+}
+
 /// Point a vector at a handler after `init` has already run.
 ///
 /// Safe to do with the IDT live: the CPU re-reads the table on every
