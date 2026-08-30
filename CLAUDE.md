@@ -941,6 +941,40 @@ else.** A builtin costs one step however much work it does. The budget is a
 safety bound, so a program that got more room by being run a different way
 would be a runaway one path stops and another does not.
 
+**`diag differ` is the gate, and it exists before the thing it gates.**
+`src/aiksi/differ.rs` runs one program two ways and requires them to agree on
+**value, step count and error text**, bit for bit with no tolerance -- the
+reason `smp.rs` gives about a split matvec, that any difference at all is a
+bug and a tolerance hides the one worth finding. Step count is in there
+because it is what the budget stops and what a verdict records.
+
+It was written before a code generator on purpose. `model.rs` makes the
+objection twice -- two implementations that are supposed to agree do not stay
+agreeing -- and a harness written afterwards is a harness shaped by whatever
+the second implementation happens to do.
+
+The second route today is `prepare`/`adopt` against `run`, which is a real
+pair rather than a placeholder and is the one every routing decision now
+depends on. A compiled route becomes a third `Route` and every case applies
+to it unchanged.
+
+**The canary is the part that makes it a harness.** A suite that has never
+reported a difference is indistinguishable from one that compares nothing,
+which is exactly how `smp.rs`'s one-shot check passed over a deadlock. So the
+suite runs two programs differing by one unused declaration: same answer, one
+more top-level statement, step counts one apart. It **fails if that is not
+caught**. That is the difference a comparison looking only at answers waves
+through, and the one a code generator with nearly-right ticks produces.
+
+Eleven cases, sixty-four rounds, including the three failure modes and a
+`while` loop for the tick most easily got wrong. Two limits are printed
+rather than left to be assumed: stored cores and seeded tools are compared
+too, but all three seeded tools have computing top levels, so the prepared
+route declines them and the stored half of the corpus contributed **nothing**
+on a fresh machine -- the line says `0 agreed, 3 declined`. And console
+output is not compared, the same blind spot `skill.rs` records for J3: a
+program of `println`s answers nil however it behaved.
+
 Two honesty notes on those figures. `arm` and `call vote` are unchanged by
 this work and the movements in them are host noise. And `fields_of` adds up
 to eight string comparisons to every builtin call that misses, where the old

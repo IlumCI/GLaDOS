@@ -7,6 +7,7 @@
 //! single-pass code generator emitting x86-64 into the heap; the front end
 //! here does not change when that happens.
 
+pub mod differ;
 pub mod eval;
 pub mod kernel;
 pub mod lex;
