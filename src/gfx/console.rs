@@ -422,7 +422,18 @@ pub const USER: usize = 0;
 pub const EXEC: usize = 1;
 pub const NCONSOLE: usize = 2;
 
-static CONSOLES: Racy<[Option<Console>; NCONSOLE]> = Racy::new([None, None]);
+/// Every core prints through this, so it is a lock rather than a promise.
+///
+/// `lock_irq`, because the clock task prints from a timer tick: a handler that
+/// spun for a lock the code it interrupted was holding would never get it.
+/// Masking for the length of a line makes that impossible rather than rare.
+///
+/// The paint path underneath must never print, or it would take this lock
+/// twice on one core. That is a real constraint and it is checkable: the
+/// deadlock panic names the waiter and the lock instead of hanging, so a
+/// violation announces itself at the first line of boot.
+static CONSOLES: crate::sync::Spin<[Option<Console>; NCONSOLE]> =
+    crate::sync::Spin::new([None, None]);
 
 /// Where `kprint!` lands when nothing more specific applies.
 ///
@@ -434,7 +445,7 @@ static CURRENT: Racy<usize> = Racy::new(EXEC);
 
 /// Install both consoles. Call once, after `ExitBootServices`.
 pub fn init(fb: Framebuffer, scale: u32, bg: Color) {
-    let all = unsafe { &mut *CONSOLES.get() };
+    let all = &mut *CONSOLES.lock_irq();
     for slot in all.iter_mut() {
         let mut console = Console::new(fb.clone(), scale, bg);
         console.clear();
@@ -443,7 +454,7 @@ pub fn init(fb: Framebuffer, scale: u32, bg: Color) {
 }
 
 pub fn is_ready() -> bool {
-    unsafe { (*CONSOLES.get())[USER].is_some() }
+    CONSOLES.lock_irq()[USER].is_some()
 }
 
 /// Which console `kprint!` is writing to right now.
@@ -495,7 +506,7 @@ pub fn set_default_channel(ch: usize) {
 }
 
 pub fn with_ch<F: FnOnce(&mut Console)>(ch: usize, f: F) {
-    if let Some(c) = unsafe { (*CONSOLES.get()).get_mut(ch).and_then(|s| s.as_mut()) } {
+    if let Some(c) = CONSOLES.lock_irq().get_mut(ch).and_then(|s| s.as_mut()) {
         f(c);
     }
 }
@@ -591,27 +602,29 @@ pub fn cols() -> usize {
 // collection mid-flight. Nesting is the difference between a tool that can
 // call the OS and one that cannot.
 
-static CAPTURE: Racy<alloc::vec::Vec<alloc::string::String>> =
-    Racy::new(alloc::vec::Vec::new());
+/// Capture nests per pipeline and is reached from whichever core is running
+/// the shell, so it is behind the same kind of lock for the same reason.
+static CAPTURE: crate::sync::Spin<alloc::vec::Vec<alloc::string::String>> =
+    crate::sync::Spin::new(alloc::vec::Vec::new());
 
 pub fn begin_capture() {
-    unsafe { CAPTURE.get().push(alloc::string::String::new()) };
+    CAPTURE.lock_irq().push(alloc::string::String::new());
 }
 
 /// Stop the innermost capture and return what it collected.
 pub fn end_capture() -> Option<alloc::string::String> {
-    unsafe { CAPTURE.get().pop() }
+    CAPTURE.lock_irq().pop()
 }
 
 pub fn capturing() -> bool {
-    unsafe { !CAPTURE.get().is_empty() }
+    !CAPTURE.lock_irq().is_empty()
 }
 
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
     use fmt::Write;
-    unsafe {
-        let stack = CAPTURE.get();
+    {
+        let mut stack = CAPTURE.lock_irq();
         if let Some(buf) = stack.last_mut() {
             // Capped. A capture wraps arbitrary applet output, and an applet
             // that prints forever -- a tool with a bad loop, a tree of a deep
