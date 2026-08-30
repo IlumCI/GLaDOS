@@ -45,10 +45,12 @@ Works, and verified:
 | Initiative | A resident task that decides for itself when to act and when to stay quiet |
 | Language | Aiksi: lexer, parser, tree-walking interpreter, records, types, capabilities |
 | Codegen | An x86-64 back end for the integer subset, checked against the interpreter |
+| Formats | Detection and structure for text, markdown, json, jsonl, xml, csv, ini and eight languages |
+| Power | Digital thermal sensor, measured frequency, HWP governors, all behind a CPUID gate |
 | Training | Gradients, Adam, QDoRA over the classifier and over every q/k/v site |
 | Self-modification | Variant lineage, a judge council, an append-only ledger, O(1) rollback |
 | Updates | Signed staged images swapped before `ExitBootServices`, with rollback |
-| SMP | Application processors started and parked as a compute fabric |
+| SMP | Application processors started and parked; heap and console safe for all of them |
 | Mining | Midstate-cached SHA-256d with an honest scoreboard |
 
 Does not work yet:
@@ -59,11 +61,15 @@ Does not work yet:
   vectors at every boot, and has never had hardware to run on. A USB dongle
   driver (RTL8188EU) has its register layer and power-on sequence, and stops
   short of PHY, radio and firmware upload.
-- **General SMP.** The extra cores run matrix ranges and nothing else. They
-  never allocate, never take an interrupt, never print and never touch anything
-  `sync::Racy<T>` guards, which is what leaves that type's safety argument
-  intact. General multiprocessing would mean auditing several hundred uses of
-  it and inventing a lock discipline, and none of that has been done.
+- **Tasks on more than one core.** The extra cores can allocate and print now,
+  because the heap and the console are behind `sync::Spin<T>` and each
+  conversion was verified rather than assumed. They still never take an
+  interrupt and still never run a task. The blocker is specific: an application
+  processor runs on the trampoline's flat descriptor table with no task-state
+  segment, so its code selector does not match the ones the interrupt table
+  names, and preemption there needs a per-core GDT and TSS. Cooperative
+  scheduling without a timer needs neither. 92 uses of `Racy` remain, down from
+  93, and the number is published so it can be watched falling.
 - **A hardware entropy source.** The generator is a fast-key-erasure ChaCha20
   DRBG fed by keyboard and mouse interrupt timing and by NVMe completion
   latency, and it refuses to answer for key material until it has seen enough

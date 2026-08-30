@@ -1188,8 +1188,106 @@ framebuffer is the only diagnostic channel there is.
 ### Concurrency
 
 `sync::Racy<T>` is **not a lock.** It is single-core interior mutability and
-the designated grep target for the day SMP arrives. **SMP has partly arrived
-and this is still true** -- see below for why.
+the designated grep target for the day SMP arrives.
+
+**`sync::Spin<T>` is a lock**, and every conversion from one to the other is a
+claim that a second core reaches that state. The claims are made one at a time
+and each is verified, because converting all of them at once produces a kernel
+where nothing is known to be right rather than one where a few things are. Two
+have been made so far, taking the count from 93 to 92: the heap and the
+console.
+
+**`lock_irq` is not optional on either.** A lock taken by ordinary code and
+also by an interrupt handler on the same core deadlocks against itself, and
+both of those are in that position: allocation can happen under an interrupt,
+and the clock task prints from a timer tick. A plain `lock` there is a hang
+that appears under load and never in a test.
+
+Nothing about the holder is recorded, deliberately: naming a core means reading
+the local controller over memory-mapped I/O, which costs more than the lock it
+would describe, and the allocator takes one on every allocation. A spin that
+reaches its patience limit panics with the waiter and the lock address rather
+than hanging, which is what makes converting the console safe to attempt: a
+paint path that printed would take the lock twice and say so on the first line
+of boot.
+
+`diag mt` is the evidence for the heap. Sixty-four rounds of 4,096 allocations
+across the cores, each writing a per-chunk pattern through its whole block and
+reading it back. A heap that handed one block to two cores fails the read-back,
+one whose free list corrupted fails a later request, and one that lost a block
+fails the closing check that the heap is exactly where it started.
+
+### File formats
+
+`src/fmt/` answers what a file is and hands back its structure. The namespace
+stored bytes and nothing above it knew what any of them were.
+
+**Extension first, contents second, and never a guess.** A name carrying a
+known extension is that kind, because the operator said so by naming it, so
+`notes.txt` full of JSON is still text. A name carrying none is sniffed.
+Anything surviving both is `Text` when it decodes as UTF-8 and `Binary` when it
+does not. Telling a program a file is JSON when it is prose earns it a parse
+failure it cannot explain.
+
+**One tokenizer, a table per language.** C, C++, C#, Rust, JavaScript, Python,
+Aiksi and shell differ in comment markers, string delimiters and keyword lists,
+and do not differ in lexical structure, so adding a language is adding a
+`Syntax` row. The cases that earn their keep are the ones naive highlighters
+fail: Rust block comments nest and C's do not, a Rust lifetime is an apostrophe
+that never closes and must not open a literal that eats the line, a Python
+docstring is a tripled delimiter, and a comment marker inside a string is not a
+comment. That last set caught a real bug on the first run: opening a block
+comment set the carry and re-entered the loop with the cursor still on the
+opener, so the nesting scanner read it twice and `/* x` ended the line at depth
+two and never closed.
+
+`fmt::xml` is its own reader rather than `net::html`'s. HTML has void elements,
+optional end tags and a parse algorithm defined by what browsers do, and
+importing that leniency into a data format turns a malformed file into a
+plausible tree. It refuses a mismatched close, a second root, an unquoted
+attribute, and a DOCTYPE with an internal subset, because honouring part of a
+DTD is how a reader disagrees with every other reader.
+
+`fmt::table` covers CSV, TSV, JSON Lines and INI. The quoting rules are the
+whole of CSV: a field may contain the delimiter, a newline and the quote
+character, and splitting on commas gives a reader that works on every file
+anybody tests it with and corrupts the first real one. JSON Lines reports the
+line number of anything that will not parse and keeps the rest.
+
+`fmt::outline` exists for the model more than the operator. A model reading a
+forty kilobyte source file spends its context on it and answers worse than one
+told the file defines nine functions and their names. Derived by scanning
+rather than parsing, which is the right trade here: an outline occasionally
+missing an entry is useful, a parser occasionally wrong about a program is not.
+
+Six Aiksi builtins reach all of it (`fmt_kind`, `fmt_outline`, `csv_rows`,
+`ini_get`, `xml_text`, `jsonl_count`) and the `file` verb prints kind and
+outline. `diag fmt`.
+
+### Temperature and frequency
+
+`src/dev/power.rs` reads the sensor, measures the clock and sets a governor,
+and **the gate in front of it matters more than the feature**. `rdmsr` on a
+register the part does not implement raises #GP, every vector here is fatal,
+and the result is a halted machine reporting a register nobody asked for.
+
+Three conditions, all of them, before any MSR is touched: the vendor is Intel,
+CPUID says the feature exists, and no hypervisor is present. The third is in no
+manual. It is there because an emulator may advertise a capability in CPUID and
+not implement the register behind it, and on real silicon the first two suffice
+while under emulation they are a guess that does not return. **So none of the
+readings can be checked under QEMU**, which reports "vendor intel, hypervisor
+yes" and then declines with its reason. `power force` overrides it and says
+what it is risking.
+
+Frequency comes from delivered against reference cycles rather than a register
+claiming one, because a part that changes its clock thousands of times a second
+has no single frequency and the ratio describes the interval somebody cares
+about. Governors are policies rather than frequencies, since naming a frequency
+pretends to know better than the part about a decision hardware-managed states
+exist to take over. The thermal policy has a gap between its thresholds because
+one threshold oscillates, and it never touches turbo, because a machine that
+quietly disabled it and forgot would look broken in a way nothing reports.
 
 ### The other cores
 
@@ -1198,9 +1296,15 @@ to long mode through a trampoline at physical 0x8000, and parks it. `smp` in
 the shell reports how many answered; `smp bench` times a 16 MiB matvec on one
 core against all of them.
 
-This is a **compute fabric, not general SMP**, and the distinction is the whole
-design. The extra cores never allocate, never take an interrupt, never print,
-and never touch anything a `Racy` guards. They wait on a generation counter
+This began as a **compute fabric rather than general SMP**, and it is moving.
+The extra cores can now allocate and print, because those two structures are
+behind real locks. They still never take an interrupt and still never run a
+task, and the reason is specific: an application processor runs on the
+trampoline's flat descriptor table with no task-state segment, so its code
+selector does not match the one the interrupt table's entries name. Preempting
+a task there needs a per-core GDT and TSS, and `smp.rs` already records why one
+TSS cannot be shared. Running tasks cooperatively without a timer needs
+neither, and is the shorter road if it is wanted. They wait on a generation counter
 with MONITOR/MWAIT, run a range of a matrix, and go back to sleep. Every
 decision and every byte of kernel state stays on the bootstrap processor, so
 `Racy`'s safety argument is untouched -- which is the point. General SMP means
