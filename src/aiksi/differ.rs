@@ -43,6 +43,7 @@
 use super::eval::{Interp, Value};
 use super::{lex, parse};
 use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 
 /// Where a differential run is allowed to write, which is nowhere it reaches.
 const JAIL: &str = "/ai/differ/scratch";
@@ -101,6 +102,10 @@ pub enum Route {
     Armed,
     /// Copy them from a snapshot taken once.
     Prepared,
+    /// Do not use an interpreter at all: emit x86-64 for the function and
+    /// jump into it. Declines everything outside `jit`'s slice, which is
+    /// almost everything.
+    Compiled,
 }
 
 /// What to ask the program for.
@@ -110,6 +115,9 @@ pub enum Entry<'a> {
     Top,
     /// `vote(text, allowed)`, the shape every core has.
     Vote(&'a str),
+    /// `f(a, b, ..)` where every argument and the answer is an integer. The
+    /// only shape a compiled function can have.
+    Ints(&'a str, &'a [i64]),
 }
 
 impl Outcome {
@@ -136,6 +144,10 @@ pub fn observe(src: &str, entry: Entry, route: Route) -> Option<Outcome> {
         Err(e) => return Some(Outcome::failed(e, 0)),
     };
 
+    if route == Route::Compiled {
+        return compiled(&prog, entry);
+    }
+
     let mut it = Interp::sandboxed(JAIL).with_step_budget(BUDGET);
     match route {
         Route::Armed => {
@@ -150,6 +162,11 @@ pub fn observe(src: &str, entry: Entry, route: Route) -> Option<Outcome> {
             let p = Interp::prepare(&prog).ok()?;
             it.adopt(&p);
         }
+        // Handled above, before an interpreter was built at all. Answering
+        // `None` rather than asserting, because a route that reached here
+        // would be a route with no implementation and the honest reply to
+        // that is "this one does not apply".
+        Route::Compiled => return None,
     }
 
     // A declarative top level evaluates to nil, because `Stmt::Fn` and
@@ -168,7 +185,74 @@ pub fn observe(src: &str, entry: Entry, route: Route) -> Option<Outcome> {
                 Err(e) => Some(Outcome::failed(e, it.steps())),
             }
         }
+        Entry::Ints(name, args) => {
+            let vals: Vec<Value> = args.iter().map(|i| Value::Int(*i)).collect();
+            match it.invoke(name, &vals) {
+                Ok(v) => Some(Outcome { value: v.render(), steps: it.steps(), error: None }),
+                Err(e) => Some(Outcome::failed(e, it.steps())),
+            }
+        }
     }
+}
+
+/// The compiled route. Declines anything that is not exactly one function in
+/// `jit`'s slice, called with integers.
+///
+/// The status the compiled code answers is turned back into the interpreter's
+/// own words here, because `differ` compares error *text*. A compiler that got
+/// every number right and said "div0" where the interpreter says "division by
+/// zero" would be wrong in a way only this comparison catches.
+fn compiled(prog: &[super::parse::Stmt], entry: Entry) -> Option<Outcome> {
+    use super::jit;
+    let Entry::Ints(want, args) = entry else { return None };
+    let (name, params, ret, body) = jit::only_fn(prog)?;
+    if name != want {
+        return None;
+    }
+    let p = jit::compile(params, ret, body)?;
+    // The budget the compiled code is given is short by the declaration's
+    // tick, for the same reason the count below is long by it.
+    let r = p.run(args, BUDGET - 1)?;
+    // The interpreter charged one tick for *executing the `fn` statement*
+    // that declared this function, before anything called it -- `observe`
+    // runs the top level and then invokes. Compiled code never ran a top
+    // level, so it owes exactly that one tick to be comparable, and `only_fn`
+    // guarantees the top level is exactly one statement so the number is one
+    // and not an estimate.
+    //
+    // This was the harness being wrong, not the compiler, and it was found by
+    // the comparison failing on `fn f(): int { return 7 }` -- two ticks
+    // against three. Worth recording because a harness that had been written
+    // to agree would have hidden every later discrepancy behind the same
+    // fudge.
+    let steps = r.steps + 1;
+    let out = match r.status {
+        jit::ST_VALUE => Outcome {
+            value: Value::Int(r.result).render(),
+            steps,
+            error: None,
+        },
+        jit::ST_NIL => {
+            // A function that falls off its end yields nothing, and
+            // `call_user` then checks that against the declared return type.
+            // Compiled code has to fail the same way, in the same words, or a
+            // function with a missing `return` would quietly answer nil here
+            // and an error there.
+            if matches!(ret, super::parse::Type::Int) {
+                Outcome::failed(alloc::format!("{} returns int, got nil", name), steps)
+            } else {
+                Outcome { value: Value::Nil.render(), steps, error: None }
+            }
+        }
+        jit::ST_BUDGET => Outcome::failed(
+            String::from("execution budget exceeded (infinite loop?)"),
+            steps,
+        ),
+        jit::ST_DIV0 => Outcome::failed(String::from("division by zero"), steps),
+        jit::ST_REM0 => Outcome::failed(String::from("remainder by zero"), steps),
+        _ => return None,
+    };
+    Some(out)
 }
 
 /// What comparing one case established.
@@ -192,7 +276,12 @@ pub enum Verdict {
 /// version of this ran all three and put their output in the middle of the
 /// suite.
 pub fn compare(src: &str, entry: Entry) -> Verdict {
-    let Some(y) = observe(src, entry, Route::Prepared) else {
+    compare_with(src, entry, Route::Prepared)
+}
+
+/// Compare `other` against the interpreter, asking `other` first.
+pub fn compare_with(src: &str, entry: Entry, other: Route) -> Verdict {
+    let Some(y) = observe(src, entry, other) else {
         return Verdict::OneRoute;
     };
     let Some(x) = observe(src, entry, Route::Armed) else {
@@ -311,6 +400,118 @@ const CORPUS: &[(&str, &str, Entry<'static>)] = &[
 
 ];
 
+/// The compiled slice: one function, integers only.
+///
+/// Every case here is run three ways -- armed, prepared and compiled -- and
+/// all three must agree on the answer, the cost and the failure. The cost is
+/// the interesting column: a code generator that gets arithmetic right and
+/// ticks nearly right passes any test that only reads answers.
+const INTS: &[(&str, &str, &str, &[i64])] = &[
+    ("a constant", "fn f(): int { return 7 }", "f", &[]),
+    ("a parameter back", "fn f(a: int): int { return a }", "f", &[41]),
+    (
+        "every arithmetic operator",
+        "fn f(a: int, b: int): int { return a + b * 3 - a / 2 + a % 3 }",
+        "f",
+        &[17, 5],
+    ),
+    (
+        "negative operands, since idiv truncates toward zero and so does Rust",
+        "fn f(a: int, b: int): int { return a / b + a % b }",
+        "f",
+        &[-17, 5],
+    ),
+    ("unary minus and not", "fn f(a: int): int { return -a + !a }", "f", &[0]),
+    (
+        "every comparison",
+        "fn f(a: int, b: int): int {          return (a < b) + (a <= b) * 2 + (a > b) * 4 + (a >= b) * 8               + (a == b) * 16 + (a != b) * 32 }",
+        "f",
+        &[3, 3],
+    ),
+    (
+        "if with an else, taken",
+        "fn f(a: int): int { if (a > 10) { return 1 } else { return 2 } }",
+        "f",
+        &[11],
+    ),
+    (
+        "if with an else, not taken",
+        "fn f(a: int): int { if (a > 10) { return 1 } else { return 2 } }",
+        "f",
+        &[3],
+    ),
+    (
+        "if with no else, falling past it",
+        "fn f(a: int): int { x = 0 if (a) { x = 5 } return x }",
+        "f",
+        &[0],
+    ),
+    (
+        "a loop that accumulates",
+        "fn f(n: int): int { i = 0 s = 0 while (i < n) { s = s + i i = i + 1 } return s }",
+        "f",
+        &[50],
+    ),
+    (
+        "a loop whose body never runs",
+        "fn f(n: int): int { i = 0 while (i < n) { i = i + 1 } return i }",
+        "f",
+        &[0],
+    ),
+    (
+        "an if nested in a loop",
+        "fn f(n: int): int { i = 0 s = 0          while (i < n) { if (i % 2) { s = s + i } else { s = s - 1 } i = i + 1 } return s }",
+        "f",
+        &[21],
+    ),
+    (
+        "returning out of a loop",
+        "fn f(n: int): int { i = 0 while (1) { if (i > n) { return i } i = i + 1 } return 0 }",
+        "f",
+        &[9],
+    ),
+    // Short circuit: whether the right side's ticks happen at all is decided
+    // by a value at runtime, which is the tick a compiler is most likely to
+    // charge unconditionally.
+    (
+        "&& that stops early",
+        "fn f(a: int, b: int): int { return a && b + b + b }",
+        "f",
+        &[0, 4],
+    ),
+    (
+        "&& that does not",
+        "fn f(a: int, b: int): int { return a && b + b + b }",
+        "f",
+        &[1, 4],
+    ),
+    (
+        "|| that stops early",
+        "fn f(a: int, b: int): int { return a || b + b + b }",
+        "f",
+        &[1, 4],
+    ),
+    (
+        "|| that does not",
+        "fn f(a: int, b: int): int { return a || b + b + b }",
+        "f",
+        &[0, 4],
+    ),
+    // The three failures, in the interpreter's own words.
+    ("division by zero", "fn f(a: int): int { return a / 0 }", "f", &[1]),
+    ("remainder by zero", "fn f(a: int): int { return a % 0 }", "f", &[1]),
+    (
+        "a runaway, stopped by the budget at the same step",
+        "fn f(a: int): int { i = 0 while (1) { i = i + 1 } return i }",
+        "f",
+        &[0],
+    ),
+    // A missing `return` is not nil here: `call_user` checks it against the
+    // declared type and refuses. The compiled route has to refuse in the same
+    // words.
+    ("no return at all", "fn f(a: int): int { x = a }", "f", &[3]),
+];
+
 /// Two programs that answer the same thing and cost different amounts.
 ///
 /// The harness has to catch this or it is not a harness. They differ by one
@@ -382,6 +583,75 @@ pub fn selftest() -> bool {
     } else {
         claim(&mut ok, compared == CORPUS.len() && one_route == 0,
             "every case in the corpus agrees exactly, 64 times over",
+        );
+    }
+
+    // The compiled slice, all three routes, every round.
+    let mut cworst: Option<(&str, Field)> = None;
+    let (mut cok, mut cskip) = (0usize, 0usize);
+    for _ in 0..ROUNDS {
+        cok = 0;
+        cskip = 0;
+        for (name, src, f, args) in INTS {
+            let e = Entry::Ints(f, args);
+            // Against the interpreter, and against the prepared route too, so
+            // a case is not quietly compared with only one of them.
+            for other in [Route::Compiled, Route::Prepared] {
+                match compare_with(src, e, other) {
+                    Verdict::Agreed => cok += 1,
+                    Verdict::OneRoute => cskip += 1,
+                    Verdict::Differed(fl) => {
+                        if cworst.is_none() {
+                            cworst = Some((name, fl));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let Some((name, f)) = cworst {
+        kprintln!("  FAIL   compiled '{}' differs from the interpreter on {:?}", name, f);
+        // Both sides, because "they differ on Steps" is not a bug report and
+        // guessing which way cost a run.
+        if let Some((_, src, fname, args)) = INTS.iter().find(|(n, ..)| n == &name) {
+            let e = Entry::Ints(fname, args);
+            for (label, route) in [("armed", Route::Armed), ("compiled", Route::Compiled)] {
+                match observe(src, e, route) {
+                    Some(o) => kprintln!(
+                        "         {:8} steps {:5}  value '{}'  err '{}'",
+                        label,
+                        o.steps,
+                        o.value,
+                        o.error.clone().unwrap_or_default()
+                    ),
+                    None => kprintln!("         {:8} declined", label),
+                }
+            }
+        }
+        ok = false;
+    } else {
+        claim(
+            &mut ok,
+            cok == INTS.len() * 2 && cskip == 0,
+            "every compiled function matches the interpreter exactly, 64 times over",
+        );
+    }
+
+    // Refusing is the other half of being correct. A code generator that
+    // compiled something outside its slice would be answering a question it
+    // was not asked, and the answer would be wrong in a way nothing here
+    // would catch -- these programs have no integer-only meaning at all.
+    for outside in [
+        "fn f(a: int): str { return \"x\" }",
+        "fn f(a: int): int { return len(list(1)) }",
+        "rec P { x } fn f(a: int): int { return P(a).x }",
+        "fn g(): int { return 1 } fn f(a: int): int { return g() }",
+        "fn f(a: int): int { return a & 1 }",
+    ] {
+        claim(
+            &mut ok,
+            observe(outside, Entry::Ints("f", &[1]), Route::Compiled).is_none(),
+            "a function outside the slice is refused, not approximated",
         );
     }
 

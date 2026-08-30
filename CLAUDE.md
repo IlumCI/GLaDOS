@@ -965,6 +965,41 @@ as an unbroken column of `EXCEPTION 0x0d`. Pacing is also turned off, since
 It belongs to the console rather than to the reporter, it predates all of
 this, and it is now visible instead of silent.
 
+**And there is a code generator now.** `src/aiksi/jit.rs` compiles one
+function of integer arithmetic, `if`, `while` and `return` to x86-64, emits it
+into an `Exec`, and calls it through the `sysv64` pointer `cpu::code` pins.
+No builtins, no strings, no records, no `use`, no calls. Anything outside that
+slice is **refused** -- `compile` answers `None` and the interpreter remains
+the only thing that ran it -- and five claims check that refusing actually
+happens, because a generator that quietly compiled a string return would be
+answering a question nobody asked.
+
+It is reached only from `differ`, never from a live path. Nothing routes
+through it and `voter` does not know it exists.
+
+**The step count is the hard part, not the arithmetic.** Twenty-one functions
+run three ways -- armed, prepared, compiled -- and all three must agree on the
+value, the cost and the error text, 64 rounds. The cases that earn their place
+are the short-circuit pair, where whether the right side's ticks happen at all
+is decided by a runtime value, and the runaway, which has to hit the budget at
+the *same step*, not merely also stop. Failure text is compared too: division
+by zero is a status in compiled code that becomes the interpreter's own words,
+because a compiler with perfect arithmetic and the wrong error string passes
+any test that only reads answers.
+
+The harness caught the first mismatch immediately, on `fn f(): int { return 7
+}`, and it was the harness's fault rather than the compiler's: `observe` runs
+the top level before invoking, so the interpreter had already charged one tick
+for *executing the `fn` statement* that declares the function. Compiled code
+never runs a top level, so it owes exactly that tick -- and `only_fn`
+guarantees the top level is one statement, so the number is one and not an
+estimate. The budget it is given is short by one for the same reason.
+
+A caution recorded because it cost three runs: two of the "still failing"
+results after that fix were stale binaries, from commands that ran `cargo`
+from the wrong directory. The `Bash` working directory is not the repo and
+does not persist between calls.
+
 The tick rule is written down on `Interp::tick` because anything executing
 this language by another route has to match it exactly: **once entering
 `stmt`, once entering `expr`, one extra per `while` iteration, and nothing
