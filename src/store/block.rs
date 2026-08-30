@@ -64,7 +64,12 @@ pub fn read(lba: u64, blocks: u32, buf: &mut [u8]) -> Result<(), Error> {
     Ok(())
 }
 
-/// Write `blocks` blocks. Fails unless NVMe writes have been unlocked.
+/// Write `blocks` blocks.
+///
+/// Fails unless NVMe writes have been unlocked *and* every block lands inside
+/// the region that unlock claimed. Both checks live in `nvme::write`, one
+/// layer down, so a caller that reaches the driver by another route cannot
+/// miss them -- which is why this function does not repeat them.
 pub fn write(lba: u64, blocks: u32, buf: &[u8]) -> Result<(), Error> {
     let bs = block_size() as usize;
     if buf.len() < blocks as usize * bs {

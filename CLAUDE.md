@@ -1228,6 +1228,20 @@ fully allocated to Windows there is no such region and init fails, which is the
 intended outcome. Every error path re-locks; leaving it open is how a safety
 mechanism becomes decorative.
 
+**The unlock names a range, and the range is enforced.** It was one bit for a
+long time: unlocking said writes were allowed and nothing said *where*, so from
+the moment `store::init` succeeded every LBA on the device was writable -- the
+partition table at zero, the ESP, and the Windows volume that is still the only
+other thing on this disk. `nvme::write` checks `may_write(lba, count)` against
+the window the unlock claimed, `store` prints the window beside "UNLOCKED"
+rather than leaving an operator to assume it means the disk, and `diag wgate`
+asserts the whole decision without a device and without writing anything --
+including that a write starting inside the window and overrunning it is
+refused, and that a length overflowing `u64` does not wrap into a pass.
+
+This is a prerequisite for anything that writes the ESP, not a separate
+concern: an ESP updater built on a global unlock is a whole-disk writer.
+
 ## Evaluation discipline
 
 This project measures instead of arguing, and the harness exists because the

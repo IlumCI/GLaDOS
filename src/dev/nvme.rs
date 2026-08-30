@@ -345,6 +345,12 @@ impl Nvme {
         if !writes_unlocked() {
             return Err(0xFFFC);
         }
+        // Outside the claimed region is refused, and this is the check the
+        // gate was missing. `store` unlocks for its own region; without this
+        // the unlock was a licence to write the partition table.
+        if !may_write(lba, count as u32) {
+            return Err(0xFFFB);
+        }
         let bytes = count as usize * self.block_size as usize;
         if count as u32 > self.max_transfer_blocks {
             return Err(0xFFFD);
@@ -370,19 +376,64 @@ impl Nvme {
 
 static WRITES: AtomicBool = AtomicBool::new(false);
 
+/// The only blocks a write may touch, as `[start, end)`.
+///
+/// **The lock used to be a bit, and a bit is the wrong shape.** Unlocking said
+/// "writes are allowed" and nothing said *where*, so from the moment
+/// `store::init` succeeded, every LBA on the device was writable -- the
+/// partition table at zero, the EFI system partition, and the Windows volume
+/// that is still the only other thing on this disk. The gate's own doc comment
+/// says there is no undo for a misplaced LBA, and then the gate did not check
+/// the LBA.
+///
+/// It is a window now, and every caller that unlocks has to name one. That is
+/// not extra ceremony: both callers already had the region in hand from
+/// `find_store_region`, and a caller that cannot say which blocks it means is
+/// exactly the caller that should not be writing.
+static WIN_START: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static WIN_END: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 pub fn writes_unlocked() -> bool {
     WRITES.load(Ordering::Relaxed)
 }
 
+/// The window writes are confined to, or `None` when locked.
+pub fn write_window() -> Option<(u64, u64)> {
+    if !writes_unlocked() {
+        return None;
+    }
+    Some((WIN_START.load(Ordering::Relaxed), WIN_END.load(Ordering::Relaxed)))
+}
+
+/// Would this write be allowed?
+///
+/// Separated from `write` so the gate can be checked without a device and
+/// without writing anything -- the property is arithmetic, and a safety gate
+/// nobody can test is a safety gate nobody has tested.
+pub fn may_write(lba: u64, count: u32) -> bool {
+    let Some((start, end)) = write_window() else { return false };
+    let Some(last) = lba.checked_add(count as u64) else { return false };
+    // An empty window admits nothing, which is the right answer for a caller
+    // that unlocked with a zero-length region.
+    start < end && lba >= start && last <= end
+}
+
 /// Deliberately explicit, and deliberately not wired to a shell command that
 /// could be typed by accident.
-pub fn unlock_writes(confirm: u64) -> bool {
-    if confirm == 0xD15EA5E {
-        WRITES.store(true, Ordering::Relaxed);
-        true
-    } else {
-        false
+///
+/// `start` and `blocks` are the region the caller is claiming. Everything
+/// outside it stays refused whether or not this succeeds.
+pub fn unlock_writes(confirm: u64, start: u64, blocks: u64) -> bool {
+    if confirm != 0xD15EA5E {
+        return false;
     }
+    let Some(end) = start.checked_add(blocks) else { return false };
+    WIN_START.store(start, Ordering::Relaxed);
+    WIN_END.store(end, Ordering::Relaxed);
+    // The window before the bit: a reader that sees writes unlocked must never
+    // see the previous caller's window still standing.
+    WRITES.store(true, Ordering::Relaxed);
+    true
 }
 
 /// Put the lock back.
@@ -394,6 +445,56 @@ pub fn unlock_writes(confirm: u64) -> bool {
 /// to undo it.
 pub fn lock_writes() {
     WRITES.store(false, Ordering::Relaxed);
+    // The window goes too. A stale one left behind would be a window somebody
+    // could re-open into by unlocking with a bad confirmation and getting the
+    // early return -- which does not set it, and so would inherit this.
+    WIN_START.store(0, Ordering::Relaxed);
+    WIN_END.store(0, Ordering::Relaxed);
+}
+
+/// The gate, checked without a device and without writing anything.
+///
+/// Every claim here is about `may_write`, which is the whole of the decision.
+/// It restores whatever window was in force, because this runs at boot on a
+/// machine that may already have mounted a store.
+pub fn gate_selftest() -> bool {
+    use crate::kprintln;
+    let saved = write_window();
+    let mut ok = true;
+    let mut claim = |what: &str, good: bool| {
+        if !good {
+            ok = false;
+        }
+        kprintln!("  {}  {}", if good { "ok " } else { "FAIL" }, what);
+    };
+
+    lock_writes();
+    claim("locked, nothing may be written", !may_write(0, 1) && !may_write(1000, 1));
+
+    unlock_writes(0xD15EA5E, 2048, 512);
+    claim("unlocked, the claimed region may be written", may_write(2048, 512));
+    claim("and the first block outside it may not", !may_write(2560, 1));
+    claim("nor the one before it", !may_write(2047, 1));
+    // The case that matters most on this machine: LBA 0 is the partition
+    // table, and before the window existed an unlocked store made it writable.
+    claim("nor the partition table", !may_write(0, 1));
+    // A write that starts inside and runs out the far end is the shape that
+    // gets a bounds check wrong.
+    claim("nor one that starts inside and overruns", !may_write(2560 - 4, 8));
+    // Length is attacker-controlled in the sense that matters: a caller with
+    // an arithmetic bug should not wrap into a pass.
+    claim("nor one whose length overflows", !may_write(u64::MAX - 1, 8));
+
+    unlock_writes(0xD15EA5E, 2048, 0);
+    claim("an empty claim admits nothing", !may_write(2048, 1));
+
+    claim("a wrong confirmation does not unlock", !unlock_writes(1, 0, u64::MAX));
+
+    lock_writes();
+    if let Some((start, end)) = saved {
+        unlock_writes(0xD15EA5E, start, end.saturating_sub(start));
+    }
+    ok
 }
 
 static CONTROLLER: Racy<Option<Nvme>> = Racy::new(None);

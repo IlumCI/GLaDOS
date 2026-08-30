@@ -51,7 +51,10 @@ pub fn init() -> Result<(u64, u64), InitError> {
     // in the case that matters most.
     cas::verify_region_safe(start, blocks).map_err(InitError::Store)?;
 
-    crate::dev::nvme::unlock_writes(0xD15EA5E);
+    // The region and nothing else. Unlocking used to be a bare bit, so from
+    // here every LBA on the device was writable -- including the partition
+    // table and the ESP, on the one disk that also holds Windows.
+    crate::dev::nvme::unlock_writes(0xD15EA5E, start, blocks);
     match cas::Store::format(start, blocks) {
         Ok(s) => {
             unsafe { *STORE.get() = Some(s) };
@@ -77,7 +80,7 @@ pub fn unlock() -> Result<(u64, u64), cas::Error> {
         return Err(cas::Error::NotFormatted);
     };
     cas::verify_region_safe(start, blocks)?;
-    crate::dev::nvme::unlock_writes(0xD15EA5E);
+    crate::dev::nvme::unlock_writes(0xD15EA5E, start, blocks);
     Ok((start, blocks))
 }
 

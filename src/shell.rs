@@ -2185,6 +2185,19 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     "  writes  {}",
                     if crate::dev::nvme::writes_unlocked() { "UNLOCKED" } else { "locked (read-only)" }
                 );
+                // Where, not just whether. "UNLOCKED" on its own reads as
+                // "the disk is writable", and for a long time that was
+                // exactly what it meant -- the gate held one bit and no
+                // range. The window is the answer to the question an operator
+                // is actually asking when they look at this line.
+                if let Some((start, end)) = crate::dev::nvme::write_window() {
+                    kprintln!(
+                        "          only LBA {}..{} ({} block(s)); everything else is refused",
+                        start,
+                        end,
+                        end.saturating_sub(start)
+                    );
+                }
                 console::set_color(WHITE);
 
                 // A page-aligned DMA buffer, not a stack array. An unaligned
