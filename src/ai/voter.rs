@@ -53,7 +53,7 @@
 //! the held-out slice and the judges decide; `install` is what wires one in,
 //! and it takes a hash somebody has seen a verdict for.
 
-use crate::aiksi::eval::{Caps, Interp, Value};
+use crate::aiksi::eval::{Interp, Value};
 use crate::aiksi::parse::Stmt;
 use crate::store::sha256;
 use crate::sysbox;
@@ -608,6 +608,84 @@ pub fn author(names: &[String], table: &[(String, usize, u32)]) -> Option<String
         return None;
     }
     Some(compose(&clauses))
+}
+
+/// Where the time in a routing decision actually goes.
+///
+/// `vote` is the most frequent Aiksi in the system -- once per routing
+/// decision -- and it does three separable things: build an interpreter, run
+/// the program's top level to register `fn vote`, and call it. Only the third
+/// is the program doing its job. The other two are paid on every vote because
+/// the interpreter must be fresh, which is a *correctness* property (a core
+/// that remembered would make the corpus order part of the answer), not an
+/// accident of using a tree-walker -- so no code generator would remove them.
+///
+/// This is measured before any compiler is written, because the case for one
+/// rests on the walk being the cost, and that has never been checked. The
+/// phases are timed through the same `interp()` and `arm()` the real path
+/// uses, not through a copy of them, so the split cannot describe something
+/// other than what `vote` does.
+pub fn bench() {
+    use crate::kprintln;
+    let mhz = crate::time::tsc_mhz().max(1);
+    const RUNS: usize = 9;
+
+    // A core of exactly the shape `compose` produces, since that is what the
+    // machine writes and therefore what the cost question is about.
+    let src = compose(&[
+        Clause { cue: String::from("applets"), class: 0 },
+        Clause { cue: String::from("support"), class: 0 },
+        Clause { cue: String::from("back"), class: 20 },
+    ]);
+    let h = sha256::hash(src.as_bytes());
+    let Ok(core) = parse(&h, &src) else {
+        kprintln!("  the composed core would not parse");
+        return;
+    };
+    let text = "put everything the way it was at checkpoint two";
+    let all: Vec<usize> = (0..23).collect();
+    let list = Value::List(all.iter().map(|i| Value::Int(*i as i64)).collect());
+
+    let ns = |c: u64| -> u64 { c.saturating_mul(1000) / mhz };
+    let (mut b_lo, mut a_lo, mut i_lo, mut t_lo) = (u64::MAX, u64::MAX, u64::MAX, u64::MAX);
+    let mut used = 0u64;
+    for _ in 0..RUNS {
+        let t0 = crate::time::rdtsc();
+        let mut it = core.interp();
+        let t1 = crate::time::rdtsc();
+        let armed = core.arm(&mut it).is_ok();
+        let t2 = crate::time::rdtsc();
+        if armed {
+            let _ = it.invoke("vote", &[Value::Str(String::from(text)), list.clone()]);
+        }
+        let t3 = crate::time::rdtsc();
+        used = it.steps();
+        b_lo = b_lo.min(t1.wrapping_sub(t0));
+        a_lo = a_lo.min(t2.wrapping_sub(t1));
+        i_lo = i_lo.min(t3.wrapping_sub(t2));
+        t_lo = t_lo.min(t3.wrapping_sub(t0));
+    }
+
+    kprintln!("  one vote, best of {}:", RUNS);
+    kprintln!("    build interpreter    {} ns", ns(b_lo));
+    kprintln!("    arm (run top level)  {} ns", ns(a_lo));
+    kprintln!("    call vote            {} ns", ns(i_lo));
+    kprintln!("    total                {} ns", ns(t_lo));
+    let total = ns(t_lo).max(1);
+    kprintln!(
+        "    the walk is {}% of it; {}% is setup paid per decision",
+        ns(i_lo) * 100 / total,
+        (ns(b_lo) + ns(a_lo)) * 100 / total
+    );
+    // The part a code generator could actually remove.
+    //
+    // "The walk" above is everything `invoke` does, and most of that is not
+    // walking: it is the string `lower` allocates, what `contains` scans, and
+    // the arguments being cloned into the frame. Only the stepping itself --
+    // this many steps at the rate `aiksi bench` just measured -- is dispatch
+    // overhead a compiler would take away. Printing the two side by side is
+    // the whole point of measuring before designing.
+    kprintln!("    {} steps taken by the vote", used);
 }
 
 pub fn selftest() -> bool {

@@ -23,6 +23,94 @@ pub fn eval_line(interp: &mut Interp, src: &str) -> Result<Value, String> {
     interp.run(&ast)
 }
 
+/// What a step actually costs, which nobody has ever measured.
+///
+/// Every step budget in this tree -- `STEP_BUDGET` 20,000,000, `SKILL_BUDGET`
+/// 5,000,000, `DRAW_BUDGET` 200,000, `VOTE_BUDGET` 20,000 -- is a step count
+/// chosen by comparison to another step count. They are a chain of "one order
+/// below the previous" decisions with no wall-clock number anywhere underneath
+/// them, so nobody has been able to say what any of them means in time. That
+/// is the first thing a compiler would need to know, and it is worth knowing
+/// whether or not one is ever written.
+///
+/// Best of nine, min and max, for the reason `video bench` is: under emulation
+/// a single sample measures the host's scheduler rather than the guest.
+///
+/// The step count comes from the interpreter itself rather than from counting
+/// nodes here. `tick` fires once per statement, once per expression node and
+/// once more per loop iteration, and a second implementation of that rule in
+/// the benchmark would be a second thing to keep in step -- and would quietly
+/// mis-report the moment either drifted.
+pub fn bench() {
+    use crate::kprintln;
+    let mhz = crate::time::tsc_mhz().max(1);
+    const RUNS: usize = 9;
+
+    // Cycles, not microseconds: the interesting quantities here are hundreds
+    // of nanoseconds and dividing by MHz first would round them to zero.
+    fn best(mut f: impl FnMut()) -> (u64, u64) {
+        let (mut lo, mut hi) = (u64::MAX, 0u64);
+        for _ in 0..RUNS {
+            let t = crate::time::rdtsc();
+            f();
+            let d = crate::time::rdtsc().wrapping_sub(t);
+            lo = lo.min(d);
+            hi = hi.max(d);
+        }
+        (lo, hi)
+    }
+    let ns = |cycles: u64| -> u64 { cycles.saturating_mul(1000) / mhz };
+
+    kprintln!("  tsc {} MHz, best of {}", mhz, RUNS);
+
+    // Construction alone. `Core::vote` pays this on every routing decision.
+    let (c_lo, c_hi) = best(|| {
+        let it = eval::Interp::new();
+        core::hint::black_box(&it);
+    });
+    kprintln!("  Interp::new()          {} ns  (max {})", ns(c_lo), ns(c_hi));
+
+    // A tight loop, timed against the interpreter's own step count.
+    let src = "i = 0 while (i < 20000) { i = i + 1 } i";
+    let mut steps = 0u64;
+    let (l_lo, l_hi) = best(|| {
+        let mut it = eval::Interp::new();
+        let _ = eval_line(&mut it, src);
+        steps = it.steps();
+    });
+    kprintln!(
+        "  20k-iteration loop     {} us  (max {}), {} steps",
+        ns(l_lo) / 1000,
+        ns(l_hi) / 1000,
+        steps
+    );
+    if steps == 0 {
+        kprintln!("  the loop reported no steps -- nothing below this line means anything");
+        return;
+    }
+    // Picoseconds, because a step is well under a nanosecond of resolution
+    // once the loop is divided out and integer nanoseconds would read as 0.
+    let ps = ns(l_lo).saturating_mul(1000) / steps;
+    kprintln!("  one step               {} ps", ps);
+
+    // What every budget in the tree means in time, which is the number none of
+    // them could be checked against before.
+    kprintln!("  a budget spent in full, at that rate:");
+    for (name, budget) in [
+        ("VOTE_BUDGET  20k", 20_000u64),
+        ("DRAW_BUDGET 200k", 200_000),
+        ("SKILL_BUDGET  5M", 5_000_000),
+        ("STEP_BUDGET  20M", 20_000_000),
+    ] {
+        let us = budget.saturating_mul(ps) / 1_000_000;
+        if us >= 1000 {
+            kprintln!("    {}   {} ms", name, us / 1000);
+        } else {
+            kprintln!("    {}   {} us", name, us);
+        }
+    }
+}
+
 /// Programs run end to end, and compared against what they should produce.
 ///
 /// The point of the language is that the machine will write in it, so what

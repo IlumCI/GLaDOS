@@ -1451,6 +1451,17 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         }
                     }
                 }
+                // Where a routing decision's time actually goes.
+                "bench" => {
+                    console::set_color(YELLOW);
+                    kprintln!("[aiksi]");
+                    console::set_color(LTGRAY);
+                    crate::aiksi::bench();
+                    console::set_color(YELLOW);
+                    kprintln!("[vote]");
+                    console::set_color(LTGRAY);
+                    voter::bench();
+                }
                 // How much room a core has here, asked without one.
                 //
                 // The first question, and until now an unaskable one. A core

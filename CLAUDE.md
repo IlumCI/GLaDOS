@@ -795,8 +795,48 @@ to ask for a billion-element list, and this kernel has no OOM killer and one
 address space, so the step budget never sees the single call that takes the
 heap. Socket timeouts are clamped to 30 s because an unbounded one in a repaint
 path hangs the desktop and the step budget cannot see a blocking call. And
-`app::document` runs an application's `rows()` on **every repaint**, so that
-path takes `with_step_budget(DRAW_BUDGET)` rather than the full one.
+`app::document` takes `with_step_budget(DRAW_BUDGET)` rather than the full one
+-- though **not** because it runs per repaint, which its own comment claimed
+for a long time. `desk::refresh_routed` is the only caller and rebuilds a
+window's panel after a command runs, since a command is the only thing that
+changes what a route would produce; `draw` paints the stored panel. The bound
+is right and the reason was wrong.
+
+**What a step costs, measured at last.** `core bench` is the first wall-clock
+calibration of Aiksi in this project's history, best of nine like `video
+bench`. Every step budget in the tree was a number chosen by comparison to
+another number, and nobody had ever timed one:
+
+    one step                    13.7 ns      (~37 cycles at 2.67 GHz)
+    Interp::new()               2,132 ns
+
+    VOTE_BUDGET  20k    274 us      DRAW_BUDGET 200k    2 ms
+    SKILL_BUDGET  5M     68 ms      STEP_BUDGET  20M    274 ms
+
+So the budgets are sane as safety bounds, and `voter::Core::vote` -- the
+genuinely hot path, on every routing decision -- spends **20 steps against a
+20,000 ceiling**, a tenth of a percent of what it is allowed.
+
+The same command breaks one vote into its parts, and the result contradicted
+a confident prediction written into the plan that asked for the measurement:
+
+    build interpreter    1,757 ns     31%
+    arm (run top level)    623 ns     11%
+    call vote            3,244 ns     57%
+    total                5,658 ns
+
+The walk looks dominant and is not. Twenty steps at 13.7 ns is about 275 ns of
+dispatch -- **8% of that call and 5% of the vote**. The rest is work no code
+generator removes: `lower` allocating a fresh string, `contains` scanning it,
+and the argument string plus a 23-element list cloned into the frame. Against
+that, the 2,380 ns of setup paid per decision is **8x larger than the entire
+tree-walk**, and it is setup for a program whose whole body is one assignment
+and three `if (contains(t, "word")) { return N }`.
+
+That is why F1 comes before any compiler, and why a compiler for this tree
+cannot be justified as an optimisation of this path. The plan's own text said
+so in advance -- "unless F0 shows the tree-walk itself is not the cost" -- and
+F0 showed exactly that.
 
 There is one TCP connection. `tcp` holds a single TCB and `connect` aborts
 whatever was open before it; the builtins expose that rather than handing back

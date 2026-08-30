@@ -165,12 +165,16 @@ pub fn call(name: &str, expr: &str) -> Result<String, String> {
     } else {
         aiksi::Interp::sandboxed(&alloc::format!("{}/{}", ROOT, name))
     }
-    // Bounded, because the desktop calls this. `document` runs the
-    // application's row function on every repaint, and the full budget is
-    // twenty million steps -- enough for a generated loop to make the window
-    // manager feel broken while the symptom points at the compositor. A
-    // program that needs more than this to build a list is a program that
-    // should say so.
+    // Bounded, because the desktop calls this. The bound is right and the
+    // reason once given for it was not: this does not run per compositor
+    // frame. `desk::refresh_routed` is the only caller and rebuilds a
+    // window's panel *after a command runs*, because a command is the only
+    // thing that changes what a route would produce; `draw` then paints the
+    // stored panel. So the budget is what stands between a generated loop
+    // and a shell that has stopped answering, not between one and a stalled
+    // window manager. At the rate `core bench` measures, this ceiling is
+    // about two milliseconds, and the full one is twenty. A program that
+    // needs more than that to build a list is a program that should say so.
     .with_step_budget(aiksi::eval::DRAW_BUDGET);
     aiksi::eval_line(&mut it, &src)?;
     let v = aiksi::eval_line(&mut it, expr)?;
