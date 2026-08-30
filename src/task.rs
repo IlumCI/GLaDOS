@@ -18,7 +18,7 @@ use crate::sync::Racy;
 use alloc::alloc::{alloc, Layout};
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-pub const MAX_TASKS: usize = 8;
+pub const MAX_TASKS: usize = 24;
 const STACK_SIZE: usize = 64 * 1024;
 
 // Defined in assembly rather than as a `#[naked]` fn: this must have exactly
@@ -64,7 +64,22 @@ extern "sysv64" {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum State {
     Unused,
+    /// Runnable and claimed by nobody. Any core may take it.
     Ready,
+    /// Executing on this core. No other core may take it, which is the whole
+    /// of the mutual exclusion between cores: a task is a single stack and two
+    /// cores on one stack is not a race that can be recovered from.
+    Running(u8),
+    /// Switched away from, with its stack pointer not yet written down.
+    ///
+    /// This state exists for a window of a few instructions and it is the
+    /// reason the scheduler is not simply a lock around the old one. Between
+    /// deciding to leave a task and `glados_switch_context` storing its `rsp`,
+    /// the task is not resumable, and marking it `Ready` there would let
+    /// another core pick it up and resume a stack pointer that is stale. The
+    /// core that switched *in* clears this, by which time the store has
+    /// happened.
+    Handoff(u8),
 }
 
 #[derive(Clone, Copy)]
@@ -74,6 +89,13 @@ pub struct Task {
     pub name: &'static str,
     pub entry: Option<fn()>,
     pub switches: u64,
+    /// The only core allowed to run this, or -1 for any of them.
+    ///
+    /// Every core has an idle task pinned to it, which is what makes a core
+    /// with nothing to do still a core with something to run. Without pinning,
+    /// one core could pick up another's idle task and both would end up with
+    /// no stack of their own to return to.
+    pub pin: i16,
     /// XSAVE/FXSAVE image for this task's x87, SSE and AVX state.
     ///
     /// Necessary because preemption breaks the assumption the rest of the
@@ -86,12 +108,19 @@ pub struct Task {
     pub fpu: *mut u8,
 }
 
+// The extended-state image is a raw pointer, and moving a task between cores
+// is sound here for the reason the heap's free list is: one address space, so
+// the pointer means the same thing on every core and no core holds a private
+// mapping of it. `Spin` requires the claim rather than assuming it.
+unsafe impl Send for Task {}
+
 const EMPTY: Task = Task {
     rsp: 0,
     state: State::Unused,
     name: "",
     entry: None,
     switches: 0,
+    pin: -1,
     fpu: core::ptr::null_mut(),
 };
 
@@ -141,8 +170,30 @@ pub fn fpu_area_bytes() -> usize {
     crate::cpu::xsave_area_size()
 }
 
-static TASKS: Racy<[Task; MAX_TASKS]> = Racy::new([EMPTY; MAX_TASKS]);
-static CURRENT: AtomicUsize = AtomicUsize::new(0);
+static TASKS: crate::sync::Spin<[Task; MAX_TASKS]> =
+    crate::sync::Spin::new([EMPTY; MAX_TASKS]);
+
+/// How many cores this scheduler will run on.
+pub const MAX_CPUS: usize = 16;
+
+/// Nothing pending, and no task. `usize::MAX` rather than 0, because 0 is a
+/// real task index.
+const NONE: usize = usize::MAX;
+
+#[allow(clippy::declare_interior_mutable_const)]
+const IDLE_SLOT: AtomicUsize = AtomicUsize::new(NONE);
+
+/// What each core is running. Indexed by `smp::this_cpu`.
+static CURRENT: [AtomicUsize; MAX_CPUS] = [IDLE_SLOT; MAX_CPUS];
+
+/// The task each core switched away from and has not released yet. See
+/// `State::Handoff`.
+static PENDING: [AtomicUsize; MAX_CPUS] = [IDLE_SLOT; MAX_CPUS];
+
+/// Cores that have joined the scheduler, as a bitmap. A core that has not
+/// joined is not given tasks, so bringing one up is a single store rather than
+/// a state machine.
+static JOINED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(1);
 static COUNT: AtomicUsize = AtomicUsize::new(0);
 static SWITCHES: AtomicU64 = AtomicU64::new(0);
 static ENABLED: AtomicUsize = AtomicUsize::new(0);
@@ -153,19 +204,48 @@ static ENABLED: AtomicUsize = AtomicUsize::new(0);
 /// it, which is exactly when its stack pointer first becomes meaningful.
 pub fn init(name: &'static str) {
     let fpu = alloc_fpu_area();
-    unsafe {
-        let tasks = TASKS.get();
+    {
+        let mut tasks = TASKS.lock_irq();
         tasks[0] = Task {
             rsp: 0,
-            state: State::Ready,
+            // Already executing on the bootstrap processor, which is core 0.
+            state: State::Running(0),
             name,
             entry: None,
             switches: 0,
+            // Not pinned. It is where boot happened to be standing, and its
+            // stack is memory like any other in a single address space, so
+            // another core may resume it.
+            //
+            // Pinning it starved it. `schedule` prefers unpinned tasks so that
+            // a core does not settle into idling while work exists, which
+            // meant the shell became reachable only when nothing else was, and
+            // once the clock, mind and agent tasks existed that was never.
+            // Boot ran to the end of its selftests and no prompt appeared.
+            pin: -1,
             fpu,
         };
     }
     COUNT.store(1, Ordering::Release);
-    CURRENT.store(0, Ordering::Release);
+    CURRENT[0].store(0, Ordering::Release);
+}
+
+/// Let this core take tasks. Called once per application processor, after its
+/// own descriptor tables and interrupt controller are up.
+pub fn join(cpu: usize) {
+    if cpu >= MAX_CPUS {
+        return;
+    }
+    JOINED.fetch_or(1 << cpu, Ordering::AcqRel);
+}
+
+fn joined(cpu: usize) -> bool {
+    JOINED.load(Ordering::Acquire) & (1 << cpu) != 0
+}
+
+/// Which task this core is running, or `NONE` while it is idle.
+fn cur_of(cpu: usize) -> usize {
+    CURRENT[cpu].load(Ordering::Acquire)
 }
 
 /// Create a task. Returns its index.
@@ -202,13 +282,14 @@ pub fn spawn(name: &'static str, entry: fn()) -> Option<usize> {
         }
         frame.add(6).write(trampoline as *const () as u64);
 
-        let tasks = TASKS.get();
+        let mut tasks = TASKS.lock_irq();
         tasks[slot] = Task {
             rsp: new_rsp as u64,
             state: State::Ready,
             name,
             entry: Some(entry),
             switches: 0,
+            pin: -1,
             fpu: alloc_fpu_area(),
         };
     }
@@ -225,11 +306,21 @@ pub fn spawn(name: &'static str, entry: fn()) -> Option<usize> {
 /// brand new one has to turn it on itself, or it would run forever without ever
 /// being preempted.
 extern "C" fn trampoline() -> ! {
+    // A task entered here was switched *into*, so it owes the same release
+    // every other incoming context owes. This is not the same path as the one
+    // after `glados_switch_context`: a task that has never run does not return
+    // there, it arrives here instead.
+    //
+    // Missing this hung boot on the first switch. Task 0 was left in
+    // `Handoff`, which is claimable by nobody, so the clock task ran forever
+    // and the shell was never resumed. The symptom was a machine that printed
+    // "spawned 'clock' as task 1" and stopped.
+    finish_handoff(crate::smp::this_cpu() as usize);
     crate::cpu::enable_interrupts();
 
     let entry = {
-        let idx = CURRENT.load(Ordering::Acquire);
-        unsafe { TASKS.get()[idx].entry }
+        let idx = CURRENT[crate::smp::this_cpu() as usize].load(Ordering::Acquire);
+        TASKS.lock_irq()[idx].entry
     };
     if let Some(f) = entry {
         f();
@@ -245,8 +336,18 @@ pub fn enable() {
     ENABLED.store(1, Ordering::Release);
 }
 
+/// Which task this core is running.
 pub fn current() -> usize {
-    CURRENT.load(Ordering::Relaxed)
+    let me = crate::smp::this_cpu() as usize;
+    if me >= MAX_CPUS {
+        return 0;
+    }
+    let c = CURRENT[me].load(Ordering::Relaxed);
+    if c == NONE {
+        0
+    } else {
+        c
+    }
 }
 
 pub fn count() -> usize {
@@ -261,39 +362,88 @@ pub fn snapshot(index: usize) -> Option<Task> {
     if index >= count() {
         return None;
     }
-    Some(unsafe { TASKS.get()[index] })
+    Some(TASKS.lock_irq()[index])
 }
 
 /// Pick the next ready task and switch to it.
+/// Release whatever this core left in handoff on its way in.
+///
+/// Runs as the *incoming* task, after the switch, which is the only moment the
+/// outgoing task's stack pointer is known to have been written down. Doing it
+/// before the switch would publish a task whose `rsp` is stale and let another
+/// core resume a stack that is still being switched off.
+fn finish_handoff(cpu: usize) {
+    let prev = PENDING[cpu].swap(NONE, Ordering::AcqRel);
+    if prev == NONE {
+        return;
+    }
+    let mut t = TASKS.lock_irq();
+    if matches!(t[prev].state, State::Handoff(_)) {
+        t[prev].state = State::Ready;
+    }
+}
+
+/// Pick a task for `cpu` and switch to it.
+///
+/// Real work first, then this core's own idle task. Taking them in one pass
+/// would let a core settle into idling while something was runnable, because
+/// an idle task is `Ready` like any other.
 fn schedule() {
-    let n = COUNT.load(Ordering::Acquire);
-    if n < 2 {
+    let me = crate::smp::this_cpu() as usize;
+    if me >= MAX_CPUS || !joined(me) {
+        return;
+    }
+    let cur = CURRENT[me].load(Ordering::Acquire);
+    if cur == NONE {
         return;
     }
 
-    let cur = CURRENT.load(Ordering::Acquire);
-    let mut next = (cur + 1) % n;
-    while next != cur {
-        if unsafe { TASKS.get()[next].state } == State::Ready {
-            break;
+    let (save, load, out_fpu, in_fpu) = {
+        let mut t = TASKS.lock_irq();
+        let n = COUNT.load(Ordering::Acquire);
+
+        // `Ready` is the only claimable state. `Running` belongs to a core,
+        // and `Handoff` is a stack whose pointer has not landed yet.
+        let mut next = NONE;
+        for pass in 0..2 {
+            let start = cur + 1;
+            for k in 0..n {
+                let i = (start + k) % n;
+                if i == cur || t[i].state != State::Ready {
+                    continue;
+                }
+                let pinned = t[i].pin >= 0;
+                if pass == 0 && pinned {
+                    continue;
+                }
+                if pinned && t[i].pin != me as i16 {
+                    continue;
+                }
+                next = i;
+                break;
+            }
+            if next != NONE {
+                break;
+            }
         }
-        next = (next + 1) % n;
-    }
-    if next == cur {
-        return;
-    }
+        if next == NONE {
+            return;
+        }
 
-    SWITCHES.fetch_add(1, Ordering::Relaxed);
+        SWITCHES.fetch_add(1, Ordering::Relaxed);
+        t[next].switches += 1;
+        t[next].state = State::Running(me as u8);
+        t[cur].state = State::Handoff(me as u8);
+
+        // Published before the lock is dropped, so a core that sees this task
+        // as `Running` also sees which core owns it.
+        CURRENT[me].store(next, Ordering::Release);
+        PENDING[me].store(cur, Ordering::Release);
+
+        (&mut t[cur].rsp as *mut u64, t[next].rsp, t[cur].fpu, t[next].fpu)
+    };
 
     unsafe {
-        let tasks = TASKS.get();
-        tasks[next].switches += 1;
-
-        let out_fpu = tasks[cur].fpu;
-        let in_fpu = tasks[next].fpu;
-        let save = &mut tasks[cur].rsp as *mut u64;
-        let load = tasks[next].rsp;
-
         // Save the outgoing task's extended state, load the incoming task's,
         // and only then switch stacks.
         //
@@ -302,25 +452,21 @@ fn schedule() {
         // the restore runs when we are the *outgoing* task again, so it has to
         // use the index captured before the switch rather than CURRENT. That is
         // a silent wrong-task bug waiting for whoever later "simplifies" it.
-        // Doing both halves before the switch leaves no code after it to get
-        // wrong.
         //
         // Nothing between the xrstor and the switch may touch FP state.
-        // `glados_switch_context` is pure integer assembly and the store below
-        // is an atomic integer write.
+        // `glados_switch_context` is pure integer assembly.
         if !out_fpu.is_null() {
             crate::cpu::xsave_to(out_fpu);
         }
         if !in_fpu.is_null() {
             crate::cpu::xrstor_from(in_fpu);
         }
-
-        CURRENT.store(next, Ordering::Release);
         glados_switch_context(save, load);
     }
-    // Execution resumes here when someone switches back to `cur`. Our extended
-    // state was already restored by whoever switched to us, so there is
-    // deliberately nothing to do here.
+
+    // Resumed. Possibly on a different core from the one that left, which is
+    // why the core is asked for again rather than reused from above.
+    finish_handoff(crate::smp::this_cpu() as usize);
 }
 
 /// Called from the timer interrupt, after EOI.

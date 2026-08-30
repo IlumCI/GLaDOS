@@ -450,6 +450,17 @@ pub fn call(it: &mut Interp, name: &str, args: &[Value]) -> Result<Value, String
                         t(match task.state {
                             crate::task::State::Ready => "ready",
                             crate::task::State::Unused => "unused",
+                            // Which core, because with more than one the
+                            // interesting question about a running task is
+                            // where rather than whether.
+                            crate::task::State::Running(c) => match c {
+                                0 => "on core 0",
+                                1 => "on core 1",
+                                2 => "on core 2",
+                                3 => "on core 3",
+                                _ => "running",
+                            },
+                            crate::task::State::Handoff(_) => "switching",
                         }),
                         i(task.switches as i64),
                         i((n == here) as i64),
