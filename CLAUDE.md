@@ -446,6 +446,42 @@ GLADOS/UPDATE.FLG     any contents; presence is the request
 private half off every machine that will ever apply an update, and rebuild --
 adopting a signer is itself a kernel change, which is the point.
 
+**Testing it under QEMU needs a real disk, not VVFAT.** `-drive file=fat:rw:`
+projects a host directory as a synthetic FAT16 volume; its read-write mode can
+change the contents of a file that was there at boot and cannot do directory
+operations at all. The guest read `UPDATE.FLG` correctly and could not delete
+it, and "the firmware will not write the ESP" was being recorded as the reason
+without anybody having checked which half was true. `tools/mkesp.py` builds a
+raw FAT32 image with an MBR and an 0xEF partition, using the same
+`mkiso.build_fat` writer whose output the firmware already boots:
+
+```powershell
+.	oolsenv\Scripts\python.exe tools\drive.py --esp-image .qemu/esp.img --esp-rebuild ...
+.	oolsenv\Scripts\python.exe tools\drive.py --esp-image .qemu/esp.img ...   # reuse; guest writes persist
+```
+
+Reuse is the point: the image is a disk, so what the guest wrote is still there
+next boot, which is what makes the apply/trial/settle sequence observable.
+`--esp-rebuild` starts clean and discards it.
+
+The whole flow has been driven this way, with a throwaway key and two builds a
+version apart:
+
+    boot 1 (0.1.0)  signature signed by the update key
+                    copying the running image aside
+                    writing the new boot image
+                    applied -- reboot to run it
+    boot 2 (0.1.1)  this image is on trial          <- the swap landed
+    boot 3 (0.1.1)  silent                          <- the trial settled
+
+Three real bugs came out of that and none was reachable any other way: the hook
+runs before `init_heap`, so verifying a signature died at `memory allocation of
+32 bytes failed` (there is a static early arena now); the staged image was read
+and verified on *every* boot including trials, which is 2.8 MB and an ECDSA
+verification to answer a question already settled; and `ResetSystem` through the
+runtime table, called while boot services are still up, left the machine silent
+-- so the hook no longer reboots and the swap simply takes effect next boot.
+
 **What the health flag can and cannot catch.** The window it can write in ends
 at `ExitBootServices`, so the question it asks is whether the new image got
 from the firmware handoff to just before the memory map -- covering a binary

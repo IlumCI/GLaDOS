@@ -210,7 +210,10 @@ pub fn decide(
     have_old: bool,
     health: Option<u32>,
 ) -> Action {
-    // The trial resolves first, always. An image that has not proved itself
+    // The trial resolves first, always -- and `hook` relies on that: when
+    // `health` is `Some`, it does not read the staged image at all and passes
+    // placeholders for `staged` and `sig`. Any future arm that reads them
+    // before this one must fix the caller too. An image that has not proved itself
     // must not be allowed to apply a further update on top of itself -- that
     // would put two unproven changes in the boot path with one rollback copy
     // between them, and the copy would be of the image already on trial.
@@ -277,29 +280,63 @@ fn health_count(bs: &crate::uefi::BootServices, image: crate::uefi::Handle) -> O
     Some(text.trim().parse::<u32>().unwrap_or(MAX_TRIES))
 }
 
+/// What the hook did, so the caller knows whether a trial is now outstanding.
+pub enum Outcome {
+    /// Nothing staged, nothing on trial. The ordinary boot, and silent.
+    Quiet,
+    Said(&'static str),
+    /// An update was applied and a trial armed for the *next* boot. This boot
+    /// must not clear it: the image being tried is not the one running.
+    Armed(&'static str),
+}
+
 /// Apply a staged update, or resolve one on trial. Runs before
-/// `ExitBootServices` and reboots if it changed the boot image.
+/// `ExitBootServices`, which is the only time the ESP is writable.
 ///
-/// Answers a line to print, or `None` when there was nothing to do -- which is
-/// the ordinary case and stays silent.
-pub fn hook(bs: &crate::uefi::BootServices, image: crate::uefi::Handle) -> Option<&'static str> {
+/// **It does not reboot.** The first version did, and the guest never came
+/// back: `ResetSystem` through the runtime table, called while boot services
+/// are still up, left the machine silent -- no reset, no fault, no further
+/// output. Rather than debug a firmware path that this arrangement does not
+/// need, the swap simply takes effect at the next boot, whenever that is. The
+/// session carries on running the image it started with, which is the one that
+/// has already proved it works.
+pub fn hook(bs: &crate::uefi::BootServices, image: crate::uefi::Handle) -> Outcome {
     let flag = slurp(bs, image, UPDATE_FLAG).is_some();
     let health = health_count(bs, image);
     if !flag && health.is_none() {
-        return None;
+        return Outcome::Quiet;
     }
 
-    let staged = slurp(bs, image, STAGED_PATH);
-    let sig = match (staged, slurp(bs, image, STAGED_SIG)) {
-        (Some(img), Some(s)) => verify(img, s),
-        _ => Verdict::Malformed,
+    // Read and verify the staged image only when the decision could use it.
+    //
+    // `decide` resolves a trial before it looks at anything else, so on a
+    // trial or rollback boot these are ignored -- and computing them anyway
+    // meant reading a 2.8 MB image off the ESP and running a P-256
+    // verification to answer a question already settled. Worse than wasteful:
+    // the verification allocates, and the trial boot is exactly the one where
+    // the least should be happening.
+    crate::serial_println!("glados: update: flag={} health={:?}", flag, health);
+    let (staged, sig) = if health.is_none() {
+        let img = slurp(bs, image, STAGED_PATH);
+        crate::serial_println!(
+            "glados: update: staged {} byte(s), verifying",
+            img.map(|b| b.len()).unwrap_or(0)
+        );
+        let v = match (img, slurp(bs, image, STAGED_SIG)) {
+            (Some(i), Some(s)) => verify(i, s),
+            _ => Verdict::Malformed,
+        };
+        crate::serial_println!("glados: update: signature {}", v.why());
+        (img, v)
+    } else {
+        (None, Verdict::Malformed)
     };
     // Whether the running image can be copied aside, which is what the
     // decision needs -- not whether an older copy happens to be lying there.
     let running = slurp(bs, image, BOOT_PATH);
 
     match decide(flag, staged.is_some(), sig, running.is_some(), health) {
-        Action::Nothing => None,
+        Action::Nothing => Outcome::Quiet,
 
         Action::Trying(n) => {
             // Record the attempt before the risky part of the boot, so an
@@ -316,7 +353,7 @@ pub fn hook(bs: &crate::uefi::BootServices, image: crate::uefi::Handle) -> Optio
                 }
             }
             crate::uefi::write_file(bs, image, HEALTH_FLAG, &buf[i..]);
-            Some("update: this image is on trial")
+            Outcome::Said("update: this image is on trial")
         }
 
         Action::RollBack => {
@@ -325,45 +362,48 @@ pub fn hook(bs: &crate::uefi::BootServices, image: crate::uefi::Handle) -> Optio
                 // loop; the machine keeps running the image it has, which is
                 // the only one there is.
                 crate::uefi::delete_file(bs, image, HEALTH_FLAG);
-                return Some("update: the image failed and there is no copy to restore");
+                return Outcome::Said("update: the image failed and there is no copy to restore");
             };
             if !copy_verified(bs, image, old, BOOT_PATH) {
                 crate::uefi::delete_file(bs, image, HEALTH_FLAG);
-                return Some("update: the rollback would not write -- boot the USB");
+                return Outcome::Said("update: the rollback would not write -- boot the USB");
             }
             crate::uefi::delete_file(bs, image, HEALTH_FLAG);
-            crate::cpu::reboot();
-            Some("update: rolled back, rebooting")
+            Outcome::Said("update: rolled back -- reboot to run the restored image")
         }
 
         Action::Refuse(why) => {
             crate::uefi::delete_file(bs, image, UPDATE_FLAG);
-            Some(why)
+            Outcome::Said(why)
         }
 
         Action::Apply => {
             let (Some(img), Some(run)) = (staged, running) else {
                 crate::uefi::delete_file(bs, image, UPDATE_FLAG);
-                return Some("update: the staged image went away");
+                return Outcome::Said("update: the staged image went away");
             };
             // 2. A rollback copy, proved.
+            crate::serial_println!("glados: update: copying the running image aside");
             if !copy_verified(bs, image, run, OLD_PATH) {
                 crate::uefi::delete_file(bs, image, UPDATE_FLAG);
-                return Some("update: refused -- no rollback copy could be made");
+                return Outcome::Said("update: refused -- no rollback copy could be made");
             }
             // 3. Clear the flag before the window, so a crash inside it
             //    cannot re-enter.
             crate::uefi::delete_file(bs, image, UPDATE_FLAG);
             // 4. The window.
+            crate::serial_println!("glados: update: writing the new boot image");
             if !copy_verified(bs, image, img, BOOT_PATH) {
                 // 5. The one repair still available.
                 copy_verified(bs, image, run, BOOT_PATH);
-                return Some("update: the write failed and the old image was put back");
+                return Outcome::Said("update: the write failed and the old image was put back");
             }
             // 6. On trial from here.
             crate::uefi::write_file(bs, image, HEALTH_FLAG, b"0");
-            crate::cpu::reboot();
-            Some("update: applied, rebooting")
+            // Armed, not Said: the trial belongs to the image that boots
+            // next, and this boot clearing it would pass a verdict on a run
+            // that has not happened.
+            Outcome::Armed("update: applied -- reboot to run it")
         }
     }
 }

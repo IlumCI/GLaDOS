@@ -212,6 +212,30 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     // other way to reach the firmware.
     cpu::set_runtime(unsafe { (*st).runtime_services });
 
+    // A heap for the update hook, which needs one before there is one.
+    //
+    // `init_heap` runs *after* `ExitBootServices`, and the hook has to run
+    // before it -- the ESP is only writable while the firmware's FAT driver
+    // exists. Everything else the hook does is stack work, but verifying a
+    // P-256 signature is big-integer arithmetic and allocates, so the first
+    // real end-to-end test of an update died at
+    // `memory allocation of 32 bytes failed` before it reached the swap.
+    //
+    // A static arena rather than `allocate_pool`: `EarlyFrames` builds the
+    // real heap from Conventional memory only, and this lives in the loaded
+    // image, so the two cannot hand out the same page. Pool memory would be
+    // `LoaderData`, and whether that is safe depends on a memory-type filter
+    // several files away agreeing with an assumption made here.
+    //
+    // It is not wasted afterwards. `add_region` is additive, so this stays in
+    // the free list and `init_heap` grows the heap around it.
+    const EARLY_ARENA_LEN: usize = 1 << 20;
+    static mut EARLY_ARENA: [u8; EARLY_ARENA_LEN] = [0; EARLY_ARENA_LEN];
+    unsafe {
+        let base = core::ptr::addr_of_mut!(EARLY_ARENA) as usize;
+        mem::heap::HEAP.add_region(base, EARLY_ARENA_LEN);
+    }
+
     // --- a staged update, while the ESP is still writable ---
     //
     // Before the model, because applying one ends in a reboot and there is no
@@ -221,7 +245,8 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     // Inert unless somebody has staged an update *and* provisioned a signing
     // key: with `UPDATE_KEY` zeroed, `verify` answers `NoKey` and the decision
     // refuses. The mechanism ships built, tested and unable to fire.
-    if let Some(line) = update::hook(bs, image) {
+    let staged = update::hook(bs, image);
+    if let update::Outcome::Said(line) | update::Outcome::Armed(line) = staged {
         serial_println!("glados: {}", line);
         con_out(st, "glados: ");
         con_out(st, line);
@@ -251,7 +276,12 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     // ran, it drew, and it read every file it needs off the ESP. Past the
     // memory map there is no filesystem to record anything in, so this is the
     // last moment a trial can be resolved.
-    update::mark_healthy(bs, image);
+    // Not when a trial was armed a moment ago: that trial belongs to the image
+    // that boots next, and clearing it here would pass a verdict on a run that
+    // has not happened -- an update accepted by the image it replaces.
+    if !matches!(staged, update::Outcome::Armed(_)) {
+        update::mark_healthy(bs, image);
+    }
 
     // --- Memory map, then leave the firmware behind ---
     let mut map_size: usize = 0;

@@ -206,6 +206,21 @@ def main():
         i = argv.index("--timeout")
         timeout = int(argv[i + 1])
         del argv[i:i + 2]
+    # A real, writable ESP on a real block device.
+    #
+    # VVFAT's read-write mode cannot create or delete files, so anything that
+    # asks the firmware to *write* the ESP -- the update hook -- reads
+    # correctly and silently fails to change anything. This boots a raw FAT32
+    # image instead, and the guest's writes stay in it across runs, which is
+    # what makes the two-boot apply/prove flow observable.
+    esp_image = None
+    if "--esp-image" in argv:
+        i = argv.index("--esp-image")
+        esp_image = Path(argv[i + 1])
+        del argv[i:i + 2]
+    esp_force = "--esp-rebuild" in argv
+    if esp_force:
+        argv.remove("--esp-rebuild")
     iso = None
     if "--iso" in argv:
         i = argv.index("--iso")
@@ -357,6 +372,19 @@ def main():
             "--stage-iso to boot a larger one off an El Torito image."
         )
 
+    if esp_image is not None:
+        import mkesp
+
+        # Only when it is not already there. The guest writes into this image
+        # and those writes are the thing being observed, so rebuilding between
+        # boots would erase the state the next boot is supposed to find --
+        # which is precisely the two-boot flow the image exists to test.
+        if esp_image.exists() and not esp_force:
+            print(f"[drive] reusing {esp_image} (--esp-rebuild to start clean)")
+        else:
+            fat, tot = mkesp.build(esp, esp_image)
+            print(f"[drive] built {esp_image} ({tot / 1024 / 1024:.0f} MB, writable)")
+
     if stage_iso:
         import mkiso
 
@@ -417,6 +445,7 @@ def main():
         # which is the only way to test that the image tools/mkiso.py produces
         # is actually bootable rather than merely well-formed.
         *(["-cdrom", str(iso)] if iso else
+          ["-drive", f"format=raw,file={esp_image}"] if esp_image is not None else
           ["-drive", f"format=raw,file=fat:rw:{esp}"]),
         "-drive", f"file={ROOT / '.qemu/nvme.img'},if=none,id=nvm0,format=raw",
         "-device", "nvme,serial=GLADOSQEMU0001,drive=nvm0",
