@@ -153,6 +153,9 @@ pub enum ProposalKind {
     /// Judge a council core already stored under its content address.
     /// Judged J1/J5/J6 by `harness::core_bench_in`.
     Core([u8; 32]),
+    /// Adapt the attention path as well as the classifier, and judge what
+    /// that bought against what it costs. J1-J4, paired on routing.
+    Deep,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -212,6 +215,16 @@ impl Proposal {
         }
     }
 
+    /// A proposal to adapt the attention path, with the knobs it trains under.
+    ///
+    /// Unlike a core, this one is trained here and now, so it carries a real
+    /// learning rate, rank and epoch count -- and they are in the rendering,
+    /// which means two deep runs at different settings are different points
+    /// and the marker directory can tell them apart.
+    pub fn deep(lr: f32, rank: usize, alpha: f32, epochs: usize) -> Proposal {
+        Proposal { lr, rank, alpha, epochs, rule: 0, kind: ProposalKind::Deep }
+    }
+
     pub fn budget(&self, examples: usize, millis: u64) -> Budget {
         Budget {
             epochs: self.epochs,
@@ -249,10 +262,14 @@ impl Proposal {
         // hash of this text, so an unconditional `kind` line would re-address
         // every marker in `/ai/godel/tried` at once and the grid would be
         // walked from the beginning as though nothing had ever been measured.
-        if let ProposalKind::Core(h) = self.kind {
-            s.push_str("core ");
-            s.push_str(&hex32(&h));
-            s.push('\n');
+        match self.kind {
+            ProposalKind::Adapter => {}
+            ProposalKind::Core(h) => {
+                s.push_str("core ");
+                s.push_str(&hex32(&h));
+                s.push('\n');
+            }
+            ProposalKind::Deep => s.push_str("deep 1\n"),
         }
         s
     }
@@ -374,6 +391,18 @@ pub fn space_selftest() -> bool {
         return false;
     }
     if GRID.iter().any(|p| p.hash() == c1.hash()) {
+        return false;
+    }
+    // A deep point is its own kind, and its knobs are in its identity: two
+    // deep runs at different ranks are different experiments, and a marker
+    // that could not tell them apart would let the loop believe it had already
+    // tried something it had not.
+    let d1 = Proposal::deep(0.02, 4, 8.0, 4);
+    let d2 = Proposal::deep(0.02, 8, 8.0, 4);
+    if !d1.render().contains("deep 1") || d1.hash() == d2.hash() || d1.hash() == c1.hash() {
+        return false;
+    }
+    if GRID.iter().any(|p| p.hash() == d1.hash()) {
         return false;
     }
 
@@ -1314,6 +1343,7 @@ pub fn run(
             p.mark();
             trial_core(e, &h).map_err(Refused::Judge)
         }
+        ProposalKind::Deep => trial_deep(e, b, p),
     }
 }
 
@@ -1748,6 +1778,220 @@ fn drop_core() -> bool {
 /// exists to prevent, relocated into its own failure path. Now the failable
 /// reads all happen first, and the mutations happen only once none of them can
 /// fail for a reason we could have seen coming.
+/// Adapt the attention path, judge what it bought, and keep it only if it won.
+///
+/// The third kind of change, and the first that is *destructive while it is
+/// being measured*. `trial` builds a candidate adapter beside the running one
+/// and attaches it only on adoption; `train_full` has no such shape -- it
+/// walks gradients into the tensors the model is using. So the incumbent is
+/// copied out first and put back on every path that does not adopt. A judge
+/// that leaves a rejected variant installed is not a judge.
+///
+/// **What the frozen-base trade costs, said in the certificate.** A
+/// classifier-only adapter leaves every hidden state a constant, and that is
+/// what makes cached features, cheap re-judging and a cheap `Trial` possible.
+/// A deep one gives that up: judging it costs two full passes over the corpus
+/// rather than one cached one, and every earlier certificate's cached
+/// comparison stops applying to it. `deep: true` on the node is what tells a
+/// later reader which kind of object they are looking at.
+pub fn trial_deep(
+    e: &mut super::Engine,
+    b: &Budget,
+    p: &Proposal,
+) -> Result<Certificate, Refused> {
+    use super::train::RunError;
+    p.mark();
+
+    // Where everything goes now, before anything moves.
+    let before = super::harness::route_snapshot(e, super::harness::VALIDATION)
+        .map_err(|_| Refused::Train(RunError::NoCorpus))?;
+
+    // The incumbent, kept so a rejection can be undone. `None` is a real
+    // answer -- the frozen model is a variant -- and detaching is how it comes
+    // back.
+    let saved = e.model.adapters.as_ref().map(|a| a.to_blob());
+    let parent = ensure_head(e);
+
+    // A deep adapter to train into, if the machine is not already carrying
+    // one. `Adapters::full` adapts every q/k/v site as well as the decision
+    // layer, which is the whole difference being judged.
+    if e.model.adapters.is_none() {
+        let cfg = e.model.cfg.clone();
+        let full = super::adapter::Adapters::full(&cfg, b.rank, b.alpha);
+        if e.model.attach_adapters(full).is_err() {
+            return Err(Refused::Judge("a deep adapter will not attach to this checkpoint"));
+        }
+    }
+
+    let Some(report) = super::train::train_full(e, b, b.examples) else {
+        restore(e, &saved);
+        return Err(Refused::Train(RunError::Hardware));
+    };
+
+    let after = match super::harness::route_snapshot(e, super::harness::VALIDATION) {
+        Ok(s) => s,
+        Err(_) => {
+            restore(e, &saved);
+            return Err(Refused::Train(RunError::NoCorpus));
+        }
+    };
+
+    // --- J1: paired, on the items both snapshots saw --------------------
+    let n = before.correct.len().min(after.correct.len());
+    let mut fixed = 0usize;
+    let mut broke = 0usize;
+    for i in 0..n {
+        match (before.correct[i], after.correct[i]) {
+            (false, true) => fixed += 1,
+            (true, false) => broke += 1,
+            _ => {}
+        }
+    }
+    let chi = mcnemar(broke, fixed);
+    let (j1, j1_why) = if n == 0 {
+        (false, "no validation decisions")
+    } else if fixed <= broke {
+        (false, "no net repair")
+    } else if fixed - broke < MIN_FIXED {
+        (false, "net repair below the floor")
+    } else if chi < MCNEMAR_95 {
+        (false, "inside the noise")
+    } else {
+        (true, "beyond the noise")
+    };
+
+    // --- J2: does it still do the same thing unasked? -------------------
+    //
+    // Recomputed on both sides rather than cached, because the cache is
+    // exactly what deep training invalidates. A goal that now routes
+    // somewhere else is the failure this judge exists for, and one that
+    // routes to a mutating applet fails it whether or not it moved.
+    let goals_total = before.guards.len().min(after.guards.len());
+    let goals_held = (0..goals_total).filter(|i| before.guards[*i] == after.guards[*i]).count();
+    let j2 = goals_total > 0
+        && goals_held == goals_total
+        && after.guards[..goals_total].iter().all(|c| {
+            crate::sysbox::APPLETS
+                .get(*c)
+                .map(|a| !a.mutates)
+                .unwrap_or(false)
+        });
+
+    // --- J3: structural sanity ------------------------------------------
+    let (j3, j3_why) = if !after.finite {
+        (false, "the features stopped being finite")
+    } else if !report.last_loss.is_finite() {
+        (false, "the loss diverged")
+    } else if before.correct.len() != after.correct.len() {
+        (false, "the slice changed under the run")
+    } else {
+        (true, "finite throughout")
+    };
+
+    // --- J4: can this machine carry it? ---------------------------------
+    //
+    // The judge that a deep variant is most likely to fail, and rightly. Every
+    // adapted attention site is resident for the life of the model, where a
+    // classifier adapter is a few rows.
+    // The rank bound is not decode cost here, it is identity: `Variant.rank`
+    // is a byte, so a rank past 255 would wrap and two different experiments
+    // would share a node. Refusing is better than recording a lie.
+    let resident_kib = e.model.adapters.as_ref().map(|a| a.resident_bytes()).unwrap_or(0) / 1024;
+    let j4 = b.rank <= 255 && resident_kib <= MAX_RESIDENT_KIB;
+
+    let blob = e.model.adapters.as_ref().map(|a| a.to_blob());
+    let ablob = blob.as_ref().map(|x| sha256::hash(x));
+
+    let variant = Variant {
+        parent,
+        adapter: ablob,
+        policy: sysbox::read_blob("/ai/agent/policy").map(|p| sha256::hash(&p)),
+        skills: None,
+        corpus: sysbox::hash_of(super::vocab::CORPUS),
+        // The whole point of the node: this one moved the attention path, and
+        // nothing that reads the lineage may confuse it with one that did not.
+        deep: true,
+        core: super::voter::installed().map(|c| c.hash),
+        core_seen: true,
+        lambda: b.lr,
+        rank: b.rank as u8,
+        epochs: report.epochs as u32,
+        rule: p.rule,
+        born: crate::dev::rtc::now().map(|d| crate::dev::rtc::unix_seconds(&d)).unwrap_or(0),
+    };
+    let vhash = variant.hash();
+
+    let mut cert = Certificate {
+        parent,
+        variant: vhash,
+        decisions: n,
+        validation: n,
+        // The cheap signal a deep run does have: the loss went down.
+        predicted: report.last_loss < report.first_loss,
+        fixed,
+        broke,
+        mcnemar: chi,
+        j1,
+        j1_why,
+        goals_held,
+        goals_total,
+        j2,
+        j3,
+        j3_why,
+        resident_kib,
+        rank: b.rank,
+        j4,
+        epochs: report.epochs as u32,
+        capped: report.stopped,
+        adopted: false,
+        test_acc: 0.0,
+        test_read: 0,
+        test_fresh: true,
+    };
+    cert.adopted = cert.unanimous();
+    TRIALS.fetch_add(1, Ordering::Relaxed);
+
+    if cert.adopted {
+        // The blob before the node, so a head can never name an adapter whose
+        // bytes are not stored -- that is the one state `rollback` cannot get
+        // out of.
+        match (blob, ablob) {
+            (Some(bytes), Some(h)) => {
+                sysbox::write_blob(&blob_path(&h), bytes);
+            }
+            _ => {
+                restore(e, &saved);
+                return Err(Refused::Judge("it passed but there is nothing attached to store"));
+            }
+        }
+        variant.store();
+        set_head(&vhash);
+        ADOPTIONS.fetch_add(1, Ordering::Relaxed);
+    } else {
+        // Put the machine back. This is the half `deeptrain` never had: it
+        // trained into the live model and left whatever came out, judged or
+        // not, until the next reboot.
+        restore(e, &saved);
+    }
+
+    let hour = crate::dev::rtc::now().map(|d| d.hour).unwrap_or(0);
+    let seq = TRIALS.load(Ordering::Relaxed);
+    ledger_append(&render_certificate(&cert, seq, hour));
+    Ok(cert)
+}
+
+/// Put back the adapters a trial was handed, whatever it did to them.
+fn restore(e: &mut super::Engine, saved: &Option<Vec<u8>>) {
+    match saved {
+        Some(bytes) => {
+            let _ = e.model.load_adapters(bytes);
+        }
+        None => {
+            let _ = e.model.detach_adapters();
+        }
+    }
+}
+
 pub fn rollback(e: &mut super::Engine) -> Result<Option<[u8; 32]>, &'static str> {
     let Some(h) = head() else { return Err("no head to roll back from") };
     let Some(v) = Variant::load(&h) else { return Err("head names a node that is not stored") };

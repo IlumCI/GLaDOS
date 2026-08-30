@@ -1166,7 +1166,6 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
         // different command rather than a flag that hides which one is being
         // paid.
         "deeptrain" => {
-            use crate::ai::{adapter::Adapters, train};
             let mut w = Words::new(rest);
             let mut n = 8usize;
             let mut ep = 4usize;
@@ -1187,94 +1186,75 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             console::set_color(YELLOW);
             kprintln!("[deeptrain]");
             console::set_color(LTGRAY);
-            let out = crate::ai::with_engine(|e| {
-                let cfg = e.model.cfg.clone();
-                if e.model.adapters.is_none()
-                    && e.model
-                        .attach_adapters(Adapters::full(&cfg, rank, 2.0 * rank as f32))
-                        .is_err()
-                {
-                    return None;
-                }
-                let b = train::Budget {
-                    epochs: ep,
-                    millis: 0,
-                    examples: n,
-                    ..Default::default()
-                };
-                train::train_full(e, &b, n)
-            })
-            .flatten();
-            match out {
+            // Through the judges, like every other change the machine makes
+            // to itself.
+            //
+            // This used to call `train_full` straight and keep whatever came
+            // out: the live model mutated, no certificate, no ledger line, no
+            // node, and nothing to roll back with -- the one self-modifying
+            // path outside the discipline every other one obeys. It now goes
+            // through `godel::run` as a `Deep` proposal, which means it is
+            // reverted unless J1 through J4 all agree, and recorded either way.
+            let p = crate::ai::godel::Proposal::deep(0.02, rank, 2.0 * rank as f32, ep);
+            let b = p.budget(n, 0);
+            let verdict = crate::ai::with_engine(|e| crate::ai::godel::run(e, &b, &p));
+            match verdict {
                 None => {
-                    // Which of the four, not a list of them. The first run of
-                    // this on hardware printed all four and left the operator
-                    // to guess, when the machine knows perfectly well: a
-                    // checkpoint's architecture and the CPU's feature bits are
-                    // both sitting right there.
-                    let f = crate::cpu::detected();
-                    let why = crate::ai::with_engine(|e| {
-                        if e.model.cfg.hybrid() {
-                            "the checkpoint is a hybrid -- q/k/v adapters need a dense one"
-                        } else if e.model.cfg.streams() {
-                            "the cache is windowed, so a live index is not a position"
-                        } else {
-                            "no corpus, or nothing in the training slice"
-                        }
-                    })
-                    .unwrap_or("no model is loaded");
-                    console::set_color(LTRED);
-                    if !(f.avx_enabled && f.avx2 && f.fma) {
-                        kprintln!(
-                            "  refused -- avx enabled={} avx2={} fma={}",
-                            f.avx_enabled, f.avx2, f.fma
-                        );
-                    } else {
-                        kprintln!("  refused -- {}", why);
-                    }
-                    console::set_color(LTGRAY);
+                    kprintln!("  {}", crate::ai::engine_refusal());
+                    return;
                 }
-                Some(r) => {
+                Some(Ok(c)) => {
+                    console::set_color(if c.adopted { LTGREEN } else { YELLOW });
                     kprintln!(
-                        "  {} example(s), {} epoch(s) in {} ms{}",
-                        r.examples,
-                        r.epochs,
-                        r.ms,
-                        if r.stopped { " (capped)" } else { "" }
-                    );
-                    console::set_color(if r.last_loss < r.first_loss { LTGREEN } else { YELLOW });
-                    kprintln!(
-                        "  loss {} -> {}",
-                        (r.first_loss * 1000.0) as i32 as f32 / 1000.0,
-                        (r.last_loss * 1000.0) as i32 as f32 / 1000.0
+                        "  {} -- fixed {} broke {} chi {}",
+                        if c.adopted { "adopted" } else { "rejected, and reverted" },
+                        c.fixed,
+                        c.broke,
+                        c.mcnemar
                     );
                     console::set_color(LTGRAY);
-                    kprintln!("  every q/k/v site moved, not just the classifier");
-                    // Said every time, because this is the one training path
-                    // in the system with no judge in front of it. `godel`
-                    // adopts nothing without four of them agreeing; this
-                    // changes the live model on the operator's say-so alone,
-                    // and a lower training loss is not evidence that routing
-                    // improved.
-                    // Write the node now, rather than leaving the next trial
-                    // to discover an adapter nobody recorded and describe it
-                    // as something it is not. Unjudged, and the node says so
-                    // by carrying the outside-arrival zeros -- but addressable,
-                    // so `godel rollback` can step back over it.
-                    let noted = crate::ai::with_engine(crate::ai::godel::record_current);
-                    console::set_color(YELLOW);
-                    kprintln!("  unjudged: this moved the live model directly");
+                    kprintln!(
+                        "  J1 {} | J2 goals {}/{} | J3 {} | J4 {} KiB rank {}",
+                        if c.j1 { "pass" } else { c.j1_why },
+                        c.goals_held,
+                        c.goals_total,
+                        if c.j3 { "pass" } else { c.j3_why },
+                        c.resident_kib,
+                        c.rank
+                    );
+                    kprintln!("  'godel ledger' for the line, 'godel rollback' to undo");
+                    return;
+                }
+                Some(Err(why)) => {
+                    console::set_color(LTRED);
+                    kprintln!("  refused: {}", why.why());
                     console::set_color(LTGRAY);
-                    match noted.flatten() {
-                        Some(h) => kprintln!(
-                            "  recorded as {} (deep) -- 'godel rollback' steps back over it",
-                            &crate::ai::godel::short_hex(&h)[..8]
-                        ),
-                        None => kprintln!("  (nothing attached to record)"),
-                    }
-                    kprintln!("  'fit' then 'route' to see what it did; 'adapter off' to undo");
                 }
             }
+            // Why it refused, not a list of candidates. The machine knows
+            // perfectly well: a checkpoint's architecture and the CPU's
+            // feature bits are both sitting right there.
+            let f = crate::cpu::detected();
+            let why = crate::ai::with_engine(|e| {
+                if e.model.cfg.hybrid() {
+                    "the checkpoint is a hybrid -- q/k/v adapters need a dense one"
+                } else if e.model.cfg.streams() {
+                    "the cache is windowed, so a live index is not a position"
+                } else {
+                    "no corpus, or nothing in the training slice"
+                }
+            })
+            .unwrap_or("no model is loaded");
+            console::set_color(LTRED);
+            if !(f.avx_enabled && f.avx2 && f.fma) {
+                kprintln!(
+                    "  refused -- avx enabled={} avx2={} fma={}",
+                    f.avx_enabled, f.avx2, f.fma
+                );
+            } else {
+                kprintln!("  refused -- {}", why);
+            }
+            console::set_color(LTGRAY);
         }
         "core" => {
             use crate::ai::{harness, voter};
@@ -1747,7 +1727,27 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                                 kprintln!("  {}: {:?} -- nothing attached", path, e)
                             }
                             Some(Ok(n)) => {
-                                kprintln!("  {} site(s) attached from {}", n, path)
+                                kprintln!("  {} site(s) attached from {}", n, path);
+                                // Addressable, even though nobody judged it.
+                                //
+                                // `deeptrain` used to be the other way an
+                                // unrecorded adapter reached the live model
+                                // and it goes through the judges now; this is
+                                // the one that is left, and it has the same
+                                // failure if left alone -- the lineage's
+                                // account of the mind is silently wrong until
+                                // some later trial notices, and `rollback` has
+                                // nothing to step back to. The node carries
+                                // the honest outside-arrival zeros.
+                                let noted =
+                                    crate::ai::with_engine(crate::ai::godel::record_current);
+                                match noted.flatten() {
+                                    Some(h) => kprintln!(
+                                        "  unjudged, recorded as {} -- 'godel rollback' steps back over it",
+                                        &crate::ai::godel::short_hex(&h)[..8]
+                                    ),
+                                    None => {}
+                                }
                             }
                         },
                     }

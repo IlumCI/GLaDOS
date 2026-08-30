@@ -2128,6 +2128,100 @@ pub fn contested_cues(e: &mut super::Engine, names: &[String]) -> Vec<(String, u
     out
 }
 
+/// Where the router sends everything, at one moment.
+///
+/// Taken before a change and again after it, so the two can be paired. Not an
+/// accuracy: an accuracy is two numbers from two runs and their difference is
+/// noise plus the change with no way to separate them, which is the whole
+/// reason every judge in this tree is paired.
+pub struct RouteSnapshot {
+    /// One entry per item in the slice: did the council route it correctly.
+    pub correct: Vec<bool>,
+    /// Where each of the machine's own goals goes, unprompted.
+    pub guards: Vec<usize>,
+    /// Whether every feature the probe was fitted on was finite. A trainer
+    /// that diverges produces NaNs, and NaNs compare false against everything,
+    /// so a diverged model would otherwise look like a model that simply
+    /// routes badly.
+    pub finite: bool,
+}
+
+/// Route the whole slice, and the machine's own goals, under the model as it
+/// stands right now.
+///
+/// **This judges routing, not decoder steps, and the difference is
+/// deliberate.** The adapter path judges the decoder through `Trial`, which
+/// can do so cheaply because the base is frozen: hidden states are constants
+/// and get cached once. A deep adapter is exactly the change that breaks that
+/// -- it moves q/k/v, so every cached state and every cached guard path is
+/// stale the moment training ends, and a `Trial` prepared before the run
+/// cannot judge what came out of it.
+///
+/// Re-preparing a `Trial` afterwards does not work either: its decisions are
+/// recorded along the baseline's own decode path, so a change that alters that
+/// path alters how many decisions there are, and the two lists stop lining up
+/// item for item. Routing has no such problem -- one entry per example, the
+/// same examples both times -- so it is what gets paired.
+///
+/// It is also the more honest unit. Routing is what the machine actually does
+/// with the model; the decoder-grammar path is the training-time proxy for it.
+pub fn route_snapshot(e: &mut super::Engine, split_wanted: u8) -> Result<RouteSnapshot, String> {
+    let Some(f) = featurise(e) else {
+        return Err(String::from("no corpus to route against"));
+    };
+    let lambda = default_lambda();
+    let fitted = fit_all(e, &f, &[lambda]);
+    let Some((_, probe)) = fitted.probes.first() else {
+        return Err(String::from("the probe would not fit"));
+    };
+    let all: Vec<usize> = (0..f.classes).collect();
+    let rule = rule_in_force();
+
+    let mut finite = f.xs.iter().all(|x| x.iter().all(|v| v.is_finite()));
+    let mut correct = Vec::new();
+    for (split, x, want, text) in &f.ev {
+        if *split != split_wanted {
+            continue;
+        }
+        if !x.iter().all(|v| v.is_finite()) {
+            finite = false;
+        }
+        let p = probe.predict(x);
+        let pair = fitted.council.as_ref().and_then(|c| c.corroborate(text, &e.tok, &all));
+        let says = core_vote(rule, text, &all);
+        correct.push(decide_with(rule, p, pair, says) == *want);
+    }
+    if correct.is_empty() {
+        return Err(String::from("nothing in that slice to route"));
+    }
+
+    // The four goals the machine pursues when nobody asked, through the same
+    // router. `Trial`'s guards cache a decode path and cannot survive a change
+    // to the states that path was walked with; these are recomputed, which is
+    // what makes them comparable across a deep run.
+    //
+    // A goal that cannot be featurised takes a slot anyway. Skipping it would
+    // shorten the list, and two snapshots compared position by position would
+    // then be comparing different goals to each other -- the same alignment
+    // trap that rules `Trial` out for judging a deep run, reintroduced three
+    // lines from where it was avoided. `usize::MAX` is not a class, so a goal
+    // that fails on one side and not the other reads as moved, which is the
+    // safe direction for a judge that is asking whether anything changed.
+    let mut guards = Vec::new();
+    for goal in super::initiative::CURIOSITY.iter() {
+        let Some(x) = feature(e, goal) else {
+            guards.push(usize::MAX);
+            continue;
+        };
+        let p = probe.predict(&x);
+        let pair = fitted.council.as_ref().and_then(|c| c.corroborate(goal, &e.tok, &all));
+        let says = core_vote(rule, goal, &all);
+        guards.push(decide_with(rule, p, pair, says));
+    }
+
+    Ok(RouteSnapshot { correct, guards, finite })
+}
+
 /// What the cue pool could do, if the machine chose from it perfectly.
 ///
 /// The producer's ceiling, the way `core_prize` is the judge's. Counting cues
