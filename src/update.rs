@@ -120,6 +120,263 @@ pub fn verify(image: &[u8], sig: &[u8]) -> Verdict {
     }
 }
 
+// --- applying one ---------------------------------------------------------
+//
+// ### What this can protect against, and what it cannot
+//
+// Said first because the limit is severe and a reader who assumes otherwise
+// will trust this further than it deserves.
+//
+// The swap happens before `ExitBootServices`, because the firmware's FAT
+// driver is the only writer of the ESP that exists while a boot image can
+// still be replaced. So the health check can only ask a question about the
+// window it can still write in: *did the new image get from the firmware
+// handoff to just before the memory map is taken*. That covers a binary that
+// will not run, an early fault, a graphics init that hangs, and a model or
+// tokenizer that will not load -- which is most of what a bad update does.
+//
+// It does **not** cover an image that fails after `ExitBootServices`, because
+// by then there is no filesystem to record anything in. And it cannot cover an
+// image that faults before reaching this hook at all: nothing running on the
+// machine gets a turn, and the recovery for that is the USB stick. An A/B
+// scheme that claimed otherwise would be claiming to run code on a computer
+// that is not running any.
+//
+// ### Why the order is the order
+//
+// There is no atomic rename through `FileProtocol`, so overwriting the image
+// the firmware boots is a window in which a power cut is fatal. That window
+// cannot be removed here; it can only be made as small as possible and made
+// the *last* thing that happens:
+//
+//   1. verify the staged image's signature -- before anything is touched
+//   2. copy the running image to `BOOTX64.OLD`, and read it back to prove it
+//      landed. A rollback copy that does not exist is the difference between
+//      a recoverable machine and a brick, so nothing proceeds without one
+//   3. clear `UPDATE.FLG`, so a crash from here cannot re-apply
+//   4. write the staged image over `BOOTX64.EFI`  <- the window
+//   5. read it back and compare its digest; on a mismatch put `OLD` straight
+//      back, which is the one repair still available
+//   6. write `HEALTH.FLG`, and reboot into the new image
+//
+// Step 2 before step 4 is the whole design. Step 5 is not paranoia: a short
+// write is a legal FAT outcome and the doc on `write_file` says so.
+
+/// Where the pieces live on the ESP.
+pub const BOOT_PATH: &str = "\\EFI\\BOOT\\BOOTX64.EFI";
+pub const OLD_PATH: &str = "\\GLADOS\\BOOTX64.OLD";
+pub const STAGED_PATH: &str = "\\GLADOS\\STAGED.EFI";
+pub const STAGED_SIG: &str = "\\GLADOS\\STAGED.SIG";
+pub const UPDATE_FLAG: &str = "\\GLADOS\\UPDATE.FLG";
+pub const HEALTH_FLAG: &str = "\\GLADOS\\HEALTH.FLG";
+
+/// Boots an unproven image may take before it is rolled back.
+///
+/// One. The image gets this boot to reach the point where it clears the flag;
+/// if the machine comes back here without that having happened, it did not.
+/// A larger number buys nothing -- an image that fails early fails every time
+/// -- and costs the operator that many reboots into a broken system.
+pub const MAX_TRIES: u32 = 1;
+
+/// What the hook should do, given what is on the disk.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Action {
+    /// No update staged and nothing unproven. The ordinary boot.
+    Nothing,
+    /// An image is on trial. Record the attempt and carry on booting.
+    Trying(u32),
+    /// The image on trial did not prove itself. Restore `OLD` and reboot.
+    RollBack,
+    /// Apply the staged image.
+    Apply,
+    /// A staged image was refused, and why. The flag is cleared either way.
+    Refuse(&'static str),
+}
+
+/// The whole decision, as a function of what is on the disk.
+///
+/// Separated from every file operation on purpose. This is where the safety
+/// lives -- the ordering argument above is only worth as much as the choice
+/// that reaches it -- and a decision made inline among `read_file` calls could
+/// only be checked by staging a real update on a real machine, which is the
+/// one thing nobody wants to do to find out whether it works.
+///
+/// `health` is the attempt count read from `HEALTH.FLG`, or `None` when the
+/// file is absent.
+pub fn decide(
+    flag: bool,
+    staged: bool,
+    sig: Verdict,
+    have_old: bool,
+    health: Option<u32>,
+) -> Action {
+    // The trial resolves first, always. An image that has not proved itself
+    // must not be allowed to apply a further update on top of itself -- that
+    // would put two unproven changes in the boot path with one rollback copy
+    // between them, and the copy would be of the image already on trial.
+    if let Some(n) = health {
+        if n >= MAX_TRIES {
+            return Action::RollBack;
+        }
+        return Action::Trying(n + 1);
+    }
+    if !flag {
+        return Action::Nothing;
+    }
+    if !staged {
+        return Action::Refuse("the flag is set and there is no staged image");
+    }
+    if !sig.ok() {
+        return Action::Refuse(sig.why());
+    }
+    // `have_old` is whether a rollback copy can be made, not whether one
+    // already exists: the copy is taken from the running image every time, so
+    // that a rollback goes back exactly one step rather than to whatever was
+    // left behind by an older update.
+    if !have_old {
+        return Action::Refuse("the running image could not be copied aside");
+    }
+    Action::Apply
+}
+
+/// Read a whole file off the ESP as a slice, or `None`.
+fn slurp(bs: &crate::uefi::BootServices, image: crate::uefi::Handle, path: &str) -> Option<&'static [u8]> {
+    let b = crate::uefi::read_file(bs, image, path)?;
+    Some(unsafe { core::slice::from_raw_parts(b.ptr, b.len) })
+}
+
+/// Copy a file and prove the copy landed.
+///
+/// The read-back is the point. A short write is a legal FAT outcome, so
+/// "`write_file` returned true" is not the same claim as "the bytes are on the
+/// disk", and the one place that distinction decides whether a machine can be
+/// recovered is here.
+fn copy_verified(
+    bs: &crate::uefi::BootServices,
+    image: crate::uefi::Handle,
+    from: &[u8],
+    to: &str,
+) -> bool {
+    if !crate::uefi::write_file(bs, image, to, from) {
+        return false;
+    }
+    match slurp(bs, image, to) {
+        Some(back) => back.len() == from.len() && sha256::hash(back) == sha256::hash(from),
+        None => false,
+    }
+}
+
+/// The attempt count in `HEALTH.FLG`, or `None` when there is no such file.
+///
+/// The file holds one ASCII digit run. Anything unreadable counts as an
+/// exhausted trial rather than a fresh one: a flag file that cannot be parsed
+/// is a flag file written by something that went wrong.
+fn health_count(bs: &crate::uefi::BootServices, image: crate::uefi::Handle) -> Option<u32> {
+    let b = slurp(bs, image, HEALTH_FLAG)?;
+    let text = core::str::from_utf8(b).unwrap_or("");
+    Some(text.trim().parse::<u32>().unwrap_or(MAX_TRIES))
+}
+
+/// Apply a staged update, or resolve one on trial. Runs before
+/// `ExitBootServices` and reboots if it changed the boot image.
+///
+/// Answers a line to print, or `None` when there was nothing to do -- which is
+/// the ordinary case and stays silent.
+pub fn hook(bs: &crate::uefi::BootServices, image: crate::uefi::Handle) -> Option<&'static str> {
+    let flag = slurp(bs, image, UPDATE_FLAG).is_some();
+    let health = health_count(bs, image);
+    if !flag && health.is_none() {
+        return None;
+    }
+
+    let staged = slurp(bs, image, STAGED_PATH);
+    let sig = match (staged, slurp(bs, image, STAGED_SIG)) {
+        (Some(img), Some(s)) => verify(img, s),
+        _ => Verdict::Malformed,
+    };
+    // Whether the running image can be copied aside, which is what the
+    // decision needs -- not whether an older copy happens to be lying there.
+    let running = slurp(bs, image, BOOT_PATH);
+
+    match decide(flag, staged.is_some(), sig, running.is_some(), health) {
+        Action::Nothing => None,
+
+        Action::Trying(n) => {
+            // Record the attempt before the risky part of the boot, so an
+            // image that dies during it is counted as having tried.
+            let mut buf = [b'0'; 12];
+            let mut i = buf.len();
+            let mut v = n;
+            loop {
+                i -= 1;
+                buf[i] = b'0' + (v % 10) as u8;
+                v /= 10;
+                if v == 0 || i == 0 {
+                    break;
+                }
+            }
+            crate::uefi::write_file(bs, image, HEALTH_FLAG, &buf[i..]);
+            Some("update: this image is on trial")
+        }
+
+        Action::RollBack => {
+            let Some(old) = slurp(bs, image, OLD_PATH) else {
+                // Nothing to go back to. Clearing the flag stops a reboot
+                // loop; the machine keeps running the image it has, which is
+                // the only one there is.
+                crate::uefi::delete_file(bs, image, HEALTH_FLAG);
+                return Some("update: the image failed and there is no copy to restore");
+            };
+            if !copy_verified(bs, image, old, BOOT_PATH) {
+                crate::uefi::delete_file(bs, image, HEALTH_FLAG);
+                return Some("update: the rollback would not write -- boot the USB");
+            }
+            crate::uefi::delete_file(bs, image, HEALTH_FLAG);
+            crate::cpu::reboot();
+            Some("update: rolled back, rebooting")
+        }
+
+        Action::Refuse(why) => {
+            crate::uefi::delete_file(bs, image, UPDATE_FLAG);
+            Some(why)
+        }
+
+        Action::Apply => {
+            let (Some(img), Some(run)) = (staged, running) else {
+                crate::uefi::delete_file(bs, image, UPDATE_FLAG);
+                return Some("update: the staged image went away");
+            };
+            // 2. A rollback copy, proved.
+            if !copy_verified(bs, image, run, OLD_PATH) {
+                crate::uefi::delete_file(bs, image, UPDATE_FLAG);
+                return Some("update: refused -- no rollback copy could be made");
+            }
+            // 3. Clear the flag before the window, so a crash inside it
+            //    cannot re-enter.
+            crate::uefi::delete_file(bs, image, UPDATE_FLAG);
+            // 4. The window.
+            if !copy_verified(bs, image, img, BOOT_PATH) {
+                // 5. The one repair still available.
+                copy_verified(bs, image, run, BOOT_PATH);
+                return Some("update: the write failed and the old image was put back");
+            }
+            // 6. On trial from here.
+            crate::uefi::write_file(bs, image, HEALTH_FLAG, b"0");
+            crate::cpu::reboot();
+            Some("update: applied, rebooting")
+        }
+    }
+}
+
+/// The image reached the end of what this hook can watch. Stop the trial.
+///
+/// Called once the model, tokenizer and roots have loaded, which is the last
+/// moment the ESP is writable and therefore the last moment anything can be
+/// recorded about this boot. An image that gets here runs.
+pub fn mark_healthy(bs: &crate::uefi::BootServices, image: crate::uefi::Handle) {
+    crate::uefi::delete_file(bs, image, HEALTH_FLAG);
+}
+
 /// The refusals, checked without needing a signer.
 ///
 /// Only the negative half is provable here: producing a good signature needs
@@ -143,6 +400,50 @@ pub fn selftest() -> bool {
         }
         kprintln!("  {}  {}", if good { "ok " } else { "FAIL" }, what);
     };
+
+    // The hook's decision, which is where the safety actually lives. Every
+    // one of these is a state the disk can really be in, and none of them
+    // needs a disk to check.
+    let good = Verdict::Good;
+    let bad = Verdict::Bad;
+    claim(
+        "an ordinary boot does nothing",
+        decide(false, false, bad, true, None) == Action::Nothing,
+    );
+    claim(
+        "a flag with no staged image is refused",
+        matches!(decide(true, false, good, true, None), Action::Refuse(_)),
+    );
+    claim(
+        "an unsigned staged image is refused",
+        matches!(decide(true, true, bad, true, None), Action::Refuse(_)),
+    );
+    // The one that decides whether a bad update is recoverable at all.
+    claim(
+        "an update is refused when no rollback copy can be made",
+        matches!(decide(true, true, good, false, None), Action::Refuse(_)),
+    );
+    claim(
+        "a signed image with somewhere to fall back to is applied",
+        decide(true, true, good, true, None) == Action::Apply,
+    );
+    // An image on trial must not be allowed to apply a further update on top
+    // of itself: that would put two unproven changes in the boot path with
+    // one rollback copy between them, and the copy would be of the image
+    // already on trial.
+    claim(
+        "an image on trial does not apply a further update",
+        decide(true, true, good, true, Some(0)) == Action::Trying(1),
+    );
+    claim(
+        "an image that has used its trial is rolled back",
+        decide(false, false, bad, true, Some(MAX_TRIES)) == Action::RollBack,
+    );
+    claim(
+        "and rolled back even with an update waiting",
+        decide(true, true, good, true, Some(MAX_TRIES)) == Action::RollBack,
+    );
+
 
     // With no key provisioned, *every* verdict is NoKey and the claims below
     // about format handling cannot be reached -- so the claim is that nothing

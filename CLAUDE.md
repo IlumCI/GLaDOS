@@ -425,6 +425,44 @@ Root certificate bundle, built from the host's store:
 .\scripts\fetch-roots.ps1          # -List to see what would be exported
 ```
 
+### Staged updates
+
+The boot image is replaced by the *next* boot, not the running one: the
+firmware's FAT driver is the only writer of the ESP that exists while a boot
+image can still be swapped, so `update::hook` runs before `ExitBootServices`
+and after `cpu::set_runtime` (the reboot goes through the runtime table).
+
+Stage one by putting three files on the ESP and rebooting:
+
+```
+GLADOS/STAGED.EFI     the new image
+GLADOS/STAGED.SIG     its detached GLADOSIG signature
+GLADOS/UPDATE.FLG     any contents; presence is the request
+```
+
+**It is inert until a key is provisioned.** `UPDATE_KEY` is all zeroes, so
+`verify` answers `NoKey`, `decide` refuses, and the flag is cleared. Run
+`tools/sign.py --keygen`, paste the public rows into `src/update.rs`, keep the
+private half off every machine that will ever apply an update, and rebuild --
+adopting a signer is itself a kernel change, which is the point.
+
+**What the health flag can and cannot catch.** The window it can write in ends
+at `ExitBootServices`, so the question it asks is whether the new image got
+from the firmware handoff to just before the memory map -- covering a binary
+that will not run, an early fault, and a model or tokenizer that will not
+load. It does not cover a failure after that line, because there is no
+filesystem left to record one in; and it cannot cover an image that faults
+before reaching the hook, because nothing on the machine gets a turn. The
+recovery for that is the USB stick, and no software scheme can do better.
+
+The ordering is the design and is argued in the module. The short version: the
+rollback copy is taken and *read back* before anything is overwritten, the flag
+is cleared before the window rather than after, the written image is verified
+by digest, and a mismatch puts `BOOTX64.OLD` straight back. `decide()` is a
+pure function, so all eight of its states are asserted at boot without staging
+anything -- including that an image already on trial refuses to apply a further
+update on top of itself.
+
 ### Testing
 
 There is no `cargo test`. This is a `no_std` UEFI binary with no host test

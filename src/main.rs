@@ -212,6 +212,23 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     // other way to reach the firmware.
     cpu::set_runtime(unsafe { (*st).runtime_services });
 
+    // --- a staged update, while the ESP is still writable ---
+    //
+    // Before the model, because applying one ends in a reboot and there is no
+    // sense reading 570 MB of weights first. After `set_runtime`, because that
+    // reboot goes through the runtime table.
+    //
+    // Inert unless somebody has staged an update *and* provisioned a signing
+    // key: with `UPDATE_KEY` zeroed, `verify` answers `NoKey` and the decision
+    // refuses. The mechanism ships built, tested and unable to fire.
+    if let Some(line) = update::hook(bs, image) {
+        serial_println!("glados: {}", line);
+        con_out(st, "glados: ");
+        con_out(st, line);
+        con_out(st, "
+");
+    }
+
     let model = uefi::read_file(bs, image, MODEL_PATH);
     let tokenizer = uefi::read_file(bs, image, TOKENIZER_PATH);
     // The root bundle comes off the same volume for the same reason: this is
@@ -229,6 +246,12 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
         Some(b) => serial_println!("glados: tokenizer {} bytes from {}", b.len, TOKENIZER_PATH),
         None => serial_println!("glados: no tokenizer at {}", TOKENIZER_PATH),
     }
+
+    // The image got here, which is the whole of what this hook can watch: it
+    // ran, it drew, and it read every file it needs off the ESP. Past the
+    // memory map there is no filesystem to record anything in, so this is the
+    // last moment a trial can be resolved.
+    update::mark_healthy(bs, image);
 
     // --- Memory map, then leave the firmware behind ---
     let mut map_size: usize = 0;

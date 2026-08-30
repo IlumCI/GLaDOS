@@ -531,6 +531,29 @@ fn widen(path: &str) -> Option<[u16; 128]> {
 /// shorter image written over a longer one would leave the tail of the old
 /// one behind -- a file that is a valid prefix of a valid binary followed by
 /// somebody else's bytes, which is the worst possible shape for a boot image.
+/// Remove a file, answering whether it is gone afterwards.
+///
+/// A file that was not there is `true`: the caller asked for it to be absent
+/// and it is. Only a refusal to remove one that exists is a failure, which is
+/// what a caller clearing a flag needs to know.
+pub fn delete_file(bs: &BootServices, image: Handle, path: &str) -> bool {
+    let Some(root) = open_root(bs, image) else { return false };
+    let Some(wide) = widen(path) else {
+        unsafe { ((*root).close)(root) };
+        return false;
+    };
+    let mut f: *mut FileProtocol = core::ptr::null_mut();
+    let opened = unsafe {
+        ((*root).open)(root, &mut f, wide.as_ptr(), FILE_MODE_READ | FILE_MODE_WRITE, 0)
+    };
+    unsafe { ((*root).close)(root) };
+    if is_error(opened) || f.is_null() {
+        return true;
+    }
+    // `delete` closes the handle whichever way it goes.
+    !is_error(unsafe { ((*f).delete)(f) })
+}
+
 pub fn write_file(bs: &BootServices, image: Handle, path: &str, data: &[u8]) -> bool {
     let Some(root) = open_root(bs, image) else { return false };
     let Some(wide) = widen(path) else {
