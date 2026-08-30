@@ -126,6 +126,7 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
             li.revision
         );
         base = li.image_base;
+        cpu::idt::IMAGE_SIZE.store(li.image_size, Ordering::Relaxed);
     }
     if base == 0 {
         let mut probe = efi_main as usize & !0xFFF;
@@ -1134,6 +1135,19 @@ fn selftest() {
     console::set_color(LTGREEN);
     kprintln!("[selftest] survived int3 -- idt is live.");
     console::set_color(LTGRAY_IDX);
+
+    // Beside int3 because it asks the same kind of question -- whether the
+    // processor does what this kernel believes it does -- and because it is
+    // the first time anything here fetches an instruction from the heap. A
+    // wrong answer is a halted machine, so it runs early and under QEMU
+    // before it ever runs on the GF63.
+    kprintln!("
+[selftest] generated code:");
+    if !cpu::code::selftest() {
+        console::set_color(LTRED);
+        kprintln!("[selftest] the code substrate is not sound -- do not generate any");
+        console::set_color(LTGRAY_IDX);
+    }
 
     // The deliberate null dereference now lives behind the shell's `fault`
     // command. It is fatal by design, so running it during boot would mean the

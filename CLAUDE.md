@@ -573,7 +573,7 @@ update on top of itself.
 There is no `cargo test`. This is a `no_std` UEFI binary with no host test
 runner, so **verification is the boot selftests plus driving QEMU.**
 
-At boot the system runs **nineteen selftest sections**, ten of which `diag`
+At boot the system runs **twenty selftest sections**, twelve of which `diag`
 also re-runs as named suites on demand (the `aiksi` section covers the capability gate by name and never by
 calling -- half that table pokes memory, drives I/O ports or paints over the
 screen, and a suite that called every row to prove it exists would be
@@ -898,6 +898,48 @@ none of it from compiling anything. Every one of the three wins was
 allocation, and the two the plan predicted -- that the tree-walk was the cost
 and that construction was near-certainly the fix -- were both wrong in the
 same direction.
+
+**Running code from the heap.** `src/cpu/code.rs` is the substrate a code
+generator would need, and it works: `diag code` writes seven bytes into a
+page-aligned buffer, serialises, and calls them. Every page in this kernel is
+`PRESENT | WRITABLE` and executable -- there is no NX constant in
+`mem::paging` and EFER.NXE is never enabled -- so getting somewhere to run
+from is a `Layout::from_size_align(n, 4096)` and no page-table work at all.
+That is exactly why the rest is careful.
+
+- **`cpu::serialize()`.** Nothing in this tree serialised before it: no
+  `wbinvd`, `clflush`, `mfence` or `cpuid`-as-barrier anywhere. `CPUID` does
+  both halves -- the processor drops what it prefetched, and since `cpuid`'s
+  `asm!` declares neither `nomem` nor `readonly` the compiler cannot sink the
+  stores that filled the buffer past it.
+- **`Compiled` is the ABI, declared once.** `unsafe extern "sysv64" fn(u64)
+  -> u64`, so no call site spells the convention. `extern "C"` here is
+  Microsoft x64; `task.rs` records what that cost when it was got wrong. The
+  selftest's stub is `mov rax, rdi / add rax, rax / ret` called with 21,
+  because a no-argument stub passes under either convention and proves
+  nothing -- both agree on a bare return in rax. Only the argument tells them
+  apart.
+- **The registry, and a fault reporter that stops lying.** `fault()` printed
+  `rip - IMAGE_BASE` whenever the base was known, with no check that rip was
+  in the image -- so a wild jump produced a number indistinguishable from a
+  real RVA, which a disassembly resolves to an unrelated function.
+  `IMAGE_SIZE` was read from `LoadedImage` at boot and printed and never
+  stored; it is stored now. `code::locate` is a pure function over (rip, base,
+  size, registry answer) with all five of its states asserted at boot, the way
+  `update::decide` is. Heap-resident generated code is named by tag and
+  offset; an rip in neither is said to be in neither.
+
+None of this prevents anything. There is no fault recovery here -- every IDT
+vector but `#BP` is `-> !` -- so a bad jump is still a halted machine. What
+the registry buys is that the one diagnostic which survives says something
+true.
+
+The tick rule is written down on `Interp::tick` because anything executing
+this language by another route has to match it exactly: **once entering
+`stmt`, once entering `expr`, one extra per `while` iteration, and nothing
+else.** A builtin costs one step however much work it does. The budget is a
+safety bound, so a program that got more room by being run a different way
+would be a runaway one path stops and another does not.
 
 Two honesty notes on those figures. `arm` and `call vote` are unchanged by
 this work and the movements in them are host noise. And `fields_of` adds up

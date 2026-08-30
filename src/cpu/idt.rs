@@ -84,6 +84,16 @@ static IDT: Racy<[Entry; 256]> = Racy::new([Entry::missing(); 256]);
 /// disassembly resolves directly.
 pub static IMAGE_BASE: AtomicU64 = AtomicU64::new(0);
 
+/// How long that image is, when the firmware would say.
+///
+/// Zero means it was never learned -- `LoadedImage` was unavailable and the
+/// base came from scanning backwards for an MZ header, which finds where the
+/// image starts and says nothing about where it ends. Without this, `fault`
+/// printed `rip - IMAGE_BASE` for *any* rip, so a wild jump into the heap
+/// produced a large number that looks exactly like a real offset and that a
+/// disassembly resolves to an unrelated function.
+pub static IMAGE_SIZE: AtomicU64 = AtomicU64::new(0);
+
 /// Shared reporting path for every fatal exception.
 fn fault(frame: &InterruptStackFrame, vector: u8, name: &str, err: Option<u64>) -> ! {
     // Copy out of the packed/borrowed frame before formatting.
@@ -120,12 +130,32 @@ fn fault(frame: &InterruptStackFrame, vector: u8, name: &str, err: Option<u64>) 
         kprintln!("  cr2   {:#018x}", cr2);
     }
     kprintln!("  cr3   {:#018x}", cr3);
+    // The firmware relocated the kernel, so RIP names nothing by itself.
+    // Relative to the load base it is an offset into the very binary in the
+    // build tree, and a disassembly answers which function it is -- but only
+    // if it is in the image at all, which this used to print without asking.
+    use super::code::Where;
     let base = IMAGE_BASE.load(Ordering::Relaxed);
-    if base != 0 {
-        // The firmware relocated the kernel, so RIP names nothing by itself.
-        // Relative to the load base it is an offset into the very binary in
-        // the build tree, and a disassembly answers which function it is.
-        kprintln!("  rva   {:#018x}   <-- rip - image base", rip.wrapping_sub(base));
+    let size = IMAGE_SIZE.load(Ordering::Relaxed);
+    match super::code::locate(rip, base, size, super::code::lookup(rip)) {
+        Where::Generated { tag, off } => {
+            kprintln!("  in generated code {:016x} at +{:#x}", tag, off);
+        }
+        Where::Image(rva) => {
+            kprintln!("  rva   {:#018x}   <-- rip - image base", rva);
+        }
+        Where::Unverified(rva) => {
+            kprintln!("  rva   {:#018x}   <-- rip - image base, extent unknown", rva);
+        }
+        Where::Elsewhere => {
+            if base != 0 && size != 0 {
+                kprintln!(
+                    "  rip is outside the image {:#x}..{:#x} and no generated range claims it",
+                    base,
+                    base + size
+                );
+            }
+        }
     }
     kprintln!("\n  halted.");
 

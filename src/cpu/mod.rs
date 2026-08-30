@@ -4,6 +4,7 @@
 
 //! Processor state we own: descriptor tables, control registers, I/O ports.
 
+pub mod code;
 pub mod gdt;
 pub mod idt;
 pub mod port;
@@ -120,6 +121,22 @@ pub fn cpuid(leaf: u32, sub: u32) -> [u32; 4] {
         );
     }
     [eax, ebx_slot as u32, ecx, edx]
+}
+
+/// Stand between writing bytes and fetching them as instructions.
+///
+/// Nothing in this tree serialised before this: no `wbinvd`, no `clflush`, no
+/// `mfence`, no `cpuid`-as-barrier. `CPUID` is the serialising instruction
+/// that needs no privilege and no feature test, and it does both halves of
+/// the job -- the processor discards what it prefetched, and because the
+/// `asm!` above declares neither `nomem` nor `readonly`, the compiler must
+/// treat it as touching memory and cannot sink the stores that filled the
+/// buffer past it.
+///
+/// Leaf 0 because its result is discarded; what is wanted is the barrier.
+#[inline]
+pub fn serialize() {
+    let _ = cpuid(0, 0);
 }
 
 /// Cached so the shell can report what was actually enabled at boot, not just

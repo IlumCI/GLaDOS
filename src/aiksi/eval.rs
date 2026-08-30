@@ -1078,6 +1078,24 @@ impl Interp {
         Ok(last)
     }
 
+    /// Charge one step, and stop if the budget is spent.
+    ///
+    /// **The tick points are the whole rule, and there are three of them:**
+    /// once on entering `stmt`, once on entering `expr`, and one extra per
+    /// iteration of a `while`. Nothing else ticks -- a builtin costs one step
+    /// however much work it does, which is why `range` and `repeat` are
+    /// capped by argument rather than by budget.
+    ///
+    /// Written down here because anything that ever executes this language by
+    /// another route has to tick at exactly these points and not merely
+    /// somewhere reasonable. The budget is a *safety* bound: a program that
+    /// got more room by being run a different way would be a runaway that one
+    /// path stops and another does not. And step count is what the judges
+    /// record and what `voter::Core::vote` reports as its cost, so two paths
+    /// that disagree about it disagree about a number in the ledger.
+    ///
+    /// `Interp::adopt` is the first thing to have depended on this, and it
+    /// carries the top level's count forward for exactly this reason.
     fn tick(&mut self) -> Result<(), String> {
         self.steps += 1;
         if self.steps > self.budget {
