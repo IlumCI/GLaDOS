@@ -250,6 +250,44 @@ impl Drop for Exec {
     }
 }
 
+/// Fault inside generated code on purpose, and halt.
+///
+/// The only way to see `Where::Generated` actually printed. `code::selftest`
+/// asserts `locate` and `lookup` agree about a live range, which is the
+/// decision; this is the wiring underneath it -- that a real #PF taken at a
+/// heap address reaches `fault`, that the range is still registered by the
+/// time the handler reads it, and that what comes out names the program
+/// rather than a fabricated RVA into the kernel binary.
+///
+/// Fatal by design, exactly like `idt::trigger_page_fault`, so it is a
+/// deliberate operator command and never part of a suite.
+///
+///   48 31 c0   xor rax, rax
+///   48 8b 00   mov rax, [rax]   <-- faults here, at +0x3
+///   c3         ret
+pub fn trigger_generated_fault() {
+    use crate::kprintln;
+    const NULLDEREF: [u8; 7] = [0x48, 0x31, 0xc0, 0x48, 0x8b, 0x00, 0xc3];
+    let Some(mut buf) = Exec::new(NULLDEREF.len()) else {
+        kprintln!("  no buffer");
+        return;
+    };
+    if !buf.push(&NULLDEREF) || !buf.arm(0xFA17_0000_0000_0003) {
+        kprintln!("  could not arm");
+        return;
+    }
+    kprintln!("
+[selftest] faulting inside generated code at {:#x}...", buf.addr());
+    kprintln!("  expect: in generated code fa17000000000003 at +0x3");
+    let Some(f) = (unsafe { buf.entry() }) else { return };
+    // Deliberately leaked: `fault` is `-> !` and reads the registry from the
+    // handler, so the range has to still be claimed when it gets there.
+    // Dropping this would unregister it and the report would say the very
+    // thing this exists to disprove.
+    core::mem::forget(buf);
+    unsafe { f(0) };
+}
+
 /// The substrate, exercised end to end without a code generator.
 ///
 /// This runs machine code from the heap, which is the thing the rest of Phase
@@ -332,11 +370,62 @@ pub fn selftest() -> bool {
     );
     claim(lookup(at - 1).is_none(), "nor one just before it");
 
+    // Two live ranges, attributed apart. One buffer proves nothing about
+    // which of several a fault landed in, and several is the normal case the
+    // moment anything compiles more than one function.
+    let Some(mut second) = Exec::new(DOUBLE.len()) else {
+        claim(false, "a second buffer could be taken");
+        return false;
+    };
+    let _ = second.push(&DOUBLE);
+    let _ = second.arm(0x5EC0_4D00_0000_0000);
+    let at2 = second.addr();
+    claim(
+        at2 != at
+            && lookup(at + 1).map(|(t, _)| t) == Some(0xC0DE_1234_5678_9ABC)
+            && lookup(at2 + 1).map(|(t, _)| t) == Some(0x5EC0_4D00_0000_0000),
+        "two live ranges are told apart",
+    );
+    claim(
+        unsafe { second.entry() }.map(|g| unsafe { g(50) }) == Some(100),
+        "and the second one runs too",
+    );
+
+    // Refusals. Each is a state the registry can reach and none was reachable
+    // through `Exec`, so they are exercised directly.
+    claim(!buf.push(&[0u8; 8192]), "bytes that do not fit are refused");
+    claim(!buf.arm(1), "and a buffer already armed will not arm twice");
+    claim(register(0, 16, 1).is_none(), "a range at address zero is refused");
+    claim(register(0x1000, 0, 1).is_none(), "and one of no length");
+
+    // Exhaustion. Two slots are held by the buffers above, so the rest are
+    // taken by hand and the overflow checked -- a registry that silently
+    // dropped a range would leave a fault in it reported as a wild rip, which
+    // is precisely the failure this module exists to end.
+    let mut held = alloc::vec::Vec::new();
+    while let Some(s) = register(0x8000_0000 + held.len() as u64 * 0x1000, 0x100, 9) {
+        held.push(s);
+    }
+    claim(!held.is_empty(), "the remaining slots can be claimed");
+    claim(
+        register(0x9000_0000, 0x100, 9).is_none(),
+        "and a full registry refuses rather than overwriting",
+    );
+    for s in held {
+        unregister(s);
+    }
+    claim(
+        register(0x9000_0000, 0x100, 9).map(unregister).is_some(),
+        "releasing them lets the next one in",
+    );
+
     // Dropping releases the slot. Without this a freed buffer goes on
     // claiming an address range the allocator has handed to somebody else,
     // and the next fault there names a program that is not running.
     drop(buf);
+    drop(second);
     claim(lookup(at + 3).is_none(), "and dropping it releases the claim");
+    claim(lookup(at2 + 1).is_none(), "for both of them");
 
     ok
 }

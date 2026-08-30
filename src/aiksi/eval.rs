@@ -175,6 +175,11 @@ struct Func {
     body: Vec<Stmt>,
 }
 
+/// Where `Interp::prepare` would be allowed to write, which is nowhere that
+/// exists. Declarations cannot write, so this is a valid answer to `here()`
+/// and never a path anything reaches.
+const PREPARE_JAIL: &str = "/ai/prepare/scratch";
+
 /// A program's declarations, run once so they need not be run again.
 ///
 /// Registering a function is not free: `Stmt::Fn` deep-copies the body,
@@ -1046,7 +1051,15 @@ impl Interp {
         if !Self::is_declarative(prog) {
             return Err(String::from("top level is more than declarations"));
         }
-        let mut it = Self::new();
+        // Sandboxed, though `is_declarative` has already established that
+        // nothing here can consult a capability: `Stmt::Fn` and `Stmt::Rec`
+        // evaluate no expression, so no builtin is reachable. The weakest
+        // caps are used anyway, because the cost is nothing and the shape of
+        // the mistake this avoids is a third declarative statement added
+        // later that does evaluate something -- at which point a sandboxed
+        // program's declarations would have been running with operator
+        // powers, and the only sign would have been that it worked.
+        let mut it = Self::sandboxed(PREPARE_JAIL);
         it.run(prog)?;
         Ok(Prepared { funcs: it.funcs, recs: it.recs, steps: it.steps })
     }

@@ -211,19 +211,23 @@ pub fn compare(src: &str, entry: Entry) -> Verdict {
 /// machine with an empty namespace as on one that has been running for a
 /// week. What is gathered -- stored cores, seeded tools -- is compared as
 /// well, and counted separately for that reason.
-const CORPUS: &[(&str, &str)] = &[
+const VOTE_TEXT: &str = "put everything back the way it was";
+
+const CORPUS: &[(&str, &str, Entry<'static>)] = &[
     // The shape `voter::compose` writes, which is the one that matters most.
     (
         "a composed core",
         "fn vote(text: str, allowed: list): int { t = lower(text) \
          if (contains(t, \"snap\")) { return 3 } \
          if (contains(t, \"back\")) { return 20 } return get(allowed, 0) }",
+        Entry::Vote(VOTE_TEXT),
     ),
     // Calls into calls, so a route that got the frame wrong is caught.
     (
         "recursion",
         "fn fib(n: int): int { if (n < 2) { return n } return fib(n - 1) + fib(n - 2) } \
          fn vote(text: str, allowed: list): int { return fib(12) }",
+        Entry::Vote(VOTE_TEXT),
     ),
     // The extra tick per iteration lives here, and it is the tick most
     // easily got wrong by anything that executes this language another way.
@@ -231,22 +235,26 @@ const CORPUS: &[(&str, &str)] = &[
         "a while loop",
         "fn vote(text: str, allowed: list): int { i = 0 s = 0 \
          while (i < 50) { s = s + i i = i + 1 } return s }",
+        Entry::Vote(VOTE_TEXT),
     ),
     // Declarations that are not functions.
     (
         "records",
         "rec P { x: int, y: int } \
          fn vote(text: str, allowed: list): int { p = P(7, 9) p.x = 11 return p.x + p.y }",
+        Entry::Vote(VOTE_TEXT),
     ),
     (
         "lists",
         "fn vote(text: str, allowed: list): int { l = range(0, 20) l = reverse(l) \
          return get(sort(l), 3) }",
+        Entry::Vote(VOTE_TEXT),
     ),
     (
         "strings",
         "fn vote(text: str, allowed: list): int { \
          return len(split(replace(text, \" \", \"-\"), \"-\")) }",
+        Entry::Vote(VOTE_TEXT),
     ),
     // Short-circuit, which does not evaluate its right side and so has a step
     // count that depends on the value.
@@ -255,26 +263,52 @@ const CORPUS: &[(&str, &str)] = &[
         "fn vote(text: str, allowed: list): int { i = 0 \
          if (0 && contains(text, \"x\")) { i = 1 } \
          if (1 || contains(text, \"y\")) { i = i + 2 } return i }",
+        Entry::Vote(VOTE_TEXT),
     ),
     // The three failures, because error *text* is compared and a route that
     // fails differently is a route that fails.
     (
         "a runaway, stopped by the budget",
         "fn vote(text: str, allowed: list): int { i = 0 while (1) { i = i + 1 } return i }",
+        Entry::Vote(VOTE_TEXT),
     ),
     (
         "a type error at a call boundary",
         "fn f(a: int): int { return a } \
          fn vote(text: str, allowed: list): int { return f(\"s\") }",
+        Entry::Vote(VOTE_TEXT),
     ),
     (
         "a name that is not defined",
         "fn vote(text: str, allowed: list): int { return nope + 1 }",
+        Entry::Vote(VOTE_TEXT),
     ),
     (
         "an arity that does not match",
         "rec P { x } fn vote(text: str, allowed: list): int { return P(1, 2).x }",
+        Entry::Vote(VOTE_TEXT),
     ),
+    // --- top level only ------------------------------------------------
+    //
+    // Every case above asks for `vote`, so until these existed the *step
+    // count of the declarations themselves* -- the number `Prepared` carries
+    // and the whole reason `adopt` is not just a table copy -- was never
+    // compared. These vary how many declarations there are and of what kind,
+    // which is exactly what that count is a function of.
+    ("one declaration", "fn f(): int { return 1 }", Entry::Top),
+    (
+        "three declarations",
+        "fn a(): int { return 1 } fn b(): int { return 2 } fn c(): int { return 3 }",
+        Entry::Top,
+    ),
+    ("a record alone", "rec P { x: int, y: str }", Entry::Top),
+    (
+        "records and functions together",
+        "rec P { x } rec Q { y } fn f(p: P): int { return p.x } fn g(): int { return 0 }",
+        Entry::Top,
+    ),
+    ("nothing at all", "", Entry::Top),
+
 ];
 
 /// Two programs that answer the same thing and cost different amounts.
@@ -330,8 +364,8 @@ pub fn selftest() -> bool {
     for _ in 0..ROUNDS {
         compared = 0;
         one_route = 0;
-        for (name, src) in CORPUS {
-            match compare(src, Entry::Vote("put everything back the way it was")) {
+        for (name, src, entry) in CORPUS {
+            match compare(src, *entry) {
                 Verdict::Agreed => compared += 1,
                 Verdict::OneRoute => one_route += 1,
                 Verdict::Differed(f) => {
@@ -350,6 +384,29 @@ pub fn selftest() -> bool {
             "every case in the corpus agrees exactly, 64 times over",
         );
     }
+
+    // The corpus has to actually contain both entry kinds. Asking for `vote`
+    // never exercises the cost of the declarations themselves, which is the
+    // number `Prepared` carries, so a refactor that quietly turned every case
+    // into a `Vote` would leave `adopt`'s step-carry untested and everything
+    // here still green.
+    claim(
+        &mut ok,
+        CORPUS.iter().any(|(_, _, e)| matches!(e, Entry::Top))
+            && CORPUS.iter().any(|(_, _, e)| matches!(e, Entry::Vote(_))),
+        "the corpus asks for both a top level and a call",
+    );
+
+    // `use` is the statement most dangerous to freeze: it lexes, parses and
+    // *executes* another file, and marks the path imported before evaluating
+    // it. Preparing one would fix at snapshot time whatever that file did,
+    // and share the imported set across every later run.
+    claim(
+        &mut ok,
+        observe("use \"/lib/text\" fn f(): int { return 1 }", Entry::Top, Route::Prepared)
+            .is_none(),
+        "a `use` at the top level is declined, not frozen",
+    );
 
     // A top level that computes is not preparable, and saying so is the
     // point: the route declines instead of quietly arming and comparing
@@ -374,11 +431,8 @@ pub fn selftest() -> bool {
             // A stored core answers `vote`; a seeded tool is a top level. Ask
             // for whichever the program actually has, rather than assuming
             // from the directory it came out of.
-            let entry = if src.contains("fn vote(") {
-                Entry::Vote("put everything back the way it was")
-            } else {
-                Entry::Top
-            };
+            let entry =
+                if src.contains("fn vote(") { Entry::Vote(VOTE_TEXT) } else { Entry::Top };
             match compare(src, entry) {
                 Verdict::Agreed => stored += 1,
                 Verdict::OneRoute => declined += 1,

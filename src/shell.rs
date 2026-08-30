@@ -3223,6 +3223,13 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             console::set_color(LTRED);
             kprintln!("  this will halt the machine.");
             console::set_color(LTGRAY);
+            // `fault code` takes the same fault from a heap buffer instead of
+            // from the image, which is the only way to see the reporter name
+            // a generated range. Both halt; they differ in what gets printed
+            // on the way down.
+            if rest.split_whitespace().next() == Some("code") {
+                crate::cpu::code::trigger_generated_fault();
+            }
             idt::trigger_page_fault();
         }
         // What the CPU offers and what the kernel turned on.
