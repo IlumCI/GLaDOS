@@ -3,19 +3,19 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>USB WiFi on bare metal. CNVi, a Realtek dongle, and 509 constants</title>
-<meta name="description" content="Why the laptop&#x27;s built-in WiFi cannot work, how a USB dongle sidesteps it, and why the RTL8188EU init tables were transcribed rather than written.">
-<meta name="keywords" content="USB WiFi driver, RTL8188EU, CNVi, WPA2, 802.11, wireless driver, rtl8xxxu">
+<title>USB WiFi on bare metal. CNVi, and a driver that is honest about its half</title>
+<meta name="description" content="The laptop wireless card is not a card, a USB dongle sidesteps the problem, and the driver states exactly which half of itself is finished.">
+<meta name="keywords" content="CNVi, RTL8188EU, USB WiFi driver, WPA2 handshake, 802.11 beacon parsing, bare metal wireless">
 <link rel="canonical" href="https://ilumci.github.io/GLaDOS/wiki/usb-wifi-driver.html">
 <meta name="robots" content="index,follow,max-image-preview:large">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="GLaDOS">
-<meta property="og:title" content="USB WiFi on bare metal. CNVi, a Realtek dongle, and 509 constants">
-<meta property="og:description" content="Why the laptop&#x27;s built-in WiFi cannot work, how a USB dongle sidesteps it, and why the RTL8188EU init tables were transcribed rather than written.">
+<meta property="og:title" content="USB WiFi on bare metal. CNVi, and a driver that is honest about its half">
+<meta property="og:description" content="The laptop wireless card is not a card, a USB dongle sidesteps the problem, and the driver states exactly which half of itself is finished.">
 <meta property="og:url" content="https://ilumci.github.io/GLaDOS/wiki/usb-wifi-driver.html">
 <meta name="twitter:card" content="summary">
-<meta name="twitter:title" content="USB WiFi on bare metal. CNVi, a Realtek dongle, and 509 constants">
-<meta name="twitter:description" content="Why the laptop&#x27;s built-in WiFi cannot work, how a USB dongle sidesteps it, and why the RTL8188EU init tables were transcribed rather than written.">
+<meta name="twitter:title" content="USB WiFi on bare metal. CNVi, and a driver that is honest about its half">
+<meta name="twitter:description" content="The laptop wireless card is not a card, a USB dongle sidesteps the problem, and the driver states exactly which half of itself is finished.">
 <meta property="og:image" content="https://ilumci.github.io/GLaDOS/img/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
@@ -27,7 +27,7 @@
 <link rel="apple-touch-icon" sizes="180x180" href="../img/icon-180.png">
 <link rel="manifest" href="../site.webmanifest">
 <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://ilumci.github.io/GLaDOS/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://ilumci.github.io/GLaDOS/wiki/"},{"@type":"ListItem","position":3,"name":"USB WiFi","item":"https://ilumci.github.io/GLaDOS/wiki/usb-wifi-driver.html"}]}</script>
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"USB WiFi on bare metal. CNVi, a Realtek dongle, and 509 constants","description":"Why the laptop's built-in WiFi cannot work, how a USB dongle sidesteps it, and why the RTL8188EU init tables were transcribed rather than written.","url":"https://ilumci.github.io/GLaDOS/wiki/usb-wifi-driver.html","dateModified":"2026-08-14","keywords":"USB WiFi driver, RTL8188EU, CNVi, WPA2, 802.11, wireless driver, rtl8xxxu","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"USB WiFi on bare metal. CNVi, and a driver that is honest about its half","description":"The laptop wireless card is not a card, a USB dongle sidesteps the problem, and the driver states exactly which half of itself is finished.","url":"https://ilumci.github.io/GLaDOS/wiki/usb-wifi-driver.html","dateModified":"2026-08-30","keywords":"CNVi, RTL8188EU, USB WiFi driver, WPA2 handshake, 802.11 beacon parsing, bare metal wireless","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -48,22 +48,24 @@
 <div id="main">
 <h1>USB WiFi on bare metal</h1>
 <figure class="fig"><img src="../img/wm/wifi-dongle.jpg" alt="A TP-Link USB WiFi dongle" width="720" height="960" loading="lazy" decoding="async"><figcaption>A USB wireless adapter is a complete radio and MAC on the far side of a bus the kernel already drives, which is the entire reason this approach is tractable.<span class="credit">Tp-link usb wi-fi dongle tl-wn821n.jpg. OleksandrOmelchuk, CC BY-SA 3.0, via <a href="https://commons.wikimedia.org/wiki/File:Tp-link_usb_wi-fi_dongle_tl-wn821n.jpg" rel="noopener">Wikimedia Commons</a>.</span></figcaption></figure>
-<p>Wireless is the one major subsystem that does not work, and the reason is worth setting out, because it is not a question of effort.</p>
+<p>The target laptop has a wireless part that cannot be driven the way a wireless part usually is, and the workaround introduces a driver whose finished and unfinished halves are worth separating carefully.</p>
+
 <h2 id="cnvi-the-card-is-not-a-card">CNVi: the card is not a card</h2>
-<p>The laptop's built-in wireless is CNVi, Intel's split architecture. The MAC, the part a driver would actually talk to, lives in the platform controller hub, and the M.2 module is only a radio. Reaching it means an undocumented signed-firmware protocol that is published nowhere.</p>
-<p>It is worth being concrete about what a modern wireless driver costs, because "add WiFi" sounds like the same size of job as "add Ethernet" and is not. The e1000 driver is about 350 lines: map a BAR, set up two descriptor rings, poll them. For an Intel AX-series card you need a signed firmware blob of roughly a megabyte, loaded into the device over a bootstrap protocol before it will do anything at all, non-redistributable and undocumented and different between families. Then an asynchronous host command interface with its own versioned message formats. Then 802.11 itself: scanning, authentication, association, and the fact that a wireless frame carries three or four address fields depending on direction, plus fragmentation and aggregation. Then WPA2.</p>
-<p>So the wireless module identifies the hardware and declines to pretend it can drive it. The <a href="tls.html">WPA2 supplicant</a> is finished: PBKDF2-HMAC-SHA1 at 4,096 rounds for the pairwise master key, the PRF-384 expansion into confirmation, encryption and data keys, the four-way handshake, and AES key unwrap for the group key. It is written as pure functions over byte slices with no I/O anywhere, so that when a driver arrives it supplies frames and this supplies answers and none of it has to change. It passes the IEEE 802.11i test vectors at every single boot, and has never been within reach of an antenna.</p>
+<p>On this machine the wireless module is a radio and nothing else. The media access controller lives in the platform controller hub, and the interface between them is proprietary. There is no PCI device implementing a wireless controller to write a driver against, because the controller is part of the chipset and the module on the M.2 slot is the analogue end.</p>
+<p>Driving it would mean implementing an undocumented chipset interface. The subsystem identifies the hardware, lists every network part on PCI and USB with what drives each, and refuses to pretend otherwise.</p>
+
 <h2 id="a-usb-dongle-sidesteps-all-of-it">A USB dongle sidesteps all of it</h2>
-<p>A USB wireless adapter is a complete radio and MAC behind a bus the kernel <a href="usb-xhci.html">now drives</a>. The target is a Realtek RTL8188EU, chosen because its firmware situation is tractable.</p>
-<p>It has no memory-mapped registers at all. Every register access is a vendor control transfer, which means a single register read is a full USB round trip of a few hundred microseconds. That one fact shapes the whole driver: anything written as a poll loop over a status register is orders of magnitude slower than the same code would be against MMIO, and the structure has to be arranged around batching, at some cost to how readable it is.</p>
-<h2 id="why-the-tables-were-copied-and-why-that-is-stated">Why the tables were copied, and why that is stated</h2>
-<p>Bringing up the chip needs a power-on sequence, PHY and radio initialisation tables, and an efuse layout: <strong>509 specific register/value pairs</strong> that exist in Realtek's vendor driver and in Linux's rtl8xxxu, and nowhere else.</p>
-<p>They were transcribed from Linux, mechanically, and not retyped. 509 hex pairs copied out by a human contain errors at some rate, and an error here does not fail loudly. A wrong AGC value costs sensitivity; a wrong PHY value skews a filter. Both present as "wireless is a bit unreliable."</p>
-<div class="note">Those constants are GPL-2.0 and live in a single file that says so at the top. They are the only code in this kernel not written for it, apart from Rust's <code>core</code>, and they are listed on <a href="../credits.html">the credits page</a>. Naming the one exception is cheaper and more useful than a blanket claim that quietly covers someone else's work.</div>
+<p>An RTL8188EU dongle is an ordinary USB device with an ordinary bulk interface. Everything above the transport is written and checked at boot: probe request construction, beacon parsing, the transmit and receive descriptor layouts, and the WPA2 four-way handshake with its key derivation, all against published vectors.</p>
+<p>What is missing is the transport in between. The link list table, the FIFO boundary that gates the media access controller's transmit and receive enables, channel selection, the efuse read, firmware upload, and handing a descriptor to a bulk endpoint. Bringing the chip up applies all four initialisation tables including the radio, over the serial interface the radio actually needs.</p>
+<p>None of the chip-facing half can be exercised here, because the emulator has no model of the part. That is stated rather than implied, and the pieces that can be checked without hardware are checked at every boot.</p>
+
+<h2 id="why-the-tables-were-copied">Why the tables were copied, and why that is stated</h2>
+<p>One file in this tree is not original: the RTL8188EU initialisation tables plus the radio and descriptor register constants, taken from the GPL-2.0 driver in Linux because there is no other source for them. They are magic numbers with no derivation anywhere public.</p>
+<p>That file is marked at the top, carries its own licence, is the only such file in the kernel, and a conversion script regenerates part of it from a checkout while stating its provenance. Copying it and not saying so would have been the easy option and would have been wrong.</p>
+
 <h2 id="order-is-content">Order is content</h2>
-<p>One property of those tables deserves its own warning. The AGC table writes the <em>same register</em> 130 times in a row, with the table index encoded into the value being written. It is a sequence, and the position of each entry is part of the data.</p>
-<p>Which means sorting it, deduplicating it, or reordering it for tidiness produces a completely different table that still looks entirely reasonable to anyone reading the source. The tooling that transcribed it preserves order for that reason, and the file says so in case somebody later decides it looks untidy.</p>
-<div class="seealso"><b>See also:</b> <a href="../wiki/usb-xhci.html">The USB stack</a>, <a href="../wiki/network-stack.html">The network stack</a>, <a href="../wiki/tls.html">TLS 1.3 from scratch</a></div>
+<p>The initialisation tables are sequences of register writes, and their order carries as much information as their values. Reordering them for tidiness produces a chip that reports success and does not work. They are transcribed in order, and the script that regenerates them preserves order for the same reason.</p>
+<div class="seealso"><b>See also:</b> <a href="usb-xhci.html">The USB stack</a>, <a href="network-stack.html">The network stack</a>, <a href="tls.html">TLS 1.3 from scratch</a>, <a href="testing.html">Testing without a test runner</a></div>
 </div>
 </div>
 </div>
@@ -75,7 +77,7 @@
   GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are
   other people's and are listed on <a href="../credits.html">the
   credits page</a>.</p>
-  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-14.</p>
+  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-30.</p>
 </div>
 
 </div>

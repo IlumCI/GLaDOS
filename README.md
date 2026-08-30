@@ -34,8 +34,8 @@ Works, and verified:
 | Boot | UEFI application, own page tables, GDT/IDT, APIC timer, i8042 keyboard |
 | Memory | Physical frame allocator, identity paging to 4 GiB, coalescing heap |
 | Tasks | Cooperative and preemptive at 100 Hz, `sysv64` context switch |
-| Graphics | GOP framebuffer, Windows-3.1-styled desktop, window manager, taskbar |
-| Storage | NVMe, content-addressed object store, Merkle trees, snapshots |
+| Graphics | GOP framebuffer, Windows-styled desktop, window manager, taskbar, three apps |
+| Storage | NVMe, content-addressed object store, Merkle trees, snapshots, ranged write gate |
 | Network | ARP, IPv4, ICMP, UDP, TCP, DHCP, DNS, TLS 1.3 with chain validation |
 | Drivers | e1000, RTL8168, xHCI (USB 3), CDC-ECM USB Ethernet |
 | Crypto | SHA-1/256/384, HMAC/HKDF, AES, ChaCha20-Poly1305, X25519, RSA, ECDSA |
@@ -43,39 +43,49 @@ Works, and verified:
 | Routing | Constrained decoding over the live applet table, plus a closed-form probe |
 | Agent | Propose, validate, execute, observe, with the grammar as the permission system |
 | Initiative | A resident task that decides for itself when to act and when to stay quiet |
-| Training | Gradients, Adam and a QDoRA adapter over the classifier, all in-kernel |
+| Language | Aiksi: lexer, parser, tree-walking interpreter, records, types, capabilities |
+| Codegen | An x86-64 back end for the integer subset, checked against the interpreter |
+| Training | Gradients, Adam, QDoRA over the classifier and over every q/k/v site |
 | Self-modification | Variant lineage, a judge council, an append-only ledger, O(1) rollback |
-| Language | Lexer, parser, tree-walking interpreter with kernel builtins |
+| Updates | Signed staged images swapped before `ExitBootServices`, with rollback |
+| SMP | Application processors started and parked as a compute fabric |
 | Mining | Midstate-cached SHA-256d with an honest scoreboard |
 
 Does not work yet:
 
-- Wireless. The built-in card is CNVi, so the MAC lives in the PCH and the M.2
-  module is only a radio, reachable through an undocumented signed-firmware
-  protocol. Our WPA2 supplicant is complete and checked against IEEE 802.11i
+- **Wireless.** The built-in card is CNVi, so the MAC lives in the PCH and the
+  M.2 module is only a radio, reachable through an undocumented signed-firmware
+  protocol. The WPA2 supplicant is complete and checked against IEEE 802.11i
   vectors at every boot, and has never had hardware to run on. A USB dongle
   driver (RTL8188EU) has its register layer and power-on sequence, and stops
   short of PHY, radio and firmware upload.
-- SMP. Single core. `sync::Racy<T>` gives interior mutability with no locking
-  of any kind, and carries that name so one grep finds every place that assumed
-  a single core on the day one stops being enough.
-- A hardware entropy source. The generator is a fast-key-erasure ChaCha20
+- **General SMP.** The extra cores run matrix ranges and nothing else. They
+  never allocate, never take an interrupt, never print and never touch anything
+  `sync::Racy<T>` guards, which is what leaves that type's safety argument
+  intact. General multiprocessing would mean auditing several hundred uses of
+  it and inventing a lock discipline, and none of that has been done.
+- **A hardware entropy source.** The generator is a fast-key-erasure ChaCha20
   DRBG fed by keyboard and mouse interrupt timing and by NVMe completion
   latency, and it refuses to answer for key material until it has seen enough
   events. That refusal is correct and it is also a limitation: a machine that
   boots, touches no disk and shuts down with no key pressed never seeds, and
-  TLS then falls back to timing-derived keys and says so during the
-  handshake. The CPU has RDRAND and we do not use it, because trusting an
-  opaque instruction is a different argument from trusting interrupt timing.
-- Attention-path training. The adapter moves the classifier. Every activation
-  adjoint needed to go deeper exists and is checked at boot, and nothing yet
-  composes them into a backward pass through the layers.
+  TLS then falls back to timing-derived keys and says so during the handshake.
+  The CPU has RDRAND and this does not use it, because trusting an opaque
+  instruction is a different argument from trusting interrupt timing.
+- **A fault report on the framebuffer.** Painting from inside an interrupt gate
+  raises a general protection fault here, so the report goes to the serial port
+  in full before the console is attempted at all. On the laptop there is no
+  UART, which means a fatal fault there currently prints one line and halts.
+  The bug belongs to the console and it is now visible instead of silent.
+- **An authored application reaching adoption.** The machine writes drafts and
+  never adopts one. The planner's output is likewise stringified into a report
+  rather than gating how much the loop attempts.
 
 ---
 
 ## The machine that changes itself
 
-The three capabilities above that are newest deserve a paragraph each, because
+The capabilities above that are newest deserve a paragraph each, because
 together they are the point of the project.
 
 **The model trains inside the kernel.** `train adapter` fits a QDoRA adapter
@@ -88,22 +98,38 @@ which is what makes the whole exercise affordable on this hardware. Real-corpus
 training refuses to run without AVX2, because scalar emulation would turn every
 hyperparameter judgement into a judgement about the clock.
 
+**Training goes deeper than the classifier now.** `deeptrain` moves every q/k/v
+site through a taped forward pass and a backward walk over the layers. The
+economics are different enough to deserve a different command: the classifier
+path caches hidden states once and an epoch costs no forward passes, while
+moving a projection in layer three moves every state after it, so every epoch
+pays a forward pass per example. Measured under emulation on SmolLM2, 24
+forward-and-backward passes in 110 s.
+
+It goes through the judges as well, and how is the interesting part. Those
+judges rest on cached features and a deep adapter moves the features, so a
+trial prepared beforehand cannot judge what came out of it. Re-preparing one
+afterwards does not work either, because decisions are recorded along the
+baseline's own decode path and a change that alters that path alters how many
+decisions there are. The comparison pairs on *routing* instead: one entry per
+example, the same examples both times.
+
 **A trained adapter is an object in the namespace.** `adapter save` writes a
 `GLADOSA1` blob holding the adapter alone, never the checkpoint. Rows are
 stored sparsely, because they are sparse in fact: on the measured decision
 layer that is 23.7 KB against 1.79 MB dense, a factor of 75. Save, detach,
-reload and save again reproduces the file byte for byte, which we check by
+reload and save again reproduces the file byte for byte, which is checked by
 comparing content addresses. `tools/adapter.py` reads the format on the host.
 
 **Self-modification runs on certificates.** Schmidhuber's Gödel machine adopts
 a rewrite once it can prove the rewrite raises expected utility, and it carries
-a theorem prover to do it. We have no theorem prover and could not build one
-for a quantised transformer's future reward. What we substitute is a
+a theorem prover to do it. There is no theorem prover here and none could be
+built for a quantised transformer's future reward. What is substituted is a
 certificate that is cheaper to refute than it was to produce, over
 content-addressed inputs, so any later run re-derives the same verdict bit for
-bit. That is affordable here for one specific reason: producing a variant costs
-a forward pass per example, and checking somebody else's claim about one costs
-a dot product per cached decision. Four orders of magnitude between making a
+bit. That is affordable for one specific reason: producing a variant costs a
+forward pass per example, and checking somebody else's claim about one costs a
+dot product per cached decision. Four orders of magnitude between making a
 claim and testing it is the asymmetry a proof system provides, reached by
 another road.
 
@@ -112,7 +138,9 @@ Four judges have to agree, each covering a different way a variant can be bad:
 - **J1, margin.** Both variants answer the same cached decisions, so the
   comparison is paired and McNemar's test applies. Nine repairs against two
   breaks scores 3.27 and fails the bar; twelve against one scores 7.69 and
-  passes. Comparing two percentages would call both of those a win.
+  passes. Comparing two percentages would call both of those a win. The floor
+  is symmetric, because "not significantly worse" alone once adopted a routing
+  rule on a measured four repairs against ten breaks.
 - **J2, its own goals.** The four goals the machine sets itself are cached
   along the path the frozen baseline walks for them. A variant that reroutes
   "list the files in /tmp" toward something that mutates the disk is
@@ -129,19 +157,82 @@ Adoption is a pointer swap and the parent stays addressed, so rollback costs a
 pointer write. Every trial appends a line to `/ai/godel/ledger.txt` whether it
 was adopted or rejected, with all four judges' numbers in it.
 
-Two details we consider load-bearing. The test slice carries a budget that
-lives in the ledger, because a loop that improves itself forever reads the
-held-out set forever and each read makes the reported figure more optimistic;
-past the budget a test number is printed as stale and marked unquotable. And
-before the judges run, the machine records whether training-set gain predicted
-a win, so the ledger accumulates an answer to a question we actually want
-settled. Nothing acts on that prediction, and at the current sample size it
-means nothing, which the ledger says out loud.
+**The night branch rotates over every axis that has a judge.** It knew two jobs
+and one always won the tie, so the adapter grid was walked to exhaustion while
+the routing rule, deep training, a compiled skill and a core the machine wrote
+were never tried unattended at all. The rotation starts from the number of
+verdicts already recorded and takes the first kind that has work, so which axis
+a given night takes is a function of the ledger rather than of a coin.
+
+Two details that are load-bearing. The test slice carries a budget that lives
+in the ledger, because a loop which improves itself forever reads the held-out
+set forever and each read makes the reported figure more optimistic; past the
+budget a test number prints as stale and is marked unquotable. And before the
+judges run, the machine records whether training-set gain predicted a win, so
+the ledger accumulates an answer to a question worth settling. Nothing acts on
+that prediction, and at the current sample size it means nothing, which the
+ledger says out loud.
 
 Trials run when two independent facts agree: the real-time clock says the hour
 falls inside a quiet window, and the entropy ring says no key or pointer
 interrupt has fired. A clock alone does not know somebody is working late, and
 silence at noon is a coffee break.
+
+**Skills are judged before they are adopted.** A successful episode compiled
+into a program used to be adopted by the act of writing it. A candidate is now
+stored by content address and put through four judges of its own: it parses, it
+runs under the powers an unadopted skill actually has, it repeats with the same
+value and step count and touched set, and it is cheap. Trust is keyed to the
+hash of the file, so editing a trusted skill revokes its trust by construction,
+and granting trust is a shell command that is never an applet.
+
+---
+
+## Aiksi, the system language
+
+`src/aiksi/` is the language everything above the kernel is written in, and the
+intended relationship is C to Unix or HolyC to TempleOS. A program is
+`code.ai&xi`, an extension chosen because nothing on the host has it.
+
+```
+use "/lib/text"
+
+rec Host { name: str, port: int }
+
+fn reachable(h: Host): int {
+  if (tcp_connect(h.name, h.port, 600)) { tcp_close() return 1 }
+  return 0
+}
+```
+
+Records are values, so `b = a` copies and there is nothing to say about
+aliasing. Types are optional and never inferred, and they are checked where a
+value crosses a boundary somebody annotated. `use` is textual inclusion that
+happens once, and the imported program runs with the importer's capabilities,
+so an import can never be an escalation.
+
+**`BUILTINS` is an allowlist and that is load-bearing.** Every row is a name, a
+touch class and an arity range, and dispatch is refused for anything absent
+from it before the arguments are examined. An arm added to the match without a
+row is unreachable dead code; a row without an arm answers "no implementation",
+which is broken and not dangerous. It replaced two denylists that were correct
+until the language was wired to the network, and a denylist grants by default,
+so the builtin anyone forgets is the one that matters.
+
+**A code generator exists for the integer subset.** `src/aiksi/jit.rs` compiles
+one function of integer arithmetic, `if`, `while` and `return` to x86-64, emits
+it into a page-aligned heap buffer and enters it through a `sysv64` pointer.
+Everything outside that slice is refused rather than approximated. It runs only
+inside the differential harness and never on a live path, because a code
+generation bug in a ring-0 image with no fault recovery gets exactly one
+mistake.
+
+What made that measurable came first. An Aiksi step costs about 14 ns, measured
+for the first time by `core bench`, and a routing vote spends 20 steps against
+a budget of 20,000. So the tree walk was never the cost the plan assumed, and
+three rounds of removing allocations instead made a vote 2.9 times faster: the
+kernel record table was being rebuilt per interpreter, a function's whole AST
+was deep-copied per call, and a core's declarations were re-run per vote.
 
 ---
 
@@ -157,7 +248,7 @@ memory-map handling has been tuned against one firmware. Expect a shell and a
 working model on other hardware, and treat your disk and your network card as
 open questions.
 
-**The boot disk on our development machine is counterfeit**: it advertises
+**The boot disk on the development machine is counterfeit**: it advertises
 976 GB and holds 14.67. That is why the layout tooling uses MBR, a GPT backup
 header having no real flash to land in, and why it carries a `SafeLimitGB`.
 
@@ -165,9 +256,9 @@ header having no real flash to land in, and why it carries a `SafeLimitGB`.
 
 ## Getting a model
 
-The model is not in this repository. It is around 570 MB, it is not our work,
-and a git repository is the wrong place for it. The ISO ships with one;
-building from source means supplying your own.
+The model is not in this repository. It is around 570 MB, it is not this
+project's work, and a git repository is the wrong place for it. The ISO ships
+with one; building from source means supplying your own.
 
 The kernel reads three files from the EFI System Partition:
 
@@ -204,10 +295,9 @@ a v4 file with a layer-major body, because three layers in four hold a gated
 DeltaNet mixer and the fourth holds full attention. Qwen3.5-MoE is refused at
 load with `LoadError::Unsupported`, since the smallest published one is 71.9 GB
 and nothing that size reaches a UEFI pool on this laptop; a forward pass for it
-could never be run and contradicted, so we decline to write one.
+could never be run and contradicted, so none is written.
 
-SmolLM2-135M also works, and it is the checkpoint to reach for under QEMU,
-which cannot host the larger ones (see below).
+SmolLM2-135M also works, and it is the quickest checkpoint to develop against.
 
 ---
 
@@ -224,29 +314,36 @@ The artifact is `target/x86_64-unknown-uefi/release/glados.efi`.
 ### Running under QEMU
 
 ```bash
-python tools/drive.py "tensor" "model" "ask -n 20 hello"
+python tools/drive.py "initiative off" "agent stop" "diag all"
 ```
 
 `drive.py` boots QEMU, stages the binary, resets NVRAM to pristine, and drives
 the shell over a serial socket. It assembles its own ESP from the small
-checkpoint, so it never disturbs deploy staging.
+checkpoint, so it never disturbs deploy staging. **It prefers the release
+artifact**, so a debug build alone leaves a stale binary staged and the change
+under test never boots.
 
 Pass `--qemu-extra "-accel whpx -cpu max"`. WHPX is the Windows hypervisor and
 it is about 160 times faster than TCG on this workload; `-cpu max` alongside it
 is what exposes AVX2, without which the trainer declines. It also raises
-unmasked SSE exceptions faithfully where TCG does not, which is how we found a
-real bug in our own per-task FPU initialisation.
+unmasked SSE exceptions faithfully where TCG does not, which is how a real bug
+in per-task FPU initialisation was found.
 
 Pass `initiative off` and then `agent stop` as the first commands: the resident
 task wakes fifteen seconds in and holds the engine for a whole episode, and
 stopping future ticks does not cancel the one already in flight.
 
-QEMU cannot run the 0.6B model. Its VVFAT is FAT16 on a fixed geometry and the
-whole disk is 516 MB. `fat:32:` raises that in principle, but QEMU says its
-FAT32 is untested and the firmware cannot read the directory it produces. So
-Qwen3 runs only on real hardware, and QEMU work uses SmolLM2. The same cap
-applies to the hybrids, so `tools/hybtest.py` builds a small one shaped to hit
-every path the real one does and prints what the logits should say.
+**The large checkpoints do run here.** The synthetic FAT path is FAT16 on a
+fixed geometry with a 516 MB ceiling, so it cannot stage one. `--stage-iso`
+has no such cap: it builds a one-shot bootable image and boots that instead,
+which is how any large checkpoint reaches emulation. Saying these models were
+runnable only on the laptop was wrong on both halves, because the image path
+existed and the hypervisor made it fast enough to matter.
+
+Testing the staged-update path needs a real disk rather than the synthetic one,
+which cannot do directory operations at all. `tools/mkesp.py` builds a raw
+FAT32 image with an MBR, and `--esp-image` reuses it across boots so what the
+guest wrote is still there next time.
 
 ### Deploying to hardware
 
@@ -255,6 +352,30 @@ every path the real one does and prints what the logits should say.
 ```
 
 Then reboot and hold **F11** for the boot menu.
+
+### Staged updates
+
+The boot image is replaced by the *next* boot rather than the running one,
+because the firmware's FAT driver is the only writer of the ESP that exists
+while a boot image can still be swapped. Put three files on the ESP and reboot:
+
+```
+GLADOS/STAGED.EFI     the new image
+GLADOS/STAGED.SIG     its detached GLADOSIG signature
+GLADOS/UPDATE.FLG     any contents; presence is the request
+```
+
+**It is inert until a key is provisioned.** `UPDATE_KEY` is all zeroes, so
+verification answers `NoKey`, the decision refuses, and the flag is cleared.
+Run `tools/sign.py --keygen`, paste the public rows into `src/update.rs`, keep
+the private half off every machine that will ever apply an update, and rebuild.
+Adopting a signer is itself a kernel change, which is the point.
+
+The rollback copy is taken and read back before anything is overwritten, the
+health flag is cleared before the window rather than after, the written image
+is verified by digest, and a mismatch puts the old image straight back. The
+decision function is pure, so all eight of its states are asserted at boot
+without staging anything.
 
 ### Building an ISO
 
@@ -288,18 +409,29 @@ python tools/drive.py --iso glados.iso "ls /"
 **There is no `cargo test`.** This is a `no_std` UEFI binary with no host test
 runner, so verification is the boot selftests plus driving QEMU.
 
-At boot the system runs eighteen selftest sections carrying seventy-one
-individual claims, printing `ok` or `FAIL` per line: heap, timer, clock, the
-namespace's Merkle addressing, fifteen sets of published cipher vectors, fault
-handling, constrained decoding, the agent loop, the linear probe, the situation
-planner, the initiative policy, the self-modification gate, corpus bundles,
-QDoRA adapters, the backward kernels, and the trainer's arithmetic.
+At boot the system runs twenty selftest sections, printing `ok` or `FAIL` per
+line: heap, timer, clock, the namespace's Merkle addressing, fifteen sets of
+published cipher vectors, fault handling, running machine code from the heap,
+constrained decoding, the agent loop, the linear probe, the situation planner,
+the initiative policy, the self-modification gate, corpus bundles, QDoRA
+adapters, the backward kernels, and the trainer's arithmetic.
+
+Thirteen of those are registered as named suites and can be re-run on demand
+with `diag all` or `diag <name>`. Registration is deliberately awkward: a suite
+added without a slot in the results table fails a compile-time assertion rather
+than silently never recording a verdict.
 
 **That output is the test suite.** It is easy to scroll past and it does catch
 real bugs. An ECDSA break sat visible in `[selftest] crypto` for an entire
 debugging cycle while the log was being sliced down to look at something else,
-and while writing the adapter format we shipped a failing sparsity claim for
-one commit by doing exactly the same thing.
+and a failing sparsity claim shipped for one commit the same way.
+
+`diag differ` is the newest instrument and the one with the most opinion in it.
+It runs one program two ways and requires agreement on value, step count and
+error text, bit for bit, sixty-four times over. It also runs a pair that is
+*supposed* to disagree and fails if that is not caught, because a harness which
+has never reported a difference is indistinguishable from one that compares
+nothing.
 
 `tools/reference.py` is a NumPy oracle for the dense models and `tools/v4.py`
 for the hybrids. Both read the *converted* file, so a `convert.py` bug shows up
@@ -338,16 +470,20 @@ hidden state is a constant, a constant can be cached, and a cached decision can
 be replayed against any number of candidate adapters for the price of a dot
 product. Every capability above rests on that one property, including the
 judging: it is why a verdict this machine reaches at three in the morning can
-be re-checked by anybody, later, for almost nothing.
+be re-checked by anybody, later, for almost nothing. Anything that proposes to
+train the attention path is proposing to give this up, which is a real trade
+and worth naming before it is made.
 
 The content hash covers content only, never block locations. Otherwise moving a
 block would rename an object.
 
-NVMe writes are locked by default. They unlock only after a target region is
-named, the formatter re-checks before touching anything, and every error path
-re-locks. On a disk fully allocated to Windows there is no such region and init
-fails, which is the intended outcome. Leaving the lock open on a failure path
-is how a safety mechanism becomes decorative.
+NVMe writes are locked by default, and the unlock names a range. It was one bit
+for a long time: unlocking said writes were allowed and nothing said where, so
+from the moment initialisation succeeded every LBA on the device was writable,
+including the partition table and the Windows volume that is still the only
+other thing on this disk. The window is enforced on every write and printed
+beside the word UNLOCKED, and `diag wgate` asserts the whole decision without a
+device and without writing anything.
 
 A model can be wrong without being broken. RoPE pairing, QK-Norm, head width,
 RMSNorm epsilon and the pre-tokenizer regex each produce a network that loads,
@@ -359,20 +495,24 @@ distance, which is indistinguishable from the outside from a small model being
 small.
 
 Negative results stay in the tree. Training the adapter head *hurts* at this
-data scale, and the Product-of-Experts council does not improve accuracy. Both
+data scale, and the Product-of-Experts council does not improve accuracy. A
+renderer survey ranked volatile framebuffer writes as the single largest
+constant-factor loss and the measurement disagreed; the real win was that blank
+console cells were being painted one pixel at a time under a background that
+had just been filled, which took a frame from 2,376 us to 1,629 us. All of them
 are kept, because the reason to know them is the reason they were worth
 measuring, and because a deleted experiment gets repeated.
 
-The measurements we have are small, and we say so where they appear. The
-adapter trainer has been exercised on subsamples of a few dozen decisions,
-which establishes that the machinery composes and establishes nothing about
-how much it helps.
+The measurements here are small, and they say so where they appear. The adapter
+trainer has been exercised on subsamples of a few dozen decisions, which
+establishes that the machinery composes and establishes nothing about how much
+it helps.
 
-For most of that time we believed a full-corpus pass needed the laptop, because
-a forward-pass group took 286 s under emulation. It took 1.8 s the first time
+For a long time a full-corpus pass was believed to need the laptop, because a
+forward-pass group took 286 s under emulation. It took 1.8 s the first time
 anybody tried the hypervisor accelerator instead of the interpreter, and the
-whole corpus is a quarter of an hour. The belief was never measured, and it
-shaped which questions we thought were answerable.
+whole corpus is about twenty minutes. The belief was never measured, and it
+shaped which questions seemed answerable.
 
 ---
 
@@ -388,9 +528,9 @@ it without written permission.
 
 `src/dev/rtl8188eu_tables.rs` contains 509 hardware initialisation constants
 transcribed from `drivers/net/wireless/realtek/rtl8xxxu/8188e.c` in the Linux
-kernel, which is **GPL-2.0**. Those values are not our work and the reservation
-above does not apply to them. They are isolated in that one file, marked at the
-top, and nothing else in the tree is copied from anywhere.
+kernel, which is **GPL-2.0**. Those values are not this project's work and the
+reservation above does not apply to them. They are isolated in that one file,
+marked at the top, and nothing else in the tree is copied from anywhere.
 
 If you intend to reuse anything here, that file's licence is Linux's.
 
@@ -399,3 +539,9 @@ If you intend to reuse anything here, that file's licence is Linux's.
 Model weights are not distributed in this repository. The ISO includes a
 converted Qwen3-0.6B, which is **Apache-2.0** and belongs to Alibaba Cloud. Its
 licence travels with it.
+
+### Trademarks
+
+GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This
+is an independent, non-commercial homage and is not affiliated with, endorsed
+by, or connected to Valve in any way.

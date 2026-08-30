@@ -3,19 +3,19 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Writing an operating system in Rust. no_std, ring 0, and no runtime</title>
-<meta name="description" content="What building a Rust OS actually involves: no_std, a hand-written allocator, the UEFI target, calling-convention traps, and where Rust genuinely helps.">
-<meta name="keywords" content="Rust OS, Rust operating system, no_std, bare metal Rust, Rust kernel development, osdev Rust">
+<title>Writing an operating system in Rust. What no_std gives and takes</title>
+<meta name="description" content="What Rust actually buys at ring 0, what no_std removes, and the traps that cost real debugging time in a kernel with one address space and a heap that is a ladder.">
+<meta name="keywords" content="Rust operating system, no_std, kernel development Rust, bare metal Rust, unsafe Rust, ownership in kernels">
 <link rel="canonical" href="https://ilumci.github.io/GLaDOS/wiki/rust-os.html">
 <meta name="robots" content="index,follow,max-image-preview:large">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="GLaDOS">
-<meta property="og:title" content="Writing an operating system in Rust. no_std, ring 0, and no runtime">
-<meta property="og:description" content="What building a Rust OS actually involves: no_std, a hand-written allocator, the UEFI target, calling-convention traps, and where Rust genuinely helps.">
+<meta property="og:title" content="Writing an operating system in Rust. What no_std gives and takes">
+<meta property="og:description" content="What Rust actually buys at ring 0, what no_std removes, and the traps that cost real debugging time in a kernel with one address space and a heap that is a ladder.">
 <meta property="og:url" content="https://ilumci.github.io/GLaDOS/wiki/rust-os.html">
 <meta name="twitter:card" content="summary">
-<meta name="twitter:title" content="Writing an operating system in Rust. no_std, ring 0, and no runtime">
-<meta name="twitter:description" content="What building a Rust OS actually involves: no_std, a hand-written allocator, the UEFI target, calling-convention traps, and where Rust genuinely helps.">
+<meta name="twitter:title" content="Writing an operating system in Rust. What no_std gives and takes">
+<meta name="twitter:description" content="What Rust actually buys at ring 0, what no_std removes, and the traps that cost real debugging time in a kernel with one address space and a heap that is a ladder.">
 <meta property="og:image" content="https://ilumci.github.io/GLaDOS/img/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
@@ -27,7 +27,7 @@
 <link rel="apple-touch-icon" sizes="180x180" href="../img/icon-180.png">
 <link rel="manifest" href="../site.webmanifest">
 <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://ilumci.github.io/GLaDOS/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://ilumci.github.io/GLaDOS/wiki/"},{"@type":"ListItem","position":3,"name":"Writing an OS in Rust","item":"https://ilumci.github.io/GLaDOS/wiki/rust-os.html"}]}</script>
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Writing an operating system in Rust. no_std, ring 0, and no runtime","description":"What building a Rust OS actually involves: no_std, a hand-written allocator, the UEFI target, calling-convention traps, and where Rust genuinely helps.","url":"https://ilumci.github.io/GLaDOS/wiki/rust-os.html","dateModified":"2026-08-14","keywords":"Rust OS, Rust operating system, no_std, bare metal Rust, Rust kernel development, osdev Rust","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Writing an operating system in Rust. What no_std gives and takes","description":"What Rust actually buys at ring 0, what no_std removes, and the traps that cost real debugging time in a kernel with one address space and a heap that is a ladder.","url":"https://ilumci.github.io/GLaDOS/wiki/rust-os.html","dateModified":"2026-08-30","keywords":"Rust operating system, no_std, kernel development Rust, bare metal Rust, unsafe Rust, ownership in kernels","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -48,21 +48,31 @@
 <div id="main">
 <h1>Writing an operating system in Rust</h1>
 <figure class="fig"><img src="../img/wm/rust-logo.svg" alt="The Rust programming language logo" width="106" height="106" loading="lazy" decoding="async"><figcaption>Rust targets <code>x86_64-unknown-uefi</code> directly, so the compiler emits a PE binary the firmware will load. There is no linker script and no custom target JSON in this project.<span class="credit">Rust programming language black logo.svg. ™/®Rust Foundation, CC BY 4.0, via <a href="https://commons.wikimedia.org/wiki/File:Rust_programming_language_black_logo.svg" rel="noopener">Wikimedia Commons</a>.</span></figcaption></figure>
-<p>GLaDOS targets <code>x86_64-unknown-uefi</code> with <code>no_std</code> and no runtime. The compiler emits a PE executable that UEFI loads directly, which means there is no linker script, no custom target specification and no assembler stub to get into long mode. What follows is what the rest of that arrangement costs and pays.</p>
+<p>Rust in a kernel is often sold on memory safety, and memory safety is the smaller half of what arrives. The larger half is that the type system can hold invariants which are otherwise comments, and comments in a kernel decay quietly.</p>
+
 <h2 id="what-no-std-takes-away">What no_std takes away</h2>
-<p>Dropping the standard library removes more than most people expect. There is no heap until you write an allocator, and therefore no <code>Vec</code>, <code>String</code> or <code>Box</code> until <code>alloc</code> is wired to it. No files, no threads, no <code>println!</code>, no <code>std::time</code>. Panicking needs a handler you supply, and so does the out-of-memory path.</p>
-<p>The one that catches people building anything numeric: there are no floating-point maths functions. <code>exp</code>, <code>sqrt</code>, <code>tanh</code> and friends live in libm, which is a C library, which is not present. For an operating system with a transformer in it this is not a footnote. Softmax is defined in terms of <code>exp</code> and RMSNorm needs a reciprocal square root, so the <a href="llm-in-kernel.html">inference code</a> carries its own implementations and the boot self-test checks them against known values.</p>
+<p>There is no standard library, so there is no <code>std::io</code>, no threads, no time, no filesystem and no operating system to ask. What remains is <code>core</code>, which is everything that needs no runtime, and <code>alloc</code>, which arrives as soon as a global allocator exists. That allocator is one of the first things the kernel builds, and until it does, every buffer is a fixed array in a static.</p>
+<p>Panics need a handler and unwinding is off, so a panic is a print and a halt. There is no backtrace and no symbol table. The panic message is the entire diagnostic, which is a strong argument for putting real information in it.</p>
+
 <h2 id="what-ownership-buys-at-ring-0">What ownership buys at ring 0</h2>
-<p>Rust's ownership model does not stop being useful at the hardware boundary. A driver that hands out a buffer it still holds, a descriptor ring the allocator might free while the controller is reading it, a device structure aliased by two code paths that both think they own it: these are the classic kernel bugs, they are miserable to find because the symptom appears in a subsystem that did nothing wrong, and here most of them are compile errors.</p>
-<p>The caveat is real, though. Everything that actually touches hardware is inside <code>unsafe</code>, and inside <code>unsafe</code> Rust does not check that a physical address is mapped, that a DMA buffer is where the device was told it is, that a volatile write reached a register rather than a cache line, or that a struct's field order matches the ABI it is standing in for. It narrows the blast radius without removing it, and the places where it narrows nothing are exactly the places that have cost the most debugging.</p>
+<p>With no privilege boundary, the compiler is the only thing left that will object to anything. Several invariants in this tree are held by types that would otherwise be discipline:</p>
+<ul>
+<li><b>The model engine has one holder.</b> Handing out a second mutable reference to it is undefined behaviour, and two forward passes interleaving in one KV cache produces confident nonsense rather than an error. A claim object records the holder for the length of the work, so nesting is refused by construction. It replaced a pair of flags per task, which is why a third holder went unnoticed for a while: the nightly self-improvement job set neither flag and was handed the engine during its own twenty seconds of work.</li>
+<li><b>Capabilities live on the interpreter.</b> There is one interpreter per program, so an import can never be an escalation. The gate is a single allowlist table and a check that runs before dispatch, so a builtin added without a row in the table is unreachable dead code instead of an ungated capability.</li>
+<li><b>A sandboxed run records its own changes.</b> The undo path saves each path's pre-image at the moment of mutation, attributed to the task that made it, so a concurrent write by another task is not swept up in the rollback.</li>
+</ul>
+
 <h2 id="traps-that-cost-real-time">Traps that cost real time</h2>
-<ul><li><code>extern "C"</code> on the UEFI target means Microsoft x64, not System V. Arguments arrive in <code>rcx, rdx, r8, r9</code> instead of <code>rdi, rsi, rdx, rcx</code>, and there are 32 bytes of shadow space. The context switch has to say <code>extern "sysv64"</code> explicitly. Getting this wrong looks exactly like memory corruption.</li><li>A guarded match arm placed after the arms it guards is unreachable. The compiler said so, in a warning, for several commits, while the bug it described was being looked for elsewhere.</li><li>Interior mutability is not a lock. The type used here is called <code>Racy</code> for the specific purpose of being greppable: on the day a second core exists, one search finds every place that quietly assumed there was only one.</li><li>Struct field order in the UEFI bindings is the ABI. Every entry in <code>BootServices</code> has to be declared, in the specification's order, even the ones that are never called, or the function pointers that are called land at the wrong offsets and the machine jumps into the middle of an unrelated firmware routine. That failure presents as a spontaneous reboot with no diagnostic at all.</li></ul>
+<p>Four are worth passing on, because each survived review and was found by a machine.</p>
+<p><b>The calling convention is a lie on this target.</b> On <code>x86_64-unknown-uefi</code>, <code>extern "C"</code> means the Microsoft x64 convention. Anything that must be System V says <code>extern "sysv64"</code> explicitly. Getting that wrong once put a stack pointer inside the framebuffer aperture, and the return instruction popped a black pixel into the instruction pointer.</p>
+<p><b>A guarded match arm placed after the arm it guards is unreachable.</b> The compiler said so in a warning that went unread for several commits.</p>
+<p><b>A <code>debug_assert</code> is checked only in debug builds, and this tree is driven in release.</b> One of them asserted a claim about the wrong dimension and would have panicked on every debug build that attached a Qwen3 adapter. Nothing runs debug under the emulator, so it never fired.</p>
+<p><b>A feature gate must test the feature the code needs.</b> The AVX2 kernel was gated on AVX being enabled and FMA being present, and never on AVX2 itself.</p>
+
 <h2 id="the-heap">The heap</h2>
-<p>The kernel heap is one physically contiguous allocation taken from the UEFI memory map. It has to be contiguous because the identity map makes a heap pointer usable as a DMA address, which is what lets the NVMe and network drivers skip bounce buffers entirely.</p>
-<p>Its size comes from a ladder that steps down until one rung fits, and it is a ladder for a specific reason: the largest contiguous region a machine can offer is not its free memory. A map can report 1.9 GB free spread across 84 separate regions and not contain 320 MB in one piece. A fixed size that the GF63's memory map cannot satisfy is an unbootable system, on the one machine that cannot be debugged from here, so boot prints the size it got and says when it had to come down a rung.</p>
-<p>The allocator underneath is an address-sorted free list with coalescing, resting on one invariant: every block address and every block size is a multiple of 16 bytes. That is what keeps it simple enough to trust. <code>dealloc</code> is handed the original <code>Layout</code> rather than a header the allocator wrote, so if <code>alloc</code> ever returned more than the rounded request, <code>dealloc</code> would give back less than was taken and leak the difference on every single allocation. Rounding both sides the same way makes them exact inverses.</p>
-<div class="note">A good bug lived in that ladder. It never actually degraded: the probing allocator advanced its cursor destructively, so once the largest rung failed, every smaller rung failed too, and the fallback path had never once run. The fix was a non-consuming <code>largest_span()</code> that looks without taking. Rewinding the cursor instead would have handed out the page tables' own frames a second time, which is a considerably more interesting failure.</div>
-<div class="seealso"><b>See also:</b> <a href="../wiki/ring-0.html">Ring 0</a>, <a href="../wiki/uefi-kernel.html">UEFI as the kernel</a>, <a href="../wiki/llm-in-kernel.html">A language model in the kernel</a>, <a href="../wiki/glados-os.html">GLaDOS OS</a></div>
+<p>The kernel heap is one physically contiguous allocation, and its size is a ladder rather than a constant. The memory map on the target laptop cannot be inspected from the machine that builds this, and a fixed size that map cannot satisfy is an unbootable system, so the allocator tries descending sizes, prints the one it got, and says when it had to come down a rung.</p>
+<p>Concurrency has the same shape of honesty. The interior mutability wrapper used throughout is named for what it is and its documentation states that it is not a lock. It is single-core interior mutability and the designated grep target for the day that stops being true. Several application processors are started and parked, and they never allocate, never take an interrupt, never print, and never touch anything that wrapper guards. They wait on a generation counter, compute a range of a matrix, and go back to sleep. That is a compute fabric rather than general multiprocessing, and the distinction is the entire reason the safety argument survived.</p>
+<div class="seealso"><b>See also:</b> <a href="ring-0.html">Ring 0</a>, <a href="uefi-kernel.html">UEFI as the kernel</a>, <a href="testing.html">Testing without a test runner</a>, <a href="llm-in-kernel.html">A language model in the kernel</a></div>
 </div>
 </div>
 </div>
@@ -74,7 +84,7 @@
   GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are
   other people's and are listed on <a href="../credits.html">the
   credits page</a>.</p>
-  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-14.</p>
+  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-30.</p>
 </div>
 
 </div>

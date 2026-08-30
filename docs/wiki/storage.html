@@ -3,19 +3,19 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Content-addressed storage. Merkle trees, NVMe, and O(1) snapshots</title>
-<meta name="description" content="How GLaDOS stores data: objects named by SHA-256 of their contents, assembled into Merkle trees, so a copy is free and a snapshot is one hash.">
-<meta name="keywords" content="content addressed storage, Merkle tree, NVMe driver, snapshots, SHA-256, filesystem design">
+<title>Content-addressed storage. Merkle trees on NVMe</title>
+<meta name="description" content="Objects named by the hash of their contents, snapshots as one root hash, and a write gate that names the range it unlocked and enforces it.">
+<meta name="keywords" content="content addressed storage, Merkle tree, NVMe driver, snapshot, copy on write, write locking">
 <link rel="canonical" href="https://ilumci.github.io/GLaDOS/wiki/storage.html">
 <meta name="robots" content="index,follow,max-image-preview:large">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="GLaDOS">
-<meta property="og:title" content="Content-addressed storage. Merkle trees, NVMe, and O(1) snapshots">
-<meta property="og:description" content="How GLaDOS stores data: objects named by SHA-256 of their contents, assembled into Merkle trees, so a copy is free and a snapshot is one hash.">
+<meta property="og:title" content="Content-addressed storage. Merkle trees on NVMe">
+<meta property="og:description" content="Objects named by the hash of their contents, snapshots as one root hash, and a write gate that names the range it unlocked and enforces it.">
 <meta property="og:url" content="https://ilumci.github.io/GLaDOS/wiki/storage.html">
 <meta name="twitter:card" content="summary">
-<meta name="twitter:title" content="Content-addressed storage. Merkle trees, NVMe, and O(1) snapshots">
-<meta name="twitter:description" content="How GLaDOS stores data: objects named by SHA-256 of their contents, assembled into Merkle trees, so a copy is free and a snapshot is one hash.">
+<meta name="twitter:title" content="Content-addressed storage. Merkle trees on NVMe">
+<meta name="twitter:description" content="Objects named by the hash of their contents, snapshots as one root hash, and a write gate that names the range it unlocked and enforces it.">
 <meta property="og:image" content="https://ilumci.github.io/GLaDOS/img/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
@@ -27,7 +27,7 @@
 <link rel="apple-touch-icon" sizes="180x180" href="../img/icon-180.png">
 <link rel="manifest" href="../site.webmanifest">
 <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://ilumci.github.io/GLaDOS/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://ilumci.github.io/GLaDOS/wiki/"},{"@type":"ListItem","position":3,"name":"Content-addressed storage","item":"https://ilumci.github.io/GLaDOS/wiki/storage.html"}]}</script>
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Content-addressed storage. Merkle trees, NVMe, and O(1) snapshots","description":"How GLaDOS stores data: objects named by SHA-256 of their contents, assembled into Merkle trees, so a copy is free and a snapshot is one hash.","url":"https://ilumci.github.io/GLaDOS/wiki/storage.html","dateModified":"2026-08-14","keywords":"content addressed storage, Merkle tree, NVMe driver, snapshots, SHA-256, filesystem design","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Content-addressed storage. Merkle trees on NVMe","description":"Objects named by the hash of their contents, snapshots as one root hash, and a write gate that names the range it unlocked and enforces it.","url":"https://ilumci.github.io/GLaDOS/wiki/storage.html","dateModified":"2026-08-30","keywords":"content addressed storage, Merkle tree, NVMe driver, snapshot, copy on write, write locking","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -47,23 +47,27 @@
 <div class="crumbs"><a href="../">GLaDOS</a> / <a href="../wiki/">Wiki</a> / Content-addressed storage</div>
 <div id="main">
 <h1>Content-addressed storage</h1>
-<figure class="fig wide"><img src="../img/wm/merkle-tree.svg" alt="Diagram of a Merkle hash tree with data blocks, leaf hashes and a root hash" width="2200" height="1400" loading="lazy" decoding="async"><figcaption>A hash tree. Each leaf is named by the hash of its data and each interior node by the hash of its children, so the root hash names the entire structure.<span class="credit">Hash Tree.svg. Azaghal, CC0, via <a href="https://commons.wikimedia.org/wiki/File:Hash_Tree.svg" rel="noopener">Wikimedia Commons</a>.</span></figcaption></figure>
-<p>The namespace here is not a tree of blocks with names attached to it. Objects are named by the SHA-256 of their own contents and assembled into Merkle trees, and several operations that are normally expensive collapse as a direct consequence.</p>
-<ul><li>A copy is O(1) on any size. Identical content already has an identical name, so copying is adding a reference to something that exists.</li><li>A snapshot is one hash. The root of the tree names the entire state of the namespace at that moment.</li><li>Comparing two whole subtrees is one comparison, because if the root hashes match the contents match.</li><li>Rolling back branches instead of rewriting. The old root remains valid and still points at everything it pointed at, because nothing was overwritten to produce the new one.</li><li>Deletion cannot destroy content that something else still references, since names are derived from content and never assigned.</li></ul>
-<p>Those are not features that were added on top. They are what content addressing already implies, and the applet list reflects it: <code>cp</code>, <code>same</code> and <code>snap</code> exist because they became cheap.</p>
-<h2 id="the-rule-that-makes-it-work">The rule that makes it work</h2>
-<p>The content hash covers content only, and never block locations. This sounds too obvious to state and is easy to violate by including a block pointer somewhere in the hashed structure, at which point moving a block to defragment renames the object that contains it, every reference to that object breaks, and deduplication stops working without any error being raised.</p>
-<h2 id="surviving-power-loss">Surviving power loss</h2>
-<p>Three properties, each chosen against a specific failure. The store is append-only, so chunks are never rewritten and a checkpoint that fails halfway cannot damage an earlier one, because it never touches the blocks an earlier one occupies. It is content-addressed, so every chunk carries the SHA-256 of its contents and reads verify it, which means corruption surfaces at read time instead of propagating into whatever is being restored.</p>
-<p>And there are two superblocks. The obvious design is a single root pointer updated atomically, and it is not actually safe: a 512-byte write is not guaranteed atomic across power loss, so a torn sector can destroy the only root and take every checkpoint with it. Two superblocks alternate, each carrying a sequence number and a checksum over itself, and mounting picks the highest sequence number that checksums. A torn write then costs the newest checkpoint and nothing else. This is the reasoning behind ZFS uberblocks and F2FS checkpoints, arrived at from the same starting point.</p>
 <figure class="fig"><img src="../img/wm/nvme-ssd.jpg" alt="An M.2 NVMe solid state drive" width="720" height="257" loading="lazy" decoding="async"><figcaption>NVMe was chosen over USB Mass Storage because it is about a third of the work: some MMIO registers and a pair of ring buffers in ordinary memory, with no host controller stack underneath.<span class="credit">Samsung 980 PRO PCIe 4.0 NVMe SSD 1TB-top PNr°0915.jpg. D-Kuru, CC BY-SA 4.0, via <a href="https://commons.wikimedia.org/wiki/File:Samsung_980_PRO_PCIe_4.0_NVMe_SSD_1TB-top_PNr%C2%B00915.jpg" rel="noopener">Wikimedia Commons</a>.</span></figcaption></figure>
+<p>Objects are named by the SHA-256 of their contents and assembled into Merkle trees. A copy is a pointer. A snapshot is one root hash. Two files with identical contents are one object with two names in two directories.</p>
+
+<h2 id="the-rule-that-makes-it-work">The rule that makes it work</h2>
+<p>The content hash covers content and never block locations. Moving a block would otherwise rename the object it belongs to, and every reference to it would break for a reason that has nothing to do with the data.</p>
+<p>Directory entries are kept sorted, so listing a directory returns lexicographic order. That is why stored corpus blobs are zero-padded to four digits: sorted order becomes insertion order, and every positional split boundary in the evaluation harness depends on it. Past four digits the padding truncates and the property fails silently, which is why the tool that emits bundles refuses to produce a larger one.</p>
+
+<h2 id="surviving-power-loss">Surviving power loss</h2>
+<p>Objects are written before anything points at them, and the root is written last. A snapshot that was interrupted leaves objects nothing references, which the next mount ignores. There is no journal, because content addressing makes the ordering argument sufficient on its own.</p>
+<p>Durability is a snapshot rather than a write, and the interface says so. Writing a blob puts it in the working tree, which is memory. It survives a reboot only once a snapshot has committed the tree, and only if a store is mounted at all. The first version of the conversation parking code returned a boolean, reported success for a memory-only write, and lost the conversation at the next boot having said it was saved. It answers with three outcomes now: durable, volatile, or failed.</p>
+
 <h2 id="the-driver-and-why-it-is-small">The driver, and why it is small</h2>
-<p>The NVMe driver exists at all because of decisions made earlier. Identity mapping means virtual equals physical, so a heap pointer <em>is</em> a DMA address, with no IOMMU setup, no translation and no bounce buffers. PCI enumeration through ECAM finds the controller and its BAR. And non-RAM pages are mapped uncacheable, so doorbell writes actually reach the device and do not sit in a write-back cache line, which is the kind of thing that costs a day if it is not arranged in advance.</p>
-<h2 id="write-locking-and-why-it-stays-that-way">Write locking, and why it stays that way</h2>
-<p>NVMe writes are locked by default. They unlock only after a target region has been explicitly identified, the formatter re-checks before touching anything, and every error path locks them again on the way out.</p>
-<p>The reason is specific: the only NVMe device in the development laptop is the internal drive holding Windows, and a stray LBA there is unrecoverable. Reads are harmless and prove everything except the write path, so the write path is exercised against a throwaway QEMU image instead. On a machine whose disk is fully allocated, storage initialisation fails and says so, which is the intended outcome rather than a bug to work around. Leaving the lock open on a failure path is precisely how a safety mechanism becomes decorative.</p>
-<div class="note">The development machine's boot disk is counterfeit. It advertises 976 GB and holds 14.67, which is why the partitioning tooling uses MBR (a GPT backup header would be written to flash that does not exist) and why it carries an explicit safe-capacity limit. Nothing anyone cares about goes on that disk.</div>
-<div class="seealso"><b>See also:</b> <a href="../wiki/glados-os.html">GLaDOS OS</a>, <a href="../wiki/tls.html">TLS 1.3 from scratch</a>, <a href="../wiki/testing.html">Testing without a test runner</a></div>
+<p>NVMe is a queue pair and a doorbell. Build a submission entry, ring the doorbell, wait for the completion. There is no bus enumeration beyond finding the controller, no command set negotiation, and no scatter-gather beyond a physical region page list. The driver is small because the specification put the complexity in the host and this host does the simple version.</p>
+<p>Completion latency feeds the entropy pool, on a path deliberately separate from the one that decides whether a person is at the keyboard.</p>
+
+<h2 id="write-locking-and-the-range">Write locking, and the range</h2>
+<p>Writes are locked by default. Initialisation unlocks only after a target region has been identified, formatting re-checks, and every error path re-locks, because leaving it open is how a safety mechanism becomes decorative. On a disk fully allocated to another operating system there is no such region and initialisation fails, which is the intended outcome.</p>
+<p>The unlock used to be one bit. Unlocking said writes were allowed and nothing said where, so from the moment initialisation succeeded every block on the device was writable: the partition table, the boot partition, and the other operating system that is still the only other thing on this disk.</p>
+<p>The unlock names a range now and the range is enforced on every write. The status display prints the window beside the word unlocked rather than leaving an operator to assume it means the disk. A test suite asserts the whole decision without a device and without writing anything, including that a write starting inside the window and overrunning it is refused, and that a length which overflows does not wrap into a pass. That is a prerequisite for anything that writes the boot partition, because an updater built on a global unlock is a whole-disk writer.</p>
+<p>One warning that belongs here. The boot disk in the target laptop is counterfeit: it advertises 976 GB and holds 14.67. That is why the partition scheme is MBR, since a backup GPT header would land in flash that does not exist, and why the layout tool carries a hard size limit.</p>
+<div class="seealso"><b>See also:</b> <a href="tls.html">TLS 1.3 from scratch</a>, <a href="agent.html">The agent loop</a>, <a href="iso-el-torito.html">How the ISO is built</a>, <a href="glados-os.html">GLaDOS OS</a></div>
 </div>
 </div>
 </div>
@@ -75,7 +79,7 @@
   GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are
   other people's and are listed on <a href="../credits.html">the
   credits page</a>.</p>
-  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-14.</p>
+  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-30.</p>
 </div>
 
 </div>

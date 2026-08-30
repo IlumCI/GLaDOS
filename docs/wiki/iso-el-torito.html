@@ -3,19 +3,19 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>How the GLaDOS ISO is built. FAT32 and El Torito, written from scratch</title>
-<meta name="description" content="Building a bootable UEFI ISO without xorriso: a hand-written FAT32 EFI System Partition wrapped in ISO 9660 with an El Torito EFI boot catalog.">
-<meta name="keywords" content="El Torito, bootable ISO, FAT32, ISO 9660, UEFI boot, EFI System Partition, mkisofs alternative">
+<title>How the ISO is built. El Torito, FAT32 and a reader to check it</title>
+<meta name="description" content="Building a bootable UEFI image by hand: the El Torito catalogue, why long file names are required, the FAT32 cluster floor, and reading the result back.">
+<meta name="keywords" content="El Torito, ISO 9660, UEFI boot ISO, FAT32, Joliet, bootable image, hybrid ISO">
 <link rel="canonical" href="https://ilumci.github.io/GLaDOS/wiki/iso-el-torito.html">
 <meta name="robots" content="index,follow,max-image-preview:large">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="GLaDOS">
-<meta property="og:title" content="How the GLaDOS ISO is built. FAT32 and El Torito, written from scratch">
-<meta property="og:description" content="Building a bootable UEFI ISO without xorriso: a hand-written FAT32 EFI System Partition wrapped in ISO 9660 with an El Torito EFI boot catalog.">
+<meta property="og:title" content="How the ISO is built. El Torito, FAT32 and a reader to check it">
+<meta property="og:description" content="Building a bootable UEFI image by hand: the El Torito catalogue, why long file names are required, the FAT32 cluster floor, and reading the result back.">
 <meta property="og:url" content="https://ilumci.github.io/GLaDOS/wiki/iso-el-torito.html">
 <meta name="twitter:card" content="summary">
-<meta name="twitter:title" content="How the GLaDOS ISO is built. FAT32 and El Torito, written from scratch">
-<meta name="twitter:description" content="Building a bootable UEFI ISO without xorriso: a hand-written FAT32 EFI System Partition wrapped in ISO 9660 with an El Torito EFI boot catalog.">
+<meta name="twitter:title" content="How the ISO is built. El Torito, FAT32 and a reader to check it">
+<meta name="twitter:description" content="Building a bootable UEFI image by hand: the El Torito catalogue, why long file names are required, the FAT32 cluster floor, and reading the result back.">
 <meta property="og:image" content="https://ilumci.github.io/GLaDOS/img/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
@@ -27,7 +27,7 @@
 <link rel="apple-touch-icon" sizes="180x180" href="../img/icon-180.png">
 <link rel="manifest" href="../site.webmanifest">
 <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://ilumci.github.io/GLaDOS/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://ilumci.github.io/GLaDOS/wiki/"},{"@type":"ListItem","position":3,"name":"How the ISO is built","item":"https://ilumci.github.io/GLaDOS/wiki/iso-el-torito.html"}]}</script>
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"How the GLaDOS ISO is built. FAT32 and El Torito, written from scratch","description":"Building a bootable UEFI ISO without xorriso: a hand-written FAT32 EFI System Partition wrapped in ISO 9660 with an El Torito EFI boot catalog.","url":"https://ilumci.github.io/GLaDOS/wiki/iso-el-torito.html","dateModified":"2026-08-14","keywords":"El Torito, bootable ISO, FAT32, ISO 9660, UEFI boot, EFI System Partition, mkisofs alternative","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"How the ISO is built. El Torito, FAT32 and a reader to check it","description":"Building a bootable UEFI image by hand: the El Torito catalogue, why long file names are required, the FAT32 cluster floor, and reading the result back.","url":"https://ilumci.github.io/GLaDOS/wiki/iso-el-torito.html","dateModified":"2026-08-30","keywords":"El Torito, ISO 9660, UEFI boot ISO, FAT32, Joliet, bootable image, hybrid ISO","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -46,27 +46,29 @@
 <div id="content">
 <div class="crumbs"><a href="../">GLaDOS</a> / <a href="../wiki/">Wiki</a> / How the ISO is built</div>
 <div id="main">
-<h1>How the GLaDOS ISO is built</h1>
+<h1>How the ISO is built</h1>
 <figure class="fig"><img src="../img/wm/compact-disc.svg" alt="Diagram of the layers of a compact disc" width="500" height="500" loading="lazy" decoding="async"><figcaption>ISO 9660 was designed for physical media like this. The format long outlived the medium, and El Torito is the 1995 extension that taught it to boot.<span class="credit">OD Compact disc.svg. The original uploader was Sakurambo~commonswiki at Wikimedia Commons., CC BY-SA 2.5, via <a href="https://commons.wikimedia.org/wiki/File:OD_Compact_disc.svg" rel="noopener">Wikimedia Commons</a>.</span></figcaption></figure>
-<p>The ISO builder writes both filesystems itself. The practical reason is that xorriso and mkisofs are absent from most Windows machines, and the Windows ADK's equivalent is a 1.5 GB install in order to produce one 600 MB file. Both formats are published, neither is large, and the same reasoning produced the FAT reader in the kernel.</p>
+<p>The distributable image is written by a script in this tree rather than by a standard tool, which was worth doing because the failure modes are otherwise opaque.</p>
+
 <h2 id="how-uefi-boots-an-optical-disc">How UEFI boots an optical disc</h2>
-<p>The firmware reads the El Torito boot catalog, looks for an entry whose platform id is <code>0xEF</code>, and treats the sectors that entry points at as a FAT filesystem: an EFI System Partition that happens to be living inside an ISO image. It then loads <code>\EFI\BOOT\BOOTX64.EFI</code> from it and jumps.</p>
-<p>Which makes the ISO 9660 structure wrapped around the whole thing almost ceremonial: it exists so the disc mounts and shows its contents, not so it boots. It gets built correctly regardless, because a disc that boots fine and appears empty when you mount it looks broken to everyone who checks.</p>
-<p>El Torito is named after the Californian restaurant where the specification was drafted in 1994, which is the sort of detail that makes reading old standards worthwhile.</p>
+<p>Firmware does not read the ISO 9660 filesystem to find a boot loader. It reads the El Torito boot catalogue, finds an entry marked as a UEFI platform, and treats the extent that entry points at as a FAT filesystem image. It then looks inside that image for the usual boot path.</p>
+<p>So a bootable image contains a whole FAT partition as a file, and the ISO around it exists mostly to be a container the firmware knows how to open.</p>
+
 <h2 id="long-file-names-are-not-optional">Long file names are not optional</h2>
-<p>The kernel opens <code>\GLADOS\tokenizer.bin</code>. That base name is nine characters and has no 8.3 representation, so a short-name-only image presents it as <code>TOKENI~1.BIN</code> and the kernel fails to find its tokenizer at boot, on real hardware, at the exact moment there is no filesystem left to debug from, since this all happens after <code>ExitBootServices</code>.</p>
-<p>So the builder generates VFAT long-name entries, complete with the specified rotate-and-add checksum that ties each set of long entries to its short entry. Get that checksum wrong and the long names are silently ignored, which returns you to the previous paragraph.</p>
+<p>Plain ISO 9660 restricts names to eight characters, a dot, and three more, in upper case. The path the firmware looks for does not fit, so the image carries a Joliet extension with the real names in UCS-2.</p>
+<p>Omitting it gives an image that mounts fine on a desktop operating system, which will happily read the Joliet names or fall back gracefully, and does not boot, because the firmware finds nothing at the path it wants.</p>
+
 <h2 id="fat32-has-a-floor">FAT32 has a floor</h2>
-<p>FAT32 is <em>defined</em> as a volume with at least 65,525 clusters. Below that the volume is by definition FAT16, and firmware that trusts the count over the boot sector's claim will misparse the entire thing. Since the cluster count has a floor, the cluster size sets a minimum image size:</p>
-<table class="data"><thead><tr><th>Cluster size</th><th>Smallest possible volume</th></tr></thead><tbody><tr><td>4 KiB</td><td>~256 MB</td></tr><tr><td>512 B</td><td>~33 MB</td></tr></tbody></table>
-<p>Before this was worked out, the kernel-only image was 269 MB to carry a 1 MB kernel: 255 MB of zeroes, faithfully compressed by nothing and downloaded in full. Choosing the cluster size from the actual payload brings it to 33 MB, and even that is the format's floor: the volume is already as small as a FAT32 volume is permitted to be.</p>
+<p>FAT32 is defined by cluster count rather than by size. Below 65,525 clusters the filesystem is FAT16 by definition, whatever the header claims, and a driver following the specification will read it as FAT16 and find nothing.</p>
+<p>A small embedded image therefore has to either use a small enough cluster size to clear the floor or be padded until it does. Getting that wrong produces an image that some drivers read and others do not, which is a worse outcome than one that fails everywhere.</p>
+
 <h2 id="why-write-a-fat-reader-as-well">Why write a FAT reader as well</h2>
-<p>There is a matching FAT implementation inside the kernel, and it exists for a reason that only becomes obvious after <code>ExitBootServices</code>. The firmware can read files, and does; that is how the model gets loaded. But its filesystem driver dies with boot services, so from the moment the kernel owns the machine it can address every block on the disk and understand none of them. That gap is the difference between a system that boots and a system you could use to fix a machine.</p>
-<p>FAT specifically, because FAT is what the ESP is, and the ESP is where boot configuration lives and therefore where things go wrong. It is also small enough to implement correctly: a chain of 32-bit numbers, a table of 32-byte records, and one awkward extension for long names.</p>
-<p>It is deliberately read-only. Writing FAT means allocating clusters, keeping two copies of the allocation table in agreement, and holding directory entries consistent across a power cut. A rescue tool that can read a broken disk is useful; one that can half-write it is worse than nothing.</p>
+<p>Because a writer with no reader is a writer nobody can check. The same tooling reads the image back, walks the directory, and asserts that the boot path is present with the expected size. That has caught a wrong cluster count, a missing Joliet tree and an off-by-one in the boot catalogue, each of which would otherwise have presented as a machine that does not boot with no further information.</p>
+<p>The same FAT writer builds the emulator's test partition, so the code path is exercised by ordinary development rather than only at release time.</p>
+
 <h2 id="verifying-the-result">Verifying the result</h2>
-<p>The image is checked by booting it, which sounds circular and is the only test that means anything: firmware is the component least likely to agree with the specification. QEMU with OVMF catches structural mistakes, and the GF63's own firmware catches the rest, of which there have been enough to justify the trip. A disc that boots under OVMF and not on metal is a normal outcome here.</p>
-<div class="seealso"><b>See also:</b> <a href="../wiki/uefi-kernel.html">UEFI as the kernel</a>, <a href="../download/">Download</a>, <a href="../wiki/testing.html">Testing without a test runner</a></div>
+<p>Every published image has a checksum file beside it. The largest is the 2B distill at about 1.9 GB, and the smallest carries no model at all for anybody who wants to supply their own. Booting the image under emulation before publishing it is one command, and it is the last step of building one.</p>
+<div class="seealso"><b>See also:</b> <a href="uefi-kernel.html">UEFI as the kernel</a>, <a href="storage.html">Content-addressed storage</a>, <a href="testing.html">Testing without a test runner</a>, <a href="qwen35.html">Qwen3.5 and the 2B distill</a></div>
 </div>
 </div>
 </div>
@@ -78,7 +80,7 @@
   GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are
   other people's and are listed on <a href="../credits.html">the
   credits page</a>.</p>
-  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-14.</p>
+  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-30.</p>
 </div>
 
 </div>

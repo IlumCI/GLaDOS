@@ -3,19 +3,19 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>TempleOS. The lineage behind a single-address-space ring-0 kernel</title>
-<meta name="description" content="What TempleOS got right about single-address-space computing, and how GLaDOS relates to it: lineage, not target.">
-<meta name="keywords" content="TempleOS, Terry Davis, single address space, hobby OS, ring 0, HolyC, operating system design">
+<title>TempleOS. What this project inherited from it</title>
+<meta name="description" content="What TempleOS got right about single address space computing, where this system follows it, and where the two deliberately diverge.">
+<meta name="keywords" content="TempleOS, Terry Davis, HolyC, single address space, ring 0 operating system, God Says">
 <link rel="canonical" href="https://ilumci.github.io/GLaDOS/wiki/templeos.html">
 <meta name="robots" content="index,follow,max-image-preview:large">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="GLaDOS">
-<meta property="og:title" content="TempleOS. The lineage behind a single-address-space ring-0 kernel">
-<meta property="og:description" content="What TempleOS got right about single-address-space computing, and how GLaDOS relates to it: lineage, not target.">
+<meta property="og:title" content="TempleOS. What this project inherited from it">
+<meta property="og:description" content="What TempleOS got right about single address space computing, where this system follows it, and where the two deliberately diverge.">
 <meta property="og:url" content="https://ilumci.github.io/GLaDOS/wiki/templeos.html">
 <meta name="twitter:card" content="summary">
-<meta name="twitter:title" content="TempleOS. The lineage behind a single-address-space ring-0 kernel">
-<meta name="twitter:description" content="What TempleOS got right about single-address-space computing, and how GLaDOS relates to it: lineage, not target.">
+<meta name="twitter:title" content="TempleOS. What this project inherited from it">
+<meta name="twitter:description" content="What TempleOS got right about single address space computing, where this system follows it, and where the two deliberately diverge.">
 <meta property="og:image" content="https://ilumci.github.io/GLaDOS/img/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
@@ -27,7 +27,7 @@
 <link rel="apple-touch-icon" sizes="180x180" href="../img/icon-180.png">
 <link rel="manifest" href="../site.webmanifest">
 <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://ilumci.github.io/GLaDOS/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://ilumci.github.io/GLaDOS/wiki/"},{"@type":"ListItem","position":3,"name":"TempleOS","item":"https://ilumci.github.io/GLaDOS/wiki/templeos.html"}]}</script>
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"TempleOS. The lineage behind a single-address-space ring-0 kernel","description":"What TempleOS got right about single-address-space computing, and how GLaDOS relates to it: lineage, not target.","url":"https://ilumci.github.io/GLaDOS/wiki/templeos.html","dateModified":"2026-08-14","keywords":"TempleOS, Terry Davis, single address space, hobby OS, ring 0, HolyC, operating system design","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"TempleOS. What this project inherited from it","description":"What TempleOS got right about single address space computing, where this system follows it, and where the two deliberately diverge.","url":"https://ilumci.github.io/GLaDOS/wiki/templeos.html","dateModified":"2026-08-30","keywords":"TempleOS, Terry Davis, HolyC, single address space, ring 0 operating system, God Says","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -48,22 +48,23 @@
 <div id="main">
 <h1>TempleOS</h1>
 <figure class="fig"><img src="../img/wm/templeos.png" alt="A TempleOS desktop screenshot showing its text-mode interface" width="640" height="480" loading="lazy" decoding="async"><figcaption>TempleOS: 640×480, sixteen colours, one address space, everything at ring 0, and a compiler you could call from anywhere in the system.<span class="credit">VirtualBox TempleOS x64 27 02 2021 20 43 48.png. Terry A. Davis, TempleOS, via <a href="https://commons.wikimedia.org/wiki/File:VirtualBox_TempleOS_x64_27_02_2021_20_43_48.png" rel="noopener">Wikimedia Commons</a>.</span></figcaption></figure>
-<p>TempleOS is the obvious ancestor of a project shaped like this one, and the parts it got right are the parts this system also relies on. Terry Davis wrote it alone over more than a decade: a 64-bit operating system in ring 0, in one address space, with its own compiler, its own graphics and its own language, and it worked.</p>
+<p>TempleOS ran everything in ring 0 in one address space, compiled its own language on the fly, and treated the whole machine as one programmable surface. It was dismissed for a long time as a curiosity. The architecture underneath was a serious position about what a personal computer could be when nobody has to be protected from anybody.</p>
+
 <h2 id="the-inheritance">The inheritance</h2>
-<ul><li>Ring 0, always. No user/kernel split and no syscall instruction, in either system.</li><li>One identity-mapped address space, where everything can reach everything. The paging code here says so directly: physical equals virtual, one set of page tables for the whole machine, no higher half, no per-process tables and no TLB shootdown to design.</li><li>No isolation, arrived at deliberately, with the costs written down where a reader will find them.</li><li>An aesthetic committed to on purpose. TempleOS chose 640×480 and sixteen colours and never apologised for it; this one chooses <a href="aperture-science.html">amber on black and Windows 3.1 chrome</a> and does not either.</li><li>One person, from scratch, with the tools included in the thing being built.</li></ul>
+<p>Four things here come more or less directly from it.</p>
+<p><b>One address space, one privilege level.</b> The justification differs, because TempleOS wanted immediacy and this wants to remove a boundary that a language model would otherwise cross thousands of times per answer. The consequence is the same, and so are the risks.</p>
+<p><b>A system language that belongs to the system.</b> HolyC was the shell, the scripting language and the compiled language at once. Aiksi occupies the same position here: everything above the kernel is written in it, the shell evaluates it, and stored programs are the same artefacts the machine writes for itself.</p>
+<p><b>The graphics are simple on purpose.</b> A linear framebuffer, a fixed glyph, drawing that anybody can follow. There is no acceleration, and the compositor is a back buffer and a row-span diff.</p>
+<p><b>An oracle.</b> TempleOS drew words from a dictionary seeded by the timing of the operator's own hands. That entropy source is kept here, with keyboard and mouse interrupt timing folded into a sampler. The subject changed.</p>
+
 <h2 id="where-the-two-diverge">Where the two diverge</h2>
-<p>TempleOS had HolyC serving as compiler, shell and system language simultaneously, which is a genuinely radical unification: the command line was the language, and the language was compiled. GLaDOS has <a href="glados-os.html">a small interpreted language</a> in the shell, but the system is Rust and stays Rust, and the interpreter is a guest in it.</p>
-<p>The organising question is different too. TempleOS was built around one person's particular conviction about what a computer should be. This is built around a narrower technical question: what changes when a language model is a kernel primitive and not a userspace process? That is answerable by measurement, which is a different sort of project even where the architecture rhymes.</p>
+<p>TempleOS was 640x480 at sixteen colours by choice, and this runs at whatever the graphics output protocol offers. TempleOS had no networking, and this has a full stack including TLS. TempleOS compiled HolyC to native code immediately, and Aiksi is a tree walker with a code generator that so far handles integer arithmetic and control flow and refuses everything else.</p>
+<p>The largest divergence is the oracle. Drawing random words and reading them as prophecy is the part of TempleOS that cannot be defended on any technical ground. The mechanism here fits a linear dynamical model to real telemetry, heap and task-switch rate and touch rate, then rolls the state forward under three interventions and plots the branches. It is a controlled linear system fitted from measurements. The first draft did generate prophetic words, and it was scrapped for exactly the reason this paragraph gives.</p>
+
 <h2 id="what-it-got-right">What it got right</h2>
-<p>That the boundary between kernel and user is a choice and not a law of nature, and that removing it makes some things genuinely simpler instead of merely more dangerous. A function call is a function call. There is no marshalling, no permission check on the way through, no context switch and no ABI that has to stay stable across a release.</p>
-<p>For a system in which a model reaches for kernel functions constantly, that stops being a philosophical position and becomes an engineering one. The identity map, the single heap and the absence of a trap gate are all load-bearing here for the same reasons they were load-bearing there, and the null-page fault guard is the one deliberate exception in both.</p>
-<h2 id="the-parts-that-turned-out-to-be-practical-not-just-philosophical">The parts that turned out to be practical, not just philosophical</h2>
-<p>Three specific things fall out of the single-address-space choice, and each one saved real work here.</p>
-<p>Identity mapping means a heap pointer is a DMA address. The NVMe driver and both network drivers hand device controllers pointers straight out of the allocator, with no IOMMU configuration, no address translation and no bounce buffers anywhere. A conventional kernel spends a meaningful amount of code on that translation layer; here it does not exist to be got wrong.</p>
-<p>The context switch is six callee-saved registers and a stack pointer. There is no privilege transition, no reload of the ring-0 stack pointer in the task state segment, no page-table swap and no TLB flush. The caller-saved registers need no handling at all, because the calling convention already permits a function call to clobber them. Preemption works by calling the switch from inside the timer interrupt: the interrupted task's full state is sitting on its own stack, pushed by the handler prologue, so swapping the stack pointer underneath means each task carries its own suspended interrupt frame around with it and resumes into the middle of its own timer handler.</p>
-<p>And there is no ABI to keep stable, anywhere, because nothing crosses a boundary. Changing the signature of a kernel function is a recompile and nothing more. For a system where the model is expected to reach into the applet table constantly, that is what keeps the table editable instead of versioned.</p>
-<div class="note">This is lineage, not continuation. It is not an attempt to carry on TempleOS and it is not a tribute; it is a different project that started from a different question and arrived at several of the same structural answers, which is the most useful kind of corroboration a design decision can get.</div>
-<div class="seealso"><b>See also:</b> <a href="../wiki/ring-0.html">Ring 0</a>, <a href="../wiki/glados-os.html">GLaDOS OS</a>, <a href="../wiki/aperture-science.html">Aperture Science</a>, <a href="../wiki/rust-os.html">Writing an OS in Rust</a></div>
+<p>That the boundary is a cost as well as a protection, and that a machine which is entirely yours can be organised around immediacy. Most of that argument was dismissed alongside everything else about its author, and most of it holds.</p>
+<p>The parts that turned out to be practical rather than only philosophical are the ones this project leans on hardest. A tool call as a function call. A language whose programs are values the system can store, hash and reason about. A screen you can write to without asking anybody. None of those needed the theology, and all of them survive it.</p>
+<div class="seealso"><b>See also:</b> <a href="ring-0.html">Ring 0</a>, <a href="glados-os.html">GLaDOS OS</a>, <a href="gui.html">The Windows 3.1 desktop</a>, <a href="rust-os.html">Writing an OS in Rust</a></div>
 </div>
 </div>
 </div>
@@ -75,7 +76,7 @@
   GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are
   other people's and are listed on <a href="../credits.html">the
   credits page</a>.</p>
-  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-14.</p>
+  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-30.</p>
 </div>
 
 </div>

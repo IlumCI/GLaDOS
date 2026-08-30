@@ -3,19 +3,19 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>RoPE. Rotary position embeddings, and the convention that fails silently</title>
-<meta name="description" content="Rotary Position Embedding explained, and why pairing dimension i with i+head_dim/2 instead of 2i with 2i+1 produces fluent text and wrong attention.">
-<meta name="keywords" content="RoPE, rotary position embedding, rotate_half, transformer positions, attention, LLM implementation">
+<title>RoPE. Two pairing conventions and one silent failure</title>
+<meta name="description" content="Rotary position embeddings pair dimensions in two different ways, both are norm preserving, and choosing the wrong one produces a fluent model that misjudges distance.">
+<meta name="keywords" content="RoPE, rotary position embedding, rotate_half, interleaved rope, llama2.c, position encoding">
 <link rel="canonical" href="https://ilumci.github.io/GLaDOS/wiki/rope.html">
 <meta name="robots" content="index,follow,max-image-preview:large">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="GLaDOS">
-<meta property="og:title" content="RoPE. Rotary position embeddings, and the convention that fails silently">
-<meta property="og:description" content="Rotary Position Embedding explained, and why pairing dimension i with i+head_dim/2 instead of 2i with 2i+1 produces fluent text and wrong attention.">
+<meta property="og:title" content="RoPE. Two pairing conventions and one silent failure">
+<meta property="og:description" content="Rotary position embeddings pair dimensions in two different ways, both are norm preserving, and choosing the wrong one produces a fluent model that misjudges distance.">
 <meta property="og:url" content="https://ilumci.github.io/GLaDOS/wiki/rope.html">
 <meta name="twitter:card" content="summary">
-<meta name="twitter:title" content="RoPE. Rotary position embeddings, and the convention that fails silently">
-<meta name="twitter:description" content="Rotary Position Embedding explained, and why pairing dimension i with i+head_dim/2 instead of 2i with 2i+1 produces fluent text and wrong attention.">
+<meta name="twitter:title" content="RoPE. Two pairing conventions and one silent failure">
+<meta name="twitter:description" content="Rotary position embeddings pair dimensions in two different ways, both are norm preserving, and choosing the wrong one produces a fluent model that misjudges distance.">
 <meta property="og:image" content="https://ilumci.github.io/GLaDOS/img/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
@@ -27,7 +27,7 @@
 <link rel="apple-touch-icon" sizes="180x180" href="../img/icon-180.png">
 <link rel="manifest" href="../site.webmanifest">
 <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://ilumci.github.io/GLaDOS/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://ilumci.github.io/GLaDOS/wiki/"},{"@type":"ListItem","position":3,"name":"RoPE","item":"https://ilumci.github.io/GLaDOS/wiki/rope.html"}]}</script>
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"RoPE. Rotary position embeddings, and the convention that fails silently","description":"Rotary Position Embedding explained, and why pairing dimension i with i+head_dim/2 instead of 2i with 2i+1 produces fluent text and wrong attention.","url":"https://ilumci.github.io/GLaDOS/wiki/rope.html","dateModified":"2026-08-14","keywords":"RoPE, rotary position embedding, rotate_half, transformer positions, attention, LLM implementation","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"RoPE. Two pairing conventions and one silent failure","description":"Rotary position embeddings pair dimensions in two different ways, both are norm preserving, and choosing the wrong one produces a fluent model that misjudges distance.","url":"https://ilumci.github.io/GLaDOS/wiki/rope.html","dateModified":"2026-08-30","keywords":"RoPE, rotary position embedding, rotate_half, interleaved rope, llama2.c, position encoding","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -47,23 +47,24 @@
 <div class="crumbs"><a href="../">GLaDOS</a> / <a href="../wiki/">Wiki</a> / RoPE</div>
 <div id="main">
 <h1>RoPE</h1>
-<figure class="fig wide"><img src="../img/paper/rope-diagram.svg" alt="Diagram of rotary position embedding applied to a query vector" width="812" height="454" loading="lazy" decoding="async"><figcaption>RoPE rotates pairs of dimensions by an angle proportional to position. Each pair turns at its own frequency, so the vector encodes position the way the hands of a clock encode time.<span class="credit">Figure 1, RoFormer: Enhanced Transformer with Rotary Position Embedding. Su, Lu, Pan, Murtadha, Wen and Liu, via <a href="https://arxiv.org/abs/2104.09864" rel="noopener">arXiv 2104.09864</a>.</span></figcaption></figure>
-<p>Rotary Position Embedding encodes a token's position by rotating pairs of dimensions in its query and key vectors through an angle proportional to that position. Each pair gets its own frequency, geometrically spaced, so the fast pairs distinguish nearby positions and the slow ones carry long-range order.</p>
-<p>The reason this is elegant and not merely clever: a dot product between two rotated vectors depends only on the <em>difference</em> of their angles. Rotate the query for position 400 and the key for position 395 and the score you get is the score for a gap of five, wherever in the sequence that gap happens to sit. Relative position falls out of absolute rotation for free, with no extra parameters and no bias matrix.</p>
+<p>Rotary position embeddings encode position by rotating pairs of dimensions in the query and key vectors by an angle proportional to the position. Attention then depends on relative distance without any position vector being added anywhere.</p>
+
 <h2 id="two-conventions-one-right-answer-per-checkpoint">Two conventions, one right answer per checkpoint</h2>
-<p>Rotating a pair requires deciding which dimensions constitute a pair, and there are two answers in circulation:</p>
-<ul><li>Interleaved: pair dimension <code>2i</code> with <code>2i+1</code>, so the pairs are adjacent. This is what the original llama2.c does, and it is the obvious reading of the paper.</li><li>rotate_half: pair dimension <code>i</code> with <code>i + head_dim/2</code>, so the first half of the vector pairs with the second. This is what HuggingFace's <code>rotate_half</code> does, and therefore what essentially every published checkpoint was trained with, because essentially every published checkpoint was trained through transformers.</li></ul>
-<p>Neither is more correct in the abstract. They are the same rotation applied to a different permutation of the axes, and a model trained under either works fine. What matters is agreeing with whatever the weights were fitted under, and the weights do not come with a note.</p>
+<p>Which dimensions form a pair is a convention, and there are two in circulation.</p>
+<p>The reference implementations most checkpoints are trained through pair dimension <em>i</em> with dimension <em>i</em> plus half the head width. The other convention, which appears in several compact C implementations, pairs adjacent dimensions: 0 with 1, 2 with 3, and so on.</p>
+<p>Both rotate by the same angles. Both are norm preserving. Applying the wrong one produces no error, no NaN, no drift, and no complaint from any check that looks at magnitudes.</p>
+
 <h2 id="why-getting-it-wrong-produces-no-error">Why getting it wrong produces no error</h2>
-<p>This is the part worth internalising. Both conventions are norm-preserving rotations through the same set of angles. Pick the wrong one and there is no NaN, no overflow, no gradual drift, no assertion and no warning. Vector lengths are unchanged. Attention scores stay in the range softmax expects. Every intermediate tensor looks exactly as healthy as it did before.</p>
-<p>What has actually happened is that the model is attending by a scrambled notion of distance: tokens that should be five apart score as though they were some other distance apart, consistently but wrongly. From outside, the result is a model that is a bit vague, loses the thread over long spans, and repeats itself, which is an exact description of a small model being small. There is no observation that separates the two except comparing against a reference or checking a fact.</p>
+<p>Because a rotation is a rotation. The vectors keep their lengths, the attention scores stay in range, and the softmax behaves. What changes is which dimensions are being rotated together, so the model's notion of relative distance is scrambled in a way that is perfectly consistent and completely wrong.</p>
+<p>A model in that state stays fluent. It writes grammatical sentences, keeps a topic for a while, and loses the thread slightly more than it should. That is indistinguishable from a small model being small, which is why this survived for a long time.</p>
+
 <h2 id="what-it-cost-measured">What it cost, measured</h2>
-<p>This kernel used the interleaved convention for a long time, on the strength of having started from llama2.c, and nothing looked broken. Switching to rotate_half with the same checkpoint, prompt and seed:</p>
-<table class="data"><thead><tr><th>Convention</th><th>Output for "The capital of France"</th></tr></thead><tbody><tr><td>Interleaved (wrong)</td><td>"The capital of France." then blank lines</td></tr><tr><td>rotate_half (correct)</td><td>"The capital of France is Paris. Paris is a city known for..."</td></tr></tbody></table>
-<p>At token level, the highest-probability first tokens went from <code>'\n'</code>, <code>'\n\n'</code>, <code>'ity'</code> and <code>' capital'</code> to <code>'The'</code>, <code>'Paris'</code> and <code>'France'</code>. The wrong version was not producing garbage. It was producing a model that had lost track of what the prompt was about and defaulted to whitespace.</p>
-<p>One checkpoint genuinely wants the interleaved convention: an actual llama2.c model, trained by that code. So the choice is recorded per checkpoint in <code>Config::rope_interleaved</code> and written into the file header at conversion time, so the kernel never decides it globally. A global constant here is a bug waiting for the second model.</p>
-<div class="note">If you are debugging an implementation that produces plausible but slightly-off text, check the RoPE pairing before anything else. It is the highest-probability silent failure in a hand-written transformer, it survives every sanity check that looks at magnitudes, and it will not announce itself at any point.</div>
-<div class="seealso"><b>See also:</b> <a href="../wiki/qwen3.html">Qwen3 in 570 MB</a>, <a href="../wiki/llm-in-kernel.html">A language model in the kernel</a>, <a href="../wiki/kv-cache.html">The int8 KV cache</a>, <a href="../wiki/tokenizer.html">Tokenizers</a></div>
+<p>The interleaved convention was used here for months. On SmolLM2, the prompt asking for the capital of France produced "The capital of France." followed by blank lines. With the pairing corrected, the same prompt and the same checkpoint produced "The capital of France is Paris. Paris is a city known for" and continued sensibly.</p>
+<p>Nothing else changed. No weights moved, no configuration was retuned. That is the entire evidence, and it is the reason the configuration now carries an explicit flag which is true only for genuine llama2.c checkpoints rather than being inferred from anything.</p>
+
+<h2 id="how-to-catch-it">How to catch it</h2>
+<p>Ask for a fact the model should know and read the answer. That is a low-effort instrument and it detects this class of bug immediately, where every numeric sanity check available will pass. Comparing logits against a host-side reference on the same converted file is the precise version of the same idea.</p>
+<div class="seealso"><b>See also:</b> <a href="qwen3.html">Qwen3 in 570 MB</a>, <a href="llm-in-kernel.html">A language model in the kernel</a>, <a href="tokenizer.html">Tokenizers</a>, <a href="testing.html">Testing without a test runner</a></div>
 </div>
 </div>
 </div>
@@ -75,7 +76,7 @@
   GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are
   other people's and are listed on <a href="../credits.html">the
   credits page</a>.</p>
-  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-14.</p>
+  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-30.</p>
 </div>
 
 </div>

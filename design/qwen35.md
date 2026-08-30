@@ -1,6 +1,10 @@
 # Qwen3.5 and Qwen3.5-MoE, as an extension
 
-Status: design. Nothing below is implemented yet.
+Status: shipped. Phases 0 through 4 are done and the hybrid path runs in the
+kernel; MoE is refused at load rather than half implemented. Phase 5 (vision)
+is not built. Phase 6 was built independently of this document and the
+paragraph below records what it looked like beforehand. The design argument is
+kept as written because the reasoning is what the file is for.
 
 ## Why bother
 
@@ -171,11 +175,22 @@ architecture whose failure mode is fluent nonsense is worse than none.
    Found by bisecting: every stage inside the mixer agreed with torch to 1e-7,
    which said the recurrence was right and the *input* was wrong, and the
    input was one normalisation.
-2. **convert.py** reads the new config, strips the `model.language_model.`
-   prefix, skips `model.visual.*` and `mtp.*`, and writes v4.
-3. **model.rs** ports the verified reference. Dense first, MoE second.
-4. Measure: tokens/sec and memory against Qwen3-0.6B at 512 and at 32k, which
-   is where the whole argument is supposed to pay off.
+2. **convert.py. Done.** Reads the new config, strips the
+   `model.language_model.` prefix, skips `model.visual.*` and `mtp.*`, and
+   writes v4 with a layer-major body and the schedule as an explicit bitmap.
+   `tools/v4.py --selftest` round-trips the writer against the reader, and both
+   walk without seeking and assert they land on the last byte, because a body
+   with no names in it turns a one-dimension disagreement into valid float32
+   garbage.
+3. **model.rs. Done.** `Arch::Qwen35` ports the verified reference. MoE is
+   refused with `LoadError::Unsupported`: the smallest published one is 71.9 GB,
+   nothing that size reaches a UEFI pool on this laptop, and a forward pass for
+   it could never be run and contradicted. A path that has never executed and
+   cannot be tested is worse than an honest refusal.
+4. **Measured.** The 2B distill ships as a bootable image of about 1.9 GB and
+   scores 43.3% on MMLU at n=30 against 20.0% for SmolLM2. Tokens per second
+   remains a laptop number and only that, for the reason the accelerator note
+   below gives.
 
 ### The real checkpoint under QEMU. Done.
 
@@ -199,18 +214,24 @@ bit-identical top-5 with the scalar one at ~8% less wall clock, which says
 decode under emulation is bandwidth-bound in the emulator itself, not ALU
 bound -- absolute tokens/sec remains a GF63 number and only that.
 
-One accelerator was tried for speed and rejected. WHPX runs guest code
-natively but crashes the kernel with #XM at varying instructions even after
-the kernel pins MXCSR to the reset value (a pin worth keeping regardless:
-inheriting FP exception state was the last assumption `enable_simd` had not
-closed). The faulting instruction was resolved by giving the kernel its own
-load base -- the Loaded Image protocol reports base 0 through this firmware
-path, so boot walks page-aligned addresses down from the entry point until
-one carries a valid MZ/PE pair -- and reporting `rip - base` from the fault
-handler. The instruction was an ordinary `divss`; no masked exception can
-fire there, so the hypervisor loses guest SIMD state across VM exits. That
-is a QEMU-WHPX bug no guest can work around, and TCG stays the reference
-path.
+**The accelerator note here has been overtaken, and the correction is the
+useful part.** WHPX was tried, crashed the kernel with #XM at varying
+instructions, and was written off as a hypervisor bug no guest could work
+around. The faulting instruction was resolved by giving the kernel its own
+load base, which is where the load-base reporting in the fault handler came
+from, and the instruction was an ordinary `divss` where no masked exception
+can fire.
+
+The diagnosis was right about the symptom and wrong about the conclusion. The
+bug was in this kernel's per-task FPU area initialisation, which TCG hides and
+WHPX surfaces faithfully. With that fixed, WHPX is the standard way this
+project runs QEMU and is about 160 times faster than TCG on this workload: a
+forward-pass group measured 286,370 ms under TCG and 1,795 ms under WHPX.
+
+Everything that had been treated as too slow to test under emulation was an
+untested assumption about the emulator, and it had been shaping which
+questions seemed answerable for months. `-cpu max` is needed alongside it,
+since WHPX alone reports no AVX2 and the trainer correctly declines.
 
 5. **Vision, optionally.** The tower is 12 layers at hidden 768, patch 16,
    about 86M parameters -- roughly 86 MB at int8 against the text model's 850.
@@ -231,25 +252,34 @@ path.
    what is on screen. It would not let it navigate, because navigating means
    acting, and acting is phase 6.
 
-6. **The agent loop, if the measurement says so.** `harness.rs` does not omit
-   it out of caution alone: it says the loop is "only worth building against a
-   model that can follow an instruction", and that judgement was made when the
-   resident model was stories260K. That is a threshold, and this port is what
-   moves the model across it.
+6. **The agent loop. Built.** This entry is kept as it was written, because
+   the reasoning held and the outcome is worth checking against it.
+
+   `harness.rs` did not omit the loop out of caution alone: it said the loop is
+   "only worth building against a model that can follow an instruction", and
+   that judgement was made when the resident model was stories260K. That is a
+   threshold, and this port is what moved the model across it.
 
    So the ordering is not arbitrary. Phases 0 to 3 are a precondition: they are
    what make a loop worth iterating on rather than a way to watch a small model
    fail repeatedly. The trigger already exists and is measured -- `gate` acts on
-   the three cores agreeing (90% correct) versus splitting (61%), and that gap
-   is the signal that says whether routing is good enough to act on.
+   the three cores agreeing (90.3% correct) versus splitting (50%), and that
+   gap is the signal that says whether routing is good enough to act on.
 
    Stated plainly, because the project states these: an agent loop, plus vision,
    plus ring 0 with one address space and no isolation, is a system in which a
-   model can reach everything. The capability is already structurally present
-   and is withheld only by a missing edge in a call graph -- `sysbox::dispatch`
-   has one caller, the typed command line. Building the loop adds that edge. It
-   is the single most consequential change on this list and belongs last, after
-   the things that make it measurable.
+   model can reach everything. The capability was already structurally present
+   and was withheld only by a missing edge in a call graph -- `sysbox::dispatch`
+   had one caller, the typed command line. Building the loop added that edge.
+
+   What went around it afterwards is this paragraph's answer. The grammar
+   removes mutating applets from the reachable set before sampling rather than
+   checking afterwards. Stored programs run sandboxed under a capability
+   allowlist, with operator powers only for bytes an operator named by hash.
+   Disk writes are locked to a claimed range and the range is enforced. A skill
+   the machine compiles for itself faces four judges before adoption, and so
+   does a change it proposes to its own routing. None of that is isolation, and
+   the documentation says so wherever a reader might assume otherwise.
 
 Phase 0 and 1 are where the risk is. Phase 3 is transcription of something
 already known correct, which is the position this project always tries to

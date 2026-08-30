@@ -3,19 +3,19 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Tool routing. Why a 1960 regression beats the transformer</title>
-<meta name="description" content="GLaDOS routes tool calls with closed-form ridge regression on one hidden state: 12,672 parameters, 1.6 ms, no forward pass, and better accuracy.">
-<meta name="keywords" content="tool routing, LLM routing, ridge regression, Widrow-Hoff, linear probe, classifier, AI tool selection">
+<title>Tool routing. When a ridge regression beats the transformer</title>
+<meta name="description" content="Two routing paths, one decoding under a grammar and one a closed-form classifier over a single hidden state. The 1960s method wins on accuracy and costs 1.6 ms.">
+<meta name="keywords" content="tool routing, ridge regression, Widrow-Hoff, linear probe, ensemble agreement, held-out evaluation">
 <link rel="canonical" href="https://ilumci.github.io/GLaDOS/wiki/routing.html">
 <meta name="robots" content="index,follow,max-image-preview:large">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="GLaDOS">
-<meta property="og:title" content="Tool routing. Why a 1960 regression beats the transformer">
-<meta property="og:description" content="GLaDOS routes tool calls with closed-form ridge regression on one hidden state: 12,672 parameters, 1.6 ms, no forward pass, and better accuracy.">
+<meta property="og:title" content="Tool routing. When a ridge regression beats the transformer">
+<meta property="og:description" content="Two routing paths, one decoding under a grammar and one a closed-form classifier over a single hidden state. The 1960s method wins on accuracy and costs 1.6 ms.">
 <meta property="og:url" content="https://ilumci.github.io/GLaDOS/wiki/routing.html">
 <meta name="twitter:card" content="summary">
-<meta name="twitter:title" content="Tool routing. Why a 1960 regression beats the transformer">
-<meta name="twitter:description" content="GLaDOS routes tool calls with closed-form ridge regression on one hidden state: 12,672 parameters, 1.6 ms, no forward pass, and better accuracy.">
+<meta name="twitter:title" content="Tool routing. When a ridge regression beats the transformer">
+<meta name="twitter:description" content="Two routing paths, one decoding under a grammar and one a closed-form classifier over a single hidden state. The 1960s method wins on accuracy and costs 1.6 ms.">
 <meta property="og:image" content="https://ilumci.github.io/GLaDOS/img/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
@@ -27,7 +27,7 @@
 <link rel="apple-touch-icon" sizes="180x180" href="../img/icon-180.png">
 <link rel="manifest" href="../site.webmanifest">
 <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://ilumci.github.io/GLaDOS/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://ilumci.github.io/GLaDOS/wiki/"},{"@type":"ListItem","position":3,"name":"Tool routing","item":"https://ilumci.github.io/GLaDOS/wiki/routing.html"}]}</script>
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Tool routing. Why a 1960 regression beats the transformer","description":"GLaDOS routes tool calls with closed-form ridge regression on one hidden state: 12,672 parameters, 1.6 ms, no forward pass, and better accuracy.","url":"https://ilumci.github.io/GLaDOS/wiki/routing.html","dateModified":"2026-08-14","keywords":"tool routing, LLM routing, ridge regression, Widrow-Hoff, linear probe, classifier, AI tool selection","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Tool routing. When a ridge regression beats the transformer","description":"Two routing paths, one decoding under a grammar and one a closed-form classifier over a single hidden state. The 1960s method wins on accuracy and costs 1.6 ms.","url":"https://ilumci.github.io/GLaDOS/wiki/routing.html","dateModified":"2026-08-30","keywords":"tool routing, ridge regression, Widrow-Hoff, linear probe, ensemble agreement, held-out evaluation","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -48,27 +48,28 @@
 <div id="main">
 <h1>Tool routing</h1>
 <figure class="fig"><img src="../img/wm/linear-regression.svg" alt="A scatter plot with a fitted least-squares regression line" width="350" height="231" loading="lazy" decoding="async"><figcaption>Least squares fits a line by minimising squared error, and has a closed-form solution. Ridge regression is the same idea with a regularisation term, and it is what routes tool calls here.<span class="credit">Linear regression.svg. Sewaqu, Public domain, via <a href="https://commons.wikimedia.org/wiki/File:Linear_regression.svg" rel="noopener">Wikimedia Commons</a>.</span></figcaption></figure>
-<p>Given a task written in natural language, something has to decide which applet to call. There are two implementations of that in the tree, and the interesting result, interesting enough that it shaped how the rest of the project is evaluated, is that the much older idea wins comfortably.</p>
+<p>Choosing which applet a request means is the decision this system makes most often, and it has two implementations. The older and simpler one wins.</p>
+
 <h2 id="the-two-paths">The two paths</h2>
-<table class="data"><thead><tr><th>Approach</th><th>Cost</th><th>Held-out accuracy</th></tr></thead><tbody><tr><td>Decode the applet name token by token under a grammar</td><td>A transformer forward pass per token, 191 of them across the evaluation</td><td>5.7%</td></tr><tr><td>Nearest neighbour on pooled embeddings</td><td>One pass over the corpus per query</td><td>32.1%</td></tr><tr><td>Ridge regression on one hidden state</td><td>12,672 parameters, ~1.6 ms, no forward pass</td><td>54.7%</td></tr></tbody></table>
-<p>The winner is a linear probe. Take the hidden state the model has already computed while reading the request, subtract a mean, and multiply by a 576×22 matrix. That matrix is solved in closed form, <code>W = (A'A + λI)⁻¹A'Y</code>, by Cholesky decomposition, which is ridge regression onto one-hot targets, or Widrow-Hoff least mean squares as published in 1960, solved directly instead of by descent.</p>
-<p>It costs effectively nothing, because the hidden state is a byproduct of work already done, and it beats asking the 135M transformer the same question by a factor of nine.</p>
+<p>The first decodes the applet name token by token under a grammar built from the live table. It costs a forward pass plus a token for each piece of the name.</p>
+<p>The second reads one hidden state and hands it to a ridge regression solved in the kernel by Cholesky decomposition. Twelve thousand six hundred and seventy two parameters, about 1.6 ms, no transformer forward pass, and better held-out accuracy than the decoder.</p>
+<p>The method is Widrow-Hoff, published in 1960. It wins because the task is easy given a good representation, and the transformer's job here is to produce the representation rather than to make the decision.</p>
+
 <h2 id="why-the-closed-form-matters-more-than-the-accuracy">Why the closed form matters more than the accuracy</h2>
-<p>The probe replaced a gradient-descent head, and that head was measured getting <em>worse</em> as it trained: 30% held-out accuracy untrained, 10% after two epochs, 0% after eight. With forty examples spread across twenty-one classes there is nothing for SGD to do except memorise, and it did, thoroughly.</p>
-<p>Ridge regression has no such failure mode. There is no learning rate, no epoch count and no schedule, so there is no way for it to drift past the optimum; it <em>is</em> the optimum for the regularisation chosen. That property is also what makes fitting practical on the machine itself: a 576×576 Cholesky is about 64 million operations, a fraction of a second, so the system can refit from its own accumulated corpus every time someone runs <code>teach</code>.</p>
-<p>One detail that turned out to be load-bearing: the mean subtraction is not cosmetic. Pooled embeddings share a large common component, because every sentence contains the same function words, and leaving it in makes every pair of examples about 0.99 similar. The argmax then falls out as whichever vector happens to be longest. Uncentred nearest-neighbour answered the same class for all twelve items it was first tried on.</p>
-<h2 id="agreement-not-votes">Agreement, not votes</h2>
-<p>Three independent cores run over the same request: the ridge probe, a multinomial naive Bayes over hashed character trigrams, and a lexical one over exact token identity. The two Bayes cores are trained by counting, so there is no matrix to factorise, and each sees something the probe cannot. The character core notices that "duplicating" and "duplicate" share most of their trigrams even when they tokenise differently, and needs no tokenizer at all.</p>
-<p>The obvious thing to do with three cores is combine them into a better answer. That was measured, and it does not work: across 108 held-out items the best single core scores 77.8% and an equal-weight product of all three scores 76.9%. The ensemble is slightly worse than its best member.</p>
-<p>What the same measurement did show is that their agreement predicts correctness sharply. Where all three pick the same applet they are right 90.3% of the time; where they split, 50%. So the probe answers, the other two corroborate, and their disagreement never changes the answer; it changes what the system says about the answer. A router that knows when it is guessing can ask, escalate or refuse. One that is silently 78% accurate cannot, and that is worth considerably more than the point or two the ensemble was supposed to buy.</p>
-<h2 id="answering-before-the-sampler-runs">Answering before the sampler runs</h2>
-<p>Agreement turned out strong enough to act on directly. When the probe and both counting cores name the same applet, the call dispatches immediately and the sampler never starts; a 12,672-parameter regression has answered a question the transformer would have spent a forward pass on. When they split, the request falls through to the constrained decoder, which weighs the choice with everything the model knows.</p>
-<p>That division of labour is the first tier of <a href="agent.html">the agent loop</a>: routed requests resolve in microseconds, unrouted ones get the full model.</p>
+<p>A closed-form fit has no learning rate, no epochs, no initialisation and no seed. The same data produces the same classifier every time, which means a routing decision can be re-derived by any later run and a verdict recorded in a ledger still means something a month later.</p>
+<p>That property is load-bearing for the self-improvement loop. There is no random seed anywhere in the training path, and the first version of the loop suffered for it in an instructive way: every trial trained a bit-identical adapter with the same content hash, so after the first adoption each later trial was being compared against itself and rejected forever. The fix was a declared grid walked in a fixed order with markers for the points already tried, so the next point is a function of the ledger rather than of a coin.</p>
+
+<h2 id="agreement-rather-than-votes">Agreement rather than votes</h2>
+<p>Three cores answer: the probe, a hashed n-gram Bayesian classifier, and a lexical matcher. Combining their votes into one answer is the obvious use and it is the less interesting one.</p>
+<p>What the ensemble is actually for is confidence. When all three agree the answer is right 90.3% of the time. When they split, 50%. That gap is what the machine acts on when deciding whether to answer, ask, or stand down.</p>
+<p>A fourth kind of core can be written by the machine itself: a small program in the system language that reads the text and returns a class. It is judged before it is installed, and it is inert unless the routing rule in force actually consults it, which the machine now says out loud because a core that passes every judge and is never asked anything looks identical in the ledger to a core that is working.</p>
+
 <h2 id="measurement-discipline">Measurement discipline</h2>
-<p>This project got its evaluation wrong three separate times before it settled, and each failure is worth naming because each one produced encouraging numbers. A grid sweep was scored on the test set. Cross-validation folded by template family in a way that leaked. And the test set itself moved whenever the corpus was appended to, so results were not comparable across runs and nobody noticed for a while.</p>
-<p>The current arrangement has three splits rather than two. Validation is spent freely; the test slice is read once, at the end. A configuration is adopted only when it measures better, and the corpus holds out whole template families rather than sampled instances, since instances within a family differ only by their slot values, so an instance split measures memorisation while looking exactly like generalisation.</p>
-<div class="note">Negative results stay in the tree next to the code that produced them. The adapter head hurts at this data scale; the Product-of-Experts council does not improve accuracy. Both are kept, because the reason to know them is the same reason they were worth measuring, and because a deleted experiment gets repeated.</div>
-<div class="seealso"><b>See also:</b> <a href="../wiki/constrained-decoding.html">Constrained decoding</a>, <a href="../wiki/agent.html">The agent loop</a>, <a href="../wiki/llm-in-kernel.html">A language model in the kernel</a>, <a href="../wiki/glados-os.html">GLaDOS OS</a></div>
+<p>This part was got wrong three separate times before it was got right, and all three are recorded because the failures are more useful than the result.</p>
+<p>A grid sweep was scored on the test set. Cross-validation was folded by template family in one place and by instance in another. And the test set moved whenever the corpus was appended to, so a figure from last week described a different set of examples.</p>
+<p>There are three splits now and exactly one place that answers what they are. Validation is spent freely. The test slice carries a budget, is consulted only after a variant has already won on validation, and prints as stale and unquotable after three reads. A machine that improves itself every night reads the held-out set every night, and the discipline does not survive that unless somebody counts.</p>
+<p>Corpora hold out whole template families rather than sampled instances, because instances within a family differ only by slot values, so an instance split measures memorisation while looking like generalisation.</p>
+<div class="seealso"><b>See also:</b> <a href="constrained-decoding.html">Constrained decoding</a>, <a href="agent.html">The agent loop</a>, <a href="llm-in-kernel.html">A language model in the kernel</a>, <a href="testing.html">Testing without a test runner</a></div>
 </div>
 </div>
 </div>
@@ -80,7 +81,7 @@
   GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are
   other people's and are listed on <a href="../credits.html">the
   credits page</a>.</p>
-  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-14.</p>
+  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-30.</p>
 </div>
 
 </div>

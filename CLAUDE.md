@@ -1457,7 +1457,7 @@ works by removing mutating applets from the reachable set *before* sampling,
 and never by checking after.
 
 Three "cores" vote (probe, hashed-n-gram Bayes, lexical). Their *agreement* is
-the signal instead of their vote: 90% right when all three agree against 61%
+the signal instead of their vote: 90.3% right when all three agree against 50%
 when they split. That gap is what `gate` acts on.
 
 **Training below the classifier now has a verified gradient.** `Tape` keeps the

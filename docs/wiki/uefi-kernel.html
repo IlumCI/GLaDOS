@@ -3,19 +3,19 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>UEFI as the kernel. Booting an OS with no bootloader at all</title>
-<meta name="description" content="How GLaDOS boots: the UEFI application is the kernel. No GRUB, no ELF loading, no handoff ABI, and what ExitBootServices takes away permanently.">
-<meta name="keywords" content="UEFI, UEFI bootloader, ExitBootServices, EFI application, OS boot, bare metal boot, EFI System Partition">
+<title>UEFI as the kernel. Booting without a bootloader</title>
+<meta name="description" content="Why this operating system is a UEFI application rather than something a bootloader loads, what ExitBootServices takes away, and the memory-map trap that broke the identity map.">
+<meta name="keywords" content="UEFI application kernel, ExitBootServices, no bootloader, UEFI boot services, identity map, x86_64-unknown-uefi">
 <link rel="canonical" href="https://ilumci.github.io/GLaDOS/wiki/uefi-kernel.html">
 <meta name="robots" content="index,follow,max-image-preview:large">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="GLaDOS">
-<meta property="og:title" content="UEFI as the kernel. Booting an OS with no bootloader at all">
-<meta property="og:description" content="How GLaDOS boots: the UEFI application is the kernel. No GRUB, no ELF loading, no handoff ABI, and what ExitBootServices takes away permanently.">
+<meta property="og:title" content="UEFI as the kernel. Booting without a bootloader">
+<meta property="og:description" content="Why this operating system is a UEFI application rather than something a bootloader loads, what ExitBootServices takes away, and the memory-map trap that broke the identity map.">
 <meta property="og:url" content="https://ilumci.github.io/GLaDOS/wiki/uefi-kernel.html">
 <meta name="twitter:card" content="summary">
-<meta name="twitter:title" content="UEFI as the kernel. Booting an OS with no bootloader at all">
-<meta name="twitter:description" content="How GLaDOS boots: the UEFI application is the kernel. No GRUB, no ELF loading, no handoff ABI, and what ExitBootServices takes away permanently.">
+<meta name="twitter:title" content="UEFI as the kernel. Booting without a bootloader">
+<meta name="twitter:description" content="Why this operating system is a UEFI application rather than something a bootloader loads, what ExitBootServices takes away, and the memory-map trap that broke the identity map.">
 <meta property="og:image" content="https://ilumci.github.io/GLaDOS/img/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
@@ -27,7 +27,7 @@
 <link rel="apple-touch-icon" sizes="180x180" href="../img/icon-180.png">
 <link rel="manifest" href="../site.webmanifest">
 <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://ilumci.github.io/GLaDOS/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://ilumci.github.io/GLaDOS/wiki/"},{"@type":"ListItem","position":3,"name":"UEFI as the kernel","item":"https://ilumci.github.io/GLaDOS/wiki/uefi-kernel.html"}]}</script>
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"UEFI as the kernel. Booting an OS with no bootloader at all","description":"How GLaDOS boots: the UEFI application is the kernel. No GRUB, no ELF loading, no handoff ABI, and what ExitBootServices takes away permanently.","url":"https://ilumci.github.io/GLaDOS/wiki/uefi-kernel.html","dateModified":"2026-08-14","keywords":"UEFI, UEFI bootloader, ExitBootServices, EFI application, OS boot, bare metal boot, EFI System Partition","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"UEFI as the kernel. Booting without a bootloader","description":"Why this operating system is a UEFI application rather than something a bootloader loads, what ExitBootServices takes away, and the memory-map trap that broke the identity map.","url":"https://ilumci.github.io/GLaDOS/wiki/uefi-kernel.html","dateModified":"2026-08-30","keywords":"UEFI application kernel, ExitBootServices, no bootloader, UEFI boot services, identity map, x86_64-unknown-uefi","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -48,23 +48,26 @@
 <div id="main">
 <h1>UEFI as the kernel</h1>
 <figure class="fig"><img src="../img/wm/uefi-logo.svg" alt="The UEFI logo" width="368" height="425" loading="lazy" decoding="async"><figcaption>UEFI replaced the BIOS with a specification that includes a filesystem driver, a memory allocator and a framebuffer, all available before your code starts.<span class="credit">Uefi logo.svg. Mouagip, Public domain, via <a href="https://commons.wikimedia.org/wiki/File:Logo_of_the_UEFI_Forum.svg" rel="noopener">Wikimedia Commons</a>.</span></figcaption></figure>
-<p>A kernel is normally loaded by a bootloader (GRUB, systemd-boot, limine) which reads an ELF file off a filesystem, arranges long mode, gathers a memory map and jumps to an entry point under an agreed calling convention. Two codebases, one handoff contract between them, and a great deal of setup code.</p>
-<p>GLaDOS skips the entire arrangement, because UEFI has already done the work. Firmware hands a UEFI application a machine in 64-bit long mode, at ring 0, with an identity-mapped address space, a working allocator, a filesystem driver, a console and a linear framebuffer. An application that starts in that state is already running under the conditions a kernel spends its first thousand lines establishing, so this one just keeps going.</p>
+<p>The firmware hands control to a UEFI application already in long mode, at privilege level 0, with an identity map covering physical memory and a set of boot services for reading files, allocating pages and drawing on the screen. A conventional kernel throws most of that away and rebuilds it. This one keeps it and simply never leaves.</p>
+<p>The build target is <code>x86_64-unknown-uefi</code>. The output is <code>BOOTX64.EFI</code> on a FAT partition. There is no bootloader, no ELF loading, no relocation step and no handoff protocol, because the thing the firmware loads is the thing that runs.</p>
+
 <h2 id="what-that-deletes">What that deletes</h2>
-<ul><li>No ELF loader, no relocation processing, no linker script.</li><li>No handoff ABI to define, document and then get subtly wrong.</li><li>No second codebase living on its own release cycle.</li><li>No multiboot header, no protected-mode stub, no A20 gate, and no real-mode assembly anywhere in the tree.</li></ul>
-<p>The bindings to the firmware are hand-written, not taken from <code>uefi-rs</code>, which is a decision with a cost attached. Field order and padding in those structs <em>are</em> the ABI: every entry in the <code>BootServices</code> table has to be declared, in the specification's order, including all the ones that are never called, or the handful that are called sit at the wrong offsets. The machine then jumps into the middle of an unrelated firmware routine, which presents as a spontaneous reboot with nothing printed.</p>
+<p>A surprising amount of traditional kernel work simply does not appear. No A20 gate, no protected mode trampoline, no GDT for the transition, no long mode enable sequence, no early page tables written by hand in assembly, no parsing of a multiboot structure. The firmware has done all of it and the first line of Rust runs with the machine already in the state that work exists to reach.</p>
+<p>The graphics output protocol supplies a linear framebuffer with a known stride and pixel format, so there is no VGA programming and no mode setting. The simple filesystem protocol reads the model and the tokenizer off the ESP with ordinary calls.</p>
+
 <h2 id="the-one-way-door">The one-way door</h2>
-<p>Boot services, meaning the filesystem access, the allocator, the console, the device protocols and the firmware's own USB and disk drivers, exist only until <code>ExitBootServices</code>. After that call they are gone permanently, every pointer into them is dangling, and there is no way back. The firmware does not offer a re-entry.</p>
-<p>So everything the kernel will ever need from disk has to be read before that moment: the 570 MB of model weights, the tokenizer, and the root certificate bundle. They go into a pool allocated as <code>LoaderData</code>, which survives the transition, and are then referenced in place for the rest of the machine's life. Copying half a gigabyte onto the heap to gain nothing would be an unusual way to spend the memory.</p>
-<div class="note">This is also why the firmware's perfectly serviceable USB stack gets thrown away and <a href="usb-xhci.html">written again from scratch</a>. It lives in boot services. Being the kernel and not a guest of the firmware is the whole point, and this is the bill for it.</div>
+<p><code>ExitBootServices</code> is the moment the firmware stops helping. After it there is no filesystem, no allocator from the firmware, no console, and no way back. Everything the kernel will ever need from a file has to be read before that line.</p>
+<p>That single fact shapes the boot sequence. The model, the tokenizer and the certificate bundle are all read into a pool while services still exist. It is also why the staged update mechanism runs where it does: the firmware's FAT driver is the only writer of the ESP that exists while a boot image can still be replaced, so the update hook runs before the door closes and the swap takes effect at the next boot rather than the current one.</p>
+<p>Three real bugs came out of testing that path, and none was reachable any other way. Verifying a signature died on an allocation because the hook runs before the kernel heap is initialised, so there is a static early arena now. The staged image was being read and verified on every boot including trials, which is 2.8 MB and an ECDSA verification to answer a question already settled. And calling <code>ResetSystem</code> through the runtime table while boot services were still up left the machine silent, so the hook stopped rebooting and lets the swap land naturally.</p>
+
 <h2 id="a-memory-map-trap-worth-knowing">A memory-map trap worth knowing</h2>
-<p>Do not take the maximum over every UEFI memory descriptor to decide how much address space to map. OVMF describes reserved regions out to 1 TiB, and using that as a limit needs more than one page-directory-pointer table can cover. The identity map then fails to install, silently, and the firmware's own page tables stay active instead.</p>
-<p>The reason this was expensive and not merely wrong: the firmware's tables map page zero. So the null-dereference self-test, which exists specifically to prove that page zero is unmapped, passed without faulting, because the mapping it was testing for had never been installed. A test that passes for the exact reason it should fail is the worst possible outcome, and it is the reason boot now prints the map limit it chose.</p>
+<p>The obvious way to size an identity map is to take the highest address any memory descriptor mentions. On OVMF that number describes reserved space out to a terabyte. Using it as a map limit exceeds what one page directory pointer table can cover, the identity map silently fails to be installed, and the machine keeps running on the firmware's own tables.</p>
+<p>The firmware's tables map page zero. So the null-dereference self-test passed by reading whatever the firmware had left at address zero, and reported success. The check that was supposed to prove faults work was proving that the map had failed.</p>
+
 <h2 id="what-the-kernel-builds-for-itself">What the kernel builds for itself</h2>
-<p>Once the firmware is gone, the machine runs on page tables this kernel wrote: a straight identity map, physical address equal to virtual address, covering RAM out to 4 GiB, with one deliberate exception. Virtual page zero is left unmapped. That costs one extra page table to describe the first 2 MiB at 4 KiB granularity instead of one large page, and it buys a hard fault on every null dereference, which, given the page-fault reporter, turns the most common bug in the kernel into a legible message instead of a silent read of whatever the firmware happened to leave lying at address zero.</p>
-<p>Non-RAM pages are mapped uncacheable, which is not optional: a doorbell write to an NVMe or xHCI controller that sits in a write-back cache line never reaches the device, and the resulting symptom is a controller that accepts commands and never completes them.</p>
-<p>Then a GDT, an IDT with the fault handlers installed, the local APIC timer at 100 Hz for preemption, and a PS/2 keyboard, in that order. The frame allocator underneath all of it is a bump allocator over the UEFI memory map that never frees, which is exactly right for what it is used for: the page tables and the initial heap both live for the lifetime of the machine.</p>
-<div class="seealso"><b>See also:</b> <a href="../wiki/rust-os.html">Writing an OS in Rust</a>, <a href="../wiki/ring-0.html">Ring 0</a>, <a href="../wiki/usb-xhci.html">The USB stack</a>, <a href="../wiki/iso-el-torito.html">How the ISO is built</a></div>
+<p>Once the door is shut, the kernel owns its own page tables, its own interrupt descriptor table, its own timer through the local APIC, and its own heap. The heap is a ladder rather than a constant: one physically contiguous allocation, tried at descending sizes, printing which rung it got and saying when it had to come down one. A fixed size the memory map cannot satisfy is an unbootable system, and the laptop cannot be tested from the machine that builds this.</p>
+<p>One detail that has cost time twice is worth repeating. On this target, <code>extern "C"</code> is the Microsoft x64 convention. The context switch and every compiled-code entry point are pinned to <code>extern "sysv64"</code> explicitly, and the comment recording what happened when that was got wrong mentions a stack pointer landing inside the framebuffer aperture and a return instruction popping a black pixel into the instruction pointer.</p>
+<div class="seealso"><b>See also:</b> <a href="ring-0.html">Ring 0</a>, <a href="rust-os.html">Writing an OS in Rust</a>, <a href="iso-el-torito.html">How the ISO is built</a>, <a href="glados-os.html">GLaDOS OS</a></div>
 </div>
 </div>
 </div>
@@ -76,7 +79,7 @@
   GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are
   other people's and are listed on <a href="../credits.html">the
   credits page</a>.</p>
-  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-14.</p>
+  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-30.</p>
 </div>
 
 </div>

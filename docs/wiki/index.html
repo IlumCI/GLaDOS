@@ -27,7 +27,7 @@
 <link rel="apple-touch-icon" sizes="180x180" href="../img/icon-180.png">
 <link rel="manifest" href="../site.webmanifest">
 <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://ilumci.github.io/GLaDOS/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://ilumci.github.io/GLaDOS/wiki/"}]}</script>
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"GLaDOS Wiki. How an AI operating system is built, subsystem by subsystem","description":"Documentation for GLaDOS OS: the kernel, the in-kernel language model, the network stack, the USB drivers, and the bugs that cost the most time.","url":"https://ilumci.github.io/GLaDOS/wiki/","dateModified":"2026-08-14","keywords":"GLaDOS wiki, OS development, kernel documentation, Rust OS tutorial, operating system internals","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"GLaDOS Wiki. How an AI operating system is built, subsystem by subsystem","description":"Documentation for GLaDOS OS: the kernel, the in-kernel language model, the network stack, the USB drivers, and the bugs that cost the most time.","url":"https://ilumci.github.io/GLaDOS/wiki/","dateModified":"2026-08-30","keywords":"GLaDOS wiki, OS development, kernel documentation, Rust OS tutorial, operating system internals","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -47,8 +47,34 @@
 <div class="crumbs"><a href="../">GLaDOS</a> / Wiki</div>
 <div id="main">
 <h1>GLaDOS Wiki</h1>
-<p>Every subsystem, how it works, and where it turned out to be more interesting than expected. The habit in this project is to write down the measurement that overturned an assumption alongside the conclusion it produced, which means a good number of these pages are accounts of being wrong for a while. Those tend to be the useful ones: a transformer with its position encoding wired the wrong way round still writes fluent English, and nothing in the system objects.</p>
-<ul class="wikilist"><li><a href="../wiki/glados-os.html">GLaDOS OS</a><span>What the system is, and how it is put together</span></li><li><a href="../wiki/aperture-science.html">Aperture Science</a><span>The homage, the aesthetic, and where it came from</span></li><li><a href="../wiki/portal-os.html">Portal OS</a><span>Portal-inspired computing and what a real one looks like</span></li><li><a href="../wiki/rust-os.html">Writing an OS in Rust</a><span>no_std, ownership at ring 0, and what Rust buys you</span></li><li><a href="../wiki/ring-0.html">Ring 0</a><span>Privilege levels, and what removing the boundary means</span></li><li><a href="../wiki/uefi-kernel.html">UEFI as the kernel</a><span>No bootloader: the UEFI application is the OS</span></li><li><a href="../wiki/llm-in-kernel.html">A language model in the kernel</a><span>Inference with no allocator, no OS, no libm</span></li><li><a href="../wiki/qwen3.html">Qwen3 in 570 MB</a><span>Head width, QK-norm, and two bugs that never threw an error</span></li><li><a href="../wiki/qwen35.html">Qwen3.5 and the 2B distill</a><span>Hybrid attention, a walk-checked format, and the 1.8 GB flagship</span></li><li><a href="../wiki/rope.html">RoPE</a><span>Rotary embeddings, and the convention that cost months</span></li><li><a href="../wiki/kv-cache.html">The int8 KV cache</a><span>Quantising attention memory, and why keys hurt more</span></li><li><a href="../wiki/tokenizer.html">Tokenizers</a><span>BPE, pre-tokenizer regexes, and 12% silent divergence</span></li><li><a href="../wiki/constrained-decoding.html">Constrained decoding</a><span>Making invalid output unreachable</span></li><li><a href="../wiki/routing.html">Tool routing</a><span>Why a 1960 regression beats the transformer</span></li><li><a href="../wiki/agent.html">The agent loop</a><span>Goal in, applet calls out, tiers in between</span></li><li><a href="../wiki/gui.html">The Windows 3.1 desktop</a><span>Bevels, a window manager, and painting from scratch</span></li><li><a href="../wiki/network-stack.html">The network stack</a><span>ARP to TLS 1.3, written by hand</span></li><li><a href="../wiki/tls.html">TLS 1.3 from scratch</a><span>Certificate chains, and why this is the dangerous part</span></li><li><a href="../wiki/storage.html">Content-addressed storage</a><span>NVMe, Merkle trees, and O(1) snapshots</span></li><li><a href="../wiki/usb-xhci.html">The USB stack</a><span>xHCI rings, cycle bits, and enumeration</span></li><li><a href="../wiki/usb-wifi-driver.html">USB WiFi</a><span>CNVi, a dongle, and 509 constants</span></li><li><a href="../wiki/iso-el-torito.html">How the ISO is built</a><span>FAT32 and El Torito, written from scratch</span></li><li><a href="../wiki/templeos.html">TempleOS</a><span>The lineage, and what it got right</span></li><li><a href="../wiki/testing.html">Testing without a test runner</a><span>Boot self-tests and driving QEMU</span></li></ul>
+<p>Every subsystem, how it works, and where it turned out to be more interesting than expected. The habit in this project is to write down the measurement that overturned an assumption alongside the conclusion it produced, which means a good number of these pages are accounts of being wrong for a while. Those tend to be the useful ones. A transformer with its position encoding wired the wrong way round still writes fluent English, and nothing in the system objects.</p>
+<ul class="wikilist">
+<li><a href="../wiki/glados-os.html">GLaDOS OS</a><span>What the system is, and how it is put together</span></li>
+<li><a href="../wiki/aperture-science.html">Aperture Science</a><span>The homage, the aesthetic, and where the voice is load-bearing</span></li>
+<li><a href="../wiki/portal-os.html">Portal OS</a><span>Which half is the fiction and which half is the kernel</span></li>
+<li><a href="../wiki/rust-os.html">Writing an OS in Rust</a><span>no_std, ownership at ring 0, and four traps that cost time</span></li>
+<li><a href="../wiki/ring-0.html">Ring 0</a><span>Privilege levels, and what removing the boundary means</span></li>
+<li><a href="../wiki/uefi-kernel.html">UEFI as the kernel</a><span>No bootloader: the UEFI application is the OS</span></li>
+<li><a href="../wiki/llm-in-kernel.html">A language model in the kernel</a><span>Inference with no allocator, no OS and no libm</span></li>
+<li><a href="../wiki/qwen3.html">Qwen3 in 570 MB</a><span>Head width, QK-Norm, and two bugs that never threw an error</span></li>
+<li><a href="../wiki/qwen35.html">Qwen3.5 and the 2B distill</a><span>Hybrid attention, a walk-checked format, and the flagship image</span></li>
+<li><a href="../wiki/rope.html">RoPE</a><span>Rotary embeddings, and the convention that cost months</span></li>
+<li><a href="../wiki/kv-cache.html">The int8 KV cache</a><span>Quantisation, attention sinks, and a pinned system turn</span></li>
+<li><a href="../wiki/tokenizer.html">Tokenizers</a><span>The pre-tokenizer regex is part of the model</span></li>
+<li><a href="../wiki/constrained-decoding.html">Constrained decoding</a><span>Making invalid output unreachable rather than rejected</span></li>
+<li><a href="../wiki/routing.html">Tool routing</a><span>When a method from 1960 beats the transformer</span></li>
+<li><a href="../wiki/agent.html">The agent loop</a><span>Three tiers, skills, and judging what the machine writes</span></li>
+<li><a href="../wiki/gui.html">The Windows 3.1 desktop</a><span>Composed and diffed, and the measurement that overturned the plan</span></li>
+<li><a href="../wiki/network-stack.html">The network stack</a><span>ARP to TCP, written here, and the re-entrancy rule</span></li>
+<li><a href="../wiki/tls.html">TLS 1.3 from scratch</a><span>Why hand-written crypto is the dangerous part</span></li>
+<li><a href="../wiki/storage.html">Content-addressed storage</a><span>Merkle trees on NVMe, and a write gate with a range</span></li>
+<li><a href="../wiki/usb-xhci.html">The USB stack</a><span>Rings, doorbells, and three bugs found from above</span></li>
+<li><a href="../wiki/usb-wifi-driver.html">USB WiFi</a><span>CNVi, a dongle, and a driver honest about its half</span></li>
+<li><a href="../wiki/iso-el-torito.html">How the ISO is built</a><span>El Torito, FAT32, and a reader to check the writer</span></li>
+<li><a href="../wiki/templeos.html">TempleOS</a><span>What this project inherited, and where it diverges</span></li>
+<li><a href="../wiki/testing.html">Testing without a test runner</a><span>Four instruments, and a canary that must fail</span></li>
+</ul>
+
 </div>
 </div>
 </div>
@@ -60,7 +86,7 @@
   GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are
   other people's and are listed on <a href="../credits.html">the
   credits page</a>.</p>
-  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-14.</p>
+  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-30.</p>
 </div>
 
 </div>

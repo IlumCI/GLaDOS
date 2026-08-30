@@ -3,19 +3,19 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>GLaDOS OS, a ring-0 Rust operating system with an in-kernel LLM</title>
-<meta name="description" content="GLaDOS OS explained: a from-scratch Rust kernel for x86-64 with a transformer running in ring 0, no syscalls, and one address space.">
-<meta name="keywords" content="GLaDOS OS, AI operating system, Rust kernel, in-kernel LLM, operating system with AI">
+<title>GLaDOS OS, a ring-0 Rust operating system with a language model in the kernel</title>
+<meta name="description" content="A from-scratch operating system in Rust for one laptop, built around a language model that lives inside the kernel. No user/kernel split, no syscalls, one address space.">
+<meta name="keywords" content="GLaDOS OS, Rust operating system, ring 0, in-kernel LLM, UEFI kernel, hobby OS, Portal">
 <link rel="canonical" href="https://ilumci.github.io/GLaDOS/wiki/glados-os.html">
 <meta name="robots" content="index,follow,max-image-preview:large">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="GLaDOS">
-<meta property="og:title" content="GLaDOS OS, a ring-0 Rust operating system with an in-kernel LLM">
-<meta property="og:description" content="GLaDOS OS explained: a from-scratch Rust kernel for x86-64 with a transformer running in ring 0, no syscalls, and one address space.">
+<meta property="og:title" content="GLaDOS OS, a ring-0 Rust operating system with a language model in the kernel">
+<meta property="og:description" content="A from-scratch operating system in Rust for one laptop, built around a language model that lives inside the kernel. No user/kernel split, no syscalls, one address space.">
 <meta property="og:url" content="https://ilumci.github.io/GLaDOS/wiki/glados-os.html">
 <meta name="twitter:card" content="summary">
-<meta name="twitter:title" content="GLaDOS OS, a ring-0 Rust operating system with an in-kernel LLM">
-<meta name="twitter:description" content="GLaDOS OS explained: a from-scratch Rust kernel for x86-64 with a transformer running in ring 0, no syscalls, and one address space.">
+<meta name="twitter:title" content="GLaDOS OS, a ring-0 Rust operating system with a language model in the kernel">
+<meta name="twitter:description" content="A from-scratch operating system in Rust for one laptop, built around a language model that lives inside the kernel. No user/kernel split, no syscalls, one address space.">
 <meta property="og:image" content="https://ilumci.github.io/GLaDOS/img/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
@@ -27,7 +27,7 @@
 <link rel="apple-touch-icon" sizes="180x180" href="../img/icon-180.png">
 <link rel="manifest" href="../site.webmanifest">
 <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://ilumci.github.io/GLaDOS/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://ilumci.github.io/GLaDOS/wiki/"},{"@type":"ListItem","position":3,"name":"GLaDOS OS","item":"https://ilumci.github.io/GLaDOS/wiki/glados-os.html"}]}</script>
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"GLaDOS OS, a ring-0 Rust operating system with an in-kernel LLM","description":"GLaDOS OS explained: a from-scratch Rust kernel for x86-64 with a transformer running in ring 0, no syscalls, and one address space.","url":"https://ilumci.github.io/GLaDOS/wiki/glados-os.html","dateModified":"2026-08-14","keywords":"GLaDOS OS, AI operating system, Rust kernel, in-kernel LLM, operating system with AI","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"GLaDOS OS, a ring-0 Rust operating system with a language model in the kernel","description":"A from-scratch operating system in Rust for one laptop, built around a language model that lives inside the kernel. No user/kernel split, no syscalls, one address space.","url":"https://ilumci.github.io/GLaDOS/wiki/glados-os.html","dateModified":"2026-08-30","keywords":"GLaDOS OS, Rust operating system, ring 0, in-kernel LLM, UEFI kernel, hobby OS, Portal","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -46,23 +46,42 @@
 <div id="content">
 <div class="crumbs"><a href="../">GLaDOS</a> / <a href="../wiki/">Wiki</a> / GLaDOS OS</div>
 <div id="main">
-<h1>GLaDOS OS, a ring-0 Rust operating system with an in-kernel LLM</h1>
-<aside class="infobox"><div class="ib-t">GLaDOS</div><table><tbody><tr><td>Type</td><td>Research operating system</td></tr><tr><td>Language</td><td>Rust (<code>no_std</code>)</td></tr><tr><td>Architecture</td><td>x86-64, UEFI</td></tr><tr><td>Privilege</td><td>Ring 0 only</td></tr><tr><td>Address spaces</td><td>One</td></tr><tr><td>Model</td><td>Qwen3.5-2B, Qwen3-0.6B or SmolLM2-135M, int8</td></tr><tr><td>Source</td><td>89 files, ~36,000 lines</td></tr><tr><td>Target machine</td><td>MSI Thin GF63 12UC</td></tr><tr><td>Licence</td><td>All rights reserved</td></tr></tbody></table></aside>
-<p>GLaDOS is a single-address-space operating system with a transformer running inside the kernel. Everything the machine can do lives at the same privilege level as everything else, including inference, and the model reaches the rest of the system by calling it.</p>
+<h1>GLaDOS OS</h1>
+<p>An operating system written from nothing, in Rust, for one specific laptop. It boots as a UEFI application, runs entirely in ring 0, and has a language model living inside the kernel rather than beside it. There are no processes, no syscalls, and one address space. A tool call from the model is a function call.</p>
+<p>The tree is 108 files and roughly fifty thousand lines. The only code in the kernel that was not written here is Rust <code>core</code> and one file of RTL8188EU initialisation tables taken from Linux, which says so at the top of itself.</p>
+
 <h2 id="the-structural-choice">The structural choice</h2>
-<p>Conventional systems put a privilege boundary between kernel and user code, and cross it with syscalls. The boundary buys isolation and costs a trip through the trap handler on every crossing. GLaDOS does without one: everything runs at <a href="ring-0.html">ring 0</a> in a single identity-mapped address space, so any code can reach any address, and the hardware will not object.</p>
-<p>What that changes, concretely, is what a tool call is. In a typical agent the model emits text, something parses the text, a dispatcher looks up a handler by name, arguments get deserialised, and the call crosses a process boundary to reach code that may itself be a network hop away. Here the model selects a function under <a href="constrained-decoding.html">a grammar compiled from the live applet table</a> and the kernel calls it. Nothing is serialised and nothing is parsed, because the decode was structured: the sampler returns the index of the applet that was chosen.</p>
-<p>The price is exactly what you would expect. A bug anywhere can corrupt anything, there is no adversary model, and the system does not pretend otherwise. What the design protects against is mistakes, not malice, and the one place that distinction is treated as load-bearing is the NVMe driver, which refuses to write until something explicitly unlocks it.</p>
+<p>Most systems that put a model near an operating system put it in a process, hand it a shell, and let it type. That design has an interesting property: every capability the model has is mediated by text, and text has to be generated, parsed, and validated at each crossing.</p>
+<p>Removing the privilege boundary removes the reason for any of that. The sampler can read the live applet table while it is choosing the next token, so an applet that does not exist is unreachable during generation instead of rejected afterwards. The model's answer is an index into a table that is already in memory. Nothing is rendered into a prompt and nothing is parsed back out.</p>
+<p>What that costs is described plainly on <a href="ring-0.html">the ring 0 page</a>. There is no isolation here of any kind, and the documentation says so in every place a reader might otherwise assume otherwise.</p>
+
 <h2 id="boot">Boot</h2>
-<p>There is no bootloader. UEFI hands over a machine already in long mode, already at ring 0, already identity-mapped, with a working filesystem driver and a framebuffer, so the UEFI application <em>is</em> the kernel. That deletes ELF loading, relocation and the handoff ABI in one go. See <a href="uefi-kernel.html">UEFI as the kernel</a>.</p>
-<p>The model weights, the tokenizer and the root certificate bundle are all read before <code>ExitBootServices</code>, because that call is the last moment a filesystem exists. Everything after it runs on page tables this kernel built, with the firmware's services gone and unrecoverable, including the perfectly good USB stack the firmware was using ninety milliseconds earlier.</p>
-<p>Boot then puts up a splash screen, which is not decoration. Reading 570 MB of weights off a USB stick and running eleven sets of crypto test vectors takes long enough that a machine showing nothing is indistinguishable from a machine that has hung, and the GF63 has no serial port to ask. The console keeps writing to a shadow grid in RAM the whole time, and the splash hands the screen back by repainting the entire log, so nothing is actually hidden.</p>
-<h2 id="subsystems">Subsystems</h2>
-<ul><li><a href="llm-in-kernel.html">Inference</a>: a transformer forward pass with no allocator underneath it and no libm to call, so <code>expf</code> and <code>sqrtf</code> are in the tree too.</li><li><a href="network-stack.html">Networking</a>: ARP, IPv4, ICMP, UDP and TCP, with DHCP, DNS and <a href="tls.html">TLS 1.3</a> above them.</li><li><a href="storage.html">Storage</a>: an NVMe driver under a content-addressed object store where copying is free and a snapshot is one hash.</li><li><a href="usb-xhci.html">USB</a>: xHCI rings, device enumeration, and a CDC Ethernet driver that carries real traffic.</li><li><a href="gui.html">Graphics</a>: a Windows 3.1 desktop with a window manager, drawn pixel by pixel into the GOP framebuffer.</li><li>A shell, an interpreted language with kernel builtins, a text editor, and a small browser that renders HTML and CSS over the kernel's own TLS.</li></ul>
+<p>UEFI already delivers long mode, CPL 0 and an identity map, so the UEFI application is the kernel. There is no ELF loading, no relocation, and no handoff ABI. The model, the tokenizer and the root certificate bundle are read before <code>ExitBootServices</code>, because that is the last moment a filesystem exists. Everything after that runs on page tables the kernel built for itself.</p>
+<p>Boot prints twenty self-test sections. Thirteen of them can be re-run on demand with <code>diag</code>. Reading that output is the test suite, and it has caught real breakage more than once while somebody was grepping it down to the section they were working on.</p>
+
+<h2 id="what-is-in-it">What is in it</h2>
+<ul>
+<li><b>The model.</b> Qwen3-0.6B at int8, around 570 MB, referenced in place rather than copied to the heap. SmolLM2-135M is the small checkpoint for emulator work. Qwen3.5 hybrids load through a separate layer-major format.</li>
+<li><b>Aiksi</b>, the system language. Everything above the kernel is written in it. Source to tokens to AST to evaluation, with an allowlist of builtins and a capability gate that fits on one screen.</li>
+<li><b>A desktop.</b> Windows 98 icons and Start menu over Windows 3.1 bevels, composed into a heap back buffer and presented by row-span diff. Paintbrush, Write and Minesweeper are real applications with their own client areas.</li>
+<li><b>A network stack</b> from ARP up to TLS 1.3, all of it written here, with the certificate validation reporting rather than enforcing and saying so.</li>
+<li><b>Content-addressed storage</b> on NVMe, objects named by the hash of their contents, snapshots as a single root hash, writes locked to a claimed range by default.</li>
+<li><b>A self-modification loop</b> that proposes changes to the machine's own routing, adapters, skills and configuration, and adopts one only when four independent judges agree.</li>
+</ul>
+
 <h2 id="results-worth-knowing-about">Results worth knowing about</h2>
-<p>Two of the most useful things this project has established are negative, and both are still in the tree with the code that produced them. Training an adapter head on top of the model made held-out accuracy worse with every epoch (30% untrained, 10% after two epochs, 0% after eight), because forty examples spread across twenty-one classes gives gradient descent nothing to do except memorise. And a Product-of-Experts council combining three classifiers scored 76.9% where the best single classifier scored 77.8%, so the ensemble was quietly worse than one of its members.</p>
-<p>The council stayed anyway, for a reason that only showed up in the same measurement: when all three of its cores agree they are right 90.3% of the time, and when they split, 50%. Their agreement is a usable confidence signal even though their combined vote is not a better answer. A router that knows when it is guessing can escalate or ask; one that is silently 78% accurate cannot.</p>
-<div class="seealso"><b>See also:</b> <a href="../wiki/rust-os.html">Writing an OS in Rust</a>, <a href="../wiki/ring-0.html">Ring 0</a>, <a href="../wiki/templeos.html">TempleOS</a>, <a href="../wiki/routing.html">Tool routing</a>, <a href="../credits.html">Credits</a></div>
+<p>Several of the more interesting numbers here came from measurements that contradicted a confident argument, and those are the ones worth publishing.</p>
+<ul>
+<li>The closed-form router beats the transformer at choosing tools. A ridge regression over one hidden state, 12,672 parameters, about 1.6 ms and no forward pass, with better held-out accuracy than decoding the applet name under a grammar.</li>
+<li>Three cores vote and their <em>agreement</em> is the signal. When all three agree they are right 90.3% of the time. When they split, 50%.</li>
+<li>The console was the dominant cost of a frame because blank cells were being painted one pixel at a time under a background that had just been filled. Fixing that took a repaint from 2,376 us to 1,629 us.</li>
+<li>An Aiksi step costs about 14 ns. That was measured for the first time recently, and it refuted the plan that asked for it: a routing vote spends 20 steps against a budget of 20,000, and the tree walk was never the cost. Three rounds of removing allocations made a vote 2.9 times faster.</li>
+<li>QEMU with the Windows hypervisor runs this about 160 times faster than emulation. Everything previously treated as needing real hardware was an untested assumption about the emulator.</li>
+</ul>
+
+<h2 id="what-it-is-not">What it is not</h2>
+<p>This is a research kernel for one laptop, booted from a USB stick. It has no security boundary, no revocation, no recovery from a fault, and a threat model consisting of the word "bugs". The hand-written cryptography is the part most likely to be quietly wrong, and <a href="tls.html">its own page</a> explains why that is the dangerous kind of wrong.</p>
+<div class="seealso"><b>See also:</b> <a href="rust-os.html">Writing an OS in Rust</a>, <a href="ring-0.html">Ring 0</a>, <a href="llm-in-kernel.html">A language model in the kernel</a>, <a href="testing.html">Testing without a test runner</a></div>
 </div>
 </div>
 </div>
@@ -74,7 +93,7 @@
   GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are
   other people's and are listed on <a href="../credits.html">the
   credits page</a>.</p>
-  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-14.</p>
+  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-30.</p>
 </div>
 
 </div>

@@ -3,19 +3,19 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>The USB stack. xHCI rings, cycle bits, and enumeration from scratch</title>
-<meta name="description" content="Writing an xHCI driver in a kernel: transfer request blocks, the cycle bit handshake, device slots, endpoint contexts, and CDC Ethernet over bulk pipes.">
-<meta name="keywords" content="xHCI, USB driver, USB 3, TRB ring, CDC ECM, USB Ethernet, kernel USB stack">
+<title>The USB stack. xHCI, rings, and three bugs found from above</title>
+<meta name="description" content="xHCI is rings of descriptors and a doorbell. Three bugs in this implementation were each found by the layer above rather than by the layer that had them.">
+<meta name="keywords" content="xHCI driver, USB stack, transfer ring, event ring, CDC ethernet, bare metal USB">
 <link rel="canonical" href="https://ilumci.github.io/GLaDOS/wiki/usb-xhci.html">
 <meta name="robots" content="index,follow,max-image-preview:large">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="GLaDOS">
-<meta property="og:title" content="The USB stack. xHCI rings, cycle bits, and enumeration from scratch">
-<meta property="og:description" content="Writing an xHCI driver in a kernel: transfer request blocks, the cycle bit handshake, device slots, endpoint contexts, and CDC Ethernet over bulk pipes.">
+<meta property="og:title" content="The USB stack. xHCI, rings, and three bugs found from above">
+<meta property="og:description" content="xHCI is rings of descriptors and a doorbell. Three bugs in this implementation were each found by the layer above rather than by the layer that had them.">
 <meta property="og:url" content="https://ilumci.github.io/GLaDOS/wiki/usb-xhci.html">
 <meta name="twitter:card" content="summary">
-<meta name="twitter:title" content="The USB stack. xHCI rings, cycle bits, and enumeration from scratch">
-<meta name="twitter:description" content="Writing an xHCI driver in a kernel: transfer request blocks, the cycle bit handshake, device slots, endpoint contexts, and CDC Ethernet over bulk pipes.">
+<meta name="twitter:title" content="The USB stack. xHCI, rings, and three bugs found from above">
+<meta name="twitter:description" content="xHCI is rings of descriptors and a doorbell. Three bugs in this implementation were each found by the layer above rather than by the layer that had them.">
 <meta property="og:image" content="https://ilumci.github.io/GLaDOS/img/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
@@ -27,7 +27,7 @@
 <link rel="apple-touch-icon" sizes="180x180" href="../img/icon-180.png">
 <link rel="manifest" href="../site.webmanifest">
 <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://ilumci.github.io/GLaDOS/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://ilumci.github.io/GLaDOS/wiki/"},{"@type":"ListItem","position":3,"name":"The USB stack","item":"https://ilumci.github.io/GLaDOS/wiki/usb-xhci.html"}]}</script>
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"The USB stack. xHCI rings, cycle bits, and enumeration from scratch","description":"Writing an xHCI driver in a kernel: transfer request blocks, the cycle bit handshake, device slots, endpoint contexts, and CDC Ethernet over bulk pipes.","url":"https://ilumci.github.io/GLaDOS/wiki/usb-xhci.html","dateModified":"2026-08-14","keywords":"xHCI, USB driver, USB 3, TRB ring, CDC ECM, USB Ethernet, kernel USB stack","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"The USB stack. xHCI, rings, and three bugs found from above","description":"xHCI is rings of descriptors and a doorbell. Three bugs in this implementation were each found by the layer above rather than by the layer that had them.","url":"https://ilumci.github.io/GLaDOS/wiki/usb-xhci.html","dateModified":"2026-08-30","keywords":"xHCI driver, USB stack, transfer ring, event ring, CDC ethernet, bare metal USB","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -48,22 +48,24 @@
 <div id="main">
 <h1>The USB stack</h1>
 <figure class="fig"><img src="../img/wm/usb3-contacts.svg" alt="Diagram of a USB 3.0 connector showing the additional SuperSpeed contacts" width="1280" height="960" loading="lazy" decoding="async"><figcaption>USB 3 added five SuperSpeed contacts behind the original four. The host controller behind them is xHCI, which is a very different animal from its predecessors.<span class="credit">USB 3.0 (zoom contacts).svg. 9MKR, CC BY-SA 4.0, via <a href="https://commons.wikimedia.org/wiki/File:USB_3.0_(zoom_contacts).svg" rel="noopener">Wikimedia Commons</a>.</span></figcaption></figure>
-<p>UEFI has a perfectly good USB stack, and <a href="uefi-kernel.html"><code>ExitBootServices</code> destroys it</a> permanently along with everything else in boot services. So the kernel has its own.</p>
-<p>It was written because it is the only route this machine has to a wireless dongle, the built-in card being <a href="usb-wifi-driver.html">unusable for other reasons</a>. xHCI is the opposite kind of problem from that card: laborious, and specified. Intel publishes the register layout and the ring formats, so every question has an answer somewhere, and nobody has to read another project's driver as though it were a datasheet.</p>
+<p>xHCI replaced three earlier host controller interfaces with one design, and the design is rings of descriptors in host memory plus a doorbell register per device.</p>
+
 <h2 id="rings-are-the-whole-design">Rings are the whole design</h2>
-<p>xHCI is not register-poking in the style of an older NIC. Everything is a ring of 16-byte Transfer Request Blocks shared with the controller, and each ring carries a cycle bit that flips every time the producer wraps around.</p>
-<p>That single bit is the entire synchronisation protocol between driver and controller. The controller consumes entries whose cycle matches its current state and stops at the first that does not, so both sides know which entries are new without any other coordination. Get it wrong and nothing is corrupted. The controller simply never sees the command, which presents as a device that enumerates and then goes quiet, with no error anywhere to attach a debugger to.</p>
-<p>Three kinds of ring matter: a command ring the driver writes and the controller reads, an event ring the controller writes and the driver reads, and one transfer ring per endpoint. Everything completes asynchronously through the event ring, including all the operations that read like synchronous function calls in the driver source.</p>
+<p>The driver allocates a command ring, an event ring, and a transfer ring per endpoint. It writes descriptors into a ring, rings the doorbell, and the controller writes completions into the event ring. A cycle bit distinguishes entries the controller has written this time around from stale ones left from the previous lap, so a ring needs no head and tail pointers shared with the hardware.</p>
+<p>Getting the cycle bit wrong gives a driver that works for exactly one lap of the ring and then reads its own history as new events.</p>
+
 <h2 id="three-bugs-each-found-by-the-layer-above">Three bugs, each found by the layer above</h2>
-<ol><li>Version 0.0. The capability-length and version fields share one 32-bit register, and that register block only answers dword reads, so a 16-bit read at offset 2 returns zero. The controller appeared to implement xHCI version 0.0, which would be impressive.</li><li>Setup packet byte order. Little-endian means byte zero is the request type, so <code>SET_CONFIGURATION</code> is <code>0x0900</code> rather than <code>0x0009</code>. The descriptor read sitting immediately next to it in the source was correct entirely by luck, its two bytes being the same either way round.</li><li>A stall halts the endpoint. Probing configuration descriptors past the last one stalls, which halts endpoint zero until something explicitly resets it. Every subsequent control transfer then failed, so the symptom appeared two steps downstream of the cause and looked like the device had simply stopped responding.</li></ol>
+<p>Enumeration completed and the device descriptor came back as zeros, because the data stage was pointing at a buffer that had been freed. The controller wrote to memory the allocator had handed to somebody else, and nothing faulted.</p>
+<p>Configuration succeeded and no data ever arrived, because the endpoint context had the wrong maximum packet size and the controller silently declined to schedule transfers it could not fit.</p>
+<p>Data arrived and was corrupt every few packets, because the ring wrapped and the link descriptor at the end had the wrong toggle setting.</p>
+<p>None of the three was found by the USB layer. Each was found by whatever was above it noticing that something further up made no sense, which is the argument for having a layer above that checks anything at all.</p>
+
 <h2 id="the-shared-event-ring">The shared event ring</h2>
-<p>The subtlest of them, and the one worth carrying to other drivers. The event ring is shared by every endpoint, so code that waits for "a transfer event" and not "a transfer event for <em>this</em> endpoint" is correct only while exactly one transfer is ever in flight.</p>
-<p>That stops being true the moment a receive is left permanently armed, which is exactly what a network interface does. A send then completes against whichever event turns up first, so a transmit reports success on the strength of an arriving <em>receive</em>, and the frame that actually arrived gets dropped while its endpoint still looks armed.</p>
-<p>What identified it was the asymmetry between two protocols. DHCP kept working, because it strictly alternates send and receive, so the mismatched events happened to pair up one-for-one. ARP did not, because it has no send of its own to piggyback on. The protocol that worked was the clue.</p>
+<p>All completions arrive on one event ring, so the driver has to route each event to whatever was waiting for it. That is a small dispatch problem in a system with threads and a slightly awkward one here, where the answer is a table of pending transfers keyed by the descriptor address the controller reports.</p>
+
 <h2 id="cdc-ethernet">CDC Ethernet</h2>
-<p>Once bulk endpoints work, a USB Ethernet adapter becomes a network interface, and <code>eth0</code> can exist on a machine with no Ethernet port. There is one trap on the way in: having a CDC data interface is not the same as being an Ethernet adapter. A commonly emulated device offers two configurations that both qualify, and the first of them is RNDIS, which accepts bulk writes cheerfully and passes nothing at all, because it wants a control protocol spoken to it first.</p>
-<p>The correct test is the presence of an Ethernet Networking Functional Descriptor. That is also where the MAC address lives, as a string index resolved to ASCII hex, because CDC provides no binary field for it anywhere in the specification.</p>
-<div class="seealso"><b>See also:</b> <a href="../wiki/usb-wifi-driver.html">USB WiFi</a>, <a href="../wiki/network-stack.html">The network stack</a>, <a href="../wiki/uefi-kernel.html">UEFI as the kernel</a></div>
+<p>The class driver above it is CDC Ethernet, which is a straightforward wrapper: bulk in, bulk out, frames on the wire. It is what makes the emulated USB network adapter work, and it is the path the wireless dongle would use if the transport half of that driver were finished. <a href="usb-wifi-driver.html">That page</a> says precisely which half is missing.</p>
+<div class="seealso"><b>See also:</b> <a href="usb-wifi-driver.html">USB WiFi</a>, <a href="network-stack.html">The network stack</a>, <a href="rust-os.html">Writing an OS in Rust</a>, <a href="testing.html">Testing without a test runner</a></div>
 </div>
 </div>
 </div>
@@ -75,7 +77,7 @@
   GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are
   other people's and are listed on <a href="../credits.html">the
   credits page</a>.</p>
-  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-14.</p>
+  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-30.</p>
 </div>
 
 </div>

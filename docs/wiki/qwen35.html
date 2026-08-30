@@ -3,19 +3,19 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Qwen3.5 and the 2B distill</title>
-<meta name="description" content="Hybrid attention in a kernel: linear-attention layers beside full attention, a checkpoint format with no names in it, and the 1.8 GB flagship model.">
-<meta name="keywords" content="Qwen3.5, linear attention, hybrid architecture, model distillation, int8 quantisation, gated attention">
+<title>Qwen3.5 and the 2B distill. A hybrid attention schedule in a kernel</title>
+<meta name="description" content="Three layers in four use linear attention, the file format is layer-major with no names in it, and the schedule travels as an explicit bitmap.">
+<meta name="keywords" content="Qwen3.5, hybrid attention, linear attention, layer-major format, MoE refusal, model conversion">
 <link rel="canonical" href="https://ilumci.github.io/GLaDOS/wiki/qwen35.html">
 <meta name="robots" content="index,follow,max-image-preview:large">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="GLaDOS">
-<meta property="og:title" content="Qwen3.5 and the 2B distill">
-<meta property="og:description" content="Hybrid attention in a kernel: linear-attention layers beside full attention, a checkpoint format with no names in it, and the 1.8 GB flagship model.">
+<meta property="og:title" content="Qwen3.5 and the 2B distill. A hybrid attention schedule in a kernel">
+<meta property="og:description" content="Three layers in four use linear attention, the file format is layer-major with no names in it, and the schedule travels as an explicit bitmap.">
 <meta property="og:url" content="https://ilumci.github.io/GLaDOS/wiki/qwen35.html">
 <meta name="twitter:card" content="summary">
-<meta name="twitter:title" content="Qwen3.5 and the 2B distill">
-<meta name="twitter:description" content="Hybrid attention in a kernel: linear-attention layers beside full attention, a checkpoint format with no names in it, and the 1.8 GB flagship model.">
+<meta name="twitter:title" content="Qwen3.5 and the 2B distill. A hybrid attention schedule in a kernel">
+<meta name="twitter:description" content="Three layers in four use linear attention, the file format is layer-major with no names in it, and the schedule travels as an explicit bitmap.">
 <meta property="og:image" content="https://ilumci.github.io/GLaDOS/img/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
@@ -27,7 +27,7 @@
 <link rel="apple-touch-icon" sizes="180x180" href="../img/icon-180.png">
 <link rel="manifest" href="../site.webmanifest">
 <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://ilumci.github.io/GLaDOS/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://ilumci.github.io/GLaDOS/wiki/"},{"@type":"ListItem","position":3,"name":"Qwen3.5 and the 2B distill","item":"https://ilumci.github.io/GLaDOS/wiki/qwen35.html"}]}</script>
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Qwen3.5 and the 2B distill","description":"Hybrid attention in a kernel: linear-attention layers beside full attention, a checkpoint format with no names in it, and the 1.8 GB flagship model.","url":"https://ilumci.github.io/GLaDOS/wiki/qwen35.html","dateModified":"2026-08-14","keywords":"Qwen3.5, linear attention, hybrid architecture, model distillation, int8 quantisation, gated attention","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Qwen3.5 and the 2B distill. A hybrid attention schedule in a kernel","description":"Three layers in four use linear attention, the file format is layer-major with no names in it, and the schedule travels as an explicit bitmap.","url":"https://ilumci.github.io/GLaDOS/wiki/qwen35.html","dateModified":"2026-08-30","keywords":"Qwen3.5, hybrid attention, linear attention, layer-major format, MoE refusal, model conversion","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -47,18 +47,26 @@
 <div class="crumbs"><a href="../">GLaDOS</a> / <a href="../wiki/">Wiki</a> / Qwen3.5 and the 2B distill</div>
 <div id="main">
 <h1>Qwen3.5 and the 2B distill</h1>
-<p>The kernel's forward pass grew a second kind of layer for the Qwen3.5 family, and with it the current flagship: a 2B distill quantised to int8, 1.8 GB on disk, shipped as the largest bootable image. Host-side it measures 40% on routing and 43.3% on MMLU through the evaluation harness.</p>
+<p>Qwen3.5 is a hybrid. Most of its layers use linear attention and a minority use ordinary softmax attention, which changes how a checkpoint has to be stored and how it has to be checked.</p>
+
 <h2 id="three-layers-in-four">Three layers in four</h2>
-<p>Qwen3.5 interleaves two mixers. Three layers out of four run linear attention: a short convolution ring feeds a recurrence whose state has a fixed size, so those layers carry no cache at all and their memory stays flat as context grows. The fourth runs ordinary attention with grouped queries over shared key-value heads, a partial rotary embedding that rotates 64 of each head's dimensions, and an output gate applied before the projection mixes heads.</p>
-<p>Only the full-attention layers own KV slots. On the 0.8B sibling that is six caches for twenty-four layers, which is most of the point of the architecture: cache memory stops scaling with depth. Norms on these models scale by one plus the weight, and the query projection is twice as wide as its head count would suggest, carrying a gate alongside every query.</p>
+<p>In the published schedule, three layers out of every four carry linear attention and the fourth carries full attention. Grouping tensors by kind stops being possible, because there is no single stride to multiply: the layers are not interchangeable and the file has to be walked in layer order.</p>
+<p>The schedule travels as an explicit bitmap in the header rather than being derived from an interval. A checkpoint that breaks the expected pattern then fails loudly at load instead of being silently misread as the pattern the reader assumed.</p>
+
 <h2 id="a-format-with-no-names-in-it">A format with no names in it</h2>
-<p>The v4 checkpoint body holds tensors laid out layer by layer, with no names, shapes or lengths written down anywhere. Two consequences follow. The reader walks from the first byte to the last and asserts it landed on the final byte, so a disagreement about one dimension cannot leave everything after it valid-looking and wrong. And the layer schedule, which kinds occupy which positions, travels as an explicit bitmap in the 160-byte header; a checkpoint breaking the pattern refuses to load.</p>
-<p>The converter enforces the same contract in reverse: every tensor in the source is written or explicitly skipped, and anything else is an error.</p>
+<p>The body carries no names, shapes or lengths. That makes it compact and makes one class of bug extremely quiet: a writer and a reader that disagree about a single dimension leave everything after that point as perfectly valid floating point garbage.</p>
+<p>So both readers walk and never seek, and both assert that they land exactly on the last byte. The converter makes the same bargain on the way in: every tensor is either written or explicitly skipped, and anything else is an error rather than a silent omission.</p>
+
+<h2 id="mixture-of-experts-is-refused">Mixture of experts is refused</h2>
+<p>The loader declines mixture-of-experts checkpoints outright. The smallest published one is 71.9 GB, nothing that size reaches a firmware pool on this laptop, and a forward pass for it could never be run or contradicted. Half implementing it would produce a code path that has never executed and cannot be tested, so it returns an unsupported error and says why.</p>
+
 <h2 id="checking-a-hybrid-without-the-hardware">Checking a hybrid without the hardware</h2>
-<p>The 2B model does not fit the development machine's emulator budget, so correctness is checked against purpose-built tools. One constructs a tiny hybrid shaped to exercise both mixer types, packed cache indexing, partial rotation, grouped queries and an untied classifier, then prints what the logits should be. A second reads v4 files back and round-trips itself. A third compares a converted checkpoint against captured reference activations within a stated tolerance.</p>
+<p>The real 0.8B hybrid is 723 MB against the emulator's 516 MB synthetic disk, so a purpose-built small hybrid stands in. It is shaped to hit every path the real one does: both layer kinds, packed cache indices, partial rotary application, four value heads over two key heads, grouped queries, and an untied classifier. The generator prints what the logits should be.</p>
+<p>Two switches make it a bisection tool rather than a pass or fail. Forcing the schedule to all-full or all-linear isolates the two mixers. Zeroing every projection back into the residual stream lets the loader, the final normalisation and the classifier be checked apart from any layer at all.</p>
+
 <h2 id="where-it-runs">Where it runs</h2>
-<p>The weights are read whole before <code>ExitBootServices</code>, so the 2B image wants roughly 8 GB of RAM on the host machine. Development against smaller checkpoints continues under emulation; the flagship is a hardware experience.</p>
-<div class="seealso"><b>See also:</b> <a href="../wiki/qwen3.html">Qwen3 in 570 MB</a>, <a href="../wiki/llm-in-kernel.html">A language model in the kernel</a>, <a href="../wiki/agent.html">The agent loop</a>, <a href="../wiki/kv-cache.html">The int8 KV cache</a>, <a href="../wiki/tokenizer.html">Tokenizers</a></div>
+<p>The 2B distill ships as a bootable image of about 1.9 GB. Guest memory has to cover the weights, because they are read whole into a pool before the firmware door closes, so the default allocation for emulation is raised accordingly. On the laptop it is a file on the boot partition and the same rules apply.</p>
+<div class="seealso"><b>See also:</b> <a href="qwen3.html">Qwen3 in 570 MB</a>, <a href="kv-cache.html">The int8 KV cache</a>, <a href="llm-in-kernel.html">A language model in the kernel</a>, <a href="testing.html">Testing without a test runner</a></div>
 </div>
 </div>
 </div>
@@ -70,7 +78,7 @@
   GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are
   other people's and are listed on <a href="../credits.html">the
   credits page</a>.</p>
-  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-14.</p>
+  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-30.</p>
 </div>
 
 </div>

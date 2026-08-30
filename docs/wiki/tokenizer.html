@@ -3,19 +3,19 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Tokenizers. BPE, pre-tokenizer regexes, and 12% silent divergence</title>
-<meta name="description" content="Why a byte-pair encoding tokenizer needs the exact pre-tokenizer regex its model trained with, and how the wrong one moved 12% of tokens with no error.">
-<meta name="keywords" content="tokenizer, BPE, byte pair encoding, pre-tokenizer, cl100k, GPT-2 regex">
+<title>Tokenizers. The pre-tokenizer regex is part of the model</title>
+<meta name="description" content="Byte pair encoding is the easy half. The pre-tokenizer pattern differs between checkpoints, and using the wrong one moves about twelve percent of tokens with no error.">
+<meta name="keywords" content="tokenizer, BPE, pre-tokenizer regex, cl100k, GPT-2 pattern, byte pair encoding">
 <link rel="canonical" href="https://ilumci.github.io/GLaDOS/wiki/tokenizer.html">
 <meta name="robots" content="index,follow,max-image-preview:large">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="GLaDOS">
-<meta property="og:title" content="Tokenizers. BPE, pre-tokenizer regexes, and 12% silent divergence">
-<meta property="og:description" content="Why a byte-pair encoding tokenizer needs the exact pre-tokenizer regex its model trained with, and how the wrong one moved 12% of tokens with no error.">
+<meta property="og:title" content="Tokenizers. The pre-tokenizer regex is part of the model">
+<meta property="og:description" content="Byte pair encoding is the easy half. The pre-tokenizer pattern differs between checkpoints, and using the wrong one moves about twelve percent of tokens with no error.">
 <meta property="og:url" content="https://ilumci.github.io/GLaDOS/wiki/tokenizer.html">
 <meta name="twitter:card" content="summary">
-<meta name="twitter:title" content="Tokenizers. BPE, pre-tokenizer regexes, and 12% silent divergence">
-<meta name="twitter:description" content="Why a byte-pair encoding tokenizer needs the exact pre-tokenizer regex its model trained with, and how the wrong one moved 12% of tokens with no error.">
+<meta name="twitter:title" content="Tokenizers. The pre-tokenizer regex is part of the model">
+<meta name="twitter:description" content="Byte pair encoding is the easy half. The pre-tokenizer pattern differs between checkpoints, and using the wrong one moves about twelve percent of tokens with no error.">
 <meta property="og:image" content="https://ilumci.github.io/GLaDOS/img/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
@@ -27,7 +27,7 @@
 <link rel="apple-touch-icon" sizes="180x180" href="../img/icon-180.png">
 <link rel="manifest" href="../site.webmanifest">
 <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://ilumci.github.io/GLaDOS/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://ilumci.github.io/GLaDOS/wiki/"},{"@type":"ListItem","position":3,"name":"Tokenizers","item":"https://ilumci.github.io/GLaDOS/wiki/tokenizer.html"}]}</script>
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Tokenizers. BPE, pre-tokenizer regexes, and 12% silent divergence","description":"Why a byte-pair encoding tokenizer needs the exact pre-tokenizer regex its model trained with, and how the wrong one moved 12% of tokens with no error.","url":"https://ilumci.github.io/GLaDOS/wiki/tokenizer.html","dateModified":"2026-08-14","keywords":"tokenizer, BPE, byte pair encoding, pre-tokenizer, cl100k, GPT-2 regex","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Tokenizers. The pre-tokenizer regex is part of the model","description":"Byte pair encoding is the easy half. The pre-tokenizer pattern differs between checkpoints, and using the wrong one moves about twelve percent of tokens with no error.","url":"https://ilumci.github.io/GLaDOS/wiki/tokenizer.html","dateModified":"2026-08-30","keywords":"tokenizer, BPE, pre-tokenizer regex, cl100k, GPT-2 pattern, byte pair encoding","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -47,26 +47,25 @@
 <div class="crumbs"><a href="../">GLaDOS</a> / <a href="../wiki/">Wiki</a> / Tokenizers</div>
 <div id="main">
 <h1>Tokenizers</h1>
-<p>A byte-pair encoding tokenizer has two halves. There is the merge table, which is the part everyone pictures: a ranked list of byte pairs, applied greedily until nothing more can be joined. And there is a pre-tokenizer regex, which chops the input into candidate pieces <em>before</em> any merging happens and forbids merges from crossing the boundaries it creates. The second half is easy to forget, because when it is right it is invisible.</p>
-<p>The kernel's tokenizer reads a flat binary: a maximum token length, then one record per vocabulary entry holding a merge score, a length and that many raw bytes. The vocabulary size deliberately is not in the file. It comes from the model header, which is what binds a tokenizer to a particular checkpoint. Hand it a mismatched pair and it parses cheerfully and produces nonsense.</p>
+<p>A tokenizer that is subtly wrong produces text that still looks like text. That single property is why this component gets more verification than most of the ones around it.</p>
+
 <h2 id="the-regexes-differ-and-it-matters">The regexes differ, and it matters</h2>
-<p>GPT-2's pattern and the cl100k pattern disagree in ways that read as cosmetic:</p>
-<ul><li>Under cl100k a word may be led by any non-alphanumeric character, so <code>(x</code> is one piece and not two.</li><li>Digits come out one at a time, never in runs, so <code>2048</code> is four pieces.</li><li>Punctuation swallows the newlines that follow it, which changes how every line ending in a full stop tokenises.</li></ul>
-<p>SmolLM2 trained with the GPT-2 pattern. Qwen3 spells out the cl100k one explicitly as a Split rule in its tokenizer configuration. Using the wrong one moved about 12% of tokens across this project's training corpus, including, unhelpfully, the ChatML control structure that the instruction tuning depends on, where <code>&lt;|im_start|&gt;</code> and its neighbours have to land exactly as trained.</p>
+<p>Byte pair encoding is a merge table applied greedily, and it is the easy half. Before any merging happens, the input is split into pieces by a regular expression, and that pattern is part of the trained model rather than an implementation detail.</p>
+<p>SmolLM2 uses the GPT-2 pattern. Qwen3 spells out the cl100k one, where a word may be led by any non-alphanumeric character so that an opening bracket and the word after it form one piece, digits arrive one at a time, and punctuation swallows the newlines that follow it.</p>
+<p>Merging is identical in both cases. The pieces the merges are applied to are not.</p>
+
 <h2 id="twelve-percent-of-nothing-visible">Twelve percent of nothing visible</h2>
-<p>There is no error anywhere in that. The tokenizer emits ids, the ids are in range, the model consumes them and produces fluent text. What is happening underneath is that the model is being handed sequences whose segmentation it never saw in training, and transformers degrade gently under that without failing, since a word split two ways instead of one still carries most of its meaning through the embedding.</p>
-<p>The fix is the same shape as the one for <a href="qwen3.html">head width and QK-norm</a>: the checkpoint carries which pre-tokenizer it needs as a flag in its own header, so the fact travels with the weights instead of being inferred. After that change, divergence across 407 texts and 66,598 tokens was zero.</p>
+<p>Using the GPT-2 pattern on a Qwen3 checkpoint moved about twelve percent of tokens across the training corpus here. There was no error, no exception and no warning. The model was simply being fed sequences of a kind it never saw in training, and it responded by being slightly worse in a way that reads as the model being small.</p>
+<p>Every checkpoint therefore carries which pattern it was trained with, and the kernel reads it from the file rather than guessing from a name.</p>
+
 <h2 id="verify-against-the-reference-always">Verify against the reference, always</h2>
-<p>The converter has a <code>--verify</code> mode that reimplements the kernel's algorithm in Python and diffs it, token for token, against the reference <code>tokenizers</code> library. Running it is not optional, for the reason that runs through this whole section of the wiki: a tokenizer that is subtly wrong produces text that still looks like text, so the only thing that catches it is a comparison against something known to be right.</p>
-<h2 id="what-the-kernel-s-implementation-actually-does">What the kernel's implementation actually does</h2>
-<p>Encoding runs greedy byte-pair merging over the pieces the pre-tokenizer produced. Start with the individual bytes, repeatedly find the adjacent pair whose merged form has the best score in the vocabulary, and join it, until no pair can be joined. The vocabulary is kept sorted by byte string so a merge candidate is found by binary search and not by scanning 150,000 entries per step, which is the difference between tokenising a prompt instantly and tokenising it noticeably.</p>
-<p>Bytes the vocabulary cannot express fall back to single-byte pieces. SentencePiece with byte fallback places those 256 pieces immediately after the three control ids, so any unrepresentable byte becomes <code>byte + 3</code>. That offset is a constant in the source with a comment explaining where the three comes from, because it is exactly the kind of number that looks arbitrary six months later.</p>
-<p>Three further per-checkpoint behaviours ride along as flags in the header, where the code would otherwise have assumed them: whether to prepend a dummy space, whether digits are split individually, and which pre-tokenizer regex applies. Every one of them is a property of how the model was trained, and every one of them fails silently if guessed.</p>
-<h2 id="an-earlier-design-and-why-it-was-abandoned">An earlier design, and why it was abandoned</h2>
-<p>The model code was originally written around a byte-level vocabulary of 256 entries, which removes the tokenizer completely: no merge table, and no vocabulary file to get onto a machine that has no filesystem driver yet. For bootstrapping something that had to run before storage existed, that was the right trade.</p>
-<p>It cost roughly four times the context per unit of text, since every character is a token. Once the kernel could read files, a real vocabulary became a 6 KB read that buys back all of it, and the byte-level path was retired. The trade was correct when it was made and wrong six months later, which is the usual shape of a bootstrapping decision.</p>
-<div class="note">A related trap, and an expensive one. Sizing the vocabulary from the merge table is wrong for Qwen3, whose 293 special tokens live <em>above</em> it. Doing that indexed the vocabulary past its end and resolved the end-of-turn token to id 2, so generation had no way to stop and simply ran to the token limit every time. Size from the highest added token id instead.</div>
-<div class="seealso"><b>See also:</b> <a href="../wiki/qwen3.html">Qwen3 in 570 MB</a>, <a href="../wiki/llm-in-kernel.html">A language model in the kernel</a>, <a href="../wiki/constrained-decoding.html">Constrained decoding</a></div>
+<p>The conversion tool has a verification mode which reimplements the kernel's algorithm in Python and compares it against the reference tokenizers library over a corpus. It is not optional, and the reason is the first sentence of this page.</p>
+<p>The boot self-tests carry a set of cases for both patterns, checked against the reference output, so a regression in the kernel's implementation shows up in the same place everything else does.</p>
+
+<h2 id="what-the-kernel-implementation-does">What the kernel implementation does</h2>
+<p>It reads a compact binary vocabulary with the merge ranks, applies the pattern the header names, and merges greedily by rank. Special tokens are matched before the pattern runs so a marker is never split. The longest single token in this vocabulary is 81 bytes, which matters only because a fixed buffer somewhere has to be at least that.</p>
+<p>An earlier design tried to derive the pattern from the vocabulary's contents. It worked on two checkpoints and would have failed silently on the third, which is the same failure this whole page is about, so it was replaced by recording the answer explicitly at conversion time.</p>
+<div class="seealso"><b>See also:</b> <a href="qwen3.html">Qwen3 in 570 MB</a>, <a href="constrained-decoding.html">Constrained decoding</a>, <a href="rope.html">RoPE</a>, <a href="testing.html">Testing without a test runner</a></div>
 </div>
 </div>
 </div>
@@ -78,7 +77,7 @@
   GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are
   other people's and are listed on <a href="../credits.html">the
   credits page</a>.</p>
-  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-14.</p>
+  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-30.</p>
 </div>
 
 </div>

@@ -3,19 +3,19 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>The agent loop. Goal in, applet calls out</title>
-<meta name="description" content="How GLaDOS runs an episode: the model picks an applet under a grammar, the kernel runs it, the observation returns as text, and three tiers decide how much thought a step deserves.">
-<meta name="keywords" content="AI agent loop, tool use, LLM agent, agentic operating system, constrained tool calling, agent skills">
+<title>The agent loop. Three tiers, skills, and judging what it writes</title>
+<meta name="description" content="How a request becomes an action, why episodes became affordable, and what happens to a skill the machine compiles for itself before it is allowed to run.">
+<meta name="keywords" content="agent loop, LLM agent, skills, tool use, episode, self-improving agent, KV cache prefill">
 <link rel="canonical" href="https://ilumci.github.io/GLaDOS/wiki/agent.html">
 <meta name="robots" content="index,follow,max-image-preview:large">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="GLaDOS">
-<meta property="og:title" content="The agent loop. Goal in, applet calls out">
-<meta property="og:description" content="How GLaDOS runs an episode: the model picks an applet under a grammar, the kernel runs it, the observation returns as text, and three tiers decide how much thought a step deserves.">
+<meta property="og:title" content="The agent loop. Three tiers, skills, and judging what it writes">
+<meta property="og:description" content="How a request becomes an action, why episodes became affordable, and what happens to a skill the machine compiles for itself before it is allowed to run.">
 <meta property="og:url" content="https://ilumci.github.io/GLaDOS/wiki/agent.html">
 <meta name="twitter:card" content="summary">
-<meta name="twitter:title" content="The agent loop. Goal in, applet calls out">
-<meta name="twitter:description" content="How GLaDOS runs an episode: the model picks an applet under a grammar, the kernel runs it, the observation returns as text, and three tiers decide how much thought a step deserves.">
+<meta name="twitter:title" content="The agent loop. Three tiers, skills, and judging what it writes">
+<meta name="twitter:description" content="How a request becomes an action, why episodes became affordable, and what happens to a skill the machine compiles for itself before it is allowed to run.">
 <meta property="og:image" content="https://ilumci.github.io/GLaDOS/img/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
@@ -27,7 +27,7 @@
 <link rel="apple-touch-icon" sizes="180x180" href="../img/icon-180.png">
 <link rel="manifest" href="../site.webmanifest">
 <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://ilumci.github.io/GLaDOS/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://ilumci.github.io/GLaDOS/wiki/"},{"@type":"ListItem","position":3,"name":"The agent loop","item":"https://ilumci.github.io/GLaDOS/wiki/agent.html"}]}</script>
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"The agent loop. Goal in, applet calls out","description":"How GLaDOS runs an episode: the model picks an applet under a grammar, the kernel runs it, the observation returns as text, and three tiers decide how much thought a step deserves.","url":"https://ilumci.github.io/GLaDOS/wiki/agent.html","dateModified":"2026-08-14","keywords":"AI agent loop, tool use, LLM agent, agentic operating system, constrained tool calling, agent skills","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"The agent loop. Three tiers, skills, and judging what it writes","description":"How a request becomes an action, why episodes became affordable, and what happens to a skill the machine compiles for itself before it is allowed to run.","url":"https://ilumci.github.io/GLaDOS/wiki/agent.html","dateModified":"2026-08-30","keywords":"agent loop, LLM agent, skills, tool use, episode, self-improving agent, KV cache prefill","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -47,20 +47,28 @@
 <div class="crumbs"><a href="../">GLaDOS</a> / <a href="../wiki/">Wiki</a> / The agent loop</div>
 <div id="main">
 <h1>The agent loop</h1>
-<p>Typing <code>agent list the files in /sys</code> queues an episode. The shell keeps its prompt and a step budget counts down. Each step follows the same shape: the model reads the goal, the transcript so far and the applets it may call; something decides which applet fits; the kernel dispatches it as an ordinary function call; whatever the applet prints becomes the next step's observation. When the model judges the goal met it names <code>done</code>, and the episode lands as a transcript under <code>/ai/episodes</code>.</p>
-<p>Trust works the way it does everywhere else in the system. At read-only trust the mutating applets are absent from the grammar entirely, so no decision sequence can reach them; at full trust everything is reachable. Enforcement lives in the sampler, ahead of any choice.</p>
+<p>A request becomes an action through the cheapest mechanism that can answer it. The expensive ones are reached only when the cheap ones decline.</p>
+
 <h2 id="three-tiers-spent-in-order">Three tiers, spent in order</h2>
-<p>A step does not always need the transformer. The cheapest tier answers first and the expensive ones run only when confidence is missing:</p>
-<ul><li><strong>Reflex.</strong> The ridge router scores every applet from one hidden state and the two counting cores corroborate it. Where all three name the same applet they measure 90% right, so that answer dispatches immediately and no token is generated.</li><li><strong>Pulse.</strong> One greedy walk under the grammar at temperature zero: a single pass over a handful of tokens, handling everything the reflex has no opinion about.</li><li><strong>Deliberation.</strong> The engine state is captured, cache included; candidates are then sampled at temperature and ranked by the router's scores. The winning candidate's keys stay in the cache, which is exactly the context wanted for decoding that applet's arguments.</li></ul>
-<p>Forks are budgeted by the caller because each one copies the KV cache, the largest allocation in the system. The ladder exists so that copy is only ever paid for when the cheap tiers had nothing confident to say.</p>
+<p>First the router, which reads one hidden state and answers in about 1.6 ms. Most requests end here.</p>
+<p>Second an episode, where the model observes, acts, and observes the result, with the action constrained by a grammar built from the live applet table. Episodes are bounded in steps and in time.</p>
+<p>Third a conversation, which is the general case and the most expensive.</p>
+<p>The order matters more than any of the individual mechanisms. A system that reaches for the transformer first spends a forward pass on questions a dot product answers.</p>
+
 <h2 id="skills">Skills</h2>
-<p>A successful episode can be frozen into a skill with <code>agent learn &lt;name&gt;</code>: the transcript's decisions become a program under <code>/ai/tools</code>, and <code>run</code> replays it whenever a matching request arrives. Skills are ordinary programs in the kernel's little language, and their trust level comes from what they call: a script invoking <code>write</code> makes every grammar admitting that script a full-trust grammar.</p>
-<p>One builtin makes this composition useful. <code>applet("ls /sys")</code> calls the OS from inside a program and returns the captured output as a string. Captures nest, because a skill may call an applet that itself runs a skill, so the capture is a stack and each call collects into its own frame.</p>
+<p>A successful episode can be compiled into a program in the system language and kept, so the sequence that worked once can be replayed without the model. That is where the interesting problem starts, because writing a skill used to be the whole of adopting it: the file appeared, the runner would execute it, and nothing had asked whether it was any good.</p>
+<p>A candidate is now stored by content address and put through four judges. It has to parse. It has to run under the powers an unadopted skill actually has, which is a real question because a replay of an episode the operator drove often depends on a mutating applet that a sandbox refuses. It has to repeat, giving the same value, the same step count and the same set of touched objects on two runs. And it has to be cheap.</p>
+<p>What those judges are is constrained by what a replay skill is. It takes no arguments and dispatches a fixed sequence, so asking whether it generalises to an unseen task is a question it cannot answer, and a judge that could never fail is worse than no judge. These four are admission rather than improvement, and the documentation says so.</p>
+<p>One blind spot is written down rather than discovered later: the repeatability judge compares the value, the cost and the objects touched, and does not compare what the program printed. A replay is a sequence of print statements, which answers nothing however the applets behaved.</p>
+
+<h2 id="who-is-allowed-to-be-the-operator">Who is allowed to be the operator</h2>
+<p>Every stored program used to run with operator capabilities: raw memory, ports, the network, the model, the framebuffer. Applications had been jailed for a long time and tools had not, and the machine writes tools, and a skill shared by a stranger is a tool. It was open by omission.</p>
+<p>Tools now follow applications exactly. Operator powers only for bytes the operator has named by hash, everything else fresh and sandboxed in its own subtree under a step budget. Identity is the hash of the file, so editing a trusted skill revokes its trust by construction. Granting trust is a shell command and never an applet, because a model that could grant itself trust would have defeated the gate by using it.</p>
+
 <h2 id="prefill-made-episodes-affordable">Prefill made episodes affordable</h2>
-<p>Every step rebuilds its context, and feeding a prompt token by token reads every weight once per token. The prefill pass now walks the prompt in 64-row chunks through which each weight matrix streams once, with per-element arithmetic unchanged, so results match single-token feeding bit for bit. Under full emulation an episode step fell from more than half an hour to about two minutes.</p>
-<p>The same change tightened a subtlety worth stating: the position marker now travels with the cache through every path, including fork capture and restore, so a resumed walk always continues exactly the context it started from.</p>
-<div class="note"><strong>The transcript is the interface.</strong> Everything above is readable: <code>cat /ai/episodes/0001.txt</code> shows the goal, the tier each choice came from, the applet calls and their observations. The desktop's <code>agentlog</code> window tails the same stream.</div>
-<div class="seealso"><b>See also:</b> <a href="../wiki/routing.html">Tool routing</a>, <a href="../wiki/constrained-decoding.html">Constrained decoding</a>, <a href="../wiki/llm-in-kernel.html">A language model in the kernel</a>, <a href="../wiki/qwen35.html">Qwen3.5 and the 2B distill</a>, <a href="../wiki/storage.html">Content-addressed storage</a></div>
+<p>The conversation resumes its key and value cache instead of resending a transcript. Every chat program re-sends its whole history each turn because the cache belongs to somebody else; here it is ours and it stays, so a turn costs the tokens of that turn and the tenth exchange is as cheap as the first. Measured across two turns, position went from 135 to 150, growing by the new turn alone.</p>
+<p>None of that was new machinery. The pieces existed and had simply never been joined up.</p>
+<div class="seealso"><b>See also:</b> <a href="routing.html">Tool routing</a>, <a href="constrained-decoding.html">Constrained decoding</a>, <a href="kv-cache.html">The int8 KV cache</a>, <a href="storage.html">Content-addressed storage</a></div>
 </div>
 </div>
 </div>
@@ -72,7 +80,7 @@
   GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are
   other people's and are listed on <a href="../credits.html">the
   credits page</a>.</p>
-  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-14.</p>
+  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-30.</p>
 </div>
 
 </div>

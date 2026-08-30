@@ -3,19 +3,19 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>The Windows 3.1 desktop. Writing a window manager from scratch</title>
-<meta name="description" content="How GLaDOS draws its GUI: raw GOP framebuffer, two-pixel bevels, z-order as focus, total repaint, and a keyboard-only window manager in kernel space.">
-<meta name="keywords" content="window manager, Windows 3.1 UI, framebuffer graphics, GUI from scratch, retro UI, OS graphics">
+<title>The desktop. Windows 98 over Windows 3.1, composed and diffed</title>
+<meta name="description" content="A window manager drawn from two eras of Windows, a compositor that diffs row spans, and the measurement that found the console was most of a frame.">
+<meta name="keywords" content="Windows 3.1 GUI, Windows 98 interface, window manager, compositor, framebuffer, retro desktop">
 <link rel="canonical" href="https://ilumci.github.io/GLaDOS/wiki/gui.html">
 <meta name="robots" content="index,follow,max-image-preview:large">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="GLaDOS">
-<meta property="og:title" content="The Windows 3.1 desktop. Writing a window manager from scratch">
-<meta property="og:description" content="How GLaDOS draws its GUI: raw GOP framebuffer, two-pixel bevels, z-order as focus, total repaint, and a keyboard-only window manager in kernel space.">
+<meta property="og:title" content="The desktop. Windows 98 over Windows 3.1, composed and diffed">
+<meta property="og:description" content="A window manager drawn from two eras of Windows, a compositor that diffs row spans, and the measurement that found the console was most of a frame.">
 <meta property="og:url" content="https://ilumci.github.io/GLaDOS/wiki/gui.html">
 <meta name="twitter:card" content="summary">
-<meta name="twitter:title" content="The Windows 3.1 desktop. Writing a window manager from scratch">
-<meta name="twitter:description" content="How GLaDOS draws its GUI: raw GOP framebuffer, two-pixel bevels, z-order as focus, total repaint, and a keyboard-only window manager in kernel space.">
+<meta name="twitter:title" content="The desktop. Windows 98 over Windows 3.1, composed and diffed">
+<meta name="twitter:description" content="A window manager drawn from two eras of Windows, a compositor that diffs row spans, and the measurement that found the console was most of a frame.">
 <meta property="og:image" content="https://ilumci.github.io/GLaDOS/img/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
@@ -27,7 +27,7 @@
 <link rel="apple-touch-icon" sizes="180x180" href="../img/icon-180.png">
 <link rel="manifest" href="../site.webmanifest">
 <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://ilumci.github.io/GLaDOS/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://ilumci.github.io/GLaDOS/wiki/"},{"@type":"ListItem","position":3,"name":"The Windows 3.1 desktop","item":"https://ilumci.github.io/GLaDOS/wiki/gui.html"}]}</script>
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"The Windows 3.1 desktop. Writing a window manager from scratch","description":"How GLaDOS draws its GUI: raw GOP framebuffer, two-pixel bevels, z-order as focus, total repaint, and a keyboard-only window manager in kernel space.","url":"https://ilumci.github.io/GLaDOS/wiki/gui.html","dateModified":"2026-08-14","keywords":"window manager, Windows 3.1 UI, framebuffer graphics, GUI from scratch, retro UI, OS graphics","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"The desktop. Windows 98 over Windows 3.1, composed and diffed","description":"A window manager drawn from two eras of Windows, a compositor that diffs row spans, and the measurement that found the console was most of a frame.","url":"https://ilumci.github.io/GLaDOS/wiki/gui.html","dateModified":"2026-08-30","keywords":"Windows 3.1 GUI, Windows 98 interface, window manager, compositor, framebuffer, retro desktop","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -46,23 +46,29 @@
 <div id="content">
 <div class="crumbs"><a href="../">GLaDOS</a> / <a href="../wiki/">Wiki</a> / The Windows 3.1 desktop</div>
 <div id="main">
-<h1>The Windows 3.1 desktop</h1>
-<p>There is no graphics library anywhere in this. UEFI's Graphics Output Protocol hands the kernel four numbers (a base address, a width, a height and a stride) and everything above them is written by hand: the glyph renderer, the bevel primitives, the window manager, the wallpaper geometry and the taskbar. There is no VGA text mode to retreat to either, because the machine boots UEFI with no CSM, so there is no INT 10h, no text buffer at 0xB8000, and no VGA BIOS. Pixels are the only output device that exists.</p>
-<h2 id="windows-3-1-chrome-precisely">Windows 3.1 chrome, precisely</h2>
-<p>The look is not an approximation of the era, it is the actual construction:</p>
-<ul><li>A <code>#C0C0C0</code> face colour on every panel.</li><li>Two-pixel bevels, white along the top and left and dark grey along the bottom and right, for a raised surface, and the same two colours swapped for a sunken one. That single trick is most of the visual language.</li><li>Title bars that fill with the selection colour when focused and go grey when they are not.</li><li>Hard rectangles throughout: no anti-aliasing, no shadows, no rounded corners, no alpha.</li></ul>
-<p>Over that sits the <a href="aperture-science.html">Aperture palette</a> and its amber accents, with a wallpaper computed as vector geometry because the kernel has no image decoder.</p>
-<p>The style and the constraint are the same decision. A raised panel with a sunken trough, four colours and one bitmap font is simultaneously the Windows 3.x dialog vocabulary and the cheapest set of operations a framebuffer can perform. Nothing here needs blending, scaling or sub-pixel positioning, which is why the boot splash and the window manager can share a drawing model despite one of them running before there is a heap.</p>
+<h1>The desktop</h1>
+<p>Icons, the Start menu and gradient title bars come from Windows 98. Bevels and dialogs that hug their content come from 3.1. The palette comes from the sign over the door.</p>
+
+<h2 id="composed-then-diffed">Composed, then diffed</h2>
+<p>Every repaint draws everything: wallpaper, icons, and every window back to front, into a heap back buffer. Presenting then writes to the framebuffer only the row spans that differ from a shadow copy of what is already on screen.</p>
+<p>Total repaint keeps the window manager obviously correct, because there is no incremental state to get wrong. The diff is why nothing flickers and why hover feedback on pointer motion is affordable at all. The console bypasses the next present through a direct rectangle flush so that shell output stays immediate, and both paths update the shadow, so they cannot disagree about what is on screen.</p>
+
 <h2 id="the-window-manager-and-its-one-idea">The window manager, and its one idea</h2>
-<p>Z-order <em>is</em> focus. There is no separate focused-window pointer kept in agreement with the stacking order, because the front window is the focused window by definition, and raising a window is how you focus it. That is one fact where most systems carry two, and two facts about the same thing eventually disagree.</p>
-<p>The terminal is a window on the desktop and not the other way round, which sounds like a detail and is the whole design. A shell that draws a dialog over itself is a program with a pop-up; a desktop that hosts a terminal alongside other windows is an environment. The console already knew how to live inside a rectangle and reflow to it, so the terminal needed no special case at all; it is a window whose contents happen to be a character grid.</p>
-<p>Repainting is total, back to front, on every change: no damage tracking, no dirty rectangles. That is affordable because of what causes a change. Nothing here animates, so a repaint happens when a key is pressed or the mouse moves, which is at most a few times a second, and 1280×800 is about a million stores into a write-back-mapped aperture. Damage tracking would buy nothing measurable and would cost the property this code cannot afford to lose, which is being obviously correct. The entire category of "stale pixels from a window that used to be there" cannot occur if there is no such thing as a partial repaint.</p>
-<div class="shot"><img src="../img/mouse.png" alt="The GLaDOS desktop with a mouse cursor and the Program Manager system status list open" width="1280" height="800" loading="lazy" decoding="async"><div class="cap"><b>A pointer, and the system status menu.</b> PS/2 mouse support. The cursor is drawn by saving the pixels underneath it and restoring them before the next move, which is the 1990 solution and the correct one when every repaint is total anyway. The second button opens the menu under the pointer.</div></div>
-<div class="shot"><img src="../img/enternet.png" alt="A small web browser window in GLaDOS displaying example.com" width="1280" height="800" loading="lazy" decoding="async"><div class="cap"><b>Enternet.</b> The browser, which is a window like any other. It has fetched a page over the kernel's own TLS 1.3 connection, parsed the HTML and a subset of CSS, and laid the result out in its rectangle. Links are amber and navigable from the keyboard.</div></div>
-<h2 id="a-bug-that-only-a-screenshot-could-find">A bug that only a screenshot could find</h2>
-<p>The console wrote straight into its own rectangle with no knowledge of what might be stacked on top of it, so a file browser opened over the terminal was gradually eaten from underneath by shell output. Nothing in the serial log showed this. The log was correct, the window manager's internal state was correct, and the screen was wrong, which is a category of bug that only exists once you have pixels.</p>
-<div class="note">It was found by capturing the framebuffer through QEMU's monitor and converting it to PNG. That capture also produced a false alarm: a screenshot taken mid-repaint looked like a broken compositor, and cost a bisect before the fix turned out to be waiting two seconds for the frame to settle. A GUI nobody has looked at is a GUI nobody has tested.</div>
-<div class="seealso"><b>See also:</b> <a href="../wiki/aperture-science.html">Aperture Science</a>, <a href="../wiki/glados-os.html">GLaDOS OS</a>, <a href="../wiki/testing.html">Testing without a test runner</a></div>
+<p>Every layout the pointer hit-tests is the same function the paint pass draws from. A control that highlights in one place and activates in another is the class of bug that arrangement forbids by construction.</p>
+<p>Everything the pointer does, a keystroke also does. That is not an accessibility gesture. Serial cannot inject mouse packets, so a control with no typed equivalent cannot be driven headlessly and therefore never gets tested.</p>
+
+<h2 id="four-lessons-already-paid-for">Four lessons already paid for</h2>
+<p>Opening an application returns focus to the terminal. The desktop takes every key while a non-terminal window has focus, so an application that kept focus ate the next command line. Minesweeper consumed one a byte at a time and flagged a cell on the letter f.</p>
+<p>Alt-Tab swaps the top two windows and does not rotate. Rotating made a second press land on a third window, and both scripts and habit need over-and-back to be two presses.</p>
+<p>Relative pointer moves must stay within 255 per axis. Larger deltas set the overflow bit and the driver correctly discards the packet, so the pointer does not move at all, which reads as a dead drag rather than a clamped one.</p>
+<p>The glyph is eight pixels tall and doubled for chrome, which makes the title bar 24 and the caption buttons twelve square. Choreographing clicks from remembered metrics instead of a press trace cost two full test cycles aimed forty pixels wide of the close box.</p>
+
+<h2 id="a-measurement-that-overturned-the-plan">A measurement that overturned the plan</h2>
+<p>A survey of the renderer ranked several changes by expected benefit. The measured results disagreed with almost all of it.</p>
+<p>The console turned out to be the dominant cost of a frame at 1,672 us of 2,376. The reason was that a blank cell rendered an eight by eight glyph like any other, writing sixty-four scaled pixels of background one at a time, under a background the desktop had just filled with a bulk span fill. About 1.2 million per-pixel stores a frame, nearly all of them writing the colour already there. Painting the background once and then only cells with something in them took the console to 592 us and the frame to 1,629 us, for identical output.</p>
+<p>The survey had missed it because it was looking for per-cell dirty tracking, which the full repaint defeats. The redundancy was never in repainting unchanged cells. It was in painting nothing, pixel by pixel.</p>
+<p>Damage-rectangle presenting was measured and declined. Comparing the buffers costs 264 us of a 1,629 us frame over 4 MB, which is already at memory bandwidth, and skipping rows requires knowing which rows changed while the draw pass repaints everything unconditionally. Two other changes were kept despite measuring flat, because they are strictly less work for identical output, and recorded because the survey had called one of them the single largest constant-factor loss.</p>
+<div class="seealso"><b>See also:</b> <a href="glados-os.html">GLaDOS OS</a>, <a href="aperture-science.html">Aperture Science</a>, <a href="templeos.html">TempleOS</a>, <a href="testing.html">Testing without a test runner</a></div>
 </div>
 </div>
 </div>
@@ -74,7 +80,7 @@
   GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are
   other people's and are listed on <a href="../credits.html">the
   credits page</a>.</p>
-  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-14.</p>
+  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-30.</p>
 </div>
 
 </div>

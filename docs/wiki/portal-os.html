@@ -3,19 +3,19 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Portal OS. What a real Portal-inspired operating system looks like</title>
-<meta name="description" content="Portal OS: not a theme pack, but a genuine ring-0 kernel named for GLaDOS, with Aperture Science styling and a language model in kernel space.">
-<meta name="keywords" content="Portal OS, Portal operating system, GLaDOS OS, Portal theme, Aperture Science OS, Portal 2">
+<title>Portal OS. What the fiction asked for and what the machine delivers</title>
+<meta name="description" content="Which parts of this system are Portal and which are an operating system, what using it is actually like, and where scepticism is warranted.">
+<meta name="keywords" content="Portal OS, GLaDOS operating system, fan project, AI operating system, Portal fan game">
 <link rel="canonical" href="https://ilumci.github.io/GLaDOS/wiki/portal-os.html">
 <meta name="robots" content="index,follow,max-image-preview:large">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="GLaDOS">
-<meta property="og:title" content="Portal OS. What a real Portal-inspired operating system looks like">
-<meta property="og:description" content="Portal OS: not a theme pack, but a genuine ring-0 kernel named for GLaDOS, with Aperture Science styling and a language model in kernel space.">
+<meta property="og:title" content="Portal OS. What the fiction asked for and what the machine delivers">
+<meta property="og:description" content="Which parts of this system are Portal and which are an operating system, what using it is actually like, and where scepticism is warranted.">
 <meta property="og:url" content="https://ilumci.github.io/GLaDOS/wiki/portal-os.html">
 <meta name="twitter:card" content="summary">
-<meta name="twitter:title" content="Portal OS. What a real Portal-inspired operating system looks like">
-<meta name="twitter:description" content="Portal OS: not a theme pack, but a genuine ring-0 kernel named for GLaDOS, with Aperture Science styling and a language model in kernel space.">
+<meta name="twitter:title" content="Portal OS. What the fiction asked for and what the machine delivers">
+<meta name="twitter:description" content="Which parts of this system are Portal and which are an operating system, what using it is actually like, and where scepticism is warranted.">
 <meta property="og:image" content="https://ilumci.github.io/GLaDOS/img/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
@@ -27,7 +27,7 @@
 <link rel="apple-touch-icon" sizes="180x180" href="../img/icon-180.png">
 <link rel="manifest" href="../site.webmanifest">
 <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://ilumci.github.io/GLaDOS/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://ilumci.github.io/GLaDOS/wiki/"},{"@type":"ListItem","position":3,"name":"Portal OS","item":"https://ilumci.github.io/GLaDOS/wiki/portal-os.html"}]}</script>
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Portal OS. What a real Portal-inspired operating system looks like","description":"Portal OS: not a theme pack, but a genuine ring-0 kernel named for GLaDOS, with Aperture Science styling and a language model in kernel space.","url":"https://ilumci.github.io/GLaDOS/wiki/portal-os.html","dateModified":"2026-08-14","keywords":"Portal OS, Portal operating system, GLaDOS OS, Portal theme, Aperture Science OS, Portal 2","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Portal OS. What the fiction asked for and what the machine delivers","description":"Which parts of this system are Portal and which are an operating system, what using it is actually like, and where scepticism is warranted.","url":"https://ilumci.github.io/GLaDOS/wiki/portal-os.html","dateModified":"2026-08-30","keywords":"Portal OS, GLaDOS operating system, fan project, AI operating system, Portal fan game","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -47,21 +47,25 @@
 <div class="crumbs"><a href="../">GLaDOS</a> / <a href="../wiki/">Wiki</a> / Portal OS</div>
 <div id="main">
 <h1>Portal OS</h1>
-<p>GLaDOS is an operating system in the literal sense: it boots on bare metal, builds its own page tables, drives its own hardware, and has no Linux, no BSD and no kernel from anyone else underneath it. The Portal connection is in the name, in the <a href="aperture-science.html">visual language</a>, and in the voice the resident model answers in. Underneath that, it is a kernel, and the table further down is the honest inventory of what that means.</p>
-<p>The distinction matters mostly because the phrase gets used for theme packs, and someone arriving here from a search deserves to know within a paragraph which kind of thing they have found. This one requires you to turn Secure Boot off.</p>
+<p>Two things are true at once. This is a fan project about a fictional artificial intelligence, and it is a kernel with a transformer in it that boots on real hardware. Separating the halves is the point of this page.</p>
+
 <h2 id="the-portal-shaped-parts">The Portal-shaped parts</h2>
-<ul><li>It is named for the facility AI, and the model answers in that register.</li><li>The <a href="aperture-science.html">Aperture palette</a> throughout: amber on black, monospace type, and the mark drawn as vector geometry at boot because there is no image decoder to draw it any other way.</li><li>A tone that treats catastrophic failure as a procedural note. The fault handler reports a page fault by decoding the error code into English and printing the faulting address, which is the Enrichment Centre approach to hazards and also just good diagnostics.</li><li>One design joke that is also the safety argument: the AI it is named after went autonomous, and this one categorically has not.</li></ul>
+<p>The name, the mark, the palette and the register. The idea that the machine has opinions and volunteers them. The oracle window, which descends from a feature of another operating system entirely and was narrowed until it stopped being prophecy.</p>
+<p>The resident mind is the largest of these. It wakes on a timer, decides whether anybody is present, and if not, may run a training trial, write a draft application, or attempt to improve its own routing. Everything about that is a Portal idea. All of the mechanism underneath it is ordinary and inspectable.</p>
+
 <h2 id="the-operating-system-shaped-parts">The operating-system-shaped parts</h2>
-<table class="data"><thead><tr><th>Layer</th><th>What is there</th></tr></thead><tbody><tr><td>Boot</td><td>Its own UEFI application; no GRUB, no shim, no Linux</td></tr><tr><td>Memory</td><td>Physical frame allocator and hand-built page tables</td></tr><tr><td>Scheduling</td><td>Preemptive multitasking on an APIC timer</td></tr><tr><td>Drivers</td><td>NVMe, Intel e1000, Realtek RTL8168, xHCI USB 3</td></tr><tr><td>Network</td><td>Its own ARP, IPv4, ICMP, UDP, TCP, DHCP, DNS, TLS 1.3</td></tr><tr><td>Crypto</td><td>Its own SHA-2, AES, ChaCha20, X25519, RSA, ECDSA</td></tr><tr><td>Graphics</td><td>Its own compositor and window manager</td></tr><tr><td>AI</td><td>Its own transformer inference, in kernel space</td></tr></tbody></table>
-<p>The only code in the tree that was not written for this project is Rust's <code>core</code> library, which the compiler supplies, and <a href="usb-wifi-driver.html">509 hardware initialisation constants</a> transcribed from Linux's <code>rtl8xxxu</code> driver because no datasheet for that chip exists and there is nowhere else to get them. That is one file, it says so at the top, and it is listed on <a href="../credits.html">the credits page</a>.</p>
+<p>Everything else. A UEFI application that becomes the kernel. Its own page tables, interrupt table, timer and heap. A preemptive scheduler at 100 Hz. A network stack from ARP through TCP to TLS 1.3, all written here. NVMe with content-addressed storage and Merkle snapshots. USB with xHCI, and a wireless driver that is honest about which half of itself is finished. A desktop with a window manager, three applications and a compositor that diffs row spans.</p>
+<p>And a language: everything above the kernel is written in it, and it exists so that a program the machine writes for itself has somewhere to be written.</p>
+
 <h2 id="what-using-it-is-like">What using it is like</h2>
-<p>The action surface is shaped like busybox: one flat table of small applets, each with a name, an argument spec, a line of help, and a flag saying whether it can change anything. That shape was borrowed because it is the right shape for something that is not only typed at. The table renders directly into a prompt, and the mutation flag is the leash, so read-only applets can be handed to the model long before the rest.</p>
-<p>Because the namespace underneath is content-addressed, the applet list reads slightly strangely to anyone expecting POSIX. <code>cp</code> is constant time at any size. <code>same</code> compares two whole subtrees in a single step. <code>rm</code> detaches a name and the content survives. <code>diff</code> compares two snapshots while skipping every subtree whose hashes already match, and <code>snap</code> commits the working tree for the price of one hash. None of that was designed in as a feature list; it is what content addressing already implies.</p>
-<p>Around that sits a shell with about eighty commands. <code>gen</code> and <code>ask</code> drive the model, <code>route</code> and <code>act</code> are the two tool-routing paths, <code>teach</code> adds an example to the corpus and <code>fit</code> refits the probe from it. <code>ping</code>, <code>dhcp</code>, <code>dns</code> and <code>https</code> exercise the network; <code>pci</code>, <code>usb</code>, <code>nvme</code> and <code>cpu</code> report on hardware; <code>vi</code> is a text editor and <code>enternet</code> is a browser. There is also a small interpreted language, so a sequence of those can be a script.</p>
+<p>A shell prompt over a desktop. Typing a request gets an applet chosen by a router that reads one hidden state and answers in about 1.6 ms without a forward pass. Asking a question gets a conversation which resumes its own cache rather than resending a transcript, so the tenth exchange costs the same as the first.</p>
+<p>Leaving it alone gets something else. Within a quiet window and with no hardware input detected, the machine may train an adapter on its own routing decisions, judge the result against four independent criteria, and adopt it if all four agree. The ledger records the verdict either way. Rolling it back is a pointer write.</p>
+
 <h2 id="where-scepticism-is-warranted">Where scepticism is warranted</h2>
-<p>The parts worth being sceptical about are the ones where writing everything yourself is a liability. Hand-written cryptography is the clearest case: a mistake there produces output that works perfectly and is not secure, which is why every primitive is checked against published RFC vectors on every boot and why <a href="tls.html">the TLS page</a> spends most of its length on what is still wrong with it.</p>
-<div class="note">GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This is an independent, non-commercial homage and is not affiliated with, endorsed by, or connected to Valve in any way.</div>
-<div class="seealso"><b>See also:</b> <a href="../wiki/aperture-science.html">Aperture Science</a>, <a href="../wiki/glados-os.html">GLaDOS OS</a>, <a href="../wiki/rust-os.html">Writing an OS in Rust</a>, <a href="../download/">Download</a></div>
+<p>The model is 0.6B and it is small in the way that 0.6B models are small. It routes well because routing was made easy for it, with a grammar that removes impossible answers and a closed-form classifier that outperforms the transformer at the job. Its prose is what a 0.6B produces.</p>
+<p>The cryptography is hand written, which is stated on <a href="tls.html">its own page</a> as the most dangerous thing in the tree, because a mistake there produces output that works perfectly and is not secure. Certificate validation reports rather than enforces. There is no revocation.</p>
+<p>The self-improvement loop is genuinely a loop with genuine judges, and the judges are statistical tests over a corpus of 717 examples with 360 held out. That is enough to establish that the machinery composes. It is not enough to claim the system is getting substantially better at anything, and the numbers are published with their sample sizes for that reason.</p>
+<div class="seealso"><b>See also:</b> <a href="glados-os.html">GLaDOS OS</a>, <a href="aperture-science.html">Aperture Science</a>, <a href="agent.html">The agent loop</a>, <a href="routing.html">Tool routing</a></div>
 </div>
 </div>
 </div>
@@ -73,7 +77,7 @@
   GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are
   other people's and are listed on <a href="../credits.html">the
   credits page</a>.</p>
-  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-14.</p>
+  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-30.</p>
 </div>
 
 </div>

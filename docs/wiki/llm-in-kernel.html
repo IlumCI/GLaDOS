@@ -3,19 +3,19 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Running a language model inside a kernel. Transformer inference at ring 0</title>
-<meta name="description" content="How a transformer runs in kernel space with no standard library, no libm and no allocator underneath it: int8 weights, hand-written exp, SIMD matmul.">
-<meta name="keywords" content="LLM in kernel, in-kernel inference, transformer bare metal, AI operating system, no_std machine learning, kernel LLM">
+<title>Running a language model inside a kernel</title>
+<meta name="description" content="What it takes to run a transformer at ring 0 with no standard library, no floating point runtime and no operating system underneath, and where the time actually goes.">
+<meta name="keywords" content="LLM in kernel, transformer bare metal, no_std inference, int8 quantisation, AVX2 kernel, in-kernel AI">
 <link rel="canonical" href="https://ilumci.github.io/GLaDOS/wiki/llm-in-kernel.html">
 <meta name="robots" content="index,follow,max-image-preview:large">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="GLaDOS">
-<meta property="og:title" content="Running a language model inside a kernel. Transformer inference at ring 0">
-<meta property="og:description" content="How a transformer runs in kernel space with no standard library, no libm and no allocator underneath it: int8 weights, hand-written exp, SIMD matmul.">
+<meta property="og:title" content="Running a language model inside a kernel">
+<meta property="og:description" content="What it takes to run a transformer at ring 0 with no standard library, no floating point runtime and no operating system underneath, and where the time actually goes.">
 <meta property="og:url" content="https://ilumci.github.io/GLaDOS/wiki/llm-in-kernel.html">
 <meta name="twitter:card" content="summary">
-<meta name="twitter:title" content="Running a language model inside a kernel. Transformer inference at ring 0">
-<meta name="twitter:description" content="How a transformer runs in kernel space with no standard library, no libm and no allocator underneath it: int8 weights, hand-written exp, SIMD matmul.">
+<meta name="twitter:title" content="Running a language model inside a kernel">
+<meta name="twitter:description" content="What it takes to run a transformer at ring 0 with no standard library, no floating point runtime and no operating system underneath, and where the time actually goes.">
 <meta property="og:image" content="https://ilumci.github.io/GLaDOS/img/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
@@ -27,7 +27,7 @@
 <link rel="apple-touch-icon" sizes="180x180" href="../img/icon-180.png">
 <link rel="manifest" href="../site.webmanifest">
 <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://ilumci.github.io/GLaDOS/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://ilumci.github.io/GLaDOS/wiki/"},{"@type":"ListItem","position":3,"name":"A language model in the kernel","item":"https://ilumci.github.io/GLaDOS/wiki/llm-in-kernel.html"}]}</script>
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Running a language model inside a kernel. Transformer inference at ring 0","description":"How a transformer runs in kernel space with no standard library, no libm and no allocator underneath it: int8 weights, hand-written exp, SIMD matmul.","url":"https://ilumci.github.io/GLaDOS/wiki/llm-in-kernel.html","dateModified":"2026-08-14","keywords":"LLM in kernel, in-kernel inference, transformer bare metal, AI operating system, no_std machine learning, kernel LLM","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Running a language model inside a kernel","description":"What it takes to run a transformer at ring 0 with no standard library, no floating point runtime and no operating system underneath, and where the time actually goes.","url":"https://ilumci.github.io/GLaDOS/wiki/llm-in-kernel.html","dateModified":"2026-08-30","keywords":"LLM in kernel, transformer bare metal, no_std inference, int8 quantisation, AVX2 kernel, in-kernel AI","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -47,22 +47,25 @@
 <div class="crumbs"><a href="../">GLaDOS</a> / <a href="../wiki/">Wiki</a> / A language model in the kernel</div>
 <div id="main">
 <h1>Running a language model inside a kernel</h1>
-<figure class="fig wide"><img src="../img/paper/transformer-arch.png" alt="The Transformer model architecture diagram from Attention Is All You Need" width="720" height="1061" loading="lazy" decoding="async"><figcaption>The decoder-only stack this implements is the right-hand half of the original Transformer: embedding, then repeated attention and feed-forward blocks, then a projection back to vocabulary logits.<span class="credit">Figure 1, Attention Is All You Need. Vaswani, Shazeer, Parmar, Uszkoreit, Jones, Gomez, Kaiser and Polosukhin, via <a href="https://arxiv.org/abs/1706.03762" rel="noopener">arXiv 1706.03762</a>.</span></figcaption></figure>
-<p>The model is a decoder-only transformer, Qwen3-0.6B by default, quantised to int8 and executed inside the kernel's address space. It is not a service and not a process. The forward pass is a function that the shell, the router or the fault handler could all call directly, and the same page tables are in effect throughout. The Qwen3.5 family loads through the same interface with hybrid layers and all; <a href="qwen35.html">the 2B distill</a> is the current flagship.</p>
-<h2 id="what-is-missing-at-ring-0">What is missing at ring 0</h2>
-<p>Inference code normally assumes an enormous amount of infrastructure: an allocator, threads, a BLAS library, libm, and an operating system to provide all four. None of it is here, so each one had to be replaced or designed around.</p>
-<ul><li>No libm. Softmax is defined in terms of <code>exp</code>, RMSNorm needs a square root, GELU needs <code>tanh</code>, and none of those exist in <code>core</code>. They are written out, and the boot self-test checks them against known values because a subtly wrong <code>expf</code> produces a subtly wrong distribution and no error.</li><li>No BLAS. The matrix-vector product is essentially the entire cost of inference, so it is written directly with an AVX2 and FMA path, and falls back to scalar when the CPU does not advertise them.</li><li>No memory to waste. The weights stay in the LoaderData pool they were read into before <code>ExitBootServices</code> and are referenced in place. Copying 570 MB onto a heap that is itself only a few hundred megabytes is not an option even if it were a good idea.</li><li>No threads. One core, with cooperative yields inside the generation loop so the shell and the clock keep running while a token is being produced.</li></ul>
-<p>There is a subtler consequence of running on one core with no operating system underneath: extended CPU state has to be saved on context switch by this kernel, or the YMM registers holding a partly-computed dot product get clobbered by whatever the clock task does next. There is a guard for exactly this, which parks a known pattern in the vector registers across a spin and checks it survived. With extended state saved it never fires; without it, the error count starts climbing the moment two tasks touch floating point.</p>
+<p>The forward pass is unremarkable arithmetic. Everything around it is where the work is, because at ring 0 with no standard library there is nothing to call.</p>
+
+<h2 id="what-is-missing">What is missing</h2>
+<p>No BLAS. No <code>libm</code>, so exponential, square root, logarithm, sine and cosine are written here and checked against known values at boot. No memory mapping, so the weights are read into a pool while the firmware still has a filesystem and referenced in place afterwards. No allocator during boot until one is built. No threads beyond the cooperative scheduler this kernel runs itself.</p>
+<p>Weights are int8 with per-row scales. At 570 MB for Qwen3-0.6B the model is far larger than the rest of the system, and it lives in the pool the firmware handed over rather than on the kernel heap, because copying it would need the heap to be larger than the model.</p>
+
 <h2 id="where-the-time-goes">Where the time goes</h2>
-<p>Generation is bound by memory bandwidth, not arithmetic. Producing one token requires reading essentially every weight once, so the number that predicts throughput is the size of the model in bytes, not its FLOP count. That is why the 570 MB Qwen3 checkpoint costs about 4.4 times as long per token as the 135 MB SmolLM2 one, almost exactly the size ratio, which is the signature of a bandwidth-bound workload.</p>
-<p>Prompt ingestion gets the same analysis applied. Feeding N prompt tokens one at a time reads every weight N times although only the last position's logits are kept. The prefill pass walks the prompt in 64-row chunks through which every weight matrix streams once, keeping per-element arithmetic identical to single-token feeding, so results match bit for bit and prompts cost roughly one weight pass per chunk.</p>
-<p>Around 155 MB of that 570 is the output classifier: one matrix multiply against the full vocabulary, performed once per token, to produce logits that are then mostly thrown away. When <a href="constrained-decoding.html">constrained decoding</a> is active the grammar often admits a few dozen tokens out of 150,000, and logits for the rest are computed and discarded. Restricting that final product to the reachable set is therefore the single largest available optimisation, and it is available precisely because the sampler and the grammar are in the same address space.</p>
+<p>Generation is bound by memory bandwidth. The bytes read per token are approximately the size of the model, so 570 MB against 135 MB is roughly 4.4 times the time per token, and arithmetic tuning moves very little next to that.</p>
+<p>The classifier is 155 MB of the total. Constrained decoding only ever needs logits for tokens the grammar still permits, so restricting that matrix multiply is the obvious win whenever it matters. The adapter trainer takes exactly that win: it dequantises the reachable rows once, measured at 132 out of 49,152 on one checkpoint, and never reads the int8 classifier again.</p>
+<p>Several projections are split across the parked application processors. The split changes no arithmetic, because a row is computed over the same values in the same order whichever core does it, so the self-test compares with exact equality. Any difference at all would be an indexing bug and a tolerance would hide precisely that. Measuring the speedup under emulation does not work and the numbers say so: one core reads 4570 MB/s alone and 3526 MB/s with seven cores merely idling beside it, so both halves of any comparison are contaminated by the host.</p>
+
 <h2 id="a-feature-gate-that-tested-the-wrong-feature">A feature gate that tested the wrong feature</h2>
-<p>The AVX2 kernel was gated on <code>avx_enabled &amp;&amp; fma</code> and never on <code>avx2</code> itself. The two are separate CPUID bits and neither implies the other. So the fast path ran on hardware that had FMA without AVX2, where it produced wrong numbers, and refused to run on hardware that had AVX2 without reporting FMA the way the check expected.</p>
-<p>The rule that came out of it is worth stating plainly: a feature gate must test the feature the code uses, not a feature that usually travels with it. Numerical code makes this failure especially unpleasant, because wrong-but-finite output looks like output.</p>
+<p>The vectorised matrix multiply was selected by checking that AVX was enabled and FMA was present. It never checked AVX2. On a machine with AVX and FMA and no AVX2 that gate admits code the processor cannot run. It was found by reading the gate rather than by a fault, which is the wrong way round and the reason it is written down.</p>
+<p>The emulator surfaced a different one. Running under the Windows hypervisor raises unmasked SSE exceptions faithfully where pure emulation hides them, and the first thing that turned up was a genuine bug in the kernel's floating point area allocation.</p>
+
 <h2 id="the-general-lesson">The general lesson</h2>
-<div class="note"><strong>A model can be wrong without being broken.</strong> <a href="rope.html">RoPE pairing</a>, QK-Norm, head width, RMSNorm epsilon and <a href="tokenizer.html">the pre-tokenizer regex</a> each produce a network that loads, runs, stays numerically well-behaved and writes fluent text. There is no error to catch. The only things that settle them are a reference implementation to diff against, or output that is supposed to contain a known fact.</div>
-<div class="seealso"><b>See also:</b> <a href="../wiki/qwen3.html">Qwen3 in 570 MB</a>, <a href="../wiki/qwen35.html">Qwen3.5 and the 2B distill</a>, <a href="../wiki/rope.html">RoPE</a>, <a href="../wiki/kv-cache.html">The int8 KV cache</a>, <a href="../wiki/constrained-decoding.html">Constrained decoding</a>, <a href="../wiki/routing.html">Tool routing</a>, <a href="../wiki/agent.html">The agent loop</a></div>
+<p>A model can be wrong without being broken, and that is the failure mode that dominates here. Rotary embedding pairing, query and key normalisation, head width, the normalisation epsilon and the pre-tokenizer regular expression all produce a network that loads, runs, stays numerically well behaved and writes fluent text while attending by a scrambled notion of distance. There is no error to catch.</p>
+<p>So the only instruments that settle any of it are a host-side reference implementation reading the same converted file, and generated text that is supposed to contain a known fact. Both are cheap. Neither is optional.</p>
+<div class="seealso"><b>See also:</b> <a href="qwen3.html">Qwen3 in 570 MB</a>, <a href="rope.html">RoPE</a>, <a href="kv-cache.html">The int8 KV cache</a>, <a href="testing.html">Testing without a test runner</a></div>
 </div>
 </div>
 </div>
@@ -74,7 +77,7 @@
   GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are
   other people's and are listed on <a href="../credits.html">the
   credits page</a>.</p>
-  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-14.</p>
+  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-30.</p>
 </div>
 
 </div>

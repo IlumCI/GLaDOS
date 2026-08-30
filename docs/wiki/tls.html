@@ -4,18 +4,18 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>TLS 1.3 from scratch, and why hand-written crypto is the dangerous part</title>
-<meta name="description" content="GLaDOS implements TLS 1.3, X25519, ChaCha20-Poly1305 and ECDSA by hand, validates certificate chains, and is honest about what is still not safe.">
-<meta name="keywords" content="TLS 1.3, cryptography from scratch, X25519, ChaCha20, ECDSA, certificate validation, kernel TLS">
+<meta name="description" content="Primitives chosen for checkability, an ECDSA break that sat visible in the boot log for a full debugging cycle, and what the validation actually does.">
+<meta name="keywords" content="TLS 1.3, hand written cryptography, ChaCha20, X25519, ECDSA, certificate validation, Jacobian coordinates">
 <link rel="canonical" href="https://ilumci.github.io/GLaDOS/wiki/tls.html">
 <meta name="robots" content="index,follow,max-image-preview:large">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="GLaDOS">
 <meta property="og:title" content="TLS 1.3 from scratch, and why hand-written crypto is the dangerous part">
-<meta property="og:description" content="GLaDOS implements TLS 1.3, X25519, ChaCha20-Poly1305 and ECDSA by hand, validates certificate chains, and is honest about what is still not safe.">
+<meta property="og:description" content="Primitives chosen for checkability, an ECDSA break that sat visible in the boot log for a full debugging cycle, and what the validation actually does.">
 <meta property="og:url" content="https://ilumci.github.io/GLaDOS/wiki/tls.html">
 <meta name="twitter:card" content="summary">
 <meta name="twitter:title" content="TLS 1.3 from scratch, and why hand-written crypto is the dangerous part">
-<meta name="twitter:description" content="GLaDOS implements TLS 1.3, X25519, ChaCha20-Poly1305 and ECDSA by hand, validates certificate chains, and is honest about what is still not safe.">
+<meta name="twitter:description" content="Primitives chosen for checkability, an ECDSA break that sat visible in the boot log for a full debugging cycle, and what the validation actually does.">
 <meta property="og:image" content="https://ilumci.github.io/GLaDOS/img/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
@@ -27,7 +27,7 @@
 <link rel="apple-touch-icon" sizes="180x180" href="../img/icon-180.png">
 <link rel="manifest" href="../site.webmanifest">
 <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://ilumci.github.io/GLaDOS/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://ilumci.github.io/GLaDOS/wiki/"},{"@type":"ListItem","position":3,"name":"TLS 1.3 from scratch","item":"https://ilumci.github.io/GLaDOS/wiki/tls.html"}]}</script>
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"TLS 1.3 from scratch, and why hand-written crypto is the dangerous part","description":"GLaDOS implements TLS 1.3, X25519, ChaCha20-Poly1305 and ECDSA by hand, validates certificate chains, and is honest about what is still not safe.","url":"https://ilumci.github.io/GLaDOS/wiki/tls.html","dateModified":"2026-08-14","keywords":"TLS 1.3, cryptography from scratch, X25519, ChaCha20, ECDSA, certificate validation, kernel TLS","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"TLS 1.3 from scratch, and why hand-written crypto is the dangerous part","description":"Primitives chosen for checkability, an ECDSA break that sat visible in the boot log for a full debugging cycle, and what the validation actually does.","url":"https://ilumci.github.io/GLaDOS/wiki/tls.html","dateModified":"2026-08-30","keywords":"TLS 1.3, hand written cryptography, ChaCha20, X25519, ECDSA, certificate validation, Jacobian coordinates","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -46,28 +46,32 @@
 <div id="content">
 <div class="crumbs"><a href="../">GLaDOS</a> / <a href="../wiki/">Wiki</a> / TLS 1.3 from scratch</div>
 <div id="main">
-<h1>TLS 1.3 from scratch, and why hand-written crypto is the dangerous part</h1>
-<figure class="fig wide"><img src="../img/wm/chain-of-trust.svg" alt="Diagram of a certificate chain of trust from a root CA to an end-entity certificate" width="1280" height="720" loading="lazy" decoding="async"><figcaption>Chain validation: each certificate is verified with the public key of the one above it, terminating at a root the machine already trusts.<span class="credit">Chain Of Trust.svg. Yuhkih, CC BY-SA 4.0, via <a href="https://commons.wikimedia.org/wiki/File:Chain_Of_Trust.svg" rel="noopener">Wikimedia Commons</a>.</span></figcaption></figure>
-<p>The kernel speaks TLS 1.3 using its own SHA-256 and SHA-384, HMAC, HKDF, AES, ChaCha20-Poly1305, X25519, RSA and ECDSA, and validates certificate chains against a root bundle exported from the host's store at build time. One cipher suite and one key exchange group, because TLS 1.3 permits exactly that and every additional option is another code path that never gets exercised.</p>
-<div class="note">This is the one place in the project where writing everything yourself is a liability. A bug in a driver produces a device that does not work, which is annoying and obvious. A bug here produces a connection that works perfectly and is not secure.</div>
-<h2 id="primitives-chosen-for-checkability">Primitives chosen for checkability</h2>
-<p>The selections were made for how hard they are to get quietly wrong, rather than for speed:</p>
-<ul><li>ChaCha20-Poly1305 rather than AES-GCM, because it has no key-dependent table lookups and therefore no cache-timing side channel to reason about. Constant-time AES in software is achievable and it is not achievable by accident.</li><li>X25519 rather than a NIST curve, because it needs no point validation, has no invalid-curve attack surface, and has substantially fewer ways to be subtly incorrect.</li></ul>
+<h1>TLS 1.3 from scratch</h1>
 <figure class="fig"><img src="../img/wm/dh-exchange.svg" alt="Diagram of the Diffie-Hellman key exchange using mixed colours as an analogy" width="427" height="641" loading="lazy" decoding="async"><figcaption>The Diffie-Hellman idea both parties rely on: a shared secret derived from two private values that never cross the wire. X25519 is the same construction over an elliptic curve.<span class="credit">Diffie-Hellman Key Exchange.svg. Original schema: A.J. Vinck, University of Duisburg-Essen SVG version: Flugaal, Public domain, via <a href="https://commons.wikimedia.org/wiki/File:Diffie-Hellman_Key_Exchange.svg" rel="noopener">Wikimedia Commons</a>.</span></figcaption></figure>
-<p>Every primitive is checked against published RFC and FIPS test vectors at every boot, eleven vector sets in total, and the boot log prints a pass or fail line for each one.</p>
-<h2 id="an-ecdsa-break-that-sat-in-plain-sight">An ECDSA break that sat in plain sight</h2>
-<p>That self-test output is easy to scroll past, and scrolling past it cost a full debugging cycle. A broken ECDSA implementation was printing <code>FAIL</code> in the crypto block the entire time, while the boot log was being sliced down to look at something else entirely. The test worked. The reader did not.</p>
-<h2 id="what-validation-actually-checks">What validation actually checks</h2>
-<p>Four things, and a certificate is rejected if any of them fails. The chain: each certificate verified with the public key of the next one up. The root: identified by SHA-256 of its full DER encoding against a built-in list, which is fingerprint pinning, so there is no name canonicalisation to get wrong. The dates, against the CMOS clock. And the name, per RFC 6125, from subjectAltName only, with wildcards allowed solely in the leftmost label and dNSName entries kept strictly apart from iPAddress ones.</p>
-<p>There is a fifth check that is easy to overlook and is the one that matters most: CertificateVerify, where the server signs the handshake transcript with the key in its certificate. That is the step proving the party at the other end of <em>this</em> connection holds the private key. Without it, an attacker can replay any certificate they have ever seen.</p>
-<p>The DER parser in front of all this is deliberately strict, because it reads bytes chosen by whoever we are talking to before we know who that is, which makes it the most hostile input in the system. Every length is checked against the buffer, indefinite-length encodings are refused outright, nesting depth is bounded, and nothing is copied on the strength of a length field alone. Two parser bugs are recorded in the source: <code>expect(tag)</code> must not consume input on a mismatch, and "try for the value, skip if that failed" throws the value away when the optional field it was looking for is simply absent.</p>
+<p>This is the one place where writing everything from nothing is a liability rather than a virtue. A bug here produces output that works perfectly and is not secure, and there is no test that distinguishes the two by looking at the result.</p>
+
+<h2 id="primitives-chosen-for-checkability">Primitives chosen for checkability</h2>
+<p>ChaCha20 over AES-GCM, because ChaCha has no key-dependent table lookups and can be checked line by line against its specification. X25519 over the NIST curves for key agreement, for the same reason. SHA-256 and SHA-384, HMAC and HKDF, all with published test vectors run at every boot.</p>
+<p>Every primitive is checked against published vectors during the boot sequence. That is the entire defence, and it only covers the primitives.</p>
+
+<h2 id="an-ecdsa-break-in-plain-sight">An ECDSA break in plain sight</h2>
+<p>The signature verification failed its own vector for an entire debugging cycle while the boot output was being sliced down to the section under active work. The break was printed at every boot, in the log, in the section named for it.</p>
+<p>It happened a second time on a different subsystem, where a sparsity claim compared a whole file against only the part sparsity can shrink and failed for one commit on an encoding that was working correctly. Both are the same failure of attention, and the instruction that came out of it is to read the whole boot output or to search it for failures across all of it.</p>
+
 <h2 id="jacobian-coordinates-and-a-trap">Jacobian coordinates, and a trap</h2>
-<p>ECDSA works in Jacobian coordinates because affine ones cost a modular inversion per point operation, and a modular inversion is a full modular exponentiation. For P-384 that came to roughly 460,000 allocating multiplications per signature, which exhausted the heap instead of merely being slow.</p>
-<p>The trap in the replacement: the inversion routine takes and returns <em>ordinary</em> values, so handing it something already in Montgomery form computes the wrong answer and says nothing. There is a wrapper that converts correctly, and using it is not optional. This is the same shape of failure as the model bugs elsewhere in this wiki, a representation mismatch that produces well-formed output, which is why the boot vectors exist.</p>
-<h2 id="what-is-still-not-safe">What is still not safe</h2>
-<ul><li>Validation reports, and does not enforce. The <code>https</code> command prints what was established and shows the body either way, which is a deliberate choice for a system whose purpose is inspection and the exact opposite of what a browser should do. A caller that cares has to check the result itself.</li><li>There is no revocation checking of any kind, no CRL and no OCSP, so a certificate withdrawn by its issuer is accepted here until it expires.</li><li>Key material comes from the timestamp counter and not from <code>RDRAND</code>. A counter is not a random number generator. This is a genuine weakness and it is on the list.</li><li>Path length constraints and key usage bits are parsed, but only basicConstraints is enforced.</li></ul>
-<p>Writing these down is the point. A system that claimed to be secure here would be worse than one that states precisely where it is not, because the first invites someone to rely on it.</p>
-<div class="seealso"><b>See also:</b> <a href="../wiki/network-stack.html">The network stack</a>, <a href="../wiki/storage.html">Content-addressed storage</a>, <a href="../wiki/glados-os.html">GLaDOS OS</a></div>
+<p>Elliptic curve point arithmetic uses Jacobian coordinates. Affine coordinates cost a modular inversion per point operation, which is a full modular exponentiation, and for P-384 that meant around 460,000 allocating multiplications per signature and an exhausted heap.</p>
+<p>One trap in that code is worth stating because it is silent. The inversion helper takes and returns ordinary values, so handing it something already in Montgomery form computes the wrong answer with no complaint. There is a wrapper that does the conversion, and the raw function is not the one to call.</p>
+
+<h2 id="what-validation-actually-checks">What validation actually checks</h2>
+<p>The chain builds to a trusted root from a bundle exported from the host's store. The transcript signature verifies. Dates are checked. The name is matched against the certificate.</p>
+<p>Then it reports. It does not enforce. A caller that cares has to ask the result whether the identity was acceptable, and callers that do not ask get a connection that is encrypted and authenticated against nothing in particular. There is no revocation checking of any kind.</p>
+<p>Without the root bundle present, TLS still encrypts and authenticates nothing at all. That is stated in the deployment instructions because it is exactly the sort of thing that looks like it is working.</p>
+
+<h2 id="key-material">Key material</h2>
+<p>Randomness comes from a fast-key-erasure generator built over the same ChaCha20 the boot vectors already check. One block per step, where the first half overwrites the key and only the second half leaves the module, so the state that produced an output is gone before the caller sees it. In a kernel with one address space and no process isolation that is the only route to backtracking resistance.</p>
+<p>Two entropy sources feed it, and the second exists because the first has a blind spot. Keyboard and mouse interrupt timing arrive through the same path that decides whether a person is present. Disk completion latency deliberately does not, because disk traffic on an unattended machine would make it look occupied and stand down the loop that only runs when nobody is there.</p>
+<p>One bit is credited per event and 256 events are required before a secret will be produced. That figure is an assumption rather than a measurement, and it is the weakest link in the module. The ordinary fill answers below the threshold for anything that wants unpredictability without depending on it; key material takes the strict path, which refuses, because a generator that quietly degrades for a private key is the failure this paragraph exists to warn about.</p>
+<div class="seealso"><b>See also:</b> <a href="network-stack.html">The network stack</a>, <a href="storage.html">Content-addressed storage</a>, <a href="testing.html">Testing without a test runner</a>, <a href="ring-0.html">Ring 0</a></div>
 </div>
 </div>
 </div>
@@ -79,7 +83,7 @@
   GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are
   other people's and are listed on <a href="../credits.html">the
   credits page</a>.</p>
-  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-14.</p>
+  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-30.</p>
 </div>
 
 </div>

@@ -3,19 +3,19 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Testing an OS with no test runner. Boot self-tests and driving QEMU</title>
-<meta name="description" content="There is no cargo test for a no_std UEFI binary. How GLaDOS is verified: self-tests at boot, a scripted QEMU serial harness, and a NumPy oracle.">
-<meta name="keywords" content="OS testing, kernel testing, QEMU automation, self-test, no_std testing, embedded testing">
+<title>Testing an operating system with no test runner</title>
+<meta name="description" content="No cargo test, no host runtime. Verification is twenty self-test sections at boot, a scripted emulator harness, a numeric oracle, and a differential harness with a canary that must fail.">
+<meta name="keywords" content="OS testing, no test runner, boot self test, QEMU harness, numeric oracle, differential testing, WHPX">
 <link rel="canonical" href="https://ilumci.github.io/GLaDOS/wiki/testing.html">
 <meta name="robots" content="index,follow,max-image-preview:large">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="GLaDOS">
-<meta property="og:title" content="Testing an OS with no test runner. Boot self-tests and driving QEMU">
-<meta property="og:description" content="There is no cargo test for a no_std UEFI binary. How GLaDOS is verified: self-tests at boot, a scripted QEMU serial harness, and a NumPy oracle.">
+<meta property="og:title" content="Testing an operating system with no test runner">
+<meta property="og:description" content="No cargo test, no host runtime. Verification is twenty self-test sections at boot, a scripted emulator harness, a numeric oracle, and a differential harness with a canary that must fail.">
 <meta property="og:url" content="https://ilumci.github.io/GLaDOS/wiki/testing.html">
 <meta name="twitter:card" content="summary">
-<meta name="twitter:title" content="Testing an OS with no test runner. Boot self-tests and driving QEMU">
-<meta name="twitter:description" content="There is no cargo test for a no_std UEFI binary. How GLaDOS is verified: self-tests at boot, a scripted QEMU serial harness, and a NumPy oracle.">
+<meta name="twitter:title" content="Testing an operating system with no test runner">
+<meta name="twitter:description" content="No cargo test, no host runtime. Verification is twenty self-test sections at boot, a scripted emulator harness, a numeric oracle, and a differential harness with a canary that must fail.">
 <meta property="og:image" content="https://ilumci.github.io/GLaDOS/img/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
@@ -27,7 +27,7 @@
 <link rel="apple-touch-icon" sizes="180x180" href="../img/icon-180.png">
 <link rel="manifest" href="../site.webmanifest">
 <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://ilumci.github.io/GLaDOS/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://ilumci.github.io/GLaDOS/wiki/"},{"@type":"ListItem","position":3,"name":"Testing without a test runner","item":"https://ilumci.github.io/GLaDOS/wiki/testing.html"}]}</script>
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Testing an OS with no test runner. Boot self-tests and driving QEMU","description":"There is no cargo test for a no_std UEFI binary. How GLaDOS is verified: self-tests at boot, a scripted QEMU serial harness, and a NumPy oracle.","url":"https://ilumci.github.io/GLaDOS/wiki/testing.html","dateModified":"2026-08-14","keywords":"OS testing, kernel testing, QEMU automation, self-test, no_std testing, embedded testing","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Testing an operating system with no test runner","description":"No cargo test, no host runtime. Verification is twenty self-test sections at boot, a scripted emulator harness, a numeric oracle, and a differential harness with a canary that must fail.","url":"https://ilumci.github.io/GLaDOS/wiki/testing.html","dateModified":"2026-08-30","keywords":"OS testing, no test runner, boot self test, QEMU harness, numeric oracle, differential testing, WHPX","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -46,23 +46,31 @@
 <div id="content">
 <div class="crumbs"><a href="../">GLaDOS</a> / <a href="../wiki/">Wiki</a> / Testing without a test runner</div>
 <div id="main">
-<h1>Testing an OS with no test runner</h1>
-<p>There is no <code>cargo test</code> here. This is a <code>no_std</code> UEFI binary with no host test runner and no operating system underneath it to host one, so the test suite had to go somewhere else. It went to three places, each catching a category the others cannot.</p>
+<h1>Testing an operating system with no test runner</h1>
+<p>There is no <code>cargo test</code> here. This is a bare-metal binary with no host runtime, so a test that runs on the development machine is testing something other than the system. Verification is four instruments.</p>
+
 <h2 id="1-self-tests-at-boot">1. Self-tests at boot</h2>
-<p>Every boot exercises the heap, the timer, the clock, the namespace, eleven sets of published cryptographic vectors, <a href="constrained-decoding.html">constrained decoding</a> and the linear probe, printing <code>ok</code> or <code>FAIL</code> on each line. That output is the test suite, and it runs on the real machine against the real hardware every time anyone starts it, which no host runner could manage.</p>
-<p>Some of those checks are more interesting than a pass line suggests. The constrained-decoding test runs 200 random decodes at maximum temperature and asserts that none escaped the grammar. The null-dereference test confirms that page zero faults, which is what caught the memory-map bug described on <a href="uefi-kernel.html">the UEFI page</a>. And there is a floating-point guard that parks a known pattern in the vector registers across a context switch and checks it survived. It never fires now, and it fires immediately if extended state saving is removed.</p>
-<div class="note">It is easy to scroll past, and it does catch real bugs. An ECDSA break was sitting in the crypto block printing <code>FAIL</code> for an entire debugging cycle while the log was being sliced down to look at something else. The Enrichment Centre reminds you that the testing protocol only works if someone reads the results.</div>
-<h2 id="2-a-scripted-qemu-harness">2. A scripted QEMU harness</h2>
-<p>A driver script boots QEMU, stages the binary, resets the firmware's NVRAM to a pristine state, and drives the shell over a serial socket, sending commands and capturing everything that comes back. That makes a regression test out of any sequence someone can type.</p>
-<p>Two details in there were not obvious in advance. QEMU's Windows stdio backend reads console handles directly, so piping a script into it does nothing whatsoever, silently, with no error and no output, whereas a TCP socket behaves like a socket on every platform. And a stale firmware boot entry sends the machine to the UEFI shell instead of the image, which is visually indistinguishable from the system failing to boot, so the NVRAM gets reset on every run and is never trusted.</p>
-<p>The harness also captures the framebuffer through QEMU's monitor and converts it to PNG, because <a href="gui.html">a serial log says nothing at all about whether the screen is right</a>. That capture found three layout bugs and produced one memorable false alarm: a screenshot taken mid-repaint looked exactly like a broken compositor and cost a bisect before the fix turned out to be waiting two seconds for the frame to settle.</p>
+<p>Twenty sections run during boot, printing a claim and whether the machine met it. Thirteen of them are registered as named suites that can be re-run on demand. Heap, timer, clock, the Merkle addressing, fifteen sets of published cipher vectors, fault handling, constrained decoding, the agent loop, the linear probe, the situation planner, the initiative policy, the self-modification gate, corpus bundles, adapters, the backward kernels and the trainer's arithmetic.</p>
+<p>Registration is deliberately awkward: adding a suite requires a slot in a results table and a compile-time assertion that the two lengths match, so a suite added without a slot fails the build instead of silently never recording a verdict.</p>
+<p>Reading that output is the test suite, and skipping it has cost real time twice. A signature verification break sat visible in the log for a full debugging cycle while the output was being filtered to the section under work.</p>
+
+<h2 id="2-a-scripted-emulator-harness">2. A scripted emulator harness</h2>
+<p>A driver script boots the emulator and drives the shell over a serial socket, so a change can be booted and exercised without a human at a keyboard. It stages the release binary, resets firmware variables to a known state, and attaches serial as a socket, because the emulator's console channel on this host reads console handles and ignores redirected files.</p>
+<p>Three things are worth knowing before a session goes sideways. The resident mind wakes fifteen seconds in and holds the model for a whole episode, so the first two commands should always stand it down. The hypervisor accelerator is about 160 times faster than pure emulation on this workload, and everything previously treated as too slow to test here was an untested assumption about the emulator. And the release artefact is what gets staged, so a debug build alone leaves the change under test unbooted.</p>
+
 <h2 id="3-a-numeric-oracle">3. A numeric oracle</h2>
-<p>For the model there is a NumPy reference implementation that reads the <em>converted</em> checkpoint and produces logits to diff against. Reading the converted file, and not the original safetensors, is the entire point of the design: a converter bug then shows up in both, so agreement plus wrong output indicts the converter, and disagreement indicts the kernel. Without that property a mismatch tells you only that something, somewhere, is wrong.</p>
-<p>This is what caught <a href="rope.html">the RoPE convention</a>, and no amount of reading the code would have. Both conventions are perfectly reasonable code that does exactly what it says. The difference only exists relative to what the weights were trained under, which is not a fact any single implementation contains.</p>
-<p>QEMU cannot run the real model, incidentally, which shapes all of this. Its built-in FAT support caps the emulated disk at 516 MB and the Qwen3 image is larger, so the full checkpoint only runs on the actual laptop. The oracle is therefore the only way to check the real model's numerics without standing in front of the hardware.</p>
+<p>A host-side reference implementation reads the same converted checkpoint and prints logits for a token sequence, so a conversion bug shows up there too and only a kernel bug shows as a mismatch. Comparing generated text against a known fact is the cheap end of the same instrument, and it is the one that caught the rotary embedding.</p>
+<p>The gradient checks work the same way, and they are directional rather than per-entry for a reason of resolution. Differencing one parameter asks floating point to resolve a quantity below the loss's own rounding, and it reported a value that was a float quantum wearing the costume of a derivative. Stepping every parameter along the gradient asks it to resolve something far larger, and checks the whole vector: 1.148 analytic against 1.135 numeric over 57,600 entries.</p>
+
+<h2 id="4-a-differential-harness-with-a-canary">4. A differential harness with a canary</h2>
+<p>The newest instrument runs one program two ways and requires the results to agree on value, step count and error text, bit for bit with no tolerance. Any difference at all is a bug and a tolerance would hide the one worth finding.</p>
+<p>The part that makes it a harness rather than a ritual is the canary. A suite that has never reported a difference is indistinguishable from one that compares nothing, so it runs two programs that differ by a single unused declaration, giving identical answers and step counts one apart, and it fails if that is not caught. That is the difference a comparison looking only at answers would wave through, and it earned its place immediately by catching a genuine miscount the first time a code generator was compared against the interpreter.</p>
+<p>The corpus runs sixty-four times, which is a number arrived at the hard way elsewhere in this tree: a one-shot check of the multiprocessing split passed while the implementation still deadlocked.</p>
+
 <h2 id="the-habit-underneath">The habit underneath</h2>
-<p>Measure, do not assume, and then go and look at the result. This project has produced a steady supply of confident beliefs that turned out to be false, and in almost every case a cheap deterministic check found it: the oracle found the RoPE pairing, screenshots found the layout bugs the serial log could not express, an A/B against a deliberately tiny context window isolated an off-by-one to a single token, and the evaluation harness exists because the measurement itself was got wrong three separate times before it settled.</p>
-<div class="seealso"><b>See also:</b> <a href="../wiki/gui.html">The Windows 3.1 desktop</a>, <a href="../wiki/rope.html">RoPE</a>, <a href="../wiki/tls.html">TLS 1.3 from scratch</a>, <a href="../wiki/glados-os.html">GLaDOS OS</a></div>
+<p>Measure rather than argue, and publish the measurements that overturned the argument. A renderer survey ranked several changes and the real win was none of them. A design panel predicted a benefit of five to seven and the system reported two. A plan called it near certain that a tree walk was the cost, and the tree walk turned out to be eight percent of it.</p>
+<p>Negative results stay in the tree for the same reason. Training the classifier head hurts at this data scale. The product-of-experts ensemble does not improve accuracy. Both are kept, because the reason to know them is the reason they were worth measuring.</p>
+<div class="seealso"><b>See also:</b> <a href="rust-os.html">Writing an OS in Rust</a>, <a href="llm-in-kernel.html">A language model in the kernel</a>, <a href="routing.html">Tool routing</a>, <a href="glados-os.html">GLaDOS OS</a></div>
 </div>
 </div>
 </div>
@@ -74,7 +82,7 @@
   GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are
   other people's and are listed on <a href="../credits.html">the
   credits page</a>.</p>
-  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-14.</p>
+  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-30.</p>
 </div>
 
 </div>
