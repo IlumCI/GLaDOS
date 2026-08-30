@@ -1004,6 +1004,15 @@ the frame. Kept because they are strictly less work for identical output, and
 recorded because the survey that proposed them called volatile `put` "the
 single largest constant-factor loss" and the measurement disagreed.
 
+**The clock draws through the compositor now.** It was the last thing writing
+straight to the aperture, so the shadow went on describing whatever had been
+there before and `present` -- finding `back` and `shadow` equal over that
+rectangle -- wrote nothing, leaving digits on screen the desktop had already
+decided to paint over. It takes the same claim the cursor does, since it runs
+on the clock task and `draw` runs on the shell's, and they would otherwise
+both write the back buffer through a `&mut` neither knows the other holds.
+Losing the claim costs one tick of clock.
+
 `task::yield_now` disables interrupts across the context switch. This is
 required: `schedule()` stores `CURRENT` and *then* switches stacks, so a timer
 tick landing between them saves the outgoing stack pointer into the wrong slot

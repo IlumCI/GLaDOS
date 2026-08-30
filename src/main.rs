@@ -610,7 +610,11 @@ fn clock_task() {
                 if c.w > width {
                     let x = c.x + (c.w - width) / 2;
                     let y = c.y + (c.h.saturating_sub(gfx::font::GLYPH_H * cs)) / 2;
-                    fb.draw_text(x, y, &text, gfx::theme::TEXT, gfx::theme::FACE, cs);
+                    // Through the compositor, and under the desktop's paint
+                    // claim. Writing the aperture directly left the shadow
+                    // describing pixels that were no longer there, so the
+                    // compositor could never repaint over the clock.
+                    gfx::desk::paint_clock(&fb, x, y, &text, cs);
                 }
             }
         }

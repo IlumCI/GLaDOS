@@ -1483,6 +1483,42 @@ pub fn pump_cursor() {
     }
 }
 
+/// Paint the uptime into the taskbar's clock well, through the compositor.
+///
+/// **The last thing in the system that drew straight to the aperture.** It
+/// wrote the digits over the firmware's memory while the compositor's shadow
+/// went on describing whatever had been there before, so the compositor could
+/// not erase the clock: a later `present` comparing `back` against `shadow`
+/// found them equal over that rectangle and wrote nothing, leaving digits on
+/// screen that the desktop had already decided to paint over. The clock kept
+/// moving above frozen windows for a different reason -- that was scheduling,
+/// and `pump_cursor` answered it -- but this is why the two never agreed about
+/// what was on the taskbar.
+///
+/// Under the same claim the cursor takes, and for the same reason: this runs
+/// on the clock task and `draw` runs on the shell's, and they would otherwise
+/// both be writing the back buffer through a `&mut` neither knows the other
+/// holds. Interrupts off around the paint so the claim cannot be held across a
+/// task switch -- a few thousand pixels once a tenth of a second.
+///
+/// Losing the claim costs one tick of clock. The shell is mid-frame and about
+/// to paint the taskbar itself.
+pub fn paint_clock(real: &Framebuffer, x: u32, y: u32, text: &str, scale: u32) {
+    crate::cpu::without_interrupts(|| {
+        let Some(_claim) = Claim::take() else { return };
+        let target = super::compose::target().unwrap_or(*real);
+        target.draw_text(x, y, text, theme::TEXT, theme::FACE, scale);
+        // Straight through, because the clock is not on anybody's draw path:
+        // nothing else is going to present this rectangle on its behalf.
+        super::compose::flush_rect(
+            x,
+            y,
+            text.len() as u32 * super::font::GLYPH_W * scale,
+            super::font::GLYPH_H * scale,
+        );
+    });
+}
+
 /// Put the arrow somewhere, without letting anything else paint while it does.
 ///
 /// Interrupts off for the whole of it, so the timer cannot switch tasks
