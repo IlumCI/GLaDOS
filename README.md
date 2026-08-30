@@ -50,7 +50,8 @@ Works, and verified:
 | Training | Gradients, Adam, QDoRA over the classifier and over every q/k/v site |
 | Self-modification | Variant lineage, a judge council, an append-only ledger, O(1) rollback |
 | Updates | Signed staged images swapped before `ExitBootServices`, with rollback |
-| SMP | Application processors started and parked; heap and console safe for all of them |
+| SMP | Per-core GDT/TSS/APIC, a real spinlock, shared heap and console, tasks that migrate |
+| Accounting | Every allocation billed to the task that made it, with peak and outstanding |
 | Mining | Midstate-cached SHA-256d with an honest scoreboard |
 
 Does not work yet:
@@ -61,15 +62,16 @@ Does not work yet:
   vectors at every boot, and has never had hardware to run on. A USB dongle
   driver (RTL8188EU) has its register layer and power-on sequence, and stops
   short of PHY, radio and firmware upload.
-- **Tasks on more than one core.** The extra cores can allocate and print now,
-  because the heap and the console are behind `sync::Spin<T>` and each
-  conversion was verified rather than assumed. They still never take an
-  interrupt and still never run a task. The blocker is specific: an application
-  processor runs on the trampoline's flat descriptor table with no task-state
-  segment, so its code selector does not match the ones the interrupt table
-  names, and preemption there needs a per-core GDT and TSS. Cooperative
-  scheduling without a timer needs neither. 92 uses of `Racy` remain, down from
-  93, and the number is published so it can be watched falling.
+- **Real tasks on more than one core.** The machinery is done and proven: every
+  core has its own descriptor table, task-state segment, per-core block and
+  idle task, the scheduler carries a task between cores and back, and `diag
+  migrate` demonstrates one running on two of them. What is missing is the
+  audit. Preemption on one core means two tasks never execute at the same
+  instant; on two cores they genuinely overlap, so every `Racy` reachable from
+  two different tasks becomes a live race, the namespace tree among them. So
+  every task this kernel spawns is pinned to core 0 on purpose, `unpin` exists,
+  and nothing calls it. Unpinning before the audit buys a kernel that passes
+  every test and corrupts something later.
 - **A hardware entropy source.** The generator is a fast-key-erasure ChaCha20
   DRBG fed by keyboard and mouse interrupt timing and by NVMe completion
   latency, and it refuses to answer for key material until it has seen enough
@@ -415,15 +417,17 @@ python tools/drive.py --iso glados.iso "ls /"
 **There is no `cargo test`.** This is a `no_std` UEFI binary with no host test
 runner, so verification is the boot selftests plus driving QEMU.
 
-At boot the system runs twenty selftest sections, printing `ok` or `FAIL` per
-line: heap, timer, clock, the namespace's Merkle addressing, fifteen sets of
-published cipher vectors, fault handling, running machine code from the heap,
-constrained decoding, the agent loop, the linear probe, the situation planner,
-the initiative policy, the self-modification gate, corpus bundles, QDoRA
-adapters, the backward kernels, and the trainer's arithmetic.
+At boot the system runs twenty-two selftest sections, printing `ok` or `FAIL`
+per line: heap, timer, clock, the namespace's Merkle addressing, fifteen sets
+of published cipher vectors, fault handling, running machine code from the
+heap, file type detection, constrained decoding, the agent loop, the linear
+probe, the situation planner, the initiative policy, the self-modification
+gate, corpus bundles, QDoRA adapters, the backward kernels, and the trainer's
+arithmetic.
 
-Thirteen of those are registered as named suites and can be re-run on demand
-with `diag all` or `diag <name>`. Registration is deliberately awkward: a suite
+Eighteen suites can be re-run on demand with `diag all` or `diag <name>`:
+crypto, rng, json, aiksi, sysbox, smp, update, model, wgate, skill, desk,
+census, migrate, mt, power, fmt, differ and code. Registration is deliberately awkward: a suite
 added without a slot in the results table fails a compile-time assertion rather
 than silently never recording a verdict.
 
