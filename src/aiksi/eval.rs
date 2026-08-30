@@ -175,6 +175,25 @@ struct Func {
     body: Vec<Stmt>,
 }
 
+/// A program's declarations, run once so they need not be run again.
+///
+/// Registering a function is not free: `Stmt::Fn` deep-copies the body,
+/// because `run` walks a borrowed `Program` and storing it without a copy
+/// would put a lifetime on `Interp` and thread it through every caller in the
+/// kernel. Anything that runs one program many times with fresh state pays
+/// that copy every time -- `voter::Core::vote` did, on every routing
+/// decision, and `core bench` measured it at 813 ns of a 2,734 ns vote.
+///
+/// The fields are private and stay that way: this is a snapshot of another
+/// interpreter's tables, not a thing to be edited.
+pub struct Prepared {
+    funcs: BTreeMap<String, alloc::rc::Rc<Func>>,
+    recs: BTreeMap<String, Vec<(String, Type)>>,
+    /// What the top level cost, so a prepared run reports what an armed one
+    /// would. See `adopt`.
+    steps: u64,
+}
+
 /// How deep calls may nest before it is called a runaway.
 ///
 /// Recursion is not the reason. The step budget already stops a program that
@@ -1001,6 +1020,51 @@ impl Interp {
     }
 
     /// Run a program, returning the value of the last expression statement.
+    /// Whether a program's top level does nothing but declare.
+    ///
+    /// This is the whole condition under which preparing is equivalent to
+    /// arming. A declaration's only effect is to register itself, so running
+    /// such a top level once and copying the result is indistinguishable from
+    /// running it again. Every other statement can read the world or change
+    /// it -- an assignment computes, a call can ask the clock, `use` lexes and
+    /// executes a whole other file -- and freezing any of those would turn a
+    /// value re-computed per run into a value fixed at prepare time. That is a
+    /// semantic change wearing an optimisation's clothes, so those programs
+    /// keep arming.
+    pub fn is_declarative(prog: &[Stmt]) -> bool {
+        prog.iter().all(|s| matches!(s, Stmt::Fn(..) | Stmt::Rec(..)))
+    }
+
+    /// Run a declarative top level once, for a program that will be run many
+    /// times over with fresh state.
+    ///
+    /// Refuses anything `is_declarative` refuses, rather than preparing what
+    /// it can and arming the rest: a program half-prepared would have its
+    /// declarations registered before its statements ran, which is not the
+    /// order it was written in.
+    pub fn prepare(prog: &[Stmt]) -> Result<Prepared, String> {
+        if !Self::is_declarative(prog) {
+            return Err(String::from("top level is more than declarations"));
+        }
+        let mut it = Self::new();
+        it.run(prog)?;
+        Ok(Prepared { funcs: it.funcs, recs: it.recs, steps: it.steps })
+    }
+
+    /// Seed from prepared declarations instead of running the top level.
+    ///
+    /// The step count comes with them, and that is not bookkeeping. `steps` is
+    /// what a caller is charged and what the budget stops, so a prepared run
+    /// that skipped the top level's ticks would answer the same and cost less
+    /// -- two paths through one program disagreeing about a number the judges
+    /// read. Carrying it makes the two bit-identical in the only things
+    /// anything can observe: the value, the cost, and the error.
+    pub fn adopt(&mut self, p: &Prepared) {
+        self.funcs = p.funcs.clone();
+        self.recs = p.recs.clone();
+        self.steps = self.steps.saturating_add(p.steps);
+    }
+
     pub fn run(&mut self, prog: &[Stmt]) -> Result<Value, String> {
         self.steps = 0;
         // A `return` typed at the prompt has nothing to return from. Cleared

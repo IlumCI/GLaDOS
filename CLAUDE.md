@@ -869,6 +869,36 @@ to remove about nineteen allocations per call. The vote is the worst case for
 it -- a seven-statement function called once -- and it still wins, because the
 saving scales with the body and the cost does not.
 
+**And the declaration itself only had to happen once.** `Core::vote` ran the
+core's top level on every routing decision to register a function that had
+been the same function since the core was parsed. `Interp::prepare` runs a
+declarative top level once and `adopt` seeds a fresh interpreter from it.
+
+    arm  813 ns -> ~75 ns  (-92%)          one vote  -20%
+
+Two conditions make that a saving rather than a semantic change, and both are
+in the code as the reason:
+
+- `is_declarative` is the whole gate. A declaration's only effect is to
+  register itself, so running such a top level once and copying the result is
+  indistinguishable from running it again. An assignment, a call that could
+  ask the clock, a `use` that lexes another file -- any of those would be
+  frozen at prepare time, so those programs keep arming. Nothing `compose`
+  writes is one, but an operator could install one.
+- `Prepared` carries the top level's **step count**. `steps` is what the
+  budget stops and what a verdict records, so a prepared run that skipped
+  those ticks would answer identically and report itself cheaper -- two paths
+  through one program disagreeing about a number the judges read. The
+  selftest compares prepared against armed on value *and* cost, which is the
+  differential check in miniature and the only reason this is allowed on a
+  path a judge reads.
+
+Cumulatively, a vote went from about 418 step-equivalents to 146: **2.9x**,
+none of it from compiling anything. Every one of the three wins was
+allocation, and the two the plan predicted -- that the tree-walk was the cost
+and that construction was near-certainly the fix -- were both wrong in the
+same direction.
+
 Two honesty notes on those figures. `arm` and `call vote` are unchanged by
 this work and the movements in them are host noise. And `fields_of` adds up
 to eight string comparisons to every builtin call that misses, where the old

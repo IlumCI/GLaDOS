@@ -53,7 +53,7 @@
 //! the held-out slice and the judges decide; `install` is what wires one in,
 //! and it takes a hash somebody has seen a verdict for.
 
-use crate::aiksi::eval::{Interp, Value};
+use crate::aiksi::eval::{Interp, Prepared, Value};
 use crate::aiksi::parse::Stmt;
 use crate::store::sha256;
 use crate::sysbox;
@@ -87,6 +87,13 @@ pub struct Core {
     pub hash: [u8; 32],
     /// Parsed once. Re-lexing per vote would cost more than the vote.
     prog: Vec<Stmt>,
+    /// Declared once, for the same reason, one step further on.
+    ///
+    /// `compose` emits a single `fn vote`, so a core's top level is one
+    /// declaration and arming it is a deep copy of the function body. `None`
+    /// for a core whose top level does more than declare, which nothing this
+    /// module writes produces but an operator could install.
+    prep: Option<Prepared>,
 }
 
 /// The program text of a stored core.
@@ -118,7 +125,8 @@ pub fn load(hash: &[u8; 32]) -> Result<Core, String> {
 pub fn parse(hash: &[u8; 32], src: &str) -> Result<Core, String> {
     let toks = crate::aiksi::lex::lex(src)?;
     let prog = crate::aiksi::parse::parse(toks)?;
-    let core = Core { hash: *hash, prog };
+    let prep = Interp::prepare(&prog).ok();
+    let core = Core { hash: *hash, prog, prep };
     // A core that does not define `vote` is not a core, and finding that out
     // at the first routing decision would be finding it out in the worst place.
     let mut it = core.interp();
@@ -138,9 +146,19 @@ impl Core {
         Interp::sandboxed(JAIL).with_step_budget(VOTE_BUDGET)
     }
 
-    /// Run the top level, which is what registers the functions.
+    /// Register the functions, from the prepared declarations where there
+    /// are any and by running the top level where there are not.
+    ///
+    /// Both paths leave the same functions, the same records and the same
+    /// step count, so nothing above here can tell which one it got.
     fn arm(&self, it: &mut Interp) -> Result<(), String> {
-        it.run(&self.prog).map(|_| ())
+        match &self.prep {
+            Some(p) => {
+                it.adopt(p);
+                Ok(())
+            }
+            None => it.run(&self.prog).map(|_| ()),
+        }
     }
 
     /// One vote, and what it cost.
@@ -737,6 +755,43 @@ pub fn selftest() -> bool {
     // An empty permitted set has no right answer, and nothing is invented.
     if c.vote("anything", &[]).0.is_some() {
         return false;
+    }
+
+    // Preparing is arming, in both things anything can observe.
+    //
+    // This is the differential check in miniature and it is the only reason
+    // the optimisation is allowed on a path the judges read: the two must
+    // agree on the answer *and* on the cost, because `steps` is what the
+    // budget stops and what a verdict records. Comparing only the answer
+    // would pass a prepared run that skipped the top level's ticks and
+    // reported a vote as cheaper than it is.
+    {
+        let Ok(toks) = crate::aiksi::lex::lex(src) else { return false };
+        let Ok(prog) = crate::aiksi::parse::parse(toks) else { return false };
+        let Ok(prep) = Interp::prepare(&prog) else { return false };
+        let prepared = Core { hash: h, prog: prog.clone(), prep: Some(prep) };
+        let armed = Core { hash: h, prog, prep: None };
+        if prepared.vote("anything", &[3, 7]) != armed.vote("anything", &[3, 7]) {
+            return false;
+        }
+    }
+
+    // A top level that does more than declare is not prepared, and still
+    // works. Freezing `n` at prepare time would answer the same here and stop
+    // being the same the moment the expression could change.
+    {
+        let live = "n = 1 fn vote(text: str, allowed: list): int { return get(allowed, n) }
+";
+        let Ok(toks) = crate::aiksi::lex::lex(live) else { return false };
+        let Ok(prog) = crate::aiksi::parse::parse(toks) else { return false };
+        if Interp::is_declarative(&prog) || Interp::prepare(&prog).is_ok() {
+            return false;
+        }
+        let hv = sha256::hash(live.as_bytes());
+        let Ok(cv) = parse(&hv, live) else { return false };
+        if cv.vote("x", &[5, 6]).0 != Some(6) {
+            return false;
+        }
     }
 
     // A core answering outside the permitted set is ignored rather than
