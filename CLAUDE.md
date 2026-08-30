@@ -995,7 +995,33 @@ that already holds it. Buttons stay latched for `poll_mouse` afterwards.
 It timed each operation once, and two consecutive `desk::draw` calls on an
 idle machine measured 2,679 us and 24,318 us -- under emulation a single
 sample measures the host's scheduler. It also times `console redraw_all`
-separately, which is what named the console as 41% of a frame.
+separately, which is what named the console as the dominant cost of a frame:
+1,672 us of 2,376.
+
+**Blank cells were the whole of it.** `draw_cell` renders an 8x8 glyph
+whatever the character is, so a blank cell wrote 64 scaled pixels of
+background one `put` at a time -- and `desk::draw` had filled that same
+background with a bulk span fill immediately before. About 1.2 million
+per-pixel stores a frame, nearly all writing the colour already there.
+`redraw_all` paints the background once as spans and then only cells with
+something in them, for identical output:
+
+    console redraw_all    1,672 us -> 592 us
+    desk::draw + present  2,376 us -> 1,629 us
+
+The survey that ranked this work missed it because it looked for per-cell
+dirty tracking, which `desk::draw` defeats by erasing the client area every
+frame -- and that is why A1 was written off as invalid as designed. The
+redundancy was never in repainting cells that had not changed; it was in
+painting *nothing*, pixel by pixel.
+
+**Damage-rect present is not worth building, and the measurement says so.**
+`present, no change` is 264 us of a 1,629 us frame, and that is a `memcmp`
+over 4 MB -- about 15 GB/s, already at memory bandwidth. Skipping rows needs
+to know which rows changed, and `desk::draw` repaints everything
+unconditionally, so its damage *is* the whole screen: a damage-rect API would
+be handed all of it every frame. The premise fails until `draw` itself becomes
+incremental, which is a much larger change than the plan described.
 
 Two renderer changes that are correct and measured **flat**: `put` no longer
 goes volatile into RAM, and the title gradient is row-major rather than
