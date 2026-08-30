@@ -492,6 +492,16 @@ pub const BUILTINS: &[(&str, Touch, usize, usize)] = &[
     // header, split a path or read a config file, so every program that needed
     // one grew a bad version of it in Aiksi. These are `str` and `char` in the
     // Rust underneath, named for what they do rather than for the method.
+    // Reading a file as what it is. Pure, because every one of these takes
+    // the text it works on as an argument: the caller has already been
+    // through the namespace and its capability check, and doing that twice
+    // would mean two answers to one question about permission.
+    ("fmt_kind", Touch::Pure, 2, 2),
+    ("fmt_outline", Touch::Pure, 2, 2),
+    ("csv_rows", Touch::Pure, 1, 2),
+    ("ini_get", Touch::Pure, 3, 3),
+    ("xml_text", Touch::Pure, 2, 2),
+    ("jsonl_count", Touch::Pure, 1, 1),
     ("upper", Touch::Pure, 1, 1),
     ("lower", Touch::Pure, 1, 1),
     ("trim", Touch::Pure, 1, 1),

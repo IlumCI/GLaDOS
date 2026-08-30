@@ -23,6 +23,7 @@ mod crypto;
 mod diag;
 mod dev;
 mod edit;
+mod fmt;
 mod gfx;
 mod json;
 mod aiksi;
@@ -1141,6 +1142,19 @@ fn selftest() {
     // the first time anything here fetches an instruction from the heap. A
     // wrong answer is a halted machine, so it runs early and under QEMU
     // before it ever runs on the GF63.
+    dev::power::probe();
+    kprintln!("
+[power]");
+    dev::power::report();
+
+    kprintln!("
+[selftest] file formats:");
+    if !fmt::selftest() {
+        console::set_color(LTRED);
+        kprintln!("[selftest] file type handling is unsound");
+        console::set_color(LTGRAY_IDX);
+    }
+
     kprintln!("
 [selftest] generated code:");
     if !cpu::code::selftest() {

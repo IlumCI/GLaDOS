@@ -3219,6 +3219,84 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 }
             }
         }
+        // Temperature, frequency, and the policy over both.
+        "power" => {
+            let mut w = rest.split_whitespace();
+            match w.next().unwrap_or("") {
+                "" | "status" => crate::dev::power::report(),
+                "force" => {
+                    let on = w.next() != Some("off");
+                    crate::dev::power::force(on);
+                    console::set_color(LTRED);
+                    kprintln!("  forced {}. A register the part does not implement halts this machine.", on);
+                    console::set_color(LTGRAY);
+                    crate::dev::power::report();
+                }
+                "turbo" => match w.next() {
+                    Some(v) => {
+                        let want = v != "off";
+                        if crate::dev::power::set_turbo(want) {
+                            kprintln!("  turbo {}", if want { "on" } else { "off" });
+                        } else {
+                            kprintln!("  unavailable: {}", crate::dev::power::why());
+                        }
+                    }
+                    None => match crate::dev::power::turbo() {
+                        Some(t) => kprintln!("  turbo {}", if t { "on" } else { "off" }),
+                        None => kprintln!("  unavailable: {}", crate::dev::power::why()),
+                    },
+                },
+                g => match crate::dev::power::Governor::parse(g) {
+                    Some(gov) => {
+                        if crate::dev::power::set_governor(gov) {
+                            kprintln!("  governor {}", gov.name());
+                        } else {
+                            kprintln!("  unavailable: {}", crate::dev::power::why());
+                        }
+                    }
+                    None => {
+                        kprintln!("  power                 what the part reports");
+                        kprintln!("  power performance|balanced|powersave");
+                        kprintln!("  power turbo [on|off]");
+                        kprintln!("  power force [on|off]  permit MSRs under a hypervisor");
+                    }
+                },
+            }
+        }
+        // What a file is, and what is in it.
+        "file" => {
+            let path = rest.trim();
+            if path.is_empty() {
+                kprintln!("  file <path>   what it is, and an outline of it");
+            } else if let Some(bytes) = crate::sysbox::read_blob(path) {
+                let name = path.rsplit('/').next().unwrap_or(path);
+                let kind = crate::fmt::detect(name, &bytes);
+                kprintln!("  {}  {} byte(s)", kind.name(), bytes.len());
+                if kind.is_text() {
+                    match core::str::from_utf8(&bytes) {
+                        Ok(s) => {
+                            let o = crate::fmt::outline::of(kind, s);
+                            if o.is_empty() {
+                                kprintln!("  no structure to report");
+                            }
+                            for e in o.iter().take(40) {
+                                let pad = "  ".repeat(e.depth.min(6) as usize);
+                                kprintln!("  {:>5}  {}{} {}", e.line, pad, e.kind, e.name);
+                            }
+                            if o.len() > 40 {
+                                kprintln!("  ... {} more", o.len() - 40);
+                            }
+                        }
+                        // The kind said text and the bytes disagree, which is
+                        // worth saying rather than showing replacement
+                        // characters and letting somebody wonder.
+                        Err(e) => kprintln!("  not valid UTF-8 at byte {}", e.valid_up_to()),
+                    }
+                }
+            } else {
+                kprintln!("  no such file");
+            }
+        }
         "fault" => {
             console::set_color(LTRED);
             kprintln!("  this will halt the machine.");

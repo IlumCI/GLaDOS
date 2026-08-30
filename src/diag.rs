@@ -95,6 +95,16 @@ pub const SUITES: &[Suite] = &[
         run: crate::gfx::desk::selftest,
     },
     Suite {
+        name: "power",
+        about: "the gate in front of every model-specific register",
+        run: crate::dev::power::selftest,
+    },
+    Suite {
+        name: "fmt",
+        about: "what a file is, and reading it as that",
+        run: crate::fmt::selftest,
+    },
+    Suite {
         name: "differ",
         about: "two ways of running one program, required to agree exactly",
         run: crate::aiksi::differ::selftest,
@@ -108,7 +118,9 @@ pub const SUITES: &[Suite] = &[
 
 /// One slot per suite. Indexed by position in `SUITES`, which is a constant,
 /// so the table cannot get out of step with the list.
-static RESULTS: [AtomicU8; 13] = [
+static RESULTS: [AtomicU8; 15] = [
+    AtomicU8::new(0),
+    AtomicU8::new(0),
     AtomicU8::new(0),
     AtomicU8::new(0),
     AtomicU8::new(0),
@@ -126,7 +138,7 @@ static RESULTS: [AtomicU8; 13] = [
 
 /// Checked here rather than trusted: a suite added to `SUITES` without a slot
 /// would silently never record a verdict.
-const _: () = assert!(SUITES.len() == 13);
+const _: () = assert!(SUITES.len() == 15);
 
 pub fn verdict(i: usize) -> Verdict {
     match RESULTS.get(i).map(|r| r.load(Ordering::Relaxed)) {

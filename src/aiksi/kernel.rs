@@ -52,6 +52,77 @@ pub fn call(it: &mut Interp, name: &str, args: &[Value]) -> Result<Value, String
         // config file, split a response header or build a path. Every one of
         // these existed as a workaround written in Aiksi itself, badly, in the
         // skeletons.
+        // --- files, as what they are -----------------------------------
+        //
+        // The name is passed alongside the text because that is what decides
+        // the kind. Handing only the bytes would force a sniff on every call
+        // and lose the operator's own statement of intent.
+        "fmt_kind" => {
+            let k = crate::fmt::detect(&text(args, 0), text(args, 1).as_bytes());
+            Ok(Value::Str(k.name().to_string()))
+        }
+        "fmt_outline" => {
+            let (name, body) = (text(args, 0), text(args, 1));
+            let k = crate::fmt::detect(&name, body.as_bytes());
+            let rows: Vec<Value> = crate::fmt::outline::of(k, &body)
+                .iter()
+                .map(|e| {
+                    Value::Str(alloc::format!("{}:{}:{}:{}", e.line, e.depth, e.kind, e.name))
+                })
+                .collect();
+            Ok(Value::List(rows))
+        }
+        "csv_rows" => {
+            let d = if args.len() > 1 {
+                text(args, 1).chars().next().unwrap_or(',')
+            } else {
+                ','
+            };
+            let rows: Vec<Value> = crate::fmt::table::delimited(&text(args, 0), d)
+                .into_iter()
+                .map(|r| Value::List(r.into_iter().map(Value::Str).collect()))
+                .collect();
+            Ok(Value::List(rows))
+        }
+        "ini_get" => {
+            let (src, want_sec, want_key) = (text(args, 0), text(args, 1), text(args, 2));
+            for s in crate::fmt::table::ini(&src) {
+                if s.name != want_sec {
+                    continue;
+                }
+                for (k, v) in &s.pairs {
+                    if *k == want_key {
+                        return Ok(Value::Str(v.clone()));
+                    }
+                }
+            }
+            // Absent answers nil rather than an empty string, because a key
+            // that is present and empty is a different fact from one that is
+            // missing and a caller may need to tell them apart.
+            Ok(Value::Nil)
+        }
+        "xml_text" => {
+            let (src, path) = (text(args, 0), text(args, 1));
+            let root = match crate::fmt::xml::parse(&src) {
+                Ok(r) => r,
+                Err(e) => return Err(e),
+            };
+            let mut cur = &root;
+            for step in path.split('/').filter(|s| !s.is_empty()) {
+                match cur.child(step) {
+                    Some(c) => cur = c,
+                    None => return Ok(Value::Nil),
+                }
+            }
+            Ok(Value::Str(cur.text()))
+        }
+        "jsonl_count" => {
+            let (v, bad) = crate::fmt::table::json_lines(&text(args, 0));
+            Ok(Value::List(alloc::vec![
+                Value::Int(v.len() as i64),
+                Value::Int(bad.len() as i64)
+            ]))
+        }
         "upper" => Ok(Value::Str(text(args, 0).to_uppercase())),
         "lower" => Ok(Value::Str(text(args, 0).to_lowercase())),
         "trim" => Ok(Value::Str(text(args, 0).trim().to_string())),
