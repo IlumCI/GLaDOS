@@ -94,42 +94,49 @@ pub static IMAGE_BASE: AtomicU64 = AtomicU64::new(0);
 /// disassembly resolves to an unrelated function.
 pub static IMAGE_SIZE: AtomicU64 = AtomicU64::new(0);
 
-/// Shared reporting path for every fatal exception.
-fn fault(frame: &InterruptStackFrame, vector: u8, name: &str, err: Option<u64>) -> ! {
-    // Copy out of the packed/borrowed frame before formatting.
-    let rip = frame.rip;
-    let cs = frame.cs;
-    let rflags = frame.rflags;
-    let rsp = frame.rsp;
-    let ss = frame.ss;
-    let cr2 = read_cr2();
-    let cr3 = read_cr3();
+/// Set once the fault reporter has begun. See `fault`.
+static REPORTING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
-    // Everything below is `kprintln`, which paints nothing while the boot
-    // screen owns the framebuffer. A fault during boot would then show a
-    // progress bar and no diagnostic at all -- on a machine whose only output
-    // device is that screen. Take it back first.
-    crate::gfx::splash::abandon();
+/// Everything a fault report says, gathered before anything tries to print
+/// any of it.
+///
+/// Separated from the printing because the report has to be emitted twice,
+/// once per sink, and the second sink can fail. See `fault`.
+struct Report<'a> {
+    vector: u8,
+    name: &'a str,
+    err: Option<u64>,
+    rip: u64,
+    cs: u64,
+    rsp: u64,
+    ss: u64,
+    rflags: u64,
+    cr2: u64,
+    cr3: u64,
+}
 
-    console::set_color(console::LTRED);
-    kprintln!("\n*** EXCEPTION {:#04x}  {} ***", vector, name);
+/// Write one fault report to one sink, a line at a time.
+fn emit(out: &mut dyn FnMut(core::fmt::Arguments), r: &Report) {
+    out(format_args!("
+*** EXCEPTION {:#04x}  {} ***", r.vector, r.name));
 
-    match err {
-        Some(e) if vector == 14 => {
-            kprintln!("  error {:#018x}  {}", e, describe_page_fault(e));
-            kprintln!("  cr2   {:#018x}   <-- faulting address", cr2);
+    match r.err {
+        Some(e) if r.vector == 14 => {
+            out(format_args!("  error {:#018x}  {}", e, describe_page_fault(e)));
+            out(format_args!("  cr2   {:#018x}   <-- faulting address", r.cr2));
         }
-        Some(e) => kprintln!("  error {:#018x}", e),
+        Some(e) => out(format_args!("  error {:#018x}", e)),
         None => {}
     }
 
-    kprintln!("  rip   {:#018x}   cs  {:#06x}", rip, cs);
-    kprintln!("  rsp   {:#018x}   ss  {:#06x}", rsp, ss);
-    kprintln!("  flags {:#018x}", rflags);
-    if vector != 14 {
-        kprintln!("  cr2   {:#018x}", cr2);
+    out(format_args!("  rip   {:#018x}   cs  {:#06x}", r.rip, r.cs));
+    out(format_args!("  rsp   {:#018x}   ss  {:#06x}", r.rsp, r.ss));
+    out(format_args!("  flags {:#018x}", r.rflags));
+    if r.vector != 14 {
+        out(format_args!("  cr2   {:#018x}", r.cr2));
     }
-    kprintln!("  cr3   {:#018x}", cr3);
+    out(format_args!("  cr3   {:#018x}", r.cr3));
+
     // The firmware relocated the kernel, so RIP names nothing by itself.
     // Relative to the load base it is an offset into the very binary in the
     // build tree, and a disassembly answers which function it is -- but only
@@ -137,27 +144,99 @@ fn fault(frame: &InterruptStackFrame, vector: u8, name: &str, err: Option<u64>) 
     use super::code::Where;
     let base = IMAGE_BASE.load(Ordering::Relaxed);
     let size = IMAGE_SIZE.load(Ordering::Relaxed);
-    match super::code::locate(rip, base, size, super::code::lookup(rip)) {
+    match super::code::locate(r.rip, base, size, super::code::lookup(r.rip)) {
         Where::Generated { tag, off } => {
-            kprintln!("  in generated code {:016x} at +{:#x}", tag, off);
+            out(format_args!("  in generated code {:016x} at +{:#x}", tag, off));
         }
         Where::Image(rva) => {
-            kprintln!("  rva   {:#018x}   <-- rip - image base", rva);
+            out(format_args!("  rva   {:#018x}   <-- rip - image base", rva));
         }
         Where::Unverified(rva) => {
-            kprintln!("  rva   {:#018x}   <-- rip - image base, extent unknown", rva);
+            out(format_args!(
+                "  rva   {:#018x}   <-- rip - image base, extent unknown",
+                rva
+            ));
         }
         Where::Elsewhere => {
             if base != 0 && size != 0 {
-                kprintln!(
+                out(format_args!(
                     "  rip is outside the image {:#x}..{:#x} and no generated range claims it",
                     base,
                     base + size
-                );
+                ));
             }
         }
     }
-    kprintln!("\n  halted.");
+    out(format_args!("
+  halted."));
+}
+
+/// Shared reporting path for every fatal exception.
+///
+/// The report goes out **twice, whole, serial before the console** -- not
+/// interleaved a line at a time -- and the ordering is the entire point.
+///
+/// `kprint!` writes the console first and serial second, which is right
+/// everywhere but here. The console paints, and painting from inside an
+/// interrupt gate takes a #GP on this kernel: measured, repeatedly, as a
+/// first line followed by an unbroken column of `EXCEPTION 0x0d`. With
+/// console-first, that meant *no fault this kernel has ever taken produced a
+/// readable report* -- the first line died in the console before serial was
+/// reached, and what a person saw was a machine that went quiet.
+///
+/// So serial, which is a port write and cannot block or fault, gets the whole
+/// thing before the console is touched at all. Then the console is attempted
+/// anyway, because on the GF63 there is no UART and the framebuffer is the
+/// only diagnostic that exists -- and if it fails there, the serial copy has
+/// already been written and `REPORTING` turns the failure into one line and a
+/// halt instead of an endless loop.
+///
+/// The console #GP itself is a real bug and is not fixed here. It is older
+/// than any of this and belongs to the console, not to the reporter.
+fn fault(frame: &InterruptStackFrame, vector: u8, name: &str, err: Option<u64>) -> ! {
+    // A fault taken *while reporting* one used to recurse: the report crashed
+    // partway through, its own handler started another report, and that
+    // crashed in the same place. One line and a halt is worth more than an
+    // infinite number of identical ones, and the first report is the one that
+    // says something.
+    if REPORTING.swap(true, Ordering::Relaxed) {
+        crate::serial_println!(
+            "
+*** {:#04x} {} while reporting a fault -- halting ***",
+            vector,
+            name
+        );
+        super::halt()
+    }
+
+    // Copy out of the packed/borrowed frame before formatting.
+    let r = Report {
+        vector,
+        name,
+        err,
+        rip: frame.rip,
+        cs: frame.cs,
+        rsp: frame.rsp,
+        ss: frame.ss,
+        rflags: frame.rflags,
+        cr2: read_cr2(),
+        cr3: read_cr3(),
+    };
+
+    emit(&mut |a| crate::serial::_print(format_args!("{}
+", a)), &r);
+
+    // Now the framebuffer. `kprintln` paints nothing while the boot screen
+    // owns it, so a fault during boot would show a progress bar and no
+    // diagnostic at all -- on a machine whose only output device is that
+    // screen. Take it back first, and stop pacing: 1200us a character turns a
+    // report into half a second of typewriter, which to somebody watching is
+    // indistinguishable from the hang it is explaining.
+    crate::gfx::splash::abandon();
+    console::set_pace(0);
+    console::set_color(console::LTRED);
+    emit(&mut |a| crate::gfx::console::_print(format_args!("{}
+", a)), &r);
 
     super::halt()
 }

@@ -934,6 +934,37 @@ vector but `#BP` is `-> !` -- so a bad jump is still a halted machine. What
 the registry buys is that the one diagnostic which survives says something
 true.
 
+**And it does, verified by faulting on purpose.** `fault code` emits a null
+dereference into an `Exec`, arms it and jumps in. The buffer is deliberately
+`mem::forget`ed, because `fault` reads the registry from inside the handler
+and dropping it would unregister the range on the way:
+
+    *** EXCEPTION 0x0e  #PF page fault ***
+      rip   0x0000000002bf2003   cs  0x0008
+      in generated code fa17000000000003 at +0x3
+
+The buffer was at `0x2bf2000`, so `+0x3` is exact.
+
+**Getting that took fixing something much older: no fault this kernel ever
+took produced a readable report.** `kprint!` writes the console first and
+serial second, and painting from inside an interrupt gate takes a #GP here --
+so the first line of every report died in the console before serial was
+reached, and what a person saw was a machine that simply went quiet. Plain
+`fault` was silent the same way, long before Phase F existed.
+
+The report is emitted **twice, whole, serial before the console** -- not
+interleaved a line at a time, which was the first attempt and still truncated
+after one line. Serial is a port write and cannot block or fault. The console
+is attempted afterwards regardless, because on the GF63 there is no UART and
+the framebuffer is the only diagnostic there is; and `REPORTING` makes a fault
+*while reporting* print one line and halt rather than recurse, which it did,
+as an unbroken column of `EXCEPTION 0x0d`. Pacing is also turned off, since
+1200us a character makes a report indistinguishable from the hang it explains.
+
+**The console #GP inside an interrupt gate is a real bug and is not fixed.**
+It belongs to the console rather than to the reporter, it predates all of
+this, and it is now visible instead of silent.
+
 The tick rule is written down on `Interp::tick` because anything executing
 this language by another route has to match it exactly: **once entering
 `stmt`, once entering `expr`, one extra per `while` iteration, and nothing
