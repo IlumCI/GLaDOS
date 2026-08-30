@@ -157,6 +157,17 @@ const STEP_BUDGET: u64 = 20_000_000;
 pub const DRAW_BUDGET: u64 = 200_000;
 
 /// A named procedure: its parameters and its body.
+///
+/// Held behind an `Rc` wherever it is stored, because a call used to take a
+/// deep copy of one. `funcs.get(name).cloned()` clones the body -- the whole
+/// statement tree, and every expression tree under it -- and it ran at every
+/// user function call, on a structure that is immutable from the moment
+/// `Stmt::Fn` declared it. `core bench` put the pair of clones a single vote
+/// pays at roughly a fifth of the vote.
+///
+/// `Rc` and not `Arc`: there is one interpreter per call chain and none of
+/// this crosses a task, which is the same single-core assumption `Racy`
+/// rests on and the same grep target if that ever stops being true.
 #[derive(Clone)]
 struct Func {
     params: Vec<(String, Type)>,
@@ -605,7 +616,7 @@ pub struct Interp {
     /// update a global without ceremony, and a parameter shadows one without
     /// destroying it.
     scopes: Vec<BTreeMap<String, Value>>,
-    funcs: BTreeMap<String, Func>,
+    funcs: BTreeMap<String, alloc::rc::Rc<Func>>,
     /// Set by `return`, and checked after every statement in a block. A
     /// sentinel rather than a control-flow type threaded through every
     /// signature, which for a tree-walker this size is the same thing with
@@ -725,6 +736,9 @@ impl Interp {
         let Some(f) = self.funcs.get(name).cloned() else {
             return Err(format!("no function '{}'", name));
         };
+        // A refcount bump, not a copy of the body. The clone is still needed:
+        // `call_user` takes `&mut self` and the borrow of `funcs` cannot be
+        // held across it.
         self.returning = None;
         self.call_user(name, &f, args)
     }
@@ -1013,9 +1027,18 @@ impl Interp {
         match s {
             Stmt::Expr(e) => self.expr(e),
             Stmt::Fn(name, params, ret, body) => {
+                // The one deep copy that stays. `run` walks a borrowed
+                // `Program`, so storing the body without copying it would put
+                // a lifetime on `Interp` and thread it through every caller in
+                // the kernel. Paid once per declaration instead of once per
+                // call, which is where it was actually being paid.
                 self.funcs.insert(
                     name.clone(),
-                    Func { params: params.clone(), ret: ret.clone(), body: body.clone() },
+                    alloc::rc::Rc::new(Func {
+                        params: params.clone(),
+                        ret: ret.clone(),
+                        body: body.clone(),
+                    }),
                 );
                 Ok(Value::Nil)
             }

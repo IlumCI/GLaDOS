@@ -647,44 +647,80 @@ pub fn bench() {
     let list = Value::List(all.iter().map(|i| Value::Int(*i as i64)).collect());
 
     let ns = |c: u64| -> u64 { c.saturating_mul(1000) / mhz };
-    let (mut b_lo, mut a_lo, mut i_lo, mut t_lo) = (u64::MAX, u64::MAX, u64::MAX, u64::MAX);
+
+    // One vote per timed sample could not resolve this, and saying so is the
+    // whole reason the shape changed. A vote is a few microseconds; under
+    // WHPX the host's scheduler moves a best-of-nine minimum by 20% between
+    // boots, which was measured directly -- the 20k-step loop above came out
+    // 25% faster on the boot where the vote came out 18% slower. A change
+    // worth roughly a tenth of a vote is invisible in that. So each sample
+    // runs REPS votes and the noise divides by REPS.
+    //
+    // The three phases are measured as nested prefixes rather than
+    // separately, because arming needs a fresh interpreter and invoking needs
+    // an armed one: timing them apart would mean rebuilding between the
+    // stopwatch's start and stop, and charging that to whichever phase came
+    // second.
+    const REPS: usize = 200;
+    let (mut b_lo, mut ba_lo, mut t_lo) = (u64::MAX, u64::MAX, u64::MAX);
     let mut used = 0u64;
     for _ in 0..RUNS {
         let t0 = crate::time::rdtsc();
-        let mut it = core.interp();
+        for _ in 0..REPS {
+            let it = core.interp();
+            // Kept, so the construction cannot be dropped as unused.
+            used = used.wrapping_add(it.steps());
+        }
         let t1 = crate::time::rdtsc();
-        let armed = core.arm(&mut it).is_ok();
+        for _ in 0..REPS {
+            let mut it = core.interp();
+            let _ = core.arm(&mut it);
+            used = used.wrapping_add(it.steps());
+        }
         let t2 = crate::time::rdtsc();
-        if armed {
-            let _ = it.invoke("vote", &[Value::Str(String::from(text)), list.clone()]);
+        for _ in 0..REPS {
+            let mut it = core.interp();
+            if core.arm(&mut it).is_ok() {
+                let _ = it.invoke("vote", &[Value::Str(String::from(text)), list.clone()]);
+            }
+            used = it.steps();
         }
         let t3 = crate::time::rdtsc();
-        used = it.steps();
         b_lo = b_lo.min(t1.wrapping_sub(t0));
-        a_lo = a_lo.min(t2.wrapping_sub(t1));
-        i_lo = i_lo.min(t3.wrapping_sub(t2));
-        t_lo = t_lo.min(t3.wrapping_sub(t0));
+        ba_lo = ba_lo.min(t2.wrapping_sub(t1));
+        t_lo = t_lo.min(t3.wrapping_sub(t2));
     }
+    let per = |c: u64| -> u64 { ns(c) / REPS as u64 };
+    let build = per(b_lo);
+    let arm = per(ba_lo).saturating_sub(build);
+    let total = per(t_lo);
+    let invoke = total.saturating_sub(build + arm);
 
-    kprintln!("  one vote, best of {}:", RUNS);
-    kprintln!("    build interpreter    {} ns", ns(b_lo));
-    kprintln!("    arm (run top level)  {} ns", ns(a_lo));
-    kprintln!("    call vote            {} ns", ns(i_lo));
-    kprintln!("    total                {} ns", ns(t_lo));
-    let total = ns(t_lo).max(1);
+    kprintln!("  one vote, best of {} x {}:", RUNS, REPS);
+    // `build` doubles as the control when two boots are compared. Nothing
+    // that changes how a program is *stored or called* can touch
+    // `Interp::new`, so a difference in this line between two builds is
+    // measurement error and nothing else -- which is how the noise floor
+    // gets a number instead of an adjective. It read 16% across the pair
+    // that judged the `Rc` change, against a 25% effect.
+    kprintln!("    build interpreter    {} ns", build);
+    kprintln!("    arm (run top level)  {} ns", arm);
+    kprintln!("    call vote            {} ns", invoke);
+    kprintln!("    total                {} ns", total);
+    let t = total.max(1);
     kprintln!(
         "    the walk is {}% of it; {}% is setup paid per decision",
-        ns(i_lo) * 100 / total,
-        (ns(b_lo) + ns(a_lo)) * 100 / total
+        invoke * 100 / t,
+        (build + arm) * 100 / t
     );
     // The part a code generator could actually remove.
     //
     // "The walk" above is everything `invoke` does, and most of that is not
     // walking: it is the string `lower` allocates, what `contains` scans, and
     // the arguments being cloned into the frame. Only the stepping itself --
-    // this many steps at the rate `aiksi bench` just measured -- is dispatch
-    // overhead a compiler would take away. Printing the two side by side is
-    // the whole point of measuring before designing.
+    // this many steps at the rate the section above just measured -- is
+    // dispatch overhead a compiler would take away. Printing the two side by
+    // side is the whole point of measuring before designing.
     kprintln!("    {} steps taken by the vote", used);
 }
 

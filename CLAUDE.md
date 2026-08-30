@@ -854,13 +854,39 @@ The freshness the doc in `voter.rs` argues for is untouched, because only
 *program* state ever had to be fresh. What was being rebuilt per vote was the
 kernel's half.
 
+**The second copy was the function itself.** `funcs.get(name).cloned()` deep
+-copied a `Func` -- its whole statement tree, and every expression tree under
+it -- at every user function call, on a structure that is immutable from the
+moment `Stmt::Fn` declared it. `funcs` holds `Rc<Func>` now, so a call is a
+refcount bump. `Rc` and not `Arc`: one interpreter per call chain, nothing
+crossing a task, the same single-core assumption `Racy` rests on.
+
+    call vote  -25%       arm  unchanged       one vote  ~2.9 us
+
+Judged against the control rather than on the raw figures, and the trade is
+worth stating because it is a trade: one `Rc::new` is *added* per declaration
+to remove about nineteen allocations per call. The vote is the worst case for
+it -- a seven-statement function called once -- and it still wins, because the
+saving scales with the body and the cost does not.
+
 Two honesty notes on those figures. `arm` and `call vote` are unchanged by
-this work and the small movements in them are host noise -- the 20k-step loop
-moved 9% between the two boots while doing no calls at all, which is the size
-of the band. And `fields_of` adds up to eight string comparisons to every
-builtin call that misses, where the old map cost about three; measured flat
-against a 2,689 ns call, and recorded because it is a real regression on the
-call path even if nothing can see it.
+this work and the movements in them are host noise. And `fields_of` adds up
+to eight string comparisons to every builtin call that misses, where the old
+map cost about three; measured flat, and recorded because it is a real
+regression on the call path even if nothing can see it.
+
+**How big the noise is, measured rather than guessed.** The first version of
+this bench timed *one* vote per sample, best of nine, and it could not
+resolve its own subject: a change worth about a tenth of a vote read as an
+18% regression on a boot whose step loop ran 25% faster than the boot it was
+compared against. Each sample runs 200 votes now.
+
+That fixes per-sample noise and not the boot-to-boot kind, so the bench
+carries a control. `build interpreter` is `Interp::new` and nothing about how
+a program is stored or called can touch it, so a difference in that line
+between two builds is measurement error and nothing else. Across the pair
+that judged the `Rc` change it read **16%** -- which is what "within noise"
+is allowed to mean here, and it is a number instead of an adjective.
 
 There is one TCP connection. `tcp` holds a single TCB and `connect` aborts
 whatever was open before it; the builtins expose that rather than handing back
