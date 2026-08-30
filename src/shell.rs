@@ -1660,6 +1660,54 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         }
                     }
                 }
+                // Judge a routing rule on calibration.
+                //
+                // The one axis where accuracy is the wrong judge: what a rule
+                // moves is how much better the council's confident answers are
+                // than its unconfident ones, and J1 as written would veto a
+                // trade of a point of accuracy for a much sharper signal.
+                "rule" => {
+                    let want = words.next().unwrap_or("");
+                    let picked = match want {
+                        "probe" => Some(0u8),
+                        "majority" => Some(1),
+                        "lexical" => Some(2),
+                        "withcore" => Some(3),
+                        _ => None,
+                    };
+                    match picked {
+                        None => {
+                            kprintln!("  usage: godel rule probe|majority|lexical|withcore");
+                            kprintln!("  in force: {}", crate::ai::harness::rule_in_force().name());
+                        }
+                        Some(r) => {
+                            let p = godel::Proposal::config(r);
+                            let b = p.budget(0, 0);
+                            match crate::ai::with_engine(|e| godel::run(e, &b, &p)) {
+                                None => kprintln!("  {}", crate::ai::engine_refusal()),
+                                Some(Err(why)) => kprintln!("  refused: {}", why.why()),
+                                Some(Ok(c)) => {
+                                    console::set_color(if c.adopted { LTGREEN } else { YELLOW });
+                                    kprintln!(
+                                        "  {} -- {}",
+                                        if c.adopted { "adopted" } else { "rejected" },
+                                        c.j1_why
+                                    );
+                                    console::set_color(LTGRAY);
+                                    kprintln!(
+                                        "  accuracy: fixed {} broke {} chi {}",
+                                        c.fixed, c.broke, c.mcnemar
+                                    );
+                                    kprintln!(
+                                        "  confident on {} item(s), was {}",
+                                        c.goals_held, c.goals_total
+                                    );
+                                    kprintln!("  J2 calibration {}", if c.j2 { "pass" } else { "VETO" });
+                                }
+                            }
+                        }
+                    }
+                }
                 "forget" => {
                     let n = godel::forget();
                     kprintln!("  {} marker(s) cleared -- the grid will be walked again", n);

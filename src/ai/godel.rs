@@ -160,6 +160,9 @@ pub enum ProposalKind {
     /// `skill::bench`: it is a program, it runs under the powers it will
     /// really have, it repeats, and it is cheap.
     Skill([u8; 32]),
+    /// Change how the council combines its cores. Judged on calibration by
+    /// `harness::rule_bench`, because accuracy is not what this axis moves.
+    Config(u8),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -239,6 +242,11 @@ impl Proposal {
         Proposal { lr: 0.0, rank: 0, alpha: 0.0, epochs: 0, rule: 0, kind: ProposalKind::Skill(h) }
     }
 
+    /// A proposal to change how the council combines its cores.
+    pub fn config(rule: u8) -> Proposal {
+        Proposal { lr: 0.0, rank: 0, alpha: 0.0, epochs: 0, rule, kind: ProposalKind::Config(rule) }
+    }
+
     pub fn budget(&self, examples: usize, millis: u64) -> Budget {
         Budget {
             epochs: self.epochs,
@@ -289,6 +297,12 @@ impl Proposal {
                 s.push_str(&hex32(&h));
                 s.push('\n');
             }
+            // The rule is already a field of the rendering above, so a config
+            // point is distinguished by carrying nothing else: zero knobs and a
+            // `rule` line that differs. Emitting a second copy of the rule would
+            // make the identity depend on the same fact twice.
+            ProposalKind::Config(_) => s.push_str("config 1
+"),
         }
         s
     }
@@ -422,6 +436,32 @@ pub fn space_selftest() -> bool {
         return false;
     }
     if GRID.iter().any(|p| p.hash() == d1.hash()) {
+        return false;
+    }
+
+    // A config point is its own kind, and its rule is its identity.
+    //
+    // The rule is already a rendered field, so what the kind line has to do is
+    // stop a config point colliding with an adapter point that happens to run
+    // under the same rule -- they are different experiments and a shared
+    // marker would let the loop believe it had judged one when it judged the
+    // other.
+    let g1 = Proposal::config(1);
+    let g3 = Proposal::config(3);
+    if g1.hash() == g3.hash() || !g1.render().contains("config 1") {
+        return false;
+    }
+    if GRID.iter().any(|p| p.hash() == g1.hash() || p.hash() == g3.hash()) {
+        return false;
+    }
+    // The byte in a node is `Rule as u8`, so the mapping back has to be the
+    // declaration order and nothing else. A node from a future kernel naming a
+    // fifth rule is refused rather than silently routed as `ProbeOnly`.
+    use super::harness::Rule;
+    if Rule::from_u8(Rule::Majority as u8) != Some(Rule::Majority)
+        || Rule::from_u8(Rule::WithCore as u8) != Some(Rule::WithCore)
+        || Rule::from_u8(200).is_some()
+    {
         return false;
     }
 
@@ -1367,6 +1407,10 @@ pub fn run(
             p.mark();
             trial_skill(&h).map_err(Refused::Judge)
         }
+        ProposalKind::Config(r) => {
+            p.mark();
+            trial_config(e, r).map_err(Refused::Judge)
+        }
     }
 }
 
@@ -1486,10 +1530,16 @@ pub fn trial(
         lambda: b.lr,
         rank: fit.dora.r as u8,
         epochs: fit.epochs as u32,
-        // From the proposal rather than hardcoded. It changes the identity,
-        // which is the point: two variants that combine their cores
-        // differently are different objects even when the weights match.
-        rule: p.rule,
+        // What is actually routing, not what the proposal happened to carry.
+        //
+        // This was `p.rule`, and every grid point carries 0 -- `ProbeOnly` --
+        // while the machine has been running the default `Majority` the whole
+        // time. So every node in every lineage recorded a rule its variant was
+        // never measured under, which is the "describes the wrong experiment"
+        // failure the corpus and policy hashes are here to prevent, on the one
+        // field nobody was varying. A trial trains an adapter *under* a rule;
+        // it does not choose one, and `ProposalKind::Config` is what does.
+        rule: super::harness::rule_in_force() as u8,
         born: crate::dev::rtc::now().map(|d| crate::dev::rtc::unix_seconds(&d)).unwrap_or(0),
     };
     let vhash = variant.hash();
@@ -2095,6 +2145,156 @@ pub fn trial_skill(h: &[u8; 32]) -> Result<Certificate, &'static str> {
     Ok(cert)
 }
 
+/// How much better the confident items must get before a rule is worth
+/// changing for.
+///
+/// Five points of separation. The measured baseline is 90.3% right when the
+/// three agree against 50% when they split -- a gap of about 0.40 -- so this
+/// is roughly an eighth of the signal, which is large enough not to be
+/// chasing validation noise on 180 items and small enough to be reachable.
+/// It is a decision and not a derivation, and the certificate records the
+/// gaps themselves so a later reader can apply a different one.
+pub const MIN_CAL_GAIN: f32 = 0.05;
+
+/// How much of its confidence a candidate may give up while claiming to have
+/// improved it. Four fifths: a rule that is beautifully calibrated over six
+/// items has not improved the router, it has stopped answering.
+const MIN_CONF_KEEP: f32 = 0.8;
+
+/// Judge a routing rule on what it actually changes.
+///
+/// **The one axis where accuracy is the wrong judge, which is why it sat
+/// unsearchable behind a comment for so long.** Every other proposal is
+/// selected by J1 -- a net repair beyond the noise -- and a rule change is
+/// mostly not that. What it moves is *calibration*: how much better the
+/// council's confident answers are than its unconfident ones, which is the
+/// property the whole three-core arrangement exists to produce. A router that
+/// knows when it is guessing can ask, escalate or refuse; one that is silently
+/// 78% accurate cannot.
+///
+/// So the two judges point in different directions on purpose:
+///
+///   J1  **do no harm.** The candidate must not lose accuracy beyond the
+///       noise. Not "must win" -- requiring a win here is exactly what made
+///       this axis unsearchable, because a rule that trades a point of
+///       accuracy for a much sharper confidence signal is a trade worth
+///       making and J1 as written would veto it.
+///   J2  **must improve.** The confidence gap has to widen by `MIN_CAL_GAIN`,
+///       and the confident set must not collapse. Something has to get better
+///       or this is drift with a certificate.
+///
+/// J3 is the arithmetic that keeps the comparison meaningful, and J4 is free:
+/// a rule costs no resident bytes, which is the honest answer rather than a
+/// judge invented to fill the slot.
+pub fn trial_config(e: &mut super::Engine, rule: u8) -> Result<Certificate, &'static str> {
+    let Some(candidate) = super::harness::Rule::from_u8(rule) else {
+        return Err("no such routing rule");
+    };
+    let v = super::harness::rule_bench(e, candidate)
+        .map_err(|_| "the router would not fit, or there is nothing to judge on")?;
+    TRIALS.fetch_add(1, Ordering::Relaxed);
+
+    // J1: did it lose anything it should not have?
+    //
+    // Two ways to fail, and the first was missing. Written as "not
+    // significantly worse" alone, this adopted `ProbeOnly` on a measured
+    // `fixed 4 broke 10` -- a net loss of six items out of 180 -- because chi
+    // reached only 1.79 against a threshold of 3.84. Significance is a poor
+    // guard in the losing direction on a slice this size: a real loss can sit
+    // under it comfortably.
+    //
+    // So the floor is symmetric with the one the adapter path uses to call a
+    // *gain* real. `MIN_FIXED` says a net repair under four is not a repair;
+    // it says just as well that a net loss over four is not nothing.
+    let net_loss = v.broke.saturating_sub(v.fixed);
+    let lost = net_loss >= MIN_FIXED || (v.broke > v.fixed && v.chi >= MCNEMAR_95);
+    let j1 = !lost;
+    let j1_why = if lost { "it costs accuracy" } else { "accuracy is unchanged beyond noise" };
+
+    // J2: did the thing this axis is for actually improve?
+    let kept = v.conf_now as f32 >= v.conf_was as f32 * MIN_CONF_KEEP;
+    let j2 = v.gain() >= MIN_CAL_GAIN && kept;
+
+    // J3: a comparison over nothing is not a comparison.
+    let (j3, j3_why) = if v.n == 0 {
+        (false, "no validation decisions")
+    } else if v.conf_now == 0 || v.conf_was == 0 {
+        (false, "one of the rules never claims confidence")
+    } else {
+        (true, "both rules answer and both claim confidence")
+    };
+
+    let parent = ensure_head(e);
+    let carried = parent.and_then(|p| Variant::load(&p));
+    let variant = Variant {
+        parent,
+        adapter: carried.as_ref().and_then(|x| x.adapter),
+        policy: sysbox::read_blob("/ai/agent/policy").map(|p| sha256::hash(&p)),
+        skills: carried.as_ref().and_then(|x| x.skills),
+        corpus: sysbox::hash_of(super::vocab::CORPUS),
+        deep: carried.as_ref().map(|x| x.deep).unwrap_or(false),
+        core: super::voter::installed().map(|c| c.hash),
+        core_seen: true,
+        lambda: 0.0,
+        rank: 0,
+        epochs: 0,
+        rule,
+        born: crate::dev::rtc::now().map(|d| crate::dev::rtc::unix_seconds(&d)).unwrap_or(0),
+    };
+    let vhash = variant.hash();
+
+    let mut cert = Certificate {
+        parent,
+        variant: vhash,
+        decisions: v.n,
+        validation: v.n,
+        // The cheap signal is the gap itself, known before the judges run.
+        predicted: v.gain() > 0.0,
+        fixed: v.fixed,
+        broke: v.broke,
+        mcnemar: v.chi,
+        j1,
+        j1_why,
+        // Confident items, before and after -- the coverage half of J2, in the
+        // two fields shaped to carry a "held out of total".
+        goals_held: v.conf_now,
+        goals_total: v.conf_was,
+        j2,
+        j3,
+        j3_why,
+        // A rule is a number. Saying it costs kilobytes would be inventing a
+        // judge to fill a slot.
+        resident_kib: 0,
+        rank: 0,
+        j4: true,
+        epochs: 0,
+        capped: false,
+        adopted: false,
+        test_acc: 0.0,
+        test_read: 0,
+        test_fresh: true,
+    };
+    cert.adopted = cert.unanimous();
+
+    if cert.adopted {
+        let cfg = super::harness::Config {
+            lambda: super::harness::default_lambda(),
+            rule: candidate,
+        };
+        if !super::harness::save_config(cfg) {
+            return Err("it passed and the configuration would not save");
+        }
+        variant.store();
+        set_head(&vhash);
+        ADOPTIONS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    let hour = crate::dev::rtc::now().map(|d| d.hour).unwrap_or(0);
+    let seq = TRIALS.load(Ordering::Relaxed);
+    ledger_append(&render_certificate(&cert, seq, hour));
+    Ok(cert)
+}
+
 /// Put back the adapters a trial was handed, whatever it did to them.
 fn restore(e: &mut super::Engine, saved: &Option<Vec<u8>>) {
     match saved {
@@ -2171,6 +2371,24 @@ pub fn rollback(e: &mut super::Engine) -> Result<Option<[u8; 32]>, &'static str>
         }
     }
 
+    // The routing rule, when the two nodes disagree about it.
+    //
+    // Only then, and the guard is not caution -- it is correctness. Every node
+    // renders a `rule` line, so unlike `core` there is no "absent" to detect;
+    // but nodes written before this axis was searchable recorded 0, which is
+    // `ProbeOnly`, while the machine that wrote them was running the default
+    // `Majority`. Restoring a parent's rule unconditionally would therefore
+    // switch a lineage full of legacy nodes to a rule none of them ever ran.
+    // If the two agree there is nothing to put back.
+    let rule_back = if v.rule != pv.rule {
+        match super::harness::Rule::from_u8(pv.rule) {
+            None => return Err("the parent names a routing rule this kernel does not have"),
+            Some(r) => Some(r),
+        }
+    } else {
+        None
+    };
+
     // --- change things -------------------------------------------------
 
     // The adapter first: it is the half that can still fail on bytes we have
@@ -2182,6 +2400,12 @@ pub fn rollback(e: &mut super::Engine) -> Result<Option<[u8; 32]>, &'static str>
         }
         Some(b) => {
             e.model.load_adapters(&b).map_err(|_| "the parent's adapter will not load")?;
+        }
+    }
+    if let Some(r) = rule_back {
+        let cfg = super::harness::Config { lambda: super::harness::default_lambda(), rule: r };
+        if !super::harness::save_config(cfg) {
+            return Err("the adapter was restored but the routing rule will not save");
         }
     }
     match want {

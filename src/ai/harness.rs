@@ -1391,6 +1391,23 @@ pub enum Rule {
 }
 
 impl Rule {
+    /// The rule a `Variant`'s `rule` byte names.
+    ///
+    /// The byte is `Rule as u8`, which is the discriminant and therefore the
+    /// declaration order. That is a fact about the enum rather than a
+    /// convention, so this is a total function of it and answers `None` for
+    /// anything the enum does not have -- a stored node from a future kernel
+    /// naming a fifth rule is refused rather than routed as `ProbeOnly`.
+    pub fn from_u8(v: u8) -> Option<Rule> {
+        match v {
+            0 => Some(Rule::ProbeOnly),
+            1 => Some(Rule::Majority),
+            2 => Some(Rule::LexicalOnly),
+            3 => Some(Rule::WithCore),
+            _ => None,
+        }
+    }
+
     pub fn name(&self) -> &'static str {
         match self {
             Rule::ProbeOnly => "probe",
@@ -2222,6 +2239,127 @@ pub fn route_snapshot(e: &mut super::Engine, split_wanted: u8) -> Result<RouteSn
     Ok(RouteSnapshot { correct, guards, finite })
 }
 
+/// What changing the routing rule does, to the answers and to the confidence.
+///
+/// Two things move together and only one of them is accuracy. `agreement`
+/// counts how many of the three cores landed on *the winner*, and the winner
+/// is what the rule decides -- so a rule that carries a class on the strength
+/// of the written core and one counter leaves the probe and the other counter
+/// disagreeing, and the item reports as unconfident. That is not a bug in the
+/// count; it is the confidence signal correctly saying it is no longer
+/// unanimous. But it means a rule can trade accuracy for calibration, or the
+/// reverse, and a judge that watches only one of them will adopt the trade
+/// without noticing it was made.
+pub struct RuleVerdict {
+    pub n: usize,
+    /// Paired counts, incumbent against candidate.
+    pub fixed: usize,
+    pub broke: usize,
+    pub chi: f32,
+    /// How often each rule claims unanimity, and how often it is right when
+    /// it does.
+    pub conf_was: usize,
+    pub conf_now: usize,
+    pub gap_was: f32,
+    pub gap_now: f32,
+}
+
+impl RuleVerdict {
+    /// The one number the whole judge is about: how much better the confident
+    /// items are than the unconfident ones.
+    pub fn gain(&self) -> f32 {
+        self.gap_now - self.gap_was
+    }
+}
+
+/// Measure a candidate rule against the one in force, on one pass.
+///
+/// Both rules are evaluated per item from the same fitted probe and council,
+/// which is not merely cheaper than two passes -- it is the only way the
+/// comparison is paired. Fitting twice would give two rules two slightly
+/// different councils and call the difference an effect.
+pub fn rule_bench(e: &mut super::Engine, candidate: Rule) -> Result<RuleVerdict, String> {
+    let Some(f) = featurise(e) else {
+        return Err(String::from("no corpus to judge against"));
+    };
+    let lambda = default_lambda();
+    let fitted = fit_all(e, &f, &[lambda]);
+    let Some((_, probe)) = fitted.probes.first() else {
+        return Err(String::from("the probe would not fit"));
+    };
+    let all: Vec<usize> = (0..f.classes).collect();
+    let was = rule_in_force();
+
+    let mut v = RuleVerdict {
+        n: 0,
+        fixed: 0,
+        broke: 0,
+        chi: 0.0,
+        conf_was: 0,
+        conf_now: 0,
+        gap_was: 0.0,
+        gap_now: 0.0,
+    };
+    // (confident right, confident total, unconfident right, unconfident total)
+    let mut a = (0usize, 0usize, 0usize, 0usize);
+    let mut b = (0usize, 0usize, 0usize, 0usize);
+
+    for (split, x, want, text) in &f.ev {
+        if *split != VALIDATION {
+            continue;
+        }
+        let p = probe.predict(x);
+        let pair = fitted.council.as_ref().and_then(|c| c.corroborate(text, &e.tok, &all));
+        let Some((l, ch)) = pair else { continue };
+
+        let mut tally = |rule: Rule, bucket: &mut (usize, usize, usize, usize)| -> bool {
+            let says = core_vote(rule, text, &all);
+            let win = decide_with(rule, p, pair, says);
+            // The same count `route` reports: how many of the three landed on
+            // the winner. The written core is deliberately not among them --
+            // it is a fourth voice, and calling three-of-four unanimous would
+            // change what the word has meant in every earlier measurement.
+            let agree = usize::from(win == p) + usize::from(win == l) + usize::from(win == ch);
+            let right = win == *want;
+            if agree == 3 {
+                bucket.1 += 1;
+                bucket.0 += usize::from(right);
+            } else {
+                bucket.3 += 1;
+                bucket.2 += usize::from(right);
+            }
+            right
+        };
+
+        let ok_was = tally(was, &mut a);
+        let ok_now = tally(candidate, &mut b);
+        v.n += 1;
+        match (ok_was, ok_now) {
+            (false, true) => v.fixed += 1,
+            (true, false) => v.broke += 1,
+            _ => {}
+        }
+    }
+
+    if v.n == 0 {
+        return Err(String::from("nothing in validation to judge against"));
+    }
+    let gap = |t: (usize, usize, usize, usize)| -> f32 {
+        // An empty bucket carries no information, and calling that a perfect
+        // separation is how a rule that answers confidently once wins.
+        if t.1 == 0 || t.3 == 0 {
+            return 0.0;
+        }
+        t.0 as f32 / t.1 as f32 - t.2 as f32 / t.3 as f32
+    };
+    v.conf_was = a.1;
+    v.conf_now = b.1;
+    v.gap_was = gap(a);
+    v.gap_now = gap(b);
+    v.chi = super::godel::mcnemar(v.broke, v.fixed);
+    Ok(v)
+}
+
 /// What the cue pool could do, if the machine chose from it perfectly.
 ///
 /// The producer's ceiling, the way `core_prize` is the judge's. Counting cues
@@ -2509,6 +2647,20 @@ pub fn core_report(hash: &[u8; 32], install: bool) {
 
     let mark = |p: bool| if p { "pass" } else { "VETO" };
     kprintln!("  judged on {} validation items", v.n);
+    // A core is judged under `WithCore` and consulted only under `WithCore`,
+    // and the rule the machine actually runs defaults to `Majority`. So a core
+    // can pass every judge here, be installed, and never be asked anything --
+    // which looks from the ledger exactly like a core that was adopted and
+    // working. `godel rule withcore` is the judged way to change that.
+    if rule_in_force() != Rule::WithCore {
+        console::set_color(YELLOW);
+        kprintln!(
+            "  the rule in force is '{}', which never consults a core --",
+            rule_in_force().name()
+        );
+        kprintln!("  adopting one here changes nothing until 'godel rule withcore' passes");
+        console::set_color(LTGRAY);
+    }
     // The room, before the verdict. A reader who sees a veto without this
     // concludes the candidate was poor; more often the slice had nothing in
     // it for any candidate to win.

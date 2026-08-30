@@ -412,8 +412,47 @@ re-addressed every node in every lineage, making `head` name something that
 no longer reproduces -- the change meant to extend re-derivability breaking
 it instead. Three selftest claims assert this rather than trusting it.
 
-`Variant.skills` carries an adopted skill's address now. `Variant.rule` is
-still a hook. `rule` reaches the variant
+`Variant.skills` carries an adopted skill's address now, and `rule` is
+searchable at last -- see below.
+
+**The routing rule needed a different judge, which is why it sat unsearchable
+behind a comment.** Every other proposal is selected by J1, a net repair beyond
+the noise, and a rule change is mostly not that: what it moves is
+*calibration*, how much better the council's confident answers are than its
+unconfident ones. `agreement` counts how many of the three cores landed on the
+winner, and the winner is what the rule decides, so accuracy and confidence
+move together and a judge watching one adopts the trade without noticing it was
+made. `harness::rule_bench` evaluates both rules per item from one fitted probe
+-- paired, because fitting twice would give two rules two slightly different
+councils and call the difference an effect -- and `godel::trial_config` judges:
+
+- **J1 do no harm.** Requiring a *win* here is exactly what made the axis
+  unsearchable. But "not significantly worse" alone is too weak in the losing
+  direction: it adopted `ProbeOnly` on a measured `fixed 4 broke 10`, a net
+  loss of six items out of 180, because chi reached 1.79 against 3.84. The
+  floor is symmetric now -- `MIN_FIXED` says a net repair under four is not a
+  repair, and just as well that a net loss over four is not nothing.
+- **J2 must improve.** The confidence gap has to widen by `MIN_CAL_GAIN`, and
+  the confident set must not collapse to four fifths of what it was. A rule
+  beautifully calibrated over six items has stopped answering, not improved.
+
+Measured: `probe` and `lexical` both cost accuracy and are refused; `majority`
+and `withcore` change nothing and are refused for having improved nothing.
+
+**An adopted core is inert unless the rule is `withcore`.** `core_vote` returns
+`None` when `!rule.needs_core()`, and `rule_in_force()` defaults to `Majority`
+-- so a core can pass all three of its judges, be installed, and never be asked
+anything, which from the ledger looks exactly like a core that is working.
+`core judge` says so now, and `godel rule withcore` is the judged way to change
+it.
+
+**Nodes record the rule in force, not the proposal's.** It was `p.rule`, and
+every grid point carries 0 -- `ProbeOnly` -- while the machine has been running
+the default `Majority` throughout. Every node in every lineage therefore
+recorded a rule its variant was never measured under. `rollback` restores the
+rule too, but only when the two nodes disagree about it: unconditional
+restoration would switch a lineage full of those legacy zeroes to a rule none
+of them ever ran. `rule` reaches the variant
 from the proposal now but nothing varies it, because J1 is a paired test over
 routing decisions and the rule changes `Verdict::confident` -- how much the
 council will claim, not what it answers. Varying it without a judge that
