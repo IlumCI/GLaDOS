@@ -125,7 +125,7 @@ error instead of a silent omission.
 ### The corpus, and getting one into a running machine
 
 `/ai/train` holds the routing corpus as one blob per example, `applet<tab>task`.
-It is seeded at boot from `src/ai/corpus.rs` (465 examples, compiled in so the
+It is seeded at boot from `src/ai/corpus.rs` (717 examples, compiled in so the
 system can route before anything is mounted) and `teach` appends to it.
 
 `dataset.py --blobs` writes the same examples a second way, as a `GLADOSC1`
@@ -171,10 +171,11 @@ every number ambiguous:
   token, which is weaker than `Trial`'s -- that scores every step of the
   spelling under a grammar that has already removed unreachable applets.
 
-  **It is the one training path with no judge in front of it.** `godel` adopts
-  nothing without four of them agreeing; `deeptrain` changes the live model on
-  the operator's say-so, and a lower training loss is not evidence that routing
-  improved. `adapter off` is the way back.
+  **It goes through the judges now.** It was the one training path with none
+  in front of it -- it walked gradients into the live model and kept whatever
+  came out. It is a `ProposalKind::Deep` proposal, so J1-J4 decide, the
+  incumbent is copied out before training and put back on every path that does
+  not adopt, and a rejection prints "rejected, and reverted".
 
 ```
 train adapter [-e epochs] [-n examples] [-ms budget] [-r rank] [-lr rate]
@@ -390,12 +391,19 @@ neither head nor ledger, so `ensure_head` wrote a node describing a
 classifier-only variant -- not "unknown", which would have been honest, but
 *wrong*. `Variant.deep` is read off the adapter (`qkv.iter().any(...)`), so
 it cannot disagree with what is attached, and the node is written when the
-training happens rather than when the next trial notices. Still unjudged and
-it says so; what changed is that it is addressable, so `godel rollback` steps
-over it. Routing it through J1-J4 is **not** done and is not a small job:
-those judges rest on cached features and a deep adapter moves the features,
-so an honest judgement needs a second `prepare` -- a forward pass per example
-again.
+training happens rather than when the next trial notices.
+
+It is judged now, and how is the interesting part. Those judges rest on cached
+features and a deep adapter moves the features, so a `Trial` prepared before
+the run cannot judge what came out of it -- and re-preparing one afterwards
+does not work either, because its decisions are recorded along the baseline's
+own decode path, so a change that alters that path alters how many decisions
+there are and the two lists stop lining up item for item.
+`harness::route_snapshot` pairs on *routing* instead: one entry per example,
+the same examples both times, and the four curiosity goals recomputed on both
+sides. Two full passes over the corpus, which is the frozen-base trade with a
+number on it -- as is J4 reporting 2,646 KiB resident at rank 4 against a few
+KiB for a classifier adapter.
 
 **Both new `Variant` fields render only when non-default.** Adding a field to
 a hashed structure re-addresses every object that already exists unless the
@@ -404,7 +412,8 @@ re-addressed every node in every lineage, making `head` name something that
 no longer reproduces -- the change meant to extend re-derivability breaking
 it instead. Three selftest claims assert this rather than trusting it.
 
-`Variant.rule` and `Variant.skills` are still hooks. `rule` reaches the variant
+`Variant.skills` carries an adopted skill's address now. `Variant.rule` is
+still a hook. `rule` reaches the variant
 from the proposal now but nothing varies it, because J1 is a paired test over
 routing decisions and the rule changes `Verdict::confident` -- how much the
 council will claim, not what it answers. Varying it without a judge that
@@ -421,8 +430,8 @@ Root certificate bundle, built from the host's store:
 There is no `cargo test`. This is a `no_std` UEFI binary with no host test
 runner, so **verification is the boot selftests plus driving QEMU.**
 
-At boot the system runs **eighteen selftest sections carrying seventy-three
-claims** (the `aiksi` section covers the capability gate by name and never by
+At boot the system runs **nineteen selftest sections**, ten of which `diag`
+also re-runs as named suites on demand (the `aiksi` section covers the capability gate by name and never by
 calling -- half that table pokes memory, drives I/O ports or paints over the
 screen, and a suite that called every row to prove it exists would be
 scribbling on the machine to do it), printing `ok` or `FAIL` per line: heap, timer, clock, the namespace's
@@ -1164,6 +1173,41 @@ to the first match.
 The three seeded tools need only Pure and Read builtins and go on working
 sandboxed. Nothing that ships needs operator powers, and now nothing has them
 until asked.
+
+**Writing a skill is no longer adopting it.** `agent learn` compiled a
+successful episode into `/ai/tools` and that was the whole of adoption -- the
+file appeared and `run` would execute it, with nothing having asked whether it
+was any good. `skill judge <path>` stores a candidate by content address under
+`/ai/skills` and runs it through `godel::run` as a `ProposalKind::Skill`;
+adoption copies it to `/ai/tools/learned-<hash>.ai&xi`, writes a node, and
+leaves something `godel rollback` can undo.
+
+Four judges, and what they are is constrained by what a replay skill *is*. It
+takes no arguments and dispatches a fixed sequence, so "does it work on a task
+it has not seen" is not a question it can answer -- a judge for that could
+never fail here, which is worse than not having one. What is left is
+admission, not improvement: it parses (J1), it runs under the powers an
+unadopted skill actually has (J2 -- a replay of an episode the *operator*
+drove often depends on a mutating applet a sandbox refuses), it repeats (J3),
+and it is cheap (J4).
+
+J3's blind spot is written down rather than discovered later: it compares the
+value the program answered, its step count and the objects it touched, and
+**not what it printed**. A replay is a sequence of `println(applet(...))`,
+which answers nil however the applets behaved. The selftest claim for J3 was
+itself wrong twice for related reasons -- first printing the clock instead of
+answering it, then answering a 100 Hz clock that does not move between two
+adjacent runs.
+
+**`run`'s argument is decoded under a grammar.** The applet *name* always was,
+so an applet that does not exist is unreachable; its arguments were free text,
+which is right for a filename to write and wrong for `run`, where the whole
+space is enumerable. The model had to spell `/ai/tools/learned-3f2a91c4.ai&xi`
+exactly, so a skill it could not spell was a skill it could not use however
+good the judges said it was -- adoption that put a tool in the toolkit nothing
+could pick up. `agent::skill_choices` is the list and the grammar is built from
+it. Not exercised through a real episode: that needs a model and minutes, and
+what is checked at boot is that every choice is a full path to a program.
 
 ### Storage (`src/store/`, `src/sysbox/`)
 

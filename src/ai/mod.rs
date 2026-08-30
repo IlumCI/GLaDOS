@@ -21,6 +21,7 @@ pub mod harness;
 pub mod model;
 pub mod probe;
 pub mod sample;
+pub mod skill;
 pub mod tensor;
 pub mod tokenizer;
 pub mod vocab;

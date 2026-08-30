@@ -459,6 +459,25 @@ fn prompt_for(goal: &str, steps: &[Step], ctx: &EpisodeCtx, names: &[&str]) -> S
 /// Arguments are free text, greedy, continuing the cache the chosen branch
 /// left behind -- a routed choice with required arguments gets a two-line
 /// prompt instead, since a reflex has no branch context to continue.
+/// The programs `run` can actually be handed, as full paths.
+///
+/// Every tool, not only the ones the judges adopted: a seeded tool is as
+/// runnable as a learned one, and offering a shorter list than the truth would
+/// make `run` unable to reach things that work. Sorted, because `children` is
+/// sorted and a grammar built in a stable order is one a later reader can
+/// rebuild.
+pub fn skill_choices() -> Vec<String> {
+    sysbox::children("/ai/tools")
+        .into_iter()
+        .filter(|n| n.ends_with(".ai&xi"))
+        .map(|n| {
+            let mut p = String::from("/ai/tools/");
+            p.push_str(&n);
+            p
+        })
+        .collect()
+}
+
 fn propose(goal: &str, steps: &[Step], ctx: &EpisodeCtx, trust: Trust) -> Option<(String, String)> {
     let names = harness::admitted(trust);
     let prompt_of = || {
@@ -483,6 +502,68 @@ fn propose(goal: &str, steps: &[Step], ctx: &EpisodeCtx, trust: Trust) -> Option
     let from_context = decision.tier != deliberate::Tier::Reflex;
     if !from_context && sysbox::check_args(&name, "").is_ok() {
         return Some((name, String::new()));
+    }
+
+    // `run` takes a path, and which paths exist is knowable.
+    //
+    // The applet name has always been decoded under a grammar, so an applet
+    // that does not exist is unreachable rather than rejected afterwards. Its
+    // *arguments* were free text, which for every other applet is right --
+    // a filename to write, a string to search for -- and for `run` is the one
+    // case where the whole space is enumerable. Free-texting it meant the
+    // model had to spell `/ai/tools/learned-3f2a91c4.ai&xi` exactly, and a
+    // skill it could not spell was a skill it could not use however good the
+    // judges said it was. That is what made adoption meaningless: a tool in
+    // the toolkit that nothing could pick up.
+    //
+    // Same treatment as the name, then, and for the same reason. The
+    // conversation is invalidated either way -- the free-text walk below ends
+    // with the identical call -- so this costs nothing that path was not
+    // already paying.
+    if name == "run" {
+        let choices = skill_choices();
+        if !choices.is_empty() {
+            let picked = harness::with_alphabet(|alphabet| {
+                with_engine(|e| {
+                    let refs: Vec<&str> = choices.iter().map(|s| s.as_str()).collect();
+                    let grammar = super::constrain::Grammar::new(refs.iter().copied());
+                    let bound = super::constrain::step_bound(&grammar);
+                    let mut cursor = super::constrain::Cursor::new(&grammar);
+                    let limit = e.model.cfg.seq_len;
+                    let mut pos = e.pos;
+                    let (mut steps, mut idle, mut found) = (0usize, 0usize, None);
+                    while steps < bound && idle <= ARGS_TOKEN_BUDGET && pos < limit {
+                        let cands = cursor.candidates(alphabet);
+                        let Some(next) =
+                            sample::sample_among(&e.state.logits, &cands, 0.7, 0.0, &mut e.rng)
+                        else {
+                            break;
+                        };
+                        if cursor.push(alphabet, next) {
+                            steps += 1;
+                        } else {
+                            idle += 1;
+                        }
+                        if let Some(i) = cursor.finished() {
+                            found = Some(i);
+                            break;
+                        }
+                        e.model.forward(&mut e.state, next, pos);
+                        pos += 1;
+                    }
+                    harness::invalidate_conversation(e);
+                    found
+                })
+            })
+            .flatten()
+            .flatten();
+            if let Some(i) = picked {
+                return Some((name, choices[i].clone()));
+            }
+            // Falling through to the free-text walk is deliberate. A decode
+            // that would not commit is a small model failing to choose, not a
+            // reason to abandon the step -- and the old path still works.
+        }
     }
 
     let args = harness::with_alphabet(|_alphabet| {

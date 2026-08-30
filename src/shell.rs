@@ -3235,6 +3235,41 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         kprintln!("  every skill is sandboxed again");
                     }
                 }
+                // Judge a program and adopt it into the toolkit if it passes.
+                //
+                // `agent learn` used to be the whole of adoption: the file
+                // appeared under /ai/tools and `run` would execute it, with
+                // nothing having asked whether it was any good. This is the
+                // same route every other change the machine makes to itself
+                // takes -- judges, a node, a ledger line, and a rollback.
+                ("judge", p) if !p.is_empty() => match crate::sysbox::read_blob(p) {
+                    None => kprintln!("  no such file: {}", p),
+                    Some(bytes) => {
+                        let src = alloc::string::String::from_utf8_lossy(&bytes).into_owned();
+                        let h = crate::ai::skill::store(&src);
+                        let prop = crate::ai::godel::Proposal::skill(h);
+                        let b = prop.budget(0, 0);
+                        match crate::ai::with_engine(|e| crate::ai::godel::run(e, &b, &prop)) {
+                            None => kprintln!("  {}", crate::ai::engine_refusal()),
+                            Some(Err(why)) => kprintln!("  refused: {}", why.why()),
+                            Some(Ok(c)) => {
+                                let v = crate::ai::skill::bench(&h);
+                                console::set_color(if c.adopted { LTGREEN } else { YELLOW });
+                                kprintln!(
+                                    "  {} {}",
+                                    if c.adopted { "adopted" } else { "rejected" },
+                                    &crate::ai::voter::hex(&h)[..8]
+                                );
+                                console::set_color(LTGRAY);
+                                kprintln!("  J1 {} | J2 {} | J3 {} | J4 {} step(s)", v.j1_why, v.j2_why, v.j3_why, v.steps);
+                                if c.adopted {
+                                    kprintln!("  at {}", crate::ai::skill::adopted_path(&h));
+                                    kprintln!("  'godel rollback' takes it back out");
+                                }
+                            }
+                        }
+                    }
+                },
                 _ => {
                     let all = crate::sysbox::skill_list();
                     if all.is_empty() {

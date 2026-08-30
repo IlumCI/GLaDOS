@@ -156,6 +156,10 @@ pub enum ProposalKind {
     /// Adapt the attention path as well as the classifier, and judge what
     /// that bought against what it costs. J1-J4, paired on routing.
     Deep,
+    /// Admit a skill the machine compiled from an episode. Judged by
+    /// `skill::bench`: it is a program, it runs under the powers it will
+    /// really have, it repeats, and it is cheap.
+    Skill([u8; 32]),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -225,6 +229,16 @@ impl Proposal {
         Proposal { lr, rank, alpha, epochs, rule: 0, kind: ProposalKind::Deep }
     }
 
+    /// A proposal to admit a stored skill.
+    ///
+    /// No training knobs at all: a skill is a program that already exists and
+    /// the question is whether it is fit to keep, not how to make one. They
+    /// are still rendered, for the reason `core` renders them -- the marker
+    /// directory holds one kind of document.
+    pub fn skill(h: [u8; 32]) -> Proposal {
+        Proposal { lr: 0.0, rank: 0, alpha: 0.0, epochs: 0, rule: 0, kind: ProposalKind::Skill(h) }
+    }
+
     pub fn budget(&self, examples: usize, millis: u64) -> Budget {
         Budget {
             epochs: self.epochs,
@@ -270,6 +284,11 @@ impl Proposal {
                 s.push('\n');
             }
             ProposalKind::Deep => s.push_str("deep 1\n"),
+            ProposalKind::Skill(h) => {
+                s.push_str("skill ");
+                s.push_str(&hex32(&h));
+                s.push('\n');
+            }
         }
         s
     }
@@ -1344,6 +1363,10 @@ pub fn run(
             trial_core(e, &h).map_err(Refused::Judge)
         }
         ProposalKind::Deep => trial_deep(e, b, p),
+        ProposalKind::Skill(h) => {
+            p.mark();
+            trial_skill(&h).map_err(Refused::Judge)
+        }
     }
 }
 
@@ -1972,6 +1995,98 @@ pub fn trial_deep(
         // trained into the live model and left whatever came out, judged or
         // not, until the next reboot.
         restore(e, &saved);
+    }
+
+    let hour = crate::dev::rtc::now().map(|d| d.hour).unwrap_or(0);
+    let seq = TRIALS.load(Ordering::Relaxed);
+    ledger_append(&render_certificate(&cert, seq, hour));
+    Ok(cert)
+}
+
+/// Judge a skill and, if it passes, put it where `run` will find it.
+///
+/// The cheapest trial in the module and the only one that needs no model: a
+/// skill is a program, and the four things worth asking about one are all
+/// answerable by running it. That matters more than it sounds -- it means the
+/// night loop can judge a skill on a machine with no checkpoint loaded, and
+/// that a rejection costs seconds rather than the twenty minutes an adapter
+/// trial costs.
+///
+/// **Adoption is a copy, not a rename.** The candidate stays at its content
+/// address under `/ai/skills` and a copy lands in `/ai/tools`, so the thing
+/// that was judged and the thing that runs are provably the same bytes. A
+/// rename would leave the ledger naming an address nothing holds.
+pub fn trial_skill(h: &[u8; 32]) -> Result<Certificate, &'static str> {
+    let v = super::skill::bench(h);
+    let Some(src) = super::skill::source(h) else { return Err("no such skill") };
+    TRIALS.fetch_add(1, Ordering::Relaxed);
+
+    // A skill does not change the mind, so the node it writes names the same
+    // adapter and core the head already did. What it changes is the toolkit,
+    // and `skills` is the field for it -- hooked up at last, having been
+    // hardcoded `None` since the struct was written.
+    let parent = head();
+    let carried = parent.and_then(|p| Variant::load(&p));
+    let variant = Variant {
+        parent,
+        adapter: carried.as_ref().and_then(|v| v.adapter),
+        policy: sysbox::read_blob("/ai/agent/policy").map(|p| sha256::hash(&p)),
+        skills: Some(*h),
+        corpus: sysbox::hash_of(super::vocab::CORPUS),
+        deep: carried.as_ref().map(|v| v.deep).unwrap_or(false),
+        core: super::voter::installed().map(|c| c.hash),
+        core_seen: true,
+        lambda: 0.0,
+        rank: 0,
+        epochs: 0,
+        rule: super::harness::rule_in_force() as u8,
+        born: crate::dev::rtc::now().map(|d| crate::dev::rtc::unix_seconds(&d)).unwrap_or(0),
+    };
+    let vhash = variant.hash();
+
+    let mut cert = Certificate {
+        parent,
+        variant: vhash,
+        // Two runs, which is what J3 compared. Not routing decisions, and the
+        // ledger's `n` should not be read as though it were.
+        decisions: 2,
+        validation: 2,
+        // Nothing predicts a skill: it is admitted or it is not, and there is
+        // no cheap signal that anticipates the verdict the way a training loss
+        // anticipates an adapter's.
+        predicted: false,
+        fixed: 0,
+        broke: 0,
+        mcnemar: 0.0,
+        j1: v.j1,
+        j1_why: v.j1_why,
+        goals_held: if v.j2 { 1 } else { 0 },
+        goals_total: 1,
+        j2: v.j2,
+        j3: v.j3,
+        j3_why: v.j3_why,
+        // Steps stand in for resident bytes: both are "what it costs to have",
+        // measured in the unit that matters for the kind of thing it is.
+        resident_kib: (v.steps / 1024) as usize,
+        rank: 0,
+        j4: v.j4,
+        epochs: 0,
+        capped: false,
+        adopted: false,
+        test_acc: 0.0,
+        test_read: 0,
+        test_fresh: true,
+    };
+    cert.adopted = cert.unanimous();
+
+    if cert.adopted {
+        let path = super::skill::adopted_path(h);
+        if !sysbox::write_text(&path, &src) {
+            return Err("it passed and the toolkit would not take it");
+        }
+        variant.store();
+        set_head(&vhash);
+        ADOPTIONS.fetch_add(1, Ordering::Relaxed);
     }
 
     let hour = crate::dev::rtc::now().map(|d| d.hour).unwrap_or(0);
