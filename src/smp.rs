@@ -448,6 +448,30 @@ fn wait_for(target: usize, ms: u64) -> bool {
 }
 
 /// Cores answering, including the bootstrap processor.
+/// Which core is executing this, as a small dense index.
+///
+/// The local interrupt controller's identifier is the only thing a core can
+/// ask about itself without per-core storage, and it is sparse: firmware
+/// numbers cores however it likes. So it is read and looked up in a table
+/// built while the cores were being started.
+///
+/// This costs a memory-mapped read and is therefore never on a hot path. It
+/// is for reports and for the deadlock message.
+pub fn this_cpu() -> u32 {
+    let id = crate::dev::lapic::id() as usize;
+    let t = unsafe { &*LAPIC_TO_CPU.get() };
+    t[id] as u32
+}
+
+/// Sparse local-controller identifier to dense index. Written only while cores
+/// are being brought up, and read-only afterwards.
+static LAPIC_TO_CPU: crate::sync::Racy<[u8; 256]> = crate::sync::Racy::new([0u8; 256]);
+
+/// Record that this controller identifier is core `index`.
+fn map_cpu(lapic_id: u8, index: u8) {
+    unsafe { LAPIC_TO_CPU.get()[lapic_id as usize] = index };
+}
+
 pub fn online() -> usize {
     ONLINE.load(Ordering::SeqCst) + 1
 }
@@ -475,6 +499,9 @@ pub fn init(acpi: &crate::acpi::Acpi) -> usize {
     }
 
     let me = lapic::id() as u32;
+    // The bootstrap processor is core 0 whatever the firmware numbered it, so
+    // `this_cpu` answers something meaningful before any AP exists.
+    map_cpu(me as u8, 0);
     let mut started = 0usize;
 
     for i in 0..acpi.cpus.min(crate::acpi::MAX_CPUS) {
@@ -496,6 +523,10 @@ pub fn init(acpi: &crate::acpi::Acpi) -> usize {
         let top = (stack.as_ptr() as u64 + AP_STACK as u64) & !0xF;
         unsafe { params.add(2).write_volatile(top) };
 
+        // Mapped before the core is started rather than after: the core can
+        // reach a lock, and therefore `this_cpu`, before `init` gets another
+        // turn to record anything.
+        map_cpu(id as u8, (started + 1) as u8);
         let want = ONLINE.load(Ordering::SeqCst) + 1;
         lapic::send_init(id);
         udelay(10_000);
@@ -624,6 +655,86 @@ pub fn selftest() -> bool {
 /// core runs, so a "parallel" pass is really eight threads competing for
 /// whatever the host has left -- the answer it gives is about the host, not
 /// about this kernel. A tight loop here has no such problem.
+/// Allocate and free from every core at once, and check nothing was lost.
+///
+/// This is the claim the allocator's lock makes, tested rather than argued.
+/// Each chunk allocates a block, writes a pattern the whole way through it,
+/// reads it back, and frees it. A heap that handed the same block to two
+/// cores fails the read-back; one whose free list corrupted fails to satisfy
+/// a later request or returns overlapping blocks.
+///
+/// The sizes vary per chunk on purpose. A fixed size exercises one free-list
+/// bucket, and the bug this is looking for is two cores splitting or merging
+/// the same block, which needs sizes that actually split and merge.
+unsafe fn hammer(_ctx: usize, lo: usize, hi: usize) {
+    use alloc::vec::Vec;
+    for i in lo..hi {
+        let n = 16 + (i % 97) * 8;
+        let mut v: Vec<u8> = Vec::with_capacity(n);
+        let tag = (i & 0xFF) as u8;
+        for _ in 0..n {
+            v.push(tag);
+        }
+        // Read back before dropping. Two cores handed the same allocation see
+        // each other's tag here, which is the failure this exists to catch.
+        if v.iter().any(|b| *b != tag) {
+            BAD.fetch_add(1, Ordering::Relaxed);
+        }
+        RAN.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+static BAD: AtomicUsize = AtomicUsize::new(0);
+static RAN: AtomicUsize = AtomicUsize::new(0);
+
+/// The concurrency claims, which need more than one core to mean anything.
+pub fn selftest_mt() -> bool {
+    let mut ok = true;
+    fn claim(ok: &mut bool, good: bool, what: &str) {
+        crate::kprintln!("  {}   {}", if good { "ok " } else { "FAIL" }, what);
+        *ok &= good;
+    }
+
+    ok &= crate::sync::selftest();
+
+    let cores = online();
+    claim(&mut ok, this_cpu() == 0, "the bootstrap processor is core 0");
+    if cores == 0 {
+        crate::kprintln!("  no application processors; the rest needs more than one core");
+        return ok;
+    }
+
+    // Sixty-four rounds, for the reason the split matvec runs sixty-four:
+    // a single pass through a lock is not evidence about a lock.
+    let before = crate::mem::heap::HEAP.stats().0;
+    BAD.store(0, Ordering::Relaxed);
+    RAN.store(0, Ordering::Relaxed);
+    let mut ran_parallel = 0;
+    for _ in 0..64 {
+        // Width is chosen to clear the threshold below which the split
+        // declines and does the work serially, so this is actually testing
+        // several cores rather than one.
+        if parallel_split(0, hammer, 4096, 256) {
+            ran_parallel += 1;
+        } else {
+            unsafe { hammer(0, 0, 4096) };
+        }
+    }
+    let after = crate::mem::heap::HEAP.stats().0;
+
+    claim(&mut ok, ran_parallel > 0, "the allocator was exercised from several cores");
+    claim(&mut ok, RAN.load(Ordering::Relaxed) == 64 * 4096, "every chunk ran exactly once");
+    claim(
+        &mut ok,
+        BAD.load(Ordering::Relaxed) == 0,
+        "no allocation was handed to two cores at once",
+    );
+    // A leak here is a lost block rather than a wrong answer, and it is the
+    // failure a lock protects against on the free path specifically.
+    claim(&mut ok, after == before, "and the heap is exactly where it started");
+    ok
+}
+
 pub fn bench() {
     use crate::ai::weights::Mat;
     use alloc::vec;

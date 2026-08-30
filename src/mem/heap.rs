@@ -175,38 +175,50 @@ impl Heap {
     }
 }
 
+// The free list is raw pointers, which are not `Send` by default and are
+// sound to move between cores here for a reason specific to this kernel:
+// there is one address space, so a pointer means the same thing on every core
+// and none of them is holding a per-core mapping of it. `Spin` requires the
+// claim rather than assuming it, which is the point of requiring it.
+unsafe impl Send for Heap {}
+
 pub struct LockedHeap {
-    inner: crate::sync::Racy<Heap>,
+    inner: crate::sync::Spin<Heap>,
 }
 
 impl LockedHeap {
     pub const fn new() -> Self {
-        Self { inner: crate::sync::Racy::new(Heap::empty()) }
+        Self { inner: crate::sync::Spin::new(Heap::empty()) }
     }
 
     /// # Safety
     /// See `Heap::add_region`.
     pub unsafe fn add_region(&self, start: usize, size: usize) {
-        unsafe { self.inner.get().add_region(start, size) }
+        unsafe { self.inner.lock_irq().add_region(start, size) }
     }
 
     pub fn stats(&self) -> (usize, usize) {
-        let h = unsafe { self.inner.get() };
+        let h = self.inner.lock_irq();
         (h.used(), h.total())
     }
 }
 
-// Single core, and allocation never happens inside an interrupt handler in
-// this kernel. When either of those stops being true this needs a real lock --
-// it uses Racy precisely so it shows up in the same grep as everything else
-// that SMP will break.
+// A real lock, because more than one core reaches this now. The interrupt
+// masking is not optional either: an allocation inside an interrupt handler
+// that preempted an allocation on the same core would spin for a lock the
+// interrupted code holds and can never release. Masking for the length of the
+// critical section makes that case impossible rather than unlikely.
+//
+// This was the first conversion from `Racy` to `Spin`, and it is the one that
+// matters most: everything above it allocates, so a heap that is not safe
+// makes every other core useless whatever else is true of it.
 unsafe impl GlobalAlloc for LockedHeap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        unsafe { self.inner.get().alloc(layout) }
+        unsafe { self.inner.lock_irq().alloc(layout) }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { self.inner.get().dealloc(ptr, layout) }
+        unsafe { self.inner.lock_irq().dealloc(ptr, layout) }
     }
 }
 
