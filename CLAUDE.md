@@ -283,6 +283,36 @@ Four judges, unanimity required, each a different failure mode:
 Trials run only when the RTC hour falls in the quiet window (02:00 to 06:00)
 **and** `godbits::felt()` shows no hardware input.
 
+**The night branch rotates over every axis that has a judge.** It knew two
+jobs and godel always won the tie, so the adapter grid was walked to
+exhaustion while the routing rule, deep training, a skill the agent compiled
+and a core the machine wrote were never tried unattended at all -- "search
+space exhausted" was the end of self-improvement, eight points and then
+nothing, every night forever.
+
+`godel::next_proposal` starts from the number of verdicts already recorded and
+takes the first kind from there that has work, so which axis a given night
+takes is a function of the ledger rather than of a coin -- the same
+re-derivability argument that makes `frontier` walk a declared grid. An
+exhausted axis costs one skipped slot rather than an idle night, and the loop
+stops only when every axis is out of moves. Order is cheap-and-declared before
+expensive-and-composed: a grid point and a rule change are minutes, a deep
+trial is two passes over the corpus, and composing a core spends a dozen
+decodes writing something that may not survive its first judge.
+
+`godel next` reports where the rotation stands without taking a turn. It
+deliberately does not ask the last slot whether it has work, because finding
+out costs those decodes -- a command answering "what would you do tonight"
+must not spend the night doing it.
+
+Widening this had to come last, and the ordering is the point rather than an
+accident: an axis in the rotation without a judge in front of it is a machine
+adopting things nobody measured.
+
+Still not done from that plan item: an authored application is left as a draft
+and never adopted, and `aixi`'s plan is still stringified to a report rather
+than gating how much the loop attempts.
+
 That question -- is anybody here -- is `quiet_hours()`, and it is shared with
 the other unattended job. `initiative::tick`'s sleep branch also writes an
 application from `WORKS`, leaving a draft it never adopts. Each job owns its own

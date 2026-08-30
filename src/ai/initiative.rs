@@ -498,21 +498,24 @@ fn tick_inner(forced: bool) {
                     // `Default::default()` here and at the prompt, which meant
                     // every trial trained the identical adapter and every one
                     // after the first was rejected against itself.
-                    // The declared grid first; when it is spent, the machine
-                    // writes something of its own to judge.
+                    // Every axis the judges can reach, in a rotation.
                     //
-                    // This is where the loop stops being an adapter search.
-                    // The grid is finite and always was, so "search space
-                    // exhausted" was the end of self-improvement -- eight
-                    // points, then nothing, every night, forever. Composing a
-                    // core is the one axis where the space is not enumerable
-                    // in advance, because the machine writes the candidate.
-                    // It goes second rather than first because the grid is a
-                    // declared experiment and a composed core is a guess.
-                    let picked = match super::godel::frontier() {
-                        Some(p) => Some(p),
-                        None => super::godel::author_core(),
-                    };
+                    // This branch knew two jobs and godel always won the tie,
+                    // so the adapter grid was walked to exhaustion while the
+                    // routing rule, deep training, a skill the agent compiled
+                    // and a core the machine wrote were never tried unattended
+                    // at all -- "search space exhausted" was the end of
+                    // self-improvement, eight points and then nothing, every
+                    // night forever.
+                    //
+                    // Widening it had to come last, and that ordering is the
+                    // point rather than an accident: an axis in the rotation
+                    // without a judge in front of it is a machine adopting
+                    // things nobody measured. `next_proposal` starts from the
+                    // number of verdicts already recorded, so which axis a
+                    // given night takes is a function of the ledger and not of
+                    // a coin.
+                    let picked = super::godel::next_proposal();
                     // Whether there was anything to run, remembered rather
                     // than re-derived afterwards.
                     //
@@ -543,12 +546,11 @@ fn tick_inner(forced: bool) {
                             let (seen, all) = super::godel::explored();
                             match super::godel::core_room() {
                                 Some((prize, need)) if prize < need => format!(
-                                    "grid spent ({} of {}); no core can pass here -- {} \
-                                     validation item(s) within reach, {} needed",
+                                    "every axis is out of moves; {} of {} grid points tried, and no core can pass here ({} within reach, {} needed)",
                                     seen, all, prize, need
                                 ),
                                 _ => format!(
-                                    "grid spent ({} of {}), nothing composed to judge",
+                                    "every axis is out of moves ({} of {} grid points tried)",
                                     seen, all
                                 ),
                             }

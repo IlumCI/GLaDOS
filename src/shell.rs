@@ -1708,6 +1708,18 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         }
                     }
                 }
+                // What the loop would try tonight, without trying it.
+                "next" => {
+                    let (start, slots) = godel::rotation();
+                    kprintln!("  {} verdict(s) recorded, so the rotation starts at slot {}", godel::ledger_len(), start);
+                    for (i, (name, has)) in slots.iter().enumerate() {
+                        let mark = if i == start { "->" } else { "  " };
+                        kprintln!("  {} {:8} {}", mark, name, if *has { "has work" } else { "spent" });
+                    }
+                    let mark = if start == 4 { "->" } else { "  " };
+                    kprintln!("  {} core     composes on demand", mark);
+                    kprintln!("  it takes the first from the arrow onwards that has work");
+                }
                 "forget" => {
                     let n = godel::forget();
                     kprintln!("  {} marker(s) cleared -- the grid will be walked again", n);

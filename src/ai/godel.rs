@@ -465,6 +465,31 @@ pub fn space_selftest() -> bool {
         return false;
     }
 
+    // The rotation covers every axis and repeats nothing within a lap.
+    //
+    // What this guards is a rotation that looks like it walks five kinds and
+    // walks one: an offset computed the wrong way round, or a `KINDS` that
+    // stopped matching the arms, would leave the loop doing exactly what it
+    // did before -- adapter points until they run out and then nothing -- and
+    // the only symptom would be a ledger that never mentions the other four.
+    let mut seen_kinds = [false; KINDS];
+    for len in 0..KINDS {
+        seen_kinds[len % KINDS] = true;
+    }
+    if !seen_kinds.iter().all(|s| *s) {
+        return false;
+    }
+    // Deep points are a declared grid like the adapter one, so two of them
+    // must be different experiments.
+    if DEEP_GRID.len() < 2 {
+        return false;
+    }
+    let d0 = Proposal::deep(DEEP_GRID[0].0, DEEP_GRID[0].1, DEEP_GRID[0].2, DEEP_GRID[0].3);
+    let d1 = Proposal::deep(DEEP_GRID[1].0, DEEP_GRID[1].1, DEEP_GRID[1].2, DEEP_GRID[1].3);
+    if d0.hash() == d1.hash() {
+        return false;
+    }
+
     // Learning rates an order of magnitude apart at the small end stay apart.
     // `push_f2` renders both 3e-4 and 2e-4 as "0.00"; a proposal is identified
     // by its rendering alone, so that would silently merge two points.
@@ -2447,6 +2472,130 @@ pub fn ledger_tail(n: usize) -> Vec<String> {
     let all: Vec<&str> = text.lines().filter(|l| !l.is_empty()).collect();
     let start = all.len().saturating_sub(n);
     all[start..].iter().map(|s| String::from(*s)).collect()
+}
+
+/// How many verdicts have been recorded. The rotation's clock.
+pub fn ledger_len() -> usize {
+    let Some(bytes) = sysbox::read_blob(LEDGER) else { return 0 };
+    let Ok(text) = core::str::from_utf8(&bytes) else { return 0 };
+    text.lines().filter(|l| !l.is_empty()).count()
+}
+
+/// Deep points, walked by markers exactly as `GRID` is.
+///
+/// Two, and small ones. A deep trial costs two full passes over the corpus
+/// plus the training between them, so this is not a space to sweep -- it is
+/// enough points to find out whether moving the attention path buys anything
+/// on this corpus at all, which is a question with a cheap answer and an
+/// expensive one and no middle.
+const DEEP_GRID: &[(f32, usize, f32, usize)] = &[(0.02, 4, 8.0, 4), (0.01, 8, 16.0, 6)];
+
+fn next_deep() -> Option<Proposal> {
+    DEEP_GRID
+        .iter()
+        .map(|&(lr, rank, alpha, epochs)| Proposal::deep(lr, rank, alpha, epochs))
+        .find(|p| !p.tried())
+}
+
+/// A routing rule that has not been judged yet, other than the one in force.
+///
+/// The rule already running is excluded rather than marked: judging it against
+/// itself is a certificate saying nothing changed, which is true and is not
+/// worth a night.
+fn next_config() -> Option<Proposal> {
+    let now = super::harness::rule_in_force() as u8;
+    (0u8..4)
+        .filter(|r| *r != now)
+        .map(Proposal::config)
+        .find(|p| !p.tried())
+}
+
+/// A program in the toolkit that has never been judged.
+///
+/// Scanned rather than queued, because `agent learn` writes straight into
+/// `/ai/tools` and a queue would be a second record of the same fact. An
+/// adopted skill is copied back there too and is skipped on the next pass by
+/// its own marker, which is the marker doing what it is for.
+fn next_skill() -> Option<Proposal> {
+    for name in sysbox::children("/ai/tools") {
+        if !name.ends_with(".ai&xi") {
+            continue;
+        }
+        let mut path = String::from("/ai/tools/");
+        path.push_str(&name);
+        let Some(bytes) = sysbox::read_blob(&path) else { continue };
+        let Ok(text) = core::str::from_utf8(&bytes) else { continue };
+        let h = super::skill::store(text);
+        let p = Proposal::skill(h);
+        if !p.tried() {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// How many kinds the rotation walks.
+const KINDS: usize = 5;
+
+/// The next thing to try tonight, over every axis the loop can judge.
+///
+/// **A rotation and not a choice.** The night branch knew two jobs and godel
+/// always won the tie, so the adapter grid was walked to exhaustion while
+/// every other axis the judges can reach -- the routing rule, deep training, a
+/// skill the agent compiled, a core the machine wrote -- was never tried
+/// unattended at all. Widening it needed the judges first, which is why this
+/// comes last.
+///
+/// The starting point is the number of verdicts already recorded, so the
+/// rotation is a function of the ledger rather than of a coin or of a counter
+/// that resets at boot. That matters for the same reason `frontier` walks a
+/// declared grid: a later reader has to be able to say what the machine would
+/// have done, and "it picked at random" is not an account of a night.
+///
+/// From the offset it takes the first kind that has work, so an exhausted axis
+/// costs one skipped slot rather than an idle night, and the loop stops only
+/// when every axis is out of moves.
+///
+/// Order is deliberate: cheap and declared before expensive and composed. A
+/// grid point and a rule change are minutes; a deep trial is two passes over
+/// the corpus and a composed core spends a dozen decodes writing something
+/// that may not survive its first judge.
+pub fn next_proposal() -> Option<Proposal> {
+    let start = ledger_len() % KINDS;
+    for i in 0..KINDS {
+        let candidate = match (start + i) % KINDS {
+            0 => frontier(),
+            1 => next_config(),
+            2 => next_skill(),
+            3 => next_deep(),
+            // Last, and the only one that *makes* its candidate rather than
+            // finding one: composing costs decodes whether or not the result
+            // is worth judging.
+            _ => author_core(),
+        };
+        if candidate.is_some() {
+            return candidate;
+        }
+    }
+    None
+}
+
+/// Where the rotation stands, without taking a turn.
+///
+/// Report-only, and deliberately does not ask the last slot whether it has
+/// work: finding out costs a dozen constrained decodes, because composing a
+/// core *is* the work. A command that answers "what would you do tonight"
+/// must not spend the night doing it.
+pub fn rotation() -> (usize, [(&'static str, bool); 4]) {
+    (
+        ledger_len() % KINDS,
+        [
+            ("adapter", frontier().is_some()),
+            ("rule", next_config().is_some()),
+            ("skill", next_skill().is_some()),
+            ("deep", next_deep().is_some()),
+        ],
+    )
 }
 
 /// The lineage of the current head, newest first.
