@@ -1330,6 +1330,38 @@ impl Drop for Claim {
     }
 }
 
+/// The one thing about the desktop that can be checked without a screen.
+///
+/// Everything else here is pixels, and a claim about pixels needs eyes. This
+/// is arithmetic: the cursor statics are shared between the shell task and
+/// whichever task is generating, and the whole defence is that two holders
+/// cannot exist at once. That property was argued for and never checked --
+/// the race it prevents needs a concurrent generation and a moving mouse to
+/// reproduce, which no boot test can arrange -- so at least the exclusion
+/// itself is asserted rather than assumed.
+pub fn selftest() -> bool {
+    use crate::kprintln;
+    let mut ok = true;
+    let mut claim = |what: &str, good: bool| {
+        if !good {
+            ok = false;
+        }
+        kprintln!("  {}  {}", if good { "ok " } else { "FAIL" }, what);
+    };
+
+    let first = Claim::take();
+    claim("a free claim can be taken", first.is_some());
+    claim("and a second holder is refused", Claim::take().is_none());
+    drop(first);
+    let again = Claim::take();
+    claim("dropping it lets the next one in", again.is_some());
+    drop(again);
+    // Leaving it held would deadlock every later repaint, so the release path
+    // is worth one more claim of its own.
+    claim("and it is free afterwards", !CUR_BUSY.load(core::sync::atomic::Ordering::Relaxed));
+    ok
+}
+
 pub fn cursor_hide(fb: &Framebuffer) {
     let Some((x, y)) = (unsafe { *SHOWN.get() }) else { return };
     // Ask the compositor for those pixels back, rather than trusting a copy

@@ -2148,6 +2148,10 @@ pub struct CueVerdict {
     pub best_fixed: usize,
     pub best_broke: usize,
     pub best: String,
+    /// The class that best rule argues for. A word alone does not name a rule
+    /// -- the same word can be filed under several classes, and which one it
+    /// argues for is the half that decides whether it repairs anything.
+    pub best_class: usize,
     /// Items repaired by *some* rule in the pool -- the ceiling a multi-rule
     /// core could approach, as opposed to what one rule reaches.
     pub reach: usize,
@@ -2220,6 +2224,7 @@ pub fn cue_oracle_on(
         best_fixed: 0,
         best_broke: 0,
         best: String::new(),
+        best_class: 0,
         reach: 0,
     };
     // Which items *any* rule repairs, so the pool's ceiling is distinguishable
@@ -2259,6 +2264,7 @@ pub fn cue_oracle_on(
             v.best_fixed = fixed;
             v.best_broke = broke;
             v.best = word.clone();
+            v.best_class = *class;
         }
     }
     v.reach = reached.iter().filter(|r| **r).count();

@@ -1430,6 +1430,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                                 .map(|i| alloc::string::String::from(e.head.name(i)))
                                 .collect()
                         });
+                    let names_for_best = names.clone().unwrap_or_default();
                     let out = names.and_then(|names| {
                         crate::ai::with_engine(|e| {
                             if contested {
@@ -1451,8 +1452,14 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                             );
                             kprintln!("  {} usable, {} harmful, {} inert", v.usable, v.harmful, v.inert);
                             kprintln!(
-                                "  best single rule: '{}' fixes {} breaks {}",
-                                v.best, v.best_fixed, v.best_broke
+                                "  best single rule: '{}' -> {} fixes {} breaks {}",
+                                v.best,
+                                names_for_best
+                                    .get(v.best_class)
+                                    .map(|s| s.as_str())
+                                    .unwrap_or("?"),
+                                v.best_fixed,
+                                v.best_broke
                             );
                             let need = crate::ai::godel::clean_fixes_needed();
                             console::set_color(if v.reach >= need { LTGREEN } else { YELLOW });

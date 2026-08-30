@@ -304,9 +304,10 @@ const MIN_USES: u32 = 2;
 /// counter it is supposed to be independent of -- which is also what J6 asks
 /// for, arriving at the same place from the other side.
 const CUE_PURITY: u32 = 100;
-/// Cues offered per class. A grammar the model cannot get through is a decode
-/// that spends its allowance and commits to nothing.
-const CUE_CAP: usize = 16;
+/// Complete rules offered per decision, ranked by how much of the contested
+/// set each carries. A grammar the model cannot get through is a decode that
+/// spends its allowance and commits to nothing.
+const RULE_CAP: usize = 12;
 /// Most rules one core may have.
 ///
 /// Six, and the number is arithmetic rather than taste. J1 wants six clean
@@ -322,6 +323,14 @@ const CUE_CAP: usize = 16;
 /// breaks something -- a longer core fails for reasons spread over more rules,
 /// and a judged whole is harder to learn from the longer it gets.
 const MAX_CLAUSES: usize = 6;
+/// Fewest rules worth composing. See the count decode in `author`: the best
+/// single rule in the pool repairs two and J1 wants six, so anything shorter
+/// than this is a certain rejection and does not belong on the list.
+const MIN_CLAUSES: usize = 3;
+/// Classes offered per decision. A ranked shortlist rather than the whole
+/// head: twenty alternatives is a grammar a small model wanders around in, and
+/// the tail carries almost none of the contested set anyway.
+const CLASS_CAP: usize = 8;
 /// Draws allowed per decision before giving up on it.
 const DECODE_TRIES: usize = 3;
 
@@ -508,44 +517,90 @@ pub fn author(names: &[String], table: &[(String, usize, u32)]) -> Option<String
     // Only classes that can actually be written about, for the same reason
     // `author::applicable` offers only actions that can be carried out:
     // choosing one that cannot be served ends the run having done nothing.
-    let mut writable: Vec<usize> = Vec::new();
-    for (_, c, _) in table.iter() {
-        if !writable.contains(c) {
-            writable.push(*c);
+    //
+    // Ranked by how much of the contested set their cues between them carry,
+    // and capped. Both matter and neither is the kernel choosing the answer:
+    // the order is a function of the training data, the model still picks, and
+    // an unranked list of twenty classes is a grammar a small model wanders
+    // around in -- the first core composed from the ranked pool had been
+    // choosing from classes in index order, which is to say at random.
+    let mut ranked: Vec<(usize, u32)> = Vec::new();
+    for (_, c, carry) in table.iter() {
+        match ranked.iter_mut().find(|(k, _)| k == c) {
+            Some((_, total)) => *total += *carry,
+            None => ranked.push((*c, *carry)),
         }
     }
-    let labels: Vec<&str> = writable.iter().map(|c| names[*c].as_str()).collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    ranked.truncate(CLASS_CAP);
+    let keep: Vec<usize> = ranked.iter().map(|(c, _)| *c).collect();
 
-    let counts: Vec<String> = (1..=MAX_CLAUSES).map(|n| n.to_string()).collect();
+    // **One decision per rule, not two.**
+    //
+    // The model used to choose a class and then a cue within it, and that
+    // ordering threw away good rules for a reason that had nothing to do with
+    // the rules: `core oracle` said the best rule in the pool was
+    // `can -> sysbox`, and the model chose `can -> cd` -- the right word,
+    // filed under a class it had already committed to. A cue is only worth
+    // anything paired with the class it argues for, so the pair is what gets
+    // offered.
+    //
+    // It is also a smaller grammar and half the decodes. The list is ranked by
+    // how much of the contested set each rule carries, and capped, for the
+    // reason every option list here is: a small model given forty
+    // alternatives commits to none of them.
+    let mut rules: Vec<(String, usize)> = Vec::new();
+    let mut shown: Vec<String> = Vec::new();
+    for (word, class, _) in table.iter() {
+        if !keep.contains(class) {
+            continue;
+        }
+        let mut label = word.clone();
+        label.push_str(" -> ");
+        label.push_str(&names[*class]);
+        rules.push((word.clone(), *class));
+        shown.push(label);
+        if rules.len() >= RULE_CAP {
+            break;
+        }
+    }
+    if rules.is_empty() {
+        return None;
+    }
+
+    // Never fewer than `MIN_CLAUSES`, because fewer cannot win.
+    //
+    // The count used to start at one and the model kept choosing one, which is
+    // a core that has already lost: `core oracle` says the best single rule in
+    // the pool repairs two and J1 wants six, so a one-rule or two-rule core is
+    // a night spent producing a certain rejection. Offering a floor is the
+    // same move as offering only applicable verbs -- the unreachable options
+    // are simply not on the list.
+    let counts: Vec<String> = (MIN_CLAUSES..=MAX_CLAUSES).map(|n| n.to_string()).collect();
     let count_refs: Vec<&str> = counts.iter().map(|s| s.as_str()).collect();
-    let want = 1 + pick(
-        "Writing a routing rule for the task classifier. How many rules?",
+    let want = MIN_CLAUSES + pick(
+        "Writing routing rules for the task classifier. How many rules?",
         &count_refs,
     )?;
 
     let mut clauses: Vec<Clause> = Vec::new();
-    let mut spent: Vec<String> = Vec::new();
     for _ in 0..want {
-        let li = pick(
-            "Which command should the next rule recognise?",
-            &labels,
-        )?;
-        let class = writable[li];
-        let cues: Vec<&str> = table
-            .iter()
-            .filter(|(w, c, _)| *c == class && !spent.iter().any(|s| s == w))
-            .map(|(w, _, _)| w.as_str())
-            .take(CUE_CAP)
-            .collect();
-        if cues.is_empty() {
-            continue;
+        if rules.is_empty() {
+            break;
         }
-        let mut prompt = String::from("Which word in a task means '");
-        prompt.push_str(&names[class]);
-        prompt.push_str("'?");
-        let wi = pick(&prompt, &cues)?;
-        let cue = String::from(cues[wi]);
-        spent.push(cue.clone());
+        let refs: Vec<&str> = shown.iter().map(|s| s.as_str()).collect();
+        let Some(i) = pick(
+            "A router mislabels some requests. Which rule should it follow?",
+            &refs,
+        ) else {
+            // A decode that will not commit ends the composition rather than
+            // the night: whatever has been chosen so far is still a core, and
+            // a shorter one that was actually decided beats a longer one
+            // finished by the kernel.
+            break;
+        };
+        let (cue, class) = rules.remove(i);
+        shown.remove(i);
         clauses.push(Clause { cue, class });
     }
 
