@@ -1302,6 +1302,25 @@ fully allocated to Windows there is no such region and init fails, which is the
 intended outcome. Every error path re-locks; leaving it open is how a safety
 mechanism becomes decorative.
 
+**`sandbox` copies nothing up front.** It opened by deep-copying the whole
+namespace so it had something to restore from, which meant every run paid for
+a clone of every object in the tree to undo a program that usually touches one
+file -- and held `&mut Sysbox` across a full recursive walk with interrupts
+disabled, twice. `note` already runs immediately before each mutation with the
+path in hand, so each path's pre-image is saved exactly there and the cost is
+proportional to the change. It records the *shallowest* path that did not
+exist, not the one asked for: `tree::put` creates intermediate directories, so
+undoing only the named file would report the run as reverted and leave
+directories behind.
+
+The read-through overlay -- a namespace handle threaded through `with`, so a
+run is invisible to other tasks rather than merely undoable -- is still not
+built, and the reason is now a decision rather than a deferral. It has to be
+paid for in the type: `Node` owns its children, so a persistent tree sharing
+unmodified subtrees needs reference counting through every accessor in the
+kernel. What it would buy is isolation the jail already provides, since a
+sandboxed skill can only write under its own scratch subtree.
+
 **The unlock names a range, and the range is enforced.** It was one bit for a
 long time: unlocking said writes were allowed and nothing said *where*, so from
 the moment `store::init` succeeded every LBA on the device was writable -- the

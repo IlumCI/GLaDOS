@@ -803,7 +803,9 @@ fn cmd_remember(text: &str) {
 /// sandboxed program's changes without also undoing the agent's.
 struct Watch {
     task: usize,
-    paths: Vec<Vec<String>>,
+    /// Each path the run touched, and what was there the *first* time it did.
+    /// `None` means the path did not exist, so undoing it is a removal.
+    seen: Vec<(Vec<String>, Option<Node>)>,
 }
 
 static WATCH: Racy<Option<Watch>> = Racy::new(None);
@@ -813,20 +815,56 @@ static WATCH: Racy<Option<Watch>> = Racy::new(None);
 /// Called from every function that changes the live tree. A mutation that
 /// reaches the tree without passing through here is one `shadow` cannot undo,
 /// which is why the call sits beside the mutation rather than at the callers.
-fn note(p: &[String]) {
+/// The pre-image is taken here, which is what removed the whole-tree copy.
+///
+/// `shadow` used to open by deep-copying the entire namespace so it had
+/// something to restore from -- every `sandbox` run paid for a full clone of
+/// every object in the tree, to undo a program that usually touches one file.
+/// But this function already runs immediately *before* each mutation with the
+/// path in hand, so the only bytes worth saving can be saved exactly here, and
+/// the cost becomes proportional to what the run actually changed.
+///
+/// The full read-through overlay would go further and make the run *invisible*
+/// to other tasks rather than merely undoable. It is not here, and the reason
+/// is that it would have to be paid for in the type: `Node` owns its children,
+/// so a persistent tree that shares unmodified subtrees needs reference
+/// counting through every accessor in the kernel. What it would buy is
+/// isolation the jail already provides -- a sandboxed skill can only write
+/// under its own scratch subtree, so there is nothing for another task to see.
+fn note(root: &Node, p: &[String]) {
     unsafe {
-        if let Some(w) = (*WATCH.get()).as_mut() {
-            if w.task == crate::task::current() {
-                w.paths.push(p.to_vec());
+        let Some(w) = (*WATCH.get()).as_mut() else { return };
+        if w.task != crate::task::current() {
+            return;
+        }
+        // The shallowest path that does not exist yet, not the one asked for.
+        //
+        // `tree::put` creates intermediate directories, so writing `/a/b/c`
+        // into an empty tree creates `/a` and `/a/b` as well. Recording only
+        // `/a/b/c` and removing it on undo leaves those behind -- the run is
+        // reported as undone and the namespace has two directories it did not
+        // have before. Recording `/a` instead takes the whole thing back out.
+        let mut at = p;
+        if tree::resolve(root, p).is_none() {
+            for n in 1..=p.len() {
+                if tree::resolve(root, &p[..n]).is_none() {
+                    at = &p[..n];
+                    break;
+                }
             }
         }
+        if w.seen.iter().any(|(q, _)| q.as_slice() == at) {
+            return;
+        }
+        let pre = tree::resolve(root, at).map(tree::clone_node);
+        w.seen.push((at.to_vec(), pre));
     }
 }
 
 pub fn write_blob(path: &str, data: Vec<u8>) -> bool {
     with(|s| {
         let p = parse(&s.cwd, path);
-        note(&p);
+        note(&s.root, &p);
         tree::put(&mut s.root, &p, Node::Blob(data)).is_ok()
     })
     .unwrap_or(false)
@@ -847,7 +885,7 @@ pub fn read_blob(path: &str) -> Option<Vec<u8>> {
 pub fn detach(path: &str) -> bool {
     with(|s| {
         let p = parse(&s.cwd, path);
-        note(&p);
+        note(&s.root, &p);
         tree::remove(&mut s.root, &p).is_some()
     })
     .unwrap_or(false)
@@ -1042,8 +1080,32 @@ pub fn selftest() -> bool {
             read_blob("/tmp/.selftest-theirs").is_some(),
         );
         detach("/tmp/.selftest-theirs");
-    } else {
-        ok &= check("a shadow can be taken", false);
+    }
+
+    // Undoing a write takes back the directories the write created.
+    //
+    // `tree::put` makes intermediate directories, so a program writing one
+    // file into a fresh path creates several objects and only names one of
+    // them. Undoing just the named one reports the run as reverted and leaves
+    // the tree with directories it did not have -- which is the same
+    // "discarded, and something is different" failure the whole mechanism
+    // exists to prevent, one level up. `note` records the shallowest path that
+    // did not exist rather than the one asked for.
+    if with(|_| ()).is_some() {
+        detach("/tmp/.deep");
+        match shadow(|| {
+            write_text("/tmp/.deep/a/b/c", "nested\n");
+        }) {
+            Some(sh) => {
+                let made = read_blob("/tmp/.deep/a/b/c").is_some();
+                sh.discard();
+                ok &= check(
+                    "undoing a nested write removes the directories it created",
+                    made && !is_dir("/tmp/.deep"),
+                );
+            }
+            None => ok &= check("a shadow can be taken", false),
+        }
     }
 
     ok
@@ -1318,7 +1380,7 @@ fn cmd_mkdir(arg: &str) {
             err("already exists");
             return;
         }
-        note(&p);
+        note(&s.root, &p);
         match tree::put(&mut s.root, &p, Node::empty_dir()) {
             Ok(()) => kprintln!("  {}", show(&p)),
             Err(tree::PutError::TooDeep) => err("too deep"),
@@ -1339,7 +1401,7 @@ fn cmd_write(arg: &str, rest: &str) {
         let mut data = text.as_bytes().to_vec();
         data.push(b'\n');
         let n = data.len();
-        note(&p);
+        note(&s.root, &p);
         match tree::put(&mut s.root, &p, Node::Blob(data)) {
             Ok(()) => kprintln!("  {}  {} B", show(&p), n),
             Err(tree::PutError::TooDeep) => err("too deep"),
@@ -1356,7 +1418,7 @@ fn cmd_rm(arg: &str) {
     }
     with(|s| {
         let p = parse(&s.cwd, arg);
-        note(&p);
+        note(&s.root, &p);
         match tree::remove(&mut s.root, &p) {
             Some(n) => {
                 let h = tree::content_hash(&n);
@@ -1396,10 +1458,10 @@ fn cmd_move(a: &str, b: &str, detach: bool) {
             Some(n) => tree::clone_node(n),
         };
         if detach {
-            note(&pa);
+            note(&s.root, &pa);
             tree::remove(&mut s.root, &pa);
         }
-        note(&pb);
+        note(&s.root, &pb);
         match tree::put(&mut s.root, &pb, node) {
             Ok(()) => kprintln!("  {} -> {}", show(&pa), show(&pb)),
             Err(_) => err("could not place that path"),
@@ -1747,10 +1809,10 @@ fn mark(sign: &str, at: &[String]) {
 
 /// The namespace as it was, so a change can be put back.
 pub struct Shadow {
-    before: Node,
-    /// The same paths as `touched`, kept resolved rather than formatted,
-    /// because `discard` has to walk them and a printed line is not a path.
-    undo: Vec<(char, Vec<String>)>,
+    /// The sign, the path, and what was there before the run touched it.
+    /// Sorted by path, which is what makes an ancestor undo before its
+    /// descendants.
+    undo: Vec<(char, Vec<String>, Option<Node>)>,
     /// Every path the change touched, signed: `+` added, `-` removed,
     /// `~` altered.
     pub touched: Vec<String>,
@@ -1793,51 +1855,50 @@ pub struct Shadow {
 /// The snapshot is still taken, because knowing which paths changed is not
 /// knowing what they held before.
 ///
-/// The honest alternative is a read-through overlay with a namespace handle
-/// threaded through `with`, which every accessor in the kernel would have to
-/// learn. That is the right long-term shape and a much larger change; this
-/// buys the capability now, at the cost of a full tree copy per run.
+/// **Nothing is copied up front.** The first version opened by deep-copying the
+/// whole namespace so it had something to restore from, which meant every
+/// `sandbox` run paid for a clone of every object in the tree in order to undo
+/// a program that usually touches one file. `note` already runs immediately
+/// before each mutation with the path in hand, so each path's pre-image is
+/// saved exactly there and the cost is proportional to the change. It also
+/// closed the window this used to hold `&mut Sysbox` open for: a full
+/// recursive walk with interrupts disabled, taken twice per run.
+///
+/// The read-through overlay -- a namespace handle threaded through `with`, so
+/// the run is *invisible* to other tasks rather than merely undoable -- is
+/// still not here, and the reason is worth stating rather than deferring
+/// again. It has to be paid for in the type: `Node` owns its children, so a
+/// persistent tree that shares unmodified subtrees needs reference counting
+/// through every accessor in the kernel. What it would buy is isolation the
+/// jail already provides, since a sandboxed skill can only write under its own
+/// scratch subtree and there is nothing there for another task to see.
 pub fn shadow<F: FnOnce()>(f: F) -> Option<Shadow> {
-    // Cloned before, compared after. `clone_node` is a deep copy and this is
-    // the expensive part -- acceptable for a test harness that runs once per
-    // candidate, and not something to put on any hot path.
-    // Interrupts off across each snapshot.
-    //
-    // `clone_node` is a long recursive walk holding `&mut Sysbox`, and a timer
-    // switch into a task that calls `write_text` takes a second `&mut` to the
-    // same `Racy` -- aliasing mutable references over a tree this one is in the
-    // middle of reading, and a directory's entry Vec can reallocate underneath
-    // the walk. Microseconds of lost tick against reading a freed buffer in the
-    // one address space with no guard pages.
-    let before =
-        crate::cpu::without_interrupts(|| with(|s| tree::clone_node(&s.root)))?;
-
-    // Watch this task for the duration. The previous watch is put back rather
-    // than cleared, so a nested run cannot silently end the outer one.
+    // No snapshot. `note` captures each path's pre-image the first time the
+    // run touches it, so there is nothing to copy up front and the cost is
+    // proportional to the change rather than to the tree.
     let mine = crate::task::current();
     let prev = unsafe {
-        core::mem::replace(&mut *WATCH.get(), Some(Watch { task: mine, paths: Vec::new() }))
+        core::mem::replace(&mut *WATCH.get(), Some(Watch { task: mine, seen: Vec::new() }))
     };
     f();
     let seen = unsafe { core::mem::replace(&mut *WATCH.get(), prev) };
-    let mut paths = seen.map(|w| w.paths).unwrap_or_default();
-    paths.sort();
-    paths.dedup();
+    let mut seen = seen.map(|w| w.seen).unwrap_or_default();
+    // Ancestors first, so restoring a directory happens before the entries
+    // inside it are put back or taken away.
+    seen.sort_by(|a, b| a.0.cmp(&b.0));
 
-    // Classified against the tree as it stands, which is `after` without
-    // paying for a second deep copy of it.
     let mut touched = Vec::new();
-    let mut undo = Vec::new();
+    let mut undo: Vec<(char, Vec<String>, Option<Node>)> = Vec::new();
     let mut changes = 0u32;
     with(|s| {
-        for p in &paths {
-            let was = tree::resolve(&before, p).map(tree::content_hash);
-            let now = tree::resolve(&s.root, p).map(tree::content_hash);
+        for (at, pre) in seen {
+            let was = pre.as_ref().map(tree::content_hash);
+            let now = tree::resolve(&s.root, &at).map(tree::content_hash);
             // Written back exactly as it was. A write is not a change.
             if was == now {
                 continue;
             }
-            let sign = match (was, now) {
+            let sign = match (&was, &now) {
                 (None, Some(_)) => '+',
                 (Some(_), None) => '-',
                 _ => '~',
@@ -1845,12 +1906,12 @@ pub fn shadow<F: FnOnce()>(f: F) -> Option<Shadow> {
             changes += 1;
             let mut line = String::from(sign);
             line.push(' ');
-            line.push_str(&show(p));
+            line.push_str(&show(&at));
             touched.push(line);
-            undo.push((sign, p.clone()));
+            undo.push((sign, at, pre));
         }
     })?;
-    Some(Shadow { before, undo, touched, changes })
+    Some(Shadow { undo, touched, changes })
 }
 
 impl Shadow {
@@ -1865,27 +1926,25 @@ impl Shadow {
     /// `/a/b`, so removing a directory the run created cannot be followed by
     /// re-creating a file inside it.
     pub fn discard(self) -> bool {
-        crate::cpu::without_interrupts(|| with(|s| {
-            for (sign, at) in &self.undo {
-                match sign {
-                    // The run created it. Take the name away again.
-                    '+' => {
-                        tree::remove(&mut s.root, at);
-                    }
-                    // The run removed or altered it. Whatever was there
-                    // before goes back; if it was not there before, the name
-                    // goes away.
-                    _ => match tree::resolve(&self.before, at) {
-                        Some(n) => {
-                            let _ = tree::put(&mut s.root, at, tree::clone_node(n));
+        crate::cpu::without_interrupts(|| {
+            with(|s| {
+                for (_, at, pre) in self.undo {
+                    match pre {
+                        // Whatever was there goes back, entry and all.
+                        Some(node) => {
+                            let _ = tree::put(&mut s.root, &at, node);
                         }
+                        // It was not there before, so it should not be there
+                        // now -- and `at` is the shallowest path the run
+                        // created, so this takes any directories it made on
+                        // the way with it.
                         None => {
-                            tree::remove(&mut s.root, at);
+                            tree::remove(&mut s.root, &at);
                         }
-                    },
+                    }
                 }
-            }
-        }))
+            })
+        })
         .is_some()
     }
 
