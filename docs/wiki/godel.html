@@ -36,7 +36,7 @@
 <!--masthead-->
 <div id="masthead">
   <a class="mark" href="../"><img src="../img/wordmark.png" alt="Aperture Institute" width="666" height="169"></a>
-  <span class="sub">GLaDOS &mdash; an operating system in Rust, with a language model in the kernel</span>
+  <span class="sub">GLaDOS: an operating system in Rust, with a language model in the kernel</span>
 </div>
 <!--/masthead-->
 
@@ -47,9 +47,9 @@
 <div id="body">
 <!--sidebar-->
 <div id="sidebar">
-<div class="box"><div class="t">Latest release</div><div class="bd"><table class="facts"><tr><td>Version</td><td>1.2.27</td></tr><tr><td>Released</td><td>2026-08-31</td></tr><tr><td>Images</td><td>6</td></tr></table><ul><li><a href="../download/">Download</a></li><li><a href="https://github.com/IlumCI/GLaDOS/releases/tag/v1.2.27">Release notes</a></li></ul></div></div>
+<div class="box"><div class="t">Latest release</div><div class="bd"><table class="facts"><tr><td>Version</td><td>1.2.28</td></tr><tr><td>Released</td><td>2026-08-31</td></tr><tr><td>Images</td><td>0</td></tr></table><ul><li><a href="../download/">Download</a></li><li><a href="https://github.com/IlumCI/GLaDOS/releases/tag/v1.2.28">Release notes</a></li></ul></div></div>
 <div class="box"><div class="t">Project information</div><div class="bd"><table class="facts"><tr><td>Development status</td><td>3 - Alpha</td></tr><tr><td>Environment</td><td>Console, framebuffer</td></tr><tr><td>Intended audience</td><td>Developers, science/research</td></tr><tr><td>Licence</td><td>Other/proprietary, all rights reserved</td></tr><tr><td>Natural language</td><td>English</td></tr><tr><td>Operating system</td><td>x86-64 UEFI, bare metal</td></tr><tr><td>Programming language</td><td>Rust, Python</td></tr><tr><td>Topic</td><td>Operating systems, kernels, artificial intelligence</td></tr></table></div></div>
-<div class="box"><div class="t">Statistics</div><div class="bd"><table class="facts"><tr><td>Registered</td><td>2026-08-14</td></tr><tr><td>Releases</td><td>4</td></tr><tr><td>Downloads</td><td>19</td></tr><tr><td>Source</td><td>108 files, ~50,000 lines</td></tr></table></div></div>
+<div class="box"><div class="t">Statistics</div><div class="bd"><table class="facts"><tr><td>Registered</td><td>2026-08-14</td></tr><tr><td>Releases</td><td>5</td></tr><tr><td>Downloads</td><td>32</td></tr><tr><td>Source</td><td>108 files, ~50,000 lines</td></tr></table></div></div>
 <div class="box"><div class="t">Developers</div><div class="bd"><table class="facts"><tr><td>IlumCI</td><td>project admin, developer</td></tr></table></div></div>
 <div class="box"><div class="t">Documentation</div><div class="bd"><ul><li><a href="../wiki/glados-os.html">GLaDOS OS</a></li><li><a href="../wiki/kernel.html">The kernel</a></li><li><a href="../wiki/model.html">The model</a></li><li><a href="../wiki/agent.html">The agent</a></li><li><a href="../wiki/rsi.html">Self-improvement</a></li><li><a href="../wiki/aiksi.html">Aiksi, the language</a></li><li><a href="../wiki/">All 16 articles</a></li></ul></div></div>
 </div>
@@ -58,25 +58,25 @@
 <div class="crumbs"><a href="../">GLaDOS</a> / <a href="./">Wiki</a> / Gödel machines</div>
 <div id="main">
 <h1>G&ouml;del machines, and what replaces the proof</h1>
-<p>Schmidhuber's G&ouml;del machine is a program that may rewrite any part of itself, including the part that decides whether to rewrite, and does so only when it can <em>prove</em>, under its own utility function, that the rewrite is an improvement. The proof searcher is the whole construction. Everything interesting about the design follows from the fact that a self-modification is permitted by a proof rather than by a measurement.</p>
-<p>This system departs from that, and the departure is stated at the top of the module rather than buried. We have no theorem prover and could not build one for this. The claim that wants proving here is not a theorem about arithmetic; it is a statistical claim about a distribution we only have samples from &mdash; that a particular adapter routes better than its parent. There is no proof of that available at any budget.</p>
+<p>Schmidhuber's G&ouml;del machine is a program that may rewrite any part of itself, including the part that decides whether to rewrite, and does so only when it can <em>prove</em>, under its own utility function, that the rewrite is an improvement. The proof searcher is the whole construction. Everything interesting about the design follows from the fact that a self-modification is permitted by a proof.</p>
+<p>This system departs from that, and the departure is stated at the top of the module. We have no theorem prover and could not build one for this. The claim that wants proving here is not a theorem about arithmetic; it is a statistical claim about a distribution we only have samples from, that a particular adapter routes better than its parent. There is no proof of that available at any budget.</p>
 
-<h2 id="the-substitution">A certificate, not a proof</h2>
+<h2 id="the-substitution">Certificates in place of proofs</h2>
 <p>What replaces the proof is <strong>a certificate cheaper to refute than to produce</strong>, over content-addressed inputs, re-derivable bit for bit by any later run.</p>
 <p>That is the right substitution because it preserves the property the proof was there for. A proof is valuable because anybody can check it without redoing the work that found it. So is this: the search is deterministic, the inputs are named by the hash of their contents, and the verdict is written down beside them. Any later run can take the recorded verdict and re-derive it, and re-deriving is far cheaper than the search that produced it. What is lost is certainty. What is kept is that nobody has to take the machine's word for anything.</p>
 
 <h2 id="determinism">Determinism is load-bearing, and its absence was the bug</h2>
 <p>Nothing in the training path is random. The adapter starts at all zeros, and a classifier-only variant does not move the cached features either. Both callers passed the same default budget.</p>
 <p>So every trial trained a <em>bit-identical</em> adapter with the same content hash, and after the first adoption every later trial was comparing a variant against itself: nothing repaired, nothing broken, rejected. Forever. The loop ran every night and could not have improved anything, and from the ledger it looked exactly like a loop that was working and finding nothing.</p>
-<p>The fix is not randomness. Determinism is precisely what lets a later run re-derive a verdict, which is the claim the whole module rests on, and a seeded search would have traded that away to fix a symptom. Instead a proposal names every knob it varies, and the search walks a declared grid in a fixed order, skipping points already marked as tried. The search is therefore <em>re-derivable</em> rather than merely repeatable: the next point is a function of the markers on disk, not of a coin.</p>
+<p>The fix is not randomness. Determinism is precisely what lets a later run re-derive a verdict, which is the claim the whole module rests on, and a seeded search would have traded that away to fix a symptom. Instead a proposal names every knob it varies, and the search walks a declared grid in a fixed order, skipping points already marked as tried. The search is therefore <em>re-derivable</em> as well as repeatable: the next point is a function of the markers on disk.</p>
 
 <h2 id="addressing">Rendering is identity, so rendering is delicate</h2>
 <p>A proposal is identified by its rendering alone, which is why it renders floating-point knobs at six decimal places where a variant renders at two. At two places, a learning rate of 3e-4 and one of 2e-4 are the same grid point. A variant carries its adapter's content hash as well, so there the imprecision is cosmetic and the coarser rendering stays, because changing it would re-address every node already stored.</p>
-<p>The same hazard has a sharper form. Adding a field to a hashed structure re-addresses every object that already exists, unless the rendering omits the field when the object omits it. An unconditional line for two later additions &mdash; whether a variant trained deeply, and which skill it adopted &mdash; would have re-addressed every node in every lineage, so the pointer naming the current best would have named something that no longer reproduced. The change meant to extend re-derivability would have broken it. Three self-test claims assert the omission rather than trusting it.</p>
+<p>The same hazard has a sharper form. Adding a field to a hashed structure re-addresses every object that already exists, unless the rendering omits the field when the object omits it. An unconditional line for two later additions (whether a variant trained deeply, and which skill it adopted) would have re-addressed every node in every lineage, so the pointer naming the current best would have named something that no longer reproduced. The change meant to extend re-derivability would have broken it. Three self-test claims assert the omission.</p>
 
 <h2 id="lineage">Adoption is a pointer swap</h2>
 <p>Every variant is a node, the parent stays addressed, and rolling back costs a pointer write. A line goes in the ledger either way, for adoptions and refusals alike, because a loop that only records its successes is a loop whose failure rate is unknowable.</p>
-<p>Rolling back restores the routing rule too, but <em>only when the two nodes disagree about it</em>. Unconditional restoration would switch a lineage full of legacy zeroes to a rule none of those variants ever ran &mdash; the nodes recorded the proposal's rule rather than the rule in force, and every grid point carries zero while the machine has been running a different default throughout. Every node in every lineage therefore recorded a rule its variant was never measured under. That is fixed going forward and the old nodes cannot be fixed, so the restore is conditional instead.</p>
+<p>Rolling back restores the routing rule too, but <em>only when the two nodes disagree about it</em>. Unconditional restoration would switch a lineage full of legacy zeroes to a rule none of those variants ever ran. The nodes recorded the proposal's rule, and the rule in force was a different thing, and every grid point carries zero while the machine has been running a different default throughout. Every node in every lineage therefore recorded a rule its variant was never measured under. That is fixed going forward and the old nodes cannot be fixed, so the restore is conditional instead.</p>
 <div class="seealso"><b>See also:</b> <a href="rsi.html">Recursive self-improvement</a>, <a href="aixi.html">AIXI and planning</a>, <a href="testing.html">Testing without a test runner</a>, <a href="agent.html">The agent</a></div>
 </div>
 </div>
@@ -85,7 +85,7 @@
 <!--footer-->
 <div id="footer">
   <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This project is independent and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
-  <p>Copyright 2026. All rights reserved. The source is published to be read rather than reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are other people's and are listed on <a href="../credits.html">the credits page</a>.</p>
+  <p>Copyright 2026. All rights reserved. The source is published so it can be read; redistribution and derivatives need asking. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are other people's and are listed on <a href="../credits.html">the credits page</a>.</p>
   <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-31.</p>
 </div>
 <!--/footer-->

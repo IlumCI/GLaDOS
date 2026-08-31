@@ -31,3 +31,6 @@ dist/
 # it needs a kernel update signed by the old one.
 update.key
 *.key
+
+# Supabase CLI scratch, rewritten on every invocation.
+supabase/.temp/

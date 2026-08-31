@@ -246,7 +246,7 @@ def masthead_html(p):
         '<div id="masthead">',
         '  <a class="mark" href="%s"><img src="%simg/wordmark.png" '
         'alt="Aperture Institute" width="666" height="169"></a>' % (home, p),
-        '  <span class="sub">GLaDOS &mdash; an operating system in Rust, '
+        '  <span class="sub">GLaDOS: an operating system in Rust, '
         'with a language model in the kernel</span>',
         '</div>',
     ])
@@ -375,8 +375,9 @@ def footer_html(p, rel):
         '  <p>GLaDOS, Aperture Science and Portal are properties of Valve '
         'Corporation. This project is independent and is not affiliated with, '
         'endorsed by, or connected to Valve in any way.</p>',
-        '  <p>Copyright 2026. All rights reserved. The source is published to '
-        'be read rather than reused. One file (<code>src/dev/'
+        '  <p>Copyright 2026. All rights reserved. The source is published so '
+        'it can be read; redistribution and derivatives need asking. '
+        'One file (<code>src/dev/'
         'rtl8188eu_tables.rs</code>) is GPL-2.0 from the Linux kernel and '
         'carries its own terms; the diagrams are other people\'s and are '
         'listed on %s.</p>' % a(p + "credits.html", "the credits page"),
@@ -449,7 +450,7 @@ def build_chrome(releases):
 def download_table(rel):
     rows = []
     for v in images_of(rel):
-        ctx = v["ctx"] or "&mdash;"
+        ctx = v["ctx"] or "n/a"
         rows.append(
             "<tr><td>%s</td><td>%s</td><td>%s</td><td class=\"size\">%s</td>"
             "<td>%s</td></tr>" % (
@@ -471,7 +472,7 @@ def releases_table(rel):
         rows.append('<tr><td>%s</td><td>%s</td><td class="size">%s</td>'
                     '<td>%s</td></tr>' % (
                         html.escape(v["model"]),
-                        html.escape(v["ctx"]) or "&mdash;",
+                        html.escape(v["ctx"]) or "n/a",
                         size_str(v["size"]),
                         a(v["url"], "Download")))
     return ('<table class="forge"><thead><tr><th>Model</th><th>Context</th>'

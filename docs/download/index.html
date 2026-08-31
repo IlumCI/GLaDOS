@@ -27,7 +27,7 @@
 <link rel="apple-touch-icon" sizes="180x180" href="../img/icon-180.png">
 <link rel="manifest" href="../site.webmanifest">
 <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://aperture.institute/"},{"@type":"ListItem","position":2,"name":"Download","item":"https://aperture.institute/download/"}]}</script>
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Is the GLaDOS ISO free?","acceptedAnswer":{"@type":"Answer","text":"Free to download and free to run. The source is published under all-rights-reserved, which means you are welcome to read it and not to redistribute it or build derivatives from it without asking."}},{"@type":"Question","name":"Will it damage my computer or my files?","acceptedAnswer":{"@type":"Answer","text":"It runs from the USB stick and installs nothing. NVMe writes are locked at boot and only unlock if the driver finds a disk region that was explicitly set aside for it, and every error path locks them again. On a laptop whose disk is entirely allocated to Windows there is no such region, so storage initialisation fails and says so, which is the intended outcome."}},{"@type":"Question","name":"Which image should I take?","acceptedAnswer":{"@type":"Answer","text":"The SmolLM2 image if you are running it under emulation, because it is the only one that fits QEMU's 516 MB disk ceiling and it is four times faster per token. The Qwen3-0.6B image on real hardware with 2 GB of RAM. The 2B images want 5 GB, and 8 GB for the 32k context variant."}},{"@type":"Question","name":"Can I run it in a virtual machine?","acceptedAnswer":{"@type":"Answer","text":"Yes, with UEFI firmware, which means OVMF. Use the SmolLM2 image: QEMU's built-in FAT support caps the whole emulated disk at 516 MB and every other image is larger than that. Give the guest at least 2 GB of RAM as well, because the weights are read into memory before ExitBootServices and the guest has to have somewhere to put them."}},{"@type":"Question","name":"Why does it need Secure Boot disabled?","acceptedAnswer":{"@type":"Answer","text":"Because the kernel is not signed by a key your firmware trusts. Getting one would mean going through a Microsoft-signed shim, which is a distribution and paperwork problem, not a technical one."}},{"@type":"Question","name":"How fast is the model?","acceptedAnswer":{"@type":"Answer","text":"Generation is bound by memory bandwidth, so the useful rule is that each token costs roughly one pass over the weights. That makes the 570 MB Qwen3 checkpoint about 4.4 times slower per token than the 135 MB SmolLM2 one. Around 155 MB of Qwen3 is the output classifier alone, which is why restricting that final matrix multiply to the tokens a grammar can actually reach is such an effective optimisation."}},{"@type":"Question","name":"Does it send anything anywhere?","acceptedAnswer":{"@type":"Answer","text":"No. There is no telemetry, no update check and no network activity at all unless you type a command that causes some. The model runs locally because there is nowhere else for it to run."}}]}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Is the GLaDOS ISO free?","acceptedAnswer":{"@type":"Answer","text":"Free to download and free to run. The source is published under all-rights-reserved, which means you are welcome to read it. Redistributing it or building derivatives from it needs asking."}},{"@type":"Question","name":"Will it damage my computer or my files?","acceptedAnswer":{"@type":"Answer","text":"It runs from the USB stick and installs nothing. NVMe writes are locked at boot and only unlock if the driver finds a disk region that was explicitly set aside for it, and every error path locks them again. On a laptop whose disk is entirely allocated to Windows there is no such region, so storage initialisation fails and says so, which is the intended outcome."}},{"@type":"Question","name":"Which image should I take?","acceptedAnswer":{"@type":"Answer","text":"The SmolLM2 image if you are running it under emulation, because it is the only one that fits QEMU's 516 MB disk ceiling and it is four times faster per token. The Qwen3-0.6B image on real hardware with 2 GB of RAM. The 2B images want 5 GB, and 8 GB for the 32k context variant."}},{"@type":"Question","name":"Can I run it in a virtual machine?","acceptedAnswer":{"@type":"Answer","text":"Yes, with UEFI firmware, which means OVMF. Use the SmolLM2 image: QEMU's built-in FAT support caps the whole emulated disk at 516 MB and every other image is larger than that. Give the guest at least 2 GB of RAM as well, because the weights are read into memory before ExitBootServices and the guest has to have somewhere to put them."}},{"@type":"Question","name":"Why does it need Secure Boot disabled?","acceptedAnswer":{"@type":"Answer","text":"Because the kernel is not signed by a key your firmware trusts. Getting one would mean going through a Microsoft-signed shim, which is a matter of distribution and paperwork."}},{"@type":"Question","name":"How fast is the model?","acceptedAnswer":{"@type":"Answer","text":"Generation is bound by memory bandwidth, so the useful rule is that each token costs roughly one pass over the weights. That makes the 570 MB Qwen3 checkpoint about 4.4 times slower per token than the 135 MB SmolLM2 one. Around 155 MB of Qwen3 is the output classifier alone, which is why restricting that final matrix multiply to the tokens a grammar can actually reach is such an effective optimisation."}},{"@type":"Question","name":"Does it send anything anywhere?","acceptedAnswer":{"@type":"Answer","text":"No. There is no telemetry, no update check and no network activity at all unless you type a command that causes some. The model runs locally because there is nowhere else for it to run."}}]}</script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -36,7 +36,7 @@
 <!--masthead-->
 <div id="masthead">
   <a class="mark" href="../"><img src="../img/wordmark.png" alt="Aperture Institute" width="666" height="169"></a>
-  <span class="sub">GLaDOS &mdash; an operating system in Rust, with a language model in the kernel</span>
+  <span class="sub">GLaDOS: an operating system in Rust, with a language model in the kernel</span>
 </div>
 <!--/masthead-->
 
@@ -47,9 +47,9 @@
 <div id="body">
 <!--sidebar-->
 <div id="sidebar">
-<div class="box"><div class="t">Latest release</div><div class="bd"><table class="facts"><tr><td>Version</td><td>1.2.27</td></tr><tr><td>Released</td><td>2026-08-31</td></tr><tr><td>Images</td><td>6</td></tr></table><ul><li><a href="../download/">Download</a></li><li><a href="https://github.com/IlumCI/GLaDOS/releases/tag/v1.2.27">Release notes</a></li></ul></div></div>
+<div class="box"><div class="t">Latest release</div><div class="bd"><table class="facts"><tr><td>Version</td><td>1.2.28</td></tr><tr><td>Released</td><td>2026-08-31</td></tr><tr><td>Images</td><td>0</td></tr></table><ul><li><a href="../download/">Download</a></li><li><a href="https://github.com/IlumCI/GLaDOS/releases/tag/v1.2.28">Release notes</a></li></ul></div></div>
 <div class="box"><div class="t">Project information</div><div class="bd"><table class="facts"><tr><td>Development status</td><td>3 - Alpha</td></tr><tr><td>Environment</td><td>Console, framebuffer</td></tr><tr><td>Intended audience</td><td>Developers, science/research</td></tr><tr><td>Licence</td><td>Other/proprietary, all rights reserved</td></tr><tr><td>Natural language</td><td>English</td></tr><tr><td>Operating system</td><td>x86-64 UEFI, bare metal</td></tr><tr><td>Programming language</td><td>Rust, Python</td></tr><tr><td>Topic</td><td>Operating systems, kernels, artificial intelligence</td></tr></table></div></div>
-<div class="box"><div class="t">Statistics</div><div class="bd"><table class="facts"><tr><td>Registered</td><td>2026-08-14</td></tr><tr><td>Releases</td><td>4</td></tr><tr><td>Downloads</td><td>19</td></tr><tr><td>Source</td><td>108 files, ~50,000 lines</td></tr></table></div></div>
+<div class="box"><div class="t">Statistics</div><div class="bd"><table class="facts"><tr><td>Registered</td><td>2026-08-14</td></tr><tr><td>Releases</td><td>5</td></tr><tr><td>Downloads</td><td>32</td></tr><tr><td>Source</td><td>108 files, ~50,000 lines</td></tr></table></div></div>
 <div class="box"><div class="t">Developers</div><div class="bd"><table class="facts"><tr><td>IlumCI</td><td>project admin, developer</td></tr></table></div></div>
 <div class="box"><div class="t">Documentation</div><div class="bd"><ul><li><a href="../wiki/glados-os.html">GLaDOS OS</a></li><li><a href="../wiki/kernel.html">The kernel</a></li><li><a href="../wiki/model.html">The model</a></li><li><a href="../wiki/agent.html">The agent</a></li><li><a href="../wiki/rsi.html">Self-improvement</a></li><li><a href="../wiki/aiksi.html">Aiksi, the language</a></li><li><a href="../wiki/">All 16 articles</a></li></ul></div></div>
 </div>
@@ -63,7 +63,7 @@
 <h2 class="sect"><a href="../news/">Release history</a>Current release</h2>
 <div class="scroll">
 <!--download-table-->
-<table class="dl"><thead><tr><th>File</th><th>Model</th><th>Context</th><th>Size</th><th>Notes</th></tr></thead><tbody><tr><td><a href="https://github.com/IlumCI/GLaDOS/releases/download/v1.2.27/glados-1.2.27-nomodel.iso">glados-1.2.27-nomodel.iso</a></td><td>Kernel only</td><td>&mdash;</td><td class="size">33 MB</td><td>Kernel only. Boots to a desktop, reports that it has no model, and everything except inference works.</td></tr><tr><td><a href="https://github.com/IlumCI/GLaDOS/releases/download/v1.2.27/glados-1.2.27-smollm2-135m.iso">glados-1.2.27-smollm2-135m.iso</a></td><td>SmolLM2-135M</td><td>512</td><td class="size">133 MB</td><td>Four times faster per token than Qwen3, and the only image that fits QEMU&#x27;s 516 MB disk ceiling. The one to reach for under emulation.</td></tr><tr><td><a href="https://github.com/IlumCI/GLaDOS/releases/download/v1.2.27/glados-1.2.27.iso">glados-1.2.27.iso</a></td><td>Qwen3-0.6B</td><td>512</td><td class="size">576 MB</td><td>The middle size. Small enough to be quick, large enough to write coherent sentences.</td></tr><tr><td><a href="https://github.com/IlumCI/GLaDOS/releases/download/v1.2.27/glados-1.2.27-qwen35-2b.iso">glados-1.2.27-qwen35-2b.iso</a></td><td>Qwen3.5-2B hybrid</td><td>512</td><td class="size">1.8 GB</td><td>The flagship. Three layers in four run as linear attention, which is what keeps the cache small at this size.</td></tr><tr><td><a href="https://github.com/IlumCI/GLaDOS/releases/download/v1.2.27/glados-1.2.27-qwen35-2b-8k.iso">glados-1.2.27-qwen35-2b-8k.iso</a></td><td>Qwen3.5-2B hybrid</td><td>8192</td><td class="size">1.8 GB</td><td>The same weights with room for a long conversation before the cache becomes a ring.</td></tr><tr><td><a href="https://github.com/IlumCI/GLaDOS/releases/download/v1.2.27/glados-1.2.27-qwen35-2b-32k.iso">glados-1.2.27-qwen35-2b-32k.iso</a></td><td>Qwen3.5-2B hybrid</td><td>32768</td><td class="size">1.8 GB</td><td>The largest context this kernel will hold. The cache alone is 768 MiB of heap.</td></tr></tbody></table>
+<table class="dl"><thead><tr><th>File</th><th>Model</th><th>Context</th><th>Size</th><th>Notes</th></tr></thead><tbody></tbody></table>
 <!--/download-table-->
 </div>
 <p class="small">Sizes are of the images themselves. The context column is how many tokens the model can hold before its cache becomes a ring and begins evicting the oldest turns.</p>
@@ -85,7 +85,7 @@ sudo dd if=glados-1.2.27.iso of=/dev/sdX bs=4M status=progress oflag=sync</code>
 <h2 class="sect">Booting it</h2>
 <div class="panel">
 <ol><li>Write the image and leave the stick in.</li><li>Reboot and open the firmware boot menu. Commonly F11, F12, F8 or Esc.</li><li>Pick the USB device listed under UEFI.</li><li>Watch the boot log. It prints the memory map it was handed, the size of heap it managed to get, every device it finds on the PCI bus, and a pass or fail line for each self-test.</li></ol>
-<p>That log rewards a read. Twenty-six sections run at boot, twenty-three of which can be re-run on demand as named suites: fifteen sets of published cipher vectors through the crypto primitives, the heap and the timer, the ACPI namespace walk against your own firmware's tables, and a check that the grammar the sampler is given admits exactly the applet names it should. An ECDSA bug once sat visible in that output for an entire debugging session while the person reading the screen was scrolling past it.</p>
+<p>That log rewards a read. Twenty-seven sections run at boot, twenty-three of which can be re-run on demand as named suites: fifteen sets of published cipher vectors through the crypto primitives, the heap and the timer, the ACPI namespace walk against your own firmware's tables, and a check that the grammar the sampler is given admits exactly the applet names it should. An ECDSA bug once sat visible in that output for an entire debugging session while the person reading the screen was scrolling past it.</p>
 </div>
 
 <h2 class="sect">What you get</h2>
@@ -93,23 +93,47 @@ sudo dd if=glados-1.2.27.iso of=/dev/sdX bs=4M status=progress oflag=sync</code>
 <p>A Windows 3.1-styled desktop with a window manager, a taskbar and a terminal, and behind that a shell. <code>gen</code> generates text and <code>ask</code> answers a question, both from the model in kernel space. <code>if</code> lists interfaces, <code>dhcp</code> takes a lease, <code>dns</code> resolves a name and <code>https example.com /</code> fetches a page over a TLS 1.3 connection that this kernel negotiated itself, down to the X25519 key exchange. <code>battery</code> reads a charge by evaluating the AML your firmware ships in its DSDT, because on a laptop there is no other way to get one. <code>agent</code> hands the model a goal and a step budget: it picks an applet through a grammar that makes wrong names unreachable, reads what the applet prints, and writes a transcript to <code>/ai/episodes</code>. <code>think</code> poses a question to the same mind while the shell stays yours. <code>crypto</code>, <code>tensor</code> and <code>model</code> re-run the self-tests on demand, and <code>help</code> lists the rest.</p>
 </div>
 
+<h2 class="sect">Updating</h2>
+
+<div class="panel">
+<p>A running system can fetch a new kernel image, check it against a signing
+key compiled into the one already running, and stage it for the next boot. The
+previous image is kept as a rollback copy, and a boot that fails to reach the
+memory map falls back to it.</p>
+
+<p><strong>An image booted from this ISO cannot update itself.</strong> ISO 9660
+is read-only and there is no writable EFI partition on it, so there is nowhere
+to stage anything. Updating needs an installed system. The
+<code>update</code> command says so directly when it cannot find a boot volume
+to write to.</p>
+
+<p>Weights are not updated this way. They are 570 MB to 1.9 GB and the network
+stack has a 32 KB receive window with no resume, so a new checkpoint arrives by
+downloading a new image from this page.</p>
+
+<p>Commands: <code>update</code> reports what is running and what the channel
+last offered, <code>update check</code> asks, <code>update fetch</code>
+downloads and verifies, and <code>update stage</code> writes it for the next
+boot after you type back eight characters of the image digest.</p>
+</div>
+
 <h2 class="sect">Hardware support, honestly</h2>
 <div class="panel">
 <p>Development happens against one laptop, an MSI Thin GF63 12UC, and that is the only machine any of this is meaningfully tested on.</p>
 <p>It should boot on most x86-64 UEFI systems. Nothing in the boot path is vendor-specific and the graphics path is plain GOP, which every UEFI implementation provides. Storage and networking are a different story, because a driver has to match a chip: there is one for Intel e1000, one for Realtek RTL8168, one for NVMe and one for xHCI, and that is the whole list. So expect a working desktop and a working model, and treat your disk and your network card as an open question.</p>
-<p>The battery reading is a further open question, and in the other direction. It goes through an interpreter that runs your firmware's own bytecode, which is universal by construction, but the embedded controller it reaches through has never had its success path exercised: QEMU models no controller, so under emulation only the timeout is proven and every figure shown is a fallback rather than a reading.</p>
+<p>The battery reading is a further open question, and in the other direction. It goes through an interpreter that runs your firmware's own bytecode, which is universal by construction, but the embedded controller it reaches through has never had its success path exercised: QEMU models no controller, so under emulation only the timeout is proven and every figure shown is a fallback.</p>
 </div>
 
 <h2 class="sect">Frequently asked questions</h2>
 <div class="panel">
 <dl class="faq">
-<dt>Is the GLaDOS ISO free?</dt><dd>Free to download and free to run. The source is published under all-rights-reserved, which means you are welcome to read it and not to redistribute it or build derivatives from it without asking.</dd>
+<dt>Is the GLaDOS ISO free?</dt><dd>Free to download and free to run. The source is published under all-rights-reserved, which means you are welcome to read it. Redistributing it or building derivatives from it needs asking.</dd>
 <dt>Will it damage my computer or my files?</dt><dd>It runs from the USB stick and installs nothing. NVMe writes are locked at boot and only unlock if the driver finds a disk region that was explicitly set aside for it, and every error path locks them again. On a laptop whose disk is entirely allocated to Windows there is no such region, so storage initialisation fails and says so, which is the intended outcome.</dd>
 <dt>Which image should I take?</dt><dd>The SmolLM2 image if you are running it under emulation, because it is the only one that fits QEMU's 516 MB disk ceiling and it is four times faster per token. The Qwen3-0.6B image on real hardware with 2 GB of RAM. The 2B images want 5 GB, and 8 GB for the 32k context variant.</dd>
 <dt>Can I run it in a virtual machine?</dt><dd>Yes, with UEFI firmware, which means OVMF. Use the SmolLM2 image: QEMU's built-in FAT support caps the whole emulated disk at 516 MB and every other image is larger than that. Give the guest at least 2 GB of RAM as well, because the weights are read into memory before ExitBootServices and the guest has to have somewhere to put them.</dd>
-<dt>Why does it need Secure Boot disabled?</dt><dd>Because the kernel is not signed by a key your firmware trusts. Getting one would mean going through a Microsoft-signed shim, which is a distribution and paperwork problem, not a technical one.</dd>
+<dt>Why does it need Secure Boot disabled?</dt><dd>Because the kernel is not signed by a key your firmware trusts. Getting one would mean going through a Microsoft-signed shim, which is a matter of distribution and paperwork.</dd>
 <dt>How fast is the model?</dt><dd>Generation is bound by memory bandwidth, so the useful rule is that each token costs roughly one pass over the weights. That makes the 570 MB Qwen3 checkpoint about 4.4 times slower per token than the 135 MB SmolLM2 one. Around 155 MB of Qwen3 is the output classifier alone, which is why restricting that final matrix multiply to the tokens a grammar can actually reach is such an effective optimisation.</dd>
-<dt>Does it send anything anywhere?</dt><dd>No. There is no telemetry, no update check and no network activity at all unless you type a command that causes some. The model runs locally because there is nowhere else for it to run.</dd>
+<dt>Does it send anything anywhere?</dt><dd>No. There is no telemetry and no network activity at all unless you type a command that causes some. There is an updater, and it runs only when you ask it to: nothing checks for a new version on its own, at boot or on a timer. The model runs locally because there is nowhere else for it to run.</dd>
 </dl>
 </div>
 
@@ -120,7 +144,7 @@ sudo dd if=glados-1.2.27.iso of=/dev/sdX bs=4M status=progress oflag=sync</code>
 <!--footer-->
 <div id="footer">
   <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This project is independent and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
-  <p>Copyright 2026. All rights reserved. The source is published to be read rather than reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are other people's and are listed on <a href="../credits.html">the credits page</a>.</p>
+  <p>Copyright 2026. All rights reserved. The source is published so it can be read; redistribution and derivatives need asking. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are other people's and are listed on <a href="../credits.html">the credits page</a>.</p>
   <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-31.</p>
 </div>
 <!--/footer-->

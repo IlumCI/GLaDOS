@@ -36,7 +36,7 @@
 <!--masthead-->
 <div id="masthead">
   <a class="mark" href="../"><img src="../img/wordmark.png" alt="Aperture Institute" width="666" height="169"></a>
-  <span class="sub">GLaDOS &mdash; an operating system in Rust, with a language model in the kernel</span>
+  <span class="sub">GLaDOS: an operating system in Rust, with a language model in the kernel</span>
 </div>
 <!--/masthead-->
 
@@ -47,9 +47,9 @@
 <div id="body">
 <!--sidebar-->
 <div id="sidebar">
-<div class="box"><div class="t">Latest release</div><div class="bd"><table class="facts"><tr><td>Version</td><td>1.2.27</td></tr><tr><td>Released</td><td>2026-08-31</td></tr><tr><td>Images</td><td>6</td></tr></table><ul><li><a href="../download/">Download</a></li><li><a href="https://github.com/IlumCI/GLaDOS/releases/tag/v1.2.27">Release notes</a></li></ul></div></div>
+<div class="box"><div class="t">Latest release</div><div class="bd"><table class="facts"><tr><td>Version</td><td>1.2.28</td></tr><tr><td>Released</td><td>2026-08-31</td></tr><tr><td>Images</td><td>0</td></tr></table><ul><li><a href="../download/">Download</a></li><li><a href="https://github.com/IlumCI/GLaDOS/releases/tag/v1.2.28">Release notes</a></li></ul></div></div>
 <div class="box"><div class="t">Project information</div><div class="bd"><table class="facts"><tr><td>Development status</td><td>3 - Alpha</td></tr><tr><td>Environment</td><td>Console, framebuffer</td></tr><tr><td>Intended audience</td><td>Developers, science/research</td></tr><tr><td>Licence</td><td>Other/proprietary, all rights reserved</td></tr><tr><td>Natural language</td><td>English</td></tr><tr><td>Operating system</td><td>x86-64 UEFI, bare metal</td></tr><tr><td>Programming language</td><td>Rust, Python</td></tr><tr><td>Topic</td><td>Operating systems, kernels, artificial intelligence</td></tr></table></div></div>
-<div class="box"><div class="t">Statistics</div><div class="bd"><table class="facts"><tr><td>Registered</td><td>2026-08-14</td></tr><tr><td>Releases</td><td>4</td></tr><tr><td>Downloads</td><td>19</td></tr><tr><td>Source</td><td>108 files, ~50,000 lines</td></tr></table></div></div>
+<div class="box"><div class="t">Statistics</div><div class="bd"><table class="facts"><tr><td>Registered</td><td>2026-08-14</td></tr><tr><td>Releases</td><td>5</td></tr><tr><td>Downloads</td><td>32</td></tr><tr><td>Source</td><td>108 files, ~50,000 lines</td></tr></table></div></div>
 <div class="box"><div class="t">Developers</div><div class="bd"><table class="facts"><tr><td>IlumCI</td><td>project admin, developer</td></tr></table></div></div>
 <div class="box"><div class="t">Documentation</div><div class="bd"><ul><li><a href="../wiki/glados-os.html">GLaDOS OS</a></li><li><a href="../wiki/kernel.html">The kernel</a></li><li><a href="../wiki/model.html">The model</a></li><li><a href="../wiki/agent.html">The agent</a></li><li><a href="../wiki/rsi.html">Self-improvement</a></li><li><a href="../wiki/aiksi.html">Aiksi, the language</a></li><li><a href="../wiki/">All 16 articles</a></li></ul></div></div>
 </div>
@@ -62,7 +62,7 @@
 
 <h2 id="1-self-tests-at-boot">1. Self-tests at boot</h2>
 <p>Twenty sections run during boot, printing a claim and whether the machine met it. Thirteen of them are registered as named suites that can be re-run on demand. Heap, timer, clock, the Merkle addressing, fifteen sets of published cipher vectors, fault handling, constrained decoding, the agent loop, the linear probe, the situation planner, the initiative policy, the self-modification gate, corpus bundles, adapters, the backward kernels and the trainer's arithmetic.</p>
-<p>Registration is deliberately awkward: adding a suite requires a slot in a results table and a compile-time assertion that the two lengths match, so a suite added without a slot fails the build instead of silently never recording a verdict.</p>
+<p>Registration is deliberately awkward: adding a suite requires a slot in a results table and a compile-time assertion that the two lengths match, so a suite added without a slot fails the build.</p>
 <p>Reading that output is the test suite, and skipping it has cost real time twice. A signature verification break sat visible in the log for a full debugging cycle while the output was being filtered to the section under work.</p>
 
 <h2 id="2-a-scripted-emulator-harness">2. A scripted emulator harness</h2>
@@ -71,15 +71,15 @@
 
 <h2 id="3-a-numeric-oracle">3. A numeric oracle</h2>
 <p>A host-side reference implementation reads the same converted checkpoint and prints logits for a token sequence, so a conversion bug shows up there too and only a kernel bug shows as a mismatch. Comparing generated text against a known fact is the cheap end of the same instrument, and it is the one that caught the rotary embedding.</p>
-<p>The gradient checks work the same way, and they are directional rather than per-entry for a reason of resolution. Differencing one parameter asks floating point to resolve a quantity below the loss's own rounding, and it reported a value that was a float quantum wearing the costume of a derivative. Stepping every parameter along the gradient asks it to resolve something far larger, and checks the whole vector: 1.148 analytic against 1.135 numeric over 57,600 entries.</p>
+<p>The gradient checks work the same way, and they are directional, for a reason of resolution. Differencing one parameter asks floating point to resolve a quantity below the loss's own rounding, and it reported a value that was a float quantum wearing the costume of a derivative. Stepping every parameter along the gradient asks it to resolve something far larger, and checks the whole vector: 1.148 analytic against 1.135 numeric over 57,600 entries.</p>
 
 <h2 id="4-a-differential-harness-with-a-canary">4. A differential harness with a canary</h2>
 <p>The newest instrument runs one program two ways and requires the results to agree on value, step count and error text, bit for bit with no tolerance. Any difference at all is a bug and a tolerance would hide the one worth finding.</p>
-<p>The part that makes it a harness rather than a ritual is the canary. A suite that has never reported a difference is indistinguishable from one that compares nothing, so it runs two programs that differ by a single unused declaration, giving identical answers and step counts one apart, and it fails if that is not caught. That is the difference a comparison looking only at answers would wave through, and it earned its place immediately by catching a genuine miscount the first time a code generator was compared against the interpreter.</p>
+<p>The part that makes it a harness is the canary. A suite that has never reported a difference is indistinguishable from one that compares nothing, so it runs two programs that differ by a single unused declaration, giving identical answers and step counts one apart, and it fails if that is not caught. That is the difference a comparison looking only at answers would wave through, and it earned its place immediately by catching a genuine miscount the first time a code generator was compared against the interpreter.</p>
 <p>The corpus runs sixty-four times, which is a number arrived at the hard way elsewhere in this tree: a one-shot check of the multiprocessing split passed while the implementation still deadlocked.</p>
 
 <h2 id="the-habit-underneath">The habit underneath</h2>
-<p>Measure rather than argue, and publish the measurements that overturned the argument. A renderer survey ranked several changes and the real win was none of them. A design panel predicted a benefit of five to seven and the system reported two. A plan called it near certain that a tree walk was the cost, and the tree walk turned out to be eight percent of it.</p>
+<p>Measure first, then argue, and publish the measurements that overturned the argument. A renderer survey ranked several changes and the real win was none of them. A design panel predicted a benefit of five to seven and the system reported two. A plan called it near certain that a tree walk was the cost, and the tree walk turned out to be eight percent of it.</p>
 <p>Negative results stay in the tree for the same reason. Training the classifier head hurts at this data scale. The product-of-experts ensemble does not improve accuracy. Both are kept, because the reason to know them is the reason they were worth measuring.</p>
 <div class="seealso"><b>See also:</b> <a href="kernel.html">The kernel</a>, <a href="model.html">The model</a>, <a href="agent.html">The agent</a>, <a href="glados-os.html">GLaDOS OS</a></div>
 </div>
@@ -89,7 +89,7 @@
 <!--footer-->
 <div id="footer">
   <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This project is independent and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
-  <p>Copyright 2026. All rights reserved. The source is published to be read rather than reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are other people's and are listed on <a href="../credits.html">the credits page</a>.</p>
+  <p>Copyright 2026. All rights reserved. The source is published so it can be read; redistribution and derivatives need asking. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are other people's and are listed on <a href="../credits.html">the credits page</a>.</p>
   <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-31.</p>
 </div>
 <!--/footer-->
