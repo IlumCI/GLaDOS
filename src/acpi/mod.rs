@@ -134,6 +134,15 @@ pub struct Acpi {
     /// ACPI PM timer I/O port. A fixed 3.579545 MHz clock, and a useful
     /// independent reference if PIT calibration ever looks wrong.
     pub pm_timer: Option<u32>,
+    /// The two power management control registers. Writing a sleep type and
+    /// the enable bit here is, physically, how a machine turns itself off.
+    pub pm1a_cnt: u32,
+    pub pm1b_cnt: u32,
+    /// The port to poke and the value to poke it with, to hand the machine
+    /// from the firmware's own power management to ours. Usually unnecessary
+    /// after a UEFI boot, which leaves ACPI mode already enabled.
+    pub smi_cmd: u32,
+    pub acpi_enable: u8,
     /// Every table found, including the ones nothing parses. Recorded so a
     /// missing one is a visible absence rather than a silent `_ => {}`.
     pub tables: [Table; MAX_TABLES],
@@ -160,6 +169,10 @@ impl Acpi {
             hpet: None,
             mcfg: None,
             pm_timer: None,
+            pm1a_cnt: 0,
+            pm1b_cnt: 0,
+            smi_cmd: 0,
+            acpi_enable: 0,
             tables: [Table { sig: [0; 4], addr: 0, len: 0, sound: false }; MAX_TABLES],
             table_count: 0,
             dsdt: None,
@@ -307,6 +320,29 @@ pub unsafe fn parse(rsdp: *const c_void) -> Option<Acpi> {
                         if port != 0 {
                             acpi.pm_timer = Some(port);
                         }
+                    }
+                    // The registers that turn the machine off, and the door
+                    // to them. Offsets 64 and 68 are the 32-bit forms; 172
+                    // and 184 hold generic address structures whose address
+                    // sits four bytes in, and those win where present for the
+                    // same reason X_DSDT does.
+                    if len >= 72 {
+                        acpi.pm1a_cnt = rd_u32(t, 64);
+                        acpi.pm1b_cnt = rd_u32(t, 68);
+                    }
+                    if len >= 196 {
+                        let a = rd_u64(t, 172 + 4) as u32;
+                        let b = rd_u64(t, 184 + 4) as u32;
+                        if a != 0 {
+                            acpi.pm1a_cnt = a;
+                        }
+                        if b != 0 {
+                            acpi.pm1b_cnt = b;
+                        }
+                    }
+                    if len >= 53 {
+                        acpi.smi_cmd = rd_u32(t, 48);
+                        acpi.acpi_enable = rd_u8(t, 52);
                     }
                     // The DSDT is the one table the root list does not point
                     // at: it hangs off the FADT instead. X_DSDT at 140 is the
@@ -1073,4 +1109,118 @@ pub fn load_report(path: &str) {
     *NAMESPACE.lock() = Some(ns);
     unsafe { *SUMMARY.get() = Some(sum) };
     crate::kprintln!("  this is now the namespace 'acpi ns' and 'acpi eval' address");
+}
+
+// --- turning the machine off --------------------------------------------
+
+/// The sleep type values `\_S5` names, for the two control registers.
+///
+/// `\_S5` is a package the firmware puts in its own namespace, and its first
+/// two elements are the numbers to write. There is no standard value: the
+/// board decides, and asking it is the only way to know. That is the whole
+/// reason powering off needed an interpreter.
+pub fn s5_values(a: &Acpi) -> Option<(u16, u16)> {
+    with_namespace(a, |ns| {
+        let node = ns.resolve(0, &parse_path("\\_S5"))?;
+        let mut it = eval::Interp::new(ns);
+        let v = it.eval_node(node, &[]).ok()?;
+        let eval::Value::Pkg(p) = v else { return None };
+        let a = p.first()?.int().ok()? as u16 & 0x07;
+        // A machine with one control register leaves the second element out,
+        // or names a value nothing will read. Zero is the safe default: it is
+        // only written to a register the FADT says exists.
+        let b = p.get(1).and_then(|x| x.int().ok()).unwrap_or(0) as u16 & 0x07;
+        Some((a, b))
+    })
+    .flatten()
+}
+
+/// Turn the machine off through ACPI.
+///
+/// This is what `src/cpu/mod.rs` recorded as not worth an interpreter's worth
+/// of work. It is worth it now, because the interpreter exists for the
+/// battery: the marginal cost of a real power-off is this function.
+///
+/// **Does not return on success**, because on success there is nothing left
+/// running to return to.
+pub fn power_off(a: &Acpi) -> Result<(), &'static str> {
+    if a.pm1a_cnt == 0 {
+        return Err("the firmware named no power management control register");
+    }
+    let (typ_a, typ_b) = s5_values(a).ok_or("the firmware declares no \\_S5")?;
+
+    // Nothing may run between deciding and writing. An interrupt landing in
+    // the middle would resume a machine that has already been told to stop.
+    crate::cpu::disable_interrupts();
+
+    unsafe {
+        // ACPI mode has to be on, or the sleep type goes to a register the
+        // firmware is still holding. A UEFI boot normally leaves it on, so
+        // this is usually a read and nothing more.
+        const SCI_EN: u16 = 1;
+        if a.smi_cmd != 0 && crate::cpu::port::inw(a.pm1a_cnt as u16) & SCI_EN == 0 {
+            crate::cpu::port::outb(a.smi_cmd as u16, a.acpi_enable);
+            for _ in 0..1000 {
+                if crate::cpu::port::inw(a.pm1a_cnt as u16) & SCI_EN != 0 {
+                    break;
+                }
+                crate::time::delay_us(1000);
+            }
+        }
+
+        // The sleep type sits at bits 12..10 and the enable bit at 13. The
+        // rest of the register belongs to the firmware, so it is read and put
+        // back rather than overwritten: writing a bare value here clears
+        // whatever else the board keeps in it.
+        let arm = |port: u16, typ: u16| {
+            let cur = crate::cpu::port::inw(port);
+            let v = (cur & !(0x07 << 10)) | (typ << 10) | (1 << 13);
+            crate::cpu::port::outw(port, v);
+        };
+        arm(a.pm1a_cnt as u16, typ_a);
+        if a.pm1b_cnt != 0 {
+            arm(a.pm1b_cnt as u16, typ_b);
+        }
+    }
+
+    // A board may take a moment. If it takes longer than this, it is not
+    // going to, and saying so beats a machine that appears to have hung while
+    // shutting down.
+    crate::time::delay_us(500_000);
+    Err("the registers were written and the machine is still running")
+}
+
+/// What the power-off path would do, without doing it.
+pub fn s5_report(a: &Acpi) {
+    if a.pm1a_cnt == 0 {
+        crate::kprintln!("  no power management control register in the FADT");
+    } else {
+        crate::kprintln!(
+            "  pm1a control at {:#x}{}",
+            a.pm1a_cnt,
+            if a.pm1b_cnt != 0 {
+                alloc::format!(", pm1b at {:#x}", a.pm1b_cnt)
+            } else {
+                alloc::string::String::from(", no pm1b")
+            }
+        );
+    }
+    match s5_values(a) {
+        Some((x, y)) => crate::kprintln!("  \\_S5 says sleep type {} and {}", x, y),
+        None => crate::kprintln!("  the firmware declares no \\_S5, so ACPI cannot power it off"),
+    }
+    let mode = if a.pm1a_cnt != 0 {
+        unsafe { crate::cpu::port::inw(a.pm1a_cnt as u16) & 1 != 0 }
+    } else {
+        false
+    };
+    crate::kprintln!(
+        "  acpi mode is {}{}",
+        if mode { "on" } else { "off" },
+        if !mode && a.smi_cmd != 0 {
+            alloc::format!(", and would be enabled by writing {:#04x} to {:#x}", a.acpi_enable, a.smi_cmd)
+        } else {
+            alloc::string::String::new()
+        }
+    );
 }

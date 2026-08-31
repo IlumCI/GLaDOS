@@ -2133,6 +2133,23 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
         }
         "battery" | "batt" => crate::dev::battery::report(),
         "ec" => crate::dev::ec::report(),
+        // The ACPI path on its own, so it can be exercised without the
+        // firmware answering first and hiding it.
+        "acpi" if rest.trim() == "off" => match acpi {
+            Some(a) => {
+                kprintln!("  powering off through ACPI, skipping the firmware");
+                if let Err(e) = crate::acpi::power_off(a) {
+                    console::set_color(LTRED);
+                    kprintln!("  {}", e);
+                    console::set_color(LTGRAY);
+                }
+            }
+            None => kprintln!("  ACPI was not parsed"),
+        },
+        "acpi" if rest.trim() == "s5" => match acpi {
+            Some(a) => crate::acpi::s5_report(a),
+            None => kprintln!("  ACPI was not parsed"),
+        },
         "acpi" if rest.trim() == "unlock" => {
             crate::acpi::eval::allow_writes(true);
             console::set_color(LTRED);

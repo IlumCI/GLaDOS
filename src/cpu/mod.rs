@@ -382,15 +382,18 @@ fn runtime() -> Option<&'static crate::uefi::RuntimeServices> {
     Some(unsafe { &*(p as *const crate::uefi::RuntimeServices) })
 }
 
-/// Ask the firmware to turn the machine off.
+/// Turn the machine off.
 ///
-/// There was no way to do this at all, which is why the only shutdown anybody
-/// had was holding the power button. ACPI S5 by hand means parsing the DSDT
-/// for `\_S5` and writing PM1a/PM1b, an AML interpreter's worth of work for
-/// something the firmware already knows how to do on this exact board.
+/// The firmware first, because it knows this board and a call through it is
+/// the path every other operating system takes. **And ACPI second, which it
+/// could not be before.** This comment used to say that doing it by hand meant
+/// parsing the DSDT for `\_S5` and writing PM1a and PM1b, an AML
+/// interpreter's worth of work for something the firmware already does -- and
+/// that was a fair trade right up until the interpreter existed for the
+/// battery. It does now, so the second chance costs a function call, and
+/// "hold the button" stops being the answer when the firmware declines.
 ///
-/// Returns only if the call is unavailable or the firmware declines, which is
-/// why the caller still has to park the core afterwards.
+/// Returns only if both refuse, which is why the caller still parks the core.
 pub fn shutdown() -> ! {
     if let Some(rt) = runtime() {
         (rt.reset_system)(
@@ -400,7 +403,14 @@ pub fn shutdown() -> ! {
             core::ptr::null(),
         );
     }
-    crate::kprintln!("  the firmware would not power down; hold the button");
+    crate::kprintln!("  the firmware declined; asking ACPI directly");
+    if let Some(a) = crate::acpi::parsed() {
+        match crate::acpi::power_off(&a) {
+            Ok(()) => {}
+            Err(e) => crate::kprintln!("  {}", e),
+        }
+    }
+    crate::kprintln!("  nothing would power this machine down; hold the button");
     halt()
 }
 
