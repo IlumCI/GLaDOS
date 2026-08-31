@@ -2042,6 +2042,8 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             kprintln!("  paint write [path] mines oracle agentlog   desktop programs; todo   the checklist");
             kprintln!("  typewriter    output pacing, in us per character");
             kprintln!("  font          every glyph this machine can draw");
+            kprintln!("  battery       charge, state and time remaining");
+            kprintln!("  power         temperature, frequency and the governor");
             kprintln!("  usb [hid]     the USB bus; 'usb hid' for keyboards and mice");
 
             console::set_color(YELLOW);
@@ -2129,6 +2131,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             kprintln!("  {} ticks  ({}.{:02} s at {} Hz)", t, t / hz, (t % hz) * 100 / hz, hz);
             kprintln!("  apic timer calibrated at {} Hz", lapic::timer_hz());
         }
+        "battery" | "batt" => crate::dev::battery::report(),
         "ec" => crate::dev::ec::report(),
         "acpi" if rest.trim() == "unlock" => {
             crate::acpi::eval::allow_writes(true);

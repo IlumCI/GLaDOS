@@ -135,6 +135,11 @@ pub const SUITES: &[Suite] = &[
         run: crate::cpu::code::selftest,
     },
     Suite {
+        name: "battery",
+        about: "the hardware id decoder, and the arithmetic over what it finds",
+        run: crate::dev::battery::selftest,
+    },
+    Suite {
         name: "acpi",
         about: "the namespace, the evaluator, and the bounds on both",
         run: crate::acpi::diag_acpi,
@@ -153,7 +158,8 @@ pub const SUITES: &[Suite] = &[
 
 /// One slot per suite. Indexed by position in `SUITES`, which is a constant,
 /// so the table cannot get out of step with the list.
-static RESULTS: [AtomicU8; 22] = [
+static RESULTS: [AtomicU8; 23] = [
+    AtomicU8::new(0),
     AtomicU8::new(0),
     AtomicU8::new(0),
     AtomicU8::new(0),
@@ -180,7 +186,7 @@ static RESULTS: [AtomicU8; 22] = [
 
 /// Checked here rather than trusted: a suite added to `SUITES` without a slot
 /// would silently never record a verdict.
-const _: () = assert!(SUITES.len() == 22);
+const _: () = assert!(SUITES.len() == 23);
 
 pub fn verdict(i: usize) -> Verdict {
     match RESULTS.get(i).map(|r| r.load(Ordering::Relaxed)) {
