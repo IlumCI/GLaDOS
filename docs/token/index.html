@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The GLaDOS utility token</title>
+<meta name="description" content="The planned GLaDOS utility token: what it would gate, what it deliberately would not, and why a kernel that runs in ring 0 cannot enforce a gate on itself.">
+<meta name="keywords" content="GLaDOS token, utility token, AI operating system token, on-chain ledger anchoring">
+<link rel="canonical" href="https://aperture.institute/token/">
+<meta name="robots" content="index,follow,max-image-preview:large">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="GLaDOS">
+<meta property="og:title" content="The GLaDOS utility token">
+<meta property="og:description" content="The planned GLaDOS utility token: what it would gate, what it deliberately would not, and why a kernel that runs in ring 0 cannot enforce a gate on itself.">
+<meta property="og:url" content="https://aperture.institute/token/">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="The GLaDOS utility token">
+<meta name="twitter:description" content="The planned GLaDOS utility token: what it would gate, what it deliberately would not, and why a kernel that runs in ring 0 cannot enforce a gate on itself.">
+<meta property="og:image" content="https://aperture.institute/img/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="The GLaDOS aperture mark">
+<meta name="twitter:image" content="https://aperture.institute/img/og.png">
+<link rel="stylesheet" href="../style.css">
+<link rel="icon" type="image/svg+xml" href="../img/logo.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="../img/icon-32.png">
+<link rel="apple-touch-icon" sizes="180x180" href="../img/icon-180.png">
+<link rel="manifest" href="../site.webmanifest">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://aperture.institute/"},{"@type":"ListItem","position":2,"name":"Token","item":"https://aperture.institute/token/"}]}</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<div id="page">
+
+<div id="masthead">
+  <img src="../img/logo.svg" alt="" width="34" height="34">
+  <a class="name" href="../">GLaDOS</a>
+  <span class="sub">An operating system in Rust, with a language model in the kernel</span>
+</div>
+
+<!--bar-->
+<div id="bar"><a href="../">Home</a> | <a href="../download/">Download</a> | <a href="../news/">News</a> | <a href="../wiki/">Wiki</a> | <a href="../screenshots/">Screenshots</a> | <a href="../archive/">Archive</a> | <a href="../token/">Token</a> | <a href="https://github.com/IlumCI/GLaDOS" rel="noopener">Source code</a></div>
+<!--/bar-->
+
+<div id="body">
+<!--sidebar-->
+<div id="sidebar">
+<div class="box"><div class="t">Navigation</div><div class="bd"><ul><li><a href="../">Home</a></li><li><a href="../download/">Download</a></li><li><a href="../news/">News</a></li><li><a href="../wiki/">Wiki</a></li><li><a href="../screenshots/">Screenshots</a></li><li><a href="../archive/">Archive</a></li><li><a href="../token/">Token</a></li><li><a href="https://github.com/IlumCI/GLaDOS">Source code</a></li></ul></div></div>
+<div class="box"><div class="t">Latest release</div><div class="bd"><table class="facts"><tr><td>Version</td><td>1.2.27</td></tr><tr><td>Released</td><td>2026-08-31</td></tr><tr><td>Images</td><td>6</td></tr></table><ul><li><a href="../download/">Download</a></li><li><a href="https://github.com/IlumCI/GLaDOS/releases/tag/v1.2.27">Release notes</a></li></ul></div></div>
+<div class="box"><div class="t">Project information</div><div class="bd"><table class="facts"><tr><td>Status</td><td>Active, research kernel</td></tr><tr><td>Language</td><td>Rust</td></tr><tr><td>Platform</td><td>x86-64 UEFI, bare metal</td></tr><tr><td>Licence</td><td>All rights reserved</td></tr><tr><td>Size</td><td>108 files, ~50,000 lines</td></tr><tr><td>Developer</td><td>IlumCI</td></tr></table></div></div>
+<div class="box"><div class="t">Wiki</div><div class="bd"><ul><li><a href="../wiki/glados-os.html">GLaDOS OS</a></li><li><a href="../wiki/llm-in-kernel.html">A model in the kernel</a></li><li><a href="../wiki/ring-0.html">Ring 0</a></li><li><a href="../wiki/uefi-kernel.html">UEFI as the kernel</a></li><li><a href="../wiki/gui.html">The desktop</a></li><li><a href="../wiki/testing.html">Testing without a runner</a></li><li><a href="../wiki/">All 25 articles</a></li></ul></div></div>
+</div>
+<!--/sidebar-->
+<div id="content">
+<div class="crumbs"><a href="../">GLaDOS</a> / Token</div>
+<div id="main">
+<h1>The GLaDOS utility token</h1>
+
+<div class="note"><strong>Status: planned. Nothing is deployed.</strong> There is no contract, no contract address, no chain chosen and no date. Anything claiming to be this token today is not. This page describes an intended design so that it can be argued with before it is built, and it is not an offer, a solicitation or investment advice of any kind.</div>
+
+<h2 class="sect">The constraint that shapes everything</h2>
+<div class="panel">
+<p>A kernel cannot gate itself. The images on this site are public, the machine runs in ring 0 with one address space and no process isolation, and the operator is by construction the most privileged thing on it. A balance check compiled into the kernel is one edit away from deleted, and anyone who wanted it gone would have both the source and the motive.</p>
+<p>It would also cost the project the only property that makes it credible, which is that you can download an image, boot it, and watch it do what the documentation says. A system that refused to run without a wallet would be asking to be taken on trust, which is the opposite of what everything else here is arranged to avoid.</p>
+<p>So the rule is that the token gates what a machine must be <em>given</em>, never what it does once it has it. Enforcement lives where the bytes come from, and every item below is on the list because it survives that test.</p>
+</div>
+
+<h2 class="sect">What it would gate</h2>
+<div class="scroll">
+<table class="forge">
+<thead><tr><th>Use</th><th>Why it is enforceable</th></tr></thead>
+<tbody>
+<tr><td>Signed release channel</td><td>The kernel already stages updates: a new image and a detached signature are checked against a key before the <em>next</em> boot swaps them in, with a verified rollback copy. You cannot patch your way into an image you were never sent. This is built and driven end to end; what it lacks is a provisioned key, which the project needs regardless.</td></tr>
+<tr><td>Model weights</td><td>The larger checkpoints, and any finetune trained against the machine's own corpus, are files that somebody distributes. Gating distribution is enforceable because it is distribution.</td></tr>
+<tr><td>Hosted inference</td><td>The kernel has DNS, TCP and a TLS 1.3 client it negotiates itself, so a larger remote model that the in-kernel one escalates to is reachable. The key is issued and checked server-side. It is also a real feature: a 0.6B model in a kernel has obvious ceilings.</td></tr>
+<tr><td>Ledger anchoring</td><td>The interesting one, and not a gate at all. See below.</td></tr>
+</tbody>
+</table>
+</div>
+
+<h2 class="sect">Anchoring the self-modification ledger</h2>
+<div class="panel">
+<p>This system already modifies itself. It proposes changes to its own routing, trains an adapter over its own decision layer, and adopts a change only when four independent judges agree. Each verdict goes in a ledger, and because the search walks a declared grid with no random seed anywhere in it, every verdict is re-derivable bit for bit by any later run. Storage is content-addressed, so a snapshot is one root hash.</p>
+<p>None of that was built with a chain in mind, and all of it is already the shape of a chain commitment. Anchoring each root and each ledger entry gives something that does not otherwise exist: a public, timestamped, tamper-evident record of an AI system rewriting itself, where a third party can take a root, re-derive the verdict independently, and check whether it holds. The token pays for anchoring, and can fund a challenge bond, so that disagreeing with an anchored verdict and being right is worth something.</p>
+<p>That is the honest reading of the phrase "tokenized operating system". Not that the software checks a balance, but that its history of changing itself is a public record somebody other than its author can verify.</p>
+</div>
+
+<h2 class="sect">What it deliberately would not do</h2>
+<div class="panel">
+<ul>
+<li><strong>Gate boot, or any local feature.</strong> Unenforceable, for the reasons above, and it would cost the project the thing that makes it worth looking at.</li>
+<li><strong>Let holders override the judges.</strong> Governance can steer which proposals get tried. It must not decide which get adopted. The judges are the measurement discipline this whole project rests on, and a vote that could overrule one would be adopting changes nobody measured.</li>
+<li><strong>Put a key-holding wallet in the kernel.</strong> One address space, no process isolation, and a language model with function-call access to raw memory and I/O ports. That is the worst available place to keep a private key. Signing stays off the machine.</li>
+</ul>
+</div>
+
+<h2 class="sect">Where it stands</h2>
+<div class="panel">
+<p>The ticker is not finalised. The design above is, in the sense that it is what the project would build rather than a list of options, but nothing has been deployed and no date is set. When something exists, its contract address will be published here and on the <a href="https://github.com/IlumCI/GLaDOS">source repository</a>, and nowhere else.</p>
+</div>
+
+</div>
+</div>
+</div>
+
+<!--footer-->
+<div id="footer">
+  <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This project is independent and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
+  <p>Copyright 2026. All rights reserved. The source is published to be read rather than reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are other people's and are listed on <a href="../credits.html">the credits page</a>.</p>
+  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-31.</p>
+</div>
+<!--/footer-->
+
+</div>
+</body>
+</html>

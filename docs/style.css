@@ -260,3 +260,110 @@ dl.faq dd { margin: 3px 0 0 20px; }
   #body { padding: 10px; }
   #masthead, #bar, #footer { padding-left: 10px; padding-right: 10px; }
 }
+
+/* --- forge components -------------------------------------------------
+   Added when the front page stopped being an encyclopedia article and became
+   a project summary. The reference is a mid-2000s software forge: facts in
+   dense tables, releases in a list, news as dated entries. Nothing here
+   introduces a colour; it is the same two ambers the rest of the site uses.  */
+
+/* A section heading that carries a bar, the way a forge boxed each block of
+   its summary page. Distinct from h2, which the wiki articles use and which
+   must keep its quieter rule. */
+h2.sect {
+  background: #b35900;
+  color: #fff;
+  font-size: 14px;
+  font-weight: bold;
+  padding: 3px 8px;
+  margin: 20px 0 0;
+  border: 0;
+}
+h2.sect:first-child { margin-top: 0; }
+h2.sect a { color: #f4e2c8; font-weight: normal; font-size: 12px; float: right; }
+
+/* The block under a barred heading, so the bar and its contents read as one
+   panel rather than a heading floating above loose text. */
+.sect + table.forge, .sect + .panel { margin-top: 0; }
+.panel {
+  border: 1px solid #d8bc94;
+  border-top: 0;
+  padding: 8px 10px;
+}
+.panel > :first-child { margin-top: 0; }
+.panel > :last-child { margin-bottom: 0; }
+
+table.forge {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0 0 4px;
+  font-size: 13px;
+}
+table.forge th, table.forge td {
+  border: 1px solid #d8bc94;
+  padding: 4px 8px;
+  text-align: left;
+  vertical-align: top;
+}
+table.forge th { background: #f4e6d0; font-weight: bold; }
+table.forge td.size { white-space: nowrap; }
+table.forge tr:hover td { background: #fdf7ee; }
+
+/* Wide tables scroll inside themselves rather than widening the page. The
+   download table has five columns and one of them is prose. */
+.scroll { overflow-x: auto; }
+
+/* A news entry. Date first, because on a project page the question is always
+   how recently anything happened. */
+.news { margin: 0 0 14px; }
+.news .nh { font-weight: bold; font-size: 15px; }
+.news .nd {
+  display: inline-block;
+  background: #f4e6d0;
+  border: 1px solid #d8bc94;
+  color: #6b3600;
+  font-size: 12px;
+  font-weight: normal;
+  padding: 0 5px;
+  margin-right: 7px;
+}
+.news p { margin: 4px 0; max-width: 48em; }
+.news .nl { font-size: 12px; color: #555; }
+
+/* The sidebar's panel, replacing the bordered ul. One frame per box: the
+   release box holds a table and a list, and two frames inside one heading
+   reads as two boxes that lost their headings. */
+.box .bd {
+  background: #f4e6d0;
+  border: 1px solid #d8bc94;
+  border-top: 0;
+  padding: 6px 7px;
+  font-size: 13px;
+}
+.box .bd ul {
+  margin: 0;
+  padding: 0 0 0 18px;
+  background: none;
+  border: 0;
+  list-style: square;
+}
+.box .bd table.facts + ul {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid #d8bc94;
+}
+
+table.facts { border-collapse: collapse; width: 100%; font-size: 12px; }
+table.facts td { padding: 1px 0; vertical-align: top; }
+table.facts td:first-child { color: #6b3600; padding-right: 8px; width: 42%; }
+
+/* A line of qualifying text under a table -- the checksum note, mostly. Small
+   enough to read as an aside and not so small it reads as a disclaimer. */
+p.small { font-size: 12px; color: #555; margin: 4px 0 0; max-width: 48em; }
+
+/* The 48em cap again, for prose that now sits inside a panel. The original
+   rule targets #main > p, and wrapping the front page's paragraphs in panels
+   took them out of its reach -- which put back exactly the 157-character line
+   the cap was added to prevent. Tables are left alone deliberately: they are
+   the one thing that wants the full column. */
+.panel > p, .panel > ul, .panel > ol, .panel > dl { max-width: 48em; }

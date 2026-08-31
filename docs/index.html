@@ -27,7 +27,9 @@
 <link rel="apple-touch-icon" sizes="180x180" href="img/icon-180.png">
 <link rel="manifest" href="site.webmanifest">
 <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://aperture.institute/"}]}</script>
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareApplication","name":"GLaDOS","applicationCategory":"OperatingSystem","operatingSystem":"x86-64 UEFI (bare metal)","description":"GLaDOS is a from-scratch ring-0 operating system written in Rust with a language model running inside the kernel. Free bootable ISO, full source, and documentation on how every part works.","url":"https://aperture.institute/","downloadUrl":"https://aperture.institute/download/","softwareVersion":"0.1","programmingLanguage":"Rust","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"}}</script>
+<!--ld-app-->
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareApplication","name":"GLaDOS","applicationCategory":"OperatingSystem","operatingSystem":"x86-64 UEFI (bare metal)","description":"GLaDOS is a from-scratch ring-0 operating system written in Rust with a language model running inside the kernel. Free bootable ISO, full source, and documentation on how every part works.","url":"https://aperture.institute/","downloadUrl":"https://aperture.institute/download/","softwareVersion":"1.2.27","datePublished":"2026-08-31","programmingLanguage":"Rust","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"}}</script>
+<!--/ld-app-->
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -35,52 +37,111 @@
 
 <div id="masthead">
   <img src="img/logo.svg" alt="" width="34" height="34">
-  <a class="name" href="">GLaDOS</a>
+  <a class="name" href="./">GLaDOS</a>
   <span class="sub">An operating system in Rust, with a language model in the kernel</span>
 </div>
 
-<div id="bar"><a href="">Home</a> | <a href="download/">Download</a> | <a href="wiki/">Wiki</a> | <a href="screenshots/">Screenshots</a> | <a href="archive/">Archive</a> | <a href="https://github.com/IlumCI/GLaDOS" rel="noopener">Source code</a></div>
+<!--bar-->
+<div id="bar"><a href="./">Home</a> | <a href="download/">Download</a> | <a href="news/">News</a> | <a href="wiki/">Wiki</a> | <a href="screenshots/">Screenshots</a> | <a href="archive/">Archive</a> | <a href="token/">Token</a> | <a href="https://github.com/IlumCI/GLaDOS" rel="noopener">Source code</a></div>
+<!--/bar-->
 
 <div id="body">
-<div id="sidebar"><div class="box"><div class="t">Navigation</div><ul><li><a href="">Home</a></li><li><a href="download/">Download</a></li><li><a href="wiki/">Wiki</a></li><li><a href="screenshots/">Screenshots</a></li><li><a href="archive/">Archive</a></li><li><a href="https://github.com/IlumCI/GLaDOS">Source code</a></li></ul></div><div class="box"><div class="t">Get it</div><ul><li><a href="download/">Download the ISO</a></li><li><a href="https://github.com/IlumCI/GLaDOS/releases/latest/download/SHA256SUMS">Checksums</a></li></ul></div><div class="box"><div class="t">The system</div><ul><li><a href="wiki/glados-os.html">GLaDOS OS</a></li><li><a href="wiki/aperture-science.html">Aperture Science</a></li><li><a href="wiki/portal-os.html">Portal OS</a></li><li><a href="wiki/rust-os.html">Writing an OS in Rust</a></li><li><a href="wiki/ring-0.html">Ring 0</a></li><li><a href="wiki/uefi-kernel.html">UEFI as the kernel</a></li><li><a href="wiki/llm-in-kernel.html">A language model in the kernel</a></li><li><a href="wiki/qwen3.html">Qwen3 in 570 MB</a></li></ul></div><div class="box"><div class="t">Internals</div><ul><li><a href="wiki/qwen35.html">Qwen3.5 and the 2B distill</a></li><li><a href="wiki/rope.html">RoPE</a></li><li><a href="wiki/kv-cache.html">The int8 KV cache</a></li><li><a href="wiki/tokenizer.html">Tokenizers</a></li><li><a href="wiki/constrained-decoding.html">Constrained decoding</a></li><li><a href="wiki/routing.html">Tool routing</a></li><li><a href="wiki/agent.html">The agent loop</a></li><li><a href="wiki/gui.html">The Windows 3.1 desktop</a></li></ul></div><div class="box"><div class="t">Hardware</div><ul><li><a href="wiki/network-stack.html">The network stack</a></li><li><a href="wiki/tls.html">TLS 1.3 from scratch</a></li><li><a href="wiki/storage.html">Content-addressed storage</a></li><li><a href="wiki/usb-xhci.html">The USB stack</a></li><li><a href="wiki/usb-wifi-driver.html">USB WiFi</a></li><li><a href="wiki/iso-el-torito.html">How the ISO is built</a></li><li><a href="wiki/templeos.html">TempleOS</a></li><li><a href="wiki/testing.html">Testing without a test runner</a></li></ul></div></div>
+<!--sidebar-->
+<div id="sidebar">
+<div class="box"><div class="t">Navigation</div><div class="bd"><ul><li><a href="./">Home</a></li><li><a href="download/">Download</a></li><li><a href="news/">News</a></li><li><a href="wiki/">Wiki</a></li><li><a href="screenshots/">Screenshots</a></li><li><a href="archive/">Archive</a></li><li><a href="token/">Token</a></li><li><a href="https://github.com/IlumCI/GLaDOS">Source code</a></li></ul></div></div>
+<div class="box"><div class="t">Latest release</div><div class="bd"><table class="facts"><tr><td>Version</td><td>1.2.27</td></tr><tr><td>Released</td><td>2026-08-31</td></tr><tr><td>Images</td><td>6</td></tr></table><ul><li><a href="download/">Download</a></li><li><a href="https://github.com/IlumCI/GLaDOS/releases/tag/v1.2.27">Release notes</a></li></ul></div></div>
+<div class="box"><div class="t">Project information</div><div class="bd"><table class="facts"><tr><td>Status</td><td>Active, research kernel</td></tr><tr><td>Language</td><td>Rust</td></tr><tr><td>Platform</td><td>x86-64 UEFI, bare metal</td></tr><tr><td>Licence</td><td>All rights reserved</td></tr><tr><td>Size</td><td>108 files, ~50,000 lines</td></tr><tr><td>Developer</td><td>IlumCI</td></tr></table></div></div>
+<div class="box"><div class="t">Wiki</div><div class="bd"><ul><li><a href="wiki/glados-os.html">GLaDOS OS</a></li><li><a href="wiki/llm-in-kernel.html">A model in the kernel</a></li><li><a href="wiki/ring-0.html">Ring 0</a></li><li><a href="wiki/uefi-kernel.html">UEFI as the kernel</a></li><li><a href="wiki/gui.html">The desktop</a></li><li><a href="wiki/testing.html">Testing without a runner</a></li><li><a href="wiki/">All 25 articles</a></li></ul></div></div>
+</div>
+<!--/sidebar-->
 <div id="content">
 
 <div id="main">
 <h1>GLaDOS: an operating system in Rust with a language model in the kernel</h1>
-<p><strong>GLaDOS</strong> is an operating system for x86-64, written from scratch in Rust, which boots on bare metal and runs entirely in ring 0. Its distinguishing feature is that a transformer lives in kernel space. The model is compiled into the same binary as the page tables and the disk driver, and shares an address space with both.</p>
+
+<h2 class="sect">About</h2>
+<div class="panel">
+<p>GLaDOS is an operating system for x86-64, written from scratch in Rust, which boots on bare metal and runs entirely in ring 0. Its distinguishing feature is that a transformer lives in kernel space. The model is compiled into the same binary as the page tables and the disk driver, and shares an address space with both.</p>
 <p>That arrangement deletes most of the machinery an AI agent usually needs. There is no userspace to marshal arguments into, no wire format, no dispatcher and no process boundary to cross. When the model decides to run <code>ls</code>, the kernel calls <code>ls</code>, and the call costs what any other function call costs.</p>
-<p>The name comes from <em>Portal</em>, and so does the look: amber on black, a boot screen drawn as vector geometry, Windows chrome from two eras, and a certain institutional cheerfulness on the subject of hazards. What is underneath the paint is ordinary systems work. The TCP/IP stack, the TLS 1.3 client, the NVMe and xHCI drivers, the window manager, the system language and the inference code were all written for this project, which comes to 108 files of Rust and roughly fifty thousand lines.</p>
-<ul><li><a href="download/">Download the ISO</a>: Bootable UEFI images with the model baked in. 33 MB to 1.8 GB.</li><li><a href="wiki/">Read the wiki</a>: Every subsystem, how it works, and what it cost to find out.</li><li><a href="screenshots/">See it running</a>: The desktop, the shell, and the model answering from ring 0.</li><li><a href="archive/">Browse the archive</a>: Mirror-style file index of images, sources and checksums.</li><li><a href="https://github.com/IlumCI/GLaDOS">Source on GitHub</a>: All rights reserved, published to be read.</li></ul>
+<p>What is underneath the paint is ordinary systems work. The TCP/IP stack, the TLS 1.3 client, the NVMe and xHCI drivers, the ACPI interpreter, the window manager, the system language and the inference code were all written for this project, which comes to 108 files of Rust and roughly fifty thousand lines. The name comes from <em>Portal</em>, and so does the look.</p>
+</div>
 
-<h2 id="what-is-actually-in-it">What is actually in it</h2>
-<p>A UEFI application that becomes the kernel, with its own page tables, interrupt table, timer, heap and preemptive scheduler. A language model at int8, referenced in place in the pool the firmware handed over. A system language that everything above the kernel is written in. A desktop with a window manager, a compositor and three applications. A network stack from ARP to TLS. Content-addressed storage on NVMe with Merkle snapshots. And a self-modification loop that proposes changes to the machine's own routing and adopts one only when four independent judges agree.</p>
+<h2 class="sect"><a href="download/">All downloads</a>Latest file releases</h2>
+<div class="scroll">
+<!--releases-table-->
+<table class="forge"><thead><tr><th>Model</th><th>Context</th><th>Size</th><th>&nbsp;</th></tr></thead><tbody><tr><td>Kernel only</td><td>&mdash;</td><td class="size">33 MB</td><td><a href="https://github.com/IlumCI/GLaDOS/releases/download/v1.2.27/glados-1.2.27-nomodel.iso">Download</a></td></tr><tr><td>SmolLM2-135M</td><td>512</td><td class="size">133 MB</td><td><a href="https://github.com/IlumCI/GLaDOS/releases/download/v1.2.27/glados-1.2.27-smollm2-135m.iso">Download</a></td></tr><tr><td>Qwen3-0.6B</td><td>512</td><td class="size">576 MB</td><td><a href="https://github.com/IlumCI/GLaDOS/releases/download/v1.2.27/glados-1.2.27.iso">Download</a></td></tr><tr><td>Qwen3.5-2B hybrid</td><td>512</td><td class="size">1.8 GB</td><td><a href="https://github.com/IlumCI/GLaDOS/releases/download/v1.2.27/glados-1.2.27-qwen35-2b.iso">Download</a></td></tr><tr><td>Qwen3.5-2B hybrid</td><td>8192</td><td class="size">1.8 GB</td><td><a href="https://github.com/IlumCI/GLaDOS/releases/download/v1.2.27/glados-1.2.27-qwen35-2b-8k.iso">Download</a></td></tr><tr><td>Qwen3.5-2B hybrid</td><td>32768</td><td class="size">1.8 GB</td><td><a href="https://github.com/IlumCI/GLaDOS/releases/download/v1.2.27/glados-1.2.27-qwen35-2b-32k.iso">Download</a></td></tr></tbody></table>
+<!--/releases-table-->
+</div>
+<p class="small">Verify what you download against <a href="https://github.com/IlumCI/GLaDOS/releases/latest/download/SHA256SUMS">SHA256SUMS</a>. A truncated image still flashes, still boots, and then fails somewhere that has nothing to do with the truncation.</p>
 
-<h2 id="the-numbers-worth-quoting">The numbers worth quoting</h2>
+<h2 class="sect"><a href="news/">All news</a>Latest news</h2>
+<div class="panel">
+<!--news-latest-->
+<div class="news">
+  <div class="nh"><span class="nd">2026-08-31</span> GLaDOS 1.2.27</div>
+  <p>The release that reads its own battery.</p>
+  <p class="nl"><a href="https://github.com/IlumCI/GLaDOS/releases/tag/v1.2.27">Release notes</a> &middot; 6 images</p>
+</div>
+<div class="news">
+  <div class="nh"><span class="nd">2026-08-31</span> GLaDOS 1.2.26</div>
+  <p>The release where the machine changes itself.</p>
+  <p class="nl"><a href="https://github.com/IlumCI/GLaDOS/releases/tag/v1.2.26">Release notes</a> &middot; 6 images</p>
+</div>
+<div class="news">
+  <div class="nh"><span class="nd">2026-08-25</span> V1.1.0</div>
+  <p>The deliberation release.</p>
+  <p class="nl"><a href="https://github.com/IlumCI/GLaDOS/releases/tag/V1.1.0">Release notes</a> &middot; 4 images</p>
+</div>
+<!--/news-latest-->
+</div>
+
+<h2 class="sect">Public areas</h2>
+<div class="scroll">
+<table class="forge">
+<tbody>
+<tr><td><a href="download/">Download</a></td><td>Bootable UEFI images, kernel only through to the 2B model at a 32k context.</td></tr>
+<tr><td><a href="news/">News</a></td><td>Release history, newest first.</td></tr>
+<tr><td><a href="wiki/">Wiki</a></td><td>Twenty-five articles: every subsystem, how it works, and what it cost to find out.</td></tr>
+<tr><td><a href="screenshots/">Screenshots</a></td><td>The desktop, the shell, and the model answering from ring 0.</td></tr>
+<tr><td><a href="archive/">Archive</a></td><td>Mirror-style file index of images, sources and checksums.</td></tr>
+<tr><td><a href="token/">Token</a></td><td>The planned utility token, what it would gate, and what it deliberately would not.</td></tr>
+<tr><td><a href="https://github.com/IlumCI/GLaDOS">Source code</a></td><td>All rights reserved, published to be read.</td></tr>
+</tbody>
+</table>
+</div>
+
+<h2 class="sect">The numbers worth quoting</h2>
+<div class="panel">
 <p>Several of these came from measurements that contradicted a confident argument, which is why they are the ones published.</p>
-<ul>
-<li>A ridge regression over one hidden state chooses tools better than decoding the name under a grammar, at about 1.6 ms and no forward pass.</li>
-<li>Three cores vote, and their agreement is the signal: 90.3% correct when all three agree, 50% when they split.</li>
-<li>An interpreter step costs about 14 ns. A routing vote spends 20 of them against a budget of 20,000, so the tree walk was never the cost it was assumed to be.</li>
-<li>Fixing how blank console cells were painted took a full repaint from 2,376 us to 1,629 us.</li>
-<li>The Windows hypervisor runs this about 160 times faster than pure emulation, which retired a long-standing belief that several things needed real hardware.</li>
-</ul>
+<div class="scroll">
+<table class="forge">
+<tbody>
+<tr><td>Tool routing</td><td>A ridge regression over one hidden state chooses tools better than decoding the name under a grammar, at about 1.6 ms and no forward pass.</td></tr>
+<tr><td>Council agreement</td><td>Three cores vote, and their agreement is the signal: 90.3% correct when all three agree, 50% when they split.</td></tr>
+<tr><td>Interpreter step</td><td>About 14 ns. A routing vote spends 20 of them against a budget of 20,000, so the tree walk was never the cost it was assumed to be.</td></tr>
+<tr><td>A full repaint</td><td>2,376 us down to 1,629 us, once blank console cells stopped being painted a pixel at a time over a background that had just been filled.</td></tr>
+<tr><td>Emulation</td><td>The Windows hypervisor runs this about 160 times faster than pure emulation, which retired a long-standing belief that several things needed real hardware.</td></tr>
+</tbody>
+</table>
+</div>
+</div>
 
-<h2 id="what-it-is-not">What it is not</h2>
+<h2 class="sect">What it is not</h2>
+<div class="panel">
 <p>There is no isolation of any kind, no recovery from a fault, no certificate enforcement and no revocation. The cryptography is hand written, which the <a href="wiki/tls.html">TLS page</a> calls the most dangerous thing in the tree. This is a research kernel for one laptop, and the documentation states its limits in the same register it states its results.</p>
-
-</div>
-</div>
 </div>
 
+</div>
+</div>
+</div>
+
+<!--footer-->
 <div id="footer">
-  <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This is an independent, non-commercial homage and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
-  <p>Copyright 2026. All rights reserved. The source is published to be read
-  rather than reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is
-  GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are
-  other people's and are listed on <a href="credits.html">the
-  credits page</a>.</p>
-  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-30.</p>
+  <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This project is independent and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
+  <p>Copyright 2026. All rights reserved. The source is published to be read rather than reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are other people's and are listed on <a href="credits.html">the credits page</a>.</p>
+  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-31.</p>
 </div>
+<!--/footer-->
 
 </div>
 </body>
