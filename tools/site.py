@@ -39,7 +39,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DOCS = os.path.normpath(os.path.join(HERE, "..", "docs"))
 REPO = "https://github.com/IlumCI/GLaDOS"
 API = "https://api.github.com/repos/IlumCI/GLaDOS/releases"
-SITE = "https://aperture.institute"
+SITE = "https://glados.aperture.institute"
 
 # --- what each image actually is ----------------------------------------
 #
