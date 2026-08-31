@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Compiling Aiksi to x86-64, and the differential harness that gates it</title>
+<meta name="description" content="A code generator that emits x86-64 into a heap page, and a harness requiring value, step count and error text to match bit for bit before anything is allowed to route through it.">
+<meta name="keywords" content="JIT compiler, code generation, differential testing, x86-64, step budget, interpreter benchmark, self-modifying code">
+<link rel="canonical" href="https://aperture.institute/wiki/compiler.html">
+<meta name="robots" content="index,follow,max-image-preview:large">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="GLaDOS">
+<meta property="og:title" content="Compiling Aiksi to x86-64, and the differential harness that gates it">
+<meta property="og:description" content="A code generator that emits x86-64 into a heap page, and a harness requiring value, step count and error text to match bit for bit before anything is allowed to route through it.">
+<meta property="og:url" content="https://aperture.institute/wiki/compiler.html">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="Compiling Aiksi to x86-64, and the differential harness that gates it">
+<meta name="twitter:description" content="A code generator that emits x86-64 into a heap page, and a harness requiring value, step count and error text to match bit for bit before anything is allowed to route through it.">
+<meta property="og:image" content="https://aperture.institute/img/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="The GLaDOS aperture mark">
+<meta name="twitter:image" content="https://aperture.institute/img/og.png">
+<link rel="stylesheet" href="../style.css">
+<link rel="icon" type="image/svg+xml" href="../img/logo.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="../img/icon-32.png">
+<link rel="apple-touch-icon" sizes="180x180" href="../img/icon-180.png">
+<link rel="manifest" href="../site.webmanifest">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://aperture.institute/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://aperture.institute/wiki/"},{"@type":"ListItem","position":3,"name":"The compiler","item":"https://aperture.institute/wiki/compiler.html"}]}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Compiling Aiksi to x86-64, and the differential harness that gates it","description":"A code generator that emits x86-64 into a heap page, and a harness requiring value, step count and error text to match bit for bit before anything is allowed to route through it.","url":"https://aperture.institute/wiki/compiler.html","dateModified":"2026-08-31","keywords":"JIT compiler, code generation, differential testing, x86-64, step budget, interpreter benchmark, self-modifying code","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://aperture.institute/"}}</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<div id="page">
+
+<!--masthead-->
+<div id="masthead">
+  <a class="mark" href="../"><img src="../img/wordmark.png" alt="Aperture Institute" width="666" height="169"></a>
+  <span class="sub">GLaDOS &mdash; an operating system in Rust, with a language model in the kernel</span>
+</div>
+<!--/masthead-->
+
+<!--bar-->
+<div id="tabs"><ul><li><a href="../">Summary</a></li><li><a href="../download/">Download</a></li><li><a href="../news/">News</a></li><li class="on"><a href="../wiki/">Wiki</a></li><li><a href="../screenshots/">Screenshots</a></li><li><a href="../archive/">Archive</a></li><li><a href="../token/">Token</a></li><li><a href="https://github.com/IlumCI/GLaDOS" rel="noopener">Source code</a></li></ul></div>
+<!--/bar-->
+
+<div id="body">
+<!--sidebar-->
+<div id="sidebar">
+<div class="box"><div class="t">Latest release</div><div class="bd"><table class="facts"><tr><td>Version</td><td>1.2.27</td></tr><tr><td>Released</td><td>2026-08-31</td></tr><tr><td>Images</td><td>6</td></tr></table><ul><li><a href="../download/">Download</a></li><li><a href="https://github.com/IlumCI/GLaDOS/releases/tag/v1.2.27">Release notes</a></li></ul></div></div>
+<div class="box"><div class="t">Project information</div><div class="bd"><table class="facts"><tr><td>Development status</td><td>3 - Alpha</td></tr><tr><td>Environment</td><td>Console, framebuffer</td></tr><tr><td>Intended audience</td><td>Developers, science/research</td></tr><tr><td>Licence</td><td>Other/proprietary, all rights reserved</td></tr><tr><td>Natural language</td><td>English</td></tr><tr><td>Operating system</td><td>x86-64 UEFI, bare metal</td></tr><tr><td>Programming language</td><td>Rust, Python</td></tr><tr><td>Topic</td><td>Operating systems, kernels, artificial intelligence</td></tr></table></div></div>
+<div class="box"><div class="t">Statistics</div><div class="bd"><table class="facts"><tr><td>Registered</td><td>2026-08-14</td></tr><tr><td>Releases</td><td>4</td></tr><tr><td>Downloads</td><td>19</td></tr><tr><td>Source</td><td>108 files, ~50,000 lines</td></tr></table></div></div>
+<div class="box"><div class="t">Developers</div><div class="bd"><table class="facts"><tr><td>IlumCI</td><td>project admin, developer</td></tr></table></div></div>
+<div class="box"><div class="t">Documentation</div><div class="bd"><ul><li><a href="../wiki/glados-os.html">GLaDOS OS</a></li><li><a href="../wiki/llm-in-kernel.html">A model in the kernel</a></li><li><a href="../wiki/ring-0.html">Ring 0</a></li><li><a href="../wiki/uefi-kernel.html">UEFI as the kernel</a></li><li><a href="../wiki/gui.html">The desktop</a></li><li><a href="../wiki/testing.html">Testing without a runner</a></li><li><a href="../wiki/">All 28 articles</a></li></ul></div></div>
+</div>
+<!--/sidebar-->
+<div id="content">
+<div class="crumbs"><a href="../">GLaDOS</a> / <a href="./">Wiki</a> / The compiler</div>
+<div id="main">
+<h1>The compiler, and the differ that gates it</h1>
+<p>There is a code generator in this tree that compiles Aiksi to x86-64 and calls it. Nothing routes through it. It is reached only from a harness whose job is to disagree with it, and the harness was written first, on purpose.</p>
+
+<h2 id="substrate">Somewhere to run from</h2>
+<p>Every page in this kernel is present, writable and executable. There is no NX constant in the paging code and the processor's no-execute enable is never set, so getting somewhere to put generated instructions is an allocation with 4096-byte alignment and no page-table work at all.</p>
+<p>That is exactly why the rest is careful. When the hard part is free, the remaining parts are the ones that bite.</p>
+<p><strong>Serialisation.</strong> Nothing in this tree serialised before this: no <code>wbinvd</code>, no <code>clflush</code>, no <code>mfence</code>, no <code>cpuid</code> used as a barrier anywhere. <code>CPUID</code> does both halves of what is needed. The processor drops what it prefetched, and because the inline assembly declares neither <code>nomem</code> nor <code>readonly</code>, the compiler cannot sink the stores that filled the buffer past it.</p>
+<p><strong>The ABI is declared once.</strong> <code>unsafe extern "sysv64" fn(u64) -&gt; u64</code>, so no call site spells the convention out. On this target <code>extern "C"</code> is Microsoft x64, not System V, and the context-switch code records what it cost to get that wrong once already. The self-test's stub is <code>mov rax, rdi</code>, <code>add rax, rax</code>, <code>ret</code>, called with 21 &mdash; because a stub taking no arguments passes under either convention and proves nothing. Both agree on a bare return in <code>rax</code>. Only the argument tells them apart.</p>
+
+<h2 id="registry">A fault reporter that stops lying</h2>
+<p>The old reporter printed <code>rip - IMAGE_BASE</code> whenever the base was known, with no check that <code>rip</code> was inside the image. A wild jump therefore produced a number indistinguishable from a real relative address, which a disassembly then resolves confidently to an unrelated function. The image size was read from the firmware at boot, printed, and never stored.</p>
+<p>It is stored now, and <code>code::locate</code> is a pure function over the five inputs &mdash; instruction pointer, image base, image size, and what the registry of generated buffers says &mdash; with all five of its outcomes asserted at boot. Heap-resident generated code is named by tag and offset. An address in neither the image nor the registry is reported as being in neither.</p>
+<p>None of this prevents anything. Every interrupt vector but the breakpoint is fatal here, so a bad jump is still a halted machine. What the registry buys is that the one diagnostic which survives says something true.</p>
+<p>Verified by faulting on purpose. <code>fault code</code> emits a null dereference into an executable buffer, arms it, and jumps in. The buffer is deliberately leaked rather than dropped, because the reporter reads the registry from inside the handler and dropping it would unregister the range on the way out:</p>
+<pre><code>*** EXCEPTION 0x0e  #PF page fault ***
+  rip   0x0000000002bf2003   cs  0x0008
+  in generated code fa17000000000003 at +0x3</code></pre>
+<p>The buffer was at <code>0x2bf2000</code>, so <code>+0x3</code> is exact.</p>
+<p>Getting that report at all meant fixing something much older: <strong>no fault this kernel ever took had produced a readable one.</strong> Printing writes the console first and the serial port second, and painting from inside an interrupt gate takes a general protection fault here &mdash; so the first line of every report died in the console before serial was reached, and what a person saw was a machine that simply went quiet. The report is emitted twice now, whole, serial before console, rather than interleaved a line at a time, which was the first attempt and still truncated after one line. Serial is a port write and cannot block or fault. A flag makes a fault <em>while</em> reporting print one line and halt rather than recurse, which it did, as an unbroken column of the same exception.</p>
+
+<h2 id="jit">What the compiler actually accepts</h2>
+<p>One function of integer arithmetic, <code>if</code>, <code>while</code> and <code>return</code>. No builtins, no strings, no records, no imports, no calls.</p>
+<p>Anything outside that slice is <strong>refused</strong>: <code>compile</code> answers nothing and the interpreter remains the only thing that ran the program. Five claims check that refusing actually happens, because a generator that quietly compiled a string return would be answering a question nobody asked.</p>
+
+<h2 id="steps">The step count is the hard part</h2>
+<p>Twenty-one functions run three ways &mdash; interpreted, prepared, and compiled &mdash; and all three must agree on the value, the cost <em>and</em> the error text, over 64 rounds.</p>
+<p>The cases that earn their place are the short-circuit pair, where whether the right-hand side's ticks happen at all is decided by a runtime value, and the runaway, which has to hit the budget at the <em>same step</em> rather than merely also stopping. Failure text is compared too: division by zero is a status code in compiled output that has to become the interpreter's own words, because a compiler with perfect arithmetic and the wrong error string passes any test that only reads answers.</p>
+<p>The harness caught its first mismatch immediately, on <code>fn f(): int { return 7 }</code>, and it was the harness's fault rather than the compiler's. Observation runs the top level before invoking, so the interpreter had already charged one tick for <em>executing the declaration</em>. Compiled code never runs a top level, so it owes exactly that tick &mdash; and because the case guarantees the top level is a single statement, the number is one and not an estimate. The budget it is given is short by one for the same reason.</p>
+<p>The tick rule is written down where the counter lives, because anything executing this language by another route has to match it exactly: <strong>once on entering a statement, once on entering an expression, one extra per loop iteration, and nothing else.</strong> A builtin costs one step however much work it does. The budget is a safety bound, so a program that got more room by being run a different way would be a runaway that one path stops and another does not.</p>
+
+<h2 id="differ">The differ, and the canary that must fail</h2>
+<p>The gate runs one program two ways and requires them to agree on value, step count and error text, bit for bit with no tolerance. That is the same argument the SMP code makes about a split matrix-vector product: any difference at all is a bug, and a tolerance hides the one worth finding.</p>
+<p>It was written before the code generator on purpose. The model code makes the objection twice &mdash; two implementations that are supposed to agree do not stay agreeing &mdash; and a harness written afterwards is a harness shaped by whatever the second implementation happens to do. The second route today is the prepare-and-adopt path against plain interpretation, which is a real pair rather than a placeholder, and is the one every routing decision now depends on. A compiled route is a third route and every case applies to it unchanged.</p>
+<p><strong>The canary is what makes it a harness rather than a formality.</strong> A suite that has never reported a difference is indistinguishable from one that compares nothing, which is exactly how a one-shot check elsewhere in this tree passed over a deadlock. So the suite runs two programs differing by one unused declaration: same answer, one more top-level statement, step counts one apart. <em>It fails if that is not caught.</em> That is the difference a comparison looking only at answers waves through, and precisely the one a code generator with nearly-right ticks produces.</p>
+<p>Eleven cases, sixty-four rounds, including the three failure modes and a loop for the tick most easily got wrong. Two limits are printed rather than left to be assumed. Stored cores and seeded tools are compared too, but all three seeded tools have computing top levels, so the prepared route declines them and the stored half of the corpus contributes nothing on a fresh machine &mdash; the line reads <code>0 agreed, 3 declined</code>. And console output is not compared at all, the same blind spot the skill judge records: a program of print statements answers nothing however it behaved.</p>
+
+<h2 id="cost">What a step costs, and why the compiler is not the answer</h2>
+<p>Before any of this, every step budget in the tree was a number chosen by comparison to another number and nobody had ever timed one. Best of nine, on real measurement:</p>
+<div class="scroll">
+<table class="data">
+<tr><th>One step</th><td>13.7 ns, about 37 cycles at 2.67 GHz</td></tr>
+<tr><th>Interpreter construction</th><td>2,132 ns</td></tr>
+<tr><th>Vote budget, 20k</th><td>274 us</td></tr>
+<tr><th>Draw budget, 200k</th><td>2 ms</td></tr>
+<tr><th>Step budget, 20M</th><td>274 ms</td></tr>
+</table>
+</div>
+<p>So the budgets are sane as safety bounds, and the genuinely hot path &mdash; the vote on every routing decision &mdash; spends <strong>20 steps against a ceiling of 20,000</strong>, a tenth of a percent of what it is allowed.</p>
+<p>Breaking one vote into its parts contradicted a confident prediction written into the plan that asked for the measurement:</p>
+<div class="scroll">
+<table class="data">
+<tr><th>Build interpreter</th><td>1,757 ns</td><td>31%</td></tr>
+<tr><th>Run the top level</th><td>623 ns</td><td>11%</td></tr>
+<tr><th>Call the function</th><td>3,244 ns</td><td>57%</td></tr>
+<tr><th>Total</th><td>5,658 ns</td><td></td></tr>
+</table>
+</div>
+<p>The walk looks dominant and is not. Twenty steps at 13.7 ns is about 275 ns of dispatch, which is 8% of that call and 5% of the whole vote. The rest is work no code generator removes: allocating a fresh string, scanning it, and cloning an argument string plus a 23-element list into the frame. Against that, the 2,380 ns of setup paid per decision is <strong>eight times larger than the entire tree-walk</strong> &mdash; setup for a program whose whole body is one assignment and three conditionals.</p>
+<p>That is why the optimisation work came before any compiler, and why a compiler for this tree cannot be justified as an optimisation of this path. The plan's own text said so in advance: unless the measurement showed the tree-walk itself was the cost, the compiler was not the answer. It showed exactly that.</p>
+
+<h2 id="wins">Three wins, all of them allocation</h2>
+<p><strong>The kernel record shapes.</strong> Interpreter construction copied all eight into the program's own table every time: 49 string allocations and eight tree inserts to reproduce immutable kernel data, identical in every interpreter that has ever existed. Lookup consults two tables now, which is safe only because a program was already forbidden from redeclaring a kernel record &mdash; a guard that was tidiness when both lived in one map and is load-bearing now that they are two.</p>
+<p><strong>The function itself.</strong> A call deep-copied the whole statement tree and every expression tree under it, on a structure that is immutable from the moment it was declared. Functions are refcounted now, so a call is a refcount bump. Not atomically refcounted: one interpreter per call chain, nothing crossing a task, the same single-core assumption the rest of the kernel's interior mutability rests on. It is a real trade &mdash; one allocation added per declaration to remove about nineteen per call &mdash; and the vote is the worst case for it, a seven-statement function called once, and it still wins, because the saving scales with the body and the cost does not.</p>
+<p><strong>The declaration.</strong> The vote ran the core's top level on every routing decision to register a function that had been the same function since it was parsed. A declarative top level runs once now and a fresh interpreter is seeded from the result. Two conditions make that a saving rather than a semantic change, and both are in the code as the reason. A declaration's only effect is to register itself, so running it once and copying is indistinguishable from running it again &mdash; but an assignment, a call that could read the clock, or an import that lexes another file would all be frozen at preparation time, so those programs keep re-arming. And the prepared form carries the top level's <em>step count</em>, because a prepared run that skipped those ticks would answer identically and report itself cheaper, which is two paths through one program disagreeing about a number the judges read.</p>
+<div class="scroll">
+<table class="data">
+<tr><th>Interpreter construction</th><td>2,132 ns &rarr; 22 ns</td></tr>
+<tr><th>Build interpreter, in a vote</th><td>1,757 ns &rarr; 42 ns</td></tr>
+<tr><th>Running the top level</th><td>813 ns &rarr; ~75 ns</td></tr>
+<tr><th>One vote, cumulative</th><td>418 &rarr; 146 step-equivalents, 2.9x</td></tr>
+</table>
+</div>
+<p>None of it from compiling anything. Both predictions the plan made &mdash; that the tree-walk was the cost, and that construction was near-certainly the fix &mdash; were wrong in the same direction.</p>
+
+<h2 id="noise">How big the noise is</h2>
+<p>The first version of this benchmark timed <em>one</em> vote per sample, best of nine, and could not resolve its own subject: a change worth about a tenth of a vote read as an 18% regression, on a boot whose step loop happened to run 25% faster than the boot it was compared against. Each sample runs 200 votes now.</p>
+<p>That fixes per-sample noise and not the boot-to-boot kind, so the benchmark carries a control. Interpreter construction cannot be touched by anything about how a program is stored or called, so a difference in that line between two builds is measurement error and nothing else. Across the pair of builds that judged the refcounting change it read <strong>16%</strong>, which is what "within noise" is allowed to mean here &mdash; a number instead of an adjective.</p>
+<div class="seealso"><b>See also:</b> <a href="aiksi.html">Aiksi, the system language</a>, <a href="testing.html">Testing without a test runner</a>, <a href="ring-0.html">Ring 0</a>, <a href="routing.html">Tool routing</a></div>
+</div>
+</div>
+</div>
+
+<!--footer-->
+<div id="footer">
+  <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This project is independent and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
+  <p>Copyright 2026. All rights reserved. The source is published to be read rather than reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are other people's and are listed on <a href="../credits.html">the credits page</a>.</p>
+  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-31.</p>
+</div>
+<!--/footer-->
+
+</div>
+</body>
+</html>

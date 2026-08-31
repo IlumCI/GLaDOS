@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Recursive self-improvement, and the four judges in front of it</title>
+<meta name="description" content="A kernel that modifies itself nightly, adopts nothing without unanimous agreement from four independent judges, and counts every read of its own held-out set.">
+<meta name="keywords" content="recursive self-improvement, RSI, self-modifying AI, McNemar test, held-out set, AI safety gate, machine learning evaluation">
+<link rel="canonical" href="https://aperture.institute/wiki/rsi.html">
+<meta name="robots" content="index,follow,max-image-preview:large">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="GLaDOS">
+<meta property="og:title" content="Recursive self-improvement, and the four judges in front of it">
+<meta property="og:description" content="A kernel that modifies itself nightly, adopts nothing without unanimous agreement from four independent judges, and counts every read of its own held-out set.">
+<meta property="og:url" content="https://aperture.institute/wiki/rsi.html">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="Recursive self-improvement, and the four judges in front of it">
+<meta name="twitter:description" content="A kernel that modifies itself nightly, adopts nothing without unanimous agreement from four independent judges, and counts every read of its own held-out set.">
+<meta property="og:image" content="https://aperture.institute/img/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="The GLaDOS aperture mark">
+<meta name="twitter:image" content="https://aperture.institute/img/og.png">
+<link rel="stylesheet" href="../style.css">
+<link rel="icon" type="image/svg+xml" href="../img/logo.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="../img/icon-32.png">
+<link rel="apple-touch-icon" sizes="180x180" href="../img/icon-180.png">
+<link rel="manifest" href="../site.webmanifest">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://aperture.institute/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://aperture.institute/wiki/"},{"@type":"ListItem","position":3,"name":"Recursive self-improvement","item":"https://aperture.institute/wiki/rsi.html"}]}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Recursive self-improvement, and the four judges in front of it","description":"A kernel that modifies itself nightly, adopts nothing without unanimous agreement from four independent judges, and counts every read of its own held-out set.","url":"https://aperture.institute/wiki/rsi.html","dateModified":"2026-08-31","keywords":"recursive self-improvement, RSI, self-modifying AI, McNemar test, held-out set, AI safety gate, machine learning evaluation","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://aperture.institute/"}}</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<div id="page">
+
+<!--masthead-->
+<div id="masthead">
+  <a class="mark" href="../"><img src="../img/wordmark.png" alt="Aperture Institute" width="666" height="169"></a>
+  <span class="sub">GLaDOS &mdash; an operating system in Rust, with a language model in the kernel</span>
+</div>
+<!--/masthead-->
+
+<!--bar-->
+<div id="tabs"><ul><li><a href="../">Summary</a></li><li><a href="../download/">Download</a></li><li><a href="../news/">News</a></li><li class="on"><a href="../wiki/">Wiki</a></li><li><a href="../screenshots/">Screenshots</a></li><li><a href="../archive/">Archive</a></li><li><a href="../token/">Token</a></li><li><a href="https://github.com/IlumCI/GLaDOS" rel="noopener">Source code</a></li></ul></div>
+<!--/bar-->
+
+<div id="body">
+<!--sidebar-->
+<div id="sidebar">
+<div class="box"><div class="t">Latest release</div><div class="bd"><table class="facts"><tr><td>Version</td><td>1.2.27</td></tr><tr><td>Released</td><td>2026-08-31</td></tr><tr><td>Images</td><td>6</td></tr></table><ul><li><a href="../download/">Download</a></li><li><a href="https://github.com/IlumCI/GLaDOS/releases/tag/v1.2.27">Release notes</a></li></ul></div></div>
+<div class="box"><div class="t">Project information</div><div class="bd"><table class="facts"><tr><td>Development status</td><td>3 - Alpha</td></tr><tr><td>Environment</td><td>Console, framebuffer</td></tr><tr><td>Intended audience</td><td>Developers, science/research</td></tr><tr><td>Licence</td><td>Other/proprietary, all rights reserved</td></tr><tr><td>Natural language</td><td>English</td></tr><tr><td>Operating system</td><td>x86-64 UEFI, bare metal</td></tr><tr><td>Programming language</td><td>Rust, Python</td></tr><tr><td>Topic</td><td>Operating systems, kernels, artificial intelligence</td></tr></table></div></div>
+<div class="box"><div class="t">Statistics</div><div class="bd"><table class="facts"><tr><td>Registered</td><td>2026-08-14</td></tr><tr><td>Releases</td><td>4</td></tr><tr><td>Downloads</td><td>19</td></tr><tr><td>Source</td><td>108 files, ~50,000 lines</td></tr></table></div></div>
+<div class="box"><div class="t">Developers</div><div class="bd"><table class="facts"><tr><td>IlumCI</td><td>project admin, developer</td></tr></table></div></div>
+<div class="box"><div class="t">Documentation</div><div class="bd"><ul><li><a href="../wiki/glados-os.html">GLaDOS OS</a></li><li><a href="../wiki/llm-in-kernel.html">A model in the kernel</a></li><li><a href="../wiki/ring-0.html">Ring 0</a></li><li><a href="../wiki/uefi-kernel.html">UEFI as the kernel</a></li><li><a href="../wiki/gui.html">The desktop</a></li><li><a href="../wiki/testing.html">Testing without a runner</a></li><li><a href="../wiki/">All 28 articles</a></li></ul></div></div>
+</div>
+<!--/sidebar-->
+<div id="content">
+<div class="crumbs"><a href="../">GLaDOS</a> / <a href="./">Wiki</a> / Recursive self-improvement</div>
+<div id="main">
+<h1>Recursive self-improvement, and the four judges in front of it</h1>
+<p>The machine changes itself while nobody is watching. It runs only inside a quiet window in the small hours, only when no hardware input has been seen, and only on mains power &mdash; a laptop that spends the night improving itself into a flat battery has not improved itself.</p>
+<p>What guards it is not the schedule. It is that nothing is adopted unless four independent judges agree, and each judge exists because a different thing can go wrong.</p>
+
+<h2 id="judges">The four</h2>
+<p><strong>J1 is paired.</strong> A McNemar test over the same cached decisions both variants answer, which is something a comparison of two percentages cannot be: two accuracies can differ because the items differed. It needs roughly six repaired validation decisions with none broken, so it needs a corpus subsample large enough to reach the held-out slice at all.</p>
+<p><strong>J2 replays the machine's own curiosity goals</strong> along the path the frozen baseline walks, and is never subsampled. A change that improves routing while quietly breaking the goals the machine set itself is a change that looks good to J1.</p>
+<p><strong>J3 is structural.</strong> Finite factors, positive scales, finite logits. It catches the variant that is not wrong but broken.</p>
+<p><strong>J4 is cost.</strong> Rank and resident bytes, because the heap here is one physically contiguous allocation that comes down a rung when the memory map cannot satisfy it. A variant that is better and does not fit is not better.</p>
+
+<h2 id="rotation">The night branch had one job, and always did it</h2>
+<p>There were two unattended jobs and this one always won the tie, so the adapter grid was walked to exhaustion while the routing rule, deep training, a skill the agent had compiled and a core the machine had written were never tried unattended at all. "Search space exhausted" became the end of self-improvement: eight grid points, and then nothing, every night, forever.</p>
+<p>The rotation now starts from the number of verdicts already recorded and takes the first kind from there that has work. Which axis a given night takes is therefore a function of the ledger rather than of a coin &mdash; the same re-derivability argument that makes the grid walk a declared order. An exhausted axis costs one skipped slot instead of an idle night, and the loop stops only when every axis is out of moves.</p>
+<p>Order is cheap-and-declared before expensive-and-composed. A grid point or a rule change is minutes. A deep trial is two full passes over the corpus. Composing a core spends a dozen decodes writing something that may not survive its first judge.</p>
+<p><code>godel next</code> reports where the rotation stands without taking a turn, and deliberately does not ask the last slot whether it has work, because finding that out costs those decodes. A command answering "what would you do tonight" must not spend the night doing it.</p>
+<p>Widening the rotation had to come last, and the ordering is the point rather than an accident: an axis in the rotation without a judge in front of it is a machine adopting things nobody measured.</p>
+
+<h2 id="rule">The axis that needed a different judge</h2>
+<p>The routing rule sat unsearchable behind a comment for a long time, and the reason is instructive. Every other proposal is selected by J1, a net repair beyond the noise, and a rule change is mostly not that. What a rule moves is <em>calibration</em> &mdash; how much better the council's confident answers are than its unconfident ones. Because the rule decides the winner, accuracy and confidence move together, and a judge watching one adopts the trade without noticing it was made.</p>
+<p>So that axis gets its own pair. <strong>J1 becomes do-no-harm</strong>, because requiring a win is exactly what made it unsearchable &mdash; but "not significantly worse" alone is too weak in the losing direction. It adopted a strictly worse rule on a measured four fixed against ten broken, a net loss of six items out of 180, because the chi statistic reached 1.79 against a threshold of 3.84. The floor is symmetric now: a net repair under four is not a repair, and just as well, a net loss over four is not nothing. <strong>J2 becomes must-improve</strong>: the confidence gap has to widen, and the confident set must not collapse to four fifths of what it was, because a rule beautifully calibrated over six items has stopped answering rather than improved.</p>
+<p>Measured on this corpus, two candidate rules cost accuracy and are refused, and two change nothing and are refused for having improved nothing. That is the axis working.</p>
+
+<h2 id="inert">A thing can be adopted and still be inert</h2>
+<p>An adopted core is never consulted unless the rule in force is the one that asks it, and the default rule does not. So a core can pass all three of its judges, be installed, and never be asked anything &mdash; which from the ledger is indistinguishable from a core that is working. That is now reported rather than left to be discovered.</p>
+<p>Deep training had the mirror problem: it moves every query, key and value site and used to touch neither the lineage nor the ledger, so the next trial wrote a node describing a classifier-only variant. Not "unknown", which would have been honest, but wrong. Whether a variant was trained deeply is read off the adapter that is attached, so it cannot disagree with what is actually there.</p>
+<p>Judging deep training is the interesting case, because the judges rest on cached features and a deep adapter moves the features. A trial prepared before the run cannot judge what came out of it, and re-preparing one afterwards does not work either: decisions are recorded along the baseline's own decode path, so a change that alters that path alters how many decisions there are and the two lists stop lining up item for item. The comparison pairs on <em>routing</em> instead &mdash; one entry per example, the same examples both times, and the curiosity goals recomputed on both sides. Two full passes over the corpus, which is the price of giving up the frozen base, with a number on it.</p>
+
+<h2 id="skills">Judging what the machine writes</h2>
+<p>Writing a skill is no longer adopting it. A successful episode compiled into a program used to <em>be</em> adoption &mdash; the file appeared and would run, with nothing having asked whether it was any good.</p>
+<p>What the judges can ask is constrained by what a replay skill is. It takes no arguments and dispatches a fixed sequence, so "does it work on a task it has not seen" is not a question it can answer, and a judge for that could never fail here, which is worse than not having one. What is left is admission rather than improvement: it parses, it runs under the powers an unadopted skill actually has, it repeats, and it is cheap.</p>
+<p>The blind spot is written down rather than discovered later. The repeatability judge compares the value the program answered, its step count and the objects it touched, and <strong>not what it printed</strong> &mdash; and a replay is a sequence of print statements, which answers nothing however the applets behaved. The claim for that judge was itself wrong twice for related reasons: first printing the clock instead of answering it, then answering a clock that does not move between two adjacent runs.</p>
+
+<h2 id="budget">The held-out set has a budget, because a loop reads it forever</h2>
+<p>This is the failure that measurement discipline does not survive without counting. A machine that improves itself every night reads the held-out set every night, and each read makes the reported figure more optimistic.</p>
+<p>So the test slice carries a budget on disk. It is consulted only <em>after</em> a variant has already won on validation, never to decide whether it won, and the ledger counts the reads. Past three, a test figure prints as stale and is marked unquotable. Any future loop that touches the test slice goes through the same door for the same reason.</p>
+<p>Corpora hold out whole template families and never sampled instances, because instances within a family differ only by slot values &mdash; an instance split measures memorisation while looking like generalisation.</p>
+<p>One thing from the original plan is still not done, and is stated here rather than quietly dropped: an application the machine authors is left as a draft and never adopted.</p>
+<div class="seealso"><b>See also:</b> <a href="godel.html">Gödel machines</a>, <a href="aixi.html">AIXI and planning</a>, <a href="routing.html">Tool routing</a>, <a href="testing.html">Testing without a test runner</a></div>
+</div>
+</div>
+</div>
+
+<!--footer-->
+<div id="footer">
+  <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This project is independent and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
+  <p>Copyright 2026. All rights reserved. The source is published to be read rather than reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are other people's and are listed on <a href="../credits.html">the credits page</a>.</p>
+  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-31.</p>
+</div>
+<!--/footer-->
+
+</div>
+</body>
+</html>

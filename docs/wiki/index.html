@@ -51,7 +51,7 @@
 <div class="box"><div class="t">Project information</div><div class="bd"><table class="facts"><tr><td>Development status</td><td>3 - Alpha</td></tr><tr><td>Environment</td><td>Console, framebuffer</td></tr><tr><td>Intended audience</td><td>Developers, science/research</td></tr><tr><td>Licence</td><td>Other/proprietary, all rights reserved</td></tr><tr><td>Natural language</td><td>English</td></tr><tr><td>Operating system</td><td>x86-64 UEFI, bare metal</td></tr><tr><td>Programming language</td><td>Rust, Python</td></tr><tr><td>Topic</td><td>Operating systems, kernels, artificial intelligence</td></tr></table></div></div>
 <div class="box"><div class="t">Statistics</div><div class="bd"><table class="facts"><tr><td>Registered</td><td>2026-08-14</td></tr><tr><td>Releases</td><td>4</td></tr><tr><td>Downloads</td><td>19</td></tr><tr><td>Source</td><td>108 files, ~50,000 lines</td></tr></table></div></div>
 <div class="box"><div class="t">Developers</div><div class="bd"><table class="facts"><tr><td>IlumCI</td><td>project admin, developer</td></tr></table></div></div>
-<div class="box"><div class="t">Documentation</div><div class="bd"><ul><li><a href="../wiki/glados-os.html">GLaDOS OS</a></li><li><a href="../wiki/llm-in-kernel.html">A model in the kernel</a></li><li><a href="../wiki/ring-0.html">Ring 0</a></li><li><a href="../wiki/uefi-kernel.html">UEFI as the kernel</a></li><li><a href="../wiki/gui.html">The desktop</a></li><li><a href="../wiki/testing.html">Testing without a runner</a></li><li><a href="../wiki/">All 23 articles</a></li></ul></div></div>
+<div class="box"><div class="t">Documentation</div><div class="bd"><ul><li><a href="../wiki/glados-os.html">GLaDOS OS</a></li><li><a href="../wiki/llm-in-kernel.html">A model in the kernel</a></li><li><a href="../wiki/ring-0.html">Ring 0</a></li><li><a href="../wiki/uefi-kernel.html">UEFI as the kernel</a></li><li><a href="../wiki/gui.html">The desktop</a></li><li><a href="../wiki/testing.html">Testing without a runner</a></li><li><a href="../wiki/">All 28 articles</a></li></ul></div></div>
 </div>
 <!--/sidebar-->
 <div id="content">
@@ -59,32 +59,74 @@
 <div id="main">
 <h1>GLaDOS Wiki</h1>
 <p>Every subsystem, how it works, and where it turned out to be more interesting than expected. The habit in this project is to write down the measurement that overturned an assumption alongside the conclusion it produced, which means a good number of these pages are accounts of being wrong for a while. Those tend to be the useful ones. A transformer with its position encoding wired the wrong way round still writes fluent English, and nothing in the system objects.</p>
+<h2 class="sect">The project</h2>
+<div class="panel">
 <ul class="wikilist">
 <li><a href="../wiki/glados-os.html">GLaDOS OS</a><span>What the system is, and how it is put together</span></li>
-<li><a href="../wiki/aperture-science.html">Aperture Science</a><span>The homage, the aesthetic, and where the voice is load-bearing</span></li>
+<li><a href="../wiki/aperture-science.html">Aperture Science</a><span>The homage, and which half is fiction and which is kernel</span></li>
+<li><a href="../wiki/templeos.html">TempleOS</a><span>What this project inherited, and where it diverges</span></li>
+</ul>
+</div>
+<h2 class="sect">The kernel</h2>
+<div class="panel">
+<ul class="wikilist">
 <li><a href="../wiki/rust-os.html">Writing an OS in Rust</a><span>no_std, ownership at ring 0, and four traps that cost time</span></li>
 <li><a href="../wiki/ring-0.html">Ring 0</a><span>Privilege levels, and what removing the boundary means</span></li>
 <li><a href="../wiki/uefi-kernel.html">UEFI as the kernel</a><span>No bootloader: the UEFI application is the OS</span></li>
+</ul>
+</div>
+<h2 class="sect">Hardware</h2>
+<div class="panel">
+<ul class="wikilist">
+<li><a href="../wiki/network-stack.html">The network stack</a><span>ARP to TCP, written here, and the re-entrancy rule</span></li>
+<li><a href="../wiki/tls.html">TLS 1.3 from scratch</a><span>Why hand-written crypto is the dangerous part</span></li>
+<li><a href="../wiki/storage.html">Content-addressed storage</a><span>Merkle trees on NVMe, and a write gate with a range</span></li>
+<li><a href="../wiki/usb-xhci.html">The USB stack</a><span>Rings, doorbells, and three bugs found from above</span></li>
+<li><a href="../wiki/usb-wifi-driver.html">USB WiFi</a><span>CNVi, a dongle, and a driver honest about its half</span></li>
+<li><a href="../wiki/gui.html">The desktop</a><span>Composed and diffed, and the measurement that overturned the plan</span></li>
+</ul>
+</div>
+<h2 class="sect">The model</h2>
+<div class="panel">
+<ul class="wikilist">
 <li><a href="../wiki/llm-in-kernel.html">A language model in the kernel</a><span>Inference with no allocator, no OS and no libm</span></li>
 <li><a href="../wiki/qwen3.html">Qwen3 in 570 MB</a><span>Head width, QK-Norm, and two bugs that never threw an error</span></li>
 <li><a href="../wiki/qwen35.html">Qwen3.5 and the 2B distill</a><span>Hybrid attention, a walk-checked format, and the flagship image</span></li>
 <li><a href="../wiki/rope.html">RoPE</a><span>Rotary embeddings, and the convention that cost months</span></li>
 <li><a href="../wiki/kv-cache.html">The int8 KV cache</a><span>Quantisation, attention sinks, and a pinned system turn</span></li>
 <li><a href="../wiki/tokenizer.html">Tokenizers</a><span>The pre-tokenizer regex is part of the model</span></li>
+</ul>
+</div>
+<h2 class="sect">Acting on the world</h2>
+<div class="panel">
+<ul class="wikilist">
 <li><a href="../wiki/constrained-decoding.html">Constrained decoding</a><span>Making invalid output unreachable rather than rejected</span></li>
 <li><a href="../wiki/routing.html">Tool routing</a><span>When a method from 1960 beats the transformer</span></li>
 <li><a href="../wiki/agent.html">The agent loop</a><span>Three tiers, skills, and judging what the machine writes</span></li>
-<li><a href="../wiki/gui.html">The Windows 3.1 desktop</a><span>Composed and diffed, and the measurement that overturned the plan</span></li>
-<li><a href="../wiki/network-stack.html">The network stack</a><span>ARP to TCP, written here, and the re-entrancy rule</span></li>
-<li><a href="../wiki/tls.html">TLS 1.3 from scratch</a><span>Why hand-written crypto is the dangerous part</span></li>
-<li><a href="../wiki/storage.html">Content-addressed storage</a><span>Merkle trees on NVMe, and a write gate with a range</span></li>
-<li><a href="../wiki/usb-xhci.html">The USB stack</a><span>Rings, doorbells, and three bugs found from above</span></li>
-<li><a href="../wiki/usb-wifi-driver.html">USB WiFi</a><span>CNVi, a dongle, and a driver honest about its half</span></li>
+</ul>
+</div>
+<h2 class="sect">The language</h2>
+<div class="panel">
+<ul class="wikilist">
+<li><a href="../wiki/aiksi.html">Aiksi, the system language</a><span>Records as values, and a gate an import cannot escalate</span></li>
+<li><a href="../wiki/compiler.html">The compiler</a><span>x86-64 from a heap page, and the canary that must fail</span></li>
+</ul>
+</div>
+<h2 class="sect">Theory, and what it cost to keep honest</h2>
+<div class="panel">
+<ul class="wikilist">
+<li><a href="../wiki/godel.html">Gödel machines</a><span>What replaces the proof when no prover exists</span></li>
+<li><a href="../wiki/rsi.html">Recursive self-improvement</a><span>Four judges, a ledger, and a budget on the held-out set</span></li>
+<li><a href="../wiki/aixi.html">AIXI</a><span>Monte-Carlo planning over the machine's own fitted dynamics</span></li>
+</ul>
+</div>
+<h2 class="sect">Building and checking</h2>
+<div class="panel">
+<ul class="wikilist">
 <li><a href="../wiki/iso-el-torito.html">How the ISO is built</a><span>El Torito, FAT32, and a reader to check the writer</span></li>
-<li><a href="../wiki/templeos.html">TempleOS</a><span>What this project inherited, and where it diverges</span></li>
 <li><a href="../wiki/testing.html">Testing without a test runner</a><span>Four instruments, and a canary that must fail</span></li>
 </ul>
-
+</div>
 </div>
 </div>
 </div>

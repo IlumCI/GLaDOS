@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aiksi. The system language, its records and its capability gate</title>
+<meta name="description" content="Aiksi is the language everything above the GLaDOS kernel is written in: records as values, optional types, and a capability allowlist that an import can never escalate.">
+<meta name="keywords" content="Aiksi language, system language, capability security, allowlist, records as values, HolyC, kernel scripting language">
+<link rel="canonical" href="https://aperture.institute/wiki/aiksi.html">
+<meta name="robots" content="index,follow,max-image-preview:large">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="GLaDOS">
+<meta property="og:title" content="Aiksi. The system language, its records and its capability gate">
+<meta property="og:description" content="Aiksi is the language everything above the GLaDOS kernel is written in: records as values, optional types, and a capability allowlist that an import can never escalate.">
+<meta property="og:url" content="https://aperture.institute/wiki/aiksi.html">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="Aiksi. The system language, its records and its capability gate">
+<meta name="twitter:description" content="Aiksi is the language everything above the GLaDOS kernel is written in: records as values, optional types, and a capability allowlist that an import can never escalate.">
+<meta property="og:image" content="https://aperture.institute/img/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="The GLaDOS aperture mark">
+<meta name="twitter:image" content="https://aperture.institute/img/og.png">
+<link rel="stylesheet" href="../style.css">
+<link rel="icon" type="image/svg+xml" href="../img/logo.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="../img/icon-32.png">
+<link rel="apple-touch-icon" sizes="180x180" href="../img/icon-180.png">
+<link rel="manifest" href="../site.webmanifest">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://aperture.institute/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://aperture.institute/wiki/"},{"@type":"ListItem","position":3,"name":"Aiksi","item":"https://aperture.institute/wiki/aiksi.html"}]}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Aiksi. The system language, its records and its capability gate","description":"Aiksi is the language everything above the GLaDOS kernel is written in: records as values, optional types, and a capability allowlist that an import can never escalate.","url":"https://aperture.institute/wiki/aiksi.html","dateModified":"2026-08-31","keywords":"Aiksi language, system language, capability security, allowlist, records as values, HolyC, kernel scripting language","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://aperture.institute/"}}</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<div id="page">
+
+<!--masthead-->
+<div id="masthead">
+  <a class="mark" href="../"><img src="../img/wordmark.png" alt="Aperture Institute" width="666" height="169"></a>
+  <span class="sub">GLaDOS &mdash; an operating system in Rust, with a language model in the kernel</span>
+</div>
+<!--/masthead-->
+
+<!--bar-->
+<div id="tabs"><ul><li><a href="../">Summary</a></li><li><a href="../download/">Download</a></li><li><a href="../news/">News</a></li><li class="on"><a href="../wiki/">Wiki</a></li><li><a href="../screenshots/">Screenshots</a></li><li><a href="../archive/">Archive</a></li><li><a href="../token/">Token</a></li><li><a href="https://github.com/IlumCI/GLaDOS" rel="noopener">Source code</a></li></ul></div>
+<!--/bar-->
+
+<div id="body">
+<!--sidebar-->
+<div id="sidebar">
+<div class="box"><div class="t">Latest release</div><div class="bd"><table class="facts"><tr><td>Version</td><td>1.2.27</td></tr><tr><td>Released</td><td>2026-08-31</td></tr><tr><td>Images</td><td>6</td></tr></table><ul><li><a href="../download/">Download</a></li><li><a href="https://github.com/IlumCI/GLaDOS/releases/tag/v1.2.27">Release notes</a></li></ul></div></div>
+<div class="box"><div class="t">Project information</div><div class="bd"><table class="facts"><tr><td>Development status</td><td>3 - Alpha</td></tr><tr><td>Environment</td><td>Console, framebuffer</td></tr><tr><td>Intended audience</td><td>Developers, science/research</td></tr><tr><td>Licence</td><td>Other/proprietary, all rights reserved</td></tr><tr><td>Natural language</td><td>English</td></tr><tr><td>Operating system</td><td>x86-64 UEFI, bare metal</td></tr><tr><td>Programming language</td><td>Rust, Python</td></tr><tr><td>Topic</td><td>Operating systems, kernels, artificial intelligence</td></tr></table></div></div>
+<div class="box"><div class="t">Statistics</div><div class="bd"><table class="facts"><tr><td>Registered</td><td>2026-08-14</td></tr><tr><td>Releases</td><td>4</td></tr><tr><td>Downloads</td><td>19</td></tr><tr><td>Source</td><td>108 files, ~50,000 lines</td></tr></table></div></div>
+<div class="box"><div class="t">Developers</div><div class="bd"><table class="facts"><tr><td>IlumCI</td><td>project admin, developer</td></tr></table></div></div>
+<div class="box"><div class="t">Documentation</div><div class="bd"><ul><li><a href="../wiki/glados-os.html">GLaDOS OS</a></li><li><a href="../wiki/llm-in-kernel.html">A model in the kernel</a></li><li><a href="../wiki/ring-0.html">Ring 0</a></li><li><a href="../wiki/uefi-kernel.html">UEFI as the kernel</a></li><li><a href="../wiki/gui.html">The desktop</a></li><li><a href="../wiki/testing.html">Testing without a runner</a></li><li><a href="../wiki/">All 28 articles</a></li></ul></div></div>
+</div>
+<!--/sidebar-->
+<div id="content">
+<div class="crumbs"><a href="../">GLaDOS</a> / <a href="./">Wiki</a> / Aiksi</div>
+<div id="main">
+<h1>Aiksi, the system language</h1>
+<p>Everything above the kernel is written in Aiksi. The intended relationship is C to Unix, or HolyC to TempleOS: GLaDOS is written in Rust, and Aiksi is how anything that is not the kernel reaches it. A program is <code>code.ai&amp;xi</code>. The extension is deliberately unusual and costs nothing &mdash; nothing on the host claims it, the shell does not parse <code>&amp;</code>, and the path resolver is a plain splitter.</p>
+<p>Source becomes tokens, tokens become a tree, and the tree is walked. That is three files and no intermediate representation, and it was chosen for a reason that paid off later: a code generator written against the same tree can be checked against the same results, which is much easier than debugging a code generator with nothing to compare against.</p>
+
+<h2 id="records">Records are values</h2>
+<pre><code>use "/lib/text"
+
+rec Host { name: str, port: int }
+
+fn reachable(h: Host): int {
+  if (tcp_connect(h.name, h.port, 600)) { tcp_close() return 1 }
+  return 0
+}</code></pre>
+<p>A record is a declaration and a constructor in one, so the name becomes callable with the fields in order and the constructor's arity is the declaration's by construction rather than by agreement.</p>
+<p>Records are <em>values</em>, like lists. <code>b = a</code> copies, and <code>a.x = 9</code> afterwards leaves <code>b</code> alone. That single decision is why nothing in this language has to explain aliasing, and it is also why <code>a.b.c = 1</code> is refused rather than silently discarded: there is no shared object to reach through, so only a plain variable can be assigned back to. Refusing is the honest answer. Accepting it and dropping the write is the version that costs somebody an afternoon.</p>
+
+<h2 id="types">Types are optional and never inferred</h2>
+<p>Absent means <code>any</code>, so every program written before types existed still means what it meant. They are checked where a value crosses a boundary somebody annotated: a call, a return, a record field at construction and at assignment.</p>
+<p>Inference would mean a solver. The thing actually worth having is much smaller, and it is that a model passing a string where a number belongs gets <code>f wants int for 'a', got str</code> instead of <code>int()</code> quietly answering 0 and the wrong number surfacing four calls later. That is the whole return on the feature, and a solver is not needed to collect it.</p>
+
+<h2 id="use">Imports cannot be an escalation</h2>
+<p><code>use</code> is textual inclusion that happens once, not a module system. There is nothing to qualify against, and inventing a prefix would mean inventing a spelling and then explaining it.</p>
+<p>The imported program runs with the <em>importer's</em> capabilities, and that is the security property rather than a convenience. Capabilities live on the interpreter, and there is one interpreter, so an import can never grant more than the importing program already had. The jail on top &mdash; a sandboxed program may <code>use</code> only its own files or <code>/lib</code> &mdash; is therefore about legibility rather than safety: it keeps a stored program's dependencies somewhere a person can find them.</p>
+<p>Cycles terminate because a path is marked imported <em>before</em> it is evaluated. That ordering matters more here than in most languages: running out of stack in ring 0 with no guard page is a triple fault, which is not an error message but an instant reboot.</p>
+
+<h2 id="builtins">The allowlist, and why it replaced two denylists</h2>
+<p>Every builtin is a row of <code>(name, Touch, min args, max args)</code>, and <code>builtin</code> refuses anything absent from that table <em>before</em> dispatch. The two failure modes are then both harmless. An arm added to the match without a row is unreachable, which is dead code. A row without an arm answers "no implementation", which is broken and not dangerous.</p>
+<p>It replaced two denylists that were correct for eleven raw builtins and stopped being correct the moment the language was wired to the network. A denylist grants by default, so the builtin anybody forgets is exactly the one that matters.</p>
+<p><code>Touch</code> has seven classes and the sandbox question stays binary: Pure, Read and Write are allowed to a stored program, and everything else needs <code>app trust</code>. That follows <code>Manifest.raw</code>, which carries one bit for the reason it states &mdash; an operator approving a request has to hold the whole of it in their head, and "may write outside itself but not open sockets" is a sentence nobody can check against a program. The line for Net is whether a packet leaves the machine, which is why <code>net_ifaces</code> is Read and <code>tcp_connect</code> is not.</p>
+<p><code>words</code> prints the table grouped by class. That is the reference.</p>
+
+<h2 id="naming">Builtins are named after the Rust path</h2>
+<p>Flattened, and without exception. <code>crate::net::tcp::connect</code> is <code>tcp_connect</code>; <code>crate::dev::rtc::now</code> is <code>rtc_now</code>.</p>
+<p>The audience is a 0.6B model and whoever is reading the kernel source beside it, and both can apply a rule they were told once to a subsystem they have never seen. A hand-picked name per builtin reads better in isolation and has to be memorised one at a time, which is the cost that actually matters at this scale. Where the rule reads badly the rule still wins, because one exception means every name has to be checked against a list again.</p>
+
+<h2 id="records-from-the-kernel">What the kernel hands back</h2>
+<p><code>KERNEL_RECS</code> declares the record types the kernel itself returns, and they are known to every interpreter so an annotation checks against something real. <code>pci_list</code> answers a list of <code>Device</code> rather than lines of text &mdash; it answered text only because there was nowhere to put a field, and every caller then wrote the same fragile <code>split</code> to take it apart.</p>
+<p>A program may not redeclare one of these. A builtin would go on returning the kernel's shape while every annotation in the program checked a different type of the same name, which is the kind of disagreement that produces a wrong field rather than an error.</p>
+<p>Everything that is genuinely a struct answers a record: <code>Device</code>, <code>Time</code>, <code>Iface</code>, plus <code>net_config</code>, <code>mem_stats</code>, <code>task_list</code>, <code>stat</code> and <code>tcp_status</code>. Atomic answers stayed atomic, deliberately. <code>mem_used()</code> is not improved by becoming <code>mem_stats().used</code>, and converting scalars into records for uniformity would make the language worse to make a rule tidy. The test is whether a caller would otherwise re-parse: <code>substr(rtc_now(), 11, 2)</code> to get an hour, or a character-by-character line counter to count what <code>ls</code> reported. The seeded <code>/ai/tools/count</code> tool contained exactly that second one, and calls <code>len(ls(path))</code> now.</p>
+<p>Two shapes answer <code>nil</code> rather than a filled-in record: <code>rtc_now</code> when the clock cannot be read, and <code>stat</code> on a path that does not exist. A record whose fields all read as "absent" is indistinguishable from a real empty one, and a program checking existence would have to know which field to trust.</p>
+<p><code>kernel::rec</code> builds a record by name and checks it against <code>KERNEL_RECS</code>, so an arm that adds a field without adding it to the shape, or gets the order wrong, fails there rather than handing back an <code>Iface</code> whose <code>.ip</code> is its netmask. Both are strings, so that mistake is invisible at a glance.</p>
+
+<h2 id="bounds">Three bounds, and why each exists</h2>
+<p><code>range</code> and <code>repeat</code> are capped at 65,536. They are the easiest way for a generated program to ask for a billion-element list, and this kernel has no OOM killer and one address space, so the step budget never gets to see the single call that takes the heap.</p>
+<p>Socket timeouts are clamped to 30 seconds, because an unbounded one in a repaint path hangs the desktop and the step budget cannot see a blocking call either.</p>
+<p>And <code>app::document</code> runs under a smaller draw budget &mdash; though <em>not</em> because it runs per repaint, which its own comment claimed for a long time. <code>desk::refresh_routed</code> is the only caller and rebuilds a window's panel after a command runs, since a command is the only thing that changes what a route would produce. The bound is right and the reason was wrong, which is worth recording as its own kind of bug.</p>
+
+<h2 id="reach">What it reaches</h2>
+<p>Text, integer arithmetic, lists, the namespace, the clock and counters, tasks and memory, PCI, network status, sockets, the model, the framebuffer, and raw memory and I/O ports.</p>
+<p>There are no floats. Adding them for one builtin changes every arithmetic path in the language, and nothing that Aiksi is for has needed them: the arithmetic here is indices, counts, ports and byte offsets.</p>
+<p>The split between the two files that implement all this is deliberate. <code>eval.rs</code> owns the gate, the arity check and the table; <code>kernel.rs</code> owns the arms that reach subsystems. That keeps "what may a program do" to one screen, and it means adding a subsystem cannot accidentally edit the gate.</p>
+<div class="seealso"><b>See also:</b> <a href="compiler.html">The compiler and the differ</a>, <a href="agent.html">The agent loop</a>, <a href="glados-os.html">GLaDOS OS</a>, <a href="templeos.html">TempleOS</a></div>
+</div>
+</div>
+</div>
+
+<!--footer-->
+<div id="footer">
+  <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This project is independent and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
+  <p>Copyright 2026. All rights reserved. The source is published to be read rather than reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are other people's and are listed on <a href="../credits.html">the credits page</a>.</p>
+  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-31.</p>
+</div>
+<!--/footer-->
+
+</div>
+</body>
+</html>

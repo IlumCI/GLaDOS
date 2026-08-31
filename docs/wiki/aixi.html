@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AIXI, and Monte-Carlo planning over fitted machine dynamics</title>
+<meta name="description" content="The smallest honest slice of AIXI for one machine: a controlled linear system fitted from its own telemetry, rolled out by Monte Carlo, with a gate that names which threshold failed.">
+<meta name="keywords" content="AIXI, MC-AIXI, Monte Carlo planning, universal intelligence, linear dynamical system, causal intervention, TempleOS God Says">
+<link rel="canonical" href="https://aperture.institute/wiki/aixi.html">
+<meta name="robots" content="index,follow,max-image-preview:large">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="GLaDOS">
+<meta property="og:title" content="AIXI, and Monte-Carlo planning over fitted machine dynamics">
+<meta property="og:description" content="The smallest honest slice of AIXI for one machine: a controlled linear system fitted from its own telemetry, rolled out by Monte Carlo, with a gate that names which threshold failed.">
+<meta property="og:url" content="https://aperture.institute/wiki/aixi.html">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="AIXI, and Monte-Carlo planning over fitted machine dynamics">
+<meta name="twitter:description" content="The smallest honest slice of AIXI for one machine: a controlled linear system fitted from its own telemetry, rolled out by Monte Carlo, with a gate that names which threshold failed.">
+<meta property="og:image" content="https://aperture.institute/img/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="The GLaDOS aperture mark">
+<meta name="twitter:image" content="https://aperture.institute/img/og.png">
+<link rel="stylesheet" href="../style.css">
+<link rel="icon" type="image/svg+xml" href="../img/logo.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="../img/icon-32.png">
+<link rel="apple-touch-icon" sizes="180x180" href="../img/icon-180.png">
+<link rel="manifest" href="../site.webmanifest">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://aperture.institute/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://aperture.institute/wiki/"},{"@type":"ListItem","position":3,"name":"AIXI","item":"https://aperture.institute/wiki/aixi.html"}]}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"AIXI, and Monte-Carlo planning over fitted machine dynamics","description":"The smallest honest slice of AIXI for one machine: a controlled linear system fitted from its own telemetry, rolled out by Monte Carlo, with a gate that names which threshold failed.","url":"https://aperture.institute/wiki/aixi.html","dateModified":"2026-08-31","keywords":"AIXI, MC-AIXI, Monte Carlo planning, universal intelligence, linear dynamical system, causal intervention, TempleOS God Says","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://aperture.institute/"}}</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<div id="page">
+
+<!--masthead-->
+<div id="masthead">
+  <a class="mark" href="../"><img src="../img/wordmark.png" alt="Aperture Institute" width="666" height="169"></a>
+  <span class="sub">GLaDOS &mdash; an operating system in Rust, with a language model in the kernel</span>
+</div>
+<!--/masthead-->
+
+<!--bar-->
+<div id="tabs"><ul><li><a href="../">Summary</a></li><li><a href="../download/">Download</a></li><li><a href="../news/">News</a></li><li class="on"><a href="../wiki/">Wiki</a></li><li><a href="../screenshots/">Screenshots</a></li><li><a href="../archive/">Archive</a></li><li><a href="../token/">Token</a></li><li><a href="https://github.com/IlumCI/GLaDOS" rel="noopener">Source code</a></li></ul></div>
+<!--/bar-->
+
+<div id="body">
+<!--sidebar-->
+<div id="sidebar">
+<div class="box"><div class="t">Latest release</div><div class="bd"><table class="facts"><tr><td>Version</td><td>1.2.27</td></tr><tr><td>Released</td><td>2026-08-31</td></tr><tr><td>Images</td><td>6</td></tr></table><ul><li><a href="../download/">Download</a></li><li><a href="https://github.com/IlumCI/GLaDOS/releases/tag/v1.2.27">Release notes</a></li></ul></div></div>
+<div class="box"><div class="t">Project information</div><div class="bd"><table class="facts"><tr><td>Development status</td><td>3 - Alpha</td></tr><tr><td>Environment</td><td>Console, framebuffer</td></tr><tr><td>Intended audience</td><td>Developers, science/research</td></tr><tr><td>Licence</td><td>Other/proprietary, all rights reserved</td></tr><tr><td>Natural language</td><td>English</td></tr><tr><td>Operating system</td><td>x86-64 UEFI, bare metal</td></tr><tr><td>Programming language</td><td>Rust, Python</td></tr><tr><td>Topic</td><td>Operating systems, kernels, artificial intelligence</td></tr></table></div></div>
+<div class="box"><div class="t">Statistics</div><div class="bd"><table class="facts"><tr><td>Registered</td><td>2026-08-14</td></tr><tr><td>Releases</td><td>4</td></tr><tr><td>Downloads</td><td>19</td></tr><tr><td>Source</td><td>108 files, ~50,000 lines</td></tr></table></div></div>
+<div class="box"><div class="t">Developers</div><div class="bd"><table class="facts"><tr><td>IlumCI</td><td>project admin, developer</td></tr></table></div></div>
+<div class="box"><div class="t">Documentation</div><div class="bd"><ul><li><a href="../wiki/glados-os.html">GLaDOS OS</a></li><li><a href="../wiki/llm-in-kernel.html">A model in the kernel</a></li><li><a href="../wiki/ring-0.html">Ring 0</a></li><li><a href="../wiki/uefi-kernel.html">UEFI as the kernel</a></li><li><a href="../wiki/gui.html">The desktop</a></li><li><a href="../wiki/testing.html">Testing without a runner</a></li><li><a href="../wiki/">All 28 articles</a></li></ul></div></div>
+</div>
+<!--/sidebar-->
+<div id="content">
+<div class="crumbs"><a href="../">GLaDOS</a> / <a href="./">Wiki</a> / AIXI</div>
+<div id="main">
+<h1>AIXI, and planning over the machine's own dynamics</h1>
+<p>AIXI is the agent that picks the action maximising expected discounted reward over <em>all</em> computable environments, each weighted by its simplicity. It is incomputable, and it is useful as a direction rather than as a destination: it says what an optimal agent would be doing, and every real system is a statement about which part of that it could afford.</p>
+<p>What is implemented here is the smallest honest slice of it for one machine. The environment model is not all computable environments; it is the controlled linear system the machine already fits online from its own telemetry. The action space is not everything the machine could do; it is how much work it takes on over the next few seconds. Expectation is not an integral; it is Monte Carlo.</p>
+
+<h2 id="model">The environment is the machine itself</h2>
+<p>Once a second, the machine records heap, task-switch rate, the operator's touch rate and task count into a ring. A linear dynamical model of the form <code>v_next = a + b*v + c*u</code> is fitted per variable, by the same Cholesky solver the router uses for its own regression &mdash; there is one linear-algebra routine in this kernel and both callers share it.</p>
+<p>That fitted system is the model AIXI plans against. Each candidate schedule is rolled out repeatedly with noise drawn at the fitted residual scale, which is the same noise the oracle window draws, so the planner and the visualisation cannot disagree about how uncertain the machine is.</p>
+<p>Utility is machine health: free heap fraction minus task pressure, discounted at 0.97. Two running tasks cost about as much utility as two per cent of heap &mdash; deliberately a small weight, because tasks here are few and heap is the thing that actually runs out. The planner recommends the schedule whose expected utility beats carrying on as usual, and reports how sure it is.</p>
+<p>The search is exhaustive rather than clever. The horizon is short enough that enumerating every schedule beats any search over them, and an exhaustive enumeration has no hyperparameters to get wrong.</p>
+
+<h2 id="caveat">The control is honest about what it is</h2>
+<p>One caveat is stated in the module in plain terms, because it is the kind of thing that is easy to leave implied. The control variable is measured as touch rate &mdash; the same variable the oracle intervenes on. What it actually models is <em>offered workload</em>, whoever offers it: the operator's hands, or the system's own decisions to run things. The knob is real even if the hand on it today is mostly a person's.</p>
+<p>That distinction is what would let this become an agent rather than an observer, and it is also why it has not yet.</p>
+
+<h2 id="gate">Acting waits on understanding</h2>
+<p>There is no executor. The planner produces a recommendation and a confidence, and gates itself on three things before claiming either is worth acting on: how many samples the fit rests on, how large the residuals are, and whether the regime has been stable. When it declines it says <em>which</em> threshold failed, rather than reporting low confidence and leaving the reason to be guessed at.</p>
+<p>An executor comes later, and only for the actions this gate has been watched passing on real hardware first. That ordering is the same one the self-modification loop follows: the judge exists before the thing it judges is allowed to act.</p>
+
+<h2 id="oracle">Where it came from</h2>
+<p>The lineage is TempleOS. Terry Davis's "God Says" drew uniform words from a dictionary file, seeded by the timing of the operator's own hands at the keyboard and mouse.</p>
+<p>This keeps the entropy and changes the subject. Every keyboard and mouse interrupt still deposits timing bits into a pool, and the sampler still draws from it &mdash; on real hardware, where the ring genuinely fills, rather than under a script, where synthetic keystrokes bypass the interrupt path and the ring stays nearly empty. What changed is what the randomness is asked about. Instead of hallucinated words, the machine is asked about the one future that is actually knowable to it, which is its own.</p>
+<p>The window plots forked timelines: solid history up to now, then three coloured projections under the interventions "left alone", "carried on", and "put under load". It is genuinely causal, being a controlled linear system fitted from real telemetry and rolled forward under an intervention on the control. It is never prophecy. A first draft that generated word-prophecies was scrapped for exactly that reason &mdash; it would have been a joke about divination in a system whose entire argument is that its claims can be checked.</p>
+<div class="seealso"><b>See also:</b> <a href="godel.html">Gödel machines</a>, <a href="rsi.html">Recursive self-improvement</a>, <a href="templeos.html">TempleOS</a>, <a href="routing.html">Tool routing</a></div>
+</div>
+</div>
+</div>
+
+<!--footer-->
+<div id="footer">
+  <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This project is independent and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
+  <p>Copyright 2026. All rights reserved. The source is published to be read rather than reused. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are other people's and are listed on <a href="../credits.html">the credits page</a>.</p>
+  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-08-31.</p>
+</div>
+<!--/footer-->
+
+</div>
+</body>
+</html>
