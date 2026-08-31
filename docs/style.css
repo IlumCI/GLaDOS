@@ -422,3 +422,38 @@ p.small { font-size: 12px; color: #555; margin: 4px 0 0; max-width: 48em; }
   #tabs { padding: 5px 10px 0; }
   #tabs a { padding: 4px 8px; }
 }
+
+/* --- the masthead, once it carried a wordmark --------------------------
+   White, because the artwork is black on transparent and was drawn for a
+   light ground. Recolouring a mark to suit a band we chose is the wrong way
+   round, so the band went instead -- the amber is still the tab strip's
+   borders, every section bar, every link and the footer, which is more of it
+   than a solid slab was.
+
+   These override the earlier #masthead rules rather than replacing them in
+   place: the old ones floated a 34px icon beside a text logotype, and there
+   is no text logotype now. */
+#masthead {
+  background: #fff;
+  padding: 14px 18px 12px;
+}
+#masthead img {
+  float: none;
+  margin: 0;
+  display: block;
+  height: 46px;
+  width: auto;
+  max-width: 100%;
+}
+#masthead .mark { display: inline-block; text-decoration: none; }
+#masthead .sub {
+  display: block;
+  color: #555;
+  font-size: 13px;
+  margin-top: 8px;
+}
+
+@media (max-width: 45rem) {
+  #masthead { padding: 10px; }
+  #masthead img { height: 34px; }
+}

@@ -226,6 +226,32 @@ def a(href, text, extra=""):
     return '<a href="%s"%s>%s</a>' % (href, extra, html.escape(text))
 
 
+def masthead_html(p):
+    """The wordmark, and the product name under it.
+
+    The mark reads "Aperture Institute", which is the organisation rather than
+    the software, so the tagline has to carry "GLaDOS" or the page stops saying
+    what it is about. That split is deliberate and it is the one the domain
+    already implies: the institute is the publisher, GLaDOS is the thing
+    published.
+
+    Drawn on white because the artwork is black on transparent and was made
+    for a light ground. Recolouring somebody's mark to fit a band we chose is
+    the wrong way round; the band moves instead. The amber has not gone
+    anywhere -- it is the tab strip's borders, every section bar, every link
+    and the footer.
+    """
+    home = p or "./"
+    return "\n".join([
+        '<div id="masthead">',
+        '  <a class="mark" href="%s"><img src="%simg/wordmark.png" '
+        'alt="Aperture Institute" width="666" height="169"></a>' % (home, p),
+        '  <span class="sub">GLaDOS &mdash; an operating system in Rust, '
+        'with a language model in the kernel</span>',
+        '</div>',
+    ])
+
+
 def section_of(relpath):
     """Which tab a page belongs under, from its own path."""
     rl = relpath.replace("\\", "/")
@@ -362,6 +388,7 @@ def footer_html(p, rel):
 # and the replacement inserts the markers on the way past.
 
 REGIONS = {
+    "masthead": r'<div id="masthead">.*?\n</div>\n',
     "bar": r'<div id="bar">.*?</div>[ \t]*\n',
     "sidebar": r'<div id="sidebar">.*?</div>\n(?=<div id="content">)',
     "footer": r'<div id="footer">.*?\n</div>\n',
@@ -395,7 +422,8 @@ def build_chrome(releases):
         p = prefix_for(rl)
         with open(full, "r", encoding="utf-8") as fh:
             text = orig = fh.read()
-        for name, new in (("bar", nav_html(p, rl)),
+        for name, new in (("masthead", masthead_html(p)),
+                          ("bar", nav_html(p, rl)),
                           ("sidebar", sidebar_html(p, rel, releases)),
                           ("footer", footer_html(p, rel))):
             text, ok = replace_region(text, name, new)
