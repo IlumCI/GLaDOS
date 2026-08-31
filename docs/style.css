@@ -432,10 +432,31 @@ p.small { font-size: 12px; color: #555; margin: 4px 0 0; max-width: 48em; }
 
    These override the earlier #masthead rules rather than replacing them in
    place: the old ones floated a 34px icon beside a text logotype, and there
-   is no text logotype now. */
+   is no text logotype now.
+
+   The mark is taken out of the flow and laid over the band. In flow it was a
+   block the layout had to make room for, so its height set the masthead's
+   height and swapping the artwork for a taller or shorter file moved
+   everything under it. Positioned, it sits on top and the band's height is a
+   number stated here instead -- the reserved top padding. The artwork can
+   change size, or be replaced entirely, and nothing below it moves.
+
+   The padding is what reserves the space, rather than the image doing it, and
+   that is the whole point: it is stated once and it does not depend on what
+   the file happens to be. The tagline stays in normal flow so it can still
+   wrap to two lines on a narrow screen and push the band taller, which is the
+   one thing that should still be allowed to. */
 #masthead {
+  position: relative;
   background: #fff;
-  padding: 14px 18px 12px;
+  padding: 68px 18px 12px;
+}
+#masthead .mark {
+  position: absolute;
+  left: 18px;
+  top: 14px;
+  line-height: 0;
+  text-decoration: none;
 }
 #masthead img {
   float: none;
@@ -445,15 +466,14 @@ p.small { font-size: 12px; color: #555; margin: 4px 0 0; max-width: 48em; }
   width: auto;
   max-width: 100%;
 }
-#masthead .mark { display: inline-block; text-decoration: none; }
 #masthead .sub {
   display: block;
   color: #555;
   font-size: 13px;
-  margin-top: 8px;
 }
 
 @media (max-width: 45rem) {
-  #masthead { padding: 10px; }
+  #masthead { padding: 52px 10px 10px; }
+  #masthead .mark { left: 10px; top: 10px; }
   #masthead img { height: 34px; }
 }
