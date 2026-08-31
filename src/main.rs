@@ -430,6 +430,18 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
         net::init(ecam, boot.roots.as_ref().map(|b| b.as_slice()));
     }
 
+    // After the network, deliberately: bringing the controller up resets the
+    // bus, and if a USB Ethernet adapter is going to claim a device it should
+    // do so before anything else walks past it. Ports it took are skipped
+    // here rather than enumerated a second time.
+    if let Some(ecam) = acpi.as_ref().and_then(|a| a.mcfg) {
+        match dev::usbhid::probe(ecam) {
+            Ok(0) => {}
+            Ok(n) => kprintln!("[boot] usb    {} input device(s) on the boot protocol", n),
+            Err(e) => kprintln!("[boot] usb    no input: {}", e),
+        }
+    }
+
     gfx::splash::stage("storage");
     let damaged = init_storage(&acpi);
     // The recovery prompt is a question, and it is being asked of a console
@@ -1163,6 +1175,14 @@ fn selftest() {
     if !fmt::selftest() {
         console::set_color(LTRED);
         kprintln!("[selftest] file type handling is unsound");
+        console::set_color(LTGRAY_IDX);
+    }
+
+    kprintln!("
+[selftest] usb input:");
+    if !dev::usbhid::selftest() {
+        console::set_color(LTRED);
+        kprintln!("[selftest] a USB keyboard would type the wrong characters");
         console::set_color(LTGRAY_IDX);
     }
 

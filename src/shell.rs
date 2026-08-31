@@ -199,6 +199,11 @@ pub fn run(boot: &BootInfo, acpi: &Option<Acpi>) -> ! {
             // 100 times a second, so this is also the stack's clock -- an
             // open connection only advances between keystrokes.
             crate::net::tcp::service();
+            // USB is polled and not interrupt-driven in this kernel, so a
+            // keyboard on it is only heard from when somebody asks. Here
+            // rather than in the timer tick for the same reason the pointer
+            // is: a keystroke can raise a window.
+            crate::dev::usbhid::poll();
             // The pointer is read from the idle loop rather than acted on in
             // the interrupt: a click raises a window and repaints, and doing
             // that from an ISR would redraw the screen underneath whatever was
@@ -2037,6 +2042,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             kprintln!("  paint write [path] mines oracle agentlog   desktop programs; todo   the checklist");
             kprintln!("  typewriter    output pacing, in us per character");
             kprintln!("  font          every glyph this machine can draw");
+            kprintln!("  usb [hid]     the USB bus; 'usb hid' for keyboards and mice");
 
             console::set_color(YELLOW);
             kprintln!("\nstorage");
@@ -2176,6 +2182,18 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             console::set_color(WHITE);
         }
         "usb" => match acpi.as_ref().and_then(|a| a.mcfg) {
+            Some(ecam) if rest.trim() == "hid" => {
+                // Says nothing when it found nothing new, because the usual
+                // reason for that is that boot already took them, and "0
+                // configured" over a list of two working devices reads as a
+                // failure.
+                match crate::dev::usbhid::probe(ecam) {
+                    Ok(0) => {}
+                    Ok(n) => kprintln!("  {} newly configured", n),
+                    Err(e) => kprintln!("  {}", e),
+                }
+                crate::dev::usbhid::report();
+            }
             Some(ecam) => crate::dev::xhci::report(ecam),
             None => {
                 console::set_color(LTRED);

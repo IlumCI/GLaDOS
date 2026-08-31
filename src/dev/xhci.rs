@@ -274,23 +274,45 @@ pub fn report(ecam: u64) {
             );
             console::set_color(WHITE);
 
-            let mut ctl = match Controller::start(&c) {
-                Ok(x) => x,
-                Err(e) => {
-                    console::set_color(LTRED);
-                    kprintln!("  controller did not start: {:?}", e);
-                    console::set_color(WHITE);
-                    return;
+            // Through the shared controller rather than a second one of its
+            // own. Starting a private controller reset the bus, which took the
+            // network interface out from under the driver running on it -- a
+            // diagnostic that breaks what it is reporting on.
+            if let Err(e) = ensure_started(ecam) {
+                console::set_color(LTRED);
+                kprintln!("  controller did not start: {}", e);
+                console::set_color(WHITE);
+                return;
+            }
+            // Devices another driver has taken are listed and not re-walked:
+            // enumerating one a second time gives it a second slot and the
+            // first driver goes on ringing a doorbell nobody answers.
+            for p in with_ctl(|x| x.connected()).unwrap_or_default() {
+                if port_claimed(p) {
+                    kprintln!("  port {}  in use by a driver", p);
                 }
-            };
-            let ports = ctl.connected();
+            }
+            // Every port register, raw. Which ports a controller has, which of
+            // them a device is on and what speed it reports are three things
+            // this driver has been inferring, and inference is what put a
+            // device on a port the controller then could not find.
+            for p in 1..=with_ctl(|x| x.max_ports).unwrap_or(0) {
+                let v = with_ctl(|x| x.r32(x.portsc(p))).unwrap_or(0);
+                if v & PORTSC_CCS != 0 || v & PORTSC_PED != 0 {
+                    kprintln!(
+                        "  portsc {}  {:#010x}  ccs={} ped={} speed={}",
+                        p, v, v & 1, (v >> 1) & 1, (v >> 10) & 0xF
+                    );
+                }
+            }
+            let ports = free_ports();
             usb_scan_begin();
             if ports.is_empty() {
                 kprintln!("  running; no devices attached");
                 return;
             }
             for p in ports {
-                let mut dev = match ctl.enumerate(p) {
+                let mut dev = match with_ctl(|x| x.enumerate(p)).unwrap_or(Err("no controller")) {
                     Ok(d) => d,
                     Err(e) => {
                         console::set_color(LTRED);
@@ -315,9 +337,16 @@ pub fn report(ecam: u64) {
                     match dma(64, 16) {
                         None => kprintln!("    no memory for a register read"),
                         Some(scratch) => {
-                            let mut regs =
-                                super::rtl8188eu::Regs::new(&mut ctl, &mut dev, scratch);
-                            match regs.chip_id() {
+                            // One controller operation per take, and `Regs`
+                            // rebuilt around each: it holds borrows and
+                            // nothing more, so constructing it twice costs
+                            // nothing and keeps the lock off the `kprintln`
+                            // between them.
+                            let chip = with_ctl(|x| {
+                                super::rtl8188eu::Regs::new(x, &mut dev, scratch).chip_id()
+                            })
+                            .unwrap_or(Err("no controller"));
+                            match chip {
                                 Err(e) => {
                                     console::set_color(LTRED);
                                     kprintln!("    chip id unreadable: {}", e);
@@ -339,7 +368,12 @@ pub fn report(ecam: u64) {
                                     // all. Said out loud rather than done
                                     // quietly.
                                     kprintln!("    powering on and loading the MAC table...");
-                                    match regs.bring_up() {
+                                    let up = with_ctl(|x| {
+                                        super::rtl8188eu::Regs::new(x, &mut dev, scratch)
+                                            .bring_up()
+                                    })
+                                    .unwrap_or(Err("no controller"));
+                                    match up {
                                         Ok(()) => {
                                             console::set_color(LTGREEN);
                                             kprintln!("    MAC up -- power sequence and 92 registers accepted");
@@ -363,7 +397,9 @@ pub fn report(ecam: u64) {
                 // the first: QEMU's usb-net puts RNDIS on configuration 1 and
                 // CDC Ethernet on 2, and only the second is worth driving.
                 for i in 0..dev.num_configs {
-                    let (buf, total) = match ctl.config_descriptor(&mut dev, i) {
+                    let (buf, total) = match with_ctl(|x| x.config_descriptor(&mut dev, i))
+                        .unwrap_or(Err("no controller"))
+                    {
                         Ok(x) => x,
                         Err(_) => break,
                     };
@@ -420,22 +456,28 @@ pub fn report(ecam: u64) {
                 }
 
                 // Bring the CDC Ethernet configuration up and move a frame.
+                let mut kept = false;
                 if let Some(c) = best {
+                    kept = true;
                     let (iface, alt) = c.data_iface.unwrap_or((0, 0));
-                    let r = ctl
-                        .set_configuration(&mut dev, c.value)
+                    let r = with_ctl(|x| x.set_configuration(&mut dev, c.value))
+                        .unwrap_or(Err("no controller"))
                         .and_then(|_| {
                             // Only when the endpoints live on a non-zero
                             // alternate setting. Sending SET_INTERFACE(0) to a
                             // device with no alternates stalls on some.
                             if alt > 0 {
-                                ctl.set_interface(&mut dev, iface, alt)
+                                with_ctl(|x| x.set_interface(&mut dev, iface, alt))
+                                    .unwrap_or(Err("no controller"))
                             } else {
                                 Ok(())
                             }
                         })
                         .and_then(|_| {
-                            ctl.configure_bulk(&mut dev, c.bulk_in.unwrap(), c.bulk_out.unwrap())
+                            with_ctl(|x| {
+                                x.configure_bulk(&mut dev, c.bulk_in.unwrap(), c.bulk_out.unwrap())
+                            })
+                            .unwrap_or(Err("no controller"))
                         });
                     match r {
                         Err(e) => {
@@ -458,7 +500,9 @@ pub fn report(ecam: u64) {
                                     }
                                     write_volatile((tx + 12) as *mut u16, 0x0608);
                                 }
-                                match ctl.bulk_out(&mut dev, tx, 60) {
+                                match with_ctl(|x| x.bulk_out(&mut dev, tx, 60))
+                                    .unwrap_or(Err("no controller"))
+                                {
                                     Ok(n) => kprintln!("    bulk out moved {} bytes", n),
                                     Err(e) => {
                                         console::set_color(LTRED);
@@ -468,7 +512,9 @@ pub fn report(ecam: u64) {
                                 }
                             }
                             if let Some(rx) = dma(1536, 16) {
-                                match ctl.bulk_in(&mut dev, rx, 1536, 300) {
+                                match with_ctl(|x| x.bulk_in(&mut dev, rx, 1536, 300))
+                                    .unwrap_or(Err("no controller"))
+                                {
                                     Ok(n) => kprintln!("    bulk in received {} bytes", n),
                                     Err(e) => kprintln!("    bulk in: {}", e),
                                 }
@@ -524,7 +570,9 @@ const TRB_SETUP: u32 = 2;
 const TRB_DATA: u32 = 3;
 const TRB_STATUS: u32 = 4;
 const TRB_NORMAL: u32 = 1;
+const TRB_DISABLE_SLOT: u32 = 10;
 const TRB_CONFIG_EP: u32 = 12;
+const TRB_EVAL_CONTEXT: u32 = 13;
 // ...and the ones the controller posts back.
 const TRB_TRANSFER_EVENT: u32 = 32;
 const TRB_CMD_COMPLETE: u32 = 33;
@@ -599,7 +647,33 @@ impl Ring {
 
     fn push(&mut self, mut t: Trb) {
         t.control = (t.control & !1) | self.cycle;
-        unsafe { write_volatile((self.base as *mut Trb).add(self.idx), t) };
+        // **The cycle bit goes last, and on its own.**
+        //
+        // A TRB belongs to the controller the instant its cycle bit matches
+        // the controller's state, and the cycle bit lives in the last dword.
+        // Writing the whole sixteen-byte struct in one store leaves the order
+        // of the four dwords to the compiler, so the controller is free to see
+        // a TRB whose cycle bit says "yours" and whose parameter has not been
+        // written yet.
+        //
+        // Enable Slot survived that for months because it carries no
+        // parameter: the control dword is the whole command. Address Device
+        // did not, and could not, because its parameter is the input context
+        // pointer -- the controller read a pointer of zero, found no add-flags
+        // of 3 there, and answered TRB Error. Every field this driver wrote
+        // was correct, which is exactly why it took so long to find: the bug
+        // was never in the values, it was in when they became visible.
+        let p = unsafe { (self.base as *mut Trb).add(self.idx) };
+        unsafe {
+            write_volatile(&mut (*p).lo, t.lo);
+            write_volatile(&mut (*p).hi, t.hi);
+            write_volatile(&mut (*p).status, t.status);
+            // Nothing above may sink past this. `write_volatile` alone orders
+            // the compiler's stores to *this* location and says nothing about
+            // the four of them against each other on a weaker model.
+            core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
+            write_volatile(&mut (*p).control, t.control);
+        }
         self.idx += 1;
         if self.idx == RING_TRBS - 1 {
             // Give the Link TRB the current cycle so the controller follows
@@ -767,7 +841,7 @@ impl Controller {
     ///
     /// Port change events arrive unbidden throughout and are not errors.
     fn wait_event(&mut self, kind: u32, ms: u64) -> Option<Trb> {
-        self.wait_event_ep(kind, 0, ms)
+        self.wait_event_ep(kind, 0, 0, ms)
     }
 
     /// Wait for an event, optionally for one endpoint only.
@@ -781,8 +855,21 @@ impl Controller {
     /// DHCP that sends fine and never sees an offer looks like from here.
     ///
     /// An event for somebody else is therefore set aside rather than discarded.
-    fn wait_event_ep(&mut self, kind: u32, ep: u32, ms: u64) -> Option<Trb> {
-        let hit = |t: &Trb| t.kind() == kind && (ep == 0 || t.endpoint() == ep);
+    /// Wait for one event belonging to a particular endpoint of a particular
+    /// device.
+    ///
+    /// The slot half is not decoration. A DCI names an endpoint *within* a
+    /// device, so two devices on the same bus routinely share one -- a
+    /// keyboard's interrupt IN and a network adapter's bulk IN are both
+    /// endpoint 1 IN, both DCI 3. Matching on the DCI alone was correct while
+    /// one driver owned the controller and became a way to hand the keyboard's
+    /// report to the network stack the moment two did.
+    fn wait_event_ep(&mut self, kind: u32, slot: u8, ep: u32, ms: u64) -> Option<Trb> {
+        let hit = |t: &Trb| {
+            t.kind() == kind
+                && (ep == 0 || t.endpoint() == ep)
+                && (slot == 0 || t.slot() == slot)
+        };
         if let Some(i) = self.pending.iter().position(hit) {
             return Some(self.pending.remove(i));
         }
@@ -892,7 +979,7 @@ impl Controller {
         // pipe while a receive is armed would otherwise complete its register
         // read against an arriving frame. Same bug as the bulk path had.
         let ev = self
-            .wait_event_ep(TRB_TRANSFER_EVENT, 1, 500)
+            .wait_event_ep(TRB_TRANSFER_EVENT, dev.slot, 1, 500)
             .ok_or("no response to control transfer")?;
         // 13 is Short Packet: fewer bytes than asked for, which for a
         // descriptor read is success rather than failure -- the device is
@@ -939,7 +1026,7 @@ impl Controller {
         });
         self.doorbell(dev.slot, 1);
         let ev = self
-            .wait_event_ep(TRB_TRANSFER_EVENT, 1, 500)
+            .wait_event_ep(TRB_TRANSFER_EVENT, dev.slot, 1, 500)
             .ok_or("no response to control transfer")?;
         if ev.code() != 1 && ev.code() != 13 {
             return Err("control transfer failed");
@@ -966,10 +1053,34 @@ impl Controller {
     ) -> Result<u32, &'static str> {
         // bmRequestType: bit 7 direction, bits 6-5 = 2 for vendor, bits 4-0 = 0
         // for a device recipient. 0xC0 in, 0x40 out.
-        let rt: u32 = if read { 0xC0 } else { 0x40 };
-        let lo = rt | ((request as u32) << 8) | ((value as u32) << 16);
+        self.control(dev, if read { 0xC0 } else { 0x40 }, request, value, index, buf, len)
+    }
+
+    /// One control transfer, with the request type spelled out.
+    ///
+    /// `vendor` fixes the type at vendor-to-device, which is right for the
+    /// wireless dongle it was written for and wrong for everything else. A HID
+    /// SET_PROTOCOL is 0x21: class type, *interface* recipient. Sent as 0x40 it
+    /// addresses the device instead of the interface, and a device answers that
+    /// with a stall -- which halts endpoint zero until it is reset, so the
+    /// mistake costs the whole device rather than the one request.
+    ///
+    /// Direction is read off bit 7 rather than passed separately, because the
+    /// two must agree and a signature that lets them disagree eventually sees
+    /// them disagree.
+    pub fn control(
+        &mut self,
+        dev: &mut Device,
+        rt: u8,
+        request: u8,
+        value: u16,
+        index: u16,
+        buf: u64,
+        len: u16,
+    ) -> Result<u32, &'static str> {
+        let lo = (rt as u32) | ((request as u32) << 8) | ((value as u32) << 16);
         let hi = (index as u32) | ((len as u32) << 16);
-        if read {
+        if rt & 0x80 != 0 {
             self.control_in(dev, lo, hi, buf, len as u32)
         } else {
             self.control_out(dev, lo, hi, buf, len as u32).map(|_| len as u32)
@@ -1000,7 +1111,7 @@ impl Controller {
             .command(Trb { control: TRB_ENABLE_SLOT << 10, ..Default::default() }, 200)
             .ok_or("no response to Enable Slot")?;
         if ev.code() != 1 {
-            return Err("Enable Slot refused");
+            return Err(why("Enable Slot", ev.code()));
         }
         let slot = ev.slot();
 
@@ -1018,13 +1129,24 @@ impl Controller {
 
         let ring = Ring::new().ok_or("out of memory")?;
         let speed = (self.r32(self.portsc(port)) >> 10) & 0xF;
-        // The default endpoint's maximum packet size is fixed by speed and is
-        // not negotiable. Guessing high on a low-speed device makes the first
-        // control transfer fail with nothing useful to look at.
+        // Endpoint zero's maximum packet size is fixed by speed for three of
+        // the four speeds, and **unknown** for the fourth.
+        //
+        // Low speed is always 8, high speed always 64, SuperSpeed always 512.
+        // Full speed may be 8, 16, 32 or 64 and the only way to find out is to
+        // read the device descriptor, which is a control transfer that needs
+        // the number. USB resolves that by making the first eight bytes always
+        // fit in one packet: address at 8, read eight bytes, take
+        // `bMaxPacketSize0` from the ninth, then correct the endpoint.
+        //
+        // Guessing 64 for full speed is what made every keyboard and mouse on
+        // this bus fail to enumerate. It never showed up before because the
+        // only device anybody had attached was a high-speed Ethernet adapter,
+        // where 64 is right by accident.
         let mps: u32 = match speed {
             4 => 512,
-            2 => 8,
-            _ => 64,
+            3 => 64,
+            _ => 8,
         };
 
         let slot_ctx = inp + cb as u64;
@@ -1051,7 +1173,42 @@ impl Controller {
             )
             .ok_or("no response to Address Device")?;
         if ev.code() != 1 {
-            return Err("Address Device refused");
+            // The three numbers that decide this command, printed where it
+            // fails rather than inferred later: which slot the controller
+            // handed out, what speed the port reports, and which port was
+            // named in the context.
+            // Everything the controller reads to answer this command, printed
+            // where it was refused. QEMU answers TRB Error for exactly two
+            // reasons -- a context address whose low four bits are not zero,
+            // and a slot context naming a port it cannot find a device on --
+            // and one line here tells the two apart.
+            let d0 = unsafe { read_volatile(slot_ctx as *const u32) };
+            let d1 = unsafe { read_volatile((slot_ctx + 4) as *const u32) };
+            let dcb = unsafe { read_volatile((self.dcbaa + slot as u64 * 8) as *const u64) };
+            crate::kprintln!(
+                "  xhci   Address Device failed: slot {} port {} speed {} mps {} code {}",
+                slot, port, speed, mps, ev.code()
+            );
+            crate::kprintln!(
+                "         inp {:#x} (low {:#x})  devctx {:#x} (low {:#x})  dcbaa[{}] {:#x}",
+                inp, inp & 0xF, dev_ctx, dev_ctx & 0xF, slot, dcb
+            );
+            let drop = unsafe { read_volatile(inp as *const u32) };
+            let add = unsafe { read_volatile((inp + 4) as *const u32) };
+            let e0 = unsafe { read_volatile((ep0_ctx + 4) as *const u32) };
+            crate::kprintln!(
+                "         slot ctx d0 {:#010x} d1 {:#010x}  ports {}",
+                d0, d1, self.max_ports
+            );
+            // The input control context is the one thing here that was assumed
+            // rather than read: drop must be zero and add must be exactly 3,
+            // and the zero half comes from the allocator rather than from any
+            // line in this function.
+            crate::kprintln!(
+                "         ictl drop {:#010x} add {:#010x}  ep0 d1 {:#010x}  ctxbytes {}",
+                drop, add, e0, self.ctx_bytes
+            );
+            return Err(why("Address Device", ev.code()));
         }
 
         let mut dev = Device {
@@ -1064,13 +1221,94 @@ impl Controller {
             port,
             bulk_in: None,
             bulk_out: None,
+            int_in: None,
         };
         let buf = dma(18, 16).ok_or("out of memory")?;
+        // Eight bytes first, which every speed can carry in one packet, so
+        // `bMaxPacketSize0` can be read before anything asks for more than
+        // one. Then correct the endpoint if the guess above was low.
+        self.descriptor(&mut dev, 0x0100, buf, 8)?;
+        let real_mps = unsafe { read_volatile((buf + 7) as *const u8) } as u32;
+        if speed == 1 && real_mps > 8 && real_mps <= 64 {
+            self.evaluate_mps(&mut dev, real_mps)?;
+        }
         self.descriptor(&mut dev, 0x0100, buf, 18)?;
         dev.vid = unsafe { read_volatile((buf + 8) as *const u16) };
         dev.pid = unsafe { read_volatile((buf + 10) as *const u16) };
         dev.num_configs = unsafe { read_volatile((buf + 17) as *const u8) };
         Ok(dev)
+    }
+
+    /// Hand a device's slot back to the controller.
+    ///
+    /// **A walk that enumerates a device and then decides it is not the one it
+    /// wanted must call this.** Enumeration takes a slot and addresses it to a
+    /// port, and the controller refuses to address a *second* slot to a port
+    /// that already has one. So a discarded device does not merely waste a
+    /// slot: it makes the port permanently unenumerable for the rest of the
+    /// boot.
+    ///
+    /// That is not a hypothetical. The network probe walks every port looking
+    /// for a CDC Ethernet adapter, kept none of them, and left every port owned
+    /// by a slot nobody was using -- so `usb` and the input probe were both
+    /// refused, on every machine, since the day the network probe was written.
+    /// The controller reported it as a malformed command TRB, which is what
+    /// sent this driver looking at its own context fields for a day: every one
+    /// of them was correct.
+    pub fn release(&mut self, dev: Device) {
+        let ev = self.command(
+            Trb {
+                control: (TRB_DISABLE_SLOT << 10) | ((dev.slot as u32) << 24),
+                ..Default::default()
+            },
+            200,
+        );
+        // The DCBAA entry is cleared whatever the controller said. A stale
+        // pointer there outlives the slot and is read by the next Address
+        // Device that lands on the same number.
+        unsafe { write_volatile((self.dcbaa + dev.slot as u64 * 8) as *mut u64, 0) };
+        if let Some(e) = ev {
+            if e.code() != 1 {
+                crate::kprintln!("  xhci   Disable Slot {} refused, code {}", dev.slot, e.code());
+            }
+        }
+    }
+
+    /// Update endpoint zero's maximum packet size on an addressed device.
+    ///
+    /// Evaluate Context rather than Configure Endpoint: this changes a field
+    /// of an endpoint that is already running, and Configure Endpoint would
+    /// tear the ring down and rebuild it. The controller reads exactly the
+    /// contexts the add-flags name, so only the packet size moves.
+    fn evaluate_mps(&mut self, dev: &mut Device, mps: u32) -> Result<(), &'static str> {
+        let cb = self.ctx_bytes as u64;
+        let inp = dev.inp;
+        let ep0 = inp + 2 * cb;
+        unsafe {
+            write_volatile(inp as *mut u32, 0);
+            // Endpoint zero only. The slot context is deliberately not named:
+            // nothing about the slot changed, and asking the controller to
+            // re-evaluate it invites a parameter error over a field this code
+            // never filled in.
+            write_volatile((inp + 4) as *mut u32, 1 << 1);
+            let d1 = read_volatile((ep0 + 4) as *const u32);
+            write_volatile((ep0 + 4) as *mut u32, (d1 & 0x0000_FFFF) | (mps << 16));
+        }
+        let ev = self
+            .command(
+                Trb {
+                    lo: inp as u32,
+                    hi: (inp >> 32) as u32,
+                    control: (TRB_EVAL_CONTEXT << 10) | ((dev.slot as u32) << 24),
+                    ..Default::default()
+                },
+                200,
+            )
+            .ok_or("no response to Evaluate Context")?;
+        if ev.code() != 1 {
+            return Err(why("Evaluate Context", ev.code()));
+        }
+        Ok(())
     }
 
     /// Read the configuration descriptor and everything that follows it.
@@ -1165,13 +1403,87 @@ impl Controller {
     }
 
     /// Bytes received, if the armed transfer has completed. Never waits.
-    fn poll_rx(&mut self, ep: u32, len: u32) -> Option<u32> {
-        let ev = self.wait_event_ep(TRB_TRANSFER_EVENT, ep, 0)?;
+    fn poll_rx(&mut self, slot: u8, ep: u32, len: u32) -> Option<u32> {
+        let ev = self.wait_event_ep(TRB_TRANSFER_EVENT, slot, ep, 0)?;
         if ev.code() != 1 && ev.code() != 13 {
             return None;
         }
         Some(len.saturating_sub(ev.status & 0xFFFFFF))
     }
+}
+
+/// The one host controller on this machine, shared.
+///
+/// There is a single xHCI controller and more than one thing that wants it: a
+/// CDC Ethernet dongle and a keyboard are both USB devices on the same bus.
+/// It used to belong to whichever driver started it, so the network adapter
+/// took it and a keyboard plugged in beside it had nothing to talk to. The
+/// alternative -- starting it a second time -- resets the bus underneath the
+/// adapter already running on it, which is worse than the problem.
+///
+/// A lock and not `Racy`, because the network stack polls from whatever task
+/// is doing I/O while input polls from the shell's idle loop, and preemption
+/// puts them inside the same transfer ring.
+///
+/// `lock` and not `lock_irq`, which is the rarer of the two here and is
+/// exactly the case `Spin::lock` documents: nothing touches this controller
+/// from an interrupt handler, since USB is polled in this kernel and there is
+/// no completion interrupt to deadlock against. Masking would be actively
+/// wrong -- a bulk transfer waits up to half a second for its event, and
+/// interrupts off for that long stops the scheduler and the clock.
+///
+/// **Held for one controller operation and never across a driver call.** That
+/// is not tidiness: `PATIENCE` is sized for a lock covering a few hundred
+/// instructions, so a waiter behind somebody holding this through a whole
+/// enumeration would reach the deadlock panic and be right to.
+static CONTROLLER: crate::sync::Spin<Option<Controller>> = crate::sync::Spin::new(None);
+
+/// Ports a driver has already taken a device on.
+///
+/// Enumeration assigns a slot, so walking the bus a second time and
+/// enumerating the same device again gives it two -- and the first driver goes
+/// on ringing a doorbell for a slot the controller has stopped associating
+/// with that port. One bit per port, and the port numbers start at 1.
+static CLAIMED_PORTS: crate::sync::Racy<u32> = crate::sync::Racy::new(0);
+
+/// Run `f` against the controller, if one has been started.
+pub fn with_ctl<R>(f: impl FnOnce(&mut Controller) -> R) -> Option<R> {
+    CONTROLLER.lock().as_mut().map(f)
+}
+
+pub fn started() -> bool {
+    CONTROLLER.lock().is_some()
+}
+
+/// Bring the controller up, once.
+///
+/// Answers `Ok` when one is already running, which is what makes it safe for
+/// two drivers to call at boot without either having to know about the other.
+pub fn ensure_started(ecam: u64) -> Result<(), &'static str> {
+    if started() {
+        return Ok(());
+    }
+    let caps = probe(ecam).map_err(|_| "no xHCI controller")?;
+    let ctl = Controller::start(&caps).map_err(|_| "controller did not start")?;
+    *CONTROLLER.lock() = Some(ctl);
+    Ok(())
+}
+
+pub fn claim_port(port: u8) {
+    unsafe { *CLAIMED_PORTS.get() |= 1u32 << (port & 31) };
+}
+
+pub fn port_claimed(port: u8) -> bool {
+    unsafe { *CLAIMED_PORTS.get() & (1u32 << (port & 31)) != 0 }
+}
+
+/// Ports with something plugged in that nobody has taken yet.
+pub fn free_ports() -> Vec<u8> {
+    with_ctl(|c| c.connected())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|p| !port_claimed(*p))
+        .collect()
 }
 
 /// A CDC Ethernet adapter behind USB, as the IP stack sees it.
@@ -1181,7 +1493,6 @@ impl Controller {
 /// fresh one per call and abandoning it on a timeout, which piles up transfers
 /// the controller will complete later into events nobody is expecting.
 pub struct UsbNet {
-    ctl: Controller,
     dev: Device,
     mac: [u8; 6],
     rx: u64,
@@ -1196,12 +1507,12 @@ pub struct UsbNet {
 const RX_LEN: u32 = 1600;
 
 impl UsbNet {
-    pub fn new(mut ctl: Controller, mut dev: Device, mac: [u8; 6]) -> Option<UsbNet> {
+    pub fn new(mut dev: Device, mac: [u8; 6]) -> Option<UsbNet> {
         let rx = dma(RX_LEN as usize, 16)?;
         let tx = dma(RX_LEN as usize, 16)?;
         let rx_dci = dev.bulk_in.as_ref().map(|(a, _)| dci(*a))?;
-        let armed = ctl.arm_rx(&mut dev, rx, RX_LEN);
-        Some(UsbNet { ctl, dev, mac, rx, tx, armed, rx_dci })
+        let armed = with_ctl(|c| c.arm_rx(&mut dev, rx, RX_LEN)).unwrap_or(false);
+        Some(UsbNet { dev, mac, rx, tx, armed, rx_dci })
     }
 }
 
@@ -1214,8 +1525,7 @@ impl crate::net::iface::Nic for UsbNet {
         // The port still reporting a connection is the closest thing to a link
         // state USB offers: CDC has a notification endpoint for it, and
         // reading that would mean a third transfer ring for one bit.
-        let off = self.ctl.portsc(self.dev.port);
-        self.ctl.r32(off) & PORTSC_CCS != 0
+        with_ctl(|c| c.still_there(&self.dev)).unwrap_or(false)
     }
 
     fn transmit(&mut self, frame: &[u8]) -> bool {
@@ -1225,16 +1535,19 @@ impl crate::net::iface::Nic for UsbNet {
         unsafe {
             core::ptr::copy_nonoverlapping(frame.as_ptr(), self.tx as *mut u8, frame.len());
         }
-        self.ctl.bulk_out(&mut self.dev, self.tx, frame.len() as u32).is_ok()
+        with_ctl(|c| c.bulk_out(&mut self.dev, self.tx, frame.len() as u32))
+            .map(|r| r.is_ok())
+            .unwrap_or(false)
     }
 
     fn receive(&mut self) -> Option<Vec<u8>> {
         if !self.armed {
-            self.armed = self.ctl.arm_rx(&mut self.dev, self.rx, RX_LEN);
+            self.armed = with_ctl(|c| c.arm_rx(&mut self.dev, self.rx, RX_LEN)).unwrap_or(false);
             return None;
         }
         let ep = self.rx_dci;
-        let n = self.ctl.poll_rx(ep, RX_LEN)?;
+        let slot = self.dev.slot;
+        let n = with_ctl(|c| c.poll_rx(slot, ep, RX_LEN))??;
         self.armed = false;
         let mut out = Vec::new();
         if out.try_reserve_exact(n as usize).is_err() {
@@ -1245,7 +1558,7 @@ impl crate::net::iface::Nic for UsbNet {
         }
         // Re-arm immediately: a receiver that only listens after being asked
         // drops everything that arrives between polls.
-        self.armed = self.ctl.arm_rx(&mut self.dev, self.rx, RX_LEN);
+        self.armed = with_ctl(|c| c.arm_rx(&mut self.dev, self.rx, RX_LEN)).unwrap_or(false);
         Some(out)
     }
 
@@ -1256,22 +1569,25 @@ impl crate::net::iface::Nic for UsbNet {
 
 /// Bring up the first CDC Ethernet adapter on the bus, if there is one.
 pub fn probe_net(ecam: u64) -> Result<UsbNet, &'static str> {
-    let caps = probe(ecam).map_err(|_| "no xHCI controller")?;
-    let mut ctl = Controller::start(&caps).map_err(|_| "controller did not start")?;
+    ensure_started(ecam)?;
     usb_scan_begin();
-    for port in ctl.connected() {
-        let Ok(mut dev) = ctl.enumerate(port) else { continue };
+    for port in free_ports() {
+        let Some(Ok(mut dev)) = with_ctl(|c| c.enumerate(port)) else { continue };
         // This walk already visits every attached device, so noting the
         // wireless ones costs a comparison and saves a second bus reset.
         usb_note(dev.vid, dev.pid);
+        let mut kept = false;
         for i in 0..dev.num_configs {
-            let Ok((buf, total)) = ctl.config_descriptor(&mut dev, i) else { break };
+            let Some(Ok((buf, total))) = with_ctl(|c| c.config_descriptor(&mut dev, i)) else {
+                break;
+            };
             let c = parse_config(buf, total);
             let (Some(ep_in), Some(ep_out)) = (c.bulk_in, c.bulk_out) else { continue };
             if !c.ecm {
                 continue;
             }
-            let mac = match ctl.ecm_mac(&mut dev, c.imac) {
+            kept = true;
+            let mac = match with_ctl(|c2| c2.ecm_mac(&mut dev, c.imac)).unwrap_or(Err("gone")) {
                 Ok(m) => m,
                 Err(e) => {
                     // Locally-administered and deliberately odd, so it is never
@@ -1282,18 +1598,24 @@ pub fn probe_net(ecam: u64) -> Result<UsbNet, &'static str> {
                     [0x02, 0x47, 0x4C, 0x41, 0x44, 0x53]
                 }
             };
-            ctl.set_configuration(&mut dev, c.value)?;
+            with_ctl(|c2| c2.set_configuration(&mut dev, c.value)).unwrap_or(Err("gone"))?;
             if let Some((iface, alt)) = c.data_iface {
                 if alt > 0 {
-                    ctl.set_interface(&mut dev, iface, alt)?;
+                    with_ctl(|c2| c2.set_interface(&mut dev, iface, alt)).unwrap_or(Err("gone"))?;
                 }
             }
-            ctl.configure_bulk(&mut dev, ep_in, ep_out)?;
+            with_ctl(|c2| c2.configure_bulk(&mut dev, ep_in, ep_out)).unwrap_or(Err("gone"))?;
             let (vid, pid) = (dev.vid, dev.pid);
-            let nic = UsbNet::new(ctl, dev, mac).ok_or("out of memory")?;
+            claim_port(dev.port);
+            let nic = UsbNet::new(dev, mac).ok_or("out of memory")?;
             unsafe { *CLAIMED.get() = true };
             unsafe { *USB_ETHERNET.get() = Some((vid, pid)) };
             return Ok(nic);
+        }
+        if !kept {
+            // Not the adapter, so the slot goes back. Keeping it would leave
+            // this port unenumerable for everything after.
+            with_ctl(|c| c.release(dev));
         }
     }
     Err("no CDC Ethernet adapter found")
@@ -1319,6 +1641,70 @@ pub struct Device {
     /// outlives the call that set it up.
     bulk_in: Option<(u8, Ring)>,
     bulk_out: Option<(u8, Ring)>,
+    /// Transfer ring for an interrupt IN endpoint. Kept apart from `bulk_in`
+    /// rather than reusing it: they are configured with different endpoint
+    /// types and a device can plausibly have both, and a field called
+    /// `bulk_in` holding an interrupt endpoint is the kind of name that
+    /// survives long enough to mislead somebody.
+    int_in: Option<(u8, Ring)>,
+}
+
+impl Device {
+    /// An empty device, for moving a real one out of a `&mut`.
+    ///
+    /// Slot zero is the controller's own, never a device's, so this cannot be
+    /// mistaken for something addressable: any doorbell rung for it goes to
+    /// the command ring, and every accessor here checks the rings first.
+    pub fn placeholder() -> Device {
+        Device {
+            slot: 0,
+            ep0: Ring { base: 0, idx: 0, cycle: 1 },
+            vid: 0,
+            pid: 0,
+            num_configs: 0,
+            inp: 0,
+            port: 0,
+            bulk_in: None,
+            bulk_out: None,
+            int_in: None,
+        }
+    }
+}
+
+/// Why a command was refused.
+///
+/// The completion code was being thrown away and every failure read
+/// "refused", which says a command did not work and nothing about whether the
+/// fault was in this driver's context fields, in the device, or in the wiring.
+/// Two of these are the difference between reading a spec and reading a
+/// datasheet, so the message names which.
+fn why(what: &'static str, code: u32) -> &'static str {
+    // Keyed on the command first and the code second, which is the way round
+    // that carries information. The other way collapses every command into one
+    // sentence about the code, and "malformed TRB" without saying *which* TRB
+    // is a message that costs a boot to act on.
+    match what {
+        "Enable Slot" => match code {
+            5 => "Enable Slot: the controller rejected the command TRB",
+            9 => "Enable Slot: no device slots left",
+            _ => "Enable Slot refused",
+        },
+        "Address Device" => match code {
+            4 => "Address Device: the device did not answer",
+            5 => "Address Device: bad slot id in the command TRB",
+            6 => "Address Device: the device stalled it",
+            11 => "Address Device: that slot is not enabled",
+            17 => "Address Device: a field in the slot or endpoint context is invalid",
+            19 => "Address Device: the slot is not in the state this expects",
+            _ => "Address Device refused",
+        },
+        "Evaluate Context" => match code {
+            17 => "Evaluate Context: a field in the endpoint context is invalid",
+            19 => "Evaluate Context: the slot is not addressed",
+            _ => "Evaluate Context refused",
+        },
+        _ => "refused",
+    }
 }
 
 /// Device Context Index for an endpoint address.
@@ -1459,7 +1845,9 @@ impl Controller {
         });
         let d = dci(addr);
         self.doorbell(slot, d);
-        let ev = self.wait_event_ep(TRB_TRANSFER_EVENT, d, ms).ok_or("bulk timed out")?;
+        let ev = self
+            .wait_event_ep(TRB_TRANSFER_EVENT, slot, d, ms)
+            .ok_or("bulk timed out")?;
         if ev.code() != 1 && ev.code() != 13 {
             return Err("bulk transfer failed");
         }
@@ -1481,6 +1869,96 @@ impl Controller {
         dev.bulk_in = Some((addr, ring));
         r
     }
+
+    /// Configure one interrupt IN endpoint.
+    ///
+    /// The same Configure Endpoint command the bulk pair uses, with three
+    /// differences that all matter. The endpoint type is 7 rather than 6.
+    /// `Interval` is a real field here and is ignored for bulk: it is the log2
+    /// of the polling period in 125 us units, and the controller schedules the
+    /// endpoint itself rather than transferring when a doorbell is rung, so
+    /// leaving it zero asks a full-speed keyboard to be polled eight thousand
+    /// times a second. And `Max ESIT Payload` is set, because an interrupt
+    /// endpoint's bandwidth is reserved in advance and a controller told the
+    /// payload is zero can refuse the configuration outright.
+    pub fn configure_interrupt(
+        &mut self,
+        dev: &mut Device,
+        ep: Endpoint,
+        interval: u8,
+    ) -> Result<(), &'static str> {
+        let cb = self.ctx_bytes as u64;
+        let inp = dev.inp;
+        let d = dci(ep.addr);
+        let ring = Ring::new().ok_or("out of memory")?;
+
+        unsafe {
+            write_volatile(inp as *mut u32, 0);
+            write_volatile((inp + 4) as *mut u32, 1 | (1 << d));
+            let slot_ctx = inp + cb;
+            let d0 = read_volatile(slot_ctx as *const u32);
+            write_volatile(slot_ctx as *mut u32, (d0 & 0x07FF_FFFF) | (d << 27));
+
+            let c = inp + cb * (d as u64 + 1);
+            write_volatile(c as *mut u32, (interval as u32) << 16);
+            // EP Type 7 is Interrupt IN. CErr 3, as for bulk.
+            write_volatile((c + 4) as *mut u32,
+                (7u32 << 3) | (3 << 1) | ((ep.max_packet as u32) << 16));
+            write_volatile((c + 8) as *mut u32, (ring.base as u32) | 1);
+            write_volatile((c + 12) as *mut u32, (ring.base >> 32) as u32);
+            write_volatile((c + 16) as *mut u32,
+                (ep.max_packet as u32) | ((ep.max_packet as u32) << 16));
+        }
+
+        let ev = self
+            .command(
+                Trb {
+                    lo: inp as u32,
+                    hi: (inp >> 32) as u32,
+                    control: (TRB_CONFIG_EP << 10) | ((dev.slot as u32) << 24),
+                    ..Default::default()
+                },
+                200,
+            )
+            .ok_or("no response to Configure Endpoint")?;
+        if ev.code() != 1 {
+            return Err("Configure Endpoint refused for the interrupt endpoint");
+        }
+        dev.int_in = Some((ep.addr, ring));
+        Ok(())
+    }
+
+    /// Queue one interrupt IN transfer without waiting for it.
+    ///
+    /// Armed and polled rather than awaited, for the reason `UsbNet` gives
+    /// about its own receive: a transfer queued per call and abandoned on a
+    /// timeout leaves the controller to complete it later into an event
+    /// nobody is expecting. A keyboard reports only when a key moves, so
+    /// nearly every poll finds nothing and a waiting version would spend the
+    /// idle loop asleep on a device that has nothing to say.
+    pub fn arm_interrupt(&mut self, dev: &mut Device, buf: u64, len: u32) -> bool {
+        let Some((addr, mut ring)) = dev.int_in.take() else { return false };
+        ring.push(Trb {
+            lo: buf as u32,
+            hi: (buf >> 32) as u32,
+            status: len,
+            control: (TRB_NORMAL << 10) | (1 << 5) | (1 << 2),
+        });
+        self.doorbell(dev.slot, dci(addr));
+        dev.int_in = Some((addr, ring));
+        true
+    }
+
+    /// Bytes reported, if the armed transfer has completed. Never waits.
+    pub fn poll_interrupt(&mut self, dev: &Device, len: u32) -> Option<u32> {
+        let addr = dev.int_in.as_ref().map(|(a, _)| *a)?;
+        self.poll_rx(dev.slot, dci(addr), len)
+    }
+
+    /// Whether the port this device sits on still reports something attached.
+    pub fn still_there(&self, dev: &Device) -> bool {
+        self.r32(self.portsc(dev.port)) & PORTSC_CCS != 0
+    }
 }
 
 /// A bulk endpoint found in a configuration descriptor.
@@ -1490,6 +1968,27 @@ pub struct Endpoint {
     pub addr: u8,
     pub max_packet: u16,
     pub input: bool,
+}
+
+/// A HID interface using the boot protocol.
+///
+/// Boot protocol only, and that is a decision rather than a stage. A HID
+/// device describes its reports with a report descriptor, which is a small
+/// stack language, and interpreting one correctly is most of a HID stack. The
+/// boot protocol exists precisely so a BIOS does not have to: subclass 1 says
+/// the device will also speak a fixed 8-byte keyboard report or 3-byte mouse
+/// report on demand, and every keyboard and mouse anybody plugs into a
+/// computer supports it. What that costs is the extra keys and buttons a
+/// gaming keyboard puts in its own report, and that is a fair trade for not
+/// having a report-descriptor interpreter in ring 0.
+#[derive(Clone, Copy)]
+pub struct HidIface {
+    pub number: u8,
+    /// bInterfaceProtocol: 1 keyboard, 2 mouse.
+    pub protocol: u8,
+    pub ep_in: Endpoint,
+    /// bInterval from the endpoint descriptor, in the units its speed uses.
+    pub interval: u8,
 }
 
 /// What a configuration offers, as far as this driver cares.
@@ -1502,6 +2001,9 @@ pub struct Config {
     pub bulk_out: Option<Endpoint>,
     /// True when this looks like CDC Ethernet rather than RNDIS.
     pub ecm: bool,
+    /// Every boot-protocol HID interface in this configuration. A plural,
+    /// because one dongle commonly presents a keyboard and a mouse.
+    pub hids: Vec<HidIface>,
     /// String index of the adapter's MAC, from the Ethernet Networking
     /// Functional Descriptor. CDC puts the address in a *string*, in ASCII
     /// hex -- there is no binary field for it anywhere in the descriptors.
@@ -1527,6 +2029,7 @@ pub fn parse_config(buf: u64, total: usize) -> Config {
         bulk_in: None,
         bulk_out: None,
         ecm: false,
+        hids: Vec::new(),
         imac: 0,
     };
     let at = |o: usize| -> u8 { unsafe { read_volatile((buf + o as u64) as *const u8) } };
@@ -1536,8 +2039,15 @@ pub fn parse_config(buf: u64, total: usize) -> Config {
         cfg.value = at(5);
     }
 
+    const CLASS_HID: u8 = 0x03;
+    const SUBCLASS_BOOT: u8 = 0x01;
+
     let mut o = 0usize;
     let mut in_data_iface = false;
+    // The interface an endpoint descriptor belongs to is the last one walked
+    // past, since the block is flat and ordering is the only association there
+    // is. Held as an index so the endpoint can be filled in when it arrives.
+    let mut hid_at: Option<usize> = None;
     while o + 2 <= total {
         let len = at(o) as usize;
         let kind = at(o + 1);
@@ -1548,6 +2058,21 @@ pub fn parse_config(buf: u64, total: usize) -> Config {
             IFACE if o + 9 <= total => {
                 let class = at(o + 5);
                 in_data_iface = class == CLASS_CDC_DATA;
+                hid_at = None;
+                if class == CLASS_HID && at(o + 6) == SUBCLASS_BOOT {
+                    let protocol = at(o + 7);
+                    // Anything that is not a keyboard or a mouse claims the
+                    // boot subclass and then means something else by it.
+                    if protocol == 1 || protocol == 2 {
+                        hid_at = Some(cfg.hids.len());
+                        cfg.hids.push(HidIface {
+                            number: at(o + 2),
+                            protocol,
+                            ep_in: Endpoint { addr: 0, max_packet: 8, input: true },
+                            interval: 8,
+                        });
+                    }
+                }
                 if in_data_iface {
                     // An ECM data interface carries its endpoints on a
                     // non-zero alternate setting; alt 0 is deliberately empty
@@ -1570,6 +2095,20 @@ pub fn parse_config(buf: u64, total: usize) -> Config {
             0x24 if o + 4 <= total && at(o + 2) == 0x0F => {
                 cfg.imac = at(o + 3);
                 cfg.ecm = true;
+            }
+            // An interrupt IN endpoint on a HID interface. Type 3 is
+            // interrupt; a HID interface may also carry an interrupt OUT for
+            // the keyboard's LEDs, which nothing here drives.
+            ENDPOINT if o + 7 <= total && hid_at.is_some() => {
+                let addr = at(o + 2);
+                let attrs = at(o + 3);
+                let mps = unsafe { read_volatile((buf + o as u64 + 4) as *const u16) } & 0x7FF;
+                if attrs & 0x3 == 3 && addr & 0x80 != 0 {
+                    if let Some(i) = hid_at {
+                        cfg.hids[i].ep_in = Endpoint { addr, max_packet: mps, input: true };
+                        cfg.hids[i].interval = at(o + 6);
+                    }
+                }
             }
             ENDPOINT if o + 7 <= total && in_data_iface => {
                 let addr = at(o + 2);

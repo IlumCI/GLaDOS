@@ -284,6 +284,18 @@ pub fn pop() -> Option<u8> {
         Some(translate(b))
     }
 
+/// How many bytes are waiting to be read.
+///
+/// For checking that a decode produced something, which `pop` cannot answer
+/// without consuming it.
+pub fn pending() -> usize {
+    // Head is where the next byte is written and tail is where the next is
+    // read, so the count is head minus tail and not the other way round.
+    let head = HEAD.load(Ordering::Relaxed);
+    let tail = TAIL.load(Ordering::Relaxed);
+    (head + CAP - tail) % CAP
+}
+
 pub fn has_input() -> bool {
     TAIL.load(Ordering::Relaxed) != HEAD.load(Ordering::Acquire)
 }
@@ -338,6 +350,22 @@ pub const KEY_TASKBAR: u8 = 0x8B;
 /// minimised windows, so taking that binding away would leave a minimised
 /// window unreachable from the keyboard.
 pub const KEY_STARTMENU: u8 = 0x8C;
+
+/// One scancode from something that is not the i8042.
+///
+/// A USB keyboard reports HID usage codes, and `usbhid` turns those into the
+/// scancodes below rather than into characters. That is the whole point: shift
+/// and caps and control, Alt held against Alt tapped, Alt-Tab, Alt-Space and
+/// Ctrl-Escape are all *policy*, and they live in `decode`. A second decoder
+/// for USB would be a second copy of that policy, and the copy nobody types on
+/// is the copy that drifts.
+///
+/// The entropy deposit comes along for the ride, because a hand on a USB
+/// keyboard is as much the operator's hand as one on the built-in.
+pub fn inject_scancode(scancode: u8) {
+    crate::ai::godbits::ins(crate::time::rdtsc());
+    decode(scancode);
+}
 
 fn decode(scancode: u8) {
     // E0 introduces a two-byte sequence: arrows, navigation keys, and the

@@ -102,6 +102,43 @@ pub fn position() -> Option<(u32, u32)> {
     Some((s.x.max(0) as u32, s.y.max(0) as u32))
 }
 
+/// Apply one movement, whatever produced it.
+///
+/// Split out of the PS/2 handler because a USB mouse arrives by a completely
+/// different road and has to mean exactly the same thing at the end of it.
+/// Two copies of "y counts up from the mouse and down on the screen" is one
+/// copy too many, and the second would be the one nobody tested.
+///
+/// The caller decodes its own wire format: PS/2 packs nine-bit deltas with the
+/// signs in a flags byte, HID sends plain signed bytes, and neither of those
+/// belongs in here.
+pub fn apply(dx: i32, dy: i32, left: bool, right: bool, wheel: i32) {
+    let s = unsafe { &mut *STATE.get() };
+    let (w, h) = unsafe { *BOUNDS.get() };
+    if dx != 0 || dy != 0 {
+        s.x = (s.x + dx).clamp(0, w - 1);
+        s.y = (s.y - dy).clamp(0, h - 1);
+        s.moved = true;
+    }
+    if wheel != 0 {
+        s.wheel += wheel;
+        s.moved = true;
+    }
+    if left != s.left || right != s.right {
+        s.moved = true;
+    }
+    s.left = left;
+    s.right = right;
+}
+
+/// Announce that a pointer exists, for a driver that is not the i8042.
+///
+/// The desktop draws no cursor at all while this is false, so a USB mouse that
+/// moved the state without setting it would be invisible.
+pub fn declare_present() {
+    unsafe { *PRESENT.get() = true };
+}
+
 pub fn set_bounds(w: i32, h: i32) {
     unsafe { *BOUNDS.get() = (w, h) };
     let s = unsafe { &mut *STATE.get() };
@@ -210,21 +247,19 @@ extern "x86-interrupt" fn mouse_isr(_frame: idt::InterruptStackFrame) {
     // jump across the screen.
     let overflow = flags & 0xC0 != 0;
 
-    let s = unsafe { &mut *STATE.get() };
-    let (w, h) = unsafe { *BOUNDS.get() };
+    // Nine-bit signed, with the sign carried in the flags byte. Overflow means
+    // the counter saturated between packets, so the delta is meaningless and
+    // the movement is dropped rather than applied as a jump across the screen.
+    let (dx, dy) = if overflow {
+        (0, 0)
+    } else {
+        (
+            buf[1] as i32 - if flags & 0x10 != 0 { 0x100 } else { 0 },
+            buf[2] as i32 - if flags & 0x20 != 0 { 0x100 } else { 0 },
+        )
+    };
 
-    if !overflow {
-        // Nine-bit signed, with the sign carried in the flags byte.
-        let dx = buf[1] as i32 - if flags & 0x10 != 0 { 0x100 } else { 0 };
-        let dy = buf[2] as i32 - if flags & 0x20 != 0 { 0x100 } else { 0 };
-        if dx != 0 || dy != 0 {
-            s.x = (s.x + dx).clamp(0, w - 1);
-            // Y counts up from the mouse and down on the screen.
-            s.y = (s.y - dy).clamp(0, h - 1);
-            s.moved = true;
-        }
-    }
-
+    let mut wheel = 0i32;
     if want == 4 {
         // Untested against a real notch, and QEMU cannot supply one. Tracing
         // the raw bytes showed the mouse in four-byte mode (the enable knock
@@ -237,20 +272,9 @@ extern "x86-interrupt" fn mouse_isr(_frame: idt::InterruptStackFrame) {
         //
         // Low nibble, sign extended: 0x01 is one notch down, 0x0F one up.
         let z = (buf[3] & 0x0F) as i8;
-        let z = if z & 0x08 != 0 { z - 16 } else { z };
-        if z != 0 {
-            s.wheel += z as i32;
-            s.moved = true;
-        }
+        wheel = if z & 0x08 != 0 { z - 16 } else { z } as i32;
     }
 
-    let left = flags & 0x01 != 0;
-    let right = flags & 0x02 != 0;
-    if left != s.left || right != s.right {
-        s.moved = true;
-    }
-    s.left = left;
-    s.right = right;
-
+    apply(dx, dy, flags & 0x01 != 0, flags & 0x02 != 0, wheel);
     lapic::eoi();
 }
