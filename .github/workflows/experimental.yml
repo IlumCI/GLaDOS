@@ -1,0 +1,139 @@
+name: experimental
+
+# Kernel builds that do not fit a release: a branch somebody wants to try on
+# real hardware, a feature that is not finished, a variant built to answer one
+# question.
+#
+# Same key, same verifier, same manifest format as stable. The ONLY difference
+# is the bucket it lands in and that reaching it needs an entitlement. A leaked
+# image from here installs anywhere -- the gate is distribution, not execution,
+# and pretending otherwise would be the one dishonest thing in this system.
+
+on:
+  push:
+    branches: ["exp/**"]
+  workflow_dispatch:
+    inputs:
+      notes:
+        description: "One line describing what this build is for"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version --verbose
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: uefi-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+
+      - name: Build
+        run: cargo build --release --locked
+
+      # The version stays the plain crate version, and it must. `version_newer`
+      # parses dotted numbers with `parse().unwrap_or(0)`, so "1.2.28-exp-a1b2"
+      # reads its third field as 0 -- an experimental build would look OLDER
+      # than the release it was branched from and be refused as a rollback.
+      #
+      # So the build's identity travels in `notes` instead, which is what
+      # `update` prints and what `channel::remember` stores. The consequence is
+      # real and worth knowing: two experimental builds off the same release
+      # carry the same version, so `update fetch` will call the second one "not
+      # newer" and want --force. That is the honest trade against a version
+      # string the comparison cannot read.
+      - name: Name it
+        run: |
+          base=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          sha=$(git rev-parse --short HEAD)
+          branch="${GITHUB_REF_NAME//\//-}"
+          echo "VERSION=$base" >> "$GITHUB_ENV"
+          echo "SLUG=$branch-$sha" >> "$GITHUB_ENV"
+
+      - name: Sign
+        env:
+          KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          test -n "$KEY" || { echo "UPDATE_SIGNING_KEY is not set"; exit 1; }
+          mkdir -p out
+          cp target/x86_64-unknown-uefi/release/glados.efi "out/glados-$VERSION.efi"
+          python3 tools/sign.py "out/glados-$VERSION.efi" "out/glados-$VERSION.efi.sig" --key "$KEY"
+
+      - name: Build the signed manifest
+        env:
+          KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+          ORIGIN: ${{ vars.SUPABASE_URL }}
+        run: |
+          test -n "$ORIGIN" || { echo "the SUPABASE_URL variable is not set"; exit 1; }
+          notes="${{ inputs.notes }}"
+          [ -n "$notes" ] || notes="branch $GITHUB_REF_NAME"
+          notes="$SLUG -- $notes"
+          # The base is the private bucket's path. The URLs in this manifest
+          # are rewritten into signed ones by the channel function before any
+          # machine sees them; what is stored here is where the object lives.
+          python3 tools/manifest.py "out/glados-$VERSION.efi" \
+            --version "$VERSION" \
+            --channel experimental \
+            --base "$ORIGIN/storage/v1/object/experimental/$SLUG" \
+            --notes "$notes" \
+            --key "$KEY" \
+            --out out
+
+      - name: Verify what we are about to publish
+        run: python3 tools/manifest.py --verify out/manifest --image "out/glados-$VERSION.efi"
+
+      - name: Publish to the experimental bucket
+        env:
+          ORIGIN: ${{ vars.SUPABASE_URL }}
+          KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          put() {
+            curl -sS --fail-with-body -X POST \
+              -H "Authorization: Bearer $KEY" \
+              -H "Content-Type: application/octet-stream" \
+              -H "x-upsert: true" \
+              --data-binary "@$1" \
+              "$ORIGIN/storage/v1/object/experimental/$2"
+            echo "  put $2"
+          }
+          put "out/glados-$VERSION.efi" "$SLUG/glados-$VERSION.efi"
+          put "out/glados-$VERSION.efi.sig" "$SLUG/glados-$VERSION.efi.sig"
+          put "out/manifest" "$SLUG/manifest"
+
+      # The row is what the channel function serves. Written last, so a build
+      # is never advertised before its objects are in place.
+      - name: Record the build
+        env:
+          ORIGIN: ${{ vars.SUPABASE_URL }}
+          KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          NOTES: ${{ inputs.notes }}
+        run: |
+          notes="$NOTES"
+          [ -n "$notes" ] || notes="branch $GITHUB_REF_NAME"
+          notes="$SLUG -- $notes"
+          sha=$(sha256sum "out/glados-$VERSION.efi" | cut -d' ' -f1)
+          size=$(stat -c%s "out/glados-$VERSION.efi")
+          jq -n \
+            --arg slug "$SLUG" --arg version "$VERSION" \
+            --arg sha "$sha" --argjson size "$size" --arg notes "$notes" \
+            '{channel:"experimental", slug:$slug, version:$version,
+              sha256:$sha, size:$size, object_path:($slug+"/manifest"),
+              notes:$notes}' > out/row.json
+          curl -sS --fail-with-body -X POST \
+            -H "Authorization: Bearer $KEY" \
+            -H "apikey: $KEY" \
+            -H "Content-Type: application/json" \
+            -H "Prefer: resolution=merge-duplicates" \
+            -d @out/row.json "$ORIGIN/rest/v1/builds"
+          echo "  recorded $SLUG"

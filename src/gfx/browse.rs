@@ -117,13 +117,13 @@ impl Browser {
             return;
         }
 
-        match crate::net::tls::https_get(ip, &url.host, url.port, &url.path) {
+        match crate::net::tls::https_fetch(ip, &url.host, url.port, &url.path, 30_000) {
             Err(e) => {
                 self.status = String::from("Fetch failed: ");
                 self.status.push_str(e.name());
             }
-            Ok((resp, _fp, _n, _id, _cn, _names)) => {
-                let (status, head, body) = crate::net::tls::http_response(&resp);
+            Ok(f) => {
+                let (status, head, body) = (f.status, f.headers, f.body);
 
                 // Follow redirects here rather than showing the server's
                 // "moved" page, which is what a browser that does not follow

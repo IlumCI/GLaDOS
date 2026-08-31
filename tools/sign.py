@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """Sign a GLaDOS update image with P-256 ECDSA.
 
-    sign.py --keygen                       print a fresh keypair
-    sign.py <image> <out.sig> --key <hex>  sign an image
+    sign.py --keygen [--out FILE]          make a keypair
+    sign.py <image> <out.sig> --key-file F sign an image
+
+Prefer `--keygen --out FILE`. Without it the private half goes to stdout,
+and a private half that has been on a terminal is not a private half. That
+is how the last one died, and UPDATE_KEY has been zeroed ever since.
 
 The kernel verifies with `crypto::p256::verify`, which the boot selftest
 already checks against published ECDSA vectors -- so a signature this produces
@@ -104,19 +108,33 @@ def main():
     if "--keygen" in sys.argv:
         d, q = keygen()
         pub = b"\x04" + q[0].to_bytes(32, "big") + q[1].to_bytes(32, "big")
-        print("private (keep this off the machine being updated):")
-        print("  " + format(d, "064x"))
-        print("public (paste into UPDATE_KEY in src/update.rs):")
+        if "--out" in sys.argv:
+            path = sys.argv[sys.argv.index("--out") + 1]
+            # 0600 at creation rather than a chmod afterwards, so the key
+            # is never briefly readable by anyone else.
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                print(format(d, "064x"), file=f)
+            print(f"private -> {path}, and not to this terminal")
+        else:
+            print("private (keep this off the machine being updated):")
+            print("  " + format(d, "064x"))
+            print("  ^ that is in your scrollback now. --out FILE avoids it.")
+        print("public (paste into UPDATE_KEY in src/update/mod.rs):")
         rows = [pub[i:i + 8] for i in range(0, len(pub), 8)]
         for row in rows:
             print("    " + " ".join("0x%02x," % b for b in row))
         return
 
-    if len(sys.argv) < 3 or "--key" not in sys.argv:
+    if len(sys.argv) < 3 or not any(a in sys.argv for a in ("--key", "--key-file")):
         raise SystemExit(__doc__)
     image = sys.argv[1]
     out = sys.argv[2]
-    d = int(sys.argv[sys.argv.index("--key") + 1], 16)
+    if "--key-file" in sys.argv:
+        path = sys.argv[sys.argv.index("--key-file") + 1]
+        d = int(open(path).read().strip(), 16)
+    else:
+        d = int(sys.argv[sys.argv.index("--key") + 1], 16)
 
     data = open(image, "rb").read()
     digest = hashlib.sha256(data).digest()

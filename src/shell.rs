@@ -138,6 +138,7 @@ fn find_core(want: &str) -> Option<[u8; 32]> {
 const KNOWN_COMMANDS: &[&str] = &[
     "term", "todo", "paint", "write", "mines", "oracle", "enternet", "net", "dhcp", "mem",
     "uptime", "tasks", "status", "help", "app", "author", "video", "serial", "log", "snap",
+    "update",
 ];
 
 /// How many steps an authoring run gets.
@@ -354,6 +355,299 @@ pub fn run(boot: &BootInfo, acpi: &Option<Acpi>) -> ! {
                 redraw(&line, cursor);
             }
             _ => {}
+        }
+    }
+}
+
+/// The in-OS updater's operator surface.
+///
+/// Several verbs rather than one `update now`. Claiming a write range on the
+/// boot partition is the most dangerous thing this system does, and `fat
+/// unlock` is already a separate deliberate act for exactly that reason.
+/// Checking, downloading and staging are three different decisions, and an
+/// operator gets to make them one at a time -- with the last one naming what
+/// it is about to overwrite and waiting to be told the digest back.
+fn update_cmd(rest: &str) {
+    use crate::store::sha256;
+    use crate::update::{channel, fetch, stage};
+
+    let (verb, arg) = match rest.trim().split_once(' ') {
+        Some((v, a)) => (v, a.trim()),
+        None => (rest.trim(), ""),
+    };
+
+    // Eight hex characters of a digest: enough that typing it back is an act
+    // rather than a reflex, and short enough that somebody will.
+    fn digest8(data: &[u8]) -> alloc::string::String {
+        let h = sha256::short_hex(&sha256::hash(data));
+        let s = core::str::from_utf8(&h).unwrap_or("????????");
+        alloc::string::String::from(&s[..8])
+    }
+
+    /// Fetch and verify the manifest for the channel in force.
+    fn manifest_now() -> Option<crate::update::manifest::Manifest> {
+        if let Err(e) = fetch::online() {
+            kprintln!("  {}", e);
+            return None;
+        }
+        let url = match channel::endpoint() {
+            Ok(u) => u,
+            Err(e) => {
+                kprintln!("  {}", e);
+                return None;
+            }
+        };
+        kprintln!("  asking {}{}", url.host, url.path);
+        let code = channel::code();
+        match fetch::manifest_at(&url, code.as_deref()) {
+            Ok(m) => Some(m),
+            Err(e) => {
+                console::set_color(LTRED);
+                kprintln!("  {}", e);
+                console::set_color(LTGRAY);
+                None
+            }
+        }
+    }
+
+    match verb {
+        "" | "status" => {
+            console::set_color(YELLOW);
+            kprintln!("[update]");
+            console::set_color(LTGRAY);
+            kprintln!("  running   {}", crate::VERSION);
+            kprintln!("  channel   {}", channel::channel());
+            match channel::source() {
+                Some(s) => kprintln!("  source    {}", s),
+                None => kprintln!("  source    none -- 'update source <url>' to set one"),
+            }
+            kprintln!(
+                "  linked    {}",
+                if channel::code().is_some() { "yes" } else { "no" }
+            );
+            if let Some(s) = channel::seen() {
+                kprintln!("  last seen {}", s);
+            }
+            if let Some(img) = crate::sysbox::read_blob(channel::IMAGE) {
+                kprintln!(
+                    "  fetched   {} B waiting -- 'update stage {}'",
+                    img.len(),
+                    digest8(&img)
+                );
+            }
+            match stage::find_esp() {
+                Ok(e) => kprintln!("  boot vol  partition {}, lba {}", e.index, e.start_lba),
+                Err(e) => kprintln!("  boot vol  {}", e),
+            }
+            if !crate::update::have_key() {
+                console::set_color(LTRED);
+                kprintln!("  no update key is compiled in, so every image would be refused");
+                console::set_color(LTGRAY);
+            }
+            kprintln!("  check | fetch | stage | unstage | source | channel | link | verify");
+        }
+
+        "check" => {
+            let Some(m) = manifest_now() else { return };
+            channel::remember(&m.version, &m.notes);
+            kprintln!("  {} offers {}", m.channel, m.version);
+            if !m.notes.is_empty() {
+                kprintln!("  {}", m.notes);
+            }
+            let h = sha256::short_hex(&m.sha256);
+            kprintln!(
+                "  {} B, sha256 {}..",
+                m.size,
+                core::str::from_utf8(&h).unwrap_or("?")
+            );
+            if m.is_upgrade() {
+                console::set_color(LTGREEN);
+                kprintln!("  newer than {} -- 'update fetch' to download it", crate::VERSION);
+            } else {
+                kprintln!("  not newer than {}, so there is nothing to do", crate::VERSION);
+            }
+            console::set_color(LTGRAY);
+        }
+
+        "fetch" => {
+            let Some(m) = manifest_now() else { return };
+            channel::remember(&m.version, &m.notes);
+            // An older image is signed just as well as a newer one and always
+            // will be, so this is the only place a rollback gets refused.
+            if !m.is_upgrade() && arg != "--force" {
+                kprintln!(
+                    "  {} is not newer than {} -- 'update fetch --force' to take it anyway",
+                    m.version,
+                    crate::VERSION
+                );
+                return;
+            }
+            kprintln!("  downloading {} B, which is slow through a 32 KB window", m.size);
+            match fetch::image_for(&m) {
+                Err(e) => {
+                    console::set_color(LTRED);
+                    kprintln!("  {}", e);
+                    console::set_color(LTGRAY);
+                }
+                Ok((image, sig)) => {
+                    let confirm = digest8(&image);
+                    let n = image.len();
+                    if !crate::sysbox::write_blob(channel::IMAGE, image)
+                        || !crate::sysbox::write_blob(channel::SIGNATURE, sig)
+                    {
+                        kprintln!("  could not hold the image in the namespace");
+                        return;
+                    }
+                    console::set_color(LTGREEN);
+                    kprintln!("  {} B verified against the manifest and the update key", n);
+                    console::set_color(LTGRAY);
+                    kprintln!("  'update stage {}' to arm the next boot", confirm);
+                }
+            }
+        }
+
+        "stage" => {
+            let (Some(image), Some(sig)) = (
+                crate::sysbox::read_blob(channel::IMAGE),
+                crate::sysbox::read_blob(channel::SIGNATURE),
+            ) else {
+                kprintln!("  nothing has been fetched -- 'update fetch' first");
+                return;
+            };
+
+            // Checked again here rather than trusted from `fetch`. These blobs
+            // live in a writable namespace between the two commands, and the
+            // whole point of the key is that it is asked every time.
+            let v = crate::update::verify(&image, &sig);
+            if !v.ok() {
+                console::set_color(LTRED);
+                kprintln!("  {}", v.why());
+                console::set_color(LTGRAY);
+                return;
+            }
+
+            let confirm = digest8(&image);
+            if arg != confirm {
+                console::set_color(WHITE);
+                kprintln!("  about to stage {} B, sha256 {}..", image.len(), confirm);
+                console::set_color(LTGRAY);
+                kprintln!("  this replaces the boot image at the next boot, keeping the");
+                kprintln!("  current one as BOOTX64.OLD to fall back to.");
+                kprintln!("  'update stage {}' to confirm", confirm);
+                return;
+            }
+
+            match stage::stage(&image, &sig) {
+                Err(e) => {
+                    console::set_color(LTRED);
+                    kprintln!("  {}", e);
+                    console::set_color(LTGRAY);
+                }
+                Ok(msg) => {
+                    console::set_color(LTGREEN);
+                    kprintln!("  {}", msg);
+                    console::set_color(LTGRAY);
+                    // The held copy is a few megabytes and autosnap would park
+                    // it in an append-only store on the next tick.
+                    crate::sysbox::detach(channel::IMAGE);
+                    crate::sysbox::detach(channel::SIGNATURE);
+                    kprintln!("  'reboot' when ready; 'update unstage' to call it off");
+                }
+            }
+        }
+
+        "unstage" => match stage::unstage() {
+            Ok(msg) => kprintln!("  {}", msg),
+            Err(e) => kprintln!("  {}", e),
+        },
+
+        "source" => {
+            if arg.is_empty() {
+                match channel::source() {
+                    Some(s) => kprintln!("  {}", s),
+                    None => kprintln!("  none -- 'update source <url>' to set one"),
+                }
+                kprintln!("  the manifest is signed, so this is where to ask, not who to trust");
+                return;
+            }
+            match channel::set_source(arg) {
+                Ok(()) => kprintln!("  source is {}", arg),
+                Err(e) => kprintln!("  {}", e),
+            }
+        }
+
+        "channel" => {
+            if arg.is_empty() {
+                kprintln!("  {}", channel::channel());
+                kprintln!("  stable is free; experimental needs a linked device code");
+                return;
+            }
+            match channel::set_channel(arg) {
+                Ok(()) => kprintln!("  channel is {}", arg),
+                Err(e) => kprintln!("  {}", e),
+            }
+        }
+
+        "link" => {
+            if arg.is_empty() {
+                kprintln!("  usage: update link <code>");
+                kprintln!("  get one at aperture.institute; it gates the experimental channel");
+                return;
+            }
+            if channel::set_code(arg) {
+                kprintln!("  linked; 'update channel experimental' to use it");
+            } else {
+                kprintln!("  could not store the code");
+            }
+        }
+
+        "unlink" => {
+            if channel::unlink() {
+                kprintln!("  unlinked");
+            } else {
+                kprintln!("  nothing was linked");
+            }
+        }
+
+        // The offline path, and the only one that worked before there was a
+        // server: verify a pair somebody brought in by hand with `fat get`.
+        "verify" => {
+            let mut w = Words::new(arg);
+            let img = match w.next() {
+                Some(a) if !a.is_empty() => alloc::string::String::from(a),
+                _ => alloc::string::String::from(channel::IMAGE),
+            };
+            let sig = match w.next() {
+                Some(a) if !a.is_empty() => alloc::string::String::from(a),
+                _ => alloc::format!("{}.sig", img),
+            };
+            let (Some(image), Some(signature)) =
+                (crate::sysbox::read_blob(&img), crate::sysbox::read_blob(&sig))
+            else {
+                kprintln!("  usage: update verify <image> [signature]");
+                kprintln!("  reads both from the namespace ('fat get' brings them in)");
+                kprintln!("  looked for {} and {}", img, sig);
+                return;
+            };
+            let v = crate::update::verify(&image, &signature);
+            console::set_color(if v.ok() { LTGREEN } else { LTRED });
+            kprintln!("  {}", v.why());
+            console::set_color(LTGRAY);
+            kprintln!("  {} B image, {} B signature", image.len(), signature.len());
+            if v.ok() {
+                kprintln!("  'update stage {}' to arm the next boot", digest8(&image));
+            }
+        }
+
+        _ => {
+            kprintln!("  no 'update {}'", verb);
+            kprintln!("  update              what is running and what was last seen");
+            kprintln!("  update check        ask the channel what it offers");
+            kprintln!("  update fetch        download it, verify it, hold it");
+            kprintln!("  update stage <hex>  write it to the boot volume");
+            kprintln!("  update unstage      call off a staged update");
+            kprintln!("  update source <url> | channel <name> | link <code> | unlink");
+            kprintln!("  update verify <image> [sig]   check a pair brought in by hand");
         }
     }
 }
@@ -2055,6 +2349,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             kprintln!("  fat           read a FAT16/32 volume: fat ls|cat <path>");
             kprintln!("  pkg           list/info/add/remove content-addressed packages");
             kprintln!("  edit <path>   modal editor ('vi' works too)");
+            kprintln!("  update        check, download and stage a signed kernel image");
 
             console::set_color(YELLOW);
             kprintln!("\nnetwork");
@@ -2073,7 +2368,8 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             kprintln!("  rng [n]       random bytes, and what the pool thinks of itself");
             console::set_color(YELLOW);
             kprintln!("  <host> is a name or an address, anywhere one is taken");
-            kprintln!("  https encrypts but does NOT verify the server -- see net/tls.rs");
+            kprintln!("  https verifies the server against the roots.der on the ESP;");
+            kprintln!("  with no roots it encrypts and authenticates nothing, and says so");
             console::set_color(WHITE);
 
             console::set_color(YELLOW);
@@ -3684,33 +3980,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
         // does not exist yet, and a command that verified and then did nothing
         // while sounding like it installed something would be worse than no
         // command.
-        "update" => {
-            let mut w = Words::new(rest);
-            let img = match w.next() {
-                Some(a) if !a.is_empty() => alloc::string::String::from(a),
-                _ => alloc::string::String::from("/tmp/staged.efi"),
-            };
-            let sig = match w.next() {
-                Some(a) if !a.is_empty() => alloc::string::String::from(a),
-                _ => alloc::format!("{}.sig", img),
-            };
-            let (Some(image), Some(signature)) =
-                (crate::sysbox::read_blob(&img), crate::sysbox::read_blob(&sig))
-            else {
-                kprintln!("  usage: update <image> [signature]");
-                kprintln!("  reads both from the namespace ('fat get' brings them in)");
-                kprintln!("  looked for {} and {}", img, sig);
-                return;
-            };
-            let v = crate::update::verify(&image, &signature);
-            console::set_color(if v.ok() { LTGREEN } else { LTRED });
-            kprintln!("  {}", v.why());
-            console::set_color(LTGRAY);
-            kprintln!("  {} B image, {} B signature", image.len(), signature.len());
-            if v.ok() {
-                kprintln!("  this build is {} -- staging is not implemented yet", crate::VERSION);
-            }
-        }
+        "update" => update_cmd(rest),
         "words" => {
             console::set_color(YELLOW);
             kprintln!("builtins");

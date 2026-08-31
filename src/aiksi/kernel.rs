@@ -627,10 +627,12 @@ pub fn call(it: &mut Interp, name: &str, args: &[Value]) -> Result<Value, String
                 return Err(alloc::format!("cannot resolve '{}'", host));
             };
             let port = int(args, 1)?.clamp(1, 65_535) as u16;
-            match crate::net::tls::https_get(ip, &host, port, &text(args, 2)) {
-                Ok((body, _, _, id, _, _)) => {
-                    set_err(it, if id.ok() { "" } else { "unauthenticated" });
-                    Ok(Value::Str(String::from_utf8_lossy(&body).into_owned()))
+            match crate::net::tls::https_fetch(ip, &host, port, &text(args, 2), 30_000) {
+                Ok(f) => {
+                    set_err(it, if f.identity.ok() { "" } else { "unauthenticated" });
+                    // The body, which is what this builtin's own header
+                    // promises. It used to hand back the head glued to it.
+                    Ok(Value::Str(String::from_utf8_lossy(&f.body).into_owned()))
                 }
                 Err(e) => Err(alloc::format!("https_get: {}", e.name())),
             }

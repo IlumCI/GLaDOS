@@ -1,0 +1,134 @@
+name: release
+
+# Tagged releases: build the kernel image, sign it, publish it to the stable
+# channel, and attach it to the GitHub release as well.
+#
+# Two independent places on purpose. The bucket is what the in-OS updater
+# reads; the release assets are what a person checks it against, and a
+# signature is only worth having if somebody can get the artifact a second way.
+#
+# What this deliberately does NOT build: the ISOs. Their payloads are 135 MB to
+# 1.9 GB of model weights that exist nowhere in this repo, and updates ship the
+# EFI image alone. The ISOs stay a local, manual build.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and sign, but publish nothing"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Not actions-rs/toolchain. It does `rustup override set`, which sits
+      # ABOVE rust-toolchain.toml in rustup's precedence -- so the pinned
+      # nightly and the x86_64-unknown-uefi target this repo declares would
+      # both be ignored, silently. That is the bug in rust-clippy.yml.
+      - name: Install the pinned toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version --verbose
+          rustc --print target-list | grep -qx x86_64-unknown-uefi
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: uefi-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+
+      # The crate has no dependencies by policy, the target is tier 2 with a
+      # precompiled core, and rust-lld ships with rustup -- so this needs no
+      # cross toolchain and no MSVC.
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: The tag and Cargo.toml must agree
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          crate=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$crate" != "$tag" ]; then
+            echo "Cargo.toml says $crate, the tag says $tag."
+            echo "VERSION is what the updater compares to decide whether an"
+            echo "image is newer, so a mismatch here ships a wrong answer."
+            exit 1
+          fi
+          echo "VERSION=$crate" >> "$GITHUB_ENV"
+
+      - name: Version, for a manual run
+        if: "!startsWith(github.ref, 'refs/tags/')"
+        run: |
+          echo "VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)" >> "$GITHUB_ENV"
+
+      - name: Sign
+        env:
+          KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          test -n "$KEY" || { echo "UPDATE_SIGNING_KEY is not set"; exit 1; }
+          mkdir -p out
+          cp target/x86_64-unknown-uefi/release/glados.efi "out/glados-$VERSION.efi"
+          python3 tools/sign.py "out/glados-$VERSION.efi" "out/glados-$VERSION.efi.sig" --key "$KEY"
+
+      - name: Build the signed manifest
+        env:
+          KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+          ORIGIN: ${{ vars.SUPABASE_URL }}
+        run: |
+          test -n "$ORIGIN" || { echo "the SUPABASE_URL variable is not set"; exit 1; }
+          python3 tools/manifest.py "out/glados-$VERSION.efi" \
+            --version "$VERSION" \
+            --channel stable \
+            --base "$ORIGIN/storage/v1/object/public/stable" \
+            --notes "release $VERSION" \
+            --key "$KEY" \
+            --out out
+
+      # Reads it back with the parser the kernel uses, against the key the
+      # kernel pins. A manifest that CI cannot read is one that fails on every
+      # machine that already trusts us, at the moment they try to update.
+      - name: Verify what we are about to publish
+        run: python3 tools/manifest.py --verify out/manifest --image "out/glados-$VERSION.efi"
+
+      - name: Publish to the stable channel
+        if: startsWith(github.ref, 'refs/tags/') || inputs.dry_run == false
+        env:
+          ORIGIN: ${{ vars.SUPABASE_URL }}
+          KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          put() {
+            curl -sS --fail-with-body -X POST \
+              -H "Authorization: Bearer $KEY" \
+              -H "Content-Type: application/octet-stream" \
+              -H "x-upsert: true" \
+              --data-binary "@$1" \
+              "$ORIGIN/storage/v1/object/stable/$2"
+            echo "  put $2"
+          }
+          # The image before the manifest, and this order is load-bearing: a
+          # manifest naming an object that is not there yet is a window in
+          # which every machine that checks gets a 404 for an update it was
+          # just told about.
+          put "out/glados-$VERSION.efi" "glados-$VERSION.efi"
+          put "out/glados-$VERSION.efi.sig" "glados-$VERSION.efi.sig"
+          put "out/manifest" "manifest"
+
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$GITHUB_REF_NAME" \
+            "out/glados-$VERSION.efi" \
+            "out/glados-$VERSION.efi.sig" \
+            out/manifest --clobber

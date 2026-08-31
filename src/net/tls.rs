@@ -662,10 +662,11 @@ pub fn connect(dst: Ipv4, host: &str, port: u16) -> Result<Session, Error> {
     }
     if let Some(bits) = weak {
         crate::kprintln!(
-            "  [tls] WARNING: {} of {} entropy bits. Keys for this handshake are              timing-derived, not random.",
+            "  [tls] WARNING: {} of {} entropy bits -- keys for this",
             bits,
             crate::rng::SEEDED_BITS
         );
+        crate::kprintln!("  handshake are timing-derived, not random.");
     }
     let pubkey = x25519::public_key(&secret);
 
@@ -904,8 +905,73 @@ impl Session {
     }
 }
 
-/// Fetch one resource over HTTPS.
-pub fn https_get(dst: Ipv4, host: &str, port: u16, path: &str) -> Result<(Vec<u8>, Option<[u8; 32]>, usize, Identity, String, Vec<String>), Error> {
+/// What one HTTPS fetch produced, and whether it is all of it.
+///
+/// The six-tuple this replaced grew out of a browser that only ever wanted the
+/// bytes. An updater wants two things that tuple could not say: how long the
+/// response claimed to be, and whether that many arrived. A short read
+/// reported as a bad signature is the failure this exists to prevent.
+pub struct Fetched {
+    pub status: u16,
+    /// The response head, lower-cased, terminator included.
+    pub headers: String,
+    /// The body, de-chunked if it arrived chunked. Never the framing.
+    pub body: Vec<u8>,
+    pub identity: Identity,
+    pub cert_fingerprint: Option<[u8; 32]>,
+    pub cert_count: usize,
+    pub leaf_cn: String,
+    pub leaf_names: Vec<String>,
+    /// The body is as long as `Content-Length` said, or a chunked body ended
+    /// with its terminator, or the peer closed a response that declared no
+    /// length at all. False means the deadline ran out first.
+    pub complete: bool,
+    /// What `Content-Length` claimed, when it claimed anything.
+    pub declared: Option<usize>,
+}
+
+/// Read `Content-Length` out of an already-lower-cased response head.
+fn content_length(head: &str) -> Option<usize> {
+    const KEY: &str = "content-length:";
+    let rest = &head[head.find(KEY)? + KEY.len()..];
+    let end = rest.find("\r\n").unwrap_or(rest.len());
+    rest[..end].trim().parse::<usize>().ok()
+}
+
+/// Fetch one resource over HTTPS, stopping as soon as the response is whole.
+///
+/// `timeout_ms` bounds the whole transfer rather than one read. The fixed
+/// fifteen seconds this replaced was ample for a page and a coin toss for a
+/// three-megabyte image over a thirty-two kilobyte window -- and losing the
+/// toss returned a truncated body with no error, leaving the caller to
+/// misdiagnose it as something else.
+///
+/// Knowing the declared length also means not waiting for the close that
+/// `Connection: close` promises: the body is done when it is done.
+pub fn https_fetch(
+    dst: Ipv4,
+    host: &str,
+    port: u16,
+    path: &str,
+    timeout_ms: u64,
+) -> Result<Fetched, Error> {
+    https_fetch_with(dst, host, port, path, timeout_ms, &[])
+}
+
+/// The same, with extra request headers.
+///
+/// Split out rather than added to every caller because exactly one thing
+/// needs it: the gated update channel, which sends a bearer token. A token
+/// in a query string is logged by every proxy it passes, and a bearer token
+/// in a log is a bearer token somebody else has.
+pub fn https_fetch_with(
+    dst: Ipv4,
+    host: &str,
+    port: u16,
+    path: &str,
+    timeout_ms: u64,
+    extra: &[(&str, &str)],
+) -> Result<Fetched, Error> {
     let mut s = connect(dst, host, port)?;
 
     let mut req = String::new();
@@ -913,28 +979,96 @@ pub fn https_get(dst: Ipv4, host: &str, port: u16, path: &str) -> Result<(Vec<u8
     req.push_str(if path.is_empty() { "/" } else { path });
     req.push_str(" HTTP/1.1\r\nHost: ");
     req.push_str(host);
-    req.push_str("\r\nUser-Agent: glados/0.1\r\nConnection: close\r\nAccept: */*\r\n\r\n");
+    req.push_str("\r\nUser-Agent: glados/0.1\r\nConnection: close\r\nAccept: */*\r\n");
+    for (name, value) in extra {
+        req.push_str(name);
+        req.push_str(": ");
+        req.push_str(value);
+        req.push_str("\r\n");
+    }
+    req.push_str("\r\n");
     s.send(req.as_bytes())?;
 
-    let mut body = Vec::new();
-    let deadline = crate::dev::lapic::ticks() + 15 * crate::TIMER_HZ as u64;
+    let mut raw: Vec<u8> = Vec::new();
+    let mut head_end: Option<usize> = None;
+    let mut declared: Option<usize> = None;
+    let mut chunked = false;
+    let mut complete = false;
+
+    let span = timeout_ms.saturating_mul(crate::TIMER_HZ as u64) / 1000;
+    let deadline = crate::dev::lapic::ticks() + span.max(1);
+
     while crate::dev::lapic::ticks() < deadline {
-        let chunk = s.recv(2000)?;
-        if chunk.is_empty() {
+        let part = s.recv(2000)?;
+        if part.is_empty() {
             if s.closed() || !matches!(tcp::state(), tcp::State::Established) {
+                // A response that declares no length at all ends when the peer
+                // closes, so this is its terminator rather than a failure.
+                complete = head_end.is_some() && declared.is_none() && !chunked;
                 break;
             }
             continue;
         }
-        body.extend_from_slice(&chunk);
+        raw.extend_from_slice(&part);
+
+        if head_end.is_none() {
+            if let Some(at) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                head_end = Some(at + 4);
+                let head = String::from_utf8_lossy(&raw[..at + 4]).to_ascii_lowercase();
+                // A chunked response has no length to trust: the framing wins,
+                // and a server sending both is describing two different bodies.
+                chunked = head.contains("transfer-encoding: chunked");
+                declared = if chunked { None } else { content_length(&head) };
+            }
+        }
+
+        if let Some(h) = head_end {
+            match declared {
+                Some(n) if raw.len() - h >= n => {
+                    complete = true;
+                    break;
+                }
+                None if chunked && raw.ends_with(b"0\r\n\r\n") => {
+                    complete = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
     }
-    let fp = s.cert_fingerprint;
-    let n = s.cert_count;
-    let id = s.identity.clone();
-    let cn = s.leaf_cn.clone();
-    let names = s.leaf_names.clone();
+
+    // Split in place. The body is the larger part by orders of magnitude, and
+    // copying it out to hand it over would mean holding two of it at once.
+    let (status, headers, body) = match head_end {
+        None => (0, String::new(), raw),
+        Some(h) => {
+            let headers = String::from_utf8_lossy(&raw[..h]).to_ascii_lowercase();
+            let status = headers
+                .split_whitespace()
+                .nth(1)
+                .and_then(|s| s.parse::<u16>().ok())
+                .unwrap_or(0);
+            let mut body = raw;
+            body.drain(..h);
+            let body = if chunked { dechunk(&body) } else { body };
+            (status, headers, body)
+        }
+    };
+
+    let out = Fetched {
+        status,
+        headers,
+        body,
+        identity: s.identity.clone(),
+        cert_fingerprint: s.cert_fingerprint,
+        cert_count: s.cert_count,
+        leaf_cn: s.leaf_cn.clone(),
+        leaf_names: s.leaf_names.clone(),
+        complete,
+        declared,
+    };
     s.close();
-    Ok((body, fp, n, id, cn, names))
+    Ok(out)
 }
 
 /// Undo chunked transfer encoding.
@@ -984,35 +1118,6 @@ fn dechunk(body: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Split an HTTP response into its status code, its headers, and a decoded body.
-///
-/// `https_get` returns the response as it came off the wire, headers and chunk
-/// framing included. Every caller has to undo that, and when only one caller
-/// existed it was reasonable to do it inline. The browser was the second, and
-/// it rendered the headers as page text with the chunked terminator on the end
-/// before anybody noticed, which is exactly what a second copy of this buys.
-pub fn http_response(resp: &[u8]) -> (u16, String, Vec<u8>) {
-    let text = String::from_utf8_lossy(resp);
-    let status = text
-        .split_whitespace()
-        .nth(1)
-        .and_then(|s| s.parse::<u16>().ok())
-        .unwrap_or(0);
-    match text.find("\r\n\r\n").map(|i| i + 4) {
-        None => (status, String::new(), resp.to_vec()),
-        Some(i) => {
-            let head = text[..i].to_ascii_lowercase();
-            let raw = &resp[i..];
-            let body = if head.contains("transfer-encoding: chunked") {
-                dechunk(raw)
-            } else {
-                raw.to_vec()
-            };
-            (status, head, body)
-        }
-    }
-}
-
 pub fn report(dst: Ipv4, host: &str, port: u16, path: &str) {
     console::set_color(YELLOW);
     kprintln!("[https] {}:{}{}", host, port, if path.is_empty() { "/" } else { path });
@@ -1020,24 +1125,24 @@ pub fn report(dst: Ipv4, host: &str, port: u16, path: &str) {
     kprintln!("  {}.{}.{}.{}", dst[0], dst[1], dst[2], dst[3]);
 
     let t0 = crate::time::rdtsc();
-    match https_get(dst, host, port, path) {
+    match https_fetch(dst, host, port, path, 30_000) {
         Err(e) => {
             console::set_color(LTRED);
             kprintln!("  {}", e.name());
             console::set_color(LTGRAY);
         }
-        Ok((body, fp, ncerts, identity, leaf_cn, leaf_names)) => {
+        Ok(f) => {
             let mhz = crate::time::tsc_mhz().max(1);
             let ms = (crate::time::rdtsc() - t0) / mhz / 1000;
             console::set_color(LTGREEN);
             kprintln!("  handshake ok -- TLS 1.3, x25519, chacha20-poly1305");
             console::set_color(LTGRAY);
-            if let Some(f) = fp {
-                let h = sha256::short_hex(&f);
+            if let Some(fp) = f.cert_fingerprint {
+                let h = sha256::short_hex(&fp);
                 let s = core::str::from_utf8(&h).unwrap_or("?");
-                kprintln!("  {} certificate(s); leaf sha256 {}..", ncerts, s);
+                kprintln!("  {} certificate(s); leaf sha256 {}..", f.cert_count, s);
             }
-            match &identity {
+            match &f.identity {
                 Identity::Verified { subject, roots } => {
                     console::set_color(LTGREEN);
                     kprintln!("  verified: {} -- chain to 1 of {} trusted roots", subject, roots);
@@ -1054,33 +1159,33 @@ pub fn report(dst: Ipv4, host: &str, port: u16, path: &str) {
                     console::set_color(LTGRAY);
                     // Say what the certificate claims, so a mismatch can be
                     // told apart from a certificate that was not parsed.
-                    kprintln!("  leaf cn '{}', {} name(s):", leaf_cn, leaf_names.len());
-                    for n in leaf_names.iter().take(6) {
+                    kprintln!("  leaf cn '{}', {} name(s):", f.leaf_cn, f.leaf_names.len());
+                    for n in f.leaf_names.iter().take(6) {
                         kprintln!("    {}", n);
                     }
                 }
             }
 
-            let text = String::from_utf8_lossy(&body);
-            if let Some(status) = text.lines().next() {
-                kprintln!("  {}", status.trim());
+            if f.status > 0 {
+                kprintln!("  HTTP {}", f.status);
             }
-            match text.find("\r\n\r\n").map(|i| i + 4) {
-                Some(i) => {
-                    let chunked = text[..i].to_ascii_lowercase().contains("transfer-encoding: chunked");
-                    let raw = &body[i..];
-                    let decoded = if chunked { dechunk(raw) } else { raw.to_vec() };
-                    let b = String::from_utf8_lossy(&decoded);
-                    kprintln!(
-                        "  {} B in {} ms, {} B of body{}",
-                        body.len(), ms, decoded.len(),
-                        if chunked { " (dechunked)" } else { "" }
-                    );
-                    for line in b.lines().take(8) {
-                        kprintln!("  | {}", line);
-                    }
+            kprintln!("  {} B of body in {} ms", f.body.len(), ms);
+
+            // A truncated body is the one outcome that used to look like a
+            // successful one, so it is said in red and it says which of the
+            // two ways it ran out.
+            if !f.complete {
+                console::set_color(LTRED);
+                match f.declared {
+                    Some(n) => kprintln!("  TRUNCATED -- {} of {} B arrived", f.body.len(), n),
+                    None => kprintln!("  TRUNCATED -- the deadline ran out first"),
                 }
-                None => kprintln!("  {} B in {} ms", body.len(), ms),
+                console::set_color(LTGRAY);
+            }
+
+            let b = String::from_utf8_lossy(&f.body);
+            for line in b.lines().take(8) {
+                kprintln!("  | {}", line);
             }
         }
     }

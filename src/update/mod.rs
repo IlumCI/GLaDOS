@@ -24,6 +24,11 @@
 //! then **refuses**. A mechanism that accepts everything until configured is a
 //! mechanism that ships disabled and looks enabled.
 
+pub mod channel;
+pub mod fetch;
+pub mod manifest;
+pub mod stage;
+
 use crate::crypto::p256;
 use crate::store::sha256;
 
@@ -56,7 +61,7 @@ pub const SIG_LEN: usize = 8 + 4 + 4 + 32 + 32;
 /// will ever apply an update, and rebuild. The rebuild is the point: adopting
 /// a signer is itself a kernel change, so it arrives the same way every other
 /// kernel change does.
-pub const UPDATE_KEY: [u8; 65] = [0u8; 65];
+pub const UPDATE_KEY: [u8; 65] = [0x04, 0xa4, 0xe1, 0xec, 0x57, 0x8a, 0x36, 0x93, 0xa7, 0x07, 0xf7, 0x9e, 0xa4, 0x07, 0x39, 0x1a, 0xa4, 0x00, 0x51, 0x30, 0x75, 0x1c, 0x95, 0xa0, 0x24, 0x7d, 0x19, 0x29, 0x39, 0x47, 0x0c, 0x0f, 0xe2, 0x03, 0x22, 0x58, 0xca, 0xdb, 0x6c, 0x38, 0xaa, 0xd1, 0x62, 0x6d, 0x33, 0xb9, 0xa0, 0x79, 0x51, 0x4b, 0xe6, 0x2e, 0x48, 0xdb, 0x54, 0xc6, 0x27, 0x54, 0xb9, 0x87, 0xee, 0x46, 0x9f, 0x74, 0x93,];
 
 /// Every way this can end, so a caller cannot collapse them into a bool and
 /// lose the difference between "not signed" and "signed by somebody else".
@@ -91,7 +96,7 @@ impl Verdict {
     }
 }
 
-fn have_key() -> bool {
+pub fn have_key() -> bool {
     UPDATE_KEY[0] == 0x04 && UPDATE_KEY[1..].iter().any(|b| *b != 0)
 }
 
@@ -433,7 +438,10 @@ pub fn selftest() -> bool {
     use crate::kprintln;
     let image = b"a staged image, or something pretending to be one";
 
-    let mut ok = true;
+    // The manifest parser first. It needs neither a key nor a network,
+    // and it has to be right even on a kernel with no signer pinned --
+    // which is exactly the case the early return below cuts short.
+    let mut ok = manifest::selftest();
     let mut claim = |what: &str, good: bool| {
         if !good {
             ok = false;
@@ -495,7 +503,7 @@ pub fn selftest() -> bool {
             verify(image, &[]) == Verdict::NoKey
                 && verify(image, &[0u8; SIG_LEN]) == Verdict::NoKey,
         );
-        kprintln!("       'python tools/sign.py --keygen' and paste into UPDATE_KEY to enable");
+        kprintln!("       'python tools/sign.py --keygen --out FILE' and paste into UPDATE_KEY");
         return ok;
     }
 

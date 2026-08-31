@@ -745,6 +745,7 @@ pub fn panel_named(name: &str) -> Option<Panel> {
         "model" => Some(settings("model")),
         "system" => Some(settings("sys")),
         "power" | "battery" => Some(settings("power")),
+        "updates" | "update" => Some(settings("updates")),
         // `win open app:todo`. Guarded, so it goes before the bare arm it
         // would otherwise sit behind and never be reached from.
         n if n.starts_with("app:") => crate::app::panel(&n[4..]).map(|(_, p)| p),
@@ -1083,6 +1084,143 @@ fn wifi_rows() -> Vec<Widget> {
     out
 }
 
+/// The Updates page.
+///
+/// This is the first place in the desktop that says which version is running.
+/// It was reachable only by typing `version` into a terminal, which is a
+/// strange gap in a system that can now replace itself.
+///
+/// Every row is read when the panel is built and none of it is cached, so the
+/// page cannot show a state the machine stopped being in. That is the same
+/// rule the rest of `settings` follows and it matters more here: the whole
+/// point is to tell somebody whether the thing they just did worked.
+fn updates_rows() -> Vec<Widget> {
+    use crate::update::{channel, stage};
+
+    let mut v: Vec<Widget> = Vec::new();
+
+    v.push(Widget::Heading(String::from("This machine")));
+    v.push(Widget::Status {
+        name: String::from("version"),
+        value: String::from(crate::VERSION),
+        tone: Tone::Plain,
+    });
+    v.push(Widget::Status {
+        name: String::from("channel"),
+        value: channel::channel(),
+        tone: Tone::Plain,
+    });
+
+    // With no key pinned, every image is refused and nothing below can work.
+    // Said as Bad rather than omitted, because a page that simply showed no
+    // updates would look like a machine that was up to date.
+    if !crate::update::have_key() {
+        v.push(Widget::Status {
+            name: String::from("update key"),
+            value: String::from("not provisioned"),
+            tone: Tone::Bad,
+        });
+        v.push(note(
+            "No signing key is compiled into this kernel, so every image would be \
+             refused. That is the safe state, and it is why nothing here can install \
+             anything yet.",
+        ));
+    }
+
+    match stage::find_esp() {
+        Ok(e) => v.push(Widget::Status {
+            name: String::from("boot volume"),
+            value: alloc::format!("partition {}", e.index),
+            tone: Tone::Ok,
+        }),
+        Err(_) => {
+            v.push(Widget::Status {
+                name: String::from("boot volume"),
+                value: String::from("not writable"),
+                tone: Tone::Warn,
+            });
+            v.push(note(
+                "A live ISO cannot update itself: the medium is read-only and there is \
+                 no writable EFI partition. Install to disk to be able to update.",
+            ));
+        }
+    }
+
+    v.push(Widget::Sep);
+    v.push(Widget::Heading(String::from("Source")));
+    match channel::source() {
+        Some(s) => v.push(Widget::Status {
+            name: String::from("manifests"),
+            value: s,
+            tone: Tone::Ok,
+        }),
+        None => {
+            v.push(Widget::Status {
+                name: String::from("manifests"),
+                value: String::from("none set"),
+                tone: Tone::Warn,
+            });
+            v.push(note(
+                "Where to ask, not who to trust: manifests are signed by the key in this \
+                 kernel, so a wrong source can fail to answer but cannot install anything.",
+            ));
+        }
+    }
+    v.push(Widget::Field {
+        name: String::from("url"),
+        text: String::new(),
+        cursor: 0,
+        submit: Action::Apply(String::from("update source")),
+    });
+    v.push(Widget::Status {
+        name: String::from("linked"),
+        value: String::from(if channel::code().is_some() { "yes" } else { "no" }),
+        tone: Tone::Plain,
+    });
+
+    v.push(Widget::Sep);
+    v.push(Widget::Heading(String::from("Available")));
+    match channel::seen() {
+        Some(s) => v.push(Widget::Status {
+            name: String::from("last seen"),
+            value: s,
+            tone: Tone::Plain,
+        }),
+        None => v.push(note("Nothing has been checked for yet.")),
+    }
+    if let Some(img) = crate::sysbox::read_blob(channel::IMAGE) {
+        v.push(Widget::Status {
+            name: String::from("downloaded"),
+            value: alloc::format!("{} B, waiting to be staged", img.len()),
+            tone: Tone::Ok,
+        });
+    }
+
+    v.push(Widget::Sep);
+    v.push(Widget::Heading(String::from("Actions")));
+    v.push(Widget::Button {
+        label: String::from("Check for updates"),
+        action: Action::Run(String::from("update check")),
+    });
+    v.push(Widget::Button {
+        label: String::from("Download"),
+        action: Action::Run(String::from("update fetch")),
+    });
+    // Staging deliberately has no button. It wants the image digest typed
+    // back, and a control that cannot carry that confirmation would either
+    // drop it -- making the riskiest step the easiest one -- or pretend to
+    // ask. The terminal is where the question can actually be put.
+    v.push(Widget::Button {
+        label: String::from("Staging, and what is staged"),
+        action: Action::Run(String::from("update")),
+    });
+    v.push(Widget::Button {
+        label: String::from("Cancel a staged update"),
+        action: Action::Run(String::from("update unstage")),
+    });
+    v
+}
+
 pub fn settings(page: &str) -> Panel {
     let nav = |sel: usize| Widget::List {
         items: alloc::vec![
@@ -1091,6 +1229,7 @@ pub fn settings(page: &str) -> Panel {
             (String::from("Model"), Action::Browse(String::from("set:model"))),
             (String::from("System"), Action::Browse(String::from("set:sys"))),
             (String::from("Power"), Action::Browse(String::from("set:power"))),
+            (String::from("Updates"), Action::Browse(String::from("set:updates"))),
             (String::from("Programs"), Action::Browse(String::from("programs:"))),
         ],
         sel,
@@ -1101,6 +1240,10 @@ pub fn settings(page: &str) -> Panel {
         // Four, matching its position in the list above. The two have to agree
         // and nothing checks them, so they are next to each other.
         "power" => (4usize, power_rows()),
+        // Five, matching the nav. Appended after Power rather than slotted
+        // beside System so that no existing index moves: the two lists agree
+        // only because somebody keeps them agreeing.
+        "updates" => (5usize, updates_rows()),
         "model" => (
             2usize,
             alloc::vec![

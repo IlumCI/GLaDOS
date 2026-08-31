@@ -511,9 +511,92 @@ GLADOS/UPDATE.FLG     any contents; presence is the request
 
 **It is inert until a key is provisioned.** `UPDATE_KEY` is all zeroes, so
 `verify` answers `NoKey`, `decide` refuses, and the flag is cleared. Run
-`tools/sign.py --keygen`, paste the public rows into `src/update.rs`, keep the
-private half off every machine that will ever apply an update, and rebuild --
-adopting a signer is itself a kernel change, which is the point.
+`tools/sign.py --keygen --out FILE`, paste the public rows into
+`src/update/mod.rs`, and rebuild -- adopting a signer is itself a kernel change,
+which is the point. **Use `--out`**: without it the private half goes to stdout,
+and that is exactly how the last one died.
+
+A consequence worth stating before it surprises somebody: the first build
+carrying the key cannot be delivered by this system, because no kernel in the
+field trusts the key yet. That one ships as an ISO like every release before it.
+
+### The updater that stages them
+
+`update.rs` became `src/update/` when it grew a client. The boot half is
+unchanged; what is new is everything on either side of it.
+
+| | |
+|---|---|
+| `mod.rs` | `verify`, `decide`, `hook`, `mark_healthy` -- untouched |
+| `manifest.rs` | the signed manifest: parse, verify, compare versions |
+| `fetch.rs` | DHCP if needed, resolve, TLS, and every refusal named |
+| `stage.rs` | ranged unlock, three files, read back, re-lock |
+| `channel.rs` | source origin, channel, device code, what was last seen |
+
+```
+update              running version, channel, what was last seen
+update check        ask the channel what it offers
+update fetch        download it, verify it, hold it
+update stage <hex>  write it to the boot volume
+update unstage      call a staged update off
+update source <url> | channel <name> | link <code> | unlink | verify
+```
+
+Separate verbs rather than one `update now`, for the reason `fat unlock` is
+separate: claiming a write range on the boot partition is the most dangerous
+thing this system does. `update stage` wants eight characters of the image
+digest typed back, in the `app trust` idiom.
+
+**A signed manifest is its text followed by exactly 80 bytes of GLADOSIG.** One
+object, because there is one TCP connection and no pipelining, and because two
+objects can be served out of step and produce a signature failure that is
+really a deployment race. `tools/manifest.py` writes it and `--verify` reads it
+back with a reimplementation of the kernel's parser, the bargain
+`tokenizer.py --verify` makes.
+
+**The manifest is signed as well as the image, and the two catch different
+things.** The image signature proves the bytes came from the signer; it says
+nothing about *which* signed image was offered, and an old one with a known
+hole in it verifies perfectly. `Manifest::is_upgrade` is the other half, and it
+is the only anti-rollback there is.
+
+**The source URL is configurable and that is safe.** It looks like a trust
+anchor and is not one: everything it serves is signed by the key compiled in
+here, so a wrong or hostile source can deny service and reveal which version is
+being asked for, and can install nothing. `channel.rs` stores an *origin* only
+-- both channel paths are compiled in, so switching channel cannot be done by
+pointing at a different host.
+
+**`fetch` refuses anything short of `Identity::Verified`.** The `https` verb
+prints the verdict and shows the body anyway, which is right for a person
+reading a page and wrong for a machine deciding what to boot. No `roots.der`
+means no update.
+
+Three limits that are stated rather than discovered:
+
+- **A live ISO cannot update itself.** ISO 9660 is read-only and there is no
+  writable ESP. `find_esp` says so in those words rather than failing obscurely,
+  and it looks for a volume carrying `\EFI\BOOT\BOOTX64.EFI` rather than
+  taking the first FAT partition -- writing three files to somebody's data
+  volume and reporting success is the worst outcome available here.
+- **FAT32 only**, because `fatw` refuses FAT16 for a reason it states.
+- **Kernel images only, never weights.** 570 MB to 1.9 GB through a 32 KB
+  receive window with no Range requests, no resume and the whole body in the
+  heap is not a download. Weights change by reinstalling.
+
+`https_get` was replaced by `tls::https_fetch`, which takes a deadline, honours
+`Content-Length` and reports whether the body is whole. The old one had a fixed
+fifteen-second deadline and **returned a truncated body with no error**, which
+the signature check would then have blamed on the signer. It also removed the
+third inline copy of response-splitting; `http_response` is gone, since
+`https_fetch` never produces an unsplit response.
+
+The server side is `supabase/` and `.github/workflows/{release,experimental}.yml`.
+`supabase/README.md` has the setup. Two things from it worth knowing here: the
+Edge Function's P-256 signer is plain JavaScript so `node` can check it against
+`tools/manifest.py`, and both workflows publish the image **before** the
+manifest, because a manifest naming an object that is not there yet is a window
+of 404s for an update every machine was just told about.
 
 **Testing it under QEMU needs a real disk, not VVFAT.** `-drive file=fat:rw:`
 projects a host directory as a synthetic FAT16 volume; its read-write mode can

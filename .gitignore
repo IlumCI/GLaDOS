@@ -25,3 +25,9 @@ out/
 # Built images. Large, reproducible from the repo plus a model, and
 # distributed through Releases rather than through git.
 dist/
+
+# The update signing key. Its private half must never reach the repository:
+# a signer whose private half has been published is not a signer, and rotating
+# it needs a kernel update signed by the old one.
+update.key
+*.key
