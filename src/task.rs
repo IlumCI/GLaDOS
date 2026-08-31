@@ -283,11 +283,29 @@ pub fn migration_selftest() -> bool {
     // every other task on it gets a turn per yield: twenty thousand of them
     // ran the resident mind three hundred times and buried the suite's own
     // output. Another core is free to take the migrant while this one waits.
-    crate::time::delay_us(200_000);
+    //
+    // Sampled until it is seen twice rather than once, because one window is
+    // a coin toss. Whether a second core picks the migrant up inside any
+    // particular 200 ms depends on what else is running, and on a boot that
+    // had just allocated a 768 MiB cache it did not: the suite reported
+    // migration broken on a machine where four consecutive runs afterwards saw
+    // it on two, three, four and four cores. `smp.rs` records this lesson in
+    // the other direction, that a check run once passed over a deadlock, and
+    // it cuts both ways -- a single sample can fail spuriously as easily as it
+    // can pass spuriously. Bounded, so a genuinely pinned task still fails
+    // rather than hanging the suite.
+    let mut seen = 0u32;
+    for _ in 0..8 {
+        crate::time::delay_us(200_000);
+        seen = MIG_SEEN.load(Ordering::Relaxed);
+        if seen.count_ones() > 1 {
+            break;
+        }
+    }
     MIG_STOP.store(true, Ordering::Relaxed);
     crate::time::delay_us(50_000);
 
-    let seen = MIG_SEEN.load(Ordering::Relaxed);
+    let seen = MIG_SEEN.load(Ordering::Relaxed).max(seen);
     let loops = MIG_LOOPS.load(Ordering::Relaxed);
     let cores = seen.count_ones();
     crate::kprintln!("  ran {} times, seen on {} core(s), mask {:#x}", loops, cores, seen);
