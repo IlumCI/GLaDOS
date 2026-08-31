@@ -367,3 +367,58 @@ p.small { font-size: 12px; color: #555; margin: 4px 0 0; max-width: 48em; }
    the cap was added to prevent. Tables are left alone deliberately: they are
    the one thing that wants the full column. */
 .panel > p, .panel > ul, .panel > ol, .panel > dl { max-width: 48em; }
+
+/* --- the tab strip ----------------------------------------------------
+   Replaces the pipe-separated bar. A forge put tabs here, and the active one
+   is the part that earns the change: it says which of eight areas the reader
+   is standing in, which a line of links cannot. The active tab is pushed down
+   a pixel so it covers the strip's own bottom border and reads as continuous
+   with the page below it, rather than as a control floating above it. */
+#tabs {
+  background: #f4e6d0;
+  border-top: 1px solid #b35900;
+  border-bottom: 1px solid #b35900;
+  padding: 5px 18px 0;
+}
+#tabs ul { margin: 0; padding: 0; list-style: none; }
+#tabs li { display: inline-block; }
+#tabs a {
+  display: inline-block;
+  padding: 4px 11px;
+  margin-right: 2px;
+  border: 1px solid #d8bc94;
+  border-bottom: 0;
+  background: #ecdcc0;
+  color: #6b3600;
+  text-decoration: none;
+  font-size: 12px;
+}
+#tabs a:hover { background: #f9f1e3; color: #964b00; }
+#tabs li.on a {
+  position: relative;
+  top: 1px;
+  background: #fff;
+  border-color: #b35900;
+  color: #000;
+  font-weight: bold;
+}
+
+/* Sidebar boxes are denser now that there are five of them: this column
+   carries categorisation and counts rather than prose, and the forge it is
+   modelled on fitted the whole of a project's facts above the fold. */
+.box { margin-bottom: 8px; }
+.box .t { font-size: 12px; }
+.box .bd { font-size: 12px; padding: 5px 7px; }
+
+@media (max-width: 45rem) {
+  /* Content before the column. The sidebar is five boxes of categorisation
+     now, and in source order it sits above the page, so a phone reader
+     scrolled the whole of it before reaching what they came for. Flex is used
+     only to reorder: the floats inside are inert in a flex container, which
+     is exactly what the narrow layout already wanted. */
+  #body { display: flex; flex-direction: column; }
+  #content { order: 1; }
+  #sidebar { order: 2; }
+  #tabs { padding: 5px 10px 0; }
+  #tabs a { padding: 4px 8px; }
+}

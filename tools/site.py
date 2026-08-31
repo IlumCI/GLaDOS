@@ -76,16 +76,28 @@ VARIANTS = {
                        note="The middle size."),
 }
 
-# The facts in the sidebar's project box. Stated once here rather than in 34
-# files, which is the whole reason the chrome is generated.
+# The project box, in the shape a forge categorised a project: a fixed list of
+# axes, every project answering the same ones, so two projects can be compared
+# without reading either description. Stated once here rather than in 31 files,
+# which is the whole reason the chrome is generated.
+#
+# Development status uses the forge's own ladder (1 Planning through 7
+# Inactive). Alpha is the honest rung: it ships releases and boots on real
+# hardware, and it has no fault recovery and no isolation.
 PROJECT = [
-    ("Status", "Active, research kernel"),
-    ("Language", "Rust"),
-    ("Platform", "x86-64 UEFI, bare metal"),
-    ("Licence", "All rights reserved"),
-    ("Size", "108 files, ~50,000 lines"),
-    ("Developer", "IlumCI"),
+    ("Development status", "3 - Alpha"),
+    ("Environment", "Console, framebuffer"),
+    ("Intended audience", "Developers, science/research"),
+    ("Licence", "Other/proprietary, all rights reserved"),
+    ("Natural language", "English"),
+    ("Operating system", "x86-64 UEFI, bare metal"),
+    ("Programming language", "Rust, Python"),
+    ("Topic", "Operating systems, kernels, artificial intelligence"),
 ]
+
+# Who is on the project. One row, and the forge convention is to say the role
+# rather than leave it implied.
+DEVELOPERS = [("IlumCI", "project admin, developer")]
 
 WIKI_PICKS = [
     ("wiki/glados-os.html", "GLaDOS OS"),
@@ -96,8 +108,12 @@ WIKI_PICKS = [
     ("wiki/testing.html", "Testing without a runner"),
 ]
 
+# "Summary" rather than "Home", which is what a forge called the page that
+# describes a project. Download keeps its own name instead of the forge's
+# "Files": it is the one label a visitor acts on, and clarity beats the period
+# reference at exactly that spot.
 NAV = [
-    ("./", "Home"),
+    ("./", "Summary"),
     ("download/", "Download"),
     ("news/", "News"),
     ("wiki/", "Wiki"),
@@ -210,30 +226,65 @@ def a(href, text, extra=""):
     return '<a href="%s"%s>%s</a>' % (href, extra, html.escape(text))
 
 
-def nav_html(p):
-    """The horizontal bar. Home is ./ at the root and ../ below it."""
-    parts = []
+def section_of(relpath):
+    """Which tab a page belongs under, from its own path."""
+    rl = relpath.replace("\\", "/")
+    if "/" not in rl:
+        return "./"                       # index.html, credits.html, 404.html
+    return rl.split("/", 1)[0] + "/"
+
+
+def nav_html(p, relpath):
+    """The tab strip.
+
+    A forge put tabs here rather than a line of links, and the active one is
+    the part that does the work: it tells a reader which of eight areas they
+    are standing in, which a pipe-separated list cannot. The active tab is
+    drawn connected to the content below it, so the strip reads as the top
+    edge of the page rather than as a separate widget.
+    """
+    here = section_of(relpath)
+    items = []
     for href, label in NAV:
-        parts.append(a(p + href if href != "./" else (p or "./"), label))
-    parts.append(a(REPO, "Source code", ' rel="noopener"'))
-    return '<div id="bar">' + " | ".join(parts) + "</div>"
+        on = ' class="on"' if href == here else ""
+        items.append("<li%s>%s</li>"
+                     % (on, a(p + href if href != "./" else (p or "./"), label)))
+    items.append("<li>%s</li>" % a(REPO, "Source code", ' rel="noopener"'))
+    return '<div id="tabs"><ul>%s</ul></div>' % "".join(items)
 
 
-def sidebar_html(p, rel):
-    """Four boxes: where to go, what the current release is, what the project
-    is, and six ways into the wiki.
+def stats_rows(releases):
+    """The statistics a forge put on every project page.
 
-    It was five boxes and 32 links, three of them being wiki article lists.
-    That is a table of contents, which is the right sidebar for a documentation
-    site and the wrong one for a project page -- the full article list belongs
-    on the wiki index, where somebody looking for it already is.
+    Downloads are the real count from the releases API rather than an estimate
+    or an omission. It is a small number today and publishing it is the point:
+    a figure that only appears once it is flattering is not a statistic, it is
+    an advertisement, and nothing else on this site works that way.
+    """
+    total = 0
+    for r in releases:
+        for asset in r.get("assets", []):
+            total += asset.get("download_count", 0)
+    first = date_of(releases[-1]) if releases else ""
+    return [
+        ("Registered", first),
+        ("Releases", "%d" % len(releases)),
+        ("Downloads", "%d" % total),
+        ("Source", "108 files, ~50,000 lines"),
+    ]
+
+
+def sidebar_html(p, rel, releases):
+    """The forge's own column: what this release is, how the project is
+    categorised, how much of it there is, who is on it, and the way in.
+
+    It began as five boxes and 32 links, three of them wiki article lists --
+    a table of contents, which is the right sidebar for a documentation site
+    and the wrong one for a project page. The navigation list went with the
+    tab strip, which now carries it and marks where the reader is standing;
+    duplicating eight links directly under eight tabs said nothing twice.
     """
     b = []
-
-    nav = "".join("<li>%s</li>" % a(p + h if h != "./" else (p or "./"), t)
-                  for h, t in NAV)
-    nav += "<li>%s</li>" % a(REPO, "Source code")
-    b.append(('Navigation', "<ul>%s</ul>" % nav))
 
     if rel:
         imgs = images_of(rel)
@@ -254,9 +305,19 @@ def sidebar_html(p, rel):
                   % (html.escape(k), html.escape(v)) for k, v in PROJECT)
     b.append(('Project information', '<table class="facts">%s</table>' % tbl))
 
+    tbl = "".join("<tr><td>%s</td><td>%s</td></tr>"
+                  % (html.escape(k), html.escape(v))
+                  for k, v in stats_rows(releases))
+    b.append(('Statistics', '<table class="facts">%s</table>' % tbl))
+
+    tbl = "".join("<tr><td>%s</td><td>%s</td></tr>"
+                  % (html.escape(who), html.escape(role))
+                  for who, role in DEVELOPERS)
+    b.append(('Developers', '<table class="facts">%s</table>' % tbl))
+
     picks = "".join("<li>%s</li>" % a(p + h, t) for h, t in WIKI_PICKS)
     picks += "<li>%s</li>" % a(p + "wiki/", "All 25 articles")
-    b.append(('Wiki', "<ul>%s</ul>" % picks))
+    b.append(('Documentation', "<ul>%s</ul>" % picks))
 
     # One panel per box rather than one per element. The release box carries a
     # fact table and a list, and styling each of those as its own bordered
@@ -327,14 +388,15 @@ def pages():
                 yield full, os.path.relpath(full, DOCS).replace("\\", "/")
 
 
-def build_chrome(rel):
+def build_chrome(releases):
+    rel = releases[0]
     changed, missed = 0, []
     for full, rl in pages():
         p = prefix_for(rl)
         with open(full, "r", encoding="utf-8") as fh:
             text = orig = fh.read()
-        for name, new in (("bar", nav_html(p)),
-                          ("sidebar", sidebar_html(p, rel)),
+        for name, new in (("bar", nav_html(p, rl)),
+                          ("sidebar", sidebar_html(p, rel, releases)),
                           ("footer", footer_html(p, rel))):
             text, ok = replace_region(text, name, new)
             if not ok:
@@ -570,16 +632,40 @@ def build_derived(releases):
 HREF = re.compile(r'(?:href|src)="([^"]+)"')
 
 
-def check():
+LATEST_DL = re.compile(r"/releases/latest/download/(?P<name>[^/?#]+)$")
+TAG_DL = re.compile(r"/releases/download/(?P<tag>[^/]+)/(?P<name>[^/?#]+)$")
+TAG_PAGE = re.compile(r"/releases/tag/(?P<tag>[^/?#]+)$")
+
+
+def check(releases, fetch=False):
     """Resolve every link the site offers.
 
-    Internal ones are checked against the filesystem, external release
-    downloads over the network with a one-byte range request. Only release
-    assets are fetched: they are the links that rot, and hammering every
-    Wikipedia reference in the wiki would make the check slow enough that
-    nobody runs it.
+    Internal links are checked against the filesystem. Release links are
+    checked against the releases API -- not by fetching them, which is how the
+    first version worked and was a mistake worth recording: GitHub counts a
+    request for an asset as a download, including a one-byte range request, so
+    a checker that fetched every image inflated the very download figure the
+    sidebar publishes. Three runs put the count from 5 to 19.
+
+    Resolving against the API is also the better check. The URLs are generated
+    from that API, so the question worth asking is whether a page names an
+    asset the release actually has, and that is what caught the original
+    breakage: `glados-qwen35-2b.iso` is absent from the current release's asset
+    list, which is exactly why it 404s. It costs one request instead of one per
+    link, and it cannot be fooled by a CDN that answers for a missing object.
+
+    `--fetch` does the end-to-end version anyway, for when that is what is
+    wanted. It is off by default because it is not free.
     """
-    bad, ext_ok, int_ok = [], 0, 0
+    latest_names = {a["name"] for a in releases[0].get("assets", [])}
+    tags = {r["tag_name"] for r in releases}
+    asset_urls = {a["browser_download_url"]
+                  for r in releases for a in r.get("assets", [])}
+    page_urls = {r["html_url"] for r in releases}
+    by_tag = {r["tag_name"]: {a["name"] for a in r.get("assets", [])}
+              for r in releases}
+
+    bad, ext_ok, int_ok, fetched = [], 0, 0, 0
     seen = set()
     for full, rl in pages():
         with open(full, "r", encoding="utf-8") as fh:
@@ -592,20 +678,41 @@ def check():
                 if "/releases/" not in href or href in seen:
                     continue
                 seen.add(href)
-                try:
-                    req = urllib.request.Request(
-                        href, headers={"Range": "bytes=0-0",
-                                       "User-Agent": "glados-site-check"})
-                    with urllib.request.urlopen(req, timeout=30) as r:
-                        if r.status in (200, 206):
-                            ext_ok += 1
-                        else:
-                            bad.append("%s -> HTTP %d  (%s)"
-                                       % (href, r.status, rl))
-                except urllib.error.HTTPError as e:
-                    bad.append("%s -> HTTP %d  (%s)" % (href, e.code, rl))
-                except Exception as e:                       # noqa: BLE001
-                    bad.append("%s -> %s  (%s)" % (href, e, rl))
+                m = LATEST_DL.search(href)
+                mt = TAG_DL.search(href)
+                mp = TAG_PAGE.search(href)
+                if m:
+                    ok = m.group("name") in latest_names
+                    why = "not an asset of the latest release"
+                elif mt:
+                    ok = (mt.group("tag") in by_tag
+                          and mt.group("name") in by_tag[mt.group("tag")])
+                    why = "not an asset of that release"
+                elif mp:
+                    ok, why = mp.group("tag") in tags, "no such release tag"
+                else:
+                    ok = href in asset_urls or href in page_urls
+                    why = "unrecognised release URL"
+                if ok:
+                    ext_ok += 1
+                else:
+                    bad.append("%s -> %s  (%s)" % (href, why, rl))
+                    continue
+                if fetch:
+                    try:
+                        req = urllib.request.Request(
+                            href, headers={"Range": "bytes=0-0",
+                                           "User-Agent": "glados-site-check"})
+                        with urllib.request.urlopen(req, timeout=30) as r:
+                            if r.status not in (200, 206):
+                                bad.append("%s -> HTTP %d  (%s)"
+                                           % (href, r.status, rl))
+                            else:
+                                fetched += 1
+                    except urllib.error.HTTPError as e:
+                        bad.append("%s -> HTTP %d  (%s)" % (href, e.code, rl))
+                    except Exception as e:                   # noqa: BLE001
+                        bad.append("%s -> %s  (%s)" % (href, e, rl))
                 continue
             # A root-absolute href resolves against docs/, not against the page
             # holding it. 404.html is the reason: it is served in place of any
@@ -625,8 +732,9 @@ def check():
             else:
                 bad.append("%s -> missing  (%s)" % (href, rl))
 
-    print("check: %d internal ok, %d release links ok, %d broken"
-          % (int_ok, ext_ok, len(bad)))
+    print("check: %d internal ok, %d release links ok%s, %d broken"
+          % (int_ok, ext_ok,
+             ", %d fetched" % fetched if fetch else "", len(bad)))
     for b in bad:
         print("  BROKEN  " + b)
     return not bad
@@ -640,23 +748,27 @@ def main():
                     help="resolve every link; non-zero exit on any break")
     ap.add_argument("--releases-json",
                     help="read releases from a file instead of the API")
+    ap.add_argument("--fetch", action="store_true",
+                    help="with --check, also fetch each release asset. Off by "
+                         "default: GitHub counts a fetch as a download, so "
+                         "this moves the figure the site publishes")
     args = ap.parse_args()
     if not (args.build or args.check):
         ap.error("pick --build or --check")
 
     ok = True
+    rels = fetch_releases(args.releases_json)
+    if not rels:
+        print("no releases returned; refusing to blank the site")
+        return 1
+    print("releases: %d, latest %s (%s)"
+          % (len(rels), rels[0]["tag_name"], date_of(rels[0])))
     if args.build:
-        rels = fetch_releases(args.releases_json)
-        if not rels:
-            print("no releases returned; refusing to blank the site")
-            return 1
-        print("releases: %d, latest %s (%s)"
-              % (len(rels), rels[0]["tag_name"], date_of(rels[0])))
-        ok &= build_chrome(rels[0])
+        ok &= build_chrome(rels)
         ok &= build_derived(rels)
         ok &= build_sitemap(rels[0])
     if args.check:
-        ok &= check()
+        ok &= check(rels, fetch=args.fetch)
     return 0 if ok else 1
 
 
