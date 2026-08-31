@@ -6,28 +6,28 @@
 <title>Ring 0. What an operating system with no privilege boundary looks like</title>
 <meta name="description" content="x86 protection rings explained, and what changes when a kernel deletes the user and kernel split entirely: no syscalls, one address space, no isolation.">
 <meta name="keywords" content="ring 0, kernel mode, protection rings, x86 privilege levels, single address space OS, no syscalls">
-<link rel="canonical" href="https://ilumci.github.io/GLaDOS/wiki/ring-0.html">
+<link rel="canonical" href="https://aperture.institute/wiki/ring-0.html">
 <meta name="robots" content="index,follow,max-image-preview:large">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="GLaDOS">
 <meta property="og:title" content="Ring 0. What an operating system with no privilege boundary looks like">
 <meta property="og:description" content="x86 protection rings explained, and what changes when a kernel deletes the user and kernel split entirely: no syscalls, one address space, no isolation.">
-<meta property="og:url" content="https://ilumci.github.io/GLaDOS/wiki/ring-0.html">
+<meta property="og:url" content="https://aperture.institute/wiki/ring-0.html">
 <meta name="twitter:card" content="summary">
 <meta name="twitter:title" content="Ring 0. What an operating system with no privilege boundary looks like">
 <meta name="twitter:description" content="x86 protection rings explained, and what changes when a kernel deletes the user and kernel split entirely: no syscalls, one address space, no isolation.">
-<meta property="og:image" content="https://ilumci.github.io/GLaDOS/img/og.png">
+<meta property="og:image" content="https://aperture.institute/img/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta property="og:image:alt" content="The GLaDOS aperture mark">
-<meta name="twitter:image" content="https://ilumci.github.io/GLaDOS/img/og.png">
+<meta name="twitter:image" content="https://aperture.institute/img/og.png">
 <link rel="stylesheet" href="../style.css">
 <link rel="icon" type="image/svg+xml" href="../img/logo.svg">
 <link rel="icon" type="image/png" sizes="32x32" href="../img/icon-32.png">
 <link rel="apple-touch-icon" sizes="180x180" href="../img/icon-180.png">
 <link rel="manifest" href="../site.webmanifest">
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://ilumci.github.io/GLaDOS/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://ilumci.github.io/GLaDOS/wiki/"},{"@type":"ListItem","position":3,"name":"Ring 0","item":"https://ilumci.github.io/GLaDOS/wiki/ring-0.html"}]}</script>
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Ring 0. What an operating system with no privilege boundary looks like","description":"x86 protection rings explained, and what changes when a kernel deletes the user and kernel split entirely: no syscalls, one address space, no isolation.","url":"https://ilumci.github.io/GLaDOS/wiki/ring-0.html","dateModified":"2026-08-30","keywords":"ring 0, kernel mode, protection rings, x86 privilege levels, single address space OS, no syscalls","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://aperture.institute/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://aperture.institute/wiki/"},{"@type":"ListItem","position":3,"name":"Ring 0","item":"https://aperture.institute/wiki/ring-0.html"}]}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Ring 0. What an operating system with no privilege boundary looks like","description":"x86 protection rings explained, and what changes when a kernel deletes the user and kernel split entirely: no syscalls, one address space, no isolation.","url":"https://aperture.institute/wiki/ring-0.html","dateModified":"2026-08-30","keywords":"ring 0, kernel mode, protection rings, x86 privilege levels, single address space OS, no syscalls","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://aperture.institute/"}}</script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>

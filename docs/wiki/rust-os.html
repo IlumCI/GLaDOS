@@ -6,28 +6,28 @@
 <title>Writing an operating system in Rust. What no_std gives and takes</title>
 <meta name="description" content="What Rust actually buys at ring 0, what no_std removes, and the traps that cost real debugging time in a kernel with one address space and a heap that is a ladder.">
 <meta name="keywords" content="Rust operating system, no_std, kernel development Rust, bare metal Rust, unsafe Rust, ownership in kernels">
-<link rel="canonical" href="https://ilumci.github.io/GLaDOS/wiki/rust-os.html">
+<link rel="canonical" href="https://aperture.institute/wiki/rust-os.html">
 <meta name="robots" content="index,follow,max-image-preview:large">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="GLaDOS">
 <meta property="og:title" content="Writing an operating system in Rust. What no_std gives and takes">
 <meta property="og:description" content="What Rust actually buys at ring 0, what no_std removes, and the traps that cost real debugging time in a kernel with one address space and a heap that is a ladder.">
-<meta property="og:url" content="https://ilumci.github.io/GLaDOS/wiki/rust-os.html">
+<meta property="og:url" content="https://aperture.institute/wiki/rust-os.html">
 <meta name="twitter:card" content="summary">
 <meta name="twitter:title" content="Writing an operating system in Rust. What no_std gives and takes">
 <meta name="twitter:description" content="What Rust actually buys at ring 0, what no_std removes, and the traps that cost real debugging time in a kernel with one address space and a heap that is a ladder.">
-<meta property="og:image" content="https://ilumci.github.io/GLaDOS/img/og.png">
+<meta property="og:image" content="https://aperture.institute/img/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta property="og:image:alt" content="The GLaDOS aperture mark">
-<meta name="twitter:image" content="https://ilumci.github.io/GLaDOS/img/og.png">
+<meta name="twitter:image" content="https://aperture.institute/img/og.png">
 <link rel="stylesheet" href="../style.css">
 <link rel="icon" type="image/svg+xml" href="../img/logo.svg">
 <link rel="icon" type="image/png" sizes="32x32" href="../img/icon-32.png">
 <link rel="apple-touch-icon" sizes="180x180" href="../img/icon-180.png">
 <link rel="manifest" href="../site.webmanifest">
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://ilumci.github.io/GLaDOS/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://ilumci.github.io/GLaDOS/wiki/"},{"@type":"ListItem","position":3,"name":"Writing an OS in Rust","item":"https://ilumci.github.io/GLaDOS/wiki/rust-os.html"}]}</script>
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Writing an operating system in Rust. What no_std gives and takes","description":"What Rust actually buys at ring 0, what no_std removes, and the traps that cost real debugging time in a kernel with one address space and a heap that is a ladder.","url":"https://ilumci.github.io/GLaDOS/wiki/rust-os.html","dateModified":"2026-08-30","keywords":"Rust operating system, no_std, kernel development Rust, bare metal Rust, unsafe Rust, ownership in kernels","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://aperture.institute/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://aperture.institute/wiki/"},{"@type":"ListItem","position":3,"name":"Writing an OS in Rust","item":"https://aperture.institute/wiki/rust-os.html"}]}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Writing an operating system in Rust. What no_std gives and takes","description":"What Rust actually buys at ring 0, what no_std removes, and the traps that cost real debugging time in a kernel with one address space and a heap that is a ladder.","url":"https://aperture.institute/wiki/rust-os.html","dateModified":"2026-08-30","keywords":"Rust operating system, no_std, kernel development Rust, bare metal Rust, unsafe Rust, ownership in kernels","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://aperture.institute/"}}</script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>

@@ -6,28 +6,28 @@
 <title>How the ISO is built. El Torito, FAT32 and a reader to check it</title>
 <meta name="description" content="Building a bootable UEFI image by hand: the El Torito catalogue, why long file names are required, the FAT32 cluster floor, and reading the result back.">
 <meta name="keywords" content="El Torito, ISO 9660, UEFI boot ISO, FAT32, Joliet, bootable image, hybrid ISO">
-<link rel="canonical" href="https://ilumci.github.io/GLaDOS/wiki/iso-el-torito.html">
+<link rel="canonical" href="https://aperture.institute/wiki/iso-el-torito.html">
 <meta name="robots" content="index,follow,max-image-preview:large">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="GLaDOS">
 <meta property="og:title" content="How the ISO is built. El Torito, FAT32 and a reader to check it">
 <meta property="og:description" content="Building a bootable UEFI image by hand: the El Torito catalogue, why long file names are required, the FAT32 cluster floor, and reading the result back.">
-<meta property="og:url" content="https://ilumci.github.io/GLaDOS/wiki/iso-el-torito.html">
+<meta property="og:url" content="https://aperture.institute/wiki/iso-el-torito.html">
 <meta name="twitter:card" content="summary">
 <meta name="twitter:title" content="How the ISO is built. El Torito, FAT32 and a reader to check it">
 <meta name="twitter:description" content="Building a bootable UEFI image by hand: the El Torito catalogue, why long file names are required, the FAT32 cluster floor, and reading the result back.">
-<meta property="og:image" content="https://ilumci.github.io/GLaDOS/img/og.png">
+<meta property="og:image" content="https://aperture.institute/img/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta property="og:image:alt" content="The GLaDOS aperture mark">
-<meta name="twitter:image" content="https://ilumci.github.io/GLaDOS/img/og.png">
+<meta name="twitter:image" content="https://aperture.institute/img/og.png">
 <link rel="stylesheet" href="../style.css">
 <link rel="icon" type="image/svg+xml" href="../img/logo.svg">
 <link rel="icon" type="image/png" sizes="32x32" href="../img/icon-32.png">
 <link rel="apple-touch-icon" sizes="180x180" href="../img/icon-180.png">
 <link rel="manifest" href="../site.webmanifest">
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://ilumci.github.io/GLaDOS/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://ilumci.github.io/GLaDOS/wiki/"},{"@type":"ListItem","position":3,"name":"How the ISO is built","item":"https://ilumci.github.io/GLaDOS/wiki/iso-el-torito.html"}]}</script>
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"How the ISO is built. El Torito, FAT32 and a reader to check it","description":"Building a bootable UEFI image by hand: the El Torito catalogue, why long file names are required, the FAT32 cluster floor, and reading the result back.","url":"https://ilumci.github.io/GLaDOS/wiki/iso-el-torito.html","dateModified":"2026-08-30","keywords":"El Torito, ISO 9660, UEFI boot ISO, FAT32, Joliet, bootable image, hybrid ISO","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://ilumci.github.io/GLaDOS/"}}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://aperture.institute/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://aperture.institute/wiki/"},{"@type":"ListItem","position":3,"name":"How the ISO is built","item":"https://aperture.institute/wiki/iso-el-torito.html"}]}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"How the ISO is built. El Torito, FAT32 and a reader to check it","description":"Building a bootable UEFI image by hand: the El Torito catalogue, why long file names are required, the FAT32 cluster floor, and reading the result back.","url":"https://aperture.institute/wiki/iso-el-torito.html","dateModified":"2026-08-30","keywords":"El Torito, ISO 9660, UEFI boot ISO, FAT32, Joliet, bootable image, hybrid ISO","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://aperture.institute/"}}</script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>

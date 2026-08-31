@@ -2,7 +2,7 @@
  "name": "GLaDOS",
  "short_name": "GLaDOS",
  "description": "An AI operating system in Rust, ring 0, bare metal.",
- "start_url": "https://ilumci.github.io/GLaDOS/",
+ "start_url": "https://aperture.institute/",
  "display": "standalone",
  "background_color": "#0b0b0c",
  "theme_color": "#f28c1e",
