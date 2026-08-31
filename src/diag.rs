@@ -159,11 +159,17 @@ pub const SUITES: &[Suite] = &[
         about: "the glyph table, and decoding UTF-8 one byte at a time",
         run: crate::gfx::text_selftest,
     },
+    Suite {
+        name: "abstract",
+        about: "structures collide when they should, and the objective refuses what does not pay",
+        run: crate::ai::abstraction::selftest,
+    },
 ];
 
 /// One slot per suite. Indexed by position in `SUITES`, which is a constant,
 /// so the table cannot get out of step with the list.
-static RESULTS: [AtomicU8; 24] = [
+static RESULTS: [AtomicU8; 25] = [
+    AtomicU8::new(0),
     AtomicU8::new(0),
     AtomicU8::new(0),
     AtomicU8::new(0),
@@ -192,7 +198,7 @@ static RESULTS: [AtomicU8; 24] = [
 
 /// Checked here rather than trusted: a suite added to `SUITES` without a slot
 /// would silently never record a verdict.
-const _: () = assert!(SUITES.len() == 24);
+const _: () = assert!(SUITES.len() == 25);
 
 pub fn verdict(i: usize) -> Verdict {
     match RESULTS.get(i).map(|r| r.load(Ordering::Relaxed)) {

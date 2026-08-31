@@ -138,7 +138,7 @@ fn find_core(want: &str) -> Option<[u8; 32]> {
 const KNOWN_COMMANDS: &[&str] = &[
     "term", "todo", "paint", "write", "mines", "oracle", "enternet", "net", "dhcp", "mem",
     "uptime", "tasks", "status", "help", "app", "author", "video", "serial", "log", "snap",
-    "update", "gpu", "mine",
+    "update", "gpu", "mine", "abstract",
 ];
 
 /// How many steps an authoring run gets.
@@ -648,6 +648,61 @@ fn update_cmd(rest: &str) {
             kprintln!("  update unstage      call off a staged update");
             kprintln!("  update source <url> | channel <name> | link <code> | unlink");
             kprintln!("  update verify <image> [sig]   check a pair brought in by hand");
+        }
+    }
+}
+
+/// What repeats across the skills this machine has written.
+///
+/// Reports and changes nothing. Rewriting a stored program would change its
+/// content hash, which revokes the operator's trust in it -- correct
+/// behaviour, and a thing that needs deciding before it happens rather than
+/// discovered afterwards by a skill that stopped running.
+fn abstract_cmd(rest: &str) {
+    let progs = crate::ai::abstraction::stored();
+    if progs.is_empty() {
+        kprintln!("  no stored programs under /ai/tools");
+        return;
+    }
+
+    console::set_color(YELLOW);
+    kprintln!("[abstract] {} program(s)", progs.len());
+    console::set_color(WHITE);
+
+    let found = crate::ai::abstraction::analyse(&progs);
+    if found.is_empty() {
+        kprintln!("  nothing repeats that would pay to name");
+        kprintln!("  (the objective refuses anything whose call is as big as its body)");
+        return;
+    }
+
+    let show = if rest.trim() == "all" { found.len() } else { found.len().min(5) };
+    console::set_color(LTGRAY);
+    kprintln!("  saved  seen  in  arity  structure");
+    console::set_color(WHITE);
+    for c in found.iter().take(show) {
+        kprintln!(
+            "  {:>5}  {:>4}  {:>2}  {:>5}  {}",
+            c.saved,
+            c.count,
+            c.programs.len(),
+            c.arity,
+            c.skeleton
+        );
+    }
+    if show < found.len() {
+        kprintln!("  ... {} more; 'abstract all' for every one", found.len() - show);
+    }
+
+    // The best candidate as something that could actually be written to /lib.
+    if let Some(top) = found.first() {
+        kprintln!("");
+        console::set_color(LTGREEN);
+        kprintln!("  {}", top.proposal(0));
+        console::set_color(WHITE);
+        kprintln!("  would save {} nodes across {} occurrence(s) in:", top.saved, top.count);
+        for p in &top.programs {
+            kprintln!("    {}", p);
         }
     }
 }
@@ -2483,6 +2538,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             kprintln!("  usb [hid]     the USB bus; 'usb hid' for keyboards and mice");
             kprintln!("  gpu           the display controllers, and whether one answers");
             kprintln!("  mine          bench|btc -- sha256d hash rate, and a difficulty sweep");
+            kprintln!("  abstract      what repeats across the skills, and what naming it would save");
 
             console::set_color(YELLOW);
             kprintln!("\nstorage");
@@ -2690,6 +2746,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             }
         },
         "gpu" => gpu_cmd(acpi),
+        "abstract" => abstract_cmd(rest),
         "pci" => match acpi.as_ref().and_then(|a| a.mcfg) {
             Some(ecam) => {
                 console::set_color(YELLOW);
