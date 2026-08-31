@@ -587,7 +587,7 @@ impl Panel {
                     }
                 }
                 Widget::Button { label, .. } => {
-                    let bw = (theme::text_w(label.len()) + PAD * 4).min(w);
+                    let bw = (theme::text_w_of(label) + PAD * 4).min(w);
                     theme::button(fb, Rect::new(x, y, bw, h - GAP), label, focused, false);
                 }
             }

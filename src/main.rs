@@ -1167,6 +1167,14 @@ fn selftest() {
     }
 
     kprintln!("
+[selftest] text:");
+    if !gfx::text_selftest() {
+        console::set_color(LTRED);
+        kprintln!("[selftest] the console cannot be trusted to draw what it was given");
+        console::set_color(LTGRAY_IDX);
+    }
+
+    kprintln!("
 [selftest] generated code:");
     if !cpu::code::selftest() {
         console::set_color(LTRED);

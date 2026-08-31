@@ -94,8 +94,16 @@ pub enum Origin {
 /// program -- not the shell's vocabulary.
 const STORED_PREFIX: &str = "app ";
 
+/// Whether a generated panel's text can actually be put on screen.
+///
+/// The rule was printable ASCII, which was the same question while the font
+/// was ASCII. It is not the same question now, and the parser refusing a
+/// label the renderer can draw perfectly well is a limit nobody could see the
+/// reason for. So it asks the font: anything with a glyph is allowed, control
+/// codes are not, and a panel that would print rows of hollow boxes is still
+/// refused at parse time rather than looked at afterwards.
 fn printable(s: &str) -> bool {
-    s.bytes().all(|b| (0x20..=0x7E).contains(&b))
+    s.chars().all(|c| c >= ' ' && super::font::index_of(c) != super::font::UNKNOWN)
 }
 
 fn check_operand(line: usize, s: &str) -> Result<(), ParseError> {

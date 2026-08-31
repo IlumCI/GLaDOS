@@ -2036,6 +2036,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             kprintln!("  log [all|save]  everything printed since power-on; the console keeps one screen");
             kprintln!("  paint write [path] mines oracle agentlog   desktop programs; todo   the checklist");
             kprintln!("  typewriter    output pacing, in us per character");
+            kprintln!("  font          every glyph this machine can draw");
 
             console::set_color(YELLOW);
             kprintln!("\nstorage");
@@ -3285,6 +3286,10 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     }
                 },
             }
+        }
+        // Every glyph, to be looked at.
+        "font" => {
+            crate::gfx::font::report();
         }
         // What a file is, and what is in it.
         "file" => {

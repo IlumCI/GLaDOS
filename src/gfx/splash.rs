@@ -199,7 +199,9 @@ pub fn aperture(fb: &super::Framebuffer, cx: i32, cy: i32, r: i32, fg: super::Co
 }
 
 fn centred_text(fb: &super::Framebuffer, cx: u32, y: u32, s: &str, scale: u32, fg: super::Color) {
-    let width = s.len() as u32 * font::GLYPH_W * scale;
+    // Characters, not bytes. A byte count centres anything with an accent in
+    // it too far to the left, by exactly the number of accents.
+    let width = s.chars().count() as u32 * font::GLYPH_W * scale;
     let x = cx.saturating_sub(width / 2);
     fb.draw_text(x, y, s, fg, LTGRAY, scale);
 }

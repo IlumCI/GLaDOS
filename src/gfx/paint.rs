@@ -260,7 +260,7 @@ fn tool_rects(client: Rect) -> Vec<(Rect, char)> {
     TOOLS
         .iter()
         .map(|(c, name)| {
-            let w = theme::text_w(name.len()) + 14;
+            let w = theme::text_w_of(name) + 14;
             let r = Rect::new(x, y, w, theme::text_h() + 10);
             x += w + 4;
             (r, *c)

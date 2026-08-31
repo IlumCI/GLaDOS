@@ -171,6 +171,44 @@ pub fn text_w(len: usize) -> u32 {
     len as u32 * font::GLYPH_W * CHROME_SCALE
 }
 
+/// How wide a particular string draws.
+///
+/// Every glyph in this font is one cell wide, so width is a character count.
+/// It is not a *byte* count, and the two stopped being the same thing the
+/// moment the console learned to decode UTF-8: a label with three accents in
+/// it measured three cells too wide, which centres it off-centre and lets a
+/// menu clip a name it had room for. Call this for anything a person or the
+/// model supplies; `text_w` still takes a count, for the callers that are
+/// asking about columns rather than about a string.
+pub fn text_w_of(s: &str) -> u32 {
+    text_w(s.chars().count())
+}
+
+/// The first `n` characters, for a label that has to fit.
+///
+/// `&s[..n]` is the obvious spelling and it is a panic: `n` is a column count
+/// and the slice wants a byte offset, and the two stopped agreeing when the
+/// console learned to decode UTF-8. Truncating a path is a cosmetic
+/// operation, so it must not be able to stop the machine.
+pub fn head_chars(s: &str, n: usize) -> &str {
+    match s.char_indices().nth(n) {
+        Some((i, _)) => &s[..i],
+        None => s,
+    }
+}
+
+/// The last `n` characters, for showing the end of a long path.
+pub fn tail_chars(s: &str, n: usize) -> &str {
+    let len = s.chars().count();
+    if len <= n {
+        return s;
+    }
+    match s.char_indices().nth(len - n) {
+        Some((i, _)) => &s[i..],
+        None => s,
+    }
+}
+
 /// The Aperture mark, small enough for a title bar.
 ///
 /// Not the full boot logo: at this size the six-slash aperture turns to mush,
@@ -288,7 +326,7 @@ pub fn title_bar(
     // close box.
     let text_end = btns[0].x.saturating_sub(6);
     let room = (text_end.saturating_sub(tx) / (font::GLYPH_W * CHROME_SCALE)) as usize;
-    let shown = if title.len() > room { &title[..room] } else { title };
+    let shown = head_chars(title, room);
     // Over a gradient there is no one background colour, so the glyphs carry
     // their own shadow instead of a box.
     text_over(fb, tx + 1, ty + 1, shown, DARKEDGE);
@@ -352,8 +390,8 @@ pub fn title_bar(
 /// gradient stamps a rectangle of the wrong colour around every letter.
 pub fn text_over(fb: &Framebuffer, x: u32, y: u32, s: &str, fg: Color) {
     let mut cx = x;
-    for &b in s.as_bytes() {
-        let rows = font::glyph(b);
+    for b in s.chars() {
+        let rows = font::rows(font::index_of(b));
         for (gy, bits) in rows.iter().enumerate() {
             for gx in 0..font::GLYPH_W {
                 if bits & (0x80 >> gx) != 0 {
@@ -389,7 +427,7 @@ pub fn button(fb: &Framebuffer, r: Rect, label: &str, focused: bool, pressed: bo
         }
     }
 
-    let tw = text_w(label.len());
+    let tw = text_w_of(label);
     let tx = r.x + (r.w.saturating_sub(tw)) / 2 + u32::from(pressed);
     let ty = r.y + (r.h.saturating_sub(font::GLYPH_H * CHROME_SCALE)) / 2 + u32::from(pressed);
     text(fb, tx, ty, label, TEXT, FACE);
@@ -409,7 +447,7 @@ pub fn list_row(fb: &Framebuffer, r: Rect, label: &str, selected: bool, focused:
     fb.rect(r.x, r.y, r.w, r.h, bg);
     let ty = r.y + (r.h.saturating_sub(font::GLYPH_H * CHROME_SCALE)) / 2;
     let room = (r.w / (font::GLYPH_W * CHROME_SCALE)).saturating_sub(1) as usize;
-    let shown = if label.len() > room { &label[..room] } else { label };
+    let shown = head_chars(label, room);
     text(fb, r.x + 6, ty, shown, fg, bg);
 }
 

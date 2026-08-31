@@ -352,7 +352,7 @@ fn start_menu_rect(fb: &Framebuffer) -> (Rect, usize) {
     // Wide enough for the longest label, and for a query worth typing. A menu
     // sized only to its labels gives the search row about eleven characters,
     // which is narrower than the thing being searched for.
-    let label_w = theme::text_w(START_ITEMS.iter().map(|(l, _)| l.len()).max().unwrap_or(4)) + 24;
+    let label_w = theme::text_w(START_ITEMS.iter().map(|(l, _)| l.chars().count()).max().unwrap_or(4)) + 24;
     let w = label_w.max(theme::text_w(QUERY_COLS) + 24);
     let h = n as u32 * MENU_H + 8;
     let bar = taskbar_rect(fb);
@@ -419,7 +419,7 @@ fn draw_icons(fb: &Framebuffer, hover: Hover) {
         let px = r.x + (r.w - 40) / 2;
         pictogram(fb, k, px, r.y, 40, theme::DESKTOP);
         let (label, _) = ICONS[k];
-        let tw = theme::text_w(label.len());
+        let tw = theme::text_w_of(label);
         let tx = r.x + (r.w.saturating_sub(tw)) / 2;
         let ty = r.y + 46;
         if hover == Hover::Icon(k) {
@@ -1681,7 +1681,7 @@ fn menu_label_at(menus: &[Menu], bar: Rect, x: i32, y: i32) -> Option<usize> {
     }
     let mut lx = bar.x + 6;
     for (mi, m) in menus.iter().enumerate() {
-        let w = theme::text_w(m.label.len()) + 12;
+        let w = theme::text_w_of(&m.label) + 12;
         if x >= lx as i32 && x < (lx + w) as i32 {
             return Some(mi);
         }
@@ -2200,14 +2200,14 @@ fn dropdown_rows(fb: &Framebuffer, d: &Desktop, screen: Rect) -> Option<(Rect, u
             let m = d.windows[f].menus.get(menu)?;
             let mut x = inner.x + 6;
             for prev in &d.windows[f].menus[..menu] {
-                x += theme::text_w(prev.label.len()) + 12;
+                x += theme::text_w_of(&prev.label) + 12;
             }
-            let w = theme::text_w(m.items.iter().map(|i| i.label.len()).max().unwrap_or(4)) + 24;
+            let w = theme::text_w(m.items.iter().map(|i| i.label.chars().count()).max().unwrap_or(4)) + 24;
             let y = inner.y + theme::TITLE_H + 2 + MENU_H;
             Some((Rect::new(x, y, w, m.items.len() as u32 * MENU_H + 8), m.items.len()))
         }
         Mode::Sys { .. } => {
-            let w = theme::text_w(SYS_ITEMS.iter().map(|s| s.len()).max().unwrap_or(4)) + 24;
+            let w = theme::text_w(SYS_ITEMS.iter().map(|s| s.chars().count()).max().unwrap_or(4)) + 24;
             let y = inner.y + theme::TITLE_H;
             Some((
                 Rect::new(inner.x, y, w, SYS_ITEMS.len() as u32 * MENU_H + 8),
@@ -2841,7 +2841,7 @@ pub fn draw() {
                     };
                     let mut x = bar.x + 6;
                     for (mi, m) in win.menus.iter().enumerate() {
-                        let w = theme::text_w(m.label.len()) + 12;
+                        let w = theme::text_w_of(&m.label) + 12;
                         let hot = Some(mi) == open
                             || d.hover == Hover::MenuLabel { win: i, menu: mi };
                         let (fg, bg) = if hot {
@@ -2899,7 +2899,7 @@ pub fn draw() {
                         let inner = frame.shrink(theme::FRAME);
                         let mut x = inner.x + 6;
                         for prev in &d.windows[f].menus[..menu] {
-                            x += theme::text_w(prev.label.len()) + 12;
+                            x += theme::text_w_of(&prev.label) + 12;
                         }
                         dropdown(
                             &fb,
@@ -2928,7 +2928,7 @@ pub fn draw() {
                     } else {
                         " Size: arrows, Enter to keep, Esc to cancel "
                     };
-                    let w = theme::text_w(msg.len());
+                    let w = theme::text_w_of(msg);
                     let r = Rect::new(
                         (fb.width().saturating_sub(w)) / 2,
                         MARGIN,
@@ -3009,7 +3009,7 @@ fn dropdown<'a>(
     if items.is_empty() {
         return;
     }
-    let w = theme::text_w(items.iter().map(|s| s.len()).max().unwrap_or(4)) + 24;
+    let w = theme::text_w(items.iter().map(|s| s.chars().count()).max().unwrap_or(4)) + 24;
     let h = items.len() as u32 * MENU_H + 8;
     let r = Rect::new(x, y, w.min(fb.width().saturating_sub(x)), h);
     theme::panel(fb, r);

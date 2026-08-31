@@ -22,6 +22,7 @@ wraps it El Torito via tools/mkiso.py, and boots off -cdrom, which has no
 size cap; guest RAM still has to cover the weights, so raise --memory.
 """
 
+import codecs
 import socket
 import subprocess
 import sys
@@ -188,11 +189,26 @@ def capture(dest):
     print(f"[drive] screenshot {dest} ({w}x{h})")
 
 
+# One decoder for the whole session rather than one per socket read.
+#
+# UTF-8 spreads a character over up to four bytes and `recv` splits wherever
+# it likes, so decoding each chunk on its own turned every accented letter
+# into two replacement characters and every box-drawing character into three
+# -- which reads exactly like a guest that cannot print them. It could not:
+# the guest was right and the log was wrong. An incremental decoder carries
+# the partial sequence into the next chunk, which is the same thing the
+# console itself had to learn to do.
+_DECODER = codecs.getincrementaldecoder("utf-8")("replace")
+
+
+def emit(chunk):
+    sys.stdout.write(_DECODER.decode(chunk))
+    sys.stdout.flush()
+
+
 def main():
-    # The serial stream is UTF-8, and a multibyte character split across a
-    # socket read decodes to U+FFFD under errors="replace" -- which the
-    # default cp1252 stdout then refuses to encode when output is redirected
-    # to a file, killing the session mid-run.
+    # The default cp1252 stdout refuses characters the guest can now print,
+    # which kills the session mid-run when output is redirected to a file.
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     argv = sys.argv[1:]
     timeout = 240
@@ -501,8 +517,7 @@ def main():
                 break
             if chunk:
                 buf += chunk
-                sys.stdout.write(chunk.decode("utf-8", "replace"))
-                sys.stdout.flush()
+                emit(chunk)
                 # Fresh output means the guest is still working. Without this
                 # the idle counter survives from the post-queue prompt of an
                 # async command -- 'agent' returns its prompt immediately --
@@ -632,13 +647,23 @@ def main():
                                 except OSError:
                                     break
                                 if extra:
-                                    sys.stdout.write(extra.decode("utf-8", "replace"))
-                                    sys.stdout.flush()
+                                    emit(extra)
                         if shot:
                             capture(shot)
+                            shot = None
                         break
                     time.sleep(0.5)
     finally:
+        # A screenshot that was asked for is taken on every exit path, not
+        # only the tidy one. It used to hang off the idle branch alone, so a
+        # session that ran to its timeout -- which is most of the interesting
+        # ones -- threw away the only evidence about what was on screen, and
+        # the guest was gone by the time anybody noticed.
+        if shot:
+            try:
+                capture(shot)
+            except Exception as e:
+                print(f"[drive] screenshot failed: {e}", file=sys.stderr)
         try:
             sock.close()
         except OSError:

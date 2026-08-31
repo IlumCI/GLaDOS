@@ -324,18 +324,22 @@ impl Todo {
         // The label sits inline before the first wrapped line.
         let mut buf = String::from(label);
         buf.push_str(text);
-        let bytes = buf.as_bytes();
+        // By character, because `cols` is a column count. Walking bytes wraps
+        // one cell early for every accent and eventually cuts a character in
+        // half, at which point `from_utf8` refused the slice and the `Ok` arm
+        // dropped the whole line -- a wrap that silently deletes a note is
+        // worse than one that breaks a word in the wrong place.
+        let chars: alloc::vec::Vec<char> = buf.chars().collect();
         let mut at = 0;
-        while at < bytes.len() && line < rows {
-            let end = (at + cols).min(bytes.len());
-            let cut = if end < bytes.len() {
-                bytes[at..end].iter().rposition(|&b| b == b' ').map(|i| at + i).unwrap_or(end)
+        while at < chars.len() && line < rows {
+            let end = (at + cols).min(chars.len());
+            let cut = if end < chars.len() {
+                chars[at..end].iter().rposition(|&c| c == ' ').map(|i| at + i).unwrap_or(end)
             } else {
                 end
             };
-            if let Ok(s) = core::str::from_utf8(&bytes[at..cut]) {
-                theme::text_over(fb, r.x, r.y + line * lh, s.trim_start(), fg);
-            }
+            let s: String = chars[at..cut].iter().collect();
+            theme::text_over(fb, r.x, r.y + line * lh, s.trim_start(), fg);
             at = if cut == at { end } else { cut + 1 };
             line += 1;
         }
@@ -406,7 +410,7 @@ impl DeskApp for Todo {
             // Title, clipped to the row.
             let title_x = tx + theme::text_w(7);
             let room = ((r.x + r.w).saturating_sub(title_x) / theme::text_w(1).max(1)) as usize;
-            let shown = if s.title.len() > room { &s.title[..room] } else { s.title };
+            let shown = theme::head_chars(s.title, room);
             let bg = if selected { theme::SELECT } else { theme::FACE };
             let _ = bg;
             if selected && focused {

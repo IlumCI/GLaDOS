@@ -56,10 +56,16 @@ impl Mode {
     }
 }
 
-/// One drawn cell: the character and its colour index into `PALETTE`-ish use.
+/// One drawn cell: a glyph index and its colour index into `PALETTE`-ish use.
+///
+/// An index rather than a byte, so this editor draws what the console draws.
+/// It held a byte and mapped anything above 127 to a question mark, which was
+/// honest while the font was ASCII and became a lie the moment it was not:
+/// the file is decoded as UTF-8 and the lines are `Vec<char>`, so the letter
+/// was there the whole way down and only the last step threw it away.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Cell {
-    ch: u8,
+    ch: u16,
     fg: u8,
     bg: u8,
 }
@@ -78,7 +84,7 @@ fn colour(i: u8) -> (Color, Color) {
     }
 }
 
-const BLANK: Cell = Cell { ch: b' ', fg: C_FG, bg: C_FG };
+const BLANK: Cell = Cell { ch: font::SPACE, fg: C_FG, bg: C_FG };
 
 /// How far back `u` can go. Bounded because the buffer is cloned each time and
 /// an editor that grows without limit on a machine with no swap is a way to
@@ -212,15 +218,15 @@ impl Editor {
 
     // --- rendering ------------------------------------------------------
 
-    fn put(&mut self, x: usize, y: usize, ch: u8, fg: u8, bg: u8) {
+    fn put(&mut self, x: usize, y: usize, ch: char, fg: u8, bg: u8) {
         if x < self.cols && y < self.rows {
-            self.frame[y * self.cols + x] = Cell { ch, fg, bg };
+            self.frame[y * self.cols + x] = Cell { ch: font::index_of(ch), fg, bg };
         }
     }
 
     fn puts(&mut self, x: usize, y: usize, s: &str, fg: u8, bg: u8) {
-        for (i, b) in s.bytes().enumerate() {
-            self.put(x + i, y, b, fg, bg);
+        for (i, c) in s.chars().enumerate() {
+            self.put(x + i, y, c, fg, bg);
         }
     }
 
@@ -234,15 +240,15 @@ impl Editor {
         for row in 0..vis {
             let ln = self.top + row;
             if ln >= self.lines.len() {
-                self.put(0, row, b'~', C_GUTTER, C_FG);
+                self.put(0, row, '~', C_GUTTER, C_FG);
                 continue;
             }
             // Line numbers, right-aligned in the gutter.
-            let mut num = [b' '; 8];
+            let mut num = [' '; 8];
             let mut n = ln + 1;
             let mut k = gut - 1;
             loop {
-                num[k - 1] = b'0' + (n % 10) as u8;
+                num[k - 1] = char::from_digit((n % 10) as u32, 10).unwrap_or('0');
                 n /= 10;
                 if n == 0 || k == 1 {
                     break;
@@ -259,10 +265,7 @@ impl Editor {
                 if x >= self.cols {
                     break;
                 }
-                // Non-ASCII is drawn as a placeholder rather than mangled: the
-                // font has 256 glyphs and no notion of anything wider.
-                let b = if (*ch as u32) < 128 { *ch as u8 } else { b'?' };
-                self.put(x, row, b, C_FG, C_FG);
+                self.put(x, row, *ch, C_FG, C_FG);
             }
         }
 
@@ -277,7 +280,7 @@ impl Editor {
             self.cx + 1
         );
         for x in 0..self.cols {
-            self.put(x, self.rows - 2, b' ', C_STATUS, C_STATUS);
+            self.put(x, self.rows - 2, ' ', C_STATUS, C_STATUS);
         }
         self.puts(0, self.rows - 2, &bar, C_STATUS, C_STATUS);
 
@@ -286,7 +289,7 @@ impl Editor {
         if self.mode == Mode::Command {
             let line = alloc::format!(":{}", self.cmd);
             self.puts(0, last, &line, C_FG, C_FG);
-            self.put(line.len(), last, b' ', C_CURSOR, C_CURSOR);
+            self.put(line.chars().count(), last, ' ', C_CURSOR, C_CURSOR);
         } else {
             let msg = self.status.clone();
             self.puts(0, last, &msg, C_FG, C_FG);
@@ -301,8 +304,8 @@ impl Editor {
                     .lines
                     .get(self.cy)
                     .and_then(|l| l.get(self.cx))
-                    .map(|c| if (*c as u32) < 128 { *c as u8 } else { b'?' })
-                    .unwrap_or(b' ');
+                    .copied()
+                    .unwrap_or(' ');
                 self.put(x, row, ch, C_CURSOR, C_CURSOR);
             }
         }
@@ -328,9 +331,7 @@ impl Editor {
                 } else {
                     (fg, bg)
                 };
-                let s = [c.ch];
-                let text = core::str::from_utf8(&s).unwrap_or(" ");
-                fb.draw_text(x as u32 * cell_w, y as u32 * cell_h, text, fg, bg, SCALE);
+                fb.draw_glyph(x as u32 * cell_w, y as u32 * cell_h, c.ch, fg, bg, SCALE);
                 self.shadow[i] = c;
             }
         }

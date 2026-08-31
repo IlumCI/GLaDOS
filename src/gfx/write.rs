@@ -110,21 +110,48 @@ impl Writer {
     fn rows(&self, cols: usize) -> Vec<(usize, usize)> {
         let cols = cols.max(1);
         let mut out = Vec::new();
-        let bytes = self.text.as_bytes();
         let mut start = 0;
-        let mut i = 0;
-        while i < bytes.len() {
-            if bytes[i] == b'\n' {
+        // Wrapping counts *characters* and breaks between them. It used to
+        // walk bytes, which wraps a line carrying an accent one cell early
+        // for each one, and eventually splits a character in half -- and the
+        // halves are then handed to `&self.text[a..b]`, which does not
+        // produce a wrong-looking line, it panics.
+        let mut width = 0;
+        for (i, c) in self.text.char_indices() {
+            if c == '\n' {
                 out.push((start, i));
                 start = i + 1;
-            } else if i - start >= cols {
+                width = 0;
+                continue;
+            }
+            if width >= cols {
                 out.push((start, i));
                 start = i;
+                width = 0;
             }
-            i += 1;
+            width += 1;
         }
-        out.push((start, bytes.len()));
+        out.push((start, self.text.len()));
         out
+    }
+
+    /// The byte offset `n` characters into `text[from..to]`, clamped.
+    ///
+    /// Columns on screen are characters and the cursor is a byte offset, so
+    /// every movement that thinks in columns has to come back through here.
+    fn byte_at_col(&self, from: usize, to: usize, n: usize) -> usize {
+        match self.text[from..to].char_indices().nth(n) {
+            Some((off, _)) => from + off,
+            None => to,
+        }
+    }
+
+    fn step_left(&self, i: usize) -> usize {
+        self.text[..i].chars().next_back().map_or(0, |c| i - c.len_utf8())
+    }
+
+    fn step_right(&self, i: usize) -> usize {
+        self.text[i..].chars().next().map_or(i, |c| i + c.len_utf8())
     }
 
     /// Which row the cursor is on, and its column.
@@ -133,7 +160,7 @@ impl Writer {
             // `<=` so a cursor at the very end of a row (including the end of
             // the document) belongs to that row rather than to nowhere.
             if self.cursor >= *a && self.cursor <= *b {
-                return (r, self.cursor - a);
+                return (r, self.text[*a..self.cursor].chars().count());
             }
         }
         (0, 0)
@@ -149,7 +176,10 @@ impl Writer {
 
     fn insert(&mut self, c: char) {
         self.text.insert(self.cursor, c);
-        self.cursor += 1;
+        // By the character's own width, not by one. A cursor that advanced by
+        // one after inserting 'e' with an acute on it would sit inside the
+        // character it had just typed, and the next insert would panic.
+        self.cursor += c.len_utf8();
         self.dirty = true;
         self.follow.set(true);
     }
@@ -189,7 +219,10 @@ impl DeskApp for Writer {
             shown.push('_');
         }
         let room = (inner.w / theme::text_w(1).max(1)) as usize;
-        let tail = if shown.len() > room { &shown[shown.len() - room..] } else { &shown };
+        // Taking a tail by subtracting a byte count from a byte length lands
+        // inside a character whenever the path has one, and slicing there is
+        // a panic rather than a mangled path.
+        let tail = theme::tail_chars(&shown, room);
         theme::text(fb, inner.x, inner.y, tail, theme::TEXT, if self.editing_path { theme::HILIGHT } else { theme::FACE });
 
         theme::well(fb, body, theme::HILIGHT);
@@ -232,7 +265,7 @@ impl DeskApp for Writer {
             self.path, flag, self.status
         );
         let room = (client.w.saturating_sub(16) / theme::text_w(1).max(1)) as usize;
-        let shown = if line.len() > room { &line[..room] } else { &line };
+        let shown = theme::head_chars(&line, room);
         theme::text(fb, client.x + 8, sy, shown, theme::TEXT, theme::FACE);
     }
 
@@ -268,8 +301,8 @@ impl DeskApp for Writer {
                 self.dirty = true;
                 self.status = String::from("empty document (unsaved)");
             }
-            kbd::KEY_LEFT => self.cursor = self.cursor.saturating_sub(1),
-            kbd::KEY_RIGHT => self.cursor = (self.cursor + 1).min(self.text.len()),
+            kbd::KEY_LEFT => self.cursor = self.step_left(self.cursor),
+            kbd::KEY_RIGHT => self.cursor = self.step_right(self.cursor),
             kbd::KEY_UP | kbd::KEY_DOWN => {
                 // Vertical movement in the columns of the last draw: same
                 // column one wrapped row over, clamped to that row's length.
@@ -282,7 +315,7 @@ impl DeskApp for Writer {
                     (r + 1).min(rows.len() - 1)
                 };
                 let (a, b) = rows[nr];
-                self.cursor = (a + c).min(b);
+                self.cursor = self.byte_at_col(a, b, c);
             }
             kbd::KEY_HOME => {
                 let rows = self.rows(self.cols.get());
@@ -296,7 +329,7 @@ impl DeskApp for Writer {
             }
             8 => {
                 if self.cursor > 0 {
-                    self.cursor -= 1;
+                    self.cursor = self.step_left(self.cursor);
                     self.text.remove(self.cursor);
                     self.dirty = true;
                 }
@@ -342,7 +375,7 @@ impl DeskApp for Writer {
             let row = self.scroll.get() + ((y - text_area.y as i32).max(0) as u32 / lh) as usize;
             let col = ((x - text_area.x as i32).max(0) as u32 / theme::text_w(1).max(1)) as usize;
             let (a, b) = *rows.get(row.min(rows.len() - 1)).unwrap_or(&(0, 0));
-            self.cursor = (a + col).min(b);
+            self.cursor = self.byte_at_col(a, b, col);
             return true;
         }
         false

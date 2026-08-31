@@ -525,8 +525,8 @@ raw FAT32 image with an MBR and an 0xEF partition, using the same
 `mkiso.build_fat` writer whose output the firmware already boots:
 
 ```powershell
-.	oolsenv\Scripts\python.exe tools\drive.py --esp-image .qemu/esp.img --esp-rebuild ...
-.	oolsenv\Scripts\python.exe tools\drive.py --esp-image .qemu/esp.img ...   # reuse; guest writes persist
+.\tools\venv\Scripts\python.exe tools\drive.py --esp-image .qemu/esp.img --esp-rebuild ...
+.\tools\venv\Scripts\python.exe tools\drive.py --esp-image .qemu/esp.img ...   # reuse; guest writes persist
 ```
 
 Reuse is the point: the image is a disk, so what the guest wrote is still there
@@ -573,7 +573,7 @@ update on top of itself.
 There is no `cargo test`. This is a `no_std` UEFI binary with no host test
 runner, so **verification is the boot selftests plus driving QEMU.**
 
-At boot the system runs **twenty-two selftest sections**, eighteen of which `diag`
+At boot the system runs **twenty-three selftest sections**, twenty of which `diag`
 also re-runs as named suites on demand (the `aiksi` section covers the capability gate by name and never by
 calling -- half that table pokes memory, drives I/O ports or paints over the
 screen, and a suite that called every row to prove it exists would be
@@ -1217,6 +1217,81 @@ reading it back. A heap that handed one block to two cores fails the read-back,
 one whose free list corrupted fails a later request, and one that lost a block
 fails the closing check that the heap is exactly where it started.
 
+### Text, and the font
+
+`src/gfx/font.rs` draws 325 glyphs at 8x8 and `src/gfx/console.rs` decodes
+UTF-8 to reach them. The console stored one byte per cell and drew one glyph
+per byte, so every character above 0x7E the model wrote arrived as a run of
+hollow boxes -- an em dash as two, a box corner as three.
+
+**The cell is still two bytes, and where it is built is the reason.**
+`console::init` runs twelve lines before `cpu::idt::init`, so the grid is
+constructed at a point in boot where a fault is a triple fault: no message, no
+register dump, an instant reboot. Two consoles of 128x72 cells cost 36 KB
+today; a `char` per cell takes that to 147 KB and puts an extra 18 KB
+temporary on the boot stack in exactly the window where running out of stack
+explains nothing at all. So a cell packs a twelve-bit glyph index beside a
+four-bit colour, which addresses four thousand glyphs against the three
+hundred that exist.
+
+The index is resolved when a character is **printed**, and the paint path is
+an array lookup. `redraw_all` visits nine thousand cells a frame, so a search
+per cell per frame would pay for the lookup nine thousand times to save it
+once.
+
+**The decoder is incremental because the console is fed bytes.** `put_char`
+is also the keyboard's path and the recovery console's, and neither has a
+decoded character to hand. Overlong forms are refused at the lead byte
+instead of being decoded and then judged: an overlong sequence decodes to a
+perfectly ordinary codepoint, so a check made afterwards is a check somebody
+can forget, and the one place it is easy to forget is the one that matters.
+The case that earns its place in the suite is a truncated sequence followed by
+a newline, since a decoder that swallows the byte it could not use eats the
+newline and the rest of the line with it.
+
+**Most of the glyphs are not drawings.** `tools/font.py` composes an accented
+letter from the letter this font already has plus a mark, and parses the ASCII
+table out of `font.rs` rather than keeping a second copy that would drift. The
+rule is uniform: the mark occupies rows 0 and 1 and the letter occupies rows 2
+to 7, which for lowercase is the existing glyph untouched and for uppercase is
+a six-row form with one interior row removed. Box drawing is generated from
+segment tables and uses all eight bits of the cell, breaking the font's own
+5-wide grid on purpose, because a line that stops short of the cell edge does
+not join the line in the cell beside it.
+
+```powershell
+.\tools\venv\Scripts\python.exe tools\font.py --proof          # look at every glyph
+.\tools\venv\Scripts\python.exe tools\font.py --proof 0xE9      # or just one
+.\tools\venv\Scripts\python.exe tools\font.py --emit           # rewrite the table
+```
+
+`font` in the shell prints the whole coverage sheet on the panel. That is the
+only check that settles a bitmap font, and the only one that reaches the GF63,
+where there is no UART and the framebuffer is the entire diagnostic. `diag
+text` checks what a program can check: that the table is sorted and every
+entry is reachable by search, that an accented letter still contains the
+letter it was composed from, that a cell is still two bytes, and ten claims
+about malformed input.
+
+**What it does not cover, said here rather than discovered later.** No CJK,
+which needs a 16x16 cell and a table three orders of magnitude larger. No
+combining marks, no shaping, no bidirectional text and no grapheme clusters:
+one codepoint is one cell, so an 'e' followed by U+0301 draws as two cells and
+not as an accented e. Anything with no glyph draws a hollow box, deliberately,
+because a font that quietly substituted something close would be lying about
+what it has.
+
+**A byte count stopped being a column count, and that broke code that had
+been right for years.** Truncating a label with `&s[..room]` where `room` is a
+column count does not produce a mangled label, it panics.
+`theme::head_chars` and `tail_chars` are the safe forms and every display
+truncation goes through them. `Write` wrapped its lines by byte and split
+characters in half; `edit` decoded a file into `Vec<char>` correctly and then
+mapped everything above 127 to a question mark on the last step before the
+screen; `browse` carried a comment saying byte indexing was safe because
+everything reaching the screen was Latin-1, which was true right up until it
+was not.
+
 ### File formats
 
 `src/fmt/` answers what a file is and hands back its structure. The namespace
@@ -1850,6 +1925,11 @@ from those runs do not belong in a claim.
 
 ## Gotchas that have already cost time
 
+- **A byte count is not a column count.** Every glyph is one cell wide, so a
+  width is a *character* count, and the two were the same number only while
+  the font was ASCII. `s.len()` for a label width overstates it by one per
+  accent; `&s[..n]` with a column count panics outright. Use
+  `theme::text_w_of` and `theme::head_chars`/`tail_chars`.
 - **`extern "C"` on `x86_64-unknown-uefi` is Microsoft x64 and not System V.**
   The context switch is pinned to `extern "sysv64"` explicitly.
 - **Do not take the max over every UEFI memory descriptor.** OVMF describes

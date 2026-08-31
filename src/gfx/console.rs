@@ -55,13 +55,129 @@ pub const LTCYAN: u8 = 11;
 const MAX_COLS: usize = 128;
 const MAX_ROWS: usize = 72;
 
-#[derive(Clone, Copy)]
-struct Cell {
-    ch: u8,
-    fg: u8,
+/// One cell: a glyph index and a palette colour, packed into two bytes.
+///
+/// Packed rather than a `char` beside a `u8`, and the reason is *where* this
+/// grid is built. `console::init` runs twelve lines before `cpu::idt::init`,
+/// so it is constructed at a point in boot where a fault is a triple fault:
+/// no message, no register dump, an instant reboot. Two consoles of 128x72
+/// cells cost 36 KB today, and a `char` would take that to 147 KB and put an
+/// extra 18 KB temporary on the boot stack in exactly the window where
+/// running out of stack explains nothing at all. Twelve bits address four
+/// thousand glyphs against the three hundred and twenty-five this font draws,
+/// so nothing that was going to be used is being given up.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Cell(u16);
+
+impl Cell {
+    const fn new(glyph: u16, fg: u8) -> Self {
+        Cell((glyph << 4) | (fg & 0x0F) as u16)
+    }
+
+    #[inline]
+    fn glyph(self) -> u16 {
+        self.0 >> 4
+    }
+
+    #[inline]
+    fn fg(self) -> u8 {
+        (self.0 & 0x0F) as u8
+    }
 }
 
-const BLANK: Cell = Cell { ch: b' ', fg: LTGRAY };
+const BLANK: Cell = Cell::new(font::SPACE, LTGRAY);
+
+/// Twelve bits of index and four of colour. Asserted rather than remembered:
+/// adding the three-hundredth glyph is safe and adding the four-thousandth is
+/// not, and the failure is silent corruption of every cell rather than an
+/// error anybody would see.
+const _: () = assert!(font::MAX_INDEX < 0x1000);
+
+/// What one byte did to the decoder.
+enum Step {
+    /// Part of a sequence. Nothing to draw yet.
+    More,
+    Emit(char),
+    /// Malformed. The caller draws one replacement box.
+    Bad,
+    /// Malformed, and this byte begins something valid. Both are drawn.
+    BadThen(char),
+}
+
+/// Incremental UTF-8, because this console is fed one byte at a time.
+///
+/// `write_bytes` is handed the bytes of a `&str` and could decode the whole
+/// thing, but `put_char` is also the keyboard's path and the recovery
+/// console's, and a decoder that only worked on complete strings would leave
+/// those two able to print half a character. So the state lives here and
+/// every byte goes through the same door.
+///
+/// Overlong forms are refused rather than decoded and then judged: an
+/// overlong sequence decodes to a perfectly ordinary codepoint, so a check
+/// after the fact has to remember to make it, and the one place it is easy to
+/// forget is the one place it matters. `min` is the smallest codepoint a
+/// sequence of that length is allowed to carry.
+#[derive(Clone, Copy)]
+struct Utf8 {
+    acc: u32,
+    need: u8,
+    min: u32,
+}
+
+impl Utf8 {
+    const IDLE: Utf8 = Utf8 { acc: 0, need: 0, min: 0 };
+
+    fn start(&mut self, b: u8) -> Step {
+        match b {
+            0x00..=0x7F => Step::Emit(b as char),
+            0xC2..=0xDF => {
+                *self = Utf8 { acc: (b & 0x1F) as u32, need: 1, min: 0x80 };
+                Step::More
+            }
+            0xE0..=0xEF => {
+                *self = Utf8 { acc: (b & 0x0F) as u32, need: 2, min: 0x800 };
+                Step::More
+            }
+            0xF0..=0xF4 => {
+                *self = Utf8 { acc: (b & 0x07) as u32, need: 3, min: 0x10000 };
+                Step::More
+            }
+            // 0xC0 and 0xC1 can only ever open an overlong encoding of an
+            // ASCII character, and 0xF5 upwards is past the last codepoint
+            // there is. Neither has a valid continuation, so neither is
+            // worth carrying state for.
+            _ => Step::Bad,
+        }
+    }
+
+    fn feed(&mut self, b: u8) -> Step {
+        if self.need == 0 {
+            return self.start(b);
+        }
+        if b & 0xC0 == 0x80 {
+            self.acc = (self.acc << 6) | (b & 0x3F) as u32;
+            self.need -= 1;
+            if self.need > 0 {
+                return Step::More;
+            }
+            let cp = self.acc;
+            let min = self.min;
+            *self = Utf8::IDLE;
+            return match char::from_u32(cp) {
+                Some(c) if cp >= min => Step::Emit(c),
+                _ => Step::Bad,
+            };
+        }
+        // The sequence was cut short. Report it and then start again *on this
+        // byte* rather than consuming it: swallowing it would eat the newline
+        // that ends a truncated line, and with it the line after that.
+        *self = Utf8::IDLE;
+        match self.start(b) {
+            Step::Emit(c) => Step::BadThen(c),
+            _ => Step::Bad,
+        }
+    }
+}
 
 pub struct Console {
     fb: Framebuffer,
@@ -83,6 +199,8 @@ pub struct Console {
     oy: u32,
     /// False while the boot screen owns the framebuffer.
     visible: bool,
+    /// Half-decoded multi-byte character, if the last byte was inside one.
+    utf8: Utf8,
     /// Whether painted cells are pushed straight to the screen.
     ///
     /// Set when `fb` is the compositor's back buffer: the console prints on
@@ -117,6 +235,7 @@ impl Console {
             ox: x,
             oy: y,
             visible: true,
+            utf8: Utf8::IDLE,
             flush: false,
         }
     }
@@ -218,8 +337,8 @@ impl Console {
             return;
         }
         let cell = self.cells[r][c];
-        let rows = font::glyph(cell.ch);
-        let fg = self.fb.encode(PALETTE[(cell.fg & 0x0F) as usize]);
+        let rows = font::rows(cell.glyph());
+        let fg = self.fb.encode(PALETTE[cell.fg() as usize]);
         let bg = self.fb.encode(self.bg);
         let s = self.scale;
         let ox = self.ox + c as u32 * font::GLYPH_W * s;
@@ -281,7 +400,7 @@ impl Console {
         self.fb.rect(self.ox, self.oy, w, h, self.bg);
         for r in 0..self.rows {
             for c in 0..self.cols {
-                if self.cells[r][c].ch == b' ' {
+                if self.cells[r][c].glyph() == font::SPACE {
                     continue;
                 }
                 self.paint_cell(r, c);
@@ -327,39 +446,62 @@ impl Console {
         }
     }
 
+    /// One byte of a UTF-8 stream.
+    ///
+    /// Still bytes and not `char`, because the two callers outside this file
+    /// are a keyboard interrupt and the recovery console, and neither has a
+    /// decoded character to hand. A byte that completes nothing draws
+    /// nothing, which is the only visible difference from before: a two-byte
+    /// character used to draw two boxes and now draws one letter.
     pub fn put_char(&mut self, ch: u8) {
-        match ch {
-            b'\n' => {
+        match self.utf8.feed(ch) {
+            Step::More => {}
+            Step::Emit(c) => self.put_cp(c),
+            Step::Bad => self.put_glyph(font::UNKNOWN),
+            Step::BadThen(c) => {
+                self.put_glyph(font::UNKNOWN);
+                self.put_cp(c);
+            }
+        }
+    }
+
+    /// One decoded character.
+    pub fn put_cp(&mut self, c: char) {
+        match c {
+            '\n' => {
                 self.newline();
                 return;
             }
-            b'\r' => {
+            '\r' => {
                 self.col = 0;
                 return;
             }
-            b'\t' => {
+            '\t' => {
                 let next = (self.col + 4) & !3;
                 while self.col < next && self.col < self.cols {
-                    self.put_char(b' ');
+                    self.put_cp(' ');
                 }
                 return;
             }
-            8 => {
+            '\u{8}' => {
                 // Backspace: erase in place so the shell can edit a line.
                 if self.col > 0 {
                     self.col -= 1;
-                    self.cells[self.row][self.col] = Cell { ch: b' ', fg: self.fg };
+                    self.cells[self.row][self.col] = Cell::new(font::SPACE, self.fg);
                     self.draw_cell(self.row, self.col);
                 }
                 return;
             }
             _ => {}
         }
+        self.put_glyph(font::index_of(c));
+    }
 
+    fn put_glyph(&mut self, glyph: u16) {
         if self.col >= self.cols {
             self.newline();
         }
-        self.cells[self.row][self.col] = Cell { ch, fg: self.fg };
+        self.cells[self.row][self.col] = Cell::new(glyph, self.fg);
         self.draw_cell(self.row, self.col);
         self.col += 1;
     }
@@ -664,4 +806,67 @@ macro_rules! kprint {
 macro_rules! kprintln {
     () => { $crate::kprint!("\n") };
     ($($arg:tt)*) => { $crate::kprint!("{}\n", format_args!($($arg)*)) };
+}
+
+/// The decoder, checked apart from any framebuffer.
+///
+/// Deliberately against `Utf8` and not against a `Console`: a console needs a
+/// framebuffer, and what is being claimed here is arithmetic on bytes. The
+/// cases that earn their place are the malformed ones, because a decoder that
+/// only handles good input is a decoder nobody has tested.
+pub fn selftest() -> bool {
+    let mut ok = true;
+    fn claim(ok: &mut bool, good: bool, what: &str) {
+        crate::kprintln!("  {}   {}", if good { "ok " } else { "FAIL" }, what);
+        *ok &= good;
+    }
+
+    /// Feed a byte string and collect what came out, with '\u{FFFD}' standing
+    /// for each replacement the console would have drawn.
+    fn decode(bytes: &[u8]) -> alloc::string::String {
+        let mut d = Utf8::IDLE;
+        let mut out = alloc::string::String::new();
+        for &b in bytes {
+            match d.feed(b) {
+                Step::More => {}
+                Step::Emit(c) => out.push(c),
+                Step::Bad => out.push('\u{FFFD}'),
+                Step::BadThen(c) => {
+                    out.push('\u{FFFD}');
+                    out.push(c);
+                }
+            }
+        }
+        out
+    }
+
+    claim(&mut ok, decode(b"plain ascii") == "plain ascii", "ASCII goes through untouched");
+    claim(&mut ok, decode("café".as_bytes()) == "café", "a two-byte character is one character");
+    claim(&mut ok, decode("┌─┐".as_bytes()) == "┌─┐", "and a three-byte one is too");
+    claim(&mut ok, decode("𝄞".as_bytes()) == "𝄞", "and a four-byte one, which nothing here can draw");
+
+    // The case that matters most, and the one a decoder written in a hurry
+    // gets wrong: a sequence cut off mid-way must not swallow what follows
+    // it. Consuming the newline here loses the rest of the line as well.
+    claim(&mut ok, decode(b"a\xC3\nb") == "a\u{FFFD}\nb",
+        "a truncated sequence reports itself and gives the next byte back");
+
+    claim(&mut ok, decode(b"\xC0\xAF") == "\u{FFFD}\u{FFFD}",
+        "an overlong '/' is refused, so it cannot become a path separator");
+    claim(&mut ok, decode(b"\xE0\x80\xAF") == "\u{FFFD}",
+        "and so is the three-byte spelling of the same trick");
+    claim(&mut ok, decode(b"\xED\xA0\x80") == "\u{FFFD}", "a surrogate is not a character");
+    claim(&mut ok, decode(b"\xF5\x80\x80\x80") == "\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}",
+        "nor is anything above the last codepoint");
+    claim(&mut ok, decode(b"\x80\x80") == "\u{FFFD}\u{FFFD}", "a stray continuation byte is not a character");
+
+    // A cell is two bytes and the grid is the largest static structure here,
+    // so this is checked rather than assumed: it is the reason the cell packs
+    // at all, and `console::init` runs before there is an interrupt table to
+    // report having run out of stack.
+    claim(&mut ok, core::mem::size_of::<Cell>() == 2, "a cell is still two bytes");
+    let c = Cell::new(font::index_of('é'), YELLOW);
+    claim(&mut ok, c.glyph() == font::index_of('é') && c.fg() == YELLOW,
+        "and packing a glyph beside a colour loses neither");
+    ok
 }

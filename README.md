@@ -35,6 +35,7 @@ Works, and verified:
 | Memory | Physical frame allocator, identity paging to 4 GiB, coalescing heap |
 | Tasks | Cooperative and preemptive at 100 Hz, `sysv64` context switch |
 | Graphics | GOP framebuffer, Windows-styled desktop, window manager, taskbar, three apps |
+| Text | 325 glyphs at 8x8, UTF-8 in the console, Latin-1, Greek, box drawing and maths |
 | Storage | NVMe, content-addressed object store, Merkle trees, snapshots, ranged write gate |
 | Network | ARP, IPv4, ICMP, UDP, TCP, DHCP, DNS, TLS 1.3 with chain validation |
 | Drivers | e1000, RTL8168, xHCI (USB 3), CDC-ECM USB Ethernet |
@@ -417,17 +418,17 @@ python tools/drive.py --iso glados.iso "ls /"
 **There is no `cargo test`.** This is a `no_std` UEFI binary with no host test
 runner, so verification is the boot selftests plus driving QEMU.
 
-At boot the system runs twenty-two selftest sections, printing `ok` or `FAIL`
-per line: heap, timer, clock, the namespace's Merkle addressing, fifteen sets
-of published cipher vectors, fault handling, running machine code from the
-heap, file type detection, constrained decoding, the agent loop, the linear
-probe, the situation planner, the initiative policy, the self-modification
-gate, corpus bundles, QDoRA adapters, the backward kernels, and the trainer's
-arithmetic.
+At boot the system runs twenty-three selftest sections, printing `ok` or
+`FAIL` per line: heap, timer, clock, the namespace's Merkle addressing,
+fifteen sets of published cipher vectors, fault handling, running machine code
+from the heap, file type detection, the glyph table and the UTF-8 decoder,
+constrained decoding, the agent loop, the linear probe, the situation planner,
+the initiative policy, the self-modification gate, corpus bundles, QDoRA
+adapters, the backward kernels, and the trainer's arithmetic.
 
-Eighteen suites can be re-run on demand with `diag all` or `diag <name>`:
+Twenty suites can be re-run on demand with `diag all` or `diag <name>`:
 crypto, rng, json, aiksi, sysbox, smp, update, model, wgate, skill, desk,
-census, migrate, mt, power, fmt, differ and code. Registration is deliberately awkward: a suite
+census, migrate, mt, power, fmt, differ, code and text. Registration is deliberately awkward: a suite
 added without a slot in the results table fails a compile-time assertion rather
 than silently never recording a verdict.
 

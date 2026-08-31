@@ -552,20 +552,16 @@ fn push_num(s: &mut String, mut n: usize) {
 }
 
 /// The last `n` characters, so a long URL shows its path rather than its
-/// scheme. Byte-indexed deliberately: everything here is Latin-1 by the time
-/// it reaches the screen.
+/// scheme.
+///
+/// It counted bytes, on a note saying everything here was Latin-1 by the time
+/// it reached the screen. That was true while the console drew one cell per
+/// byte and stopped being true the moment it decoded UTF-8, and a page title
+/// with an accent in it turned a cosmetic trim into a panic.
 fn tail(s: &str, n: usize) -> &str {
-    if s.len() <= n {
-        s
-    } else {
-        &s[s.len() - n..]
-    }
+    super::theme::tail_chars(s, n)
 }
 
 fn tail_front(s: &str, n: usize) -> &str {
-    if s.len() <= n {
-        s
-    } else {
-        &s[..n]
-    }
+    super::theme::head_chars(s, n)
 }

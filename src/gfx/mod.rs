@@ -607,16 +607,31 @@ impl Framebuffer {
         let bg_raw = self.encode(bg);
         let scale = scale.max(1);
 
-        for (i, ch) in s.bytes().enumerate() {
-            let glyph = font::glyph(ch);
+        for (i, ch) in s.chars().enumerate() {
             let ox = x + i as u32 * font::GLYPH_W * scale;
-            for (gy, bits) in glyph.iter().enumerate() {
-                for gx in 0..font::GLYPH_W {
-                    let raw = if bits & (0x80 >> gx) != 0 { fg_raw } else { bg_raw };
-                    for dy in 0..scale {
-                        for dx in 0..scale {
-                            self.put(ox + gx * scale + dx, y + gy as u32 * scale + dy, raw);
-                        }
+            self.blit_glyph(ox, y, font::index_of(ch), fg_raw, bg_raw, scale);
+        }
+    }
+
+    /// One glyph by index, for a caller that already resolved it.
+    ///
+    /// `edit.rs` keeps a cell grid of indices, and rebuilding a `&str` per
+    /// cell to hand back to `draw_text` was how it drew before -- which is
+    /// also why it could not draw anything a single byte could not spell.
+    pub fn draw_glyph(&self, x: u32, y: u32, glyph: u16, fg: Color, bg: Color, scale: u32) {
+        let fg_raw = self.encode(fg);
+        let bg_raw = self.encode(bg);
+        self.blit_glyph(x, y, glyph, fg_raw, bg_raw, scale.max(1));
+    }
+
+    fn blit_glyph(&self, x: u32, y: u32, glyph: u16, fg_raw: u32, bg_raw: u32, scale: u32) {
+        let rows = font::rows(glyph);
+        for (gy, bits) in rows.iter().enumerate() {
+            for gx in 0..font::GLYPH_W {
+                let raw = if bits & (0x80 >> gx) != 0 { fg_raw } else { bg_raw };
+                for dy in 0..scale {
+                    for dx in 0..scale {
+                        self.put(x + gx * scale + dx, y + gy as u32 * scale + dy, raw);
                     }
                 }
             }
@@ -871,4 +886,17 @@ pub fn bench() {
     kprintln!("  console redraw_all    {:>7} us  (max {})", lo, hi);
 
     desk::draw();
+}
+
+
+/// Everything about turning characters into pixels.
+///
+/// One suite rather than two, because the halves are only correct together:
+/// a decoder that produces the right codepoints and a table that draws the
+/// wrong glyph for them is a console that is wrong, and either half on its
+/// own would report itself fine.
+pub fn text_selftest() -> bool {
+    let a = font::selftest();
+    let b = console::selftest();
+    a && b
 }
