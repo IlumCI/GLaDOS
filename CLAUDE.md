@@ -573,7 +573,7 @@ update on top of itself.
 There is no `cargo test`. This is a `no_std` UEFI binary with no host test
 runner, so **verification is the boot selftests plus driving QEMU.**
 
-At boot the system runs **twenty-four selftest sections**, twenty-one of which `diag`
+At boot the system runs **twenty-six selftest sections**, twenty-three of which `diag`
 also re-runs as named suites on demand (the `aiksi` section covers the capability gate by name and never by
 calling -- half that table pokes memory, drives I/O ports or paints over the
 screen, and a suite that called every row to prove it exists would be
@@ -1216,6 +1216,75 @@ across the cores, each writing a per-chunk pattern through its whole block and
 reading it back. A heap that handed one block to two cores fails the read-back,
 one whose free list corrupted fails a later request, and one that lost a block
 fails the closing check that the heap is exactly where it started.
+
+### ACPI, and the battery under it
+
+`src/acpi/` is an AML interpreter. It exists because battery state on a laptop
+lives behind bytecode the firmware ships in its DSDT, and there is no way to
+read a charge without running that bytecode. Two cheaper routes were declined
+and the reason was testability rather than effort: Linux's `msi-ec` approach of
+hardcoded Embedded Controller offsets is three hundred lines and works on one
+laptop, and QEMU emulates no MSI controller, so it would have shipped in the
+state the RTL8188EU driver is in.
+
+**The parser must be exact and the evaluator may be partial.** Those are
+opposite obligations and separating them is what made this bounded. AML carries
+package lengths inside itself, so one misread length desynchronises the rest of
+a table: a parser that is ninety per cent right produces a complete-looking
+namespace full of names the firmware never wrote. So the only acceptable result
+is consuming the table to its last byte, and that is asserted. The evaluator
+runs only methods somebody names, and an opcode with no arm is one method
+returning an error that carries the opcode and its offset.
+
+**The walk never enters a method body.** Everything that declares a name is
+package-delimited, so bodies are stepped over by length. That matters because
+the one hard problem in AML parsing lives inside them: a bare name followed by
+arguments is a call whose argument count depends on a declaration that may be
+in a table not yet loaded. ACPICA needs multiple passes for it. By the time the
+evaluator meets it, the namespace is complete and the arity is known.
+
+**Test against real firmware, not QEMU's.** QEMU's DSDT is nine kilobytes with
+no battery. The GF63's is 575, and Windows hands it over through
+`GetSystemFirmwareTable`. `-acpitable` caps an injected table at 65,535 bytes,
+so it travels the way a corpus bundle does:
+
+```powershell
+.\tools\venv\Scripts\python.exe tools\mkfat.py .qemu\nvme.img out\gf63.aml
+```
+
+then `fat get /GF63.AML /tmp/gf63` and `acpi load /tmp/gf63` in the shell. That
+found four opcodes QEMU never exercises: a region offset given as a name, one
+computed with `Add`, a bare top-level `Store`, and the `CreateWordField`
+family. Nodes went 70, 2491, 3367, 5110, 5889.
+
+Bounded on three axes, because this is firmware bytecode in ring 0 and a fault
+outside a guard is fatal. A step budget, since `While (One) {}` is legal AML. A
+depth cap, since a method may call itself and there is no guard page. And
+nothing runs unasked: building the namespace executes nothing, which is why a
+top-level `Store` is stepped over rather than executed even though ACPI says it
+should run at table load.
+
+Region writes are off until `acpi unlock`. Reading a battery needs none, and a
+stray write to an embedded controller is a fan that stops or a charge threshold
+that moves, on hardware, permanently.
+
+**The unit is a field of the thing it measures.** `_BIF` element zero says
+whether the whole set is milliwatts or milliamps and machines differ, so a
+capacity in mAh over a rate in mW gives a number that looks like a time and is
+wrong by the battery's voltage. Everything converts once at the boundary. The
+percentage is computed *before* conversion, since remaining and last-full always
+share a unit and converting first would round twice.
+
+`0xFFFFFFFF` is ACPI's "unknown" and is refused rather than believed.
+
+Verbs: `acpi tables`, `acpi ns [path]`, `acpi eval <path> [args]`, `acpi load
+<blob>`, `acpi s5`, `acpi off`, `acpi unlock`, `battery`, `ec`. Suites `acpi`
+and `battery`.
+
+**What cannot be tested here.** QEMU models no embedded controller, so the EC's
+success path has never run: the ports answer 0xFF, both status bits look set
+forever, and only the timeout is proven. Every battery figure seen under
+emulation is the firmware's fallback branch rather than a reading.
 
 ### Text, and the font
 

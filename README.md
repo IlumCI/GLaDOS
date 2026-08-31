@@ -48,6 +48,8 @@ Works, and verified:
 | Codegen | An x86-64 back end for the integer subset, checked against the interpreter |
 | Formats | Detection and structure for text, markdown, json, jsonl, xml, csv, ini and eight languages |
 | Power | Digital thermal sensor, measured frequency, HWP governors, all behind a CPUID gate |
+| ACPI | An AML interpreter: namespace, evaluator, operation regions, embedded controller |
+| Battery | Charge, health and time remaining from the firmware's own bytecode, and S5 power-off |
 | Training | Gradients, Adam, QDoRA over the classifier and over every q/k/v site |
 | Self-modification | Variant lineage, a judge council, an append-only ledger, O(1) rollback |
 | Updates | Signed staged images swapped before `ExitBootServices`, with rollback |
@@ -426,9 +428,9 @@ constrained decoding, the agent loop, the linear probe, the situation planner,
 the initiative policy, the self-modification gate, corpus bundles, QDoRA
 adapters, the backward kernels, and the trainer's arithmetic.
 
-Twenty-one suites can be re-run on demand with `diag all` or `diag <name>`:
+Twenty-three suites can be re-run on demand with `diag all` or `diag <name>`:
 crypto, rng, json, aiksi, sysbox, smp, update, model, wgate, skill, desk,
-census, migrate, mt, power, fmt, differ, code, text and hid. Registration is deliberately awkward: a suite
+census, migrate, mt, power, fmt, differ, code, text, hid, acpi and battery. Registration is deliberately awkward: a suite
 added without a slot in the results table fails a compile-time assertion rather
 than silently never recording a verdict.
 
