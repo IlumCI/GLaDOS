@@ -341,8 +341,13 @@ def sidebar_html(p, rel, releases):
                   for who, role in DEVELOPERS)
     b.append(('Developers', '<table class="facts">%s</table>' % tbl))
 
+    # Counted rather than written down. It said 25 while there were 23, which
+    # is what a hand-maintained number does the first time an article is
+    # merged into another.
+    n = len([f for f in os.listdir(os.path.join(DOCS, "wiki"))
+             if f.endswith(".html") and f != "index.html"])
     picks = "".join("<li>%s</li>" % a(p + h, t) for h, t in WIKI_PICKS)
-    picks += "<li>%s</li>" % a(p + "wiki/", "All 25 articles")
+    picks += "<li>%s</li>" % a(p + "wiki/", "All %d articles" % n)
     b.append(('Documentation', "<ul>%s</ul>" % picks))
 
     # One panel per box rather than one per element. The release box carries a
