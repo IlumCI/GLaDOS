@@ -421,8 +421,32 @@ def pages():
                 yield full, os.path.relpath(full, DOCS).replace("\\", "/")
 
 
+def current(releases):
+    """The release the site should present as the current one.
+
+    The newest release that actually carries images, which is not always the
+    newest release. The kernel image and its manifest are published by CI the
+    moment a tag lands; the ISOs are built by hand afterwards, so there is a
+    window where the latest release has no downloads in it. Taking
+    `releases[0]` blindly during that window empties the download table and
+    the front page, and the site then says the project has nothing to
+    download -- which is how it went out once already.
+
+    A release with no images is reported, so a release that never gets its
+    ISOs uploaded is visible instead of silently skipped.
+    """
+    for i, r in enumerate(releases):
+        if images_of(r):
+            if i:
+                print("  note: %s has no images yet; presenting %s"
+                      % (releases[0]["tag_name"], r["tag_name"]))
+            return r
+    print("  warning: no release has images; the download table will be empty")
+    return releases[0]
+
+
 def build_chrome(releases):
-    rel = releases[0]
+    rel = current(releases)
     changed, missed = 0, []
     for full, rl in pages():
         p = prefix_for(rl)
@@ -583,10 +607,32 @@ def ld_app(rel):
             % json.dumps(doc, separators=(",", ":")))
 
 
+def flash_example(rel):
+    """The dd line, naming an image that exists.
+
+    Hardcoded prose is exactly the failure this generator was written for. The
+    version sat at 1.2.27 in a code block a reader is meant to copy, which is
+    the one place a stale name costs somebody a download that 404s.
+
+    Names the default image, which is what the prose around it recommends for
+    real hardware, and falls back to the tag when a release has no images so
+    the block never reads "None".
+    """
+    imgs = [v for v in images_of(rel) if v["key"] == ""]
+    name = imgs[0]["name"] if imgs else "glados-%s.iso" % version_of(rel)
+    body = [
+        "# Linux / macOS. Check the device name first, this overwrites it",
+        "sudo dd if=%s of=/dev/sdX bs=4M status=progress oflag=sync"
+        % html.escape(name),
+    ]
+    return "<pre><code>" + chr(10).join(body) + "</code></pre>"
+
+
 DERIVED = {
     "download-table": download_table,
     "releases-table": releases_table,
     "archive-tree": archive_tree,
+    "flash-example": flash_example,
     "ld-app": ld_app,
 }
 
@@ -627,7 +673,7 @@ def build_sitemap(rel):
 
 
 def build_derived(releases):
-    rel = releases[0]
+    rel = current(releases)
     filled, missing = 0, []
     for full, rl in pages():
         with open(full, "r", encoding="utf-8") as fh:

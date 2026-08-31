@@ -1,0 +1,73 @@
+name: site
+
+# Regenerate the derived regions of docs/ from the Releases API and commit
+# them if anything moved.
+#
+# The download table, the front page's release list, the archive tree, the
+# news column and the sidebar's release box are all functions of what is
+# published. They used to be hand-written, went stale twice in a row, and both
+# times silently: every ISO link on the download page 404'd for a release and
+# a half because the assets had become version-stamped and the page had not.
+# tools/site.py exists to make those facts derived. This runs it.
+#
+# Why the triggers are what they are: a tag fires release.yml, which publishes
+# the kernel image within a few minutes, but the ISOs are built by hand
+# afterwards and uploading an asset fires no event at all. So the release
+# events catch the fast half, the schedule catches the slow half, and
+# workflow_dispatch is there for when you have just finished uploading and do
+# not want to wait for the schedule.
+
+on:
+  release:
+    types: [published, edited, released, deleted]
+  workflow_dispatch:
+  schedule:
+    # Daily. The window this closes is "ISOs uploaded, site not yet told".
+    - cron: "40 6 * * *"
+
+permissions:
+  contents: write
+
+# A schedule tick and a release event can land together, and two jobs both
+# committing to main means one of them force-pushes or fails. Queue them.
+concurrency:
+  group: site
+  cancel-in-progress: false
+
+jobs:
+  regenerate:
+    runs-on: ubuntu-latest
+    steps:
+      # main, never the tag: a release event checks out the tagged ref by
+      # default, and committing from there would put the change on a detached
+      # head that nothing ever sees.
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Regenerate
+        env:
+          # Lifts the API rate limit from 60/hour per runner IP, which is
+          # shared, to 1000/hour for this repository.
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 tools/site.py --build
+
+      # Committing comes before the check, deliberately. A broken link should
+      # be loud, and it should not also mean the site keeps serving last
+      # week's release because the job that would have updated it stopped one
+      # step early.
+      - name: Commit if anything moved
+        run: |
+          if git diff --quiet -- docs/; then
+            echo "  the site already matches what is published"
+            exit 0
+          fi
+          git -c user.name=IlumCI -c user.email=ilumbackup@gmail.com \
+            commit -qm "docs: regenerate from the releases API (${{ github.event_name }})" -- docs/
+          git push origin main
+          git show --stat --oneline HEAD | tail -n +2
+
+      - name: Check every link still resolves
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 tools/site.py --check
