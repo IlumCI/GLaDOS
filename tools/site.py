@@ -101,11 +101,11 @@ DEVELOPERS = [("IlumCI", "project admin, developer")]
 
 WIKI_PICKS = [
     ("wiki/glados-os.html", "GLaDOS OS"),
-    ("wiki/llm-in-kernel.html", "A model in the kernel"),
-    ("wiki/ring-0.html", "Ring 0"),
-    ("wiki/uefi-kernel.html", "UEFI as the kernel"),
-    ("wiki/gui.html", "The desktop"),
-    ("wiki/testing.html", "Testing without a runner"),
+    ("wiki/kernel.html", "The kernel"),
+    ("wiki/model.html", "The model"),
+    ("wiki/agent.html", "The agent"),
+    ("wiki/rsi.html", "Self-improvement"),
+    ("wiki/aiksi.html", "Aiksi, the language"),
 ]
 
 # "Summary" rather than "Home", which is what a forge called the page that
