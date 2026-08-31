@@ -407,6 +407,8 @@ def main():
     ap.add_argument('output')
     ap.add_argument('--efi', required=True, help='BOOTX64.EFI to boot')
     ap.add_argument('--payload', help='directory copied to \\GLADOS\\')
+    ap.add_argument('--no-license', action='store_true',
+                    help='build a payload with no licence file in it')
     ap.add_argument('--label', default='GLADOS')
     ap.add_argument('--cluster', type=int, default=0,
                     help='cluster size; 0 picks the smallest that fits')
@@ -429,10 +431,26 @@ def main():
         if not pdir.is_dir():
             raise SystemExit('not a directory: ' + str(pdir))
         g = Entry('GLADOS', 0)
-        for f in sorted(pdir.iterdir()):
-            if f.is_file():
-                g.children.append(Entry(f.name, f.stat().st_size, f))
-                payload_bytes += f.stat().st_size
+        files = [f for f in sorted(pdir.iterdir()) if f.is_file()]
+        # The model weights are Apache-2.0, and section 4(a) says a copy of the
+        # licence goes to whoever receives them. The README states that the ISO
+        # carries it; nothing made that true, because `esp/` is gitignored -- so
+        # the file lived on one machine and every image built anywhere else
+        # shipped without it. Refused rather than warned: a warning scrolls past
+        # in a build that then produces a perfectly bootable non-compliant disc.
+        if not args.no_license and not any(
+            f.name.upper().startswith('LICENSE') for f in files
+        ):
+            raise SystemExit(
+                'no LICENSE file in ' + str(pdir) + chr(10)
+                + '  The payload carries model weights, and their licence has to '
+                  'travel with them.' + chr(10)
+                + '  Copy licenses/qwen3-apache-2.0.txt in as LICENSE.TXT, or pass '
+                  '--no-license' + chr(10)
+                + '  if this payload genuinely has no licensed content in it.')
+        for f in files:
+            g.children.append(Entry(f.name, f.stat().st_size, f))
+            payload_bytes += f.stat().st_size
         root.children.append(g)
 
     # FAT32 is *defined* as having at least 65525 clusters -- below that the
