@@ -403,7 +403,7 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     init_smp(&acpi);
     init_keyboard(&acpi);
     gfx::splash::stage("self-test");
-    selftest();
+    selftest(&acpi);
 
     // Adopt the current thread of execution as task 0, then give it company.
     gfx::splash::stage("scheduler");
@@ -1007,7 +1007,7 @@ fn install_paging(boot: &BootInfo, frames: &mut mem::frame::EarlyFrames) {
 }
 
 /// Prove the exception path works while we are still expecting it to.
-fn selftest() {
+fn selftest(acpi_ref: &Option<acpi::Acpi>) {
     console::set_color(LTGREEN);
     kprintln!("\n[selftest] heap:");
     console::set_color(LTGRAY_IDX);
@@ -1175,6 +1175,14 @@ fn selftest() {
     if !fmt::selftest() {
         console::set_color(LTRED);
         kprintln!("[selftest] file type handling is unsound");
+        console::set_color(LTGRAY_IDX);
+    }
+
+    kprintln!("
+[selftest] acpi tables:");
+    if !acpi::selftest(acpi_ref) {
+        console::set_color(LTRED);
+        kprintln!("[selftest] the tables cannot be trusted, and the namespace comes from them");
         console::set_color(LTGRAY_IDX);
     }
 

@@ -64,6 +64,44 @@ pub struct OverrideInfo {
     pub flags: u16,
 }
 
+/// One table as it was found: where it is, how long it says it is, and
+/// whether its bytes add up.
+///
+/// Kept, where before every pointer was read once and dropped. Five integers
+/// were all anything wanted while ACPI meant the MADT and a timer port; the
+/// moment the DSDT is going to be *executed* the questions become which tables
+/// exist, whether each one is intact, and where the bytecode starts.
+#[derive(Clone, Copy, Default)]
+pub struct Table {
+    pub sig: [u8; 4],
+    pub addr: u64,
+    pub len: u32,
+    /// Whether the whole declared length sums to zero.
+    pub sound: bool,
+}
+
+impl Table {
+    pub fn name(&self) -> &str {
+        core::str::from_utf8(&self.sig).unwrap_or("????")
+    }
+
+    /// The bytes after the 36-byte header, which for a DSDT or SSDT is AML.
+    ///
+    /// # Safety
+    /// Only meaningful for a table this module found and checksummed. ACPI
+    /// memory is identity-mapped write-back and is never handed to the frame
+    /// allocator or the heap, so the pointer stays valid for the life of the
+    /// machine.
+    pub unsafe fn body(&self) -> &'static [u8] {
+        let len = (self.len as usize).saturating_sub(SDT_HEADER_LEN);
+        unsafe { core::slice::from_raw_parts((self.addr as *const u8).add(SDT_HEADER_LEN), len) }
+    }
+}
+
+/// How many tables are recorded. A laptop has a dozen; the SSDT count is what
+/// varies and eight of those is already unusual.
+pub const MAX_TABLES: usize = 32;
+
 /// Enough for any laptop, and a bound rather than an allocation: the MADT is
 /// parsed before the heap exists.
 pub const MAX_CPUS: usize = 64;
@@ -93,6 +131,16 @@ pub struct Acpi {
     /// ACPI PM timer I/O port. A fixed 3.579545 MHz clock, and a useful
     /// independent reference if PIT calibration ever looks wrong.
     pub pm_timer: Option<u32>,
+    /// Every table found, including the ones nothing parses. Recorded so a
+    /// missing one is a visible absence rather than a silent `_ => {}`.
+    pub tables: [Table; MAX_TABLES],
+    pub table_count: usize,
+    /// The DSDT, reached through the FADT rather than through the XSDT, since
+    /// it is the one table the root list does not point at.
+    pub dsdt: Option<Table>,
+    /// How many tables failed their checksum. Loud, because a table that does
+    /// not add up is one this kernel is about to read as bytecode.
+    pub unsound: usize,
 }
 
 impl Acpi {
@@ -109,7 +157,41 @@ impl Acpi {
             hpet: None,
             mcfg: None,
             pm_timer: None,
+            tables: [Table { sig: [0; 4], addr: 0, len: 0, sound: false }; MAX_TABLES],
+            table_count: 0,
+            dsdt: None,
+            unsound: 0,
         }
+    }
+
+    /// Record one table. Silently drops past `MAX_TABLES`, and the count says
+    /// so by reaching the cap.
+    fn note(&mut self, sig: [u8; 4], addr: u64, len: u32, sound: bool) {
+        if !sound {
+            self.unsound += 1;
+        }
+        if self.table_count < MAX_TABLES {
+            self.tables[self.table_count] = Table { sig, addr, len, sound };
+            self.table_count += 1;
+        }
+    }
+
+    /// Every table whose signature matches, in the order found.
+    ///
+    /// A plural because SSDTs are a plural: firmware routinely splits the
+    /// namespace across several, and taking only the first is how half a
+    /// machine's devices go missing.
+    pub fn tables_named(&self, sig: &[u8; 4]) -> impl Iterator<Item = Table> + '_ {
+        let sig = *sig;
+        self.tables[..self.table_count].iter().copied().filter(move |t| t.sig == sig)
+    }
+
+    /// Every table carrying AML: the DSDT, then each SSDT in order.
+    ///
+    /// Order matters and is not cosmetic. An SSDT may extend a scope the DSDT
+    /// defined, so loading them out of order leaves names unresolvable.
+    pub fn aml_tables(&self) -> impl Iterator<Item = Table> + '_ {
+        self.dsdt.into_iter().chain(self.tables_named(b"SSDT"))
     }
 
     /// Resolve a legacy ISA IRQ to its global system interrupt, honouring any
@@ -199,6 +281,12 @@ pub unsafe fn parse(rsdp: *const c_void) -> Option<Acpi> {
                 *b = rd_u8(t, j);
             }
             let len = rd_u32(t, 4) as usize;
+            // Checked here, once, for every table. Before this only the RSDP
+            // was validated, which was defensible while the tables supplied
+            // five integers and stops being defensible now that one of them is
+            // about to be run as bytecode.
+            let sound = len >= SDT_HEADER_LEN && checksum_ok(t, len);
+            acpi.note(tsig, table, len as u32, sound);
 
             match &tsig {
                 b"APIC" => parse_madt(t, len, &mut acpi),
@@ -215,6 +303,28 @@ pub unsafe fn parse(rsdp: *const c_void) -> Option<Acpi> {
                         let port = rd_u32(t, 76);
                         if port != 0 {
                             acpi.pm_timer = Some(port);
+                        }
+                    }
+                    // The DSDT is the one table the root list does not point
+                    // at: it hangs off the FADT instead. X_DSDT at 140 is the
+                    // 64-bit field and wins when it is present, because on a
+                    // machine with tables above 4 GiB the 32-bit field at 40
+                    // is zero rather than wrong.
+                    let mut d = 0u64;
+                    if len >= 148 {
+                        d = rd_u64(t, 140);
+                    }
+                    if d == 0 && len >= 44 {
+                        d = rd_u32(t, 40) as u64;
+                    }
+                    if d != 0 {
+                        let p = d as *const u8;
+                        let dlen = rd_u32(p, 4) as usize;
+                        if dlen >= SDT_HEADER_LEN {
+                            let ok = checksum_ok(p, dlen);
+                            acpi.note(*b"DSDT", d, dlen as u32, ok);
+                            acpi.dsdt =
+                                Some(Table { sig: *b"DSDT", addr: d, len: dlen as u32, sound: ok });
                         }
                     }
                 }
@@ -290,4 +400,78 @@ unsafe fn parse_madt(t: *const u8, len: usize, acpi: &mut Acpi) {
             off += elen;
         }
     }
+}
+
+/// Every table found, with its verdict.
+pub fn report(a: &Acpi) {
+    crate::kprintln!("  {} table(s) from the root list", a.table_count);
+    for i in 0..a.table_count {
+        let t = a.tables[i];
+        crate::kprintln!(
+            "  {}  {:#012x}  {:>7} bytes  {}",
+            t.name(),
+            t.addr,
+            t.len,
+            if t.sound { "ok" } else { "CHECKSUM FAILED" }
+        );
+    }
+    match a.dsdt {
+        Some(d) => {
+            let aml: usize = a.aml_tables().map(|t| t.len as usize).sum::<usize>()
+                - (a.aml_tables().count() * SDT_HEADER_LEN);
+            crate::kprintln!(
+                "  {} byte(s) of AML across {} table(s); the DSDT is {} of it",
+                aml,
+                a.aml_tables().count(),
+                d.len as usize - SDT_HEADER_LEN
+            );
+        }
+        None => crate::kprintln!("  no DSDT: the FADT named none, so there is no namespace"),
+    }
+    if a.unsound > 0 {
+        crate::kprintln!("  {} table(s) did not checksum -- do not trust what they say", a.unsound);
+    }
+}
+
+/// What can be checked about ACPI without a machine to check against.
+pub fn selftest(a: &Option<Acpi>) -> bool {
+    let mut ok = true;
+    fn claim(ok: &mut bool, good: bool, what: &str) {
+        crate::kprintln!("  {}   {}", if good { "ok " } else { "FAIL" }, what);
+        *ok &= good;
+    }
+
+    let Some(a) = a else {
+        claim(&mut ok, false, "ACPI was parsed at all");
+        return false;
+    };
+
+    claim(&mut ok, a.table_count > 0, "the root list named at least one table");
+    claim(&mut ok, a.unsound == 0, "and every table checksums");
+
+    // The FADT is what points at the DSDT, so a machine with one and no DSDT
+    // has a pointer this code failed to follow rather than firmware with no
+    // namespace.
+    let fadt = a.tables_named(b"FACP").next();
+    claim(&mut ok, fadt.is_some(), "there is a FADT");
+    if fadt.is_some() {
+        claim(&mut ok, a.dsdt.is_some(), "and the DSDT it names was reached");
+    }
+
+    if let Some(d) = a.dsdt {
+        claim(&mut ok, d.len as usize > SDT_HEADER_LEN, "the DSDT has a body");
+        // Read the first and last byte. If the table were not mapped this
+        // would fault rather than answer, which is the claim: ACPI memory
+        // survives ExitBootServices and is never handed to the allocator.
+        let body = unsafe { d.body() };
+        let touched = !body.is_empty() && (body[0] as usize + body[body.len() - 1] as usize) < 512;
+        claim(&mut ok, touched, "and its first and last byte are readable");
+    }
+
+    claim(
+        &mut ok,
+        a.aml_tables().count() >= a.dsdt.iter().count(),
+        "the AML list starts with the DSDT and adds every SSDT",
+    );
+    ok
 }

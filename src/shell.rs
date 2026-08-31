@@ -2129,6 +2129,14 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             kprintln!("  {} ticks  ({}.{:02} s at {} Hz)", t, t / hz, (t % hz) * 100 / hz, hz);
             kprintln!("  apic timer calibrated at {} Hz", lapic::timer_hz());
         }
+        "acpi" if rest.trim() == "tables" => match acpi {
+            Some(a) => crate::acpi::report(a),
+            None => {
+                console::set_color(LTRED);
+                kprintln!("  ACPI was not parsed");
+                console::set_color(WHITE);
+            }
+        },
         "acpi" => match acpi {
             Some(a) => {
                 kprintln!("  revision {}  cpus {}", a.revision, a.cpus);
@@ -2141,6 +2149,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     let o = a.overrides[i];
                     kprintln!("  irq {} -> gsi {}  flags {:#06x}", o.source, o.gsi, o.flags);
                 }
+                kprintln!("  {} tables ('acpi tables' for the list)", a.table_count);
             }
             None => {
                 console::set_color(LTRED);
