@@ -573,7 +573,7 @@ update on top of itself.
 There is no `cargo test`. This is a `no_std` UEFI binary with no host test
 runner, so **verification is the boot selftests plus driving QEMU.**
 
-At boot the system runs **twenty-three selftest sections**, twenty of which `diag`
+At boot the system runs **twenty-four selftest sections**, twenty-one of which `diag`
 also re-runs as named suites on demand (the `aiksi` section covers the capability gate by name and never by
 calling -- half that table pokes memory, drives I/O ports or paints over the
 screen, and a suite that called every row to prove it exists would be

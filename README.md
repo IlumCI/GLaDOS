@@ -38,7 +38,7 @@ Works, and verified:
 | Text | 325 glyphs at 8x8, UTF-8 in the console, Latin-1, Greek, box drawing and maths |
 | Storage | NVMe, content-addressed object store, Merkle trees, snapshots, ranged write gate |
 | Network | ARP, IPv4, ICMP, UDP, TCP, DHCP, DNS, TLS 1.3 with chain validation |
-| Drivers | e1000, RTL8168, xHCI (USB 3), CDC-ECM USB Ethernet |
+| Drivers | e1000, RTL8168, xHCI (USB 3), CDC-ECM USB Ethernet, USB keyboards and mice |
 | Crypto | SHA-1/256/384, HMAC/HKDF, AES, ChaCha20-Poly1305, X25519, RSA, ECDSA |
 | Model | Qwen3, Qwen3.5 hybrids and SmolLM2, int8, in-kernel inference |
 | Routing | Constrained decoding over the live applet table, plus a closed-form probe |
@@ -426,9 +426,9 @@ constrained decoding, the agent loop, the linear probe, the situation planner,
 the initiative policy, the self-modification gate, corpus bundles, QDoRA
 adapters, the backward kernels, and the trainer's arithmetic.
 
-Twenty suites can be re-run on demand with `diag all` or `diag <name>`:
+Twenty-one suites can be re-run on demand with `diag all` or `diag <name>`:
 crypto, rng, json, aiksi, sysbox, smp, update, model, wgate, skill, desk,
-census, migrate, mt, power, fmt, differ, code and text. Registration is deliberately awkward: a suite
+census, migrate, mt, power, fmt, differ, code, text and hid. Registration is deliberately awkward: a suite
 added without a slot in the results table fails a compile-time assertion rather
 than silently never recording a verdict.
 
