@@ -200,3 +200,20 @@ pub fn vendor_name(vendor: u16) -> &'static str {
         _ => "",
     }
 }
+
+/// Read a 32-bit word from a function's config space.
+///
+/// `bar` and `enable_bus_master` reach config space through private helpers
+/// because they were the only two callers. Probing a device that has no
+/// driver needs more: the revision at 0x08, the subsystem id at 0x2c, a
+/// bridge's secondary bus at 0x18, and eventually the capability list at
+/// 0x34. Exposing the accessor is cheaper than growing a named function per
+/// field.
+pub fn cfg_read32(ecam: u64, d: &Device, off: u64) -> u32 {
+    unsafe { read32(cfg_addr(ecam, d.bus, d.dev, d.func), off) }
+}
+
+/// Write a 32-bit word to a function's config space.
+pub fn cfg_write32(ecam: u64, d: &Device, off: u64, v: u32) {
+    unsafe { write32(cfg_addr(ecam, d.bus, d.dev, d.func), off, v) }
+}

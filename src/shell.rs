@@ -138,7 +138,7 @@ fn find_core(want: &str) -> Option<[u8; 32]> {
 const KNOWN_COMMANDS: &[&str] = &[
     "term", "todo", "paint", "write", "mines", "oracle", "enternet", "net", "dhcp", "mem",
     "uptime", "tasks", "status", "help", "app", "author", "video", "serial", "log", "snap",
-    "update",
+    "update", "gpu", "mine",
 ];
 
 /// How many steps an authoring run gets.
@@ -650,6 +650,148 @@ fn update_cmd(rest: &str) {
             kprintln!("  update verify <image> [sig]   check a pair brought in by hand");
         }
     }
+}
+
+/// What graphics hardware this machine has, and whether it will answer.
+///
+/// Read-only apart from setting the memory-space enable bit, which the
+/// register read needs and which firmware has normally set already. Nothing
+/// here powers a device on, resets one, or grants it DMA. Those are all
+/// separate acts and they should stay separate ones.
+fn gpu_cmd(acpi: &Option<Acpi>) {
+    let Some(ecam) = acpi.as_ref().and_then(|a| a.mcfg) else {
+        console::set_color(LTRED);
+        kprintln!("  no MCFG table, so no ECAM base and no PCIe enumeration at all");
+        console::set_color(WHITE);
+        return;
+    };
+
+    console::set_color(YELLOW);
+    kprintln!("[gpu]");
+    console::set_color(WHITE);
+
+    let displays = crate::gpu::all(ecam);
+    if displays.is_empty() {
+        kprintln!("  no display controller answers on this bus");
+    }
+    for d in &displays {
+        kprintln!(
+            "  {:02x}:{:02x}.{}  {:04x}:{:04x}  {} {}",
+            d.bus,
+            d.dev,
+            d.func,
+            d.vendor,
+            d.device,
+            crate::dev::pci::class_name(d.class, d.subclass),
+            crate::dev::pci::vendor_name(d.vendor)
+        );
+    }
+
+    let Some(gpu) = crate::gpu::find(ecam) else {
+        crate::gpu::record(None, None);
+        report_absent(ecam);
+        return;
+    };
+
+    kprintln!("  revision  {:#04x}", gpu.revision);
+    kprintln!(
+        "  subsys    {:04x}:{:04x}",
+        gpu.subsystem & 0xffff,
+        gpu.subsystem >> 16
+    );
+    for (n, bar) in [(0, gpu.bar0), (1, gpu.bar1), (3, gpu.bar3)] {
+        match bar {
+            Some(a) if a != 0 => kprintln!("  bar{}      {:#x}", n, a),
+            Some(_) => kprintln!("  bar{}      unassigned", n),
+            None => kprintln!("  bar{}      none", n),
+        }
+    }
+
+    // NV_PMC_BOOT_0 is NVIDIA's register, and offset 0 of BAR0 on anyone
+    // else's device is whatever they put there. Under QEMU it is the VGA
+    // framebuffer, which reads back as 0x001c222c and is harmless; on a
+    // device with a read-sensitive register at offset 0 it would not be.
+    // Reading a vendor's register on another vendor's part is not a probe,
+    // it is a poke.
+    if !gpu.is_nvidia() {
+        kprintln!("  boot0     not read: that register belongs to NVIDIA, and this part does not");
+        report_absent(ecam);
+        crate::gpu::record(Some(&gpu), None);
+        return;
+    }
+
+    match gpu.boot0(ecam) {
+        None => {
+            console::set_color(LTRED);
+            kprintln!("  boot0     not read: no usable BAR0, or the mapping failed");
+            console::set_color(WHITE);
+            crate::gpu::record(Some(&gpu), None);
+        }
+        Some(raw) => match crate::gpu::decode_boot0(raw) {
+            Some((chipset, rev)) => {
+                let name = crate::gpu::chip_name(chipset);
+                let fam = crate::gpu::family(chipset);
+                console::set_color(LTGREEN);
+                if name.is_empty() {
+                    kprintln!(
+                        "  boot0     {:#010x}  chipset {:#05x} rev {:#04x}, {} family",
+                        raw,
+                        chipset,
+                        rev,
+                        if fam.is_empty() { "an unrecognised" } else { fam }
+                    );
+                } else {
+                    kprintln!(
+                        "  boot0     {:#010x}  {} rev {:#04x} ({})",
+                        raw,
+                        name,
+                        rev,
+                        fam
+                    );
+                }
+                kprintln!("  the device is alive and addressable from ring 0");
+                console::set_color(WHITE);
+                crate::gpu::record(Some(&gpu), Some(if name.is_empty() { fam } else { name }));
+            }
+            None => {
+                console::set_color(LTRED);
+                kprintln!("  boot0     {:#010x}  not a chip id", raw);
+                console::set_color(WHITE);
+                if raw == 0xFFFF_FFFF {
+                    kprintln!("  all ones: the aperture decodes, but nothing answers behind it");
+                }
+                crate::gpu::record(Some(&gpu), None);
+            }
+        },
+    }
+}
+
+/// Say whether an absent GPU is missing or merely asleep.
+///
+/// Worth the extra scan. On a muxless Optimus laptop the discrete part is
+/// parked in D3cold, where config space reads back as all ones and the device
+/// is indistinguishable from one that was never fitted. Its root port does not
+/// disappear, though, so a bridge forwarding a bus that nobody answers on is
+/// the tell -- and it is the difference between giving up and reaching for the
+/// ACPI interpreter this kernel already has.
+fn report_absent(ecam: u64) {
+    let empty = crate::gpu::empty_bridges(ecam);
+    if empty.is_empty() {
+        kprintln!("  every bridge forwards a bus that answers, so nothing is hiding");
+        return;
+    }
+    console::set_color(YELLOW);
+    for (b, secondary) in &empty {
+        kprintln!(
+            "  bridge {:02x}:{:02x}.{} forwards bus {:02x}, and nothing answers there",
+            b.bus,
+            b.dev,
+            b.func,
+            secondary
+        );
+    }
+    kprintln!("  that is what a device parked in D3cold looks like");
+    console::set_color(WHITE);
 }
 
 fn store_cmd(rest: &str) {
@@ -2339,6 +2481,8 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             kprintln!("  battery       charge, state and time remaining");
             kprintln!("  power         temperature, frequency and the governor");
             kprintln!("  usb [hid]     the USB bus; 'usb hid' for keyboards and mice");
+            kprintln!("  gpu           the display controllers, and whether one answers");
+            kprintln!("  mine          bench|btc -- sha256d hash rate, and a difficulty sweep");
 
             console::set_color(YELLOW);
             kprintln!("\nstorage");
@@ -2545,6 +2689,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 console::set_color(WHITE);
             }
         },
+        "gpu" => gpu_cmd(acpi),
         "pci" => match acpi.as_ref().and_then(|a| a.mcfg) {
             Some(ecam) => {
                 console::set_color(YELLOW);

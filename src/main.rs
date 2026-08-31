@@ -25,6 +25,7 @@ mod dev;
 mod edit;
 mod fmt;
 mod gfx;
+mod gpu;
 mod json;
 mod aiksi;
 mod log;
