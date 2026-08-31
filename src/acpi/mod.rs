@@ -589,14 +589,18 @@ pub fn ns_report(a: &Acpi, filter: &str) {
             );
             crate::kprintln!("  the namespace past that point is not real");
             crate::console::set_color(crate::gfx::console::LTGRAY);
-            // The bytes it choked on. An offset alone says where and not what,
-            // and the what is the whole fix.
-            if let Some(t) = a.aml_tables().nth(s.table) {
-                let body = unsafe { t.body() };
-                let from = s.at.saturating_sub(8);
+            // The bytes it choked on, taken from the namespace's own record
+            // of what it walked rather than re-derived from the machine's
+            // tables. Those are two sources of truth for the same bytes, and
+            // they disagree the moment `acpi load` puts a different table in
+            // force -- which read a 575 KB offset into a 9 KB slice and
+            // panicked, on a diagnostic path whose whole job is to explain a
+            // failure without becoming one.
+            if let Some(body) = with_namespace(a, |ns| ns.table_bytes(s.table)).flatten() {
+                let from = s.at.saturating_sub(8).min(body.len());
                 let to = (s.at + 24).min(body.len());
                 let mut line = alloc::string::String::new();
-                for (k, b) in body[from..to].iter().enumerate() {
+                for (k, b) in body[from..to.max(from)].iter().enumerate() {
                     let mark = if from + k == s.at { '>' } else { ' ' };
                     line.push(mark);
                     let hi = b >> 4;
@@ -937,4 +941,90 @@ pub fn aml_selftest(a: &Option<Acpi>) -> bool {
         sum.offered
     );
     ok
+}
+
+/// Parse an AML blob from the namespace, and make it the namespace in force.
+///
+/// This exists because the interesting firmware is not the firmware this
+/// kernel is running on. QEMU's DSDT is nine kilobytes with no battery in it;
+/// the machine this is built for has five hundred and seventy-five kilobytes
+/// with a `BAT1` and an `ADP1`. `-acpitable` would inject one, and QEMU caps
+/// an injected table at 65,535 bytes, so the real one travels the way a corpus
+/// bundle travels: onto the test disk and in through `fat get`.
+///
+///     tools/mkfat.py .qemu/nvme.img out/gf63.aml
+///     fat get /GF63.AML /tmp/gf63
+///     acpi load /tmp/gf63
+///
+/// The bytes are leaked on purpose. A namespace holds `&'static [u8]` because
+/// the tables it normally reads are firmware memory that outlives everything,
+/// and a blob has to make the same promise. One leak per load, on a diagnostic
+/// path nobody runs in a loop.
+pub fn load_report(path: &str) {
+    let Some(bytes) = crate::sysbox::read_blob(path) else {
+        crate::kprintln!("  no such file: {}", path);
+        return;
+    };
+    let leaked: &'static [u8] = alloc::boxed::Box::leak(bytes.into_boxed_slice());
+
+    // A dump may or may not carry its 36-byte table header. Detected rather
+    // than demanded: the signature is four upper-case characters and the
+    // length field agrees with the file, which no AML body starts with.
+    let headered = leaked.len() > 36
+        && leaked[..4].iter().all(|c| c.is_ascii_uppercase())
+        && u32::from_le_bytes([leaked[4], leaked[5], leaked[6], leaked[7]]) as usize == leaked.len();
+    let body = if headered { &leaked[36..] } else { leaked };
+    if headered {
+        crate::kprintln!(
+            "  {} table, {} byte(s), {} of AML",
+            core::str::from_utf8(&leaked[..4]).unwrap_or("????"),
+            leaked.len(),
+            body.len()
+        );
+    } else {
+        crate::kprintln!("  {} byte(s), taken as a bare AML body", body.len());
+    }
+
+    let mut ns = aml::Namespace::new();
+    let r = ns.load(body);
+    let sum = NsSummary {
+        tables: 1,
+        nodes: r.nodes,
+        skipped: r.skipped_conditionals,
+        redefinitions: ns.redefinitions,
+        stop: r.stop,
+        offered: body.len(),
+    };
+    crate::kprintln!("  {} node(s)", r.nodes);
+    match r.stop {
+        None => crate::kprintln!("  walked to the last byte"),
+        Some(s) => {
+            crate::console::set_color(crate::gfx::console::LTRED);
+            crate::kprintln!("  stopped at byte {} of {}: {:?}", s.at, body.len(), s.why);
+            crate::console::set_color(crate::gfx::console::LTGRAY);
+            let from = s.at.saturating_sub(8);
+            let to = (s.at + 24).min(body.len());
+            let mut line = alloc::string::String::new();
+            for (k, b) in body[from..to].iter().enumerate() {
+                line.push(if from + k == s.at { '>' } else { ' ' });
+                line.push(char::from_digit((b >> 4) as u32, 16).unwrap_or('?'));
+                line.push(char::from_digit((b & 0xF) as u32, 16).unwrap_or('?'));
+            }
+            crate::kprintln!("  bytes {}..{}:{}", from, to, line);
+        }
+    }
+    if r.skipped_conditionals > 0 {
+        crate::kprintln!("  {} conditional block(s) skipped whole", r.skipped_conditionals);
+    }
+    if ns.redefinitions > 0 {
+        crate::kprintln!("  {} name(s) defined more than once", ns.redefinitions);
+    }
+
+    // In force from here, so `acpi ns` and `acpi eval` address this firmware
+    // rather than the one underneath. Said out loud because a namespace that
+    // silently stopped describing the running machine would be a good way to
+    // read a battery that is not there.
+    *NAMESPACE.lock() = Some(ns);
+    unsafe { *SUMMARY.get() = Some(sum) };
+    crate::kprintln!("  this is now the namespace 'acpi ns' and 'acpi eval' address");
 }

@@ -2129,6 +2129,9 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             kprintln!("  {} ticks  ({}.{:02} s at {} Hz)", t, t / hz, (t % hz) * 100 / hz, hz);
             kprintln!("  apic timer calibrated at {} Hz", lapic::timer_hz());
         }
+        "acpi" if rest.trim().starts_with("load") => {
+            crate::acpi::load_report(rest.trim()[4..].trim());
+        }
         "acpi" if rest.trim().starts_with("eval") => match acpi {
             Some(a) => crate::acpi::eval_report(a, rest.trim()[4..].trim()),
             None => kprintln!("  ACPI was not parsed"),

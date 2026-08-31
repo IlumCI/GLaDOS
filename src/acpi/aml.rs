@@ -72,6 +72,9 @@ pub enum Kind {
     BankField { region: usize, bank: usize, flags: u8 },
     Mutex { level: u8 },
     Event,
+    /// A field cut out of a buffer by `CreateWordField` and its relatives.
+    /// Bytes are the source and index expressions.
+    BufferField { bits: u16 },
     /// Points at whatever it was aliased to, resolved after the walk.
     Alias,
 }
@@ -371,35 +374,141 @@ impl Reader {
         }
     }
 
-    /// Step over one DataRefObject: a constant, a string, a buffer, or a
-    /// package. Everything a `Name` can hold.
+    /// Step over one term argument, whatever shape it is.
+    ///
+    /// Named for what it started as, which was stepping over the data object a
+    /// `Name` holds. A real DSDT needed more than that almost immediately:
+    ///
+    ///     OperationRegion (SANV, SystemMemory, SANB, SANL)
+    ///     OperationRegion (MCHR, SystemMemory, Add (GMHB, 0x6100), 0x0100)
+    ///
+    /// The first gives its offset as a name and the second computes one. Both
+    /// are ordinary on a machine with real firmware and neither appears in
+    /// QEMU's nine kilobytes, which is why a table sixty times larger was
+    /// worth going and getting.
+    ///
+    /// This does not evaluate anything. It only needs each opcode's shape:
+    /// how many term arguments follow it, and how many targets after those.
+    /// That is a finite table and it is the whole of the function.
     fn skip_data(&mut self) -> Option<()> {
-        match self.u8()? {
-            0x00 | 0x01 | 0xFF => Some(()),
-            0x0A => self.skip(1),
-            0x0B => self.skip(2),
-            0x0C => self.skip(4),
-            0x0E => self.skip(8),
-            // String: NUL-terminated.
+        let op = self.u8()?;
+        let (args, targets) = match op {
+            // Constants and inline literals.
+            0x00 | 0x01 | 0xFF => (0, 0),
+            0x0A => {
+                self.skip(1)?;
+                (0, 0)
+            }
+            0x0B => {
+                self.skip(2)?;
+                (0, 0)
+            }
+            0x0C => {
+                self.skip(4)?;
+                (0, 0)
+            }
+            0x0E => {
+                self.skip(8)?;
+                (0, 0)
+            }
             0x0D => {
                 while self.u8()? != 0 {}
-                Some(())
+                (0, 0)
             }
-            // Buffer, Package, VarPackage: all package-delimited.
+            // Buffer, Package, VarPackage: self-delimiting, so their contents
+            // never have to be understood here.
             0x11 | 0x12 | 0x13 => {
                 let end = self.pkg()?;
                 self.at = end;
+                (0, 0)
+            }
+            // Locals and arguments.
+            0x60..=0x6E => (0, 0),
+            // Two arguments and a target: the arithmetic and bitwise set,
+            // plus Concat, Index and ToString.
+            0x72 | 0x73 | 0x74 | 0x77 | 0x79 | 0x7A | 0x7B | 0x7C | 0x7D | 0x7E | 0x7F | 0x85
+            | 0x88 | 0x9C => (2, 1),
+            // Divide alone takes two targets, remainder before quotient.
+            0x78 => (2, 2),
+            // One argument and a target.
+            0x80 | 0x81 | 0x82 | 0x96 | 0x97 | 0x98 | 0x99 | 0x9D => (1, 1),
+            // Store is an argument and a target; RefOf and the two counters
+            // are a target alone.
+            0x70 => (1, 1),
+            0x71 | 0x75 | 0x76 => (0, 1),
+            // One argument, no target.
+            0x83 | 0x87 | 0x8E => (1, 0),
+            // LNot, which doubles as the prefix for the three negated
+            // comparisons. Whether it takes one argument or two depends on the
+            // byte after it.
+            0x92 => match self.peek() {
+                Some(0x93) | Some(0x94) | Some(0x95) => {
+                    self.at += 1;
+                    (2, 0)
+                }
+                _ => (1, 0),
+            },
+            0x90 | 0x91 | 0x93 | 0x94 | 0x95 => (2, 0),
+            0x9E => (3, 1),
+            0x89 => (6, 0),
+            // Extended opcodes that can appear in an argument.
+            0x5B => match self.u8()? {
+                // Revision, Debug.
+                0x30 | 0x31 => (0, 0),
+                // CondRefOf takes a name and a target.
+                0x12 => (1, 1),
+                // FromBCD, ToBCD.
+                0x28 | 0x29 => (1, 1),
+                // Acquire: a target and a 16-bit timeout.
+                0x23 => {
+                    self.skip(2)?;
+                    (0, 1)
+                }
+                _ => return None,
+            },
+            // A bare name. Stepped over as a leaf: in this position it is
+            // almost always an object rather than a call, and a call whose
+            // arguments were misread would leave the walk somewhere other than
+            // the last byte, which is checked.
+            0x5C | b'^' | b'_' | b'A'..=b'Z' | 0x2E | 0x2F => {
+                self.at -= 1;
+                self.name()?;
+                (0, 0)
+            }
+            _ => return None,
+        };
+        for _ in 0..args {
+            self.skip_data()?;
+        }
+        for _ in 0..targets {
+            self.skip_target()?;
+        }
+        Some(())
+    }
+
+    /// Step over a target: nothing, a local, an argument, or a name.
+    fn skip_target(&mut self) -> Option<()> {
+        match self.peek()? {
+            0x00 => {
+                self.at += 1;
                 Some(())
             }
-            // RevisionOp, under the extended prefix.
+            0x60..=0x6E => {
+                self.at += 1;
+                Some(())
+            }
+            // Index and DerefOf are legal targets and carry their own
+            // arguments.
+            0x88 | 0x83 => self.skip_data(),
             0x5B => {
+                self.at += 1;
                 self.skip(1)?;
                 Some(())
             }
-            // Anything else is an expression, which a Name may legally hold
-            // through a method call. Refused rather than guessed at, because
-            // guessing its length is exactly how a walk desynchronises.
-            _ => None,
+            _ => {
+                self.name()?;
+                Some(())
+            }
         }
     }
 }
@@ -580,6 +689,34 @@ impl Namespace {
                 *skipped += 1;
                 r.at = end;
             }
+            // CreateByteField and its relatives: a source buffer, an index,
+            // and the name being cut out of it. They declare a name, so they
+            // get a node rather than being stepped over.
+            0x8A | 0x8B | 0x8C | 0x8D | 0x8F => {
+                let bits: u16 = match op {
+                    0x8A => 32,
+                    0x8B => 16,
+                    0x8C => 8,
+                    0x8D => 1,
+                    _ => 64,
+                };
+                let start = r.at;
+                for _ in 0..2 {
+                    if r.skip_data().is_none() {
+                        return Some(Stop { table, at, why: Why::Overrun });
+                    }
+                }
+                let n = match r.name() {
+                    Some(v) => v,
+                    None => return Some(Stop { table, at, why: Why::BadName }),
+                };
+                match self.place(scope, &n) {
+                    Some((p, seg)) => {
+                        self.ensure(p, seg, Kind::BufferField { bits }, table, (start, r.at));
+                    }
+                    None => return Some(Stop { table, at, why: Why::BadName }),
+                }
+            }
             // NoopOp.
             0xA3 => {}
             0x5B => {
@@ -589,7 +726,24 @@ impl Namespace {
                 };
                 return self.ext_term(r, ext, at, scope, table, depth, skipped);
             }
-            other => return Some(Stop { table, at, why: Why::Unknown(other) }),
+            other => {
+                // A bare expression at the top level. `Store (GSIP, SIPV)` is
+                // the first one a real DSDT does, and ACPI says such a term
+                // executes when the table loads.
+                //
+                // It is stepped over instead, and that is a deliberate
+                // limit rather than an omission: **loading a namespace must
+                // not run anything.** Executing firmware bytecode as a side
+                // effect of reading it would mean touching hardware before
+                // anybody asked, on a kernel where a fault outside a guard is
+                // fatal. The cost is that a name initialised by a top-level
+                // store reads as whatever it was declared with.
+                r.at = at;
+                if r.skip_data().is_some() {
+                    return None;
+                }
+                return Some(Stop { table, at, why: Why::Unknown(other) });
+            }
         }
         None
     }
@@ -638,6 +792,27 @@ impl Namespace {
         }
 
         match ext {
+            // CreateField: source, bit index, bit count, then the name. The
+            // only one of the family that takes a length, and the only one
+            // under the extended prefix.
+            0x13 => {
+                let start = r.at;
+                for _ in 0..3 {
+                    if r.skip_data().is_none() {
+                        return Some(Stop { table, at, why: Why::Overrun });
+                    }
+                }
+                let n = match r.name() {
+                    Some(v) => v,
+                    None => return Some(Stop { table, at, why: Why::BadName }),
+                };
+                match self.place(scope, &n) {
+                    Some((p, seg)) => {
+                        self.ensure(p, seg, Kind::BufferField { bits: 0 }, table, (start, r.at));
+                    }
+                    None => return Some(Stop { table, at, why: Why::BadName }),
+                }
+            }
             // MutexOp: name, sync level.
             0x01 => {
                 let n = match r.name() {
