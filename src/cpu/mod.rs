@@ -6,6 +6,7 @@
 
 pub mod code;
 pub mod percpu;
+pub mod recover;
 pub mod gdt;
 pub mod idt;
 pub mod port;

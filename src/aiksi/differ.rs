@@ -248,6 +248,7 @@ fn compiled(prog: &[super::parse::Stmt], entry: Entry) -> Option<Outcome> {
             String::from("execution budget exceeded (infinite loop?)"),
             steps,
         ),
+        jit::ST_FAULT => Outcome::failed(String::from("compiled code faulted"), steps),
         jit::ST_DIV0 => Outcome::failed(String::from("division by zero"), steps),
         jit::ST_REM0 => Outcome::failed(String::from("remainder by zero"), steps),
         _ => return None,

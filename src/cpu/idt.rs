@@ -194,6 +194,31 @@ fn emit(out: &mut dyn FnMut(core::fmt::Arguments), r: &Report) {
 /// The console #GP itself is a real bug and is not fixed here. It is older
 /// than any of this and belongs to the console, not to the reporter.
 fn fault(frame: &InterruptStackFrame, vector: u8, name: &str, err: Option<u64>) -> ! {
+    // A program the machine wrote for itself is the thing most likely to fault
+    // here, and stopping the machine for one is the wrong answer. If the task
+    // is inside a guard, land there instead of reporting.
+    //
+    // This does not return through `iretq`. It restores a stack pointer and
+    // jumps, because editing the interrupt frame means knowing whether this
+    // code was handed the real frame or a copy, and being wrong there returns
+    // to an address nobody chose. The pad is on the same task stack at a point
+    // that was live when the guard was set, so the frame and everything above
+    // it is abandoned, which also works when the fault arrived on an interrupt
+    // stack as the page-fault vector does.
+    if let Some((rsp, rbp, rip)) = super::recover::take(vector) {
+        unsafe {
+            core::arch::asm!(
+                "mov rsp, {rsp}",
+                "mov rbp, {rbp}",
+                "jmp {rip}",
+                rsp = in(reg) rsp,
+                rbp = in(reg) rbp,
+                rip = in(reg) rip,
+                options(noreturn),
+            );
+        }
+    }
+
     // A fault taken *while reporting* one used to recurse: the report crashed
     // partway through, its own handler started another report, and that
     // crashed in the same place. One line and a halt is worth more than an

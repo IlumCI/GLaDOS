@@ -53,6 +53,10 @@ pub struct Volume {
     root_cluster: u32,
     root_dir_sectors: u32,
     root_dir_start: u64,
+    /// How many copies of the table this volume keeps. The writer updates all
+    /// of them, because copies that disagree are a volume some drivers repair
+    /// and others refuse.
+    num_fats: u32,
 }
 
 #[inline]
@@ -143,6 +147,7 @@ impl Volume {
             root_cluster: if kind == Kind::Fat32 { u32_at(&buf, 0x2C) } else { 0 },
             root_dir_sectors,
             root_dir_start: base + (reserved + num_fats * sectors_per_fat) as u64,
+            num_fats,
         })
     }
 
@@ -156,6 +161,37 @@ impl Volume {
 
     pub fn total_clusters(&self) -> u32 {
         self.total_clusters
+    }
+
+    pub fn bytes_per_sector(&self) -> u32 {
+        self.bytes_per_sector
+    }
+
+    pub fn sectors_per_cluster(&self) -> u32 {
+        self.sectors_per_cluster
+    }
+
+    pub fn fat_start(&self) -> u64 {
+        self.fat_start
+    }
+
+    pub fn sectors_per_fat(&self) -> u32 {
+        self.sectors_per_fat
+    }
+
+    pub fn num_fats(&self) -> u32 {
+        self.num_fats
+    }
+
+    /// Where a directory listing starts. FAT32 keeps the root in a cluster
+    /// chain like any other directory; FAT16 keeps it in a fixed area, which
+    /// the writer does not handle and says so.
+    pub fn root_cluster(&self) -> u32 {
+        self.root_cluster
+    }
+
+    pub fn cluster_lba_of(&self, cluster: u32) -> u64 {
+        self.cluster_lba(cluster)
     }
 
     fn cluster_lba(&self, cluster: u32) -> u64 {

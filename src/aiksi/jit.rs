@@ -69,6 +69,9 @@ pub const ST_NIL: u64 = 1;
 pub const ST_BUDGET: u64 = 2;
 pub const ST_DIV0: u64 = 3;
 pub const ST_REM0: u64 = 4;
+/// The compiled code faulted and was caught. Distinct from every status the
+/// code itself can set, because it is the one nothing inside it chose.
+pub const ST_FAULT: u64 = 5;
 
 /// What running a compiled function produced.
 pub struct Run {
@@ -105,8 +108,21 @@ impl Program {
             ctx.slots[i] = *a;
         }
         let f: Compiled = unsafe { self.buf.entry()? };
-        // The one place in this kernel that jumps into memory it wrote.
-        unsafe { f(&mut ctx as *mut Ctx as u64) };
+        // The one place in this kernel that jumps into memory it wrote, and
+        // now the one place where doing so is survivable.
+        //
+        // The plan for this back end said a code generation bug in a ring-0
+        // image gets exactly one mistake, and that was true when every vector
+        // was fatal. Inside a guard a bad jump is an error the caller reads
+        // instead of a machine that stopped, which is what makes it reasonable
+        // to run generated code at all.
+        let ptr = &mut ctx as *mut Ctx as u64;
+        let caught = crate::cpu::recover::guard(|| {
+            unsafe { f(ptr) };
+        });
+        if caught.is_err() {
+            return Some(Run { status: ST_FAULT, result: 0, steps: ctx.steps });
+        }
         Some(Run { status: ctx.status, result: ctx.result, steps: ctx.steps })
     }
 }

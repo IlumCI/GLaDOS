@@ -3219,6 +3219,20 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 }
             }
         }
+        // Which single-core assumptions are actually shared.
+        "racy" => {
+            match rest.trim() {
+                "on" => {
+                    crate::sync::audit::start();
+                    kprintln!("  watching. use the machine, then 'racy' to read it back");
+                }
+                "off" => {
+                    crate::sync::audit::stop();
+                    kprintln!("  stopped");
+                }
+                _ => crate::sync::audit::report(),
+            }
+        }
         // Who is using the memory.
         "census" => {
             if rest.trim() == "reset" {
@@ -3314,6 +3328,23 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             // from the image, which is the only way to see the reporter name
             // a generated range. Both halt; they differ in what gets printed
             // on the way down.
+            // Guarded: the same dereference, inside a guard, so it is caught
+            // and the machine carries on. This is the live-system version of
+            // what `diag recover` asserts, and it is worth having separately
+            // because a suite runs with the desktop quiet and this does not.
+            if rest.split_whitespace().next() == Some("guarded") {
+                let r = crate::cpu::recover::guard(|| unsafe {
+                    core::ptr::read_volatile(0x0 as *const u64);
+                });
+                console::set_color(LTGREEN);
+                match r {
+                    Err(what) => kprintln!("  caught: {}. still here.", what),
+                    Ok(()) => kprintln!("  no fault happened, which is itself wrong"),
+                }
+                console::set_color(LTGRAY);
+                kprintln!("  {} fault(s) caught since boot", crate::cpu::recover::caught());
+                return;
+            }
             if rest.split_whitespace().next() == Some("code") {
                 crate::cpu::code::trigger_generated_fault();
             }
