@@ -430,3 +430,43 @@ pub fn selftest() -> bool {
     }
     ok
 }
+
+// --- policy -------------------------------------------------------------
+
+/// Whether this module has forced the governor down, so it knows to let go.
+static HELD: crate::sync::Racy<bool> = crate::sync::Racy::new(false);
+
+/// Hold the governor at powersave while on battery, and release on mains.
+///
+/// Called once a second from the clock task, beside `power::tick`, which does
+/// the same for temperature. The two can both want the governor down and only
+/// one of them may release it, so each tracks its own hold: a machine that was
+/// hot *and* unplugged must not come back to performance the moment it cools
+/// while still on battery.
+///
+/// Announced when it acts. A machine that quietly halves its own clock is
+/// indistinguishable from one that is broken, and the operator who notices is
+/// the one who then cannot explain it.
+pub fn policy_tick() -> Option<&'static str> {
+    let c = status()?;
+    let on_battery = c.on_ac == Some(false);
+    let held = unsafe { *HELD.get() };
+
+    if on_battery && !held {
+        unsafe { *HELD.get() = true };
+        if crate::dev::power::set_governor(crate::dev::power::Governor::Powersave) {
+            return Some("on battery: held at powersave");
+        }
+        return None;
+    }
+    if !on_battery && held {
+        unsafe { *HELD.get() = false };
+        // Back to whatever the operator last asked for, which `governor()`
+        // still remembers: forcing it down never overwrote the request.
+        let g = crate::dev::power::governor();
+        if crate::dev::power::set_governor(g) {
+            return Some("on mains: governor released");
+        }
+    }
+    None
+}

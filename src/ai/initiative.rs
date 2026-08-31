@@ -282,14 +282,33 @@ fn journal_push(line: String) {
 }
 
 fn situation_line(s: &context::Situation) -> String {
-    format!(
+    // Power is appended rather than woven in, so a machine with no battery and
+    // no readable sensor produces exactly the line it always did. A journal
+    // that changed shape on every machine would be a journal nobody could
+    // compare across two of them.
+    let mut line = format!(
         "heap {:.1}/{:.0} MiB drift {:+.2} load {} op {}",
         s.heap_used_mib,
         s.heap_total_mib,
         s.heap_trend_mib_s,
         s.load.label(),
         s.operator.label()
-    )
+    );
+    if let Some(p) = s.charge {
+        line.push_str(&format!(
+            " batt {}%{}",
+            p,
+            match s.on_ac {
+                Some(true) => " on mains",
+                Some(false) => " on battery",
+                None => "",
+            }
+        ));
+    }
+    if let Some(t) = s.temp_c {
+        line.push_str(&format!(" {}C", t));
+    }
+    line
 }
 
 /// One evaluation of the loop. Called on the second boundary from the

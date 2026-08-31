@@ -431,6 +431,28 @@ pub fn call(it: &mut Interp, name: &str, args: &[Value]) -> Result<Value, String
                 ],
             )
         }
+        // Nil rather than a filled-in record when there is no battery, the
+        // way `rtc_now` answers a clock it cannot read. A record whose fields
+        // all say zero is indistinguishable from a flat battery on mains.
+        "battery_status" => {
+            let Some(c) = crate::dev::battery::status() else {
+                return Ok(Value::Nil);
+            };
+            if !c.present {
+                return Ok(Value::Nil);
+            }
+            rec(
+                "Battery",
+                alloc::vec![
+                    i(c.percent as i64),
+                    Value::Str(alloc::string::String::from(c.state.label())),
+                    i(c.minutes.map(|m| m as i64).unwrap_or(-1)),
+                    i(c.on_ac.map(|a| a as i64).unwrap_or(-1)),
+                    i(c.rate_mw.map(|r| r as i64).unwrap_or(-1)),
+                    i(c.health.map(|h| h as i64).unwrap_or(-1)),
+                ],
+            )
+        }
         "mem_stats" => {
             let (used, total) = crate::mem::heap::HEAP.stats();
             rec("Mem", alloc::vec![i(used as i64), i(total as i64)])

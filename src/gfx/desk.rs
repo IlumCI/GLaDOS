@@ -2666,8 +2666,11 @@ fn task_layout(fb: &Framebuffer, d: &Desktop) -> Vec<(Rect, usize, bool)> {
         // lets a bar of nine windows still read as a row rather than a ransom
         // note. The title lives on the window; the bar says what *kind*.
         let w = btn_h + 10;
-        // Stop before the clock rather than drawing under it.
-        if x + w > clock_rect(fb).x {
+        // Stop before whatever is on the right rather than drawing under it.
+        // The charge well sits left of the clock when there is one, so the
+        // buttons have to break against it and not against the clock.
+        let right = battery_rect(fb).map(|r| r.x).unwrap_or_else(|| clock_rect(fb).x);
+        if x + w > right {
             break;
         }
         out.push((Rect::new(x, y, w, btn_h), icon, pressed));
@@ -2716,6 +2719,46 @@ fn taskbar(fb: &Framebuffer, d: &Desktop, sel: Option<usize>) {
 
     let c = clock_rect(fb);
     theme::well(fb, c, theme::FACE);
+    if let Some(b) = battery_rect(fb) {
+        theme::well(fb, b, theme::FACE);
+    }
+}
+
+/// Where the charge readout goes, when there is one.
+///
+/// Its own well rather than sharing the clock's. The clock's is exactly
+/// thirteen columns because every column it takes is one the task buttons do
+/// not get, and a string one character too long is dropped in silence rather
+/// than truncated -- which is how it once came to be blank. Widening it to fit
+/// a percentage would repeat that, so this is six columns of its own, and it
+/// only exists on a machine that has a battery to put in it.
+pub fn battery_rect(fb: &Framebuffer) -> Option<Rect> {
+    let c = crate::dev::battery::status()?;
+    if !c.present {
+        return None;
+    }
+    let bar = taskbar_rect(fb);
+    let w = theme::text_w(6);
+    let clock = clock_rect(fb);
+    Some(Rect::new(clock.x.saturating_sub(w + 4), bar.y + 4, w, bar.h - 8))
+}
+
+/// What the charge well says: a percentage, and a mark for the source.
+///
+/// Six columns, so "+100%" fits with a space either side. The plus is mains
+/// and the minus is battery, which is one character to say the thing an
+/// operator most wants at a glance.
+pub fn battery_text() -> Option<alloc::string::String> {
+    let c = crate::dev::battery::status()?;
+    if !c.present {
+        return None;
+    }
+    let mark = match c.on_ac {
+        Some(true) => '+',
+        Some(false) => '-',
+        None => ' ',
+    };
+    Some(alloc::format!("{}{}% ", mark, c.percent))
 }
 
 /// Where the uptime readout goes. Right-hand end of the bar.

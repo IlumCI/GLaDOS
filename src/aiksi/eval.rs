@@ -300,6 +300,22 @@ pub const KERNEL_RECS: &[(&str, &[(&str, Type)])] = &[
     // the way out. It reached Aiksi as two builtins that had to be called
     // together to mean anything.
     ("Mem", &[("used", Type::Int), ("total", Type::Int)]),
+    // The battery. Every field is an integer because this language has no
+    // floats and no option type: `minutes` is -1 when a battery at rest gives
+    // no estimate, and `ac` is -1 when the machine declares no adapter to ask.
+    // A zero there would read as "no time left" and "on battery", which are
+    // both answers rather than absences.
+    (
+        "Battery",
+        &[
+            ("percent", Type::Int),
+            ("state", Type::Str),
+            ("minutes", Type::Int),
+            ("ac", Type::Int),
+            ("rate_mw", Type::Int),
+            ("health", Type::Int),
+        ],
+    ),
     (
         "Task",
         &[
@@ -576,6 +592,9 @@ pub const BUILTINS: &[(&str, Touch, usize, usize)] = &[
     // make a rule tidy. What gets a record is what is actually a struct.
     ("net_config", Touch::Read, 0, 0),
     ("mem_stats", Touch::Read, 0, 0),
+
+    // --- crate::dev::battery -----------------------------------------------
+    ("battery_status", Touch::Read, 0, 0),
     ("task_list", Touch::Read, 0, 0),
     ("stat", Touch::Read, 1, 1),
 

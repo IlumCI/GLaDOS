@@ -1213,6 +1213,19 @@ pub fn quiet_hours() -> Result<u8, &'static str> {
     if felt != last {
         return Err("hardware input since the last check");
     }
+    // And not on battery. The unattended jobs are the most expensive thing
+    // this machine does -- two passes over the corpus for a deep trial, a
+    // dozen decodes to compose a core -- and a laptop that spends the night
+    // improving itself into a flat battery has not improved itself. A skipped
+    // night costs one rotation slot; a flat battery costs the morning.
+    //
+    // Only a *known* battery refuses. A desktop reports no adapter and gets
+    // the same answer it always did, because "unknown" must not become "no".
+    if let Some(c) = crate::dev::battery::status() {
+        if c.on_ac == Some(false) {
+            return Err("on battery");
+        }
+    }
     Ok(dt.hour)
 }
 

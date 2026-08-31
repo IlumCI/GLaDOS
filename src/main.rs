@@ -604,6 +604,16 @@ fn clock_task() {
             // to have been accruing before anyone asks.
             if crossed_second {
                 ai::futures::sample();
+                // The thermal policy and the power-source policy, both of
+                // which were written and neither of which had a caller. A
+                // rule nothing runs is a rule that does not exist, and both
+                // say so out loud when they act, because a machine that
+                // quietly changes its own clock is one nobody can explain.
+                for what in [dev::power::tick(), dev::battery::policy_tick()] {
+                    if let Some(msg) = what {
+                        console::on_channel(console::EXEC, || kprintln!("[power] {}", msg));
+                    }
+                }
             }
             // The boot screen owns the framebuffer while it is up; an uptime
             // counter in the corner of a splash is the tell that something is
@@ -629,6 +639,23 @@ fn clock_task() {
                     // describing pixels that were no longer there, so the
                     // compositor could never repaint over the clock.
                     gfx::desk::paint_clock(&fb, x, y, &text, cs);
+                }
+                // The charge, in its own well beside the clock. Painted from
+                // here for the same reason the clock is: this is the task that
+                // wakes on a schedule, and the reading behind it is cached, so
+                // asking ten times a second costs a comparison rather than a
+                // run of the firmware's bytecode.
+                if crossed_second {
+                    if let (Some(b), Some(t)) =
+                        (gfx::desk::battery_rect(&fb), gfx::desk::battery_text())
+                    {
+                        let bw = t.chars().count() as u32 * gfx::font::GLYPH_W * cs;
+                        if b.w > bw {
+                            let x = b.x + (b.w - bw) / 2;
+                            let y = b.y + (b.h.saturating_sub(gfx::font::GLYPH_H * cs)) / 2;
+                            gfx::desk::paint_clock(&fb, x, y, &t, cs);
+                        }
+                    }
                 }
             }
         }

@@ -744,6 +744,7 @@ pub fn panel_named(name: &str) -> Option<Panel> {
         "search" => Some(search_panel()),
         "model" => Some(settings("model")),
         "system" => Some(settings("sys")),
+        "power" | "battery" => Some(settings("power")),
         // `win open app:todo`. Guarded, so it goes before the bare arm it
         // would otherwise sit behind and never be reached from.
         n if n.starts_with("app:") => crate::app::panel(&n[4..]).map(|(_, p)| p),
@@ -1089,6 +1090,7 @@ pub fn settings(page: &str) -> Panel {
             (String::from("Wi-Fi"), Action::Browse(String::from("set:wifi"))),
             (String::from("Model"), Action::Browse(String::from("set:model"))),
             (String::from("System"), Action::Browse(String::from("set:sys"))),
+            (String::from("Power"), Action::Browse(String::from("set:power"))),
             (String::from("Programs"), Action::Browse(String::from("programs:"))),
         ],
         sel,
@@ -1096,6 +1098,9 @@ pub fn settings(page: &str) -> Panel {
 
     let (sel, mut body) = match page {
         "wifi" => (1usize, wifi_rows()),
+        // Four, matching its position in the list above. The two have to agree
+        // and nothing checks them, so they are next to each other.
+        "power" => (4usize, power_rows()),
         "model" => (
             2usize,
             alloc::vec![
@@ -1582,3 +1587,130 @@ pub fn program_manager() -> Panel {
     )
 }
 
+
+/// The Power page: the battery, the thermals, and the governor over both.
+///
+/// `src/dev/power.rs` has read the temperature and set the governor since it
+/// was written and has never had anywhere to show either. The Settings app has
+/// had a Power heading over two buttons for just as long. This is both halves
+/// meeting, and the battery joining them, because an operator asking "why is
+/// this machine slow" wants the temperature, the clock and the charge on one
+/// page rather than three commands.
+fn power_rows() -> Vec<Widget> {
+    let mut ws = alloc::vec![Widget::Heading(String::from("Battery"))];
+
+    match crate::dev::battery::status() {
+        None => {
+            ws.push(stat("Battery", String::from("none declared"), Tone::Plain));
+            ws.push(note(
+                "The firmware declares no battery and no adapter. That is the right \
+                 answer on a desktop and under emulation.",
+            ));
+        }
+        Some(c) => {
+            match c.on_ac {
+                Some(true) => ws.push(stat("Power source", String::from("mains"), Tone::Ok)),
+                Some(false) => {
+                    ws.push(stat("Power source", String::from("battery"), Tone::Warn))
+                }
+                None => ws.push(stat("Power source", String::from("unknown"), Tone::Plain)),
+            }
+            if !c.present {
+                ws.push(stat("Charge", String::from("no cell in the bay"), Tone::Warn));
+            } else {
+                let tone = if c.critical || c.percent < 10 {
+                    Tone::Bad
+                } else if c.percent < 25 {
+                    Tone::Warn
+                } else {
+                    Tone::Ok
+                };
+                ws.push(stat("Charge", alloc::format!("{}%", c.percent), tone));
+                ws.push(stat("State", String::from(c.state.label()), Tone::Plain));
+                match c.minutes {
+                    Some(m) => ws.push(stat(
+                        if c.state == crate::dev::battery::State::Charging {
+                            "Until full"
+                        } else {
+                            "Remaining"
+                        },
+                        alloc::format!("{}h {:02}m", m / 60, m % 60),
+                        Tone::Plain,
+                    )),
+                    // Said rather than left blank. A rate of zero is a real
+                    // state, and an empty field reads as a failure.
+                    None => ws.push(stat("Remaining", String::from("no estimate at rest"), Tone::Plain)),
+                }
+                if let (Some(r), Some(f)) = (c.remaining_mwh, c.full_mwh) {
+                    ws.push(stat("Capacity", alloc::format!("{} of {} mWh", r, f), Tone::Plain));
+                }
+                if let Some(rt) = c.rate_mw {
+                    ws.push(stat("Draw", alloc::format!("{} mW", rt), Tone::Plain));
+                }
+                if let Some(h) = c.health {
+                    let tone = if h < 70 { Tone::Warn } else { Tone::Ok };
+                    ws.push(stat("Health", alloc::format!("{}% of design", h), tone));
+                }
+            }
+        }
+    }
+
+    ws.push(Widget::Sep);
+    ws.push(Widget::Heading(String::from("Temperature and clock")));
+    match crate::dev::power::core_temp() {
+        Some(r) => {
+            let tone = if r.critical {
+                Tone::Bad
+            } else if r.throttling || r.temp >= crate::dev::power::HOT_C {
+                Tone::Warn
+            } else {
+                Tone::Ok
+            };
+            ws.push(stat("Core", alloc::format!("{} C", r.temp), tone));
+            ws.push(stat(
+                "Headroom",
+                alloc::format!("{} C below the limit", r.headroom),
+                Tone::Plain,
+            ));
+            if r.throttling {
+                ws.push(stat("Throttling", String::from("yes"), Tone::Warn));
+            }
+        }
+        None => ws.push(stat("Core", String::from(crate::dev::power::why()), Tone::Plain)),
+    }
+    match crate::dev::power::base_mhz() {
+        Some(m) => ws.push(stat("Base clock", alloc::format!("{} MHz", m), Tone::Plain)),
+        None => ws.push(stat("Base clock", String::from("unknown"), Tone::Plain)),
+    }
+    ws.push(stat("Governor", String::from(crate::dev::power::governor().name()), Tone::Plain));
+    // Measuring the live frequency costs twenty milliseconds of delay, and a
+    // panel is rebuilt after every command. The shell verb does it; a page
+    // that redraws must not.
+    ws.push(note("`power` in the terminal measures the live frequency, which costs 20 ms."));
+
+    ws.push(Widget::Button {
+        label: String::from("Performance"),
+        action: Action::Run(String::from("power performance")),
+    });
+    ws.push(Widget::Button {
+        label: String::from("Balanced"),
+        action: Action::Run(String::from("power balanced")),
+    });
+    ws.push(Widget::Button {
+        label: String::from("Powersave"),
+        action: Action::Run(String::from("power powersave")),
+    });
+
+    ws.push(Widget::Sep);
+    ws.push(Widget::Heading(String::from("Off")));
+    ws.push(note("Both ask the firmware first, and reset the machine directly if it declines."));
+    ws.push(Widget::Button {
+        label: String::from("Restart"),
+        action: Action::Run(String::from("reboot")),
+    });
+    ws.push(Widget::Button {
+        label: String::from("Shut down"),
+        action: Action::Run(String::from("shutdown")),
+    });
+    ws
+}

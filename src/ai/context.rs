@@ -74,6 +74,16 @@ pub struct Situation {
     pub episode_running: bool,
     pub store_mounted: bool,
     pub nets: Vec<(&'static str, bool)>,
+    /// Charge, when there is a battery to ask. `None` on a machine with none,
+    /// which is a different thing from a flat one and the module's own rule
+    /// about honest unknowns says to keep them apart.
+    pub charge: Option<u8>,
+    /// Whether the mains is connected. `None` when no adapter is declared.
+    pub on_ac: Option<bool>,
+    /// Core temperature in degrees, when the gate in `dev::power` allows it to
+    /// be read at all. Not here before, and it belongs beside the rest of what
+    /// the machine knows about its own condition.
+    pub temp_c: Option<u32>,
 }
 
 impl Situation {
@@ -160,6 +170,7 @@ pub fn gather() -> Situation {
         nets.push((iface.name, iface.up));
     }
 
+    let c = crate::dev::battery::status();
     Situation {
         uptime_s: now.t_s,
         heap_used_mib: used as f32 / (1024.0 * 1024.0),
@@ -174,5 +185,11 @@ pub fn gather() -> Situation {
         episode_running: agent::busy(),
         store_mounted: crate::store::mounted(),
         nets,
+        // Cached behind both of these, so gathering a situation costs a
+        // comparison rather than a run of the firmware's bytecode and an MSR
+        // read. `gather` is called once a second by the Oracle's sampler.
+        charge: c.map(|c| c.percent).filter(|_| c.map(|c| c.present).unwrap_or(false)),
+        on_ac: c.and_then(|c| c.on_ac),
+        temp_c: crate::dev::power::core_temp().map(|r| r.temp),
     }
 }
