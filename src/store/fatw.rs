@@ -35,6 +35,23 @@ use alloc::vec::Vec;
 /// A cluster value meaning "this is the last one".
 const EOC: u32 = 0x0FFF_FFF8;
 
+/// FAT32 only, and refused rather than approximated.
+///
+/// FAT16 keeps its root directory in a fixed area before the data region
+/// rather than in a cluster chain, so every routine here that walks a
+/// directory by following clusters would address the wrong sectors for it.
+/// Writing into that is not a bug that shows up as an error, it is a bug that
+/// shows up as a volume another operating system cannot read, so the shape is
+/// checked once at the top rather than hoped for.
+fn root_is_writable(v: &Volume) -> Result<(), String> {
+    if v.kind() != Kind::Fat32 {
+        return Err(String::from(
+            "writing is FAT32 only: FAT16 keeps its root outside the cluster chain",
+        ));
+    }
+    Ok(())
+}
+
 /// Turn a path's final component into an 8.3 name, or say why it will not fit.
 ///
 /// Answers the eleven packed bytes a directory entry wants: eight of name and
@@ -176,6 +193,7 @@ fn release(v: &Volume, start: u32, fats: u32) -> Result<(), Error> {
 /// final component is created. Directories are not made on the way, because a
 /// half-made path after a failure is worse than a refusal.
 pub fn put(v: &Volume, path: &str, data: &[u8]) -> Result<(), String> {
+    root_is_writable(v)?;
     let (dir_path, name) = match path.rsplit_once('/') {
         Some((d, n)) => (d, n),
         None => ("", path),
@@ -335,6 +353,7 @@ fn add_entry(
 
 /// Remove a file, freeing what it held.
 pub fn remove(v: &Volume, path: &str) -> Result<(), String> {
+    root_is_writable(v)?;
     let (dir_path, name) = match path.rsplit_once('/') {
         Some((d, n)) => (d, n),
         None => ("", path),

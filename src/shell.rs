@@ -4102,6 +4102,67 @@ fn fat_cmd(rest: &str) {
                 kprintln!("  'fat ls <path>', 'fat cat <path>', 'fat get <path> <namespace-path>'");
             }
         }
+        // Claim this partition's range so it can be written.
+        //
+        // Separate from `store unlock`, which claims the object store's
+        // region: these are different ranges and conflating them would let a
+        // claim for one authorise writes to the other, which is the whole
+        // failure the ranged gate exists to prevent.
+        "unlock" => {
+            let Some(p) = layout.partitions.iter().find(|p| {
+                arg.is_empty() || arg.parse::<u32>().ok() == Some(p.index)
+            }) else {
+                kprintln!("  no such partition");
+                return;
+            };
+            if crate::dev::nvme::unlock_writes(0xD15EA5E, p.start_lba, p.block_count) {
+                console::set_color(LTRED);
+                kprintln!(
+                    "  partition {} is writable: lba {}..{}",
+                    p.index,
+                    p.start_lba,
+                    p.start_lba + p.block_count
+                );
+                console::set_color(WHITE);
+                kprintln!("  nothing outside that range can be written, including the table");
+                console::set_color(LTGRAY);
+            } else {
+                kprintln!("  refused");
+            }
+        }
+        // Writing. Refused unless the operator has claimed a range covering
+        // this partition, because that gate is the only thing standing between
+        // a file write and the Windows volume next to it.
+        "put" | "rm" => {
+            let Some((idx, vol)) = pick_auto() else {
+                kprintln!("  no FAT filesystem found");
+                return;
+            };
+            if !crate::dev::nvme::writes_unlocked() {
+                console::set_color(YELLOW);
+                kprintln!("  writes are locked. 'store unlock' claims a range first.");
+                console::set_color(LTGRAY);
+                return;
+            }
+            if verb == "rm" {
+                match crate::store::fatw::remove(&vol, arg) {
+                    Ok(()) => kprintln!("  removed {} from partition {}", arg, idx),
+                    Err(e) => kprintln!("  {}", e),
+                }
+                return;
+            }
+            // `fat put <path> <text>`. Text rather than bytes, because the
+            // thing somebody wants to carry off this machine on a stick is
+            // almost always something they can read at the other end.
+            if arg2.is_empty() {
+                kprintln!("  fat put <path> <text>");
+                return;
+            }
+            match crate::store::fatw::put(&vol, arg, arg2.as_bytes()) {
+                Ok(()) => kprintln!("  wrote {} byte(s) to {} on partition {}", arg2.len(), arg, idx),
+                Err(e) => kprintln!("  {}", e),
+            }
+        }
         "ls" | "cat" | "get" => {
             let Some((idx, vol)) = pick_auto() else {
                 kprintln!("  no FAT filesystem found");
