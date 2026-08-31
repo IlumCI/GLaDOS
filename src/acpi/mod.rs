@@ -14,6 +14,7 @@
 #![allow(dead_code)]
 
 pub mod aml;
+pub mod eval;
 
 use core::ffi::c_void;
 use core::ptr::read_unaligned;
@@ -334,6 +335,7 @@ pub unsafe fn parse(rsdp: *const c_void) -> Option<Acpi> {
             }
         }
 
+        unsafe { *PARSED.get() = Some(acpi) };
         Some(acpi)
     }
 }
@@ -541,6 +543,24 @@ pub fn with_namespace<R>(a: &Acpi, f: impl FnOnce(&aml::Namespace) -> R) -> Opti
     NAMESPACE.lock().as_ref().map(f)
 }
 
+/// The parsed tables, kept so anything can reach them without being handed a
+/// reference through every call.
+///
+/// `parse` returns by value and `main` passes that value down, which was
+/// fine while ACPI meant five integers read once at boot. A battery reading
+/// refreshes on a timer and a diag suite takes no arguments, so both need to
+/// find it themselves.
+static PARSED: crate::sync::Racy<Option<Acpi>> = crate::sync::Racy::new(None);
+
+pub fn parsed() -> Option<Acpi> {
+    unsafe { *PARSED.get() }
+}
+
+/// The AML suite, for `diag`, which hands its suites no arguments.
+pub fn diag_acpi() -> bool {
+    aml_selftest(&parsed())
+}
+
 pub fn ns_summary() -> Option<NsSummary> {
     unsafe { *SUMMARY.get() }
 }
@@ -652,4 +672,269 @@ pub fn space_name(space: u8) -> &'static str {
         10 => "platform communications",
         _ => "an unnamed space",
     }
+}
+
+// --- evaluating, from the shell -----------------------------------------
+
+/// Turn a written path into one the namespace can resolve.
+///
+/// Accepts what a person types: `\_SB.PCI0._PRT`, `_SB.PCI0`, or a bare
+/// `_PRT` to be searched for. Segments are padded to four characters with
+/// underscores, which is what ACPI stores.
+pub fn parse_path(text: &str) -> aml::Path {
+    let mut p = aml::Path::default();
+    let mut rest = text.trim();
+    if let Some(r) = rest.strip_prefix('\\') {
+        p.rooted = true;
+        rest = r;
+    }
+    while let Some(r) = rest.strip_prefix('^') {
+        p.parents += 1;
+        rest = r;
+    }
+    for part in rest.split('.').filter(|s| !s.is_empty()) {
+        let mut seg = [b'_'; 4];
+        for (i, c) in part.bytes().take(4).enumerate() {
+            seg[i] = c.to_ascii_uppercase();
+        }
+        p.segs.push(seg);
+    }
+    p
+}
+
+/// Render a value the way a person reads one.
+///
+/// Packages are printed one element per line and indented, because a `_BST` is
+/// a four-element package and its meaning is entirely positional: printing it
+/// on one line makes the reader count commas to find the one they want.
+fn show(ns: &aml::Namespace, v: &eval::Value, indent: usize, out: &mut alloc::string::String) {
+    let pad = "                ";
+    let lead = &pad[..indent.min(pad.len())];
+    match v {
+        eval::Value::Int(i) => {
+            out.push_str(&alloc::format!("{}{} ({:#x})\n", lead, i, i));
+        }
+        eval::Value::Str(s) => out.push_str(&alloc::format!("{}\"{}\"\n", lead, s)),
+        eval::Value::Buf(b) => {
+            out.push_str(&alloc::format!("{}buffer of {} byte(s):", lead, b.len()));
+            for byte in b.iter().take(16) {
+                out.push_str(&alloc::format!(" {:02x}", byte));
+            }
+            if b.len() > 16 {
+                out.push_str(" ...");
+            }
+            out.push('\n');
+        }
+        eval::Value::Pkg(items) => {
+            out.push_str(&alloc::format!("{}package of {}:\n", lead, items.len()));
+            for (i, item) in items.iter().take(24).enumerate() {
+                out.push_str(&alloc::format!("{}  [{}]\n", lead, i));
+                show(ns, item, indent + 4, out);
+            }
+            if items.len() > 24 {
+                out.push_str(&alloc::format!("{}  ... {} more\n", lead, items.len() - 24));
+            }
+        }
+        eval::Value::Node(n) => {
+            out.push_str(&alloc::format!("{}-> {}\n", lead, ns.path(*n)));
+        }
+        eval::Value::Uninit => out.push_str(&alloc::format!("{}nothing\n", lead)),
+    }
+}
+
+/// Evaluate one name and print what it answered.
+pub fn eval_report(a: &Acpi, text: &str) {
+    let mut words = text.split_whitespace();
+    let Some(target) = words.next() else {
+        crate::kprintln!("  acpi eval <path> [args...]   run a method, or read a name");
+        return;
+    };
+    let mut args: alloc::vec::Vec<eval::Value> = alloc::vec::Vec::new();
+    for w in words {
+        let v = if let Some(hex) = w.strip_prefix("0x") {
+            u64::from_str_radix(hex, 16).unwrap_or(0)
+        } else {
+            w.parse::<u64>().unwrap_or(0)
+        };
+        args.push(eval::Value::Int(v));
+    }
+
+    let p = parse_path(target);
+    let done = with_namespace(a, |ns| {
+        let Some(node) = ns.resolve(0, &p) else {
+            crate::kprintln!("  no such name: {}", target);
+            return;
+        };
+        let mut it = eval::Interp::new(ns);
+        let r = it.eval_node(node, &args);
+        match r {
+            Ok(v) => {
+                let mut s = alloc::string::String::new();
+                show(ns, &v, 2, &mut s);
+                crate::kprintln!("  {} in {} step(s):", ns.path(node), it.steps());
+                for line in s.lines() {
+                    crate::kprintln!("{}", line);
+                }
+            }
+            Err(e) => {
+                crate::console::set_color(crate::gfx::console::LTRED);
+                crate::kprintln!("  {} failed after {} step(s): {}", ns.path(node), it.steps(), fault_text(&e));
+                crate::console::set_color(crate::gfx::console::LTGRAY);
+            }
+        }
+        if let Some(d) = it.debug {
+            crate::kprintln!("  the firmware wrote to the debug object: {}", d);
+        }
+    });
+    if done.is_none() {
+        crate::kprintln!("  no namespace");
+    }
+}
+
+/// A fault as a sentence. The opcode and its offset are in there because the
+/// fix for an unimplemented one is a match arm, and the arm needs the number.
+pub fn fault_text(f: &eval::Fault) -> alloc::string::String {
+    match f {
+        eval::Fault::Budget => alloc::format!(
+            "it ran past {} steps, which is a loop waiting on something that never answered",
+            eval::BUDGET
+        ),
+        eval::Fault::Depth => alloc::string::String::from("it nested too deep"),
+        eval::Fault::Opcode(b, at) => {
+            alloc::format!("opcode {:#04x} at byte {} is not implemented", b, at)
+        }
+        eval::Fault::ExtOpcode(b, at) => {
+            alloc::format!("extended opcode {:#04x} at byte {} is not implemented", b, at)
+        }
+        eval::Fault::NotFound(n) => alloc::format!("it referred to '{}', which does not exist", n),
+        eval::Fault::Type(want) => alloc::format!("something was not {}", want),
+        eval::Fault::Region(s) => {
+            alloc::format!("it reads a region in {}, which has no handler yet", space_name(*s))
+        }
+        eval::Fault::Truncated => alloc::string::String::from("the bytecode ended mid-term"),
+        eval::Fault::DivideByZero => alloc::string::String::from("it divided by zero"),
+        eval::Fault::Args => alloc::string::String::from("it wanted more arguments than it got"),
+    }
+}
+
+/// Four declarations, hand-assembled, covering what the claims below need.
+///
+/// Written by hand rather than by a compiler because there is no `iasl` on the
+/// machine that builds this, and that turns out to be an advantage: a fixture
+/// assembled here is shaped to hit the paths this implementation has, which is
+/// the same argument `tools/hybtest.py` makes for building a model to exercise
+/// every layer kind rather than taking whatever a real checkpoint happens to
+/// contain.
+///
+///     08 'TST1' 0A 2A                     Name (TST1, 42)
+///     14 0B 'TST2' 01  A4 72 68 01 00     Method (TST2, 1) { Return (Arg0 + 1) }
+///     14 09 'TST3' 00  A2 02 01           Method (TST3, 0) { While (One) {} }
+///     14 07 'TST4' 00  6F                 Method (TST4, 0) { <no such opcode> }
+///
+/// The package lengths count themselves, which is the rule most easily got
+/// wrong: 0x0B is one length byte plus four name bytes plus one flags byte
+/// plus five of body.
+#[rustfmt::skip]
+const FIXTURE: &[u8] = &[
+    0x08, 0x54, 0x53, 0x54, 0x31, 0x0A, 0x2A,
+    0x14, 0x0B, 0x54, 0x53, 0x54, 0x32, 0x01, 0xA4, 0x72, 0x68, 0x01, 0x00,
+    0x14, 0x09, 0x54, 0x53, 0x54, 0x33, 0x00, 0xA2, 0x02, 0x01,
+    0x14, 0x07, 0x54, 0x53, 0x54, 0x34, 0x00, 0x6F,
+];
+
+/// What can be checked about AML on any machine, plus what this one says.
+pub fn aml_selftest(a: &Option<Acpi>) -> bool {
+    let mut ok = true;
+    fn claim(ok: &mut bool, good: bool, what: &str) {
+        crate::kprintln!("  {}   {}", if good { "ok " } else { "FAIL" }, what);
+        *ok &= good;
+    }
+
+    // --- the fixture, which is the same on every machine -----------------
+    let mut ns = aml::Namespace::new();
+    let r = ns.load(FIXTURE);
+    claim(&mut ok, r.stop.is_none(), "a hand-assembled table walks to its last byte");
+    claim(&mut ok, r.nodes == 4, "and declares exactly the four names in it");
+
+    let find = |ns: &aml::Namespace, n: &str| ns.resolve(0, &parse_path(n));
+
+    // A data name reads back as what it was given. The first thing that would
+    // break if package lengths or name lengths were off by one.
+    match find(&ns, "TST1") {
+        Some(node) => {
+            let mut it = eval::Interp::new(&ns);
+            let got = it.eval_node(node, &[]);
+            claim(&mut ok, got == Ok(eval::Value::Int(42)), "a name reads back as its value");
+        }
+        None => claim(&mut ok, false, "TST1 is in the namespace"),
+    }
+
+    // A method takes an argument, does arithmetic, and returns.
+    match find(&ns, "TST2") {
+        Some(node) => {
+            let mut it = eval::Interp::new(&ns);
+            let got = it.eval_node(node, &[eval::Value::Int(41)]);
+            claim(&mut ok, got == Ok(eval::Value::Int(42)), "a method adds one to its argument");
+            let mut it = eval::Interp::new(&ns);
+            claim(
+                &mut ok,
+                it.eval_node(node, &[]) == Err(eval::Fault::Args),
+                "and refuses to run with fewer arguments than it declared",
+            );
+        }
+        None => claim(&mut ok, false, "TST2 is in the namespace"),
+    }
+
+    // The claim this whole evaluator is bounded for. `While (One) {}` is legal
+    // AML and a machine that ran it would simply stop.
+    match find(&ns, "TST3") {
+        Some(node) => {
+            let mut it = eval::Interp::new(&ns);
+            let got = it.eval_node(node, &[]);
+            claim(&mut ok, got == Err(eval::Fault::Budget), "a loop that never ends is stopped");
+            claim(
+                &mut ok,
+                it.steps() > eval::BUDGET,
+                "and it is the budget that stopped it, not an accident",
+            );
+        }
+        None => claim(&mut ok, false, "TST3 is in the namespace"),
+    }
+
+    // An opcode with no arm is named rather than guessed at. This is the
+    // property that makes a partial evaluator honest: the next machine that
+    // needs something adds one match arm, and the number is in the message.
+    match find(&ns, "TST4") {
+        Some(node) => {
+            let mut it = eval::Interp::new(&ns);
+            let got = it.eval_node(node, &[]);
+            claim(
+                &mut ok,
+                matches!(got, Err(eval::Fault::Opcode(0x6F, _))),
+                "an opcode with no arm is refused, and says which opcode",
+            );
+        }
+        None => claim(&mut ok, false, "TST4 is in the namespace"),
+    }
+
+    // A name that is not there is an error rather than a zero, because a
+    // caller testing `_STA` against zero would read an absent device as one
+    // that is present and switched off.
+    claim(&mut ok, find(&ns, "NOPE").is_none(), "a name that was never declared is not found");
+
+    // --- and what this particular firmware says --------------------------
+    let Some(a) = a else {
+        claim(&mut ok, false, "ACPI was parsed");
+        return false;
+    };
+    let sum = ns_summary().unwrap_or_else(|| load_namespace(a));
+    claim(&mut ok, sum.nodes > 0, "this machine's own tables declare a namespace");
+    // The one that cannot be faked by a fixture: real firmware, walked whole.
+    claim(&mut ok, sum.stop.is_none(), "and every one of them walked to its last byte");
+    crate::kprintln!(
+        "  {} node(s) from {} byte(s) of this machine's AML",
+        sum.nodes,
+        sum.offered
+    );
+    ok
 }

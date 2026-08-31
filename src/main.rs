@@ -1187,6 +1187,14 @@ fn selftest(acpi_ref: &Option<acpi::Acpi>) {
     }
 
     kprintln!("
+[selftest] aml:");
+    if !acpi::aml_selftest(acpi_ref) {
+        console::set_color(LTRED);
+        kprintln!("[selftest] the namespace is not trustworthy, and battery comes from it");
+        console::set_color(LTGRAY_IDX);
+    }
+
+    kprintln!("
 [selftest] usb input:");
     if !dev::usbhid::selftest() {
         console::set_color(LTRED);
