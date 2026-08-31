@@ -13,6 +13,8 @@
 
 #![allow(dead_code)]
 
+pub mod aml;
+
 use core::ffi::c_void;
 use core::ptr::read_unaligned;
 
@@ -474,4 +476,180 @@ pub fn selftest(a: &Option<Acpi>) -> bool {
         "the AML list starts with the DSDT and adds every SSDT",
     );
     ok
+}
+
+// --- the namespace, built once ------------------------------------------
+
+/// The namespace, built on first use and kept.
+///
+/// Behind a lock rather than `Racy` because the battery reading refreshes from
+/// a timer while the shell can ask for the same tree, and building it twice
+/// would be two trees that disagree about which one a node index refers to.
+static NAMESPACE: crate::sync::Spin<Option<aml::Namespace>> = crate::sync::Spin::new(None);
+
+/// What building it established, kept so a report does not have to rebuild.
+static SUMMARY: crate::sync::Racy<Option<NsSummary>> = crate::sync::Racy::new(None);
+
+#[derive(Clone, Copy)]
+pub struct NsSummary {
+    pub tables: usize,
+    pub nodes: usize,
+    pub skipped: usize,
+    pub redefinitions: usize,
+    /// Where a walk stopped short, if one did. The whole point of the walk is
+    /// that this is `None`.
+    pub stop: Option<aml::Stop>,
+    /// Bytes offered to the walk, and bytes it consumed.
+    pub offered: usize,
+}
+
+/// Build the namespace from every AML table, in order.
+///
+/// Order is not cosmetic: an SSDT may extend a scope the DSDT opened, so
+/// loading them out of order leaves names unresolvable.
+pub fn load_namespace(a: &Acpi) -> NsSummary {
+    let mut ns = aml::Namespace::new();
+    let mut sum =
+        NsSummary { tables: 0, nodes: 0, skipped: 0, redefinitions: 0, stop: None, offered: 0 };
+    for t in a.aml_tables() {
+        if !t.sound {
+            // A table that does not add up is not walked. Executing bytes that
+            // failed their own checksum is the one thing worth refusing here.
+            continue;
+        }
+        let body = unsafe { t.body() };
+        sum.offered += body.len();
+        let r = ns.load(body);
+        sum.tables += 1;
+        sum.nodes += r.nodes;
+        sum.skipped += r.skipped_conditionals;
+        if sum.stop.is_none() {
+            sum.stop = r.stop;
+        }
+    }
+    sum.redefinitions = ns.redefinitions;
+    *NAMESPACE.lock() = Some(ns);
+    unsafe { *SUMMARY.get() = Some(sum) };
+    sum
+}
+
+/// Run `f` against the namespace, building it first if nobody has.
+pub fn with_namespace<R>(a: &Acpi, f: impl FnOnce(&aml::Namespace) -> R) -> Option<R> {
+    if NAMESPACE.lock().is_none() {
+        load_namespace(a);
+    }
+    NAMESPACE.lock().as_ref().map(f)
+}
+
+pub fn ns_summary() -> Option<NsSummary> {
+    unsafe { *SUMMARY.get() }
+}
+
+/// Print the namespace tree from `root`, or a summary when asked for nothing.
+pub fn ns_report(a: &Acpi, filter: &str) {
+    let sum = match ns_summary() {
+        Some(s) => s,
+        None => load_namespace(a),
+    };
+    crate::kprintln!(
+        "  {} node(s) from {} table(s), {} byte(s) of AML",
+        sum.nodes,
+        sum.tables,
+        sum.offered
+    );
+    match sum.stop {
+        None => crate::kprintln!("  every table walked to its last byte"),
+        Some(s) => {
+            crate::console::set_color(crate::gfx::console::LTRED);
+            crate::kprintln!(
+                "  table {} stopped at byte {}: {:?}",
+                s.table,
+                s.at,
+                s.why
+            );
+            crate::kprintln!("  the namespace past that point is not real");
+            crate::console::set_color(crate::gfx::console::LTGRAY);
+            // The bytes it choked on. An offset alone says where and not what,
+            // and the what is the whole fix.
+            if let Some(t) = a.aml_tables().nth(s.table) {
+                let body = unsafe { t.body() };
+                let from = s.at.saturating_sub(8);
+                let to = (s.at + 24).min(body.len());
+                let mut line = alloc::string::String::new();
+                for (k, b) in body[from..to].iter().enumerate() {
+                    let mark = if from + k == s.at { '>' } else { ' ' };
+                    line.push(mark);
+                    let hi = b >> 4;
+                    let lo = b & 0xF;
+                    line.push(char::from_digit(hi as u32, 16).unwrap_or('?'));
+                    line.push(char::from_digit(lo as u32, 16).unwrap_or('?'));
+                }
+                crate::kprintln!("  bytes {}..{}:{}", from, to, line);
+            }
+        }
+    }
+    if sum.skipped > 0 {
+        crate::kprintln!(
+            "  {} conditional block(s) skipped whole; names inside are not defined",
+            sum.skipped
+        );
+    }
+    if sum.redefinitions > 0 {
+        crate::kprintln!("  {} name(s) defined more than once", sum.redefinitions);
+    }
+
+    with_namespace(a, |ns| {
+        let mut shown = 0usize;
+        for i in 0..ns.len() {
+            let n = ns.node(i);
+            if matches!(n.kind, aml::Kind::Field { .. }) && filter.is_empty() {
+                // A machine has hundreds of these and they are only meaningful
+                // beside their region. Listed when asked for by name.
+                continue;
+            }
+            let p = ns.path(i);
+            if !filter.is_empty() && !p.contains(filter) {
+                continue;
+            }
+            if shown >= 200 {
+                crate::kprintln!("  ... and more; give a path to narrow it");
+                break;
+            }
+            shown += 1;
+            match n.kind {
+                aml::Kind::Method { args, serialized } => crate::kprintln!(
+                    "  {:<34} method, {} arg(s){}",
+                    p,
+                    args,
+                    if serialized { ", serialized" } else { "" }
+                ),
+                aml::Kind::OpRegion { space } => {
+                    crate::kprintln!("  {:<34} region in {}", p, space_name(space))
+                }
+                k => crate::kprintln!("  {:<34} {:?}", p, k),
+            }
+        }
+        if shown == 0 {
+            crate::kprintln!("  nothing matches '{}'", filter);
+        }
+    });
+}
+
+/// The address spaces a region can live in. Named because the number alone
+/// says nothing about whether this kernel can reach it.
+pub fn space_name(space: u8) -> &'static str {
+    match space {
+        0 => "system memory",
+        1 => "system I/O",
+        2 => "PCI config",
+        3 => "embedded controller",
+        4 => "SMBus",
+        5 => "CMOS",
+        6 => "PCI bar target",
+        7 => "IPMI",
+        8 => "general purpose I/O",
+        9 => "generic serial bus",
+        10 => "platform communications",
+        _ => "an unnamed space",
+    }
 }
