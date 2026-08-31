@@ -306,7 +306,7 @@ impl<'a> Interp<'a> {
                 }
             }
             Kind::Field { .. } | Kind::IndexField { .. } | Kind::BankField { .. } => {
-                Err(Fault::Region(0xFF))
+                self.read_field(node)
             }
             _ => Ok(Value::Node(node)),
         }
@@ -883,4 +883,129 @@ pub fn name_of(p: &Path) -> String {
         s.pop();
     }
     s
+}
+
+// --- regions, and reading fields out of them ----------------------------
+
+/// Whether writes through a region are permitted.
+///
+/// Off, and the same shape as `store unlock` and `fat unlock`. Reading a
+/// battery needs no writes at all, and a stray write to an embedded controller
+/// is not a wrong number: it is a fan that stops or a charge threshold that
+/// moves, on hardware, permanently. So the capability is separate from the
+/// code that would use it and has to be asked for.
+static WRITES: crate::sync::Racy<bool> = crate::sync::Racy::new(false);
+
+pub fn allow_writes(on: bool) {
+    unsafe { *WRITES.get() = on };
+}
+
+pub fn writes_allowed() -> bool {
+    unsafe { *WRITES.get() }
+}
+
+impl<'a> Interp<'a> {
+    /// A region's address space, base and length, evaluated on demand.
+    ///
+    /// The offset and length are term arguments and on a real machine one of
+    /// them is routinely a name or an `Add` over one, so they cannot be read
+    /// at load time. They are evaluated here, where the namespace they refer
+    /// to is complete.
+    fn region_of(&mut self, node: usize) -> Result<(u8, u64, u64), Fault> {
+        let (space, body, scope) = {
+            let n = self.ns.node(node);
+            let space = match n.kind {
+                Kind::OpRegion { space } => space,
+                _ => return Err(Fault::Type("a region")),
+            };
+            (space, self.ns.body_of(node), n.parent)
+        };
+        let mut c = Cursor { b: body, at: 0 };
+        let base = self.arg(&mut c, scope)?.int()?;
+        let len = self.arg(&mut c, scope)?.int().unwrap_or(0);
+        Ok((space, base, len))
+    }
+
+    /// A region's base and length, for a report that wants to show them.
+    pub fn region_bounds(&mut self, node: usize) -> Result<(u64, u64), Fault> {
+        let (_, base, len) = self.region_of(node)?;
+        Ok((base, len))
+    }
+
+    /// Read one access-sized unit from an address space.
+    ///
+    /// The embedded controller is a byte at a time whatever the field's
+    /// declared access size says, because its protocol has no other shape.
+    fn read_unit(&mut self, space: u8, addr: u64, bytes: usize) -> Result<u64, Fault> {
+        match space {
+            // System memory. Identity-mapped here, so the address is the
+            // pointer, and read volatile because it is very often not memory.
+            0 => Ok(unsafe {
+                match bytes {
+                    1 => core::ptr::read_volatile(addr as *const u8) as u64,
+                    2 => core::ptr::read_volatile(addr as *const u16) as u64,
+                    4 => core::ptr::read_volatile(addr as *const u32) as u64,
+                    _ => core::ptr::read_volatile(addr as *const u64),
+                }
+            }),
+            // System I/O.
+            1 => Ok(unsafe {
+                match bytes {
+                    1 => crate::cpu::port::inb(addr as u16) as u64,
+                    2 => crate::cpu::port::inw(addr as u16) as u64,
+                    _ => crate::cpu::port::inl(addr as u16) as u64,
+                }
+            }),
+            // The embedded controller, one byte per transaction.
+            3 => crate::dev::ec::read(addr as u8).map(|v| v as u64).ok_or(Fault::Region(3)),
+            other => Err(Fault::Region(other)),
+        }
+    }
+
+    /// Read a field: the named window onto a region.
+    ///
+    /// Fields are not required to be aligned to anything, so this reads every
+    /// access-sized unit the window touches, assembles them, then shifts and
+    /// masks. A `_BST` on a real machine has four-bit and one-bit fields
+    /// sharing a byte with each other.
+    pub fn read_field(&mut self, node: usize) -> Result<Value, Fault> {
+        self.tick()?;
+        let (region, flags, offset, width) = match self.ns.node(node).kind {
+            Kind::Field { region, flags, offset, width } => (region, flags, offset, width),
+            // A bank field needs its bank register selected first, and an
+            // index field is two writes and a read. Both need writes, which
+            // are off, so both are refused by name rather than read wrongly.
+            Kind::IndexField { .. } => return Err(Fault::Type("a field this can read")),
+            Kind::BankField { .. } => return Err(Fault::Type("a field this can read")),
+            _ => return Err(Fault::Type("a field")),
+        };
+        if width == 0 || width > 64 {
+            return Err(Fault::Type("a field of at most 64 bits"));
+        }
+        let (space, base, _len) = self.region_of(region)?;
+
+        // Access size, from the low nibble of the field flags. Anything the
+        // controller cannot do a byte at a time is forced to bytes.
+        let bits = match flags & 0x0F {
+            2 => 16u32,
+            3 => 32,
+            4 => 64,
+            _ => 8,
+        };
+        let bits = if space == 3 { 8 } else { bits };
+        let unit = (bits / 8) as usize;
+
+        let first = offset / bits;
+        let last = (offset + width - 1) / bits;
+        let mut acc: u128 = 0;
+        for u in first..=last {
+            let addr = base + (u as u64) * (unit as u64);
+            let v = self.read_unit(space, addr, unit)?;
+            acc |= (v as u128) << ((u - first) * bits);
+            self.tick()?;
+        }
+        let shift = offset - first * bits;
+        let mask = if width >= 64 { u64::MAX } else { (1u64 << width) - 1 };
+        Ok(Value::Int(((acc >> shift) as u64) & mask))
+    }
 }

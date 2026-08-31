@@ -2129,6 +2129,14 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             kprintln!("  {} ticks  ({}.{:02} s at {} Hz)", t, t / hz, (t % hz) * 100 / hz, hz);
             kprintln!("  apic timer calibrated at {} Hz", lapic::timer_hz());
         }
+        "ec" => crate::dev::ec::report(),
+        "acpi" if rest.trim() == "unlock" => {
+            crate::acpi::eval::allow_writes(true);
+            console::set_color(LTRED);
+            kprintln!("  region writes are on. A stray write to an embedded controller");
+            kprintln!("  is a fan that stops or a charge threshold that moves, on hardware.");
+            console::set_color(LTGRAY);
+        }
         "acpi" if rest.trim().starts_with("load") => {
             crate::acpi::load_report(rest.trim()[4..].trim());
         }

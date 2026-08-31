@@ -66,10 +66,16 @@ pub enum Kind {
     Method { args: u8, serialized: bool },
     /// Bytes are the offset and length expressions, unevaluated.
     OpRegion { space: u8 },
-    /// Bytes are the element list. `region` is the node it fields.
-    Field { region: usize, flags: u8 },
-    IndexField { index: usize, data: usize, flags: u8 },
-    BankField { region: usize, bank: usize, flags: u8 },
+    /// One named window onto a region: where it starts in bits and how wide
+    /// it is.
+    ///
+    /// The offsets accumulate across an element list, so a reserved run moves
+    /// everything after it. That is why the list is walked rather than
+    /// skipped: a partial read does not lose the last few fields, it gives
+    /// every field after the gap the wrong address.
+    Field { region: usize, flags: u8, offset: u32, width: u32 },
+    IndexField { index: usize, data: usize, flags: u8, offset: u32, width: u32 },
+    BankField { region: usize, bank: usize, flags: u8, offset: u32, width: u32 },
     Mutex { level: u8 },
     Event,
     /// A field cut out of a buffer by `CreateWordField` and its relatives.
@@ -77,6 +83,14 @@ pub enum Kind {
     BufferField { bits: u16 },
     /// Points at whatever it was aliased to, resolved after the walk.
     Alias,
+}
+
+/// What a field list hangs off, so one walker serves all three kinds.
+#[derive(Clone, Copy)]
+enum Owner {
+    Region(usize),
+    Index { index: usize, data: usize },
+    Bank { region: usize, bank: usize },
 }
 
 pub struct Node {
@@ -312,6 +326,23 @@ impl Reader {
             return None;
         }
         Some(end)
+    }
+
+    /// The same encoding as `pkg`, decoded as a plain number.
+    ///
+    /// A field list reuses it to carry a bit count rather than a byte range,
+    /// so the value is the answer instead of somewhere to jump to.
+    fn pkg_raw(&mut self) -> Option<u32> {
+        let lead = self.u8()?;
+        let extra = (lead >> 6) as usize;
+        if extra == 0 {
+            return Some((lead & 0x3F) as u32);
+        }
+        let mut v = (lead & 0x0F) as u32;
+        for i in 0..extra {
+            v |= (self.u8()? as u32) << (4 + 8 * i);
+        }
+        Some(v)
     }
 
     fn name(&mut self) -> Option<Path> {
@@ -886,7 +917,7 @@ impl Namespace {
                     None => return Some(Stop { table, at, why: Why::Overrun }),
                 };
                 let region = self.resolve(scope, &n).unwrap_or(0);
-                self.add_fields(r, end, scope, table, Kind::Field { region, flags });
+                self.add_fields(r, end, scope, table, Owner::Region(region), flags);
                 r.at = end;
             }
             // IndexFieldOp: two names, flags, elements.
@@ -909,7 +940,7 @@ impl Namespace {
                 };
                 let index = self.resolve(scope, &i).unwrap_or(0);
                 let data = self.resolve(scope, &d).unwrap_or(0);
-                self.add_fields(r, end, scope, table, Kind::IndexField { index, data, flags });
+                self.add_fields(r, end, scope, table, Owner::Index { index, data }, flags);
                 r.at = end;
             }
             // BankFieldOp: region, bank name, bank value, flags, elements.
@@ -937,7 +968,7 @@ impl Namespace {
                 };
                 let region = self.resolve(scope, &rg).unwrap_or(0);
                 let bank = self.resolve(scope, &bk).unwrap_or(0);
-                self.add_fields(r, end, scope, table, Kind::BankField { region, bank, flags });
+                self.add_fields(r, end, scope, table, Owner::Bank { region, bank }, flags);
                 r.at = end;
             }
             other => return Some(Stop { table, at, why: Why::UnknownExt(other) }),
@@ -945,25 +976,45 @@ impl Namespace {
         None
     }
 
-    /// Define every named element of a field list.
+    /// Define every named element of a field list, tracking where each one is.
     ///
-    /// The elements are walked rather than skipped, because each one names a
-    /// node and the bit offsets accumulate across them: a reserved run of
-    /// eight bits moves everything after it, so a list read partially gives
-    /// every later field the wrong offset. The offset arithmetic itself is the
-    /// evaluator's, and each node keeps the byte range it was declared in.
-    fn add_fields(&mut self, r: &mut Reader, end: usize, scope: usize, table: usize, kind: Kind) {
+    /// The bit offset accumulates across the list and every element moves it:
+    /// a named field by its own width, and a reserved run by the width it
+    /// declares, which is what `Offset()` compiles to. That is why the list is
+    /// walked rather than skipped. Reading it partially would not lose the
+    /// last few fields, it would give every field after the gap the wrong
+    /// address, and a battery read from the wrong address is a plausible
+    /// number rather than an error.
+    ///
+    /// Note these lengths are **counts, not ranges**. A field list reuses the
+    /// package-length encoding to carry a number of bits, so the decoded value
+    /// is the answer rather than an offset to jump to. That distinction is
+    /// invisible until a field is one byte wide and reads as though it were
+    /// zero.
+    fn add_fields(
+        &mut self,
+        r: &mut Reader,
+        end: usize,
+        scope: usize,
+        table: usize,
+        owner: Owner,
+        flags: u8,
+    ) {
+        let mut bit = 0u32;
         while r.at < end {
             let at = r.at;
             match r.peek() {
                 // ReservedField: a gap, given as a bit count.
                 Some(0x00) => {
                     r.at += 1;
-                    if r.pkg().is_none() {
-                        return;
-                    }
+                    let Some(width) = r.pkg_raw() else { return };
+                    bit += width;
                 }
-                // AccessField, then ConnectField, then extended access.
+                // AccessField changes the access size for what follows. The
+                // size is taken from the field's own flags instead, which is
+                // the common case; a list that changed it midway would be read
+                // at the original size, and that is written down rather than
+                // silently assumed.
                 Some(0x01) => {
                     r.at += 1;
                     if r.skip(2).is_none() {
@@ -983,14 +1034,19 @@ impl Namespace {
                     }
                 }
                 Some(_) => {
-                    let seg = match r.seg() {
-                        Some(v) => v,
-                        None => return,
+                    let Some(seg) = r.seg() else { return };
+                    let Some(width) = r.pkg_raw() else { return };
+                    let kind = match owner {
+                        Owner::Region(region) => Kind::Field { region, flags, offset: bit, width },
+                        Owner::Index { index, data } => {
+                            Kind::IndexField { index, data, flags, offset: bit, width }
+                        }
+                        Owner::Bank { region, bank } => {
+                            Kind::BankField { region, bank, flags, offset: bit, width }
+                        }
                     };
-                    if r.pkg().is_none() {
-                        return;
-                    }
                     self.ensure(scope, seg, kind, table, (at, r.at));
+                    bit += width;
                 }
                 None => return,
             }

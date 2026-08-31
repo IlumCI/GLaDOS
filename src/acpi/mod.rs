@@ -648,7 +648,22 @@ pub fn ns_report(a: &Acpi, filter: &str) {
                     if serialized { ", serialized" } else { "" }
                 ),
                 aml::Kind::OpRegion { space } => {
-                    crate::kprintln!("  {:<34} region in {}", p, space_name(space))
+                    // The base is evaluated rather than printed from the
+                    // bytes, because on a real machine it is a name or an
+                    // expression over one. Showing it is what turns "a region
+                    // exists" into "a region at an address somebody can check
+                    // against a datasheet".
+                    let mut it = eval::Interp::new(ns);
+                    match it.region_bounds(i) {
+                        Ok((base, len)) => crate::kprintln!(
+                            "  {:<34} region in {} at {:#x}, {} byte(s)",
+                            p, space_name(space), base, len
+                        ),
+                        Err(e) => crate::kprintln!(
+                            "  {:<34} region in {}, base unreadable: {}",
+                            p, space_name(space), fault_text(&e)
+                        ),
+                    }
                 }
                 k => crate::kprintln!("  {:<34} {:?}", p, k),
             }
@@ -834,6 +849,8 @@ pub fn fault_text(f: &eval::Fault) -> alloc::string::String {
 ///     14 0B 'TST2' 01  A4 72 68 01 00     Method (TST2, 1) { Return (Arg0 + 1) }
 ///     14 09 'TST3' 00  A2 02 01           Method (TST3, 0) { While (One) {} }
 ///     14 07 'TST4' 00  6F                 Method (TST4, 0) { <no such opcode> }
+///     5b 80 'TEC0' 03 00 0a 10             OperationRegion (TEC0, EmbeddedControl, 0, 0x10)
+///     5b 81 0b 'TEC0' 11 'TBYT' 08         Field (TEC0, ByteAcc, Lock) { TBYT, 8 }
 ///
 /// The package lengths count themselves, which is the rule most easily got
 /// wrong: 0x0B is one length byte plus four name bytes plus one flags byte
@@ -844,6 +861,8 @@ const FIXTURE: &[u8] = &[
     0x14, 0x0B, 0x54, 0x53, 0x54, 0x32, 0x01, 0xA4, 0x72, 0x68, 0x01, 0x00,
     0x14, 0x09, 0x54, 0x53, 0x54, 0x33, 0x00, 0xA2, 0x02, 0x01,
     0x14, 0x07, 0x54, 0x53, 0x54, 0x34, 0x00, 0x6F,
+    0x5B, 0x80, 0x54, 0x45, 0x43, 0x30, 0x03, 0x00, 0x0A, 0x10,
+    0x5B, 0x81, 0x0B, 0x54, 0x45, 0x43, 0x30, 0x11, 0x54, 0x42, 0x59, 0x54, 0x08,
 ];
 
 /// What can be checked about AML on any machine, plus what this one says.
@@ -858,7 +877,7 @@ pub fn aml_selftest(a: &Option<Acpi>) -> bool {
     let mut ns = aml::Namespace::new();
     let r = ns.load(FIXTURE);
     claim(&mut ok, r.stop.is_none(), "a hand-assembled table walks to its last byte");
-    claim(&mut ok, r.nodes == 4, "and declares exactly the four names in it");
+    claim(&mut ok, r.nodes == 6, "and declares exactly the six names in it");
 
     let find = |ns: &aml::Namespace, n: &str| ns.resolve(0, &parse_path(n));
 
@@ -919,6 +938,33 @@ pub fn aml_selftest(a: &Option<Acpi>) -> bool {
             );
         }
         None => claim(&mut ok, false, "TST4 is in the namespace"),
+    }
+
+    // The embedded controller, which is the road every battery reading takes
+    // and the one thing here that cannot be tested on a machine that has one
+    // emulated. What *is* testable is the failure: QEMU models no controller,
+    // so the ports read 0xFF, both status bits look set forever, and a driver
+    // that waited for them to clear would never come back.
+    match find(&ns, "TBYT") {
+        Some(node) => {
+            let before = crate::dev::ec::counters().1;
+            let mut it = eval::Interp::new(&ns);
+            let got = it.eval_node(node, &[]);
+            let after = crate::dev::ec::counters().1;
+            if crate::dev::ec::present() {
+                // A real controller answered, which means this is the machine
+                // rather than the emulator.
+                claim(&mut ok, got.is_ok(), "a field over the embedded controller reads");
+            } else {
+                claim(
+                    &mut ok,
+                    got == Err(eval::Fault::Region(3)),
+                    "a field over an absent controller fails, naming the address space",
+                );
+                claim(&mut ok, after > before, "and the wait gave up rather than hanging");
+            }
+        }
+        None => claim(&mut ok, false, "TBYT is in the namespace"),
     }
 
     // A name that is not there is an error rather than a zero, because a
