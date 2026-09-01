@@ -236,9 +236,18 @@ pub fn queue_command(cmd: &str) {
 
 const MARGIN: u32 = 8;
 const NUDGE: u32 = 16;
-const MENU_H: u32 = theme::TITLE_H;
+/// A menu bar's height, which is the theme's and no longer the caption's.
+///
+/// It was `= theme::TITLE_H`, which was a coincidence rather than a fact and
+/// became a trap the moment the caption grew: every menu row and every
+/// dropdown row would have gone to thirty pixels around sixteen of text,
+/// silently, because nothing here says a menu row is as tall as a title.
+const MENU_H: u32 = theme::MENU_H;
 /// The bar along the bottom.
-const TASK_H: u32 = theme::TITLE_H + 10;
+///
+/// A number rather than `TITLE_H + 10` for the same reason. A taskbar is its
+/// own surface and XP's is not a caption plus a constant.
+const TASK_H: u32 = 38;
 /// Gap between task buttons.
 const TASK_GAP: u32 = 4;
 
@@ -1646,48 +1655,22 @@ fn is_double(x: i32, y: i32) -> bool {
 
 /// Where a window's title bar, menu bar and client area are.
 ///
-/// One formula, used by the paint pass and the hit-test alike, because these
-/// two disagreeing is the classic pointer bug: a button that highlights in one
-/// place and presses in another. `theme::window` paints the same geometry; the
-/// client rectangle it returns is this one.
+/// `theme::chrome` owns the formula now, because the painter and the
+/// hit-tester both need it and they used to hold two copies in two files. This
+/// is the shim that keeps the four callers reading as they did.
 fn chrome(frame: Rect, has_menus: bool) -> (Rect, Option<Rect>, Rect) {
-    let inner = frame.shrink(theme::FRAME);
-    let title = Rect::new(inner.x, inner.y, inner.w, theme::TITLE_H);
-    let mut client = Rect::new(
-        inner.x,
-        inner.y + theme::TITLE_H + 2,
-        inner.w,
-        inner.h.saturating_sub(theme::TITLE_H + 2),
-    );
-    let menubar = if has_menus {
-        let bar = Rect::new(client.x, client.y, client.w, MENU_H);
-        client = Rect::new(
-            client.x,
-            client.y + MENU_H,
-            client.w,
-            client.h.saturating_sub(MENU_H),
-        );
-        Some(bar)
-    } else {
-        None
-    };
-    (title, menubar, client)
+    let c = theme::chrome(frame, has_menus);
+    (c.title, c.menubar, c.client)
 }
 
-/// Which menu-bar label sits under a point, mirroring the paint loop exactly.
+/// Which menu-bar label sits under a point, from the same iterator the paint
+/// loop walks.
 fn menu_label_at(menus: &[Menu], bar: Rect, x: i32, y: i32) -> Option<usize> {
     if y < bar.y as i32 || y >= (bar.y + bar.h) as i32 {
         return None;
     }
-    let mut lx = bar.x + 6;
-    for (mi, m) in menus.iter().enumerate() {
-        let w = theme::text_w_of(&m.label) + 12;
-        if x >= lx as i32 && x < (lx + w) as i32 {
-            return Some(mi);
-        }
-        lx += w;
-    }
-    None
+    theme::menu_labels(bar, menus.iter().map(|m| m.label.as_str()))
+        .position(|r| x >= r.x as i32 && x < (r.x + r.w) as i32)
 }
 
 /// Which sides of a frame a resize drag has hold of.
@@ -2198,10 +2181,10 @@ fn dropdown_rows(fb: &Framebuffer, d: &Desktop, screen: Rect) -> Option<(Rect, u
     match d.mode {
         Mode::Menu { menu, .. } => {
             let m = d.windows[f].menus.get(menu)?;
-            let mut x = inner.x + 6;
-            for prev in &d.windows[f].menus[..menu] {
-                x += theme::text_w_of(&prev.label) + 12;
-            }
+            let bar = Rect::new(inner.x, inner.y + theme::TITLE_H + 2, inner.w, MENU_H);
+            let x = theme::menu_labels(bar, d.windows[f].menus.iter().map(|p| p.label.as_str()))
+                .nth(menu)?
+                .x;
             let w = theme::text_w(m.items.iter().map(|i| i.label.chars().count()).max().unwrap_or(4)) + 24;
             let y = inner.y + theme::TITLE_H + 2 + MENU_H;
             Some((Rect::new(x, y, w, m.items.len() as u32 * MENU_H + 8), m.items.len()))
@@ -2860,14 +2843,16 @@ pub fn draw() {
             // one simply does not write outside itself, and whatever the
             // back-to-front repaint already put there shows through.
             with_window_shape(win, frame, || {
-                let mut client = theme::window(
+                let c = theme::window(
                     &fb,
                     frame,
                     &win.title,
                     active,
                     win.state == WinState::Maximised,
+                    !win.menus.is_empty(),
                     hot,
                 );
+                let mut client = c.client;
                 if client.is_empty() {
                     // Nothing left to draw inside the frame; the chrome is
                     // already painted. `return` and not `continue`, because
@@ -2875,16 +2860,14 @@ pub fn draw() {
                     return;
                 }
 
-                if !win.menus.is_empty() {
-                    let bar = Rect::new(client.x, client.y, client.w, MENU_H);
+                if let Some(bar) = c.menubar {
                     theme::panel(&fb, bar);
                     let open = match d.mode {
                         Mode::Menu { menu, .. } if active => Some(menu),
                         _ => None,
                     };
-                    let mut x = bar.x + 6;
-                    for (mi, m) in win.menus.iter().enumerate() {
-                        let w = theme::text_w_of(&m.label) + 12;
+                    let labels = theme::menu_labels(bar, win.menus.iter().map(|m| m.label.as_str()));
+                    for (mi, (m, lr)) in win.menus.iter().zip(labels).enumerate() {
                         let hot = Some(mi) == open
                             || d.hover == Hover::MenuLabel { win: i, menu: mi };
                         let (fg, bg) = if hot {
@@ -2892,16 +2875,10 @@ pub fn draw() {
                         } else {
                             (theme::TEXT, theme::FACE)
                         };
-                        fb.rect(x, bar.y + 2, w, bar.h - 4, bg);
-                        theme::text(&fb, x + 6, bar.y + 5, &m.label, fg, bg);
-                        x += w;
+                        let ty = lr.y + (lr.h.saturating_sub(theme::text_h())) / 2;
+                        fb.rect(lr.x, lr.y + 1, lr.w, lr.h.saturating_sub(2), bg);
+                        theme::text(&fb, lr.x + 6, ty, &m.label, fg, bg);
                     }
-                    client = Rect::new(
-                        client.x,
-                        client.y + MENU_H,
-                        client.w,
-                        client.h.saturating_sub(MENU_H),
-                    );
                 }
 
                 match &win.content {
@@ -2940,13 +2917,16 @@ pub fn draw() {
                 Mode::Menu { menu, item } => {
                     if let Some(m) = d.windows[f].menus.get(menu) {
                         let inner = frame.shrink(theme::FRAME);
-                        let mut x = inner.x + 6;
-                        for prev in &d.windows[f].menus[..menu] {
-                            x += theme::text_w_of(&prev.label) + 12;
-                        }
+                        let bar = Rect::new(inner.x, inner.y + theme::TITLE_H + 2, inner.w, MENU_H);
+                        let Some(lr) =
+                            theme::menu_labels(bar, d.windows[f].menus.iter().map(|p| p.label.as_str()))
+                                .nth(menu)
+                        else {
+                            return;
+                        };
                         dropdown(
                             &fb,
-                            x,
+                            lr.x,
                             inner.y + theme::TITLE_H + 2 + MENU_H,
                             m.items.iter().map(|i| i.label.as_str()),
                             item,
@@ -3506,6 +3486,9 @@ pub fn key(k: u8) -> Route {
                 // edited is the restored one, so drop out of maximised first
                 // rather than editing a rectangle nobody can see.
                 d.windows[f].state = WinState::Normal;
+                // Taken before the rectangle is borrowed mutably: it is a
+                // fact about the window's content, not about its geometry.
+                let floor_h = min_size_of(&d.windows[f]).1;
                 let r = &mut d.windows[f].rect;
                 match k {
                     kbd::KEY_LEFT if moving => r.x = r.x.saturating_sub(NUDGE),
@@ -3520,7 +3503,10 @@ pub fn key(k: u8) -> Route {
                     kbd::KEY_RIGHT => {
                         r.w = (r.w + NUDGE).min(screen.x + screen.w - r.x)
                     }
-                    kbd::KEY_UP => r.h = r.h.saturating_sub(NUDGE).max(theme::TITLE_H * 3),
+                    // `TITLE_H * 3` was a stand-in for "a window has to keep
+                    // some body", and it moved to 90 the moment the caption
+                    // grew. `min_size_of` is what it meant.
+                    kbd::KEY_UP => r.h = r.h.saturating_sub(NUDGE).max(floor_h),
                     kbd::KEY_DOWN => r.h = (r.h + NUDGE).min(screen.y + screen.h - r.y),
                     b'\n' | b'\r' => d.mode = Mode::Normal,
                     27 => {

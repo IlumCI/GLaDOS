@@ -117,9 +117,102 @@ pub const BAD_TEXT: Color = Color::new(0xA0, 0x1C, 0x1C);
 pub const APERTURE: Color = Color::new(0xF2, 0x8C, 0x1E);
 pub const APERTURE_DEEP: Color = Color::new(0x9A, 0x50, 0x0C);
 pub const TITLE_TEXT: Color = Color::new(0xFF, 0xFF, 0xFF);
-/// An unfocused title bar. Grey rather than a dimmer orange, so "which window
-/// has the keyboard" is answered by hue and not by brightness.
-pub const TITLE_IDLE: Color = Color::new(0x80, 0x80, 0x80);
+/// Caption text on an unfocused bar. Near-white rather than grey: Luna dims
+/// the *bar* and leaves its title readable, so "which window has the
+/// keyboard" is answered by the surface behind the words instead of by the
+/// words going faint.
+pub const TITLE_IDLE: Color = Color::new(0xE4, 0xE2, 0xDA);
+
+// --- ramps ---------------------------------------------------------------
+//
+// Positions are 0..=255 across whatever height the ramp is asked for, so one
+// table serves a 30-pixel caption and a 21-pixel caption button. Two stops one
+// apart is a hard step: the break across the middle of a Luna surface is a
+// step and not a fade, and every one of these tables uses it.
+
+/// The focused caption: a gloss over the top third, the step, then a lift at
+/// the foot so the bar does not read as ending in mud.
+pub const TITLE_ON: [(u8, Color); 7] = [
+    (0, Color::new(0xC9, 0x72, 0x14)),
+    (18, Color::new(0xFF, 0xC0, 0x78)),
+    (70, Color::new(0xF5, 0x9A, 0x2E)),
+    (128, Color::new(0xEE, 0x8A, 0x18)),
+    (129, Color::new(0xD3, 0x77, 0x10)),
+    (225, Color::new(0xB0, 0x60, 0x0D)),
+    (255, Color::new(0xC4, 0x6C, 0x11)),
+];
+/// The same shape in greys. Shape rather than brightness, so an unfocused bar
+/// still looks like a bar rather than like a flat strip.
+pub const TITLE_OFF: [(u8, Color); 5] = [
+    (0, Color::new(0x9A, 0x9A, 0x96)),
+    (18, Color::new(0xD8, 0xD8, 0xD2)),
+    (128, Color::new(0xB4, 0xB4, 0xAE)),
+    (129, Color::new(0xA2, 0xA2, 0x9C)),
+    (255, Color::new(0x8C, 0x8C, 0x86)),
+];
+/// The window border, which is the caption's colour carried round the outside.
+pub const BORDER_ON: Color = Color::new(0xB4, 0x63, 0x0E);
+pub const BORDER_OFF: Color = Color::new(0x9A, 0x9A, 0x94);
+
+/// Minimise and maximise.
+pub const CAP_BTN: [(u8, Color); 5] = [
+    (0, Color::new(0xFF, 0xD9, 0xA6)),
+    (30, Color::new(0xF6, 0xA9, 0x3E)),
+    (128, Color::new(0xE6, 0x8D, 0x1C)),
+    (129, Color::new(0xCE, 0x7A, 0x14)),
+    (255, Color::new(0xB4, 0x65, 0x0F)),
+];
+pub const CAP_BTN_HOT: [(u8, Color); 5] = [
+    (0, Color::new(0xFF, 0xF0, 0xD8)),
+    (30, Color::new(0xFF, 0xC8, 0x78)),
+    (128, Color::new(0xF6, 0xA9, 0x3E)),
+    (129, Color::new(0xE6, 0x8D, 0x1C)),
+    (255, Color::new(0xCE, 0x7A, 0x14)),
+];
+/// Close. Red whether or not the pointer is on it -- see `CLOSE_HOT`.
+pub const CAP_CLOSE: [(u8, Color); 5] = [
+    (0, Color::new(0xFF, 0xA8, 0xA8)),
+    (30, Color::new(0xE8, 0x5A, 0x5A)),
+    (128, Color::new(0xD2, 0x3A, 0x3A)),
+    (129, Color::new(0xBE, 0x2E, 0x2E)),
+    (255, Color::new(0xA8, 0x24, 0x24)),
+];
+/// Its hovered form, built round `CLOSE_HOT` so the two cannot drift apart.
+pub const CAP_CLOSE_HOT: [(u8, Color); 5] = [
+    (0, Color::new(0xFF, 0xD0, 0xD0)),
+    (30, Color::new(0xF0, 0x80, 0x80)),
+    (128, CLOSE_HOT),
+    (129, Color::new(0xCE, 0x38, 0x38)),
+    (255, Color::new(0xB8, 0x2C, 0x2C)),
+];
+/// The pale outline round a caption button, and the catchlight along the top
+/// row of the bar itself.
+pub const CAP_EDGE: Color = Color::new(0xFF, 0xE0, 0xBC);
+/// The glyph on a caption button. White, because these sit on colour now.
+pub const CAP_INK: Color = Color::new(0xFF, 0xFF, 0xFF);
+
+/// A push button. The ramp is there to catch the top edge rather than to be
+/// looked at, which is why it is three stops and nearly flat by the foot.
+pub const BTN: [(u8, Color); 3] = [
+    (0, Color::new(0xFF, 0xFF, 0xFF)),
+    (24, Color::new(0xF6, 0xF4, 0xEA)),
+    (255, FACE),
+];
+pub const BTN_DOWN: [(u8, Color); 3] = [
+    (0, Color::new(0xC7, 0xC4, 0xB4)),
+    (32, Color::new(0xDD, 0xDA, 0xCA)),
+    (255, FACE),
+];
+/// Under the pointer. Luna's focused button glows; this is the cheap version
+/// of the glow, which is a warmer face and a brighter outline.
+pub const BTN_HOT: [(u8, Color); 3] = [
+    (0, Color::new(0xFF, 0xFB, 0xE8)),
+    (24, Color::new(0xFF, 0xEB, 0xB8)),
+    (255, Color::new(0xFF, 0xD1, 0x74)),
+];
+/// The one-pixel outline XP puts round every button, and its lit form.
+pub const BTN_EDGE: Color = APERTURE_DEEP;
+pub const BTN_EDGE_HOT: Color = APERTURE;
 
 /// The console's own background, inside the terminal window's well.
 pub const SCREEN: Color = Color::new(0x0A, 0x0C, 0x10);
@@ -137,9 +230,25 @@ pub const HEADING: Color = HILIGHT;
 
 pub const CHROME_SCALE: u32 = 2;
 /// Height of a title bar at `CHROME_SCALE`, with room above and below the text.
-pub const TITLE_H: u32 = font::GLYPH_H * CHROME_SCALE + 8;
+///
+/// Fourteen rather than eight above a 16-pixel line. A caption is the surface
+/// somebody looks at to know which window has the keyboard, and the 3.1
+/// proportion crowds it: XP put air around the same text and that air is most
+/// of why one reads as modern and the other does not.
+pub const TITLE_H: u32 = font::GLYPH_H * CHROME_SCALE + 14;
+/// Height of a menu bar and of one row in a dropdown.
+///
+/// **Its own constant, and that is the point of it.** It was
+/// `= theme::TITLE_H` over in `desk`, which is a coincidence and not a fact:
+/// the moment the caption grew, every menu row and every dropdown row would
+/// have grown with it, silently, to thirty pixels around sixteen of text.
+pub const MENU_H: u32 = font::GLYPH_H * CHROME_SCALE + 6;
 /// Thickness of a window's outer frame.
-pub const FRAME: u32 = 4;
+///
+/// Three, and it is a coloured border now rather than a grey slab. XP's frame
+/// says which window is active along its whole length; 3.1's said only that
+/// there was an edge here to grab.
+pub const FRAME: u32 = 3;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Rect {
@@ -198,6 +307,29 @@ pub fn outline(fb: &Framebuffer, r: Rect, c: Color) {
     fb.rect(r.x, r.y + r.h - 1, r.w, 1, c);
     fb.rect(r.x, r.y, 1, r.h, c);
     fb.rect(r.x + r.w - 1, r.y, 1, r.h, c);
+}
+
+/// A control face: a vertical ramp inside a one-pixel outline, with the four
+/// corner pixels left unwritten.
+///
+/// The shape every XP control is -- push button, caption button, task button,
+/// Start. The rounding is those four omitted pixels and nothing else, which is
+/// enough at this size and costs nothing: what shows through them is whatever
+/// the parent painted, the same argument `Shape` makes about a window, applied
+/// where it happens to be free.
+///
+/// Deliberately not a `Shape`. A row table and a clip on every span inside it
+/// is the right trade for a window and an absurd one for a twenty-one pixel
+/// box.
+pub fn control(fb: &Framebuffer, r: Rect, stops: &[(u8, Color)], edge: Color) {
+    if r.w < 3 || r.h < 3 {
+        return;
+    }
+    fb.vgrad(r.x + 1, r.y + 1, r.w - 2, r.h - 2, stops);
+    fb.rect(r.x + 1, r.y, r.w - 2, 1, edge);
+    fb.rect(r.x + 1, r.y + r.h - 1, r.w - 2, 1, edge);
+    fb.rect(r.x, r.y + 1, 1, r.h - 2, edge);
+    fb.rect(r.x + r.w - 1, r.y + 1, 1, r.h - 2, edge);
 }
 
 /// A raised surface: face plus a raised edge. Buttons, panels, menu bars.
@@ -281,39 +413,96 @@ fn mark(fb: &Framebuffer, cx: i32, cy: i32, r: i32, fg: Color) {
     fb.fill_circle(cx, cy, inner, fg);
 }
 
-/// Draw a window: frame, title bar, and a raised body. Returns the client area.
+/// Where every part of a window is.
 ///
-/// The caller gets a rectangle and no further obligations -- everything that
-/// makes it look like a window has already happened.
+/// One formula, and it lives here rather than in `desk` because
+/// `theme::window` paints from it and `desk::press_at` hit-tests from it, and
+/// those two are exactly the pair that must never disagree -- a title bar you
+/// can see and cannot grab is the shape that bug takes.
+///
+/// It was two copies of the same arithmetic in two files, held in agreement by
+/// hand. That held right up until `TITLE_H` moved, which is the moment it
+/// would have stopped holding silently. `caption_buttons` has been arranged
+/// this way since it existed; this is the rest of it.
+#[derive(Clone, Copy)]
+pub struct Chrome {
+    pub frame: Rect,
+    pub title: Rect,
+    /// Everything below the caption, before any menu bar is taken out of it.
+    /// The ground the body is painted on.
+    pub body: Rect,
+    pub menubar: Option<Rect>,
+    pub client: Rect,
+}
+
+pub fn chrome(frame: Rect, has_menus: bool) -> Chrome {
+    let inner = frame.shrink(FRAME);
+    let title = Rect::new(inner.x, inner.y, inner.w, TITLE_H);
+    // Two pixels of border show between the caption and the body, which under
+    // Luna is a thin accent line rather than the gap it used to be.
+    let body = Rect::new(
+        inner.x,
+        inner.y + TITLE_H + 2,
+        inner.w,
+        inner.h.saturating_sub(TITLE_H + 2),
+    );
+    let (menubar, client) = if has_menus {
+        (
+            Some(Rect::new(body.x, body.y, body.w, MENU_H)),
+            Rect::new(body.x, body.y + MENU_H, body.w, body.h.saturating_sub(MENU_H)),
+        )
+    } else {
+        (None, body)
+    };
+    Chrome { frame, title, body, menubar, client }
+}
+
+/// Draw a window: border, title bar, and the ground its body sits on.
+///
+/// Answers where everything is, so a caller that wants to hit-test what it
+/// just painted asks nobody a second time.
 pub fn window(
     fb: &Framebuffer,
     r: Rect,
     title: &str,
     active: bool,
     maximised: bool,
+    has_menus: bool,
     hot_caption: Option<usize>,
-) -> Rect {
-    // Outer frame: a raised slab, then a groove, which is how 3.1 gets a border
-    // thick enough to grab without looking like a picture frame.
-    panel(fb, r);
-    let inner = r.shrink(FACE_INSET);
-    if inner.is_empty() {
-        return inner;
+) -> Chrome {
+    let c = chrome(r, has_menus);
+    // The border is the caption's colour carried round the outside, painted as
+    // the whole window and then covered. Two fills rather than four strips,
+    // and the strip between the caption and the body comes out of it for
+    // free.
+    fb.rect(r.x, r.y, r.w, r.h, if active { BORDER_ON } else { BORDER_OFF });
+    if c.body.is_empty() {
+        return c;
     }
-
-    let bar = Rect::new(inner.x, inner.y, inner.w, TITLE_H);
-    title_bar(fb, bar, title, active, maximised, hot_caption);
-
-    let client = Rect::new(
-        inner.x,
-        inner.y + TITLE_H + 2,
-        inner.w,
-        inner.h.saturating_sub(TITLE_H + 2),
-    );
-    client
+    title_bar(fb, c.title, title, active, maximised, hot_caption);
+    // The body's ground, whether or not a menu bar will be drawn on part of
+    // it. A window with menus and one without must stand on the same face.
+    fb.rect(c.body.x, c.body.y, c.body.w, c.body.h, FACE);
+    c
 }
 
-const FACE_INSET: u32 = FRAME;
+/// The rectangle of each menu-bar label, in order.
+///
+/// One formula for the paint loop, the hit-test, and the two places a dropdown
+/// is positioned under one. There were four copies of it and the fourth was in
+/// a different file from the first.
+pub fn menu_labels<'a>(
+    bar: Rect,
+    labels: impl Iterator<Item = &'a str> + 'a,
+) -> impl Iterator<Item = Rect> + 'a {
+    let (y, h) = (bar.y, bar.h);
+    labels.scan(bar.x + 6, move |x, label| {
+        let w = text_w_of(label) + 12;
+        let r = Rect::new(*x, y, w, h);
+        *x += w;
+        Some(r)
+    })
+}
 
 /// The three caption buttons in a title bar, left to right:
 /// minimise, maximise/restore, close.
@@ -323,13 +512,15 @@ const FACE_INSET: u32 = FRAME;
 /// button that highlights in one place and presses in another is the bug
 /// that duplicated layout always becomes.
 pub fn caption_buttons(bar: Rect) -> [Rect; 3] {
-    let s = bar.h.saturating_sub(8);
-    let y = bar.y + 4;
-    let close_x = bar.x + bar.w.saturating_sub(s + 6);
+    let s = bar.h.saturating_sub(9);
+    let y = bar.y + (bar.h.saturating_sub(s)) / 2;
+    let close_x = bar.x + bar.w.saturating_sub(s + 5);
     // The close button sits apart from the pair, as it has since 95 -- the
     // one you reach for blind should not share an edge with the one that
-    // merely tidies.
-    let max_x = close_x.saturating_sub(s + 6);
+    // merely tidies. XP itself puts all three flush and this keeps the gap:
+    // the argument for it did not stop being true because Redmond stopped
+    // making it.
+    let max_x = close_x.saturating_sub(s + 4);
     let min_x = max_x.saturating_sub(s + 2);
     [
         Rect::new(min_x, y, s, s),
@@ -346,31 +537,12 @@ pub fn title_bar(
     maximised: bool,
     hot_caption: Option<usize>,
 ) {
-    // The 98 half of the ancestry: a smooth left-to-right ramp, deep to
-    // bright, in Aperture's colours instead of Redmond's blues. Inactive bars
-    // ramp in greys, which is what makes the focused window findable at a
-    // glance on a desktop of several.
-    let (from, to) = if active { (APERTURE_DEEP, APERTURE) } else { (Color::new(0x50, 0x50, 0x50), TITLE_IDLE) };
-    let w = r.w.max(1);
-    // The ramp is horizontal, so every row of it is the same row. Building it
-    // once and blitting it down costs `h` memcpys; the column-major form this
-    // replaces cost `w * h` single-pixel spans -- 30,000 of them for a
-    // 1250-pixel title bar, per window, per frame, in the worst possible order
-    // for a row-major buffer.
-    let mut row: alloc::vec::Vec<u32> = alloc::vec::Vec::with_capacity(w as usize);
-    for i in 0..w {
-        let lerp = |a: u8, b: u8| (a as u32 + (b as u32).abs_diff(a as u32) * i / w) as u8;
-        let c = Color::new(
-            if to.r >= from.r { lerp(from.r, to.r) } else { (from.r as u32 - (from.r - to.r) as u32 * i / w) as u8 },
-            if to.g >= from.g { lerp(from.g, to.g) } else { (from.g as u32 - (from.g - to.g) as u32 * i / w) as u8 },
-            if to.b >= from.b { lerp(from.b, to.b) } else { (from.b as u32 - (from.b - to.b) as u32 * i / w) as u8 },
-        );
-        row.push(fb.encode(c));
-    }
-    let bottom = r.y.saturating_add(r.h);
-    for y in r.y..bottom {
-        fb.blit_span(r.x, y, &row);
-    }
+    fb.vgrad(r.x, r.y, r.w, r.h, if active { &TITLE_ON } else { &TITLE_OFF });
+    // A one-pixel catchlight along the very top. The stop table is
+    // proportional and so cannot express an absolute one-pixel edge at any
+    // height, which is the intended division of labour between the ramp and
+    // the line drawn on top of it.
+    fb.rect(r.x, r.y, r.w, 1, if active { CAP_EDGE } else { EDGE_LIGHT });
 
     let pad = 6;
     let cy = r.y + r.h / 2;
@@ -388,24 +560,28 @@ pub fn title_bar(
     // Over a gradient there is no one background colour, so the glyphs carry
     // their own shadow instead of a box.
     text_over(fb, tx + 1, ty + 1, shown, DARKEDGE);
-    text_over(fb, tx, ty, shown, TITLE_TEXT);
+    text_over(fb, tx, ty, shown, if active { TITLE_TEXT } else { TITLE_IDLE });
 
-    // The caption buttons: raised 3.1 faces on the 98 gradient, glyphs drawn
-    // by hand because the font has no box-drawing worth the name. Hover gets
-    // the same inner ring every other button here uses for "the next press
-    // lands here".
+    // The caption buttons: rounded ramps on the caption's own ramp, glyphs
+    // drawn by hand because the font has no box-drawing worth the name.
+    //
+    // **Close is red whether or not the pointer is on it.** That overturns the
+    // note on `CLOSE_HOT`, which argued the red was the hover feedback and
+    // that every other control here answers hover with a ring. Under Luna the
+    // red is the control's identity rather than its response, and an operator
+    // coming from any Windows since XP finds it by colour before they read the
+    // glyph. Hover still says something -- it brightens.
     for (i, b) in btns.iter().enumerate() {
         let hot = hot_caption == Some(i);
-        let danger = hot && i == 2;
-        fb.rect(b.x, b.y, b.w, b.h, if danger { CLOSE_HOT } else { FACE });
-        bevel(fb, *b, true);
-        if hot && !danger {
-            let f = b.shrink(2);
-            if !f.is_empty() {
-                fb.frame(f.x, f.y, f.w, f.h, DARKEDGE);
-            }
-        }
-        let ink = if danger { HILIGHT } else { TEXT };
+        let close = i == 2;
+        let stops: &[(u8, Color)] = match (close, hot) {
+            (true, true) => &CAP_CLOSE_HOT,
+            (true, false) => &CAP_CLOSE,
+            (false, true) => &CAP_BTN_HOT,
+            (false, false) => &CAP_BTN,
+        };
+        control(fb, *b, stops, CAP_EDGE);
+        let ink = CAP_INK;
         let g = b.shrink(4);
         if g.is_empty() {
             continue;
@@ -420,7 +596,7 @@ pub fn title_bar(
                     let s = g.w.saturating_sub(4);
                     fb.frame(g.x + 4, g.y, s, s, ink);
                     fb.rect(g.x + 4, g.y, s, 2, ink);
-                    fb.rect(g.x, g.y + 4, s, s, FACE);
+                    fb.rect(g.x, g.y + 4, s, s, stops[2].1);
                     fb.frame(g.x, g.y + 4, s, s, ink);
                     fb.rect(g.x, g.y + 4, s, 2, ink);
                 } else {
@@ -472,8 +648,12 @@ pub fn text_over(fb: &Framebuffer, x: u32, y: u32, s: &str, fg: Color) {
 /// A button. `focused` draws the keyboard focus; `default` marks the one Enter
 /// would press if focus were elsewhere.
 pub fn button(fb: &Framebuffer, r: Rect, label: &str, focused: bool, pressed: bool) {
-    fb.rect(r.x, r.y, r.w, r.h, FACE);
-    bevel(fb, r, !pressed);
+    control(
+        fb,
+        r,
+        if pressed { &BTN_DOWN } else { &BTN },
+        if focused { BTN_EDGE_HOT } else { BTN_EDGE },
+    );
 
     // 3.1 marked the default button with an extra black rectangle just inside
     // the edge. Reused here for keyboard focus, which is the thing that
@@ -488,7 +668,9 @@ pub fn button(fb: &Framebuffer, r: Rect, label: &str, focused: bool, pressed: bo
     let tw = text_w_of(label);
     let tx = r.x + (r.w.saturating_sub(tw)) / 2 + u32::from(pressed);
     let ty = r.y + (r.h.saturating_sub(font::GLYPH_H * CHROME_SCALE)) / 2 + u32::from(pressed);
-    text(fb, tx, ty, label, TEXT, FACE);
+    // `text_over` rather than `text`: the face is a ramp now, so stamping one
+    // background colour behind every glyph would print a flat block across it.
+    text_over(fb, tx, ty, label, TEXT);
 }
 
 /// One row of a list box. Selected rows invert to the Aperture bar.
