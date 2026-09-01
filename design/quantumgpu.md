@@ -39,7 +39,7 @@ reproducible.
 ## What the durations mean, because they nearly produced a wrong answer
 
 The first sweep ran 70 ms kernels and measured 0.448 GH/s. The same kernel over
-6.4 s measures 0.493, and over 1.4 s measures 0.674. Three different answers
+6.4 s under a loaded host measured 0.493, and over 1.4 s measures 0.674. Three different answers
 from one binary, spanning 50%.
 
 At 70 ms the GPU never leaves its idle clock: sampled mid-run it read
@@ -89,9 +89,9 @@ than by foresight.
 
 | | predicted | measured |
 |---|---|---|
-| Throughput | 0.5-0.9 GH/s | 0.493 sustained, 0.674 burst |
+| Throughput | 0.5-0.9 GH/s | 0.645 sustained, idle host |
 | ILP widening | 1.2-1.8x | 1.00x |
-| Energy vs an S21 ASIC | ~4,300x worse | ~5,100x worse |
+| Energy vs an S21 ASIC | ~4,300x worse | ~4,000x worse |
 
 The throughput band held. The ILP prediction was wrong by its whole margin,
 and it was wrong because it reasoned from somebody else's register count
