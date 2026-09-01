@@ -1660,14 +1660,14 @@ pub fn trial(
 /// and comes down a rung when the memory map cannot satisfy it, so a lineage
 /// that grows a megabyte per adoption is a lineage that eventually does not
 /// boot. The ledger records the figure either way.
-const MAX_RESIDENT_KIB: usize = 8 * 1024;
+pub const MAX_RESIDENT_KIB: usize = 8 * 1024;
 
 /// Guards that hold regardless of any score.
 ///
 /// These are the ones worth having when the scores look good: a variant can
 /// improve validation accuracy and still be carrying a non-finite scale that
 /// will produce a NaN on the first prompt outside the corpus.
-fn sanity(t: &Trial, d: &super::adapter::Dora) -> (bool, &'static str) {
+pub fn sanity(t: &Trial, d: &super::adapter::Dora) -> (bool, &'static str) {
     for v in d.a.iter().chain(d.b.iter()) {
         if !v.is_finite() {
             return (false, "non-finite factor");

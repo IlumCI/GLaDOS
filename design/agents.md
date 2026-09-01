@@ -255,15 +255,107 @@ Research was the other candidate and is dropped: reading needs `fetch` and
 `save`, which carry the `net` bit and live behind the token gate, so a workflow
 built on them could not be a stable feature.
 
-### Stage 3. Escalation, and only then
+### Stage 3. Role adapters, trained and judged  (done, and the answer is no)
 
-Let the panel's disagreement decide whether to spend a model call. This is the
-gate pattern already proven on routing, applied to a workflow: cheap agents
-answer, and the expensive one is consulted only where they split.
+`work harvest` turns transcripts into per-role example sets. `work train
+<role>` trains an adapter from one and puts it through `godel`'s four judges.
+An adapter that passes is stored under its role, attached around that role's
+decodes, and detached after.
 
-The number to report is not accuracy. It is **model calls per completed task**,
-against a baseline that asks the model at every step. If that ratio is not far
-below one, the design has failed and should be said to have failed.
+All of that works. The measurement it exists to take says roles are a naming
+convention, and the reason is structural rather than a shortage of data.
+
+#### What was measured
+
+24 workflows, SmolLM2-135M, read-only trust, one worker-decided step each:
+
+    work harvest      24 step(s) across 24 run(s)
+                       1 dropped, the step failed
+                      23 example(s) under the role "worker"
+
+    work train worker 23 example(s) from 23 run(s), 18 trained and 5 held
+                      47 decision(s), 10 of them held out, over 2 applet(s)
+                      trained    base 97.3%
+                      held-out   base 100.0%  role 100.0%
+                      paired     fixed 0  broke 0  chi 0.00
+                      J1 FAIL (no net repair)   J2 pass   J3 pass   J4 pass
+
+#### Why more transcripts would not change it
+
+**A harvested label is the base model's own argmax.** `choose` decodes the
+applet name at temperature 0 under the grammar, so the action written into a
+transcript is what the classifier already ranks first. Training on that set
+asks the adapter to reproduce whatever produced it, and the paired test finds
+nothing in either cell because there was no disagreement to find. The 97.3% on
+the training slice is the only gap there is, and it comes from the trial
+scoring under the whole applet table while the label was decoded under the
+read-only subset.
+
+**The `ok` filter does not escape it.** Keeping only successful steps was
+meant to make the target distribution differ from the source. It fails to,
+because `ok` records that the applet ran and says nothing about whether it was
+the right applet, so it drops examples while agreeing with every label that
+survives.
+
+**The label set was degenerate as well.** 23 examples over two applets: a 135M
+model answered two things to 24 different goals. `train_role` refuses a
+one-class set outright now, because an adapter over one class learns a prior
+and scores 100% doing it, which is the one outcome that would look like
+success and mean nothing.
+
+#### What would have to be true instead
+
+A label from something other than the model being trained. Three sources exist
+in this tree already:
+
+- `teach`, an operator naming the right applet, which is how `/ai/train` was
+  built in the first place.
+- A judged outcome in place of a bare `ok`: whether the observation answered
+  the goal. `skill.rs`'s judges are the pattern for it.
+- A larger model's choice as the teacher, which is the distillation direction
+  that works.
+
+A transcript is none of those, and that is the finding.
+
+#### What is kept, and why
+
+The negative result is the deliverable, and the mechanism is what makes it
+checkable by anybody who doubts it. Three parts stand on their own.
+
+**The split is by run and never by step.** Steps inside one run share a goal
+and differ by slot values, so a step split measures memorisation while looking
+like generalisation. It is the same argument the routing corpus makes for
+holding out whole template families.
+
+**The judges are called rather than copied.** `godel::mcnemar` and
+`godel::sanity` were made public, so a role adapter is judged by J1 itself. A
+second implementation would judge it by whatever that copy had drifted into,
+which is the objection `model.rs` makes twice about two implementations that
+are supposed to agree.
+
+**There is no ledger and no rollback, deliberately.** `godel` adopts by
+swapping a head pointer, which puts one adapter in front of every decision the
+machine makes. A role adapter adopted that way stops being a role. It goes on
+around its own role's decodes and comes off after, so declining to store one
+leaves the machine exactly as it was and leaves nothing to undo.
+
+And one economy worth naming: the adapter is attached only around a step the
+worker actually decides. A pre-decided step decodes nothing, so a swap around
+one pays for a specialist to read out somebody else's decision.
+
+### Stage 4. Autonomy, declared per workflow
+
+A workflow declares whether it may run unattended. Unattended runs at
+`Trust::ReadOnly`, attended may be `Full`. The declaration is part of what is
+judged before a workflow is allowed to run on its own, which is the shape
+`app::manifest`'s `raw` bit and `skill trust` already use.
+
+Escalation belongs here rather than in a stage of its own. Letting a panel's
+disagreement decide whether to spend a model call is the gate pattern already
+proven on routing, and the number to report for it is model calls per completed
+task against a baseline that asks the model at every step. Stage 2 already
+drove that ratio to zero for pre-decided steps, so what is left for escalation
+is deciding when a plan needs re-planning, which is a question about autonomy.
 
 ## What to measure, and what would count as failure
 

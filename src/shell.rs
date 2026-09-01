@@ -745,6 +745,174 @@ fn work_cmd(rest: &str) {
         return;
     }
 
+    // `work harvest` -- transcripts into role example sets.
+    if rest == "harvest" {
+        let runs = work::runs().len();
+        let h = work::harvest();
+        console::set_color(YELLOW);
+        kprintln!("[work harvest] {} step(s) across {} run(s)", h.seen, runs);
+        console::set_color(WHITE);
+        // Every count, including what was thrown away. A harvest printing only
+        // what it kept reads the same whether it found a rich set or dropped
+        // four fifths of one.
+        kprintln!("  {:>4} dropped, the manager decided it and not a worker", h.dispatched);
+        kprintln!("  {:>4} dropped, the step failed", h.failed);
+        kprintln!("  {:>4} dropped, a duplicate of one already kept", h.duplicate);
+        if h.roles.is_empty() {
+            console::set_color(LTRED);
+            kprintln!("  nothing to train on");
+            console::set_color(WHITE);
+            kprintln!("  worker-decided steps come from `work new`; `work plan` pre-decides them");
+            return;
+        }
+        for (name, n) in &h.roles {
+            kprintln!("  {:16} {:>4} example(s)", name, n);
+        }
+        return;
+    }
+
+    // `work roles` -- what has been harvested, and what has been trained.
+    if rest == "roles" {
+        let names = work::role_names();
+        if names.is_empty() {
+            kprintln!("  no roles harvested; run `work harvest`");
+            return;
+        }
+        console::set_color(YELLOW);
+        kprintln!("[work roles] {}", names.len());
+        console::set_color(WHITE);
+        for name in names {
+            let ex = work::role_examples(&name);
+            let cut = work::role_split(&ex);
+            let held = ex.len().saturating_sub(cut);
+            let adapter = match work::role_adapter(&name) {
+                Some(b) => alloc::format!("{} B", b.len()),
+                None => String::from("none"),
+            };
+            kprintln!(
+                "  {:16} {:>4} example(s)  {} run(s)  {} held  adapter {}",
+                name, ex.len(), work::role_runs(&ex), held, adapter
+            );
+        }
+        return;
+    }
+
+    // `work train <role>` -- the Stage 3 measurement, and the only one that
+    // decides whether a role is a specialist or a word in a plan file.
+    if let Some(arg) = rest.strip_prefix("train ") {
+        let mut words = arg.split_whitespace();
+        let Some(role) = words.next() else {
+            kprintln!("  usage: work train <role> [-e epochs] [-r rank] [-lr rate]");
+            return;
+        };
+        let mut b = crate::ai::train::Budget::default();
+        let mut bad: Option<&str> = None;
+        while let Some(flag) = words.next() {
+            let value = words.next().unwrap_or("");
+            match (flag, value.parse::<u64>()) {
+                ("-e", Ok(v)) => b.epochs = v as usize,
+                ("-ms", Ok(v)) => b.millis = v,
+                ("-r", Ok(v)) => b.rank = v as usize,
+                ("-lr", _) => match value.parse::<f32>() {
+                    Ok(v) => b.lr = v,
+                    Err(_) => bad = Some(value),
+                },
+                _ => bad = Some(flag),
+            }
+        }
+        // No `-n`. It subsamples the corpus, and a role set is already the
+        // small thing -- striding through forty examples to save time would
+        // trade away the only evidence there is.
+        if let Some(w) = bad {
+            kprintln!("  unrecognised: {}", w);
+            kprintln!("  usage: work train <role> [-e epochs] [-ms budget] [-r rank] [-lr rate]");
+            return;
+        }
+        if crate::ai::mind_busy() {
+            kprintln!("  the mind is busy -- wait for it to finish first");
+            return;
+        }
+        console::set_color(YELLOW);
+        kprintln!("[work train] {}", role);
+        console::set_color(WHITE);
+        match work::train_role(role, &b) {
+            Err(work::RoleError::Unknown) => {
+                console::set_color(LTRED);
+                kprintln!("  no such role, or its set is empty");
+                console::set_color(WHITE);
+            }
+            Err(work::RoleError::TooFew(n)) => {
+                console::set_color(LTRED);
+                kprintln!("  {} example(s): too few for a judge to work with", n);
+                console::set_color(WHITE);
+                // The arithmetic, said out loud, because the alternative is
+                // printing a figure over a slice too small to carry one.
+                kprintln!("  J1 wants a net repair of 4 on a quarter held out, so 16 is the floor");
+            }
+            Err(work::RoleError::OneRun) => {
+                console::set_color(LTRED);
+                kprintln!("  every example came from one run, so nothing can be held out");
+                console::set_color(WHITE);
+                kprintln!("  steps inside a run share a goal; splitting them measures memorisation");
+            }
+            Err(work::RoleError::OneClass) => {
+                console::set_color(LTRED);
+                kprintln!("  every example carries the same label");
+                console::set_color(WHITE);
+                kprintln!("  an adapter over one class learns a prior and scores 100% doing it");
+            }
+            Err(work::RoleError::NoEngine) => kprintln!("  {}", crate::ai::engine_refusal()),
+            Err(work::RoleError::Train(e)) => {
+                use crate::ai::train::RunError;
+                console::set_color(LTRED);
+                // Worded for a role set rather than for the corpus. "there is
+                // no corpus" would be a true sentence about the wrong object.
+                kprintln!("  {}", match e {
+                    RunError::Hardware => "no AVX2/FMA, so this would measure the emulator",
+                    RunError::Hybrid => "adapters are refused on a hybrid checkpoint",
+                    RunError::NoCorpus => "the role set is empty",
+                    RunError::NoDecisions => "the grammar cannot spell any applet in this set",
+                });
+                console::set_color(WHITE);
+            }
+            Ok(f) => {
+                kprintln!(
+                    "  {} example(s) from {} run(s), {} trained and {} held",
+                    f.examples, f.runs, f.train_end, f.examples - f.train_end
+                );
+                kprintln!("  {} decision(s), {} of them held out, over {} applet(s)",
+                          f.decisions, f.validation, f.classes);
+                // Against what would otherwise run, not against a bare model.
+                kprintln!("  trained    base {:.1}%", f.base_train * 100.0);
+                kprintln!("  held-out   base {:.1}%  role {:.1}%", f.base * 100.0, f.adapted * 100.0);
+                kprintln!("  paired     fixed {}  broke {}  chi {:.2}", f.fixed, f.broke, f.mcnemar);
+                // The line that says whether the experiment was possible at
+                // all. A harvested label is what the base already answered,
+                // so a paired test with nothing in either cell is not a small
+                // sample: there was no disagreement to find, and more
+                // transcripts produce more examples the base already answers.
+                if f.fixed == 0 && f.broke == 0 {
+                    kprintln!("  the two agreed on every held-out decision, which is what a");
+                    kprintln!("  harvested label is: the base's own argmax. More runs add more.");
+                }
+                let mark = |b: bool| if b { "pass" } else { "FAIL" };
+                kprintln!("  J1 better  {}  ({})", mark(f.j1), f.j1_why);
+                kprintln!("  J2 unasked {}  ({} of {} goals hold)", mark(f.j2), f.goals_held, f.goals_total);
+                kprintln!("  J3 sane    {}  ({})", mark(f.j3), f.j3_why);
+                kprintln!("  J4 cost    {}  ({} KiB resident)", mark(f.j4), f.resident_kib);
+                if f.kept {
+                    console::set_color(LTGREEN);
+                    kprintln!("  kept -- workers of this role decode wearing it");
+                } else {
+                    console::set_color(LTRED);
+                    kprintln!("  not kept -- on this evidence the role is a naming convention");
+                }
+                console::set_color(WHITE);
+            }
+        }
+        return;
+    }
+
     // `work cmp <a> <b>` -- the Stage 1 check, and it reports two answers
     // because they mean different things.
     if let Some(arg) = rest.strip_prefix("cmp ") {

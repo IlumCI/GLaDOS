@@ -944,6 +944,33 @@ impl Trial {
 /// Build a trial: everything a variant can be judged on, and the model is
 /// not needed again afterwards.
 pub fn prepare(e: &mut super::Engine, b: &Budget) -> Result<Trial, RunError> {
+    let corpus = super::vocab::examples();
+    let (train_end, val_end, seed_end) = super::vocab::splits();
+    prepare_on(e, b, &corpus, train_end, val_end, seed_end)
+}
+
+/// The same trial over examples somebody else assembled.
+///
+/// `prepare` reads the routing corpus and takes its boundaries from
+/// `vocab::splits`; this takes both from the caller. Everything below is
+/// identical, deliberately -- a role adapter judged by a second copy of this
+/// function would be judged by whatever that copy had drifted into, which is
+/// the objection `model.rs` makes twice about two implementations that are
+/// supposed to agree.
+///
+/// The boundaries are positional in the same sense: training is `[0,
+/// train_end)`, validation `[train_end, val_end)`, test `[val_end, end)`.
+/// Passing `val_end == end` gives a trial with no test slice at all, which is
+/// the right shape for a set too small to split three ways -- and it means
+/// nothing reads the test budget by accident.
+pub fn prepare_on(
+    e: &mut super::Engine,
+    b: &Budget,
+    corpus: &[super::vocab::Example],
+    train_end: usize,
+    val_end: usize,
+    seed_end: usize,
+) -> Result<Trial, RunError> {
     // The gate comes first, before anything is allocated or measured. Scalar
     // emulation turns one optimiser step into minutes, and every judgement
     // made from a run like that is a judgement about timing rather than
@@ -954,7 +981,6 @@ pub fn prepare(e: &mut super::Engine, b: &Budget) -> Result<Trial, RunError> {
     if e.model.cfg.hybrid() {
         return Err(RunError::Hybrid);
     }
-    let corpus = super::vocab::examples();
     if corpus.is_empty() {
         return Err(RunError::NoCorpus);
     }
@@ -1054,7 +1080,7 @@ pub fn prepare(e: &mut super::Engine, b: &Budget) -> Result<Trial, RunError> {
     // Cache one hidden state per decision. This is the expensive half and it
     // happens once: a forward pass over the prompt per example, then one more
     // per token of the label's spelling.
-    let (train_end, val_end, seed_end) = super::vocab::splits();
+    //
     // A subsample strides through the corpus rather than taking a prefix.
     // The splits are positional -- training first, held-out in the tail -- so
     // the first N examples are all training examples, and a short run would
