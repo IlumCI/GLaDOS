@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>What happens when the model breaks something</title>
+<meta name="description" content="A kernel with a language model inside it and no process isolation. What the model can reach, what stops it, and what to do when the machine will not come back cleanly.">
+<meta name="keywords" content="AI safety, kernel sandbox, capability gate, recovery console, content addressing, rollback, fault handling, ring 0">
+<link rel="canonical" href="https://glados.aperture.institute/wiki/failure.html">
+<meta name="robots" content="index,follow,max-image-preview:large">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="GLaDOS">
+<meta property="og:title" content="What happens when the model breaks something">
+<meta property="og:description" content="A kernel with a language model inside it and no process isolation. What the model can reach, what stops it, and what to do when the machine will not come back cleanly.">
+<meta property="og:url" content="https://glados.aperture.institute/wiki/failure.html">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="What happens when the model breaks something">
+<meta name="twitter:description" content="A kernel with a language model inside it and no process isolation. What the model can reach, what stops it, and what to do when the machine will not come back cleanly.">
+<meta property="og:image" content="https://glados.aperture.institute/img/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="The GLaDOS aperture mark">
+<meta name="twitter:image" content="https://glados.aperture.institute/img/og.png">
+<link rel="stylesheet" href="../style.css">
+<link rel="icon" type="image/svg+xml" href="../img/logo.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="../img/icon-32.png">
+<link rel="apple-touch-icon" sizes="180x180" href="../img/icon-180.png">
+<link rel="manifest" href="../site.webmanifest">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://glados.aperture.institute/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://glados.aperture.institute/wiki/"},{"@type":"ListItem","position":3,"name":"Failure and recovery","item":"https://glados.aperture.institute/wiki/failure.html"}]}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"What happens when the model breaks something","description":"A kernel with a language model inside it and no process isolation. What the model can reach, what stops it, and what to do when the machine will not come back cleanly.","url":"https://glados.aperture.institute/wiki/failure.html","dateModified":"2026-08-31","keywords":"AI safety, kernel sandbox, capability gate, recovery console, content addressing, rollback, fault handling, ring 0","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://glados.aperture.institute/"}}</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<div id="page">
+
+<!--masthead-->
+<div id="masthead">
+  <a class="mark" href="../"><img src="../img/wordmark.png" alt="Aperture Institute" width="666" height="169"></a>
+  <span class="sub">GLaDOS: an operating system in Rust, with a language model in the kernel</span>
+</div>
+<!--/masthead-->
+
+<!--bar-->
+<div id="tabs"><ul><li><a href="../">Summary</a></li><li><a href="../download/">Download</a></li><li><a href="../news/">News</a></li><li class="on"><a href="../wiki/">Wiki</a></li><li><a href="../screenshots/">Screenshots</a></li><li><a href="../archive/">Archive</a></li><li><a href="../token/">Token</a></li><li><a href="https://github.com/IlumCI/GLaDOS" rel="noopener">Source code</a></li></ul></div>
+<!--/bar-->
+
+<div id="body">
+<!--sidebar-->
+<div id="sidebar">
+<div class="box"><div class="t">Latest release</div><div class="bd"><table class="facts"><tr><td>Version</td><td>1.2.30</td></tr><tr><td>Released</td><td>2026-09-01</td></tr><tr><td>Images</td><td>3</td></tr></table><ul><li><a href="../download/">Download</a></li><li><a href="https://github.com/IlumCI/GLaDOS/releases/tag/v1.2.30">Release notes</a></li></ul></div></div>
+<div class="box"><div class="t">Project information</div><div class="bd"><table class="facts"><tr><td>Development status</td><td>3 - Alpha</td></tr><tr><td>Environment</td><td>Console, framebuffer</td></tr><tr><td>Intended audience</td><td>Developers, science/research</td></tr><tr><td>Licence</td><td>Other/proprietary, all rights reserved</td></tr><tr><td>Natural language</td><td>English</td></tr><tr><td>Operating system</td><td>x86-64 UEFI, bare metal</td></tr><tr><td>Programming language</td><td>Rust, Python</td></tr><tr><td>Topic</td><td>Operating systems, kernels, artificial intelligence</td></tr></table></div></div>
+<div class="box"><div class="t">Statistics</div><div class="bd"><table class="facts"><tr><td>Registered</td><td>2026-08-14</td></tr><tr><td>Releases</td><td>9</td></tr><tr><td>Downloads</td><td>316</td></tr><tr><td>Source</td><td>108 files, ~50,000 lines</td></tr></table></div></div>
+<div class="box"><div class="t">Developers</div><div class="bd"><table class="facts"><tr><td>IlumCI</td><td>project admin, developer</td></tr></table></div></div>
+<div class="box"><div class="t">Documentation</div><div class="bd"><ul><li><a href="../wiki/glados-os.html">GLaDOS OS</a></li><li><a href="../wiki/kernel.html">The kernel</a></li><li><a href="../wiki/model.html">The model</a></li><li><a href="../wiki/agent.html">The agent</a></li><li><a href="../wiki/rsi.html">Self-improvement</a></li><li><a href="../wiki/aiksi.html">Aiksi, the language</a></li><li><a href="../wiki/">All 17 articles</a></li></ul></div></div>
+</div>
+<!--/sidebar-->
+<div id="content">
+<div class="crumbs"><a href="../">GLaDOS</a> / <a href="./">Wiki</a> / Failure and recovery</div>
+<div id="main">
+<h1>What happens when the model breaks something</h1>
+<p>This system has one address space, no user and kernel split, and no process isolation. A tool call from the model is a function call. So the usual answer to this question, that the model runs somewhere it cannot reach the kernel from, is unavailable here. There is nowhere else.</p>
+<p>What exists instead is a set of gates, each in front of a different kind of mistake, and one repair tool that lives outside the thing it repairs. This page walks them in the order a failure would meet them.</p>
+
+<h2 id="surface">What the model can reach at all</h2>
+<p>Every action the model takes goes through one table, <code>sysbox::APPLETS</code>, and the decoding grammar is built from that table. An applet absent from it is unspellable: there is no token sequence that names it, so the question of whether the model would be refused never arises.</p>
+<p>That table holds filesystem verbs and two that read the network. It holds no way to write memory, no way to touch an I/O port, and no way to reach a device. The model can list a directory, read a file, write a file, take a snapshot, run a stored program, and fetch a page from an allowed source. That is the whole surface.</p>
+<p>Each applet carries two independent bits, saying whether it changes persistent content and whether it sends a packet off the machine. Three trust levels select on them. <strong>Read-only</strong> admits neither, and it is what the machine runs at when it acts on its own initiative overnight. <strong>Online</strong> adds the network and still refuses every mutating applet. <strong>Full</strong> admits everything and is reached by typing the word in full.</p>
+
+<h2 id="episode">A wrong step inside an episode</h2>
+<p>The model chooses an applet by decoding its name under the grammar, so an invalid choice is unreachable rather than caught. What remains is a valid choice that was the wrong one.</p>
+<p>Arguments are validated before dispatch, and a refusal is an observation the model gets to read and react to. A step that reaches an applet and produces nothing is recorded as barren, which is a different thing from a refusal and is counted separately.</p>
+<p>The <code>sandbox</code> verb runs a program and reports every object it touched, then puts the tree back. It saves each path's pre-image immediately before the write that would change it, so the cost is proportional to the change. It records the shallowest path that did not exist rather than the one asked for, because writing a file creates the directories above it and undoing only the named file would leave those behind and report success.</p>
+
+<h2 id="skill">A program the model wrote</h2>
+<p>A successful episode can be compiled into a stored program under <code>/ai/tools</code>. Those run sandboxed in a subtree of their own, under a step budget, with the capability classes that apply to any stored program: reading values, reading state and writing inside its own subtree are allowed, and everything else needs the operator to name it.</p>
+<p>Identity is the SHA-256 of the file, so editing a trusted program revokes its trust by construction. Nothing has to remember to re-check it.</p>
+<p>Writing such a program is separate from adopting it. Four judges decide: it parses, it runs under the powers an unadopted program actually has, it does the same thing twice, and it is cheap. The third has a blind spot that is written down rather than discovered later, which is that it compares the value answered, the steps taken and the objects touched, and never what the program printed.</p>
+
+<h2 id="self">A change the machine made to itself</h2>
+<p>The nightly loop trains a variant, judges it, and adopts only on unanimity from four judges that each catch a different failure. A paired test over the same cached decisions, a replay of the machine's own goals along the baseline path, a structural check for finite factors and positive scales, and a cost check against the heap.</p>
+<p>Adoption is a pointer swap. Every variant is a node, the parent stays addressed, and rolling back costs a pointer write. A line goes in the ledger for adoptions and refusals alike, so a night that changed nothing is as legible afterwards as one that did.</p>
+<p>The held-out set carries a budget, counted in the ledger, because a loop that improves itself forever would otherwise read its own test set forever and report a figure that got more optimistic each time. Past three reads a test figure prints as stale and is marked unquotable.</p>
+
+<h2 id="store">Persistent state that is itself the problem</h2>
+<p>Once state survives a reboot, turning the machine off and on again stops helping, because the reboot faithfully restores the corruption. This is the case the rest of this page cannot cover, and it has its own console.</p>
+<p>Hold <kbd>ESC</kbd> or <kbd>R</kbd> during boot. The recovery console is compiled into the boot image on the ESP, runs before any persistent state is restored, and depends on as little as it can: the disk driver, the store and the keyboard. It has its own line reader so that recovery does not depend on the interpreter, which is exactly the sort of dependency that stops working on the day it is needed.</p>
+<table class="facts">
+<tr><td><code>l</code></td><td>list checkpoints, newest first</td></tr>
+<tr><td><code>v</code></td><td>verify every chunk in every checkpoint</td></tr>
+<tr><td><code>i</code></td><td>store and superblock detail</td></tr>
+<tr><td><code>b</code></td><td>roll back one checkpoint</td></tr>
+<tr><td><code>g &lt;seq&gt;</code></td><td>roll back to a specific sequence number</td></tr>
+<tr><td><code>c</code></td><td>continue booting and restore state</td></tr>
+<tr><td><code>s</code></td><td>continue booting without restoring anything</td></tr>
+</table>
+<p>The last of those is the escape hatch for state that cannot be repaired: boot with none of it and look at the machine with a clear head. Storage is content addressed, so a checkpoint is a root hash and rolling back to an older one is cheap and exact. <code>v</code> walks the chain and says where it breaks, which tells you which checkpoint to roll back past.</p>
+
+<h2 id="fault">A fault</h2>
+<p>Every interrupt vector except the breakpoint is fatal. A bad pointer halts the machine. There is no process to kill and no recovery from it, and the design says so plainly rather than implying otherwise.</p>
+<p>What the machine owes you in that moment is an accurate report, and for a long time it did not give one. Printing writes the console first and the serial port second, and painting from inside an interrupt gate takes a fault of its own, so the first line of every report died before it reached the serial port. A person saw a machine that simply went quiet.</p>
+<p>The report is written twice now, whole, serial before the console, because a serial write is a port write and cannot block or fault. A fault while reporting prints one line and halts rather than recursing. Where the fault happened is resolved against the image and against a registry of generated code, and an address in neither is described as being in neither, which is more useful than a plausible number that resolves to an unrelated function.</p>
+
+<h2 id="cannot">What the model cannot do</h2>
+<p><strong>It cannot reach raw memory.</strong> No applet writes memory or touches a port, so the grammar cannot spell one. The language does have those operations, and a stored program asking for them is refused by the sandbox. The only route is a program the operator has explicitly trusted by hash.</p>
+<p><strong>It cannot replace the kernel.</strong> A boot image is adopted only if it carries a signature from a key compiled into the running kernel. The model has no access to the private half and no way to produce one. A hostile or wrong update source can deny service and can install nothing.</p>
+<p><strong>It cannot scribble the disk.</strong> Writes are locked by default, and unlocking names a range that is enforced on every write. A write starting inside the window and overrunning it is refused, and a length that would overflow does not wrap into a pass.</p>
+<p><strong>It cannot spend the night on the network.</strong> Unattended episodes run read-only, which excludes both network applets. Reading on the machine's own schedule is a separate switch, off until asked, and it does not raise the trust an unattended episode runs at.</p>
+
+<h2 id="honest">What none of this covers</h2>
+<p>A trusted program can do what the operator granted it, and the grant is one bit. The reasoning is that a person approving a request has to hold the whole of it in their head, and "may write outside itself but not open sockets" is a sentence nobody can check against a program. The cost of that choice is that trust is coarse.</p>
+<p>A fault before the boot image hands over is beyond every mechanism here, because nothing on the machine has had a turn yet. The recovery for that is the install medium, and no software scheme can do better.</p>
+<p>Running out of stack in ring 0 with no guard page is a triple fault, which arrives as an instant reboot with nothing printed. Deep recursion in the interpreter is bounded by a depth cap for that reason.</p>
+<p>And the model is a language model. The gates on this page bound what a mistake can reach. They do not make the machine correct, and no arrangement of them would.</p>
+</div>
+</div>
+
+</div>
+</div>
+
+<!--footer-->
+<div id="footer">
+  <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This project is independent and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
+  <p>Copyright 2026. All rights reserved. The source is published so it can be read; redistribution and derivatives need asking. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are other people's and are listed on <a href="../credits.html">the credits page</a>.</p>
+  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-09-01.</p>
+</div>
+<!--/footer-->
+
+</div>
+</body>
+</html>

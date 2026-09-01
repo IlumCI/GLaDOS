@@ -183,12 +183,12 @@ jobs:
           # 1340 MiB total), and the kernel holds the KV cache int8 where
           # convert.py reports f32. At 8k it uses 130 MiB of heap, at 32k
           # 347 MiB of 1341. Both boot and load.
-          - name: q35-2b
+          - name: qwen35-2b-8k
             payload: payload-q35-2b-v1
             manifest: q35-2b
             seq: 8192
             label: GLADOS
-          - name: q35-2b
+          - name: qwen35-2b-32k
             payload: payload-q35-2b-v1
             manifest: q35-2b
             seq: 32768
@@ -251,8 +251,11 @@ jobs:
 
       - name: Build the ISO
         run: |
+          # The matrix names the image outright. Deriving it as
+          # "$name-$seq" invented a spelling (q35-2b-8192) for a variant
+          # tools/site.py already knows as qwen35-2b-8k, and site.py refuses
+          # to build a download page it cannot describe an image on.
           NAME="glados-$VERSION-${{ matrix.name }}"
-          if [ "${{ matrix.seq }}" != "0" ]; then NAME="$NAME-${{ matrix.seq }}"; fi
           python3 tools/mkiso.py "out/$NAME.iso" \
             --efi "out/glados-$VERSION.efi" \
             --payload payload-dir \

@@ -58,12 +58,19 @@ VARIANTS = {
                       note="The flagship. Three layers in four run as linear "
                            "attention, which is what keeps the cache small at "
                            "this size."),
-    "qwen35-2b-8k": dict(model="Qwen3.5-2B hybrid", ctx="8192", kv="192 MiB", ram="5 GB", order=4,
+    # The two figures here were the converter's, which reports the cache as
+    # f32. The kernel holds it int8, so they were four times too large, and
+    # the 32k row said 768 MiB of an apparent 320 MiB heap: a number that
+    # made its own image look impossible. Measured on a boot of the shipped
+    # ISO instead, as resident state, which is the cache plus the recurrent
+    # state the linear layers carry.
+    "qwen35-2b-8k": dict(model="Qwen3.5-2B hybrid", ctx="8192", kv="99 MiB", ram="4 GB", order=4,
                          note="The same weights with room for a long "
                               "conversation before the cache becomes a ring."),
-    "qwen35-2b-32k": dict(model="Qwen3.5-2B hybrid", ctx="32768", kv="768 MiB", ram="8 GB", order=5,
-                          note="The largest context this kernel will hold. The "
-                               "cache alone is 768 MiB of heap."),
+    "qwen35-2b-32k": dict(model="Qwen3.5-2B hybrid", ctx="32768", kv="333 MiB", ram="4 GB", order=5,
+                          note="The longest context shipped. Three layers in "
+                               "four are linear, so the cache grows far more "
+                               "slowly with context than a dense model's."),
     "smollm2-135m": dict(model="SmolLM2-135M", ctx="512", kv="112 MiB", ram="2 GB", order=1,
                          note="Four times faster per token than Qwen3, and the "
                               "only image that fits QEMU's 516 MB disk ceiling. "
