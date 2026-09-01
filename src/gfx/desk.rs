@@ -2888,6 +2888,46 @@ pub fn draw() {
                 Hover::Caption { win, which } if win == i => Some(which),
                 _ => None,
             };
+            // The shadow, before the window and after everything under it.
+            //
+            // Back to front is what makes this correct rather than careful:
+            // whatever is already composed here -- wall, icons, an earlier
+            // window -- is what gets darkened, and the only thing that can
+            // cover it afterwards is a window in front, which is exactly what
+            // should. No compositing, no second pass, no order to get right
+            // beyond the one the loop already has.
+            if win.state != WinState::Maximised {
+                let (off, wide) = (theme::SHADOW_OFF, theme::SHADOW_W);
+                let right = frame.x + frame.w;
+                let bottom = frame.y + frame.h;
+                // Clamped to the screen: `snap_release` can put a window flush
+                // against an edge, and `MARGIN` only protects the un-snapped
+                // case.
+                let edge_x = screen.x + screen.w;
+                let edge_y = screen.y + screen.h;
+                let band_w = wide.min(edge_x.saturating_sub(right));
+                let band_h = wide.min(edge_y.saturating_sub(bottom));
+                // The right band starts a radius below the top. Without that
+                // the offset silhouette leaves a three-pixel nub above the
+                // rounded top-right corner, which is the one place a hard
+                // shadow gives the rounding away.
+                let top = frame.y + off + win.round;
+                fb.shade_rect(
+                    right,
+                    top,
+                    band_w,
+                    (bottom + off).saturating_sub(top),
+                    theme::SHADOW_NUM,
+                );
+                fb.shade_rect(
+                    frame.x + off,
+                    bottom,
+                    (frame.w + band_w).saturating_sub(off),
+                    band_h,
+                    theme::SHADOW_NUM,
+                );
+            }
+
             // Confine this window's paint to its own outline. A rectangular
             // window costs a load and a branch for the whole frame; a shaped
             // one simply does not write outside itself, and whatever the

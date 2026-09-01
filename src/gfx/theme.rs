@@ -304,6 +304,16 @@ pub const MENU_GUTTER_W: u32 = 20;
 /// rounded one reads as a control that has come loose from the frame.
 pub const WIN_ROUND: u32 = 8;
 
+/// A window's drop shadow: how far it is offset, how wide it falls, and how
+/// much of the backdrop survives underneath it out of 256.
+///
+/// Aero's is soft and this one is not, because softness needs the backdrop at
+/// the moment the corner is drawn and the back-to-front repaint has already
+/// covered it. A hard band at 84% is what an opaque renderer can say honestly.
+pub const SHADOW_OFF: u32 = 3;
+pub const SHADOW_W: u32 = 5;
+pub const SHADOW_NUM: u32 = 214;
+
 /// The console's own background, inside the terminal window's well.
 pub const SCREEN: Color = Color::new(0x0A, 0x0C, 0x10);
 
