@@ -125,8 +125,8 @@ error instead of a silent omission.
 ### The corpus, and getting one into a running machine
 
 `/ai/train` holds the routing corpus as one blob per example, `applet<tab>task`.
-It is seeded at boot from `src/ai/corpus.rs` (717 examples, compiled in so the
-system can route before anything is mounted) and `teach` appends to it.
+It is seeded at boot from `src/ai/corpus.rs` (775 examples over 23 applets,
+compiled in so the system can route before anything is mounted) and `teach` appends to it.
 
 `dataset.py --blobs` writes the same examples a second way, as a `GLADOSC1`
 bundle in the shape `/ai/train` actually stores, so a corpus can be replaced on
@@ -656,8 +656,8 @@ update on top of itself.
 There is no `cargo test`. This is a `no_std` UEFI binary with no host test
 runner, so **verification is the boot selftests plus driving QEMU.**
 
-At boot the system runs **twenty-six selftest sections**, twenty-three of which `diag`
-also re-runs as named suites on demand (the `aiksi` section covers the capability gate by name and never by
+At boot the system runs **twenty-six selftest sections**, and `diag` offers
+twenty-nine named suites on demand (the `aiksi` section covers the capability gate by name and never by
 calling -- half that table pokes memory, drives I/O ports or paints over the
 screen, and a suite that called every row to prove it exists would be
 scribbling on the machine to do it), printing `ok` or `FAIL` per line: heap, timer, clock, the namespace's
@@ -1969,6 +1969,100 @@ which answers nil however the applets behaved. The selftest claim for J3 was
 itself wrong twice for related reasons -- first printing the clock instead of
 answering it, then answering a 100 Hz clock that does not move between two
 adjacent runs.
+
+### Reading off the network
+
+`sysbox::web` adds `fetch` and `save`, and they are the first applets that
+reach off the machine. Before them the model's whole action surface was the
+namespace, so it could be asked to go and learn something and had no route to
+anything it was not shipped with -- the gap was in the routing table rather
+than anywhere hard.
+
+**`Applet` carries two bits now, not one.** `mutates` and `net` are independent
+in fact -- `fetch` changes nothing and is still not read-only in the sense that
+matters, `save` is both -- so they are independent here, and a three-state enum
+could not have said it. `Trust` gained `Online` to match: `ReadOnly` is
+`!mutates && !net`, `Online` is `!mutates`, `Full` is everything. The middle
+level exists because a namespace change is undoable (content is addressed, `rm`
+detaches a name, a snapshot costs nothing) and a packet that has left is not.
+
+`initiative` runs its unattended episodes at `ReadOnly`, so that exclusion is
+load-bearing rather than incidental.
+
+**The model names a source, not a URL**, and this was measured rather than
+assumed. Fetching the Wikipedia *article* for a topic and rendering it gave
+four kilobytes of "Jump to content / Main menu / move to sidebar" and reached
+no prose at all; the REST summary endpoint for the same topic returns four
+hundred words of content. So `fetch wiki Ribosome` builds the URL from a
+template. Two consequences: a 0.6B never has to spell an endpoint, and there is
+no token sequence that names a host, which is a stronger guarantee than the
+allowlist gives.
+
+Sources are `wiki`, `arxiv`, `rfc`, `book`, and `url` as the operator's escape
+hatch. The host allowlist (`net sources`) is **compiled in**, because the model
+can `write`, so a namespace-resident allowlist is one the gated party can
+widen. `net allow <host>` adds one for a boot.
+
+Stricter than the `https` verb on purpose: HTTPS only, `Identity::Verified` or
+nothing, and the body must be whole. `tls::report` shows an unverified body
+anyway, which is right for a person weighing it and wrong for a machine about
+to write it into the namespace as a fact.
+
+**`arxiv` does not currently verify** -- the chain from `export.arxiv.org`
+reaches no root in `esp/GLADOS/roots.der`, so it is refused. That is the gate
+working, and it is a root-store gap rather than a code fault. Re-run
+`scripts/fetch-roots.ps1` if it matters.
+
+Three defects found while getting this to work, all of them silent:
+
+- **`aiksi`'s `applet` builtin checked only `mutates`.** It is `Touch::Read`,
+  which was true while every applet it could reach was at worst a namespace
+  write. A net applet made it the one route around the `BUILTINS` allowlist --
+  the denylist failure that allowlist was built to end, arriving through a
+  builtin nobody thought to re-read.
+- **`flatten` refused a line that would not fit whole**, so one block longer
+  than the display cap rendered as a blank page -- indistinguishable from a
+  fetch that failed. It truncates now.
+- **`is_html` searched the whole response head for `content-type:`**, which
+  matches inside another header's value. Reading plain text with a tag parser
+  does not fail, it quietly returns something else.
+
+### The syllabus
+
+`src/ai/curiosity.rs`. `initiative::CURIOSITY` was four strings rotated by a
+counter, and the problem was not that they were dull: a rotation over a
+hardcoded array is a machine walking somebody else's list.
+
+A frontier over declared subjects with markers for what is done, which is
+`godel::frontier()` and `/ai/godel/tried` exactly, for the same reason -- **what
+the machine studies tonight is a function of what it has already studied**, not
+of a counter and not of a coin, so the derivation can be re-run and `study
+space` can say what is left.
+
+```
+study space          progress per subject, and what is next
+study now            read one topic now, without waiting for the tick
+study auto [on|off]  let the resident tick study unattended (off by default)
+```
+
+Seeds are compiled in; `/ai/study/subjects` extends them, one blob per subject
+with a topic per line. Namespace-resident is safe here where it was not for the
+host allowlist: a subject list decides what the machine reads *about*, inside a
+set of hosts it cannot change.
+
+**The study step does not go through the model, and the first design that did
+was wrong twice.** `save` carries the mutating bit, so an episode would need
+`Trust::Full` to reach it -- handing an unattended machine `rm` to let it read
+an encyclopedia. Raising only to `Trust::Online` leaves `save` unreachable, so
+nothing is written, so no marker appears, so `next()` returns the same topic
+every night forever: the fixation the old counter existed to avoid, arriving
+through the front door. And there was never a decision for a router to make.
+`study_once` calls `web::save_to` directly.
+
+**Marking requires the evidence.** `mark` re-reads the saved document and
+refuses if it is absent, so a study step that failed on the network does not
+tick a topic off. Marking at proposal time would leave the machine believing it
+had read something it never saw.
 
 **`run`'s argument is decoded under a grammar.** The applet *name* always was,
 so an applet that does not exist is unreachable; its arguments were free text,

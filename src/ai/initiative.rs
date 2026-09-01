@@ -76,6 +76,13 @@ static SAW_PROMPT_AT: Racy<u64> = Racy::new(0);
 const QUIET_AFTER_INPUT_S: u64 = 8;
 /// Minimum spacing between self-set goals, however interesting things look.
 const EPISODE_GAP_S: u64 = 240;
+/// Minimum spacing between study steps.
+///
+/// Longer than the episode gap because a study step leaves the machine and an
+/// episode does not. Nothing about the frontier needs it to be fast: it is a
+/// syllabus, not a download, and at this spacing a machine left alone
+/// overnight walks about a dozen topics.
+const STUDY_GAP_S: u64 = 900;
 /// Minimum spacing between self-modification trials. An hour: a trial is
 /// minutes of forward passes, and the value of running one more tonight is
 /// far below the value of the machine still answering if somebody wakes up.
@@ -142,6 +149,8 @@ static LAST_TICKED_SEC: AtomicU64 = AtomicU64::new(u64::MAX);
 /// whole loop down on its very first live tick.
 static PREV_TICK_TOUCHED: Racy<bool> = Racy::new(false);
 static LAST_EPISODE_AT: Racy<u64> = Racy::new(0);
+/// When the machine last read something on its own initiative.
+static LAST_STUDY_AT: Racy<u64> = Racy::new(0);
 static LAST_GODEL_AT: Racy<u64> = Racy::new(0);
 static LAST_AUTHOR_AT: Racy<u64> = Racy::new(0);
 
@@ -389,14 +398,51 @@ fn tick_inner(forced: bool) {
 
     let busy = super::agent::busy();
 
+    // Study before anything else, when it has been turned on and something is
+    // still unread.
+    //
+    // Ahead of the episode decision rather than folded into it, because it is
+    // not an episode: there is no goal for the router to interpret and no
+    // transcript to learn from, just one document fetched and filed. Skipped
+    // while the agent is busy for the reason everything here is -- the engine
+    // has one holder -- even though this particular job never touches it.
+    if super::curiosity::auto() && !busy {
+        let since_study = now_s.saturating_sub(unsafe { *LAST_STUDY_AT.get() });
+        if since_study >= STUDY_GAP_S {
+            if let Some((subject, topic, outcome)) = super::curiosity::study_once() {
+                unsafe { *LAST_STUDY_AT.get() = now_s };
+                journal_push(format!(
+                    "[t{} +{}s] study: {} / {} -- {}",
+                    TICKS.load(Ordering::Relaxed),
+                    now_s,
+                    subject,
+                    topic,
+                    match &outcome {
+                        Ok(path) => format!("kept at {}", path),
+                        Err(why) => format!("failed: {}", why),
+                    }
+                ));
+                // One act per tick. Returning here rather than falling through
+                // keeps a study step from also queueing an episode in the same
+                // fifteen seconds, which would put two jobs in front of a
+                // machine that was supposed to be idle.
+                return;
+            }
+        }
+    }
+
     // The planner is consulted only often enough to stay honest about its
     // own confidence; its verdict is the expensive part of the tick and
     // microseconds against a fifteen-second clock.
     let p = aixi::plan(4, 16);
     let planner_ready = p.confident;
 
-    // Rotate curiosity goals; the counter makes the rotation advance even
+    // Rotate the inspection goals; the counter makes the rotation advance even
     // when ticks are suppressed, so the machine does not fixate.
+    //
+    // These stay exactly what they were. Studying is handled above and is not
+    // an episode -- the two were briefly merged and the merge was wrong, for
+    // the reason `curiosity`'s module comment gives at length.
     let proposal = {
         let n = CURIOSITY.len();
         let i = (TICKS.load(Ordering::Relaxed) as usize) % n;
@@ -672,6 +718,10 @@ fn tick_inner(forced: bool) {
         Decision::Episode(ref goal) => {
             EPISODES.fetch_add(1, Ordering::Relaxed);
             unsafe { *LAST_EPISODE_AT.get() = now_s };
+            // Still read-only, and `study auto on` does not change it. That
+            // switch says the machine may read on its own schedule; it does
+            // not say an unattended *decode* may reach the network, which is a
+            // different question with a different failure mode.
             let queued =
                 super::agent::queue_autonomous(&goal, super::harness::Trust::ReadOnly, 2);
             journal_push(format!(
