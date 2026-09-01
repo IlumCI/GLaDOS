@@ -138,7 +138,7 @@ fn find_core(want: &str) -> Option<[u8; 32]> {
 const KNOWN_COMMANDS: &[&str] = &[
     "term", "todo", "paint", "write", "mines", "oracle", "enternet", "net", "dhcp", "mem",
     "uptime", "tasks", "status", "help", "app", "author", "video", "serial", "log", "snap",
-    "update", "gpu", "mine", "abstract", "study", "work",
+    "update", "gpu", "abstract", "study", "work",
 ];
 
 /// How many steps an authoring run gets.
@@ -3379,7 +3379,6 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             kprintln!("  power         temperature, frequency and the governor");
             kprintln!("  usb [hid]     the USB bus; 'usb hid' for keyboards and mice");
             kprintln!("  gpu           the display controllers, and whether one answers");
-            kprintln!("  mine          bench|btc -- sha256d hash rate, and a difficulty sweep");
             kprintln!("  abstract      what repeats across the skills, and what naming it would save");
             kprintln!("  study [n]     learn one field then another; what the second cost the first");
             kprintln!("  study seq [n] the same with an adapter carried through: real forgetting");
@@ -3834,26 +3833,6 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             }
         }
         "plan" => crate::ai::aixi::report(),
-        "mine" => {
-            // Lottery mining: the economics are printed with every run so
-            // nobody gets to forget them. `bench` measures; `btc` sweeps a
-            // synthetic template at a difficulty chosen to actually hit.
-            let mut it = rest.trim().split_whitespace();
-            let sub = it.next().unwrap_or("bench");
-            let n: u64 = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-            match (sub, n) {
-                ("btc", secs) => {
-                    let secs = if secs == 0 { 10 } else { secs };
-                    if crate::mine::lotto(secs, 24).is_none() {
-                        kprintln!("[mine] no qualifying hash this round");
-                    }
-                }
-                _ => {
-                    let secs = if n == 0 { 3 } else { n };
-                    kprintln!("[mine] {}", crate::mine::bench(secs));
-                }
-            }
-        }
         // `rng` -- bytes from the kernel generator, and what it thinks of
         // itself. The status line is the interesting half: an estimate below
         // the threshold means `fill_secret` is refusing, which is what a TLS

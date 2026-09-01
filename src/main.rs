@@ -30,7 +30,6 @@ mod json;
 mod aiksi;
 mod log;
 mod mem;
-mod mine;
 mod net;
 mod pkg;
 mod recovery;

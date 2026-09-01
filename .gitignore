@@ -34,3 +34,7 @@ update.key
 
 # Supabase CLI scratch, rewritten on every invocation.
 supabase/.temp/
+
+# The miner and the compute pool it runs on live on exp/xpu. Checking that
+# branch out and building it must not leave this one's status dirty.
+cuda/
