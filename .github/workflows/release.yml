@@ -165,10 +165,33 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # seq 0 means "leave the header alone", for a payload whose
+          # canonical context is already the one to ship.
           - name: qwen3-0.6b
             payload: payload-qwen3-0.6b-v1
             manifest: qwen3-0.6b
-            seq: 0            # 0 means "leave the header alone"
+            seq: 0
+            label: GLADOS
+          # The 2B distill, Apache-2.0. Its payload is canonical at seq 512,
+          # which is not a context worth shipping for a model this size, so
+          # both variants stamp. The weights are uploaded once and these two
+          # differ by four bytes -- see tools/ctxstamp.py.
+          #
+          # Measured before enabling, because the arithmetic said 32k could
+          # not fit and the arithmetic was wrong twice: HEAP_LADDER's 320 MiB
+          # is the first contiguous region rather than the heap (boot reports
+          # 1340 MiB total), and the kernel holds the KV cache int8 where
+          # convert.py reports f32. At 8k it uses 130 MiB of heap, at 32k
+          # 347 MiB of 1341. Both boot and load.
+          - name: q35-2b
+            payload: payload-q35-2b-v1
+            manifest: q35-2b
+            seq: 8192
+            label: GLADOS
+          - name: q35-2b
+            payload: payload-q35-2b-v1
+            manifest: q35-2b
+            seq: 32768
             label: GLADOS
     steps:
       - uses: actions/checkout@v4
