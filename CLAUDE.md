@@ -2147,7 +2147,18 @@ terminal -- which made it tempting to let the study step run while somebody is
 working, and that would have been the module quietly breaking its own contract.
 `initiative` promises it acts when nobody is here; `study auto on` says the
 machine *may* study, not that it may study over your shoulder. `study now` is
-the operator's version.
+the operator's version, and `initiative now` skips the fifteen-minute spacing
+the same way it skips the settle window -- `LAST_STUDY_AT` starts at zero
+against uptime, so without that the unattended path could only be watched by
+waiting fifteen minutes, which is the definition of a loop nobody tests.
+
+Verified end to end under QEMU with `-rtc base=...T03:00:00`: two forced ticks
+(the first is spent recording when the prompt appeared), and the journal reads
+`study: bioinformatics / Bioinformatics -- kept at /ai/read/wiki-bioinformatics`
+with `study space` advancing to 1 of 8. **A guest clock in the past fails the
+certificate date check** and reads as `the server's identity did not verify` --
+that is the check working, and it cost a confused half-hour before the eight
+months between the RTC flag and today were the obvious answer.
 
 **Marking requires the evidence.** `mark` re-reads the saved document and
 refuses if it is absent, so a study step that failed on the network does not

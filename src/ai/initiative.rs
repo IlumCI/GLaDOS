@@ -429,8 +429,13 @@ fn tick_inner(forced: bool) {
     // not that it may study over your shoulder. An operator who wants it now
     // has `study now`.
     if super::curiosity::auto() && !busy && seconds_since_input >= QUIET_AFTER_INPUT_S {
+        // Forced ticks skip the spacing, for the reason they skip the settle
+        // window: `LAST_STUDY_AT` starts at zero and `now_s` is uptime, so the
+        // first unattended study is fifteen minutes into a boot and the
+        // unattended path could only ever be watched by waiting fifteen
+        // minutes. An operator asking for a tick has said what they want.
         let since_study = now_s.saturating_sub(unsafe { *LAST_STUDY_AT.get() });
-        if since_study >= STUDY_GAP_S {
+        if forced || since_study >= STUDY_GAP_S {
             if let Some((subject, topic, outcome)) = super::curiosity::study_once() {
                 unsafe { *LAST_STUDY_AT.get() = now_s };
                 journal_push(format!(
