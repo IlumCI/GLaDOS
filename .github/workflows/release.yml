@@ -348,6 +348,17 @@ jobs:
 
           echo "--- what the release stored ---"
           cat stored.txt
+
+          # Only meaningful when this run is the one that published. On a dry
+          # run `publish` rebuilds and re-signs and uploads nothing, so this
+          # would compare a fresh build against whatever the last tag stored
+          # and always disagree -- and legitimately, because the signature is
+          # ECDSA and randomised per signature, so even two builds of the same
+          # commit differ in the .sig and in the manifest that names it.
+          if [ "$GITHUB_REF_TYPE" != "tag" ]; then
+            echo "  dry run: assembled but not compared, since nothing here was published"
+            exit 0
+          fi
           if diff -u built.txt stored.txt; then
             echo "  every asset matches what was built"
           else
