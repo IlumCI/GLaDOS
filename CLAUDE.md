@@ -801,8 +801,20 @@ clean boot this project had ever driven. A check that always fails is read as
 one nobody has to look at, which is the objection `smp.rs` makes about its own
 canary.
 
+**Run `video bench` at `-smp 1`.** The extra cores cost the graphics path 30
+to 40% while doing nothing at all: `desk::draw + present` measures 1,541 us at
+one core and 2,107 at four, `full-screen rect` 158 against 221, `present, no
+change` 270 against 358. That is the same contention `smp bench` records --
+one core reads 4570 MB/s alone and 3526 MB/s with seven merely idling beside
+it -- and it lands here because the whole graphics path is span fills and a
+memcmp, which is to say memory bandwidth and nothing else. The figures
+elsewhere in this file predate the `-smp` default and are one-core figures;
+comparing a four-core run against them reads as a renderer that regressed by a
+third.
+
 Four rather than two, because two leaves a single contender for the chunk
-cursor and the bug `smp.rs` records there needs several. It costs nothing:
+cursor and the bug `smp.rs` records there needs several. It costs nothing on
+the decode path, which is what was measured when the default was chosen:
 best of nine decodes on SmolLM2 under WHPX read 50,819 us/token at one core,
 49,463 at two and 50,818 at four, and `logits 7 11 3` is bit-identical across
 all three. The single-sample figures that suggested a cost (65 ms against

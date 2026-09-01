@@ -185,21 +185,43 @@ impl Shape {
     /// arithmetic is a square root per row of the corner arc, which is
     /// nothing once and noticeable sixty times a second.
     pub fn round_rect(w: u32, h: u32, r: u32) -> Shape {
-        let r = r.min(w / 2).min(h / 2);
+        Self::rounded(w, h, r, r)
+    }
+
+    /// The top two corners rounded, the bottom two square.
+    ///
+    /// The window silhouette. The reason it is the top only is structural
+    /// rather than decorative: the bottom edge of a window is something you
+    /// drag, and a rounded one reads as a control that has come loose from
+    /// its frame.
+    pub fn round_top(w: u32, h: u32, r: u32) -> Shape {
+        Self::rounded(w, h, r, 0)
+    }
+
+    /// Independent top and bottom radii.
+    ///
+    /// One arc, so a corner cannot be computed two ways. Both public forms
+    /// are one call into here, which is what makes `round_top` free rather
+    /// than a second copy of a square root nobody would diff.
+    fn rounded(w: u32, h: u32, top: u32, bottom: u32) -> Shape {
+        let cap = (w / 2).min(h / 2);
+        let (top, bottom) = (top.min(cap), bottom.min(cap));
         let mut rows = alloc::vec::Vec::with_capacity(h as usize);
         for y in 0..h {
-            // Distance from the nearer horizontal edge, inside the corner
-            // band. Outside it the row is the full width.
-            let dy = if y < r {
-                Some(r - 1 - y)
-            } else if y >= h - r {
-                Some(y - (h - r))
+            // The radius in force at this row and the distance from the
+            // nearer horizontal edge. Outside both corner bands the row is
+            // the full width -- and a radius of zero puts every row there,
+            // since `y < 0` and `y >= h` are both empty.
+            let band = if y < top {
+                Some((top, top - 1 - y))
+            } else if y >= h - bottom {
+                Some((bottom, y - (h - bottom)))
             } else {
                 None
             };
-            match dy {
+            match band {
                 None => rows.push((0, w)),
-                Some(d) => {
+                Some((r, d)) => {
                     // How far in the arc has come at this row: r - sqrt(r^2 - d^2).
                     let rr = (r * r) as i32;
                     let dd = (d * d) as i32;
@@ -354,6 +376,56 @@ impl Framebuffer {
         }
         let off = (y as usize) * (self.stride as usize) + (x as usize);
         Some(unsafe { core::slice::from_raw_parts_mut(self.base.add(off), w) })
+    }
+
+    /// Darken a run of pixels in place: every channel scaled by `num`/256.
+    ///
+    /// The one read-modify-write primitive here, and it exists so a window can
+    /// cast a shadow. It sits beside `row_mut` rather than that going public:
+    /// `row_mut` gives a reason for handing out no slice of the aperture, and
+    /// spending it to serve one caller in the same `impl` would be paying for
+    /// nothing.
+    ///
+    /// **RAM surfaces only, and silently so.** Reading the aperture back to
+    /// blend is the discipline `row_mut` declines to break, and it is not
+    /// worth breaking here: without a compositor there are no shadows and
+    /// everything else looks the same, which is the bargain `compose::target`
+    /// already makes about flicker.
+    ///
+    /// Format-independent by construction. Scaling every channel by the same
+    /// factor commutes with any byte permutation, so `Rgbx` and `Bgrx` need no
+    /// separate arms and cannot come to disagree about one.
+    pub fn shade_span(&self, x: u32, y: u32, w: u32, num: u32) {
+        // Clipped first, for symmetry with `fill_span` and `blit_span`: a
+        // shadow drawn under a shaped window has the same right to be cut.
+        let Some((x, w)) = clip_run(y, x, w) else { return };
+        let Some(dst) = self.row_mut(y, x, w) else { return };
+        let num = num.min(256);
+        for px in dst.iter_mut() {
+            let v = *px;
+            // Two channels at a time. They are eight bits apart, so masking
+            // alternate ones leaves the multiply room in the gaps and nothing
+            // has to be unpacked.
+            //
+            // `0x00FF00FF * 256` is `0xFF00FF00` exactly, so `num <= 256`
+            // cannot carry out of a channel into its neighbour. That is the
+            // only reason this is safe without a wider type, and it is why the
+            // clamp above is not merely defensive.
+            //
+            // Not a shift. `>>1` keeps half and `>>2` a quarter; a drop shadow
+            // wants around 84%, and a power of two cannot say that.
+            let lo = (((v & 0x00FF_00FF) * num) >> 8) & 0x00FF_00FF;
+            let hi = (((v & 0x0000_FF00) * num) >> 8) & 0x0000_FF00;
+            *px = lo | hi;
+        }
+    }
+
+    /// `shade_span` per row, the way `rect` is `fill_span` per row.
+    pub fn shade_rect(&self, x: u32, y: u32, w: u32, h: u32, num: u32) {
+        let end = y.saturating_add(h).min(self.height);
+        for row in y..end {
+            self.shade_span(x, row, w, num);
+        }
     }
 
     /// Copy a run of pixels into one row.
@@ -594,6 +666,64 @@ impl Framebuffer {
         let raw = self.encode(c);
         let end = y.saturating_add(h).min(self.height);
         for row in y..end {
+            self.fill_span(x, row, w, raw);
+        }
+    }
+
+    /// A vertical ramp through `stops`, one span fill per row.
+    ///
+    /// `rect` with a colour that varies by row, which is why it lives here
+    /// beside the other loop that memsets rows rather than in `theme` with the
+    /// tables that describe a look.
+    ///
+    /// **It allocates nothing, and that is why the ramp is vertical.** A row
+    /// of a vertical ramp is one colour; a row of a horizontal one is a
+    /// pattern, which is why the title bar's old ramp had to build a `Vec` of
+    /// its width every window every frame and blit it down. Same picture, one
+    /// less allocation inside `desk::draw`.
+    ///
+    /// Stops are `(position, colour)` with position 0..=255 across `h`,
+    /// ascending, and are read as proportions rather than pixel offsets -- so
+    /// one table serves a 30-pixel title bar, a 38-pixel taskbar and a
+    /// 21-pixel caption button instead of three tables that drift apart.
+    ///
+    /// **Two stops one position apart is a hard step**, and that is deliberate
+    /// rather than tolerated: the break across the middle of a Luna caption is
+    /// a step and not a ramp, and a table that could not express one would
+    /// turn every gradient in the interface into a plain fade.
+    pub fn vgrad(&self, x: u32, y: u32, w: u32, h: u32, stops: &[(u8, Color)]) {
+        if h == 0 || stops.is_empty() {
+            return;
+        }
+        if stops.len() == 1 {
+            self.rect(x, y, w, h, stops[0].1);
+            return;
+        }
+        let end = y.saturating_add(h).min(self.height);
+        for row in y..end {
+            // Taken against the height that was asked for rather than the one
+            // that survived clipping, so a ramp running off the bottom of the
+            // screen is cut rather than squashed.
+            let t = if h > 1 { ((row - y) * 255 / (h - 1)) as u8 } else { 0 };
+            // The bracketing pair. Linear because a stop table is a handful of
+            // entries and a binary search over five is slower than looking.
+            let mut k = 0usize;
+            while k + 2 < stops.len() && stops[k + 1].0 <= t {
+                k += 1;
+            }
+            let (p0, c0) = stops[k];
+            let (p1, c1) = stops[k + 1];
+            let span = (p1.saturating_sub(p0)).max(1) as i32;
+            // Saturating and clamped so a table that does not span the whole
+            // 0..=255 holds its end colours instead of extrapolating past
+            // them, which at u8 would wrap into the wrong hue entirely.
+            let f = (t.saturating_sub(p0) as i32).min(span);
+            let mix = |a: u8, b: u8| (a as i32 + (b as i32 - a as i32) * f / span) as u8;
+            let raw = self.encode(Color::new(
+                mix(c0.r, c1.r),
+                mix(c0.g, c1.g),
+                mix(c0.b, c1.b),
+            ));
             self.fill_span(x, row, w, raw);
         }
     }
@@ -899,4 +1029,124 @@ pub fn text_selftest() -> bool {
     let a = font::selftest();
     let b = console::selftest();
     a && b
+}
+
+/// The three primitives the chrome is drawn out of.
+///
+/// Pure arithmetic over a scratch surface, so it needs no framebuffer, no
+/// compositor and no screen. That is the point of testing these here rather
+/// than by looking: a gradient that is one shade wrong is invisible in a
+/// screenshot and a shadow that bleeds one channel into the next is a colour
+/// nobody would think to check.
+pub fn paint_selftest() -> bool {
+    use crate::kprintln;
+    let mut ok = true;
+    let mut claim = |what: &str, good: bool| {
+        if !good {
+            ok = false;
+        }
+        kprintln!("  {}  {}", if good { "ok " } else { "FAIL" }, what);
+    };
+
+    const W: u32 = 16;
+    const H: u32 = 16;
+    let mut buf = alloc::vec![0u32; (W * H) as usize];
+    // The same construction `compose::init` makes, at a size that fits on the
+    // boot stack's conscience.
+    let fb = unsafe { Framebuffer::over_ram(buf.as_mut_ptr() as u64, W, H, W, Format::Bgrx) };
+
+    // --- shade ------------------------------------------------------------
+    let white = fb.encode(Color::new(0xFF, 0xFF, 0xFF));
+    fb.rect(0, 0, W, H, Color::new(0xFF, 0xFF, 0xFF));
+    fb.shade_span(0, 0, W, 256);
+    claim("shading by 256 leaves a pixel alone", buf[0] == white);
+
+    fb.rect(0, 0, W, H, Color::new(0xFF, 0xFF, 0xFF));
+    fb.shade_span(0, 0, W, 0);
+    claim("and by 0 takes it to black", buf[0] == 0);
+
+    fb.rect(0, 0, W, H, Color::new(0xFF, 0xFF, 0xFF));
+    fb.shade_span(0, 0, W, 128);
+    claim(
+        "half of white is grey in every channel",
+        buf[0] == fb.encode(Color::new(0x7F, 0x7F, 0x7F)),
+    );
+
+    // The claim the two-halves trick exists to earn. A channel at zero
+    // between two at full is where a carry would land, and it would read as a
+    // plausible colour rather than as an error.
+    fb.rect(0, 0, W, H, Color::new(0xFF, 0x00, 0xFF));
+    fb.shade_span(0, 0, W, 128);
+    claim(
+        "no channel carries into its neighbour",
+        buf[0] == fb.encode(Color::new(0x7F, 0x00, 0x7F)),
+    );
+
+    fb.rect(0, 0, W, H, Color::new(0xFF, 0xFF, 0xFF));
+    fb.shade_span(0, 0, W, 255);
+    claim("and the top byte stays clear", buf[0] & 0xFF00_0000 == 0);
+
+    // A run stops where it was told to. A shadow band that ran on would
+    // darken the window it belongs to.
+    fb.rect(0, 0, W, H, Color::new(0xFF, 0xFF, 0xFF));
+    fb.shade_span(0, 0, 4, 0);
+    claim(
+        "a shaded run ends where it was asked to",
+        buf[3] == 0 && buf[4] == white,
+    );
+
+    // --- vgrad ------------------------------------------------------------
+    let a = Color::new(0x10, 0x20, 0x30);
+    let b = Color::new(0xF0, 0xE0, 0xD0);
+    fb.rect(0, 0, W, H, Color::new(0, 0, 0));
+    fb.vgrad(0, 0, W, H, &[(0, a), (255, b)]);
+    claim("a ramp starts on its first stop", buf[0] == fb.encode(a));
+    claim(
+        "and ends exactly on its last, rather than near it",
+        buf[((H - 1) * W) as usize] == fb.encode(b),
+    );
+    claim(
+        "and moves in between",
+        buf[(8 * W) as usize] != fb.encode(a) && buf[(8 * W) as usize] != fb.encode(b),
+    );
+
+    // The load-bearing one. Luna's caption breaks across the middle, and a
+    // table that smoothed the break would turn every gradient in the
+    // interface into a plain fade without anything reporting it.
+    fb.rect(0, 0, W, H, Color::new(0, 0, 0));
+    fb.vgrad(0, 0, W, H, &[(0, a), (128, a), (129, b), (255, b)]);
+    let mid = (H / 2) as usize;
+    claim(
+        "two stops one apart are a step and not a ramp",
+        buf[(mid - 1) * W as usize] == fb.encode(a) && buf[mid * W as usize] == fb.encode(b),
+    );
+
+    fb.rect(0, 0, W, H, Color::new(0, 0, 0));
+    fb.vgrad(0, 0, W, H, &[(0, a)]);
+    claim("one stop fills flat", buf[0] == fb.encode(a) && buf[(15 * W) as usize] == fb.encode(a));
+
+    // --- shape ------------------------------------------------------------
+    let top = Shape::round_top(40, 40, 8);
+    let both = Shape::round_rect(40, 40, 8);
+    claim(
+        "a rounded top insets its first row",
+        top.span(0).map(|(x0, _)| x0 > 0) == Some(true),
+    );
+    claim(
+        "and leaves the last row square",
+        top.span(39) == Some((0, 40)),
+    );
+    // The canary: the two forms must actually differ, or `round_top` is a
+    // name for `round_rect` and every window would be rounded at the bottom
+    // with nothing saying so.
+    claim(
+        "where a fully rounded one does not",
+        both.span(39) != top.span(39),
+    );
+    claim(
+        "a radius of zero is a plain rectangle",
+        Shape::round_top(40, 40, 0).span(0) == Some((0, 40)),
+    );
+
+    ok
 }
