@@ -649,7 +649,7 @@ pub fn init() {
         state: WinState::Normal,
         snap_back: None,
         route: None,
-        round: 0,
+        round: theme::WIN_ROUND,
         content: Content::Terminal(super::console::USER),
         menus: alloc::vec![
             Menu {
@@ -688,7 +688,7 @@ pub fn init() {
         state: WinState::Normal,
         snap_back: None,
         route: None,
-        round: 0,
+        round: theme::WIN_ROUND,
         content: Content::Panel(pm),
         menus: Vec::new(),
         closable: false,
@@ -716,7 +716,7 @@ pub fn init() {
         state: WinState::Minimised,
         snap_back: None,
         route: None,
-        round: 0,
+        round: theme::WIN_ROUND,
         content: Content::Terminal(super::console::EXEC),
         menus: alloc::vec![Menu {
             label: String::from("View"),
@@ -924,7 +924,7 @@ pub fn open(title: &str, panel: Panel) {
             state: WinState::Normal,
         snap_back: None,
         route: None,
-        round: 0,
+        round: theme::WIN_ROUND,
             content: Content::Panel(panel),
             menus: Vec::new(),
             closable: true,
@@ -985,7 +985,7 @@ pub fn open_app(title: &str, icon: usize, app: Box<dyn DeskApp>, w: u32, h: u32)
             state: WinState::Normal,
         snap_back: None,
         route: None,
-        round: 0,
+        round: theme::WIN_ROUND,
             content: Content::App(app),
             menus: Vec::new(),
             closable: true,
@@ -1124,7 +1124,7 @@ pub fn open_browser(url: &str) {
             state: WinState::Normal,
         snap_back: None,
         route: None,
-        round: 0,
+        round: theme::WIN_ROUND,
             content: Content::Browser(b),
             menus: Vec::new(),
             closable: true,
@@ -1769,14 +1769,21 @@ static OUTLINE: Racy<Option<super::Shape>> = Racy::new(None);
 /// Paint `f` clipped to this window's outline, or straight through when the
 /// window is an ordinary rectangle.
 fn with_window_shape<R>(w: &Window, frame: Rect, f: impl FnOnce() -> R) -> R {
-    if w.round == 0 {
+    // A maximised window has square corners and nothing behind it to show
+    // through them. XP squares them too.
+    if w.round == 0 || w.state == WinState::Maximised {
         return f();
     }
     let key = (frame.w, frame.h, w.round);
     let stale = unsafe { *SHAPE_CACHE.get() } != Some(key);
     if stale {
         unsafe {
-            *OUTLINE.get() = Some(super::Shape::round_rect(frame.w, frame.h, w.round));
+            // Only ever `round_top` through this slot, which is why the key
+            // does not name the kind. Somebody adding a second shape here has
+            // to add a fourth field, and the failure if they forget is a
+            // window with the wrong corners -- visible, and not looking like a
+            // cache bug.
+            *OUTLINE.get() = Some(super::Shape::round_top(frame.w, frame.h, w.round));
             *SHAPE_CACHE.get() = Some(key);
         }
     }

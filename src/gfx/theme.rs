@@ -264,6 +264,13 @@ pub const MENU_EDGE: Color = Color::new(0xAC, 0xA8, 0x99);
 /// box, which is a different control that does a different thing.
 pub const MENU_GUTTER_W: u32 = 20;
 
+/// How far a window's top corners are rounded.
+///
+/// Six pixels against a thirty-pixel caption is XP's proportion at 96 dpi. The
+/// bottom corners stay square: the bottom edge is something you drag, and a
+/// rounded one reads as a control that has come loose from the frame.
+pub const WIN_ROUND: u32 = 6;
+
 /// The console's own background, inside the terminal window's well.
 pub const SCREEN: Color = Color::new(0x0A, 0x0C, 0x10);
 
