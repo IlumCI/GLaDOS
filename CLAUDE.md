@@ -2270,6 +2270,45 @@ the shapes did not change.
 imbalance unprompted. A generator asked for 20,000 that quietly returns 54
 near-duplicates yields a corpus that trains a model to recite.
 
+### Forgetting, measured
+
+`study seq` carries one adapter through every domain in turn and scores all of
+them after each stage, so what it shows is forgetting rather than interference.
+The first run to produce a usable matrix, six domains at `-n 40` on SmolLM2
+under QEMU:
+
+```
+  after studying     loss      navigate  inspect   mutate  history     meta  network
+  (frozen base)         -           66%      55%      57%?     42%      66%?     50%?
+  navigate          13->10           83%      55%      57%?     42%      66%?     50%?
+  inspect          129->4            41%v     55%      57%?     42%      66%?     50%?
+  mutate           211->2            41%v     55%      71%?     42%      66%?     50%?
+  history          118->0            58%v     55%      42%?     85%      66%?     50%?
+  meta             inf->0            58%v     55%      57%?     42%v    100%?     50%?
+  network           75->1            58%v     55%      57%?     42%v     66%?     50%?
+```
+
+**Forgetting is real and it is large.** `navigate` goes 66% to 83% when it is
+studied and falls to 41% one stage later -- below where it started. `history`
+goes 42% to 85% and is back to 42% by the end. Studying a field helps that
+field and costs the fields already learned, which is the result the experiment
+was built to look for and which the earlier under-powered run could not see.
+
+**The `?` columns say nothing and must not be read.** `mutate`, `meta` and
+`network` all carry fewer than eight held-out decisions at this stride, and
+`network` is flat at 50% throughout for exactly that reason -- it has two
+applets and twelve evaluation items, and a stride of 40 reaches almost none of
+them. The network domain was added to give the curriculum a field whose
+vocabulary shares nothing with the others; whether that changes the picture is
+not answered here and needs a full-corpus run.
+
+**`meta` shows `inf->0` and that is honest now.** It printed `2147483647->0`,
+which is `x as i32` saturating -- a number in a column of numbers that reads
+like a very large loss rather than like no loss at all. The trainer is fine: a
+first step from a row it assigned zero probability is `-log(0)`, which is a
+real thing for restricted cross-entropy to see, and the run converged. The bug
+was in saying so, and `loss_str` says it now.
+
 Sample sizes get stated wherever a figure appears. The adapter trainer has been
 exercised on subsamples of a few dozen decisions, which establishes that the
 machinery composes and establishes nothing about how much it helps. Numbers

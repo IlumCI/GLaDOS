@@ -135,14 +135,22 @@ pub fn set_auto(on: bool) {
 /// Shares `sysbox::web`'s slug rule rather than inventing a second one,
 /// because a marker written under one spelling and looked up under another is
 /// a frontier that never advances and never says so.
-fn marker(subject: &str, topic: &str) -> String {
+///
+/// **No subject in the name, deliberately.** The marker records that a
+/// *document* was read, and a document is the same document whichever
+/// syllabus asked for it -- so a topic appearing in two subjects is studied
+/// once and counts for both, which is what actually happened. Keying by
+/// subject would fetch the same page twice and call the second one progress.
+/// This function took a `subject` argument for a while and discarded it, which
+/// is worse than not taking one: a parameter that does nothing invites the
+/// next caller to believe it matters.
+fn marker(topic: &str) -> String {
     let mut s = String::from(DONE);
     s.push('/');
     // The saved document's own path minus its directory, so the marker and the
     // reading are named alike and a person can pair them by eye.
     let p = crate::sysbox::web::slug_for("wiki", topic);
     s.push_str(p.rsplit('/').next().unwrap_or("item"));
-    let _ = subject;
     s
 }
 
@@ -177,8 +185,8 @@ fn learned() -> Vec<(String, Vec<String>)> {
 }
 
 /// Has this topic been studied?
-fn studied(subject: &str, topic: &str) -> bool {
-    crate::sysbox::read_blob(&marker(subject, topic)).is_some()
+fn studied(topic: &str) -> bool {
+    crate::sysbox::read_blob(&marker(topic)).is_some()
 }
 
 /// Record that it has. Called after a reading goal actually succeeds.
@@ -187,12 +195,12 @@ fn studied(subject: &str, topic: &str) -> bool {
 /// of the frontier: marking at proposal time would tick a topic off when the
 /// network was down, and the machine would believe it had read something it
 /// never saw. The evidence is the saved document, so that is what is checked.
-pub fn mark(subject: &str, topic: &str) -> bool {
+pub fn mark(topic: &str) -> bool {
     let read = crate::sysbox::web::slug_for("wiki", topic);
     if crate::sysbox::read_blob(&read).is_none() {
         return false;
     }
-    crate::sysbox::write_blob(&marker(subject, topic), b"\n".to_vec())
+    crate::sysbox::write_blob(&marker(topic), b"\n".to_vec())
 }
 
 /// One thing to study, or `None` when the frontier is walked out.
@@ -203,14 +211,14 @@ pub fn mark(subject: &str, topic: &str) -> bool {
 pub fn next() -> Option<(String, String)> {
     for s in SUBJECTS {
         for t in s.topics {
-            if !studied(s.name, t) {
+            if !studied(t) {
                 return Some((s.name.to_string(), t.to_string()));
             }
         }
     }
     for (name, topics) in learned() {
         for t in &topics {
-            if !studied(&name, t) {
+            if !studied(t) {
                 return Some((name.clone(), t.clone()));
             }
         }
@@ -233,7 +241,7 @@ pub fn study_once() -> Option<(String, String, Result<String, alloc::string::Str
         Ok((path, _, _)) => {
             // Marked only after the document is on disk, and `mark` re-checks
             // that for itself rather than trusting this branch.
-            if mark(&subject, &topic) {
+            if mark(&topic) {
                 Some((subject, topic, Ok(path)))
             } else {
                 Some((subject, topic, Err("saved but could not mark it studied".to_string())))
@@ -247,11 +255,11 @@ pub fn study_once() -> Option<(String, String, Result<String, alloc::string::Str
 pub fn progress() -> Vec<(String, usize, usize)> {
     let mut v = Vec::new();
     for s in SUBJECTS {
-        let done = s.topics.iter().filter(|t| studied(s.name, t)).count();
+        let done = s.topics.iter().filter(|t| studied(t)).count();
         v.push((s.name.to_string(), done, s.topics.len()));
     }
     for (name, topics) in learned() {
-        let done = topics.iter().filter(|t| studied(&name, t)).count();
+        let done = topics.iter().filter(|t| studied(t)).count();
         v.push((name, done, topics.len()));
     }
     v
@@ -296,21 +304,21 @@ pub fn selftest() -> bool {
     // is a frontier that never advances.
     claim(
         "a marker is derived from the same slug the document is",
-        marker("bioinformatics", "Ribosome").ends_with("wiki-ribosome"),
+        marker("Ribosome").ends_with("wiki-ribosome"),
     );
     claim(
         "and it lives under the markers directory",
-        marker("x", "Y").starts_with(DONE),
+        marker("Y").starts_with(DONE),
     );
     claim(
         "two spellings of one topic mark the same point",
-        marker("x", "DNA sequencing") == marker("x", "dna   sequencing"),
+        marker("DNA sequencing") == marker("dna   sequencing"),
     );
 
     // Marking must depend on the evidence rather than on having been asked.
     claim(
         "a topic with no saved document cannot be marked studied",
-        !mark("bioinformatics", "A Topic Nothing Has Ever Saved"),
+        !mark("A Topic Nothing Has Ever Saved"),
     );
 
     claim("auto is off unless somebody said otherwise", !auto());

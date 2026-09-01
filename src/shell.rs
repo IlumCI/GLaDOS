@@ -652,6 +652,28 @@ fn update_cmd(rest: &str) {
     }
 }
 
+/// A loss, rendered so a non-finite one says so.
+///
+/// `x as i32` saturates in Rust, so an infinite or NaN loss prints as
+/// 2147483647 -- a number, in a column of numbers, that a reader has every
+/// reason to treat as a very large loss rather than as no loss at all. The
+/// first `study seq` run to produce one reported `meta 2147483647->0`, which
+/// reads like a spectacular recovery and is actually the trainer starting from
+/// a row it assigned zero probability: -log(0).
+///
+/// Not a bug in the trainer -- a first step from zero probability is a real
+/// thing for restricted cross-entropy to see, and the run converged. It is a
+/// bug in saying so.
+fn loss_str(x: f32) -> String {
+    if x.is_nan() {
+        return String::from("nan");
+    }
+    if x.is_infinite() {
+        return String::from(if x > 0.0 { "inf" } else { "-inf" });
+    }
+    alloc::format!("{}", x as i32)
+}
+
 /// Learn one field, then another, and print what the second cost the first.
 ///
 /// `study [stride]`. The stride subsamples the corpus, because the expensive
@@ -742,7 +764,7 @@ fn study_cmd(rest: &str) {
             None => kprintln!("  could not prepare a trial"),
             Some((before, after, l0, l1, held)) => {
                 kprintln!("[study check] train_masked with nothing masked, no adapter carried in");
-                kprintln!("  loss      {} -> {}", l0 as i32, l1 as i32);
+                kprintln!("  loss      {} -> {}", loss_str(l0), loss_str(l1));
                 kprintln!("  held out  {}% -> {}%  over {} decisions",
                           (before * 100.0) as i32, (after * 100.0) as i32, held);
                 kprintln!("  compare against 'train adapter -n {} -e 12': they should agree", n);
@@ -894,7 +916,7 @@ fn study_seq_cmd(arg: &str) {
         let loss = if r.studied.is_none() {
             String::from("      -   ")
         } else {
-            alloc::format!("{:>4}->{:<4}", r.first_loss as i32, r.last_loss as i32)
+            alloc::format!("{:>4}->{:<4}", loss_str(r.first_loss), loss_str(r.last_loss))
         };
         let mut line = alloc::format!("  {:<18} {} ", label, loss);
         for (i, (right, total)) in r.scores.iter().enumerate() {
