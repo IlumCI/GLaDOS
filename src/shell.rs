@@ -138,7 +138,7 @@ fn find_core(want: &str) -> Option<[u8; 32]> {
 const KNOWN_COMMANDS: &[&str] = &[
     "term", "todo", "paint", "write", "mines", "oracle", "enternet", "net", "dhcp", "mem",
     "uptime", "tasks", "status", "help", "app", "author", "video", "serial", "log", "snap",
-    "update", "gpu", "mine", "abstract", "study",
+    "update", "gpu", "mine", "abstract", "study", "work",
 ];
 
 /// How many steps an authoring run gets.
@@ -648,6 +648,92 @@ fn update_cmd(rest: &str) {
             kprintln!("  update unstage      call off a staged update");
             kprintln!("  update source <url> | channel <name> | link <code> | unlink");
             kprintln!("  update verify <image> [sig]   check a pair brought in by hand");
+        }
+    }
+}
+
+/// The workflow graph: what runs exist, and what one of them did.
+///
+/// Read-only. Nothing here starts a run, because there is nothing to start
+/// yet: this is the graph half, built and tested before any worker exists.
+fn work_cmd(rest: &str) {
+    use crate::ai::work::{self, Status};
+
+    let rest = rest.trim();
+    if rest.is_empty() {
+        let runs = work::runs();
+        if runs.is_empty() {
+            kprintln!("  no runs");
+            kprintln!("  a run is a plan, its steps, and what it built, under /ai/work");
+            return;
+        }
+        console::set_color(YELLOW);
+        kprintln!("[work] {} run(s)", runs.len());
+        console::set_color(WHITE);
+        for r in runs {
+            let n = work::steps(&r).len();
+            // The address, because it is the whole point: two runs that did
+            // the same thing show the same eight characters here.
+            let root = work::root(&r)
+                .map(|h| alloc::string::String::from(&crate::ai::voter::hex(&h)[..16]))
+                .unwrap_or_else(|| String::from("--------"));
+            let goal = work::plan(&r).map(|p| p.goal).unwrap_or_default();
+            kprintln!("  {:20} {:>3} step(s)  {}  {}", r, n, root, goal);
+        }
+        return;
+    }
+
+    let Some(plan) = work::plan(rest) else {
+        console::set_color(LTRED);
+        kprintln!("  no such run: {}", rest);
+        console::set_color(WHITE);
+        return;
+    };
+
+    console::set_color(YELLOW);
+    kprintln!("[work] {}", rest);
+    console::set_color(WHITE);
+    kprintln!("  goal  {}", plan.goal);
+    if let Some(h) = work::root(rest) {
+        kprintln!("  root  {}", crate::ai::voter::hex(&h));
+    }
+
+    console::set_color(LTGRAY);
+    kprintln!("  plan");
+    console::set_color(WHITE);
+    for st in &plan.steps {
+        let mark = match st.status {
+            Status::Done => "x",
+            Status::Failed => "!",
+            Status::Todo => " ",
+        };
+        // Indented by whether it has a parent. One level, because the render
+        // is for reading and a deep tree printed as deep text is worse than a
+        // flat list with parents named.
+        let lead = if st.parent.is_some() { "    " } else { "  " };
+        kprintln!("  [{}]{}{} {} {}", mark, lead, st.id,
+                  if st.role.is_empty() { "-" } else { &st.role }, st.goal);
+    }
+    match plan.next() {
+        Some(n) => kprintln!("  next  step {} ({})", n.id,
+                             if n.role.is_empty() { "unassigned" } else { &n.role }),
+        None if plan.done() => kprintln!("  next  nothing; every step is settled"),
+        None => kprintln!("  next  nothing ready; every remaining step waits on a parent"),
+    }
+
+    let steps = work::steps(rest);
+    if !steps.is_empty() {
+        console::set_color(LTGRAY);
+        kprintln!("  what happened");
+        console::set_color(WHITE);
+        for (i, st) in steps.iter().enumerate() {
+            kprintln!("  {:>4} {} {} -- {}", i,
+                      if st.ok { "ok  " } else { "FAIL" },
+                      if st.role.is_empty() { "-" } else { &st.role },
+                      st.goal);
+            for line in st.summary.lines().take(3) {
+                kprintln!("       | {}", line);
+            }
         }
     }
 }
@@ -2987,6 +3073,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
         "gpu" => gpu_cmd(acpi),
         "abstract" => abstract_cmd(rest),
         "study" => study_cmd(rest),
+        "work" => work_cmd(rest),
         "pci" => match acpi.as_ref().and_then(|a| a.mcfg) {
             Some(ecam) => {
                 console::set_color(YELLOW);

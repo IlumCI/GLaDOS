@@ -174,19 +174,25 @@ indistinguishable from one that compares nothing.
 
 ### Stage 2. The first workflow worth having
 
-Reading. `fetch` and `save` exist now, `curiosity` picks topics, and the
-obvious pipeline is:
+Building something in the namespace, and only that. Research was the other
+candidate and is dropped, for a reason worth recording: reading needs `fetch`
+and `save`, which carry the `net` bit and live behind the token gate, so a
+workflow built on them could not be a stable feature. Building needs Aiksi,
+`author.rs` and `skill.rs`, all of which ship in stable today.
 
-    pick a topic          deterministic, the frontier
-    fetch it              deterministic, one HTTPS call
-    extract claims        MODEL, once
-    check each claim      deterministic, against what is already in /ai/read
-    agree?                deterministic
-    keep or flag          deterministic
+    read the plan node        deterministic, a namespace read
+    write or amend a program  MODEL, once per revision
+    run it sandboxed          deterministic, budgeted, already exists
+    judge it                  deterministic, skill.rs already does this
+    keep or revise            deterministic, from the judges' verdict
 
-One model call for a document. Everything else is namespace reads and string
-work. That is the ratio the whole design is aiming at, and it is measurable
-against the alternative of asking the model at every step.
+One model call per revision. Everything else is a namespace read, an Aiksi run
+and four judges that already exist and already work. That is the ratio the
+whole design aims at, and this is the workflow where it is easiest to reach,
+because the expensive half is already written.
+
+The loop it makes is the useful one: propose, run, judge, revise. A worker that
+fails leaves a summary node saying why, and the next revision reads it.
 
 ### Stage 3. Escalation, and only then
 
@@ -229,6 +235,10 @@ was tuned on.
 - **A workflow language.** Aiksi is the language. A workflow is a list of
   roles, and inventing a second syntax to describe that list is how a small
   mechanism becomes a project.
+- **Research and synthesis workflows.** They need `fetch` and `save`, which
+  carry the `net` bit and sit behind the token gate, so anything built on
+  them cannot ship as a stable feature. Reopen on the experimental channel
+  once the building workflow has soaked.
 - **Anything non-deterministic scheduling anything.** See the rule above.
 
 ## The honest summary
