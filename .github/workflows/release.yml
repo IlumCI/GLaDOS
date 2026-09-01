@@ -7,9 +7,15 @@ name: release
 # reads; the release assets are what a person checks it against, and a
 # signature is only worth having if somebody can get the artifact a second way.
 #
-# What this deliberately does NOT build: the ISOs. Their payloads are 135 MB to
-# 1.9 GB of model weights that exist nowhere in this repo, and updates ship the
-# EFI image alone. The ISOs stay a local, manual build.
+# The ISOs are built here too, which they were not. The reason they were not is
+# still true -- the payloads are hundreds of megabytes of model weights that
+# exist nowhere in this repo -- so they are fetched from a pinned release that
+# holds them, verified against digests that DO live in this repo
+# (payload/*.txt), and only then handed to mkiso.py.
+#
+# Updates still ship the EFI image alone. An ISO is how a machine is installed,
+# not how it is updated, and nothing in `update` will ever pull 576 MB through
+# a 32 KB window.
 
 on:
   push:
@@ -139,3 +145,58 @@ jobs:
             "out/glados-$VERSION.efi" \
             "out/glados-$VERSION.efi.sig" \
             out/manifest --clobber
+
+      # --- the ISO ------------------------------------------------------
+      #
+      # Last, and deliberately after the image and the manifest are already
+      # published. An ISO is an install medium and nothing waits on it, while
+      # every machine in the field is waiting on the manifest -- so a failure
+      # down here must not be able to delay what is above it.
+
+      # No `if:` on the next three, deliberately. Gating them on a real
+      # release would mean the only run that ever exercises them is the one
+      # that is not allowed to fail -- a dry run would skip exactly the path
+      # it was invoked to rehearse. Downloading 600 MB costs four minutes on a
+      # workflow that runs on tags and by hand, which is cheap against
+      # discovering the fetch is broken during a release.
+      - name: Fetch the payload
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PAYLOAD_TAG: ${{ vars.PAYLOAD_TAG || 'payload-qwen3-0.6b-v1' }}
+        run: |
+          mkdir -p payload-dir
+          # A release of its own, holding only weights. Not the repo (600 MB
+          # of binary that git would carry forever), not LFS (whose free
+          # bandwidth this would exhaust in three builds), and not the
+          # Supabase bucket the images go to -- that egress is metered and
+          # this is not.
+          gh release download "$PAYLOAD_TAG" --dir payload-dir --clobber
+          ls -la payload-dir
+
+      - name: The payload must be the payload
+        run: |
+          # The step this whole arrangement exists for. A truncated download
+          # builds an ISO that boots and then cannot load the model, and
+          # nothing else in this workflow knows how long model.bin should be.
+          python3 tools/payload.py --selftest
+          python3 tools/payload.py verify payload-dir "payload/${PAYLOAD_NAME}.txt"
+        env:
+          PAYLOAD_NAME: ${{ vars.PAYLOAD_NAME || 'qwen3-0.6b' }}
+
+      - name: Build the ISO
+        run: |
+          python3 tools/mkiso.py "out/glados-$VERSION.iso" \
+            --efi "out/glados-$VERSION.efi" \
+            --payload payload-dir \
+            --label "GLADOS"
+          ls -la "out/glados-$VERSION.iso"
+
+      - name: Attach the ISO
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Separate from the attach above so that an ISO upload failing --
+          # it is 576 MB and the one asset here big enough to time out --
+          # cannot take the kernel image down with it.
+          gh release upload "$GITHUB_REF_NAME" "out/glados-$VERSION.iso" --clobber
