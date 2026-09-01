@@ -1212,6 +1212,119 @@ impl Trial {
         Fit { dora, first_loss, last_loss, epochs, ms: millis_since(t), stopped }
     }
 
+
+    /// Train over a subset of applets, optionally continuing from an adapter
+    /// that already exists.
+    ///
+    /// Both halves are what `train` cannot do and what sequential learning
+    /// needs. `train` builds `Dora::new` every call, so fitting on one field
+    /// and then another produces two independent adapters and no history --
+    /// which is exactly why the probe curriculum could only report
+    /// interference. Passing the previous stage's adapter as `start` makes the
+    /// second field's gradients land on top of the first field's weights,
+    /// which is the only arrangement in which forgetting is a thing that can
+    /// happen at all.
+    ///
+    /// `mask` is indexed by position in `sysbox::APPLETS`, which is the same
+    /// index `Decision::applet` carries.
+    ///
+    /// The optimiser state is fresh per stage rather than carried. That is
+    /// deliberate and it matches how sequential fine-tuning is actually done:
+    /// a new task is a new run, and Adam's moments describe the loss surface
+    /// of the task that built them.
+    pub fn train_masked(&self, b: &Budget, start: Option<&Dora>, mask: &[bool]) -> Fit {
+        let mat = self.mat();
+        let mut dora = match start {
+            Some(d) => d.clone(),
+            None => Dora::new(b.rank, b.alpha, self.dim, self.live.len()),
+        };
+        dora.refresh(&mat, start.is_none());
+
+        let t = crate::time::rdtsc();
+        let mut opt_a = Adam::new(dora.a.len());
+        let mut opt_b = Adam::new(dora.b.len());
+        let mut opt_m = Adam::new(dora.m.len());
+        let mut ga = vec![0.0f32; dora.a.len()];
+        let mut gb = vec![0.0f32; dora.b.len()];
+        let mut dm = vec![0.0f32; dora.m.len()];
+        let mut ax = vec![0.0f32; dora.r];
+        let mut out: Vec<f32> = Vec::new();
+
+        let keep = |d: &Decision| !d.held && mask.get(d.applet).copied().unwrap_or(false);
+        let n_train = self.decisions.iter().filter(|d| keep(d)).count().max(1);
+        let (mut first_loss, mut last_loss) = (0.0f32, 0.0f32);
+        let (mut epochs, mut stopped) = (0usize, false);
+
+        for epoch in 0..b.epochs {
+            for v in ga.iter_mut() {
+                *v = 0.0;
+            }
+            for v in gb.iter_mut() {
+                *v = 0.0;
+            }
+            for v in dm.iter_mut() {
+                *v = 0.0;
+            }
+            last_loss = 0.0;
+            for d in self.decisions.iter().filter(|d| keep(d)) {
+                let st = &self.chains[d.applet].as_ref().unwrap()[d.step];
+                out.clear();
+                out.extend_from_slice(&d.base);
+                dora.apply_rows(&mut out, &st.local, &d.x, &mut ax);
+                let (loss, gy) = restricted_ce_compact(&out, st.target);
+                last_loss += loss;
+                dora.backward_rows(
+                    &mat, &d.x, &ax, &d.base, &gy, &st.local, &mut ga, &mut gb, &mut dm,
+                );
+            }
+            if epoch == 0 {
+                first_loss = last_loss;
+            }
+            let k = 1.0 / n_train as f32;
+            for v in ga.iter_mut() {
+                *v *= k;
+            }
+            for v in gb.iter_mut() {
+                *v *= k;
+            }
+            for v in dm.iter_mut() {
+                *v *= k;
+            }
+            opt_a.step(&mut dora.a, &ga, b.lr);
+            opt_b.step(&mut dora.b, &gb, b.lr);
+            opt_m.step(&mut dora.m, &dm, b.lr * 0.25);
+            dora.refresh(&mat, false);
+            epochs += 1;
+            if b.millis > 0 && millis_since(t) >= b.millis {
+                stopped = true;
+                break;
+            }
+        }
+        Fit { dora, first_loss, last_loss, epochs, ms: millis_since(t), stopped }
+    }
+
+    /// Score one slice, restricted to a subset of applets.
+    ///
+    /// Returns (right, total) rather than a ratio, because the caller needs
+    /// the denominator: a field with four held-out decisions produces a
+    /// percentage that looks like a measurement and is not one.
+    pub fn score_masked(&self, dora: Option<&Dora>, s: Slice, mask: &[bool]) -> (usize, usize) {
+        let mut out = Vec::new();
+        let mut ax = vec![0.0f32; dora.map(|d| d.r).unwrap_or(1)];
+        let (mut right, mut total) = (0usize, 0usize);
+        for d in self.decisions.iter() {
+            if !self.in_slice(d, s) || !mask.get(d.applet).copied().unwrap_or(false) {
+                continue;
+            }
+            self.logits(d, dora, &mut out, &mut ax);
+            if self.correct(d, &out) {
+                right += 1;
+            }
+            total += 1;
+        }
+        (right, total)
+    }
+
     /// Widen a locally-trained adapter to the model's full row space.
     ///
     /// `a` is shared across rows and copies whole; `b`, `m` and `s` are

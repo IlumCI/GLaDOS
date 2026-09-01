@@ -234,3 +234,75 @@ pub fn selftest() -> bool {
 
     ok
 }
+
+// --- the adapter version: real sequential forgetting ---------------------
+
+/// One stage of a sequential curriculum.
+pub struct SeqRow {
+    /// Which domain was just studied. `None` is the frozen base, before any
+    /// study at all, which is the reference every later row is read against.
+    pub studied: Option<usize>,
+    /// Per domain, (right, total) over its held-out decisions.
+    pub scores: Vec<(usize, usize)>,
+    pub first_loss: f32,
+    pub last_loss: f32,
+    pub trained_on: usize,
+}
+
+/// Study each field in turn, carrying one adapter through all of them.
+///
+/// This is the experiment the probe curriculum could not run. There the fit is
+/// closed-form and refit per stage, so nothing is ever overwritten and a
+/// falling column means interference. Here a single adapter is carried from
+/// stage to stage and each field's gradients land on the previous field's
+/// weights, so a falling column means the machine has actually forgotten
+/// something it could previously do.
+///
+/// The row before any studying is the frozen base, and it has to be there.
+/// Without it a drop from stage one to stage five is unreadable: it could be
+/// forgetting, or it could be an adapter that never helped that field to begin
+/// with.
+pub fn sequential(b: &super::train::Budget) -> Option<Vec<SeqRow>> {
+    use super::train::Slice;
+
+    // Masks are indexed by position in APPLETS, which is what
+    // `Decision::applet` carries.
+    let masks: Vec<Vec<bool>> = DOMAINS
+        .iter()
+        .map(|d| {
+            crate::sysbox::APPLETS
+                .iter()
+                .map(|a| d.applets.contains(&a.name))
+                .collect()
+        })
+        .collect();
+
+    let trial = super::with_engine(|e| super::train::prepare(e, b))?.ok()?;
+
+    let mut rows = Vec::new();
+    let score_all = |dora: Option<&super::adapter::Dora>| -> Vec<(usize, usize)> {
+        masks.iter().map(|m| trial.score_masked(dora, Slice::Held, m)).collect()
+    };
+
+    rows.push(SeqRow {
+        studied: None,
+        scores: score_all(None),
+        first_loss: 0.0,
+        last_loss: 0.0,
+        trained_on: 0,
+    });
+
+    let mut carried: Option<super::adapter::Dora> = None;
+    for (i, mask) in masks.iter().enumerate() {
+        let fit = trial.train_masked(b, carried.as_ref(), mask);
+        rows.push(SeqRow {
+            studied: Some(i),
+            scores: score_all(Some(&fit.dora)),
+            first_loss: fit.first_loss,
+            last_loss: fit.last_loss,
+            trained_on: fit.epochs,
+        });
+        carried = Some(fit.dora);
+    }
+    Some(rows)
+}

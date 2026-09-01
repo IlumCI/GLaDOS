@@ -660,7 +660,13 @@ fn update_cmd(rest: &str) {
 fn study_cmd(rest: &str) {
     use crate::ai::study::{self, DOMAINS};
 
-    let stride = rest.trim().parse::<usize>().unwrap_or(1).max(1);
+    let rest = rest.trim();
+    if let Some(arg) = rest.strip_prefix("seq") {
+        study_seq_cmd(arg.trim());
+        return;
+    }
+
+    let stride = rest.parse::<usize>().unwrap_or(1).max(1);
     let held = study::held_out_counts();
 
     console::set_color(YELLOW);
@@ -746,6 +752,115 @@ fn study_cmd(rest: &str) {
         }
     }
     kprintln!("  the probe is refit, not updated, so this is interference and not forgetting");
+}
+
+/// The adapter version: one adapter carried through every field in turn, so a
+/// falling column is forgetting rather than interference.
+///
+/// `study seq [examples]`. Expensive -- the preparation is a forward pass per
+/// example and every stage after it is a full training run, so the default
+/// subsample is small and the wall-clock ceiling is real.
+fn study_seq_cmd(arg: &str) {
+    use crate::ai::study::{self, DOMAINS};
+    use crate::ai::train::Budget;
+
+    if !crate::ai::train::hardware_ok() {
+        console::set_color(LTRED);
+        kprintln!("  the trainer needs AVX2 and FMA, and this CPU reports neither");
+        kprintln!("  under QEMU that is the default cpu model; add -cpu max");
+        console::set_color(WHITE);
+        return;
+    }
+
+    let examples = arg.parse::<usize>().unwrap_or(48).max(8);
+    let b = Budget { epochs: 12, millis: 90_000, examples, lr: 0.02, rank: 8, alpha: 16.0 };
+
+    console::set_color(YELLOW);
+    kprintln!("[study seq] {} domains, ~{} examples, {} epochs a stage",
+              DOMAINS.len(), examples, b.epochs);
+    console::set_color(LTGRAY);
+    kprintln!("  preparing: one forward pass per example, then {} training runs", DOMAINS.len());
+    console::set_color(WHITE);
+
+    let Some(rows) = study::sequential(&b) else {
+        console::set_color(LTRED);
+        kprintln!("  could not prepare a trial -- no corpus, no model, or nothing spellable");
+        console::set_color(WHITE);
+        return;
+    };
+
+    console::set_color(LTGRAY);
+    let mut hdr = String::from("  after studying     loss ");
+    for d in DOMAINS {
+        hdr.push_str(&alloc::format!("{:>10}", d.name));
+    }
+    kprintln!("{}", hdr);
+    console::set_color(WHITE);
+
+    let mut first: Vec<Option<usize>> = alloc::vec![None; DOMAINS.len()];
+    for r in &rows {
+        let label = match r.studied {
+            None => "(frozen base)",
+            Some(i) => DOMAINS[i].name,
+        };
+        let loss = if r.studied.is_none() {
+            String::from("   -")
+        } else {
+            alloc::format!("{:>4}", r.last_loss as i32)
+        };
+        let mut line = alloc::format!("  {:<18} {} ", label, loss);
+        for (i, (right, total)) in r.scores.iter().enumerate() {
+            if *total == 0 {
+                line.push_str("         -");
+                continue;
+            }
+            let pct = right * 100 / total;
+            // Mark the drop from this field's own best, which is the number
+            // forgetting actually shows up in.
+            if let Some(i2) = r.studied {
+                if i2 == i && first[i].is_none() {
+                    first[i] = Some(pct);
+                }
+            }
+            let fell = match first[i] {
+                Some(best) if pct + 5 < best => "v",
+                _ => " ",
+            };
+            let thin = if *total < 8 { "?" } else { fell };
+            line.push_str(&alloc::format!("{:>8}%{}", pct, thin));
+        }
+        kprintln!("{}", line);
+    }
+
+    console::set_color(LTGRAY);
+    kprintln!("  v marks a field at least 5 points below its own best, after later study");
+    kprintln!("  ? marks a slice under 8 held-out decisions");
+    console::set_color(WHITE);
+
+    // The reading. One adapter carried through, so this is the real thing.
+    let mut forgot = String::new();
+    if let Some(last) = rows.last() {
+        for (i, (right, total)) in last.scores.iter().enumerate() {
+            if *total < 8 {
+                continue;
+            }
+            let pct = right * 100 / total;
+            if let Some(best) = first[i] {
+                if pct + 5 < best {
+                    forgot.push_str(&alloc::format!(" {} {}%->{}%", DOMAINS[i].name, best, pct));
+                }
+            }
+        }
+    }
+    if forgot.is_empty() {
+        console::set_color(LTGREEN);
+        kprintln!("  no field ended more than 5 points below its own best: no forgetting here");
+    } else {
+        console::set_color(LTRED);
+        kprintln!("  forgotten by the end:{}", forgot);
+    }
+    console::set_color(WHITE);
+    kprintln!("  one adapter carried through every stage, so this is forgetting and not interference");
 }
 
 /// What repeats across the skills this machine has written.
@@ -2636,6 +2751,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             kprintln!("  mine          bench|btc -- sha256d hash rate, and a difficulty sweep");
             kprintln!("  abstract      what repeats across the skills, and what naming it would save");
             kprintln!("  study [n]     learn one field then another; what the second cost the first");
+            kprintln!("  study seq [n] the same with an adapter carried through: real forgetting");
 
             console::set_color(YELLOW);
             kprintln!("\nstorage");
