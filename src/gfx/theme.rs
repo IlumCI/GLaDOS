@@ -1,42 +1,87 @@
-//! Windows 3.1 chrome, in Aperture colours.
+//! Luna chrome, in Aperture colours.
 //!
 //! One place that owns what the system looks like, so a widget is a few calls
 //! rather than a pile of rectangles, and so changing the look is changing this
-//! file rather than every caller.
+//! file rather than every caller. That sentence is also the reason there is no
+//! theme struct here and should not be: a scheme selectable at runtime would
+//! put an indirection in front of every chrome draw to serve a switch nobody
+//! has asked for twice.
 //!
-//! ### Why the bevel is two pixels
+//! ### Why Aperture rather than Luna's blue
 //!
-//! The 3.1 look is not "a border" -- it is a specific claim about where the
-//! light is. Every raised surface is lit from the top left: an outer white
-//! edge, an inner light-grey edge, an inner dark-grey shadow, an outer black
-//! shadow. Sunken surfaces state the reverse. One-pixel edges read as a line
-//! drawn around a box; two-pixel edges read as a solid object with a thickness,
-//! and that is the entire difference between "themed" and "chrome".
+//! XP shipped three schemes and two of them were not blue. Olive Green and
+//! Silver are the same geometry, the same gradients and the same gloss with
+//! one hue substituted, so keeping this machine's orange is what XP itself
+//! did rather than a departure from it. The Start button stays green, as it
+//! was in every one of the three.
 //!
-//! The face colour matters for the same reason. 0xC0C0C0 is bright enough that
-//! white reads as a highlight against it and dark grey reads as shadow. Against
-//! the console palette's 0xAAAAAA the highlight is too close and the surface
-//! goes flat, which is why these colours are their own set rather than indices
-//! into the sixteen.
+//! ### Why the bevel stopped being two pixels
 //!
-//! ### Why Aperture rather than navy
+//! It was two, and the argument was sound while it held: the 3.1 look is a
+//! claim about where the light is, an outer white edge and an inner light
+//! grey against an outer black and an inner dark grey, and two pixels read as
+//! an object with a thickness where one reads as a line drawn round a box.
 //!
-//! Everything structural is 3.1. The one thing that is not is the title bar,
-//! which is the only surface a user looks at to know *whose* machine this is.
+//! Two pixels needs two distinguishable lights, and against XP's warmer face
+//! the inner one has nowhere to be. `EDGE_LIGHT` -- XP's own ButtonLight,
+//! 0xF1EFE2 -- differs from the 0xECE9D8 face by **5, 6 and 10** across the
+//! three channels, which is not a highlight, it is the same colour. So the
+//! second pixel had nothing left to say, and one edge says what remains.
+//!
+//! **The highlight is still white, and a screenshot is what settled that.**
+//! The first cut of this used `EDGE_LIGHT` for the raised edge on the
+//! reasoning that white had stopped reading as a highlight too. It has not:
+//! white against this face is 19, 22 and 39, and the difference between those
+//! two numbers is the difference between a Minesweeper board of buttons and a
+//! Minesweeper board of thin dark boxes, which is exactly what the first
+//! screenshot showed. XP raises with ButtonHighlight and not with ButtonLight
+//! for the same reason.
+//!
+//! `EDGE_LIGHT` keeps its place on the separators, which is where XP uses
+//! ButtonLight and where it sits against a line rather than against a field.
+//!
+//! ### Why `SHADOW` and `DARKEDGE` kept their old values
+//!
+//! They are not only the halves of a bevel. Fourteen places outside this file
+//! draw *with* them -- pictogram detail, the icon label shadow on the wall,
+//! Minesweeper's counts, the Oracle's plot ink, ToDo's field labels, Paint's
+//! pen-up mark. Retinting them to XP's greys would wash out ten drawings that
+//! have nothing to do with edges. Keeping a name only helps when the name
+//! means one thing, so the bevel got new constants instead.
 
 use super::font;
 use super::{Color, Framebuffer};
 
 // --- surfaces ------------------------------------------------------------
 
-/// The face of every raised control. The canonical 3.1 grey.
-pub const FACE: Color = Color::new(0xC0, 0xC0, 0xC0);
-/// Outer highlight of a raised edge, inner shadow of a sunken one.
+/// The face of every raised control. XP's ButtonFace, and warm, which is the
+/// same family the orange is in.
+pub const FACE: Color = Color::new(0xEC, 0xE9, 0xD8);
+/// A white field. Not the light half of a bevel -- that is `EDGE_LIGHT` --
+/// but the fill behind text somebody types into, which is what the ten
+/// callers outside this file mean by it.
 pub const HILIGHT: Color = Color::new(0xFF, 0xFF, 0xFF);
-/// Inner shadow of a raised edge.
+/// A mid grey, used as *ink* by ten drawings across five files. See the
+/// module note; it is not the bevel's dark half any more.
 pub const SHADOW: Color = Color::new(0x80, 0x80, 0x80);
-/// Outer shadow. Black, not dark grey -- 3.1 frames really do end in black.
+/// Black. Still black: the icon labels on the wall are shadowed with it and
+/// every pictogram is drawn in it.
 pub const DARKEDGE: Color = Color::new(0x00, 0x00, 0x00);
+
+/// The dark half of a one-pixel edge. XP's ButtonShadow. The light half is
+/// `HILIGHT`, which is white -- see the module note on what a screenshot said
+/// about trying to use the softer one here.
+pub const EDGE: Color = Color::new(0xAC, 0xA8, 0x99);
+/// XP's ButtonLight. Only the separators, where it sits against a line and
+/// not against the face.
+pub const EDGE_LIGHT: Color = Color::new(0xF1, 0xEF, 0xE2);
+/// The border round a field. One colour all the way round rather than a
+/// light and dark pair: a well is a hole in the surface, and XP says so by
+/// outlining it in a desaturated accent instead of by lighting it.
+pub const WELL_EDGE: Color = Color::new(0xB0, 0x8A, 0x5E);
+/// A selected row in a list that does not have focus. Was an anonymous
+/// 0xA8A8A8 written out three times in two files.
+pub const LIST_SEL_IDLE: Color = Color::new(0xD8, 0xD4, 0xC8);
 /// The desktop behind everything.
 pub const DESKTOP: Color = Color::new(0x0A, 0x0C, 0x10);
 /// A sparse dot grid over it. Barely there on purpose: a wall should read
@@ -48,14 +93,14 @@ pub const DESKTOP_GRID: Color = Color::new(0x1C, 0x22, 0x2C);
 /// in front of.
 pub const WALL_MARK: Color = Color::new(0x4A, 0x2E, 0x12);
 pub const TEXT: Color = Color::new(0x00, 0x00, 0x00);
-pub const TEXT_DIM: Color = Color::new(0x80, 0x80, 0x80);
+pub const TEXT_DIM: Color = Color::new(0x8A, 0x86, 0x7A);
 /// The close button under the pointer.
 ///
 /// The one control on a window that cannot be undone, and the one an operator
 /// coming from Windows identifies by colour before they read the glyph. Every
 /// other button here answers hover with a ring; this one answers with red,
 /// because "this is the destructive one" is worth saying twice.
-pub const CLOSE_HOT: Color = Color::new(0xC4, 0x28, 0x28);
+pub const CLOSE_HOT: Color = Color::new(0xE0, 0x43, 0x43);
 
 /// Status text on a panel face: working, needs attention, will not work.
 ///
@@ -123,27 +168,36 @@ impl Rect {
     }
 }
 
-/// Two-pixel raised or sunken edge. See the module note on why it is two.
+/// One-pixel raised or sunken edge. See the module note on why it stopped
+/// being two.
 pub fn bevel(fb: &Framebuffer, r: Rect, raised: bool) {
-    if r.w < 4 || r.h < 4 {
+    if r.w < 2 || r.h < 2 {
         return;
     }
-    let (outer_tl, inner_tl, inner_br, outer_br) = if raised {
-        (HILIGHT, FACE, SHADOW, DARKEDGE)
-    } else {
-        (SHADOW, DARKEDGE, FACE, HILIGHT)
-    };
-    for (i, (tl, br)) in [(outer_tl, outer_br), (inner_tl, inner_br)].iter().enumerate() {
-        let i = i as u32;
-        let (x, y) = (r.x + i, r.y + i);
-        let (w, h) = (r.w - 2 * i, r.h - 2 * i);
-        // Top and left first, then bottom and right, so the corners belong to
-        // the shadow. That is what makes a corner read as a mitre.
-        fb.rect(x, y, w, 1, *tl);
-        fb.rect(x, y, 1, h, *tl);
-        fb.rect(x, y + h - 1, w, 1, *br);
-        fb.rect(x + w - 1, y, 1, h, *br);
+    let (tl, br) = if raised { (HILIGHT, EDGE) } else { (EDGE, HILIGHT) };
+    // Top and left first, then bottom and right, so the corners belong to the
+    // shadow. That is what makes a corner read as a mitre, and it is the one
+    // line of the two-pixel version that needed no rethinking.
+    fb.rect(r.x, r.y, r.w, 1, tl);
+    fb.rect(r.x, r.y, 1, r.h, tl);
+    fb.rect(r.x, r.y + r.h - 1, r.w, 1, br);
+    fb.rect(r.x + r.w - 1, r.y, 1, r.h, br);
+}
+
+/// A one-pixel outline in a single colour.
+///
+/// `Framebuffer::frame` draws the same thing through `put`, a pixel at a
+/// time. This is four span fills, and it is on the path every window takes
+/// every frame, so the difference is worth a second function rather than a
+/// comment about it.
+pub fn outline(fb: &Framebuffer, r: Rect, c: Color) {
+    if r.w == 0 || r.h == 0 {
+        return;
     }
+    fb.rect(r.x, r.y, r.w, 1, c);
+    fb.rect(r.x, r.y + r.h - 1, r.w, 1, c);
+    fb.rect(r.x, r.y, 1, r.h, c);
+    fb.rect(r.x + r.w - 1, r.y, 1, r.h, c);
 }
 
 /// A raised surface: face plus a raised edge. Buttons, panels, menu bars.
@@ -153,9 +207,13 @@ pub fn panel(fb: &Framebuffer, r: Rect) {
 }
 
 /// A sunken surface. Text fields, list boxes, anything content sits *in*.
+///
+/// One border colour rather than a lit pair. A well under Luna is not a
+/// surface pushed in, it is a hole with an edge, and lighting it from the top
+/// left would be saying something about it that is not true.
 pub fn well(fb: &Framebuffer, r: Rect, fill: Color) {
     fb.rect(r.x, r.y, r.w, r.h, fill);
-    bevel(fb, r, false);
+    outline(fb, r, WELL_EDGE);
 }
 
 pub fn text(fb: &Framebuffer, x: u32, y: u32, s: &str, fg: Color, bg: Color) {
@@ -440,7 +498,7 @@ pub fn list_row(fb: &Framebuffer, r: Rect, label: &str, selected: bool, focused:
     } else if selected {
         // Selected but the list does not have focus: keep the bar, drop the
         // colour, so a form with several lists still says which one is live.
-        (TEXT, Color::new(0xA8, 0xA8, 0xA8))
+        (TEXT, LIST_SEL_IDLE)
     } else {
         (TEXT, FACE)
     };
@@ -453,8 +511,8 @@ pub fn list_row(fb: &Framebuffer, r: Rect, label: &str, selected: bool, focused:
 
 /// A vertical groove, for dividing a bar into sections.
 pub fn separator_v(fb: &Framebuffer, x: u32, y: u32, h: u32) {
-    fb.rect(x, y, 1, h, SHADOW);
-    fb.rect(x + 1, y, 1, h, HILIGHT);
+    fb.rect(x, y, 1, h, EDGE);
+    fb.rect(x + 1, y, 1, h, EDGE_LIGHT);
 }
 
 /// The Aperture mark at button size, on a raised face.
@@ -468,6 +526,6 @@ pub fn aperture_dot(fb: &Framebuffer, cx: u32, cy: u32, r: i32) {
 
 /// A horizontal rule, drawn as a groove. The 3.1 separator.
 pub fn separator(fb: &Framebuffer, x: u32, y: u32, w: u32) {
-    fb.rect(x, y, w, 1, SHADOW);
-    fb.rect(x, y + 1, w, 1, HILIGHT);
+    fb.rect(x, y, w, 1, EDGE);
+    fb.rect(x, y + 1, w, 1, EDGE_LIGHT);
 }

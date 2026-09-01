@@ -801,6 +801,15 @@ clean boot this project had ever driven. A check that always fails is read as
 one nobody has to look at, which is the objection `smp.rs` makes about its own
 canary.
 
+**`video bench` is only comparable against a run with the same text on
+screen.** `console redraw_all` skips blank cells, so its cost scales with how
+much output is sitting in the terminal: the same build measured 497 us after a
+bare boot and 823 us after `diag all` had filled the console, which reads as a
+40% regression and is a full scrollback. Take the before and after with the
+identical command prefix, and read `full-screen rect` as the control -- nothing
+above the framebuffer can touch it, so what it moves by is the noise floor.
+Between boots on the development machine that is about 10%.
+
 **Run `video bench` at `-smp 1`.** The extra cores cost the graphics path 30
 to 40% while doing nothing at all: `desk::draw + present` measures 1,541 us at
 one core and 2,107 at four, `full-screen rect` 158 against 221, `present, no

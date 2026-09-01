@@ -386,7 +386,7 @@ impl DeskApp for Todo {
             let r = Rect::new(inner.x, ry, inner.w, row_h);
             let selected = i == self.sel;
             if selected {
-                fb.rect(r.x, r.y, r.w, r.h, if focused { theme::SELECT } else { Color::new(0xA8, 0xA8, 0xA8) });
+                fb.rect(r.x, r.y, r.w, r.h, if focused { theme::SELECT } else { theme::LIST_SEL_IDLE });
             }
             let fg = if selected && focused { theme::SELECT_TEXT } else { theme::TEXT };
             // Checkbox.
@@ -416,7 +416,7 @@ impl DeskApp for Todo {
             if selected && focused {
                 theme::text(fb, title_x, r.y + (row_h - lh) / 2, shown, theme::SELECT_TEXT, theme::SELECT);
             } else {
-                theme::text(fb, title_x, r.y + (row_h - lh) / 2, shown, theme::TEXT, if selected { Color::new(0xA8, 0xA8, 0xA8) } else { theme::FACE });
+                theme::text(fb, title_x, r.y + (row_h - lh) / 2, shown, theme::TEXT, if selected { theme::LIST_SEL_IDLE } else { theme::FACE });
             }
         }
 
