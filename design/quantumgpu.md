@@ -97,23 +97,80 @@ The throughput band held. The ILP prediction was wrong by its whole margin,
 and it was wrong because it reasoned from somebody else's register count
 instead of compiling this kernel and reading its own.
 
+## The efficiency curve
+
+Measured with `nvidia-smi -lgc` from an elevated shell, sustained runs, host
+CPU idle, correctness checked at every setting.
+
+| clock | GH/s | watts | temp | MH/J | digest |
+|---|---|---|---|---|---|
+| 900 | 0.366 | 15.4 | 70 | **23.8** | ok |
+| 1200 | 0.495 | 21.0 | 73 | 23.6 | ok |
+| 1400 | 0.586 | 27.9 | 77 | 21.0 | ok |
+| 1600 | 0.671 | 39.8 | 80 | 16.9 | ok |
+| 1800 | **0.696** | 44.0 | 82 | 15.8 | ok |
+| 2000 | 0.691 | 44.2 | 83 | 15.6 | ok |
+| 2100 | 0.692 | 45.0 | 84 | 15.4 | ok |
+
+**Throughput stops at 1800 MHz and the power cap is why.** Locking higher buys
+nothing -- 1800, 2000 and 2100 all land within noise of each other at 44-45 W,
+because the part is already spending its whole budget. The clock lock is a
+ceiling, not a floor, and above 1800 the ceiling is not what binds.
+
+**Peak efficiency is at 900 MHz and it is 51% better than peak throughput.**
+23.8 MH/J against 15.8. Half the hash rate for a third of the power. For
+anything that runs continuously that is the operating point, because joules are
+the budget and peak rate is not the objective.
+
+Even there the gap to purpose-built silicon is about 2,400x rather than the
+4,000x at full clock, which is the most flattering way this hardware can be
+described and still leaves it three orders of magnitude out.
+
+**Correctness held at every clock**, 900 through 2100, checked against block
+125552 each time. That is the expected result and worth stating precisely so it
+is not mistaken for a guardband finding: `-lgc` pins the clock and the GPU
+still applies the voltage its own curve specifies. Nothing was undervolted.
+Testing the guardband means holding a clock at *less* voltage than the curve
+asks for, which `nvidia-smi` cannot express -- Afterburner's curve editor is
+the only route, and it is untried.
+
+## Two algorithms
+
+`cuda/miner.cu` runs either, and refuses to benchmark one whose digest does not
+match `tools/algocheck.py`. Sustained, idle host:
+
+| algorithm | best GH/s | npt 1 | npt 2 | npt 4 | registers |
+|---|---|---|---|---|---|
+| sha256d | 0.704 | 0.633 | 0.632 | -- | 40 |
+| blake2s | **1.185** | 1.001 | 1.138 | 1.157 | 168 |
+
+**BLAKE2s is about 1.7x SHA-256d**, which is less than instruction counting
+predicts. Ten ARX rounds against sixty-four plus a second compression suggests
+nearer 2.3x; the shortfall is the sigma permutation, which indexes the message
+array per round and does not resolve to registers as cleanly as SHA-256's
+rolling schedule.
+
+**And ILP width matters for one of them and not the other.** BLAKE2s gains 16%
+from one nonce per thread to four; SHA-256d is flat. That is the plan's first
+experiment turning out to be right about the mechanism and wrong about the
+kernel: SHA-256d sits at 40 registers and roughly full occupancy with nothing
+to buy back, while BLAKE2s at 168 has room. The optimal width is a property of
+the algorithm, which is why it stays a per-algorithm knob rather than a
+constant.
+
+Run-to-run variance is real and thermal: SHA-256d measured 0.704 and 0.632 on
+the same settings minutes apart. Quote a range or quote the conditions.
+
 ## What is not measured yet
 
 - **Instructions per hash.** The derived figure depends on an assumed ALU
   utilisation, so it is not quoted. Nsight Compute gives it directly and that
   is the next run.
-- **Undervolting.** The plan ranks it second and the telemetry supports the
-  premise: this part is **power-limited, not clock-limited**, sitting at 44.8 W
-  of a 45 W budget with 100% utilisation. Energy per operation converts into
-  clock here, so the guardband lever is real.
-
-  **Blocked on privilege, not on method.** `nvidia-smi -lgc` and `-pl` both
-  answer *"the current user does not have permission to change clocks"*, and
-  the experiment needs an elevated shell. What makes it worth running when
-  somebody has one is that this kernel can grade itself: `sha256d.exe` with no
-  arguments prints block 125552's digest, so the error rate at each setting is
-  measurable rather than assumed, which is the whole premise of operating
-  outside the guardband.
+- **True undervolting.** The clock sweep above is not it, for the reason given
+  there. Afterburner's curve editor is the only tool that can hold a clock
+  below its curve voltage, and the harness is ready for it: the miner grades
+  itself against hashlib at every setting, so the error rate is measurable
+  rather than assumed.
 - **The uniform datapath.** Untouched.
 - **A persistent megakernel is worth about 6%, not the large win the plan
   implied.** Measured directly by holding total work fixed and cutting the
