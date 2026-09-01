@@ -42,13 +42,61 @@ pub struct Dora {
     pub s: Vec<f32>, // [out], cached m/|C|, refreshed against the frozen rows
 }
 
+/// Deterministic generator, the same xorshift shape the trainer's self-test
+/// uses. Deliberately *not* `crate::rng`.
+///
+/// The module this feeds rests on being able to re-derive any verdict it ever
+/// recorded, and an adapter seeded from the entropy pool would make every
+/// trial unreproducible -- the same objection that stopped randomness being
+/// the answer the last time this initialisation was questioned. A fixed seed
+/// breaks the symmetry without spending determinism.
+struct Seed(u64);
+
+impl Seed {
+    fn f32(&mut self) -> f32 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        (self.0 >> 40) as f32 / 8_388_608.0 - 1.0
+    }
+}
+
+/// Fixed, and it has to be. Two `Dora::new` calls with the same shape must
+/// produce byte-identical factors or a lineage stops re-deriving.
+const INIT_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
+
 impl Dora {
+    /// A is seeded, B is zero.
+    ///
+    /// Both were zero, and that made the low-rank branch a fixed point: the B
+    /// gradient carries a factor of `A.x` and the A gradient a factor of B, so
+    /// with both at the origin neither can ever move and only the per-row
+    /// magnitudes train. `diag adapterinit` has the arithmetic. The finite
+    /// difference gate never caught it because it perturbs from a non-zero
+    /// point, where the derivatives are correct -- the formula was right and
+    /// the starting point was not.
+    ///
+    /// Seeding A and leaving B at zero is the standard LoRA arrangement and it
+    /// costs nothing at attachment: `BA` is still zero, so `refresh` sees the
+    /// frozen row unchanged, `m` initialises to `|W0|` and `s` to 1. The
+    /// forward pass at initialisation is bit-identical to what it was. Only
+    /// the gradient changed.
+    ///
+    /// Scale is `1/sqrt(k_in)`, which keeps `A.x` order-one for a unit input
+    /// rather than growing with the width of the projection.
     pub fn new(r: usize, alpha: f32, k_in: usize, out: usize) -> Self {
         let r = r.min(MAX_RANK);
+        let mut g = Seed(INIT_SEED);
+        let sigma = if k_in > 0 {
+            1.0 / crate::ai::tensor::sqrtf(k_in as f32)
+        } else {
+            0.0
+        };
+        let a = (0..r * k_in).map(|_| g.f32() * sigma).collect();
         Self {
             r,
             alpha,
-            a: vec![0.0; r * k_in],
+            a,
             b: vec![0.0; out * r],
             m: vec![1.0; out],
             s: vec![1.0; out],
@@ -799,33 +847,29 @@ impl Dora {
     }
 }
 
-/// Does a freshly constructed adapter have any gradient to follow?
+/// Does a freshly constructed adapter have a gradient to follow?
 ///
-/// It does not, and that is the point of this check. `Dora::new` zeroes both
-/// low-rank factors, and `row_backward` forms them as
+/// It does now, and it did not before. `Dora::new` zeroed both low-rank
+/// factors, and `row_backward` forms them as
 ///
 /// ```text
-///   gb[o,j] += scale * gy * ax[j]                 ax = A.x, so zero when A is zero
+///   gb[o,j] += scale * gy * ax[j]                 ax = A.x, zero when A is zero
 ///   ga[j,:] += scale * gy * b[o,j] * x            guarded by `if bcoef != 0`
 /// ```
 ///
-/// so A being zero kills every B gradient and B being zero kills every A
-/// gradient. The pair is a fixed point: a zero-initialised low-rank branch has
-/// identically zero gradient and cannot leave the origin however long it is
-/// trained. Only the per-row magnitudes move, and an "adapter" that only
-/// rescales frozen rows is a much weaker object than the one the rest of the
-/// tree describes.
+/// so A at the origin killed every B gradient and B at the origin killed every
+/// A gradient. The pair was a fixed point and only the per-row magnitudes ever
+/// moved -- an "adapter" that rescales frozen rows, which is a much weaker
+/// object than the rest of this tree describes.
 ///
-/// The arithmetic in `row_backward` is not wrong -- the finite-difference gate
-/// checks it from a non-zero point and it passes. The initialisation is wrong,
-/// which is why nothing caught it: every gradient this asserts to be zero
-/// really is the correct gradient at that point.
+/// The arithmetic was never wrong. The finite-difference gate perturbs from a
+/// non-zero point, where every one of these derivatives is correct, which is
+/// exactly why nothing caught it for as long as it stood.
 ///
-/// Standard LoRA initialises A randomly and B at zero, so `BA` is zero at the
-/// start (the adapter is the identity, as intended) while B still has a live
-/// gradient through A. This asserts the current behaviour rather than the
-/// desired one, so that changing the initialisation has to come here and say
-/// so.
+/// A is seeded now and B is not, which is the standard arrangement. What this
+/// asserts is the pair of properties that makes it safe: the branch has a
+/// gradient, and attachment still changes nothing, because `BA` is zero either
+/// way.
 pub fn init_gradient_selftest() -> bool {
     let mut ok = true;
     let mut claim = |what: &str, good: bool| {
@@ -840,36 +884,56 @@ pub fn init_gradient_selftest() -> bool {
     let mat = Mat::F32 { data: &w, rows, cols: k };
     let d = Dora::new(r, 16.0, k, rows);
 
-    claim("a fresh adapter has a all zero", d.a.iter().all(|v| *v == 0.0));
-    claim("a fresh adapter has b all zero", d.b.iter().all(|v| *v == 0.0));
+    claim("A is seeded, so the branch is off the origin", d.a.iter().any(|v| *v != 0.0));
+    claim("B is still zero, so BA is zero", d.b.iter().all(|v| *v == 0.0));
+
+    // Re-derivability is the claim the whole judging apparatus rests on, so
+    // two adapters of the same shape have to be byte-identical. Seeding from
+    // the entropy pool would have broken every lineage.
+    let d_again = Dora::new(r, 16.0, k, rows);
+    claim("two fresh adapters are identical", d.a == d_again.a);
+
+    // Attachment must change nothing. With B zero, `refresh` sees the frozen
+    // row untouched, m initialises to |W0| and s to exactly 1 -- so a freshly
+    // attached adapter is the identity and inference is bit-identical to what
+    // it was before this seeding existed.
+    let mut d_att = Dora::new(r, 16.0, k, rows);
+    d_att.refresh(&mat, true);
+    claim("a fresh adapter is still the identity", d_att.s.iter().all(|v| (*v - 1.0).abs() < 1e-6));
 
     let x: Vec<f32> = (0..k).map(|i| 0.2 + i as f32 * 0.05).collect();
     let base: Vec<f32> = (0..rows).map(|i| 0.5 - i as f32 * 0.1).collect();
     let gy: Vec<f32> = (0..rows).map(|i| 0.3 + i as f32 * 0.11).collect();
 
-    // ax is what a forward pass would have produced: A.x, which is zero.
-    let ax = alloc::vec![0.0f32; r];
+    // ax is what the forward pass produces: A.x, which is no longer zero.
+    let mut ax = alloc::vec![0.0f32; r];
+    for j in 0..r {
+        ax[j] = (0..k).map(|i| d.a[j * k + i] * x[i]).sum();
+    }
+    claim("A.x is non-zero", ax.iter().any(|v| *v != 0.0));
+
     let mut ga = alloc::vec![0.0f32; d.a.len()];
     let mut gb = alloc::vec![0.0f32; d.b.len()];
     let mut dm = alloc::vec![0.0f32; d.m.len()];
     d.backward(&mat, &x, &ax, &base, &gy, &mut ga, &mut gb, &mut dm);
 
-    claim("at zero init the A gradient is identically zero", ga.iter().all(|v| *v == 0.0));
-    claim("at zero init the B gradient is identically zero", gb.iter().all(|v| *v == 0.0));
-    // The magnitudes are the only thing with anywhere to go, which is exactly
-    // why training appears to run and to change nothing that matters.
-    claim("the magnitude gradient is not zero", dm.iter().any(|v| *v != 0.0));
+    // The whole point: B can now move.
+    claim("the B gradient is live", gb.iter().any(|v| *v != 0.0));
+    claim("the magnitude gradient is live", dm.iter().any(|v| *v != 0.0));
 
-    // And the arithmetic is fine once it is off the origin: give B a value and
-    // the A gradient appears. This is what separates a wrong derivative from a
-    // wrong starting point.
+    // And A's is still zero at step zero, which is correct rather than a
+    // leftover: it carries a factor of B, B starts at zero, and B moves first.
+    // A follows from the next step onward. Asserted so that nobody reads this
+    // as the old bug surviving.
+    claim("the A gradient is zero until B moves", ga.iter().all(|v| *v == 0.0));
+
     let mut d2 = Dora::new(r, 16.0, k, rows);
     d2.b[0] = 0.5;
     let mut ga2 = alloc::vec![0.0f32; d2.a.len()];
     let mut gb2 = alloc::vec![0.0f32; d2.b.len()];
     let mut dm2 = alloc::vec![0.0f32; d2.m.len()];
     d2.backward(&mat, &x, &ax, &base, &gy, &mut ga2, &mut gb2, &mut dm2);
-    claim("a non-zero B revives the A gradient", ga2.iter().any(|v| *v != 0.0));
+    claim("a non-zero B brings A to life", ga2.iter().any(|v| *v != 0.0));
 
     ok
 }
