@@ -116,14 +116,31 @@ pub enum Trust {
     /// Read-only applets only. The mutating ones are absent from the grammar,
     /// so they are not merely refused -- there is no token sequence that names
     /// them.
+    ///
+    /// This also excludes the network, and that exclusion is load-bearing
+    /// rather than incidental: `initiative` runs its unattended nightly
+    /// episodes at this level, so anything admitted here is something the
+    /// machine may do while nobody is watching it.
     ReadOnly,
+    /// Read-only, plus the applets that reach off the machine.
+    ///
+    /// A level of its own because the two axes are genuinely different. A
+    /// mutating applet can put the namespace in a state somebody has to undo,
+    /// and every one of them is undoable -- content is addressed, `rm` detaches
+    /// a name rather than destroying anything, and a snapshot costs nothing.
+    /// A packet that has left the machine is not undoable by anything in this
+    /// tree. So "may change things here" and "may talk to anyone" are not
+    /// points on one scale, and collapsing them would mean either giving the
+    /// nightly loop the internet or never letting the model read anything.
+    Online,
     Full,
 }
 
 impl Trust {
     fn admits(&self, a: &sysbox::Applet) -> bool {
         match self {
-            Trust::ReadOnly => !a.mutates,
+            Trust::ReadOnly => !a.mutates && !a.net,
+            Trust::Online => !a.mutates,
             Trust::Full => true,
         }
     }
@@ -160,11 +177,29 @@ pub(crate) fn prompt_for(task: &str, names: &[&'static str]) -> String {
     s
 }
 
+/// Both effect bits for an applet name, refusing to guess harmlessly.
+///
+/// The three `Choice` sites each looked this up themselves and each defaulted
+/// an unknown name to "changes nothing", which was safe only because the name
+/// always comes from a list built out of `APPLETS` and so is never unknown. A
+/// default that is only correct because it is unreachable is one to write the
+/// other way round, and with a network bit in the pair it is worth doing:
+/// "assume it does nothing" is the wrong direction for a packet.
+fn effects(name: &str) -> (bool, bool) {
+    sysbox::APPLETS
+        .iter()
+        .find(|a| a.name == name)
+        .map(|a| (a.mutates, a.net))
+        .unwrap_or((true, true))
+}
+
 pub struct Choice {
     pub applet: &'static str,
     /// Whether it can change persistent content -- carried through so the
     /// caller never has to look it up again and get it wrong.
     pub mutates: bool,
+    /// Whether it sends a packet off the machine, carried for the same reason.
+    pub net: bool,
     pub steps: usize,
 }
 
@@ -218,17 +253,13 @@ pub fn choose(task: &str, trust: Trust, temperature: f32) -> Option<Choice> {
 
                 if let Some(idx) = cursor.finished() {
                     let name = names[idx];
-                    let mutates = sysbox::APPLETS
-                        .iter()
-                        .find(|a| a.name == name)
-                        .map(|a| a.mutates)
-                        .unwrap_or(false);
+                    let (mutates, net) = effects(name);
                     // On the way out of the success path too, not just the
                     // failure one -- the cache is equally overwritten either
                     // way, and only invalidating on failure would leave the
                     // corruption in place exactly when it went well.
                     invalidate_conversation(e);
-                    return Some(Choice { applet: name, mutates, steps });
+                    return Some(Choice { applet: name, mutates, net, steps });
                 }
 
                 // Advance the model by the token it just committed to.
@@ -252,6 +283,7 @@ pub fn report(task: &str, trust: Trust, temperature: f32) {
         sysbox::APPLETS.len(),
         match trust {
             Trust::ReadOnly => "read-only",
+            Trust::Online => "read-only, online",
             Trust::Full => "full",
         }
     );
@@ -275,6 +307,11 @@ pub fn report(task: &str, trust: Trust, temperature: f32) {
             if c.mutates {
                 console::set_color(YELLOW);
                 kprintln!("  that applet mutates content");
+                console::set_color(LTGRAY);
+            }
+            if c.net {
+                console::set_color(YELLOW);
+                kprintln!("  that applet talks to the network");
                 console::set_color(LTGRAY);
             }
         }
@@ -316,11 +353,55 @@ pub fn selftest() -> bool {
         mutating.iter().all(|m| !names.contains(m)),
     );
     ok &= check(
-        "read-only grammar keeps every read-only applet",
+        "read-only grammar keeps every applet that is neither",
         sysbox::APPLETS
             .iter()
-            .filter(|a| !a.mutates)
+            .filter(|a| !a.mutates && !a.net)
             .all(|a| names.contains(&a.name)),
+    );
+    // This claim used to read "keeps every read-only applet" and tested
+    // `!a.mutates` alone, which is what it meant while there was one axis.
+    // Adding `fetch` -- read-only and still not something to hand an
+    // unattended machine -- made it fail, and that failure was the right
+    // one: a claim written against a two-state leash is a claim that says
+    // nothing about a three-state one. It is spelled out here rather than
+    // quietly widened because the next axis will break it the same way.
+    let networked: Vec<&str> = sysbox::APPLETS
+        .iter()
+        .filter(|a| a.net)
+        .map(|a| a.name)
+        .collect();
+    ok &= check(
+        "read-only grammar excludes every applet that reaches the network",
+        networked.iter().all(|m| !names.contains(m)),
+    );
+
+    // The middle level exists and actually differs from both ends. A `Trust`
+    // variant that admitted the same set as `ReadOnly` would pass every claim
+    // above and be a gate that gates nothing.
+    let (_, online) = grammar_for(Trust::Online);
+    let (_, full) = grammar_for(Trust::Full);
+    ok &= check(
+        "online reaches strictly more than read-only",
+        online.len() > names.len() && names.iter().all(|n| online.contains(n)),
+    );
+    ok &= check(
+        "and strictly less than full",
+        full.len() > online.len() && online.iter().all(|n| full.contains(n)),
+    );
+    // `save` is net *and* mutating, so Online refuses it -- which is the
+    // whole point of two bits. The claim has to be about the applets that
+    // carry only the net bit, or it asserts the opposite of the design.
+    ok &= check(
+        "online admits a net applet that changes nothing",
+        sysbox::APPLETS
+            .iter()
+            .filter(|a| a.net && !a.mutates)
+            .all(|a| online.contains(&a.name)),
+    );
+    ok &= check(
+        "online still refuses every mutating applet, networked or not",
+        mutating.iter().all(|m| !online.contains(m)),
     );
 
     let Some(engine_present) = with_engine(|_| true) else {
@@ -1084,12 +1165,8 @@ pub fn route(task: &str, trust: Trust) -> Option<Choice> {
         }
         let (i, _) = best?;
         let name = e.head.name(i);
-        let mutates = sysbox::APPLETS
-            .iter()
-            .find(|a| a.name == name)
-            .map(|a| a.mutates)
-            .unwrap_or(false);
-        Some(Choice { applet: name, mutates, steps: 1 })
+        let (mutates, net) = effects(name);
+        Some(Choice { applet: name, mutates, net, steps: 1 })
     })?
 }
 
@@ -1206,14 +1283,10 @@ pub fn route_verdict(task: &str, trust: Trust) -> Option<(Choice, super::council
             + usize::from(winner == character);
 
         let name = e.head.name(winner);
-        let mutates = sysbox::APPLETS
-            .iter()
-            .find(|a| a.name == name)
-            .map(|a| a.mutates)
-            .unwrap_or(false);
+        let (mutates, net) = effects(name);
 
         Some((
-            Choice { applet: name, mutates, steps: 1 },
+            Choice { applet: name, mutates, net, steps: 1 },
             super::council::Verdict { applet: winner, agreement, lexical, character },
         ))
     })?
@@ -1280,6 +1353,11 @@ pub fn route_report(task: &str, trust: Trust) {
     if c.mutates {
         console::set_color(YELLOW);
         kprintln!("  that applet mutates content");
+        console::set_color(LTGRAY);
+    }
+    if c.net {
+        console::set_color(YELLOW);
+        kprintln!("  that applet talks to the network");
         console::set_color(LTGRAY);
     }
 }

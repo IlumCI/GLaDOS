@@ -20,6 +20,7 @@
 //! not features bolted on, they are what content addressing already implies.
 
 pub mod tree;
+pub mod web;
 
 use crate::gfx::console::{self, LTCYAN, LTGREEN, LTGRAY, LTRED, WHITE, YELLOW};
 use crate::kprintln;
@@ -40,41 +41,61 @@ pub struct Applet {
     /// counts as read-only, `rm` only detaches a name and still counts as
     /// mutating.
     pub mutates: bool,
+    /// Whether this applet sends a packet off the machine.
+    ///
+    /// A second bit rather than a third state of `mutates`, because `save` is
+    /// both -- it fetches a page *and* writes it -- and an enum with one slot
+    /// could not have said so. The two axes are independent in fact, so they
+    /// are independent here.
+    ///
+    /// The line is the one `aiksi::Touch` already draws: whether a packet
+    /// leaves the machine. Reading which interfaces exist is not net; opening
+    /// a socket is.
+    pub net: bool,
 }
 
 pub const APPLETS: &[Applet] = &[
-    Applet { name: "sysbox", args: "",             help: "this list", mutates: false },
-    Applet { name: "ls",     args: "[path]",       help: "list a directory", mutates: false },
-    Applet { name: "cd",     args: "[path|-]",     help: "change directory", mutates: false },
-    Applet { name: "pwd",    args: "",             help: "print working directory", mutates: false },
-    Applet { name: "tree",   args: "[path]",       help: "list recursively", mutates: false },
-    Applet { name: "cat",    args: "<path>",       help: "print a file", mutates: false },
-    Applet { name: "stat",   args: "<path>",       help: "address, kind, size", mutates: false },
-    Applet { name: "hash",   args: "<path>",       help: "content address", mutates: false },
-    Applet { name: "same",   args: "<a> <b>",      help: "compare two subtrees in one step", mutates: false },
-    Applet { name: "du",     args: "[path]",       help: "apparent bytes vs bytes that exist", mutates: false },
-    Applet { name: "find",   args: "<text>",       help: "search names and content", mutates: false },
-    Applet { name: "diff",   args: "<seq> [seq]",  help: "compare snapshots, skipping equal subtrees", mutates: false },
-    Applet { name: "snaps",  args: "",             help: "list snapshots", mutates: false },
-    Applet { name: "fsck",   args: "",             help: "verify every stored object against its address", mutates: false },
-    Applet { name: "mkdir",  args: "<path>",       help: "create a directory and its parents", mutates: true },
-    Applet { name: "write",  args: "<path> <text>", help: "write a file", mutates: true },
-    Applet { name: "rm",     args: "<path>",       help: "detach a name; content survives", mutates: true },
-    Applet { name: "mv",     args: "<a> <b>",      help: "rename", mutates: true },
-    Applet { name: "cp",     args: "<a> <b>",      help: "copy; constant time at any size", mutates: true },
-    Applet { name: "snap",   args: "",             help: "commit the working tree as a snapshot", mutates: true },
-    Applet { name: "back",   args: "<seq>",        help: "load a past snapshot into the working tree", mutates: true },
+    Applet { name: "sysbox", args: "",             help: "this list", mutates: false, net: false },
+    Applet { name: "ls",     args: "[path]",       help: "list a directory", mutates: false, net: false },
+    Applet { name: "cd",     args: "[path|-]",     help: "change directory", mutates: false, net: false },
+    Applet { name: "pwd",    args: "",             help: "print working directory", mutates: false, net: false },
+    Applet { name: "tree",   args: "[path]",       help: "list recursively", mutates: false, net: false },
+    Applet { name: "cat",    args: "<path>",       help: "print a file", mutates: false, net: false },
+    Applet { name: "stat",   args: "<path>",       help: "address, kind, size", mutates: false, net: false },
+    Applet { name: "hash",   args: "<path>",       help: "content address", mutates: false, net: false },
+    Applet { name: "same",   args: "<a> <b>",      help: "compare two subtrees in one step", mutates: false, net: false },
+    Applet { name: "du",     args: "[path]",       help: "apparent bytes vs bytes that exist", mutates: false, net: false },
+    Applet { name: "find",   args: "<text>",       help: "search names and content", mutates: false, net: false },
+    Applet { name: "diff",   args: "<seq> [seq]",  help: "compare snapshots, skipping equal subtrees", mutates: false, net: false },
+    Applet { name: "snaps",  args: "",             help: "list snapshots", mutates: false, net: false },
+    Applet { name: "fsck",   args: "",             help: "verify every stored object against its address", mutates: false, net: false },
+    Applet { name: "mkdir",  args: "<path>",       help: "create a directory and its parents", mutates: true,  net: false },
+    Applet { name: "write",  args: "<path> <text>", help: "write a file", mutates: true,  net: false },
+    Applet { name: "rm",     args: "<path>",       help: "detach a name; content survives", mutates: true,  net: false },
+    Applet { name: "mv",     args: "<a> <b>",      help: "rename", mutates: true,  net: false },
+    Applet { name: "cp",     args: "<a> <b>",      help: "copy; constant time at any size", mutates: true,  net: false },
+    Applet { name: "snap",   args: "",             help: "commit the working tree as a snapshot", mutates: true,  net: false },
+    Applet { name: "back",   args: "<seq>",        help: "load a past snapshot into the working tree", mutates: true,  net: false },
     // Always mutating, by construction rather than by inspection: a program
     // can reach `write`, and `write` mutates, so no static analysis of the
     // source may claim otherwise. The read-only grammar therefore never
     // carries it, whatever the tool's text says.
-    Applet { name: "run",    args: "<path>",       help: "execute a lang program from the namespace", mutates: true },
+    Applet { name: "run",    args: "<path>",       help: "execute a lang program from the namespace", mutates: true,  net: false },
     // The model's own way to keep something. It is in this table rather than
     // being a parse of the model's prose, because everything else it does goes
     // through this table: the decoding grammar is built from it, so `remember`
     // is reachable by the same route as `ls`, and an answer that merely *says*
     // it will remember cannot be mistaken for one that did.
-    Applet { name: "remember", args: "<text>",     help: "keep a fact about the operator", mutates: true },
+    Applet { name: "remember", args: "<text>",     help: "keep a fact about the operator", mutates: true,  net: false },
+    // The two that reach off the machine. `sysbox::web` holds the reasoning;
+    // the short version is that the model's actions come from this table and
+    // nothing else, so until these existed it could be asked to go and read
+    // something and had no route to anything it was not shipped with.
+    //
+    // `fetch` changes nothing and is still not read-only in the sense
+    // `Trust::ReadOnly` means, which is the whole reason `net` is its own bit.
+    Applet { name: "fetch",  args: "<source> <topic>", help: "read something from wiki, arxiv, rfc or book", mutates: false, net: true },
+    Applet { name: "save",   args: "<source> <topic>", help: "read it and keep it under /ai/read", mutates: true,  net: true },
 ];
 
 /// Resolve a path the way every applet does, against the working directory.
@@ -101,6 +122,18 @@ pub fn resolve_path(path: &str) -> String {
 /// drift.
 pub fn applet_mutates(name: &str) -> Option<bool> {
     APPLETS.iter().find(|a| a.name == name).map(|a| a.mutates)
+}
+
+/// Whether an applet sends a packet off the machine, or `None` if there is no
+/// such applet.
+///
+/// Consulted by the same two gates `applet_mutates` is: the model's grammar
+/// through `harness::Trust`, and the sandbox's `applet` builtin. A net applet
+/// added without both of those learning about it would be reachable from a
+/// stored program, which is exactly the hole `aiksi::BUILTINS` was made an
+/// allowlist to close.
+pub fn applet_net(name: &str) -> Option<bool> {
+    APPLETS.iter().find(|a| a.name == name).map(|a| a.net)
 }
 
 pub fn is_applet(name: &str) -> bool {
@@ -435,6 +468,8 @@ pub fn dispatch(cmd: &str, rest: &str) -> bool {
         "fsck" => cmd_fsck(),
         "run" => cmd_run(a1),
         "remember" => cmd_remember(rest),
+        "fetch" => web::cmd_fetch(rest.trim()),
+        "save" => web::cmd_save(rest.trim()),
         _ => {}
     }
     true
@@ -1108,6 +1143,29 @@ pub fn selftest() -> bool {
         }
     }
 
+    // The two axes of the leash, asserted against the live table rather than
+    // against a copy of it. `fetch` is the interesting row: it changes nothing
+    // and must still be absent from the read-only grammar, which is the whole
+    // argument for `net` being a second bit instead of a third state.
+    ok &= check(
+        "fetch is not mutating and still reaches the network",
+        applet_mutates("fetch") == Some(false) && applet_net("fetch") == Some(true),
+    );
+    ok &= check(
+        "save is both, which one flag could not have said",
+        applet_mutates("save") == Some(true) && applet_net("save") == Some(true),
+    );
+    // A table where nothing is net means the gate below is untested by
+    // construction, and it would pass silently.
+    ok &= check(
+        "some applet reaches the network, so the gate has something to gate",
+        APPLETS.iter().any(|a| a.net),
+    );
+
+    // The allowlist itself. Here rather than only in `diag web` because this
+    // is a security boundary and boot is the run nobody skips.
+    ok &= web::selftest();
+
     ok
 }
 
@@ -1116,7 +1174,15 @@ fn list_applets() {
     kprintln!("sysbox applets");
     console::set_color(WHITE);
     for a in APPLETS {
-        let mark = if a.mutates { "*" } else { " " };
+        // Two marks, because there are two axes. `fetch` carries no `*` and is
+        // still not something to hand over first, which a single column could
+        // not have said.
+        let mark = match (a.mutates, a.net) {
+            (true, true) => "*@",
+            (true, false) => "* ",
+            (false, true) => " @",
+            (false, false) => "  ",
+        };
         let mut label = String::from(a.name);
         if !a.args.is_empty() {
             label.push(' ');

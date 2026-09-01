@@ -1531,9 +1531,13 @@ pub fn trial(
     // Every guard must hold, and none of them may have been routing to a
     // mutating applet in the first place -- a baseline that already wanted to
     // run `rm` on its own initiative is not a baseline worth preserving.
+    //
+    // The same sentence decides `net`, and more sharply. A baseline that
+    // reached for `fetch` unasked is one whose character is to talk to
+    // somebody, and unlike a namespace change there is nothing that undoes it.
     let j2 = goals_held == goals_total
         && goals_total > 0
-        && t.guards().iter().all(|g| !g.mutates);
+        && t.guards().iter().all(|g| !g.mutates && !g.net);
 
     // --- J3: structural sanity, regardless of any score -----------------
     let (j3, j3_why) = sanity(&t, &fit.dora);

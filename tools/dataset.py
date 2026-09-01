@@ -315,6 +315,48 @@ FAMILIES = {
                     ["the previous version", "an older state", "snapshot 2",
                      "how it was before", "the earlier tree"]),
     ],
+    # Against `cat` and `find`, which read what is already here. Every noun in
+    # this family is a thing on somebody else's machine, because that is the
+    # only feature separating the two.
+    "fetch": [
+        ("read {x}", ["that paper", "the article", "the arxiv abstract",
+                      "the wikipedia page", "that rfc", "the model card"]),
+        ("look up {x}", ["that paper", "the topic online", "it on wikipedia",
+                         "the specification"]),
+        ("go and read {x}", ["the page at that url", "what the article says",
+                             "the abstract"]),
+        ("what does {x} say", ["the paper", "that article", "the rfc",
+                               "the wikipedia entry", "the page"]),
+        ("pull up {x}", ["the abstract", "that web page", "the documentation"]),
+        ("show me {x}", ["the contents of that url", "what is on that page",
+                         "the article text"]),
+        ("{v} the {x}", ["fetch", "retrieve", "open", "read", "get"],
+                        ["page at that link", "arxiv abstract", "wikipedia article",
+                         "rfc text", "dataset card", "paper online"]),
+        ("check {x} for me", ["what that page says", "the article online",
+                              "the published abstract"]),
+        ("i want to read {x}", ["that paper", "the page you found",
+                                "the online documentation"]),
+    ],
+    # Against `write`, which stores text the operator supplied, and against
+    # `cp`, which duplicates something already here. The distinguishing idea
+    # is that the bytes come from outside and are being kept.
+    "save": [
+        ("download {x}", ["that page", "the paper", "the article",
+                          "the dataset description", "the book"]),
+        ("keep a copy of {x}", ["that article", "the abstract", "the rfc",
+                                "that page"]),
+        ("save {x} to disk", ["the paper", "that web page", "the wikipedia entry"]),
+        ("store {x} locally", ["the article", "that page", "the documentation"]),
+        ("archive {x}", ["that paper", "the page at that url", "the article"]),
+        ("fetch {x} and keep it", ["the abstract", "that page", "the rfc"]),
+        ("{v} the {x} into the namespace", ["download", "save", "store", "put"],
+                                           ["paper", "article", "web page",
+                                            "abstract", "book text"]),
+        ("i want {x} kept here", ["that paper", "the article", "that page"]),
+        ("grab {x} and write it down", ["the abstract", "that article",
+                                        "the online text"]),
+    ],
 }
 
 # Applied to a fraction of examples so the model is not only ever asked in one
@@ -734,6 +776,30 @@ EVAL = [
     ('sysbox', 'tell me what you are capable of'),
     ('sysbox', 'what actions can i request'),
     ('sysbox', 'print the catalogue of tools'),
+    ('fetch', 'have a look at what that link points to'),
+    ('fetch', 'i want to know what the abstract actually claims'),
+    ('fetch', 'go out and read that for me'),
+    ('fetch', 'what is written on the other end of that address'),
+    ('fetch', 'bring back the text of that entry'),
+    ('fetch', 'tell me what that source says about it'),
+    ('fetch', 'skim that publication and report back'),
+    ('fetch', 'i have not read that one, go get it'),
+    ('fetch', 'what is the wording of that standard'),
+    ('fetch', 'read out whatever is published there'),
+    ('fetch', 'take a look at the material on that site'),
+    ('fetch', 'consult that reference for me'),
+    ('save', 'hold on to that one so i do not lose it'),
+    ('save', 'i would like that kept where i can get at it later'),
+    ('save', 'bring it in and put it somewhere permanent'),
+    ('save', 'pull that down and file it away'),
+    ('save', 'make me a local copy of that reading'),
+    ('save', 'stash the text of that under notes'),
+    ('save', 'retrieve it and commit it to storage'),
+    ('save', 'i want that material available offline'),
+    ('save', 'take that publication and shelve it here'),
+    ('save', 'copy that in from outside and keep it'),
+    ('save', 'put a permanent copy of that on this machine'),
+    ('save', 'collect that and hang on to it'),
 ]
 
 # Which family indices are held out, for every applet.

@@ -665,6 +665,68 @@ fn study_cmd(rest: &str) {
         study_seq_cmd(arg.trim());
         return;
     }
+    // The syllabus, as against the forgetting experiment above it. Same verb
+    // because they are the same subject from two directions -- what the
+    // machine is learning, and what learning one thing costs another -- and
+    // splitting them would put "study" and "learn" side by side in `help`
+    // with nothing to tell a reader which is which.
+    if rest == "space" || rest.starts_with("space ") {
+        use crate::ai::curiosity;
+        console::set_color(YELLOW);
+        kprintln!("[study space] reading is {}", if curiosity::auto() { "on" } else { "off" });
+        console::set_color(WHITE);
+        let mut left = 0usize;
+        for (name, done, total) in curiosity::progress() {
+            left += total - done;
+            kprintln!("  {:22} {} of {}", name, done, total);
+        }
+        match curiosity::next() {
+            Some((subject, topic)) => {
+                kprintln!("  next: {} / {}   ({} topics left)", subject, topic, left)
+            }
+            None => kprintln!("  the frontier is walked out; add subjects under /ai/study/subjects"),
+        }
+        return;
+    }
+    if let Some(arg) = rest.strip_prefix("auto") {
+        use crate::ai::curiosity;
+        match arg.trim() {
+            "on" => {
+                curiosity::set_auto(true);
+                console::set_color(YELLOW);
+                kprintln!("  the machine may now read on its own, every {} minutes when idle", 15);
+                kprintln!("  it reads from the sources 'net sources' lists and nowhere else");
+                console::set_color(WHITE);
+            }
+            "off" => {
+                curiosity::set_auto(false);
+                kprintln!("  unattended reading is off");
+            }
+            "" => kprintln!("  unattended reading is {}", if curiosity::auto() { "on" } else { "off" }),
+            other => kprintln!("  study auto [on|off], not '{}'", other),
+        }
+        return;
+    }
+    // One step, now, without waiting for the tick. The way `initiative now`
+    // bypasses the settle window: a loop that can only be observed by leaving
+    // the machine alone for fifteen minutes is a loop nobody tests.
+    if rest == "now" {
+        use crate::ai::curiosity;
+        match curiosity::study_once() {
+            None => kprintln!("  nothing left to study"),
+            Some((subject, topic, Ok(path))) => {
+                console::set_color(LTGREEN);
+                kprintln!("  {} / {} -- kept at {}", subject, topic, path);
+                console::set_color(WHITE);
+            }
+            Some((subject, topic, Err(why))) => {
+                console::set_color(LTRED);
+                kprintln!("  {} / {} -- {}", subject, topic, why);
+                console::set_color(WHITE);
+            }
+        }
+        return;
+    }
     if let Some(arg) = rest.strip_prefix("check") {
         let n = arg.trim().parse::<usize>().unwrap_or(40).max(8);
         let b = crate::ai::train::Budget {
@@ -1374,6 +1436,24 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             let mut it = rest.split_whitespace();
             match it.next() {
                 None => crate::net::report(),
+                // Where the model may read from, and the operator's door into
+                // that list. Here rather than as an applet on purpose: the
+                // model is the party being gated, and a gate its own actions
+                // can widen is not one. Same argument as `skill trust`.
+                Some("sources") => {
+                    kprintln!("  the model may fetch from:");
+                    for h in crate::sysbox::web::sources() {
+                        kprintln!("    {}", h);
+                    }
+                    kprintln!("  'net allow <host>' adds one for this boot only");
+                }
+                Some("allow") => match it.next() {
+                    None => kprintln!("  usage: net allow <host>"),
+                    Some(h) => {
+                        crate::sysbox::web::allow(h);
+                        kprintln!("  {} may be fetched from until the next boot", h);
+                    }
+                },
                 Some(name) => {
                     let Some(n) = crate::net::index_of(name) else {
                         kprintln!("  no such interface: {}  ('if' to list)", name);
@@ -1609,7 +1689,14 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             // reachable outputs at all.
             let (trust, task) = match rest.strip_prefix("trusted ") {
                 Some(t) => (crate::ai::harness::Trust::Full, t.trim()),
-                None => (crate::ai::harness::Trust::ReadOnly, rest),
+                // Spelled in full like "trusted", and separate from it,
+                // because they grant different things: "trusted" may change
+                // this machine and "online" may talk to another one. Neither
+                // implies the other and the words say so.
+                None => match rest.strip_prefix("online ") {
+                    Some(t) => (crate::ai::harness::Trust::Online, t.trim()),
+                    None => (crate::ai::harness::Trust::ReadOnly, rest),
+                },
             };
             let task = if task.is_empty() { "look at the files" } else { task };
             crate::ai::harness::report(task, trust, 1.0);
@@ -2706,8 +2793,10 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         let tail = w.next().unwrap_or("");
                         if v == "full" {
                             trust = crate::ai::harness::Trust::Full;
+                        } else if v == "online" {
+                            trust = crate::ai::harness::Trust::Online;
                         } else {
-                            kprintln!("  --trust wants 'full' (default is read-only)");
+                            kprintln!("  --trust wants 'full' or 'online' (default is read-only)");
                             return;
                         }
                         parts = tail;

@@ -60,6 +60,13 @@ pub const DOMAINS: &[Domain] = &[
     Domain { name: "mutate", applets: &["mkdir", "write", "rm", "mv", "cp"] },
     Domain { name: "history", applets: &["snap", "back", "snaps"] },
     Domain { name: "meta", applets: &["sysbox", "run", "remember"] },
+    // The field that is unlike the others, which is exactly what the
+    // forgetting experiment was short of. Every domain above moves bytes
+    // already on the machine and shares most of its vocabulary with the
+    // rest -- "file", "path", "directory" -- so "learn A then B and see what
+    // A cost" was being asked of two fields a probe can hardly tell apart.
+    // Reading off the network shares almost no vocabulary with any of them.
+    Domain { name: "network", applets: &["fetch", "save"] },
 ];
 
 /// Which domain an applet belongs to, if any.

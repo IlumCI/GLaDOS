@@ -636,6 +636,7 @@ pub fn run(goal: &str, trust: Trust, max_steps: usize) {
         goal,
         match trust {
             Trust::ReadOnly => "read-only",
+            Trust::Online => "read-only, online",
             Trust::Full => "full",
         },
         max_steps

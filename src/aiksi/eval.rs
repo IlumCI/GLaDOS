@@ -1508,6 +1508,22 @@ impl Interp {
                     }
                     Some(false) => {}
                 }
+                // The second bit, and it has to be checked separately.
+                //
+                // `applet` is `Touch::Read`, which was true while every applet
+                // it could reach was at worst a namespace write with the
+                // `may_write` jail behind it. A net applet is not that: it is
+                // exactly what `BUILTINS` classifies `Touch::Net` and refuses a
+                // stored program outright. Without this line, `applet("fetch
+                // ...")` would be the one route around that allowlist -- the
+                // denylist failure the allowlist was built to end, arriving
+                // through a builtin nobody thought to re-read.
+                if crate::sysbox::applet_net(cmd) == Some(true) {
+                    return Err(format!(
+                        "'{}' talks to the network and a stored program may not call it",
+                        cmd
+                    ));
+                }
             }
         }
 

@@ -1423,6 +1423,11 @@ pub struct Guard {
     pub goal: &'static str,
     pub name: &'static str,
     pub mutates: bool,
+    /// Whether the baseline's own unasked choice reaches off the machine.
+    ///
+    /// Carried for the same reason `mutates` is, and it matters more: a
+    /// namespace change is undoable and a packet that has left is not.
+    pub net: bool,
     steps: Vec<GuardStep>,
 }
 
@@ -1533,12 +1538,13 @@ fn cache_guard(
         cursor.push(alphabet, next);
         if let Some(idx) = cursor.finished() {
             let name = names[idx];
-            let mutates = crate::sysbox::APPLETS
-                .iter()
-                .find(|a| a.name == name)
-                .map(|a| a.mutates)
-                .unwrap_or(true);
-            return Some(Guard { goal, name, mutates, steps });
+            // Both default to "yes" on a name that is not in the table, which
+            // cannot happen -- the grammar was built from it -- and is the
+            // safe direction if it ever does.
+            let entry = crate::sysbox::APPLETS.iter().find(|a| a.name == name);
+            let mutates = entry.map(|a| a.mutates).unwrap_or(true);
+            let net = entry.map(|a| a.net).unwrap_or(true);
+            return Some(Guard { goal, name, mutates, net, steps });
         }
         e.model.forward(&mut e.state, next, pos);
         pos += 1;
