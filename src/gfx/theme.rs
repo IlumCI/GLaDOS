@@ -254,6 +254,16 @@ pub const START_HOT: [(u8, Color); 6] = [
 pub const START_EDGE: Color = Color::new(0x8E, 0xD4, 0x6A);
 pub const START_TEXT: Color = Color::new(0xFF, 0xFF, 0xFF);
 
+/// A popup menu. White with a face-coloured gutter down its left and one
+/// border, which is what every Windows menu has been since XP.
+pub const MENU_BG: Color = Color::new(0xFF, 0xFF, 0xFF);
+pub const MENU_GUTTER: Color = FACE;
+pub const MENU_EDGE: Color = Color::new(0xAC, 0xA8, 0x99);
+/// How wide the gutter is. Nothing is drawn in it yet -- XP puts an icon or a
+/// tick there -- and it is here because a menu without one reads as a list
+/// box, which is a different control that does a different thing.
+pub const MENU_GUTTER_W: u32 = 20;
+
 /// The console's own background, inside the terminal window's well.
 pub const SCREEN: Color = Color::new(0x0A, 0x0C, 0x10);
 
@@ -526,6 +536,82 @@ pub fn window(
     c
 }
 
+/// A popup menu's geometry.
+///
+/// One object where there were five copies of `text_w(longest) + 24`,
+/// `n * MENU_H + 8` and a four-pixel inset: `dropdown` painted from one,
+/// `dropdown_rows` answered a second, `dropdown_item_at` asked a third,
+/// `start_menu_rect` built a fourth with an extra row, and the Start menu
+/// painted from a fifth. They agreed by hand, and this commit is what would
+/// have broken the agreement -- a Luna popup gains a border and a gutter, so
+/// the inset stops being four and the width stops being the labels alone.
+pub struct Popup {
+    pub panel: Rect,
+    pub rows: usize,
+}
+
+/// Inset from the panel edge to the first row.
+const POPUP_PAD: u32 = 3;
+
+impl Popup {
+    /// Sized from its widest label in columns and its row count, clamped to
+    /// whatever room is left on the right.
+    pub fn sized(x: u32, y: u32, cols: usize, rows: usize, max_w: u32) -> Popup {
+        let w = (text_w(cols) + 24 + MENU_GUTTER_W).min(max_w);
+        let h = rows as u32 * MENU_H + POPUP_PAD * 2;
+        Popup { panel: Rect::new(x, y, w, h), rows }
+    }
+
+    /// Where row `i` is drawn: to the right of the gutter, which is why a
+    /// selection bar stops at it rather than running under it.
+    pub fn row(&self, i: usize) -> Rect {
+        let inset = POPUP_PAD + MENU_GUTTER_W;
+        Rect::new(
+            self.panel.x + inset,
+            self.panel.y + POPUP_PAD + i as u32 * MENU_H,
+            self.panel.w.saturating_sub(inset + POPUP_PAD),
+            MENU_H,
+        )
+    }
+
+    /// Which row a point is on.
+    ///
+    /// The whole panel width and not just the row: a click in the gutter is a
+    /// click on that line, which is what every menu anybody has used does.
+    pub fn item_at(&self, x: i32, y: i32) -> Option<usize> {
+        let p = self.panel;
+        if x < p.x as i32 || x >= (p.x + p.w) as i32 {
+            return None;
+        }
+        if y < p.y as i32 || y >= (p.y + p.h) as i32 {
+            return None;
+        }
+        let row = (y - (p.y + POPUP_PAD) as i32) / MENU_H as i32;
+        if row >= 0 && (row as usize) < self.rows {
+            Some(row as usize)
+        } else {
+            None
+        }
+    }
+
+    /// Whether there is room to draw anything at all.
+    ///
+    /// A menu opened near the right edge can be clipped to nothing, and the
+    /// width arithmetic on a narrow one used to wrap to four billion -- not a
+    /// crash but a fill loop long enough to look like a hang.
+    pub fn wide_enough(&self) -> bool {
+        self.panel.w >= MENU_GUTTER_W + 16
+    }
+}
+
+/// The ground a popup's rows sit on: white, a gutter, and one border.
+pub fn popup(fb: &Framebuffer, p: &Popup) {
+    let r = p.panel;
+    fb.rect(r.x, r.y, r.w, r.h, MENU_BG);
+    fb.rect(r.x + 1, r.y + 1, MENU_GUTTER_W, r.h.saturating_sub(2), MENU_GUTTER);
+    outline(fb, r, MENU_EDGE);
+}
+
 /// The rectangle of each menu-bar label, in order.
 ///
 /// One formula for the paint loop, the hit-test, and the two places a dropdown
@@ -722,7 +808,7 @@ pub fn list_row(fb: &Framebuffer, r: Rect, label: &str, selected: bool, focused:
         // colour, so a form with several lists still says which one is live.
         (TEXT, LIST_SEL_IDLE)
     } else {
-        (TEXT, FACE)
+        (TEXT, MENU_BG)
     };
     fb.rect(r.x, r.y, r.w, r.h, bg);
     let ty = r.y + (r.h.saturating_sub(font::GLYPH_H * CHROME_SCALE)) / 2;

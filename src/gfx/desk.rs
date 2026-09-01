@@ -360,16 +360,26 @@ fn start_rect(fb: &Framebuffer) -> Rect {
 
 /// Where the Start menu pops, directly above its button. The width formula is
 /// `dropdown`'s own, so the paint and the hit-test cannot disagree.
-fn start_menu_rect(fb: &Framebuffer) -> (Rect, usize) {
+fn start_menu_rect(fb: &Framebuffer) -> theme::Popup {
     let n = start_rows();
     // Wide enough for the longest label, and for a query worth typing. A menu
     // sized only to its labels gives the search row about eleven characters,
     // which is narrower than the thing being searched for.
-    let label_w = theme::text_w(START_ITEMS.iter().map(|(l, _)| l.chars().count()).max().unwrap_or(4)) + 24;
-    let w = label_w.max(theme::text_w(QUERY_COLS) + 24);
-    let h = n as u32 * MENU_H + 8;
+    let cols = START_ITEMS
+        .iter()
+        .map(|(l, _)| l.chars().count())
+        .max()
+        .unwrap_or(4)
+        .max(QUERY_COLS);
     let bar = taskbar_rect(fb);
-    (Rect::new(bar.x + 2, bar.y.saturating_sub(h), w, h), n)
+    let probe = theme::Popup::sized(bar.x + 2, 0, cols, n, fb.width());
+    theme::Popup::sized(
+        bar.x + 2,
+        bar.y.saturating_sub(probe.panel.h),
+        cols,
+        n,
+        fb.width(),
+    )
 }
 
 /// How many characters wide the query row is sized for.
@@ -2181,10 +2191,9 @@ fn task_press(fb: &Framebuffer, x: i32, y: i32) {
 
 /// Where the open dropdown is -- window menu, system menu, or Start -- and how
 /// many rows it holds. Mirrors the paint pass; they must not disagree.
-fn dropdown_rows(fb: &Framebuffer, d: &Desktop, screen: Rect) -> Option<(Rect, usize)> {
+fn dropdown_rows(fb: &Framebuffer, d: &Desktop, screen: Rect) -> Option<theme::Popup> {
     if let Mode::Start { .. } = d.mode {
-        let (r, n) = start_menu_rect(fb);
-        return Some((r, n));
+        return Some(start_menu_rect(fb));
     }
     let f = d.focus()?;
     let frame = d.windows[f].frame(screen);
@@ -2196,16 +2205,19 @@ fn dropdown_rows(fb: &Framebuffer, d: &Desktop, screen: Rect) -> Option<(Rect, u
             let x = theme::menu_labels(bar, d.windows[f].menus.iter().map(|p| p.label.as_str()))
                 .nth(menu)?
                 .x;
-            let w = theme::text_w(m.items.iter().map(|i| i.label.chars().count()).max().unwrap_or(4)) + 24;
+            let cols = m.items.iter().map(|i| i.label.chars().count()).max().unwrap_or(4);
             let y = inner.y + theme::TITLE_H + 2 + MENU_H;
-            Some((Rect::new(x, y, w, m.items.len() as u32 * MENU_H + 8), m.items.len()))
+            Some(theme::Popup::sized(x, y, cols, m.items.len(), fb.width().saturating_sub(x)))
         }
         Mode::Sys { .. } => {
-            let w = theme::text_w(SYS_ITEMS.iter().map(|s| s.chars().count()).max().unwrap_or(4)) + 24;
+            let cols = SYS_ITEMS.iter().map(|s| s.chars().count()).max().unwrap_or(4);
             let y = inner.y + theme::TITLE_H;
-            Some((
-                Rect::new(inner.x, y, w, SYS_ITEMS.len() as u32 * MENU_H + 8),
+            Some(theme::Popup::sized(
+                inner.x,
+                y,
+                cols,
                 SYS_ITEMS.len(),
+                fb.width().saturating_sub(inner.x),
             ))
         }
         _ => None,
@@ -2213,17 +2225,7 @@ fn dropdown_rows(fb: &Framebuffer, d: &Desktop, screen: Rect) -> Option<(Rect, u
 }
 
 /// Which dropdown row a point is in, mirroring `dropdown`'s row layout.
-fn dropdown_item_at(r: Rect, n: usize, x: i32, y: i32) -> Option<usize> {
-    if !contains(r, x, y) {
-        return None;
-    }
-    let row = (y - (r.y + 4) as i32) / MENU_H as i32;
-    if row >= 0 && (row as usize) < n {
-        Some(row as usize)
-    } else {
-        None
-    }
-}
+
 
 /// A press while any menu is open. Returns true when consumed.
 fn menu_press(fb: &Framebuffer, x: i32, y: i32, screen: Rect) -> bool {
@@ -2236,11 +2238,11 @@ fn menu_press(fb: &Framebuffer, x: i32, y: i32, screen: Rect) -> bool {
     }
     let mut run: Option<String> = None;
     with(|d| {
-        let Some((r, n)) = dropdown_rows(fb, d, screen) else {
+        let Some(p) = dropdown_rows(fb, d, screen) else {
             d.mode = Mode::Normal;
             return;
         };
-        let Some(item) = dropdown_item_at(r, n, x, y) else {
+        let Some(item) = p.item_at(x, y) else {
             d.mode = Mode::Normal;
             return;
         };
@@ -2484,10 +2486,10 @@ fn update_hover(x: i32, y: i32) {
     // An open dropdown tracks the pointer with its selection, exactly as the
     // arrows move it.
     let tracked = with(|d| {
-        let Some((r, n)) = dropdown_rows(&fb, d, screen) else {
+        let Some(p) = dropdown_rows(&fb, d, screen) else {
             return None;
         };
-        let Some(item) = dropdown_item_at(r, n, x, y) else {
+        let Some(item) = p.item_at(x, y) else {
             // Off the menu: nothing tracks, and whatever was hot before the
             // menu opened must not stay lit underneath it.
             let stale = d.hover != Hover::None;
@@ -3012,24 +3014,17 @@ pub fn draw() {
             }
         }
         if let Mode::Start { item } = d.mode {
-            let (r, _) = start_menu_rect(&fb);
+            let p = start_menu_rect(&fb);
             // The panel is drawn to the full height including the query row,
-            // then the items over it, then the query row last. `dropdown`
-            // sizes its own panel from its labels, so it is given the whole
-            // rectangle to paint and the rows are placed on top.
-            theme::panel(&fb, r);
-            if r.w >= 16 {
+            // then the items over it, then the query row last. It carries one
+            // more row than it has items, which is why it builds its own
+            // `Popup` rather than going through `dropdown`.
+            theme::popup(&fb, &p);
+            if p.wide_enough() {
                 for (i, (label, _)) in START_ITEMS.iter().enumerate() {
-                    let row =
-                        Rect::new(r.x + 4, r.y + 4 + i as u32 * MENU_H, r.w - 8, MENU_H);
-                    theme::list_row(&fb, row, label, i == item, true);
+                    theme::list_row(&fb, p.row(i), label, i == item, true);
                 }
-                let row = Rect::new(
-                    r.x + 4,
-                    r.y + 4 + START_ITEMS.len() as u32 * MENU_H,
-                    r.w - 8,
-                    MENU_H,
-                );
+                let row = p.row(START_ITEMS.len());
                 // A well, not a list row: it is a place to type, and it should
                 // not look like something that runs when pressed.
                 theme::well(&fb, row, theme::HILIGHT);
@@ -3070,19 +3065,16 @@ fn dropdown<'a>(
     if items.is_empty() {
         return;
     }
-    let w = theme::text_w(items.iter().map(|s| s.chars().count()).max().unwrap_or(4)) + 24;
-    let h = items.len() as u32 * MENU_H + 8;
-    let r = Rect::new(x, y, w.min(fb.width().saturating_sub(x)), h);
-    theme::panel(fb, r);
-    // A menu opened near the right edge can be clipped to nothing, and `r.w - 8`
-    // on a narrow one wraps to four billion -- which is not a crash but a fill
-    // loop long enough to look like a hang.
-    if r.w < 16 {
+    let cols = items.iter().map(|s| s.chars().count()).max().unwrap_or(4);
+    // The same construction `dropdown_rows` answers with, so the paint and the
+    // hit-test cannot come to different conclusions about the same menu.
+    let p = theme::Popup::sized(x, y, cols, items.len(), fb.width().saturating_sub(x));
+    theme::popup(fb, &p);
+    if !p.wide_enough() {
         return;
     }
     for (i, label) in items.iter().enumerate() {
-        let row = Rect::new(r.x + 4, r.y + 4 + i as u32 * MENU_H, r.w - 8, MENU_H);
-        theme::list_row(fb, row, label, i == sel, true);
+        theme::list_row(fb, p.row(i), label, i == sel, true);
     }
 }
 
