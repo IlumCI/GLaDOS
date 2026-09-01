@@ -161,6 +161,53 @@ constant.
 Run-to-run variance is real and thermal: SHA-256d measured 0.704 and 0.632 on
 the same settings minutes apart. Quote a range or quote the conditions.
 
+## Do the tensor cores help? Measured: barely
+
+The plan closed the tensor path for SHA-256 on the grounds that BMMA cannot do
+carries. kHeavyHash is the fair test of the other case -- its heavy step *is* a
+matrix multiply, 64x64 over GF(16), which is the shape a tensor core exists
+for. `cuda/kheavy.cu` implements it three ways and refuses to time any of them
+until all three match `tools/algocheck.py`.
+
+| path | Mstep/s | vs scalar |
+|---|---|---|
+| scalar, int32 | 293 | 1.00x |
+| dp4a, int8 on the INT pipe | 371 | 1.26x |
+| wmma, int8 tensor cores | **383** | **1.31x** |
+| everything except the matmul | 7628 | -- |
+
+**The tensor core beats dp4a by 3%, and costs a batch of sixteen nonces to do
+it.** `wmma::mma_sync` is warp-wide, so there is no single-nonce form; using it
+forces a shape the algorithm does not otherwise want. dp4a needs no batching,
+no shared memory and no staging, and lands within noise of it.
+
+**The Amdahl explanation was wrong and the last row is how that was found.**
+The obvious reading of a 1.31x result is that the matmul is a small part of the
+step -- so the step was run with the multiply removed, and everything else
+takes 41 ms of 1073. The matrix is **96%** of the work. Amdahl is not
+available as an excuse.
+
+What is left is that the problem is too small per warp. Each warp does
+64x64x16, which is sixteen `mma` ops against three fragment loads each plus a
+strided read back out of the accumulator, so the fixed cost of getting data
+into and out of the tensor unit never amortises. Tensor cores want large
+matrices; a proof-of-work step is a small one repeated forever, which is the
+opposite shape.
+
+Taken with the BMMA analysis, the conclusion for this hardware is the same from
+two directions. SHA-256 cannot use the tensor cores because its critical path
+is additions and they cannot carry. kHeavyHash can use them and gains almost
+nothing because its matrix is too small. **Use `dp4a`.**
+
+Two caveats, both real. This is the heavy step, not kHeavyHash: the full
+algorithm wraps it in two cSHAKE256 passes, which are not implemented here
+because cSHAKE is not in hashlib and an unverifiable hash has no business in
+this tree. Those passes would only make the matmul a smaller share of the
+whole, which weakens the tensor case further rather than strengthening it. And
+the input feeding the benchmark is a cheap xorshift standing in for the Keccak
+that would really produce it -- the matrix step does not care what it is
+handed, only that it varies.
+
 ## What is not measured yet
 
 - **Instructions per hash.** The derived figure depends on an assumed ALU

@@ -54,9 +54,58 @@ def blake2s_expect():
     return hashlib.blake2s(bytes(blk), digest_size=32).digest().hex()
 
 
+# ---- kHeavyHash, the matrix step only -----------------------------------
+#
+# The "heavy" part of kHeavyHash: a 64x64 matrix over GF(16) against the 64
+# nibbles of a 32-byte hash, shifted right by 10, packed back into bytes and
+# XORed with the input. Transcribed from rusty-kaspa's `heavy_hash`.
+#
+# **This is not kHeavyHash.** The full algorithm wraps this in two cSHAKE256
+# passes, and cSHAKE is not in hashlib -- shake_256 uses different domain
+# separation, so it cannot be built from what is here. Rather than ship a hash
+# that cannot be checked against an implementation nobody here wrote, only the
+# step that *can* be checked is implemented, which is also the only step where
+# the tensor cores could possibly matter.
+
+KHH_N = 64
+
+
+def khh_matrix_ref():
+    """The deterministic test matrix, so both sides can build the same one."""
+    return [[(i * 7 + j * 13 + ((i * j) >> 2)) & 0x0F for j in range(KHH_N)]
+            for i in range(KHH_N)]
+
+
+def khh_step(hash32, matrix):
+    """One heavy step. Returns 32 bytes."""
+    v = [0] * KHH_N
+    for i in range(KHH_N):
+        # High nibble first, which is the ordering the reference uses and the
+        # easiest thing in the whole algorithm to get backwards.
+        v[i] = (hash32[i // 2] >> (4 * (1 - i % 2))) & 0x0F
+    prod = [0] * KHH_N
+    for i in range(KHH_N):
+        acc = 0
+        for j in range(KHH_N):
+            acc += matrix[i][j] * v[j]
+        prod[i] = acc >> 10
+    out = bytearray(32)
+    for k in range(32):
+        out[k] = hash32[k] ^ (((prod[2 * k] << 4) | prod[2 * k + 1]) & 0xFF)
+    return bytes(out)
+
+
+KHH_INPUT = hashlib.sha256(b"glados kheavyhash matrix vector").digest()
+
+
+def kheavy_expect():
+    return khh_step(KHH_INPUT, khh_matrix_ref()).hex()
+
+
 ALGOS = [
     ("sha256d", "sha256d.cuh", sha256d_expect),
     ("blake2s", "blake2s.cuh", blake2s_expect),
+    ("kheavy",  "kheavy.cuh",  kheavy_expect),
 ]
 
 
@@ -90,6 +139,19 @@ def selftest():
           d.hex() == "1dbd981fe6985776b644b173a4d0385ddc1aa2a829688d1e"
                      "0000000000000000")
     claim("the blake2s block is 64 bytes", len(B2S_SEED) == 64)
+
+    # The heavy step, against properties rather than a published vector --
+    # there is no published vector for the step in isolation. Both of these
+    # would fail on the nibble ordering, which is the likely mistake.
+    m0 = [[0] * KHH_N for _ in range(KHH_N)]
+    claim("a zero matrix leaves the hash alone", khh_step(KHH_INPUT, m0) == KHH_INPUT)
+    m15 = [[15] * KHH_N for _ in range(KHH_N)]
+    # Every row sums 15 * sum(nibbles), so every product entry is equal and the
+    # xor mask is one repeated byte. That pins the shift and the packing.
+    r = khh_step(KHH_INPUT, m15)
+    mask = set(r[k] ^ KHH_INPUT[k] for k in range(32))
+    claim("a constant matrix gives a constant mask", len(mask) == 1)
+    claim("the heavy step is 32 bytes", len(khh_step(KHH_INPUT, khh_matrix_ref())) == 32)
 
     print("algocheck selftest: %s" % ("ok" if ok else "FAILED"))
     return 0 if ok else 1
