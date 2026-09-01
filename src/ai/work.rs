@@ -92,6 +92,12 @@ pub struct PlanStep {
     pub status: Status,
     /// Which worker role should take it. Empty until the manager assigns one.
     pub role: String,
+    /// What the manager already decided, if it did.
+    ///
+    /// The whole economy of a manager is here. Empty means the worker decides,
+    /// which costs a model call per step. Filled means the manager decided it
+    /// during decomposition, and the worker is a dispatcher costing none.
+    pub action: String,
     pub goal: String,
 }
 
@@ -146,6 +152,11 @@ impl Plan {
             // its own and the goal can take the rest of the line.
             s.push_str(if st.role.is_empty() { "-" } else { &st.role });
             s.push(' ');
+            // Braced so an empty action is still a field and an action
+            // containing spaces does not eat the goal.
+            s.push('[');
+            s.push_str(&one_line(&st.action).replace(']', ")"));
+            s.push_str("] ");
             s.push_str(&one_line(&st.goal));
             s.push('\n');
         }
@@ -178,8 +189,15 @@ impl Plan {
                     "-" => String::new(),
                     r => r.to_string(),
                 };
-                let goal = it.next().unwrap_or("").to_string();
-                steps.push(PlanStep { id, parent, status, role, goal });
+                let tail = it.next().unwrap_or("");
+                // `[action] goal`. A plan written before actions existed has
+                // no bracket, and reads back with an empty action rather than
+                // failing, so older runs stay readable.
+                let (action, goal) = match tail.strip_prefix('[').and_then(|t| t.split_once("] ")) {
+                    Some((a, g)) => (a.to_string(), g.to_string()),
+                    None => (String::new(), tail.to_string()),
+                };
+                steps.push(PlanStep { id, parent, status, role, action, goal });
             }
         }
         // Refused rather than guessed at, the way every other format in this
@@ -382,16 +400,40 @@ pub fn exists(run: &str) -> bool {
 /// The trust level is the caller's. A worker cannot reach past it, because the
 /// grammar `choose` decodes under is built from what that level admits, so an
 /// applet outside it has no token sequence at all.
-pub fn run_step(run: &str, step: &PlanStep, trust: super::harness::Trust) -> Option<Step> {
-    let choice = super::harness::choose(&step.goal, trust, 0.0)?;
-    let name = choice.applet;
-    // Arguments only when the applet takes some. `check_args` already knows
-    // which do, so asking it is cheaper than a decode and cannot disagree with
-    // the check that follows.
-    let args = if crate::sysbox::check_args(name, "").is_ok() {
-        String::new()
+pub fn run_step(
+    run: &str,
+    step: &PlanStep,
+    trust: super::harness::Trust,
+    calls: &mut usize,
+) -> Option<Step> {
+    // A pre-decided action costs nothing. This is the line the whole manager
+    // exists to reach: with it filled the worker is a dispatcher, and `calls`
+    // does not move.
+    let (name, args) = if !step.action.is_empty() {
+        let (n, a) = match step.action.split_once(' ') {
+            Some((n, a)) => (n.trim(), a.trim()),
+            None => (step.action.trim(), ""),
+        };
+        // Re-checked against the trust level rather than trusted because it
+        // was written down. A plan is a file, and a file can be edited by
+        // anything that can write, so admission is decided here and not by
+        // whoever produced the plan.
+        let name = super::harness::admitted(trust).into_iter().find(|x| *x == n)?;
+        (name, String::from(a))
     } else {
-        super::harness::decode_args(&step.goal, name, true).unwrap_or_default()
+        *calls += 1;
+        let choice = super::harness::choose(&step.goal, trust, 0.0)?;
+        let name = choice.applet;
+        // Arguments only when the applet takes some. `check_args` already
+        // knows which do, so asking it is cheaper than a decode and cannot
+        // disagree with the check that follows.
+        let args = if crate::sysbox::check_args(name, "").is_ok() {
+            String::new()
+        } else {
+            *calls += 1;
+            super::harness::decode_args(&step.goal, name, true).unwrap_or_default()
+        };
+        (name, args)
     };
 
     let (ok, observation) = match crate::sysbox::check_args(name, &args) {
@@ -434,15 +476,16 @@ pub fn run_step(run: &str, step: &PlanStep, trust: super::harness::Trust) -> Opt
 /// somebody else's conversation land in the middle of it.
 ///
 /// Answers how many steps ran.
-pub fn run(run: &str, trust: super::harness::Trust, budget: usize) -> usize {
+pub fn run(run: &str, trust: super::harness::Trust, budget: usize) -> (usize, usize) {
     let Some(_claim) = super::claim_engine() else {
-        return 0;
+        return (0, 0);
     };
     let mut ran = 0;
+    let mut calls = 0;
     for _ in 0..budget {
         let Some(mut p) = plan(run) else { break };
         let Some(next) = p.next().cloned() else { break };
-        let Some(done) = run_step(run, &next, trust) else { break };
+        let Some(done) = run_step(run, &next, trust, &mut calls) else { break };
         // The plan is the schedule, so it has to record what happened or the
         // next read picks the same step forever.
         for st in p.steps.iter_mut() {
@@ -453,7 +496,57 @@ pub fn run(run: &str, trust: super::harness::Trust, budget: usize) -> usize {
         set_plan(run, &p);
         ran += 1;
     }
-    ran
+    (ran, calls)
+}
+
+/// Decompose a goal into a plan, in one generation.
+///
+/// The manager. It is re-prompted from nothing, holds no conversation, and
+/// writes what it decided into the plan so the workers that follow need no
+/// model at all.
+///
+/// Answers (steps planned, decode calls spent).
+pub fn decompose(
+    run: &str,
+    goal: &str,
+    trust: super::harness::Trust,
+    max_steps: usize,
+) -> Option<(usize, usize)> {
+    let _claim = super::claim_engine()?;
+    let (actions, calls) = super::harness::plan_actions(goal, trust, max_steps)?;
+    let steps: Vec<PlanStep> = actions
+        .iter()
+        .enumerate()
+        .map(|(i, (name, args))| {
+            let mut action = String::from(*name);
+            if !args.is_empty() {
+                action.push(' ');
+                action.push_str(args);
+            }
+            PlanStep {
+                id: i + 1,
+                // Flat. A manager that decomposed into a tree would need to
+                // say which step depends on which, and nothing it produces
+                // today carries that, so claiming a tree would be inventing
+                // structure the model never expressed.
+                parent: None,
+                status: Status::Todo,
+                role: String::from("worker"),
+                // The step's goal is what the manager decided for it, not the
+                // whole task. Copying the overall goal into every step made
+                // `work <run>` print the same line four times and said nothing
+                // about what any step was for.
+                goal: action.clone(),
+                action,
+            }
+        })
+        .collect();
+    let n = steps.len();
+    let plan = Plan { goal: String::from(goal), steps };
+    if !set_plan(run, &plan) {
+        return None;
+    }
+    Some((n, calls))
 }
 
 /// What a run decided, in order.
@@ -525,8 +618,8 @@ pub fn selftest() -> bool {
     let p = Plan {
         goal: String::from("build the thing"),
         steps: alloc::vec![
-            PlanStep { id: 1, parent: None, status: Status::Done, role: String::from("writer"), goal: String::from("draft it") },
-            PlanStep { id: 2, parent: Some(1), status: Status::Todo, role: String::new(), goal: String::from("check it\nover two lines") },
+            PlanStep { id: 1, parent: None, status: Status::Done, role: String::from("writer"), action: String::from("write /tmp/x hi"), goal: String::from("draft it") },
+            PlanStep { id: 2, parent: Some(1), status: Status::Todo, role: String::new(), action: String::new(), goal: String::from("check it\nover two lines") },
         ],
     };
     let back = Plan::parse(&p.render());
@@ -545,13 +638,17 @@ pub fn selftest() -> bool {
             "next() takes the ready step, not merely the first todo",
             b.next().map(|s| s.id) == Some(2),
         );
+        claim(
+            "a pre-decided action survives, and an absent one stays empty",
+            b.steps[0].action == "write /tmp/x hi" && b.steps[1].action.is_empty(),
+        );
     }
     // A blocked child must not be offered before its parent is done.
     let blocked = Plan {
         goal: String::new(),
         steps: alloc::vec![
-            PlanStep { id: 1, parent: None, status: Status::Todo, role: String::new(), goal: String::from("a") },
-            PlanStep { id: 2, parent: Some(1), status: Status::Todo, role: String::new(), goal: String::from("b") },
+            PlanStep { id: 1, parent: None, status: Status::Todo, role: String::new(), action: String::new(), goal: String::from("a") },
+            PlanStep { id: 2, parent: Some(1), status: Status::Todo, role: String::new(), action: String::new(), goal: String::from("b") },
         ],
     };
     claim("a child waits for its parent", blocked.next().map(|s| s.id) == Some(1));

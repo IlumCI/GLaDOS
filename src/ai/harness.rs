@@ -530,6 +530,155 @@ fn feature_hidden(e: &mut super::Engine, task: &str) -> Option<Vec<f32>> {
 /// makes the next generation start clean, which is the honest outcome, and is
 /// cheap next to snapshotting a cache purely to restore something the operator
 /// was probably not still using.
+/// Decompose a goal into a sequence of actions, in one generation.
+///
+/// This is what a manager is for, and the saving is prefill rather than
+/// cleverness. `agent::prompt_for` includes every prior step, so an episode
+/// re-encodes a growing prompt at every step and spends **O(N^2)** tokens over
+/// a run. Here the prompt is encoded once and the engine is left positioned,
+/// so N actions cost one prefill and N decodes: **O(N)**.
+///
+/// The applet name is decoded under the same grammar `choose` uses, so a name
+/// outside the trust level has no token sequence rather than being refused
+/// afterwards. `done` travels in that grammar too, exactly as it does for an
+/// episode, so stopping is a choice made under the same constraint as acting.
+///
+/// Greedy throughout, so the same goal against the same state plans the same
+/// way and a plan can be re-derived.
+///
+/// Answers the actions, and how many decode calls it took. The count is the
+/// number Stage 2 is judged on.
+pub fn plan_actions(
+    goal: &str,
+    trust: Trust,
+    max_steps: usize,
+) -> Option<(Vec<(&'static str, alloc::string::String)>, usize)> {
+    // The admitted names plus `done`, so stopping is a choice made under the
+    // same grammar as acting rather than a budget running out. `grammar_for`
+    // carries applets only, which is right for `choose` and would leave a
+    // manager unable to say it had finished.
+    let mut names = admitted(trust);
+    names.push(super::agent::DONE);
+    let grammar = Grammar::new(names.iter().copied());
+    if grammar.is_empty() {
+        return None;
+    }
+    let bound = step_bound(&grammar);
+
+    with_alphabet(|alphabet| {
+        with_engine(|e| {
+            let mut out: Vec<(&'static str, alloc::string::String)> = Vec::new();
+
+            // Encoded once. Everything after this continues from where the
+            // last token left the cache.
+            // Shown rather than described. The first version said "one tool
+            // per line, then done" in words and both checkpoints ignored it:
+            // SmolLM2-135M picked one tool four times with no arguments, and
+            // Qwen3-0.6B answered `done` on the first decode. A demonstration
+            // is the cheapest thing to try before concluding that models this
+            // size cannot decompose.
+            let mut prompt = alloc::string::String::from(
+                "Goal: show what is here and read the notes\nls\ncat notes\ndone\n\nGoal: ",
+            );
+            prompt.push_str(goal);
+            prompt.push('\n');
+            let tokens = e.tok.encode(&prompt, true, false);
+            let limit = e.model.cfg.seq_len;
+            let mut pos = 0usize;
+            for &t in tokens.iter() {
+                if pos >= limit {
+                    break;
+                }
+                e.model.forward(&mut e.state, t, pos);
+                pos += 1;
+            }
+
+            let mut calls = 0usize;
+            for _ in 0..max_steps {
+                // A fresh cursor per action, over the same grammar and the
+                // same cache. No re-encoding.
+                let mut cursor = Cursor::new(&grammar);
+                let (mut steps, mut idle) = (0usize, 0usize);
+                let mut picked: Option<&'static str> = None;
+                while steps < bound && idle <= MAX_LEADING_SPACES && pos < limit {
+                    let cands = cursor.candidates(alphabet);
+                    let next =
+                        sample::sample_among(&e.state.logits, &cands, 0.0, 0.0, &mut e.rng)?;
+                    if cursor.push(alphabet, next) {
+                        steps += 1;
+                    } else {
+                        idle += 1;
+                    }
+                    if let Some(idx) = cursor.finished() {
+                        picked = Some(names[idx]);
+                        e.model.forward(&mut e.state, next, pos);
+                        pos += 1;
+                        break;
+                    }
+                    e.model.forward(&mut e.state, next, pos);
+                    pos += 1;
+                }
+                calls += 1;
+                let Some(name) = picked else { break };
+                if name == super::agent::DONE {
+                    break;
+                }
+
+                // Arguments, greedily, to the end of the line. Same walk as
+                // `decode_args` and inline here because it must not re-prefill.
+                let mut raw: Vec<u8> = Vec::new();
+                if sysbox::check_args(name, "").is_err() {
+                    // A separator first, and it is not cosmetic. The grammar
+                    // consumed the name exactly, so without this the model
+                    // continues mid-word: it sees `find` and is as likely to
+                    // extend the word as to start an argument. `decode_args`
+                    // gets this for free because its prompt ends "name ", and
+                    // the first run of this function without it produced
+                    // `find - - - -` for every step.
+                    for &t in e.tok.encode(" ", false, false).iter() {
+                        if pos >= limit {
+                            break;
+                        }
+                        e.model.forward(&mut e.state, t, pos);
+                        pos += 1;
+                    }
+                    let eos = e.tok.eos();
+                    for _ in 0..ARGS_TOKEN_BUDGET {
+                        if pos >= limit || raw.len() >= ARGS_CLIP_BYTES {
+                            break;
+                        }
+                        let vocab = e.tok.vocab_size();
+                        let all: Vec<u32> = (0..vocab as u32).collect();
+                        let next = sample::sample_among(
+                            &e.state.logits, &all, 0.0, 0.0, &mut e.rng,
+                        )?;
+                        if next == eos {
+                            break;
+                        }
+                        let piece = alphabet_for(&e.tok).piece(next).to_vec();
+                        let nl = piece.iter().position(|&b| b == b'\n');
+                        raw.extend_from_slice(&piece[..nl.unwrap_or(piece.len())]);
+                        let done = nl.is_some() || raw.len() >= ARGS_CLIP_BYTES;
+                        e.model.forward(&mut e.state, next, pos);
+                        pos += 1;
+                        if done {
+                            break;
+                        }
+                    }
+                }
+                let args = alloc::string::String::from_utf8_lossy(&raw).into_owned();
+                let args = alloc::string::String::from(args.trim());
+                out.push((name, args));
+            }
+
+            invalidate_conversation(e);
+            Some((out, calls))
+        })
+    })
+    .flatten()
+    .flatten()
+}
+
 /// Longest argument string accepted from free generation.
 pub(crate) const ARGS_CLIP_BYTES: usize = 96;
 

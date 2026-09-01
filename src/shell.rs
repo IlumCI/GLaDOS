@@ -700,6 +700,10 @@ fn work_cmd(rest: &str) {
                 parent: None,
                 status: work::Status::Todo,
                 role: alloc::string::String::from("worker"),
+                // No pre-decided action: `work new` makes a step the worker
+                // decides, which is the Stage 1 shape. `work plan` is the
+                // manager, and fills this in.
+                action: alloc::string::String::new(),
                 goal: alloc::string::String::from(goal),
             }],
         };
@@ -707,6 +711,36 @@ fn work_cmd(rest: &str) {
             kprintln!("  {}  one step, todo", name);
         } else {
             kprintln!("  could not write the plan");
+        }
+        return;
+    }
+
+    // `work plan <run> <goal>` -- the manager. One prefill, N decodes, and
+    // every action written down so the workers that follow need no model.
+    if let Some(arg) = rest.strip_prefix("plan ") {
+        let Some((name, goal)) = arg.trim().split_once(' ') else {
+            kprintln!("  usage: work plan <run> <goal>");
+            return;
+        };
+        let (name, goal) = (name.trim(), goal.trim());
+        if crate::ai::mind_busy() {
+            kprintln!("  the mind is busy -- wait for it to finish first");
+            return;
+        }
+        let trust = crate::ai::harness::Trust::ReadOnly;
+        console::set_color(YELLOW);
+        kprintln!("[work plan] {}  trust read-only", name);
+        console::set_color(WHITE);
+        match work::decompose(name, goal, trust, 4) {
+            None => {
+                console::set_color(LTRED);
+                kprintln!("  the manager decided nothing");
+                console::set_color(WHITE);
+            }
+            Some((n, calls)) => {
+                kprintln!("  {} step(s) planned, {} decode call(s)", n, calls);
+                kprintln!("  the workers that run them cost no model calls at all");
+            }
         }
         return;
     }
@@ -772,8 +806,10 @@ fn work_cmd(rest: &str) {
         console::set_color(YELLOW);
         kprintln!("[work run] {}  budget {}  trust read-only", name, budget);
         console::set_color(WHITE);
-        let n = work::run(name, trust, budget);
-        kprintln!("  {} step(s) ran", n);
+        let (n, calls) = work::run(name, trust, budget);
+        // The number Stage 2 is judged on. A manager that leaves nothing
+        // decided costs one call per step and has bought structure only.
+        kprintln!("  {} step(s) ran, {} model call(s)", n, calls);
         if let Some(h) = work::root(name) {
             // The number the whole design turns on. Two runs of one plan that
             // did the same thing print the same line here.

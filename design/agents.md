@@ -195,13 +195,55 @@ The root hash is still exact and still worth having. It is a complete statement
 of what a run produced, which is a different claim from determinism, and
 conflating the two was the error.
 
-### Stage 2. The first workflow worth having
+### Stage 2. The manager  (done, with the quality limit measured)
 
-Building something in the namespace, and only that. Research was the other
-candidate and is dropped, for a reason worth recording: reading needs `fetch`
-and `save`, which carry the `net` bit and live behind the token gate, so a
-workflow built on them could not be a stable feature. Building needs Aiksi,
-`author.rs` and `skill.rs`, all of which ship in stable today.
+`work plan <run> <goal>` decomposes into actions and writes them into the plan;
+`work run` then executes them.
+
+**The saving is prefill, not cleverness.** `agent::prompt_for` includes every
+prior step, so an episode re-encodes a growing prompt at each step and spends
+O(N^2) tokens over a run. `harness::plan_actions` encodes once and leaves the
+engine positioned, so N actions cost one prefill and N decodes: O(N). And
+because the manager writes what it decided, the workers that follow decode
+nothing at all.
+
+Measured, four-step goal, Qwen3-0.6B:
+
+    work plan   4 step(s) planned, 4 decode call(s)
+    work run    4 step(s) ran,     0 model call(s)
+
+Against the baseline, where a worker decides its own step, at one decode for
+the applet plus one for arguments, each behind its own growing prefill.
+**Execution is free. That is the whole result.**
+
+#### The quality limit, which is the honest half
+
+The mechanism works and the plans are mediocre. Three findings, in the order
+they were found, because each changed the next:
+
+**The prompt has to demonstrate, not describe.** "One tool per line, then
+done" in words was ignored by both checkpoints: SmolLM2-135M picked one tool
+four times with no arguments, and Qwen3-0.6B answered `done` on the first
+decode and planned nothing. A two-line worked example took Qwen3-0.6B from
+zero steps to four, the first of them correct.
+
+**A separator after the applet name is load-bearing.** The grammar consumes
+the name exactly, so without a space the model continues mid-word. Every step
+of the first run planned `find - - - -`. `decode_args` never had the bug
+because its prompt ends `"name "`.
+
+**What is left is real and is not plumbing.** At 0.6B the planner copies the
+worked example's argument rather than the goal's, and once decoded `cat done`,
+which is the model reaching for the stop word where an argument goes. Neither
+is a bug in the mechanism, and neither is fixed by tuning the prompt further
+against the same two checkpoints, which is how a number gets better on the set
+it was tuned on.
+
+That is what Stage 3 is for. Role adapters trained on real transcripts and
+judged by `godel` are the answer to plan quality, and they are the reason the
+stages are in this order rather than the other one.
+
+#### The building workflow
 
     read the plan node        deterministic, a namespace read
     write or amend a program  MODEL, once per revision
@@ -209,13 +251,9 @@ workflow built on them could not be a stable feature. Building needs Aiksi,
     judge it                  deterministic, skill.rs already does this
     keep or revise            deterministic, from the judges' verdict
 
-One model call per revision. Everything else is a namespace read, an Aiksi run
-and four judges that already exist and already work. That is the ratio the
-whole design aims at, and this is the workflow where it is easiest to reach,
-because the expensive half is already written.
-
-The loop it makes is the useful one: propose, run, judge, revise. A worker that
-fails leaves a summary node saying why, and the next revision reads it.
+Research was the other candidate and is dropped: reading needs `fetch` and
+`save`, which carry the `net` bit and live behind the token gate, so a workflow
+built on them could not be a stable feature.
 
 ### Stage 3. Escalation, and only then
 
