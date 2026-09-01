@@ -214,6 +214,46 @@ pub const BTN_HOT: [(u8, Color); 3] = [
 pub const BTN_EDGE: Color = APERTURE_DEEP;
 pub const BTN_EDGE_HOT: Color = APERTURE;
 
+/// The taskbar. The accent at full width, and deeper than the caption
+/// deliberately: thirty-eight pixels of `APERTURE` across the whole screen
+/// would be the brightest thing on it. XP made the same choice, and its
+/// taskbar is a notably darker blue than its captions are.
+pub const TASKBAR: [(u8, Color); 6] = [
+    (0, Color::new(0xE8, 0x9F, 0x3E)),
+    (14, Color::new(0xC4, 0x76, 0x18)),
+    (34, Color::new(0x9C, 0x54, 0x0C)),
+    (128, Color::new(0x86, 0x47, 0x0B)),
+    (129, Color::new(0x7A, 0x40, 0x0A)),
+    (255, Color::new(0x62, 0x33, 0x08)),
+];
+/// One bright line where the bar meets the desktop.
+pub const TASK_EDGE: Color = Color::new(0xFF, 0xC8, 0x84);
+/// The clock and battery recess. Darker than the bar, because a well on a
+/// coloured surface reads by being darker and not by being outlined.
+pub const TRAY: Color = Color::new(0x6E, 0x3A, 0x09);
+pub const TRAY_EDGE: Color = Color::new(0x4A, 0x26, 0x06);
+
+/// Start. Green in every real XP scheme, including the blue one, which is why
+/// it stays green here rather than following the accent.
+pub const START: [(u8, Color); 6] = [
+    (0, Color::new(0x7A, 0xC0, 0x4E)),
+    (16, Color::new(0x5C, 0xA5, 0x33)),
+    (48, Color::new(0x45, 0x8C, 0x24)),
+    (128, Color::new(0x39, 0x7C, 0x1C)),
+    (129, Color::new(0x2F, 0x6C, 0x16)),
+    (255, Color::new(0x24, 0x58, 0x10)),
+];
+pub const START_HOT: [(u8, Color); 6] = [
+    (0, Color::new(0x96, 0xD6, 0x6A)),
+    (16, Color::new(0x74, 0xBF, 0x46)),
+    (48, Color::new(0x5A, 0xA7, 0x32)),
+    (128, Color::new(0x4C, 0x95, 0x26)),
+    (129, Color::new(0x42, 0x85, 0x1E)),
+    (255, Color::new(0x35, 0x70, 0x16)),
+];
+pub const START_EDGE: Color = Color::new(0x8E, 0xD4, 0x6A);
+pub const START_TEXT: Color = Color::new(0xFF, 0xFF, 0xFF);
+
 /// The console's own background, inside the terminal window's well.
 pub const SCREEN: Color = Color::new(0x0A, 0x0C, 0x10);
 
@@ -702,8 +742,10 @@ pub fn separator_v(fb: &Framebuffer, x: u32, y: u32, h: u32) {
 /// Small enough that the six blades are mush, so this is the ring and the
 /// opening -- the same reduction `mark` makes for a title bar, exposed because
 /// the app bar wants it too.
+/// White, not `APERTURE_DEEP`. Its one caller is the Start button, which is
+/// green now, and a deep orange on that green reads as mud.
 pub fn aperture_dot(fb: &Framebuffer, cx: u32, cy: u32, r: i32) {
-    mark(fb, cx as i32, cy as i32, r.max(3), APERTURE_DEEP);
+    mark(fb, cx as i32, cy as i32, r.max(3), HILIGHT);
 }
 
 /// A horizontal rule, drawn as a groove. The 3.1 separator.

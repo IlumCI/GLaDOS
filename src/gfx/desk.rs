@@ -351,7 +351,11 @@ fn taskbar_rect(fb: &Framebuffer) -> Rect {
 /// The Start button, left end of the bar.
 fn start_rect(fb: &Framebuffer) -> Rect {
     let bar = taskbar_rect(fb);
-    Rect::new(bar.x + 3, bar.y + 4, theme::text_w(6) + 30, bar.h - 8)
+    // Bleeding to the left edge and nearly the bar's full height, as XP's
+    // does. A button inset from the corner gives away the pixels Fitts' law
+    // makes the most valuable on the screen: the corner is infinitely large to
+    // a pointer and a three-pixel margin throws that away.
+    Rect::new(bar.x, bar.y + 1, theme::text_w(6) + 34, bar.h.saturating_sub(2))
 }
 
 /// Where the Start menu pops, directly above its button. The width formula is
@@ -1516,7 +1520,14 @@ pub fn paint_clock(real: &Framebuffer, x: u32, y: u32, text: &str, scale: u32) {
     crate::cpu::without_interrupts(|| {
         let Some(_claim) = Claim::take() else { return };
         let target = super::compose::target().unwrap_or(*real);
-        target.draw_text(x, y, text, theme::TEXT, theme::FACE, scale);
+        // Light ink on the tray's own ground, not dark ink on `FACE`. The
+        // recess is a dark colour now, and `draw_text` fills the cell behind
+        // every glyph -- so the old pair stamped a cream block into the middle
+        // of it, which reads as a label stuck on the bar rather than as a
+        // readout set into it. The background has to stay opaque here: it is
+        // what erases the digit that was there a tenth of a second ago, and
+        // nothing else presents this rectangle on the clock's behalf.
+        target.draw_text(x, y, text, theme::TITLE_TEXT, theme::TRAY, scale);
         // Straight through, because the clock is not on anybody's draw path:
         // nothing else is going to present this rectangle on its behalf.
         super::compose::flush_rect(
@@ -2670,22 +2681,43 @@ fn task_layout(fb: &Framebuffer, d: &Desktop) -> Vec<(Rect, usize, bool)> {
 /// what you then cannot find.
 fn taskbar(fb: &Framebuffer, d: &Desktop, sel: Option<usize>) {
     let bar = taskbar_rect(fb);
-    theme::panel(fb, bar);
+    fb.vgrad(bar.x, bar.y, bar.w, bar.h, &theme::TASKBAR);
+    // One bright line along the top, where the bar meets the desktop. The stop
+    // table is proportional and cannot say "one pixel" at any height, which is
+    // the same division of labour the caption's catchlight makes.
+    fb.rect(bar.x, bar.y, bar.w, 1, theme::TASK_EDGE);
 
     // The Start button: the mark and the name. Held down while its menu is
     // open, which is the one place the bar states a mode rather than a focus.
     let s = start_rect(fb);
     let start_open = matches!(d.mode, Mode::Start { .. });
-    theme::button(fb, s, "GLaDOS", d.hover == Hover::Start, start_open);
-    theme::aperture_dot(fb, s.x + 11, s.y + s.h / 2, (s.h / 2) as i32 - 4);
-    theme::separator_v(fb, s.x + s.w + 3, s.y, s.h);
+    let lit = start_open || d.hover == Hover::Start;
+    theme::control(
+        fb,
+        s,
+        if lit { &theme::START_HOT } else { &theme::START },
+        theme::START_EDGE,
+    );
+    theme::aperture_dot(fb, s.x + 15, s.y + s.h / 2, (s.h / 2) as i32 - 5);
+    let ty = s.y + (s.h.saturating_sub(theme::text_h())) / 2;
+    theme::text_over(fb, s.x + 30, ty, "GLaDOS", theme::START_TEXT);
 
     for (i, (r, icon, pressed)) in task_layout(fb, d).into_iter().enumerate() {
         // Keyboard selection and pointer hover draw the same way: both are "the
         // next click or Enter lands here", and two different highlights would
         // claim two different things.
         let hot = sel == Some(i) || d.hover == Hover::Task(i);
-        theme::button(fb, r, "", hot, pressed);
+        // `control` rather than `button`: a task button wants the hover wash,
+        // and `button` reads its one boolean as keyboard focus. The two mean
+        // different things and only here do they need telling apart.
+        let stops: &[(u8, Color)] = if pressed {
+            &theme::BTN_DOWN
+        } else if hot {
+            &theme::BTN_HOT
+        } else {
+            &theme::BTN
+        };
+        theme::control(fb, r, stops, if hot { theme::BTN_EDGE_HOT } else { theme::BTN_EDGE });
         let s = r.h.saturating_sub(6);
         // Nudged a pixel when pressed, the same lie about depth the label
         // used to tell.
@@ -2700,10 +2732,16 @@ fn taskbar(fb: &Framebuffer, d: &Desktop, sel: Option<usize>) {
         );
     }
 
-    let c = clock_rect(fb);
-    theme::well(fb, c, theme::FACE);
+    // The tray recesses. Not `theme::well`: a well outlines a hole in a face,
+    // and on a coloured bar the thing that reads as a recess is being darker
+    // than what surrounds it.
+    let recess = |r: Rect| {
+        fb.rect(r.x, r.y, r.w, r.h, theme::TRAY);
+        theme::outline(fb, r, theme::TRAY_EDGE);
+    };
+    recess(clock_rect(fb));
     if let Some(b) = battery_rect(fb) {
-        theme::well(fb, b, theme::FACE);
+        recess(b);
     }
 }
 
