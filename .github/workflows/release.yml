@@ -146,6 +146,23 @@ jobs:
             "out/glados-$VERSION.efi.sig" \
             out/manifest --clobber
 
+      # Hashed here, from the bytes this job produced, rather than read back
+      # from the API afterwards. GitHub reports a digest of what it stored, so
+      # a digest taken from there proves the file is what was stored and says
+      # nothing about whether the upload changed it. Two independently
+      # computed numbers compared is the check; one number is a restatement.
+      - name: Record what was built
+        run: |
+          mkdir -p sums
+          ( cd out && sha256sum "glados-$VERSION.efi" "glados-$VERSION.efi.sig" manifest ) > sums/kernel.txt
+          cat sums/kernel.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sums-kernel
+          path: sums/kernel.txt
+          retention-days: 1
+
   # --- the ISOs -------------------------------------------------------------
   #
   # A job of its own, and a matrix, because there is more than one image to
@@ -263,8 +280,83 @@ jobs:
           ls -la "out/$NAME.iso"
           echo "ISO_NAME=$NAME" >> "$GITHUB_ENV"
 
+      - name: Record what was built
+        run: |
+          mkdir -p sums
+          ( cd out && sha256sum "$ISO_NAME.iso" ) > "sums/${{ matrix.name }}.txt"
+          cat "sums/${{ matrix.name }}.txt"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sums-iso-${{ matrix.name }}
+          path: sums/${{ matrix.name }}.txt
+          retention-days: 1
+
       - name: Attach the ISO
         if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "$GITHUB_REF_NAME" "out/$ISO_NAME.iso" --clobber
+
+  # --- SHA256SUMS -----------------------------------------------------------
+  #
+  # Last, because it describes everything the other two jobs published and
+  # cannot be written until they have. `index.html` has linked to this file
+  # for a while and no release ever carried it, which is the sort of promise
+  # a download page should not make twice.
+  sums:
+    needs: [publish, iso]
+    runs-on: ubuntu-latest
+    steps:
+      # No `if:` on the job, and the assembly below runs on every invocation
+      # for the reason the ISO steps do: gating it on a real release would
+      # mean the only run that ever exercises it is the one not allowed to
+      # fail. Only the attach is gated.
+      - uses: actions/checkout@v4
+
+      - name: Which release this describes
+        run: |
+          V="$(grep -m1 '^version' Cargo.toml | cut -d\" -f2)"
+          echo "VERSION=$V" >> "$GITHUB_ENV"
+          TAG="$GITHUB_REF_NAME"
+          if [ "$GITHUB_REF_TYPE" != "tag" ]; then TAG="v$V"; fi
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: sums-*
+          merge-multiple: true
+          path: sums
+
+      - name: Assemble and cross-check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat sums/*.txt | sort -k2 > SHA256SUMS
+          echo "--- what the build produced ---"
+          cat SHA256SUMS
+
+          # The check worth having. Every line above came from hashing a file
+          # this workflow built; GitHub reports a digest of what it received.
+          # A disagreement means the upload changed the bytes, which at 1.9 GB
+          # is a real failure mode and one nothing else here would notice.
+          #
+          # SHA256SUMS is excluded from the comparison because on a re-run it
+          # is already an asset, and a file cannot list its own digest.
+          gh release view "$TAG" --json assets             --jq '.assets[] | select(.name != "SHA256SUMS") | "\(.digest|sub("^sha256:";"")) \(.name)"'             | sort -k2 > stored.txt
+          awk '{print $1, $2}' SHA256SUMS | sort -k2 > built.txt
+
+          echo "--- what the release stored ---"
+          cat stored.txt
+          if diff -u built.txt stored.txt; then
+            echo "  every asset matches what was built"
+          else
+            echo "  built and stored disagree; refusing to publish this file"
+            exit 1
+          fi
+
+      - name: Attach
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" SHA256SUMS --clobber
