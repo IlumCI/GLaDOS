@@ -12,6 +12,7 @@
     .\scripts\run.ps1 -Release
     .\scripts\run.ps1 -Gdb          # then: gdb -ex 'target remote :1234'
     .\scripts\run.ps1 -TraceFaults  # log every exception; finds triple faults
+    .\scripts\run.ps1 -Smp 1       # one core; `diag mt` cannot pass there
 #>
 param(
     [switch]$Release,
@@ -24,7 +25,18 @@ param(
     # plus the heap. 512M was ample for SmolLM2's 135 MB and cannot load
     # Qwen3-0.6B's 570 MB at all -- the read fails and the system boots into a
     # shell with no model, which reads as a loader bug rather than as memory.
-    [string]$Memory = '2048M'
+    [string]$Memory = '2048M',
+    # Guest cores. QEMU gives one unless told otherwise, and with one there are
+    # no application processors for `smp::init` to start -- so `diag mt`'s two
+    # multi-core claims are false and the suite fails on every clean boot. A
+    # check that always fails is read as one nobody has to look at.
+    #
+    # Four rather than two, because two leaves a single contender for the chunk
+    # cursor and the bug `smp.rs` records there needs several. Measured under
+    # WHPX, best of nine: the decode path is flat across one, two and four, and
+    # `logits` is bit-identical, which is what `smp.rs` claims for a split
+    # matvec.
+    [int]$Smp = 4
 )
 
 $ErrorActionPreference = 'Stop'
@@ -152,7 +164,8 @@ Copy-Item $efi (Join-Path $bootDir 'BOOTX64.EFI') -Force
 # --- launch ---
 $qemuArgs = @(
     '-machine', 'q35',
-    '-m', $Memory
+    '-m', $Memory,
+    '-smp', $Smp
 )
 
 if ($combined) {

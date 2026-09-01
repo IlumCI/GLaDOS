@@ -80,6 +80,12 @@ pub fn adopt(cpu: usize) -> bool {
 
 /// Declare that every core has its block. Called once, from the bootstrap
 /// processor, after the others are up.
+///
+/// On a machine with no other cores to wait for it is called anyway, and that
+/// is the point rather than a detail: `billed()` answers `None` until it
+/// happens, so a boot that skipped it left `recover` unable to find a landing
+/// pad and `census` unable to bill anything, on paths that had nothing to do
+/// with parallelism.
 pub fn arm() {
     ARMED.store(true, Ordering::Release);
 }

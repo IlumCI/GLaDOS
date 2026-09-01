@@ -445,10 +445,38 @@ def main():
         print(f"[drive] staged {total / 1024 / 1024:.0f} MB as {out_iso}")
         iso = out_iso
 
+    # Four cores by default, because one is a suite that fails every time.
+    #
+    # QEMU gives a guest one vCPU unless told otherwise, so `smp::init` finds
+    # no application processors to start and two of `diag mt`'s claims cannot
+    # pass: "the sharing audit notices a second toucher" and "the allocator
+    # was exercised from several cores" are both false on a machine with one
+    # core. The suite printed `mt FAILED` on every clean boot this project has
+    # ever driven, and a check that always fails is read as one nobody has to
+    # look at -- the objection `smp.rs` already makes about its own canary.
+    #
+    # Four rather than two. Two satisfies the claims and exercises nothing
+    # beyond a single contender for the chunk cursor, and the failure `smp.rs`
+    # records there -- a worker claiming an index valid for the *next* job --
+    # needs several claimants before it is likely.
+    #
+    # It costs nothing measurable. Best of nine decodes on SmolLM2 under WHPX:
+    # 50,819 us/token at one core, 49,463 at two, 50,818 at four. That is a 3%
+    # spread with no trend in it, and the single-sample figures that suggested
+    # otherwise (65 ms against 95 ms) were the host's scheduler, which is the
+    # error `video bench` was rewritten to stop making.
+    #
+    # And `logits 7 11 3` is bit-identical across all three, which is what
+    # `smp.rs` claims for a split matvec and is worth checking rather than
+    # believing, since splitting is live above 2^19 element-operations and the
+    # classifier is far above it.
+    smp = [] if any(a == "-smp" or a.startswith("-smp=") for a in qemu_extra) else ["-smp", "4"]
+
     args = [
         find_qemu(),
         "-machine", "q35",
         "-m", memory,
+        *smp,
         *qemu_extra,
         *find_firmware(),
         # Plain VVFAT, which is FAT16. `fat:32:` raises the 516 MB ceiling in

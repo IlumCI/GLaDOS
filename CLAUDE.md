@@ -786,6 +786,29 @@ Compare `logits <ids>` in GLaDOS against the same ids here. Coherent generated
 text is the cheap end of the same check: an 0.6B instruction-tuned model whose
 attention path is wired correctly writes real sentences.
 
+**`diag` on its own lists the suites; `diag all` runs them.** A bare `diag`
+prints a table with `-` beside everything that has not run this boot and a
+tally reading `0 passed, 0 failed, 28 not run`, which is easy to read as a
+clean sweep. It is the opposite of one.
+
+**The tooling gives the guest four cores, and two suites need more than one.**
+`drive.py` and `run.ps1` pass `-smp 4` by default; `--qemu-extra "-smp N"` and
+`run.ps1 -Smp N` override it. QEMU's own default is one vCPU, and with one
+`diag mt` and `diag migrate` cannot pass at all -- "the allocator was exercised
+from several cores" and "a task carried onto another core and back" are false
+statements about a machine with one core, so both printed `FAILED` on every
+clean boot this project had ever driven. A check that always fails is read as
+one nobody has to look at, which is the objection `smp.rs` makes about its own
+canary.
+
+Four rather than two, because two leaves a single contender for the chunk
+cursor and the bug `smp.rs` records there needs several. It costs nothing:
+best of nine decodes on SmolLM2 under WHPX read 50,819 us/token at one core,
+49,463 at two and 50,818 at four, and `logits 7 11 3` is bit-identical across
+all three. The single-sample figures that suggested a cost (65 ms against
+95 ms) were the host's scheduler, which is the error `video bench` was
+rewritten to stop making.
+
 **Boot selftest output is easy to skip past and it does catch real bugs.** An
 ECDSA break was visible in `[selftest] crypto` for a whole debugging cycle
 while the output was being sliced away. It happened again while the adapter
@@ -2183,6 +2206,20 @@ from those runs do not belong in a claim.
   no error to catch, so the only thing that settles any of them is comparing
   against `tools/reference.py` or reading generated output that is supposed to
   contain a known fact.
+- **Per-core storage is not only about other cores.** `init_smp` returned
+  early when the firmware declared one CPU, or declared no ACPI tables at all,
+  and both returns came before `cpu::percpu::arm()`. So `armed()` stayed false
+  forever, `billed()` answered `None`, and the two things that read per-core
+  state for reasons that have nothing to do with parallelism both died
+  silently: `mem::census` could bill no allocation, and `recover::slot` could
+  find no landing pad, which made **every fault inside a guard fatal** on a
+  machine whose stated reason for having guards is that it runs programs it
+  wrote itself. Measured at `-smp 1`: `diag recover` halted the machine at its
+  third claim, twice out of twice, and `diag census` failed six of seven. The
+  bug was invisible because nothing in the tooling had ever started the guest
+  with more than one core, so the only configuration anybody ran was the
+  broken one, and it was found while giving the guest a second core for an
+  unrelated suite.
 - **The kernel heap is a ladder and not a constant** (`HEAP_LADDER`). It is one
   physically contiguous allocation, the GF63 cannot be tested from here, and a
   fixed size its memory map cannot satisfy is an unbootable system. Boot prints

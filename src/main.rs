@@ -750,12 +750,42 @@ fn init_smp(acpi: &Option<acpi::Acpi>) {
     kprintln!("\n[smp]");
     console::set_color(LTGRAY_IDX);
 
+    // Core 0 gets its block on every path, including the two that start no
+    // other core.
+    //
+    // Per-core storage is not only about other cores, and treating it that way
+    // was a real bug rather than an inelegance. `recover::slot` reads it to
+    // find where a guarded fault should land and `mem::census` reads it to bill
+    // an allocation, so both were dead on a single-core machine and on one with
+    // no ACPI tables: the returns below came before `percpu::arm`, `armed()`
+    // stayed false forever, `billed()` answered `None`, and **every fault
+    // inside a guard was fatal**. On a machine whose stated reason for having
+    // guards is that it runs programs it wrote itself.
+    //
+    // Measured before the fix, `-smp 1`: `diag recover` halted the machine at
+    // the third claim, twice out of twice, and `diag all` never reached the
+    // sixteen suites after it. At four cores the same suite passed. Nothing in
+    // that difference was about parallelism.
+    //
+    // Only the percpu half is hoisted. `gdt::prepare` builds a TSS and two
+    // 16 KiB interrupt stacks per core for application processors to load, and
+    // core 0 is already running on the boot tables, so calling it here would
+    // allocate for a core that will never adopt them.
+    let one_core = |why: core::fmt::Arguments| {
+        kprintln!("{}", why);
+        cpu::percpu::prepare(1);
+        cpu::percpu::adopt(0);
+        cpu::percpu::arm();
+    };
     let Some(a) = acpi else {
-        kprintln!("  no acpi tables -- staying on one core");
+        one_core(format_args!("  no acpi tables -- staying on one core"));
         return;
     };
     if a.cpus <= 1 {
-        kprintln!("  firmware declares {} cpu -- nothing to start", a.cpus);
+        one_core(format_args!(
+            "  firmware declares {} cpu -- nothing to start",
+            a.cpus
+        ));
         return;
     }
 
