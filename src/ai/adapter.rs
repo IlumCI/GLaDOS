@@ -799,6 +799,81 @@ impl Dora {
     }
 }
 
+/// Does a freshly constructed adapter have any gradient to follow?
+///
+/// It does not, and that is the point of this check. `Dora::new` zeroes both
+/// low-rank factors, and `row_backward` forms them as
+///
+/// ```text
+///   gb[o,j] += scale * gy * ax[j]                 ax = A.x, so zero when A is zero
+///   ga[j,:] += scale * gy * b[o,j] * x            guarded by `if bcoef != 0`
+/// ```
+///
+/// so A being zero kills every B gradient and B being zero kills every A
+/// gradient. The pair is a fixed point: a zero-initialised low-rank branch has
+/// identically zero gradient and cannot leave the origin however long it is
+/// trained. Only the per-row magnitudes move, and an "adapter" that only
+/// rescales frozen rows is a much weaker object than the one the rest of the
+/// tree describes.
+///
+/// The arithmetic in `row_backward` is not wrong -- the finite-difference gate
+/// checks it from a non-zero point and it passes. The initialisation is wrong,
+/// which is why nothing caught it: every gradient this asserts to be zero
+/// really is the correct gradient at that point.
+///
+/// Standard LoRA initialises A randomly and B at zero, so `BA` is zero at the
+/// start (the adapter is the identity, as intended) while B still has a live
+/// gradient through A. This asserts the current behaviour rather than the
+/// desired one, so that changing the initialisation has to come here and say
+/// so.
+pub fn init_gradient_selftest() -> bool {
+    let mut ok = true;
+    let mut claim = |what: &str, good: bool| {
+        if !good {
+            ok = false;
+            crate::kprintln!("    FAIL {}", what);
+        }
+    };
+
+    let (rows, k, r) = (4usize, 6usize, 2usize);
+    let w: Vec<f32> = (0..rows * k).map(|i| (i % 7) as f32 * 0.1 - 0.3).collect();
+    let mat = Mat::F32 { data: &w, rows, cols: k };
+    let d = Dora::new(r, 16.0, k, rows);
+
+    claim("a fresh adapter has a all zero", d.a.iter().all(|v| *v == 0.0));
+    claim("a fresh adapter has b all zero", d.b.iter().all(|v| *v == 0.0));
+
+    let x: Vec<f32> = (0..k).map(|i| 0.2 + i as f32 * 0.05).collect();
+    let base: Vec<f32> = (0..rows).map(|i| 0.5 - i as f32 * 0.1).collect();
+    let gy: Vec<f32> = (0..rows).map(|i| 0.3 + i as f32 * 0.11).collect();
+
+    // ax is what a forward pass would have produced: A.x, which is zero.
+    let ax = alloc::vec![0.0f32; r];
+    let mut ga = alloc::vec![0.0f32; d.a.len()];
+    let mut gb = alloc::vec![0.0f32; d.b.len()];
+    let mut dm = alloc::vec![0.0f32; d.m.len()];
+    d.backward(&mat, &x, &ax, &base, &gy, &mut ga, &mut gb, &mut dm);
+
+    claim("at zero init the A gradient is identically zero", ga.iter().all(|v| *v == 0.0));
+    claim("at zero init the B gradient is identically zero", gb.iter().all(|v| *v == 0.0));
+    // The magnitudes are the only thing with anywhere to go, which is exactly
+    // why training appears to run and to change nothing that matters.
+    claim("the magnitude gradient is not zero", dm.iter().any(|v| *v != 0.0));
+
+    // And the arithmetic is fine once it is off the origin: give B a value and
+    // the A gradient appears. This is what separates a wrong derivative from a
+    // wrong starting point.
+    let mut d2 = Dora::new(r, 16.0, k, rows);
+    d2.b[0] = 0.5;
+    let mut ga2 = alloc::vec![0.0f32; d2.a.len()];
+    let mut gb2 = alloc::vec![0.0f32; d2.b.len()];
+    let mut dm2 = alloc::vec![0.0f32; d2.m.len()];
+    d2.backward(&mat, &x, &ax, &base, &gy, &mut ga2, &mut gb2, &mut dm2);
+    claim("a non-zero B revives the A gradient", ga2.iter().any(|v| *v != 0.0));
+
+    ok
+}
+
 /// Boot self-test for adapter persistence. Six claims, none needing a model.
 ///
 /// The round trip is checked against a *hand-built* adapter rather than a

@@ -665,6 +665,29 @@ fn study_cmd(rest: &str) {
         study_seq_cmd(arg.trim());
         return;
     }
+    if let Some(arg) = rest.strip_prefix("check") {
+        let n = arg.trim().parse::<usize>().unwrap_or(40).max(8);
+        let b = crate::ai::train::Budget {
+            epochs: 12, millis: 90_000, examples: n, lr: 0.02, rank: 8, alpha: 16.0,
+        };
+        if !crate::ai::train::hardware_ok() {
+            console::set_color(LTRED);
+            kprintln!("  the trainer needs AVX2 and FMA; add -cpu max under QEMU");
+            console::set_color(WHITE);
+            return;
+        }
+        match crate::ai::study::control(&b) {
+            None => kprintln!("  could not prepare a trial"),
+            Some((before, after, l0, l1, held)) => {
+                kprintln!("[study check] train_masked with nothing masked, no adapter carried in");
+                kprintln!("  loss      {} -> {}", l0 as i32, l1 as i32);
+                kprintln!("  held out  {}% -> {}%  over {} decisions",
+                          (before * 100.0) as i32, (after * 100.0) as i32, held);
+                kprintln!("  compare against 'train adapter -n {} -e 12': they should agree", n);
+            }
+        }
+        return;
+    }
 
     let stride = rest.parse::<usize>().unwrap_or(1).max(1);
     let held = study::held_out_counts();
@@ -790,7 +813,7 @@ fn study_seq_cmd(arg: &str) {
     };
 
     console::set_color(LTGRAY);
-    let mut hdr = String::from("  after studying     loss ");
+    let mut hdr = String::from("  after studying     loss       ");
     for d in DOMAINS {
         hdr.push_str(&alloc::format!("{:>10}", d.name));
     }
@@ -803,10 +826,13 @@ fn study_seq_cmd(arg: &str) {
             None => "(frozen base)",
             Some(i) => DOMAINS[i].name,
         };
+        // First and last, not just last. A single number cannot say whether
+        // the run moved anything, and "the adapter changed nothing" is the
+        // one outcome this table has to be able to show.
         let loss = if r.studied.is_none() {
-            String::from("   -")
+            String::from("      -   ")
         } else {
-            alloc::format!("{:>4}", r.last_loss as i32)
+            alloc::format!("{:>4}->{:<4}", r.first_loss as i32, r.last_loss as i32)
         };
         let mut line = alloc::format!("  {:<18} {} ", label, loss);
         for (i, (right, total)) in r.scores.iter().enumerate() {

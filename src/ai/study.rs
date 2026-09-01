@@ -306,3 +306,28 @@ pub fn sequential(b: &super::train::Budget) -> Option<Vec<SeqRow>> {
     }
     Some(rows)
 }
+
+/// `train_masked` with nothing masked out and no adapter carried in, which is
+/// by construction the same run `Trial::train` does.
+///
+/// A differential rather than a new measurement. When the sequential matrix
+/// came back completely flat there were two candidates -- a broken masked path,
+/// or an experiment too small to resolve the effect -- and reading the code
+/// could not tell them apart. This can: if it reproduces what `train adapter`
+/// reports on the same budget, the masked path is faithful and the flat matrix
+/// is a sample-size problem.
+///
+/// Returns (held before, held after, first loss, last loss, decisions trained).
+pub fn control(b: &super::train::Budget) -> Option<(f32, f32, f32, f32, usize)> {
+    use super::train::Slice;
+
+    let all: Vec<bool> = crate::sysbox::APPLETS.iter().map(|_| true).collect();
+    let trial = super::with_engine(|e| super::train::prepare(e, b))?.ok()?;
+
+    let before = trial.score(None, Slice::Held);
+    let fit = trial.train_masked(b, None, &all);
+    let after = trial.score(Some(&fit.dora), Slice::Held);
+    let (right, total) = trial.score_masked(Some(&fit.dora), Slice::Held, &all);
+    let _ = right;
+    Some((before, after, fit.first_loss, fit.last_loss, total))
+}
