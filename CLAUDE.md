@@ -706,8 +706,8 @@ update on top of itself.
 There is no `cargo test`. This is a `no_std` UEFI binary with no host test
 runner, so **verification is the boot selftests plus driving QEMU.**
 
-At boot the system runs **twenty-six selftest sections**, twenty-three of which `diag`
-also re-runs as named suites on demand (the `aiksi` section covers the capability gate by name and never by
+At boot the system runs **twenty-six selftest sections**, and `diag` offers
+**twenty-eight named suites** on demand, most of them the same checks (the `aiksi` section covers the capability gate by name and never by
 calling -- half that table pokes memory, drives I/O ports or paints over the
 screen, and a suite that called every row to prove it exists would be
 scribbling on the machine to do it), printing `ok` or `FAIL` per line: heap, timer, clock, the namespace's
@@ -1797,7 +1797,7 @@ LoaderData pool instead of being copied to the heap. SmolLM2-135M still loads
 and is the small checkpoint to reach for when something needs to run under
 QEMU. Qwen3.5 hybrids load through the v4 path.
 
-The module map, since `src/ai/` is now twenty-three files:
+The module map, since `src/ai/` is now thirty files:
 
 | | |
 |---|---|
@@ -1809,6 +1809,8 @@ The module map, since `src/ai/` is now twenty-three files:
 | `aixi.rs` `futures.rs` `godbits.rs` | Planning over fitted dynamics, and the Oracle |
 | `adapter.rs` `backward.rs` `train.rs` | QDoRA, the adjoints, and the trainer |
 | `godel.rs` | Variants, judges, ledger, adoption |
+| `work.rs` | Workflows: the plan graph, the manager, roles, autonomy |
+| `skill.rs` `study.rs` `abstraction.rs` `voter.rs` | Judged skills, the corpus study, abstraction, the cores |
 
 **Qwen3 differs from Llama in two ways and neither fails loudly.** Its head
 width is *stated* (128) instead of derived (1024/16 = 64), so `wq` is
@@ -2052,6 +2054,116 @@ good the judges said it was -- adoption that put a tool in the toolkit nothing
 could pick up. `agent::skill_choices` is the list and the grammar is built from
 it. Not exercised through a real episode: that needs a model and minutes, and
 what is checked at boot is that every choice is a full path to a program.
+
+### Multi-agent workflows (`src/ai/work.rs`)
+
+A manager delegating to workers, which is a different relationship from the
+two multi-agent systems this tree already had. `council.rs` and `godel`'s
+judges are independent evaluators whose *disagreement* is the product; this is
+about getting something done.
+
+**Three facts decided the shape before any code, and none is negotiable.**
+`HOLDER` is one `AtomicUsize`, so two `&mut Engine` is undefined behaviour and
+concurrent inference is unavailable rather than slow. `agent::Job` is one queue
+on one task on purpose. And ensembling for accuracy was measured here and lost,
+77.8% for the best single core against 76.9% for a product of three. So what
+multi-agent buys here is specialisation, and never concurrency.
+
+**Memory is the namespace, because a conversation is the one thing that cannot
+be afforded.** `ctx_save` on a 512-slot cache measures in thousands of store
+blocks, so swapping a context per worker costs more than the work. The
+namespace is already a content-addressed Merkle tree, so the graph inherits
+dedup, constant-time copy, `same` over whole subtrees, and `snap` versioning
+everything as one root hash. A context switch becomes a namespace read.
+
+```text
+  /ai/work/<run>/plan            the plan tree, re-read at every step
+  /ai/work/<run>/steps/NNNN      one summary per completed step
+  /ai/work/<run>/artifacts/<n>   what is being built
+  /ai/roles/<role>/ex/NNNN       harvested examples for a role
+  /ai/roles/<role>/adapter       the role's adapter, if one was kept
+  /ai/autonomy                   one hex line per granted plan
+```
+
+```
+work                      list runs, each with its root hash
+work new <run> <goal>     one step, decided by the worker
+work plan <run> <goal>    the manager: decompose and write the actions down
+work run <run> [budget]   execute, read-only
+work cmp <a> <b>          decisions and observations, reported separately
+work harvest              transcripts into per-role example sets
+work roles | train <role> the Stage 3 measurement
+work autonomy <run> ... | check | trust | untrust | trusted | night
+```
+
+**Execution is free, and that is the whole result.** `agent::prompt_for`
+includes every prior step, so an episode re-encodes a growing prompt and spends
+O(N^2) tokens over a run. `harness::plan_actions` encodes once and leaves the
+engine positioned, so N actions cost one prefill and N decodes. And a worker
+handed a pre-decided action decodes nothing. Measured on a four-step goal with
+Qwen3-0.6B: `work plan` spent 4 decode calls, `work run` spent **0**.
+
+A written action is re-checked against the trust level at dispatch rather than
+trusted for being written down. A plan is a file, and a file can be edited by
+anything that can write.
+
+**A run has an address, and only half of it is re-derivable.** Stage 1 was
+written expecting two runs of one plan to produce the same root hash, and they
+did not: a run writes its steps under `/ai/work`, which is inside the `/ai` a
+worker then lists, so the second run legitimately saw a directory the first had
+changed. So a step records `action`, which is the decision and must agree
+across runs, apart from `observation`, which is a reading of a world that
+moves. `work cmp` reports them separately because decisions differing is a
+defect and observations differing is Tuesday.
+
+**Two prompt findings that cost a run each.** The manager's prompt has to
+*demonstrate*: "one tool per line, then done" in words was ignored by both
+checkpoints, and a two-line worked example took Qwen3-0.6B from zero steps to
+four. And the grammar consumes an applet name exactly, so a prompt that does
+not emit a separator after it leaves the model continuing mid-word -- every
+step of the first run planned `find - - - -`. `decode_args` never had the bug
+because its prompt ends `"name "`.
+
+**Role adapters do not work, and the reason is structural.** `work harvest`
+builds a per-role set from transcripts and `work train` puts it through
+`godel`'s four judges, called rather than copied. It was measured on 24
+workflows: 23 examples from 23 runs, base 97.3% on the training slice and 100%
+held out, `fixed 0 broke 0`. **A harvested label is the base model's own
+argmax** -- `choose` decodes at temperature 0, so the action in a transcript is
+what the classifier already ranks first, and training on it asks the adapter to
+reproduce whatever produced it. Filtering on `ok` does not escape that, because
+`ok` records that the applet ran and never that it was the right one. On this
+evidence a role is a naming convention, and a role adapter needs a label from
+somewhere else: `teach`, a judged outcome, or a larger model as teacher.
+
+The split is by *run* and never by step, since steps inside one run share a
+goal and a step split measures memorisation while looking like generalisation.
+Same argument as holding out whole template families.
+
+**Autonomy takes a declaration and a grant.** `work autonomy <run>
+unattended` writes the declaration, which grants nothing on its own: a plan is
+a file, so a workflow declaring its own autonomy would be the gated party
+writing its own permission. `work trust <run> <hex8>` is the operator's half,
+in the `update stage` idiom. `work` is absent from `sysbox::APPLETS`, so no
+grammar can spell it and the model has no route to the command.
+
+**The grant names the plan without its statuses**, and that detail is the
+feature. Hashing the file as written would mean the first step revoked the
+grant that let it take that step, which is a gate that works exactly once and
+looks like it is holding. `work check` re-runs before every unattended step,
+because a grant is evidence the operator approved an intent rather than
+evidence the intent is still admissible, and `admitted` comes from the live
+applet table.
+
+**The unattended branch is not gated on `spent`, and that is deliberate.**
+`initiative.rs` records what happened the last time a job went behind the
+one-expensive-job-per-tick rule: godel won the tie every night and the job
+behind it was never tried at all. A pre-decided step costs no model call, so it
+does not compete for what the other two compete for; a step the worker must
+still decide waits for an unspent tick. `work night` takes the step the quiet
+tick would take, which is how any of this is testable -- the first quiet tick
+queues an episode in the same moment the prompt appears, and under emulation
+that stands the whole block down for minutes.
 
 ### Storage (`src/store/`, `src/sysbox/`)
 

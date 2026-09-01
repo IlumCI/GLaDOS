@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>One model, several jobs: workflows in the kernel</title>
+<meta name="description" content="A manager delegating to workers inside a kernel that can only run one forward pass at a time. What that buys, what it cannot buy, and the measurement that said a role is a naming convention.">
+<meta name="keywords" content="multi-agent, workflow, planning, LLM agents, content addressing, Merkle tree, QDoRA adapter, autonomy, unattended, kernel">
+<link rel="canonical" href="https://glados.aperture.institute/wiki/work.html">
+<meta name="robots" content="index,follow,max-image-preview:large">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="GLaDOS">
+<meta property="og:title" content="One model, several jobs: workflows in the kernel">
+<meta property="og:description" content="A manager delegating to workers inside a kernel that can only run one forward pass at a time. What that buys, what it cannot buy, and the measurement that said a role is a naming convention.">
+<meta property="og:url" content="https://glados.aperture.institute/wiki/work.html">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="One model, several jobs: workflows in the kernel">
+<meta name="twitter:description" content="A manager delegating to workers inside a kernel that can only run one forward pass at a time. What that buys, what it cannot buy, and the measurement that said a role is a naming convention.">
+<meta property="og:image" content="https://glados.aperture.institute/img/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="The GLaDOS aperture mark">
+<meta name="twitter:image" content="https://glados.aperture.institute/img/og.png">
+<link rel="stylesheet" href="../style.css">
+<link rel="icon" type="image/svg+xml" href="../img/logo.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="../img/icon-32.png">
+<link rel="apple-touch-icon" sizes="180x180" href="../img/icon-180.png">
+<link rel="manifest" href="../site.webmanifest">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://glados.aperture.institute/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://glados.aperture.institute/wiki/"},{"@type":"ListItem","position":3,"name":"Workflows","item":"https://glados.aperture.institute/wiki/work.html"}]}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"One model, several jobs: workflows in the kernel","description":"A kernel with a language model inside it and no process isolation. What the model can reach, what stops it, and what to do when the machine will not come back cleanly.","url":"https://glados.aperture.institute/wiki/work.html","dateModified":"2026-09-01","keywords":"multi-agent, workflow, planning, LLM agents, content addressing, Merkle tree, QDoRA adapter, autonomy, unattended, kernel","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://glados.aperture.institute/"}}</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<div id="page">
+
+<!--masthead-->
+<div id="masthead">
+  <a class="mark" href="../"><img src="../img/wordmark.png" alt="Aperture Institute" width="666" height="169"></a>
+  <span class="sub">GLaDOS: an operating system in Rust, with a language model in the kernel</span>
+</div>
+<!--/masthead-->
+
+<!--bar-->
+<div id="tabs"><ul><li><a href="../">Summary</a></li><li><a href="../download/">Download</a></li><li><a href="../news/">News</a></li><li class="on"><a href="../wiki/">Wiki</a></li><li><a href="../screenshots/">Screenshots</a></li><li><a href="../archive/">Archive</a></li><li><a href="../token/">Token</a></li><li><a href="https://github.com/IlumCI/GLaDOS" rel="noopener">Source code</a></li></ul></div>
+<!--/bar-->
+
+<div id="body">
+<!--sidebar-->
+<div id="sidebar">
+<div class="box"><div class="t">Latest release</div><div class="bd"><table class="facts"><tr><td>Version</td><td>1.2.30</td></tr><tr><td>Released</td><td>2026-09-01</td></tr><tr><td>Images</td><td>3</td></tr></table><ul><li><a href="../download/">Download</a></li><li><a href="https://github.com/IlumCI/GLaDOS/releases/tag/v1.2.30">Release notes</a></li></ul></div></div>
+<div class="box"><div class="t">Project information</div><div class="bd"><table class="facts"><tr><td>Development status</td><td>3 - Alpha</td></tr><tr><td>Environment</td><td>Console, framebuffer</td></tr><tr><td>Intended audience</td><td>Developers, science/research</td></tr><tr><td>Licence</td><td>Other/proprietary, all rights reserved</td></tr><tr><td>Natural language</td><td>English</td></tr><tr><td>Operating system</td><td>x86-64 UEFI, bare metal</td></tr><tr><td>Programming language</td><td>Rust, Python</td></tr><tr><td>Topic</td><td>Operating systems, kernels, artificial intelligence</td></tr></table></div></div>
+<div class="box"><div class="t">Statistics</div><div class="bd"><table class="facts"><tr><td>Registered</td><td>2026-08-14</td></tr><tr><td>Releases</td><td>9</td></tr><tr><td>Downloads</td><td>395</td></tr><tr><td>Source</td><td>108 files, ~50,000 lines</td></tr></table></div></div>
+<div class="box"><div class="t">Developers</div><div class="bd"><table class="facts"><tr><td>IlumCI</td><td>project admin, developer</td></tr></table></div></div>
+<div class="box"><div class="t">Documentation</div><div class="bd"><ul><li><a href="../wiki/glados-os.html">GLaDOS OS</a></li><li><a href="../wiki/kernel.html">The kernel</a></li><li><a href="../wiki/model.html">The model</a></li><li><a href="../wiki/agent.html">The agent</a></li><li><a href="../wiki/rsi.html">Self-improvement</a></li><li><a href="../wiki/aiksi.html">Aiksi, the language</a></li><li><a href="../wiki/">All 18 articles</a></li></ul></div></div>
+</div>
+<!--/sidebar-->
+<div id="content">
+<div class="crumbs"><a href="../">GLaDOS</a> / <a href="./">Wiki</a> / Workflows</div>
+<div id="main">
+<h1>One model, several jobs</h1>
+<p>A manager handing work to specialists is the ordinary shape of a multi-agent system, and most of the reason people build one is to run the parts at the same time. That reason is unavailable here, and it is worth stating first because everything else follows from it.</p>
+<p>This kernel holds one engine and one holder for it. Two mutable borrows of the engine at once is undefined behaviour, and a decode slipped between two of somebody else's calls corrupts the cache, the position and the last token, which produces confident nonsense rather than an error. So the workers run one after another. What a workflow buys here is specialisation and a record of who did what.</p>
+<p>The other usual motive is already refuted in this tree. Three independent evaluators voting for a better answer was measured at 76.9% against 77.8% for the strongest one alone. What earns its place is their <em>disagreement</em>: where all three agree the answer is right 90.3% of the time, and where they split, 50%. A router that knows when it is guessing is worth more than a point of accuracy.</p>
+
+<h2 id="memory">Why memory is a filesystem</h2>
+<p>A manager and its workers need somewhere to put what has been decided and what came back. The obvious place is a conversation, and it is the one place this machine cannot afford. Parking a 512-slot cache writes thousands of blocks to the store, so swapping a context per worker costs more than the work does.</p>
+<p>So the memory is a graph in the namespace, and a context switch becomes a read. That is not a compromise: the namespace is already a content-addressed tree of nodes, which is exactly the thing that would otherwise have to be built. It comes with deduplication, copying in constant time, comparison of whole subtrees in one step, and versioning of the entire graph as a single hash.</p>
+<p>That last property is the one that matters. <strong>A run's root hash is a complete statement of what the run produced.</strong> Two runs of one workflow can be compared exactly, for nothing, by one comparison.</p>
+
+<h2 id="run">What a run is</h2>
+<p>A plan, the steps that have completed, and whatever is being built. The plan is a file, re-read at every step, so the schedule is a function of what is written rather than of anything held in memory. Two readers of the same plan pick the same next step.</p>
+<p>The plan uses parent pointers rather than indentation, because indentation stops being unambiguous the moment a goal contains a newline, and a goal is text a model wrote.</p>
+
+<h2 id="manager">The manager, and the only number that matters</h2>
+<p>An episode re-encodes its whole history at every step, so a run of N steps spends time proportional to N squared. The manager encodes the prompt once, leaves the engine in place, and decodes N actions from there. It then writes each decision into the plan.</p>
+<p>The consequence is the result. Measured on a four-step goal with a 0.6B model, planning cost four decodes and <strong>running the plan cost none at all</strong>. A worker holding a decision somebody already made is a dispatcher.</p>
+<p>A written action is checked against the trust level again at the moment it runs. A plan is a file, and a file can be edited by anything that can write, so admission is decided where the work happens.</p>
+
+<h2 id="derive">What two runs must agree about</h2>
+<p>The first version of this required two runs of one plan to produce the same graph, and the experiment said no. A run writes its own steps inside the directory a worker then lists, so the second run legitimately saw something the first had changed.</p>
+<p>The decision was identical both times. The observation could not be. So a step records the two separately: what the worker chose, which two runs must agree about, and what the world answered, which is allowed to differ. A comparison reports them apart, because decisions differing is a defect and observations differing is the world having moved.</p>
+
+<h2 id="roles">Roles, and the measurement that said no</h2>
+<p>A specialist here costs 23.7 KB, since a worker is the base model wearing a sparse adapter that can be attached and detached while it runs. The obvious next step is to train one per role from the transcripts the earlier work produced, and to put each through the same four judges the self-improvement loop uses.</p>
+<p>That was built and measured, and the answer is that it does not work. Across 24 workflows the base model answered 100% of the held-out decisions correctly before any training, and the paired test found no disagreement in either direction.</p>
+<p><strong>The reason is structural rather than a shortage of data.</strong> A transcript records what the model chose, and it chose by taking the highest-scoring option. So the label is the answer the model already gives, and training on it asks the adapter to reproduce whatever produced it. Keeping only the steps that succeeded does not escape that, because succeeding means the tool ran and says nothing about whether it was the right tool.</p>
+<p>On that evidence a role is a naming convention, and the page says so rather than reporting a number that would look better. A role adapter needs a label from somewhere else: a person naming the right tool, a judged outcome, or a larger model as the teacher. A transcript is none of those.</p>
+
+<h2 id="autonomy">Running while nobody is watching</h2>
+<p>A workflow may advance overnight, and doing so takes two separate things.</p>
+<p>The plan declares that it wants to. That alone grants nothing, and it cannot: a plan is a file, so a workflow that declared its own autonomy would be the thing being gated writing its own permission. The operator grants it by typing back part of the plan's address, which is the same idiom used for approving an application or a staged update. The command is not in the model's vocabulary at all, so no amount of decoding reaches it.</p>
+<p>The grant names the plan's contents, so editing a plan revokes it. It names the plan <em>without</em> its progress, and that detail is the whole feature: hashing the file as written would mean the first step revoked the grant that let it take that step, which is a gate that works exactly once while looking like it is holding.</p>
+<p>Unattended work runs read-only, and the enforcement is the grammar rather than a check afterwards. At that level a mutating tool has no spelling.</p>
+
+<h2 id="honest">What this does not do</h2>
+<p>It does not make the plans good. A 0.6B model asked to decompose a goal will copy the argument out of the worked example it was shown, and will once answer the stop word where an argument belongs. Those are real and are not plumbing, and tuning the prompt further against the same two checkpoints would only make the number better on the set it was tuned on.</p>
+<p>It does not run anything in parallel, and no amount of work on this part would change that. The engine has one holder.</p>
+<p>And it does not decide anything about correctness. The graph records what happened and makes it comparable. Whether the workflow was worth running is a separate question, and this machinery is deliberately silent about it.</p>
+</div>
+</div>
+
+</div>
+</div>
+
+<!--footer-->
+<div id="footer">
+  <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This project is independent and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
+  <p>Copyright 2026. All rights reserved. The source is published so it can be read; redistribution and derivatives need asking. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are other people's and are listed on <a href="../credits.html">the credits page</a>.</p>
+  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-09-01.</p>
+</div>
+<!--/footer-->
+
+</div>
+</body>
+</html>
