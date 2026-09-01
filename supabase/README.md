@@ -108,3 +108,63 @@ Both workflows put the image and its signature **before** the manifest, and
 `experimental.yml` writes its `builds` row last. A manifest naming an object
 that is not there yet is a window in which every machine that checks gets a 404
 for an update it was just told about.
+
+## The link function
+
+Wallet linking, added once the token launched as an ERC-20 in self-custody.
+Two POST steps, distinguished by the last path segment:
+
+```
+POST /functions/v1/link/nonce   {address}             -> {nonce, message, expires_at}
+POST /functions/v1/link/verify  {address, signature}  -> {code, address, balance}
+```
+
+Run migration `0002_link.sql` first; it adds `nonces` and three columns to
+`wallets`.
+
+### Secrets it needs
+
+| Where | Name | What |
+|---|---|---|
+| Supabase → Function secrets | `TOKEN_CONTRACT` | `0x3d609ecafc6aa7dba67dd7ad1d10b49c52d57777` |
+| | `TOKEN_RPC` | `https://rpc.mainnet.chain.robinhood.com` |
+| | `TOKEN_CHAIN_ID` | `4663` |
+| | `TOKEN_MIN_BALANCE` | `1000000000000000000000000` (1e6 tokens at 18 decimals) |
+| | `LINK_DOMAIN` | `glados.aperture.institute` |
+
+All five have defaults in the source, so the function runs without them. They
+exist so the threshold can move without a redeploy of anything the kernel
+trusts, and `channel` reads the same three, from the same place, so the door
+that issues a code and the door that honours one cannot disagree about what
+counts as holding.
+
+### Both functions deploy with `--no-verify-jwt`
+
+```
+supabase functions deploy link --no-verify-jwt
+supabase functions deploy channel --no-verify-jwt
+```
+
+Neither uses Supabase auth. `channel` authenticates with a device code it
+hashes itself, and `link` authenticates with a wallet signature. Leaving JWT
+verification on would put a second, unrelated credential in front of both, and
+the kernel has no way to present one.
+
+### What the signature does and does not prove
+
+It proves the signer holds the key for the recovered address. Nothing else --
+no chain, no balance, no token. The balance is a separate `eth_call`, which is
+why a wallet that has never added Robinhood Chain can still link.
+
+That balance is read server-side and re-read on every download rather than
+cached. A holding is not a permanent fact about a person, and a remembered one
+is a gate that stays open after the thing it gated on is gone.
+
+### The check on the address recovery
+
+There is no published test vector for it in this repository, and one this code
+generated for itself would prove nothing. The real check happens on first use:
+the wallet page displays the address the *wallet* reports beside the address
+the *server* recovered. MetaMask and Phantom are the independent
+implementations, and a wrong recovery shows up as two different addresses
+rather than as silence.

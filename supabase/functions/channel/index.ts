@@ -29,12 +29,21 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 // that can be run by node and cross-checked against the Python verifier
 // that mirrors the kernel's. See _shared/crosscheck.mjs.
 import { sha256, signedManifest } from "../_shared/gladosig.js";
+import { balanceOf } from "../_shared/evm.js";
 
 const TTL_SECONDS = 60 * 60;
 
 const url = Deno.env.get("SUPABASE_URL")!;
 const service = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const signingKey = Deno.env.get("UPDATE_SIGNING_KEY")!;
+
+// The same three values the link function reads, from the same environment, so
+// the threshold cannot drift between the door that issues a code and the door
+// that honours one.
+const TOKEN = (Deno.env.get("TOKEN_CONTRACT") ??
+  "0x3d609ecafc6aa7dba67dd7ad1d10b49c52d57777").toLowerCase();
+const RPC = Deno.env.get("TOKEN_RPC") ?? "https://rpc.mainnet.chain.robinhood.com";
+const MIN_BALANCE = BigInt(Deno.env.get("TOKEN_MIN_BALANCE") ?? "1000000000000000000000000");
 
 const db = createClient(url, service);
 
@@ -43,11 +52,19 @@ const db = createClient(url, service);
 /// Whether this device may have an experimental build.
 ///
 /// ONE function, one job, and the only thing that knows about entitlement.
-/// Its first implementation is a lookup in `allowlist`, because custody is not
-/// settled: if the token is held custodially, holders have no key to sign with
-/// and no address of their own, so there is nothing on a chain to read for
-/// them. When that is decided, a balance read goes here and nothing else in
-/// this file changes.
+/// Two ways in, and they answer different needs.
+///
+/// `allowlist` was the first implementation and stays: it hands access to a
+/// tester or a contributor without a wallet, and it is the only route for
+/// anyone holding custodially, who has no key to sign with. Rows go in by hand.
+///
+/// The balance read is the second, and it exists because the token launched as
+/// an ERC-20 in self-custody rather than inside a custodial app -- so holders
+/// do have keys, and `link` can prove an address. That was the open question
+/// this comment used to describe, and it is closed.
+///
+/// Everything else in this file was written not to care which of the two said
+/// yes, and still does not.
 async function entitled(codeHash: string): Promise<boolean> {
   const now = new Date().toISOString();
 
@@ -65,11 +82,30 @@ async function entitled(codeHash: string): Promise<boolean> {
     .eq("code_hash", codeHash)
     .maybeSingle();
   if (!device || device.revoked) return false;
+  if (!device.wallet) return false;
 
-  // The chain half. Not written, because which chain is not decided -- and a
-  // plausible-looking stub that returned true would be an open gate wearing
-  // the costume of a closed one.
-  return false;
+  // The chain half, written now that there is a chain to read.
+  //
+  // Re-read every time rather than trusting `wallets.linked_balance`. A
+  // holding is not a permanent fact about a person, and a cached one is a gate
+  // that stays open after the thing it was gating on is gone. It costs one
+  // eth_call against a public RPC per download, which is nothing beside the
+  // image that follows.
+  let balance: bigint;
+  try {
+    balance = await balanceOf(RPC, TOKEN, device.wallet);
+  } catch {
+    // An RPC that is unreachable is not a holder who sold. Refusing here is
+    // the safe direction -- the alternative is an outage that opens the gate
+    // -- but it is a refusal for a reason the holder cannot act on, so it is
+    // logged as itself rather than folded into "not entitled".
+    console.error("entitled: rpc unreachable for", device.wallet);
+    return false;
+  }
+  await db.from("wallets")
+    .update({ linked_balance: balance.toString(), last_checked: new Date().toISOString() })
+    .eq("address", device.wallet);
+  return balance >= MIN_BALANCE;
 }
 
 // --- the handler ---------------------------------------------------------
