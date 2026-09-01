@@ -155,22 +155,45 @@ decision can be routed through. Cost: refactoring, no new mechanism. This is
 the stage that decides whether the rest is worth building, because if the
 existing pattern does not generalise cleanly then a bigger one will not either.
 
-### Stage 1. A declared workflow, run by the agent task
+### Stage 1. A declared workflow, run by the agent task  (done)
 
-A workflow is data: a list of roles, each naming an agent and what it consumes.
-Stored content-addressed like everything else, so a run can be re-derived from
-its address.
+A workflow is data: a plan tree in the namespace, re-read at every step. The
+engine is claimed once for the whole run with `claim_engine()`, so no other
+task can interleave a decode into the middle of it.
 
-- The schedule is a pure function of the workflow and what has been recorded.
-- Every step's inputs and outputs go in a ledger, the way `godel` writes one
-  line per trial whether or not it adopted.
-- The engine is claimed once for the whole run with `claim_engine()`, so no
-  other task can interleave a decode into the middle of it.
+The worker is greedy throughout. `choose` at temperature 0 takes the argmax and
+`decode_args` always did, so the same goal against the same state produces the
+same action and the same argument string. It deliberately does not go through
+`agent::propose`, which forks three ways through `deliberate`: that is the
+better router for an operator asking once, and a fork is exactly what stops the
+same question getting the same answer twice.
 
-Verification is `differ`'s: run the same workflow twice and require agreement
-on value, step count and objects touched for every deterministic role. With a
-canary, because a harness that has never reported a difference is
-indistinguishable from one that compares nothing.
+#### What this stage got wrong, and what replaced it
+
+It was written requiring **the graph root hash to be identical across two
+runs**. That cannot hold, and the experiment said so: two runs of one plan
+produced different roots.
+
+The cause is worth keeping. A run writes its steps under `/ai/work/<run>`,
+which is inside the `/ai` a worker then lists, so the second run legitimately
+saw a directory hash the first had changed. The decision was identical both
+times. The observation was not, and could not be.
+
+**So a step records two things and only one of them is re-derivable.** `action`
+is what the worker chose and is what two runs must agree on. `observation` is
+what the world answered and is allowed to differ. `work cmp <a> <b>` reports
+them separately, because decisions differing is a defect and observations
+differing is the world having moved.
+
+Measured on two runs of one plan:
+
+    steps        1 and 1
+    decisions    agree -- the workflow is re-derivable over these inputs
+    observations differ, which is the world moving between runs
+
+The root hash is still exact and still worth having. It is a complete statement
+of what a run produced, which is a different claim from determinism, and
+conflating the two was the error.
 
 ### Stage 2. The first workflow worth having
 

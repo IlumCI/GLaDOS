@@ -194,12 +194,27 @@ impl Plan {
 
 // --- steps ----------------------------------------------------------------
 
+/// One completed step: what was decided, and what the world answered.
+///
+/// The two are separate fields because only one of them is re-derivable, and
+/// finding that out cost an experiment. Stage 1 was written expecting two runs
+/// of one plan to produce the same graph, and they did not: the run writes its
+/// own steps under `/ai/work`, which is inside the `/ai` a worker then lists,
+/// so the second run legitimately saw a directory hash the first had changed.
+///
+/// The decision was identical both times. The observation was not, and could
+/// not be, because the world had moved. So `action` is what the worker chose
+/// and is the thing two runs must agree on; `observation` is what came back
+/// and is allowed to differ.
 #[derive(Clone)]
 pub struct Step {
     pub role: String,
     pub goal: String,
+    /// The applet and its arguments, as decided. Re-derivable.
+    pub action: String,
     pub ok: bool,
-    pub summary: String,
+    /// What came back. A reading of a world that moves, so not re-derivable.
+    pub observation: String,
 }
 
 impl Step {
@@ -208,13 +223,15 @@ impl Step {
         s.push_str(if self.role.is_empty() { "-" } else { &self.role });
         s.push_str("\ngoal ");
         s.push_str(&one_line(&self.goal));
+        s.push_str("\naction ");
+        s.push_str(&one_line(&self.action));
         s.push_str("\noutcome ");
         s.push_str(if self.ok { "done" } else { "failed" });
-        // A blank line, then the summary takes the rest of the file. Summaries
-        // are prose and contain newlines; anything that had to parse past them
-        // would be a format that breaks on its own content.
+        // A blank line, then the observation takes the rest of the file.
+        // Observations are prose and contain newlines; anything that had to
+        // parse past them would break on its own content.
         s.push_str("\n\n");
-        s.push_str(&self.summary);
+        s.push_str(&self.observation);
         s
     }
 
@@ -222,17 +239,20 @@ impl Step {
         let (head, body) = text.split_once("\n\n")?;
         let mut role = String::new();
         let mut goal = String::new();
+        let mut action = String::new();
         let mut ok = None;
         for line in head.lines() {
             if let Some(r) = line.strip_prefix("role ") {
                 role = if r == "-" { String::new() } else { r.to_string() };
             } else if let Some(g) = line.strip_prefix("goal ") {
                 goal = g.to_string();
+            } else if let Some(a) = line.strip_prefix("action ") {
+                action = a.to_string();
             } else if let Some(o) = line.strip_prefix("outcome ") {
                 ok = Some(o == "done");
             }
         }
-        Some(Step { role, goal, ok: ok?, summary: body.to_string() })
+        Some(Step { role, goal, action, ok: ok?, observation: body.to_string() })
     }
 }
 
@@ -341,6 +361,145 @@ pub fn exists(run: &str) -> bool {
     sysbox::is_dir(&dir(run))
 }
 
+// --- the worker -----------------------------------------------------------
+
+/// Run one step, greedily, and record what happened.
+///
+/// The whole worker. It chooses an applet for the step's goal, walks out the
+/// arguments, dispatches, and writes a summary node.
+///
+/// **Everything in it is greedy on purpose.** `choose` at temperature 0 takes
+/// the argmax and `decode_args` always did, so given the same goal and the
+/// same engine state this produces the same action and the same argument
+/// string. That is what makes a run re-derivable, and re-derivability is what
+/// lets two runs be compared by one hash instead of by reading them.
+///
+/// It deliberately does not go through `agent::propose`. That path forks three
+/// ways through `deliberate` and is the better router for an operator asking
+/// for something once; here the same question must get the same answer twice,
+/// and a fork is exactly what stops that.
+///
+/// The trust level is the caller's. A worker cannot reach past it, because the
+/// grammar `choose` decodes under is built from what that level admits, so an
+/// applet outside it has no token sequence at all.
+pub fn run_step(run: &str, step: &PlanStep, trust: super::harness::Trust) -> Option<Step> {
+    let choice = super::harness::choose(&step.goal, trust, 0.0)?;
+    let name = choice.applet;
+    // Arguments only when the applet takes some. `check_args` already knows
+    // which do, so asking it is cheaper than a decode and cannot disagree with
+    // the check that follows.
+    let args = if crate::sysbox::check_args(name, "").is_ok() {
+        String::new()
+    } else {
+        super::harness::decode_args(&step.goal, name, true).unwrap_or_default()
+    };
+
+    let (ok, observation) = match crate::sysbox::check_args(name, &args) {
+        // A refusal is an observation, not an error. The next revision reads
+        // it, which is the same bargain `agent::episode` makes.
+        Err(why) => (false, format!("invalid arguments: {}", why)),
+        Ok(()) => {
+            crate::gfx::console::begin_capture();
+            let ran = crate::sysbox::dispatch(name, &args);
+            let mut obs = crate::gfx::console::end_capture().unwrap_or_default();
+            if !ran && obs.is_empty() {
+                obs = String::from("(applet did not run)");
+            }
+            (ran, obs)
+        }
+    };
+
+    let mut action = String::from(name);
+    if !args.is_empty() {
+        action.push(' ');
+        action.push_str(&args);
+    }
+
+    let s = Step {
+        role: step.role.clone(),
+        goal: step.goal.clone(),
+        action,
+        ok,
+        observation: String::from(observation.trim_end()),
+    };
+    append_step(run, &s)?;
+    Some(s)
+}
+
+/// Walk a run to completion, or until the budget is spent.
+///
+/// The engine is claimed once for the whole run rather than per step. Two
+/// `&mut Engine` is undefined behaviour and an interleaved decode corrupts the
+/// KV cache, so a run that released the engine between steps could have
+/// somebody else's conversation land in the middle of it.
+///
+/// Answers how many steps ran.
+pub fn run(run: &str, trust: super::harness::Trust, budget: usize) -> usize {
+    let Some(_claim) = super::claim_engine() else {
+        return 0;
+    };
+    let mut ran = 0;
+    for _ in 0..budget {
+        let Some(mut p) = plan(run) else { break };
+        let Some(next) = p.next().cloned() else { break };
+        let Some(done) = run_step(run, &next, trust) else { break };
+        // The plan is the schedule, so it has to record what happened or the
+        // next read picks the same step forever.
+        for st in p.steps.iter_mut() {
+            if st.id == next.id {
+                st.status = if done.ok { Status::Done } else { Status::Failed };
+            }
+        }
+        set_plan(run, &p);
+        ran += 1;
+    }
+    ran
+}
+
+/// What a run decided, in order.
+///
+/// The re-derivable half. Two runs of one plan over the same starting state
+/// must agree here; whether their observations agree is a question about the
+/// world, not about the workflow.
+pub fn decisions(run: &str) -> Vec<String> {
+    steps(run).into_iter().map(|s| s.action).collect()
+}
+
+/// How two runs compare.
+///
+/// Reported as two answers rather than one, because they mean different
+/// things. Decisions differing is a workflow that is not re-derivable and is a
+/// defect. Observations differing is the world having moved between the runs,
+/// which for a workflow that writes into the namespace it reads is not only
+/// possible but usual.
+pub struct Comparison {
+    pub steps_a: usize,
+    pub steps_b: usize,
+    pub decisions_agree: bool,
+    pub observations_agree: bool,
+    /// The first step whose decision differed, if any.
+    pub first_difference: Option<usize>,
+}
+
+pub fn compare(a: &str, b: &str) -> Comparison {
+    let (sa, sb) = (steps(a), steps(b));
+    let mut first = None;
+    for (i, (x, y)) in sa.iter().zip(sb.iter()).enumerate() {
+        if x.action != y.action {
+            first = Some(i);
+            break;
+        }
+    }
+    Comparison {
+        steps_a: sa.len(),
+        steps_b: sb.len(),
+        decisions_agree: first.is_none() && sa.len() == sb.len(),
+        observations_agree: sa.len() == sb.len()
+            && sa.iter().zip(sb.iter()).all(|(x, y)| x.observation == y.observation),
+        first_difference: first,
+    }
+}
+
 // --- selftest -------------------------------------------------------------
 
 /// Twelve claims, none of which need an engine.
@@ -403,16 +562,18 @@ pub fn selftest() -> bool {
     let s = Step {
         role: String::from("writer"),
         goal: String::from("draft it"),
+        action: String::from("write /tmp/x hello"),
         ok: true,
-        summary: String::from("wrote three lines\n\nand a blank one in the middle"),
+        observation: String::from("wrote three lines\n\nand a blank one in the middle"),
     };
     let sb = Step::parse(&s.render());
     claim("a step round-trips", sb.is_some());
-    if let Some(b) = sb {
+    if let Some(b) = &sb {
         claim(
-            "a summary containing a blank line survives whole",
-            b.summary == s.summary && b.ok,
+            "an observation containing a blank line survives whole",
+            b.observation == s.observation && b.ok,
         );
+        claim("the decision is kept apart from it", b.action == s.action);
     }
 
     // --- against a real namespace -----------------------------------------
@@ -437,8 +598,9 @@ pub fn selftest() -> bool {
             &Step {
                 role: String::from("checker"),
                 goal: String::from("check it"),
+                action: String::from("cat /tmp/x"),
                 ok: true,
-                summary: format!("looked it over{}", tail),
+                observation: format!("looked it over{}", tail),
             },
         );
         put_artifact(run, "out.txt", b"artifact bytes".to_vec());

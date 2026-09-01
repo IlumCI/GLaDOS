@@ -566,61 +566,12 @@ fn propose(goal: &str, steps: &[Step], ctx: &EpisodeCtx, trust: Trust) -> Option
         }
     }
 
-    let args = harness::with_alphabet(|_alphabet| {
-        with_engine(|e| {
-            let mut raw: Vec<u8> = Vec::new();
-            let eos = e.tok.eos();
-            let limit = e.model.cfg.seq_len;
-            let mut pos = e.pos;
-            if !from_context {
-                // Targeted prompt: the routed name is known, only its
-                // arguments are wanted.
-                let p = format!("Task: {}\n{} ", goal, name);
-                let tokens = e.tok.encode(&p, true, false);
-                pos = e.model.prefill(&mut e.state, &tokens, pos);
-            }
-            for _ in 0..ARGS_TOKEN_BUDGET {
-                if pos >= limit || raw.len() >= ARGS_CLIP_BYTES {
-                    break;
-                }
-                let vocab = e.tok.vocab_size();
-                let all: Vec<u32> = (0..vocab as u32).collect();
-                let next =
-                    sample::sample_among(&e.state.logits, &all, 0.0, 0.0, &mut e.rng)?;
-                if next == eos {
-                    break;
-                }
-                // The decoded bytes, not the raw vocabulary entry.
-                //
-                // `token_bytes` returns what the vocabulary literally holds,
-                // and on a v1 sentencepiece checkpoint a newline is stored as
-                // the six-character text `<0x0A>`. The stop below then never
-                // fires and every argument runs the full token budget. It is
-                // right on SmolLM2, which is v2 and byte-level -- so the bug is
-                // invisible in QEMU and live on Qwen3, which is the worst shape
-                // a defect can have in this tree. `Alphabet` is the decoded
-                // form and is already built once per tokenizer.
-                let piece = harness::alphabet_for(&e.tok).piece(next).to_vec();
-                let nl = piece.iter().position(|&b| b == b'\n');
-                raw.extend_from_slice(&piece[..nl.unwrap_or(piece.len())]);
-                let done = nl.is_some() || raw.len() >= ARGS_CLIP_BYTES;
-                e.model.forward(&mut e.state, next, pos);
-                pos += 1;
-                if done {
-                    break;
-                }
-            }
-            harness::invalidate_conversation(e);
-            Some(String::from_utf8_lossy(&raw).into_owned())
-        })
-    });
-    let args = match args {
-        // Same three layers as every with_alphabet/with_engine call: the
-        // closure's Option plus one wrapper each. The innermost is what the
-        // greedy argument walk produced.
-        Some(Some(Some(a))) => a,
-        _ => String::new(),
-    };
+    // The same walk a workflow worker runs, lifted into `harness` so the two
+    // cannot drift. It was always greedy; only the `run` path above samples.
+    let args = harness::decode_args(goal, &name, !from_context);
+    // `decode_args` unwraps the with_alphabet/with_engine layers itself, so
+    // what arrives here is the argument string or nothing.
+    let args = args.unwrap_or_default();
     Some((name, args))
 }
 

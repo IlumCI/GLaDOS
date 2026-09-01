@@ -683,6 +683,105 @@ fn work_cmd(rest: &str) {
         return;
     }
 
+    // `work new <run> <goal>` -- a run with one step, which is what there is
+    // to make until a manager exists to decompose anything.
+    if let Some(arg) = rest.strip_prefix("new ") {
+        let (name, goal) = match arg.trim().split_once(' ') {
+            Some((n, g)) => (n.trim(), g.trim()),
+            None => {
+                kprintln!("  usage: work new <run> <goal>");
+                return;
+            }
+        };
+        let plan = work::Plan {
+            goal: alloc::string::String::from(goal),
+            steps: alloc::vec![work::PlanStep {
+                id: 1,
+                parent: None,
+                status: work::Status::Todo,
+                role: alloc::string::String::from("worker"),
+                goal: alloc::string::String::from(goal),
+            }],
+        };
+        if work::set_plan(name, &plan) {
+            kprintln!("  {}  one step, todo", name);
+        } else {
+            kprintln!("  could not write the plan");
+        }
+        return;
+    }
+
+    // `work cmp <a> <b>` -- the Stage 1 check, and it reports two answers
+    // because they mean different things.
+    if let Some(arg) = rest.strip_prefix("cmp ") {
+        let Some((a, b)) = arg.trim().split_once(' ') else {
+            kprintln!("  usage: work cmp <a> <b>");
+            return;
+        };
+        let (a, b) = (a.trim(), b.trim());
+        let c = work::compare(a, b);
+        console::set_color(YELLOW);
+        kprintln!("[work cmp] {} against {}", a, b);
+        console::set_color(WHITE);
+        kprintln!("  steps        {} and {}", c.steps_a, c.steps_b);
+        if c.decisions_agree {
+            console::set_color(LTGREEN);
+            kprintln!("  decisions    agree -- the workflow is re-derivable over these inputs");
+        } else {
+            console::set_color(LTRED);
+            match c.first_difference {
+                Some(i) => kprintln!("  decisions    DIFFER, first at step {}", i),
+                None => kprintln!("  decisions    DIFFER in count"),
+            }
+        }
+        console::set_color(WHITE);
+        if c.observations_agree {
+            kprintln!("  observations agree");
+        } else {
+            // Not a failure. A run writes its own steps under /ai/work, which
+            // is inside the /ai a worker lists, so the second run sees a
+            // directory hash the first one changed.
+            kprintln!("  observations differ, which is the world moving between runs");
+        }
+        return;
+    }
+
+    // `work run <run> [budget]`
+    if let Some(arg) = rest.strip_prefix("run ") {
+        let mut it = arg.split_whitespace();
+        let Some(name) = it.next() else {
+            kprintln!("  usage: work run <run> [budget]");
+            return;
+        };
+        let budget = it.next().and_then(|w| w.parse::<usize>().ok()).unwrap_or(4);
+        if work::plan(name).is_none() {
+            console::set_color(LTRED);
+            kprintln!("  no such run: {}", name);
+            console::set_color(WHITE);
+            return;
+        }
+        if crate::ai::mind_busy() {
+            kprintln!("  the mind is busy -- wait for it to finish first");
+            return;
+        }
+        // Read-only, and the operator types the word to widen it. Same shape
+        // as `act` and for the same reason: the grammar is what enforces it,
+        // so a worker at this level has no token sequence for a mutating
+        // applet rather than being refused after choosing one.
+        let trust = crate::ai::harness::Trust::ReadOnly;
+        console::set_color(YELLOW);
+        kprintln!("[work run] {}  budget {}  trust read-only", name, budget);
+        console::set_color(WHITE);
+        let n = work::run(name, trust, budget);
+        kprintln!("  {} step(s) ran", n);
+        if let Some(h) = work::root(name) {
+            // The number the whole design turns on. Two runs of one plan that
+            // did the same thing print the same line here.
+            kprintln!("  root {}", crate::ai::voter::hex(&h));
+        }
+        return;
+    }
+
     let Some(plan) = work::plan(rest) else {
         console::set_color(LTRED);
         kprintln!("  no such run: {}", rest);
@@ -727,11 +826,14 @@ fn work_cmd(rest: &str) {
         kprintln!("  what happened");
         console::set_color(WHITE);
         for (i, st) in steps.iter().enumerate() {
+            // The decision on its own line, because it is the half two runs
+            // must agree on and the half a reader is checking.
             kprintln!("  {:>4} {} {} -- {}", i,
                       if st.ok { "ok  " } else { "FAIL" },
                       if st.role.is_empty() { "-" } else { &st.role },
                       st.goal);
-            for line in st.summary.lines().take(3) {
+            kprintln!("       > {}", st.action);
+            for line in st.observation.lines().take(3) {
                 kprintln!("       | {}", line);
             }
         }

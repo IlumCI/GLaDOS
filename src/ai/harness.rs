@@ -530,6 +530,82 @@ fn feature_hidden(e: &mut super::Engine, task: &str) -> Option<Vec<f32>> {
 /// makes the next generation start clean, which is the honest outcome, and is
 /// cheap next to snapshotting a cache purely to restore something the operator
 /// was probably not still using.
+/// Longest argument string accepted from free generation.
+pub(crate) const ARGS_CLIP_BYTES: usize = 96;
+
+/// Tokens the model may spend on arguments before being cut off.
+pub(crate) const ARGS_TOKEN_BUDGET: usize = 16;
+
+/// Walk out an applet's arguments, greedily.
+///
+/// Lifted out of `agent::propose` so the episode loop and a workflow worker
+/// run the same walk rather than two that are supposed to agree. `model.rs`
+/// makes that objection twice and it applies here: the two would drift, and
+/// the drift would show up as a worker that spells an argument differently
+/// from the agent for reasons nobody could see.
+///
+/// **Greedy, and it always was.** `sample_among` at temperature 0 takes the
+/// argmax and never consults the RNG, so given the same prompt this answers
+/// the same string every time. That is what lets a workflow built on it be
+/// re-derived.
+///
+/// `prefill` is false when the caller has already left the engine positioned
+/// after the chosen name, which is the branch `propose` takes when the choice
+/// came from a deliberation rather than from a reflex.
+pub(crate) fn decode_args(goal: &str, name: &str, prefill: bool) -> Option<String> {
+    with_alphabet(|_alphabet| {
+        with_engine(|e| {
+            let mut raw: Vec<u8> = Vec::new();
+            let eos = e.tok.eos();
+            let limit = e.model.cfg.seq_len;
+            let mut pos = e.pos;
+            if prefill {
+                // Targeted prompt: the routed name is known, only its
+                // arguments are wanted.
+                let p = alloc::format!("Task: {}\n{} ", goal, name);
+                let tokens = e.tok.encode(&p, true, false);
+                pos = e.model.prefill(&mut e.state, &tokens, pos);
+            }
+            for _ in 0..ARGS_TOKEN_BUDGET {
+                if pos >= limit || raw.len() >= ARGS_CLIP_BYTES {
+                    break;
+                }
+                let vocab = e.tok.vocab_size();
+                let all: Vec<u32> = (0..vocab as u32).collect();
+                let next =
+                    super::sample::sample_among(&e.state.logits, &all, 0.0, 0.0, &mut e.rng)?;
+                if next == eos {
+                    break;
+                }
+                // The decoded bytes, not the raw vocabulary entry.
+                //
+                // `token_bytes` returns what the vocabulary literally holds,
+                // and on a v1 sentencepiece checkpoint a newline is stored as
+                // the six-character text `<0x0A>`. The stop below then never
+                // fires and every argument runs the full token budget. It is
+                // right on SmolLM2, which is v2 and byte-level, so the bug is
+                // invisible in QEMU and live on Qwen3 -- the worst shape a
+                // defect can have in this tree.
+                let piece = alphabet_for(&e.tok).piece(next).to_vec();
+                let nl = piece.iter().position(|&b| b == b'\n');
+                raw.extend_from_slice(&piece[..nl.unwrap_or(piece.len())]);
+                let done = nl.is_some() || raw.len() >= ARGS_CLIP_BYTES;
+                e.model.forward(&mut e.state, next, pos);
+                pos += 1;
+                if done {
+                    break;
+                }
+            }
+            invalidate_conversation(e);
+            Some(alloc::string::String::from_utf8_lossy(&raw).into_owned())
+        })
+    })
+    // Three layers, as every with_alphabet/with_engine pair here produces:
+    // the closure's Option plus one wrapper each.
+    .flatten()
+    .flatten()
+}
+
 pub(crate) fn invalidate_conversation(e: &mut super::Engine) {
     e.pos = 0;
     e.last_token = super::tokenizer::BOS;
