@@ -695,6 +695,10 @@ fn work_cmd(rest: &str) {
         };
         let plan = work::Plan {
             goal: alloc::string::String::from(goal),
+            // Attended. Autonomy is declared afterwards, deliberately, so
+            // that granting it is a second decision about a plan somebody has
+            // read rather than a flag on the command that created it.
+            autonomy: work::Autonomy::Attended,
             steps: alloc::vec![work::PlanStep {
                 id: 1,
                 parent: None,
@@ -740,6 +744,215 @@ fn work_cmd(rest: &str) {
             Some((n, calls)) => {
                 kprintln!("  {} step(s) planned, {} decode call(s)", n, calls);
                 kprintln!("  the workers that run them cost no model calls at all");
+            }
+        }
+        return;
+    }
+
+    // `work autonomy <run> attended|unattended` -- the declaration half.
+    if let Some(arg) = rest.strip_prefix("autonomy ") {
+        let Some((name, word)) = arg.trim().split_once(' ') else {
+            kprintln!("  usage: work autonomy <run> attended|unattended");
+            return;
+        };
+        let (name, word) = (name.trim(), word.trim());
+        let want = match word {
+            "unattended" => work::Autonomy::Unattended,
+            "attended" => work::Autonomy::Attended,
+            _ => {
+                kprintln!("  usage: work autonomy <run> attended|unattended");
+                return;
+            }
+        };
+        let Some(mut p) = work::plan(name) else {
+            console::set_color(LTRED);
+            kprintln!("  no such run: {}", name);
+            console::set_color(WHITE);
+            return;
+        };
+        p.autonomy = want;
+        if !work::set_plan(name, &p) {
+            kprintln!("  could not write the plan");
+            return;
+        }
+        kprintln!("  {} is now {}", name, word);
+        // Declaring is half of it, and the half a plan can do to itself. Say
+        // the other half out loud rather than leaving an operator to find out
+        // that nothing happened overnight.
+        if want == work::Autonomy::Unattended {
+            match work::intent_hash(name) {
+                Some(h) => kprintln!(
+                    "  it advances unattended once granted: work trust {} {}",
+                    name,
+                    &crate::ai::voter::hex(&h)[..8]
+                ),
+                None => kprintln!("  it advances unattended once granted"),
+            }
+        }
+        return;
+    }
+
+    // `work check <run>` -- what a grant would be approving.
+    if let Some(arg) = rest.strip_prefix("check ") {
+        let name = arg.trim();
+        let Some(f) = work::check(name) else {
+            console::set_color(LTRED);
+            kprintln!("  no such run: {}", name);
+            console::set_color(WHITE);
+            return;
+        };
+        console::set_color(YELLOW);
+        kprintln!("[work check] {}", name);
+        console::set_color(WHITE);
+        let mark = |b: bool| if b { "pass" } else { "FAIL" };
+        kprintln!("  declared    {}  (the plan says so)", mark(f.declared));
+        match &f.refused {
+            None => kprintln!("  admissible  pass  (every action a read-only worker can reach)"),
+            Some(a) => kprintln!("  admissible  FAIL  ({})", a),
+        }
+        kprintln!("  acyclic     {}  (ids unique, every parent present)", mark(f.acyclic));
+        kprintln!("  bounded     {}  ({} step(s), one per quiet tick)", mark(f.bounded), f.steps);
+        if let Some(h) = work::intent_hash(name) {
+            // The address a grant names, which is the plan without its
+            // statuses. Printed so what was approved can be checked later.
+            kprintln!("  intent      {}", crate::ai::voter::hex(&h));
+        }
+        if f.fit {
+            console::set_color(LTGREEN);
+            kprintln!("  fit to advance unattended");
+        } else {
+            console::set_color(LTRED);
+            kprintln!("  not fit; a grant would be refused");
+        }
+        console::set_color(WHITE);
+        return;
+    }
+
+    // `work trust <run> <hex8>` -- the operator's half.
+    //
+    // Eight characters of the intent typed back, the `update stage` idiom.
+    // Shell-only and never an applet: `work` is absent from `sysbox::APPLETS`,
+    // so no grammar can spell it and the model cannot reach this at all.
+    if let Some(arg) = rest.strip_prefix("trust ") {
+        let Some((name, typed)) = arg.trim().split_once(' ') else {
+            kprintln!("  usage: work trust <run> <first 8 of the intent>");
+            kprintln!("  `work check <run>` prints it");
+            return;
+        };
+        let (name, typed) = (name.trim(), typed.trim());
+        let Some(f) = work::check(name) else {
+            console::set_color(LTRED);
+            kprintln!("  no such run: {}", name);
+            console::set_color(WHITE);
+            return;
+        };
+        if !f.fit {
+            console::set_color(LTRED);
+            kprintln!("  refused: this plan is not fit to advance unattended");
+            console::set_color(WHITE);
+            kprintln!("  `work check {}` says which check failed", name);
+            return;
+        }
+        let Some(h) = work::intent_hash(name) else {
+            kprintln!("  the plan has no address");
+            return;
+        };
+        let hex = crate::ai::voter::hex(&h);
+        if typed.len() < 8 || !hex.starts_with(typed) {
+            console::set_color(LTRED);
+            kprintln!("  that is not this plan's intent");
+            console::set_color(WHITE);
+            kprintln!("  wanted the first 8 of {}", hex);
+            return;
+        }
+        if work::grant(&h) {
+            console::set_color(LTGREEN);
+            kprintln!("  granted {}", hex);
+            console::set_color(WHITE);
+            // The property that makes the grant worth anything, said where
+            // somebody will read it.
+            kprintln!("  editing the plan revokes this, because the grant names its contents");
+        } else {
+            kprintln!("  could not write the grant");
+        }
+        return;
+    }
+
+    if let Some(arg) = rest.strip_prefix("untrust ") {
+        let want = arg.trim();
+        let all = work::grants();
+        let hits: Vec<&String> = all.iter().filter(|g| g.starts_with(want)).collect();
+        // Refused rather than resolved to the first match, the rule
+        // `skill untrust` already follows.
+        if hits.len() != 1 {
+            console::set_color(LTRED);
+            kprintln!("  {}", if hits.is_empty() { "no grant matches" } else { "ambiguous" });
+            console::set_color(WHITE);
+            return;
+        }
+        let mut h = [0u8; 32];
+        let bytes = hits[0].as_bytes();
+        for (i, b) in h.iter_mut().enumerate() {
+            let hi = (bytes[i * 2] as char).to_digit(16).unwrap_or(0) as u8;
+            let lo = (bytes[i * 2 + 1] as char).to_digit(16).unwrap_or(0) as u8;
+            *b = (hi << 4) | lo;
+        }
+        if work::revoke(&h) {
+            kprintln!("  revoked {}", hits[0]);
+        } else {
+            kprintln!("  could not write the grants");
+        }
+        return;
+    }
+
+    if rest == "trusted" {
+        let all = work::grants();
+        if all.is_empty() {
+            kprintln!("  nothing is granted; no workflow advances unattended");
+            return;
+        }
+        console::set_color(YELLOW);
+        kprintln!("[work trusted] {}", all.len());
+        console::set_color(WHITE);
+        for g in all {
+            // Which run still hashes to it, if any. A grant outliving its plan
+            // is the ordinary case after an edit and is worth seeing.
+            let owner = work::runs()
+                .into_iter()
+                .find(|r| work::intent_hash(r).map(|h| crate::ai::voter::hex(&h)) == Some(g.clone()));
+            match owner {
+                Some(r) => kprintln!("  {}  {}", &g[..16], r),
+                None => kprintln!("  {}  (no run has this intent any more)", &g[..16]),
+            }
+        }
+        return;
+    }
+
+    // `work night` -- take the step the quiet tick would take, now.
+    //
+    // The same call `initiative`'s sleep branch makes, so what an operator
+    // sees here is what the night does. `godel next` exists for the same
+    // reason and has to decline to act, because finding out would cost the
+    // night; here a granted step is a dispatch and costs nothing, so this one
+    // takes it.
+    if rest == "night" {
+        if crate::ai::mind_busy() {
+            kprintln!("  the mind is busy -- wait for it to finish first");
+            return;
+        }
+        console::set_color(YELLOW);
+        kprintln!("[work night]");
+        console::set_color(WHITE);
+        match work::tick_unattended(true) {
+            None => {
+                kprintln!("  nothing advanced");
+                kprintln!("  a run needs `work autonomy <run> unattended` and then `work trust`");
+            }
+            Some((name, decoded)) => {
+                console::set_color(LTGREEN);
+                kprintln!("  {} advanced one step, {}", name,
+                          if decoded { "a decode" } else { "no model call" });
+                console::set_color(WHITE);
             }
         }
         return;

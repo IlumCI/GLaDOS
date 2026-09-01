@@ -171,7 +171,7 @@ pub const SUITES: &[Suite] = &[
     },
     Suite {
         name: "work",
-        about: "a plan round-trips, a goal cannot inject a step, and a child waits for its parent",
+        about: "a plan round-trips, a run splits by run, and an attended plan is never fit to run alone",
         run: crate::ai::work::selftest,
     },
     Suite {

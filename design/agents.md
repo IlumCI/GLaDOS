@@ -343,19 +343,106 @@ And one economy worth naming: the adapter is attached only around a step the
 worker actually decides. A pre-decided step decodes nothing, so a swap around
 one pays for a specialist to read out somebody else's decision.
 
-### Stage 4. Autonomy, declared per workflow
+### Stage 4. Autonomy, declared per workflow  (done)
 
-A workflow declares whether it may run unattended. Unattended runs at
-`Trust::ReadOnly`, attended may be `Full`. The declaration is part of what is
-judged before a workflow is allowed to run on its own, which is the shape
-`app::manifest`'s `raw` bit and `skill trust` already use.
+A workflow that advances while nobody is watching needs two things, and taking
+only one of them is a gate that does not hold.
 
-Escalation belongs here rather than in a stage of its own. Letting a panel's
-disagreement decide whether to spend a model call is the gate pattern already
-proven on routing, and the number to report for it is model calls per completed
-task against a baseline that asks the model at every step. Stage 2 already
-drove that ratio to zero for pre-decided steps, so what is left for escalation
-is deciding when a plan needs re-planning, which is a question about autonomy.
+**The plan declares it.** `work autonomy <run> unattended` writes a line into
+the plan. That line alone grants nothing, and it cannot: a plan is a file, and
+a file can be edited by anything that can write, so a workflow declaring its
+own autonomy would be the thing being gated writing its own permission.
+
+**The operator grants it.** `work trust <run> <hex8>` takes eight characters of
+the plan's address typed back, the `update stage` idiom. `work` is absent from
+`sysbox::APPLETS`, so no decoding grammar can spell it and the model has no
+route to this command at all. Same reason `app trust` and `skill trust` are
+shell-only.
+
+#### The address a grant names
+
+A grant is pinned to the plan's contents, so editing a plan by one byte revokes
+it. That is the property `app::manifest` gets from putting the request inside
+the hash.
+
+**It is the plan without its statuses, and that detail is the whole feature.**
+Hashing the file as written would mean the first step revoked the grant that
+let it take that step, which is a gate that works exactly once and looks like
+it is holding. Measured, across one granted step:
+
+    before   root  bf6e9cb8ab9ed61a...
+    after    root  8c10db9667881103...   the run's address moved
+             work trusted -> 2b25ab746a0109c6  r1   the grant still names it
+
+Change what the workflow will do and the grant stops matching:
+
+    work autonomy r1 attended
+    work trusted -> 2b25ab746a0109c6  (no run has this intent any more)
+
+#### What is checked before a grant, and again at every step
+
+`work check <run>` is static and cheap, which is what lets it run before every
+unattended step instead of once at the grant. A grant is evidence the operator
+approved an intent. It is not evidence the intent is still admissible, because
+`admitted` is built from the live applet table and a build can narrow it.
+
+| | |
+|---|---|
+| declared | the plan says unattended |
+| admissible | every pre-decided action names an applet a read-only worker can reach |
+| acyclic | ids unique, every parent present, every chain reaching a root |
+| bounded | between one step and 64 |
+
+A worker-decided step needs no admissibility check, and the reason is the one
+this whole tree rests on: `choose` decodes under a grammar built from the same
+trust level, so an applet outside it has no token sequence and is unspellable.
+The check exists for pre-decided actions, which are the one place in a plan
+where an applet is named with no grammar in front of it.
+
+`bounded` is 64 because an unattended workflow advances one step per quiet
+tick, ten minutes apart, so a four-hour window is about 24 steps and 64 is
+under three nights. A plan of several hundred steps is months of them, which is
+nothing anybody declared when they granted it.
+
+#### The tie the sleep branch already lost once
+
+`initiative`'s quiet block runs one expensive job per tick and `godel` wins the
+tie. That file records what happened the last time a job was added behind that
+rule: the adapter grid was walked to exhaustion while every other axis was
+never tried unattended at all.
+
+So this branch is shaped differently. **A pre-decided step is not gated on
+`spent`**, because it is not competing for the thing the other two compete for.
+Stage 2 measured `work run` at zero model calls for a planned step, and what it
+spends is one applet's worth of engine claim. A step the worker still has to
+decide is a model call, so that one waits for a tick with its expensive job
+unspent.
+
+Verified under QEMU at 03:00, `godel off`, with a granted single-step run:
+
+    [t3 +90s] author: hour 3, journal queued
+    [t3 +90s] work:   hour 3, r1 advanced one step, a decode
+
+Both on one tick, which is the arrangement a third `if !spent` would have made
+impossible.
+
+#### What `work night` is for
+
+The same call the sleep branch makes, available at the prompt. `godel next`
+exists for the same reason and has to decline to act, because finding out what
+it would do tonight costs the night. Here a granted step is a dispatch, so this
+one takes it.
+
+Every arm of the gate was exercised through it, in order: no run, a run that is
+attended, one declared and not granted, one granted (advances), nothing left
+ready, and a plan edited after the grant.
+
+One thing worth knowing before anybody tries to reproduce the journal line
+above. The first quiet tick queues an episode in the same moment the prompt
+appears, and under emulation two constrained decodes run for minutes while
+`agent::idle()` stands the whole quiet block down. Reaching the branch took 200
+filler commands and 90 seconds of guest time. `work night` is the reason that
+is a footnote rather than the test.
 
 ## What to measure, and what would count as failure
 

@@ -89,6 +89,19 @@ const GODEL_GAP_S: u64 = 3600;
 /// tuning one by breaking the other.
 const AUTHOR_GAP_S: u64 = 3600;
 
+/// How long between steps of a workflow the operator declared unattended.
+///
+/// Ten minutes rather than an hour, because a pre-decided step costs no model
+/// call at all -- Stage 2 measured `work run` at zero for a planned step, and
+/// what it spends is one applet's worth of engine claim. It still needs a gap:
+/// the sleep branch fires on any tick, and a plan advancing once a second is a
+/// plan nobody watched.
+///
+/// The two numbers are chosen together. At this spacing a four-hour quiet
+/// window advances about 24 steps, so `work::MAX_UNATTENDED` at 64 is under
+/// three nights of work rather than an open-ended one.
+const WORK_GAP_S: u64 = 600;
+
 /// Steps an unattended run gets.
 ///
 /// Smaller than the operator's, and for a reason that is not timidity: nobody
@@ -144,6 +157,7 @@ static PREV_TICK_TOUCHED: Racy<bool> = Racy::new(false);
 static LAST_EPISODE_AT: Racy<u64> = Racy::new(0);
 static LAST_GODEL_AT: Racy<u64> = Racy::new(0);
 static LAST_AUTHOR_AT: Racy<u64> = Racy::new(0);
+static LAST_WORK_AT: Racy<u64> = Racy::new(0);
 
 /// Claimed while an unattended job is in flight.
 ///
@@ -235,6 +249,16 @@ fn since_author(now_s: u64) -> u64 {
         // Never run is readiness, not a cooldown in force -- the same reading
         // the episode clock gives zero.
         AUTHOR_GAP_S
+    } else {
+        now_s.saturating_sub(last)
+    }
+}
+
+/// Seconds since the last unattended workflow step.
+fn since_work(now_s: u64) -> u64 {
+    let last = unsafe { *LAST_WORK_AT.get() };
+    if last == 0 {
+        WORK_GAP_S
     } else {
         now_s.saturating_sub(last)
     }
@@ -643,6 +667,36 @@ fn tick_inner(forced: bool) {
                                 if ok { "queued" } else { "REFUSED by queue" }
                             ));
                         }
+                    }
+                }
+                // A workflow the operator declared and granted, one step.
+                //
+                // **Not gated on `spent` when the step is pre-decided**, and
+                // that is the whole reason this branch is shaped differently
+                // from the two above it. Appending a third `if !spent` would
+                // recreate the failure this file already records: godel won
+                // the tie every night, so the job behind it was never tried
+                // unattended at all. A pre-decided step is not competing for
+                // the same resource -- it is a dispatch, `work run` reports
+                // zero model calls for one, and the engine claim it takes is
+                // the length of an applet.
+                //
+                // A step the worker still has to decide *is* a model call, so
+                // it waits for a tick that has not spent its expensive job.
+                // The trust level is not passed in: `tick_unattended` fixes it
+                // at read-only, because the grammar is what enforces it and a
+                // caller choosing would be the wrong place for that decision.
+                if since_work(now_s) >= WORK_GAP_S {
+                    if let Some((name, decoded)) = super::work::tick_unattended(!spent) {
+                        unsafe { *LAST_WORK_AT.get() = now_s };
+                        journal_push(format!(
+                            "[t{} +{}s] work: hour {}, {} advanced one step, {}",
+                            TICKS.load(Ordering::Relaxed),
+                            now_s,
+                            hour,
+                            name,
+                            if decoded { "a decode" } else { "no model call" }
+                        ));
                     }
                 }
                 NIGHT_BUSY.store(false, Ordering::Release);

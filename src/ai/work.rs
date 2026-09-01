@@ -70,6 +70,20 @@ const ROLES: &str = "/ai/roles";
 /// one.
 const MIN_ROLE_EXAMPLES: usize = 4 * super::godel::MIN_FIXED;
 
+/// Grants: which plans the operator approved to advance unattended.
+///
+/// One hex line per approved intent, the shape `/app/grants` uses. Not under
+/// `/ai/work`, for the same reason the role sets are not: `runs()` answers
+/// that directory's children.
+const GRANTS: &str = "/ai/autonomy";
+
+/// Steps a plan may hold and still be granted unattended.
+///
+/// An unattended workflow advances one step per quiet tick, and a tick is
+/// hourly inside a four-hour window. So a plan of a few hundred steps is
+/// months of nights, which is nothing anybody declared when they granted it.
+const MAX_UNATTENDED: usize = 64;
+
 // --- the plan -------------------------------------------------------------
 
 #[derive(Clone, Copy, PartialEq)]
@@ -118,9 +132,23 @@ pub struct PlanStep {
     pub goal: String,
 }
 
+/// Whether a workflow may advance while nobody is watching.
+///
+/// Declared by the plan and granted by the operator, and it takes both. The
+/// declaration alone cannot be the gate: a plan is a file, and a file can be
+/// edited by anything that can write, so a workflow that granted itself
+/// autonomy by writing a line into itself would have defeated the gate by
+/// using it. That is the argument `app trust` and `skill trust` already make.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Autonomy {
+    Attended,
+    Unattended,
+}
+
 #[derive(Clone)]
 pub struct Plan {
     pub goal: String,
+    pub autonomy: Autonomy,
     pub steps: Vec<PlanStep>,
 }
 
@@ -154,6 +182,13 @@ impl Plan {
         let mut s = String::from("work 1\ngoal ");
         s.push_str(self.goal.trim());
         s.push('\n');
+        // Rendered only when it is not the default, which is the lesson
+        // `Variant::render` records: a field written unconditionally
+        // re-addresses every object that already exists, and here that would
+        // change the root hash of every run ever stored.
+        if self.autonomy == Autonomy::Unattended {
+            s.push_str("autonomy unattended\n");
+        }
         for st in &self.steps {
             s.push_str("step ");
             s.push_str(&st.id.to_string());
@@ -182,6 +217,7 @@ impl Plan {
 
     fn parse(text: &str) -> Option<Plan> {
         let mut goal = String::new();
+        let mut autonomy = Autonomy::Attended;
         let mut steps = Vec::new();
         let mut seen_magic = false;
         for line in text.lines() {
@@ -192,6 +228,17 @@ impl Plan {
             }
             if let Some(rest) = line.strip_prefix("goal ") {
                 goal = rest.to_string();
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("autonomy ") {
+                // Anything that is not the word reads as attended. The
+                // conservative direction, and the only one available: a plan
+                // whose declaration cannot be read is a plan nobody declared.
+                autonomy = if rest.trim() == "unattended" {
+                    Autonomy::Unattended
+                } else {
+                    Autonomy::Attended
+                };
                 continue;
             }
             if let Some(rest) = line.strip_prefix("step ") {
@@ -223,7 +270,7 @@ impl Plan {
         if !seen_magic {
             return None;
         }
-        Some(Plan { goal, steps })
+        Some(Plan { goal, autonomy, steps })
     }
 }
 
@@ -601,7 +648,10 @@ pub fn decompose(
         })
         .collect();
     let n = steps.len();
-    let plan = Plan { goal: String::from(goal), steps };
+    // Attended. A manager that could declare its own plan autonomous would
+    // be the model deciding when nobody watches it, which is the one thing
+    // the grant exists to keep out of the model's hands.
+    let plan = Plan { goal: String::from(goal), autonomy: Autonomy::Attended, steps };
     if !set_plan(run, &plan) {
         return None;
     }
@@ -650,6 +700,230 @@ pub fn compare(a: &str, b: &str) -> Comparison {
             && sa.iter().zip(sb.iter()).all(|(x, y)| x.observation == y.observation),
         first_difference: first,
     }
+}
+
+// --- autonomy -------------------------------------------------------------
+//
+// A workflow that may advance while nobody is watching needs two things and
+// not one: the plan declares it, and the operator grants it. Either alone is
+// a gate that does not hold. A declaration alone is the file granting itself,
+// and a grant alone would apply to whatever the file says next.
+
+/// The part of a plan a grant is pinned to.
+///
+/// Everything except each step's status. A grant approves what a workflow will
+/// do, and status is how far it got, so hashing the whole file would mean the
+/// first step revoked the grant that let it take that step. A gate that works
+/// exactly once is worse than none, because it looks like it is holding.
+fn intent(plan: &Plan) -> String {
+    let mut p = plan.clone();
+    for st in p.steps.iter_mut() {
+        st.status = Status::Todo;
+    }
+    p.render()
+}
+
+/// The address a grant names.
+///
+/// Editing a plan by one byte revokes its grant by construction, which is the
+/// property `app::manifest` gets from putting the request inside the hash and
+/// `skill` gets from hashing the file.
+pub fn intent_hash(run: &str) -> Option<[u8; 32]> {
+    let p = plan(run)?;
+    Some(crate::store::sha256::hash(intent(&p).as_bytes()))
+}
+
+pub fn granted(h: &[u8; 32]) -> bool {
+    let Some(b) = sysbox::read_blob(GRANTS) else {
+        return false;
+    };
+    let want = super::voter::hex(h);
+    alloc::string::String::from_utf8_lossy(&b)
+        .lines()
+        .any(|l| l.trim() == want)
+}
+
+/// Approve one plan's intent. Only the operator's command reaches this.
+///
+/// `work` is not in `sysbox::APPLETS`, so the decoding grammar has no token
+/// sequence for it and the model cannot call this by any route. That is the
+/// same reason `skill trust` and `app trust` are shell-only: a model able to
+/// grant itself trust would have defeated the gate by using it.
+pub fn grant(h: &[u8; 32]) -> bool {
+    if granted(h) {
+        return true;
+    }
+    let mut text = sysbox::read_blob(GRANTS)
+        .map(|b| alloc::string::String::from_utf8_lossy(&b).into_owned())
+        .unwrap_or_default();
+    text.push_str(&super::voter::hex(h));
+    text.push('\n');
+    sysbox::write_text(GRANTS, &text)
+}
+
+pub fn revoke(h: &[u8; 32]) -> bool {
+    let Some(b) = sysbox::read_blob(GRANTS) else {
+        return false;
+    };
+    let drop = super::voter::hex(h);
+    let mut text = String::new();
+    let mut hit = false;
+    for line in alloc::string::String::from_utf8_lossy(&b).lines() {
+        if line.trim() == drop {
+            hit = true;
+            continue;
+        }
+        text.push_str(line);
+        text.push('\n');
+    }
+    hit && sysbox::write_text(GRANTS, &text)
+}
+
+pub fn grants() -> Vec<String> {
+    let Some(b) = sysbox::read_blob(GRANTS) else {
+        return Vec::new();
+    };
+    alloc::string::String::from_utf8_lossy(&b)
+        .lines()
+        .map(|l| String::from(l.trim()))
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
+/// Whether a plan is fit to advance unattended, and why not when it is not.
+///
+/// Static and cheap, which is what lets it run before every unattended step
+/// rather than once at the grant. The order is the same one `godel`'s
+/// rotation uses: cheap and declared before expensive and composed.
+pub struct Fitness {
+    pub declared: bool,
+    pub steps: usize,
+    pub admissible: bool,
+    /// The first action no read-only worker could reach.
+    pub refused: Option<String>,
+    pub acyclic: bool,
+    pub bounded: bool,
+    pub fit: bool,
+}
+
+pub fn check(run: &str) -> Option<Fitness> {
+    Some(check_plan(&plan(run)?))
+}
+
+/// The rules themselves, over a plan rather than a name.
+///
+/// Split out so they are pure, which is what lets the boot suite exercise them
+/// on a machine with no namespace. A gate whose rules are only reachable
+/// through a store is a gate nobody checks on the way past.
+pub fn check_plan(p: &Plan) -> Fitness {
+    let admitted = super::harness::admitted(super::harness::Trust::ReadOnly);
+
+    // A pre-decided action is the one thing in a plan that names an applet
+    // without a grammar in front of it. A worker-decided step needs no check
+    // here: `choose` decodes under a grammar built from this same level, so an
+    // applet outside it has no token sequence at all and is unspellable.
+    let mut refused = None;
+    for st in p.steps.iter() {
+        if st.action.is_empty() {
+            continue;
+        }
+        let name = st.action.split(' ').next().unwrap_or("").trim();
+        if !admitted.iter().any(|a| *a == name) {
+            refused = Some(st.action.clone());
+            break;
+        }
+    }
+
+    // Ids unique, parents present, and every chain reaching a root. A
+    // duplicate id makes `next()`'s parent lookup answer whichever it met
+    // first, and a cycle makes a plan that is never done and never ready.
+    let mut acyclic = true;
+    for (i, st) in p.steps.iter().enumerate() {
+        if p.steps.iter().take(i).any(|q| q.id == st.id) {
+            acyclic = false;
+            break;
+        }
+        let mut at = st.parent;
+        let mut hops = 0usize;
+        while let Some(id) = at {
+            hops += 1;
+            if hops > p.steps.len() {
+                acyclic = false;
+                break;
+            }
+            match p.steps.iter().find(|q| q.id == id) {
+                Some(q) => at = q.parent,
+                None => {
+                    acyclic = false;
+                    break;
+                }
+            }
+        }
+        if !acyclic {
+            break;
+        }
+    }
+
+    let bounded = !p.steps.is_empty() && p.steps.len() <= MAX_UNATTENDED;
+    let declared = p.autonomy == Autonomy::Unattended;
+    let admissible = refused.is_none();
+    Fitness {
+        declared,
+        steps: p.steps.len(),
+        admissible,
+        refused,
+        acyclic,
+        bounded,
+        fit: declared && admissible && acyclic && bounded,
+    }
+}
+
+/// Advance one step of one workflow the operator declared and granted.
+///
+/// **The trust level is not a parameter.** Unattended means read-only, and
+/// making it an argument would put the one decision that matters in the hands
+/// of every caller. The enforcement is the grammar rather than a check after
+/// the fact: a worker at this level has no token sequence for a mutating
+/// applet.
+///
+/// Which run it picks is a function of what is written, so two readers of the
+/// same namespace advance the same workflow. Same argument
+/// `godel::next_proposal` makes for taking its axis from the ledger.
+///
+/// `allow_decode` is the caller saying whether this tick can afford a model
+/// call. Answers the run it advanced and whether that step cost one.
+pub fn tick_unattended(allow_decode: bool) -> Option<(String, bool)> {
+    for name in runs() {
+        let Some(p) = plan(&name) else { continue };
+        if p.autonomy != Autonomy::Unattended {
+            continue;
+        }
+        let Some(next) = p.next().cloned() else { continue };
+        // Re-derived at dispatch from the plan as it stands, never from what
+        // it looked like when the operator read it. That is the whole value of
+        // pinning a grant to a hash rather than to a name.
+        let Some(h) = intent_hash(&name) else { continue };
+        if !granted(&h) {
+            continue;
+        }
+        // Re-checked as well. A grant is evidence that the operator approved
+        // this intent. It is not evidence that the intent is still admissible,
+        // because `admitted` is built from the live applet table and a build
+        // can narrow it.
+        match check(&name) {
+            Some(f) if f.fit => {}
+            _ => continue,
+        }
+        let decodes = next.action.is_empty();
+        if decodes && !allow_decode {
+            continue;
+        }
+        let (ran, _) = run(&name, super::harness::Trust::ReadOnly, 1);
+        if ran > 0 {
+            return Some((name, decodes));
+        }
+    }
+    None
 }
 
 // --- roles ----------------------------------------------------------------
@@ -1116,6 +1390,7 @@ pub fn selftest() -> bool {
 
     let p = Plan {
         goal: String::from("build the thing"),
+        autonomy: Autonomy::Attended,
         steps: alloc::vec![
             PlanStep { id: 1, parent: None, status: Status::Done, role: String::from("writer"), action: String::from("write /tmp/x hi"), goal: String::from("draft it") },
             PlanStep { id: 2, parent: Some(1), status: Status::Todo, role: String::new(), action: String::new(), goal: String::from("check it\nover two lines") },
@@ -1145,6 +1420,7 @@ pub fn selftest() -> bool {
     // A blocked child must not be offered before its parent is done.
     let blocked = Plan {
         goal: String::new(),
+        autonomy: Autonomy::Attended,
         steps: alloc::vec![
             PlanStep { id: 1, parent: None, status: Status::Todo, role: String::new(), action: String::new(), goal: String::from("a") },
             PlanStep { id: 2, parent: Some(1), status: Status::Todo, role: String::new(), action: String::new(), goal: String::from("b") },
@@ -1207,6 +1483,90 @@ pub fn selftest() -> bool {
         role_split(&alloc::vec![ex("a"), ex("a")]) == 2,
     );
     claim("an empty set splits at nothing", role_split(&[]) == 0);
+
+    // --- autonomy ---------------------------------------------------------
+    claim(
+        "an attended plan renders no autonomy line, so old runs keep their address",
+        !p.render().contains("autonomy"),
+    );
+    let mut unattended = p.clone();
+    unattended.autonomy = Autonomy::Unattended;
+    claim(
+        "and an unattended one round-trips",
+        Plan::parse(&unattended.render()).map(|q| q.autonomy) == Some(Autonomy::Unattended),
+    );
+    claim(
+        "a plan that says nothing is attended",
+        Plan::parse("work 1\ngoal x\n").map(|q| q.autonomy) == Some(Autonomy::Attended),
+    );
+    // The property that stops the gate working exactly once: a grant names
+    // what a workflow will do, so taking a step must not revoke it.
+    let mut advanced = unattended.clone();
+    for st in advanced.steps.iter_mut() {
+        st.status = Status::Failed;
+    }
+    claim(
+        "progress does not change what a grant names",
+        intent(&unattended) == intent(&advanced),
+    );
+    claim(
+        "but an edited step does",
+        intent(&unattended) != {
+            let mut edited = unattended.clone();
+            edited.steps[0].action = String::from("rm /");
+            intent(&edited)
+        },
+    );
+
+    // --- fitness ----------------------------------------------------------
+    let fit_step = |action: &str| PlanStep {
+        id: 1,
+        parent: None,
+        status: Status::Todo,
+        role: String::from("worker"),
+        action: String::from(action),
+        goal: String::from("g"),
+    };
+    let mk = |steps: Vec<PlanStep>| Plan {
+        goal: String::from("g"),
+        autonomy: Autonomy::Unattended,
+        steps,
+    };
+    claim(
+        "a read-only action is admissible",
+        check_plan(&mk(alloc::vec![fit_step("ls /ai")])).fit,
+    );
+    claim(
+        "a mutating one is not, and is named",
+        check_plan(&mk(alloc::vec![fit_step("rm /ai/about")])).refused.is_some(),
+    );
+    claim(
+        "a worker-decided step needs no action check",
+        check_plan(&mk(alloc::vec![fit_step("")])).admissible,
+    );
+    claim(
+        "an attended plan is never fit, whatever else holds",
+        !check_plan(&Plan {
+            goal: String::from("g"),
+            autonomy: Autonomy::Attended,
+            steps: alloc::vec![fit_step("ls /ai")],
+        })
+        .fit,
+    );
+    let dangling = PlanStep { parent: Some(9), ..fit_step("ls /ai") };
+    claim(
+        "a parent that is not there is caught",
+        !check_plan(&mk(alloc::vec![dangling])).acyclic,
+    );
+    let a = PlanStep { id: 1, parent: Some(2), ..fit_step("ls /ai") };
+    let b = PlanStep { id: 2, parent: Some(1), ..fit_step("ls /ai") };
+    claim("and so is a cycle", !check_plan(&mk(alloc::vec![a, b])).acyclic);
+    let twins = alloc::vec![fit_step("ls /ai"), fit_step("ls /ai")];
+    claim(
+        "a duplicate id is refused, since a parent lookup would be ambiguous",
+        !check_plan(&mk(twins)).acyclic,
+    );
+    claim("an empty plan is not bounded, it is empty", !check_plan(&mk(Vec::new())).bounded);
 
     // --- against a real namespace -----------------------------------------
     //
