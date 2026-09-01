@@ -243,18 +243,6 @@ pub fn study_once() -> Option<(String, String, Result<String, alloc::string::Str
     }
 }
 
-/// The goal text for the next topic, in the shape an episode takes.
-///
-/// `save` rather than `fetch`, deliberately. A goal that only reads leaves
-/// nothing behind, so the next tick derives the same goal and the machine
-/// studies one topic forever; `save` puts the document where `mark` can see it
-/// and where `find` can reach it later, which is what makes the frontier
-/// advance at all.
-pub fn next_goal() -> Option<String> {
-    let (_, topic) = next()?;
-    Some(format!("save the wikipedia article about {}", topic))
-}
-
 /// How far along each subject is.
 pub fn progress() -> Vec<(String, usize, usize)> {
     let mut v = Vec::new();
@@ -325,13 +313,6 @@ pub fn selftest() -> bool {
         !mark("bioinformatics", "A Topic Nothing Has Ever Saved"),
     );
 
-    // The goal has to be one an episode can actually route, which means the
-    // words the corpus taught for `save`.
-    let g = next_goal().unwrap_or_default();
-    claim(
-        "the goal names the act and the thing",
-        g.is_empty() || (g.contains("save") && g.len() > 10),
-    );
     claim("auto is off unless somebody said otherwise", !auto());
 
     ok

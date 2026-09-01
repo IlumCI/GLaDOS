@@ -389,6 +389,28 @@ pub fn plan(depth: usize, k_mc: usize) -> Plan {
     Plan { situation, samples, resid_heap_kib: resid, best, baseline, confident, reasons }
 }
 
+/// How much work the planner thinks this machine can take on, in [0, 1].
+///
+/// The fraction of the recommended schedule spent above idle. `plan` already
+/// enumerates every schedule over `("idle", "steady", "load")` and picks the
+/// one with the best discounted utility under the fitted dynamics; what that
+/// answer *means* is "how hard should this machine be running", and until now
+/// the answer was formatted into a report and thrown away.
+///
+/// **Zero when the planner is not confident, and that is the point.** A
+/// planner that has not cleared its own confidence gates has no opinion, and a
+/// caller must not read an unfitted model's noise as advice to do less --
+/// callers below treat 0 as "use the default", not as "do nothing". The
+/// distinction is `confident`, which is why this returns it rather than
+/// hiding it.
+pub fn appetite(p: &Plan) -> (f32, bool) {
+    if !p.confident || p.best.levels.is_empty() {
+        return (0.0, false);
+    }
+    let busy = p.best.levels.iter().filter(|l| **l != "idle").count();
+    (busy as f32 / p.best.levels.len() as f32, true)
+}
+
 pub fn report() {
     use crate::gfx::console::{self, LTGRAY, YELLOW};
     use crate::kprintln;

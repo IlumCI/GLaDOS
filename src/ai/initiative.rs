@@ -128,7 +128,21 @@ const WORKS: &[(&str, &str)] = &[
 /// the judges get less evidence per trial in exchange for the machine staying
 /// responsive, and the ledger accumulates across nights rather than within
 /// one.
+///
+/// This is the *floor* now rather than the figure. `aixi::appetite` scales it
+/// up to `GODEL_EXAMPLES_MAX` when the planner is confident and recommends
+/// running hard -- see `sized_budget`.
 const GODEL_EXAMPLES: usize = 24;
+/// The most a confident planner may ask for.
+///
+/// Three times the floor and not thirty: J1 needs about six repaired
+/// validation decisions to say anything, so more evidence is worth having, and
+/// a trial that runs all night is one that holds the engine all night. The
+/// ceiling is what stops a mis-fitted planner from turning a bounded job into
+/// an unbounded one, which is the failure a gate like this exists to prevent.
+const GODEL_EXAMPLES_MAX: usize = 72;
+/// And the matching ceiling on optimiser time.
+const GODEL_MS_MAX: u64 = 60_000;
 /// Wall-clock ceiling on the optimiser half of a nightly trial.
 const GODEL_MS: u64 = 20_000;
 
@@ -443,11 +457,23 @@ fn tick_inner(forced: bool) {
     // These stay exactly what they were. Studying is handled above and is not
     // an episode -- the two were briefly merged and the merge was wrong, for
     // the reason `curiosity`'s module comment gives at length.
+    //
+    // What is new is that a goal which has never once reached an applet stops
+    // being proposed. `agent::OUTCOMES` has been written after every episode
+    // since it was added, explicitly "for whatever eventually learns from it",
+    // and nothing ever read it -- so the machine kept proposing goals it had
+    // already failed to serve, forever, which is the plainest possible failure
+    // to learn from experience. The whole rotation being barren is a real
+    // state and answers `None`, the same as a cooldown: silence is better than
+    // a goal known not to work.
     let proposal = {
         let n = CURIOSITY.len();
-        let i = (TICKS.load(Ordering::Relaxed) as usize) % n;
+        let start = TICKS.load(Ordering::Relaxed) as usize;
         if since_episode >= EPISODE_GAP_S {
-            Some(String::from(CURIOSITY[i]))
+            (0..n)
+                .map(|k| CURIOSITY[(start + k) % n])
+                .find(|g| !super::agent::barren_goal(g))
+                .map(String::from)
         } else {
             None
         }
@@ -596,10 +622,24 @@ fn tick_inner(forced: bool) {
                     // engine was busy became unreachable in exactly the regime
                     // that introduced it.
                     let composed = picked.is_some();
+                    // What the planner is for, at last.
+                    //
+                    // `aixi::plan` has been fitted, sampled and formatted into
+                    // a report every tick since it was written, and nothing
+                    // read the answer. It is a controlled linear model of this
+                    // machine's own heap, task rate and touch rate, so what it
+                    // is actually good for is deciding how much to take on --
+                    // and the nightly trial is the one job here big enough for
+                    // that to matter.
+                    //
+                    // Between the floor and the ceiling, never outside them. A
+                    // planner that has not cleared its confidence gates gets
+                    // the floor, which is what every night got before this.
+                    let (examples, millis) = sized_budget(&p);
                     let verdict = match picked {
                         None => None,
                         Some(p) => {
-                            let b = p.budget(GODEL_EXAMPLES, GODEL_MS);
+                            let b = p.budget(examples, millis);
                             super::with_engine(|e| super::godel::run(e, &b, &p))
                         }
                     };
@@ -735,6 +775,23 @@ fn tick_inner(forced: bool) {
     }
 }
 
+/// Scale the nightly trial by what the planner thinks the machine can take.
+///
+/// Pure in its input so the self-test can drive every branch without fitting a
+/// model, which is the shape `decide` and `update::decide` already use here.
+fn sized_budget(p: &aixi::Plan) -> (usize, u64) {
+    let (appetite, confident) = aixi::appetite(p);
+    if !confident {
+        return (GODEL_EXAMPLES, GODEL_MS);
+    }
+    let span_e = GODEL_EXAMPLES_MAX - GODEL_EXAMPLES;
+    let span_m = GODEL_MS_MAX - GODEL_MS;
+    (
+        GODEL_EXAMPLES + (span_e as f32 * appetite) as usize,
+        GODEL_MS + (span_m as f32 * appetite) as u64,
+    )
+}
+
 /// The resident task. Wakes on second boundaries; sleeps between them by
 /// yielding, which is what every other well-behaved task here does.
 pub fn initiative_task() {
@@ -829,5 +886,55 @@ pub fn selftest() -> bool {
     "  {}  presence outranks readiness, cooldowns hold, curiosity converts",
         if ok { "ok " } else { "FAIL" }
     );
+
+    // The planner's grip on the nightly budget, driven through every branch
+    // without fitting a model. `sized_budget` is pure for exactly this reason.
+    let plan_of = |levels: Vec<&'static str>, confident: bool| aixi::Plan {
+        situation: context::gather(),
+        samples: 0,
+        resid_heap_kib: 0.0,
+        best: aixi::Candidate { levels, u_mean: 0.0, u_std: 0.0 },
+        baseline: aixi::Candidate { levels: Vec::new(), u_mean: 0.0, u_std: 0.0 },
+        confident,
+        reasons: Vec::new(),
+    };
+    let mut bok = true;
+
+    // An unconfident planner has no opinion, and its silence must read as
+    // "use the default" rather than as "do less". Getting this backwards would
+    // shrink every night on a machine whose model never fitted, which is every
+    // machine for its first few minutes.
+    let (e, m) = sized_budget(&plan_of(alloc::vec!["load", "load", "load", "load"], false));
+    bok &= e == GODEL_EXAMPLES && m == GODEL_MS;
+
+    // A confident planner recommending idle throughout also gets the floor:
+    // the floor is a floor, not a starting point to be cut into.
+    let (e, m) = sized_budget(&plan_of(alloc::vec!["idle", "idle", "idle", "idle"], true));
+    bok &= e == GODEL_EXAMPLES && m == GODEL_MS;
+
+    // Flat out reaches the ceiling exactly, and never past it. The ceiling is
+    // what stops a mis-fitted planner turning a bounded job unbounded.
+    let (e, m) = sized_budget(&plan_of(alloc::vec!["load", "load", "load", "load"], true));
+    bok &= e == GODEL_EXAMPLES_MAX && m == GODEL_MS_MAX;
+
+    // And half-and-half lands between the two, strictly.
+    let (e, m) = sized_budget(&plan_of(alloc::vec!["idle", "load", "idle", "steady"], true));
+    bok &= e > GODEL_EXAMPLES && e < GODEL_EXAMPLES_MAX;
+    bok &= m > GODEL_MS && m < GODEL_MS_MAX;
+
+    // "steady" is work, not rest. Counting only "load" would make a machine
+    // ticking along at its own average look idle.
+    let (steady, _) = aixi::appetite(&plan_of(alloc::vec!["steady", "steady"], true));
+    bok &= steady == 1.0;
+
+    // An empty schedule is not an opinion either.
+    let (_, conf) = aixi::appetite(&plan_of(Vec::new(), true));
+    bok &= !conf;
+
+    kprintln!(
+    "  {}  the planner sizes the nightly trial, between a floor and a ceiling",
+        if bok { "ok " } else { "FAIL" }
+    );
+    ok &= bok;
     ok
 }

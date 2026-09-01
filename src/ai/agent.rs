@@ -852,10 +852,12 @@ impl Outcome {
     /// is arguable, which is exactly why they are named constants sitting in
     /// the open instead of arithmetic buried in a caller.
     ///
-    /// Nothing acts on this. It is recorded so that when there are enough
-    /// episodes to check the convention against something, the check is
-    /// possible; a weighting adopted before that would be a guess wearing a
-    /// number's clothes.
+    /// Nothing acts on this, and that stays true after `barren_goal` below.
+    /// The distinction is the whole point: `barren_goal` reads `ok=`, a count
+    /// of applets that ran, while this is a weighted opinion about what they
+    /// were worth. Acting on the first is reading the record; acting on the
+    /// second would be adopting the convention before anything has checked
+    /// it, which is a guess wearing a number's clothes.
     pub fn score(&self) -> f32 {
         const W_DISPATCH: f32 = 1.0;
         const W_REJECT: f32 = -1.0;
@@ -908,6 +910,60 @@ static LAST_OUTCOME: Racy<Option<Outcome>> = Racy::new(None);
 
 pub fn last_outcome() -> Option<Outcome> {
     unsafe { (*LAST_OUTCOME.get()).clone() }
+}
+
+/// How many times a goal may reach no applet at all before it is dropped.
+///
+/// Three. One episode reaching nothing is a bad decode, two is bad luck, and
+/// the machine cannot tell either from a goal that simply cannot be served --
+/// which is what this is for. A goal whose every episode dispatched nothing is
+/// one the router cannot route to anything the applet table answers, and
+/// re-proposing it forever is a failure to learn from experience in the most
+/// basic form available here.
+const BARREN_LIMIT: usize = 3;
+
+/// Has this goal run repeatedly without ever reaching an applet?
+///
+/// **Reads `ok=` and nothing else, deliberately.** `Outcome::score` exists and
+/// is not consulted, because its weights are a stated judgement rather than a
+/// finding, and using them to decide anything would adopt the convention
+/// before there is anything to check it against. `ok=0` is not a judgement:
+/// either an applet ran or it did not.
+///
+/// **Any episode that ever dispatched clears the goal outright.** The question
+/// is whether it has ever worked, not whether it worked lately -- a goal that
+/// reached an applet once is one this machine can serve, and a run of bad
+/// decodes afterwards is not evidence against the goal.
+///
+/// **What it cannot see, said here rather than discovered.** A goal that
+/// dispatches to the *wrong* applet every time is indistinguishable from one
+/// that dispatches correctly, because nothing in this kernel can observe
+/// whether a goal was met -- `Outcome::observe` says exactly that about
+/// itself. So this catches goals that are unreachable, never goals that are
+/// merely useless, and the second is much the larger set.
+///
+/// The goal is matched against the *clipped* rendering, because that is what
+/// was written: `render` puts `clip(goal, 60)` in the line, so comparing the
+/// full goal would silently never match anything longer than sixty bytes.
+pub fn barren_goal(goal: &str) -> bool {
+    let Some(bytes) = sysbox::read_blob(OUTCOMES) else { return false };
+    let Ok(text) = String::from_utf8(bytes) else { return false };
+    let want = clip(goal, 60);
+    let mut runs = 0usize;
+    for line in text.lines() {
+        let Some((before, named)) = line.rsplit_once("goal=") else { continue };
+        if named != want {
+            continue;
+        }
+        runs += 1;
+        // The spaces matter: `ok=0` without them also matches `ok=05`, which
+        // cannot occur today and would be a silent wrong answer if the
+        // rendering ever padded.
+        if !before.contains(" ok=0 ") {
+            return false;
+        }
+    }
+    runs >= BARREN_LIMIT
 }
 
 /// Every outcome recorded this boot, newest last.
@@ -1041,6 +1097,105 @@ fn episode(
 /// a mutating applet is unreachable under ReadOnly trust even when named
 /// outright by a script; bad arguments are rejected as observations rather
 /// than dispatched; and `done` ends the episode inside the budget.
+/// Claims for `barren_goal`, driven from a written record rather than from
+/// episodes: three real ones would be three constrained decodes and minutes.
+///
+/// The record is the thing being parsed, so writing it and reading it back is
+/// exactly the check -- and the first version of the parser did not survive
+/// it. It looked for "dispatched 0" and for the goal anywhere in the line,
+/// where `render` actually writes `ok=0` and `goal=` followed by the goal
+/// *clipped to sixty bytes*. Both were wrong in the quiet direction: the
+/// function answered false for everything and would have read as "no goal has
+/// ever been barren" forever.
+fn barren_selftest() -> bool {
+    use crate::kprintln;
+    let mut ok = true;
+    let mut claim = |what: &str, cond: bool| {
+        if !cond {
+            kprintln!("    FAIL: {}", what);
+            ok = false;
+        }
+    };
+    if !sysbox::is_ready() {
+        // Said out loud rather than returned quietly. A suite that skips
+        // itself and reports success is indistinguishable from one that
+        // passed, which is the failure `smp.rs` records about its own one-shot
+        // check and the reason `differ` carries a canary.
+        kprintln!("  --   no namespace, so the outcome record was not exercised");
+        return true;
+    }
+
+    let saved = sysbox::read_blob(OUTCOMES);
+    let restore = |b: &Option<alloc::vec::Vec<u8>>| match b {
+        Some(bytes) => {
+            sysbox::write_text(OUTCOMES, &String::from_utf8_lossy(bytes));
+        }
+        None => {
+            sysbox::detach(OUTCOMES);
+        }
+    };
+
+    // Nothing recorded is not evidence of anything.
+    sysbox::write_text(OUTCOMES, "");
+    claim("an unseen goal is not barren", !barren_goal("look at /sys"));
+
+    // Two barren runs are not enough; three are.
+    let line = |okc: usize, goal: &str| {
+        alloc::format!("done steps=2/8 ok={} rej=0 barren=0 rep=0 score=+0.00 goal={}\n", okc, goal)
+    };
+    let mut t = String::new();
+    t.push_str(&line(0, "look at /sys"));
+    t.push_str(&line(0, "look at /sys"));
+    sysbox::write_text(OUTCOMES, &t);
+    claim("two barren runs are not yet a pattern", !barren_goal("look at /sys"));
+    t.push_str(&line(0, "look at /sys"));
+    sysbox::write_text(OUTCOMES, &t);
+    claim("three are", barren_goal("look at /sys"));
+
+    // One episode that reached an applet clears it, wherever it sits.
+    t.push_str(&line(1, "look at /sys"));
+    sysbox::write_text(OUTCOMES, &t);
+    claim(
+        "a single dispatch clears the goal, however many barren runs precede it",
+        !barren_goal("look at /sys"),
+    );
+
+    // Another goal's rows must not count toward this one.
+    let mut u = String::new();
+    for _ in 0..4 {
+        u.push_str(&line(0, "some other goal"));
+    }
+    sysbox::write_text(OUTCOMES, &u);
+    claim("another goal's failures are not this goal's", !barren_goal("look at /sys"));
+
+    // `ok=10` must not be read as `ok=0` with a stray digit. Nothing produces
+    // this today; the claim is here because the parser is a substring test and
+    // that is exactly the mistake a substring test makes.
+    let mut w = String::new();
+    for _ in 0..3 {
+        w.push_str(&line(10, "busy goal"));
+    }
+    sysbox::write_text(OUTCOMES, &w);
+    claim("ten dispatches is not zero dispatches", !barren_goal("busy goal"));
+
+    // A goal longer than the clip is matched against what was written, not
+    // against what was asked for.
+    let long: String = core::iter::repeat('g').take(80).collect();
+    let mut v = String::new();
+    for _ in 0..3 {
+        v.push_str(&line(0, &clip(&long, 60)));
+    }
+    sysbox::write_text(OUTCOMES, &v);
+    claim("a goal past the clip still matches its own record", barren_goal(&long));
+
+    restore(&saved);
+    kprintln!(
+        "  {}  a goal that never reaches an applet stops being proposed",
+        if ok { "ok " } else { "FAIL" }
+    );
+    ok
+}
+
 pub fn selftest() -> bool {
     let script = alloc::vec![
         String::from("ls /sys"),
@@ -1115,6 +1270,10 @@ pub fn selftest() -> bool {
     check("done ends the episode", {
         outcome == "model called done" && steps.len() == 3
     });
+
+    // The record this loop writes, read back. Its own suite because it needs a
+    // namespace and the scripted episode above does not.
+    ok &= barren_selftest();
 
     ok
 }

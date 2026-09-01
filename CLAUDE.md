@@ -264,7 +264,8 @@ replaced by a certificate cheaper to refute than to produce, over
 content-addressed inputs, re-derivable bit for bit by any later run.
 
 ```
-godel [status|now [n]|ledger [n]|rollback|on|off]
+godel [status|now [n]|next|ledger [n]|rollback|on|off]
+abstract [all|judge]      what repeats across the skills, and whether to name it
 ```
 
 Four judges, unanimity required, each a different failure mode:
@@ -309,9 +310,91 @@ Widening this had to come last, and the ordering is the point rather than an
 accident: an axis in the rotation without a judge in front of it is a machine
 adopting things nobody measured.
 
-Still not done from that plan item: an authored application is left as a draft
-and never adopted, and `aixi`'s plan is still stringified to a report rather
-than gating how much the loop attempts.
+**The rotation walks six kinds now.** `ProposalKind::Abstract` is the sleep
+phase of DreamCoder, which this tree had the wake phase of under another name:
+`agent learn` accumulates skills and nothing ever looked *across* them, so the
+library only grew. `abstraction::bench` judges a repeated structure and
+adoption writes it to `/lib`, where a sandboxed skill's `use` can reach it.
+
+Its judges are admission judges rather than improvement judges, and the
+constraint is the one `skill.rs` records: "does this make the machine better at
+its job" cannot be asked of a library entry without a synthesiser that would
+use it, and a judge that can never fail is worse than an absent one. So: J1 it
+parses as a function, J2 the body evaluates when called with zeros, J3 it is
+genuinely shared, J4 it pays and is small enough to read.
+
+**J3 is the one that earns its place.** The first real run found the increment
+idiom `#0 = (#0 + 1)`, three occurrences, passing J1, J2 and J4 -- and refused
+it, because all three occurrences are inside one program. That is a loop
+somebody did not write, not a library function.
+
+**Adoption is additive and stays that way.** `/lib` gains a function; no
+existing skill is rewritten, because rewriting a program the operator trusted
+by hash changes its hash and revokes the trust. So the compression is
+*available*, not *realised*, and `saved` is what naming it would buy if the
+callers were rewritten.
+
+`Variant.library` renders only when set -- third field for which an
+unconditional line would have re-addressed every node in every lineage. Unlike
+`core` it needs no `library_seen`: rollback does not remove a file, so "says
+none" and "says nothing" have no different consequence.
+
+**The planner gates the nightly trial now.** `aixi::plan` had been fitted,
+sampled and formatted into a report every tick since it was written, and
+nothing read the answer -- it is a controlled linear model of this machine's
+own heap, task rate and touch rate, so what it is actually good for is deciding
+how much to take on. `aixi::appetite` is the fraction of the recommended
+schedule spent above idle, and `initiative::sized_budget` scales the trial
+between `GODEL_EXAMPLES` (24 examples, 20 s) and `GODEL_EXAMPLES_MAX` (72, 60
+s).
+
+Two things that had to be right and are asserted rather than assumed.
+**An unfitted planner's silence reads as "use the default", never as "do
+less"** -- `appetite` returns `(0.0, false)` when it is not confident, and a
+caller treating that as an instruction would shrink every night on a machine
+whose model has not fitted yet, which is every machine for its first few
+minutes. And **the ceiling is the point**: it is what stops a mis-fitted
+planner turning a bounded job into an unbounded one, which is the whole reason
+a gate like this exists. `sized_budget` is pure, so the self-test drives every
+branch without fitting anything.
+
+**And the outcome record has a reader at last.** `agent::OUTCOMES` gets a line
+per episode and has since it was added, explicitly "for whatever eventually
+learns from it" -- and nothing ever read it, so the machine went on proposing
+goals it had already failed to serve, forever. `agent::barren_goal` is that
+reader, and `initiative` skips a goal that has run three times without ever
+reaching an applet.
+
+**It reads `ok=` and never `score()`.** That distinction is the whole design.
+`Outcome::score` still says "nothing acts on this" and that is still true: its
+weights are a stated judgement rather than a finding, and deciding anything
+with them would adopt the convention before there is anything to check it
+against. `ok=0` is not a judgement -- either an applet ran or it did not.
+
+**Any single dispatch clears the goal**, however many barren runs surround it.
+The question is whether the goal has *ever* worked, not whether it worked
+lately.
+
+What it cannot see is stated in the function rather than left to be found: a
+goal that dispatches to the *wrong* applet every time looks identical to one
+that dispatches correctly, because nothing in this kernel can observe whether a
+goal was met -- `Outcome::observe` says exactly that about itself. So this
+catches goals that are unreachable, never goals that are merely useless, and
+the second is much the larger set.
+
+The first version of the parser did not survive its own self-test, which is why
+that self-test writes the record and reads it back rather than mocking it: it
+looked for `dispatched 0` and for the goal anywhere in the line, where `render`
+writes `ok=0` and `goal=` followed by the goal *clipped to sixty bytes*. Both
+were wrong in the quiet direction -- it answered false for everything, which
+reads as "no goal has ever been barren" forever.
+
+One item from that plan is listed as unfinished and should not be: an authored
+application is left as a draft and never adopted. `author::commission` argues
+for that in its own doc comment -- "a machine that installed what it wrote
+overnight without anybody reading it would be answering a question nobody
+asked" -- so it is a decision with a reason, not a gap. `app take` is the
+adoption, and it is a person's.
 
 That question -- is anybody here -- is `quiet_hours()`, and it is shared with
 the other unattended job. `initiative::tick`'s sleep branch also writes an
