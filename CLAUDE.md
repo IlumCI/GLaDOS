@@ -2062,9 +2062,25 @@ on validation, and past three reads the figure prints as stale and marked
 unquotable. Any future loop that touches the test slice must go through
 `godel::read_test` for the same reason.
 
-Negative results stay in the tree. Training the adapter head *hurts* at this
-data scale; the Product-of-Experts council does not improve accuracy. Both are
-kept because the reason to know them is the reason they were worth measuring.
+Negative results stay in the tree. The **gradient-descent classifier head**
+that `probe.rs` replaced made held-out accuracy *worse* with every epoch --
+30% untrained, 10% after two, 0% after eight -- because 40 examples across 21
+classes leaves SGD nothing to do but memorise. The Product-of-Experts council
+does not improve accuracy. Both are kept because the reason to know them is
+the reason they were worth measuring.
+
+That first one said "the adapter head" here for a long time and it cost a
+session. It is the **SGD head**, which the ridge probe replaced; it is not the
+QDoRA adapter, and the two have nothing to do with each other. `probe.rs:3`
+has always been precise about it. This line was not, and the summary is what
+got read.
+
+**What the QDoRA initialisation fix does invalidate is separate**: every
+verdict `godel`'s adapter grid ever recorded. Until `Dora::new` seeded A, both
+low-rank factors were zero and the branch had identically zero gradient, so
+every rejected grid point was rejected on an adapter that could only rescale
+rows. Those rejections are not evidence any more. J4's cost figures stand --
+the shapes did not change.
 
 `tools/traces.py` reports what it could **not** produce and the per-family
 imbalance unprompted. A generator asked for 20,000 that quietly returns 54
