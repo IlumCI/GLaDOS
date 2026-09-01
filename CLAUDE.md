@@ -509,12 +509,19 @@ GLADOS/STAGED.SIG     its detached GLADOSIG signature
 GLADOS/UPDATE.FLG     any contents; presence is the request
 ```
 
-**It is inert until a key is provisioned.** `UPDATE_KEY` is all zeroes, so
-`verify` answers `NoKey`, `decide` refuses, and the flag is cleared. Run
-`tools/sign.py --keygen --out FILE`, paste the public rows into
-`src/update/mod.rs`, and rebuild -- adopting a signer is itself a kernel change,
-which is the point. **Use `--out`**: without it the private half goes to stdout,
-and that is exactly how the last one died.
+**A key is provisioned and the updater is live.** This said "`UPDATE_KEY` is
+all zeroes, so `verify` answers `NoKey`" for a long time after it stopped being
+true, and the cost was real: it is why a session went looking for why the
+update channel could not publish, on the day it published. `UPDATE_KEY` in
+`src/update/mod.rs` holds a real P-256 point, tags push, and `release.yml`
+signs and uploads.
+
+To rotate: `tools/sign.py --keygen --out FILE`, paste the public rows into
+`src/update/mod.rs`, and rebuild -- adopting a signer is itself a kernel
+change, which is the point. **Use `--out`**: without it the private half goes
+to stdout, and that is exactly how the last one died. And the first build
+carrying a new key cannot be delivered by this system, because no kernel in
+the field trusts it yet; that one ships as an ISO.
 
 A consequence worth stating before it surprises somebody: the first build
 carrying the key cannot be delivered by this system, because no kernel in the
@@ -590,6 +597,49 @@ fifteen-second deadline and **returned a truncated body with no error**, which
 the signature check would then have blamed on the signer. It also removed the
 third inline copy of response-splitting; `http_response` is gone, since
 `https_fetch` never produces an unsplit response.
+
+### Install media, built in CI
+
+`release.yml` has two jobs. `publish` builds, signs and ships the kernel image
+plus its manifest; `iso` fans out over a matrix and assembles install media.
+The second `needs` the first and nothing needs the second, which is the right
+shape: every machine in the field is waiting on the manifest and nothing at
+all is waiting on an ISO.
+
+**The weights are not in this repository and still are not.** They live in
+pinned releases (`payload-qwen3-0.6b-v1`, `payload-q35-2b-v1`), which CI
+downloads. Not the repo, which would carry 600 MB to 1.9 GB of binary forever;
+not LFS, whose free bandwidth this exhausts in a few builds; not the Supabase
+bucket the images go to, because that egress is metered and public release
+assets are not.
+
+`tools/payload.py` records sizes and digests into `payload/*.txt` and verifies
+after the download. That step is the reason the rest exists: a truncated
+transfer produces an ISO that builds, boots, and then cannot load the model,
+because nothing else in the build knows how long `model.bin` should be. Nine
+claims, and the two that earn their place are truncation and a *same-length*
+corruption, which size alone waves through.
+
+**Context is a four-byte stamp, not a conversion.** `--seq` changes no weight;
+it sets `seq_len` in the header and the kernel sizes its KV cache from that.
+The three 2B files in `out/` differ in exactly one byte. So N context variants
+cost one upload and N stamps: `tools/ctxstamp.py` writes the i32 at offset 36
+-- where `convert.py` packs it and `v4.py` reads it -- and reads the result
+back *through `v4.py`*, the reader that is deliberately not the writer.
+Stamping `q35-2b.bin` from 512 to 32768 produces a file byte-identical to a
+full `convert.py --seq 32768` run, which is how that claim was settled.
+
+**Verify runs before the stamp**, and that order is not cosmetic: stamping
+changes four bytes, so a digest taken afterwards could never match.
+
+Two figures worth knowing before adding a payload. The 2B ISO is 1.90 GB
+against GitHub's **2 GB per-asset limit**, so about 100 MB of headroom and a
+larger model does not fit this route. And `HEAP_LADDER`'s 320 MiB is the first
+*contiguous* region rather than the heap -- boot reports `heap 320 MiB` then
+`+1020 MiB across 1 more regions (1340 MiB total)` -- while the kernel holds
+the KV cache **int8** where `convert.py` reports it f32. Both of those were got
+wrong first: the arithmetic said the 2B could not run at 32k, and measurement
+said it uses 347 MiB of 1341 and boots.
 
 The server side is `supabase/` and `.github/workflows/{release,experimental}.yml`.
 `supabase/README.md` has the setup. Two things from it worth knowing here: the
