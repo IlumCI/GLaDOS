@@ -12,18 +12,29 @@ worth 1.2-1.8x. One of those was right.
 
 | | |
 |---|---|
-| **Sustained, 6.4 s** | **0.493 GH/s** |
+| **Sustained, 4.9 s, host CPU idle** | **0.645 GH/s** |
+| Same run with the CPU loaded | 0.493 GH/s |
 | Burst, 1.4 s | 0.674 GH/s |
 | Short, 70 ms | 0.448 GH/s |
-| Clock under sustained load | ~1670 MHz (1642-1695) |
-| Power | 44.5 W, against a 45 W cap |
-| Temperature | 78 -> 82 C and still climbing |
-| Hashes per GPU cycle | 0.295 |
-| Hashes per SM per cycle | 0.0184 |
-| Energy | ~11.1 MH/J |
+| Clock under sustained load | ~1695 MHz |
+| Power | 44.8 W, against a 45 W cap |
+| Temperature | 78-79 C |
+| Hashes per GPU cycle | 0.381 |
+| Hashes per SM per cycle | 0.0238 |
+| Energy | ~14.4 MH/J |
 
 **The sustained figure is the real one.** Mining runs forever, so a number
 taken before the part reaches its power limit is not a mining number.
+
+**And the host CPU has to be idle, which cost a wrong figure before it was
+noticed.** Every measurement in the first version of this file was taken while
+QEMU was driving a gödel grid walk on the CPU, and the same run repeated
+against an idle host gives 0.645 rather than 0.493 -- **31% of the answer was
+the other workload.** The clocks and power were nearly identical between the
+two (1670/44.5 against 1695/44.8), so this is not the dynamic power budget
+being shared; it is the host thread that issues the launches being starved.
+State the host's load beside any figure here or the figure is not
+reproducible.
 
 ## What the durations mean, because they nearly produced a wrong answer
 
@@ -91,10 +102,24 @@ instead of compiling this kernel and reading its own.
 - **Instructions per hash.** The derived figure depends on an assumed ALU
   utilisation, so it is not quoted. Nsight Compute gives it directly and that
   is the next run.
-- **Undervolting.** The plan ranks it second and the telemetry now supports
-  the premise: this part is **power-limited, not clock-limited**, sitting at
-  44.5 W of a 45 W budget. Energy per operation converts directly into clock
-  here, so the guardband experiment has a real lever to pull. Not attempted.
-- **The uniform datapath** and **a persistent megakernel**. Untouched.
+- **Undervolting.** The plan ranks it second and the telemetry supports the
+  premise: this part is **power-limited, not clock-limited**, sitting at 44.8 W
+  of a 45 W budget with 100% utilisation. Energy per operation converts into
+  clock here, so the guardband lever is real.
+
+  **Blocked on privilege, not on method.** `nvidia-smi -lgc` and `-pl` both
+  answer *"the current user does not have permission to change clocks"*, and
+  the experiment needs an elevated shell. What makes it worth running when
+  somebody has one is that this kernel can grade itself: `sha256d.exe` with no
+  arguments prints block 125552's digest, so the error rate at each setting is
+  measurable rather than assumed, which is the whole premise of operating
+  outside the guardband.
+- **The uniform datapath.** Untouched.
+- **A persistent megakernel is worth about 6%, not the large win the plan
+  implied.** Measured directly by holding total work fixed and cutting the
+  launch count 30-fold: 3000 launches gives 0.599 GH/s, 300 gives 0.618, 100
+  gives 0.634. Launch overhead is real and it is small. That bounds what
+  eliminating it entirely can return, and it is worth knowing before building
+  the thing whose whole justification was that GLaDOS has no TDR watchdog.
 - **Anything on the ring-0 side.** This is all host CUDA. The GLaDOS probe is
   committed but has still never seen the GPU, because that needs a reboot.
