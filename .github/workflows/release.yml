@@ -186,15 +186,19 @@ jobs:
           # The published artifact rather than a rebuild. An ISO carrying a
           # kernel that was compiled separately from the one the manifest
           # names is an ISO nobody can check against the signature.
-          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
-            gh release download "$GITHUB_REF_NAME" --dir out \
-              --pattern "glados-$VERSION.efi" --clobber
-          else
-            gh release download "v$VERSION" --dir out \
-              --pattern "glados-$VERSION.efi" --clobber || \
-              cargo build --release --locked && \
-              cp target/x86_64-unknown-uefi/release/glados.efi "out/glados-$VERSION.efi"
-          fi
+          # No `||` fallback here. The first version ended
+          # `download || cargo build && cp`, which bash parses as
+          # `(download || build) && cp` -- equal precedence, left associative
+          # -- so on a SUCCESSFUL download it skipped the build and ran the
+          # copy anyway, against a target/ this job never populated.
+          #
+          # The fallback was wrong regardless: no Rust toolchain is installed
+          # in this job, deliberately, because it assembles a published
+          # artifact rather than producing one. If the image is missing the
+          # right outcome is to fail saying so.
+          TAG="$GITHUB_REF_NAME"
+          if [ "$GITHUB_REF_TYPE" != "tag" ]; then TAG="v$VERSION"; fi
+          gh release download "$TAG" --dir out --pattern "glados-$VERSION.efi" --clobber
           ls -la "out/glados-$VERSION.efi"
 
       - name: Fetch the payload
