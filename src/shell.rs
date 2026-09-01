@@ -958,6 +958,54 @@ fn study_seq_cmd(arg: &str) {
 /// behaviour, and a thing that needs deciding before it happens rather than
 /// discovered afterwards by a skill that stopped running.
 fn abstract_cmd(rest: &str) {
+    // `abstract judge` -- put the best candidate through its four judges and
+    // adopt it if they agree. The way `initiative now` bypasses the settle
+    // window: an axis that can only be exercised by leaving the machine alone
+    // until 3 a.m. is an axis nobody tests.
+    if rest.trim() == "judge" {
+        use crate::ai::abstraction;
+        let Some(c) = abstraction::unjudged().into_iter().next() else {
+            kprintln!("  nothing repeats that would pay to name");
+            return;
+        };
+        let h = abstraction::store(&c.skeleton);
+        let v = abstraction::bench(&h);
+        console::set_color(YELLOW);
+        kprintln!("[abstract judge] {}", c.skeleton);
+        console::set_color(WHITE);
+        kprintln!("  saves {} nodes, {} occurrence(s) across {} program(s), arity {}",
+                  v.saved, v.count, v.programs, v.arity);
+        let mark = |b: bool| if b { "ok  " } else { "FAIL" };
+        kprintln!("  J1 {}  {}", mark(v.j1), v.j1_why);
+        kprintln!("  J2 {}  {}", mark(v.j2), v.j2_why);
+        kprintln!("  J3 {}  {}", mark(v.j3), v.j3_why);
+        kprintln!("  J4 {}  {}", mark(v.j4),
+                  if v.j4 { "it pays and can be read" } else { "it does not pay for itself" });
+        if !v.src.is_empty() {
+            console::set_color(LTGREEN);
+            kprintln!("  {}", v.src);
+            console::set_color(WHITE);
+        }
+        match crate::ai::godel::trial_abstraction(&h) {
+            Err(why) => {
+                console::set_color(LTRED);
+                kprintln!("  {}", why);
+                console::set_color(WHITE);
+            }
+            Ok(cert) => {
+                if cert.adopted {
+                    console::set_color(LTGREEN);
+                    kprintln!("  adopted, at {}", abstraction::adopted_path(&h));
+                } else {
+                    console::set_color(LTRED);
+                    kprintln!("  refused; the judges did not agree");
+                }
+                console::set_color(WHITE);
+            }
+        }
+        return;
+    }
+
     let progs = crate::ai::abstraction::stored();
     if progs.is_empty() {
         kprintln!("  no stored programs under /ai/tools");

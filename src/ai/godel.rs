@@ -163,6 +163,14 @@ pub enum ProposalKind {
     /// Change how the council combines its cores. Judged on calibration by
     /// `harness::rule_bench`, because accuracy is not what this axis moves.
     Config(u8),
+    /// Name a structure that repeats across the skills the machine has
+    /// written, and put it in `/lib`. Judged by `abstraction::bench`.
+    ///
+    /// The one axis that makes the library *smaller* rather than the mind
+    /// better. Every other kind here changes how well the machine decides;
+    /// this changes what it has to say a decision with, which is the half of
+    /// DreamCoder this tree had the wake phase of and not the sleep phase.
+    Abstract([u8; 32]),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -247,6 +255,15 @@ impl Proposal {
         Proposal { lr: 0.0, rank: 0, alpha: 0.0, epochs: 0, rule, kind: ProposalKind::Config(rule) }
     }
 
+    /// A proposal to name a repeated structure.
+    ///
+    /// No training knobs, for the reason `skill` has none: the thing already
+    /// exists and the question is whether it is fit to keep. They are still
+    /// rendered, because the marker directory holds one kind of document.
+    pub fn abstraction(h: [u8; 32]) -> Proposal {
+        Proposal { lr: 0.0, rank: 0, alpha: 0.0, epochs: 0, rule: 0, kind: ProposalKind::Abstract(h) }
+    }
+
     pub fn budget(&self, examples: usize, millis: u64) -> Budget {
         Budget {
             epochs: self.epochs,
@@ -301,6 +318,11 @@ impl Proposal {
             // point is distinguished by carrying nothing else: zero knobs and a
             // `rule` line that differs. Emitting a second copy of the rule would
             // make the identity depend on the same fact twice.
+            ProposalKind::Abstract(h) => {
+                s.push_str("abstract ");
+                s.push_str(&hex32(&h));
+                s.push('\n');
+            }
             ProposalKind::Config(_) => s.push_str("config 1
 "),
         }
@@ -683,6 +705,13 @@ pub struct Variant {
     pub policy: Option<[u8; 32]>,
     /// Content address of the skill directory.
     pub skills: Option<[u8; 32]>,
+    /// Content address of the abstraction most recently added to `/lib`.
+    ///
+    /// The library axis. Like `skills` it names what the machine has to work
+    /// *with* rather than how well it decides, and like `core` it renders only
+    /// when it is set -- see the comment on the `core` arm of `render`, which
+    /// is the whole argument and applies here unchanged.
+    pub library: Option<[u8; 32]>,
     /// Content address of the corpus this was trained on.
     ///
     /// A training set is a subtree, so one hash names every example in it and
@@ -907,6 +936,21 @@ impl Variant {
             (None, true) => s.push_str("core none\n"),
             (None, false) => {}
         }
+        // Same rule, third time. Absent when absent, so every node written
+        // before the library axis existed re-renders to its stored bytes.
+        //
+        // There is no `library none` counterpart and no `library_seen`. `core`
+        // needs one because `rollback` uninstalls on seeing "no core", so it
+        // has to tell "this node says there is none" from "this node is older
+        // than the question". Rolling back a library entry does not remove a
+        // file -- adoption is additive and nothing is rewritten -- so the
+        // ambiguity has no consequence here and a flag guarding against it
+        // would be a field carrying no decision.
+        if let Some(h) = self.library {
+            s.push_str("library ");
+            s.push_str(&hex32(&h));
+            s.push('\n');
+        }
         // Conditional for the same reason `core` is: absent from the rendering
         // when absent from the object, so every node written before this
         // existed still renders to the bytes it was stored as.
@@ -963,6 +1007,7 @@ impl Variant {
             adapter: None,
             policy: None,
             skills: None,
+            library: None,
             corpus: None,
             lambda: 0.0,
             rank: 0,
@@ -984,6 +1029,7 @@ impl Variant {
                 "adapter" => v.adapter = from_hex32(val),
                 "policy" => v.policy = from_hex32(val),
                 "skills" => v.skills = from_hex32(val),
+                "library" => v.library = from_hex32(val),
                 "corpus" => v.corpus = from_hex32(val),
                 // Absent for a long time, and the omission was not cosmetic.
                 // A node read back got `lambda: 0.0` whatever was stored, so
@@ -1388,6 +1434,7 @@ fn ensure_head(e: &mut super::Engine) -> Option<[u8; 32]> {
         adapter: Some(ah),
         policy: sysbox::read_blob("/ai/agent/policy").map(|p| sha256::hash(&p)),
         skills: None,
+        library: None,
         corpus: sysbox::hash_of(super::vocab::CORPUS),
         deep,
         // What is actually installed, recorded rather than assumed -- the same
@@ -1448,6 +1495,10 @@ pub fn run(
         ProposalKind::Config(r) => {
             p.mark();
             trial_config(e, r).map_err(Refused::Judge)
+        }
+        ProposalKind::Abstract(h) => {
+            p.mark();
+            trial_abstraction(&h).map_err(Refused::Judge)
         }
     }
 }
@@ -1559,6 +1610,7 @@ pub fn trial(
         adapter: Some(ablob),
         policy: sysbox::read_blob("/ai/agent/policy").map(|p| sha256::hash(&p)),
         skills: None,
+        library: None,
         corpus: sysbox::hash_of(super::vocab::CORPUS),
         // `scatter` builds a classifier-only adapter, always.
         deep: false,
@@ -1762,6 +1814,7 @@ pub fn trial_core(e: &mut super::Engine, h: &[u8; 32]) -> Result<Certificate, &'
         adapter: parent.and_then(|p| Variant::load(&p)).and_then(|v| v.adapter),
         policy: sysbox::read_blob("/ai/agent/policy").map(|p| sha256::hash(&p)),
         skills: None,
+        library: None,
         corpus: sysbox::hash_of(super::vocab::CORPUS),
         lambda: 0.0,
         rank: 0,
@@ -2022,6 +2075,7 @@ pub fn trial_deep(
         adapter: ablob,
         policy: sysbox::read_blob("/ai/agent/policy").map(|p| sha256::hash(&p)),
         skills: None,
+        library: None,
         corpus: sysbox::hash_of(super::vocab::CORPUS),
         // The whole point of the node: this one moved the attention path, and
         // nothing that reads the lineage may confuse it with one that did not.
@@ -2124,6 +2178,7 @@ pub fn trial_skill(h: &[u8; 32]) -> Result<Certificate, &'static str> {
         adapter: carried.as_ref().and_then(|v| v.adapter),
         policy: sysbox::read_blob("/ai/agent/policy").map(|p| sha256::hash(&p)),
         skills: Some(*h),
+        library: carried.as_ref().and_then(|v| v.library),
         corpus: sysbox::hash_of(super::vocab::CORPUS),
         deep: carried.as_ref().map(|v| v.deep).unwrap_or(false),
         core: super::voter::installed().map(|c| c.hash),
@@ -2175,6 +2230,94 @@ pub fn trial_skill(h: &[u8; 32]) -> Result<Certificate, &'static str> {
         let path = super::skill::adopted_path(h);
         if !sysbox::write_text(&path, &src) {
             return Err("it passed and the toolkit would not take it");
+        }
+        variant.store();
+        set_head(&vhash);
+        ADOPTIONS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    let hour = crate::dev::rtc::now().map(|d| d.hour).unwrap_or(0);
+    let seq = TRIALS.load(Ordering::Relaxed);
+    ledger_append(&render_certificate(&cert, seq, hour));
+    Ok(cert)
+}
+
+/// Judge one abstraction and, if every judge agrees, put it in `/lib`.
+///
+/// A sibling of `trial_skill` rather than a branch inside it, and for the
+/// reason `core trial` is a sibling of `trial`: a skill is a program the agent
+/// wrote from an episode and is judged on whether it runs, while an
+/// abstraction is a structure found *across* programs and is judged on whether
+/// it is shared. Folding two questions behind one name is what splitting
+/// `deeptrain` out was meant to avoid.
+///
+/// The variant it writes names the same adapter and core the head already did.
+/// What changes is the library, and `library` is the field for it.
+pub fn trial_abstraction(h: &[u8; 32]) -> Result<Certificate, &'static str> {
+    let v = super::abstraction::bench(h);
+    TRIALS.fetch_add(1, Ordering::Relaxed);
+
+    let parent = head();
+    let carried = parent.and_then(|p| Variant::load(&p));
+    let variant = Variant {
+        parent,
+        adapter: carried.as_ref().and_then(|v| v.adapter),
+        policy: sysbox::read_blob("/ai/agent/policy").map(|p| sha256::hash(&p)),
+        skills: carried.as_ref().and_then(|v| v.skills),
+        library: Some(*h),
+        corpus: sysbox::hash_of(super::vocab::CORPUS),
+        deep: carried.as_ref().map(|v| v.deep).unwrap_or(false),
+        core: super::voter::installed().map(|c| c.hash),
+        core_seen: true,
+        lambda: 0.0,
+        rank: 0,
+        epochs: 0,
+        rule: super::harness::rule_in_force() as u8,
+        born: crate::dev::rtc::now().map(|d| crate::dev::rtc::unix_seconds(&d)).unwrap_or(0),
+    };
+    let vhash = variant.hash();
+
+    let mut cert = Certificate {
+        parent,
+        variant: vhash,
+        // Occurrences, which is what J3 actually counted. Not routing
+        // decisions, and the ledger's `n` should not be read as though it
+        // were -- the same caveat `trial_skill` records about its own 2.
+        decisions: v.count,
+        validation: v.programs,
+        predicted: false,
+        // The objective, in the ledger's repair columns. `saved` is nodes the
+        // naming would buy, so it goes where a reader looks for "what did this
+        // gain", and `broke` stays zero because adoption is additive: no
+        // existing program is rewritten, so nothing can be broken by it.
+        fixed: if v.saved > 0 { v.saved as usize } else { 0 },
+        broke: 0,
+        mcnemar: 0.0,
+        j1: v.j1,
+        j1_why: v.j1_why,
+        goals_held: if v.j2 { 1 } else { 0 },
+        goals_total: 1,
+        j2: v.j2,
+        j3: v.j3,
+        j3_why: v.j3_why,
+        // Nodes in the definition, which is what it costs to have -- the same
+        // substitution `trial_skill` makes when it reports steps here.
+        resident_kib: v.size,
+        rank: v.arity,
+        j4: v.j4,
+        epochs: 0,
+        capped: false,
+        adopted: false,
+        test_acc: 0.0,
+        test_read: 0,
+        test_fresh: true,
+    };
+    cert.adopted = cert.unanimous();
+
+    if cert.adopted {
+        let path = super::abstraction::adopted_path(h);
+        if !sysbox::write_text(&path, &v.src) {
+            return Err("it passed and /lib would not take it");
         }
         variant.store();
         set_head(&vhash);
@@ -2273,6 +2416,7 @@ pub fn trial_config(e: &mut super::Engine, rule: u8) -> Result<Certificate, &'st
         adapter: carried.as_ref().and_then(|x| x.adapter),
         policy: sysbox::read_blob("/ai/agent/policy").map(|p| sha256::hash(&p)),
         skills: carried.as_ref().and_then(|x| x.skills),
+        library: carried.as_ref().and_then(|x| x.library),
         corpus: sysbox::hash_of(super::vocab::CORPUS),
         deep: carried.as_ref().map(|x| x.deep).unwrap_or(false),
         core: super::voter::installed().map(|c| c.hash),
@@ -2551,8 +2695,25 @@ fn next_skill() -> Option<Proposal> {
     None
 }
 
+/// The next unjudged abstraction, largest saving first.
+///
+/// `unjudged` re-scans rather than reading a stored list, so a candidate that
+/// stopped occurring -- because the skill it came from was replaced -- simply
+/// is not offered. That is the same freshness argument `abstraction::find`
+/// makes: the question is whether this is worth naming now.
+fn next_abstraction() -> Option<Proposal> {
+    for c in super::abstraction::unjudged() {
+        let h = super::abstraction::store(&c.skeleton);
+        let p = Proposal::abstraction(h);
+        if !p.tried() {
+            return Some(p);
+        }
+    }
+    None
+}
+
 /// How many kinds the rotation walks.
-const KINDS: usize = 5;
+const KINDS: usize = 6;
 
 /// The next thing to try tonight, over every axis the loop can judge.
 ///
@@ -2584,7 +2745,11 @@ pub fn next_proposal() -> Option<Proposal> {
             0 => frontier(),
             1 => next_config(),
             2 => next_skill(),
-            3 => next_deep(),
+            // Cheap and declared, like the two above it: scanning the stored
+            // programs is a parse each and no decode at all, and the judges
+            // that follow are a parse and one hundred-thousand-step call.
+            3 => next_abstraction(),
+            4 => next_deep(),
             // Last, and the only one that *makes* its candidate rather than
             // finding one: composing costs decodes whether or not the result
             // is worth judging.
@@ -2603,13 +2768,17 @@ pub fn next_proposal() -> Option<Proposal> {
 /// work: finding out costs a dozen constrained decodes, because composing a
 /// core *is* the work. A command that answers "what would you do tonight"
 /// must not spend the night doing it.
-pub fn rotation() -> (usize, [(&'static str, bool); 4]) {
+pub fn rotation() -> (usize, [(&'static str, bool); 5]) {
     (
         ledger_len() % KINDS,
         [
             ("adapter", frontier().is_some()),
             ("rule", next_config().is_some()),
             ("skill", next_skill().is_some()),
+            // Cheap to ask, like the three above it: scanning the stored
+            // programs is a parse each and no decode at all, so this stays on
+            // the report-only side of the line the doc comment draws.
+            ("abstract", next_abstraction().is_some()),
             ("deep", next_deep().is_some()),
         ],
     )
@@ -2850,6 +3019,7 @@ pub fn selftest() -> bool {
         adapter: Some(sha256::hash(b"adapter")),
         policy: None,
         skills: None,
+        library: None,
         corpus: Some(sha256::hash(b"corpus")),
         lambda,
         rank: 8,
@@ -2899,6 +3069,33 @@ pub fn selftest() -> bool {
         "and reads back as having said it",
         Variant::from_text(&says_none.render()).core_seen,
     );
+    // The same guard for `library`, third field to be added to a hashed
+    // structure and third time the failure would be identical: an
+    // unconditional line re-addresses every node that already exists, so
+    // `head` names something that no longer reproduces and the change meant to
+    // extend re-derivability breaks it instead.
+    claim(
+        "a node written before the library field says nothing about one",
+        old.library.is_none() && !old.render().contains("library"),
+    );
+    let with_lib = Variant { library: Some(h), ..old.clone() };
+    claim(
+        "a node naming a library entry renders it and is a different node",
+        with_lib.render().contains("library ") && with_lib.hash() != old.hash(),
+    );
+    claim(
+        "and round-trips through its own rendering",
+        Variant::from_text(&with_lib.render()).library == Some(h)
+            && Variant::from_text(&with_lib.render()).hash() == with_lib.hash(),
+    );
+    // Two axes that must not collide: naming a library entry and naming a
+    // skill are different changes and have to reach different addresses.
+    let with_skill = Variant { skills: Some(h), ..old.clone() };
+    claim(
+        "a library entry and a skill with the same address are different nodes",
+        with_lib.hash() != with_skill.hash(),
+    );
+
     let with_core = Variant { core: Some(h), core_seen: true, ..old.clone() };
     let back = Variant::from_text(&with_core.render());
     claim(
