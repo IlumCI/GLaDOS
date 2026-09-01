@@ -146,57 +146,95 @@ jobs:
             "out/glados-$VERSION.efi.sig" \
             out/manifest --clobber
 
-      # --- the ISO ------------------------------------------------------
-      #
-      # Last, and deliberately after the image and the manifest are already
-      # published. An ISO is an install medium and nothing waits on it, while
-      # every machine in the field is waiting on the manifest -- so a failure
-      # down here must not be able to delay what is above it.
+  # --- the ISOs -------------------------------------------------------------
+  #
+  # A job of its own, and a matrix, because there is more than one image to
+  # build and they differ only in payload and context. Inline in `publish` it
+  # would have re-signed the kernel once per variant, which is both wasted work
+  # and a second chance to get signing wrong.
+  #
+  # `needs: publish` and nothing depends on this in turn. An ISO is install
+  # media: every machine in the field is waiting on the manifest, and nothing
+  # at all is waiting on this.
+  iso:
+    needs: publish
+    runs-on: ubuntu-latest
+    strategy:
+      # One variant failing must not cancel the others. They share nothing but
+      # the kernel image, which is already published by the time this runs.
+      fail-fast: false
+      matrix:
+        include:
+          - name: qwen3-0.6b
+            payload: payload-qwen3-0.6b-v1
+            manifest: qwen3-0.6b
+            seq: 0            # 0 means "leave the header alone"
+            label: GLADOS
+    steps:
+      - uses: actions/checkout@v4
 
-      # No `if:` on the next three, deliberately. Gating them on a real
-      # release would mean the only run that ever exercises them is the one
-      # that is not allowed to fail -- a dry run would skip exactly the path
-      # it was invoked to rehearse. Downloading 600 MB costs four minutes on a
-      # workflow that runs on tags and by hand, which is cheap against
-      # discovering the fetch is broken during a release.
+      - name: Version
+        run: |
+          V="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          echo "VERSION=$V" >> "$GITHUB_ENV"
+
+      - name: Fetch the kernel image that was just published
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p out
+          # The published artifact rather than a rebuild. An ISO carrying a
+          # kernel that was compiled separately from the one the manifest
+          # names is an ISO nobody can check against the signature.
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            gh release download "$GITHUB_REF_NAME" --dir out \
+              --pattern "glados-$VERSION.efi" --clobber
+          else
+            gh release download "v$VERSION" --dir out \
+              --pattern "glados-$VERSION.efi" --clobber || \
+              cargo build --release --locked && \
+              cp target/x86_64-unknown-uefi/release/glados.efi "out/glados-$VERSION.efi"
+          fi
+          ls -la "out/glados-$VERSION.efi"
+
       - name: Fetch the payload
         env:
           GH_TOKEN: ${{ github.token }}
-          PAYLOAD_TAG: ${{ vars.PAYLOAD_TAG || 'payload-qwen3-0.6b-v1' }}
         run: |
           mkdir -p payload-dir
-          # A release of its own, holding only weights. Not the repo (600 MB
-          # of binary that git would carry forever), not LFS (whose free
-          # bandwidth this would exhaust in three builds), and not the
-          # Supabase bucket the images go to -- that egress is metered and
-          # this is not.
-          gh release download "$PAYLOAD_TAG" --dir payload-dir --clobber
+          gh release download "${{ matrix.payload }}" --dir payload-dir --clobber
           ls -la payload-dir
 
       - name: The payload must be the payload
         run: |
-          # The step this whole arrangement exists for. A truncated download
-          # builds an ISO that boots and then cannot load the model, and
-          # nothing else in this workflow knows how long model.bin should be.
+          # BEFORE the stamp below, and that order is not cosmetic: stamping
+          # changes four bytes of model.bin, so a digest taken afterwards can
+          # never match what was recorded. Verify what arrived, then modify it.
           python3 tools/payload.py --selftest
-          python3 tools/payload.py verify payload-dir "payload/${PAYLOAD_NAME}.txt"
-        env:
-          PAYLOAD_NAME: ${{ vars.PAYLOAD_NAME || 'qwen3-0.6b' }}
+          python3 tools/payload.py verify payload-dir "payload/${{ matrix.manifest }}.txt"
+
+      - name: Set the context window
+        if: matrix.seq != 0
+        run: |
+          # Four bytes. `--seq` changes no weight, so N context variants are
+          # one upload and N stamps rather than N uploads of the same 1.8 GB.
+          # ctxstamp reads the result back through v4.py, which is the reader
+          # and deliberately not the writer.
+          python3 tools/ctxstamp.py payload-dir/model.bin "${{ matrix.seq }}"
 
       - name: Build the ISO
         run: |
-          python3 tools/mkiso.py "out/glados-$VERSION.iso" \
+          NAME="glados-$VERSION-${{ matrix.name }}"
+          if [ "${{ matrix.seq }}" != "0" ]; then NAME="$NAME-${{ matrix.seq }}"; fi
+          python3 tools/mkiso.py "out/$NAME.iso" \
             --efi "out/glados-$VERSION.efi" \
             --payload payload-dir \
-            --label "GLADOS"
-          ls -la "out/glados-$VERSION.iso"
+            --label "${{ matrix.label }}"
+          ls -la "out/$NAME.iso"
+          echo "ISO_NAME=$NAME" >> "$GITHUB_ENV"
 
       - name: Attach the ISO
         if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          # Separate from the attach above so that an ISO upload failing --
-          # it is 576 MB and the one asset here big enough to time out --
-          # cannot take the kernel image down with it.
-          gh release upload "$GITHUB_REF_NAME" "out/glados-$VERSION.iso" --clobber
+        run: gh release upload "$GITHUB_REF_NAME" "out/$ISO_NAME.iso" --clobber
