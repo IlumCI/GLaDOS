@@ -428,6 +428,75 @@ impl Framebuffer {
         }
     }
 
+    /// Blend a run toward `c` by `num`/256, leaving `256 - num` of what was
+    /// there. Zero changes nothing and 256 is a solid fill.
+    ///
+    /// What `shade_span` is to a shadow, this is to glass. A translucent
+    /// surface is not a darker one: it takes the colour of what it is made of
+    /// and keeps some of what is behind it, and a taskbar that only darkened
+    /// the desktop would read as a smoked strip rather than as something with
+    /// a tint of its own.
+    ///
+    /// **No carry, for a reason worth stating.** Each half is floored
+    /// independently, and `floor(a*(256-n)/256) + floor(b*n/256)` is at most
+    /// the exact sum, which is at most `max(a, b)` and so at most 255. So the
+    /// two-lane trick holds here as well and neither addition can spill into
+    /// the neighbouring channel.
+    ///
+    /// RAM surfaces only, exactly as `shade_span`.
+    pub fn tint_span(&self, x: u32, y: u32, w: u32, c: Color, num: u32) {
+        let Some((x, w)) = clip_run(y, x, w) else { return };
+        let num = num.min(256);
+        let keep = 256 - num;
+        let src = self.encode(c);
+        let (src_lo, src_hi) = (
+            (((src & 0x00FF_00FF) * num) >> 8) & 0x00FF_00FF,
+            (((src & 0x0000_FF00) * num) >> 8) & 0x0000_FF00,
+        );
+        let Some(dst) = self.row_mut(y, x, w) else { return };
+        for px in dst.iter_mut() {
+            let v = *px;
+            let lo = ((((v & 0x00FF_00FF) * keep) >> 8) & 0x00FF_00FF) + src_lo;
+            let hi = ((((v & 0x0000_FF00) * keep) >> 8) & 0x0000_FF00) + src_hi;
+            *px = lo | hi;
+        }
+    }
+
+    /// `tint_span` per row.
+    pub fn tint_rect(&self, x: u32, y: u32, w: u32, h: u32, c: Color, num: u32) {
+        let end = y.saturating_add(h).min(self.height);
+        for row in y..end {
+            self.tint_span(x, row, w, c, num);
+        }
+    }
+
+    /// A pane of glass: a vertical ramp of *opacity* over one colour.
+    ///
+    /// Aero's surfaces are not one translucency all the way down. They are
+    /// most solid where the light catches them and thinnest at the foot, which
+    /// is what makes a strip of it read as a pane rather than as a wash. So
+    /// this is `vgrad`'s shape applied to `num` instead of to the colour, and
+    /// it costs the same: one blended span per row.
+    pub fn glass(&self, x: u32, y: u32, w: u32, h: u32, c: Color, stops: &[(u8, u32)]) {
+        if h == 0 || stops.is_empty() {
+            return;
+        }
+        let end = y.saturating_add(h).min(self.height);
+        for row in y..end {
+            let t = if h > 1 { ((row - y) * 255 / (h - 1)) as u8 } else { 0 };
+            let mut k = 0usize;
+            while k + 2 < stops.len() && stops[k + 1].0 <= t {
+                k += 1;
+            }
+            let (p0, n0) = stops[k];
+            let (p1, n1) = stops[(k + 1).min(stops.len() - 1)];
+            let span = (p1.saturating_sub(p0)).max(1) as i32;
+            let f = (t.saturating_sub(p0) as i32).min(span);
+            let num = (n0 as i32 + (n1 as i32 - n0 as i32) * f / span).clamp(0, 256) as u32;
+            self.tint_span(x, row, w, c, num);
+        }
+    }
+
     /// Copy a run of pixels into one row.
     ///
     /// The fast path under `present`, which used to write the changed span of
@@ -1093,6 +1162,40 @@ pub fn paint_selftest() -> bool {
     claim(
         "a shaded run ends where it was asked to",
         buf[3] == 0 && buf[4] == white,
+    );
+
+    // --- tint -------------------------------------------------------------
+    let red = Color::new(0xFF, 0x00, 0x00);
+    fb.rect(0, 0, W, H, Color::new(0x00, 0x00, 0xFF));
+    fb.tint_span(0, 0, W, red, 0);
+    claim(
+        "tinting by 0 leaves the backdrop alone",
+        buf[0] == fb.encode(Color::new(0x00, 0x00, 0xFF)),
+    );
+
+    fb.rect(0, 0, W, H, Color::new(0x00, 0x00, 0xFF));
+    fb.tint_span(0, 0, W, red, 256);
+    claim("and by 256 replaces it outright", buf[0] == fb.encode(red));
+
+    // The claim the no-carry argument earns. Blending a full channel against
+    // an empty one is where a spill would land, and it would read as a
+    // plausible colour rather than as an error.
+    fb.rect(0, 0, W, H, Color::new(0x00, 0xFF, 0x00));
+    fb.tint_span(0, 0, W, Color::new(0xFF, 0x00, 0xFF), 128);
+    claim(
+        "half and half carries into no neighbour",
+        buf[0] == fb.encode(Color::new(0x7F, 0x7F, 0x7F)),
+    );
+
+    // Glass is a ramp of opacity rather than of colour, so its ends are the
+    // backdrop and the pane, not two shades of one thing.
+    let sky = Color::new(0x00, 0x00, 0x00);
+    fb.rect(0, 0, W, H, Color::new(0xFF, 0xFF, 0xFF));
+    fb.glass(0, 0, W, H, sky, &[(0, 0), (255, 256)]);
+    claim(
+        "glass keeps everything at one end and nothing at the other",
+        buf[0] == fb.encode(Color::new(0xFF, 0xFF, 0xFF))
+            && buf[((H - 1) * W) as usize] == fb.encode(sky),
     );
 
     // --- vgrad ------------------------------------------------------------
