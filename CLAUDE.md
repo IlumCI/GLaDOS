@@ -2142,6 +2142,13 @@ every night forever: the fixation the old counter existed to avoid, arriving
 through the front door. And there was never a decision for a router to make.
 `study_once` calls `web::save_to` directly.
 
+**Presence outranks it.** Reading a page is cheap -- one fetch, no engine, no
+terminal -- which made it tempting to let the study step run while somebody is
+working, and that would have been the module quietly breaking its own contract.
+`initiative` promises it acts when nobody is here; `study auto on` says the
+machine *may* study, not that it may study over your shoulder. `study now` is
+the operator's version.
+
 **Marking requires the evidence.** `mark` re-reads the saved document and
 refuses if it is absent, so a study step that failed on the network does not
 tick a topic off. Marking at proposal time would leave the machine believing it

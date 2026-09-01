@@ -420,7 +420,15 @@ fn tick_inner(forced: bool) {
     // transcript to learn from, just one document fetched and filed. Skipped
     // while the agent is busy for the reason everything here is -- the engine
     // has one holder -- even though this particular job never touches it.
-    if super::curiosity::auto() && !busy {
+    //
+    // Presence outranks it, like everything else here. Reading a page is cheap
+    // -- one fetch, no engine, no terminal -- so it was tempting to let this
+    // run while somebody is working, and that would have been the module
+    // quietly breaking its own contract. `initiative`'s promise is that it
+    // acts when nobody is here; `study auto on` says the machine *may* study,
+    // not that it may study over your shoulder. An operator who wants it now
+    // has `study now`.
+    if super::curiosity::auto() && !busy && seconds_since_input >= QUIET_AFTER_INPUT_S {
         let since_study = now_s.saturating_sub(unsafe { *LAST_STUDY_AT.get() });
         if since_study >= STUDY_GAP_S {
             if let Some((subject, topic, outcome)) = super::curiosity::study_once() {
