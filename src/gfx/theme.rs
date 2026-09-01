@@ -114,7 +114,84 @@ pub const WALL: [(u8, Color); 6] = [
 /// at a fifth of the screen it would otherwise be the brightest thing on the
 /// desktop, and a wallpaper that outshines the windows is one nobody can work
 /// in front of.
-pub const WALL_MARK: Color = Color::new(0x9E, 0xCF, 0xDC);
+/// The mark on the wall, lit: a sun over the horizon.
+///
+/// The mark there is a disc at the centre of a sky that already has water at
+/// the top and gold at the foot, which is a composition with a sun-shaped hole
+/// in it. Filling that hole with the accent rather than with another blue is
+/// also the one place the warm half of this scheme gets to be the largest
+/// thing on the screen.
+pub const SUN: [(u8, Color); 5] = [
+    (0, Color::new(0xFF, 0xF4, 0xC8)),
+    (40, Color::new(0xFF, 0xDD, 0x74)),
+    (132, Color::new(0xFF, 0xB1, 0x3A)),
+    (200, Color::new(0xF2, 0x8A, 0x1E)),
+    (255, Color::new(0xD9, 0x64, 0x10)),
+];
+
+// --- what is drawn on the wall -------------------------------------------
+//
+// A sky is a surface and not a picture. What makes this one the wall of a
+// machine that measures things is what is ruled on it: a graticule, an
+// instrument at the centre, and light.
+//
+// Every figure here is drawn as a *wash* rather than in a colour of its own,
+// which is the point of doing it with `tint` and is why the dot grid that
+// used to be here could not work. A fixed colour is subtle over one part of a
+// gradient and either invisible or filthy over the rest; a percentage of
+// white is equally faint over near-black water and over gold.
+
+/// The ink everything on the wall is washed in.
+pub const WALL_INK: Color = Color::new(0xFF, 0xFF, 0xFF);
+/// Pitch of the fine ruling, and of the heavy line every fourth one.
+pub const WALL_MINOR: u32 = 64;
+pub const WALL_MAJOR: u32 = 256;
+/// How much of the ink each carries, out of 256.
+pub const WALL_MINOR_NUM: u32 = 15;
+pub const WALL_MAJOR_NUM: u32 = 34;
+
+/// The atom. Semi-major and semi-minor axes as hundredths of the mark's
+/// radius, and how many tilts they are drawn at across a half turn.
+///
+/// The mark is the nucleus and needs no help to be one: it is already a ring
+/// with a filled centre, which is what the middle of every atomic diagram
+/// drawn between 1955 and 1965 looks like. Three orbits because that is the
+/// number the era settled on -- two reads as an eye and four as a flower.
+pub const WALL_ORBIT_A: u32 = 236;
+pub const WALL_ORBIT_B: u32 = 76;
+pub const WALL_ORBIT_TILTS: u32 = 3;
+pub const WALL_ORBIT: Color = Color::new(0x8F, 0xDC, 0xF0);
+/// Where on its orbit each electron sits, in sixty-fourths of a turn. Fixed,
+/// like the bubbles, because nothing in a paint path here is random.
+pub const WALL_ELECTRONS: [u32; 3] = [6, 27, 48];
+
+/// The dial the atom sits inside, and its graduations. An instrument has a
+/// scale on it, and the ticks point outward rather than in so the figure
+/// reads as emitting rather than as aiming.
+pub const WALL_DIAL: u32 = 268;
+pub const WALL_TICKS: u32 = 24;
+
+/// Bubbles: centre and radius, each as a percentage -- of the width, of the
+/// height, and of the height again -- so one table serves 1280x800 and the
+/// GF63's 1920x1080 without a second set of numbers.
+///
+/// A fixed table and not a scattering, because there is no randomness in a
+/// paint path here and there should not be: a wall that differed between two
+/// boots would make every screenshot comparison a judgement call.
+pub const WALL_BUBBLES: [(u32, u32, u32); 7] = [
+    (31, 17, 7),
+    (26, 68, 4),
+    (68, 16, 3),
+    (81, 47, 9),
+    (57, 84, 5),
+    (91, 76, 3),
+    (37, 37, 2),
+];
+/// How much of the sky a bubble keeps, the rim that catches the light, and
+/// the specular on it.
+pub const WALL_BUBBLE_NUM: u32 = 30;
+pub const WALL_RIM: Color = Color::new(0xBF, 0xEC, 0xF8);
+pub const WALL_SPEC: Color = Color::new(0xFF, 0xFF, 0xFF);
 pub const TEXT: Color = Color::new(0x00, 0x00, 0x00);
 pub const TEXT_DIM: Color = Color::new(0x76, 0x88, 0x90);
 /// The close button under the pointer.

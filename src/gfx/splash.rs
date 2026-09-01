@@ -110,30 +110,40 @@ fn layout(w: u32, h: u32) -> Layout {
 
 /// Blade directions and opening vertices, as unit vectors scaled by 1000.
 ///
-/// Seven blades, so the angles are multiples of 360/7 and no table of round
-/// degrees divides them. A whole trig implementation for a logo would be silly
-/// and there is no floating point this early, so the fourteen vectors the mark
-/// needs are simply written down.
+/// There is no floating point this early and a trig implementation for a logo
+/// would be silly, so the vectors the mark needs are written down. Generated
+/// rather than derived by hand -- `tools/mklogo.py` holds the same
+/// construction in floating point and is where the geometry changes first.
 ///
 /// `BLADE_DIR[i]` points at the tangent point of cut `i`. `OPEN_DIR[i]` points
 /// at a vertex of the opening, offset half a step, which is where two blade
 /// edges meet.
 const BLADE_DIR: [(i32, i32); BLADES] = [
-    (1000, 0), (623, 782), (-222, 975), (-901, 434),
-    (-901, -434), (-222, -975), (623, -782),
+    (1000, 0), (707, 707), (0, 1000), (-707, 707),
+    (-1000, 0), (-707, -707), (0, -1000), (707, -707),
 ];
 const OPEN_DIR: [(i32, i32); BLADES] = [
-    (901, 434), (222, 975), (-623, 782), (-1000, 0),
-    (-623, -782), (222, -975), (901, -434),
+    (924, 383), (383, 924), (-383, 924), (-924, 383),
+    (-924, -383), (-383, -924), (383, -924), (924, -383),
 ];
 
-const BLADES: usize = 7;
+/// Eight, and it went from seven to get here.
+///
+/// Seven made each blade a seventh of the disc, which at the size the wall
+/// draws it is a wedge big enough to read as a triangle rather than as a
+/// blade. A real iris has more and finer ones. Eight also puts every angle on
+/// a multiple of 45 degrees, so the table above is exact rather than a rounded
+/// approximation of a seventh of a turn.
+const BLADES: usize = 8;
 /// Opening radius, as hundredths of the disc radius.
 const OPEN_PCT: i32 = 46;
-/// Circumradius of the opening is its inradius over cos(pi/7) = 0.9010.
-const OPEN_CIRCUM_NUM: i32 = 1110;
-/// Half-width of a cut, as thousandths of the disc radius.
-const CUT_PCT: i32 = 35;
+/// Circumradius of the opening is its inradius over cos(pi/8) = 0.9239.
+const OPEN_CIRCUM_NUM: i32 = 1082;
+/// Half-width of a cut, as thousandths of the disc radius. Narrower with more
+/// blades, or the cuts take more of the disc than the blades do -- and the cut
+/// is a gap between blades rather than a spoke, so it wants to be thin enough
+/// to read as one.
+const CUT_PCT: i32 = 22;
 
 /// The iris on the wall at Aperture Science.
 ///
@@ -160,9 +170,62 @@ const CUT_PCT: i32 = 35;
 /// the logo *is*, so the wall and the boot screen cannot drift apart --
 /// `tools/mklogo.py` is a port of this and must be re-run if it changes.
 pub fn aperture(fb: &super::Framebuffer, cx: i32, cy: i32, r: i32, fg: super::Color, bg: super::Color) {
-    let scaled = |(dx, dy): (i32, i32), rad: i32| (cx + dx * rad / 1000, cy + dy * rad / 1000);
+    aperture_with(fb, cx, cy, r, Face::Flat(fg), Cut::Solid(bg));
+}
 
-    fb.fill_circle(cx, cy, r, fg);
+/// What the blades themselves are made of.
+///
+/// Flat is the mark as a mark: a boot screen, a favicon, an icon on a bar.
+/// `Ramp` is the mark as an object with light on it, which is what it becomes
+/// on a wall that already has a sky and a horizon -- at that size and in that
+/// company a flat disc reads as a sticker and a lit one reads as a sun.
+#[derive(Clone, Copy)]
+pub enum Face<'a> {
+    Flat(super::Color),
+    Ramp(&'a [(u8, super::Color)]),
+}
+
+/// What a cut through the disc is filled with.
+///
+/// The blades are solid and the cuts between them are gaps, so what a gap is
+/// filled with has to be whatever was behind the mark. On a boot screen and on
+/// a twenty-pixel icon that is one colour and `Solid` is exact. On a wall that
+/// is a gradient it is not: a single colour there belongs to no part of the
+/// sky and reads as a rectangle of the wrong shade laid across the disc, which
+/// is what a cut is least allowed to look like.
+#[derive(Clone, Copy)]
+pub enum Cut<'a> {
+    Solid(super::Color),
+    Sky {
+        stops: &'a [(u8, super::Color)],
+        top: u32,
+        height: u32,
+    },
+}
+
+/// The mark, with the caller saying what shows through its blades.
+///
+/// One geometry and one set of constants for both. Two marks that agreed about
+/// where a blade goes only while somebody kept them agreeing would be the
+/// duplicated-layout bug wearing a logo.
+pub fn aperture_with(
+    fb: &super::Framebuffer,
+    cx: i32,
+    cy: i32,
+    r: i32,
+    face: Face<'_>,
+    cut: Cut<'_>,
+) {
+    let scaled = |(dx, dy): (i32, i32), rad: i32| (cx + dx * rad / 1000, cy + dy * rad / 1000);
+    let carve = |a: (i32, i32), b: (i32, i32), c: (i32, i32)| match cut {
+        Cut::Solid(bg) => fb.fill_triangle(a, b, c, bg),
+        Cut::Sky { stops, top, height } => fb.fill_triangle_over(a, b, c, stops, top, height),
+    };
+
+    match face {
+        Face::Flat(fg) => fb.fill_circle(cx, cy, r, fg),
+        Face::Ramp(stops) => fb.fill_circle_ramp(cx, cy, r, stops),
+    }
 
     // The opening: the polygon bounded by the same lines the cuts run along.
     // A circular hole leaves a nub where each straight cut meets the curve;
@@ -173,7 +236,7 @@ pub fn aperture(fb: &super::Framebuffer, cx: i32, cy: i32, r: i32, fg: super::Co
     for b in 0..BLADES {
         let v0 = scaled(OPEN_DIR[b], circum);
         let v1 = scaled(OPEN_DIR[(b + 1) % BLADES], circum);
-        fb.fill_triangle(centre, v0, v1, bg);
+        carve(centre, v0, v1);
     }
 
     // One cut per blade, tangent to the opening, running out past the rim. The
@@ -193,8 +256,8 @@ pub fn aperture(fb: &super::Framebuffer, cx: i32, cy: i32, r: i32, fg: super::Co
         let a1 = (ax - ox, ay - oy);
         let e0 = (ex + ox, ey + oy);
         let e1 = (ex - ox, ey - oy);
-        fb.fill_triangle(a0, a1, e1, bg);
-        fb.fill_triangle(a0, e1, e0, bg);
+        carve(a0, a1, e1);
+        carve(a0, e1, e0);
     }
 }
 

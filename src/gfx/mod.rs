@@ -300,6 +300,31 @@ fn clip_run(y: u32, x: u32, w: u32) -> Option<(u32, u32)> {
     Some((lo as u32, (hi - lo) as u32))
 }
 
+/// The colour a stop table gives at row `dy` of `h`.
+///
+/// Pulled out of `vgrad` so a shape cut into something drawn over a ramp can
+/// ask the ramp what it would have put there, rather than approximating it
+/// with one colour that belongs to no part of it.
+pub fn ramp_at(stops: &[(u8, Color)], dy: u32, h: u32) -> Color {
+    if stops.is_empty() {
+        return Color::new(0, 0, 0);
+    }
+    if stops.len() == 1 || h <= 1 {
+        return stops[0].1;
+    }
+    let t = (dy.min(h - 1) * 255 / (h - 1)) as u8;
+    let mut k = 0usize;
+    while k + 2 < stops.len() && stops[k + 1].0 <= t {
+        k += 1;
+    }
+    let (p0, c0) = stops[k];
+    let (p1, c1) = stops[k + 1];
+    let span = (p1.saturating_sub(p0)).max(1) as i32;
+    let f = (t.saturating_sub(p0) as i32).min(span);
+    let mix = |a: u8, b: u8| (a as i32 + (b as i32 - a as i32) * f / span) as u8;
+    Color::new(mix(c0.r, c1.r), mix(c0.g, c1.g), mix(c0.b, c1.b))
+}
+
 #[derive(Clone, Copy)]
 pub struct Framebuffer {
     base: *mut u32,
@@ -773,26 +798,7 @@ impl Framebuffer {
             // Taken against the height that was asked for rather than the one
             // that survived clipping, so a ramp running off the bottom of the
             // screen is cut rather than squashed.
-            let t = if h > 1 { ((row - y) * 255 / (h - 1)) as u8 } else { 0 };
-            // The bracketing pair. Linear because a stop table is a handful of
-            // entries and a binary search over five is slower than looking.
-            let mut k = 0usize;
-            while k + 2 < stops.len() && stops[k + 1].0 <= t {
-                k += 1;
-            }
-            let (p0, c0) = stops[k];
-            let (p1, c1) = stops[k + 1];
-            let span = (p1.saturating_sub(p0)).max(1) as i32;
-            // Saturating and clamped so a table that does not span the whole
-            // 0..=255 holds its end colours instead of extrapolating past
-            // them, which at u8 would wrap into the wrong hue entirely.
-            let f = (t.saturating_sub(p0) as i32).min(span);
-            let mix = |a: u8, b: u8| (a as i32 + (b as i32 - a as i32) * f / span) as u8;
-            let raw = self.encode(Color::new(
-                mix(c0.r, c1.r),
-                mix(c0.g, c1.g),
-                mix(c0.b, c1.b),
-            ));
+            let raw = self.encode(ramp_at(stops, row - y, h));
             self.fill_span(x, row, w, raw);
         }
     }
@@ -862,7 +868,19 @@ impl Framebuffer {
     /// Filled triangle, scanline. The workhorse for anything that is not a
     /// rectangle -- which on this display is very nearly nothing, and then
     /// suddenly a logo.
-    pub fn fill_triangle(&self, a: (i32, i32), b: (i32, i32), c: (i32, i32), col: Color) {
+    /// Walk a triangle's rows, handing each span to `row`.
+    ///
+    /// Split out so the two fillers cannot come to disagree about which pixels
+    /// a triangle covers. One of them cuts holes in a logo and the other fills
+    /// it in; a shape and its hole rasterising differently would show as a
+    /// fringe nobody could account for.
+    fn tri_spans(
+        &self,
+        a: (i32, i32),
+        b: (i32, i32),
+        c: (i32, i32),
+        mut row: impl FnMut(u32, u32, u32),
+    ) {
         let mut v = [a, b, c];
         v.sort_by_key(|p| p.1);
         let (top, mid, bot) = (v[0], v[1], v[2]);
@@ -894,8 +912,62 @@ impl Framebuffer {
                 continue;
             }
             let x0 = x0.max(0);
-            self.rect(x0 as u32, y as u32, (x1 - x0 + 1) as u32, 1, col);
+            row(y as u32, x0 as u32, (x1 - x0 + 1) as u32);
         }
+    }
+
+    /// A disc filled from a vertical ramp, top to bottom of the disc itself.
+    ///
+    /// `fill_circle` with a colour that varies by row. The ramp is measured
+    /// across the disc rather than across the screen, so the same table gives
+    /// the same sphere at any size -- which is what separates a lit body from
+    /// a circle cut out of a background gradient.
+    pub fn fill_circle_ramp(&self, cx: i32, cy: i32, r: i32, stops: &[(u8, Color)]) {
+        if r <= 0 {
+            return;
+        }
+        let span = (2 * r + 1) as u32;
+        for dy in -r..=r {
+            let y = cy + dy;
+            if y < 0 || y as u32 >= self.height {
+                continue;
+            }
+            let half = isqrt((r * r - dy * dy).max(0) as u32) as i32;
+            let x0 = (cx - half).max(0);
+            let w = (cx + half - x0).max(0) as u32;
+            let raw = self.encode(ramp_at(stops, (dy + r) as u32, span));
+            self.fill_span(x0 as u32, y as u32, w, raw);
+        }
+    }
+
+    pub fn fill_triangle(&self, a: (i32, i32), b: (i32, i32), c: (i32, i32), col: Color) {
+        let raw = self.encode(col);
+        self.tri_spans(a, b, c, |y, x, w| self.fill_span(x, y, w, raw));
+    }
+
+    /// Fill a triangle with the colour a vertical ramp would have put there.
+    ///
+    /// For cutting a shape out of something drawn over a gradient: the hole
+    /// gets exactly what the gradient would have given that row, which is the
+    /// same thing as never having drawn over it. A logo whose blades are gaps
+    /// needs this, because one background colour belongs to no part of a sky
+    /// and shows as a rectangle of the wrong shade wherever it is put.
+    ///
+    /// `top` and `height` are the ramp's own, not the triangle's, so a hole
+    /// anywhere in a full-screen gradient lines up with it.
+    pub fn fill_triangle_over(
+        &self,
+        a: (i32, i32),
+        b: (i32, i32),
+        c: (i32, i32),
+        stops: &[(u8, Color)],
+        top: u32,
+        height: u32,
+    ) {
+        self.tri_spans(a, b, c, |y, x, w| {
+            let raw = self.encode(ramp_at(stops, y.saturating_sub(top), height));
+            self.fill_span(x, y, w, raw);
+        });
     }
 
     /// Bresenham. Integer only -- there is no floating point in early boot and

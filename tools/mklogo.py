@@ -10,7 +10,7 @@ desktop wallpaper and the favicon are one mark.
 
 What the mark is, and the ways it has been got wrong
 ---------------------------------------------------
-A solid disc with wedges cut out of it: seven blades around a large open
+A solid disc with wedges cut out of it: eight blades around a large open
 middle. Not blades drawn onto a background, and not a ring with spokes.
 
   * Stroking the blade edges as lines gives a wireframe, and full chords
@@ -47,7 +47,7 @@ from pathlib import Path
 AMBER = (0xF2, 0x8C, 0x1E)
 DARK = (0x0E, 0x0E, 0x0E)
 
-BLADES = 7
+BLADES = 8
 # Fractions of the disc radius.
 R_IN = 0.46             # the opening: large, and the thing every wrong version shrinks
 SLASH = 0.035           # half-width of the cut between blades
