@@ -2285,40 +2285,85 @@ near-duplicates yields a corpus that trains a model to recite.
 
 `study seq` carries one adapter through every domain in turn and scores all of
 them after each stage, so what it shows is forgetting rather than interference.
-The first run to produce a usable matrix, six domains at `-n 40` on SmolLM2
-under QEMU:
+The whole corpus, six domains, 775 examples on SmolLM2 under QEMU -- no column
+under eight held-out decisions, so every figure here is readable:
 
 ```
   after studying     loss      navigate  inspect   mutate  history     meta  network
-  (frozen base)         -           66%      55%      57%?     42%      66%?     50%?
-  navigate          13->10           83%      55%      57%?     42%      66%?     50%?
-  inspect          129->4            41%v     55%      57%?     42%      66%?     50%?
-  mutate           211->2            41%v     55%      71%?     42%      66%?     50%?
-  history          118->0            58%v     55%      42%?     85%      66%?     50%?
-  meta             inf->0            58%v     55%      57%?     42%v    100%?     50%?
-  network           75->1            58%v     55%      57%?     42%v     66%?     50%?
+  (frozen base)         -           63%      54%      55%      43%      66%      50%
+  navigate         273->163          69%      53%      54%      43%      66%      50%
+  inspect         1943->514          45%v     65%      54%      43%      66%      50%
+  mutate          4722->128          54%v     53%v     63%      43%      66%      50%
+  history         1421->204          54%v     46%v     45%v     70%      66%      50%
+  meta             inf->0            54%v     53%v     45%v     43%v    100%      50%
+  network          910->34           45%v     53%v     54%v     43%v     33%v     75%
 ```
 
-**Forgetting is real and it is large.** `navigate` goes 66% to 83% when it is
-studied and falls to 41% one stage later -- below where it started. `history`
-goes 42% to 85% and is back to 42% by the end. Studying a field helps that
-field and costs the fields already learned, which is the result the experiment
-was built to look for and which the earlier under-powered run could not see.
+**Every field studied is forgotten, and most end below their frozen baseline.**
 
-**The `?` columns say nothing and must not be read.** `mutate`, `meta` and
-`network` all carry fewer than eight held-out decisions at this stride, and
-`network` is flat at 50% throughout for exactly that reason -- it has two
-applets and twelve evaluation items, and a stride of 40 reaches almost none of
-them. The network domain was added to give the curriculum a field whose
-vocabulary shares nothing with the others; whether that changes the picture is
-not answered here and needs a full-corpus run.
+    navigate  63% base -> 69% studied -> 45% at the end
+    inspect   54%      -> 65%         -> 53%
+    mutate    55%      -> 63%         -> 54%
+    history   43%      -> 70%         -> 43%
+    meta      66%      -> 100%        -> 33%
 
-**`meta` shows `inf->0` and that is honest now.** It printed `2147483647->0`,
+`meta` is the sharpest: perfect after being studied, and one stage later at
+half its untrained accuracy. Studying a field helps that field and costs every
+field already learned, and by the end sequential study has left the router
+**worse than never training at all** on navigate, mutate and meta.
+
+**The network domain does move once there is enough of it**, 50% to 75%, which
+the `-n 40` run could not show -- it was flat at 50% throughout with fewer than
+eight held-out decisions, and was correctly marked unreadable. It is studied
+last so nothing follows it, which is why it does not fall: this table says
+nothing about whether a field sharing no vocabulary with the others forgets
+differently, only that it learns.
+
+**What this is and is not evidence about.** `godel` does not train this way:
+`Trial::train` builds a fresh adapter over every non-held decision, all domains
+at once, so nothing in the deployed loop fine-tunes sequentially. `study seq`
+is a deliberately adversarial curriculum built to expose forgetting. It is a
+constraint on incremental learning -- which is exactly what the syllabus would
+be -- rather than a description of the machine as it runs.
+
+**`meta` shows `inf->0` and that is honest now**, in both runs. It printed
+`2147483647->0`,
 which is `x as i32` saturating -- a number in a column of numbers that reads
 like a very large loss rather than like no loss at all. The trainer is fine: a
 first step from a row it assigned zero probability is `-log(0)`, which is a
 real thing for restricted cross-entropy to see, and the run converged. The bug
 was in saying so, and `loss_str` says it now.
+
+### Rehearsal
+
+`study seq [n] [rehearse [stride]]`. Rehearsal replays one earlier-field
+decision in every `stride` into each stage, which is the standard answer to
+catastrophic forgetting and is unusually cheap here: the base is frozen, so a
+hidden state is a constant and replaying an old decision costs a dot product
+rather than a forward pass. The expensive half -- the prepare -- is identical
+with and without it.
+
+**It is off by default and the default is the thing to compare against.** A
+claim about forgetting that is not measured against the same run without it is
+an assertion, so `stride 0` is asserted to select exactly the stage's own
+field.
+
+**A stride and not a coin**, for the reason `godel::frontier` walks a declared
+grid: a run nobody can re-derive is a run nobody can check.
+
+Two things about the sampling that would have been wrong quietly. The counter
+advances only over *eligible* earlier decisions, so the sample is an even
+fraction of the earlier material rather than of the positions -- striding over
+positions takes almost nothing from a field whose decisions sit close together
+in the corpus, and takes it silently. And the stage's own field is never
+thinned: rehearsal adds to a stage, it does not sample it.
+
+`rehearsal_keep` is pure, so all seven claims run without a prepared `Trial`;
+`Trial::train_selected` is now the one training loop and `train_masked` builds
+a decision vector from an applet mask and delegates to it. Both exclude
+held-out decisions, deliberately twice -- training on the validation slice does
+not announce itself, it just makes every later figure optimistic, and a check
+in one place is one somebody removes while refactoring the other.
 
 Sample sizes get stated wherever a figure appears. The adapter trainer has been
 exercised on subsamples of a few dozen decisions, which establishes that the

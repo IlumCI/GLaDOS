@@ -864,9 +864,15 @@ fn study_cmd(rest: &str) {
 /// The adapter version: one adapter carried through every field in turn, so a
 /// falling column is forgetting rather than interference.
 ///
-/// `study seq [examples]`. Expensive -- the preparation is a forward pass per
-/// example and every stage after it is a full training run, so the default
-/// subsample is small and the wall-clock ceiling is real.
+/// `study seq [examples] [rehearse [stride]]`. Expensive -- the preparation is
+/// a forward pass per example and every stage after it is a full training run,
+/// so the default subsample is small and the wall-clock ceiling is real.
+///
+/// `rehearse` replays one earlier decision in every `stride` into each stage.
+/// It is off by default and the default is what to compare against: a claim
+/// about forgetting that is not measured against the same run without it is an
+/// assertion, and the prepare is the expensive half and is identical either
+/// way.
 fn study_seq_cmd(arg: &str) {
     use crate::ai::study::{self, DOMAINS};
     use crate::ai::train::Budget;
@@ -879,17 +885,31 @@ fn study_seq_cmd(arg: &str) {
         return;
     }
 
-    let examples = arg.parse::<usize>().unwrap_or(48).max(8);
+    let mut it = arg.split_whitespace();
+    let examples = it.next().and_then(|w| w.parse::<usize>().ok()).unwrap_or(48).max(8);
+    let rehearse = match it.next() {
+        Some("rehearse") => it
+            .next()
+            .and_then(|w| w.parse::<usize>().ok())
+            .unwrap_or(study::REHEARSAL_STRIDE)
+            .max(1),
+        _ => 0,
+    };
     let b = Budget { epochs: 12, millis: 90_000, examples, lr: 0.02, rank: 8, alpha: 16.0 };
 
     console::set_color(YELLOW);
     kprintln!("[study seq] {} domains, ~{} examples, {} epochs a stage",
               DOMAINS.len(), examples, b.epochs);
+    if rehearse > 0 {
+        kprintln!("  rehearsing one earlier decision in every {}", rehearse);
+    } else {
+        kprintln!("  no rehearsal -- 'study seq {} rehearse' for the comparison", examples);
+    }
     console::set_color(LTGRAY);
     kprintln!("  preparing: one forward pass per example, then {} training runs", DOMAINS.len());
     console::set_color(WHITE);
 
-    let Some(rows) = study::sequential(&b) else {
+    let Some(rows) = study::sequential(&b, rehearse) else {
         console::set_color(LTRED);
         kprintln!("  could not prepare a trial -- no corpus, no model, or nothing spellable");
         console::set_color(WHITE);
@@ -897,7 +917,7 @@ fn study_seq_cmd(arg: &str) {
     };
 
     console::set_color(LTGRAY);
-    let mut hdr = String::from("  after studying     loss       ");
+    let mut hdr = String::from("  after studying     loss   replay");
     for d in DOMAINS {
         hdr.push_str(&alloc::format!("{:>10}", d.name));
     }
@@ -918,7 +938,11 @@ fn study_seq_cmd(arg: &str) {
         } else {
             alloc::format!("{:>4}->{:<4}", loss_str(r.first_loss), loss_str(r.last_loss))
         };
-        let mut line = alloc::format!("  {:<18} {} ", label, loss);
+        let replay = match r.studied {
+            None => String::from("     -"),
+            Some(_) => alloc::format!("{:>6}", r.rehearsed),
+        };
+        let mut line = alloc::format!("  {:<18} {}{} ", label, loss, replay);
         for (i, (right, total)) in r.scores.iter().enumerate() {
             if *total == 0 {
                 line.push_str("         -");
@@ -971,6 +995,9 @@ fn study_seq_cmd(arg: &str) {
     }
     console::set_color(WHITE);
     kprintln!("  one adapter carried through every stage, so this is forgetting and not interference");
+    if rehearse > 0 {
+        kprintln!("  with rehearsal at stride {} -- compare against the same run without it", rehearse);
+    }
 }
 
 /// What repeats across the skills this machine has written.

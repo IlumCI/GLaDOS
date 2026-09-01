@@ -1232,7 +1232,50 @@ impl Trial {
     /// deliberate and it matches how sequential fine-tuning is actually done:
     /// a new task is a new run, and Adam's moments describe the loss surface
     /// of the task that built them.
+    /// What each decision is about, in order: its applet and whether it is
+    /// held out.
+    ///
+    /// Exposed so a caller can select decisions rather than applets. The mask
+    /// form below cannot express "a sample of the earlier material", because
+    /// naming an applet takes every decision that applet ever appears in --
+    /// which is not rehearsal, it is cumulative training, and `curriculum`
+    /// already measures that.
+    pub fn decisions_meta(&self) -> Vec<(usize, bool)> {
+        self.decisions.iter().map(|d| (d.applet, d.held)).collect()
+    }
+
+    /// Train over exactly the decisions `keep` selects, by position.
+    ///
+    /// The one training loop. `train_masked` is a thin wrapper that builds a
+    /// `keep` vector from an applet mask, so there is no second implementation
+    /// to drift -- the reason `harness::decide` is the single implementation
+    /// of the routing rule.
+    ///
+    /// Held-out decisions are refused here rather than left to the caller.
+    /// A caller that had to remember would eventually forget, and training on
+    /// the validation slice is the failure this tree's whole evaluation
+    /// discipline exists to prevent: it does not announce itself, it just
+    /// makes every later figure optimistic.
+    pub fn train_selected(&self, b: &Budget, start: Option<&Dora>, keep: &[bool]) -> Fit {
+        let by_pos: Vec<bool> = self
+            .decisions
+            .iter()
+            .enumerate()
+            .map(|(i, d)| !d.held && keep.get(i).copied().unwrap_or(false))
+            .collect();
+        self.train_inner(b, start, &by_pos)
+    }
+
     pub fn train_masked(&self, b: &Budget, start: Option<&Dora>, mask: &[bool]) -> Fit {
+        let keep: Vec<bool> = self
+            .decisions
+            .iter()
+            .map(|d| !d.held && mask.get(d.applet).copied().unwrap_or(false))
+            .collect();
+        self.train_inner(b, start, &keep)
+    }
+
+    fn train_inner(&self, b: &Budget, start: Option<&Dora>, by_pos: &[bool]) -> Fit {
         let mat = self.mat();
         let mut dora = match start {
             Some(d) => d.clone(),
@@ -1250,8 +1293,8 @@ impl Trial {
         let mut ax = vec![0.0f32; dora.r];
         let mut out: Vec<f32> = Vec::new();
 
-        let keep = |d: &Decision| !d.held && mask.get(d.applet).copied().unwrap_or(false);
-        let n_train = self.decisions.iter().filter(|d| keep(d)).count().max(1);
+        let picked = |i: usize| by_pos.get(i).copied().unwrap_or(false);
+        let n_train = (0..self.decisions.len()).filter(|i| picked(*i)).count().max(1);
         let (mut first_loss, mut last_loss) = (0.0f32, 0.0f32);
         let (mut epochs, mut stopped) = (0usize, false);
 
@@ -1266,7 +1309,12 @@ impl Trial {
                 *v = 0.0;
             }
             last_loss = 0.0;
-            for d in self.decisions.iter().filter(|d| keep(d)) {
+            for (_, d) in self
+                .decisions
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| picked(*i))
+            {
                 let st = &self.chains[d.applet].as_ref().unwrap()[d.step];
                 out.clear();
                 out.extend_from_slice(&d.base);

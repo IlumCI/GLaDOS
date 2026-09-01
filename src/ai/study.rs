@@ -239,6 +239,60 @@ pub fn selftest() -> bool {
     claim("no domain names a missing applet", phantom.is_empty());
     claim("there is more than one domain to compare", DOMAINS.len() >= 2);
 
+    // --- rehearsal selection, driven without a model ---------------------
+    //
+    // Twelve decisions over three applets in three domains, two of them held
+    // out, laid out so the answers are countable by hand.
+    let domain_of = alloc::vec![Some(0), Some(1), Some(2)];
+    let mut meta: Vec<(usize, bool)> = Vec::new();
+    for k in 0..12 {
+        meta.push((k % 3, k >= 10));
+    }
+
+    // Off means exactly this stage's field, which is what the run without
+    // rehearsal has to be if the two are to be compared at all.
+    let (keep, n) = rehearsal_keep(&meta, &domain_of, 1, 0);
+    claim("stride 0 replays nothing", n == 0);
+    claim(
+        "and selects exactly the stage's own field",
+        keep.iter().enumerate().all(|(j, k)| {
+            *k == (meta[j].0 == 1 && !meta[j].1)
+        }),
+    );
+
+    // The first stage has nothing behind it, whatever the stride says.
+    let (_, n) = rehearsal_keep(&meta, &domain_of, 0, 4);
+    claim("the first field rehearses nothing", n == 0);
+
+    // A stride of 1 is every earlier decision -- cumulative training, and the
+    // upper bound on what rehearsal can replay.
+    let (all_keep, all_n) = rehearsal_keep(&meta, &domain_of, 2, 1);
+    let earlier = meta.iter().filter(|(a, h)| !h && *a < 2).count();
+    claim("stride 1 replays every earlier decision", all_n == earlier);
+
+    // And a wider stride replays strictly fewer, never more.
+    let (_, few) = rehearsal_keep(&meta, &domain_of, 2, 4);
+    claim("a wider stride replays fewer", few > 0 && few < all_n);
+
+    // The one that would be silent: a held-out decision reaching the fit.
+    claim(
+        "no held-out decision is ever selected, at any stride",
+        [0usize, 1, 2, 3, 4].iter().all(|st| {
+            let (k, _) = rehearsal_keep(&meta, &domain_of, 2, *st);
+            k.iter().enumerate().all(|(j, sel)| !(*sel && meta[j].1))
+        }),
+    );
+
+    // The stage's own field is never thinned by the stride: rehearsal adds to
+    // a stage, it does not sample it.
+    let own = meta.iter().enumerate().filter(|(_, (a, h))| !h && *a == 2).count();
+    let got = all_keep
+        .iter()
+        .enumerate()
+        .filter(|(j, k)| **k && meta[*j].0 == 2)
+        .count();
+    claim("the stage's own field is never sampled away", got == own);
+
     ok
 }
 
@@ -254,6 +308,14 @@ pub struct SeqRow {
     pub first_loss: f32,
     pub last_loss: f32,
     pub trained_on: usize,
+    /// Earlier-field decisions replayed into this stage, 0 without rehearsal.
+    ///
+    /// Reported rather than derived from the stride, because what actually
+    /// went into the fit is the number worth reading: a stride of four over
+    /// eleven earlier decisions is three, not "a quarter", and a stage that
+    /// rehearsed nothing because nothing came before it should say 0 rather
+    /// than leave a reader to work it out.
+    pub rehearsed: usize,
 }
 
 /// Study each field in turn, carrying one adapter through all of them.
@@ -269,11 +331,79 @@ pub struct SeqRow {
 /// Without it a drop from stage one to stage five is unreadable: it could be
 /// forgetting, or it could be an adapter that never helped that field to begin
 /// with.
-pub fn sequential(b: &super::train::Budget) -> Option<Vec<SeqRow>> {
+/// Which decisions a stage trains on, and how many of them are replays.
+///
+/// Pure in its inputs, for the reason `update::decide` and
+/// `initiative::sized_budget` are: this is the part of rehearsal that can be
+/// got wrong quietly, and asserting it must not cost a prepared `Trial` and
+/// four minutes of forward passes.
+///
+/// `stride` of 0 is rehearsal off, and must select exactly the stage's own
+/// field -- that is what makes the two runs comparable, so it is a claim
+/// rather than an assumption.
+///
+/// **Held-out decisions are excluded here as well as in `train_selected`.**
+/// Twice on purpose. Training on the validation slice does not announce
+/// itself; it just makes every later figure optimistic, and a check that
+/// exists in one place is a check somebody removes when refactoring the other.
+///
+/// The counter advances only over *eligible* earlier decisions, so the sample
+/// is an even fraction of the earlier material rather than of the positions --
+/// striding over positions would take almost nothing from a field whose
+/// decisions happen to sit close together in the corpus, and would take it
+/// silently.
+pub fn rehearsal_keep(
+    meta: &[(usize, bool)],
+    domain_of: &[Option<usize>],
+    stage: usize,
+    stride: usize,
+) -> (Vec<bool>, usize) {
+    let mut keep = alloc::vec![false; meta.len()];
+    let mut seen_earlier = 0usize;
+    let mut rehearsed = 0usize;
+    for (j, (applet, held)) in meta.iter().enumerate() {
+        if *held {
+            continue;
+        }
+        match domain_of.get(*applet).copied().flatten() {
+            Some(d) if d == stage => keep[j] = true,
+            Some(d) if d < stage && stride > 0 => {
+                if seen_earlier % stride == 0 {
+                    keep[j] = true;
+                    rehearsed += 1;
+                }
+                seen_earlier += 1;
+            }
+            _ => {}
+        }
+    }
+    (keep, rehearsed)
+}
+
+/// Replay one earlier decision in every `stride`.
+///
+/// A stride and not a coin, for the reason `godel::frontier` walks a declared
+/// grid: a run somebody cannot re-derive is a run nobody can check. Four is a
+/// quarter of the earlier material, which is large enough to matter and small
+/// enough that the point of studying one field at a time survives -- rehearsing
+/// everything is not rehearsal, it is cumulative training, and `curriculum`
+/// already measures that and unsurprisingly finds no forgetting in it.
+pub const REHEARSAL_STRIDE: usize = 4;
+
+/// Learn each field in turn, carrying one adapter through, optionally
+/// replaying a sample of what came before.
+///
+/// `rehearse` is the stride: 0 is off and reproduces exactly what this
+/// function did before rehearsal existed, which is what makes the two
+/// comparable. The comparison is the whole point -- rehearsal is a claim about
+/// forgetting, and a claim about forgetting that is not measured against the
+/// same run without it is an assertion.
+pub fn sequential(b: &super::train::Budget, rehearse: usize) -> Option<Vec<SeqRow>> {
     use super::train::Slice;
 
     // Masks are indexed by position in APPLETS, which is what
-    // `Decision::applet` carries.
+    // `Decision::applet` carries. Scoring still works this way; only the
+    // *training* selection had to become per-decision.
     let masks: Vec<Vec<bool>> = DOMAINS
         .iter()
         .map(|d| {
@@ -285,6 +415,14 @@ pub fn sequential(b: &super::train::Budget) -> Option<Vec<SeqRow>> {
         .collect();
 
     let trial = super::with_engine(|e| super::train::prepare(e, b))?.ok()?;
+    let meta = trial.decisions_meta();
+
+    // Which domain each applet belongs to, once, so the inner loop is a lookup
+    // rather than a search through every domain's name list per decision.
+    let domain_of: Vec<Option<usize>> = crate::sysbox::APPLETS
+        .iter()
+        .map(|a| DOMAINS.iter().position(|d| d.applets.contains(&a.name)))
+        .collect();
 
     let mut rows = Vec::new();
     let score_all = |dora: Option<&super::adapter::Dora>| -> Vec<(usize, usize)> {
@@ -297,34 +435,26 @@ pub fn sequential(b: &super::train::Budget) -> Option<Vec<SeqRow>> {
         first_loss: 0.0,
         last_loss: 0.0,
         trained_on: 0,
+        rehearsed: 0,
     });
 
     let mut carried: Option<super::adapter::Dora> = None;
-    for (i, mask) in masks.iter().enumerate() {
-        let fit = trial.train_masked(b, carried.as_ref(), mask);
+    for i in 0..masks.len() {
+        let (keep, rehearsed) = rehearsal_keep(&meta, &domain_of, i, rehearse);
+        let fit = trial.train_selected(b, carried.as_ref(), &keep);
         rows.push(SeqRow {
             studied: Some(i),
             scores: score_all(Some(&fit.dora)),
             first_loss: fit.first_loss,
             last_loss: fit.last_loss,
             trained_on: fit.epochs,
+            rehearsed,
         });
         carried = Some(fit.dora);
     }
     Some(rows)
 }
 
-/// `train_masked` with nothing masked out and no adapter carried in, which is
-/// by construction the same run `Trial::train` does.
-///
-/// A differential rather than a new measurement. When the sequential matrix
-/// came back completely flat there were two candidates -- a broken masked path,
-/// or an experiment too small to resolve the effect -- and reading the code
-/// could not tell them apart. This can: if it reproduces what `train adapter`
-/// reports on the same budget, the masked path is faithful and the flat matrix
-/// is a sample-size problem.
-///
-/// Returns (held before, held after, first loss, last loss, decisions trained).
 pub fn control(b: &super::train::Budget) -> Option<(f32, f32, f32, f32, usize)> {
     use super::train::Slice;
 
