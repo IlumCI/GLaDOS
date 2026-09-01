@@ -2613,17 +2613,14 @@ fn wheel_at(x: i32, y: i32, notches: i32) {
 /// wall's own colour anyway, so the mark is a two-colour figure by
 /// construction.
 fn wallpaper(fb: &Framebuffer) {
-    fb.rect(0, 0, fb.width(), fb.height(), theme::DESKTOP);
-    let step = 32;
-    let mut y = 0;
-    while y < fb.height() {
-        let mut x = 0;
-        while x < fb.width() {
-            fb.rect(x, y, 1, 1, theme::DESKTOP_GRID);
-            x += step;
-        }
-        y += step;
-    }
+    // A horizon rather than a fill. One `vgrad` is the same memset per row the
+    // flat colour was, so the sky costs nothing over what it replaced -- and
+    // it is what gives a drop shadow somewhere to land, which a near-black
+    // wall never did.
+    //
+    // The dot grid is gone with it. It read as a surface against a flat fill
+    // and reads as dirt against a sky.
+    fb.vgrad(0, 0, fb.width(), fb.height(), &theme::WALL);
 
     let r = (fb.height() / 5).min(fb.width() / 5) as i32;
     super::splash::aperture(
@@ -2690,10 +2687,16 @@ fn task_layout(fb: &Framebuffer, d: &Desktop) -> Vec<(Rect, usize, bool)> {
 /// what you then cannot find.
 fn taskbar(fb: &Framebuffer, d: &Desktop, sel: Option<usize>) {
     let bar = taskbar_rect(fb);
-    fb.vgrad(bar.x, bar.y, bar.w, bar.h, &theme::TASKBAR);
-    // One bright line along the top, where the bar meets the desktop. The stop
-    // table is proportional and cannot say "one pixel" at any height, which is
-    // the same division of labour the caption's catchlight makes.
+    // Glass, so the sky shows through it. The wallpaper is painted before this
+    // and the back-to-front repaint means what is underneath is already
+    // composed -- which is the whole reason a translucent bar costs one blended
+    // span per row and no second pass over anything.
+    fb.glass(bar.x, bar.y, bar.w, bar.h, theme::GLASS, &theme::GLASS_STOPS);
+    // The specular sheen over the top, and then one hard line where the pane
+    // meets the sky. The opacity table is proportional and cannot say "one
+    // pixel" at any height, which is the division of labour between a ramp and
+    // the line drawn on top of it.
+    fb.glass(bar.x, bar.y, bar.w, bar.h / 2, theme::GLOSS, &theme::GLOSS_STOPS);
     fb.rect(bar.x, bar.y, bar.w, 1, theme::TASK_EDGE);
 
     // The Start button: the mark and the name. Held down while its menu is
