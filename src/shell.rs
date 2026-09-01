@@ -138,7 +138,7 @@ fn find_core(want: &str) -> Option<[u8; 32]> {
 const KNOWN_COMMANDS: &[&str] = &[
     "term", "todo", "paint", "write", "mines", "oracle", "enternet", "net", "dhcp", "mem",
     "uptime", "tasks", "status", "help", "app", "author", "video", "serial", "log", "snap",
-    "update", "gpu", "mine", "abstract",
+    "update", "gpu", "mine", "abstract", "study",
 ];
 
 /// How many steps an authoring run gets.
@@ -650,6 +650,102 @@ fn update_cmd(rest: &str) {
             kprintln!("  update verify <image> [sig]   check a pair brought in by hand");
         }
     }
+}
+
+/// Learn one field, then another, and print what the second cost the first.
+///
+/// `study [stride]`. The stride subsamples the corpus, because the expensive
+/// part is one forward pass per example and a full run is minutes; every stage
+/// after that is a ridge fit over cached features and is nearly free.
+fn study_cmd(rest: &str) {
+    use crate::ai::study::{self, DOMAINS};
+
+    let stride = rest.trim().parse::<usize>().unwrap_or(1).max(1);
+    let held = study::held_out_counts();
+
+    console::set_color(YELLOW);
+    kprintln!("[study] {} domains, stride {}", DOMAINS.len(), stride);
+    console::set_color(WHITE);
+
+    let Some(rows) = study::curriculum(1.0, stride) else {
+        console::set_color(LTRED);
+        kprintln!("  no corpus, or no model loaded");
+        console::set_color(WHITE);
+        return;
+    };
+
+    console::set_color(LTGRAY);
+    let mut hdr = String::from("  trained on          fit ");
+    for d in DOMAINS {
+        hdr.push_str(&alloc::format!("{:>10}", d.name));
+    }
+    kprintln!("{}", hdr);
+    console::set_color(WHITE);
+
+    for r in &rows {
+        let mut line = alloc::format!("  {:<18} {:>4} ", DOMAINS[r.trained - 1].name, r.fitted_on);
+        for (i, (right, total)) in r.scores.iter().enumerate() {
+            if i >= r.trained {
+                // Not a zero, and printing one would be a lie worth catching.
+                // The fit is given every applet as a class but only this
+                // stage's labels, so a class with no positive example can
+                // never be predicted -- the cell is zero by construction and
+                // says nothing about transfer. Measuring zero-shot routing
+                // needs the description-derived row that `zero_shot_rank`
+                // builds, which is a different experiment.
+                line.push_str("       n/a");
+            } else if *total == 0 {
+                line.push_str("         -");
+            } else {
+                // Marked when the slice is too small to mean anything. A
+                // percentage over three examples is a number, not a
+                // measurement, and it should not read like one.
+                let pct = right * 100 / total;
+                let thin = if *total < 8 { "?" } else { " " };
+                line.push_str(&alloc::format!("{:>8}%{}", pct, thin));
+            }
+        }
+        kprintln!("{}", line);
+    }
+
+    console::set_color(LTGRAY);
+    let mut counts = String::from("  held out per domain:");
+    for (i, n) in held.iter().enumerate() {
+        counts.push_str(&alloc::format!(" {}={}", DOMAINS[i].name, n));
+    }
+    kprintln!("{}", counts);
+    kprintln!("  ? marks a slice under 8 examples -- a number, not a measurement");
+    kprintln!("  n/a is a field this stage never trained on: the label is not a class it");
+    kprintln!("  can predict, so the cell would read 0% by construction and mean nothing");
+    console::set_color(WHITE);
+
+    // The reading, stated rather than left to the eye, because the interesting
+    // cell is the one that went down and nobody looks for it.
+    if rows.len() >= 2 {
+        let first = &rows[0];
+        let last = &rows[rows.len() - 1];
+        let (a0, t0) = first.scores[0];
+        let (a1, t1) = last.scores[0];
+        if t0 > 0 && t1 > 0 {
+            let before = a0 * 100 / t0;
+            let after = a1 * 100 / t1;
+            if after + 2 < before {
+                console::set_color(LTRED);
+                kprintln!(
+                    "  {} fell {}% -> {}% as later fields were added: interference",
+                    DOMAINS[0].name, before, after
+                );
+            } else {
+                console::set_color(LTGREEN);
+                kprintln!(
+                    "  {} held at {}% -> {}% across every later field",
+                    DOMAINS[0].name, before, after
+                );
+            }
+            console::set_color(WHITE);
+        }
+    }
+    kprintln!("  the probe is refit, not updated, so this is interference and not forgetting");
 }
 
 /// What repeats across the skills this machine has written.
@@ -2539,6 +2635,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             kprintln!("  gpu           the display controllers, and whether one answers");
             kprintln!("  mine          bench|btc -- sha256d hash rate, and a difficulty sweep");
             kprintln!("  abstract      what repeats across the skills, and what naming it would save");
+            kprintln!("  study [n]     learn one field then another; what the second cost the first");
 
             console::set_color(YELLOW);
             kprintln!("\nstorage");
@@ -2747,6 +2844,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
         },
         "gpu" => gpu_cmd(acpi),
         "abstract" => abstract_cmd(rest),
+        "study" => study_cmd(rest),
         "pci" => match acpi.as_ref().and_then(|a| a.mcfg) {
             Some(ecam) => {
                 console::set_color(YELLOW);
