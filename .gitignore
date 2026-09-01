@@ -34,3 +34,7 @@ update.key
 
 # Supabase CLI scratch, rewritten on every invocation.
 supabase/.temp/
+
+# Built CUDA binaries. The sources are the artifact; an .exe in a source
+# tree is a thing nobody can review and everybody has to trust.
+cuda/*.exe

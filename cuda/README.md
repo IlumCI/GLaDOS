@@ -1,6 +1,6 @@
 # The host-side GPU work
 
-`sha256d.cu` is the SHA-256d kernel the QuantumGPU plan calls Stage 1. It is
+`sha256d.cu` is the SHA-256d kernel the XPU plan calls Stage 1. It is
 host-side and has nothing to do with the kernel in `src/` -- it is built with
 NVIDIA's toolchain on Windows, because `ptxas` is closed source and nobody
 outside NVIDIA has replaced it. GLaDOS would eventually ship a precompiled
@@ -41,4 +41,4 @@ sha256d.exe --bench --npt 2 --blocks 2048 --iters 3000
 
 **Run it for seconds, not milliseconds.** A short run measures a GPU that never
 left its idle clock, and the first sweep taken that way was wrong by 42%. See
-`design/quantumgpu.md` for what that cost and what the sustained figures are.
+`design/xpu.md` for what that cost and what the sustained figures are.

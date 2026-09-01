@@ -1,4 +1,19 @@
-# QuantumGPU Stage 1: SHA-256d on the RTX 3050, measured
+# XPU Stage 1: SHA-256d on the RTX 3050, measured
+
+## The name
+
+This was called XPU and is called the XPU now. The rename is not
+cosmetic and the old name was wrong twice over: nothing here is quantum, and
+the subject is not a GPU. What is being built is one addressable pool of
+whatever this machine can compute with -- the bootstrap processor, the
+application processors `smp.rs` parks, the RTX 3050 sitting on the PCIe bus,
+and whatever else turns up on a laptop that is supposed to run a model in ring
+0. A name that promises a physics it does not have is the kind of thing that
+gets quoted back later, so it goes now rather than after somebody has built on
+it.
+
+Everything below predates the rename and is unchanged. The figures are about
+one device because that is the device that was measured.
 
 Status: first measurements. Host-side, CUDA 13.3 on the GF63's own RTX 3050
 Laptop (GA107, sm_86, 16 SMs, 45 W cap). Correctness established against
