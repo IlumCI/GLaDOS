@@ -707,7 +707,7 @@ There is no `cargo test`. This is a `no_std` UEFI binary with no host test
 runner, so **verification is the boot selftests plus driving QEMU.**
 
 At boot the system runs **twenty-six selftest sections**, and `diag` offers
-**twenty-eight named suites** on demand, most of them the same checks (the `aiksi` section covers the capability gate by name and never by
+**twenty-nine named suites** on demand, most of them the same checks (the `aiksi` section covers the capability gate by name and never by
 calling -- half that table pokes memory, drives I/O ports or paints over the
 screen, and a suite that called every row to prove it exists would be
 scribbling on the machine to do it), printing `ok` or `FAIL` per line: heap, timer, clock, the namespace's
@@ -1268,9 +1268,35 @@ headlessly. Screenshots come from `drive.py --screenshot out/x.png`, pointer
 events from `--mouse "mouse_move dx dy"` and `--mouse "mouse_button 1"` (QEMU
 monitor, relative moves from (0,0) at boot).
 
-The look is 98 plus 3.1 plus the palette from the sign over our door: icons and
-Start and gradient titles from 98, bevels and dialogs that hug their content
-from 3.1. The Start menu has a query row at its foot -- nearest the Start button, where
+The look is Frutiger Aero in Aperture's colours, and it was 98 plus 3.1 until
+1.3.0. `theme.rs` owns all of it and says so: changing the look is changing
+that file rather than every caller, which is what made a whole reskin mostly a
+change of numbers.
+
+**The rule, where a rule was needed.** Aero is aqua, glass and saturation and
+this machine's colour is orange, so each got where it belongs: the surfaces the
+machine speaks through are warm -- captions, selection, links, focus -- and the
+room it sits in is cool -- wallpaper, taskbar glass, fields, menus. The wall is
+where they meet, a horizon from deep water to gold, with the Aperture mark lit
+as the sun on it.
+
+Four primitives carry it, all in `gfx/mod.rs` and all span-based, which is why
+a gradient interface costs about what a flat one did. `vgrad` is a vertical
+ramp, one `fill_span` per row, allocating nothing -- vertical for exactly that
+reason, since a row of a vertical ramp is one colour and a row of a horizontal
+one is a pattern that has to be built and blitted. **Two stops one position
+apart is a hard step**, and every gloss break in the interface is one. `tint`
+and `glass` blend toward a colour, `glass` ramping the opacity rather than the
+colour. `shade` darkens, for the drop shadows. `ramp_at` and `tri_spans` are
+shared lookups, so a shape and the hole cut in it cannot rasterise differently.
+
+`theme::chrome` is the one formula for where a window's parts are, and
+`theme::Popup` the one formula for a menu's. Both were several copies agreeing
+by hand across two files, and both were unified in the commit that moved the
+metrics, because that is the change that would otherwise have broken the
+agreement silently -- as a title bar you can see and cannot grab.
+
+The Start menu has a query row at its foot -- nearest the Start button, where
 this menu opens upwards out of the taskbar and where Windows 7 put its search
 box. Typing anywhere in the menu goes to it; Enter runs `open <query>`, the same
 dispatcher the search panel uses. `KEY_STARTMENU` (`win keys start`) opens the
@@ -1306,10 +1332,13 @@ Four lessons already paid for. Do not relearn them:
   packet, so the pointer simply does not move, which reads as a dead drag
   instead of a clamped one.
 - **`font::GLYPH_H` is 8 and not 16** (glyphs are 8x8, doubled by
-  `CHROME_SCALE`). `TITLE_H` is therefore 24, and the caption buttons are 12x12
-  at the bar's right end. Choreographing clicks from remembered metrics instead
-  of a `[desk] press` trace cost two full test cycles aimed 40 pixels left of
-  the close box.
+  `CHROME_SCALE`). `TITLE_H` is `GLYPH_H * CHROME_SCALE + 14` = 30, `MENU_H` is
+  22 and is **not** `TITLE_H` -- it was, over in `desk`, and that was a
+  coincidence rather than a fact until the caption grew and took every menu row
+  with it. Caption buttons are 21x21. Choreographing clicks from remembered
+  metrics instead of a `[desk] press` trace cost two full test cycles aimed 40
+  pixels left of the close box, and every metric on this line has moved since
+  then.
 
 `write` is two things told apart by shape: with `<path> <text>` it is the
 sysbox applet, with at most a path it opens the editor (decided in
