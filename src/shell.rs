@@ -4201,6 +4201,81 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
         }
         "bench" => crate::ai::bench(),
         "model" => crate::ai::model_demo(),
+        // What a WAD contains. The parser cannot print -- it lives under a
+        // tree that may not name `crate::` outside `crate::port`, so
+        // `kprintln!` is out of reach -- which is why it has an `Error` type
+        // with a `Display` and no diagnostics of its own. This does the
+        // talking.
+        "wad" => {
+            let Some(parsed) = crate::doom::open() else {
+                kprintln!("  no WAD on the boot volume");
+                kprintln!("  put one at {} and reboot", crate::WAD_PATH);
+                kprintln!("  DOOM1.WAD is id's; freedoom.github.io is the free one");
+                return;
+            };
+            let w = match parsed {
+                Ok(w) => w,
+                Err(e) => {
+                    console::set_color(LTRED);
+                    kprintln!("  {}", e);
+                    console::set_color(LTGRAY);
+                    return;
+                }
+            };
+            let arg = rest.trim();
+            kprintln!(
+                "  {}  {} lump(s)  {} B",
+                w.kind().as_str(),
+                w.len(),
+                w.size()
+            );
+            match arg {
+                // A named lump: say where it is and how big, and show the
+                // first bytes. A WAD's own structure is the fastest way to
+                // tell a truncated download from a wrong file, and the head of
+                // a lump is where a format announces itself.
+                name if !name.is_empty() && !name.starts_with('-') => {
+                    let Some(e) = w.find(name) else {
+                        kprintln!("  no lump called '{}'", name);
+                        return;
+                    };
+                    kprintln!("  {}  {} B", e.name, e.len());
+                    let d = w.data(e);
+                    let n = d.len().min(32);
+                    let mut hex = alloc::string::String::new();
+                    let mut txt = alloc::string::String::new();
+                    for b in &d[..n] {
+                        hex.push_str(&alloc::format!("{:02x} ", b));
+                        txt.push(if (0x20..0x7F).contains(b) { *b as char } else { '.' });
+                    }
+                    kprintln!("  {}", hex);
+                    kprintln!("  {}", txt);
+                }
+                _ => {
+                    // The whole directory is thousands of lines and would
+                    // scroll every one of them past the operator. A summary
+                    // and the first few, which is what says "this parsed" --
+                    // `wad <name>` is there for the rest.
+                    let show = 12.min(w.len());
+                    for i in 0..show {
+                        if let Some(e) = w.at(i) {
+                            kprintln!("    {:8}  {:>8} B", e.name.as_str(), e.len());
+                        }
+                    }
+                    if w.len() > show {
+                        kprintln!("    ... {} more -- 'wad <name>' for one", w.len() - show);
+                    }
+                    // Two lumps worth naming: every IWAD has a palette, and a
+                    // map marker is how you know it is a game rather than a
+                    // resource pack.
+                    for probe in ["PLAYPAL", "E1M1", "MAP01"] {
+                        if let Some(e) = w.find(probe) {
+                            kprintln!("  has {} ({} B)", e.name, e.len());
+                        }
+                    }
+                }
+            }
+        }
         // The seam a ported program reaches this machine through, and the
         // only way to look at it before there is a program.
         "port" => {

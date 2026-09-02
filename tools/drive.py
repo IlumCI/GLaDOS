@@ -12,6 +12,7 @@ between "the selftests probably pass" and knowing.
 Usage:
     drive.py [--timeout N] [--memory 2048M] [cmd ...]
     drive.py --stage-iso MODEL.BIN [--tokenizer TOK.BIN] [--memory 3072M] [cmd ...]
+    drive.py --wad out/test.wad "wad"
 
 Each positional argument is one shell line. With none, it just captures the
 boot log and exits at the first prompt.
@@ -376,6 +377,16 @@ def main():
     hd = "--hd" in argv
     if hd:
         argv.remove("--hd")
+    # A WAD to stage, overriding whatever is in `esp/GLADOS/`. The override
+    # exists for the malformed ones: a parser whose error paths have never run
+    # is a parser with no error paths, and in a kernel with no unwinder those
+    # are the difference between "that file is truncated" and a halt.
+    wad_src = None
+    if "--wad" in argv:
+        i = argv.index("--wad")
+        wad_src = Path(argv[i + 1])
+        del argv[i:i + 2]
+
     rec_dir, rec_frames, rec_gap = None, 120, 4.0
     if "--record" in argv:
         i = argv.index("--record")
@@ -462,11 +473,29 @@ def main():
 
     esp = ROOT / ".qemu/esp"
     (esp / "GLADOS").mkdir(parents=True, exist_ok=True)
-    for src, dst in [
+    # A WAD is optional in a way the other three are not: most runs have none
+    # and boot exactly as before. `--wad` names one, otherwise whatever is in
+    # `esp/GLADOS/` comes along -- which is what `deploy.ps1` does for the real
+    # machine, where it copies the whole directory.
+    staged = [
         (model_src, "model.bin"),
         (tokenizer_src, "tokenizer.bin"),
         (ROOT / "esp/GLADOS/roots.der", "roots.der"),
-    ]:
+    ]
+    wad = wad_src if wad_src is not None else ROOT / "esp/GLADOS/DOOM.WAD"
+    if wad.exists():
+        staged.append((wad, "DOOM.WAD"))
+    elif wad_src is not None:
+        raise SystemExit(f"missing {wad_src}")
+    else:
+        # Stale copies are worse than none: a run with --wad pointing at a
+        # broken file, followed by one without, would otherwise still be
+        # testing the broken file.
+        old_wad = esp / "GLADOS" / "DOOM.WAD"
+        if old_wad.exists():
+            old_wad.unlink()
+
+    for src, dst in staged:
         if not src.exists():
             raise SystemExit(f"missing {src}")
         target = esp / "GLADOS" / dst

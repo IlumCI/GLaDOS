@@ -21,6 +21,8 @@ mod app;
 mod cpu;
 mod crypto;
 mod diag;
+/// DOOM, ported. Not our code -- see the module doc.
+mod doom;
 mod dev;
 mod edit;
 mod fmt;
@@ -82,6 +84,9 @@ pub struct BootInfo {
     pub model: Option<Blob>,
     /// The matching tokenizer.
     pub tokenizer: Option<Blob>,
+    /// A DOOM WAD, if one was on the boot volume. `None` is the ordinary
+    /// case: this is not a machine that needs one to run.
+    pub wad: Option<Blob>,
     /// A DER bundle of root certificates. `None` means TLS can encrypt and
     /// cannot authenticate, which is reported rather than assumed.
     pub roots: Option<Blob>,
@@ -91,6 +96,13 @@ pub struct BootInfo {
 /// on the ESP, not a namespace path.
 pub const MODEL_PATH: &str = "\\GLADOS\\model.bin";
 pub const TOKENIZER_PATH: &str = "\\GLADOS\\tokenizer.bin";
+/// A WAD, if the operator put one there. Absent is the ordinary case.
+///
+/// Read at boot for the reason the model is: this is the only moment there is
+/// a filesystem, and `read_file` leaves it in a firmware pool that nothing
+/// frees, so a four-megabyte IWAD costs the heap nothing and can be sliced
+/// rather than copied for the life of the machine.
+pub const WAD_PATH: &str = "\\GLADOS\\DOOM.WAD";
 
 #[no_mangle]
 pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
@@ -258,6 +270,14 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
 ");
     }
 
+    // Beside the model, and for the same reason. `None` here is not a
+    // failure: most machines have no WAD and boot exactly as before.
+    let wad = uefi::read_file(bs, image, WAD_PATH);
+    match &wad {
+        Some(b) => serial_println!("glados: wad {} bytes from {}", b.len, WAD_PATH),
+        None => serial_println!("glados: no wad at {}", WAD_PATH),
+    }
+
     let model = uefi::read_file(bs, image, MODEL_PATH);
     let tokenizer = uefi::read_file(bs, image, TOKENIZER_PATH);
     // The root bundle comes off the same volume for the same reason: this is
@@ -355,6 +375,7 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
         fb_end,
         model,
         tokenizer,
+        wad,
         roots,
     };
 
@@ -467,6 +488,17 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     sysbox::init();
     if restore {
         sysbox::restore_latest();
+    }
+
+    // A ported program's data, filed where `port::files` can find it. After
+    // the heap, because the registry is a `Vec`; before the shell, because a
+    // command asking for it must not race the registration.
+    //
+    // The bytes are not copied. `Blob::as_slice` hands out the firmware pool
+    // allocation itself, which nothing frees, so a four-megabyte IWAD is
+    // borrowed for the life of the machine and costs the heap one pointer.
+    if let Some(b) = boot.wad {
+        port::files::provide(doom::WAD_FILE, b.as_slice());
     }
 
     // After storage, so a future version can pull weights out of the store
