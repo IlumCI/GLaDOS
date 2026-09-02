@@ -132,9 +132,18 @@ VERTEXES = [
     (-R, R),    # 5
 ]
 
-# Anticlockwise, so the right side of each faces into the room -- which is
-# what makes the sidedef on the right the one that exists.
-LINEDEFS = [(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 0)]
+# Clockwise, and the direction is not cosmetic.
+#
+# DOOM's front side is the *right* one, so for a one-sided wall the right side
+# has to face into its sector -- which means walking the boundary with the room
+# on your right, which is clockwise. Anticlockwise puts every front face
+# outward, and the symptom is not a mirrored room or a stripe: it is an
+# entirely empty screen, because the renderer's backface cull correctly
+# discards every wall in the level.
+#
+# This was anticlockwise, with a comment claiming it was the other way, and it
+# cost a debugging session on a renderer that was right all along.
+LINEDEFS = [(1, 0), (2, 1), (3, 2), (4, 3), (5, 4), (0, 5)]
 
 # Which linedefs fall on which side of the partition x=0.
 RIGHT_LINES = [1, 2, 3]   # x >= 0
@@ -458,6 +467,30 @@ def check_map(lumps):
                     raise ValueError(f"node {i} names subsector {child & 0x7FFF}")
             elif child >= nnodes:
                 raise ValueError(f"node {i} names node {child} of {nnodes}")
+
+    # Winding. Every one-sided wall's right side must face into its sector,
+    # and the failure mode is an empty screen rather than a wrong picture --
+    # which is much harder to diagnose, because an empty screen looks like a
+    # renderer that has not been finished yet.
+    for i in range(nlines):
+        e = i * SIZES["LINEDEFS"]
+        a, b, _fl, _sp, _tag, right, left = struct.unpack(
+            "<HHHHHHH", by["LINEDEFS"][e:e + 14]
+        )
+        if left != NO_SIDE:
+            continue
+        (ax, ay) = struct.unpack("<hh", by["VERTEXES"][a * 4:a * 4 + 4])
+        (bx, by_) = struct.unpack("<hh", by["VERTEXES"][b * 4:b * 4 + 4])
+        dx, dy = bx - ax, by_ - ay
+        # A step from the midpoint along the right-hand normal, which for a
+        # convex room centred on the origin lands inside it.
+        mx, my = (ax + bx) / 2, (ay + by_) / 2
+        n = (dx * dx + dy * dy) ** 0.5 or 1
+        px_, py_ = mx + dy / n * 8, my - dx / n * 8
+        if not (abs(px_) < R and abs(py_) < R):
+            raise ValueError(
+                f"linedef {i} is wound the wrong way: its right side faces out"
+            )
 
     (px, py, ang, kind, _flags) = struct.unpack("<hhhhh", by["THINGS"][:10])
     if kind != 1:

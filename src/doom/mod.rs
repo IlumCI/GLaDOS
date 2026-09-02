@@ -44,6 +44,8 @@
 //! a filesystem.
 
 pub mod draw;
+pub mod math;
+pub mod render;
 pub mod level;
 pub mod wad;
 

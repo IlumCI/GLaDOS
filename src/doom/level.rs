@@ -462,6 +462,30 @@ impl Level {
         }
     }
 
+    /// The sector a point stands in, by way of the subsector containing it.
+    ///
+    /// A subsector does not record its sector -- the format leaves it implied
+    /// by the segs, every one of which faces into it -- so this takes the
+    /// front sector of the first seg. A miniseg has no linedef and therefore
+    /// no sector, so it is skipped rather than trusted.
+    pub fn sector_at(&self, x: i32, y: i32) -> Option<&Sector> {
+        let ss = self.subsector_at(x, y)?;
+        for i in 0..ss.count as usize {
+            let seg = self.segs.get(ss.first as usize + i)?;
+            if seg.linedef == NONE {
+                continue;
+            }
+            let line = self.linedefs.get(seg.linedef as usize)?;
+            let side = if seg.side == 0 { line.right } else { line.left };
+            if side == NONE {
+                continue;
+            }
+            let sd = self.sidedefs.get(side as usize)?;
+            return self.sectors.get(sd.sector as usize);
+        }
+        None
+    }
+
     /// Walk the tree to the subsector containing a point.
     pub fn subsector_at(&self, x: i32, y: i32) -> Option<&SubSector> {
         let mut n = self.root();

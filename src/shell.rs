@@ -4244,23 +4244,16 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
         // so the path being proven is the path that will be used, rather than
         // a convenient stand-in for it.
         "doom" => {
-            // Parsed per subcommand rather than positionally, because the two
-            // do not have the same shape: `pal` takes a duration and `map`
-            // takes a name *then* a duration. Reading the duration first ate
-            // the map name, and `doom map E1M1 6000` went looking for a map
-            // called 6000.
+            // Each subcommand parses its own arguments, because no rule
+            // covers all three. `pal [ms]`, `map [name] [ms]` and
+            // `view [deg] [ms]` disagree about what a leading number means,
+            // and two general rules have already been wrong here: reading the
+            // duration first ate `map E1M1`, and then treating a trailing
+            // number as the duration ate `view 45`.
             let mut it = rest.split_whitespace();
             let what = it.next().unwrap_or("");
-            let rest_args: alloc::vec::Vec<&str> = it.collect();
-            // A duration is the trailing argument, when the last one is a
-            // number. Everything before it belongs to the subcommand.
-            let (names, hold): (&[&str], u64) = match rest_args.split_last() {
-                Some((last, head)) => match last.parse::<u64>() {
-                    Ok(ms) => (head, ms),
-                    Err(_) => (&rest_args[..], 0),
-                },
-                None => (&[], 0),
-            };
+            let args: alloc::vec::Vec<&str> = it.collect();
+            let num = |i: usize| -> Option<u64> { args.get(i).and_then(|t| t.parse().ok()) };
 
             let Some(parsed) = crate::doom::open() else {
                 kprintln!("  no WAD on the boot volume -- see 'wad'");
@@ -4292,6 +4285,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
 
             match what {
                 "pal" | "" => {
+                    let hold = num(0).unwrap_or(0);
                     crate::port::with_screen(|| {
                         let Some(mut surf) = crate::port::Surface::new(320, 200) else {
                             return;
@@ -4303,7 +4297,9 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     kprintln!("  drew 256 colours");
                 }
                 "map" => {
-                    let name = names.first().copied().unwrap_or("");
+                    let named = args.first().map(|t| t.parse::<u64>().is_err()).unwrap_or(false);
+                    let name = if named { args[0] } else { "" };
+                    let hold = num(if named { 1 } else { 0 }).unwrap_or(0);
                     let marker = if name.is_empty() {
                         first_map(&w)
                     } else {
@@ -4333,7 +4329,73 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     });
                     kprintln!("  drew it");
                 }
-                other => kprintln!("  no such action: {}  (try: pal [ms], map [name] [ms])", other),
+                // The first three-dimensional picture. `doom view [deg] [ms]`
+                // stands at the player start facing `deg`, so a frame can be
+                // asked for from a known place -- which is the only way to
+                // check a projection without a person at the keyboard.
+                "view" => {
+                    let marker = first_map(&w);
+                    if marker.is_empty() {
+                        kprintln!("  no map marker in this WAD");
+                        return;
+                    }
+                    let lv = match crate::doom::level::Level::load(&w, &marker) {
+                        Ok(l) => l,
+                        Err(e) => {
+                            console::set_color(LTRED);
+                            kprintln!("  {}: {}", marker, e);
+                            console::set_color(LTGRAY);
+                            return;
+                        }
+                    };
+                    let Some(start) = lv.player_start().copied() else {
+                        console::set_color(YELLOW);
+                        kprintln!("  no player start, so there is nowhere to stand");
+                        console::set_color(LTGRAY);
+                        return;
+                    };
+                    // The floor under the start, so the eye sits at a
+                    // sensible height rather than at zero -- which in a room
+                    // with a raised floor is inside it.
+                    let floor = lv
+                        .sector_at(start.x as i32, start.y as i32)
+                        .map(|s| s.floor as f32)
+                        .unwrap_or(0.0);
+
+                    let deg: f32 = args
+                        .first()
+                        .and_then(|t| t.parse::<i32>().ok())
+                        .map(|d| d as f32)
+                        .unwrap_or(start.angle as f32);
+                    let hold = num(1).unwrap_or(0);
+                    let view = crate::doom::render::View {
+                        x: start.x as f32,
+                        y: start.y as f32,
+                        z: floor + crate::doom::render::EYE_HEIGHT,
+                        angle: deg * (crate::doom::math::PI / 180.0),
+                    };
+                    kprintln!(
+                        "  {} from {},{} at z {} facing {} deg",
+                        lv.name,
+                        start.x,
+                        start.y,
+                        view.z as i32,
+                        deg as i32
+                    );
+                    crate::port::with_screen(|| {
+                        let Some(mut surf) = crate::port::Surface::new(320, 200) else {
+                            return;
+                        };
+                        surf.set_palette_rgb(pal);
+                        let sky = crate::doom::draw::nearest(pal, 0x10, 0x18, 0x60);
+                        let mut r = crate::doom::render::Renderer::new(&surf, pal);
+                        r.frame(&mut surf, &lv, view, sky);
+                        surf.present();
+                        wait_or(hold);
+                    });
+                    kprintln!("  drew a frame");
+                }
+                other => kprintln!("  no such action: {}  (try: pal, map [name], view [deg])", other),
             }
         }
         // One map, decoded. `map` alone takes the first marker it can find;
