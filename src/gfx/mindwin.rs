@@ -186,19 +186,25 @@ impl Improve {
 
     /// The four verdicts out of a ledger line, if it has them.
     ///
-    /// A line records them as `J1 ok` / `J1 no` style tokens; anything else is
-    /// a line from a shape of trial that does not have four judges, and the
-    /// honest answer for those is none rather than four falses.
+    /// A line records each as `Jn[...]`, and the bracket **ends** with the
+    /// verdict: `ok` or `no`. Anything else is a line from a shape of trial
+    /// that does not have four judges, and the honest answer for those is none
+    /// rather than four falses.
+    ///
+    /// Reading the bracket and not the next whitespace token, which is what
+    /// this did first: the token after `J1` is `[fix=0`, so every judge parsed
+    /// as a veto and a trial two judges had passed showed four red chips. Four
+    /// falses and "cannot tell" are different answers and only one of them is
+    /// true.
     fn verdicts(line: &str) -> Option<[bool; 4]> {
         let mut out = [false; 4];
         let mut seen = 0;
-        for (i, tag) in ["J1", "J2", "J3", "J4"].iter().enumerate() {
-            if let Some(p) = line.find(tag) {
-                let rest = &line[p + tag.len()..];
-                let word = rest.split_whitespace().next().unwrap_or("");
-                out[i] = word.starts_with("ok") || word.starts_with('+') || word.starts_with("yes");
-                seen += 1;
-            }
+        for (i, tag) in ["J1[", "J2[", "J3[", "J4["].iter().enumerate() {
+            let Some(p) = line.find(tag) else { continue };
+            let rest = &line[p + tag.len()..];
+            let Some(end) = rest.find(']') else { continue };
+            out[i] = rest[..end].trim_end().ends_with("ok");
+            seen += 1;
         }
         if seen == 4 {
             Some(out)
@@ -695,11 +701,14 @@ pub fn selftest() -> bool {
     // rather than four falses that would read as four failed judges.
     claim(
         "four judges are read off a ledger line",
-        Improve::verdicts("adopted J1 ok J2 ok J3 ok J4 ok") == Some([true, true, true, true]),
+        Improve::verdicts("h3 J1[fix=2 chi=4.10 beyond the noise ok] J2[goals=4/4 ok] J3[ok] J4[r=8 kib=24 ok] ADOPT")
+            == Some([true, true, true, true]),
     );
     claim(
         "a refusal is not mistaken for a pass",
-        Improve::verdicts("rejected J1 no J2 ok J3 ok J4 ok") == Some([false, true, true, true]),
+        Improve::verdicts(
+            "h3 J1[fix=0 broke=0 chi=0.00 inside the noise no] J2[goals=0/4 no]              J3[ok] J4[r=8 kib=24 ok] reject",
+        ) == Some([false, false, true, true]),
     );
     claim(
         "and a line with no judges reports none",

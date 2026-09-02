@@ -1287,15 +1287,25 @@ fn render_certificate(c: &Certificate, seq: u32, hour: u8) -> String {
     push_f2(&mut s, c.mcnemar);
     s.push(' ');
     s.push_str(c.j1_why);
-    s.push(']');
+    // Every judge ends its bracket with its verdict. J2 and J4 always did; J1
+    // ended with prose ("inside the noise") and J3 with either "ok" or its
+    // reason, so a reader had to know the why-strings to tell a pass from a
+    // veto -- and the Improve window, which is such a reader, showed four red
+    // chips for a trial two judges had passed. A window that invents a verdict
+    // is worse than one that admits it cannot read the line.
+    s.push_str(if c.j1 { " ok]" } else { " no]" });
     s.push_str(" J2[goals=");
     push_u32(&mut s, c.goals_held as u32);
     s.push('/');
     push_u32(&mut s, c.goals_total as u32);
     s.push_str(if c.j2 { " ok]" } else { " no]" });
     s.push_str(" J3[");
-    s.push_str(if c.j3 { "ok" } else { c.j3_why });
-    s.push(']');
+    if c.j3 {
+        s.push_str("ok]");
+    } else {
+        s.push_str(c.j3_why);
+        s.push_str(" no]");
+    }
     s.push_str(" ep=");
     push_u32(&mut s, c.epochs);
     if c.capped {
