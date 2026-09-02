@@ -96,6 +96,20 @@ pub fn with_screen<R>(f: impl FnOnce() -> R) -> R {
     out
 }
 
+/// Wait until something happens.
+///
+/// A game loop that has drawn its frame and is waiting for the next tic should
+/// not spin: this machine has other tasks -- the resident mind among them --
+/// and a busy wait starves them for the whole of a session. `hlt` parks the
+/// core until the next interrupt, and the 100 Hz timer guarantees one arrives.
+///
+/// A host service rather than something a ported program does for itself,
+/// because halting a CPU is exactly the kind of thing only the machine should
+/// decide it is safe to do.
+pub fn idle() {
+    unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };
+}
+
 /// A scratch buffer sized once and reused, because a ported program allocating
 /// per frame is a ported program that stutters.
 pub(crate) fn sized<T: Clone + Default>(v: &mut Vec<T>, n: usize) {

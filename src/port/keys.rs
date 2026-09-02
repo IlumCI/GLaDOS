@@ -70,6 +70,17 @@ impl Held {
     }
 }
 
+/// Hold or release a key without a keyboard.
+///
+/// The typed equivalent, which this tree requires of everything: serial can
+/// send a keystroke but not a *held* one, because there is no make without a
+/// break, so a program that reads held keys is one no harness could otherwise
+/// drive. It goes through the same map the interrupt fills, so the scripted
+/// path and the real one cannot disagree about what "held" means.
+pub fn force(code: u8, down: bool) {
+    kbd::force_down(code, down);
+}
+
 /// Forget every held key.
 ///
 /// For the moment a program takes the keyboard and the moment it gives it

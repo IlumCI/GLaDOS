@@ -4036,6 +4036,86 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 todo::STEPS.len()
             );
         }
+        // Hold a key down, or let it go.
+        //
+        // The typed equivalent of leaning on a key, and the only way anything
+        // continuous is ever tested here: serial can send a keystroke but not
+        // a *held* one -- there is no make without a break -- so a game that
+        // reads held keys is a game no harness can drive. `win keys` sends
+        // events; this sets state.
+        //
+        // Held keys survive across commands on purpose. `keys hold w` then
+        // `doom play 2000` walks forward for two seconds, and where the player
+        // ends up is arithmetic rather than an opinion about a screenshot.
+        "keys" => {
+            use crate::dev::kbd;
+            let mut it = rest.split_whitespace();
+            let verb = it.next().unwrap_or("");
+            let named = |n: &str| -> Option<u8> {
+                Some(match n {
+                    "w" => kbd::SC_W,
+                    "a" => kbd::SC_A,
+                    "s" => kbd::SC_S,
+                    "d" => kbd::SC_D,
+                    "left" => kbd::SC_LEFT,
+                    "right" => kbd::SC_RIGHT,
+                    "up" => kbd::SC_UP,
+                    "down" => kbd::SC_DOWN,
+                    "shift" => kbd::SC_LSHIFT,
+                    "ctrl" => kbd::SC_LCTRL,
+                    "space" => kbd::SC_SPACE,
+                    "esc" => kbd::SC_ESC,
+                    _ => return None,
+                })
+            };
+            match verb {
+                "hold" | "release" => {
+                    let down = verb == "hold";
+                    let mut any = false;
+                    for n in it {
+                        match named(n) {
+                            Some(c) => {
+                                kbd::force_down(c, down);
+                                any = true;
+                                kprintln!("  {} {}", if down { "holding" } else { "released" }, n);
+                            }
+                            None => kprintln!("  no key called '{}'", n),
+                        }
+                    }
+                    if !any {
+                        kprintln!("  usage: keys hold|release w a s d left right up down shift ctrl space esc");
+                    }
+                }
+                "clear" => {
+                    kbd::clear_down();
+                    kprintln!("  nothing held");
+                }
+                "" | "status" => {
+                    let names = [
+                        ("w", kbd::SC_W), ("a", kbd::SC_A), ("s", kbd::SC_S), ("d", kbd::SC_D),
+                        ("left", kbd::SC_LEFT), ("right", kbd::SC_RIGHT),
+                        ("up", kbd::SC_UP), ("down", kbd::SC_DOWN),
+                        ("shift", kbd::SC_LSHIFT), ("ctrl", kbd::SC_LCTRL),
+                        ("space", kbd::SC_SPACE), ("esc", kbd::SC_ESC),
+                    ];
+                    let mut held = alloc::string::String::new();
+                    for (n, c) in names.iter() {
+                        if kbd::is_down(*c) {
+                            if !held.is_empty() {
+                                held.push(' ');
+                            }
+                            held.push_str(n);
+                        }
+                    }
+                    if held.is_empty() {
+                        kprintln!("  nothing held");
+                    } else {
+                        kprintln!("  held: {}", held);
+                    }
+                }
+                other => kprintln!("  no such action: {}  (try: hold, release, clear, status)", other),
+            }
+        }
         "win" => {
             use crate::gfx::desk;
             let mut it = rest.split_whitespace();
@@ -4395,7 +4475,85 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     });
                     kprintln!("  drew a frame");
                 }
-                other => kprintln!("  no such action: {}  (try: pal, map [name], view [deg])", other),
+                // Standing in it. `doom play [ms]` -- bounded because a
+                // program that runs until a keypress cannot be driven over a
+                // serial line, which is how everything here is tested.
+                "play" => {
+                    let marker = first_map(&w);
+                    if marker.is_empty() {
+                        kprintln!("  no map marker in this WAD");
+                        return;
+                    }
+                    let lv = match crate::doom::level::Level::load(&w, &marker) {
+                        Ok(l) => l,
+                        Err(e) => {
+                            console::set_color(LTRED);
+                            kprintln!("  {}: {}", marker, e);
+                            console::set_color(LTGRAY);
+                            return;
+                        }
+                    };
+                    let hold = num(0).unwrap_or(0);
+                    // Keys named after the duration are held for the session.
+                    let mut script: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+                    for n in args.iter().skip(1) {
+                        use crate::dev::kbd;
+                        let c = match *n {
+                            "w" => kbd::SC_W,
+                            "a" => kbd::SC_A,
+                            "s" => kbd::SC_S,
+                            "d" => kbd::SC_D,
+                            "left" => kbd::SC_LEFT,
+                            "right" => kbd::SC_RIGHT,
+                            "shift" => kbd::SC_LSHIFT,
+                            _ => {
+                                kprintln!("  no key called '{}'", n);
+                                continue;
+                            }
+                        };
+                        script.push(c);
+                    }
+                    kprintln!("  {}  --  W/S walk, A/D strafe, arrows turn, shift runs, Esc quits", lv.name);
+                    if hold != 0 {
+                        kprintln!("  (running for {} ms)", hold);
+                    }
+                    let mut out: Option<crate::doom::play::Stats> = None;
+                    crate::port::with_screen(|| {
+                        let Some(mut surf) = crate::port::Surface::new(320, 200) else {
+                            return;
+                        };
+                        out = crate::doom::play::run(&mut surf, &lv, pal, hold, &script);
+                    });
+                    match out {
+                        None => kprintln!("  no player start, so there is nowhere to stand"),
+                        Some(st) => {
+                            let fps = if st.ms > 0 { st.frames as u64 * 1000 / st.ms } else { 0 };
+                            kprintln!(
+                                "  {} frames, {} tics in {} ms  ({} fps)",
+                                st.frames,
+                                st.tics,
+                                st.ms,
+                                fps
+                            );
+                            kprintln!(
+                                "  ended at {},{} facing {} deg",
+                                st.x as i32,
+                                st.y as i32,
+                                st.deg as i32
+                            );
+                            // The world runs at 35 Hz whatever the renderer
+                            // manages, so this is the number that says whether
+                            // it did. Reported rather than assumed.
+                            let want = st.ms * 35 / 1000;
+                            if st.tics as u64 + 2 < want {
+                                console::set_color(YELLOW);
+                                kprintln!("  the world fell behind: {} tics where {} were due", st.tics, want);
+                                console::set_color(LTGRAY);
+                            }
+                        }
+                    }
+                }
+                other => kprintln!("  no such action: {}  (try: pal, map, view [deg], play)", other),
             }
         }
         // One map, decoded. `map` alone takes the first marker it can find;
