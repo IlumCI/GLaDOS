@@ -32,6 +32,8 @@ mod log;
 mod mem;
 mod net;
 mod pkg;
+/// What a program written somewhere else may ask of this machine.
+mod port;
 mod recovery;
 mod rng;
 mod serial;

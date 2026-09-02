@@ -4201,6 +4201,122 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
         }
         "bench" => crate::ai::bench(),
         "model" => crate::ai::model_demo(),
+        // The seam a ported program reaches this machine through, and the
+        // only way to look at it before there is a program.
+        "port" => {
+            match rest.trim() {
+                "" | "status" => {
+                    kprintln!("  files a ported program can reach:");
+                    let names = crate::port::files::names();
+                    if names.is_empty() {
+                        kprintln!("    (none -- nothing was found on the boot volume)");
+                    }
+                    for n in names {
+                        let len = crate::port::files::get(n).map(|b| b.len()).unwrap_or(0);
+                        kprintln!("    {}  {} B", n, len);
+                    }
+                    kprintln!(
+                        "  clock {}, screen {}",
+                        if crate::port::clock::ready() { "calibrated" } else { "UNCALIBRATED" },
+                        if crate::gfx::exclusive() { "held" } else { "free" }
+                    );
+                    kprintln!("  'port bars' draws a test frame through the surface");
+                }
+                // The whole indexed-frame path, with something a person can
+                // check by looking. Every element of it is exercised -- the
+                // 256-entry palette, the pre-encode into the screen's word
+                // order, the row expansion, the integer scale and the blit --
+                // and if any of them is wrong the picture is wrong in a way
+                // that needs no debugger. A renderer put on top of an untested
+                // present path is two unknowns at once.
+                // `bars` waits for a key; `bars <ms>` returns on its own.
+                //
+                // The bounded form is not a convenience, it is the only way
+                // this is ever tested. `drive.py` sends the next command when
+                // it sees a prompt, and a program that owns the screen until
+                // somebody presses a key never gives the prompt back -- so the
+                // keystroke that would end it is the one command the harness
+                // cannot deliver. The first run of this deadlocked exactly
+                // there, with two commands unsent.
+                //
+                // Every full-screen program that follows needs the same thing.
+                b if b == "bars" || b.starts_with("bars ") => {
+                    let hold_ms: u64 = b
+                        .strip_prefix("bars")
+                        .map(|t| t.trim())
+                        .filter(|t| !t.is_empty())
+                        .and_then(|t| t.parse().ok())
+                        .unwrap_or(0);
+                    crate::port::with_screen(|| {
+                        let Some(mut surf) = crate::port::Surface::new(320, 200) else {
+                            kprintln!("  no framebuffer");
+                            return;
+                        };
+                        // A palette that makes an index legible: sixteen hues
+                        // by sixteen brightnesses, so a wrong byte lands in
+                        // visibly the wrong place rather than merely the wrong
+                        // shade.
+                        for i in 0..256u32 {
+                            let (hue, lev) = (i / 16, i % 16);
+                            let v = (lev * 17) as u8;
+                            let c = match hue {
+                                0 => crate::gfx::Color::new(v, v, v),
+                                1 => crate::gfx::Color::new(v, 0, 0),
+                                2 => crate::gfx::Color::new(0, v, 0),
+                                3 => crate::gfx::Color::new(0, 0, v),
+                                4 => crate::gfx::Color::new(v, v, 0),
+                                5 => crate::gfx::Color::new(0, v, v),
+                                6 => crate::gfx::Color::new(v, 0, v),
+                                7 => crate::gfx::Color::new(v, v / 2, 0),
+                                _ => {
+                                    let k = (hue - 8) as u8 * 32;
+                                    crate::gfx::Color::new(v, k, 255u8.saturating_sub(v))
+                                }
+                            };
+                            surf.set_colour(i as u8, c);
+                        }
+                        // Sixteen by sixteen blocks, one per palette entry, so
+                        // the index at any point on screen is computable by
+                        // eye from its position.
+                        let (w, h) = (surf.width(), surf.height());
+                        {
+                            let px = surf.pixels();
+                            for y in 0..h {
+                                for x in 0..w {
+                                    let cx = x * 16 / w;
+                                    let cy = y * 16 / h;
+                                    px[y * w + x] = (cy * 16 + cx) as u8;
+                                }
+                            }
+                        }
+                        surf.present();
+                        let (ox, oy, sc) = surf.placement();
+                        crate::serial_println!(
+                            "[port] 320x200 at +{},{} scale {}",
+                            ox,
+                            oy,
+                            sc
+                        );
+                        // Held until a key, so the clock has time to fail to
+                        // paint over it -- ten seconds is a hundred chances at
+                        // 10 Hz, and one digit would be visible.
+                        crate::gfx::desk::trace("port bars");
+                        let until = crate::port::clock::now_ms() + hold_ms;
+                        loop {
+                            if crate::dev::kbd::pop_any().is_some() {
+                                break;
+                            }
+                            if hold_ms != 0 && crate::port::clock::now_ms() >= until {
+                                break;
+                            }
+                            unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };
+                        }
+                    });
+                    kprintln!("  done");
+                }
+                other => kprintln!("  no such action: {}  (try: status, bars [ms])", other),
+            }
+        }
         "video" => {
             kprintln!(
                 "  {}x{}  stride {}  {:?}",

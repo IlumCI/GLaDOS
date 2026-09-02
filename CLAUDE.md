@@ -701,6 +701,40 @@ pure function, so all eight of its states are asserted at boot without staging
 anything -- including that an image already on trial refuses to apply a further
 update on top of itself.
 
+### Ported programs, and the seam they reach through
+
+`src/port/` is everything a program written somewhere else may ask of this
+machine: an indexed `Surface` with its own palette, held keys, a monotonic
+clock, and the bytes of a file. **Anything under a ported tree may name
+`crate::port` and nothing else**, and that is checked rather than intended:
+
+```powershell
+.\tools\venv\Scripts\python.exe tools\portcheck.py
+```
+
+It scans for `crate::x` where x is not `port`, and for `super::super::`, which
+is what somebody writes ten minutes after being told about the first. A line
+with a genuine exception carries `# portcheck: ok` so the exception is in the
+diff rather than achieved by rewording. There is no `build.rs` here and there
+cannot be one, so this runs beside the build the way `tokenizer.py --verify`
+does.
+
+The reason for a seam with one consumer, stated because this tree normally
+refuses to build an interface before there are two: the point of the first
+port is to find out where the boundary is. A port that reaches into `gfx`,
+`kbd`, `sysbox` and `time` wherever it needs them is not a port, it is a
+merge, and the second one starts from nothing.
+
+`Surface` applies the palette in software, because the framebuffer is 32bpp
+only and there is no mode-setting -- the resolution and format are whatever
+UEFI handed over. It is cheap anyway: the palette is pre-encoded once into the
+screen's word order, a row is expanded into a `u32` scratch and blitted whole
+through `blit_span` (a `copy_nonoverlapping` on the aperture), and integer
+scaling repeats that row rather than rebuilding it. `gfx/paint.rs` has the
+other approach -- run-length plus a `rect` per run -- which is right for a
+drawing program and wrong for a rendered scene where every pixel differs from
+its neighbour.
+
 ### Testing
 
 There is no `cargo test`. This is a `no_std` UEFI binary with no host test
@@ -836,6 +870,25 @@ best of nine decodes on SmolLM2 under WHPX read 50,819 us/token at one core,
 all three. The single-sample figures that suggested a cost (65 ms against
 95 ms) were the host's scheduler, which is the error `video bench` was
 rewritten to stop making.
+
+**A full-screen program needs a bounded form or nothing can test it.**
+`drive.py` sends the next command when it sees a prompt, so a program that
+owns the screen until somebody presses a key never gives the prompt back --
+and the keystroke that would end it is the one command the harness cannot
+deliver. `port bars` deadlocked exactly there on its first run, with two
+commands unsent. Hence `port bars <ms>`: the interactive form waits for a key,
+the bounded form returns on its own, and only the second one is ever driven.
+Anything full-screen that follows needs the same.
+
+**`gfx::exclusive` is how a full-screen program keeps the screen.** Owning the
+framebuffer is not enough: `desk::paint_clock` runs on the clock task at 10 Hz
+and `desk::move_cursor` runs on whichever task is generating, and both write
+the framebuffer under a paint claim that is private to `desk.rs` and therefore
+unreachable from outside it. So instead of contending for the claim, the two
+periodic painters stand down while the flag is set. `port::with_screen` sets
+it, blanks the screen and calls `desk::draw()` on the way out. `edit::run` has
+owned the screen the same way since it was written and had this defect the
+whole time -- the clock painted over the editor.
 
 **Boot selftest output is easy to skip past and it does catch real bugs.** An
 ECDSA break was visible in `[selftest] crypto` for a whole debugging cycle

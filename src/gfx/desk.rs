@@ -1853,6 +1853,12 @@ pub fn pump_cursor() {
 /// Losing the claim costs one tick of clock. The shell is mid-frame and about
 /// to paint the taskbar itself.
 pub fn paint_clock(real: &Framebuffer, x: u32, y: u32, text: &str, scale: u32) {
+    // Somebody owns the screen. The clock is the one painter with no event
+    // behind it -- it fires on a schedule whether or not the desktop is what
+    // is being looked at -- so it is the one that has to ask.
+    if super::exclusive() {
+        return;
+    }
     crate::cpu::without_interrupts(|| {
         let Some(_claim) = Claim::take() else { return };
         let target = super::compose::target().unwrap_or(*real);
@@ -1886,6 +1892,13 @@ pub fn paint_clock(real: &Framebuffer, x: u32, y: u32, text: &str, scale: u32) {
 /// pointer lag and nothing else, so the caller leaves `POS` alone and tries
 /// again rather than recording a move it never drew.
 fn move_cursor(x: u32, y: u32) -> bool {
+    // As with the clock: while something owns the screen, the pointer is not
+    // on it. Answering `true` rather than `false` so the caller records the
+    // new position and does not spend the rest of the session retrying a move
+    // it can never make.
+    if super::exclusive() {
+        return true;
+    }
     crate::cpu::without_interrupts(|| {
         let Some(_claim) = Claim::take() else { return false };
         let Some(fb) = super::primary() else { return false };
