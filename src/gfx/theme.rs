@@ -1012,6 +1012,82 @@ pub fn separator_v(fb: &Framebuffer, x: u32, y: u32, h: u32) {
     fb.rect(x + 1, y, 1, h, EDGE_LIGHT);
 }
 
+// --- icon bodies ----------------------------------------------------------
+//
+// One light source for the whole set, which is the entire point of putting
+// these here rather than letting each drawing carry its own gradient. Ten
+// private ramps is ten chances for one icon to be lit from the left while its
+// neighbour is lit from above, and nothing catches that but an eye.
+//
+// Every ramp runs light at the top to dark at the bottom, matching `SUN` and
+// `TITLE_ON` and the wallpaper's own horizon. The hard step at 128/129 that
+// the chrome ramps use is deliberately absent: a caption is a plate and takes
+// a gloss break, a solid object is a solid object.
+
+/// Cool aqua, for glass and water-like bodies -- the globe, the sliders.
+pub const ICON_GLASS: [(u8, Color); 4] = [
+    (0, Color::new(0x9C, 0xDD, 0xF2)),
+    (90, Color::new(0x4F, 0xA8, 0xCE)),
+    (180, Color::new(0x2A, 0x74, 0x9C)),
+    (255, Color::new(0x18, 0x4C, 0x6C)),
+];
+
+/// The warm half of the palette, for anything the machine speaks through.
+pub const ICON_WARM: [(u8, Color); 4] = [
+    (0, Color::new(0xFF, 0xD8, 0x8E)),
+    (90, Color::new(0xF7, 0xA8, 0x33)),
+    (180, Color::new(0xDC, 0x7E, 0x14)),
+    (255, Color::new(0xA8, 0x58, 0x0C)),
+];
+
+/// Paper, which is not flat white: a page lit from above has a shadow side.
+pub const ICON_PAPER: [(u8, Color); 4] = [
+    (0, Color::new(0xFF, 0xFF, 0xFF)),
+    (110, Color::new(0xF4, 0xF8, 0xFA)),
+    (200, Color::new(0xDD, 0xE7, 0xEC)),
+    (255, Color::new(0xC4, 0xD3, 0xDA)),
+];
+
+/// A dark body -- a screen, a mine. Never pure black; a black object in a lit
+/// scene still catches the sky.
+pub const ICON_DARK: [(u8, Color); 4] = [
+    (0, Color::new(0x3A, 0x4A, 0x56)),
+    (70, Color::new(0x1C, 0x26, 0x30)),
+    (180, Color::new(0x10, 0x16, 0x1E)),
+    (255, Color::new(0x06, 0x0A, 0x10)),
+];
+
+/// The paint palette's board.
+pub const ICON_WOOD: [(u8, Color); 3] = [
+    (0, Color::new(0xD8, 0xAE, 0x74)),
+    (140, Color::new(0xB0, 0x86, 0x50)),
+    (255, Color::new(0x7E, 0x5C, 0x33)),
+];
+
+/// The thin edge every icon body carries, and the specular that sits on top
+/// of it. One pixel each: an icon is 40 across and a two-pixel outline is a
+/// fifth of its face.
+pub const ICON_EDGE: Color = Color::new(0x2E, 0x4A, 0x5A);
+pub const ICON_SPEC: Color = HILIGHT;
+
+/// How much white the gloss band carries, out of 256, and how far down the
+/// body it reaches, out of 256.
+pub const ICON_GLOSS_NUM: u32 = 64;
+pub const ICON_GLOSS_SPAN: u32 = 110;
+
+/// How much a base shadow keeps of what is under it, out of 256. Higher is
+/// fainter; `SHADOW_NUM` is 214 for a window and an icon wants less weight
+/// than a window.
+pub const ICON_SHADE_NUM: u32 = 224;
+
+// The three ink wells on the paint palette, and the globe's water. These were
+// `Color::new` literals inside `pictogram` and belonged to no palette, so a
+// reskin moved the whole interface and left the icons behind -- which is
+// exactly what happened when the desktop went Aero and nine drawings did not.
+pub const INK_BLUE: Color = Color::new(0x30, 0x70, 0xC0);
+pub const INK_GREEN: Color = Color::new(0x30, 0xA0, 0x40);
+pub const INK_RED: Color = Color::new(0xC0, 0x30, 0x30);
+
 /// The Aperture mark at button size, on a raised face.
 ///
 /// Small enough that the six blades are mush, so this is the ring and the

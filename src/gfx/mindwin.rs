@@ -393,7 +393,14 @@ impl Flows {
         let pad = client.shrink(6);
         let btn_h = theme::text_h_at(dense()) + 10;
         let body_h = pad.h.saturating_sub(btn_h + 4);
-        let left_w = pad.w * 5 / 16;
+        // Five sixteenths, but never narrower than a name. A fraction alone
+        // was right at one text scale and wrong at the other: the same rail
+        // that fitted `nightly` at scale one truncated it to `nightl` at scale
+        // two, because a fraction of the width is a different number of
+        // *characters* depending on how wide a character is. Twelve is the
+        // budget a run name is written against, plus the row's own padding.
+        let want = col_w(12) + 12;
+        let left_w = (pad.w * 5 / 16).max(want.min(pad.w / 2));
         let list = Rect::new(pad.x, pad.y, left_w, body_h);
         let plan = Rect::new(pad.x + left_w + 4, pad.y, pad.w.saturating_sub(left_w + 4), body_h);
         let feet = Rect::new(pad.x, pad.y + body_h + 4, pad.w, btn_h);

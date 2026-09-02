@@ -90,8 +90,17 @@ pub const ICO_NET: usize = 4;
 pub const ICO_PAINT: usize = 5;
 pub const ICO_WRITE: usize = 6;
 pub const ICO_MINES: usize = 7;
-pub const ICO_SET: usize = 8;
-pub const ICO_ORACLE: usize = 9;
+pub const ICO_ORACLE: usize = 8;
+pub const ICO_SET: usize = 9;
+
+/// The wall draws `ICONS[k]`'s label under `pictogram(k)`, so the two tables
+/// are one table with the index as its only key. Asserted, because it was
+/// wrong: `ICO_SET` was 8 against `ICONS[8] == "Oracle"`, so the sliders wore
+/// the Oracle's name and the eye wore Settings' -- for as long as those two
+/// icons have existed. The comment on the `ICO_PAINT` arm says the named
+/// constants made that mistake unwriteable, and it was half true. It made it
+/// unwriteable for the four icons somebody checked.
+const _: () = assert!(ICONS.len() == 10);
 
 /// The icon for a named panel -- the names `win open` and the Browse routes
 /// use. Anything unrecognised gets the mark, because everything here is
@@ -440,7 +449,16 @@ fn icon_at(fb: &Framebuffer, x: i32, y: i32) -> Option<usize> {
 fn draw_icons(fb: &Framebuffer, hover: Hover) {
     for (r, k) in icon_rects(fb) {
         let px = r.x + (r.w - 40) / 2;
-        pictogram(fb, k, px, r.y, 40, theme::DESKTOP);
+        // The wall is one `vgrad` of `WALL` over the whole framebuffer
+        // (`wallpaper`), so that is exactly what shows through the mark.
+        pictogram(
+            fb,
+            k,
+            px,
+            r.y,
+            40,
+            super::splash::Cut::Sky { stops: &theme::WALL, top: 0, height: fb.height() },
+        );
         let (label, _) = ICONS[k];
         let tw = theme::text_w_of(label);
         let tx = r.x + (r.w.saturating_sub(tw)) / 2;
@@ -463,122 +481,210 @@ fn draw_icons(fb: &Framebuffer, hover: Hover) {
     }
 }
 
+/// How much of a drawing survives at the size it is drawn.
+///
+/// The same decision `mindwin::dense()` makes about text, for the same reason
+/// and stated the same way: the detail is chosen from the size rather than
+/// from the call site, so no caller has to know and two callers cannot
+/// disagree.
+///
+/// The floor is not a taste judgement. `m()` clamps a thickness to one pixel,
+/// so at 24 across every hairline is *already* at its minimum and a gloss band
+/// two units tall and a shadow offset two units right land on the same pixel
+/// as the thing they are meant to be offset from. Below 32 those flourishes
+/// are not subtle, they are noise, and the honest drawing is the silhouette.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Detail {
+    /// Silhouette and one accent. The taskbar.
+    Bar,
+    /// Lit body, gloss and a base shadow. The wall.
+    Wall,
+}
+
 /// One pictogram at `(x, y)`, `s` pixels square, by icon index.
 ///
 /// Drawn in a 40-unit design space and scaled, so the wall (40) and the
-/// taskbar (20) share one set of drawings instead of two sets that drift.
-/// Thicknesses clamp to a pixel -- a hairline that rounds to zero is a
-/// detail that vanishes, and at 20 pixels every line is load-bearing.
-/// `bg` is what the mark's cut wedges are painted in: the wall behind an
-/// icon, the button face on the bar.
-fn pictogram(fb: &Framebuffer, k: usize, x: u32, y: u32, s: u32, bg: Color) {
-    let face = theme::FACE;
-    let dark = theme::DARKEDGE;
+/// taskbar (24) share one set of drawings instead of two sets that drift.
+/// Thicknesses clamp to a pixel -- a hairline that rounds to zero is a detail
+/// that vanishes, and at 24 pixels every line is load-bearing.
+///
+/// `cut` is what shows through the mark's blades, and it is a `Cut` rather
+/// than a `Color` because a single colour is a lie everywhere it is used here.
+/// The wall is a six-stop gradient and the taskbar button is a ramp; the old
+/// parameter took `DESKTOP` and `FACE`, neither of which is any row of the
+/// thing actually behind the icon, so the Aperture mark stamped a flat patch
+/// of the wrong shade across both. `splash::Cut::Sky` samples the real ramp at
+/// the real row, and the wallpaper's own mark has always used it.
+fn pictogram(fb: &Framebuffer, k: usize, x: u32, y: u32, s: u32, cut: super::splash::Cut<'_>) {
+    let dark = theme::ICON_EDGE;
     let hi = theme::HILIGHT;
     // Rounded scale from the 40-unit space, and the same for thicknesses but
     // never less than a pixel.
     let c = |v: u32| (v * s + 20) / 40;
     let m = |v: u32| ((v * s + 20) / 40).max(1);
-    match k {
-        // Terminal: a monitor with a prompt on it.
-        ICO_TERM => {
-            fb.rect(x + c(2), y + c(4), c(36), c(26), face);
-            fb.frame(x + c(2), y + c(4), c(36), c(26), dark);
-            fb.rect(x + c(5), y + c(7), c(30), c(20), theme::SCREEN);
-            fb.rect(x + c(8), y + c(10), c(8), m(2), theme::APERTURE);
-            fb.rect(x + c(8), y + c(15), c(14), m(2), Color::new(0xC8, 0xC8, 0xC8));
-            fb.rect(x + c(14), y + c(30), c(12), m(4), face);
-            fb.rect(x + c(10), y + c(34), c(20), m(3), face);
-            fb.frame(x + c(10), y + c(34), c(20), m(3), dark);
+    let d = if s >= 32 { Detail::Wall } else { Detail::Bar };
+    let lit = d == Detail::Wall;
+
+    // A body: the ramp, its edge, and the gloss that makes it an object rather
+    // than a sticker. Taken as design-space units so every icon is written in
+    // the same coordinates as before.
+    let body = |bx: u32, by: u32, bw: u32, bh: u32, ramp: &[(u8, Color)]| {
+        let (px, py, pw, ph) = (x + c(bx), y + c(by), c(bw), c(bh));
+        if pw == 0 || ph == 0 {
+            return;
         }
-        // Programs: the mark itself. This is the Aperture program manager.
+        if lit {
+            // Under and right, and drawn first so the body covers the half of
+            // it that would otherwise sit on the object itself.
+            fb.shade_rect(px + m(2), py + m(2), pw, ph, theme::ICON_SHADE_NUM);
+        }
+        fb.vgrad(px, py, pw, ph, ramp);
+        if lit && ph > 4 {
+            let gh = (ph * theme::ICON_GLOSS_SPAN / 256).max(1);
+            fb.tint_rect(px + 1, py + 1, pw.saturating_sub(2), gh, hi, theme::ICON_GLOSS_NUM);
+        }
+        fb.frame(px, py, pw, ph, dark);
+    };
+
+    // The one highlight that says "lit from above and to the left". Skipped
+    // entirely on the bar, where its radius rounds to a pixel and it reads as
+    // a stray dot rather than as a shine.
+    let spec = |cx: u32, cy: u32, r: u32| {
+        if lit {
+            fb.fill_circle((x + c(cx)) as i32, (y + c(cy)) as i32, c(r).max(1) as i32, hi);
+        }
+    };
+
+    match k {
+        // Terminal: a lit screen with a prompt on it.
+        ICO_TERM => {
+            body(3, 5, 34, 24, &theme::ICON_DARK);
+            fb.rect(x + c(8), y + c(11), c(7), m(3), theme::APERTURE);
+            if lit {
+                fb.rect(x + c(8), y + c(17), c(13), m(2), theme::SCREEN_TEXT);
+                fb.rect(x + c(8), y + c(22), c(9), m(2), theme::SCREEN_TEXT);
+            }
+            body(16, 30, 8, 4, &theme::ICON_GLASS);
+            body(10, 34, 20, 4, &theme::ICON_GLASS);
+        }
+        // Programs: the mark itself, lit, with the real background showing
+        // through its blades. This is the Aperture program manager.
         ICO_PROGRAMS => {
-            super::splash::aperture(
+            super::splash::aperture_with(
                 fb,
                 (x + c(20)) as i32,
                 (y + c(20)) as i32,
                 c(18) as i32,
-                theme::APERTURE,
-                bg,
+                if lit {
+                    super::splash::Face::Ramp(&theme::SUN)
+                } else {
+                    super::splash::Face::Flat(theme::APERTURE)
+                },
+                cut,
             );
         }
-        // Files: a folder.
+        // Files: a folder, with the tab behind the face so the fold reads.
         ICO_FILES => {
-            fb.rect(x + c(4), y + c(10), c(14), c(6), theme::APERTURE_DEEP);
-            fb.rect(x + c(4), y + c(14), c(32), c(20), theme::APERTURE_DEEP);
-            fb.frame(x + c(4), y + c(14), c(32), c(20), dark);
-            fb.rect(x + c(5), y + c(15), c(30), m(3), theme::APERTURE);
+            body(4, 8, 15, 6, &theme::ICON_WARM);
+            body(4, 12, 32, 23, &theme::ICON_WARM);
+            if lit {
+                // The lip: one lighter line where the front panel meets the
+                // back, which is the whole difference between a folder and an
+                // orange rectangle.
+                fb.rect(x + c(5), y + c(13), c(30), m(2), theme::APERTURE);
+            }
         }
         // ToDo: a card with ticked lines.
         ICO_TODO => {
-            fb.rect(x + c(6), y + c(2), c(28), c(36), hi);
-            fb.frame(x + c(6), y + c(2), c(28), c(36), dark);
+            body(6, 2, 28, 36, &theme::ICON_PAPER);
             for (i, done) in [true, true, false].iter().enumerate() {
-                let ly = y + c(8 + i as u32 * 10);
-                fb.frame(x + c(10), ly, m(6), m(6), dark);
+                let ly = y + c(9 + i as u32 * 10);
+                fb.frame(x + c(10), ly, m(7), m(7), dark);
                 if *done {
-                    fb.rect(x + c(12), ly + m(2), m(3), m(3), theme::APERTURE_DEEP);
+                    fb.rect(x + c(11), ly + m(1), m(5), m(5), theme::APERTURE);
                 }
-                fb.rect(x + c(20), ly + m(2), c(10), m(2), theme::SHADOW);
+                fb.rect(x + c(21), ly + m(2), c(9), m(2), theme::TEXT_DIM);
             }
         }
-        // Enternet: a rough globe.
+        // Enternet: a globe, lit as a sphere.
         ICO_NET => {
-            for (i, w) in [16u32, 28, 34, 38, 38, 38, 34, 28, 16].iter().enumerate() {
-                let ly = y + c(2 + i as u32 * 4);
-                fb.rect(x + c(20) - c(*w) / 2, ly, c(*w), m(4), Color::new(0x2A, 0x4A, 0x6E));
+            let (cx, cy, r) = ((x + c(20)) as i32, (y + c(20)) as i32, c(17) as i32);
+            // No drop shadow. `shade_rect` is a rectangle, and a rectangle
+            // behind a disc is a grey box with a ball in it -- which is what
+            // the first attempt looked like. There is no shaded-circle
+            // primitive and a round body does not need one: the ramp already
+            // turns it away from the light at the bottom.
+            fb.fill_circle_ramp(cx, cy, r, &theme::ICON_GLASS);
+            fb.circle(cx, cy, r, dark);
+            // Latitudes as chords of the same circle, so they narrow toward
+            // the poles the way a wireframe globe does.
+            for dy in [-9i32, 0, 9] {
+                let yy = cy + c(dy.unsigned_abs()) as i32 * dy.signum();
+                let half = crate::gfx::isqrt((r * r - (yy - cy) * (yy - cy)).max(0) as u32) as i32;
+                if half > 1 {
+                    fb.rect((cx - half) as u32, yy as u32, (half * 2) as u32, m(1), theme::WALL_RIM);
+                }
             }
-            fb.rect(x + c(2), y + c(16), c(36), m(3), hi);
-            fb.rect(x + c(18), y + c(2), m(3), c(36), hi);
-            fb.frame(x + c(12), y + c(8), c(16), c(24), hi);
+            fb.rect((cx - m(1) as i32 / 2).max(0) as u32, (cy - r) as u32, m(1), (r * 2) as u32, theme::WALL_RIM);
+            spec(14, 13, 4);
         }
-        // Paint: a palette board with wells. (This arm and the three after it
-        // were numbered one past their icons for a while -- Paint wore the
-        // sliders, Settings wore the minefield -- and the labels under the
-        // wall icons hid it. The names make that mistake unwriteable.)
+        // Paint: a palette with wells, and a brush laid across it.
         ICO_PAINT => {
-            fb.rect(x + c(4), y + c(8), c(32), c(26), Color::new(0xB0, 0x86, 0x50));
-            fb.frame(x + c(4), y + c(8), c(32), c(26), dark);
-            for (i, col) in [
-                theme::APERTURE,
-                Color::new(0x30, 0x70, 0xC0),
-                Color::new(0x30, 0xA0, 0x40),
-                Color::new(0xC0, 0x30, 0x30),
-            ]
-            .iter()
-            .enumerate()
+            let (cx, cy, r) = ((x + c(19)) as i32, (y + c(22)) as i32, c(16) as i32);
+            fb.fill_circle_ramp(cx, cy, r, &theme::ICON_WOOD);
+            fb.circle(cx, cy, r, dark);
+            // The thumb hole, in the board's own shadow tone rather than in
+            // the background -- a palette is a solid object with a hole in it,
+            // and what shows through a hole in a held object is more board.
+            fb.fill_circle(cx + c(7) as i32, cy + c(5) as i32, c(4).max(1) as i32, Color::new(0x5E, 0x42, 0x24));
+            for (i, col) in [theme::APERTURE, theme::INK_BLUE, theme::INK_GREEN, theme::INK_RED]
+                .iter()
+                .enumerate()
             {
-                let (ix, iy) = (
-                    x + c(8 + (i as u32 % 2) * 14),
-                    y + c(12 + (i as u32 / 2) * 11),
-                );
-                fb.rect(ix, iy, m(9), m(7), *col);
-                fb.frame(ix, iy, m(9), m(7), dark);
+                let wx = cx + c(if i % 2 == 0 { 0 } else { 9 }) as i32 - c(6) as i32;
+                let wy = cy + c(if i / 2 == 0 { 0 } else { 9 }) as i32 - c(9) as i32;
+                fb.fill_circle(wx, wy, c(3).max(1) as i32, *col);
+                if lit {
+                    fb.put((wx - 1) as u32, (wy - 1) as u32, fb.raw(hi));
+                }
             }
-            fb.rect(x + c(26), y + c(2), m(3), c(14), dark);
-            fb.rect(x + c(25), y + c(1), m(5), m(4), theme::APERTURE_DEEP);
+            fb.rect(x + c(26), y + c(2), m(3), c(15), theme::TEXT_DIM);
+            body(24, 1, 6, 5, &theme::ICON_WARM);
         }
-        // Write: a page with lines of text.
+        // Write: a page with lines of text and a nib.
         ICO_WRITE => {
-            fb.rect(x + c(8), y + c(2), c(24), c(36), hi);
-            fb.frame(x + c(8), y + c(2), c(24), c(36), dark);
+            body(8, 2, 24, 36, &theme::ICON_PAPER);
             for i in 0..5u32 {
                 let w = if i == 4 { 10 } else { 16 };
-                fb.rect(x + c(12), y + c(7 + i * 6), c(w), m(2), theme::SHADOW);
+                fb.rect(x + c(12), y + c(8 + i * 6), c(w), m(2), theme::TEXT_DIM);
             }
-            fb.rect(x + c(12), y + c(31), c(8), m(2), theme::APERTURE_DEEP);
+            fb.rect(x + c(12), y + c(32), c(8), m(2), theme::APERTURE);
         }
         // Mines: a grid with one uncovered mine.
         ICO_MINES => {
-            fb.rect(x + c(2), y + c(2), c(36), c(36), face);
-            for i in 0..4u32 {
-                fb.rect(x + c(2 + i * 12), y + c(2), 1, c(36), theme::SHADOW);
-                fb.rect(x + c(2), y + c(2 + i * 12), c(36), 1, theme::SHADOW);
+            body(2, 2, 36, 36, &theme::ICON_PAPER);
+            for i in 1..4u32 {
+                fb.rect(x + c(2 + i * 12), y + c(2), m(1), c(36), theme::EDGE);
+                fb.rect(x + c(2), y + c(2 + i * 12), c(36), m(1), theme::EDGE);
             }
-            fb.rect(x + c(15), y + c(15), c(10), c(10), dark);
-            fb.rect(x + c(19), y + c(11), m(2), c(18), dark);
-            fb.rect(x + c(11), y + c(19), c(18), m(2), dark);
-            fb.rect(x + c(17), y + c(17), m(3), m(3), hi);
+            let (cx, cy, r) = ((x + c(20)) as i32, (y + c(20)) as i32, c(9) as i32);
+            // Short, and only on the wall. At 24 across a spike is two pixels
+            // of grey crossing a grid line and reads as a smudge.
+            if lit {
+                let reach = r + c(2) as i32;
+                for (dx, dy) in [(0i32, 1i32), (1, 0), (1, 1), (1, -1)] {
+                    fb.line_thick(
+                        cx - dx * reach,
+                        cy - dy * reach,
+                        cx + dx * reach,
+                        cy + dy * reach,
+                        m(2) as i32,
+                        theme::ICON_EDGE,
+                    );
+                }
+            }
+            fb.fill_circle_ramp(cx, cy, r, &theme::ICON_DARK);
+            spec(17, 17, 2);
         }
         // Oracle: an eye. The lids are stacked rows, the iris the mark's
         // colour, and it reads at both sizes because an eye is mostly its
@@ -588,20 +694,41 @@ fn pictogram(fb: &Framebuffer, k: usize, x: u32, y: u32, s: u32, bg: Color) {
                 let ly = y + c(8 + i as u32 * 4);
                 fb.rect(x + c(20) - c(*w) / 2, ly, c(*w), m(4), hi);
             }
-            fb.rect(x + c(14), y + c(14), c(12), c(12), theme::APERTURE);
-            fb.frame(x + c(14), y + c(14), c(12), c(12), dark);
-            fb.rect(x + c(18), y + c(18), m(4), m(4), dark);
+            let (cx, cy) = ((x + c(20)) as i32, (y + c(20)) as i32);
+            fb.fill_circle_ramp(cx, cy, c(7).max(1) as i32, &theme::ICON_WARM);
+            fb.fill_circle(cx, cy, c(3).max(1) as i32, theme::DARKEDGE);
+            spec(17, 17, 2);
         }
-        // Settings: three sliders.
-        _ => {
+        // Settings: three sliders, each a well with a lit knob in it.
+        ICO_SET => {
             for i in 0..3u32 {
-                let ly = y + c(8 + i * 11);
-                fb.rect(x + c(4), ly + m(2), c(32), m(2), theme::SHADOW);
-                fb.rect(x + c(4), ly + m(4), c(32), 1, hi);
-                let kx = x + c(6 + (i * 11) % 24);
-                fb.rect(kx, ly.saturating_sub(m(2)), m(6), m(10), face);
-                fb.frame(kx, ly.saturating_sub(m(2)), m(6), m(10), dark);
+                let ly = y + c(9 + i * 11);
+                fb.rect(x + c(4), ly, c(32), m(4), theme::WELL_EDGE);
+                fb.rect(x + c(4), ly + m(1), c(32), m(2), theme::TRAY);
+                let kx = 6 + (i * 11) % 24;
+                body(kx, 9 + i * 11 - 3, 7, 10, &theme::ICON_GLASS);
             }
+        }
+        // Not an icon. Drawn rather than defaulted, because the arm this
+        // replaces *was* Settings -- an out-of-range index silently drew the
+        // sliders, which is the mistake the named constants exist to make
+        // unwriteable, wearing the costume of a working icon.
+        _ => {
+            body(4, 4, 32, 32, &theme::ICON_PAPER);
+            fb.line(
+                (x + c(8)) as i32,
+                (y + c(8)) as i32,
+                (x + c(32)) as i32,
+                (y + c(32)) as i32,
+                theme::BAD_TEXT,
+            );
+            fb.line(
+                (x + c(32)) as i32,
+                (y + c(8)) as i32,
+                (x + c(8)) as i32,
+                (y + c(32)) as i32,
+                theme::BAD_TEXT,
+            );
         }
     }
 }
@@ -1456,6 +1583,44 @@ pub fn selftest() -> bool {
             })
             .sum();
         claim("and they tile it with no gap or overlap", area == screen.w * screen.h);
+    }
+
+    // --- the icon tables agree ---------------------------------------------
+    //
+    // `draw_icons` draws `pictogram(k)` and writes `ICONS[k].0` under it, so a
+    // constant that does not match its row puts one icon's name under another
+    // icon's drawing. That is not a hypothetical: `ICO_SET` was 8 while
+    // `ICONS[8]` was "Oracle", so the sliders were labelled Oracle and the eye
+    // was labelled Settings, on every screenshot this project ever took.
+    //
+    // Checked by name rather than by index, because the index is the thing
+    // that was wrong.
+    {
+        let named: [(usize, &str); 10] = [
+            (ICO_TERM, "Terminal"),
+            (ICO_PROGRAMS, "Programs"),
+            (ICO_FILES, "Files"),
+            (ICO_TODO, "ToDo"),
+            (ICO_NET, "Enternet"),
+            (ICO_PAINT, "Paint"),
+            (ICO_WRITE, "Write"),
+            (ICO_MINES, "Mines"),
+            (ICO_ORACLE, "Oracle"),
+            (ICO_SET, "Settings"),
+        ];
+        let mut agree = true;
+        for (k, label) in named.iter() {
+            agree &= ICONS[*k].0 == *label;
+        }
+        claim("every icon wears its own label", agree);
+        // And no two share an index, which is the other way to break it.
+        let mut distinct = true;
+        for (i, (a, _)) in named.iter().enumerate() {
+            for (b, _) in named.iter().skip(i + 1) {
+                distinct &= a != b;
+            }
+        }
+        claim("and no two icons share an index", distinct);
     }
 
     // --- the opening curve -------------------------------------------------
@@ -3419,13 +3584,15 @@ fn taskbar(fb: &Framebuffer, d: &Desktop, sel: Option<usize>) {
         // Nudged a pixel when pressed, the same lie about depth the label
         // used to tell.
         let off = u32::from(pressed);
+        // The button face is the ramp chosen just above, not `FACE` -- which
+        // is no row of any of them.
         pictogram(
             fb,
             icon,
             r.x + (r.w.saturating_sub(s)) / 2 + off,
             r.y + 3 + off,
             s,
-            theme::FACE,
+            super::splash::Cut::Sky { stops, top: r.y, height: r.h },
         );
     }
 
