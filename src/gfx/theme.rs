@@ -961,6 +961,187 @@ pub fn aperture_dot(fb: &Framebuffer, cx: u32, cy: u32, r: i32) {
     mark(fb, cx as i32, cy as i32, r.max(3), HILIGHT);
 }
 
+// --- dashboard painters ---------------------------------------------------
+//
+// A window that reports on the machine wants shapes `ui::Panel` has no variant
+// for: a filled proportion, a row of chips, a name against a value. These live
+// here for the same reason `button` and `list_row` do -- the look is this
+// file's business and the layout is the caller's -- and they are span-based,
+// so a window full of them costs what a window full of rectangles costs.
+
+/// A filled proportion, `frac` out of 256, in a sunken track.
+///
+/// The ramp is clipped to the filled part rather than being drawn across the
+/// whole track and covered, so an empty gauge costs one `rect` and a full one
+/// costs a `vgrad`. Neither costs a per-pixel loop.
+pub fn gauge(fb: &Framebuffer, r: Rect, frac: u32, stops: &[(u8, Color)]) {
+    if r.w < 3 || r.h < 3 {
+        return;
+    }
+    fb.rect(r.x, r.y, r.w, r.h, SCREEN);
+    let inner = r.shrink(1);
+    if !inner.is_empty() {
+        let w = inner.w * frac.min(256) / 256;
+        if w > 0 {
+            fb.vgrad(inner.x, inner.y, w, inner.h, stops);
+        }
+    }
+    outline(fb, r, WELL_EDGE);
+}
+
+/// The same shape in one colour, for a bar that is a quantity rather than a
+/// surface -- a memory figure, a step count.
+pub fn bar(fb: &Framebuffer, r: Rect, frac: u32, fill: Color) {
+    if r.w < 3 || r.h < 3 {
+        return;
+    }
+    fb.rect(r.x, r.y, r.w, r.h, SCREEN);
+    let inner = r.shrink(1);
+    if !inner.is_empty() {
+        let w = inner.w * frac.min(256) / 256;
+        if w > 0 {
+            fb.rect(inner.x, inner.y, w, inner.h, fill);
+        }
+    }
+    outline(fb, r, WELL_EDGE);
+}
+
+/// A strip of tabs across `r`, and **where each one landed**.
+///
+/// Returning the rectangles is the whole point. A tab strip drawn in one place
+/// and hit-tested in another is the bug this desktop forbids, and every other
+/// control here that has two halves -- `caption_buttons`, `Popup::row`,
+/// `menu_labels` -- is arranged the same way for the same reason.
+pub fn tabs(fb: &Framebuffer, r: Rect, labels: &[&str], sel: usize) -> alloc::vec::Vec<Rect> {
+    let mut out = alloc::vec::Vec::with_capacity(labels.len());
+    if labels.is_empty() || r.w == 0 {
+        return out;
+    }
+    let n = labels.len() as u32;
+    for (i, label) in labels.iter().enumerate() {
+        // Divided by position rather than by accumulating a width, so rounding
+        // cannot leave a gap or an overlap between two tabs.
+        let x0 = r.x + r.w * i as u32 / n;
+        let x1 = r.x + r.w * (i as u32 + 1) / n;
+        let t = Rect::new(x0, r.y, x1.saturating_sub(x0), r.h);
+        let on = i == sel;
+        control(
+            fb,
+            t,
+            if on { &TITLE_ON } else { &BTN },
+            if on { BTN_EDGE_HOT } else { BTN_EDGE },
+        );
+        let room = (t.w / text_w(1)).saturating_sub(1) as usize;
+        let shown = head_chars(label, room);
+        let tx = t.x + (t.w.saturating_sub(text_w_of(shown))) / 2;
+        let ty = t.y + (t.h.saturating_sub(text_h())) / 2;
+        text_over(fb, tx, ty, shown, if on { TITLE_TEXT } else { TEXT });
+        out.push(t);
+    }
+    out
+}
+
+/// A small chip that is either good or not. J1 through J4, pass or fail.
+pub fn pill(fb: &Framebuffer, r: Rect, label: &str, ok: bool) {
+    if r.w < 3 || r.h < 3 {
+        return;
+    }
+    control(
+        fb,
+        r,
+        if ok { &START } else { &CAP_CLOSE },
+        if ok { START_EDGE } else { CAP_EDGE },
+    );
+    let room = (r.w / text_w(1)).saturating_sub(1) as usize;
+    let shown = head_chars(label, room);
+    let tx = r.x + (r.w.saturating_sub(text_w_of(shown))) / 2;
+    let ty = r.y + (r.h.saturating_sub(text_h())) / 2;
+    text_over(fb, tx, ty, shown, CAP_INK);
+}
+
+/// A name against a value, on one line.
+///
+/// `ui::Status` is this widget and cannot be used here, because a `Panel` is a
+/// vertical stack rebuilt after a command and these windows are neither. Same
+/// fourteen-column gutter, so a dashboard row and a settings row line up.
+pub fn kv(fb: &Framebuffer, r: Rect, name: &str, value: &str, tone: Color) {
+    if r.h < text_h() {
+        return;
+    }
+    let gutter = text_w(14);
+    let room = (r.w / text_w(1)) as usize;
+    text_over(fb, r.x, r.y, head_chars(name, room.min(13)), TEXT_DIM);
+    if r.w > gutter {
+        let vroom = ((r.w - gutter) / text_w(1)) as usize;
+        text_over(fb, r.x + gutter, r.y, head_chars(value, vroom), tone);
+    }
+}
+
+/// One turn of a conversation.
+///
+/// The machine's turns and the operator's are told apart by ground and by
+/// which edge they sit against, which is how every chat since has done it and
+/// costs nothing here: two fills and an outline.
+pub fn bubble(fb: &Framebuffer, r: Rect, lines: &[alloc::string::String], from_machine: bool) {
+    if r.w < 8 || r.h < 8 {
+        return;
+    }
+    if from_machine {
+        control(fb, r, &TITLE_ON, CAP_EDGE);
+    } else {
+        control(fb, r, &BTN, BTN_EDGE);
+    }
+    let ink = if from_machine { TITLE_TEXT } else { TEXT };
+    let inner = r.shrink(4);
+    let room = (inner.w / text_w(1)) as usize;
+    for (i, line) in lines.iter().enumerate() {
+        let y = inner.y + i as u32 * text_h();
+        if y + text_h() > inner.y + inner.h {
+            break;
+        }
+        text_over(fb, inner.x, y, head_chars(line, room), ink);
+    }
+}
+
+/// How many lines `bubble` will show `text` as, wrapped to `cols`.
+///
+/// Wrapped by the caller and not by the painter, because a bubble's height has
+/// to be known before it is placed -- the same order `ui::note` works in and
+/// for the same reason.
+pub fn wrap(text: &str, cols: usize) -> alloc::vec::Vec<alloc::string::String> {
+    let mut out = alloc::vec::Vec::new();
+    if cols == 0 {
+        return out;
+    }
+    let mut line = alloc::string::String::new();
+    for word in text.split_whitespace() {
+        let need = if line.is_empty() { word.chars().count() } else { line.chars().count() + 1 + word.chars().count() };
+        if need > cols && !line.is_empty() {
+            out.push(core::mem::take(&mut line));
+        }
+        if word.chars().count() > cols {
+            // A word longer than the line is cut rather than allowed to push
+            // everything after it off the edge.
+            let mut rest = word;
+            while rest.chars().count() > cols {
+                let head = head_chars(rest, cols);
+                out.push(alloc::string::String::from(head));
+                rest = &rest[head.len()..];
+            }
+            line.push_str(rest);
+            continue;
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() {
+        out.push(line);
+    }
+    out
+}
+
 /// A horizontal rule, drawn as a groove. The 3.1 separator.
 pub fn separator(fb: &Framebuffer, x: u32, y: u32, w: u32) {
     fb.rect(x, y, w, 1, EDGE);

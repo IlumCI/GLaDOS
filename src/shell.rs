@@ -3994,6 +3994,36 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 // in the theme because whether rounded corners belong on a
                 // desktop that otherwise looks like 98 is a taste question,
                 // and the mechanism should not depend on the answer.
+                // Tiling. The gesture an operator arriving from any modern
+                // desktop tries first, and the one `snap_release` could only
+                // half answer because a drag has no keyboard.
+                "tile" => {
+                    use desk::Tile;
+                    let which = it.next().unwrap_or("grid");
+                    let t = match which {
+                        "left" | "l" => Some(Tile::Left),
+                        "right" | "r" => Some(Tile::Right),
+                        "tl" | "topleft" => Some(Tile::TopLeft),
+                        "tr" | "topright" => Some(Tile::TopRight),
+                        "bl" | "bottomleft" => Some(Tile::BottomLeft),
+                        "br" | "bottomright" => Some(Tile::BottomRight),
+                        "full" | "max" => Some(Tile::Full),
+                        _ => None,
+                    };
+                    match t {
+                        Some(t) => match desk::tile_focused(t) {
+                            true => kprintln!("  tiled {}", which),
+                            false => kprintln!("  no focused window"),
+                        },
+                        None if which == "grid" || which == "all" => {
+                            match desk::tile_all() {
+                                0 => kprintln!("  nothing to tile"),
+                                n => kprintln!("  {} window(s) into a grid", n),
+                            }
+                        }
+                        None => kprintln!("  usage: win tile left|right|tl|tr|bl|br|full|grid"),
+                    }
+                }
                 "round" => {
                     let r: u32 = it.next().and_then(|w| w.parse().ok()).unwrap_or(12);
                     match desk::set_round(r) {

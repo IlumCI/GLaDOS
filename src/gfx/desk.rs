@@ -1382,6 +1382,35 @@ pub fn selftest() -> bool {
     // Leaving it held would deadlock every later repaint, so the release path
     // is worth one more claim of its own.
     claim("and it is free afterwards", !CUR_BUSY.load(core::sync::atomic::Ordering::Relaxed));
+
+    // --- tiling -----------------------------------------------------------
+    //
+    // Pure geometry, checked here rather than by dragging windows into corners
+    // and looking. The odd width is the case that matters: two halves computed
+    // as a width applied twice leave a column of wallpaper showing between
+    // windows that are supposed to meet.
+    {
+        let screen = Rect::new(10, 20, 101, 51);
+        let l = tile_rect(Tile::Left, screen);
+        let r = tile_rect(Tile::Right, screen);
+        claim("halves start at the screen and end at it", l.x == 10 && r.x + r.w == 111);
+        claim("and meet exactly, on an odd width", l.x + l.w == r.x);
+        let tl = tile_rect(Tile::TopLeft, screen);
+        let bl = tile_rect(Tile::BottomLeft, screen);
+        claim("quadrants meet vertically too", tl.y + tl.h == bl.y);
+        claim("and the bottom row reaches the foot", bl.y + bl.h == 71);
+        claim("full is the screen", tile_rect(Tile::Full, screen) == screen);
+        // The four quadrants must cover the screen exactly: no overlap and no
+        // gap, which is the property a grid of windows is judged on.
+        let area: u32 = [Tile::TopLeft, Tile::TopRight, Tile::BottomLeft, Tile::BottomRight]
+            .iter()
+            .map(|t| {
+                let q = tile_rect(*t, screen);
+                q.w * q.h
+            })
+            .sum();
+        claim("and they tile it with no gap or overlap", area == screen.w * screen.h);
+    }
     ok
 }
 
@@ -2291,6 +2320,103 @@ fn menu_press(fb: &Framebuffer, x: i32, y: i32, screen: Rect) -> bool {
     true
 }
 
+/// Where a tile goes.
+///
+/// A window manager that can only maximise makes an operator measure two
+/// windows by hand to put them side by side. `snap_release` has answered half
+/// of that since it was written -- drag to an edge, take half the screen --
+/// and this is the rest: the corners, and a way to ask without a pointer.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Tile {
+    Left,
+    Right,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+    Full,
+}
+
+/// The rectangle a tile occupies on `screen`.
+///
+/// Pure, so the geometry is checkable at boot with no framebuffer and no
+/// desktop -- the alternative being to check it by dragging windows into
+/// corners and looking at them.
+///
+/// Halves are computed as *positions* rather than as a width applied twice:
+/// `screen.w / 2` used twice leaves a column unpainted on an odd width, and
+/// the gap shows as a stripe of wallpaper between two windows that are
+/// supposed to meet.
+fn tile_rect(t: Tile, screen: Rect) -> Rect {
+    let midx = screen.x + screen.w / 2;
+    let midy = screen.y + screen.h / 2;
+    let right_w = (screen.x + screen.w).saturating_sub(midx);
+    let bottom_h = (screen.y + screen.h).saturating_sub(midy);
+    match t {
+        Tile::Full => screen,
+        Tile::Left => Rect::new(screen.x, screen.y, screen.w / 2, screen.h),
+        Tile::Right => Rect::new(midx, screen.y, right_w, screen.h),
+        Tile::TopLeft => Rect::new(screen.x, screen.y, screen.w / 2, screen.h / 2),
+        Tile::TopRight => Rect::new(midx, screen.y, right_w, screen.h / 2),
+        Tile::BottomLeft => Rect::new(screen.x, midy, screen.w / 2, bottom_h),
+        Tile::BottomRight => Rect::new(midx, midy, right_w, bottom_h),
+    }
+}
+
+/// Put the focused window in a tile.
+pub fn tile_focused(t: Tile) -> bool {
+    let Some(fb) = super::primary() else { return false };
+    let screen = screen_rect(&fb);
+    let ok = with(|d| {
+        let Some(f) = d.focus() else { return false };
+        let w = &mut d.windows[f];
+        // Remembered the way a drag-snap remembers, so a tiled window dragged
+        // off an edge afterwards comes back to the size it chose for itself
+        // rather than to a half screen.
+        w.snap_back = w.snap_back.or(Some(w.rect));
+        w.state = WinState::Normal;
+        w.rect = tile_rect(t, screen);
+        true
+    })
+    .unwrap_or(false);
+    if ok {
+        draw();
+    }
+    ok
+}
+
+/// The four quadrants, filled from the front of the stack back.
+///
+/// Answers how many it placed. Capped at four deliberately: a fifth window has
+/// no quadrant, and shrinking the grid to fit an arbitrary count produces
+/// panes too small to read any of these windows in.
+pub fn tile_all() -> usize {
+    let Some(fb) = super::primary() else { return 0 };
+    let screen = screen_rect(&fb);
+    const ORDER: [Tile; 4] = [Tile::TopLeft, Tile::TopRight, Tile::BottomLeft, Tile::BottomRight];
+    let n = with(|d| {
+        // Front to back, so the window last used takes the first quadrant
+        // rather than whichever happens to be deepest in the stack.
+        let mut idx: Vec<usize> = (0..d.windows.len())
+            .filter(|i| d.windows[*i].state != WinState::Minimised)
+            .collect();
+        idx.reverse();
+        idx.truncate(ORDER.len());
+        for (slot, i) in idx.iter().enumerate() {
+            let w = &mut d.windows[*i];
+            w.snap_back = w.snap_back.or(Some(w.rect));
+            w.state = WinState::Normal;
+            w.rect = tile_rect(ORDER[slot], screen);
+        }
+        idx.len()
+    })
+    .unwrap_or(0);
+    if n > 0 {
+        draw();
+    }
+    n
+}
+
 /// How close to a screen edge a move has to end to count as a snap.
 const SNAP: i32 = 8;
 
@@ -2317,7 +2443,31 @@ fn snap_release(x: i32, y: i32) {
         let w = &mut d.windows[f];
         let here = w.rect;
 
-        if y <= t + SNAP {
+        let b = screen.y as i32 + screen.h as i32;
+        let near_l = x <= l + SNAP;
+        let near_r = x >= r - SNAP;
+        let near_t = y <= t + SNAP;
+        let near_b = y >= b - SNAP;
+
+        // A corner beats an edge, and is tested first for that reason. A drag
+        // ending within the snap distance of two edges is at a corner and
+        // meant one; checking the top or the side first would give it half the
+        // screen and swallow the gesture.
+        let corner = match (near_l, near_r, near_t, near_b) {
+            (true, _, true, _) => Some(Tile::TopLeft),
+            (_, true, true, _) => Some(Tile::TopRight),
+            (true, _, _, true) => Some(Tile::BottomLeft),
+            (_, true, _, true) => Some(Tile::BottomRight),
+            _ => None,
+        };
+        if let Some(tl) = corner {
+            w.snap_back = w.snap_back.or(Some(here));
+            w.state = WinState::Normal;
+            w.rect = tile_rect(tl, screen);
+            return true;
+        }
+
+        if near_t {
             // The top edge maximises, using the state the caption button and
             // the system menu already use, so there is one maximised window
             // and not two ideas of one.
@@ -2329,9 +2479,9 @@ fn snap_release(x: i32, y: i32) {
             return false;
         }
 
-        let side = if x <= l + SNAP {
+        let side = if near_l {
             Some(screen.x)
-        } else if x >= r - SNAP {
+        } else if near_r {
             Some(screen.x + screen.w - half_w)
         } else {
             None
