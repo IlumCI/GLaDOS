@@ -199,13 +199,27 @@ pub fn model_line(g: &Glance) -> String {
         None => String::from("no model"),
         Some(m) => {
             let mb = m.bytes / (1024 * 1024);
-            alloc::format!(
-                "{}M {} {}k ctx {} MB",
-                m.params / 1_000_000,
-                if m.quantised { "int8" } else { "f32" },
-                m.seq_len / 1024,
-                mb
-            )
+            // Not `seq_len / 1024` unconditionally: SmolLM2 at 512 rendered
+            // as "0k ctx", which reads as a broken field rather than as a
+            // small one. Under a thousand the number itself is short enough
+            // to print.
+            if m.seq_len >= 1024 {
+                alloc::format!(
+                    "{}M {} {}k ctx {} MB",
+                    m.params / 1_000_000,
+                    if m.quantised { "int8" } else { "f32" },
+                    m.seq_len / 1024,
+                    mb
+                )
+            } else {
+                alloc::format!(
+                    "{}M {} {} ctx {} MB",
+                    m.params / 1_000_000,
+                    if m.quantised { "int8" } else { "f32" },
+                    m.seq_len,
+                    mb
+                )
+            }
         }
     }
 }

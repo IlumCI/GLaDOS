@@ -41,6 +41,45 @@ pub const ABOUT: &str = "/ai/about";
 /// Turns exchanged since this conversation opened.
 static TURNS: crate::sync::Racy<usize> = crate::sync::Racy::new(0);
 
+/// What was said, as text, for anything that has to *show* the conversation.
+///
+/// The cache is the conversation and this is not a second copy of it -- the
+/// model is never fed from here, and a turn still costs the tokens of that
+/// turn. It exists because a window cannot read a KV cache: `slot_of` gives
+/// positions and attention keys, not sentences, and there is no route from an
+/// int8 cache back to the words that filled it.
+///
+/// So it is written where the words already exist, on the way past. The two
+/// have exactly one point of contact and it is `reset`, which clears both --
+/// a transcript outliving the cache it describes would show a conversation the
+/// model has already forgotten, which is worse than showing none.
+///
+/// `true` is the operator's turn.
+static LOG: crate::sync::Racy<Vec<(bool, String)>> = crate::sync::Racy::new(Vec::new());
+
+/// How many turns are kept. Twenty-four is about six screens of the Ask
+/// window at its densest, and the cache holds fewer than that at 512 slots
+/// anyway.
+const LOG_KEEP: usize = 24;
+
+/// The conversation as text, oldest first. A clone of a small static, so it is
+/// a free read for a paint pass -- see `glance`'s tiers.
+pub fn log_snapshot() -> Vec<(bool, String)> {
+    unsafe { (*LOG.get()).clone() }
+}
+
+fn log_push(mine: bool, text: &str) {
+    let text = text.trim();
+    if text.is_empty() {
+        return;
+    }
+    let log = unsafe { &mut *LOG.get() };
+    log.push((mine, String::from(text)));
+    if log.len() > LOG_KEEP {
+        log.remove(0);
+    }
+}
+
 pub fn turns() -> usize {
     unsafe { *TURNS.get() }
 }
@@ -48,6 +87,7 @@ pub fn turns() -> usize {
 /// Forget the conversation and start over.
 pub fn reset() {
     unsafe { *TURNS.get() = 0 };
+    unsafe { (*LOG.get()).clear() };
     unsafe { *SYS_LEN.get() = 0 };
     super::with_engine(|e| {
         e.pos = 0;
@@ -230,7 +270,15 @@ pub fn turn(message: &str, opts: &super::GenOpts) -> usize {
         resume: !opening,
         ..*opts
     };
+    // Recorded around the generation rather than after it, so a turn that
+    // runs out of budget still leaves the question in the transcript. A
+    // window showing an answer with nothing above it is the worse failure.
+    log_push(true, message);
+    super::echo_begin();
     super::generate(&prompt, &framed);
+    if let Some(said) = super::echo_end() {
+        log_push(false, &said);
+    }
 
     unsafe { *TURNS.get() += 1 };
     super::with_engine(|e| e.pos).unwrap_or(0)

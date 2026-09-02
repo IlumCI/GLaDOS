@@ -813,7 +813,14 @@ Between boots on the development machine that is about 10%.
 **Run `video bench` at `-smp 1`.** The extra cores cost the graphics path 30
 to 40% while doing nothing at all: `desk::draw + present` measures 1,541 us at
 one core and 2,107 at four, `full-screen rect` 158 against 221, `present, no
-change` 270 against 358. That is the same contention `smp bench` records --
+change` 270 against 358. Those three figures **predate the Frutiger Aero
+reskin** and are not the number to compare a change against: the same command
+on the same prefix now reads 2,143 us at one core, which is what gradients,
+rounded corners and shadows cost. Take a matched baseline by stashing rather
+than reaching for a figure written down here -- a session comparing the
+terminal status strip against 1,541 read a 41% regression that was entirely
+the reskin, and the strip itself measured 1.5% on a stashed pair, against a
+control that moved 4% the same way. That is the same contention `smp bench` records --
 one core reads 4570 MB/s alone and 3526 MB/s with seven merely idling beside
 it -- and it lands here because the whole graphics path is span fills and a
 memcmp, which is to say memory bandwidth and nothing else. The figures

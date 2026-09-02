@@ -341,6 +341,17 @@ pub const TASK_EDGE: Color = Color::new(0xBF, 0xE8, 0xF6);
 pub const TRAY: Color = Color::new(0x07, 0x2A, 0x3C);
 pub const TRAY_EDGE: Color = Color::new(0x9F, 0xCF, 0xE2);
 
+/// The terminal's status strip, which is the tray's colour given a ramp.
+///
+/// Dark rather than the pale window face, because it is read against the
+/// console above it and a light strip there reads as a second window rather
+/// than as the foot of this one.
+pub const STATUS_BAR: [(u8, Color); 3] = [
+    (0, Color::new(0x0D, 0x39, 0x4E)),
+    (128, Color::new(0x07, 0x2A, 0x3C)),
+    (255, Color::new(0x05, 0x1F, 0x2D)),
+];
+
 /// Start. Green in every real XP scheme, including the blue one, which is why
 /// it stays green here rather than following the accent.
 pub const START: [(u8, Color); 7] = [
@@ -876,31 +887,68 @@ pub fn title_bar(
 /// under an icon label. `text` fills the cell behind each glyph, which on a
 /// gradient stamps a rectangle of the wrong colour around every letter.
 pub fn text_over(fb: &Framebuffer, x: u32, y: u32, s: &str, fg: Color) {
+    text_over_at(fb, x, y, s, fg, CHROME_SCALE);
+}
+
+/// The same, at a chosen scale.
+///
+/// Chrome is drawn at `CHROME_SCALE` because it is read at arm's length and a
+/// title bar has room to spare. A window that reports on the machine does not:
+/// it is a dense list of facts in a quarter of a screen, and at scale two a
+/// pane fits nine rows. At scale one it fits nineteen, and the glyphs are a
+/// crisp bitmap rather than a shrunk one, because the font *is* eight pixels
+/// and two was always a doubling.
+pub fn text_over_at(fb: &Framebuffer, x: u32, y: u32, s: &str, fg: Color, scale: u32) {
+    let scale = scale.max(1);
     let mut cx = x;
     for b in s.chars() {
         let rows = font::rows(font::index_of(b));
         for (gy, bits) in rows.iter().enumerate() {
             for gx in 0..font::GLYPH_W {
                 if bits & (0x80 >> gx) != 0 {
-                    for dy in 0..CHROME_SCALE {
-                        for dx in 0..CHROME_SCALE {
-                            fb.put(
-                                cx + gx * CHROME_SCALE + dx,
-                                y + gy as u32 * CHROME_SCALE + dy,
-                                fb.raw(fg),
-                            );
+                    for dy in 0..scale {
+                        for dx in 0..scale {
+                            fb.put(cx + gx * scale + dx, y + gy as u32 * scale + dy, fb.raw(fg));
                         }
                     }
                 }
             }
         }
-        cx += font::GLYPH_W * CHROME_SCALE;
+        cx += font::GLYPH_W * scale;
     }
+}
+
+/// Row height and column width at a chosen scale, the companions to
+/// `text_h` and `text_w`.
+pub fn text_h_at(scale: u32) -> u32 {
+    font::GLYPH_H * scale.max(1)
+}
+
+pub fn text_w_at(len: usize, scale: u32) -> u32 {
+    len as u32 * font::GLYPH_W * scale.max(1)
 }
 
 /// A button. `focused` draws the keyboard focus; `default` marks the one Enter
 /// would press if focus were elsewhere.
 pub fn button(fb: &Framebuffer, r: Rect, label: &str, focused: bool, pressed: bool) {
+    button_at(fb, r, label, focused, pressed, CHROME_SCALE);
+}
+
+/// The same, at a chosen text scale, and with the label truncated to fit.
+///
+/// Both halves of that matter for a dense window. `button` centres its label
+/// and clips nothing, which is correct where a button is laid out to suit its
+/// text; in a rail a quarter of the screen wide the row is laid out first and
+/// the labels have to live inside it. Two full-size labels in a 300-pixel rail
+/// ran into each other and read as one word.
+pub fn button_at(
+    fb: &Framebuffer,
+    r: Rect,
+    label: &str,
+    focused: bool,
+    pressed: bool,
+    scale: u32,
+) {
     control(
         fb,
         r,
@@ -918,16 +966,30 @@ pub fn button(fb: &Framebuffer, r: Rect, label: &str, focused: bool, pressed: bo
         }
     }
 
-    let tw = text_w_of(label);
+    let room = (r.w.saturating_sub(6) / (font::GLYPH_W * scale.max(1))) as usize;
+    let label = head_chars(label, room);
+    let tw = text_w_at(label.chars().count(), scale);
     let tx = r.x + (r.w.saturating_sub(tw)) / 2 + u32::from(pressed);
-    let ty = r.y + (r.h.saturating_sub(font::GLYPH_H * CHROME_SCALE)) / 2 + u32::from(pressed);
+    let ty = r.y + (r.h.saturating_sub(text_h_at(scale))) / 2 + u32::from(pressed);
     // `text_over` rather than `text`: the face is a ramp now, so stamping one
     // background colour behind every glyph would print a flat block across it.
-    text_over(fb, tx, ty, label, TEXT);
+    text_over_at(fb, tx, ty, label, TEXT, scale);
 }
 
 /// One row of a list box. Selected rows invert to the Aperture bar.
 pub fn list_row(fb: &Framebuffer, r: Rect, label: &str, selected: bool, focused: bool) {
+    list_row_at(fb, r, label, selected, focused, CHROME_SCALE);
+}
+
+/// The same, at a chosen text scale.
+pub fn list_row_at(
+    fb: &Framebuffer,
+    r: Rect,
+    label: &str,
+    selected: bool,
+    focused: bool,
+    scale: u32,
+) {
     let (fg, bg) = if selected && focused {
         (SELECT_TEXT, SELECT)
     } else if selected {
@@ -938,10 +1000,10 @@ pub fn list_row(fb: &Framebuffer, r: Rect, label: &str, selected: bool, focused:
         (TEXT, MENU_BG)
     };
     fb.rect(r.x, r.y, r.w, r.h, bg);
-    let ty = r.y + (r.h.saturating_sub(font::GLYPH_H * CHROME_SCALE)) / 2;
-    let room = (r.w / (font::GLYPH_W * CHROME_SCALE)).saturating_sub(1) as usize;
+    let ty = r.y + (r.h.saturating_sub(text_h_at(scale))) / 2;
+    let room = (r.w / (font::GLYPH_W * scale.max(1))).saturating_sub(1) as usize;
     let shown = head_chars(label, room);
-    text(fb, r.x + 6, ty, shown, fg, bg);
+    text_over_at(fb, r.x + 4, ty, shown, fg, scale);
 }
 
 /// A vertical groove, for dividing a bar into sections.

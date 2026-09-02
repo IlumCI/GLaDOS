@@ -28,16 +28,45 @@
 //! Queueing makes that unreachable rather than merely unlikely.
 
 use super::theme::{self, Rect};
-use super::{DeskApp, Framebuffer};
+use super::{Color, DeskApp, Framebuffer};
 use crate::ai::glance::with_glance;
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::Cell;
 
+/// These windows are drawn dense.
+///
+/// Chrome is doubled because a title bar is read at arm's length and has room
+/// to spare. A pane of facts in a fifth of a screen does not: at scale two it
+/// fits nine rows, at scale one it fits nineteen, and the glyphs are a crisp
+/// bitmap either way -- the font *is* eight pixels and two was always a
+/// doubling.
+pub const DENSE: u32 = 1;
+
 /// Height of one text row in these windows.
 fn row_h() -> u32 {
-    theme::text_h() + 4
+    theme::text_h_at(DENSE) + 3
+}
+
+/// Width of `n` columns at the dense scale.
+fn col_w(n: usize) -> u32 {
+    theme::text_w_at(n, DENSE)
+}
+
+/// Text in these windows, always at the dense scale.
+fn dtext(fb: &Framebuffer, x: u32, y: u32, s: &str, fg: Color) {
+    theme::text_over_at(fb, x, y, s, fg, DENSE);
+}
+
+/// A name against a value, at the dense scale.
+fn dkv(fb: &Framebuffer, r: Rect, name: &str, value: &str, tone: Color) {
+    let gutter = col_w(12);
+    dtext(fb, r.x, r.y, theme::head_chars(name, 11), theme::TEXT_DIM);
+    if r.w > gutter {
+        let room = ((r.w - gutter) / col_w(1)) as usize;
+        dtext(fb, r.x + gutter, r.y, theme::head_chars(value, room), tone);
+    }
 }
 
 /// A button that remembers where it was drawn.
@@ -70,7 +99,7 @@ fn button_row(fb: &Framebuffer, r: Rect, btns: &[Btn], hot: Option<usize>) {
         let x1 = r.x + r.w * (i as u32 + 1) / n;
         let br = Rect::new(x0 + 2, r.y, x1.saturating_sub(x0 + 4), r.h);
         b.at.set(br);
-        theme::button(fb, br, b.label, hot == Some(i), false);
+        theme::button_at(fb, br, b.label, hot == Some(i), false, DENSE);
     }
 }
 
@@ -80,6 +109,28 @@ fn button_at(btns: &[Btn], x: i32, y: i32) -> Option<usize> {
         let r = b.at.get();
         x >= r.x as i32 && x < (r.x + r.w) as i32 && y >= r.y as i32 && y < (r.y + r.h) as i32
     })
+}
+
+/// One turn, drawn dense.
+fn dbubble(fb: &Framebuffer, r: Rect, lines: &[String], from_machine: bool) {
+    if r.w < 8 || r.h < 6 {
+        return;
+    }
+    if from_machine {
+        theme::control(fb, r, &theme::TITLE_ON, theme::CAP_EDGE);
+    } else {
+        theme::control(fb, r, &theme::BTN, theme::BTN_EDGE);
+    }
+    let ink = if from_machine { theme::TITLE_TEXT } else { theme::TEXT };
+    let inner = r.shrink(3);
+    let room = (inner.w / col_w(1)) as usize;
+    for (i, line) in lines.iter().enumerate() {
+        let y = inner.y + i as u32 * theme::text_h_at(DENSE);
+        if y + theme::text_h_at(DENSE) > inner.y + inner.h {
+            break;
+        }
+        dtext(fb, inner.x, y, theme::head_chars(line, room), ink);
+    }
 }
 
 // --- Improve --------------------------------------------------------------
@@ -116,7 +167,7 @@ impl Improve {
     fn layout(client: Rect) -> (Rect, Rect, Rect) {
         let pad = client.shrink(6);
         let head_h = row_h() * 4 + 8;
-        let btn_h = theme::text_h() + 12;
+        let btn_h = theme::text_h_at(DENSE) + 10;
         let head = Rect::new(pad.x, pad.y, pad.w, head_h.min(pad.h));
         let feet = Rect::new(
             pad.x,
@@ -164,14 +215,14 @@ impl DeskApp for Improve {
 
         with_glance(|g| {
             let h = row_h();
-            theme::kv(
+            dkv(
                 fb,
                 Rect::new(head.x, head.y, head.w, h),
                 "state",
                 if g.godel_on { "watching" } else { "stood down" },
                 if g.godel_on { theme::OK_TEXT } else { theme::TEXT_DIM },
             );
-            theme::kv(
+            dkv(
                 fb,
                 Rect::new(head.x, head.y + h, head.w, h),
                 "adopted",
@@ -182,7 +233,7 @@ impl DeskApp for Improve {
                 Some(x) => crate::ai::godel::short_hex(&x),
                 None => String::from("none yet"),
             };
-            theme::kv(
+            dkv(
                 fb,
                 Rect::new(head.x, head.y + h * 2, head.w, h),
                 "head",
@@ -192,12 +243,13 @@ impl DeskApp for Improve {
             // The held-out budget, as a bar, because it is the one number here
             // that is spent rather than accumulated.
             let (used, cap, fresh) = g.test;
-            let label = Rect::new(head.x, head.y + h * 3, theme::text_w(14), h);
-            theme::kv(fb, label, "held-out", "", theme::TEXT);
+            let label = Rect::new(head.x, head.y + h * 3, col_w(12), h);
+            dkv(
+                fb, label, "held-out", "", theme::TEXT);
             let track = Rect::new(
-                head.x + theme::text_w(14),
+                head.x + col_w(12),
                 head.y + h * 3 + 2,
-                head.w.saturating_sub(theme::text_w(14)),
+                head.w.saturating_sub(col_w(12)),
                 h.saturating_sub(6),
             );
             let frac = if cap == 0 { 0 } else { 256 * used / cap.max(1) };
@@ -224,19 +276,19 @@ impl DeskApp for Improve {
         let max_scroll = lines.len().saturating_sub(rows);
         let scroll = self.scroll.get().min(max_scroll);
         self.scroll.set(scroll);
-        let room = (inner.w / theme::text_w(1)) as usize;
+        let room = (inner.w / col_w(1)) as usize;
         for (i, line) in lines.iter().skip(scroll).take(rows).enumerate() {
             let y = inner.y + i as u32 * row_h();
             let pills = Improve::verdicts(line);
             let text_w = if pills.is_some() {
-                inner.w.saturating_sub(theme::text_w(10))
+                inner.w.saturating_sub(col_w(10))
             } else {
                 inner.w
             };
-            let shown = theme::head_chars(line, (text_w / theme::text_w(1)) as usize);
-            theme::text_over(fb, inner.x, y, shown, theme::SCREEN_TEXT);
+            let shown = theme::head_chars(line, (text_w / col_w(1)) as usize);
+            dtext(fb, inner.x, y, shown, theme::SCREEN_TEXT);
             if let Some(v) = pills {
-                let pw = theme::text_w(2) + 4;
+                let pw = col_w(2) + 4;
                 for (k, ok) in v.iter().enumerate() {
                     let px = inner.x + inner.w.saturating_sub(pw * (4 - k as u32));
                     theme::pill(
@@ -250,13 +302,7 @@ impl DeskApp for Improve {
             let _ = room;
         }
         if lines.is_empty() {
-            theme::text_over(
-                fb,
-                inner.x,
-                inner.y,
-                "nothing adopted yet -- 'godel now' runs a trial",
-                theme::TEXT_DIM,
-            );
+            dtext(fb, inner.x, inner.y, "nothing adopted yet", theme::TEXT_DIM);
         }
         self.ledger.set(Some(lines));
 
@@ -316,7 +362,7 @@ impl Flows {
     /// Run list on the left, the selected plan on the right, buttons beneath.
     fn layout(client: Rect) -> (Rect, Rect, Rect) {
         let pad = client.shrink(6);
-        let btn_h = theme::text_h() + 12;
+        let btn_h = theme::text_h_at(DENSE) + 10;
         let body_h = pad.h.saturating_sub(btn_h + 4);
         let left_w = pad.w * 5 / 16;
         let list = Rect::new(pad.x, pad.y, left_w, body_h);
@@ -340,10 +386,10 @@ impl DeskApp for Flows {
         let rows = (li.h / row_h()) as usize;
         for (i, name) in runs.iter().take(rows).enumerate() {
             let r = Rect::new(li.x, li.y + i as u32 * row_h(), li.w, row_h());
-            theme::list_row(fb, r, name, i == sel, focused);
+            theme::list_row_at(fb, r, name, i == sel, focused, DENSE);
         }
         if runs.is_empty() {
-            theme::text_over(fb, li.x, li.y, "no runs", theme::TEXT_DIM);
+            dtext(fb, li.x, li.y, "no runs", theme::TEXT_DIM);
         }
 
         // The plan for the selected run, re-read only when the selection moves.
@@ -369,7 +415,7 @@ impl DeskApp for Flows {
 
         theme::well(fb, plan, theme::SCREEN);
         let pi = plan.shrink(3);
-        let room = (pi.w / theme::text_w(1)).saturating_sub(5) as usize;
+        let room = (pi.w / col_w(1)).saturating_sub(5) as usize;
         if let Some((_, steps)) = cache.as_ref() {
             for (i, (done, failed, goal)) in steps.iter().enumerate() {
                 let y = pi.y + i as u32 * row_h();
@@ -383,17 +429,11 @@ impl DeskApp for Flows {
                 } else {
                     ("[ ]", theme::SCREEN_TEXT)
                 };
-                theme::text_over(fb, pi.x, y, mark, ink);
-                theme::text_over(
-                    fb,
-                    pi.x + theme::text_w(4),
-                    y,
-                    theme::head_chars(goal, room),
-                    theme::SCREEN_TEXT,
-                );
+                dtext(fb, pi.x, y, mark, ink);
+                dtext(fb, pi.x + col_w(4), y, theme::head_chars(goal, room), theme::SCREEN_TEXT);
             }
             if steps.is_empty() {
-                theme::text_over(fb, pi.x, pi.y, "no steps", theme::TEXT_DIM);
+                dtext(fb, pi.x, pi.y, "no steps", theme::TEXT_DIM);
             }
         }
         self.cached.set(cache);
@@ -477,9 +517,9 @@ impl Ask {
     /// Transcript above, a field and a button beneath.
     fn layout(client: Rect) -> (Rect, Rect, Rect) {
         let pad = client.shrink(6);
-        let bar_h = theme::text_h() + 12;
+        let bar_h = theme::text_h_at(DENSE) + 10;
         let body = Rect::new(pad.x, pad.y, pad.w, pad.h.saturating_sub(bar_h + 4));
-        let btn_w = theme::text_w(5);
+        let btn_w = col_w(6);
         let field = Rect::new(
             pad.x,
             pad.y + pad.h.saturating_sub(bar_h),
@@ -498,53 +538,44 @@ impl DeskApp for Ask {
 
         theme::well(fb, body, theme::SCREEN);
         let inner = body.shrink(4);
-        let cols = (inner.w / theme::text_w(1)).saturating_sub(2) as usize;
+        let cols = (inner.w / col_w(1)).saturating_sub(2) as usize;
 
-        // The agent's ring is where a turn lands. A line beginning with the
-        // prompt marker is the operator's; everything else is the machine's.
-        let lines = crate::ai::agent::log_snapshot();
+        // `companion` and not `agent`: the agent's ring is episodes, which is
+        // a different thing from the conversation and never contains a turn of
+        // it. Reading that ring here is why this window was empty after an
+        // `ask` that had visibly answered.
+        let said = crate::ai::companion::log_snapshot();
         let mut turns: Vec<(bool, Vec<String>)> = Vec::new();
-        for line in lines.iter() {
-            let mine = line.starts_with("> ") || line.starts_with("you:");
-            let text = line.trim_start_matches("> ").trim_start_matches("you:").trim();
-            if text.is_empty() {
-                continue;
-            }
+        for (mine, text) in said.iter() {
             turns.push((!mine, theme::wrap(text, cols)));
         }
 
         // Bottom-up, so the newest turn is always the one on screen.
         let mut y = inner.y + inner.h;
         for (from_machine, wrapped) in turns.iter().rev().skip(self.scroll.get()) {
-            let h = wrapped.len() as u32 * theme::text_h() + 8;
+            let h = wrapped.len() as u32 * theme::text_h_at(DENSE) + 6;
             if y < inner.y + h {
                 break;
             }
             y -= h + 4;
             let w = inner.w * 4 / 5;
             let x = if *from_machine { inner.x } else { inner.x + inner.w - w };
-            theme::bubble(fb, Rect::new(x, y, w, h), wrapped, *from_machine);
+            dbubble(fb, Rect::new(x, y, w, h), wrapped, *from_machine);
         }
         if turns.is_empty() {
-            theme::text_over(
-                fb,
-                inner.x,
-                inner.y,
-                "nothing said yet -- type below, or 'ask' at the shell",
-                theme::TEXT_DIM,
-            );
+            dtext(fb, inner.x, inner.y, "nothing said yet -- ask it something", theme::TEXT_DIM);
         }
 
         theme::well(fb, field, theme::HILIGHT);
-        let room = (field.w / theme::text_w(1)).saturating_sub(1) as usize;
+        let room = (field.w / col_w(1)).saturating_sub(1) as usize;
         let shown = theme::tail_chars(&self.typed, room);
-        theme::text_over(fb, field.x + 4, field.y + 6, shown, theme::TEXT);
+        dtext(fb, field.x + 4, field.y + 6, shown, theme::TEXT);
         if focused {
-            let cx = field.x + 4 + theme::text_w_of(shown);
-            fb.rect(cx, field.y + 6, 2, theme::text_h(), theme::APERTURE);
+            let cx = field.x + 4 + theme::text_w_at(shown.chars().count(), DENSE);
+            fb.rect(cx, field.y + 5, 2, theme::text_h_at(DENSE), theme::APERTURE);
         }
         self.send.at.set(btn);
-        theme::button(fb, btn, "Ask", false, false);
+        theme::button_at(fb, btn, "Ask", false, false, DENSE);
     }
 
     fn key(&mut self, k: u8) -> bool {
@@ -625,7 +656,10 @@ pub fn open_workspace() {
         Ask::preferred().0,
         Ask::preferred().1,
     );
-    super::desk::tile_all();
+    // A workbench, not four quarters: the rails carry short columns, the
+    // middle carries what is being read, and the strip under it carries what
+    // is streaming.
+    super::desk::tile_workspace("Workflows", "Ask", "Agent", "Improve");
 }
 
 pub fn selftest() -> bool {

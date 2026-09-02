@@ -2430,6 +2430,182 @@ pub fn tile_all() -> usize {
     n
 }
 
+/// Four windows in the shape of a workbench rather than four equal quarters.
+///
+/// Quarters are the wrong arrangement for these windows and the reason is not
+/// taste: they carry different amounts. A run list is a column of short names,
+/// a conversation is the thing being read, a log is a tail, and a ledger is a
+/// column of facts. Giving each a quarter gives the list three times the room
+/// it needs and the conversation half of what it wants.
+///
+/// So: a narrow rail either side, the wide pane in the middle for what is
+/// being read, and a short strip along the foot of it for what is streaming.
+/// That is the layout every workbench has converged on, and it converged for
+/// this reason.
+///
+/// Answers how many it placed.
+pub fn tile_workspace(rail_l: &str, main: &str, foot: &str, rail_r: &str) -> usize {
+    let Some(fb) = super::primary() else { return 0 };
+    let screen = screen_rect(&fb);
+    let lw = screen.w * 22 / 100;
+    let rw = screen.w * 24 / 100;
+    let midx = screen.x + lw;
+    let midw = screen.w.saturating_sub(lw + rw);
+    let foot_h = screen.h * 30 / 100;
+    let mainh = screen.h.saturating_sub(foot_h);
+    let places = [
+        (rail_l, Rect::new(screen.x, screen.y, lw, screen.h)),
+        (main, Rect::new(midx, screen.y, midw, mainh)),
+        (foot, Rect::new(midx, screen.y + mainh, midw, foot_h)),
+        (rail_r, Rect::new(screen.x + lw + midw, screen.y, rw, screen.h)),
+    ];
+    let n = with(|d| {
+        let mut placed = 0;
+        for (title, r) in places.iter() {
+            if let Some(i) = d.windows.iter().position(|w| w.title == *title) {
+                let w = &mut d.windows[i];
+                w.snap_back = w.snap_back.or(Some(w.rect));
+                w.state = WinState::Normal;
+                w.rect = *r;
+                placed += 1;
+            }
+        }
+        placed
+    })
+    .unwrap_or(0);
+    if n > 0 {
+        draw();
+    }
+    n
+}
+
+/// Where the terminal's status strip goes inside its well, or `None` when the
+/// window is too short to give a row to anything but the console.
+///
+/// One formula, because two would be the bug this tree keeps paying for: the
+/// draw pass reflows the grid into what this leaves, and `refresh_status`
+/// repaints into what it returns. A disagreement between them is a strip
+/// painted over the last line of output.
+fn terminal_strip(well: Rect) -> Option<Rect> {
+    let h = theme::text_h_at(1) + 7;
+    let inner = well.shrink(3);
+    if inner.h <= h * 4 {
+        return None;
+    }
+    Some(Rect::new(well.x, well.y + well.h - h, well.w, h))
+}
+
+/// Repaint the strip alone, without a full desktop draw.
+///
+/// The strip reports state a command changes -- `initiative off` is the
+/// obvious one -- and `desk::draw` runs on window operations and pointer
+/// motion, neither of which a serial session or a typed command produces. So
+/// the strip was showing what was true when the desktop was last laid out,
+/// which for `mind on` is not a stale field, it is a false statement.
+///
+/// Its own flush, because nothing else is going to present this rectangle:
+/// the console flushes only its grid.
+pub fn refresh_status() {
+    let Some(fb) = super::primary() else { return };
+    let screen = screen_rect(&fb);
+    let mut well = None;
+    with(|d| {
+        let Some(w) = d
+            .windows
+            .iter()
+            .find(|w| matches!(w.content, Content::Terminal(c) if c == super::console::USER))
+        else {
+            return;
+        };
+        if w.state == WinState::Minimised {
+            return;
+        }
+        let (_, _, client) = chrome(w.frame(screen), !w.menus.is_empty());
+        if !client.is_empty() {
+            well = Some(client.shrink(2).shrink(2));
+        }
+    });
+    let Some(strip) = well.and_then(terminal_strip) else { return };
+    terminal_status(&fb, strip);
+    super::compose::flush_rect(strip.x, strip.y, strip.w, strip.h);
+}
+
+/// A tick in the margin beside every row that starts a command.
+///
+/// A terminal is an undifferentiated wall of text and always has been, and the
+/// thing an operator actually looks for in one is where the last command
+/// began. Marking it costs one rect per prompt and needs nothing from the
+/// shell: `rows_starting` asks the grid, and a row that begins with the prompt
+/// is the start of a run by construction.
+///
+/// In the three pixels between the well and the grid, which were margin. So
+/// this adds no chrome and takes no space from the console.
+fn prompt_gutter(fb: &super::Framebuffer, well: Rect, grid: Rect) {
+    let mut starts = [false; 96];
+    let mut row_h = 0u32;
+    let mut oy = 0u32;
+    super::console::with_ch(super::console::USER, |c| {
+        row_h = c.rows_starting(crate::shell::PROMPT, &mut starts);
+        oy = c.origin().1;
+    });
+    if row_h == 0 {
+        return;
+    }
+    let x = well.x + 1;
+    for (r, hit) in starts.iter().enumerate() {
+        if !hit {
+            continue;
+        }
+        let y = oy + r as u32 * row_h;
+        if y < grid.y || y + row_h > grid.y + grid.h {
+            continue;
+        }
+        fb.rect(x, y + 1, 2, row_h.saturating_sub(2), theme::APERTURE);
+    }
+}
+
+/// What the terminal is sitting on top of, along the foot of its window.
+///
+/// Every reading here is in `glance`'s free tier -- an atomic or a clone of a
+/// small static -- and that is not an efficiency note, it is the correctness
+/// argument. This runs inside `desk::draw`, which repaints on pointer motion;
+/// anything that went through `with_engine` from here would *claim* the engine
+/// out from under a running episode between two of its own calls, and the
+/// failure is an interleaved decode and a corrupted cache rather than an
+/// error. The model line is the one costly reading and `glance` takes it once,
+/// while nothing holds the engine, and keeps it.
+///
+/// The strip is where the model facts moved to. They were a window before, and
+/// a window is the wrong shape for four constants that never change: they are
+/// the answer to "what am I talking to", which is a question asked at a glance
+/// and never twice.
+fn terminal_status(fb: &super::Framebuffer, r: Rect) {
+    if r.w < 120 {
+        return;
+    }
+    fb.vgrad(r.x, r.y, r.w, r.h, &theme::STATUS_BAR);
+    fb.rect(r.x, r.y, r.w, 1, theme::TRAY_EDGE);
+    let ty = r.y + (r.h.saturating_sub(theme::text_h_at(1))) / 2;
+
+    crate::ai::glance::with_glance(|g| {
+        let left = crate::ai::glance::model_line(g);
+        theme::text_over_at(fb, r.x + 6, ty, &left, theme::TITLE_TEXT, 1);
+
+        // Right-aligned, and laid out from the right edge inwards so a long
+        // model line runs out of room before it can overwrite the state --
+        // which is the half that changes and therefore the half worth seeing.
+        let engine = crate::ai::glance::engine_line(g);
+        let mind = if g.mind_on { "mind on" } else { "mind off" };
+        let right = alloc::format!("{}  |  {}", engine, mind);
+        let w = theme::text_w_at(right.chars().count(), 1);
+        if r.w > w + 24 {
+            let x = r.x + r.w - w - 6;
+            let tone = if g.engine.is_some() { theme::APERTURE } else { theme::TITLE_TEXT };
+            theme::text_over_at(fb, x, ty, &right, tone, 1);
+        }
+    });
+}
+
 /// How close to a screen edge a move has to end to count as a snap.
 const SNAP: i32 = 8;
 
@@ -3278,7 +3454,22 @@ pub fn draw() {
                     Content::Terminal(ch) => {
                         let well = client.shrink(2);
                         theme::well(&fb, well, theme::SCREEN);
-                        let grid = well.shrink(3);
+                        let inner = well.shrink(3);
+                        // A status strip along the foot of the *window*, with
+                        // the grid reflowed into what is left. It goes on the
+                        // main terminal only: the exec console is a transcript
+                        // of one command and has no state of its own to
+                        // report, and a second strip would be two rows of
+                        // chrome saying the same thing.
+                        let strip = if *ch == super::console::USER {
+                            terminal_strip(well)
+                        } else {
+                            None
+                        };
+                        let grid = match strip {
+                            Some(s) => Rect::new(inner.x, inner.y, inner.w, inner.h - s.h),
+                            None => inner,
+                        };
                         // Each grid reflows into its own window. They are
                         // different sizes and hold different text, so asking
                         // for "the console" here would paint one of them
@@ -3288,6 +3479,12 @@ pub fn draw() {
                             c.reflow(grid.x, grid.y, grid.w, grid.h);
                         });
                         super::console::redraw_ch(*ch);
+                        if *ch == super::console::USER {
+                            prompt_gutter(&fb, well, grid);
+                        }
+                        if let Some(strip) = strip {
+                            terminal_status(&fb, strip);
+                        }
                     }
                     Content::Panel(p) => {
                         theme::panel(&fb, client);

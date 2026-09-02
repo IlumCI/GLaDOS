@@ -1265,6 +1265,41 @@ pub fn init(model_blob: Option<Blob>, tok_blob: Option<Blob>) {
 /// arbitrary byte, and a multi-byte character can straddle two tokens. So this
 /// buffers and only prints what is currently decodable, keeping any trailing
 /// partial sequence for the next call.
+/// A copy of what `emit` is printing, when somebody asked for one.
+///
+/// A tee rather than `console::begin_capture`, and the difference is the
+/// point: a capture takes the output *away* from the terminal, which is right
+/// for an applet whose result is being fed to a program and wrong for `ask`,
+/// where the operator is reading the answer as it arrives. This leaves the
+/// printing exactly as it was and keeps a second copy for whoever armed it.
+///
+/// Bounded, because a `-n 4096` answer would otherwise sit in the heap
+/// forever; past the cap the tail is dropped and the transcript is short by
+/// the end of one turn rather than the machine being short of memory.
+static ECHO: Racy<Option<alloc::string::String>> = Racy::new(None);
+
+const ECHO_CAP: usize = 4096;
+
+/// Start keeping a copy of generated text. Returns whatever the last arming
+/// left behind, which is always `None` in practice and is discarded here
+/// rather than being appended to somebody else's turn.
+pub fn echo_begin() {
+    unsafe { *ECHO.get() = Some(alloc::string::String::new()) };
+}
+
+/// Stop, and take the copy.
+pub fn echo_end() -> Option<alloc::string::String> {
+    unsafe { (*ECHO.get()).take() }
+}
+
+fn echo(s: &str) {
+    if let Some(buf) = unsafe { (*ECHO.get()).as_mut() } {
+        if buf.len() + s.len() <= ECHO_CAP {
+            buf.push_str(s);
+        }
+    }
+}
+
 fn emit(pending: &mut Vec<u8>) {
     loop {
         if pending.is_empty() {
@@ -1273,6 +1308,7 @@ fn emit(pending: &mut Vec<u8>) {
         match core::str::from_utf8(pending) {
             Ok(s) => {
                 kprint!("{}", s);
+                echo(s);
                 pending.clear();
                 return;
             }
@@ -1281,6 +1317,7 @@ fn emit(pending: &mut Vec<u8>) {
                 if good > 0 {
                     if let Ok(s) = core::str::from_utf8(&pending[..good]) {
                         kprint!("{}", s);
+                        echo(s);
                     }
                     pending.drain(..good);
                     continue;

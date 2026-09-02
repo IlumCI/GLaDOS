@@ -16,7 +16,10 @@ use crate::{kprint, kprintln, serial_println};
 use alloc::string::String;
 use alloc::vec::Vec;
 
-const PROMPT: &str = "glados> ";
+/// Public because the terminal window marks the rows that begin with it --
+/// see `desk::prompt_gutter`. One spelling, so a changed prompt cannot leave
+/// the gutter looking for a marker nothing prints.
+pub const PROMPT: &str = "glados> ";
 /// Derived, not written out. Hardcoding this was fine until the prompt changed
 /// length during the rename, at which point every cursor position in the line
 /// editor was off by one.
@@ -188,6 +191,7 @@ pub fn run(boot: &BootInfo, acpi: &Option<Acpi>) -> ! {
             cursor = 0;
             prompt();
             crate::gfx::desk::refresh_routed();
+            crate::gfx::desk::refresh_status();
             crate::gfx::desk::redraw_over_terminal();
             continue;
         }
@@ -276,6 +280,7 @@ pub fn run(boot: &BootInfo, acpi: &Option<Acpi>) -> ! {
                 // paths need it: the typed one and the one a panel's own
                 // button takes.
                 crate::gfx::desk::refresh_routed();
+                crate::gfx::desk::refresh_status();
                 // *After* the prompt, not before. Everything the console prints
                 // -- including the prompt itself -- lands in the terminal's
                 // rectangle without regard for what is drawn on top of it, so

@@ -197,6 +197,14 @@ pub struct Console {
     /// what boot uses before the chrome is drawn.
     ox: u32,
     oy: u32,
+    /// Where the caret is *drawn*, which is not always where `col` is.
+    ///
+    /// The distinction is the whole mechanism. `redraw` writes over the cell
+    /// it is about to put the caret back in, so the console has to remember
+    /// the cell it painted rather than deriving one from the current cursor:
+    /// erasing "wherever the cursor is now" would leave the old caret on
+    /// screen and blank a character that was never covered.
+    caret: Option<(usize, usize)>,
     /// False while the boot screen owns the framebuffer.
     visible: bool,
     /// Half-decoded multi-byte character, if the last byte was inside one.
@@ -232,6 +240,7 @@ impl Console {
             fg: LTGRAY,
             bg,
             scale,
+            caret: None,
             ox: x,
             oy: y,
             visible: true,
@@ -277,6 +286,7 @@ impl Console {
         self.col = self.col.min(cols.saturating_sub(1));
         self.ox = x;
         self.oy = y;
+        self.drop_caret();
     }
 
     /// Pixel size of the grid as currently laid out.
@@ -299,6 +309,7 @@ impl Console {
         }
         self.col = 0;
         self.row = 0;
+        self.drop_caret();
         if self.visible {
             // The grid's own rectangle, not the panel: clearing the screen must
             // not erase the window around it.
@@ -307,6 +318,67 @@ impl Console {
             if self.flush {
                 super::compose::flush_rect(self.ox, self.oy, w, h);
             }
+        }
+    }
+
+    /// Put the caret where the cursor is, taking it off wherever it was.
+    ///
+    /// There was none at all until now, which on a machine with a line editor
+    /// -- history, arrow keys, a scrolling window onto a long line -- meant
+    /// the one thing the editor is for was invisible. Everything needed was
+    /// already here: `set_col` is what the shell's `redraw` ends with, so a
+    /// caret hung off that follows the editor for free.
+    ///
+    /// A bar rather than a block, because a block hides the character under
+    /// it and this console has no reverse-video cell to fall back on.
+    fn move_caret(&mut self) {
+        let to = (self.row, self.col);
+        if self.caret == Some(to) {
+            // Still repainted, because whatever was written over it since is
+            // the reason `redraw` calls this at the same column twice.
+            self.paint_caret();
+            return;
+        }
+        if let Some((r, c)) = self.caret.take() {
+            self.draw_cell(r, c);
+        }
+        self.caret = Some(to);
+        self.paint_caret();
+    }
+
+    /// Forget where the caret was, without repainting the cell.
+    ///
+    /// Only for the paths that are about to paint over it anyway: `clear`
+    /// fills the whole rectangle and `reflow` moves the grid out from under
+    /// it. Anywhere else this leaves the bar on screen with nothing owning
+    /// it -- which is exactly what it did, and every past prompt kept a caret
+    /// of its own down the screen.
+    fn drop_caret(&mut self) {
+        self.caret = None;
+    }
+
+    /// Take the caret off the screen, repainting what was underneath.
+    fn erase_caret(&mut self) {
+        if let Some((r, c)) = self.caret.take() {
+            self.draw_cell(r, c);
+        }
+    }
+
+    fn paint_caret(&self) {
+        if !self.visible {
+            return;
+        }
+        let Some((r, c)) = self.caret else { return };
+        if r >= self.rows || c >= self.cols {
+            return;
+        }
+        let s = self.scale;
+        let ox = self.ox + c as u32 * font::GLYPH_W * s;
+        let oy = self.oy + r as u32 * font::GLYPH_H * s;
+        let w = s.max(1);
+        self.fb.rect(ox, oy, w, font::GLYPH_H * s, super::theme::APERTURE);
+        if self.flush {
+            super::compose::flush_rect(ox, oy, font::GLYPH_W * s, font::GLYPH_H * s);
         }
     }
 
@@ -406,6 +478,10 @@ impl Console {
                 self.paint_cell(r, c);
             }
         }
+        // Last, so it is over the cell rather than under it -- a total
+        // repaint is the one path that would otherwise paint the grid on top
+        // of a caret it had already drawn.
+        self.paint_caret();
         // One flush for the whole console rather than one per cell. The
         // per-cell path stays for `draw_cell` on its own, which is what a
         // single typed character takes.
@@ -415,6 +491,10 @@ impl Console {
     }
 
     fn scroll(&mut self) {
+        // Before the rows move, so the cell repaints from what is actually on
+        // screen. Erased and not dropped: `scroll_rect` shifts pixels, so a
+        // caret left painted would ride up the screen a row at a time.
+        self.erase_caret();
         for r in 1..self.rows {
             self.cells[r - 1] = self.cells[r];
         }
@@ -513,10 +593,44 @@ impl Console {
     /// arrow keys possible.
     pub fn set_col(&mut self, col: usize) {
         self.col = col.min(self.cols.saturating_sub(1));
+        self.move_caret();
     }
 
     pub fn col(&self) -> usize {
         self.col
+    }
+
+    /// Which rows start with `marker`, and the row height, for the gutter the
+    /// terminal window paints beside them.
+    ///
+    /// Derived rather than recorded, which is the whole reason it is cheap.
+    /// The console does not know what a "run" is -- it is a grid of cells and
+    /// nothing above it has ever told it where one command's output ends -- so
+    /// teaching it would mean a second notion of structure kept in step with
+    /// the shell by hand. A row that begins with the prompt *is* the start of
+    /// a run, by construction, and the scan is `rows * marker.len()` cell
+    /// reads: 576 against the nine thousand `redraw_all` already visits.
+    pub fn rows_starting(&self, marker: &str, out: &mut [bool]) -> u32 {
+        // Trailing space trimmed: a prompt is written with one and the cell
+        // after it is where the caret sits, so matching the space would make
+        // the mark depend on whether anything had been typed yet.
+        let want: alloc::vec::Vec<u16> =
+            marker.trim_end().chars().map(font::index_of).collect();
+        if want.is_empty() {
+            return 0;
+        }
+        for (r, slot) in out.iter_mut().enumerate().take(self.rows) {
+            *slot = r < self.rows
+                && want.len() <= self.cols
+                && want.iter().enumerate().all(|(c, g)| self.cells[r][c].glyph() == *g);
+        }
+        font::GLYPH_H * self.scale
+    }
+
+    /// Where the grid starts, so a caller drawing beside it can line up with
+    /// a row rather than with the window.
+    pub fn origin(&self) -> (u32, u32) {
+        (self.ox, self.oy)
     }
 
     pub fn cols(&self) -> usize {
@@ -528,6 +642,14 @@ impl Console {
     /// uses it to echo keystrokes and reposition the cursor, and pacing those
     /// would just feel like input lag.
     pub fn write_bytes(&mut self, s: &[u8]) {
+        // The caret is put back at the end rather than maintained per byte.
+        // `prompt()` is a `kprint!` and not a `set_col`, so hanging the caret
+        // off `set_col` alone left the shell sitting at a prompt with no caret
+        // until the first keystroke -- which is precisely the moment it is
+        // most wanted. Once per call and not once per character: this is the
+        // paced path, and a cell repainted per byte would be a caret trailing
+        // its own output across the screen.
+        self.erase_caret();
         let pace = pace_us();
         for &b in s {
             self.put_char(b);
@@ -535,6 +657,7 @@ impl Console {
                 crate::time::delay_us(pace);
             }
         }
+        self.move_caret();
     }
 }
 
