@@ -43,6 +43,7 @@
 //! the model takes and for the same reason -- that is the only moment there is
 //! a filesystem.
 
+pub mod draw;
 pub mod level;
 pub mod wad;
 

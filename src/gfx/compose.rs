@@ -120,6 +120,28 @@ pub fn present() {
 }
 
 /// Whether there is a back buffer at all.
+/// Forget what is on screen, so the next `present` writes every row.
+///
+/// For anything that wrote to the framebuffer without going through here --
+/// which is exactly what a full-screen program does, since it owns the screen
+/// and has no desktop to compose with. The shadow still describes the desktop
+/// that was there before, so `present` finds every row unchanged and repaints
+/// nothing, and the desktop never comes back.
+///
+/// This is the same failure the clock had before it was moved onto the
+/// compositor, recorded in CLAUDE.md: writing the aperture directly leaves the
+/// shadow describing pixels that are no longer there.
+///
+/// The fill is `0xFFFF_FFFF` for the reason `init` uses it -- `encode` can
+/// never produce it, because both pixel formats leave the top byte zero, so
+/// nothing can accidentally match.
+pub fn invalidate() {
+    let Some(c) = (unsafe { (*COMP.get()).as_mut() }) else { return };
+    for p in c.shadow.iter_mut() {
+        *p = 0xFFFF_FFFF;
+    }
+}
+
 pub fn active() -> bool {
     unsafe { (*COMP.get()).is_some() }
 }

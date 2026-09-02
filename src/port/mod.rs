@@ -84,9 +84,14 @@ pub fn with_screen<R>(f: impl FnOnce() -> R) -> R {
     }
     let out = f();
     crate::gfx::set_exclusive(false);
-    // Whatever was underneath, put back. The program painted over the whole
-    // desktop and the compositor's shadow still describes what was there
-    // before, so a plain `present` would repaint nothing.
+    // Whatever was underneath, put back -- and the shadow forgotten first,
+    // which the comment below always said was necessary and the code did not
+    // do. A `Surface` writes the aperture directly, so the compositor still
+    // believes the desktop is on screen; `present` then finds every row
+    // unchanged and repaints none of them, and the game stays on screen with
+    // the terminal drawn over the top of it. Found by looking at a
+    // screenshot taken after the picture was supposed to be gone.
+    crate::gfx::compose::invalidate();
     crate::gfx::desk::draw();
     out
 }

@@ -96,6 +96,43 @@ fn redraw(line: &str, cursor: usize) {
     });
 }
 
+/// Hold a full-screen picture until a key, or for `ms` if one is given.
+///
+/// The bounded form is the only one a test can use: `drive.py` sends the next
+/// command when it sees a prompt, so a program that owns the screen until a
+/// keypress never gives the prompt back, and the keystroke that would end it
+/// is the one thing the harness cannot deliver.
+fn wait_or(ms: u64) {
+    let until = crate::port::clock::now_ms() + ms;
+    loop {
+        if crate::dev::kbd::pop_any().is_some() {
+            break;
+        }
+        if ms != 0 && crate::port::clock::now_ms() >= until {
+            break;
+        }
+        unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };
+    }
+}
+
+/// The first map marker in a WAD: an empty lump named like a map.
+///
+/// By name rather than by emptiness, because plenty of legitimate lumps are
+/// empty and only these two spellings have ever marked a map.
+fn first_map(w: &crate::doom::wad::Wad) -> alloc::string::String {
+    for i in 0..w.len() {
+        if let Some(e) = w.at(i) {
+            let n = e.name.as_str();
+            let looks = (n.len() == 4 && n.starts_with('E') && n.contains('M'))
+                || (n.len() == 5 && n.starts_with("MAP"));
+            if looks && e.is_empty() {
+                return alloc::string::String::from(n);
+            }
+        }
+    }
+    alloc::string::String::new()
+}
+
 static INTERACTIVE: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
@@ -4201,6 +4238,104 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
         }
         "bench" => crate::ai::bench(),
         "model" => crate::ai::model_demo(),
+        // The two pictures that come before a renderer: the WAD's own
+        // palette, and its level seen from above. Both go through
+        // `port::Surface`, which is the surface the renderer will draw into --
+        // so the path being proven is the path that will be used, rather than
+        // a convenient stand-in for it.
+        "doom" => {
+            // Parsed per subcommand rather than positionally, because the two
+            // do not have the same shape: `pal` takes a duration and `map`
+            // takes a name *then* a duration. Reading the duration first ate
+            // the map name, and `doom map E1M1 6000` went looking for a map
+            // called 6000.
+            let mut it = rest.split_whitespace();
+            let what = it.next().unwrap_or("");
+            let rest_args: alloc::vec::Vec<&str> = it.collect();
+            // A duration is the trailing argument, when the last one is a
+            // number. Everything before it belongs to the subcommand.
+            let (names, hold): (&[&str], u64) = match rest_args.split_last() {
+                Some((last, head)) => match last.parse::<u64>() {
+                    Ok(ms) => (head, ms),
+                    Err(_) => (&rest_args[..], 0),
+                },
+                None => (&[], 0),
+            };
+
+            let Some(parsed) = crate::doom::open() else {
+                kprintln!("  no WAD on the boot volume -- see 'wad'");
+                return;
+            };
+            let w = match parsed {
+                Ok(w) => w,
+                Err(e) => {
+                    console::set_color(LTRED);
+                    kprintln!("  {}", e);
+                    console::set_color(LTGRAY);
+                    return;
+                }
+            };
+            let Some(pal) = w.lump("PLAYPAL") else {
+                kprintln!("  this WAD has no PLAYPAL, so nothing can be coloured");
+                return;
+            };
+            if pal.len() < 768 {
+                console::set_color(LTRED);
+                kprintln!("  PLAYPAL is {} bytes, short of one 768-byte palette", pal.len());
+                console::set_color(LTGRAY);
+                return;
+            }
+            kprintln!(
+                "  PLAYPAL: {} palette(s) of 256",
+                crate::doom::draw::palette_count(pal)
+            );
+
+            match what {
+                "pal" | "" => {
+                    crate::port::with_screen(|| {
+                        let Some(mut surf) = crate::port::Surface::new(320, 200) else {
+                            return;
+                        };
+                        crate::doom::draw::palette(&mut surf, pal);
+                        surf.present();
+                        wait_or(hold);
+                    });
+                    kprintln!("  drew 256 colours");
+                }
+                "map" => {
+                    let name = names.first().copied().unwrap_or("");
+                    let marker = if name.is_empty() {
+                        first_map(&w)
+                    } else {
+                        alloc::string::String::from(name)
+                    };
+                    if marker.is_empty() {
+                        kprintln!("  no map marker in this WAD");
+                        return;
+                    }
+                    let lv = match crate::doom::level::Level::load(&w, &marker) {
+                        Ok(l) => l,
+                        Err(e) => {
+                            console::set_color(LTRED);
+                            kprintln!("  {}: {}", marker, e);
+                            console::set_color(LTGRAY);
+                            return;
+                        }
+                    };
+                    kprintln!("  {} -- {} linedefs from above", lv.name, lv.linedefs.len());
+                    crate::port::with_screen(|| {
+                        let Some(mut surf) = crate::port::Surface::new(320, 200) else {
+                            return;
+                        };
+                        crate::doom::draw::overhead(&mut surf, &lv, pal);
+                        surf.present();
+                        wait_or(hold);
+                    });
+                    kprintln!("  drew it");
+                }
+                other => kprintln!("  no such action: {}  (try: pal [ms], map [name] [ms])", other),
+            }
+        }
         // One map, decoded. `map` alone takes the first marker it can find;
         // `map E1M1` names one.
         "map" => {
