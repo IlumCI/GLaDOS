@@ -14,6 +14,7 @@ pub mod train;
 pub mod deliberate;
 pub mod corpus;
 pub mod futures;
+pub mod glance;
 pub mod godel;
 pub mod godbits;
 pub mod companion;
