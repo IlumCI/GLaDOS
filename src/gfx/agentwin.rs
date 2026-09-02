@@ -14,7 +14,7 @@
 
 use super::theme::{self, Rect};
 use super::{DeskApp, Framebuffer};
-use super::mindwin::DENSE;
+use super::mindwin::dense;
 use crate::ai::agent;
 use alloc::string::String;
 use core::cell::Cell;
@@ -46,8 +46,8 @@ impl DeskApp for AgentLog {
         // Log density, not chrome density. This window sits along the foot of
         // the workspace where it is a tail being watched out of the corner of
         // an eye, and at chrome scale a third of the screen held four lines of
-        // it. `mindwin::DENSE` is the same decision for the same reason.
-        let lh = theme::text_h_at(DENSE) + 2;
+        // it. `mindwin::dense()` is the same decision for the same reason.
+        let lh = theme::text_h_at(dense()) + 2;
         let area = client.shrink(6);
         let rows = (area.h / lh.max(1)) as usize;
 
@@ -65,7 +65,7 @@ impl DeskApp for AgentLog {
                 break;
             }
             let shown = clip_line(&lines[i], area.w);
-            theme::text_over_at(fb, area.x, area.y + (k as u32) * lh, &shown, theme::TEXT, DENSE);
+            theme::text_over_at(fb, area.x, area.y + (k as u32) * lh, &shown, theme::TEXT, dense());
         }
 
         if lines.is_empty() {
@@ -75,7 +75,7 @@ impl DeskApp for AgentLog {
                 area.y,
                 "no episode yet -- run 'agent <goal>' at the shell",
                 theme::TEXT_DIM,
-                DENSE,
+                dense(),
             );
         }
     }
@@ -104,7 +104,7 @@ impl DeskApp for AgentLog {
 /// window and across the desktop behind it. Cut on the char boundary the
 /// width allows -- `theme::text_w` counts glyphs, so this is exact.
 fn clip_line(s: &str, max_w: u32) -> String {
-    let budget = (max_w / theme::text_w_at(1, DENSE).max(1)) as usize;
+    let budget = (max_w / theme::text_w_at(1, dense()).max(1)) as usize;
     if s.chars().count() <= budget {
         return String::from(s);
     }

@@ -42,21 +42,44 @@ use core::cell::Cell;
 /// fits nine rows, at scale one it fits nineteen, and the glyphs are a crisp
 /// bitmap either way -- the font *is* eight pixels and two was always a
 /// doubling.
-pub const DENSE: u32 = 1;
+/// The text scale these windows draw at, decided by how tall the screen is.
+///
+/// Chrome is doubled because a title bar is read at arm's length and has room
+/// to spare. A window reporting on the machine has neither -- at scale two a
+/// quarter of an 800-pixel screen held nine rows, where scale one holds
+/// nineteen, and that is what made the workspace a workbench rather than four
+/// sparse boxes.
+///
+/// But density is a means and not the point. The GF63's panel is 1920x1080,
+/// and an eight-pixel glyph on it is not compact, it is unreadable -- the same
+/// pane that needed scale one to fit nineteen rows at 800 fits twenty-six at
+/// scale two on 1080. So the rule is stated in rows rather than in pixels:
+/// take the larger scale whenever the screen is tall enough to keep the rows.
+///
+/// The threshold is where the two are equal. A rail is roughly the full screen
+/// height, so scale two matches scale one's nineteen-row budget at about a
+/// thousand pixels, and every panel this project targets is either well below
+/// that or well above it.
+pub fn dense() -> u32 {
+    match super::primary() {
+        Some(fb) if fb.height() >= 1000 => 2,
+        _ => 1,
+    }
+}
 
 /// Height of one text row in these windows.
 fn row_h() -> u32 {
-    theme::text_h_at(DENSE) + 3
+    theme::text_h_at(dense()) + 3
 }
 
 /// Width of `n` columns at the dense scale.
 fn col_w(n: usize) -> u32 {
-    theme::text_w_at(n, DENSE)
+    theme::text_w_at(n, dense())
 }
 
 /// Text in these windows, always at the dense scale.
 fn dtext(fb: &Framebuffer, x: u32, y: u32, s: &str, fg: Color) {
-    theme::text_over_at(fb, x, y, s, fg, DENSE);
+    theme::text_over_at(fb, x, y, s, fg, dense());
 }
 
 /// A name against a value, at the dense scale.
@@ -99,7 +122,7 @@ fn button_row(fb: &Framebuffer, r: Rect, btns: &[Btn], hot: Option<usize>) {
         let x1 = r.x + r.w * (i as u32 + 1) / n;
         let br = Rect::new(x0 + 2, r.y, x1.saturating_sub(x0 + 4), r.h);
         b.at.set(br);
-        theme::button_at(fb, br, b.label, hot == Some(i), false, DENSE);
+        theme::button_at(fb, br, b.label, hot == Some(i), false, dense());
     }
 }
 
@@ -125,8 +148,8 @@ fn dbubble(fb: &Framebuffer, r: Rect, lines: &[String], from_machine: bool) {
     let inner = r.shrink(3);
     let room = (inner.w / col_w(1)) as usize;
     for (i, line) in lines.iter().enumerate() {
-        let y = inner.y + i as u32 * theme::text_h_at(DENSE);
-        if y + theme::text_h_at(DENSE) > inner.y + inner.h {
+        let y = inner.y + i as u32 * theme::text_h_at(dense());
+        if y + theme::text_h_at(dense()) > inner.y + inner.h {
             break;
         }
         dtext(fb, inner.x, y, theme::head_chars(line, room), ink);
@@ -167,7 +190,7 @@ impl Improve {
     fn layout(client: Rect) -> (Rect, Rect, Rect) {
         let pad = client.shrink(6);
         let head_h = row_h() * 4 + 8;
-        let btn_h = theme::text_h_at(DENSE) + 10;
+        let btn_h = theme::text_h_at(dense()) + 10;
         let head = Rect::new(pad.x, pad.y, pad.w, head_h.min(pad.h));
         let feet = Rect::new(
             pad.x,
@@ -368,7 +391,7 @@ impl Flows {
     /// Run list on the left, the selected plan on the right, buttons beneath.
     fn layout(client: Rect) -> (Rect, Rect, Rect) {
         let pad = client.shrink(6);
-        let btn_h = theme::text_h_at(DENSE) + 10;
+        let btn_h = theme::text_h_at(dense()) + 10;
         let body_h = pad.h.saturating_sub(btn_h + 4);
         let left_w = pad.w * 5 / 16;
         let list = Rect::new(pad.x, pad.y, left_w, body_h);
@@ -392,7 +415,7 @@ impl DeskApp for Flows {
         let rows = (li.h / row_h()) as usize;
         for (i, name) in runs.iter().take(rows).enumerate() {
             let r = Rect::new(li.x, li.y + i as u32 * row_h(), li.w, row_h());
-            theme::list_row_at(fb, r, name, i == sel, focused, DENSE);
+            theme::list_row_at(fb, r, name, i == sel, focused, dense());
         }
         if runs.is_empty() {
             dtext(fb, li.x, li.y, "no runs", theme::TEXT_DIM);
@@ -523,7 +546,7 @@ impl Ask {
     /// Transcript above, a field and a button beneath.
     fn layout(client: Rect) -> (Rect, Rect, Rect) {
         let pad = client.shrink(6);
-        let bar_h = theme::text_h_at(DENSE) + 10;
+        let bar_h = theme::text_h_at(dense()) + 10;
         let body = Rect::new(pad.x, pad.y, pad.w, pad.h.saturating_sub(bar_h + 4));
         let btn_w = col_w(6);
         let field = Rect::new(
@@ -559,7 +582,7 @@ impl DeskApp for Ask {
         // Bottom-up, so the newest turn is always the one on screen.
         let mut y = inner.y + inner.h;
         for (from_machine, wrapped) in turns.iter().rev().skip(self.scroll.get()) {
-            let h = wrapped.len() as u32 * theme::text_h_at(DENSE) + 6;
+            let h = wrapped.len() as u32 * theme::text_h_at(dense()) + 6;
             if y < inner.y + h {
                 break;
             }
@@ -577,11 +600,11 @@ impl DeskApp for Ask {
         let shown = theme::tail_chars(&self.typed, room);
         dtext(fb, field.x + 4, field.y + 6, shown, theme::TEXT);
         if focused {
-            let cx = field.x + 4 + theme::text_w_at(shown.chars().count(), DENSE);
-            fb.rect(cx, field.y + 5, 2, theme::text_h_at(DENSE), theme::APERTURE);
+            let cx = field.x + 4 + theme::text_w_at(shown.chars().count(), dense());
+            fb.rect(cx, field.y + 5, 2, theme::text_h_at(dense()), theme::APERTURE);
         }
         self.send.at.set(btn);
-        theme::button_at(fb, btn, "Ask", false, false, DENSE);
+        theme::button_at(fb, btn, "Ask", false, false, dense());
     }
 
     fn key(&mut self, k: u8) -> bool {
