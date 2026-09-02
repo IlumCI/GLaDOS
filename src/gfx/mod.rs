@@ -20,6 +20,7 @@ pub mod ui;
 pub mod uidoc;
 pub mod desk;
 pub mod agentwin;
+pub mod mindwin;
 
 /// A program that owns a window's client area.
 ///

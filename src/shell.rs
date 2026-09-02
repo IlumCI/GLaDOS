@@ -3886,6 +3886,13 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 }
             }
         }
+        "mind" if rest.trim() == "open" => {
+            // The workspace. One command because the arrangement is the point:
+            // a machine reporting on itself in four places at once reads as a
+            // machine doing several things, which is what it is.
+            crate::gfx::mindwin::open_workspace();
+            kprintln!("  four windows, gridded -- Ask, Workflows, Agent, Improve");
+        }
         "mind" => {
             use crate::gfx::console::{self, LTGRAY, YELLOW};
             let (ticks, acts, episodes, suppressed, enabled, seen, tenths) =

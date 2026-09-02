@@ -1093,6 +1093,19 @@ pub fn has_window(title: &str) -> bool {
     with(|d| d.windows.iter().any(|w| w.title == title)).unwrap_or(false)
 }
 
+/// Put every window away, so what opens next is what is on screen.
+///
+/// Minimised rather than closed: the terminal and the Program Manager are
+/// `closable: false` for a reason, and a workspace that destroyed the shell to
+/// tidy the screen would be a workspace nobody could get out of.
+pub fn minimise_all() {
+    with(|d| {
+        for w in d.windows.iter_mut() {
+            w.state = WinState::Minimised;
+        }
+    });
+}
+
 pub fn open_agentlog() {
     let (w, h) = super::agentwin::AgentLog::preferred();
     open_app("Agent", ICO_ORACLE, Box::new(super::agentwin::AgentLog::new()), w, h);
