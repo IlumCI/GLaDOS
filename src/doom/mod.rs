@@ -43,6 +43,7 @@
 //! the model takes and for the same reason -- that is the only moment there is
 //! a filesystem.
 
+pub mod level;
 pub mod wad;
 
 /// The name the boot loader files a WAD under, and the name this module asks

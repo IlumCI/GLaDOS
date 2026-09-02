@@ -41,6 +41,13 @@ pub struct Name {
 }
 
 impl Name {
+    /// The eight bytes a *lump body* spells a name in -- a sector's floor
+    /// texture, a sidedef's wall. Same encoding as a directory entry, so the
+    /// same reader, exposed because the level lumps carry them too.
+    pub fn from_lump(b: &[u8]) -> Name {
+        Name::from_bytes(b)
+    }
+
     fn from_bytes(b: &[u8]) -> Name {
         let mut raw = [0u8; 8];
         let mut len = 0usize;

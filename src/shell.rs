@@ -4201,6 +4201,117 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
         }
         "bench" => crate::ai::bench(),
         "model" => crate::ai::model_demo(),
+        // One map, decoded. `map` alone takes the first marker it can find;
+        // `map E1M1` names one.
+        "map" => {
+            let Some(parsed) = crate::doom::open() else {
+                kprintln!("  no WAD on the boot volume -- see 'wad'");
+                return;
+            };
+            let w = match parsed {
+                Ok(w) => w,
+                Err(e) => {
+                    console::set_color(LTRED);
+                    kprintln!("  {}", e);
+                    console::set_color(LTGRAY);
+                    return;
+                }
+            };
+            // A marker is an empty lump whose name looks like a map. Guessing
+            // by name rather than by emptiness because plenty of legitimate
+            // lumps are empty, and only these two spellings have ever been
+            // used for a marker.
+            let want = rest.trim();
+            let name = if !want.is_empty() {
+                alloc::string::String::from(want)
+            } else {
+                let mut found = alloc::string::String::new();
+                for i in 0..w.len() {
+                    if let Some(e) = w.at(i) {
+                        let n = e.name.as_str();
+                        let looks = (n.len() == 4 && n.starts_with('E') && n.contains('M'))
+                            || (n.len() == 5 && n.starts_with("MAP"));
+                        if looks && e.is_empty() {
+                            found = alloc::string::String::from(n);
+                            break;
+                        }
+                    }
+                }
+                found
+            };
+            if name.is_empty() {
+                kprintln!("  no map marker in this WAD");
+                return;
+            }
+
+            let lv = match crate::doom::level::Level::load(&w, &name) {
+                Ok(l) => l,
+                Err(e) => {
+                    console::set_color(LTRED);
+                    kprintln!("  {}: {}", name, e);
+                    console::set_color(LTGRAY);
+                    return;
+                }
+            };
+            kprintln!("  {}", lv.name);
+            kprintln!(
+                "  {} vertexes  {} linedefs  {} sidedefs  {} sector(s)",
+                lv.vertexes.len(),
+                lv.linedefs.len(),
+                lv.sidedefs.len(),
+                lv.sectors.len()
+            );
+            kprintln!(
+                "  {} segs  {} subsectors  {} node(s)  {} thing(s)",
+                lv.segs.len(),
+                lv.subsectors.len(),
+                lv.nodes.len(),
+                lv.things.len()
+            );
+            let two = lv.linedefs.iter().filter(|l| l.two_sided()).count();
+            kprintln!("  {} of the linedefs are two-sided", two);
+
+            match lv.player_start() {
+                None => {
+                    console::set_color(YELLOW);
+                    kprintln!("  no player start -- nothing could spawn here");
+                    console::set_color(LTGRAY);
+                }
+                Some(t) => {
+                    kprintln!("  player 1 starts at {},{} facing {} deg", t.x, t.y, t.angle);
+                    // The BSP, walked. This is the first thing in the port
+                    // that *uses* the level rather than reporting it, and it
+                    // is the cheapest possible check that the tree is
+                    // navigable: if the side test is mirrored or a child index
+                    // is wrong, the descent lands somewhere impossible or not
+                    // at all.
+                    match lv.subsector_at(t.x as i32, t.y as i32) {
+                        Some(ss) => kprintln!(
+                            "  which is in a subsector of {} seg(s) from {}",
+                            ss.count,
+                            ss.first
+                        ),
+                        None => {
+                            console::set_color(LTRED);
+                            kprintln!("  and the BSP does not lead anywhere from there");
+                            console::set_color(LTGRAY);
+                        }
+                    }
+                }
+            }
+
+            let mut floor = i16::MAX;
+            let mut ceil = i16::MIN;
+            for s in lv.sectors.iter() {
+                floor = floor.min(s.floor);
+                ceil = ceil.max(s.ceiling);
+            }
+            if !lv.sectors.is_empty() {
+                kprintln!("  floors from {} up to a ceiling of {}", floor, ceil);
+                let s = &lv.sectors[0];
+                kprintln!("  sector 0: {} / {}, light {}", s.floor_pic, s.ceiling_pic, s.light);
+            }
+        }
         // What a WAD contains. The parser cannot print -- it lives under a
         // tree that may not name `crate::` outside `crate::port`, so
         // `kprintln!` is out of reach -- which is why it has an `Error` type
