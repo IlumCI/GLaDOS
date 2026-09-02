@@ -1264,6 +1264,19 @@ fn ledger_append(line: &str) {
     text.push_str(line);
     text.push('\n');
     sysbox::write_text(LEDGER, &text);
+
+    // The one moment a trial changes anything a window can show: the counts,
+    // the head and the judges' verdicts all land with this line. Repainted
+    // from here, on this task, which is the pattern `agent` and `author`
+    // already follow -- `desk::with` is unguarded, so a repaint driven from
+    // the clock task could alias `&mut Desktop` against whatever the working
+    // task was halfway through.
+    //
+    // Without it the Improve window kept whatever it last drew until some
+    // unrelated window operation repainted the desktop, so a trial could run,
+    // be judged and be refused with the pane in front of the operator still
+    // reading `0 of 0 trials`.
+    crate::gfx::desk::draw();
 }
 
 fn render_certificate(c: &Certificate, seq: u32, hour: u8) -> String {
