@@ -364,6 +364,18 @@ def main():
         import shlex
         qemu_extra = shlex.split(argv[i + 1])
         del argv[i:i + 2]
+    # 1920x1080 instead of whatever mode OVMF picks on its own, which is
+    # 1280x800. A flag and not the default: every figure `video bench` has ever
+    # recorded is at the default mode, and the graphics path is span fills and
+    # a memcmp, so it scales with pixel count -- changing the default would
+    # silently invalidate every one of them.
+    #
+    # `-vga none` first is not optional. `-global VGA.xres=` on the default
+    # device does not set the mode, it breaks it: OVMF then cannot publish a
+    # GOP at all, and the kernel boots with no framebuffer and no message.
+    hd = "--hd" in argv
+    if hd:
+        argv.remove("--hd")
     rec_dir, rec_frames, rec_gap = None, 120, 4.0
     if "--record" in argv:
         i = argv.index("--record")
@@ -607,6 +619,7 @@ def main():
         # nobody has tested.
         "-monitor", f"tcp:127.0.0.1:{MONITOR_PORT},server=on,wait=off",
         "-display", "none",
+        *(["-vga", "none", "-device", "VGA,xres=1920,yres=1080"] if hd else []),
         "-no-reboot",
     ]
 
