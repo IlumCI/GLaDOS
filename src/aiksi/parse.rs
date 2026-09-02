@@ -148,10 +148,40 @@ pub enum Stmt {
 pub struct Parser {
     toks: Vec<Tok>,
     pos: usize,
+    /// How deep the parser's own recursion is: `primary` back into
+    /// `expression`, `statement` back into `block`, and the two
+    /// right-recursive expression forms. Bounds the *parse* call stack.
+    depth: usize,
+    /// The height of the most recently parsed expression. Bounds the *tree*,
+    /// which is what a later `eval` or `drop` walks.
+    height: usize,
 }
 
+/// The most nesting the parser will accept, in two senses at once.
+///
+/// This is a safety limit, not a taste one. The parser is recursive-descent,
+/// so a `(`, a `{` or a unary `-` is a stack frame, and this kernel runs in
+/// ring 0 with no guard page -- a stack that runs off the end is a triple
+/// fault, an instant silent reboot with nothing printed because the fault
+/// handler needs the stack that is gone.
+///
+/// Two different depths overflow, and both are capped here. **Parse depth** is
+/// the parser's own recursion, and a deep pile of `(((...)))` blows it while
+/// parsing. **Tree height** is the depth of the AST that gets built, and a
+/// long flat `1+1+1+...` builds a tall left-leaning tree with no deep parser
+/// recursion at all -- which then triple faults later, when `eval` or even
+/// just `drop` walks down it. Measured on this build: parse survives 200
+/// nested parens, and a flat chain survives height 150 but not 400. This caps
+/// well under both, with margin for however much stack a caller has already
+/// spent -- a skill run through `cmd_run` starts deeper than the prompt does.
+///
+/// `MAX_DEPTH` in `eval` makes the same trade for call nesting at run time;
+/// this is its parse-time sibling, and it has to exist because a program that
+/// will not run is small comfort if merely reading it reboots the machine.
+const MAX_PARSE_DEPTH: usize = 64;
+
 pub fn parse(toks: Vec<Tok>) -> Result<Vec<Stmt>, String> {
-    let mut p = Parser { toks, pos: 0 };
+    let mut p = Parser { toks, pos: 0, depth: 0, height: 0 };
     let mut out = Vec::new();
     while !p.at(&Tok::Eof) {
         out.push(p.statement()?);
@@ -160,6 +190,41 @@ pub fn parse(toks: Vec<Tok>) -> Result<Vec<Stmt>, String> {
 }
 
 impl Parser {
+    /// Enter a level of parser recursion, or refuse. Paired with `descend_out`.
+    ///
+    /// Guards the *call stack*: the paren, block and unary/assignment cycles
+    /// all overflow the parser itself before any tree is finished, so the
+    /// check has to happen on the way down, here, rather than on the way up
+    /// where the height check lives.
+    fn descend_in(&mut self) -> Result<(), String> {
+        self.depth += 1;
+        if self.depth > MAX_PARSE_DEPTH {
+            self.depth -= 1;
+            return Err("expression nested too deep".to_string());
+        }
+        Ok(())
+    }
+
+    fn descend_out(&mut self) {
+        self.depth -= 1;
+    }
+
+    /// Record that the expression just parsed is one taller than its tallest
+    /// child, and refuse if that reaches the cap.
+    ///
+    /// Guards the *tree*: this is what stops a flat `1+1+...` from building a
+    /// tree too tall to evaluate or even drop. `self.height` is left holding
+    /// the new height for the caller to read, so height threads up through the
+    /// whole expression by each node reporting its own.
+    fn grew(&mut self, tallest_child: usize) -> Result<(), String> {
+        let h = tallest_child + 1;
+        if h > MAX_PARSE_DEPTH {
+            return Err("expression nested too deep".to_string());
+        }
+        self.height = h;
+        Ok(())
+    }
+
     fn peek(&self) -> &Tok {
         self.toks.get(self.pos).unwrap_or(&Tok::Eof)
     }
@@ -304,6 +369,18 @@ impl Parser {
     }
 
     fn block(&mut self) -> Result<Vec<Stmt>, String> {
+        // The re-entry point of the `statement` -> `block` cycle: `if`,
+        // `while` and `fn` all require a braced body, so every level of
+        // nested statements passes through one `block`. Same counter as the
+        // expression cycle, so a program that is deep in both ways cannot
+        // spend the whole budget on one and overflow on the other.
+        self.descend_in()?;
+        let r = self.block_inner();
+        self.descend_out();
+        r
+    }
+
+    fn block_inner(&mut self) -> Result<Vec<Stmt>, String> {
         self.expect(&Tok::LBrace, "'{'")?;
         let mut out = Vec::new();
         while !self.at(&Tok::RBrace) {
@@ -363,15 +440,29 @@ impl Parser {
     }
 
     fn expression(&mut self) -> Result<Expr, String> {
-        self.assignment()
+        // The re-entry point of the `primary` -> `expression` cycle: every
+        // `(` and every call argument comes back through here once, so the
+        // parse-depth guard belongs here. `assignment` leaves `self.height`
+        // holding this expression's tree height on the way out.
+        self.descend_in()?;
+        let r = self.assignment();
+        self.descend_out();
+        r
     }
 
     fn assignment(&mut self) -> Result<Expr, String> {
         let lhs = self.log_or()?;
+        let lh = self.height;
         if self.at(&Tok::Assign) {
             self.bump();
-            // Right associative, so recurse into assignment rather than log_or.
-            let rhs = self.assignment()?;
+            // Right associative, so recurse into assignment. That recursion is
+            // a parser stack frame, so it takes the descent guard as well as
+            // the height check -- `a = a = ... = 1` overflows both ways.
+            self.descend_in()?;
+            let rhs = self.assignment();
+            self.descend_out();
+            let rhs = rhs?;
+            self.grew(lh.max(self.height))?;
             return match lhs {
                 Expr::Var(name) => Ok(Expr::Assign(name, Box::new(rhs))),
                 Expr::Field(target, field) => Ok(Expr::SetField(target, field, Box::new(rhs))),
@@ -383,46 +474,71 @@ impl Parser {
 
     fn log_or(&mut self) -> Result<Expr, String> {
         let mut lhs = self.log_and()?;
+        let mut lh = self.height;
         while self.eat(&Tok::OrOr) {
             let rhs = self.log_and()?;
+            lh = lh.max(self.height);
+            self.grew(lh)?;
+            lh = self.height;
             lhs = Expr::Bin(BinOp::LogOr, Box::new(lhs), Box::new(rhs));
         }
+        self.height = lh;
         Ok(lhs)
     }
 
     fn log_and(&mut self) -> Result<Expr, String> {
         let mut lhs = self.bit_or()?;
+        let mut lh = self.height;
         while self.eat(&Tok::AndAnd) {
             let rhs = self.bit_or()?;
+            lh = lh.max(self.height);
+            self.grew(lh)?;
+            lh = self.height;
             lhs = Expr::Bin(BinOp::LogAnd, Box::new(lhs), Box::new(rhs));
         }
+        self.height = lh;
         Ok(lhs)
     }
 
     fn bit_or(&mut self) -> Result<Expr, String> {
         let mut lhs = self.bit_xor()?;
+        let mut lh = self.height;
         while self.eat(&Tok::Pipe) {
             let rhs = self.bit_xor()?;
+            lh = lh.max(self.height);
+            self.grew(lh)?;
+            lh = self.height;
             lhs = Expr::Bin(BinOp::Or, Box::new(lhs), Box::new(rhs));
         }
+        self.height = lh;
         Ok(lhs)
     }
 
     fn bit_xor(&mut self) -> Result<Expr, String> {
         let mut lhs = self.bit_and()?;
+        let mut lh = self.height;
         while self.eat(&Tok::Caret) {
             let rhs = self.bit_and()?;
+            lh = lh.max(self.height);
+            self.grew(lh)?;
+            lh = self.height;
             lhs = Expr::Bin(BinOp::Xor, Box::new(lhs), Box::new(rhs));
         }
+        self.height = lh;
         Ok(lhs)
     }
 
     fn bit_and(&mut self) -> Result<Expr, String> {
         let mut lhs = self.equality()?;
+        let mut lh = self.height;
         while self.eat(&Tok::Amp) {
             let rhs = self.equality()?;
+            lh = lh.max(self.height);
+            self.grew(lh)?;
+            lh = self.height;
             lhs = Expr::Bin(BinOp::And, Box::new(lhs), Box::new(rhs));
         }
+        self.height = lh;
         Ok(lhs)
     }
 
@@ -444,6 +560,7 @@ impl Parser {
 
     fn comparison(&mut self) -> Result<Expr, String> {
         let mut lhs = self.shift()?;
+        let mut lh = self.height;
         loop {
             let op = if self.eat(&Tok::Lt) {
                 BinOp::Lt
@@ -457,13 +574,18 @@ impl Parser {
                 break;
             };
             let rhs = self.shift()?;
+            lh = lh.max(self.height);
+            self.grew(lh)?;
+            lh = self.height;
             lhs = Expr::Bin(op, Box::new(lhs), Box::new(rhs));
         }
+        self.height = lh;
         Ok(lhs)
     }
 
     fn shift(&mut self) -> Result<Expr, String> {
         let mut lhs = self.term()?;
+        let mut lh = self.height;
         loop {
             let op = if self.eat(&Tok::Shl) {
                 BinOp::Shl
@@ -473,13 +595,18 @@ impl Parser {
                 break;
             };
             let rhs = self.term()?;
+            lh = lh.max(self.height);
+            self.grew(lh)?;
+            lh = self.height;
             lhs = Expr::Bin(op, Box::new(lhs), Box::new(rhs));
         }
+        self.height = lh;
         Ok(lhs)
     }
 
     fn term(&mut self) -> Result<Expr, String> {
         let mut lhs = self.factor()?;
+        let mut lh = self.height;
         loop {
             let op = if self.eat(&Tok::Plus) {
                 BinOp::Add
@@ -489,13 +616,18 @@ impl Parser {
                 break;
             };
             let rhs = self.factor()?;
+            lh = lh.max(self.height);
+            self.grew(lh)?;
+            lh = self.height;
             lhs = Expr::Bin(op, Box::new(lhs), Box::new(rhs));
         }
+        self.height = lh;
         Ok(lhs)
     }
 
     fn factor(&mut self) -> Result<Expr, String> {
         let mut lhs = self.unary()?;
+        let mut lh = self.height;
         loop {
             let op = if self.eat(&Tok::Star) {
                 BinOp::Mul
@@ -507,20 +639,34 @@ impl Parser {
                 break;
             };
             let rhs = self.unary()?;
+            lh = lh.max(self.height);
+            self.grew(lh)?;
+            lh = self.height;
             lhs = Expr::Bin(op, Box::new(lhs), Box::new(rhs));
         }
+        self.height = lh;
         Ok(lhs)
     }
 
     fn unary(&mut self) -> Result<Expr, String> {
-        if self.eat(&Tok::Minus) {
-            return Ok(Expr::Unary(UnOp::Neg, Box::new(self.unary()?)));
-        }
-        if self.eat(&Tok::Not) {
-            return Ok(Expr::Unary(UnOp::Not, Box::new(self.unary()?)));
-        }
-        if self.eat(&Tok::Tilde) {
-            return Ok(Expr::Unary(UnOp::BitNot, Box::new(self.unary()?)));
+        let op = if self.eat(&Tok::Minus) {
+            Some(UnOp::Neg)
+        } else if self.eat(&Tok::Not) {
+            Some(UnOp::Not)
+        } else if self.eat(&Tok::Tilde) {
+            Some(UnOp::BitNot)
+        } else {
+            None
+        };
+        if let Some(op) = op {
+            // `- - - ... x` recurses the parser and builds a tall tree, so it
+            // takes both guards, the same as assignment.
+            self.descend_in()?;
+            let inner = self.unary();
+            self.descend_out();
+            let inner = inner?;
+            self.grew(self.height)?;
+            return Ok(Expr::Unary(op, Box::new(inner)));
         }
         self.postfix()
     }
@@ -537,6 +683,7 @@ impl Parser {
             match self.peek().clone() {
                 Tok::Ident(field) => {
                     self.bump();
+                    self.grew(self.height)?;
                     e = Expr::Field(Box::new(e), field);
                 }
                 _ => return Err("a field name after '.'".to_string()),
@@ -547,9 +694,18 @@ impl Parser {
 
     fn primary(&mut self) -> Result<Expr, String> {
         match self.bump() {
-            Tok::Int(v) => Ok(Expr::Int(v)),
-            Tok::Str(s) => Ok(Expr::Str(s)),
+            Tok::Int(v) => {
+                self.height = 1;
+                Ok(Expr::Int(v))
+            }
+            Tok::Str(s) => {
+                self.height = 1;
+                Ok(Expr::Str(s))
+            }
             Tok::LParen => {
+                // A paren is not a node, so the height is whatever was inside
+                // it and `expression` has already set it. The parse-depth
+                // guard for the `(` lives in `expression`.
                 let e = self.expression()?;
                 self.expect(&Tok::RParen, "')'")?;
                 Ok(e)
@@ -557,17 +713,23 @@ impl Parser {
             Tok::Ident(name) => {
                 if self.eat(&Tok::LParen) {
                     let mut args = Vec::new();
+                    let mut tallest = 0;
                     if !self.at(&Tok::RParen) {
                         loop {
                             args.push(self.expression()?);
+                            tallest = tallest.max(self.height);
                             if !self.eat(&Tok::Comma) {
                                 break;
                             }
                         }
                     }
                     self.expect(&Tok::RParen, "')' after arguments")?;
+                    // A call is one taller than its tallest argument, so a
+                    // pile of `f(f(f(...)))` is bounded like any other nesting.
+                    self.grew(tallest)?;
                     Ok(Expr::Call(name, args))
                 } else {
+                    self.height = 1;
                     Ok(Expr::Var(name))
                 }
             }

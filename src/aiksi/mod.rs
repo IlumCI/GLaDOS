@@ -694,6 +694,42 @@ pub fn selftest() -> bool {
     if run("fn boom(n) { return boom(n + 1) } boom(0)").is_some() {
         return false;
     }
+    // The same hazard at parse time, which the call guard above does not
+    // cover: the parser is recursive-descent, so nesting is stack depth, and
+    // a deeply nested expression or block overflows before a single step
+    // runs. Measured on this kernel: fine at 200 nested parens, a silent
+    // triple fault before 300. These are past the cap and must come back as
+    // an error rather than as a reboot -- built into strings here so the
+    // source of this file is not itself a wall of brackets.
+    //
+    // Every mechanism that can build depth is here, because they overflow by
+    // two different routes and a fix for one is not a fix for the other. Nested
+    // parens and nested blocks overflow the *parser*; a flat operator chain, a
+    // unary run and an assignment run build a tall *tree* that overflows later,
+    // in eval or in drop. All must come back as an error, and this selftest
+    // runs at boot -- so if any of them still faulted, the machine would not
+    // reach a prompt to report it.
+    {
+        let n = 400;
+        let cases = [
+            alloc::format!("{}1{}", "(".repeat(n), ")".repeat(n)),   // parser
+            alloc::format!("fn f() {{ {}1 {} }}", "if (1) { ".repeat(n), "}".repeat(n)),
+            alloc::format!("1{}", "+1".repeat(n)),                    // flat tree
+            alloc::format!("{}1", "-".repeat(n)),                    // unary run
+            alloc::format!("{}1", "a=".repeat(n)),                   // assignment run
+        ];
+        for c in cases {
+            if run(&c).is_some() {
+                return false;
+            }
+        }
+        // And the cap does not reject a program anybody would actually write.
+        // Ten deep, and a chain of ten, are far past what real code has and
+        // well under the bound.
+        if !int("((((((((((7))))))))))", 7) || !int("1+1+1+1+1+1+1+1+1+1", 10) {
+            return false;
+        }
+    }
     // Malformed input is an error, not a panic. This is also the gate that
     // makes generated programs safe to run at all.
     run("fn (").is_none() && run("return return").is_none()
