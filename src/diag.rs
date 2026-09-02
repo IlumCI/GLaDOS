@@ -199,48 +199,58 @@ pub const SUITES: &[Suite] = &[
         about: "the held-key map: a make sets, a break clears",
         run: crate::dev::kbd::selftest,
     },
+    Suite {
+        name: "doom",
+        about: "the ported picture decoder, including the tall-patch delta rule",
+        run: doom_selftest,
+    },
 ];
+
+/// The ported picture decoder.
+///
+/// The body is here rather than beside its subject because **nothing under
+/// `src/doom/` may name the printing macro** -- that is the seam rule the port
+/// exists to establish, and `tools/portcheck.py` enforces it. So the checks
+/// answer names and verdicts (`doom::pic::checks`) and the talking happens on
+/// this side of the line, which is the same bargain the WAD reader's `Error`
+/// type makes.
+fn doom_selftest() -> bool {
+    use crate::kprintln;
+    let mut ok = true;
+    for (what, good) in crate::doom::pic::checks() {
+        if !good {
+            kprintln!("    FAIL: {}", what);
+            ok = false;
+        }
+    }
+    ok
+}
+
+/// How many suites there are, and therefore how many verdict slots.
+///
+/// One number rather than two, because the assertion below used to compare
+/// `SUITES.len()` against a *literal* while the table it was protecting was a
+/// separate literal beside it. Adding the thirty-third suite therefore passed
+/// the guard and panicked at the store -- "index out of bounds: the len is 32
+/// but the index is 32" -- which is the exact failure the guard's own comment
+/// says it exists to prevent. A `static` cannot be read in a const context, so
+/// the array cannot be measured directly; naming its length is the next best
+/// thing and it is now the only place the number appears.
+const SLOTS: usize = 33;
 
 /// One slot per suite. Indexed by position in `SUITES`, which is a constant,
 /// so the table cannot get out of step with the list.
-static RESULTS: [AtomicU8; 32] = [
-    AtomicU8::new(0),
-    AtomicU8::new(0),
-    AtomicU8::new(0),
-    AtomicU8::new(0),
-    AtomicU8::new(0),
-    AtomicU8::new(0),
-    AtomicU8::new(0),
-    AtomicU8::new(0),
-    AtomicU8::new(0),
-    AtomicU8::new(0),
-    AtomicU8::new(0),
-    AtomicU8::new(0),
-    AtomicU8::new(0),
-    AtomicU8::new(0),
-    AtomicU8::new(0),
-    AtomicU8::new(0),
-    AtomicU8::new(0),
-    AtomicU8::new(0),
-    AtomicU8::new(0),
-    AtomicU8::new(0),
-    AtomicU8::new(0),
-    AtomicU8::new(0),
-    AtomicU8::new(0),
-    AtomicU8::new(0),
-    AtomicU8::new(0),
-    AtomicU8::new(0),
-    AtomicU8::new(0),
-    AtomicU8::new(0),
-    AtomicU8::new(0),
-    AtomicU8::new(0),
-    AtomicU8::new(0),
-    AtomicU8::new(0),
-];
+static RESULTS: [AtomicU8; SLOTS] = {
+    // `AtomicU8` is not `Copy`, so an array repeat needs a `const` item rather
+    // than a value -- each element is a fresh evaluation of the constant.
+    #[allow(clippy::declare_interior_mutable_const)]
+    const UNRUN: AtomicU8 = AtomicU8::new(0);
+    [UNRUN; SLOTS]
+};
 
 /// Checked here rather than trusted: a suite added to `SUITES` without a slot
 /// would silently never record a verdict.
-const _: () = assert!(SUITES.len() == 32);
+const _: () = assert!(SUITES.len() == SLOTS);
 
 pub fn verdict(i: usize) -> Verdict {
     match RESULTS.get(i).map(|r| r.load(Ordering::Relaxed)) {

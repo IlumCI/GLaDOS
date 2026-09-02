@@ -32,10 +32,20 @@
 //!
 //! ### Where it is going
 //!
-//! `wad` is the file format. `level`, `pic-data` and the software renderer
-//! follow, in that order, each testable before the next exists. There is no
-//! sound: this machine has no audio driver of any kind, and the one reference
-//! to the PC speaker deliberately keeps it disconnected.
+//! `wad` is the file format, `level` the map, `pic` the art and `render` the
+//! picture, in that order and each testable before the next existed. That
+//! order was the whole method: walls were drawn shaded by distance alone
+//! first, so a wrong picture was a geometry bug and could not be a texture
+//! bug, and only then did the pictures arrive.
+//!
+//! What is left, in the order it is worth doing: flats (floors and ceilings,
+//! which need visplanes rather than a per-column window), sprites, and the
+//! masked mid-wall -- a grate or a railing, the one surface drawn *after* what
+//! is behind it. Then DOOM in a window rather than owning the screen, which
+//! needs four things the desktop does not have and is deliberately last.
+//!
+//! There is no sound: this machine has no audio driver of any kind, and the
+//! one reference to the PC speaker deliberately keeps it disconnected.
 //!
 //! The WAD itself is never in this repository. `DOOM1.WAD` belongs to id;
 //! [FreeDoom](https://freedoom.github.io/) is the freely licensed one to test
@@ -45,6 +55,7 @@
 
 pub mod draw;
 pub mod math;
+pub mod pic;
 pub mod play;
 pub mod render;
 pub mod level;

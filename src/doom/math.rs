@@ -80,3 +80,25 @@ pub fn bam_to_rad(bam: u16) -> f32 {
 pub fn deg_to_rad(deg: i16) -> f32 {
     deg as f32 * (PI / 180.0)
 }
+
+/// The greatest integer at or below `x`.
+///
+/// Integer rather than `f32`, and hand-rolled rather than `f32::floor`,
+/// because both alternatives are unavailable here for the same reason: this
+/// is `no_std` with no `libm`, so `floor` and the `%` operator on floats are
+/// calls to functions that do not exist and the failure is at link time. A
+/// texture coordinate wraps, and wrapping means a negative one has to round
+/// the same direction as a positive one -- `-0.5 as i32` is 0, which puts the
+/// leftmost half-pixel of every tile on the wrong side of the seam.
+///
+/// The cast saturates rather than wrapping (Rust 1.45 onwards), so a
+/// coordinate that has gone wild gives a clamped column instead of undefined
+/// behaviour.
+pub fn floor_i(x: f32) -> i32 {
+    let t = x as i32;
+    if x < 0.0 && (t as f32) != x {
+        t - 1
+    } else {
+        t
+    }
+}

@@ -32,6 +32,7 @@
 
 use super::level::{Level, NONE};
 use super::math;
+use super::pic::Art;
 use super::render::{Renderer, View, EYE_HEIGHT};
 use crate::port::{keys, Surface};
 
@@ -202,6 +203,10 @@ pub struct Stats {
     pub x: f32,
     pub y: f32,
     pub deg: f32,
+    /// Whether the shading table came out of the WAD's own COLORMAP. Carried
+    /// rather than printed, because nothing in this tree may reach the
+    /// printing macro -- the shell does the talking.
+    pub lit_from_wad: bool,
 }
 
 /// Walk around the level until Escape, or until `limit_ms` has passed.
@@ -213,14 +218,14 @@ pub struct Stats {
 pub fn run(
     surf: &mut Surface,
     lv: &Level,
-    pal: &[u8],
+    art: &Art<'_>,
     limit_ms: u64,
     script: &[u8],
 ) -> Option<Stats> {
     let mut p = Player::at(lv)?;
-    surf.set_palette_rgb(pal);
-    let sky = super::draw::nearest(pal, 0x10, 0x18, 0x60);
-    let mut r = Renderer::new(surf, pal);
+    surf.set_palette_rgb(art.playpal);
+    let sky = super::draw::nearest(art.playpal, 0x10, 0x18, 0x60);
+    let mut r = Renderer::new(surf, art);
 
     // Anything held when the game started belongs to whoever was typing, not
     // to the player.
@@ -236,7 +241,8 @@ pub fn run(
 
     let start = crate::port::now_us();
     let mut next_tic = start;
-    let mut stats = Stats { frames: 0, tics: 0, ms: 0, x: p.x, y: p.y, deg: 0.0 };
+    let mut stats =
+        Stats { frames: 0, tics: 0, ms: 0, x: p.x, y: p.y, deg: 0.0, lit_from_wad: r.lit_from_wad };
 
     loop {
         let now = crate::port::now_us();
@@ -261,7 +267,7 @@ pub fn run(
             next_tic = now + TIC_US;
         }
 
-        r.frame(surf, lv, p.view(), sky);
+        r.frame(surf, lv, art, p.view(), sky);
         surf.present();
         stats.frames += 1;
 

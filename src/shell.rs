@@ -4362,6 +4362,30 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 "  PLAYPAL: {} palette(s) of 256",
                 crate::doom::draw::palette_count(pal)
             );
+            // The picture directory, read once for whichever subcommand wants
+            // it -- and only for those. Loading it decodes every patch in the
+            // WAD and composes every texture, which for a real IWAD is a few
+            // hundred pictures and a couple of megabytes; `doom pal` and `doom
+            // map` want none of it and used to be instant. A WAD with no
+            // TEXTURE1 is a legal WAD -- a map-only PWAD has none -- so its
+            // absence is reported rather than treated as an error.
+            let wants_pics = matches!(what, "tex" | "view" | "play");
+            let pics = if wants_pics { crate::doom::pic::Pics::load(&w) } else { None };
+            let art = crate::doom::pic::Art {
+                playpal: pal,
+                colormap: w.lump("COLORMAP"),
+                pics: pics.as_ref(),
+            };
+            if wants_pics {
+                match &pics {
+                    Some(p) => kprintln!(
+                        "  TEXTURE1: {} texture(s) over {} patch name(s)",
+                        p.textures.len(),
+                        p.patch_names.len()
+                    ),
+                    None => kprintln!("  no TEXTURE1/PNAMES, so walls draw flat"),
+                }
+            }
 
             match what {
                 "pal" | "" => {
@@ -4375,6 +4399,66 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         wait_or(hold);
                     });
                     kprintln!("  drew 256 colours");
+                }
+                // One texture, composed and blown up. This is where a
+                // decoding mistake is caught, because on a wall every one of
+                // them reads as "the art looks odd" and here each reads as a
+                // different obviously wrong picture.
+                "tex" => {
+                    let Some(p) = pics.as_ref() else {
+                        kprintln!("  this WAD has no texture directory");
+                        return;
+                    };
+                    if p.textures.is_empty() {
+                        kprintln!("  its texture directory is empty");
+                        return;
+                    }
+                    let named = args.first().map(|t| t.parse::<u64>().is_err()).unwrap_or(false);
+                    let idx = if named {
+                        match p.index_of(args[0]) {
+                            Some(i) => i,
+                            None => {
+                                console::set_color(YELLOW);
+                                kprintln!("  no texture called '{}'", args[0]);
+                                console::set_color(LTGRAY);
+                                let mut shown = 0;
+                                for d in p.textures.iter() {
+                                    kprintln!("    {} {}x{}", d.name, d.width, d.height);
+                                    shown += 1;
+                                    if shown == 12 {
+                                        kprintln!("    ... and {} more", p.textures.len() - shown);
+                                        break;
+                                    }
+                                }
+                                return;
+                            }
+                        }
+                    } else {
+                        0
+                    };
+                    let hold = num(if named { 1 } else { 0 }).unwrap_or(0);
+                    let Some(d) = p.def(idx) else { return };
+                    kprintln!(
+                        "  {} -- {}x{} from {} patch(es)",
+                        d.name,
+                        d.width,
+                        d.height,
+                        d.patches.len()
+                    );
+                    let mut zoom = 0usize;
+                    crate::port::with_screen(|| {
+                        let Some(mut surf) = crate::port::Surface::new(320, 200) else {
+                            return;
+                        };
+                        zoom = crate::doom::draw::texture(&mut surf, p, idx, pal).unwrap_or(0);
+                        surf.present();
+                        wait_or(hold);
+                    });
+                    if zoom == 0 {
+                        kprintln!("  it has no pixels");
+                    } else {
+                        kprintln!("  drew it at {}x", zoom);
+                    }
                 }
                 "map" => {
                     let named = args.first().map(|t| t.parse::<u64>().is_err()).unwrap_or(false);
@@ -4462,18 +4546,23 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         view.z as i32,
                         deg as i32
                     );
+                    let mut lit = false;
                     crate::port::with_screen(|| {
                         let Some(mut surf) = crate::port::Surface::new(320, 200) else {
                             return;
                         };
                         surf.set_palette_rgb(pal);
                         let sky = crate::doom::draw::nearest(pal, 0x10, 0x18, 0x60);
-                        let mut r = crate::doom::render::Renderer::new(&surf, pal);
-                        r.frame(&mut surf, &lv, view, sky);
+                        let mut r = crate::doom::render::Renderer::new(&surf, &art);
+                        lit = r.lit_from_wad;
+                        r.frame(&mut surf, &lv, &art, view, sky);
                         surf.present();
                         wait_or(hold);
                     });
-                    kprintln!("  drew a frame");
+                    kprintln!(
+                        "  drew a frame, lit by {}",
+                        if lit { "the WAD's COLORMAP" } else { "a ramp built from PLAYPAL" }
+                    );
                 }
                 // Standing in it. `doom play [ms]` -- bounded because a
                 // program that runs until a keypress cannot be driven over a
@@ -4522,7 +4611,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         let Some(mut surf) = crate::port::Surface::new(320, 200) else {
                             return;
                         };
-                        out = crate::doom::play::run(&mut surf, &lv, pal, hold, &script);
+                        out = crate::doom::play::run(&mut surf, &lv, &art, hold, &script);
                     });
                     match out {
                         None => kprintln!("  no player start, so there is nowhere to stand"),
@@ -4536,10 +4625,11 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                                 fps
                             );
                             kprintln!(
-                                "  ended at {},{} facing {} deg",
+                                "  ended at {},{} facing {} deg, lit by {}",
                                 st.x as i32,
                                 st.y as i32,
-                                st.deg as i32
+                                st.deg as i32,
+                                if st.lit_from_wad { "COLORMAP" } else { "PLAYPAL" }
                             );
                             // The world runs at 35 Hz whatever the renderer
                             // manages, so this is the number that says whether
@@ -4553,7 +4643,10 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         }
                     }
                 }
-                other => kprintln!("  no such action: {}  (try: pal, map, view [deg], play)", other),
+                other => kprintln!(
+                    "  no such action: {}  (try: pal, tex [name], map, view [deg], play)",
+                    other
+                ),
             }
         }
         // One map, decoded. `map` alone takes the first marker it can find;

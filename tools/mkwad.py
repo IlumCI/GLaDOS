@@ -39,15 +39,20 @@ renderer bugs later:**
     with linedef 0xFFFF, so each subsector is a closed polygon. These
     subsectors are open along x=0. Wall rendering does not care; anything that
     fills flats by walking a subsector's edges will.
-  * **No textures.** The names in the sidedefs and sector are the usual ones
-    (STARTAN3, FLOOR4_8, CEIL3_5) but there are no TEXTURE1, PNAMES or patch
-    lumps in this WAD, so nothing can look them up. A renderer needs a real
-    IWAD, or those lumps added here.
+  * **No flats.** The sector names FLOOR4_8 and CEIL3_5 and there is no
+    F_START/F_END namespace here, so floors and ceilings have nothing to look
+    up. Walls do: `STARTAN3` is a real composed texture in this file.
   * **REJECT is all zero**, meaning no sector pair is rejected. That is the
     permissive answer and is always safe; it just does no work.
 
 The palette is real: 256 entries as a legible sixteen-by-sixteen ramp, so
-`PLAYPAL` can be pushed through the framebuffer and checked by eye.
+`PLAYPAL` can be pushed through the framebuffer and checked by eye. So is the
+COLORMAP, and so are the wall textures -- the *art* in them is generated,
+because id's is not ours to ship, but the *encoding* is the real one: columns
+of posts with real transparency, a PNAMES list and a TEXTURE1 directory. The
+patterns are chosen so that a decoding mistake reads as an obviously wrong
+picture rather than as slightly odd art; `make_patch` says which mistake each
+one catches.
 """
 
 import argparse
@@ -104,14 +109,240 @@ def playpal():
 
 
 def colormap():
-    """34 light levels of 256 bytes. Identity, which is wrong and harmless.
+    """34 light levels of 256 bytes, and it darkens.
 
-    A real COLORMAP darkens; this one maps every index to itself at every
-    level, so a renderer using it draws at full brightness everywhere. That is
-    a visibly flat picture rather than a broken one, and it is obvious enough
-    that nobody will mistake it for a lighting bug in their own code.
+    This shipped as an identity table for a while, on the reasoning that a
+    flat picture is obviously flat. It is not: a renderer that used it drew
+    every wall at full brightness at every distance, which reads exactly like
+    a lighting bug in the renderer -- and a test file whose failure mode is
+    indistinguishable from the bug it is meant to catch is worse than no test
+    file. So it darkens for real now, and the kernel prefers a WAD's own table
+    only when it can see that it does.
+
+    A COLORMAP is *the* answer to shading indexed art, because a palette index
+    is not a colour and cannot be dimmed by arithmetic. Map 0 is full
+    brightness, map 31 is nearly black, map 32 is the invulnerability inverse
+    and map 33 is unused and all zero, which is the layout every DOOM engine
+    indexes by number.
     """
-    return bytes(bytes(range(256)) * 34)
+    pal = playpal()
+    out = bytearray()
+    for level in range(32):
+        f = 1.0 - level / 31.0
+        for i in range(256):
+            j = i * 3
+            out.append(
+                _nearest(pal, int(pal[j] * f), int(pal[j + 1] * f), int(pal[j + 2] * f))
+            )
+    # 32: the inverse ramp the invulnerability sphere draws through, keyed on
+    # luminance, since this palette has no grey ramp to index directly.
+    for i in range(256):
+        j = i * 3
+        g = 255 - (pal[j] * 30 + pal[j + 1] * 59 + pal[j + 2] * 11) // 100
+        out.append(_nearest(pal, g, g, g))
+    # 33: all black. Unused by anything, and present because a reader indexing
+    # by map number expects 34 of them.
+    out += bytes(256)
+    return bytes(out)
+
+
+def _nearest(pal, r, g, b):
+    """The palette index closest to a colour, by squared distance in RGB.
+
+    The same search the kernel's `doom::draw::nearest` runs, deliberately: a
+    generated COLORMAP built by a different rule than the fallback the kernel
+    builds would make the two paths disagree about the same WAD, and telling
+    which one was in force is exactly what this file exists to make easy.
+    """
+    best, best_d = 0, 1 << 30
+    for i in range(256):
+        j = i * 3
+        dr, dg, db = pal[j] - r, pal[j + 1] - g, pal[j + 2] - b
+        d = dr * dr + dg * dg + db * db
+        if d < best_d:
+            best, best_d = i, d
+            if d == 0:
+                break
+    return best
+
+
+# --------------------------------------------------------------------------
+# Patches and textures
+# --------------------------------------------------------------------------
+#
+# The *art* here is generated and the *format* is not. There is no way to ship
+# id's patches, so the pictures are drawn by this file -- but they are drawn
+# into the real column-and-post encoding, with real transparency, so the
+# kernel's decoder is exercised by exactly the structure a commercial WAD has.
+#
+# The patterns are chosen to make a decoding mistake visible rather than
+# merely wrong:
+#
+#   * a bright marker in the **top-left 8x8** -- upside-down puts it at the
+#     bottom, mirrored puts it on the right, and both are instant to see;
+#   * horizontal mortar lines and vertical joins, so a column mapped to the
+#     wrong x smears rather than blending in;
+#   * a vertical gradient, so a v coordinate that runs backwards is obvious
+#     even where the bricks happen to line up;
+#   * a **transparent hole**, because a patch with no gaps never exercises the
+#     post loop at all -- a decoder that ignored posts entirely and copied
+#     `width * height` bytes would pass on a solid patch.
+
+PATCH_W, PATCH_H = 64, 128
+
+# Palette indices into `playpal` above: hue * 16 + level.
+def _idx(hue, lev):
+    return hue * 16 + max(0, min(15, lev))
+
+
+TRANSPARENT = None
+
+
+def brick_pixel(x, y):
+    """One pixel of the wall patch, or None where it is see-through."""
+    # A hole, so the post encoding has something to encode. Off-centre, so it
+    # also shows a mirrored patch.
+    if 40 <= x < 56 and 16 <= y < 40:
+        return TRANSPARENT
+    # The corner marker: bright green, top-left.
+    if x < 8 and y < 8:
+        return _idx(2, 15)
+    # Mortar: a course every 16 rows, and a vertical join every 32 columns
+    # offset on alternate courses -- which is what makes a wrongly ordered
+    # column obvious rather than merely different.
+    course = y // 16
+    if y % 16 < 2:
+        return _idx(0, 6)
+    if (x + (0 if course % 2 == 0 else 16)) % 32 < 2:
+        return _idx(0, 6)
+    # The brick face, darkening down the patch.
+    return _idx(7, 14 - (y * 10 // PATCH_H))
+
+
+def stripe_pixel(x, y):
+    """A second patch, so composition has two things to compose."""
+    if x % 16 < 8:
+        return _idx(3, 4 + (y * 10 // PATCH_H))
+    return _idx(5, 4 + (y * 10 // PATCH_H))
+
+
+def make_patch(w, h, fn, left=0, top=0):
+    """Encode a picture in DOOM's column-and-post format.
+
+    A column is a series of posts, each `topdelta, length, pad, pixels..., pad`
+    and the whole terminated by a topdelta of 255. The two pad bytes are not
+    padding in any useful sense -- the renderer reads one pixel before and
+    after each post for its own smoothing -- but they are part of the format
+    and a reader that omits them is off by one from the first post onward.
+    """
+    columns = []
+    for x in range(w):
+        col = bytearray()
+        y = 0
+        while y < h:
+            # Skip transparent runs.
+            while y < h and fn(x, y) is TRANSPARENT:
+                y += 1
+            if y >= h:
+                break
+            run_start = y
+            run = bytearray()
+            while y < h and fn(x, y) is not TRANSPARENT and len(run) < 254:
+                run.append(fn(x, y))
+                y += 1
+            col.append(run_start)          # topdelta
+            col.append(len(run))           # length
+            col.append(run[0])             # leading pad
+            col += run
+            col.append(run[-1])            # trailing pad
+        col.append(0xFF)                   # end of column
+        columns.append(bytes(col))
+
+    header = struct.pack("<hhhh", w, h, left, top)
+    table_len = 4 * w
+    offsets = []
+    cursor = len(header) + table_len
+    for c in columns:
+        offsets.append(cursor)
+        cursor += len(c)
+    out = bytearray(header)
+    for o in offsets:
+        out += struct.pack("<i", o)
+    for c in columns:
+        out += c
+    return bytes(out)
+
+
+def make_pnames(names):
+    out = struct.pack("<i", len(names))
+    for n in names:
+        out += name8(n)
+    return bytes(out)
+
+
+def make_texture1(textures, pnames):
+    """The texture directory.
+
+    `maptexture_t` carries two fields no engine has read since 1993 --
+    `masked` and `columndirectory` -- and they are written as zero here
+    because a reader that skips them by the wrong width lands mid-field on the
+    patch count and produces a texture with tens of thousands of patches.
+    """
+    idx = {n: i for i, n in enumerate(pnames)}
+    bodies = []
+    for name, w, h, patches in textures:
+        b = bytearray(name8(name))
+        b += struct.pack("<i", 0)              # masked, unused
+        b += struct.pack("<hh", w, h)
+        b += struct.pack("<i", 0)              # columndirectory, unused
+        b += struct.pack("<h", len(patches))
+        for ox, oy, pname in patches:
+            b += struct.pack("<hhhhh", ox, oy, idx[pname], 1, 0)
+        bodies.append(bytes(b))
+
+    head = struct.pack("<i", len(bodies))
+    table = 4 * len(bodies)
+    offsets = []
+    cursor = len(head) + table
+    for b in bodies:
+        offsets.append(cursor)
+        cursor += len(b)
+    out = bytearray(head)
+    for o in offsets:
+        out += struct.pack("<i", o)
+    for b in bodies:
+        out += b
+    return bytes(out)
+
+
+PATCHES = [
+    ("WALL01", lambda: make_patch(PATCH_W, PATCH_H, brick_pixel)),
+    ("WALL02", lambda: make_patch(PATCH_W, PATCH_H, stripe_pixel)),
+]
+
+# `STARTAN3` is the name the map's sidedefs already carry, so the walls
+# resolve without touching the map. `BIGWALL` is two patches side by side,
+# which is the case a single-patch texture never tests: an origin that is
+# ignored draws both at x=0 and the right half stays empty.
+TEXTURES = [
+    ("STARTAN3", PATCH_W, PATCH_H, [(0, 0, "WALL01")]),
+    ("BIGWALL", PATCH_W * 2, PATCH_H, [(0, 0, "WALL01"), (PATCH_W, 0, "WALL02")]),
+]
+
+
+def texture_lumps():
+    names = [n for n, _ in PATCHES]
+    out = [
+        ("PNAMES", make_pnames(names)),
+        ("TEXTURE1", make_texture1(TEXTURES, names)),
+        # The patch namespace. Not consulted by a name lookup, but a WAD
+        # without the markers is one a real editor will not open.
+        ("P_START", b""),
+    ]
+    for n, build in PATCHES:
+        out.append((n, build()))
+    out.append(("P_END", b""))
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -315,6 +546,7 @@ def map_lumps():
 def all_lumps():
     return (
         [("PLAYPAL", playpal()), ("COLORMAP", colormap())]
+        + texture_lumps()
         + map_lumps()
         # Two with one name, to exercise the rule that a lookup searches from
         # the end and the later one wins.
@@ -491,6 +723,50 @@ def check_map(lumps):
             raise ValueError(
                 f"linedef {i} is wound the wrong way: its right side faces out"
             )
+
+    # The COLORMAP has to actually darken, which is the property the kernel
+    # tests before it will use one -- so a regression here would silently send
+    # every render down the fallback path instead.
+    if "COLORMAP" in by:
+        cm = by["COLORMAP"]
+        if len(cm) != 34 * 256:
+            raise ValueError(f"COLORMAP is {len(cm)} bytes, not 34 maps of 256")
+        if cm[:256] == cm[31 * 256:32 * 256]:
+            raise ValueError("COLORMAP's brightest and darkest maps are identical")
+        if any(b != 0 for b in cm[33 * 256:]):
+            raise ValueError("COLORMAP's last map should be all black")
+
+    # The texture directory, checked the same way the map is: every reference
+    # resolved, every offset inside the lump.
+    if "TEXTURE1" in by and "PNAMES" in by:
+        pn = by["PNAMES"]
+        (npatch,) = struct.unpack("<i", pn[:4])
+        if 4 + npatch * 8 > len(pn):
+            raise ValueError(f"PNAMES claims {npatch} patches, past the lump")
+        patch_names = [
+            pn[4 + i * 8:12 + i * 8].rstrip(b"\x00").decode("ascii", "replace")
+            for i in range(npatch)
+        ]
+        for n in patch_names:
+            if not any(ln == n for ln, _ in lumps):
+                raise ValueError(f"PNAMES names {n}, which is not in the WAD")
+
+        t = by["TEXTURE1"]
+        (ntex,) = struct.unpack("<i", t[:4])
+        for i in range(ntex):
+            (off,) = struct.unpack("<i", t[4 + i * 4:8 + i * 4])
+            if off + 22 > len(t):
+                raise ValueError(f"texture {i} at {off} runs past TEXTURE1")
+            tname = t[off:off + 8].rstrip(b"\x00").decode("ascii", "replace")
+            tw, th = struct.unpack("<hh", t[off + 12:off + 16])
+            (np_,) = struct.unpack("<h", t[off + 20:off + 22])
+            if tw <= 0 or th <= 0:
+                raise ValueError(f"texture {tname} is {tw}x{th}")
+            for j in range(np_):
+                e = off + 22 + j * 10
+                ox, oy, pi, _sd, _cm = struct.unpack("<hhhhh", t[e:e + 10])
+                if not 0 <= pi < npatch:
+                    raise ValueError(f"texture {tname} names patch {pi} of {npatch}")
 
     (px, py, ang, kind, _flags) = struct.unpack("<hhhhh", by["THINGS"][:10])
     if kind != 1:

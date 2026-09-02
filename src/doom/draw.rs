@@ -190,3 +190,54 @@ pub fn overhead(surf: &mut Surface, lv: &Level, playpal: &[u8]) {
         }
     }
 }
+
+/// One composed texture, as large as it will go and centred.
+///
+/// The proof-by-eye for the picture decoder, in the same spirit as `palette`
+/// is for the blit path. A composed texture is the end of a long chain --
+/// PNAMES, the TEXTURE1 directory, a patch's column offsets, the posts inside
+/// a column and the tall-patch delta rule -- and every link in it fails as a
+/// *plausible* picture rather than as an error. Drawing one at a size a person
+/// can look at is the only check that settles them: the generated test WAD
+/// puts a bright marker in a patch's top-left corner, offsets its vertical
+/// joins course by course and cuts a hole in it, so a flip, a transposition
+/// and a decoder that ignores posts each read as a different wrong picture.
+///
+/// Answers the zoom it used, or `None` if there is no such texture.
+pub fn texture(
+    surf: &mut Surface,
+    pics: &super::pic::Pics,
+    tex: usize,
+    playpal: &[u8],
+) -> Option<usize> {
+    let def = pics.def(tex)?;
+    let (tw, th) = (def.width, def.height);
+    if tw == 0 || th == 0 {
+        return None;
+    }
+    surf.set_palette_rgb(playpal);
+    // A background that is neither the transparent index nor anything a
+    // pattern uses, so a texture's own edges are visible and a hole in it is
+    // told apart from the surround.
+    let back = nearest(playpal, 0x30, 0x00, 0x30);
+    surf.clear(back);
+
+    let (w, h) = (surf.width(), surf.height());
+    let zoom = (w / tw).min(h / th).max(1);
+    let (dw, dh) = (tw * zoom, th * zoom);
+    let (ox, oy) = ((w.saturating_sub(dw)) / 2, (h.saturating_sub(dh)) / 2);
+
+    for sx in 0..dw.min(w) {
+        let Some(col) = pics.column(tex, (sx / zoom) as i32) else { continue };
+        for sy in 0..dh.min(h) {
+            let ty = sy / zoom;
+            let Some(v) = col.get(ty) else { continue };
+            let (px_, py_) = (ox + sx, oy + sy);
+            if px_ < w && py_ < h {
+                let i = py_ * w + px_;
+                surf.pixels()[i] = *v;
+            }
+        }
+    }
+    Some(zoom)
+}

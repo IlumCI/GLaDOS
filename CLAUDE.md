@@ -725,6 +725,46 @@ port is to find out where the boundary is. A port that reaches into `gfx`,
 `kbd`, `sysbox` and `time` wherever it needs them is not a port, it is a
 merge, and the second one starts from nothing.
 
+**The pictures are ported, not redrawn.** `src/doom/pic.rs` is room4doom's
+patch and TEXTURE1/PNAMES decoder, and one line of it is the reason it was
+brought over rather than written from the format description:
+
+```rust
+if y <= top { top += y } else { top = y }
+```
+
+A post's `topdelta` is normally the absolute row it starts at. But a patch
+taller than 254 cannot say row 300 in a byte, so the convention -- DeePsea's,
+and universal since -- is that a delta which does **not rise** above the
+previous one is relative to it. Every published description of the format
+predates that and says the field is simply the row. Writing this from the
+specification gives a decoder correct on every patch in DOOM and wrong on half
+the patches in anything made after 1997, which is the worst kind of wrong: it
+works until it does not, on somebody else's data. `diag doom` asserts exactly
+that case, both directions.
+
+**A texture pixel is an index, not a colour**, so it cannot be darkened by
+arithmetic -- an index scaled by 0.7 is an unrelated colour. The only way to
+shade indexed art is to remap it, and the table that says how is COLORMAP.
+`Art::lighting_colormap` prefers the WAD's own, and checks that it *lights*
+before using it: an identity table is a legal lump, and a renderer trusting one
+draws every wall at full brightness at every distance, which reads exactly like
+a lighting bug in the renderer. `tools/mkwad.py` shipped an identity table for
+a while on the reasoning that a flat picture is obviously flat; it was not, and
+it emits a real one now. Where there is no usable table, one is built by asking
+the palette for the nearest match to each colour dimmed.
+
+The generated test WAD carries real column-and-post patches with real
+transparency. The *art* in them is generated -- id's is not ours to ship -- but
+the patterns are chosen so a decoding mistake reads as an obviously wrong
+picture rather than as slightly odd art: a bright marker in the top-left 8x8
+(a flip moves it), mortar courses with joins offset course by course (a
+transposed column smears), a vertical gradient (a reversed `v` is visible even
+where the bricks line up), and a hole, because a solid patch never exercises
+the post loop at all -- a decoder that ignored posts and copied `width *
+height` bytes would pass on one. `doom tex [name]` composes one and blows it up
+to look at, which is the only check that settles a picture decoder.
+
 `Surface` applies the palette in software, because the framebuffer is 32bpp
 only and there is no mode-setting -- the resolution and format are whatever
 UEFI handed over. It is cheap anyway: the palette is pre-encoded once into the
@@ -741,7 +781,7 @@ There is no `cargo test`. This is a `no_std` UEFI binary with no host test
 runner, so **verification is the boot selftests plus driving QEMU.**
 
 At boot the system runs **twenty-six selftest sections**, and `diag` offers
-**twenty-nine named suites** on demand, most of them the same checks (the `aiksi` section covers the capability gate by name and never by
+**thirty-three named suites** on demand, most of them the same checks (the `aiksi` section covers the capability gate by name and never by
 calling -- half that table pokes memory, drives I/O ports or paints over the
 screen, and a suite that called every row to prove it exists would be
 scribbling on the machine to do it), printing `ok` or `FAIL` per line: heap, timer, clock, the namespace's
@@ -822,8 +862,18 @@ attention path is wired correctly writes real sentences.
 
 **`diag` on its own lists the suites; `diag all` runs them.** A bare `diag`
 prints a table with `-` beside everything that has not run this boot and a
-tally reading `0 passed, 0 failed, 28 not run`, which is easy to read as a
+tally reading `0 passed, 0 failed, 33 not run`, which is easy to read as a
 clean sweep. It is the opposite of one.
+
+**The list and its verdict table are one number now, and were not.** `RESULTS`
+is a fixed array indexed by a suite's position, and the `const` assertion
+guarding it compared `SUITES.len()` against a *literal* while the array's
+length was a separate literal beside it. So adding the thirty-third suite
+passed the guard and then panicked at the store -- `index out of bounds: the
+len is 32 but the index is 32` -- which is exactly the failure the guard's own
+comment says it prevents. `SLOTS` is the one number; a `static` cannot be read
+in a `const` context, so naming its length is as close as this gets to
+measuring the array directly.
 
 **The tooling gives the guest four cores, and two suites need more than one.**
 `drive.py` and `run.ps1` pass `-smp 4` by default; `--qemu-extra "-smp N"` and
