@@ -2590,9 +2590,22 @@ pub fn refresh_status() {
             well = Some(client.shrink(2).shrink(2));
         }
     });
-    let Some(strip) = well.and_then(terminal_strip) else { return };
-    terminal_status(&fb, strip);
-    super::compose::flush_rect(strip.x, strip.y, strip.w, strip.h);
+    let Some(w) = well else { return };
+    // The gutter too, and for the same reason the strip is here: `clear` is a
+    // console-only repaint, so without this the marks it cannot reach survive
+    // the screen they described.
+    if let Some(strip) = terminal_strip(w) {
+        let grid = Rect::new(
+            w.x + 3,
+            w.y + 3,
+            w.w.saturating_sub(6),
+            w.h.saturating_sub(6 + strip.h),
+        );
+        prompt_gutter(&fb, w, grid);
+        super::compose::flush_rect(w.x, grid.y, 4, grid.h);
+        terminal_status(&fb, strip);
+        super::compose::flush_rect(strip.x, strip.y, strip.w, strip.h);
+    }
 }
 
 /// A tick in the margin beside every row that starts a command.
@@ -2617,6 +2630,12 @@ fn prompt_gutter(fb: &super::Framebuffer, well: Rect, grid: Rect) {
         return;
     }
     let x = well.x + 1;
+    // The strip is cleared first, every time. It lives in the well's margin
+    // and not in the console's own rectangle, so nothing the console does
+    // repaints it -- `clear` fills `pixel_size()` and leaves the margin
+    // exactly as it was, which left a column of ticks beside an empty screen
+    // pointing at prompts that had been erased.
+    fb.rect(x, grid.y, 2, grid.h, theme::SCREEN);
     for (r, hit) in starts.iter().enumerate() {
         if !hit {
             continue;

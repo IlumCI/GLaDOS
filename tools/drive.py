@@ -145,6 +145,23 @@ def capture(dest):
         print("[drive] screendump produced nothing", file=sys.stderr)
         return
 
+    w, h = ppm_to_png(ppm, dest)
+    print(f"[drive] screenshot {dest} ({w}x{h})")
+
+
+def ppm_to_png(ppm, dest):
+    """Convert one QEMU screendump, and answer its size.
+
+    Split out of `capture` because the recorder needs it too, and two copies
+    of a hand-rolled PNG writer is exactly the kind of thing that ends with
+    one of them subtly wrong.
+    """
+    import binascii
+    import struct as _s
+    import zlib
+
+    ppm = Path(ppm)
+    dest = Path(dest)
     raw = ppm.read_bytes()
     # P6 header: magic, width height, maxval -- each possibly separated by any
     # whitespace, with # comments allowed between them.
@@ -186,7 +203,75 @@ def capture(dest):
     # delete the PNG it had just written, and reported success doing it.
     if ppm != dest:
         ppm.unlink(missing_ok=True)
-    print(f"[drive] screenshot {dest} ({w}x{h})")
+    return w, h
+
+
+def record(dest_dir, frames, gap):
+    """Dump a numbered PNG sequence while the guest carries on running.
+
+    A timelapse and not a screen recording, and the distinction is forced by
+    the mechanism: `screendump` is a monitor round-trip that writes a 3 MB PPM,
+    so a few frames a second is the ceiling and anything the machine does in
+    under a second is invisible to it. That is fine for what this is for --
+    the machine writing an application takes minutes, and 120 frames four
+    seconds apart is the whole run in five seconds at 24fps.
+
+    One connection for the whole sequence rather than one per frame: the
+    per-frame cost is otherwise two socket handshakes and `capture`'s 3.5s of
+    conservative sleeping, which is most of the interval.
+    """
+    dest_dir = Path(dest_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    ppm = dest_dir / "_frame.ppm"
+    try:
+        mon = socket.create_connection(("127.0.0.1", MONITOR_PORT), timeout=5)
+    except OSError as e:
+        print(f"[drive] no monitor: {e}", file=sys.stderr)
+        return
+    kept = 0
+    with mon:
+        mon.settimeout(2.0)
+        try:
+            mon.recv(4096)
+        except OSError:
+            pass
+        for i in range(frames):
+            t0 = time.time()
+            ppm.unlink(missing_ok=True)
+            mon.sendall(f"screendump {ppm.as_posix()}\n".encode())
+            # Waited for by watching the file settle rather than by sleeping a
+            # fixed amount: the dump is asynchronous, and a fixed sleep is
+            # either a torn frame or most of the interval spent idle.
+            size, stable, deadline = -1, 0, time.time() + 5.0
+            while time.time() < deadline:
+                time.sleep(0.08)
+                now = ppm.stat().st_size if ppm.exists() else -1
+                if now == size and now > 0:
+                    stable += 1
+                    if stable >= 2:
+                        break
+                else:
+                    stable = 0
+                size = now
+            try:
+                mon.recv(4096)
+            except OSError:
+                pass
+            if not ppm.exists() or ppm.stat().st_size == 0:
+                continue
+            try:
+                ppm_to_png(ppm, dest_dir / f"f{i:04d}.png")
+            except Exception as e:  # a torn frame is a dropped frame
+                print(f"[drive] frame {i} unreadable: {e}", file=sys.stderr)
+                continue
+            kept += 1
+            if kept % 10 == 0:
+                print(f"[drive] recorded {kept}/{frames}")
+            left = gap - (time.time() - t0)
+            if left > 0:
+                time.sleep(left)
+    ppm.unlink(missing_ok=True)
+    print(f"[drive] recorded {kept} frame(s) into {dest_dir}")
 
 
 # One decoder for the whole session rather than one per socket read.
@@ -278,6 +363,19 @@ def main():
         i = argv.index("--qemu-extra")
         import shlex
         qemu_extra = shlex.split(argv[i + 1])
+        del argv[i:i + 2]
+    rec_dir, rec_frames, rec_gap = None, 120, 4.0
+    if "--record" in argv:
+        i = argv.index("--record")
+        rec_dir = argv[i + 1]
+        del argv[i:i + 2]
+    if "--record-n" in argv:
+        i = argv.index("--record-n")
+        rec_frames = int(argv[i + 1])
+        del argv[i:i + 2]
+    if "--record-gap" in argv:
+        i = argv.index("--record-gap")
+        rec_gap = float(argv[i + 1])
         del argv[i:i + 2]
     mouse = []
     while "--mouse" in argv:
@@ -676,6 +774,8 @@ def main():
                                     break
                                 if extra:
                                     emit(extra)
+                        if rec_dir:
+                            record(rec_dir, rec_frames, rec_gap)
                         if shot:
                             capture(shot)
                             shot = None
