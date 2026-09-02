@@ -117,13 +117,83 @@ static SHIFTED: [u8; MAP_LEN] = [
     b'M', b'<', b'>', b'?', 0,    b'*', 0,    b' ',
 ];
 
-const SC_LSHIFT: u8 = 0x2A;
+pub const SC_LSHIFT: u8 = 0x2A;
 const SC_RSHIFT: u8 = 0x36;
 const SC_CAPS: u8 = 0x3A;
-const SC_LCTRL: u8 = 0x1D;
+pub const SC_LCTRL: u8 = 0x1D;
 const SC_LALT: u8 = 0x38;
 const SC_RELEASE: u8 = 0x80;
 const SC_EXTENDED: u8 = 0xE0;
+
+/// Which keys are held, by set-1 make code.
+///
+/// The ring above is a *byte queue* and says so: keys with no ASCII form are
+/// delivered as bytes over 0x7F precisely so it never has to grow an event
+/// type. That is the right shape for a shell and the wrong one for anything
+/// that needs to know a key is *still* down -- a game asking "is forward held"
+/// cannot be answered by a queue of things that happened.
+///
+/// So the state lives beside the queue rather than in it. `decode` is the one
+/// decoder, shared by the PS/2 ISR and the USB-HID path through
+/// `inject_scancode`, so both fill this without either knowing about it.
+///
+/// Two `u64`s rather than `[AtomicBool; 128]`: 128 atomics is a kilobyte of
+/// bss to answer a question that fits in sixteen bytes, and a bitmap can be
+/// snapshotted whole.
+static DOWN_LO: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static DOWN_HI: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Set-1 make codes worth naming, for callers that want to ask by key.
+pub const SC_W: u8 = 0x11;
+pub const SC_A: u8 = 0x1E;
+pub const SC_S: u8 = 0x1F;
+pub const SC_D: u8 = 0x20;
+pub const SC_SPACE: u8 = 0x39;
+pub const SC_ESC: u8 = 0x01;
+pub const SC_LEFT: u8 = 0x4B;
+pub const SC_RIGHT: u8 = 0x4D;
+pub const SC_UP: u8 = 0x48;
+pub const SC_DOWN: u8 = 0x50;
+
+fn set_down(code: u8, down: bool) {
+    let (reg, bit) = if code < 64 { (&DOWN_LO, code) } else { (&DOWN_HI, code - 64) };
+    let mask = 1u64 << bit;
+    if down {
+        reg.fetch_or(mask, Ordering::Relaxed);
+    } else {
+        reg.fetch_and(!mask, Ordering::Relaxed);
+    }
+}
+
+/// Is that key held right now?
+pub fn is_down(code: u8) -> bool {
+    let (reg, bit) = if code < 64 { (&DOWN_LO, code) } else { (&DOWN_HI, code - 64) };
+    reg.load(Ordering::Relaxed) & (1u64 << bit) != 0
+}
+
+/// Every held key at one instant, so a caller reading several does not see
+/// them from different moments.
+pub fn down_snapshot() -> (u64, u64) {
+    (DOWN_LO.load(Ordering::Relaxed), DOWN_HI.load(Ordering::Relaxed))
+}
+
+/// Forget every key. For anything taking over the keyboard, so a key held
+/// when it started is not held forever after -- and for the typed test path,
+/// which has no releases to send.
+pub fn clear_down() {
+    DOWN_LO.store(0, Ordering::Relaxed);
+    DOWN_HI.store(0, Ordering::Relaxed);
+}
+
+/// Drive the down-map directly.
+///
+/// Serial cannot inject PS/2 packets, which is the reason `win keys` exists at
+/// all, and a game reachable only by a real keyboard is a game no test ever
+/// drives. This is that door, and it goes through `set_down` rather than
+/// beside it so the typed path and the hardware path cannot disagree.
+pub fn force_down(code: u8, down: bool) {
+    set_down(code, down);
+}
 
 static SHIFT: AtomicBool = AtomicBool::new(false);
 static CTRL: AtomicBool = AtomicBool::new(false);
@@ -383,6 +453,10 @@ fn decode(scancode: u8) {
     }
     if EXTENDED.swap(false, Ordering::Relaxed) {
         let released = scancode & SC_RELEASE != 0;
+        // The state is recorded before the early return, which is the whole
+        // change: this path covers the arrow keys, and it threw every release
+        // away, so nothing above could ever know an arrow was still held.
+        set_down(scancode & !SC_RELEASE, !released);
         if released {
             return;
         }
@@ -441,6 +515,11 @@ fn decode(scancode: u8) {
         }
         _ => {}
     }
+
+    // The map is updated for every key, including the ones with no character
+    // and the ones past the table -- being unable to *type* F5 is not a reason
+    // to be unable to tell that it is held.
+    set_down(code, !released);
 
     // Only make codes produce characters.
     if released || (code as usize) >= MAP_LEN {
@@ -580,4 +659,78 @@ pub fn init(acpi: &Acpi, apic_id: u8) -> InitReport {
     flush();
 
     report
+}
+
+/// The down-map, which is pure logic and is the thing most easily got
+/// backwards.
+///
+/// A make sets and a break clears, and the two differ by one bit in the
+/// scancode -- so an implementation that forgot to mask `SC_RELEASE` would set
+/// the bit for `code | 0x80` on release and leave the real one held forever.
+/// That is the failure this checks, and it is invisible from the outside: the
+/// key simply never comes up again.
+pub fn selftest() -> bool {
+    use crate::kprintln;
+    let mut ok = true;
+    let mut claim = |what: &str, good: bool| {
+        if !good {
+            kprintln!("    FAIL: {}", what);
+            ok = false;
+        }
+    };
+
+    let saved = down_snapshot();
+    clear_down();
+
+    claim("nothing is held to begin with", !is_down(SC_W) && !is_down(SC_ESC));
+
+    decode(SC_W);
+    claim("a make marks the key held", is_down(SC_W));
+    claim("and marks only that key", !is_down(SC_A) && !is_down(SC_S));
+
+    decode(SC_W | SC_RELEASE);
+    claim("a break clears it", !is_down(SC_W));
+    // The bit the break carries must not be recorded as a key of its own.
+    claim("and does not hold the release code instead", !is_down(SC_W | SC_RELEASE));
+
+    // Several at once, which is the case the whole thing exists for.
+    decode(SC_W);
+    decode(SC_A);
+    decode(SC_SPACE);
+    claim("three keys are held together", is_down(SC_W) && is_down(SC_A) && is_down(SC_SPACE));
+    decode(SC_A | SC_RELEASE);
+    claim("and releasing one leaves the others", is_down(SC_W) && !is_down(SC_A) && is_down(SC_SPACE));
+
+    // Above 64, which is the other half of the bitmap and the arithmetic most
+    // likely to be wrong.
+    decode(SC_ESC);
+    decode(0x50);
+    claim("a code past the first word is held too", is_down(0x50));
+    decode(0x50 | SC_RELEASE);
+    claim("and released from the right word", !is_down(0x50) && is_down(SC_ESC));
+
+    // A key with no character and no row in the map -- F5 is 0x3F, past
+    // MAP_LEN -- must still be known to be held. Being unable to type it is
+    // not a reason to be unable to see it.
+    decode(0x3F);
+    claim("a key past the character map is still held", is_down(0x3F));
+
+    clear_down();
+    claim("and clearing forgets everything", !is_down(SC_W) && !is_down(SC_ESC) && !is_down(0x3F));
+
+    // Leave the machine as it was found, in both respects.
+    //
+    // The map first: a real key held while `diag` ran would otherwise come
+    // back up under it.
+    DOWN_LO.store(saved.0, Ordering::Relaxed);
+    DOWN_HI.store(saved.1, Ordering::Relaxed);
+
+    // And the ring, which is the part that bit. `decode` is the function under
+    // test and putting characters in the buffer is its *job*, so every make
+    // code above also queued a keystroke -- the first run of this suite typed
+    // `wwa ` into the shell, and the next command came out as `wwa echo .`.
+    // A test that drives the real decoder has to clean up after the real
+    // decoder.
+    while pop().is_some() {}
+    ok
 }
