@@ -100,12 +100,25 @@ fn dkv(fb: &Framebuffer, r: Rect, name: &str, value: &str, tone: Color) {
 struct Btn {
     label: &'static str,
     cmd: &'static str,
+    /// Whether the selected run's name is appended before queueing.
+    ///
+    /// `cmd` is a `&'static str` because a button is a constant, and most
+    /// commands are. `work run` is not -- it needs the selection -- and the
+    /// first version handled that by comparing a button's `cmd` against the
+    /// literal `"work run"` inside the press handler, which is a dispatch on a
+    /// string that also happens to be the thing being dispatched. This says it
+    /// in the table instead.
+    takes_run: bool,
     at: Cell<Rect>,
 }
 
 impl Btn {
     const fn new(label: &'static str, cmd: &'static str) -> Btn {
-        Btn { label, cmd, at: Cell::new(Rect::new(0, 0, 0, 0)) }
+        Btn { label, cmd, takes_run: false, at: Cell::new(Rect::new(0, 0, 0, 0)) }
+    }
+
+    const fn on_run(label: &'static str, cmd: &'static str) -> Btn {
+        Btn { label, cmd, takes_run: true, at: Cell::new(Rect::new(0, 0, 0, 0)) }
     }
 }
 
@@ -169,16 +182,23 @@ pub struct Improve {
     /// Ledger lines, fetched when the window opens rather than per frame --
     /// `ledger_tail` reads the whole ledger however few lines are asked for.
     ledger: Cell<Option<Vec<String>>>,
+    /// `(trials, head)` when the ledger above was read.
+    stamp: Cell<Option<(u32, Option<[u8; 32]>)>>,
     scroll: Cell<usize>,
-    btns: [Btn; 2],
+    btns: [Btn; 3],
 }
 
 impl Improve {
     pub fn new() -> Improve {
         Improve {
             ledger: Cell::new(None),
+            stamp: Cell::new(None),
             scroll: Cell::new(0),
-            btns: [Btn::new("Trial now", "godel now 24"), Btn::new("Rollback", "godel rollback")],
+            btns: [
+                Btn::new("Trial", "godel now 24"),
+                Btn::new("Space", "godel space"),
+                Btn::new("Rollback", "godel rollback"),
+            ],
         }
     }
 
@@ -290,13 +310,23 @@ impl DeskApp for Improve {
             );
         });
 
-        // The ledger, fetched once on the first paint after opening and kept.
-        // `ledger_tail` reads the *whole* ledger however few lines are asked
-        // for, so a window that re-read it per frame would walk a file that
-        // grows forever, sixty times a second.
-        let lines = match self.ledger.take() {
-            Some(l) => l,
-            None => crate::ai::godel::ledger_tail(64),
+        // The ledger is costly -- `ledger_tail` reads the *whole* file however
+        // few lines are asked for -- so it is cached. But it was cached
+        // *forever*: `take()` returned `Some` on every frame after the first,
+        // so the pane whose entire subject is trials kept showing the
+        // pre-trial ledger after its own "Trial now" button did its job. The
+        // only way to see the result was to close the window and reopen it.
+        //
+        // Stamped with the two free readings that move when a trial lands, so
+        // it re-reads exactly when there is something new and not otherwise.
+        let now = with_glance(|g| (g.trials, g.head));
+        let fresh = self.stamp.get() == Some(now);
+        let lines = match (fresh, self.ledger.take()) {
+            (true, Some(l)) => l,
+            _ => {
+                self.stamp.set(Some(now));
+                crate::ai::godel::ledger_tail(64)
+            }
         };
 
         theme::well(fb, body, theme::SCREEN);
@@ -339,8 +369,26 @@ impl DeskApp for Improve {
         let _ = focused;
     }
 
-    fn key(&mut self, _k: u8) -> bool {
-        false
+    fn key(&mut self, k: u8) -> bool {
+        // Arrows scroll the ledger and Enter runs a trial. The pane had no
+        // keyboard at all, which contradicts the desktop's own rule that
+        // everything the pointer does a keystroke also does -- and its two
+        // buttons are the only way to make anything happen here.
+        match k {
+            crate::dev::kbd::KEY_DOWN => {
+                self.scroll.set(self.scroll.get() + 1);
+                true
+            }
+            crate::dev::kbd::KEY_UP => {
+                self.scroll.set(self.scroll.get().saturating_sub(1));
+                true
+            }
+            b'\n' | b'\r' => {
+                super::desk::queue_command(self.btns[0].cmd);
+                true
+            }
+            _ => false,
+        }
     }
 
     fn press(&mut self, client: Rect, x: i32, y: i32) -> bool {
@@ -371,16 +419,25 @@ pub struct Flows {
     sel: Cell<usize>,
     /// The selected run's plan, kept because `plan()` is a blob read and a
     /// full parse and the selection changes far less often than a frame does.
-    cached: Cell<Option<(String, Vec<(bool, bool, String)>)>>,
-    btns: [Btn; 2],
+    /// How far down the plan pane is scrolled.
+    pscroll: Cell<usize>,
+    /// `((run, root), steps)` -- the root is what makes it notice a run
+    /// that changed under a selection that did not.
+    cached: Cell<Option<((String, Option<[u8; 32]>), Vec<(bool, bool, String)>)>>,
+    btns: [Btn; 3],
 }
 
 impl Flows {
     pub fn new() -> Flows {
         Flows {
             sel: Cell::new(0),
+            pscroll: Cell::new(0),
             cached: Cell::new(None),
-            btns: [Btn::new("Run", "work run"), Btn::new("Grid", "win tile grid")],
+            btns: [
+                Btn::on_run("Run", "work run"),
+                Btn::on_run("Check", "work check"),
+                Btn::new("Tile", "win tile workspace"),
+            ],
         }
     }
 
@@ -399,12 +456,36 @@ impl Flows {
         // two, because a fraction of the width is a different number of
         // *characters* depending on how wide a character is. Twelve is the
         // budget a run name is written against, plus the row's own padding.
-        let want = col_w(12) + 12;
+        // Eight, not twelve. A run name is short -- `audit`, `nightly` -- and
+        // every column the list takes is one the plan does not get, which is
+        // the half with the sentences in it.
+        let want = col_w(8) + 12;
         let left_w = (pad.w * 5 / 16).max(want.min(pad.w / 2));
         let list = Rect::new(pad.x, pad.y, left_w, body_h);
         let plan = Rect::new(pad.x + left_w + 4, pad.y, pad.w.saturating_sub(left_w + 4), body_h);
         let feet = Rect::new(pad.x, pad.y + body_h + 4, pad.w, btn_h);
         (list, plan, feet)
+    }
+}
+
+impl Flows {
+    /// Queue button `i`, filling in the selection where the button asks for
+    /// it. One path for the pointer and the keyboard, so Enter and a click on
+    /// the same button cannot come to mean different things.
+    fn fire(&self, i: usize) -> bool {
+        let Some(b) = self.btns.get(i) else { return false };
+        if !b.takes_run {
+            super::desk::queue_command(b.cmd);
+            return true;
+        }
+        let runs = with_glance(|g| g.runs.clone());
+        match runs.get(self.sel.get()) {
+            Some(name) => {
+                super::desk::queue_command(&alloc::format!("{} {}", b.cmd, name));
+                true
+            }
+            None => false,
+        }
     }
 }
 
@@ -428,10 +509,19 @@ impl DeskApp for Flows {
             dtext(fb, li.x, li.y, "no runs", theme::TEXT_DIM);
         }
 
-        // The plan for the selected run, re-read only when the selection moves.
+        // The plan for the selected run, re-read when the selection moves *or
+        // when the run itself does*. Keyed on the name alone it froze at the
+        // state the run had when it was selected -- so watching `work run`
+        // execute, which is the one thing this pane is for, showed nothing.
+        //
+        // `work::root()` is the run's content address, and it is the number
+        // the whole design turns on: a subtree that hashes the same has not
+        // changed, so this re-reads if and only if something did.
         let want = runs.get(sel).cloned().unwrap_or_default();
+        let root = if want.is_empty() { None } else { crate::ai::work::root(&want) };
+        let key = (want.clone(), root);
         let mut cache = self.cached.take();
-        if cache.as_ref().map(|(n, _)| n != &want).unwrap_or(true) && !want.is_empty() {
+        if cache.as_ref().map(|(n, _)| n != &key).unwrap_or(true) && !want.is_empty() {
             let steps = crate::ai::work::plan(&want)
                 .map(|p| {
                     p.steps
@@ -446,14 +536,15 @@ impl DeskApp for Flows {
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            cache = Some((want.clone(), steps));
+            cache = Some((key.clone(), steps));
         }
 
         theme::well(fb, plan, theme::SCREEN);
         let pi = plan.shrink(3);
         let room = (pi.w / col_w(1)).saturating_sub(5) as usize;
         if let Some((_, steps)) = cache.as_ref() {
-            for (i, (done, failed, goal)) in steps.iter().enumerate() {
+            let skip = self.pscroll.get().min(steps.len().saturating_sub(1));
+            for (i, (done, failed, goal)) in steps.iter().skip(skip).enumerate() {
                 let y = pi.y + i as u32 * row_h();
                 if y + row_h() > pi.y + pi.h {
                     break;
@@ -488,26 +579,37 @@ impl DeskApp for Flows {
                 self.sel.set((self.sel.get() + n - 1) % n);
                 true
             }
+            // Enter is Run. The desktop's rule is that everything the pointer
+            // does a keystroke also does, and until now the two buttons on
+            // this pane were reachable only by clicking them.
+            b'\n' | b'\r' => self.fire(0),
             _ => false,
         }
+    }
+
+    fn wheel(&mut self, notches: i32) -> bool {
+        // The plan pane. Its list `break`s at the fold and had no wheel at
+        // all, so a plan longer than the window was simply unreachable -- and
+        // a plan is exactly the thing that grows.
+        let s = (self.pscroll.get() as i32 + notches).max(0) as usize;
+        let steps = self
+            .cached
+            .take()
+            .map(|c| {
+                let n = c.1.len();
+                self.cached.set(Some(c));
+                n
+            })
+            .unwrap_or(0);
+        self.pscroll.set(s.min(steps.saturating_sub(1)));
+        true
     }
 
     fn press(&mut self, client: Rect, x: i32, y: i32) -> bool {
         let ax = client.x as i32 + x;
         let ay = client.y as i32 + y;
         if let Some(i) = button_at(&self.btns, ax, ay) {
-            // `work run` needs the selected run's name, which the button
-            // cannot carry because it is a constant. Built here instead.
-            if self.btns[i].cmd == "work run" {
-                let runs = with_glance(|g| g.runs.clone());
-                if let Some(name) = runs.get(self.sel.get()) {
-                    super::desk::queue_command(&alloc::format!("work run {}", name));
-                    return true;
-                }
-                return false;
-            }
-            super::desk::queue_command(self.btns[i].cmd);
-            return true;
+            return self.fire(i);
         }
         let (list, _, _) = Flows::layout(client);
         let li = list.shrink(3);
@@ -574,7 +676,13 @@ impl DeskApp for Ask {
 
         theme::well(fb, body, theme::SCREEN);
         let inner = body.shrink(4);
-        let cols = (inner.w / col_w(1)).saturating_sub(2) as usize;
+        // Wrapped to the width a bubble actually gets, not to the pane's.
+        // A bubble is four fifths of the pane and the text was wrapped to the
+        // whole of it, so every line ran past the bubble's right edge and was
+        // clipped mid-word -- the wrap was correct for a width nothing is
+        // drawn at.
+        let bubble_w = inner.w * 4 / 5;
+        let cols = (bubble_w / col_w(1)).saturating_sub(2) as usize;
 
         // `companion` and not `agent`: the agent's ring is episodes, which is
         // a different thing from the conversation and never contains a turn of
@@ -594,7 +702,7 @@ impl DeskApp for Ask {
                 break;
             }
             y -= h + 4;
-            let w = inner.w * 4 / 5;
+            let w = bubble_w;
             let x = if *from_machine { inner.x } else { inner.x + inner.w - w };
             dbubble(fb, Rect::new(x, y, w, h), wrapped, *from_machine);
         }
@@ -653,8 +761,13 @@ impl DeskApp for Ask {
     }
 
     fn wheel(&mut self, notches: i32) -> bool {
-        let s = self.scroll.get() as i32 + notches;
-        self.scroll.set(s.max(0) as usize);
+        // Clamped at both ends. It was `.max(0)` only, so scrolling up past
+        // the oldest turn left `turns.iter().rev().skip(n)` yielding nothing
+        // -- and because `turns` is not empty the "nothing said yet" line does
+        // not appear either, so the pane went blank with no way to know why.
+        let n = crate::ai::companion::log_snapshot().len();
+        let s = (self.scroll.get() as i32 + notches).max(0) as usize;
+        self.scroll.set(s.min(n.saturating_sub(1)));
         true
     }
 
@@ -669,6 +782,16 @@ impl DeskApp for Ask {
 /// on itself in four places at once reads as a machine doing several things,
 /// which is what it is.
 pub fn open_workspace() {
+    // Idempotent, because it was not. `tile_workspace` finds a window by title
+    // and takes the *first* match, so a second `mind open` pushed four more
+    // windows with the same four titles and then placed the originals again --
+    // leaving four duplicates floating wherever `open_app` centred them, with
+    // no way to tell which was which. `desk::open_authoring` has had this
+    // guard since it was written.
+    if super::desk::has_window("Ask") {
+        super::desk::tile_workspace("Workflows", "Ask", "Agent", "Improve");
+        return;
+    }
     super::desk::minimise_all();
     super::desk::open_app(
         "Improve",

@@ -190,6 +190,12 @@ pub fn run(boot: &BootInfo, acpi: &Option<Acpi>) -> ! {
             line.clear();
             cursor = 0;
             prompt();
+            // The cheap tier is a second stale by design, which is right
+            // for a repaint and wrong immediately after a command that
+            // changed exactly what it caches. `invalidate` was written for
+            // this and its doc says "called after a command"; it had no
+            // caller but its own selftest.
+            crate::ai::glance::invalidate();
             crate::gfx::desk::refresh_routed();
             crate::gfx::desk::refresh_status();
             crate::gfx::desk::redraw_over_terminal();
@@ -3423,6 +3429,13 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             console::set_color(YELLOW);
             kprintln!("\nthe model");
             console::set_color(WHITE);
+            // First, because it is the door to everything under it and it was
+            // the one command in this section that appeared nowhere -- not
+            // here, not on the wall, not in the Start menu, not in the Program
+            // Manager. Four windows nobody could find.
+            kprintln!("  mind open     the workspace: Workflows, Ask, Agent, Improve");
+            kprintln!("  work ...      multi-agent runs      godel ...  self-modification");
+            kprintln!("  author <name> <what it should do>   write an application");
             kprintln!("  gen <prompt>  generate text     ask <prompt>  chat turn");
             kprintln!("  think <p>     run it in the background, off the shell");
             kprintln!("  agent [-n n] [--trust full] <goal>   act-observe-repeat; 'agent stop' cancels");
@@ -4080,7 +4093,20 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                                 n => kprintln!("  {} window(s) into a grid", n),
                             }
                         }
-                        None => kprintln!("  usage: win tile left|right|tl|tr|bl|br|full|grid"),
+                        // The workbench, by name. Without this the only way
+                        // back to it was `mind open`, which re-opens the four
+                        // windows rather than re-placing them -- so the
+                        // workspace's own "Grid" button was a one-way door out
+                        // of the layout `tile_workspace`'s doc argues for.
+                        None if which == "workspace" || which == "work" => {
+                            match desk::tile_workspace("Workflows", "Ask", "Agent", "Improve") {
+                                0 => kprintln!("  the workspace is not open -- 'mind open'"),
+                                n => kprintln!("  {} window(s) back to the workbench", n),
+                            }
+                        }
+                        None => kprintln!(
+                            "  usage: win tile left|right|tl|tr|bl|br|full|grid|workspace"
+                        ),
                     }
                 }
                 "round" => {

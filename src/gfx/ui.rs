@@ -1709,6 +1709,7 @@ pub fn program_manager() -> Panel {
         run("Network", "win open network"),
         run("Storage", "win open storage"),
         run("Files", "win open files"),
+        run("Mind (workspace)", "mind open"),
         run("Attention", "win open attention"),
         (String::from("Model"), Action::Run(String::from("win open model"))),
         run("ToDo list", "todo"),

@@ -232,15 +232,36 @@ pub struct Desktop {
 }
 
 static DESK: Racy<Option<Desktop>> = Racy::new(None);
-static PENDING: Racy<Option<String>> = Racy::new(None);
+static PENDING: Racy<Vec<String>> = Racy::new(Vec::new());
+
+/// How many queued commands are kept.
+///
+/// The shell drains one per pass of its idle loop, and a pass is fast, so this
+/// only has to cover a burst -- somebody clicking three buttons before the
+/// loop gets a turn. Eight is well past that and small enough that a runaway
+/// press handler cannot grow the heap.
+const PENDING_CAP: usize = 8;
 
 /// Ask for a command to be run as though it had been typed.
 ///
 /// The one way in from outside this module, so there stays exactly one path
 /// from "a command should run" to "a command ran" -- the property the panel
 /// dispatch was built around, and one a second setter would quietly end.
+///
+/// **A queue and not a slot.** It was `Option<String>`, so a second press
+/// before the shell's idle loop took a turn overwrote the first and the first
+/// was gone with nothing said. That was survivable while the AI windows had
+/// six buttons between them and is not now.
+///
+/// Full drops the *newest* and says so. The alternative -- pushing the oldest
+/// out -- is the bug this replaces, arriving one command later.
 pub fn queue_command(cmd: &str) {
-    unsafe { *PENDING.get() = Some(String::from(cmd)) };
+    let q = unsafe { &mut *PENDING.get() };
+    if q.len() >= PENDING_CAP {
+        crate::kprintln!("  (queue full -- '{}' dropped)", cmd);
+        return;
+    }
+    q.push(String::from(cmd));
 }
 
 const MARGIN: u32 = 8;
@@ -281,7 +302,7 @@ const ICONS: [(&str, &str); 10] = [
 /// The Start menu, bottom of the bar upward -- the 98 half of the ancestry.
 /// Same entries as the icons plus the one thing that belongs behind a second
 /// look, exactly where 98 kept it.
-const START_ITEMS: [(&str, &str); 12] = [
+const START_ITEMS: [(&str, &str); 13] = [
     // "Search..." used to lead this list, opening a panel with one text field
     // in it. The query row at the foot of this menu does the same job in the
     // place a person already is, and dispatches through the same `open`, so
@@ -290,6 +311,12 @@ const START_ITEMS: [(&str, &str); 12] = [
     // something that does not exist.
     ("Terminal", "term"),
     ("Programs", "win open programs"),
+    // The AI workspace. It was reachable only by typing `mind open`, which
+    // appeared in no menu, no `help` and no Program Manager row -- so the four
+    // windows this machine's whole argument rests on were undiscoverable from
+    // inside the machine. Not on the wall: `ICONS` is index-locked to the
+    // `ICO_*` constants and adding a row there renumbers every pictogram.
+    ("Mind", "mind open"),
     ("Files", "win open files"),
     ("ToDo", "todo"),
     ("Enternet", "enternet"),
@@ -323,7 +350,7 @@ fn launch(cmd: &str) {
     // that window in front (see `open`/`open_app`); one that only prints does
     // so in the terminal wherever it sits. The shell processes PENDING every
     // loop regardless of focus, so nothing here needs to touch focus at all.
-    unsafe { *PENDING.get() = Some(String::from(cmd)) };
+    queue_command(cmd);
 }
 
 pub fn ready() -> bool {
@@ -1585,6 +1612,33 @@ pub fn selftest() -> bool {
         claim("and they tile it with no gap or overlap", area == screen.w * screen.h);
     }
 
+    // --- the command queue keeps the oldest ---------------------------------
+    //
+    // It was a single slot, so a burst of presses kept only the last one. The
+    // claim that matters is which end is dropped when it fills: the whole
+    // point of the change is that an early press is not silently lost, so
+    // overflowing must cost the *newest*.
+    {
+        while take_pending().is_some() {}
+        for i in 0..PENDING_CAP + 1 {
+            let mut c = String::from("q");
+            c.push_str(&alloc::format!("{}", i));
+            queue_command(&c);
+        }
+        claim("the queue fills to its cap and no further", pending_len() == PENDING_CAP);
+        let first = take_pending();
+        claim("and the oldest press is the one that survives", first.as_deref() == Some("q0"));
+        let mut last = first;
+        while let Some(n) = take_pending() {
+            last = Some(n);
+        }
+        claim(
+            "while the one past the cap was refused",
+            last.as_deref() == Some(&alloc::format!("q{}", PENDING_CAP - 1)[..]),
+        );
+        claim("and draining leaves it empty", pending_len() == 0);
+    }
+
     // --- the icon tables agree ---------------------------------------------
     //
     // `draw_icons` draws `pictogram(k)` and writes `ICONS[k].0` under it, so a
@@ -2385,7 +2439,7 @@ fn act_on(step: ui::Step) {
     match step {
         ui::Step::Do(Action::Run(cmd)) => {
             focus_terminal();
-            unsafe { *PENDING.get() = Some(cmd) };
+            queue_command(&cmd);
         }
         ui::Step::Do(Action::Browse(route)) => {
             if let Some((title, panel)) = ui::panel_for_route(&route) {
@@ -2543,7 +2597,7 @@ fn menu_press(fb: &Framebuffer, x: i32, y: i32, screen: Rect) -> bool {
                 if let Some(f) = d.focus() {
                     if let Some(mi) = d.windows[f].menus[menu].items.get(item) {
                         if let Action::Run(cmd) = &mi.action {
-                            unsafe { *PENDING.get() = Some(cmd.clone()) };
+                            queue_command(cmd);
                         }
                     }
                 }
@@ -4311,7 +4365,7 @@ pub fn key(k: u8) -> Route {
                 Some(ui::Step::Close) => close_focused(),
                 Some(ui::Step::Do(Action::Run(cmd))) => {
                     focus_terminal();
-                    unsafe { *PENDING.get() = Some(cmd) };
+                    queue_command(&cmd);
                 }
                 // Navigation replaces the panel where it stands. The window
                 // keeps its geometry, its place in the z-order and the
@@ -4385,7 +4439,7 @@ pub fn key(k: u8) -> Route {
                         d.mode = Mode::Normal;
                         if let Some(mi) = d.windows[f].menus[menu].items.get(item) {
                             if let Action::Run(cmd) = &mi.action {
-                                unsafe { *PENDING.get() = Some(cmd.clone()) };
+                                queue_command(cmd);
                             }
                         }
                     }
@@ -4626,5 +4680,15 @@ pub fn redraw_over_terminal() {
 }
 
 pub fn take_pending() -> Option<String> {
-    unsafe { (*PENDING.get()).take() }
+    let q = unsafe { &mut *PENDING.get() };
+    if q.is_empty() {
+        return None;
+    }
+    Some(q.remove(0))
+}
+
+/// How many commands are waiting. For the selftest, and for anything that
+/// wants to know whether a press landed.
+pub fn pending_len() -> usize {
+    unsafe { (*PENDING.get()).len() }
 }
