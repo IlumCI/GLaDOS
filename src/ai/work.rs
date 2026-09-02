@@ -370,6 +370,23 @@ impl Step {
 
 // --- paths ----------------------------------------------------------------
 
+/// Whether a name is safe to build a path from.
+///
+/// A run name and a role name become one path component under `ROOT` or
+/// `ROLES` by `format!`, and the namespace resolver honours `..` -- so a name
+/// of `../../pwned` climbs out of the work tree and writes at the root, and a
+/// name of `../agent/policy` writes *through* an existing blob, turning it
+/// into a directory and destroying it. Found by trying exactly that: it
+/// replaced `/ai/agent/policy`, which `godel` reads into every variant's
+/// lineage.
+///
+/// So a name has to be a single component: non-empty, no slash, and not a
+/// `.`/`..` that the resolver would act on. Everything a plausible run or role
+/// is called passes; nothing that escapes the subtree does.
+fn valid_name(name: &str) -> bool {
+    !name.is_empty() && name != "." && name != ".." && !name.contains('/')
+}
+
 fn dir(run: &str) -> String {
     format!("{}/{}", ROOT, run)
 }
@@ -408,6 +425,12 @@ fn one_line(s: &str) -> String {
 // --- the interface --------------------------------------------------------
 
 pub fn set_plan(run: &str, plan: &Plan) -> bool {
+    // The one choke point for creating a run, so the name is checked here
+    // rather than at each of the several callers -- a write that slips past a
+    // caller's own check is the failure this guards.
+    if !valid_name(run) {
+        return false;
+    }
     sysbox::write_text(&plan_path(run), &plan.render())
 }
 
@@ -1044,6 +1067,12 @@ pub fn harvest() -> Harvest {
         }
     }
     for name in names {
+        // A role comes from a plan's `role` field, which is text, so it takes
+        // the same check a run name does before it becomes a path -- a step
+        // whose role is `../../x` must not write outside the roles tree.
+        if !valid_name(&name) {
+            continue;
+        }
         // Rewritten whole rather than appended to. A set that grew on every
         // harvest would double on the second one, and positional splits over
         // a set that moves are the "test set that moved" failure arriving by
@@ -1483,6 +1512,16 @@ pub fn selftest() -> bool {
         role_split(&alloc::vec![ex("a"), ex("a")]) == 2,
     );
     claim("an empty set splits at nothing", role_split(&[]) == 0);
+
+    // --- names are single components --------------------------------------
+    //
+    // A run or role name becomes a path under a fixed root, and the resolver
+    // honours `..`, so a name that is not one component escapes the subtree.
+    claim("a plain name is allowed", valid_name("run-1"));
+    claim("a traversal is refused", !valid_name("../agent/policy"));
+    claim("a bare dot-dot is refused", !valid_name(".."));
+    claim("a slashed name is refused", !valid_name("a/b"));
+    claim("an empty name is refused", !valid_name(""));
 
     // --- autonomy ---------------------------------------------------------
     claim(
