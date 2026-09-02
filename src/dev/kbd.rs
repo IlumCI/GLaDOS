@@ -324,6 +324,13 @@ pub const KEY_BACKTAB: u8 = 0x87;
 /// the shell -- a window switcher that stole Tab would make the terminal
 /// unusable. The `win` command exists for the headless path.
 pub const KEY_ALTTAB: u8 = 0x88;
+/// Alt-Shift-Tab: the deepest window instead of the last one.
+///
+/// Its own key rather than a modifier the desktop reads, because the desktop
+/// is handed bytes and has no view of the modifier state -- and reaching back
+/// into the driver for it from `keys` would be a second source of truth about
+/// which keys were down.
+pub const KEY_ALTTAB_BACK: u8 = 0x8E;
 /// Alt-Space: the window's own menu -- move, size, maximise, close.
 pub const KEY_SYSMENU: u8 = 0x89;
 /// Alt on its own: open the focused window's menu bar.
@@ -447,11 +454,12 @@ fn decode(scancode: u8) {
     // Tab and Space are the keys whose modified forms are *different keys*
     // rather than different characters, and the map cannot express that: both
     // tables hold the same byte at those indices. Alt is checked first, so
-    // Alt-Shift-Tab still switches windows.
+    // Alt-Shift-Tab still switches windows -- backwards, which is a different
+    // key rather than a flag, because the desktop is handed bytes.
     if ALT.load(Ordering::Relaxed) {
         match code {
             0x0F => {
-                push(KEY_ALTTAB);
+                push(if shift { KEY_ALTTAB_BACK } else { KEY_ALTTAB });
                 return;
             }
             0x39 => {

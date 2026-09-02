@@ -3992,6 +3992,10 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             match it.next().unwrap_or("") {
                 "" | "list" => {}
                 "next" => desk::cycle(false),
+                // Every gesture needs a typed equivalent: serial cannot hold
+                // Alt and Shift, and a control with no typed form never gets
+                // tested.
+                "prev" => desk::cycle(true),
                 // Focus the terminal without reaching for the mouse.
                 //
                 // `open` leaves the new window focused on purpose, which is

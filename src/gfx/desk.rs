@@ -859,7 +859,7 @@ pub fn show_routed(title: &str, panel: Panel, route: &str) -> bool {
         // Last is front, and front is focused.
         d.windows.push(w);
     });
-    draw();
+    open_flourish();
     true
 }
 
@@ -936,7 +936,7 @@ pub fn open(title: &str, panel: Panel) {
     // consumed before the window exists, so there is nothing left to leak into
     // it; the earlier worry conflated "raise the window" with "steal the next
     // command", which is only a problem for a headless driver typing blind.
-    draw();
+    open_flourish();
 }
 
 /// Open a window around a program.
@@ -993,7 +993,7 @@ pub fn open_app(title: &str, icon: usize, app: Box<dyn DeskApp>, w: u32, h: u32)
     });
     // Opened to be used -> in front and focused. To type at the shell again,
     // click the terminal, Alt-Tab, or its taskbar button, as with any window.
-    draw();
+    open_flourish();
 }
 
 pub fn open_paint() {
@@ -1150,7 +1150,7 @@ pub fn open_browser(url: &str) {
     // the terminal. (The headless driver must Alt-Tab back before typing the
     // next command -- it types blind over serial and cannot see what has the
     // keyboard.)
-    draw();
+    open_flourish();
 }
 
 // --- the pointer ----------------------------------------------------------
@@ -1423,6 +1423,38 @@ pub fn selftest() -> bool {
             })
             .sum();
         claim("and they tile it with no gap or overlap", area == screen.w * screen.h);
+    }
+
+    // --- the opening curve -------------------------------------------------
+    //
+    // Pure arithmetic, and the last frame is the claim that matters: a final
+    // rectangle off by a pixel leaves a seam of chrome the real window does
+    // not cover, and nothing repaints it until something else happens to.
+    {
+        let to = Rect::new(100, 60, 300, 200);
+        claim("a window arrives exactly where it was going", open_rect(to, OPEN_STEPS - 1, OPEN_STEPS) == to);
+        claim("and one step is one step", open_rect(to, 0, 1) == to);
+        let first = open_rect(to, 0, OPEN_STEPS);
+        claim("it starts smaller than it ends", first.w < to.w && first.h < to.h);
+        // Concentric, because growing from a corner reads as a slide from
+        // somewhere -- and a window opened by a command came from nowhere.
+        claim(
+            "and grows from its own centre",
+            first.x + first.w / 2 == to.x + to.w / 2 && first.y + first.h / 2 == to.y + to.h / 2,
+        );
+        let mut prev = 0;
+        let mut grows = true;
+        for step in 0..OPEN_STEPS {
+            let r = open_rect(to, step, OPEN_STEPS);
+            grows &= r.w >= prev;
+            prev = r.w;
+        }
+        claim("monotonically", grows);
+        // A window too small to have chrome must not produce a rectangle with
+        // a negative or wrapped size -- every dimension here is unsigned.
+        let tiny = Rect::new(0, 0, 8, 8);
+        let t = open_rect(tiny, 0, OPEN_STEPS);
+        claim("and a tiny window does not wrap", t.w > 0 && t.h > 0 && t.w <= 24 && t.h <= 16);
     }
     ok
 }
@@ -2606,6 +2638,110 @@ fn terminal_status(fb: &super::Framebuffer, r: Rect) {
     });
 }
 
+/// Which window is still on its way, if any.
+///
+/// A static rather than a field on `Window`, because it is true of the desktop
+/// for a tenth of a second and not a property of a window -- and a field would
+/// have to be spelled out at four `Window` literals to say "no" four times.
+static ARRIVING: crate::sync::Racy<Option<usize>> = crate::sync::Racy::new(None);
+
+fn arriving() -> Option<usize> {
+    unsafe { *ARRIVING.get() }
+}
+
+/// How many frames a window takes to arrive.
+///
+/// Six, which at the delay below is about a tenth of a second -- long enough
+/// to be seen and short enough that it is never something to wait through. It
+/// is bounded and one-shot rather than a running cost: six frames at ~2.2 ms
+/// is ~13 ms of painting for the whole gesture.
+const OPEN_STEPS: u32 = 6;
+
+/// Where a window sits partway through arriving.
+///
+/// Pure, so the curve is checkable at boot with no framebuffer and no desktop.
+/// It grows from a small rectangle at the window's own centre, so the motion
+/// reads as the window coming forward rather than sliding in from an edge --
+/// which would be a claim about where it came from, and windows here come from
+/// a command.
+///
+/// The last step is `to` exactly and not `to` approximately: a final frame off
+/// by a pixel leaves a seam of chrome the real window does not cover, and it
+/// would be there until something else repainted.
+fn open_rect(to: Rect, step: u32, steps: u32) -> Rect {
+    if step + 1 >= steps || steps == 0 {
+        return to;
+    }
+    // Eased rather than linear: `f = 1 - (1-t)^2` starts fast and settles, so
+    // the frames cluster near the end where the shape is recognisable. Integer
+    // arithmetic throughout -- there is no float anywhere else in this file.
+    let t = (step + 1) * 256 / steps;
+    let inv = 256 - t;
+    let f = 256 - (inv * inv) / 256;
+    let f = f.clamp(40, 256);
+    let w = (to.w * f / 256).max(24);
+    let h = (to.h * f / 256).max(16);
+    let cx = to.x + to.w / 2;
+    let cy = to.y + to.h / 2;
+    Rect::new(cx.saturating_sub(w / 2), cy.saturating_sub(h / 2), w, h)
+}
+
+/// Play a window arriving, then leave the desktop as it was.
+///
+/// Chrome only, and that is a constraint rather than a shortcut. There is no
+/// way to blend a window against a backdrop the back-to-front repaint has
+/// already overwritten, so a fade is not available; and `Console::reflow`
+/// **discards rows when it shrinks**, so animating a terminal's real geometry
+/// would destroy its scrollback to decorate its opening. So the frames paint a
+/// frame and a caption at a rectangle nothing owns, and the window itself
+/// appears whole on the frame after.
+///
+/// Called before the window exists, so `draw` needs to know nothing about any
+/// of this: each step repaints the desktop as it stands and puts the chrome on
+/// top of it, and the flush is over that rectangle alone.
+pub fn open_flourish() {
+    let Some(fb) = super::primary() else { return };
+    let screen = screen_rect(&fb);
+    let mut what = None;
+    with(|d| {
+        let i = d.windows.len().checked_sub(1)?;
+        let w = &d.windows[i];
+        if w.state == WinState::Minimised {
+            return None;
+        }
+        what = Some((i, w.frame(screen), w.title.clone()));
+        Some(())
+    });
+    let Some((i, to, title)) = what else { return };
+    if to.w < 64 || to.h < 48 {
+        return;
+    }
+    unsafe { *ARRIVING.get() = Some(i) };
+    for step in 0..OPEN_STEPS.saturating_sub(1) {
+        let r = open_rect(to, step, OPEN_STEPS);
+        draw();
+        let claimed = Claim::take();
+        if claimed.is_none() {
+            return;
+        }
+        let back = super::compose::target().unwrap_or(fb);
+        theme::window(&back, r, &title, true, false, false, None);
+        super::compose::flush_rect(
+            r.x.saturating_sub(theme::SHADOW_W),
+            r.y.saturating_sub(theme::SHADOW_W),
+            r.w + theme::SHADOW_W * 2,
+            r.h + theme::SHADOW_W * 2,
+        );
+        drop(claimed);
+        crate::time::delay_us(16_000);
+    }
+    // Cleared before the last draw, not after it, so the window's own first
+    // frame is the one that lands. Clearing afterwards would leave the last
+    // animation frame on screen until something else repainted.
+    unsafe { *ARRIVING.get() = None };
+    draw();
+}
+
 /// How close to a screen edge a move has to end to count as a snap.
 const SNAP: i32 = 8;
 
@@ -3223,6 +3359,70 @@ fn taskbar(fb: &Framebuffer, d: &Desktop, sel: Option<usize>) {
         );
     }
 
+    // What the button is for, which the bar itself cannot say.
+    //
+    // A task button is a pictogram and nothing else, and that is the right
+    // trade -- every button the same width is what lets nine of them read as a
+    // row rather than a ransom note, and a bar of truncated titles says
+    // nothing three times over. But it leaves two windows of the same kind
+    // indistinguishable, and there is no third state between "no label" and
+    // "a label on every button": there is hover, which labels the one being
+    // asked about.
+    //
+    // Painted at the end of the whole frame and not here, which is the part
+    // that had to be found by looking: the bar is drawn *before* the windows,
+    // and nothing about that mattered while everything the bar drew stayed
+    // inside the bar. A tip stands above it, so drawn from here it went under
+    // the terminal -- visible only in the strip of wallpaper to its left.
+    taskbar_tail(fb, d);
+}
+
+/// The hovered task button's window title, standing above the bar.
+
+fn taskbar_tip(fb: &Framebuffer, d: &Desktop) {
+    let Hover::Task(i) = d.hover else { return };
+    let Some((r, _, _)) = task_layout(fb, d).into_iter().nth(i) else { return };
+    {
+        if let Some(title) = d.windows.get(i).map(|w| w.title.as_str()) {
+            let tw = theme::text_w_of(title);
+            let box_w = tw + 12;
+            let box_h = theme::text_h() + 8;
+            // Clamped to the screen rather than centred blindly: the last
+            // button on a full bar sits against the clock, and a tip centred
+            // on it would hang off the edge.
+            let want = r.x + r.w / 2 - (box_w / 2).min(r.x + r.w / 2);
+            let x = want.min(fb.width().saturating_sub(box_w + 2)).max(2);
+            let y = r.y.saturating_sub(box_h + 4);
+            let tr = Rect::new(x, y, box_w, box_h);
+            fb.shade_rect(tr.x + 2, tr.y + 2, tr.w, tr.h, 96);
+            fb.vgrad(tr.x, tr.y, tr.w, tr.h, &theme::TITLE_OFF);
+            theme::outline(fb, tr, theme::EDGE);
+            theme::text_over(fb, tr.x + 6, tr.y + 4, title, theme::TEXT);
+        }
+    }
+}
+
+/// The rest of the bar: the recesses, and what did not fit.
+fn taskbar_tail(fb: &Framebuffer, d: &Desktop) {
+    // Windows the bar had no room for. `task_layout` breaks when it runs out,
+    // which is right -- shrinking every button to fit an arbitrary count ends
+    // with a row of slivers -- but it did so in silence, so a window could be
+    // open, unreachable from the bar, and nothing said why.
+    let shown = task_layout(fb, d).len();
+    let total = task_slots(d).len();
+    if total > shown {
+        let label = alloc::format!("+{}", total - shown);
+        let w = theme::text_w_of(&label) + 8;
+        let right = battery_rect(fb).map(|r| r.x).unwrap_or_else(|| clock_rect(fb).x);
+        let bar = taskbar_rect(fb);
+        if right > w + 6 {
+            let r = Rect::new(right - w - 6, bar.y + 4, w, bar.h - 8);
+            theme::control(fb, r, &theme::BTN, theme::BTN_EDGE);
+            let ty = r.y + (r.h.saturating_sub(theme::text_h())) / 2;
+            theme::text_over(fb, r.x + 4, ty, &label, theme::TEXT_DIM);
+        }
+    }
+
     // The tray recesses. Not `theme::well`: a well outlines a hole in a face,
     // and on a coloured bar the thing that reads as a recess is being darker
     // than what surrounds it.
@@ -3358,6 +3558,13 @@ pub fn draw() {
             super::console::with_ch(ch, |c| c.set_visible(false));
         }
         for (i, win) in d.windows.iter().enumerate() {
+            // A window that exists and has not arrived yet. `open_flourish`
+            // paints its chrome itself, at a rectangle that is on its way to
+            // this one; drawing it here as well would put the finished window
+            // under the animation of it.
+            if arriving() == Some(i) {
+                continue;
+            }
             if win.state == WinState::Minimised {
                 continue;
             }
@@ -3499,6 +3706,10 @@ pub fn draw() {
                 }
             });
             }
+
+        // Over the windows, because the bar is drawn under them and a tip
+        // stands above the bar.
+        taskbar_tip(&fb, d);
 
         // Popups last, over everything, because that is what a popup is.
         if let Some(f) = focus {
@@ -3652,7 +3863,21 @@ pub fn focus_is_terminal() -> bool {
 /// person) needs "over and back" to be two presses, deterministically. It
 /// cost a test run in which the second Alt-Tab focused the Program Manager
 /// and the next command line ran one of its rows.
-pub fn cycle(_back: bool) {
+/// Alt-Tab, and Shift-Alt-Tab.
+///
+/// Plain Alt-Tab **swaps the top two and deliberately does not rotate**. That
+/// is a decision this tree already made and paid for: rotating made a second
+/// press land on a third window, and both scripts and habit need over-and-back
+/// to be two presses. Nothing here changes it.
+///
+/// What `back` gets is the other half of the same idea rather than the other
+/// direction of a rotation, because a swap has no other direction -- it is its
+/// own inverse, and honouring `back` as "swap the top two, backwards" would be
+/// the same operation under a second name. So it raises the *deepest* visible
+/// window: the one furthest from the top, which in a stack where z-order is
+/// recency is the one least recently used. Two keys, two reachable windows,
+/// and plain Alt-Tab still returns to where it was.
+pub fn cycle(back: bool) {
     with(|d| {
         let visible: Vec<usize> = d
             .windows
@@ -3665,10 +3890,13 @@ pub fn cycle(_back: bool) {
             return;
         }
         // The two topmost visible windows; raising the lower one swaps them.
-        let below = visible[visible.len() - 2];
-        d.raise(below);
+        // Backwards, the bottom of the stack instead, which for two windows is
+        // the same window and for three or more is the one Alt-Tab alone can
+        // never reach.
+        let pick = if back { visible[0] } else { visible[visible.len() - 2] };
+        d.raise(pick);
     });
-    trace("alt-tab");
+    trace(if back { "alt-tab back" } else { "alt-tab" });
     draw();
 }
 
@@ -3766,9 +3994,9 @@ pub fn key(k: u8) -> Route {
 
     // Window management first, in every mode, so there is no state the keyboard
     // can get stuck in.
-    if k == kbd::KEY_ALTTAB {
+    if k == kbd::KEY_ALTTAB || k == kbd::KEY_ALTTAB_BACK {
         with(|d| d.mode = Mode::Normal);
-        cycle(false);
+        cycle(k == kbd::KEY_ALTTAB_BACK);
         return Route::Handled;
     }
     // Before the mode dispatch, like Alt-Tab, so there is no state the

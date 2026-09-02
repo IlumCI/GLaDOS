@@ -1309,6 +1309,28 @@ box. Typing anywhere in the menu goes to it; Enter runs `open <query>`, the same
 dispatcher the search panel uses. `KEY_STARTMENU` (`win keys start`) opens the
 menu, which previously had no key at all and so could not be driven headlessly.
 
+**A window arrives over about a tenth of a second, and only its chrome does.**
+`open_flourish` plays six frames from a small rectangle at the window's own
+centre before the window is drawn for the first time, and `ARRIVING` is what
+tells `draw` to skip the window while its own animation is on screen. Chrome
+only is a constraint rather than a shortcut: there is no way to blend a window
+against a backdrop the back-to-front repaint has already overwritten, and
+`Console::reflow` **discards rows when it shrinks**, so animating a terminal's
+real geometry would destroy its scrollback to decorate its opening. `open_rect`
+is pure and selftested, and the claim that earns its place is that the last
+frame is the target *exactly* -- a final rectangle off by a pixel leaves a seam
+of chrome the real window does not cover, and nothing repaints it until
+something else happens to.
+
+**The taskbar is drawn before the windows**, which mattered for the first time
+when a hover tip had to stand above it: drawn from inside the bar's own painter
+it went under the terminal, visible only in the strip of wallpaper to its left.
+`taskbar_tip` is called at the end of the frame instead. Task buttons stay
+pictogram-only -- every button the same width is what lets nine of them read as
+a row -- and the tip is the third state between "no label" and "a label on
+every button". A window the bar had no room for now shows as a `+N` chip rather
+than being dropped in silence.
+
 `todo` (shell) and the ToDo window share one list. It is the hand-off
 note for what to test at the GF63, since the machine that builds this is a
 different machine from the one that runs it.
@@ -1333,7 +1355,13 @@ Four lessons already paid for. Do not relearn them:
   Alt-Tab land on a third window; scripts and habit both need over-and-back to
   be two presses. Headless recipe: every `win keys` line that drives an app must
   be self-contained, as in `alttab,...,alttab`, because between commands the
-  focused app would swallow the next line.
+  focused app would swallow the next line. **Alt-Shift-Tab is not the other
+  direction of that** -- a swap is its own inverse, so it would be the same
+  operation under a second name. It raises the *deepest* visible window
+  instead, which is the one plain Alt-Tab can never reach, and it is
+  `KEY_ALTTAB_BACK` rather than a modifier the desktop reads, because the
+  desktop is handed bytes and has no view of what is held down. `win prev` and
+  `win keys alt-shift-tab` are the typed forms.
 - **QEMU monitor `mouse_move` deltas must stay within +-255 per axis.** Bigger
   deltas set the PS/2 overflow bit and the driver correctly discards the
   packet, so the pointer simply does not move, which reads as a dead drag

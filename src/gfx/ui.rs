@@ -624,6 +624,7 @@ pub fn parse_keys(spec: &str) -> Vec<u8> {
             "tab" => b'\t',
             "backtab" | "shift-tab" => kbd::KEY_BACKTAB,
             "alttab" | "alt-tab" => kbd::KEY_ALTTAB,
+            "alttab-back" | "alt-shift-tab" => kbd::KEY_ALTTAB_BACK,
             "sysmenu" | "alt-space" => kbd::KEY_SYSMENU,
             "menu" | "alt" => kbd::KEY_MENU,
             "taskbar" | "ctrl-esc" => kbd::KEY_TASKBAR,
