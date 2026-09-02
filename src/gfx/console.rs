@@ -307,6 +307,16 @@ impl Console {
         // most recent lines off the bottom.
         if self.row >= rows {
             let drop = self.row + 1 - rows;
+            // Into the history rather than over the side. This is the boot
+            // handover: everything printed before the terminal had a window is
+            // in the grid, the window is smaller than the screen was, and the
+            // difference used to be discarded -- so the head of every boot log
+            // this system has ever produced was thrown away at the moment the
+            // desktop appeared, which is why scrolling back from a fresh boot
+            // found nothing to scroll to.
+            for r in 0..drop {
+                self.push_history(self.cells[r]);
+            }
             for r in 0..rows {
                 self.cells[r] = self.cells[r + drop];
             }
@@ -558,12 +568,7 @@ impl Console {
         // Kept before it is overwritten. It grows to `HISTORY` and is written
         // in place after that, so the steady state allocates nothing and moves
         // nothing -- the whole point of the index.
-        if self.history.len() < HISTORY {
-            self.history.push(self.cells[0]);
-        } else {
-            self.history[self.hist_next] = self.cells[0];
-        }
-        self.hist_next = (self.hist_next + 1) % HISTORY;
+        self.push_history(self.cells[0]);
 
         // A view that is not at the tail follows the content instead of the
         // window, and it costs nothing to do it: with one more row in the
@@ -674,6 +679,20 @@ impl Console {
         self.cells[self.row][self.col] = Cell::new(glyph, self.fg);
         self.draw_cell(self.row, self.col);
         self.col += 1;
+    }
+
+    /// Keep one row that has left the screen.
+    ///
+    /// It grows to `HISTORY` and is written in place after that, so the steady
+    /// state allocates nothing and moves nothing -- the whole point of the
+    /// index.
+    fn push_history(&mut self, row: [Cell; MAX_COLS]) {
+        if self.history.len() < HISTORY {
+            self.history.push(row);
+        } else {
+            self.history[self.hist_next] = row;
+        }
+        self.hist_next = (self.hist_next + 1) % HISTORY;
     }
 
     /// The row displayed at screen row `r`, which is not `cells[r]` while the

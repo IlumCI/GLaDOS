@@ -4032,6 +4032,22 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 // how the first test of an application deleted the item it had
                 // just added.
                 "term" => desk::focus_terminal(),
+                // Clearing the screen, and clearing the screen around one
+                // thing. Neither is the other with an argument, so they are
+                // two verbs. Minimised and not closed -- the terminal and the
+                // Program Manager are `closable: false`, and a command that
+                // destroyed the shell to tidy the screen would be one nobody
+                // could come back from.
+                "only" | "solo" => desk::minimise_others(),
+                "min" | "hide" => {
+                    if !desk::minimise_focused() {
+                        kprintln!("  nothing focused");
+                    }
+                }
+                "clear" | "none" => {
+                    desk::minimise_all();
+                    desk::draw();
+                }
                 // `win round [n]` -- the focused window's corner radius, 0 for
                 // a plain rectangle. Exposed on the shell rather than settled
                 // in the theme because whether rounded corners belong on a
@@ -4138,7 +4154,9 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 }
                 other => {
                     kprintln!("  no such action: {}", other);
-                    kprintln!("  usage: win [list|next|prev|scroll <n>|open <panel>|keys <spec>]");
+                    kprintln!(
+                        "  usage: win [list|next|prev|term|only|min|clear|scroll <n>|open <panel>|keys <spec>]"
+                    );
                     return;
                 }
             }

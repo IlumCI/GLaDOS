@@ -1106,6 +1106,39 @@ pub fn minimise_all() {
     });
 }
 
+/// Put every window away except the focused one.
+///
+/// The companion to `minimise_all`, and the reason it exists separately is
+/// that "clear the screen" and "clear the screen around *this*" are the two
+/// things anybody actually wants and neither is the other with an argument.
+/// Minimised, not closed, for the reason above: the terminal and the Program
+/// Manager are `closable: false`.
+pub fn minimise_others() {
+    with(|d| {
+        let f = d.focus();
+        for (i, w) in d.windows.iter_mut().enumerate() {
+            if Some(i) != f {
+                w.state = WinState::Minimised;
+            }
+        }
+    });
+    draw();
+}
+
+/// Put the focused window away.
+pub fn minimise_focused() -> bool {
+    let ok = with(|d| {
+        let Some(f) = d.focus() else { return false };
+        d.windows[f].state = WinState::Minimised;
+        true
+    })
+    .unwrap_or(false);
+    if ok {
+        draw();
+    }
+    ok
+}
+
 pub fn open_agentlog() {
     let (w, h) = super::agentwin::AgentLog::preferred();
     open_app("Agent", ICO_ORACLE, Box::new(super::agentwin::AgentLog::new()), w, h);
@@ -2728,10 +2761,17 @@ pub fn open_flourish() {
     for step in 0..OPEN_STEPS.saturating_sub(1) {
         let r = open_rect(to, step, OPEN_STEPS);
         draw();
-        let claimed = Claim::take();
-        if claimed.is_none() {
+        let Some(claimed) = Claim::take() else {
+            // The clock task has the painter. Give up on the animation rather
+            // than waiting for it -- but clear the flag first: leaving it set
+            // would make `draw` skip that window for the rest of the session,
+            // and the index would later name a different window entirely. A
+            // missed flourish is a window that appears instantly; a leaked
+            // flag is a window that never appears at all.
+            unsafe { *ARRIVING.get() = None };
+            draw();
             return;
-        }
+        };
         let back = super::compose::target().unwrap_or(fb);
         theme::window(&back, r, &title, true, false, false, None);
         super::compose::flush_rect(
