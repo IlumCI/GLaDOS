@@ -3996,6 +3996,33 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 // Alt and Shift, and a control with no typed form never gets
                 // tested.
                 "prev" => desk::cycle(true),
+                // The typed equivalent of the wheel over the terminal. Serial
+                // cannot inject PS/2 packets, so a scrollback reachable only
+                // by a wheel is a scrollback nothing ever checks -- the same
+                // reason `win keys` exists at all.
+                "scroll" => {
+                    let arg = it.next().unwrap_or("");
+                    let by: isize = match arg {
+                        "end" | "" => -(crate::gfx::console::view_of(
+                            crate::gfx::console::USER,
+                        ) as isize),
+                        n => n.parse().unwrap_or(0),
+                    };
+                    let moved = crate::gfx::console::scroll_view(
+                        crate::gfx::console::USER,
+                        by,
+                    );
+                    // Read *before* printing. `kprintln!` writes, and every
+                    // write snaps the view back to the tail -- so a message
+                    // that read the view while rendering itself would always
+                    // report zero, which is exactly what it did.
+                    let now = crate::gfx::console::view_of(crate::gfx::console::USER);
+                    let kept = crate::gfx::console::history_of(crate::gfx::console::USER);
+                    if moved {
+                        desk::draw();
+                    }
+                    kprintln!("  {} row(s) back of {} kept", now, kept);
+                }
                 // Focus the terminal without reaching for the mouse.
                 //
                 // `open` leaves the new window focused on purpose, which is
@@ -4111,7 +4138,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 }
                 other => {
                     kprintln!("  no such action: {}", other);
-                    kprintln!("  usage: win [list|next|open <panel>|keys <spec>]");
+                    kprintln!("  usage: win [list|next|prev|scroll <n>|open <panel>|keys <spec>]");
                     return;
                 }
             }

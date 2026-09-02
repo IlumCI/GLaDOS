@@ -2628,7 +2628,15 @@ fn terminal_status(fb: &super::Framebuffer, r: Rect) {
         // which is the half that changes and therefore the half worth seeing.
         let engine = crate::ai::glance::engine_line(g);
         let mind = if g.mind_on { "mind on" } else { "mind off" };
-        let right = alloc::format!("{}  |  {}", engine, mind);
+        // A terminal showing something other than its last line has to say so.
+        // Without it the only evidence is that nothing new appears, which reads
+        // as a hung machine rather than as a scrolled one.
+        let back = super::console::view_of(super::console::USER);
+        let right = if back > 0 {
+            alloc::format!("^ {} back  |  {}  |  {}", back, engine, mind)
+        } else {
+            alloc::format!("{}  |  {}", engine, mind)
+        };
         let w = theme::text_w_at(right.chars().count(), 1);
         if r.w > w + 24 {
             let x = r.x + r.w - w - 6;
@@ -3069,6 +3077,9 @@ fn wheel_at(x: i32, y: i32, notches: i32) {
         // over a launcher or a checklist means.
         Content::Panel(p) => p.wheel(notches),
         Content::App(a) => a.wheel(notches),
+        // Up is back, which is the direction every terminal has agreed on.
+        // Three rows a notch, matching the log windows.
+        Content::Terminal(ch) => super::console::scroll_view(*ch, (notches * 3) as isize),
         _ => false,
     })
     .unwrap_or(false);

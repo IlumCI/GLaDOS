@@ -87,6 +87,15 @@ impl Cell {
 
 const BLANK: Cell = Cell::new(font::SPACE, LTGRAY);
 
+/// How many scrolled-off rows are kept.
+///
+/// 512 rows of 128 two-byte cells is 128 KB, which against a 320 MiB first
+/// heap region is nothing, and against the boot stack -- where the fixed grid
+/// lives and where this deliberately does not -- would have been everything.
+/// Seven screens at the terminal's usual height, which is the length of a
+/// `diag all` and the reason the number is not smaller.
+const HISTORY: usize = 512;
+
 /// Twelve bits of index and four of colour. Asserted rather than remembered:
 /// adding the three-hundredth glyph is safe and adding the four-thousandth is
 /// not, and the failure is silent corruption of every cell rather than an
@@ -205,6 +214,28 @@ pub struct Console {
     /// erasing "wherever the cursor is now" would leave the old caret on
     /// screen and blank a character that was never covered.
     caret: Option<(usize, usize)>,
+    /// Rows that have scrolled off the top, oldest first.
+    ///
+    /// A heap `Vec` and not a second fixed array, and the distinction is about
+    /// *when* rather than about memory. `console::init` runs twelve lines
+    /// before `cpu::idt::init`, at a point in boot where a fault is a silent
+    /// triple fault -- no message, no register dump, an instant reboot -- and
+    /// the fixed `[[Cell; 128]; 72]` sizing is called load-bearing in its own
+    /// comment for exactly that reason. So this is allocated on the first
+    /// scroll and never during construction: by the time a row falls off the
+    /// top the heap has been up for a long time, and if the allocation fails
+    /// the console behaves precisely as it did before there was one.
+    history: alloc::vec::Vec<[Cell; MAX_COLS]>,
+    /// Where the next scrolled-off row goes.
+    ///
+    /// A ring rather than a queue, because a queue's `remove(0)` is a 128 KB
+    /// memmove *per scrolled row* once the buffer is full -- about 13 us a row
+    /// on a path that runs hundreds of times during a `diag all`, to discard
+    /// one row. The index costs one modulo in `row_at` and nothing anywhere
+    /// else.
+    hist_next: usize,
+    /// How many rows back the view is. Zero is the live tail.
+    view: usize,
     /// False while the boot screen owns the framebuffer.
     visible: bool,
     /// Half-decoded multi-byte character, if the last byte was inside one.
@@ -241,6 +272,9 @@ impl Console {
             bg,
             scale,
             caret: None,
+            history: alloc::vec::Vec::new(),
+            hist_next: 0,
+            view: 0,
             ox: x,
             oy: y,
             visible: true,
@@ -286,6 +320,7 @@ impl Console {
         self.col = self.col.min(cols.saturating_sub(1));
         self.ox = x;
         self.oy = y;
+        self.view = self.view.min(rows.saturating_sub(1));
         self.drop_caret();
     }
 
@@ -309,6 +344,7 @@ impl Console {
         }
         self.col = 0;
         self.row = 0;
+        self.view = 0;
         self.drop_caret();
         if self.visible {
             // The grid's own rectangle, not the panel: clearing the screen must
@@ -369,6 +405,11 @@ impl Console {
             return;
         }
         let Some((r, c)) = self.caret else { return };
+        // The caret's row is a *grid* row, and while the view is scrolled back
+        // the grid is drawn lower down -- so it moves with what it belongs to,
+        // and off the bottom is off the screen rather than clamped to the last
+        // row, where it would sit under a line it has nothing to do with.
+        let r = r + self.view;
         if r >= self.rows || c >= self.cols {
             return;
         }
@@ -384,7 +425,12 @@ impl Console {
 
     /// Paint one cell, and tell the compositor about it.
     fn draw_cell(&self, r: usize, c: usize) {
-        if !self.visible {
+        if !self.visible || self.view > 0 {
+            // Scrolled back, the live grid is below the bottom of the window.
+            // The cell is in the grid either way -- `redraw_all` will paint it
+            // when the view comes home -- and painting it *here* would put it
+            // at the screen row of its grid index, over whatever the view is
+            // actually showing there.
             return;
         }
         self.paint_cell(r, c);
@@ -408,7 +454,20 @@ impl Console {
         if !self.visible {
             return;
         }
-        let cell = self.cells[r][c];
+        self.paint_at(r, c, self.cells[r][c]);
+    }
+
+    /// The pixels for one cell's worth of content at one screen position.
+    ///
+    /// Split from `paint_cell` because a scrolled-back row is not in the grid
+    /// at the row it is drawn at -- `cells[r]` and "what is on screen at row r"
+    /// stopped being the same thing the moment there was a history to look
+    /// into, and a paint path that indexed the grid directly would silently
+    /// draw the live tail underneath the view.
+    fn paint_at(&self, r: usize, c: usize, cell: Cell) {
+        if !self.visible {
+            return;
+        }
         let rows = font::rows(cell.glyph());
         let fg = self.fb.encode(PALETTE[cell.fg() as usize]);
         let bg = self.fb.encode(self.bg);
@@ -471,11 +530,12 @@ impl Console {
         let (w, h) = self.pixel_size();
         self.fb.rect(self.ox, self.oy, w, h, self.bg);
         for r in 0..self.rows {
+            let row = self.row_at(r);
             for c in 0..self.cols {
-                if self.cells[r][c].glyph() == font::SPACE {
+                if row[c].glyph() == font::SPACE {
                     continue;
                 }
-                self.paint_cell(r, c);
+                self.paint_at(r, c, row[c]);
             }
         }
         // Last, so it is over the cell rather than under it -- a total
@@ -495,6 +555,32 @@ impl Console {
         // screen. Erased and not dropped: `scroll_rect` shifts pixels, so a
         // caret left painted would ride up the screen a row at a time.
         self.erase_caret();
+        // Kept before it is overwritten. It grows to `HISTORY` and is written
+        // in place after that, so the steady state allocates nothing and moves
+        // nothing -- the whole point of the index.
+        if self.history.len() < HISTORY {
+            self.history.push(self.cells[0]);
+        } else {
+            self.history[self.hist_next] = self.cells[0];
+        }
+        self.hist_next = (self.hist_next + 1) % HISTORY;
+
+        // A view that is not at the tail follows the content instead of the
+        // window, and it costs nothing to do it: with one more row in the
+        // history and the view one further back, `row_at` resolves every
+        // screen row to exactly the row it resolved to before -- the history
+        // grew by one at the end and the view grew by one at the start, and
+        // they cancel. So there is no repaint here, and none is needed.
+        //
+        // At the cap it cannot follow any further, and then the display really
+        // does move: `redraw_all` at the end, because the pixel shift below is
+        // about the live grid and the screen is not showing that.
+        let cap = self.rows.saturating_sub(1);
+        let held = self.view > 0 && self.view < cap;
+        if held {
+            self.view += 1;
+        }
+
         for r in 1..self.rows {
             self.cells[r - 1] = self.cells[r];
         }
@@ -509,7 +595,11 @@ impl Console {
         // whole number of rows, and the console now has a window frame beside
         // it that must not be dragged upwards.
         let cell_h = font::GLYPH_H * self.scale;
-        if self.visible {
+        if held {
+            // Nothing moved on screen. See above.
+        } else if self.view > 0 {
+            self.redraw_all();
+        } else if self.visible {
             let (w, h) = self.pixel_size();
             self.fb.scroll_rect(self.ox, self.oy, w, h, cell_h, self.bg);
             if self.flush {
@@ -586,12 +676,85 @@ impl Console {
         self.col += 1;
     }
 
+    /// The row displayed at screen row `r`, which is not `cells[r]` while the
+    /// view is scrolled back.
+    ///
+    /// One function, so `redraw_all` cannot disagree with anything else about
+    /// what is on screen. The split is exact: the first `view` rows come from
+    /// the tail of the history and the rest from the top of the live grid, so
+    /// scrolling back by one shows one remembered row and loses one live one.
+    fn row_at(&self, r: usize) -> &[Cell; MAX_COLS] {
+        if r < self.view {
+            let cap = self.history.len();
+            if cap == 0 {
+                return &self.cells[0];
+            }
+            // `back` counts from the newest, so 1 is the row that just left the
+            // screen. One expression for both phases of the ring: while it is
+            // still growing `hist_next == cap`, and `(cap + cap - back) % cap`
+            // is `cap - back`, which is what a plain queue would have given.
+            let back = (self.view - r).min(cap);
+            return &self.history[(self.hist_next + cap - back) % cap];
+        }
+        &self.cells[r - self.view]
+    }
+
+    /// Move the view. Positive is back into the history.
+    ///
+    /// Answers whether it moved, so a caller does not repaint for a wheel
+    /// notch at the end of the log -- which is most of them, since a wheel is
+    /// spun until it stops doing anything.
+    pub fn scroll_view(&mut self, by: isize) -> bool {
+        // Never past the point where the live grid would leave the screen
+        // entirely, and never past what is remembered.
+        let cap = self.history.len().min(self.rows.saturating_sub(1));
+        let next = (self.view as isize + by).clamp(0, cap as isize) as usize;
+        if next == self.view {
+            return false;
+        }
+        self.view = next;
+        true
+    }
+
+    pub fn view(&self) -> usize {
+        self.view
+    }
+
+    pub fn history_len(&self) -> usize {
+        self.history.len()
+    }
+
+    /// Back to the live tail, answering whether it had to move.
+    ///
+    /// Every path that writes calls this. A terminal that stayed where it was
+    /// put while output arrived would hide the thing the operator is waiting
+    /// for, and worse, `draw_cell` paints `cells[r]` at screen row `r` with no
+    /// notion of the view at all -- so a character echoed while scrolled back
+    /// would land in the wrong row.
+    fn to_tail(&mut self) -> bool {
+        if self.view == 0 {
+            return false;
+        }
+        self.view = 0;
+        true
+    }
+
     /// Move the cursor within the current row without disturbing what is drawn.
     ///
     /// Backspace erases, which is right for typing but wrong for a line editor
     /// that needs to reposition and redraw. This is the primitive that makes
     /// arrow keys possible.
     pub fn set_col(&mut self, col: usize) {
+        // A keystroke returns to the live tail; output does not. That is what
+        // every terminal does, and here it is also the only arrangement that
+        // works: the line editor echoes through `draw_cell`, which paints a
+        // grid row at the screen row of the same number, so a character typed
+        // while scrolled back would land in a row it has nothing to do with.
+        // Output has `scroll` below, which keeps the view without repainting
+        // anything at all.
+        if self.to_tail() {
+            self.redraw_all();
+        }
         self.col = col.min(self.cols.saturating_sub(1));
         self.move_caret();
     }
@@ -620,9 +783,12 @@ impl Console {
             return 0;
         }
         for (r, slot) in out.iter_mut().enumerate().take(self.rows) {
-            *slot = r < self.rows
-                && want.len() <= self.cols
-                && want.iter().enumerate().all(|(c, g)| self.cells[r][c].glyph() == *g);
+            // Through the view, like everything else that answers "what is on
+            // screen": scrolled back, the live grid's rows are somewhere else
+            // and marking them would tick rows that say nothing.
+            let row = self.row_at(r);
+            *slot = want.len() <= self.cols
+                && want.iter().enumerate().all(|(c, g)| row[c].glyph() == *g);
         }
         font::GLYPH_H * self.scale
     }
@@ -838,6 +1004,27 @@ pub fn redraw_ch(ch: usize) {
 
 pub fn set_color(fg: u8) {
     with(|c| c.set_color(fg));
+}
+
+/// Move the main terminal's view. Answers whether anything moved.
+pub fn scroll_view(ch: usize, by: isize) -> bool {
+    let mut moved = false;
+    with_ch(ch, |c| moved = c.scroll_view(by));
+    moved
+}
+
+/// How many scrolled-off rows the given console has kept.
+pub fn history_of(ch: usize) -> usize {
+    let mut n = 0;
+    with_ch(ch, |c| n = c.history_len());
+    n
+}
+
+/// How far back the given console is looking.
+pub fn view_of(ch: usize) -> usize {
+    let mut n = 0;
+    with_ch(ch, |c| n = c.view());
+    n
 }
 
 pub fn set_col(col: usize) {

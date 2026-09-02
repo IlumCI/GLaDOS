@@ -1591,6 +1591,33 @@ not as an accented e. Anything with no glyph draws a hollow box, deliberately,
 because a font that quietly substituted something close would be lying about
 what it has.
 
+**The terminal has a scrollback, and the view is not the grid.** 512 rows in a
+heap ring, allocated on the *first scroll* and never in `console::init` --
+which runs twelve lines before `cpu::idt::init`, where a fault is a silent
+triple fault and where the fixed `[[Cell; 128]; 72]` sizing is load-bearing for
+that reason. If the allocation fails the console behaves exactly as it did
+before there was one.
+
+`row_at` is the one answer to "what is on screen at row r", and everything that
+draws goes through it, because `cells[r]` and screen row `r` stopped being the
+same thing. `draw_cell` refuses while the view is back -- a character echoed
+then would land in a row it has nothing to do with -- and `rows_starting`, the
+caret and the status strip all read through the view too.
+
+**Output does not yank the view to the bottom; a keystroke does.** That is what
+every terminal does and here it is also free: when a row scrolls off while the
+view is back, the history grows by one at the end and the view grows by one at
+the start, and `row_at` resolves every screen row to exactly what it resolved
+to before. Nothing is repainted because nothing moved. At the cap it cannot
+follow any further and `redraw_all` runs instead. `set_col` is the keystroke
+path, since the shell's `redraw` ends with it.
+
+`win scroll <n|end>` is the typed equivalent, and it exists for the reason
+`win keys` does: serial cannot inject PS/2 packets, so a scrollback reachable
+only by a wheel is one nothing ever checks. Note it must read the view
+**before** printing -- `kprintln!` writes, and the first version reported zero
+every time because the message snapped the view home while rendering itself.
+
 **A byte count stopped being a column count, and that broke code that had
 been right for years.** Truncating a label with `&s[..room]` where `room` is a
 column count does not produce a mangled label, it panics.
