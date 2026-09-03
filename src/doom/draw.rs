@@ -277,3 +277,55 @@ pub fn flat(surf: &mut Surface, pixels: &[u8], playpal: &[u8]) -> Option<usize> 
     }
     Some(zoom)
 }
+
+/// One sprite, blown up, over a background that is obviously not part of it.
+///
+/// The check `texture` and `flat` cannot make: a sprite is mostly *hole*, so a
+/// decoder that filled the bounding box draws a rectangle where a barrel
+/// should be, and one that lost the two pad bytes shears each post by a row.
+/// Both are invisible on a wall texture, which is opaque everywhere.
+///
+/// The origin is marked, because `left` and `top` are the two fields a wall
+/// never reads and the two a billboard is placed by.
+pub fn sprite(surf: &mut Surface, p: &super::pic::Patch, playpal: &[u8]) {
+    surf.set_palette_rgb(playpal);
+    let back = nearest(playpal, 0x28, 0x00, 0x00);
+    surf.clear(back);
+    let (w, h) = (surf.width(), surf.height());
+    if p.width == 0 || p.height == 0 {
+        return;
+    }
+    let zoom = (w / p.width).min(h / p.height).max(1);
+    let (dw, dh) = (p.width * zoom, p.height * zoom);
+    let (ox, oy) = ((w.saturating_sub(dw)) / 2, (h.saturating_sub(dh)) / 2);
+
+    for (cx, posts) in p.columns.iter().enumerate() {
+        for post in posts.iter() {
+            for (i, v) in post.pixels.iter().enumerate() {
+                for zy in 0..zoom {
+                    for zx in 0..zoom {
+                        let px_ = ox + cx * zoom + zx;
+                        let py_ = oy + (post.top + i) * zoom + zy;
+                        if px_ < w && py_ < h {
+                            let k = py_ * w + px_;
+                            surf.pixels()[k] = *v;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // The origin: where the thing's own position lands in the picture. A
+    // cross rather than a dot, so it is legible over whatever is behind it.
+    let mark = nearest(playpal, 0xFF, 0xFF, 0x00);
+    let (gx, gy) = (ox + p.left.max(0) as usize * zoom, oy + p.top.max(0) as usize * zoom);
+    for d in 0..6usize {
+        for (a, b) in [(gx + d, gy), (gx.saturating_sub(d), gy), (gx, gy + d), (gx, gy.saturating_sub(d))] {
+            if a < w && b < h {
+                let k = b * w + a;
+                surf.pixels()[k] = mark;
+            }
+        }
+    }
+}

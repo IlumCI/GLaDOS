@@ -18,8 +18,11 @@ two halves of one bug agreeing. Same bargain `tokenizer.py --verify` makes.
 WHAT THE MAP IS, AND WHAT IT IS NOT
 --------------------------------------------------------------------------
 
-`E1M1` is a single square room, 1024 units on a side, one sector, floor at 0
-and ceiling at 128, with a player 1 start at the origin facing north.
+`E1M1` is a single convex room -- a hexagon about 1024 units across, one
+sector, floor at 0 and ceiling at 128 -- with a player 1 start at the origin
+facing north, two barrels and a floor lamp. It said "square" here for a while
+and the paragraph below said six vertices, which is the sort of disagreement
+that costs somebody an afternoon.
 
 It is a **complete** map in the sense that every lump vanilla expects is
 present and structurally valid: THINGS, LINEDEFS, SIDEDEFS, VERTEXES, SEGS,
@@ -31,6 +34,22 @@ what it can be used for. The room is six vertices rather than four so that a
 vertical partition through the middle splits it into two convex halves without
 having to split any wall: three walls fall either side, one node, two
 subsectors, and node traversal is genuinely exercised.
+
+**Every picture in this file is generated here and none of it is id's.**
+Stating it at the top because the distinction is easy to lose: what was
+*ported* into the kernel is the code that reads DOOM's formats -- the patch
+column-and-post decoder, the TEXTURE1/PNAMES reader, the flat and sprite
+namespaces. What is written *here* is test art in those formats, drawn by the
+functions below. It looks like a test pattern because it is one: a green corner
+marker, mortar joins offset course by course, a transparent hole, a wedge that
+is asymmetric under both a transpose and a mirror. Each exists to make one
+specific decoding mistake visible, and none of it is meant to be looked at for
+its own sake.
+
+DOOM's own art is not in this repository and cannot be. Load an IWAD or
+FreeDoom to see the real thing; the renderer needs no change for it, and that
+claim is **untested**, because there is no WAD on the machine this was built
+on.
 
 **Three things it does not have, said here so they are not diagnosed as
 renderer bugs later:**
@@ -413,6 +432,87 @@ def flat_lumps():
     return out
 
 
+# --------------------------------------------------------------------------
+# Sprites
+# --------------------------------------------------------------------------
+#
+# A sprite is a patch -- the same column-and-post encoding a wall texture is
+# built from -- living in its own namespace and named by a convention rather
+# than by a directory: four characters of sprite name, a frame letter, and a
+# rotation digit. `BAR1A0` is sprite BAR1, frame A, rotation 0, and rotation 0
+# means "this picture from every angle", which is what every item and every
+# piece of scenery uses.
+#
+# Two fields matter here that a wall texture never reads, and both are in the
+# patch header this file already writes:
+#
+#   * **`left`** is how far the sprite's *centre* is from its left edge. A
+#     renderer that ignores it hangs every sprite off to one side by half its
+#     width, which on a symmetric picture looks like a positioning bug
+#     somewhere else entirely.
+#   * **`top`** is how far the sprite's *origin* is below its top edge, and the
+#     origin sits at the thing's feet. So for something standing on the floor
+#     it is the full height, and getting it wrong sinks every object into the
+#     ground or floats it.
+#
+# So the pictures here are asymmetric left-to-right on purpose, and they do not
+# fill their own bounding box -- a sprite that was a solid rectangle would say
+# nothing about whether transparency survived the trip.
+
+SPRITE_W, SPRITE_H = 48, 64
+
+
+def barrel_pixel(x, y):
+    """A drum with a bite out of one side, so a mirror shows and a column
+    can hold more than one post."""
+    # The body: an oval, so the corners of the patch are transparent and the
+    # post encoding has to describe a different run in every column.
+    cx, cy = SPRITE_W / 2.0, SPRITE_H / 2.0
+    dx, dy = (x - cx) / 20.0, (y - cy) / 30.0
+    if dx * dx + dy * dy > 1.0:
+        return TRANSPARENT
+    # A bite out of the right side. Two jobs: it is the asymmetry that makes a
+    # mirrored sprite obvious, and it is the only thing here that puts *two*
+    # posts in one column -- an oval gives every column a single run, so a
+    # decoder that read one post per column and stopped would draw this
+    # perfectly.
+    if 30 <= x < 40 and 22 <= y < 34:
+        return TRANSPARENT
+    # Hoops, so a vertically squashed sprite is obvious.
+    if y % 16 < 3:
+        return _idx(7, 13)
+    # A highlight down the left of the body, which is the other half of
+    # telling a mirror: the lit side and the handle are on opposite sides.
+    if x < cx - 6:
+        return _idx(1, 11 - (y * 4 // SPRITE_H))
+    return _idx(1, 7 - (y * 4 // SPRITE_H))
+
+
+def lamp_pixel(x, y):
+    """A column with a lit top: tall, thin, and nothing like the barrel."""
+    if 20 <= x < 28:
+        return _idx(0, 4 + (y * 6 // SPRITE_H))
+    if y < 12 and 14 <= x < 34:
+        return _idx(4, 15 - y)
+    return TRANSPARENT
+
+
+# `left` is half the width, so the sprite is centred on the thing. `top` is the
+# full height, so the bottom edge sits on the floor.
+SPRITES = [
+    ("BAR1A0", barrel_pixel, SPRITE_W // 2, SPRITE_H),
+    ("COLUA0", lamp_pixel, SPRITE_W // 2, SPRITE_H),
+]
+
+
+def sprite_lumps():
+    out = [("S_START", b"")]
+    for n, fn, left, top in SPRITES:
+        out.append((n, make_patch(SPRITE_W, SPRITE_H, fn, left, top)))
+    out.append(("S_END", b""))
+    return out
+
+
 def texture_lumps():
     names = [n for n, _ in PATCHES]
     out = [
@@ -470,14 +570,34 @@ def bam(x0, y0, x1, y1):
     return int(round(a / (2 * math.pi) * 65536)) & 0xFFFF
 
 
-def build_things():
-    # type 1 is the player 1 start; angle is in degrees with 90 as north;
-    # flags 7 is "present on all three skill levels".
-    return struct.pack("<hhhhh", 0, 0, 90, 1, 7)
-
-
 def build_vertexes():
     return b"".join(struct.pack("<hh", x, y) for x, y in VERTEXES)
+
+
+# The player start, plus scenery to look at. Positions are inside the hexagon
+# (radius 512) and off-axis, so a sprite that is drawn at the wrong world point
+# does not land somewhere that happens to look plausible.
+#
+# 2035 is a barrel and 2028 a floor lamp, which are the doomednums every DOOM
+# map uses for them -- the mapping from that number to a sprite name is the
+# kernel's table, and using the real numbers is what makes the table testable
+# with something other than itself.
+THINGS = [
+    (0, 0, 90, 1),          # the player, facing north
+    (0, 260, 0, 2035),      # a barrel straight ahead
+    (180, 200, 0, 2035),    # one off to the right
+    (-220, 150, 0, 2028),   # a lamp off to the left
+]
+
+
+def build_things():
+    out = b""
+    for (x, y, ang, kind) in THINGS:
+        # Flag 7 is "on every skill level"; a thing with no skill flags is
+        # invisible in play, which would make an absent sprite and a filtered
+        # thing look exactly alike.
+        out += struct.pack("<hhhhh", x, y, ang, kind, 7)
+    return out
 
 
 def build_linedefs():
@@ -631,6 +751,7 @@ def all_lumps():
         [("PLAYPAL", playpal()), ("COLORMAP", colormap())]
         + texture_lumps()
         + flat_lumps()
+        + sprite_lumps()
         + map_lumps()
         # Two with one name, to exercise the rule that a lookup searches from
         # the end and the later one wins.

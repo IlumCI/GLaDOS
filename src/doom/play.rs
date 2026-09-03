@@ -215,10 +215,12 @@ pub struct Stats {
 /// a serial line and sends the next command when it sees a prompt, so a
 /// program that runs until a keypress can never be tested -- the keystroke
 /// that would end it is the one thing the harness cannot deliver.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     surf: &mut Surface,
     lv: &Level,
     art: &Art<'_>,
+    things: &[super::sprite::Billboard],
     limit_ms: u64,
     script: &[u8],
 ) -> Option<Stats> {
@@ -226,6 +228,11 @@ pub fn run(
     surf.set_palette_rgb(art.playpal);
     let sky = super::draw::nearest(art.playpal, 0x10, 0x18, 0x60);
     let mut r = Renderer::new(surf, art);
+    // The same projection scale the walls use: a 90-degree field of view, so
+    // half the width. Read once rather than per frame, and from the surface
+    // rather than from a constant, because a different resolution would give
+    // the sprites a different field of view from the geometry.
+    let surf_scale = surf.width() as f32 / 2.0;
 
     // Anything held when the game started belongs to whoever was typing, not
     // to the player.
@@ -267,7 +274,9 @@ pub fn run(
             next_tic = now + TIC_US;
         }
 
-        r.frame(surf, lv, art, p.view(), sky);
+        let v = p.view();
+        r.frame(surf, lv, art, v, sky);
+        r.things(surf, things, &v, surf_scale);
         surf.present();
         stats.frames += 1;
 

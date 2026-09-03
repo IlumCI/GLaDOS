@@ -99,6 +99,25 @@ pub struct Renderer {
     pub lit_from_wad: bool,
     /// How many columns are still open, so a full screen can stop the walk.
     open: usize,
+    /// Distance at which each column was closed by a solid surface, or
+    /// infinity where nothing closed it.
+    ///
+    /// Sprites are drawn after the walk and need to know what is in front of
+    /// them, and the per-column window cannot say: `top`/`bot` record *where*
+    /// a column is still open and never *how far away* the thing that narrowed
+    /// it was. One distance per column is the cheapest record that answers the
+    /// question at all.
+    solid: alloc::vec::Vec<f32>,
+    /// The window each column was left with, saved before `close` wipes it.
+    ///
+    /// A doorway narrows a column without closing it, and a sprite beyond the
+    /// doorway must not be drawn over its frame. Keeping the final opening
+    /// alongside the distance that produced it covers that: past `near`, a
+    /// sprite is only visible inside the opening.
+    win_top: alloc::vec::Vec<i32>,
+    win_bot: alloc::vec::Vec<i32>,
+    /// Distance of the nearest surface that narrowed each column at all.
+    near: alloc::vec::Vec<f32>,
 }
 
 impl Renderer {
@@ -165,6 +184,10 @@ impl Renderer {
             light,
             lit_from_wad: from_wad.is_some(),
             open: w,
+            solid: alloc::vec![f32::INFINITY; w],
+            win_top: alloc::vec![0; w],
+            win_bot: alloc::vec![h as i32 - 1; w],
+            near: alloc::vec![f32::INFINITY; w],
         }
     }
 
@@ -172,6 +195,10 @@ impl Renderer {
         for x in 0..self.w {
             self.top[x] = 0;
             self.bot[x] = self.h as i32 - 1;
+            self.solid[x] = f32::INFINITY;
+            self.near[x] = f32::INFINITY;
+            self.win_top[x] = 0;
+            self.win_bot[x] = self.h as i32 - 1;
         }
         self.open = self.w;
     }
@@ -198,6 +225,7 @@ impl Renderer {
         let scale = self.w as f32 / 2.0;
         let (sin, cos) = (math::sin(view.angle), math::cos(view.angle));
         self.walk(surf, lv, art, &view, lv.root(), sin, cos, scale);
+        self.record_windows();
     }
 
     /// The BSP, near side first.
@@ -439,6 +467,10 @@ impl Renderer {
             match back {
                 // A solid wall: it fills the column and closes it.
                 None => {
+                    // Nothing behind a solid wall is ever visible in this
+                    // column again, which is what a sprite needs to know.
+                    self.solid[x as usize] = self.solid[x as usize].min(dist);
+                    self.near[x as usize] = self.near[x as usize].min(dist);
                     match mid_t {
                         Some(tex) => self.tex_fill(
                             surf, pics, tex, x, wall_top, wall_bot, u, mid_anchor, view.z, dist,
@@ -460,6 +492,7 @@ impl Renderer {
                 // would seal every open doorway that happens to name one.
                 Some(b) => {
                     let mut closed = true;
+                    self.near[x as usize] = self.near[x as usize].min(dist);
                     if b.ceiling < front.ceiling {
                         let step_bot = y_of(b.ceiling as f32);
                         match up_t {
@@ -646,5 +679,115 @@ impl Renderer {
         }
         self.top[x as usize] = 1;
         self.bot[x as usize] = 0;
+    }
+
+    /// Keep what each column was left open to, for the sprite pass.
+    fn record_windows(&mut self) {
+        for x in 0..self.w {
+            if self.top[x] <= self.bot[x] {
+                self.win_top[x] = self.top[x];
+                self.win_bot[x] = self.bot[x];
+            }
+        }
+    }
+
+    /// Every thing on the level, back to front, over the world already drawn.
+    ///
+    /// After the walls rather than during, because a billboard is not part of
+    /// the BSP and has no place in a front-to-back order -- two sprites in one
+    /// subsector can be any way round. So they are sorted by distance and
+    /// painted far to near, which is the one place this renderer overdraws
+    /// and the reason DOOM calls them *masked* rather than solid.
+    pub fn things(
+        &mut self,
+        surf: &mut Surface,
+        billboards: &[super::sprite::Billboard],
+        view: &View,
+        scale: f32,
+    ) {
+        let (sin, cos) = (math::sin(view.angle), math::cos(view.angle));
+        // Depth per thing, computed once, so the sort compares numbers rather
+        // than recomputing a transform per comparison.
+        let mut order: alloc::vec::Vec<(usize, f32)> = alloc::vec::Vec::new();
+        for (i, b) in billboards.iter().enumerate() {
+            let (dx, dy) = (b.x - view.x, b.y - view.y);
+            let depth = dx * cos + dy * sin;
+            if depth > NEAR {
+                order.push((i, depth));
+            }
+        }
+        // Far to near. `total_cmp` rather than `partial_cmp`, because a NaN
+        // depth would make the comparator inconsistent and the sort's contract
+        // is not defined for one -- and a NaN here would come from a thing at
+        // exactly the eye, which the near-plane test above does not exclude.
+        order.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+
+        for (i, depth) in order {
+            let b = &billboards[i];
+            let (dx, dy) = (b.x - view.x, b.y - view.y);
+            let lat = dx * sin - dy * cos;
+            let inv = 1.0 / depth;
+            let (cx, cy) = (self.w as f32 / 2.0, self.h as f32 / 2.0);
+            let px_per_unit = scale * inv;
+
+            // `left` is the distance from the picture's left edge to the
+            // thing's own centre, and `top` from its top edge down to the
+            // thing's feet. Ignoring either is not subtle: the first hangs
+            // every object half its width to one side, the second buries it
+            // in the floor or floats it.
+            let x1f = cx + (lat - b.patch.left as f32) * px_per_unit;
+            let gzt = b.z + b.patch.top as f32;
+            let y1f = cy - (gzt - view.z) * px_per_unit;
+
+            let xa = x1f.max(0.0) as i32;
+            let xb = ((x1f + b.patch.width as f32 * px_per_unit) as i32).min(self.w as i32 - 1);
+            if xb < xa {
+                continue;
+            }
+            let lit = Self::level(depth, b.light);
+            for x in xa..=xb {
+                // Behind a solid wall in this column, or behind something that
+                // narrowed it and outside what it left open.
+                if depth >= self.solid[x as usize] {
+                    continue;
+                }
+                let clipped = depth >= self.near[x as usize];
+                let col_i = ((x as f32 + 0.5 - x1f) / px_per_unit) as usize;
+                let Some(posts) = b.patch.columns.get(col_i) else { continue };
+                // Walk the *destination* rows and ask each which source row it
+                // wants, rather than walking the source and placing each one.
+                // The two agree only while a sprite is being shrunk: magnify
+                // one and consecutive source rows land more than a pixel
+                // apart, so the sprite comes out combed with background
+                // showing between its own scanlines. It is invisible at any
+                // distance a test map happens to place an object at and
+                // obvious the moment you walk up to it.
+                let y_lo = y1f.max(0.0) as i32;
+                let y_hi = ((y1f + b.patch.height as f32 * px_per_unit)
+                    .min(self.h as f32 - 1.0)) as i32;
+                for y in y_lo..=y_hi {
+                    if y < 0 {
+                        continue;
+                    }
+                    if clipped && (y < self.win_top[x as usize] || y > self.win_bot[x as usize]) {
+                        continue;
+                    }
+                    let src = ((y as f32 + 0.5 - y1f) / px_per_unit) as usize;
+                    // Which post covers that row, if any. A sprite is mostly
+                    // hole, so most rows of most columns land in no post at
+                    // all and are simply left alone -- that is the whole of
+                    // what makes a billboard masked rather than a rectangle.
+                    for post in posts.iter() {
+                        if src >= post.top && src < post.top + post.pixels.len() {
+                            let v = post.pixels[src - post.top];
+                            let c = self.light[lit][v as usize];
+                            let w = self.w;
+                            surf.pixels()[y as usize * w + x as usize] = c;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
     }
 }

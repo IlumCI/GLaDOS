@@ -58,6 +58,7 @@ pub mod math;
 pub mod pic;
 pub mod play;
 pub mod render;
+pub mod sprite;
 pub mod level;
 pub mod wad;
 

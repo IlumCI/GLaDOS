@@ -337,6 +337,9 @@ pub enum Mark {
     Close,
     /// A lump the right size to be a flat.
     Flat,
+    /// A marker opening or closing *some other* namespace.
+    ForeignOpen,
+    ForeignClose,
     Other,
 }
 
@@ -358,12 +361,13 @@ pub enum Mark {
 /// * **Exactly 4096 bytes.** A flat has no header at all, so its size is the
 ///   only test there is.
 pub fn classify(name: &str, empty: bool, len: usize) -> Mark {
-    if empty && name.starts_with('F') {
+    if empty {
+        let f = name.starts_with('F');
         if name.ends_with("_START") {
-            return Mark::Open;
+            return if f { Mark::Open } else { Mark::ForeignOpen };
         }
         if name.ends_with("_END") {
-            return Mark::Close;
+            return if f { Mark::Close } else { Mark::ForeignClose };
         }
     }
     if len == FLAT_BYTES {
@@ -410,6 +414,12 @@ impl Flats {
         let mut data = Vec::new();
         let mut loose = Vec::new();
         let mut depth = 0usize;
+        // How deep inside somebody else's namespace we are. A sprite is a
+        // patch and a patch can be any size, so one that happens to be exactly
+        // 4096 bytes would otherwise be adopted here as a stray flat -- which
+        // is precisely the name collision the loose list's own doc warns
+        // about, arriving from the one direction it did not guard.
+        let mut foreign = 0usize;
         let mut marked = false;
         for i in 0..wad.len() {
             let Some(e) = wad.at(i) else { continue };
@@ -419,14 +429,18 @@ impl Flats {
                     marked = true;
                 }
                 Mark::Close => depth = depth.saturating_sub(1),
+                Mark::ForeignOpen => foreign += 1,
+                Mark::ForeignClose => foreign = foreign.saturating_sub(1),
                 Mark::Flat if depth > 0 => {
                     names.push(e.name);
                     data.push(wad.data(e));
                 }
-                // Right size, no namespace. Kept separately and consulted only
-                // after the namespace, because 4096 bytes is the whole of the
-                // test available -- a flat has no header at all -- and a name
-                // can legitimately belong to something else.
+                // Right size, and somebody else has claimed it. Not a flat.
+                Mark::Flat if foreign > 0 => {}
+                // Right size, no namespace at all. Kept separately and
+                // consulted only after the namespace, because 4096 bytes is
+                // the whole of the test available -- a flat has no header --
+                // and a name can legitimately belong to something else.
                 Mark::Flat => loose.push((e.name, wad.data(e))),
                 Mark::Other => {}
             }
@@ -663,10 +677,10 @@ pub fn checks() -> Vec<(&'static str, bool)> {
             && classify("F2_END", true, 0) == Mark::Close,
     ));
     out.push((
-        "a sprite or patch marker does not",
-        classify("S_START", true, 0) == Mark::Other
-            && classify("P_START", true, 0) == Mark::Other
-            && classify("P_END", true, 0) == Mark::Other,
+        "a sprite or patch marker opens somebody else's namespace instead",
+        classify("S_START", true, 0) == Mark::ForeignOpen
+            && classify("P_START", true, 0) == Mark::ForeignOpen
+            && classify("P_END", true, 0) == Mark::ForeignClose,
     ));
     out.push((
         "a marker must be empty, so a flat cannot close its own namespace",
@@ -677,6 +691,27 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         classify("FLOOR4_8", false, FLAT_BYTES) == Mark::Flat
             && classify("FLOOR4_8", false, FLAT_BYTES - 1) == Mark::Other
             && classify("FLOOR4_8", false, FLAT_BYTES + 1) == Mark::Other,
+    ));
+
+    // Sprites. The lump name *is* the directory -- four characters, a frame
+    // letter and a rotation digit -- so the two things worth asserting are
+    // that the name is built correctly and that a thing which is map data
+    // rather than an object resolves to nothing.
+    use super::sprite::sprite_for;
+    out.push((
+        "a scenery thing resolves to its sprite",
+        sprite_for(2035) == Some("BAR1") && sprite_for(2028) == Some("COLU"),
+    ));
+    out.push((
+        "a player start is not an object and draws nothing",
+        sprite_for(1).is_none()
+            && sprite_for(2).is_none()
+            && sprite_for(11).is_none()
+            && sprite_for(14).is_none(),
+    ));
+    out.push((
+        "and a doomednum nobody has a table row for draws nothing",
+        sprite_for(31337).is_none(),
     ));
 
     // `floor_i`, because a texture coordinate wraps and the negative side of

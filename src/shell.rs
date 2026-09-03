@@ -4380,9 +4380,11 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             // map` want none of it and used to be instant. A WAD with no
             // TEXTURE1 is a legal WAD -- a map-only PWAD has none -- so its
             // absence is reported rather than treated as an error.
-            let wants_pics = matches!(what, "tex" | "flat" | "view" | "play");
+            let wants_pics = matches!(what, "tex" | "flat" | "sprite" | "view" | "play");
             let pics = if wants_pics { crate::doom::pic::Pics::load(&w) } else { None };
             let flats = if wants_pics { Some(crate::doom::pic::Flats::load(&w)) } else { None };
+            let sprites =
+                if wants_pics { Some(crate::doom::sprite::Sprites::load(&w)) } else { None };
             let art = crate::doom::pic::Art {
                 playpal: pal,
                 colormap: w.lump("COLORMAP"),
@@ -4405,6 +4407,10 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         if f.marked { "" } else { " (no F_START marker)" }
                     ),
                     _ => kprintln!("  no flats, so floors and ceilings stay open sky"),
+                }
+                match sprites.as_ref() {
+                    Some(sp) if !sp.is_empty() => kprintln!("  {} sprite lump(s)", sp.len()),
+                    _ => kprintln!("  no sprites, so things do not appear"),
                 }
             }
 
@@ -4533,6 +4539,67 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         kprintln!("  drew it at {}x", zoom);
                     }
                 }
+                // One sprite lump, blown up. Same eye-check as `tex` and
+                // `flat`, and it is the one that shows transparency: a sprite
+                // is mostly hole, so a decoder that filled its bounding box
+                // draws a rectangle where a barrel should be.
+                "sprite" => {
+                    let Some(sp) = sprites.as_ref().filter(|s| !s.is_empty()) else {
+                        kprintln!("  this WAD has no sprites");
+                        return;
+                    };
+                    let named = args.first().map(|t| t.parse::<u64>().is_err()).unwrap_or(false);
+                    let idx = if named {
+                        // A four-character name is a sprite; six is a lump.
+                        let want = args[0];
+                        let found = if want.len() == 4 { sp.still(want) } else { sp.index_of(want) };
+                        match found {
+                            Some(i) => i,
+                            None => {
+                                console::set_color(YELLOW);
+                                kprintln!("  no sprite lump called '{}'", want);
+                                console::set_color(LTGRAY);
+                                for i in 0..sp.len().min(12) {
+                                    if let Some(n) = sp.name_at(i) {
+                                        kprintln!("    {}", n);
+                                    }
+                                }
+                                if sp.len() > 12 {
+                                    kprintln!("    ... and {} more", sp.len() - 12);
+                                }
+                                return;
+                            }
+                        }
+                    } else {
+                        0
+                    };
+                    let hold = num(if named { 1 } else { 0 }).unwrap_or(0);
+                    let Some(bytes) = sp.bytes(idx) else { return };
+                    let Some(nm) = sp.name_at(idx).copied() else { return };
+                    let Some(patch) = crate::doom::pic::Patch::parse(nm, bytes) else {
+                        console::set_color(LTRED);
+                        kprintln!("  {} will not decode as a patch", nm);
+                        console::set_color(LTGRAY);
+                        return;
+                    };
+                    kprintln!(
+                        "  {} -- {}x{}, centre {} from the left, feet {} from the top",
+                        nm,
+                        patch.width,
+                        patch.height,
+                        patch.left,
+                        patch.top
+                    );
+                    crate::port::with_screen(|| {
+                        let Some(mut surf) = crate::port::Surface::new(320, 200) else {
+                            return;
+                        };
+                        crate::doom::draw::sprite(&mut surf, &patch, pal);
+                        surf.present();
+                        wait_or(hold);
+                    });
+                    kprintln!("  drew it");
+                }
                 "map" => {
                     let named = args.first().map(|t| t.parse::<u64>().is_err()).unwrap_or(false);
                     let name = if named { args[0] } else { "" };
@@ -4619,6 +4686,19 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         view.z as i32,
                         deg as i32
                     );
+                    let billboards = match sprites.as_ref() {
+                        Some(sp) => crate::doom::sprite::collect(&lv, sp),
+                        None => alloc::vec::Vec::new(),
+                    };
+                    if let Some(sp) = sprites.as_ref() {
+                        let (drew, no_kind, no_lump) = crate::doom::sprite::census(&lv, sp);
+                        kprintln!(
+                            "  {} thing(s) drawn, {} of unknown kind, {} with no rotation-0 lump",
+                            drew,
+                            no_kind,
+                            no_lump
+                        );
+                    }
                     let mut lit = false;
                     crate::port::with_screen(|| {
                         let Some(mut surf) = crate::port::Surface::new(320, 200) else {
@@ -4629,6 +4709,8 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         let mut r = crate::doom::render::Renderer::new(&surf, &art);
                         lit = r.lit_from_wad;
                         r.frame(&mut surf, &lv, &art, view, sky);
+                        let vscale = surf.width() as f32 / 2.0;
+                        r.things(&mut surf, &billboards, &view, vscale);
                         surf.present();
                         wait_or(hold);
                     });
@@ -4675,7 +4757,12 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         };
                         script.push(c);
                     }
+                    let billboards = match sprites.as_ref() {
+                        Some(sp) => crate::doom::sprite::collect(&lv, sp),
+                        None => alloc::vec::Vec::new(),
+                    };
                     kprintln!("  {}  --  W/S walk, A/D strafe, arrows turn, shift runs, Esc quits", lv.name);
+                    kprintln!("  {} thing(s) to draw", billboards.len());
                     if hold != 0 {
                         kprintln!("  (running for {} ms)", hold);
                     }
@@ -4684,7 +4771,14 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         let Some(mut surf) = crate::port::Surface::new(320, 200) else {
                             return;
                         };
-                        out = crate::doom::play::run(&mut surf, &lv, &art, hold, &script);
+                        out = crate::doom::play::run(
+                            &mut surf,
+                            &lv,
+                            &art,
+                            &billboards,
+                            hold,
+                            &script,
+                        );
                     });
                     match out {
                         None => kprintln!("  no player start, so there is nowhere to stand"),
@@ -4717,7 +4811,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     }
                 }
                 other => kprintln!(
-                    "  no such action: {}  (try: pal, tex [name], flat [name], map, view [deg], play)",
+                    "  no such action: {}  (try: pal, tex, flat, sprite, map, view [deg], play)",
                     other
                 ),
             }
