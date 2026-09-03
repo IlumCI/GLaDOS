@@ -1183,6 +1183,15 @@ all three. The single-sample figures that suggested a cost (65 ms against
 95 ms) were the host's scheduler, which is the error `video bench` was
 rewritten to stop making.
 
+**Two `drive.py` runs at once is a failure that looks like a hung guest.**
+The serial and monitor ports are fixed at 45454 and 45455, so the second
+launch gets neither, and what it prints is a log with **no boot output at all**
+followed by `TIMEOUT after Ns with N commands unsent` -- which reads exactly
+like a guest that died early. The tell is the empty log: a real hang prints
+the firmware banner and the boot sequence first. `.qemu/qemu-stderr.log` says
+`Failed to find an available port`. Check for a running QEMU before launching,
+especially when the first run is in the background.
+
 **A screenshot is taken when `drive.py` exits, which for a full-screen program
 means you get the desktop.** The bounded `ms` form returns before the harness
 does, so `--screenshot` catches whatever is on screen *after* the program gave

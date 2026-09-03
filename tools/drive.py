@@ -243,9 +243,22 @@ def record(dest_dir, frames, gap):
             # Waited for by watching the file settle rather than by sleeping a
             # fixed amount: the dump is asynchronous, and a fixed sleep is
             # either a torn frame or most of the interval spent idle.
+            #
+            # **And not by waiting for the monitor prompt either**, which was
+            # tried, looks obviously right, and is wrong: QEMU answers `(qemu)`
+            # before the file is flushed and closed, so the converter gets half
+            # a frame and the next iteration cannot even delete it -- on
+            # Windows that is `WinError 32`, the file still being open. The
+            # comment above already said the dump was asynchronous. It was
+            # read as a description of the sleep rather than as the reason for
+            # it, and the correction cost a fifteen-minute run.
+            #
+            # The poll is 30 ms rather than 80 because at four seconds between
+            # frames the difference was invisible and at a tenth of a second it
+            # is most of the budget.
             size, stable, deadline = -1, 0, time.time() + 5.0
             while time.time() < deadline:
-                time.sleep(0.08)
+                time.sleep(0.03)
                 now = ppm.stat().st_size if ppm.exists() else -1
                 if now == size and now > 0:
                     stable += 1
@@ -304,6 +317,7 @@ def main():
         i = argv.index("--screenshot")
         shot = Path(argv[i + 1])
         del argv[i:i + 2]
+
     if "--timeout" in argv:
         i = argv.index("--timeout")
         timeout = int(argv[i + 1])
@@ -388,6 +402,18 @@ def main():
         del argv[i:i + 2]
 
     rec_dir, rec_frames, rec_gap = None, 120, 4.0
+    # When to start, measured from the moment the last command was *sent*.
+    #
+    # Zero means the old behaviour: wait for the prompt to come back. That is
+    # right for a command that returns immediately and leaves the machine
+    # working -- `initiative now`, `author` -- and useless for one that holds
+    # the screen until it is finished, because by then the thing worth
+    # filming is over. `doom play` is the second kind, and so is `edit`.
+    #
+    # Measured from the send and not from the first frame, so it has to cover
+    # whatever the command spends before it draws: loading a WAD's textures
+    # and sprites takes a couple of seconds on its own.
+    rec_after = 0.0
     if "--record" in argv:
         i = argv.index("--record")
         rec_dir = argv[i + 1]
@@ -395,6 +421,10 @@ def main():
     if "--record-n" in argv:
         i = argv.index("--record-n")
         rec_frames = int(argv[i + 1])
+        del argv[i:i + 2]
+    if "--record-after" in argv:
+        i = argv.index("--record-after")
+        rec_after = float(argv[i + 1])
         del argv[i:i + 2]
     if "--record-gap" in argv:
         i = argv.index("--record-gap")
@@ -791,6 +821,15 @@ def main():
                     # recovery. Capped, and reset by any fresh output.
                     pending = {"line": line, "at": time.time(),
                                "retries": 0, "mark": len(buf)}
+                    # A recording that must start *during* a command rather
+                    # than after it. Blocking, deliberately: the guest is busy
+                    # holding the screen and there is nothing on the serial
+                    # line to miss, and a recorder racing the reader for the
+                    # monitor would tear frames.
+                    if rec_dir and rec_after > 0 and not queue:
+                        time.sleep(rec_after)
+                        record(rec_dir, rec_frames, rec_gap)
+                        rec_dir = None
                     time.sleep(0.2)
                 else:
                     idle_prompts += 1
