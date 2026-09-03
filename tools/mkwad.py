@@ -497,11 +497,80 @@ def lamp_pixel(x, y):
     return TRANSPARENT
 
 
+def barrel_b_pixel(x, y):
+    """The barrel's second frame: the same drum with its hoops moved.
+
+    **A second frame is not decoration here.** A barrel's cycle is `BAR1A` then
+    `BAR1B`, and while this file shipped only the first, every barrel in the
+    fixture went invisible for six tics in twelve -- the state machine advanced
+    to a frame with no lump. FreeDoom could never have found that, because it
+    has every frame anything asks for.
+
+    Moved rather than redrawn, so the difference between the two frames is
+    unmistakable on screen and is *only* the thing that should differ.
+    """
+    cx, cy = SPRITE_W / 2.0, SPRITE_H / 2.0
+    dx, dy = (x - cx) / 20.0, (y - cy) / 30.0
+    if dx * dx + dy * dy > 1.0:
+        return TRANSPARENT
+    if 30 <= x < 40 and 22 <= y < 34:
+        return TRANSPARENT
+    if (y + 8) % 16 < 3:
+        return _idx(7, 13)
+    if x < cx - 6:
+        return _idx(1, 11 - (y * 4 // SPRITE_H))
+    return _idx(1, 7 - (y * 4 // SPRITE_H))
+
+
+def clip_pixel(x, y):
+    """A magazine: small, squat, and sitting on the floor."""
+    if 18 <= x < 30 and SPRITE_H - 14 <= y < SPRITE_H:
+        return _idx(6, 6 + ((x - 18) * 6 // 12))
+    return TRANSPARENT
+
+
+def medi_pixel(x, y):
+    """A box with a cross on it, and the cross is off-centre on purpose."""
+    if not (14 <= x < 36 and SPRITE_H - 24 <= y < SPRITE_H):
+        return TRANSPARENT
+    # The cross, pushed left of the box's middle so a mirrored draw shows.
+    if 18 <= x < 22 and SPRITE_H - 20 <= y < SPRITE_H - 8:
+        return _idx(4, 12)
+    if 16 <= x < 26 and SPRITE_H - 16 <= y < SPRITE_H - 12:
+        return _idx(4, 12)
+    return _idx(0, 6)
+
+
+def key_pixel(bright):
+    """A key card: a tall thin tag, in two brightnesses so it blinks.
+
+    A key's cycle is `BKEYA` then `BKEYB` and the two differ only in how lit
+    they are, which is what makes a key catch the eye on a dark map. Both are
+    emitted, so this fixture exercises a two-frame cycle where *both* frames
+    exist -- the barrel above covers the case where one does not.
+    """
+
+    def px(x, y):
+        if 20 <= x < 26 and SPRITE_H - 30 <= y < SPRITE_H - 4:
+            return _idx(11, 9 if bright else 13)
+        # A notch on one side, so a mirror shows.
+        if 26 <= x < 30 and SPRITE_H - 26 <= y < SPRITE_H - 22:
+            return _idx(11, 9 if bright else 13)
+        return TRANSPARENT
+
+    return px
+
+
 # `left` is half the width, so the sprite is centred on the thing. `top` is the
 # full height, so the bottom edge sits on the floor.
 SPRITES = [
     ("BAR1A0", barrel_pixel, SPRITE_W // 2, SPRITE_H),
+    ("BAR1B0", barrel_b_pixel, SPRITE_W // 2, SPRITE_H),
     ("COLUA0", lamp_pixel, SPRITE_W // 2, SPRITE_H),
+    ("CLIPA0", clip_pixel, SPRITE_W // 2, SPRITE_H),
+    ("MEDIA0", medi_pixel, SPRITE_W // 2, SPRITE_H),
+    ("BKEYA0", key_pixel(True), SPRITE_W // 2, SPRITE_H),
+    ("BKEYB0", key_pixel(False), SPRITE_W // 2, SPRITE_H),
 ]
 
 
@@ -586,8 +655,18 @@ LINEDEFS = [(1, 0), (2, 1), (3, 2), (4, 3), (5, 4), (0, 5), (1, 4)]
 # refuse from the only place you can reach it.
 DIVIDER = 6
 
-# DR Door Open Wait Close. Repeatable, manual, untagged.
-DOOR_SPECIAL = 1
+# DR Door Blue: open, wait, close -- repeatable, manual, untagged, and locked.
+#
+# It was special 1, the same door without the lock, and the lock is what makes
+# the fixture test a *sequence* rather than a single rule: the player must walk
+# over the key before the door will do anything. A run that opens it has proved
+# the pickup fired, the key was recorded, and the door consulted it, and a run
+# that does not says which of those failed -- the key count is in the report
+# beside the door's height.
+#
+# 26 rather than 32 because 26 is the repeatable form. A once-only door that
+# had already been opened would make every later run in a session meaningless.
+DOOR_SPECIAL = 26
 
 # Which sector each half is. 0 is the right (x>0), where the player stands.
 RIGHT_SECTOR, LEFT_SECTOR = 0, 1
@@ -633,6 +712,20 @@ THINGS = [
     (120, 120, 0, 2035),    # a barrel in the near half
     (-200, -150, 0, 2035),  # one in the far half, standing 32 higher
     (-260, 200, 0, 2028),   # a lamp in the far half
+    # Three pickups on the straight line west from the player to the door, so
+    # a run that holds one key walks over all of them in order. Each is here
+    # for a different answer:
+    #
+    #   the clip     is taken           -- 50 bullets become 60
+    #   the medikit  is *refused*       -- at full health it stays on the floor
+    #   the key      is taken, and is the only way through the door
+    #
+    # The refusal is the one worth having. A pickup that always disappears
+    # cannot tell a working rule from `return true`, and "the medikit is still
+    # there" is a fact a headless run can report as a number.
+    (250, 0, 0, 2007),      # a clip
+    (200, 0, 0, 2012),      # a medikit, which full health will not take
+    (150, 0, 0, 5),         # the blue key the door wants
 ]
 
 
@@ -1056,10 +1149,61 @@ def check_map(lumps):
     # an opening *door*: a sector whose ceiling is already above its floor
     # would let the player through before anything was triggered, and the run
     # would pass whether or not a single special ever fired.
-    if fl & 4 and struct.unpack("<H", by["LINEDEFS"][two[0] * 14 + 6:two[0] * 14 + 8])[0] == 1:
+    door_special = struct.unpack("<H", by["LINEDEFS"][two[0] * 14 + 6:two[0] * 14 + 8])[0]
+    if fl & 4 and door_special in (1, 26, 27, 28, 32, 33, 34):
         shut = [h for h in hts if h[0] == h[1]]
         if not shut:
             raise ValueError("the door sector does not start shut")
+    if door_special != DOOR_SPECIAL:
+        raise ValueError(
+            f"the two-sided line carries special {door_special}, not {DOOR_SPECIAL}"
+        )
+
+    # A locked door needs its key on the map, and the key has to be somewhere a
+    # run can reach *before* the door. Both halves are asserted, because either
+    # one alone makes the fixture pass for the wrong reason: a key nobody can
+    # reach turns the door test into a test that doors refuse, and a key with
+    # no door turns the pickup test into a test that nothing crashes.
+    LOCK_KEYS = {26: 5, 32: 5, 27: 6, 34: 6, 28: 13, 33: 13}
+    if door_special in LOCK_KEYS:
+        want = LOCK_KEYS[door_special]
+        things = []
+        for i in range(len(by["THINGS"]) // 10):
+            x, y, ang, kind, flags = struct.unpack_from("<5h", by["THINGS"], i * 10)
+            things.append((x, y, kind))
+        start = [t for t in things if t[2] == 1]
+        if len(start) != 1:
+            raise ValueError(f"expected one player start, found {len(start)}")
+        sx, sy, _ = start[0]
+        keys = [t for t in things if t[2] == want]
+        if not keys:
+            raise ValueError(
+                f"door special {door_special} wants doomednum {want} and no thing is one"
+            )
+        # The door is the partition, at x = 0, and the player starts east of it
+        # facing west. So "on the way" is: the same row, and between the two.
+        for kx, ky, _ in keys:
+            if ky != sy or not (0 < kx < sx):
+                raise ValueError(
+                    f"the key at {kx},{ky} is not on the straight line from "
+                    f"{sx},{sy} to the door, so holding one movement key "
+                    f"would not walk over it"
+                )
+
+    # Every pickup placed must have the sprite lump its first frame wants, or
+    # the thing is dropped at level load and the run reports nothing rather
+    # than reporting a failure. The table is small and explicit on purpose:
+    # deriving it would mean carrying a copy of `mobjinfo` in this file.
+    FIRST_FRAME = {
+        2007: "CLIPA0", 2012: "MEDIA0", 5: "BKEYA0",
+        2035: "BAR1A0", 2028: "COLUA0",
+    }
+    have = {n for n, _ in lumps}
+    for i in range(len(by["THINGS"]) // 10):
+        _x, _y, _a, kind, _f = struct.unpack_from("<5h", by["THINGS"], i * 10)
+        want = FIRST_FRAME.get(kind)
+        if want and want not in have:
+            raise ValueError(f"thing {kind} needs sprite {want}, which is not in this WAD")
 
     # Flats, which have no header to check -- so what is checked is the one
     # property a reader depends on: exactly 4096 bytes, inside the namespace,

@@ -1029,7 +1029,11 @@ impl Renderer {
             // Height and light read live from the sector, so a thing standing
             // on a lift rides it and one in a room that darkens goes dark.
             let Some(sec) = lv.sectors.get(b.sector) else { continue };
-            let (bz, blight) = (sec.floor as f32, sec.light);
+            // Feet, which for something hanging from the ceiling is not the
+            // floor. Read live from the sector either way, so a thing on a
+            // lift rides it and one in a room that darkens goes dark.
+            let bz = b.z(sec.floor as f32, sec.ceiling as f32);
+            let blight = sec.light;
             let lat = dx * sin - dy * cos;
             let inv = 1.0 / depth;
             let (cx, cy) = (self.w as f32 / 2.0, self.h as f32 / 2.0);

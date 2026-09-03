@@ -317,9 +317,24 @@ impl Frame {
 /// allocates a vector per column, and a map with forty barrels on it would
 /// otherwise decode forty copies of the same two pictures.
 pub struct Things {
-    /// One decoded picture per state anything on this level can be in, sorted
-    /// by state so a lookup is a search rather than a scan.
-    art: Vec<(u16, Frame)>,
+    /// The decoded pictures, one per state that had a lump.
+    art: Vec<Frame>,
+    /// Which picture each reachable state shows, sorted by state so a lookup
+    /// is a search rather than a scan.
+    ///
+    /// An index and not the `Frame` itself, because **two states can share
+    /// one**. A WAD is allowed to be incomplete, and a state whose lump is
+    /// missing falls back to the last one that had a picture rather than
+    /// drawing nothing -- the same judgement `Frame::pick` makes about a
+    /// missing facing, and for a better reason than tidiness: drawing nothing
+    /// on alternate frames makes a thing *flicker*, which reads as a renderer
+    /// fault and not as a WAD that is short of a lump.
+    ///
+    /// This was found by the test fixture, which ships `BAR1A0` and no
+    /// `BAR1B0` while a barrel's cycle is A then B. Every barrel in it was
+    /// vanishing for six tics in twelve, and FreeDoom hid the fault completely
+    /// by having every frame a thing could ask for.
+    by_state: Vec<(u16, usize)>,
     /// Every object on the level.
     pub objs: Objs,
     /// How many distinct kinds turn to face the viewer, and how many have more
@@ -339,7 +354,14 @@ pub struct Things {
 impl Things {
     /// Nothing to draw, for a WAD with no sprite namespace at all.
     pub fn none() -> Things {
-        Things { art: Vec::new(), objs: Objs::new(), turning: 0, animated: 0, kinds: 0 }
+        Things {
+            art: Vec::new(),
+            by_state: Vec::new(),
+            objs: Objs::new(),
+            turning: 0,
+            animated: 0,
+            kinds: 0,
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -352,8 +374,8 @@ impl Things {
 
     /// The pictures for one state, if this level decoded any.
     pub fn frame(&self, state: u16) -> Option<&Frame> {
-        let i = self.art.binary_search_by_key(&state, |(s, _)| *s).ok()?;
-        self.art.get(i).map(|(_, f)| f)
+        let i = self.by_state.binary_search_by_key(&state, |(s, _)| *s).ok()?;
+        self.art.get(self.by_state[i].1)
     }
 
     /// How many of the kinds on this level turn to face the viewer.
@@ -372,7 +394,13 @@ impl Things {
         self.kinds
     }
 
-    /// How many distinct states were decoded for them.
+    /// How many distinct states can be drawn.
+    pub fn states(&self) -> usize {
+        self.by_state.len()
+    }
+
+    /// How many pictures were actually decoded, which is fewer whenever a WAD
+    /// is short of a frame and a state had to borrow one.
     pub fn pictures(&self) -> usize {
         self.art.len()
     }
@@ -390,7 +418,8 @@ impl Things {
 
 /// Decode every drawable thing on the level, once.
 pub fn collect(lv: &Level, sprites: &Sprites) -> Things {
-    let mut art: Vec<(u16, Frame)> = Vec::new();
+    let mut art: Vec<Frame> = Vec::new();
+    let mut by_state: Vec<(u16, usize)> = Vec::new();
     let mut objs = Objs::new();
     // Which kinds have been met, so the art for a second imp is not decoded
     // again and the two counters below are per kind rather than per thing.
@@ -424,16 +453,36 @@ pub fn collect(lv: &Level, sprites: &Sprites) -> Things {
             let (states, _) = chain(info::KINDS[row as usize].spawn);
             let mut have = 0usize;
             let mut turns = false;
+            // The picture this kind falls back to when a state has no lump.
+            // The *previous* one in the chain, so a gap borrows the frame
+            // before it rather than the kind's first frame -- which for a long
+            // animation with one lump missing is much less visible.
+            let mut last: Option<usize> = None;
             for st in states.iter() {
-                if art.iter().any(|(s, _)| s == st) {
+                if let Some(k) = by_state.iter().find(|(s, _)| s == st).map(|(_, i)| *i) {
+                    last = Some(k);
                     have += 1;
                     continue;
                 }
-                let Some((name, letter)) = info::frame_of(*st) else { continue };
-                let Some(f) = Frame::load(sprites, name, letter) else { continue };
-                turns |= f.turns();
-                art.push((*st, f));
-                have += 1;
+                let picture = match info::frame_of(*st)
+                    .and_then(|(name, letter)| Frame::load(sprites, name, letter))
+                {
+                    Some(f) => {
+                        turns |= f.turns();
+                        art.push(f);
+                        have += 1;
+                        art.len() - 1
+                    }
+                    // No lump. Borrow, and do not count it as a picture this
+                    // kind has -- a kind whose second frame is missing does
+                    // not animate, whatever the table says.
+                    None => match last {
+                        Some(k) => k,
+                        None => continue,
+                    },
+                };
+                by_state.push((*st, picture));
+                last = Some(picture);
             }
             if turns {
                 turning += 1;
@@ -446,14 +495,14 @@ pub fn collect(lv: &Level, sprites: &Sprites) -> Things {
         // A kind whose pictures are all missing draws nothing, so the object
         // is not kept: an invisible thing that still occupies the sort and the
         // clock is a cost with no picture at the end of it.
-        if art.iter().any(|(s, _)| *s == o.state) {
+        if by_state.iter().any(|(s, _)| *s == o.state) {
             objs.list.push(o);
         }
     }
 
-    art.sort_unstable_by_key(|(s, _)| *s);
+    by_state.sort_unstable_by_key(|(s, _)| *s);
     let kinds = seen.len();
-    Things { art, objs, turning, animated, kinds }
+    Things { art, by_state, objs, turning, animated, kinds }
 }
 
 /// Numbers a map places that are not objects.

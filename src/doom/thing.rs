@@ -141,6 +141,69 @@ impl Obj {
     }
 }
 
+impl Obj {
+    /// The row of `info::KINDS` this is, if it is one.
+    fn row(&self) -> Option<&'static info::Kind> {
+        info::KINDS.get(self.kind as usize)
+    }
+
+    /// Its flags, or none of them.
+    pub fn flags(&self) -> u32 {
+        self.row().map(|k| k.flags).unwrap_or(0)
+    }
+
+    /// Whether walking over it picks it up.
+    pub fn special(&self) -> bool {
+        self.flags() & info::MF_SPECIAL != 0
+    }
+
+    /// Whether it can be walked through.
+    pub fn solid(&self) -> bool {
+        self.flags() & info::MF_SOLID != 0
+    }
+
+    /// Whether it can be shot.
+    pub fn shootable(&self) -> bool {
+        self.flags() & info::MF_SHOOTABLE != 0
+    }
+
+    /// Whether it hangs from the ceiling rather than standing on the floor.
+    ///
+    /// A hanging corpse, and the reason a thing's height is not simply its
+    /// sector's floor. Getting this wrong buries every one of them in the
+    /// ground, which on a map with a room full of them is unmistakable and on
+    /// a map with one is not.
+    pub fn hangs(&self) -> bool {
+        self.flags() & info::MF_SPAWNCEILING != 0
+    }
+
+    pub fn radius(&self) -> f32 {
+        self.row().map(|k| k.radius as f32).unwrap_or(0.0)
+    }
+
+    pub fn height(&self) -> f32 {
+        self.row().map(|k| k.height as f32).unwrap_or(0.0)
+    }
+
+    /// The four-character sprite name the state it is in wears.
+    pub fn sprite(&self) -> Option<&'static str> {
+        info::frame_of(self.state).map(|(n, _)| n)
+    }
+
+    /// Where its feet are, given the sector it stands in.
+    ///
+    /// Takes the two heights rather than the level, so this file needs to know
+    /// nothing about maps -- which is what keeps the state machine testable
+    /// without one.
+    pub fn z(&self, floor: f32, ceiling: f32) -> f32 {
+        if self.hangs() {
+            ceiling - self.height()
+        } else {
+            floor
+        }
+    }
+}
+
 /// Every object on the level.
 ///
 /// A `Vec` and a sweep, which is the same adaptation `Thinkers` makes of

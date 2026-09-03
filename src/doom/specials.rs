@@ -17,6 +17,7 @@
 
 use super::level::{Level, NONE};
 use super::math;
+use super::player::{Colour, Status};
 use super::thinker::{DoorKind, FLOOR_SPEED, PlatKind, Thinkers};
 
 /// How far ahead of the player a Use reaches. DOOM's `USERANGE`.
@@ -101,6 +102,17 @@ fn lookup(special: u16, by: Trigger) -> Option<(Action, bool)> {
         108 => (Action::Door(Normal), Trigger::Cross, false),
         109 => (Action::Door(Open), Trigger::Cross, false),
         110 => (Action::Door(Close), Trigger::Cross, false),
+
+        // Locked doors, which are manual like special 1 and differ only in
+        // wanting a key. The two rows per colour are the ordinary door and
+        // the one that opens and stays open -- and note 33 is red where 34 is
+        // yellow, which is not the order the first three are in.
+        26 => (Action::Door(Normal), Trigger::Use, true),
+        27 => (Action::Door(Normal), Trigger::Use, true),
+        28 => (Action::Door(Normal), Trigger::Use, true),
+        32 => (Action::Door(Open), Trigger::Use, false),
+        33 => (Action::Door(Open), Trigger::Use, false),
+        34 => (Action::Door(Open), Trigger::Use, false),
 
         // Switches. Tagged, and they swap their own texture when pressed.
         29 => (Action::Door(Normal), Trigger::Use, false),
@@ -192,6 +204,18 @@ fn side_of(lv: &Level, line: usize, px: f32, py: f32) -> Option<usize> {
 /// Answers whether something happened, which the caller wants for two reasons:
 /// a Use that hit nothing should keep looking at the next line, and a once-only
 /// special is only spent when it actually fired.
+/// What came of trying a line.
+///
+/// A bool was enough while every special either worked or was not one we
+/// implement. A locked door is a third answer -- nothing happened, and the
+/// reason is worth saying, because a door that refuses somebody with no key
+/// is behaving correctly and looks exactly like a door that is broken.
+#[derive(Clone, Copy, Default)]
+pub struct Attempt {
+    pub fired: bool,
+    pub locked: Option<Colour>,
+}
+
 pub fn activate(
     lv: &mut Level,
     th: &mut Thinkers,
@@ -199,9 +223,19 @@ pub fn activate(
     by: Trigger,
     px: f32,
     py: f32,
-) -> bool {
-    let Some(l) = lv.linedefs.get(line).copied() else { return false };
-    let Some((action, repeats)) = lookup(l.special, by) else { return false };
+    who: &Status,
+) -> Attempt {
+    let Some(l) = lv.linedefs.get(line).copied() else { return Attempt::default() };
+    let Some((action, repeats)) = lookup(l.special, by) else { return Attempt::default() };
+
+    // The key, before anything moves. DOOM asks this of the *original* special
+    // number rather than of the door it turns into, which is why the colour
+    // lives beside the special table and not beside `DoorKind`.
+    if let Some(c) = super::player::locked(l.special) {
+        if !who.opens(c) {
+            return Attempt { fired: false, locked: Some(c) };
+        }
+    }
 
     let mut fired = false;
     // Which sectors this operates on. A tag names them; no tag on a Use-line
@@ -279,7 +313,7 @@ pub fn activate(
             m.special = 0;
         }
     }
-    fired
+    Attempt { fired, locked: None }
 }
 
 /// Swap a switch's texture between its off and on faces.
@@ -324,7 +358,14 @@ fn flip_switch(lv: &mut Level, line: usize) {
 /// against the scan is affordable. It is the same answer, arrived at more
 /// slowly, and the note is here so the eventual blockmap work knows where to
 /// look.
-pub fn use_lines(lv: &mut Level, th: &mut Thinkers, px: f32, py: f32, angle: f32) -> bool {
+pub fn use_lines(
+    lv: &mut Level,
+    th: &mut Thinkers,
+    px: f32,
+    py: f32,
+    angle: f32,
+    who: &Status,
+) -> Attempt {
     let (ex, ey) = (
         px + math::cos(angle) * USE_RANGE,
         py + math::sin(angle) * USE_RANGE,
@@ -351,8 +392,8 @@ pub fn use_lines(lv: &mut Level, th: &mut Thinkers, px: f32, py: f32, angle: f32
         }
     }
     match best {
-        Some((_, i)) => activate(lv, th, i, Trigger::Use, px, py),
-        None => false,
+        Some((_, i)) => activate(lv, th, i, Trigger::Use, px, py, who),
+        None => Attempt::default(),
     }
 }
 
@@ -392,6 +433,7 @@ pub fn cross_lines(
     th: &mut Thinkers,
     from: (f32, f32),
     to: (f32, f32),
+    who: &Status,
 ) -> bool {
     let mut any = false;
     for i in 0..lv.linedefs.len() {
@@ -409,7 +451,7 @@ pub fn cross_lines(
             from.0, from.1, to.0, to.1, a.x as f32, a.y as f32, b.x as f32, b.y as f32,
         )
         .is_some()
-            && activate(lv, th, i, Trigger::Cross, from.0, from.1)
+            && activate(lv, th, i, Trigger::Cross, from.0, from.1, who).fired
         {
             any = true;
         }
@@ -443,10 +485,20 @@ pub fn checks() -> alloc::vec::Vec<(&'static str, bool)> {
         lookup(1, Trigger::Use).map(|(_, r)| r) == Some(true)
             && lookup(31, Trigger::Use).map(|(_, r)| r) == Some(false),
     ));
+    // A key door is an ordinary manual door with a colour in front of it, and
+    // the colour is read off the *special* rather than off the door it becomes
+    // -- so both halves are asserted here, together, because a lookup that
+    // found the door while `locked` did not find the colour would be a locked
+    // door that opens for anybody.
     out.push((
-        "a key door is not handled, so it stays shut",
-        lookup(26, Trigger::Use).is_none() && lookup(32, Trigger::Use).is_none(),
+        "a key door is a manual door that wants a colour",
+        lookup(26, Trigger::Use).is_some()
+            && lookup(32, Trigger::Use).is_some()
+            && super::player::locked(26).is_some()
+            && super::player::locked(32).is_some()
+            && super::player::locked(1).is_none(),
     ));
+
     out.push(("special 0 is nothing at all", lookup(0, Trigger::Use).is_none()));
     // The ray test, which decides what a Use reaches.
     out.push((
@@ -465,7 +517,7 @@ pub fn checks() -> alloc::vec::Vec<(&'static str, bool)> {
     // Which side of a line a point is on, checked because getting it backwards
     // is silent: a door refuses, correctly, on the belief that the player is
     // standing inside the wall it is set into.
-    let lv = Level {
+    let mut lv = Level {
         name: super::wad::Name::from_lump(b"TEST    "),
         sector_lines: alloc::vec::Vec::new(),
         tagged: alloc::vec::Vec::new(),
@@ -511,6 +563,39 @@ pub fn checks() -> alloc::vec::Vec<(&'static str, bool)> {
     out.push((
         "east of a northward line is its front, and west is its back",
         side_of(&lv, 0, 25.0, 0.0) == Some(0) && side_of(&lv, 0, -25.0, 0.0) == Some(1),
+    ));
+
+    // The lock, against a real `activate` rather than against `opens` alone.
+    //
+    // What this level can show is the **refusal**, and that is the half worth
+    // asserting here: the key is checked before anything moves, so a check
+    // written after the door had been started would open it and then report
+    // that it had not. It has no sectors, so the opening half cannot be shown
+    // without building a map -- the fixture does that, by walking a player
+    // over a key and reporting the door's height afterwards.
+    let mut th = Thinkers::new(&lv);
+    if let Some(l) = lv.linedefs.get_mut(0) {
+        l.special = 26;
+    }
+    let empty = Status::new();
+    let refused = activate(&mut lv, &mut th, 0, Trigger::Use, 25.0, 0.0, &empty);
+    let mut carrying = Status::new();
+    carrying.give_key(super::player::Card::BlueSkull);
+    let allowed = activate(&mut lv, &mut th, 0, Trigger::Use, 25.0, 0.0, &carrying);
+    out.push((
+        "a locked door refuses without the key and is let past with it",
+        !refused.fired
+            && matches!(refused.locked, Some(Colour::Blue))
+            && allowed.locked.is_none(),
+    ));
+
+    // A once-only special is spent by clearing its number, so a *refused* one
+    // must not be spent. Getting this wrong is invisible on the first press
+    // and permanent afterwards: the door refuses for want of a key, forgets it
+    // was ever a door, and then refuses forever with the key in hand.
+    out.push((
+        "a refused door is not spent",
+        lv.linedefs.first().map(|l| l.special) == Some(26),
     ));
     out
 }

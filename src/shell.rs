@@ -4827,7 +4827,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                             billboards.turning(),
                             billboards.kinds(),
                             billboards.animated(),
-                            billboards.pictures()
+                            billboards.states()
                         );
                     }
                     let mut lit = false;
@@ -4960,6 +4960,23 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                                 billboards.animated(),
                                 billboards.kinds(),
                                 st.flips
+                            );
+                            kprintln!(
+                                "  health {}, armour {}, {} bullet(s), {} key(s), {} picked up{}",
+                                st.health,
+                                st.armour,
+                                st.bullets,
+                                st.keys,
+                                st.picked,
+                                match st.refused {
+                                    Some(crate::doom::player::Colour::Blue) =>
+                                        ", refused by a blue door",
+                                    Some(crate::doom::player::Colour::Yellow) =>
+                                        ", refused by a yellow door",
+                                    Some(crate::doom::player::Colour::Red) =>
+                                        ", refused by a red door",
+                                    None => "",
+                                }
                             );
                             kprintln!(
                             "  ended at {},{} facing {} deg, lit by {}",

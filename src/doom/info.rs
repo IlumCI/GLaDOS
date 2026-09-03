@@ -28,6 +28,102 @@
 // hand.
 #![allow(dead_code)]
 
+/// What each action id is called upstream, indexed by `State::action`.
+///
+/// The ids alone are unreadable, and a dispatcher written against bare
+/// numbers is a dispatcher nobody can check. Emitting the names beside
+/// them costs a kilobyte and means a `match` can be read against DOOM's
+/// own source.
+pub const ACTIONS: [&str; 75] = [
+    "None", "ABfgspray", "AExplode", "APain", "APlayerscream", "AFall", "AXscream", "ALook",
+    "AChase", "AFacetarget", "APosattack", "AScream", "ASposattack", "AVilechase", "AVilestart", "AViletarget",
+    "AVileattack", "AStartfire", "AFire", "AFirecrackle", "ATracer", "ASkelwhoosh", "ASkelfist", "ASkelmissile",
+    "AFatraise", "AFatattack1", "AFatattack2", "AFatattack3", "ABossdeath", "ACposattack", "ACposrefire", "ATroopattack",
+    "ASargattack", "AHeadattack", "ABruisattack", "ASkullattack", "AMetal", "ASpidrefire", "ABabymetal", "ABspiattack",
+    "AHoof", "ACyberattack", "APainattack", "APaindie", "AKeendie", "ABrainpain", "ABrainscream", "ABraindie",
+    "ABrainawake", "ABrainspit", "ASpawnsound", "ASpawnfly", "ABrainexplode", "PLight0", "PWeaponready", "PLower",
+    "PRaise", "PPunch", "PRefire", "PFirepistol", "PLight1", "PFireshotgun", "PLight2", "PFireshotgun2",
+    "PCheckreload", "POpenshotgun2", "PLoadshotgun2", "PCloseshotgun2", "PFirecgun", "PGunflash", "PFiremissile", "PSaw",
+    "PFireplasma", "PBfgsound", "PFirebfg",
+];
+
+// One constant per action, so a dispatcher names what it is dispatching
+// and a renumbering upstream cannot silently point it at another.
+pub const A_BFGSPRAY: u8 = 1;
+pub const A_EXPLODE: u8 = 2;
+pub const A_PAIN: u8 = 3;
+pub const A_PLAYERSCREAM: u8 = 4;
+pub const A_FALL: u8 = 5;
+pub const A_XSCREAM: u8 = 6;
+pub const A_LOOK: u8 = 7;
+pub const A_CHASE: u8 = 8;
+pub const A_FACETARGET: u8 = 9;
+pub const A_POSATTACK: u8 = 10;
+pub const A_SCREAM: u8 = 11;
+pub const A_SPOSATTACK: u8 = 12;
+pub const A_VILECHASE: u8 = 13;
+pub const A_VILESTART: u8 = 14;
+pub const A_VILETARGET: u8 = 15;
+pub const A_VILEATTACK: u8 = 16;
+pub const A_STARTFIRE: u8 = 17;
+pub const A_FIRE: u8 = 18;
+pub const A_FIRECRACKLE: u8 = 19;
+pub const A_TRACER: u8 = 20;
+pub const A_SKELWHOOSH: u8 = 21;
+pub const A_SKELFIST: u8 = 22;
+pub const A_SKELMISSILE: u8 = 23;
+pub const A_FATRAISE: u8 = 24;
+pub const A_FATATTACK1: u8 = 25;
+pub const A_FATATTACK2: u8 = 26;
+pub const A_FATATTACK3: u8 = 27;
+pub const A_BOSSDEATH: u8 = 28;
+pub const A_CPOSATTACK: u8 = 29;
+pub const A_CPOSREFIRE: u8 = 30;
+pub const A_TROOPATTACK: u8 = 31;
+pub const A_SARGATTACK: u8 = 32;
+pub const A_HEADATTACK: u8 = 33;
+pub const A_BRUISATTACK: u8 = 34;
+pub const A_SKULLATTACK: u8 = 35;
+pub const A_METAL: u8 = 36;
+pub const A_SPIDREFIRE: u8 = 37;
+pub const A_BABYMETAL: u8 = 38;
+pub const A_BSPIATTACK: u8 = 39;
+pub const A_HOOF: u8 = 40;
+pub const A_CYBERATTACK: u8 = 41;
+pub const A_PAINATTACK: u8 = 42;
+pub const A_PAINDIE: u8 = 43;
+pub const A_KEENDIE: u8 = 44;
+pub const A_BRAINPAIN: u8 = 45;
+pub const A_BRAINSCREAM: u8 = 46;
+pub const A_BRAINDIE: u8 = 47;
+pub const A_BRAINAWAKE: u8 = 48;
+pub const A_BRAINSPIT: u8 = 49;
+pub const A_SPAWNSOUND: u8 = 50;
+pub const A_SPAWNFLY: u8 = 51;
+pub const A_BRAINEXPLODE: u8 = 52;
+pub const A_LIGHT0: u8 = 53;
+pub const A_WEAPONREADY: u8 = 54;
+pub const A_LOWER: u8 = 55;
+pub const A_RAISE: u8 = 56;
+pub const A_PUNCH: u8 = 57;
+pub const A_REFIRE: u8 = 58;
+pub const A_FIREPISTOL: u8 = 59;
+pub const A_LIGHT1: u8 = 60;
+pub const A_FIRESHOTGUN: u8 = 61;
+pub const A_LIGHT2: u8 = 62;
+pub const A_FIRESHOTGUN2: u8 = 63;
+pub const A_CHECKRELOAD: u8 = 64;
+pub const A_OPENSHOTGUN2: u8 = 65;
+pub const A_LOADSHOTGUN2: u8 = 66;
+pub const A_CLOSESHOTGUN2: u8 = 67;
+pub const A_FIRECGUN: u8 = 68;
+pub const A_GUNFLASH: u8 = 69;
+pub const A_FIREMISSILE: u8 = 70;
+pub const A_SAW: u8 = 71;
+pub const A_FIREPLASMA: u8 = 72;
+pub const A_BFGSOUND: u8 = 73;
+pub const A_FIREBFG: u8 = 74;
+
 /// The four-character sprite names, indexed by `State::sprite`.
 pub const SPRITES: [&str; 138] = [
     "TROO", "SHTG", "PUNG", "PISG", "PISF", "SHTF", "SHT2", "CHGG", "CHGF", "MISG",

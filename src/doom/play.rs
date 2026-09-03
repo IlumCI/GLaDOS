@@ -90,6 +90,15 @@ pub struct Player {
     /// because the sector is busy, and the one tic it is not busy starts it
     /// again. Doors that open and immediately shut, forever.
     pub used: bool,
+    /// Health, armour, ammunition and keys.
+    pub status: super::player::Status,
+    /// The colour of the last door that refused, if one has.
+    ///
+    /// Kept so a run can report it. A locked door is the one special that
+    /// does nothing *correctly*, and without somewhere to say so it is
+    /// indistinguishable from a special nobody implemented -- which is the
+    /// state special 26 was in for the whole of the previous phase.
+    pub refused: Option<super::player::Colour>,
 }
 
 impl Player {
@@ -102,6 +111,8 @@ impl Player {
             angle: math::deg_to_rad(t.angle),
             floor,
             used: false,
+            status: super::player::Status::new(),
+            refused: None,
         })
     }
 
@@ -210,6 +221,49 @@ fn try_move(lv: &Level, p: &mut Player, dx: f32, dy: f32) {
     }
 }
 
+/// How far below the feet a pickup can sit and still be reachable.
+///
+/// DOOM's own number, and it is not symmetric with the reach above: a thing
+/// can be as high as the player is tall and only eight units below. The map is
+/// two-dimensional as far as movement goes, so this is the whole of what stops
+/// a player collecting a medikit from a room underneath them.
+const REACH_DOWN: f32 = 8.0;
+
+/// Take anything the player is standing on.
+///
+/// DOOM does this inside `PIT_CheckThing` while the move is being tested,
+/// against the blockmap. This walks the object list, for the reason
+/// `use_lines` walks every linedef: there is no blockmap reader yet, and on
+/// the maps this runs against the sweep is affordable. Same answer, arrived at
+/// more slowly.
+///
+/// The overlap test is a **square**, not a circle, and that is not a
+/// simplification -- DOOM's is `abs(dx) >= dist || abs(dy) >= dist`, so a
+/// thing caught diagonally is reachable from slightly further away than one
+/// straight ahead. Rounding it to a circle would be a different game.
+fn pickups(lv: &Level, p: &mut Player, things: &mut super::sprite::Things) {
+    let (px, py, pz) = (p.x, p.y, p.floor);
+    let status = &mut p.status;
+    things.objs.list.retain(|o| {
+        if !o.special() {
+            return true;
+        }
+        let reach = RADIUS + o.radius();
+        if (px - o.x).abs() >= reach || (py - o.y).abs() >= reach {
+            return true;
+        }
+        let Some(sec) = lv.sectors.get(o.sector) else { return true };
+        let delta = o.z(sec.floor as f32, sec.ceiling as f32) - pz;
+        if delta > HEIGHT || delta < -REACH_DOWN {
+            return true;
+        }
+        let Some(name) = o.sprite() else { return true };
+        // Refusing is not failing. A medikit at full health stays on the
+        // floor, which is what makes it worth coming back for.
+        !status.touch(name)
+    });
+}
+
 /// One tic of the world.
 fn tic(lv: &mut Level, p: &mut Player, th: &mut Thinkers, things: &mut super::sprite::Things) {
     let held = keys::snapshot();
@@ -258,14 +312,17 @@ fn tic(lv: &mut Level, p: &mut Player, th: &mut Thinkers, things: &mut super::sp
         // player can be on one side at the start of a tic and the other at the
         // end without ever having been within a unit of the line itself.
         if was != (p.x, p.y) {
-            specials::cross_lines(lv, th, was, (p.x, p.y));
+            specials::cross_lines(lv, th, was, (p.x, p.y), &p.status);
         }
     }
 
     // Use, on the press rather than while held.
     let use_now = held.down(keys::USE);
     if use_now && !p.used {
-        specials::use_lines(lv, th, p.x, p.y, p.angle);
+        let tried = specials::use_lines(lv, th, p.x, p.y, p.angle, &p.status);
+        if tried.locked.is_some() {
+            p.refused = tried.locked;
+        }
     }
     p.used = use_now;
 
@@ -285,6 +342,11 @@ fn tic(lv: &mut Level, p: &mut Player, th: &mut Thinkers, things: &mut super::sp
     if let Some(sec) = lv.sector_at(p.x as i32, p.y as i32) {
         p.floor = sec.floor as f32;
     }
+
+    // After the floor is known, because a pickup's reach is measured from the
+    // player's feet and a lift that just moved would otherwise be judged
+    // against where they were a tic ago.
+    pickups(&*lv, p, things);
 }
 
 /// What a session did, for the caller to report.
@@ -311,6 +373,15 @@ pub struct Stats {
     pub flips: usize,
     /// Whether something ended the level.
     pub exited: bool,
+    /// What the player finished with.
+    pub health: i32,
+    pub armour: i32,
+    pub bullets: u32,
+    pub keys: usize,
+    /// How many things were picked up over the run.
+    pub picked: usize,
+    /// The colour of the last door that refused for want of a key.
+    pub refused: Option<super::player::Colour>,
     /// Whether the shading table came out of the WAD's own COLORMAP. Carried
     /// rather than printed, because nothing in this tree may reach the
     /// printing macro -- the shell does the talking.
@@ -381,6 +452,12 @@ pub fn run(
         watched: 0,
         spawned: 0,
         flips: 0,
+        health: 0,
+        armour: 0,
+        bullets: 0,
+        keys: 0,
+        picked: 0,
+        refused: None,
         exited: false,
         lit_from_wad: r.lit_from_wad,
     };
@@ -460,6 +537,12 @@ pub fn run(
     stats.deg = d;
     stats.moving = th.len();
     stats.spawned = th.spawned;
+    stats.health = p.status.health;
+    stats.armour = p.status.armour;
+    stats.bullets = p.status.ammo[super::player::Ammo::Clip as usize];
+    stats.keys = p.status.keys();
+    stats.picked = p.status.picked;
+    stats.refused = p.refused;
     stats.exited = lv.exited;
     stats.watched = lv
         .sectors
