@@ -78,3 +78,14 @@ pub const WAD_FILE: &str = "doom.wad";
 pub fn open() -> Option<Result<wad::Wad, wad::Error>> {
     crate::port::files::get(WAD_FILE).map(wad::Wad::parse)
 }
+
+/// Every claim this tree makes about itself, for `diag doom`.
+///
+/// Aggregated here so a module gaining checks does not also have to be wired
+/// into the shell: `diag` calls one function and the list grows underneath it.
+pub fn checks() -> alloc::vec::Vec<(&'static str, bool)> {
+    let mut out = pic::checks();
+    out.extend(level::checks());
+    out.extend(play::checks());
+    out
+}

@@ -320,12 +320,16 @@ pub struct Billboard {
     /// Where it stands.
     pub x: f32,
     pub y: f32,
-    /// The floor it stands on.
-    pub z: f32,
-    /// The light of the sector it is in, so it is lit by the room rather than
-    /// by itself -- an object at full brightness in a dark room reads as a
-    /// sprite pasted on top of the picture, which is exactly what it is.
-    pub light: i16,
+    /// The sector it stands in, rather than the height and light that sector
+    /// had when the level loaded.
+    ///
+    /// It was a copied `z` and `light`, which is correct exactly as long as no
+    /// floor ever moves. A lift raising a sector would have left every thing
+    /// standing in it hanging in the air at its load-time height, lit by a
+    /// room that had since gone dark -- and nothing would have looked broken
+    /// enough to investigate, because a barrel at the wrong height is still a
+    /// barrel. An index cannot go stale.
+    pub sector: usize,
 }
 
 /// Decode every drawable thing on the level, once.
@@ -377,17 +381,16 @@ pub fn collect(lv: &Level, sprites: &Sprites) -> Things {
                 art.len() - 1
             }
         };
-        // The floor of the sector it is standing in. A thing whose sector
-        // cannot be found is dropped rather than placed at zero, which in a
-        // map with a raised floor would bury it.
-        let Some(sector) = lv.sector_at(t.x as i32, t.y as i32) else { continue };
+        // The sector it is standing in. A thing whose sector cannot be found
+        // is dropped rather than placed at zero, which in a map with a raised
+        // floor would bury it.
+        let Some(sector) = lv.sector_index_at(t.x as i32, t.y as i32) else { continue };
         items.push(Billboard {
             art: idx,
             angle: math::deg_to_rad(t.angle),
             x: t.x as f32,
             y: t.y as f32,
-            z: sector.floor as f32,
-            light: sector.light,
+            sector,
         });
     }
     Things { art, items }

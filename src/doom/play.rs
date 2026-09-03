@@ -51,6 +51,20 @@ const TURN_FAST: f32 = 6.0;
 /// The player's width, which DOOM fixes at 16 units either side.
 const RADIUS: f32 = 16.0;
 
+/// How tall the player is, which DOOM fixes at 56 units.
+///
+/// Not the eye height -- the eye sits at 41 and the other 15 are the headroom
+/// a doorway has to clear. A gap shorter than this is not a doorway.
+const HEIGHT: f32 = 56.0;
+
+/// The tallest step that can be walked up rather than blocked, DOOM's
+/// `MAXSTEPMOVE`.
+///
+/// The whole of what makes a staircase a staircase and a ledge a wall. There
+/// is no jump in DOOM: 24 units is the entire vertical vocabulary of the
+/// player, and every stair in every map is built to it.
+const MAX_STEP: f32 = 24.0;
+
 /// Give up on catching up after this many missed tics.
 ///
 /// Without a cap, a frame that took a long time -- a first frame with a cold
@@ -102,21 +116,64 @@ fn dist_to_seg(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
     math::sqrt(ex * ex + ey * ey)
 }
 
-/// Would the player standing here be inside a wall?
-fn blocked(lv: &Level, x: f32, y: f32) -> bool {
-    for l in lv.linedefs.iter() {
-        // Two-sided lines are openings unless flagged impassable. A one-sided
-        // line is always a wall, whatever its flags say -- there is nothing on
-        // the other side of it to walk into.
-        let solid = l.left == NONE || (l.flags & 1) != 0;
-        if !solid {
-            continue;
+/// What a two-sided line leaves open, vertically.
+///
+/// DOOM's `P_LineOpening`, ported from room4doom's `PortalZ` -- the lowest of
+/// the two ceilings, the highest of the two floors, and the gap between them.
+/// Three numbers that between them decide every vertical question a moving
+/// thing can ask about a portal.
+struct Opening {
+    /// The lowest ceiling of the two sides.
+    top: f32,
+    /// The highest floor of the two sides -- the step you would climb.
+    bottom: f32,
+}
+
+impl Opening {
+    fn of(lv: &Level, l: &super::level::LineDef) -> Option<Opening> {
+        if l.left == NONE {
+            return None;
         }
+        let side = |i: u16| -> Option<&super::level::Sector> {
+            lv.sidedefs
+                .get(i as usize)
+                .and_then(|sd| lv.sectors.get(sd.sector as usize))
+        };
+        let (f, b) = (side(l.right)?, side(l.left)?);
+        Some(Opening {
+            top: (f.ceiling.min(b.ceiling)) as f32,
+            bottom: (f.floor.max(b.floor)) as f32,
+        })
+    }
+}
+
+/// Would the player standing here be inside a wall?
+fn blocked(lv: &Level, x: f32, y: f32, z: f32) -> bool {
+    for l in lv.linedefs.iter() {
+        // A one-sided line is always a wall, whatever its flags say -- there
+        // is nothing on the other side to walk into. A two-sided one is a wall
+        // if it is flagged impassable, and otherwise is decided by the gap.
+        let wall = l.left == NONE || (l.flags & 1) != 0;
         let (Some(a), Some(b)) = (lv.vertexes.get(l.v1 as usize), lv.vertexes.get(l.v2 as usize))
         else {
             continue;
         };
-        if dist_to_seg(x, y, a.x as f32, a.y as f32, b.x as f32, b.y as f32) < RADIUS {
+        if dist_to_seg(x, y, a.x as f32, a.y as f32, b.x as f32, b.y as f32) >= RADIUS {
+            continue;
+        }
+        if wall {
+            return true;
+        }
+        // **The gap is what makes a door a door.** Until this existed a
+        // two-sided line without the impassable flag was simply passable, so a
+        // shut door -- which is a two-sided line whose back sector has been
+        // squeezed to nothing -- was walked straight through. Nothing looked
+        // wrong; the door was just scenery.
+        let Some(o) = Opening::of(lv, l) else { return true };
+        let too_short = o.top - o.bottom < HEIGHT;
+        let no_headroom = o.top - z < HEIGHT;
+        let step_too_high = o.bottom - z > MAX_STEP;
+        if too_short || no_headroom || step_too_high {
             return true;
         }
     }
@@ -125,7 +182,8 @@ fn blocked(lv: &Level, x: f32, y: f32) -> bool {
 
 /// Move if the destination is free, sliding along a wall if it is not.
 fn try_move(lv: &Level, p: &mut Player, dx: f32, dy: f32) {
-    if !blocked(lv, p.x + dx, p.y + dy) {
+    let z = p.floor;
+    if !blocked(lv, p.x + dx, p.y + dy, z) {
         p.x += dx;
         p.y += dy;
         return;
@@ -134,15 +192,15 @@ fn try_move(lv: &Level, p: &mut Player, dx: f32, dy: f32) {
     // north, the eastward half of a north-east move is what is blocked and the
     // northward half is not, so the player slides along it. Refusing outright
     // instead makes a wall something you stick to.
-    if !blocked(lv, p.x + dx, p.y) {
+    if !blocked(lv, p.x + dx, p.y, z) {
         p.x += dx;
-    } else if !blocked(lv, p.x, p.y + dy) {
+    } else if !blocked(lv, p.x, p.y + dy, z) {
         p.y += dy;
     }
 }
 
 /// One tic of the world.
-fn tic(lv: &Level, p: &mut Player) {
+fn tic(lv: &mut Level, p: &mut Player) {
     let held = keys::snapshot();
     let fast = held.down(keys::SHIFT);
     let turn = math::deg_to_rad(if fast { TURN_FAST as i16 } else { TURN as i16 });
@@ -182,13 +240,18 @@ fn tic(lv: &Level, p: &mut Player) {
         // a quarter turn clockwise.
         let dx = c * fwd + s * side;
         let dy = s * fwd - c * side;
-        try_move(lv, p, dx, dy);
-        // The floor under wherever we ended up, so a step up or down is
-        // followed. There is no gravity and no step height yet: on a real map
-        // this will teleport the eye up a cliff rather than refuse it.
-        if let Some(sec) = lv.sector_at(p.x as i32, p.y as i32) {
-            p.floor = sec.floor as f32;
-        }
+        try_move(&*lv, p, dx, dy);
+    }
+    // The floor under wherever we are, sampled **every** tic rather than only
+    // on one where a movement key was held.
+    //
+    // It used to sit inside the branch above, which is correct for walking and
+    // wrong for standing still on something that moves: a lift would rise
+    // through a stationary player, who would keep the height of the floor as
+    // it was when they last pressed a key. The whole point of a lift is that
+    // you stand on it and do nothing.
+    if let Some(sec) = lv.sector_at(p.x as i32, p.y as i32) {
+        p.floor = sec.floor as f32;
     }
 }
 
@@ -218,13 +281,13 @@ pub struct Stats {
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     surf: &mut Surface,
-    lv: &Level,
+    lv: &mut Level,
     art: &Art<'_>,
     things: &super::sprite::Things,
     limit_ms: u64,
     script: &[u8],
 ) -> Option<Stats> {
-    let mut p = Player::at(lv)?;
+    let mut p = Player::at(&*lv)?;
     surf.set_palette_rgb(art.playpal);
     let sky = super::draw::nearest(art.playpal, 0x10, 0x18, 0x60);
     let mut r = Renderer::new(surf, art);
@@ -275,8 +338,8 @@ pub fn run(
         }
 
         let v = p.view();
-        r.frame(surf, lv, art, v, sky);
-        r.things(surf, things, &v, surf_scale);
+        r.frame(surf, &*lv, art, v, sky);
+        r.things(surf, &*lv, things, &v, surf_scale);
         surf.present();
         stats.frames += 1;
 
@@ -298,4 +361,38 @@ pub fn run(
     }
     stats.deg = d;
     Some(stats)
+}
+
+/// What `diag doom` asks of the line opening.
+///
+/// The three rules DOOM decides every portal with, checked as arithmetic
+/// because on a map they are invisible: a door that is walked through looks
+/// like a door somebody forgot to close, and a ledge that is climbed looks
+/// like a map with no ledge.
+pub fn checks() -> alloc::vec::Vec<(&'static str, bool)> {
+    let mut out: alloc::vec::Vec<(&'static str, bool)> = alloc::vec::Vec::new();
+    // `blocked` needs a whole level, so the rules are checked directly. They
+    // are three comparisons and this is where they are stated once.
+    let blocks = |top: f32, bottom: f32, z: f32| -> bool {
+        top - bottom < HEIGHT || top - z < HEIGHT || bottom - z > MAX_STEP
+    };
+    out.push(("a shut door -- no gap at all -- blocks", blocks(64.0, 64.0, 0.0)));
+    out.push(("an open doorway does not", !blocks(128.0, 0.0, 0.0)));
+    out.push((
+        "a gap shorter than the player blocks, even wide open below",
+        blocks(40.0, 0.0, 0.0),
+    ));
+    out.push((
+        "a step of 24 is climbed and 25 is not",
+        !blocks(200.0, 24.0, 0.0) && blocks(200.0, 25.0, 0.0),
+    ));
+    out.push((
+        "standing higher makes the same step climbable",
+        !blocks(200.0, 25.0, 1.0),
+    ));
+    out.push((
+        "a ceiling too low over where the player *is* blocks",
+        blocks(50.0, 0.0, 0.0),
+    ));
+    out
 }

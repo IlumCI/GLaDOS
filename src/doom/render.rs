@@ -993,6 +993,7 @@ impl Renderer {
     pub fn things(
         &mut self,
         surf: &mut Surface,
+        lv: &Level,
         things: &super::sprite::Things,
         view: &View,
         scale: f32,
@@ -1022,6 +1023,10 @@ impl Renderer {
             // the lump for it is the mirror of one the WAD stores once.
             let Some(art) = things.art.get(b.art) else { continue };
             let Some((patch, flip)) = art.pick(math::atan2(dy, dx), b.angle) else { continue };
+            // Height and light read live from the sector, so a thing standing
+            // on a lift rides it and one in a room that darkens goes dark.
+            let Some(sec) = lv.sectors.get(b.sector) else { continue };
+            let (bz, blight) = (sec.floor as f32, sec.light);
             let lat = dx * sin - dy * cos;
             let inv = 1.0 / depth;
             let (cx, cy) = (self.w as f32 / 2.0, self.h as f32 / 2.0);
@@ -1033,7 +1038,7 @@ impl Renderer {
             // every object half its width to one side, the second buries it
             // in the floor or floats it.
             let x1f = cx + (lat - patch.left as f32) * px_per_unit;
-            let gzt = b.z + patch.top as f32;
+            let gzt = bz + patch.top as f32;
             let y1f = cy - (gzt - view.z) * px_per_unit;
 
             let xa = x1f.max(0.0) as i32;
@@ -1041,7 +1046,7 @@ impl Renderer {
             if xb < xa {
                 continue;
             }
-            let lit = Self::level(depth, b.light);
+            let lit = Self::level(depth, blight);
             for x in xa..=xb {
                 // Behind a solid wall in this column, or behind something that
                 // narrowed it and outside what it left open.

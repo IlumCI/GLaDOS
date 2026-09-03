@@ -201,7 +201,7 @@ pub const SUITES: &[Suite] = &[
     },
     Suite {
         name: "doom",
-        about: "the ported picture decoder, including the tall-patch delta rule",
+        about: "the picture decoder, the level indexes, and the line opening",
         run: doom_selftest,
     },
 ];
@@ -217,7 +217,7 @@ pub const SUITES: &[Suite] = &[
 fn doom_selftest() -> bool {
     use crate::kprintln;
     let mut ok = true;
-    for (what, good) in crate::doom::pic::checks() {
+    for (what, good) in crate::doom::checks() {
         if !good {
             kprintln!("    FAIL: {}", what);
             ok = false;

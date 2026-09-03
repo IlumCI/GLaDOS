@@ -4765,7 +4765,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         lit = r.lit_from_wad;
                         r.frame(&mut surf, &lv, &art, view, sky);
                         let vscale = surf.width() as f32 / 2.0;
-                        r.things(&mut surf, &billboards, &view, vscale);
+                        r.things(&mut surf, &lv, &billboards, &view, vscale);
                         surf.present();
                         wait_or(hold);
                     });
@@ -4783,7 +4783,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         kprintln!("  no map marker in this WAD");
                         return;
                     }
-                    let lv = match crate::doom::level::Level::load(&w, &marker) {
+                    let mut lv = match crate::doom::level::Level::load(&w, &marker) {
                         Ok(l) => l,
                         Err(e) => {
                             console::set_color(LTRED);
@@ -4833,7 +4833,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         };
                         out = crate::doom::play::run(
                             &mut surf,
-                            &lv,
+                            &mut lv,
                             &art,
                             &billboards,
                             hold,

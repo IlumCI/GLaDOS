@@ -183,6 +183,26 @@ pub struct Sector {
 
 pub struct Level {
     pub name: Name,
+    /// Which linedefs touch each sector, by index.
+    ///
+    /// The map stores the arrow the other way -- a linedef names its sidedefs
+    /// and a sidedef names its sector -- and every `EV_Do*` needs to walk it
+    /// backwards: "the lowest ceiling among this sector's neighbours" is the
+    /// height a door opens to, and there is no way to ask it without knowing
+    /// which lines bound the sector. Built once at load rather than scanned
+    /// per query, because a door asks on the tic it opens and a map has
+    /// thousands of lines.
+    pub sector_lines: Vec<Vec<u16>>,
+    /// Which sectors carry each non-zero tag.
+    ///
+    /// A linedef's special names a *tag*, not a sector, and several sectors
+    /// can share one -- that is how a switch opens four doors at once. Vanilla
+    /// scans the sector list per activation; this is the same answer without
+    /// the scan.
+    ///
+    /// Note the tag types disagree in the format: a linedef's is `u16` and a
+    /// sector's is `i16`. Everything here compares as `i32`.
+    pub tagged: Vec<(i32, Vec<u16>)>,
     pub things: Vec<Thing>,
     pub vertexes: Vec<Vertex>,
     pub linedefs: Vec<LineDef>,
@@ -428,8 +448,12 @@ impl Level {
             });
         }
 
+        let sector_lines = build_sector_lines(&linedefs, &sidedefs, sectors.len());
+        let tagged = build_tag_index(&sectors);
         Ok(Level {
             name,
+            sector_lines,
+            tagged,
             things,
             vertexes,
             linedefs,
@@ -468,6 +492,83 @@ impl Level {
     /// by the segs, every one of which faces into it -- so this takes the
     /// front sector of the first seg. A miniseg has no linedef and therefore
     /// no sector, so it is skipped rather than trusted.
+    /// Every sector carrying this tag.
+    ///
+    /// Empty for tag 0, deliberately: zero means "no tag" and a special that
+    /// asked for it would otherwise operate on every untagged sector in the
+    /// map at once.
+    pub fn tagged(&self, tag: i32) -> &[u16] {
+        if tag == 0 {
+            return &[];
+        }
+        self.tagged
+            .iter()
+            .find(|(t, _)| *t == tag)
+            .map(|(_, v)| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// The sector on the other side of a line from this one, if there is one.
+    fn across(&self, line: u16, from: usize) -> Option<usize> {
+        let l = self.linedefs.get(line as usize)?;
+        let side = |i: u16| -> Option<usize> {
+            if i == NONE {
+                return None;
+            }
+            self.sidedefs.get(i as usize).map(|sd| sd.sector as usize)
+        };
+        let (a, b) = (side(l.right), side(l.left));
+        match (a, b) {
+            (Some(x), Some(y)) if x == from => Some(y),
+            (Some(x), Some(y)) if y == from => Some(x),
+            _ => None,
+        }
+    }
+
+    /// The lowest ceiling among a sector's neighbours, and the height a door
+    /// in it opens to.
+    ///
+    /// DOOM's `P_FindLowestCeilingSurrounding` less four units, which is the
+    /// gap a door leaves under the lintel so its top texture has something to
+    /// draw on. A sector with no neighbour at all answers its own ceiling.
+    pub fn lowest_neighbour_ceiling(&self, sector: usize) -> i16 {
+        let mut best: Option<i16> = None;
+        for &line in self.sector_lines.get(sector).map(|v| v.as_slice()).unwrap_or(&[]) {
+            let Some(other) = self.across(line, sector) else { continue };
+            let Some(sec) = self.sectors.get(other) else { continue };
+            best = Some(match best {
+                Some(b) if b <= sec.ceiling => b,
+                _ => sec.ceiling,
+            });
+        }
+        best.unwrap_or_else(|| self.sectors.get(sector).map(|s| s.ceiling).unwrap_or(0))
+    }
+
+    /// Which sector a point is in, by index.
+    ///
+    /// The same walk as `sector_at`, answering the index instead of the
+    /// record. Anything that has to survive a sector *moving* wants this one:
+    /// a `&Sector` is a snapshot of a value that changes, and an index is not.
+    pub fn sector_index_at(&self, x: i32, y: i32) -> Option<usize> {
+        let ss = self.subsector_at(x, y)?;
+        for i in 0..ss.count as usize {
+            let seg = self.segs.get(ss.first as usize + i)?;
+            if seg.linedef == NONE {
+                continue;
+            }
+            let line = self.linedefs.get(seg.linedef as usize)?;
+            let side = if seg.side == 0 { line.right } else { line.left };
+            if side == NONE {
+                continue;
+            }
+            let sd = self.sidedefs.get(side as usize)?;
+            if (sd.sector as usize) < self.sectors.len() {
+                return Some(sd.sector as usize);
+            }
+        }
+        None
+    }
+
     pub fn sector_at(&self, x: i32, y: i32) -> Option<&Sector> {
         let ss = self.subsector_at(x, y)?;
         for i in 0..ss.count as usize {
@@ -503,4 +604,133 @@ impl Level {
         }
         self.subsectors.get((n & !SUBSECTOR_BIT) as usize)
     }
+}
+
+/// Which linedefs touch each sector.
+///
+/// Both sides of every line are walked, so a two-sided line appears in the
+/// list of both sectors it separates -- which is what a neighbour query needs
+/// and is the whole reason the index exists.
+fn build_sector_lines(
+    linedefs: &[LineDef],
+    sidedefs: &[SideDef],
+    nsectors: usize,
+) -> Vec<Vec<u16>> {
+    let mut out: Vec<Vec<u16>> = Vec::new();
+    out.resize_with(nsectors, Vec::new);
+    for (i, l) in linedefs.iter().enumerate() {
+        for side in [l.right, l.left] {
+            if side == NONE {
+                continue;
+            }
+            let Some(sd) = sidedefs.get(side as usize) else { continue };
+            let Some(list) = out.get_mut(sd.sector as usize) else { continue };
+            if !list.contains(&(i as u16)) {
+                list.push(i as u16);
+            }
+        }
+    }
+    out
+}
+
+/// Sectors grouped by tag, skipping tag 0.
+fn build_tag_index(sectors: &[Sector]) -> Vec<(i32, Vec<u16>)> {
+    let mut out: Vec<(i32, Vec<u16>)> = Vec::new();
+    for (i, s) in sectors.iter().enumerate() {
+        let t = s.tag as i32;
+        if t == 0 {
+            continue;
+        }
+        match out.iter_mut().find(|(k, _)| *k == t) {
+            Some((_, v)) => v.push(i as u16),
+            None => out.push((t, alloc::vec![i as u16])),
+        }
+    }
+    out
+}
+
+/// What `diag doom` asks of the level indexes.
+///
+/// Claims rather than printed lines, because nothing in this tree may name the
+/// printing macro -- the same bargain the WAD reader's `Error` type makes.
+///
+/// These two indexes are the sort that fail silently. A tag lookup that
+/// answered the wrong sector opens the wrong door, which on a real map looks
+/// like a mapper's mistake; a neighbour walk that missed one side of a line
+/// gives a door that opens to the wrong height, which looks like a texture
+/// problem. Neither produces an error.
+pub fn checks() -> Vec<(&'static str, bool)> {
+    let mut out: Vec<(&'static str, bool)> = Vec::new();
+    let sec = |ceiling: i16, tag: i16| Sector {
+        floor: 0,
+        ceiling,
+        floor_pic: Name::from_lump(b"F       "),
+        ceiling_pic: Name::from_lump(b"C       "),
+        light: 160,
+        special: 0,
+        tag,
+    };
+
+    // Three sectors: two sharing tag 7, one untagged.
+    let sectors = alloc::vec![sec(128, 7), sec(96, 0), sec(64, 7)];
+    let idx = build_tag_index(&sectors);
+    out.push((
+        "sectors sharing a tag group together",
+        idx.iter().find(|(t, _)| *t == 7).map(|(_, v)| v.as_slice()) == Some(&[0u16, 2][..]),
+    ));
+    out.push(("and an untagged sector joins no group", idx.len() == 1));
+
+    // A two-sided line must appear in *both* the sectors it separates, which
+    // is the whole point of the index -- a neighbour query that only walked
+    // the front side would never see the sector on the other side of a door.
+    let side = |sector: u16| SideDef {
+        x_off: 0,
+        y_off: 0,
+        upper: Name::from_lump(b"-       "),
+        lower: Name::from_lump(b"-       "),
+        middle: Name::from_lump(b"-       "),
+        sector,
+    };
+    let sidedefs = alloc::vec![side(0), side(1)];
+    let line = |right: u16, left: u16| LineDef {
+        v1: 0,
+        v2: 1,
+        flags: 0,
+        special: 0,
+        tag: 0,
+        right,
+        left,
+    };
+    let linedefs = alloc::vec![line(0, 1)];
+    let by_sector = build_sector_lines(&linedefs, &sidedefs, 3);
+    out.push((
+        "a two-sided line is listed under both its sectors",
+        by_sector[0].as_slice() == [0u16] && by_sector[1].as_slice() == [0u16],
+    ));
+    out.push(("and under no others", by_sector[2].is_empty()));
+
+    let lv = Level {
+        name: Name::from_lump(b"TEST    "),
+        sector_lines: by_sector,
+        tagged: idx,
+        things: Vec::new(),
+        vertexes: alloc::vec![Vertex { x: 0, y: 0 }, Vertex { x: 64, y: 0 }],
+        linedefs,
+        sidedefs,
+        segs: Vec::new(),
+        subsectors: Vec::new(),
+        nodes: Vec::new(),
+        sectors,
+    };
+    out.push(("tag 0 matches nothing, rather than everything untagged", lv.tagged(0).is_empty()));
+    out.push(("a tag names its sectors", lv.tagged(7) == [0u16, 2]));
+    out.push((
+        "a sector's neighbour is found across a two-sided line",
+        lv.lowest_neighbour_ceiling(0) == 96,
+    ));
+    out.push((
+        "and a sector with no neighbour answers its own ceiling",
+        lv.lowest_neighbour_ceiling(2) == 64,
+    ));
+    out
 }
