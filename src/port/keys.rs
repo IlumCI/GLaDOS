@@ -34,6 +34,10 @@ pub const SHIFT: u8 = kbd::SC_LSHIFT;
 /// The key that opens a door. DOOM's Use is the space bar.
 pub const USE: u8 = kbd::SC_SPACE;
 
+/// Fire. DOOM's own default, and it is control rather than a mouse button
+/// because there is no mouse in this seam yet.
+pub const FIRE: u8 = kbd::SC_LCTRL;
+
 /// Is that key held right now?
 pub fn down(code: u8) -> bool {
     kbd::is_down(code)

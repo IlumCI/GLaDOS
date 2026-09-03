@@ -4869,6 +4869,16 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         }
                     };
                     let hold = num(0).unwrap_or(0);
+                    // Mouse motion to inject before the run starts, so
+                    // turning is checkable as a number: 400 counts is
+                    // 400 * 0.0439 = 17.6 degrees, and the run reports the
+                    // angle it finished at. A scheduled form would need the
+                    // script to carry something other than a key, and nothing
+                    // yet wants to turn *during* a run.
+                    let mouse = args
+                        .iter()
+                        .find_map(|t| t.strip_prefix("mouse=").and_then(|v| v.parse::<i32>().ok()))
+                        .unwrap_or(0);
                     // A sector to report the ceiling height of, so a door is
                     // checkable as a number. `doom play 3000 w watch=1`.
                     let watch = args
@@ -4877,16 +4887,22 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         .and_then(|n| n.parse::<usize>().ok())
                         .unwrap_or(0);
                     // Keys named after the duration are held for the session.
-                    // `w` holds from the start; `use@1500` presses at 1500 ms.
-                    // Options carrying `=` are not keys and are skipped.
-                    let mut script: alloc::vec::Vec<(u8, u64)> = alloc::vec::Vec::new();
+                    // `w` holds from the start; `use@1500` presses at 1500 ms;
+                    // a leading `-` releases instead, so `fire@200 -fire@300
+                    // fire@400` is two shots. Options carrying `=` are not
+                    // keys and are skipped.
+                    let mut script: alloc::vec::Vec<(u8, u64, bool)> = alloc::vec::Vec::new();
                     for n in args.iter().skip(1) {
                         if n.contains('=') {
                             continue;
                         }
+                        let (n, down) = match n.strip_prefix('-') {
+                            Some(rest) => (rest, false),
+                            None => (*n, true),
+                        };
                         let (n, at) = match n.split_once('@') {
                             Some((k, t)) => (k, t.parse::<u64>().unwrap_or(0)),
-                            None => (*n, 0),
+                            None => (n, 0),
                         };
                         let n = &n;
                         use crate::dev::kbd;
@@ -4899,18 +4915,19 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                             "right" => kbd::SC_RIGHT,
                             "shift" => kbd::SC_LSHIFT,
                             "use" | "space" => kbd::SC_SPACE,
+                            "fire" | "ctrl" => kbd::SC_LCTRL,
                             _ => {
                                 kprintln!("  no key called '{}'", n);
                                 continue;
                             }
                         };
-                        script.push((c, at));
+                        script.push((c, at, down));
                     }
                     let mut billboards = match sprites.as_ref() {
                         Some(sp) => crate::doom::sprite::collect(&lv, sp),
                         None => crate::doom::sprite::Things::none(),
                     };
-                    kprintln!("  {}  --  W/S walk, A/D strafe, arrows turn, shift runs, Esc quits", lv.name);
+                    kprintln!("  {}  --  W/S walk, A/D strafe, arrows turn, ctrl fires, Esc quits", lv.name);
                     kprintln!(
                         "  {} thing(s) to draw, {} of {} kind(s) turning, {} animating",
                         billboards.len(),
@@ -4920,6 +4937,13 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     );
                     if hold != 0 {
                         kprintln!("  (running for {} ms)", hold);
+                    }
+                    // Before the run, because the run removes what it kills
+                    // and comparing the end against itself says nothing.
+                    let began_with = billboards.len();
+                    if mouse != 0 {
+                        let m = crate::dev::mouse::peek();
+                        crate::dev::mouse::apply(mouse, 0, m.left, m.right, 0);
                     }
                     let mut out: Option<crate::doom::play::Stats> = None;
                     crate::port::with_screen(|| {
@@ -4960,6 +4984,13 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                                 billboards.animated(),
                                 billboards.kinds(),
                                 st.flips
+                            );
+                            kprintln!(
+                                "  {} shot(s), {} killed, {} thing(s) left of {}",
+                                st.shots,
+                                st.killed,
+                                st.remaining,
+                                began_with
                             );
                             kprintln!(
                                 "  health {}, armour {}, {} bullet(s), {} key(s), {} picked up{}",
@@ -5187,6 +5218,60 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         }
                     }
                 }
+            }
+        }
+        // The pointer, typed.
+        //
+        // Serial cannot inject PS/2 packets, so a capability reachable only by
+        // hand is one nothing ever checks -- the argument `win keys` makes for
+        // the keyboard, and `port bars` makes for anything full-screen. It
+        // goes through `dev::mouse::apply`, which is the single point the PS/2
+        // and USB roads already converge on, so what this injects is
+        // indistinguishable from a real movement by construction rather than
+        // by resemblance.
+        "mouse" => {
+            let mut it = rest.split_whitespace();
+            match it.next() {
+                None | Some("status") => {
+                    let s = crate::dev::mouse::peek();
+                    kprintln!(
+                        "  pointer {}, at {},{}  buttons{}{}",
+                        if crate::dev::mouse::present() { "present" } else { "absent" },
+                        s.x,
+                        s.y,
+                        if s.left { " left" } else { "" },
+                        if s.right { " right" } else { "" }
+                    );
+                }
+                Some("move") => {
+                    let dx = it.next().and_then(|t| t.parse::<i32>().ok());
+                    let dy = it.next().and_then(|t| t.parse::<i32>().ok()).unwrap_or(0);
+                    match dx {
+                        None => kprintln!("  usage: mouse move <dx> [dy]"),
+                        Some(dx) => {
+                            let s = crate::dev::mouse::peek();
+                            crate::dev::mouse::apply(dx, dy, s.left, s.right, 0);
+                            let now = crate::dev::mouse::peek();
+                            kprintln!("  moved {},{} -- pointer now at {},{}", dx, dy, now.x, now.y);
+                        }
+                    }
+                }
+                Some(w @ ("down" | "up" | "click")) => {
+                    let which = it.next().unwrap_or("left");
+                    let right = which == "right";
+                    let down = w != "up";
+                    let s = crate::dev::mouse::peek();
+                    let (l, r) = if right { (s.left, down) } else { (down, s.right) };
+                    crate::dev::mouse::apply(0, 0, l, r, 0);
+                    // A click is a press and a release, and the release has to
+                    // happen: a button left down is a button every later
+                    // command in the script is holding.
+                    if w == "click" {
+                        crate::dev::mouse::apply(0, 0, s.left, s.right, 0);
+                    }
+                    kprintln!("  {} {}", w, which);
+                }
+                Some(other) => kprintln!("  no idea what '{}' is (try: status, move, down, up, click)", other),
             }
         }
         // The seam a ported program reaches this machine through, and the

@@ -37,6 +37,7 @@ use alloc::vec::Vec;
 pub mod clock;
 pub mod files;
 pub mod keys;
+pub mod mouse;
 pub mod surface;
 
 pub use clock::now_us;

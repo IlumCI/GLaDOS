@@ -68,8 +68,18 @@ pub struct Obj {
     /// enough to investigate, because a barrel at the wrong height is still a
     /// barrel. An index cannot go stale.
     pub sector: usize,
-    /// What is left of it. Nothing takes it away yet.
+    /// What is left of it.
     pub health: i16,
+    /// Its own flags, copied from the kind at spawn.
+    ///
+    /// Its **own**, not the kind's, because dying changes them: a corpse is no
+    /// longer shootable and no longer solid, and reading them off the shared
+    /// row would make one barrel's death take every barrel's out of the world
+    /// with it.
+    pub flags: u32,
+    /// Its own height, for the same reason. A corpse is a quarter as tall,
+    /// which is what lets you walk over one.
+    pub height: i16,
 }
 
 impl Obj {
@@ -92,8 +102,51 @@ impl Obj {
             angle,
             sector,
             health: k.health,
+            flags: k.flags,
+            height: k.height,
         };
-        o.set_state(k.spawn).then_some(o)
+        let mut fired = Vec::new();
+        o.set_state(k.spawn, &mut fired).then_some(o)
+    }
+
+    /// Take damage. True means this killed it.
+    ///
+    /// DOOM's `P_DamageMobj`, without the thrust and without the pain state.
+    /// The thrust needs momentum, which nothing here has yet. The pain state
+    /// needs `P_Random` against `painchance`, and the random table is DOOM's
+    /// own 256-byte one -- it arrives with the monsters that need it, because
+    /// a generator that invented its own sequence would be a game that plays
+    /// differently from every other copy of DOOM and would say so nowhere.
+    pub fn hurt(&mut self, amount: i32, fired: &mut Vec<u8>) -> bool {
+        if self.flags & info::MF_SHOOTABLE == 0 || self.health <= 0 {
+            return false;
+        }
+        self.health = self.health.saturating_sub(amount as i16);
+        if self.health > 0 {
+            return false;
+        }
+        self.kill(fired);
+        true
+    }
+
+    /// DOOM's `P_KillMobj`, less the item a monster drops.
+    fn kill(&mut self, fired: &mut Vec<u8>) {
+        let Some(k) = self.row() else { return };
+        // A corpse is not shot at again, does not block, and does not float.
+        self.flags &= !(info::MF_SHOOTABLE | info::MF_SOLID | info::MF_FLOAT);
+        self.flags |= info::MF_CORPSE | info::MF_DROPOFF;
+        // A quarter as tall, which is what lets you walk over one.
+        self.height /= 4;
+        // Overkill has its own animation where there is one. The test is
+        // against *negative* spawn health, so it takes twice the thing's
+        // health in one hit -- a barrel has no gib state and takes the
+        // ordinary one however hard it is hit.
+        let state = if self.health < -k.health && k.xdeath != 0 {
+            k.xdeath
+        } else {
+            k.death
+        };
+        self.set_state(state, fired);
     }
 
     /// DOOM's `P_SetMobjState`. False means the thing has reached `S_NULL` and
@@ -103,7 +156,7 @@ impl Obj {
     /// they go is here, between reading the state and following `next` --
     /// which is the ordering that matters, since an action may itself set a
     /// state and the loop has to see the one it left behind.
-    pub fn set_state(&mut self, state: u16) -> bool {
+    pub fn set_state(&mut self, state: u16, fired: &mut Vec<u8>) -> bool {
         let mut next = state;
         for _ in 0..CHAIN_CAP {
             if next == 0 {
@@ -116,6 +169,14 @@ impl Obj {
             };
             self.state = next;
             self.tics = st.tics;
+            // The action of the state just entered, recorded rather than
+            // called. An action needs the level, the other objects and the
+            // player, and reaching all three from here would put the world
+            // inside the state machine -- which is precisely what keeps this
+            // file checkable at boot without a map. The caller dispatches.
+            if st.action != 0 {
+                fired.push(st.action);
+            }
             next = st.next;
             if self.tics != 0 {
                 return true;
@@ -128,14 +189,14 @@ impl Obj {
     }
 
     /// One tic of this object's own clock.
-    pub fn tick(&mut self) -> bool {
+    pub fn tick(&mut self, fired: &mut Vec<u8>) -> bool {
         if self.tics == -1 {
             return true;
         }
         self.tics -= 1;
         if self.tics <= 0 {
             let next = info::STATES.get(self.state as usize).map(|s| s.next).unwrap_or(0);
-            return self.set_state(next);
+            return self.set_state(next, fired);
         }
         true
     }
@@ -147,9 +208,14 @@ impl Obj {
         info::KINDS.get(self.kind as usize)
     }
 
-    /// Its flags, or none of them.
+    /// Its flags, which are its own and not the kind's once it has died.
     pub fn flags(&self) -> u32 {
-        self.row().map(|k| k.flags).unwrap_or(0)
+        self.flags
+    }
+
+    /// Whether it has been killed.
+    pub fn dead(&self) -> bool {
+        self.flags & info::MF_CORPSE != 0
     }
 
     /// Whether walking over it picks it up.
@@ -182,7 +248,7 @@ impl Obj {
     }
 
     pub fn height(&self) -> f32 {
-        self.row().map(|k| k.height as f32).unwrap_or(0.0)
+        self.height as f32
     }
 
     /// The four-character sprite name the state it is in wears.
@@ -202,6 +268,13 @@ impl Obj {
             floor
         }
     }
+}
+
+/// An action that fired, and where.
+pub struct Fired {
+    pub action: u8,
+    pub x: f32,
+    pub y: f32,
 }
 
 /// Every object on the level.
@@ -227,9 +300,38 @@ impl Objs {
     }
 
     /// Advance every object by one tic, dropping anything that ran out of
-    /// states.
-    pub fn tick(&mut self) {
-        self.list.retain_mut(|o| o.tick());
+    /// states, and report every action that fired.
+    ///
+    /// An action is reported by **where it happened**, not by which object it
+    /// belongs to. An index would be the obvious choice and would be wrong:
+    /// the sweep removes objects as it goes, so an index handed out early in a
+    /// tic names a different object by the end of it -- and the action that
+    /// most wants dispatching, a barrel exploding, is fired by an object on
+    /// its way off the level. A position cannot go stale.
+    pub fn tick(&mut self, out: &mut Vec<Fired>) {
+        let mut scratch: Vec<u8> = Vec::new();
+        let mut i = 0;
+        while i < self.list.len() {
+            scratch.clear();
+            let alive = self.list[i].tick(&mut scratch);
+            for a in scratch.iter() {
+                out.push(Fired {
+                    action: *a,
+                    x: self.list[i].x,
+                    y: self.list[i].y,
+                });
+            }
+            if alive {
+                i += 1;
+            } else {
+                self.list.remove(i);
+            }
+        }
+    }
+
+    /// How many of them have been killed.
+    pub fn dead(&self) -> usize {
+        self.list.iter().filter(|o| o.dead()).count()
     }
 
     /// The states every object is in, added up.
@@ -257,7 +359,18 @@ impl Default for Objs {
 
 /// A thing standing nowhere, for a check that only cares about its states.
 fn bare() -> Obj {
-    Obj { kind: 0, state: 0, tics: 0, x: 0.0, y: 0.0, angle: 0.0, sector: 0, health: 0 }
+    Obj {
+        kind: 0,
+        state: 0,
+        tics: 0,
+        x: 0.0,
+        y: 0.0,
+        angle: 0.0,
+        sector: 0,
+        health: 0,
+        flags: 0,
+        height: 0,
+    }
 }
 
 /// What `diag doom` asks of the state machine.
@@ -273,14 +386,15 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     // its own clock therefore returns it to where it started and ten does not,
     // which is the whole of what a state machine has to get right.
     let mut z = bare();
-    let alive = z.set_state(info::kind_of(3004).map(|k| k.spawn).unwrap_or(0));
+    let mut fired: Vec<u8> = Vec::new();
+    let alive = z.set_state(info::kind_of(3004).map(|k| k.spawn).unwrap_or(0), &mut fired);
     let first = z.state;
     for _ in 0..10 {
-        z.tick();
+        z.tick(&mut fired);
     }
     let after10 = z.state;
     for _ in 0..10 {
-        z.tick();
+        z.tick(&mut fired);
     }
     out.push((
         "an idle monster returns to its first state after one cycle",
@@ -292,10 +406,10 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     // ordinary countdown would march the entire contents of a map through
     // their death animations in the first second.
     let mut m = bare();
-    m.set_state(info::kind_of(2012).map(|k| k.spawn).unwrap_or(0));
+    m.set_state(info::kind_of(2012).map(|k| k.spawn).unwrap_or(0), &mut fired);
     let held = m.state;
     for _ in 0..1000 {
-        m.tick();
+        m.tick(&mut fired);
     }
     out.push((
         "an item never leaves its spawn state",
@@ -305,7 +419,10 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     // `S_NULL` takes a thing off the level rather than drawing it, and the
     // caller has to honour the return value. Nothing about the object looks
     // wrong afterwards, which is why this is asserted rather than trusted.
-    out.push(("a thing set to state zero is removed", !bare().set_state(0)));
+    out.push((
+        "a thing set to state zero is removed",
+        !bare().set_state(0, &mut fired),
+    ));
 
     // A kind that spawns into `S_NULL` is not an object at all. A teleport
     // destination is exactly this: a real row with a real doomednum.

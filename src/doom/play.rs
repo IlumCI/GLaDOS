@@ -34,6 +34,7 @@ use super::level::{Level, NONE};
 use super::math;
 use super::pic::Art;
 use super::specials;
+use super::thing::Fired;
 use super::thinker::Thinkers;
 use super::render::{Renderer, View, EYE_HEIGHT};
 use crate::port::{keys, Surface};
@@ -49,6 +50,20 @@ const RUN: f32 = 50.0;
 /// Degrees turned per tic.
 const TURN: f32 = 3.0;
 const TURN_FAST: f32 = 6.0;
+
+/// How far one count of mouse movement turns the player, in radians.
+///
+/// DOOM's, derived rather than chosen: `G_BuildTiccmd` does
+/// `cmd->angleturn -= mousex * 0x8`, and `angleturn` is added to the player's
+/// angle shifted left sixteen, so its unit is 1/65536 of a full turn. Eight of
+/// those is 0.0439 degrees, which is about seventeen degrees to the inch on a
+/// 400-count mouse -- famously slow, and famously what DOOM feels like.
+///
+/// Sensitivity is left out because DOOM's default is exactly 1: `mousex` is
+/// scaled by `(sensitivity + 5) / 10` and the default sensitivity is 5. A
+/// number that multiplies by one is a number worth not carrying until
+/// something can change it.
+const MOUSE_TURN: f32 = math::TAU * 8.0 / 65536.0;
 
 /// The player's width, which DOOM fixes at 16 units either side.
 const RADIUS: f32 = 16.0;
@@ -92,6 +107,11 @@ pub struct Player {
     pub used: bool,
     /// Health, armour, ammunition and keys.
     pub status: super::player::Status,
+    /// Whether Fire was held on the previous tic, for the same reason as Use.
+    pub firing: bool,
+    /// How many shots were taken, and how many things they killed.
+    pub shots: usize,
+    pub killed: usize,
     /// The colour of the last door that refused, if one has.
     ///
     /// Kept so a run can report it. A locked door is the one special that
@@ -111,6 +131,9 @@ impl Player {
             angle: math::deg_to_rad(t.angle),
             floor,
             used: false,
+            firing: false,
+            shots: 0,
+            killed: 0,
             status: super::player::Status::new(),
             refused: None,
         })
@@ -144,15 +167,15 @@ fn dist_to_seg(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
 /// the two ceilings, the highest of the two floors, and the gap between them.
 /// Three numbers that between them decide every vertical question a moving
 /// thing can ask about a portal.
-struct Opening {
+pub struct Opening {
     /// The lowest ceiling of the two sides.
-    top: f32,
+    pub top: f32,
     /// The highest floor of the two sides -- the step you would climb.
-    bottom: f32,
+    pub bottom: f32,
 }
 
 impl Opening {
-    fn of(lv: &Level, l: &super::level::LineDef) -> Option<Opening> {
+    pub fn of(lv: &Level, l: &super::level::LineDef) -> Option<Opening> {
         if l.left == NONE {
             return None;
         }
@@ -264,6 +287,40 @@ fn pickups(lv: &Level, p: &mut Player, things: &mut super::sprite::Things) {
     });
 }
 
+/// Dispatch the actions a tic set off.
+///
+/// One action so far, and it is the one that needed the mechanism: a barrel
+/// entering `BEXPD` fifteen tics after it dies. The loop is bounded because a
+/// blast can kill a barrel whose own blast can kill another -- which is the
+/// chain reaction, and is meant to happen -- and this kernel has no unwinder,
+/// so a cycle that could not terminate would be a machine that stops with no
+/// message. It terminates anyway, since every round needs a fresh kill and a
+/// corpse is not shootable; the bound is what makes that a fact rather than an
+/// argument.
+fn dispatch(
+    lv: &Level,
+    things: &mut super::sprite::Things,
+    fired: &mut alloc::vec::Vec<Fired>,
+) -> usize {
+    const ROUNDS: usize = 8;
+    let mut killed = 0usize;
+    let mut next: alloc::vec::Vec<Fired> = alloc::vec::Vec::new();
+    for _ in 0..ROUNDS {
+        if fired.is_empty() {
+            break;
+        }
+        next.clear();
+        for f in fired.iter() {
+            if f.action == super::info::A_EXPLODE {
+                killed += super::shoot::blast(lv, &mut things.objs, f.x, f.y, &mut next);
+            }
+        }
+        core::mem::swap(fired, &mut next);
+    }
+    fired.clear();
+    killed
+}
+
 /// One tic of the world.
 fn tic(lv: &mut Level, p: &mut Player, th: &mut Thinkers, things: &mut super::sprite::Things) {
     let held = keys::snapshot();
@@ -276,6 +333,15 @@ fn tic(lv: &mut Level, p: &mut Player, th: &mut Thinkers, things: &mut super::sp
     }
     if held.down(keys::RIGHT) {
         p.angle -= turn;
+    }
+    // And the mouse, which turns in the same direction the right arrow does:
+    // moving the hand right is positive `dx` and *subtracts* from the angle,
+    // because the angle grows anticlockwise. Getting that sign wrong gives a
+    // game that steers backwards, which is instantly obvious to a person and
+    // completely invisible to a test that only checks the angle moved.
+    let (mdx, _mdy) = crate::port::mouse::motion();
+    if mdx != 0 {
+        p.angle -= mdx as f32 * MOUSE_TURN;
     }
     if p.angle > math::PI {
         p.angle -= math::TAU;
@@ -326,11 +392,59 @@ fn tic(lv: &mut Level, p: &mut Player, th: &mut Thinkers, things: &mut super::sp
     }
     p.used = use_now;
 
+    // Fire, on the press rather than while held.
+    //
+    // **This is a deviation and not a simplification, so it is named here.**
+    // DOOM's pistol autofires: `A_WeaponReady` re-reads the attack button at
+    // the end of the firing sequence, so the *rate* is a property of the
+    // weapon's own state machine -- four states for the pistol, a different
+    // four for the shotgun -- and not of the key. Edge-triggering gives one
+    // shot per press, which is slower than DOOM and never faster, and it is
+    // what there is until the weapon states exist to be walked. Those arrive
+    // with the sprite that draws them, since a weapon whose rate is right and
+    // whose picture is absent is half a weapon either way.
+    let fire_now = held.down(keys::FIRE);
+    if fire_now && !p.firing {
+        let round = p.status.weapon.ammo();
+        let enough = match round {
+            Some(a) => p.status.ammo[a as usize] > 0,
+            None => true,
+        };
+        if enough {
+            if let Some(a) = round {
+                p.status.ammo[a as usize] -= 1;
+            }
+            p.shots += 1;
+            let mut fired: alloc::vec::Vec<Fired> = alloc::vec::Vec::new();
+            let hit = super::shoot::fire(
+                &*lv,
+                &mut things.objs,
+                p.x,
+                p.y,
+                p.angle,
+                super::shoot::PISTOL_DAMAGE,
+                &mut fired,
+            );
+            if let Some((_, died)) = hit {
+                if died {
+                    p.killed += 1;
+                }
+            }
+            p.killed += dispatch(&*lv, things, &mut fired);
+        }
+    }
+    p.firing = fire_now;
+
     th.tick(lv);
     // The objects run on the same clock as the doors, which is the point of
     // there being one: a thing animating off the frame rate would speed up
     // whenever the player looked at a wall.
-    things.tick();
+    let mut fired: alloc::vec::Vec<Fired> = alloc::vec::Vec::new();
+    things.tick(&mut fired);
+    // A barrel entering its explosion state fifteen tics after it died, and
+    // whatever that takes with it. Counted on the player, because a chain
+    // reaction somebody started is theirs.
+    p.killed += dispatch(&*lv, things, &mut fired);
     // The floor under wherever we are, sampled **every** tic rather than only
     // on one where a movement key was held.
     //
@@ -380,6 +494,14 @@ pub struct Stats {
     pub keys: usize,
     /// How many things were picked up over the run.
     pub picked: usize,
+    /// How many shots were taken, and how many things died -- which is more
+    /// than the shots hit, when a barrel takes another with it.
+    pub shots: usize,
+    pub killed: usize,
+    /// How many things are left on the level at the end. A thing that died
+    /// finishes its animation and comes off, so this falls where `killed`
+    /// rises, and the two disagreeing is a thing that died and stayed.
+    pub remaining: usize,
     /// The colour of the last door that refused for want of a key.
     pub refused: Option<super::player::Colour>,
     /// Whether the shading table came out of the WAD's own COLORMAP. Carried
@@ -401,7 +523,7 @@ pub fn run(
     art: &Art<'_>,
     things: &mut super::sprite::Things,
     limit_ms: u64,
-    script: &[(u8, u64)],
+    script: &[(u8, u64, bool)],
     watch: usize,
 ) -> Option<Stats> {
     let mut p = Player::at(&*lv)?;
@@ -430,13 +552,13 @@ pub fn run(
     // units being the whole reach, which on any real map is nowhere near the
     // thing you meant to open. The press has to happen *after* the walking,
     // and nothing in a held-key model can say that.
-    for (k, at) in script {
+    for (k, at, down) in script {
         if *at == 0 {
-            keys::force(*k, true);
+            keys::force(*k, *down);
         }
     }
-    let mut pending: alloc::vec::Vec<(u8, u64)> =
-        script.iter().copied().filter(|(_, at)| *at != 0).collect();
+    let mut pending: alloc::vec::Vec<(u8, u64, bool)> =
+        script.iter().copied().filter(|(_, at, _)| *at != 0).collect();
 
     let start = crate::port::now_us();
     let mut next_tic = start;
@@ -457,6 +579,9 @@ pub fn run(
         bullets: 0,
         keys: 0,
         picked: 0,
+        shots: 0,
+        killed: 0,
+        remaining: 0,
         refused: None,
         exited: false,
         lit_from_wad: r.lit_from_wad,
@@ -477,12 +602,14 @@ pub fn run(
             break;
         }
 
-        // Anything the script scheduled for by now. Pressed and left down: a
-        // release would need a second time and nothing yet wants one.
+        // Anything the script scheduled for by now. A release is a scheduled
+        // entry like a press, which it had to become the moment anything was
+        // edge-triggered: firing twice needs the trigger let go in between,
+        // and no held-key model can say that.
         let elapsed = (now - start) / 1000;
-        pending.retain(|(k, at)| {
+        pending.retain(|(k, at, down)| {
             if elapsed >= *at {
-                keys::force(*k, true);
+                keys::force(*k, *down);
                 false
             } else {
                 true
@@ -542,6 +669,9 @@ pub fn run(
     stats.bullets = p.status.ammo[super::player::Ammo::Clip as usize];
     stats.keys = p.status.keys();
     stats.picked = p.status.picked;
+    stats.shots = p.shots;
+    stats.killed = p.killed;
+    stats.remaining = things.len();
     stats.refused = p.refused;
     stats.exited = lv.exited;
     stats.watched = lv

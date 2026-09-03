@@ -71,6 +71,16 @@ static BUF: Racy<[u8; 4]> = Racy::new([0; 4]);
 static PHASE: Racy<usize> = Racy::new(0);
 static BOUNDS: Racy<(i32, i32)> = Racy::new((1280, 800));
 
+/// Motion since somebody last drained it, in mouse counts.
+///
+/// Kept beside the cursor position rather than derived from it, because they
+/// are different quantities and only one of them is what a game wants. The
+/// position is clamped to the screen: a pointer stops at the edge, which is
+/// right for a pointer and fatal for a player, who would turn until they
+/// faced the left wall and then stop turning. This accumulates and is
+/// unclamped, and it is drained by whoever reads it.
+static REL: Racy<(i32, i32)> = Racy::new((0, 0));
+
 pub fn present() -> bool {
     unsafe { *PRESENT.get() }
 }
@@ -86,6 +96,16 @@ pub fn take() -> State {
     s.wheel = 0;
     s.moved = false;
     out
+}
+
+/// The state as it stands, consuming nothing.
+///
+/// `take` clears the wheel and the moved flag because those describe what
+/// happened since the last look. A caller that only wants to know whether a
+/// button is *down* must not clear anything -- a button is a state, not an
+/// event, and draining it would swallow a click the real handler has not seen.
+pub fn peek() -> State {
+    unsafe { *STATE.get() }
 }
 
 /// Where the pointer is, without consuming anything.
@@ -119,6 +139,14 @@ pub fn apply(dx: i32, dy: i32, left: bool, right: bool, wheel: i32) {
         s.x = (s.x + dx).clamp(0, w - 1);
         s.y = (s.y - dy).clamp(0, h - 1);
         s.moved = true;
+        // The same motion, kept unclamped for a reader that wants how far the
+        // hand moved rather than where the pointer ended up. Accumulated here
+        // because `apply` is the one place every road converges -- PS/2 and
+        // USB HID both arrive here, and a second copy of this would be the one
+        // nobody tested.
+        let r = unsafe { &mut *REL.get() };
+        r.0 = r.0.saturating_add(dx);
+        r.1 = r.1.saturating_add(dy);
     }
     if wheel != 0 {
         s.wheel += wheel;
@@ -129,6 +157,18 @@ pub fn apply(dx: i32, dy: i32, left: bool, right: bool, wheel: i32) {
     }
     s.left = left;
     s.right = right;
+}
+
+/// Take the motion accumulated since the last call, and forget it.
+///
+/// Drained rather than sampled, for the reason `take` drains the wheel: it
+/// describes what happened since the last look, so a reader that sampled it
+/// would apply the same movement on every frame until the next one arrived.
+pub fn take_relative() -> (i32, i32) {
+    let r = unsafe { &mut *REL.get() };
+    let out = *r;
+    *r = (0, 0);
+    out
 }
 
 /// Announce that a pointer exists, for a driver that is not the i8042.

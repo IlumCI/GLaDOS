@@ -405,9 +405,9 @@ impl Things {
         self.art.len()
     }
 
-    /// One tic of every object's own clock.
-    pub fn tick(&mut self) {
-        self.objs.tick();
+    /// One tic of every object's own clock, reporting what fired.
+    pub fn tick(&mut self, out: &mut Vec<super::thing::Fired>) {
+        self.objs.tick(out);
     }
 
     /// The states every object is in, added up. See `Objs::phase`.

@@ -709,7 +709,16 @@ THINGS = [
     # Not at the origin any more -- the origin is exactly on the partition,
     # where which sector a point is in has no answer.
     (300, 0, 180, 1),
-    (120, 120, 0, 2035),    # a barrel in the near half
+    # Two barrels close enough to set each other off, with the first of them
+    # directly west of the player so a shot fired without turning hits it.
+    #
+    # 60 units apart, and the arithmetic is the point rather than the aesthetic:
+    # a blast does `128 - (max(|dx|,|dy|) - radius)`, so at 60 with a radius of
+    # 10 the second barrel takes 78 against 20 health and goes up too. A pair
+    # far enough apart to survive would test a barrel that explodes and nothing
+    # else, which is a chain reaction with one link.
+    (100, 0, 0, 2035),      # shot directly
+    (100, 60, 0, 2035),     # taken out by the first one's blast
     (-200, -150, 0, 2035),  # one in the far half, standing 32 higher
     (-260, 200, 0, 2028),   # a lamp in the far half
     # Three pickups on the straight line west from the player to the door, so
@@ -1189,6 +1198,39 @@ def check_map(lumps):
                     f"{sx},{sy} to the door, so holding one movement key "
                     f"would not walk over it"
                 )
+
+    # The chain reaction the shooting test depends on. Two barrels in the near
+    # half, one of them on the line the player fires along, and close enough
+    # that the first one's blast kills the second. All three are properties of
+    # where they were put, so all three are asserted -- moving a barrel is a
+    # one-character edit that would turn the test into one that passes because
+    # nothing happened.
+    BARREL, BLAST, BARREL_R, BARREL_HP = 2035, 128, 10, 20
+    barrels = []
+    for i in range(len(by["THINGS"]) // 10):
+        x, y, _a, kind, _f = struct.unpack_from("<5h", by["THINGS"], i * 10)
+        if kind == BARREL:
+            barrels.append((x, y))
+    start = [
+        struct.unpack_from("<5h", by["THINGS"], i * 10)[:2]
+        for i in range(len(by["THINGS"]) // 10)
+        if struct.unpack_from("<5h", by["THINGS"], i * 10)[3] == 1
+    ][0]
+    online = [b for b in barrels if b[1] == start[1] and 0 < b[0] < start[0]]
+    if not online:
+        raise ValueError(
+            f"no barrel on the line west from {start}, so a shot without a turn hits nothing"
+        )
+    chained = False
+    for bx, by_ in barrels:
+        for cx, cy in barrels:
+            if (bx, by_) == (cx, cy):
+                continue
+            gap = max(abs(bx - cx), abs(by_ - cy)) - BARREL_R
+            if BLAST - gap > BARREL_HP:
+                chained = True
+    if not chained:
+        raise ValueError("no two barrels are close enough for one to set off the other")
 
     # Every pickup placed must have the sprite lump its first frame wants, or
     # the thing is dropped at level load and the run reports nothing rather
