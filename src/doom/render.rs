@@ -997,9 +997,8 @@ impl Renderer {
         things: &super::sprite::Things,
         view: &View,
         scale: f32,
-        tic: u32,
     ) {
-        let billboards = &things.items;
+        let billboards = &things.objs.list;
         let (sin, cos) = (math::sin(view.angle), math::cos(view.angle));
         // Depth per thing, computed once, so the sort compares numbers rather
         // than recomputing a transform per comparison.
@@ -1022,13 +1021,10 @@ impl Renderer {
             let (dx, dy) = (b.x - view.x, b.y - view.y);
             // Which of the thing's facings this bearing shows, and whether
             // the lump for it is the mirror of one the WAD stores once.
-            // Which picture of the cycle, then which facing of that picture.
-            // The tic is the world's, not the frame's: at 35 Hz against
-            // whatever the renderer manages, an animation driven by frames
-            // would run at a speed that depends on how much of the map is on
-            // screen.
-            let Some(art) = things.art.get(b.art) else { continue };
-            let frame = art.at(tic);
+            // The pictures for the state this object is in, then which of
+            // their facings this bearing shows. The object carries its own
+            // phase, so two barrels lit at different moments animate apart.
+            let Some(frame) = things.frame(b.state) else { continue };
             let Some((patch, flip)) = frame.pick(math::atan2(dy, dx), b.angle) else { continue };
             // Height and light read live from the sector, so a thing standing
             // on a lift rides it and one in a room that darkens goes dark.

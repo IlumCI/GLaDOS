@@ -11,13 +11,36 @@ model that lives *inside* the kernel. No user/kernel split, no syscalls, no
 process isolation, one address space. A tool call from the model is a function
 call.
 
-108 files, roughly 50,000 lines. The only code in the kernel we did not write
-is Rust `core`, and `src/dev/rtl8188eu_tables.rs`, which is the RTL8188EU
-initialisation tables plus the RF and descriptor register constants, taken
-from Linux's GPL-2.0 rtl8xxxu driver because there is no other source for
-them. It is one file, marked as such at the top, and nothing else in the tree
-is copied from anywhere. `tools/rtlconv.py` regenerates the second half from
-a checkout and states its provenance; the tables came the same way.
+170 files, roughly 108,000 lines. **Three** things in the kernel we did not
+write, and the list has grown twice, so it is worth stating precisely rather
+than approximately:
+
+- **Rust `core`.**
+- **`src/dev/rtl8188eu_tables.rs`**: the RTL8188EU initialisation tables plus
+  the RF and descriptor register constants, taken from Linux's GPL-2.0
+  rtl8xxxu driver because there is no other source for them. One file, marked
+  as such at the top. `tools/rtlconv.py` regenerates the second half from a
+  checkout and states its provenance; the tables came the same way.
+- **`src/doom/`**: 9,900 lines adapted from
+  [room4doom](https://github.com/flukejones/room4doom) (MIT, Luke Jones),
+  which is itself a transliteration of id's DOOM. Eleven of its thirteen files
+  say at the top what they came from and what changed. This is the largest
+  piece and it is the *point* of that directory rather than an exception to
+  the rule: `src/doom/` exists to find out whether software written somewhere
+  else can be brought over without dissolving into the kernel, and code we
+  wrote ourselves would answer nothing.
+
+Of that last one, **`src/doom/info.rs` is generated rather than copied**, and
+the distinction matters. It is 3,900 lines of DOOM's *content* -- every sprite
+frame, how long it shows, what it becomes next -- emitted by
+`tools/doominfo.py` from an upstream checkout, the same arrangement
+`rtlconv.py` has with the wireless tables. Nine hundred and sixty-seven states
+is not a table anybody writes by hand correctly, and it can be re-derived by
+anybody with the checkout.
+
+No WAD is in this repository and none ever will be. What `src/doom/` reads is
+`DOOM1.WAD`, which belongs to id, or FreeDoom, which does not; every byte of
+art it draws comes off the boot volume at runtime.
 
 ## Commands
 
@@ -780,8 +803,79 @@ ceilings, which nothing in the fixture has and which the flat reader has to
 decline to draw so the cleared sky shows through.
 
 Every count the kernel printed matched an independent host-side parse exactly,
-including the thing census decomposing to 292: 179 drawn, 49 of a doomednum
-the table does not carry, 52 monsters with no rotation-0 lump, 12 invisible.
+including the thing census decomposing to 292. What that decomposition *was*
+is the reason the sprite table stopped being hand-written:
+
+    before   179 drawn, 49 of a doomednum the table does not carry,
+             52 monsters with no rotation-0 lump, 12 invisible
+    after    280 drawn, 12 start(s), 0 of unknown kind, 0 with no picture
+
+**The sprite table is generated, and the hand-written one was the problem.**
+It carried 44 doomednums, on the argument that copying `mobjinfo` would be
+copying a game's content. The argument was sound and the conclusion was wrong:
+a doomednum means what id decided it means, so a *partial* table is not a
+smaller version of the right answer, it is a level with 49 things missing from
+it. `tools/doominfo.py` emits `src/doom/info.rs` -- 967 states, 137 kinds, 118
+doomednums -- and the third figure above is the one worth watching, because it
+would rise again the moment somebody loaded a PWAD with custom things in it,
+which is the honest answer rather than a bug.
+
+The 12 remaining are exactly the four player starts and eight deathmatch
+starts. Those are **placeholders and not things**: positions the map format
+defines, with no `mobjinfo` row, from which nothing ever spawns. A teleport
+destination looks like it belongs with them and does not -- it is a real
+object with a real doomednum whose whole job is to be a marker, and what makes
+it invisible is that its row spawns into `S_NULL`. `S_NULL` carries `sprite:
+TROO, frame: 0` like every other row because the array needs *something*
+there, so a reader trusting the fields would draw an imp on every teleport pad
+in the game.
+
+Three generator mistakes, each recorded where it was fixed, and the pattern in
+them is the useful part -- **the two that would not compile were the cheap
+ones**:
+
+- The flag names were hand-written beside the parsed table. `NotDeathmatch` is
+  spelled `Notdmatch` upstream, so the constant emitted and the constant
+  referred to were different identifiers, which is a build failure. But
+  `Translation` is `0xC000000`, a two-bit colour field and not a bit at all,
+  so a positional list assigning it bit 26 produced a constant that compiled
+  perfectly and meant something else. Names *and* values are read out of
+  upstream's `bitflags` block now, and every flag the table names is checked
+  against the declaration.
+- `speed` is units per tic for a monster and **fixed point** for a missile,
+  one field with two units in it. A rocket reads 655360 where an imp reads 8,
+  which does not fit an `i16` -- the only reason anybody noticed.
+- `mass` is a divisor in the damage thrust, so Commander Keen and the boss
+  brain carry ten million to mean *immovable*. Also not an `i16`, for a
+  completely unrelated reason.
+
+**A thing has a state of its own, and it did not at first.** The first version
+played a kind's spawn cycle as a pure function of the world tic, which draws
+every barrel on the map correctly and is right *only* while every object of a
+kind stays in phase with every other. That holds while nothing joins the level
+late and nothing leaves its cycle, and it stops holding the moment anything
+can be hurt -- a monster in pain is a monster whose animation no longer agrees
+with its neighbour's. So `thing.rs` carries `Obj` with a state pointer and its
+own countdown, `sprite.rs` keys the decoded pictures by **state** rather than
+by kind, and the renderer asks the object which state it is in. On E1M1 that
+is 44 kinds over 66 states, of which 13 animate.
+
+Two details of `P_SetMobjState` worth knowing before touching it. A state with
+`tics == 0` is not a state that shows for no time -- it runs its action and
+falls straight through to the next one, which is how DOOM writes logic into an
+animation, so setting a state is a loop rather than an assignment. And that
+loop is **bounded here where upstream's is not**: id could rely on the shipped
+table having no zero-tic cycle, but this table is *generated*, there is no
+unwinder in this kernel and no watchdog, so an unbounded walk over a bad chain
+is a machine that stops with no message at all.
+
+**Which frame is showing gets a number, not a screenshot.** `doom play`
+reports how many times a sprite changed picture, and non-zero is the whole
+claim: every part of this can be right -- the chains walked, the durations
+read, the arithmetic asserted at boot -- and the tic never reach the objects,
+which then show their spawn frame forever and look exactly like a level whose
+barrels happen not to move. Measured on E1M1: `140 tics, 13 of 44 kind(s)
+animate, 58 frame change(s)`.
 
 **A claim made from a glance at that frame was wrong, and is recorded here
 because it is the exact error this file spends pages warning about.** A dark

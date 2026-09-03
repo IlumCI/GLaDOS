@@ -36,12 +36,19 @@
 //! walks it, and the two ways it can stop are the two kinds of thing there
 //! are: a torch closes a loop and animates forever, a medikit reaches a state
 //! with negative `tics` and stands in it.
+//!
+//! Which frame is showing is **not** decided here. That belongs to the object
+//! (`thing.rs`), because a picture chosen from the world tic is only right
+//! while every barrel on the map stays in step with every other -- true today
+//! and false the moment one of them can be shot. This module decodes the
+//! pictures and keys them by state; the object says which state it is in.
 
 use alloc::vec::Vec;
 
 use super::info;
 use super::level::Level;
 use super::math;
+use super::thing::{Obj, Objs};
 use super::pic::Patch;
 use super::wad::{Name, Wad};
 
@@ -302,226 +309,151 @@ impl Frame {
     }
 }
 
-/// The pictures one kind of thing cycles through, and how long each shows.
+/// The things of a level: the objects, and the pictures they draw from.
 ///
-/// Decoded once per *spawn state* rather than once per thing, which is the
-/// same trade `Frame` already makes one level down and matters more here: an
-/// animated kind decodes several patches, and a map with forty barrels in it
-/// would otherwise decode forty copies of the same two pictures.
-///
-/// Keyed on the spawn state and not on the sprite name, which are not the same
-/// key. Several kinds share a four-character name and animate differently --
-/// the name says which pictures exist, the chain says which of them this thing
-/// walks and how fast.
-pub struct Anim {
-    /// One decoded frame per state in the cycle.
-    frames: Vec<Frame>,
-    /// How long each of them shows. Negative means it never advances.
-    ///
-    /// Kept apart from the pictures so the arithmetic that reads it can be
-    /// checked without a WAD. Which frame a tic shows is the one thing here
-    /// that is genuinely easy to get wrong and completely invisible when it
-    /// is -- an animation off by one frame is still an animation.
-    durations: Vec<i16>,
-    /// The cycle in tics. Zero for anything that never advances.
-    total: i32,
-    /// Whether the chain closed on itself.
-    looping: bool,
-}
-
-/// Which frame of a cycle a tic falls in.
-///
-/// The modulo is taken **only** for a chain that closed. A chain that ended on
-/// a negative duration is one that stops there, so wrapping it would restart a
-/// death animation forever -- which stops being a subtle difference the moment
-/// anything can die.
-fn frame_at(durations: &[i16], total: i32, looping: bool, tic: u32) -> usize {
-    if durations.is_empty() {
-        return 0;
-    }
-    let mut t = tic as i64;
-    if looping && total > 0 {
-        t %= total as i64;
-    }
-    for (i, d) in durations.iter().enumerate() {
-        if *d < 0 {
-            return i;
-        }
-        t -= *d as i64;
-        if t < 0 {
-            return i;
-        }
-    }
-    // Ran off the end of a chain that does not repeat: the last one stands.
-    durations.len() - 1
-}
-
-impl Anim {
-    /// Every frame of the chain leaving `spawn`, or nothing if the WAD has a
-    /// picture for none of them.
-    ///
-    /// A state whose lump is missing is **skipped rather than fatal**, and the
-    /// cycle shortens by its duration. That is the same judgement `Frame`
-    /// makes about a missing facing: a WAD is allowed to be incomplete, and
-    /// half an animation is a better answer than no thing at all.
-    pub fn load(sprites: &Sprites, spawn: u16) -> Option<Anim> {
-        let (states, looping) = chain(spawn);
-        let mut frames = Vec::new();
-        let mut durations = Vec::new();
-        let mut total = 0i32;
-        for st in states {
-            let Some((name, letter)) = info::frame_of(st) else { continue };
-            let Some(f) = Frame::load(sprites, name, letter) else { continue };
-            let tics = info::STATES.get(st as usize).map(|r| r.tics).unwrap_or(-1);
-            frames.push(f);
-            durations.push(tics);
-            if tics > 0 {
-                total += tics as i32;
-            }
-        }
-        if frames.is_empty() {
-            return None;
-        }
-        Some(Anim { frames, durations, total, looping })
-    }
-
-    /// Which frame is showing at this tic.
-    pub fn at(&self, tic: u32) -> &Frame {
-        let i = frame_at(&self.durations, self.total, self.looping, tic);
-        &self.frames[i.min(self.frames.len() - 1)]
-    }
-
-    /// Which frame of the cycle a tic falls in, as a number.
-    ///
-    /// For a caller that wants to say whether anything moved without holding
-    /// on to a picture to compare against.
-    pub fn index_at(&self, tic: u32) -> usize {
-        frame_at(&self.durations, self.total, self.looping, tic)
-    }
-
-    /// How many pictures this cycles through. One means it does not move.
-    pub fn len(&self) -> usize {
-        self.frames.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.frames.is_empty()
-    }
-
-    /// Whether this turns to face the viewer, which is a property of the WAD
-    /// rather than of the table -- asked of the first frame, since a kind with
-    /// eight facings has them for every frame of its cycle.
-    pub fn turns(&self) -> bool {
-        self.frames[0].turns()
-    }
-}
-
-/// One thing, placed and pointing.
-pub struct Billboard {
-    /// Which entry of `Things::art` this wears.
-    pub art: usize,
-    /// The way it is pointing, in radians -- which for anything with eight
-    /// facings decides which of them the viewer sees.
-    pub angle: f32,
-    /// Where it stands.
-    pub x: f32,
-    pub y: f32,
-    /// The sector it stands in, rather than the height and light that sector
-    /// had when the level loaded.
-    ///
-    /// It was a copied `z` and `light`, which is correct exactly as long as no
-    /// floor ever moves. A lift raising a sector would have left every thing
-    /// standing in it hanging in the air at its load-time height, lit by a
-    /// room that had since gone dark -- and nothing would have looked broken
-    /// enough to investigate, because a barrel at the wrong height is still a
-    /// barrel. An index cannot go stale.
-    pub sector: usize,
-}
-
-/// Decode every drawable thing on the level, once.
-///
-/// Once rather than per frame: a patch decode allocates a vector per column,
-/// and a map has hundreds of things. The same trade `Pics` makes, for the same
-/// reason, and it is why this returns owned `Patch`es rather than indices.
-/// The things of a level, and the animations they share.
+/// The art is keyed by **state** and not by kind, which is the key that
+/// survives an object leaving its spawn cycle. Decoded once and shared, which
+/// is the same trade `Pics` makes and matters more here: a patch decode
+/// allocates a vector per column, and a map with forty barrels on it would
+/// otherwise decode forty copies of the same two pictures.
 pub struct Things {
-    /// One per distinct spawn state on the level.
-    pub art: Vec<Anim>,
-    pub items: Vec<Billboard>,
+    /// One decoded picture per state anything on this level can be in, sorted
+    /// by state so a lookup is a search rather than a scan.
+    art: Vec<(u16, Frame)>,
+    /// Every object on the level.
+    pub objs: Objs,
+    /// How many distinct kinds turn to face the viewer, and how many have more
+    /// than one frame. Counted at load, because afterwards the objects are
+    /// what exist and the kinds are not enumerated anywhere.
+    turning: usize,
+    animated: usize,
+    /// How many distinct kinds stand on the level.
+    ///
+    /// Not `art.len()`, which is a count of *states*: one kind contributes as
+    /// many pictures as its cycle is long, so 44 kinds on FreeDoom E1M1 decode
+    /// 66 of them. Reporting the second under the first's name reads as a
+    /// level with half again as many sorts of thing on it as it has.
+    kinds: usize,
 }
 
 impl Things {
     /// Nothing to draw, for a WAD with no sprite namespace at all.
     pub fn none() -> Things {
-        Things { art: Vec::new(), items: Vec::new() }
+        Things { art: Vec::new(), objs: Objs::new(), turning: 0, animated: 0, kinds: 0 }
     }
 
     pub fn len(&self) -> usize {
-        self.items.len()
+        self.objs.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.items.is_empty()
+        self.objs.is_empty()
+    }
+
+    /// The pictures for one state, if this level decoded any.
+    pub fn frame(&self, state: u16) -> Option<&Frame> {
+        let i = self.art.binary_search_by_key(&state, |(s, _)| *s).ok()?;
+        self.art.get(i).map(|(_, f)| f)
     }
 
     /// How many of the kinds on this level turn to face the viewer.
     pub fn turning(&self) -> usize {
-        self.art.iter().filter(|a| a.turns()).count()
+        self.turning
     }
 
     /// How many of them have more than one picture, for a caller that wants to
     /// report that anything moves at all.
     pub fn animated(&self) -> usize {
-        self.art.iter().filter(|a| a.len() > 1).count()
+        self.animated
     }
 
-    /// Every kind's current frame, added up.
-    ///
-    /// A number that changes exactly when some kind changes picture, which is
-    /// what a run needs to report that animation is *live* rather than merely
-    /// configured. Everything up to here can be right -- the chains walked,
-    /// the durations read, the arithmetic asserted -- and the tic never reach
-    /// the renderer, which draws frame `A` forever and looks exactly like a
-    /// game whose barrels happen not to move.
-    ///
-    /// A sum rather than a hash: two kinds advancing in the same tic can
-    /// cancel in principle, so this undercounts and never overcounts, which is
-    /// the right way round for a figure whose whole job is to be non-zero.
-    pub fn phase(&self, tic: u32) -> usize {
-        self.art.iter().map(|a| a.index_at(tic)).sum()
+    /// How many distinct sprite kinds the level draws from.
+    pub fn kinds(&self) -> usize {
+        self.kinds
+    }
+
+    /// How many distinct states were decoded for them.
+    pub fn pictures(&self) -> usize {
+        self.art.len()
+    }
+
+    /// One tic of every object's own clock.
+    pub fn tick(&mut self) {
+        self.objs.tick();
+    }
+
+    /// The states every object is in, added up. See `Objs::phase`.
+    pub fn phase(&self) -> usize {
+        self.objs.phase()
     }
 }
 
+/// Decode every drawable thing on the level, once.
 pub fn collect(lv: &Level, sprites: &Sprites) -> Things {
-    let mut art: Vec<Anim> = Vec::new();
-    // Which `art` index each spawn state took, so a second imp shares the
-    // first one's decoded cycle.
-    let mut seen: Vec<(u16, usize)> = Vec::new();
-    let mut items = Vec::new();
+    let mut art: Vec<(u16, Frame)> = Vec::new();
+    let mut objs = Objs::new();
+    // Which kinds have been met, so the art for a second imp is not decoded
+    // again and the two counters below are per kind rather than per thing.
+    let mut seen: Vec<u16> = Vec::new();
+    let (mut turning, mut animated) = (0usize, 0usize);
+
     for t in lv.things.iter() {
-        let Some(spawn) = spawn_state(t.kind) else { continue };
-        let idx = match seen.iter().find(|(sp, _)| *sp == spawn) {
-            Some((_, i)) => *i,
-            None => {
-                let Some(a) = Anim::load(sprites, spawn) else { continue };
-                art.push(a);
-                seen.push((spawn, art.len() - 1));
-                art.len() - 1
-            }
-        };
+        let Some(row) = info::row_of(t.kind) else { continue };
         // The sector it is standing in. A thing whose sector cannot be found
         // is dropped rather than placed at zero, which in a map with a raised
         // floor would bury it.
         let Some(sector) = lv.sector_index_at(t.x as i32, t.y as i32) else { continue };
-        items.push(Billboard {
-            art: idx,
-            angle: math::deg_to_rad(t.angle),
-            x: t.x as f32,
-            y: t.y as f32,
+        let Some(o) = Obj::spawn(
+            row,
+            t.x as f32,
+            t.y as f32,
+            math::deg_to_rad(t.angle),
             sector,
-        });
+        ) else {
+            continue;
+        };
+
+        if !seen.contains(&row) {
+            seen.push(row);
+            // Every state this kind can reach today, which is its spawn cycle
+            // and nothing else. The kinds that can reach further -- a monster
+            // walking, hurting, dying -- get their chains decoded by the phase
+            // that gives them somewhere to walk to; decoding all eight chains
+            // of every kind now would be several thousand patch decodes at
+            // level load for pictures nothing can ask for.
+            let (states, _) = chain(info::KINDS[row as usize].spawn);
+            let mut have = 0usize;
+            let mut turns = false;
+            for st in states.iter() {
+                if art.iter().any(|(s, _)| s == st) {
+                    have += 1;
+                    continue;
+                }
+                let Some((name, letter)) = info::frame_of(*st) else { continue };
+                let Some(f) = Frame::load(sprites, name, letter) else { continue };
+                turns |= f.turns();
+                art.push((*st, f));
+                have += 1;
+            }
+            if turns {
+                turning += 1;
+            }
+            if have > 1 {
+                animated += 1;
+            }
+        }
+
+        // A kind whose pictures are all missing draws nothing, so the object
+        // is not kept: an invisible thing that still occupies the sort and the
+        // clock is a cost with no picture at the end of it.
+        if art.iter().any(|(s, _)| *s == o.state) {
+            objs.list.push(o);
+        }
     }
-    Things { art, items }
+
+    art.sort_unstable_by_key(|(s, _)| *s);
+    let kinds = seen.len();
+    Things { art, objs, turning, animated, kinds }
 }
 
 /// Numbers a map places that are not objects.
@@ -533,7 +465,7 @@ pub fn collect(lv: &Level, sprites: &Sprites) -> Things {
 /// row, and what makes it invisible is that its row spawns into `S_NULL`.
 ///
 /// The list exists so a census can tell "a placeholder" from "a doomednum
-/// nothing has a row for", which are the same answer from `spawn_state` and
+/// nothing has a row for", which are the same answer from `info::row_of` and
 /// very different news. The first is every map ever made; the second is a
 /// thing that will not appear.
 fn map_data(kind: i16) -> bool {
@@ -551,15 +483,24 @@ fn map_data(kind: i16) -> bool {
 pub fn census(lv: &Level, sprites: &Sprites) -> (usize, usize, usize, usize) {
     let (mut drawn, mut placed, mut no_kind, mut no_lump) = (0, 0, 0, 0);
     for t in lv.things.iter() {
-        match spawn_state(t.kind) {
-            None if map_data(t.kind) => placed += 1,
-            None => no_kind += 1,
-            // A kind draws if any state of its cycle has any picture: a
-            // rotation-0 lump, or at least one of the eight facings.
-            Some(spawn) => match Anim::load(sprites, spawn) {
-                Some(_) => drawn += 1,
-                None => no_lump += 1,
-            },
+        let Some(row) = info::row_of(t.kind) else {
+            if map_data(t.kind) {
+                placed += 1;
+            } else {
+                no_kind += 1;
+            }
+            continue;
+        };
+        // A kind draws if any state of its cycle has any picture: a rotation-0
+        // lump, or at least one of the eight facings.
+        let (states, _) = chain(info::KINDS[row as usize].spawn);
+        let any = states.iter().any(|st| {
+            info::frame_of(*st).is_some_and(|(n, l)| Frame::load(sprites, n, l).is_some())
+        });
+        if any {
+            drawn += 1;
+        } else {
+            no_lump += 1;
         }
     }
     (drawn, placed, no_kind, no_lump)
@@ -635,39 +576,6 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     // them, so this is no longer the common case it was, but a PWAD is free
     // to place anything.
     out.push(("an unknown doomednum draws nothing", spawn_state(31337).is_none()));
-
-    // Which frame a tic shows. A synthetic table rather than a real one,
-    // because what is being checked is the arithmetic and a real cycle would
-    // make the expected answers depend on the generated table as well.
-    let loop2 = [6i16, 6];
-    out.push((
-        "a two-frame loop alternates and wraps",
-        frame_at(&loop2, 12, true, 0) == 0
-            && frame_at(&loop2, 12, true, 5) == 0
-            && frame_at(&loop2, 12, true, 6) == 1
-            && frame_at(&loop2, 12, true, 11) == 1
-            && frame_at(&loop2, 12, true, 12) == 0
-            && frame_at(&loop2, 12, true, 100_000) == 0,
-    ));
-    // The distinction the whole type turns on. Same durations, same tics, and
-    // a chain that does not close stops on its last frame instead of starting
-    // over -- so a corpse stays a corpse.
-    out.push((
-        "a chain that does not close stops on its last frame",
-        frame_at(&loop2, 12, false, 6) == 1
-            && frame_at(&loop2, 12, false, 12) == 1
-            && frame_at(&loop2, 12, false, 100_000) == 1,
-    ));
-    // A negative duration ends it wherever it is, which is every item in the
-    // game: one frame, shown forever, reached at tic zero.
-    out.push((
-        "a negative duration never advances",
-        frame_at(&[-1], 0, false, 0) == 0
-            && frame_at(&[-1], 0, false, 9_999) == 0
-            && frame_at(&[4, -1], 4, false, 0) == 0
-            && frame_at(&[4, -1], 4, false, 4) == 1
-            && frame_at(&[4, -1], 4, false, 9_999) == 1,
-    ));
 
     // The scenery claim that used to live in `pic::checks`, which is where
     // the sprite checks were kept before this module had any of its own.

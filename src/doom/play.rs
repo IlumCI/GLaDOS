@@ -211,7 +211,7 @@ fn try_move(lv: &Level, p: &mut Player, dx: f32, dy: f32) {
 }
 
 /// One tic of the world.
-fn tic(lv: &mut Level, p: &mut Player, th: &mut Thinkers) {
+fn tic(lv: &mut Level, p: &mut Player, th: &mut Thinkers, things: &mut super::sprite::Things) {
     let held = keys::snapshot();
     let fast = held.down(keys::SHIFT);
     let turn = math::deg_to_rad(if fast { TURN_FAST as i16 } else { TURN as i16 });
@@ -270,6 +270,10 @@ fn tic(lv: &mut Level, p: &mut Player, th: &mut Thinkers) {
     p.used = use_now;
 
     th.tick(lv);
+    // The objects run on the same clock as the doors, which is the point of
+    // there being one: a thing animating off the frame rate would speed up
+    // whenever the player looked at a wall.
+    things.tick();
     // The floor under wherever we are, sampled **every** tic rather than only
     // on one where a movement key was held.
     //
@@ -324,7 +328,7 @@ pub fn run(
     surf: &mut Surface,
     lv: &mut Level,
     art: &Art<'_>,
-    things: &super::sprite::Things,
+    things: &mut super::sprite::Things,
     limit_ms: u64,
     script: &[(u8, u64)],
     watch: usize,
@@ -365,7 +369,7 @@ pub fn run(
 
     let start = crate::port::now_us();
     let mut next_tic = start;
-    let mut last_phase = things.phase(0);
+    let mut last_phase = things.phase();
     let mut stats = Stats {
         frames: 0,
         tics: 0,
@@ -412,7 +416,7 @@ pub fn run(
         // renderer manages.
         let mut ran = 0;
         while now >= next_tic && ran < MAX_CATCHUP {
-            tic(lv, &mut p, &mut th);
+            tic(lv, &mut p, &mut th, things);
             next_tic += TIC_US;
             stats.tics += 1;
             ran += 1;
@@ -424,12 +428,12 @@ pub fn run(
 
         let v = p.view();
         r.frame(surf, &*lv, art, v, sky);
-        r.things(surf, &*lv, things, &v, surf_scale, stats.tics);
+        r.things(surf, &*lv, &*things, &v, surf_scale);
         // Whether anything actually changed picture this frame. Counted here
         // rather than asserted, because how many flips a run sees depends on
         // how long it ran and what is on the level -- what matters is that it
         // is not zero on a level with animated things on it.
-        let phase = things.phase(stats.tics);
+        let phase = things.phase();
         if phase != last_phase {
             stats.flips += 1;
             last_phase = phase;

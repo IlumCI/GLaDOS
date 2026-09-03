@@ -4823,10 +4823,11 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                             no_lump
                         );
                         kprintln!(
-                            "  {} of {} sprite kind(s) turn to face the viewer, {} animate",
+                            "  {} of {} kind(s) turn to face the viewer, {} animate over {} state(s)",
                             billboards.turning(),
-                            billboards.art.len(),
-                            billboards.animated()
+                            billboards.kinds(),
+                            billboards.animated(),
+                            billboards.pictures()
                         );
                     }
                     let mut lit = false;
@@ -4840,7 +4841,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         lit = r.lit_from_wad;
                         r.frame(&mut surf, &lv, &art, view, sky);
                         let vscale = surf.width() as f32 / 2.0;
-                        r.things(&mut surf, &lv, &billboards, &view, vscale, 0);
+                        r.things(&mut surf, &lv, &billboards, &view, vscale);
                         surf.present();
                         wait_or(hold);
                     });
@@ -4905,7 +4906,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         };
                         script.push((c, at));
                     }
-                    let billboards = match sprites.as_ref() {
+                    let mut billboards = match sprites.as_ref() {
                         Some(sp) => crate::doom::sprite::collect(&lv, sp),
                         None => crate::doom::sprite::Things::none(),
                     };
@@ -4914,7 +4915,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         "  {} thing(s) to draw, {} of {} kind(s) turning, {} animating",
                         billboards.len(),
                         billboards.turning(),
-                        billboards.art.len(),
+                        billboards.kinds(),
                         billboards.animated()
                     );
                     if hold != 0 {
@@ -4929,7 +4930,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                             &mut surf,
                             &mut lv,
                             &art,
-                            &billboards,
+                            &mut billboards,
                             hold,
                             &script,
                             watch,
@@ -4957,7 +4958,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                             kprintln!(
                                 "  {} of {} kind(s) animate, {} frame change(s)",
                                 billboards.animated(),
-                                billboards.art.len(),
+                                billboards.kinds(),
                                 st.flips
                             );
                             kprintln!(

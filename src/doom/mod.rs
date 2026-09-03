@@ -60,6 +60,7 @@ pub mod pic;
 pub mod play;
 pub mod specials;
 pub mod render;
+pub mod thing;
 pub mod thinker;
 pub mod sprite;
 pub mod level;
@@ -92,5 +93,6 @@ pub fn checks() -> alloc::vec::Vec<(&'static str, bool)> {
     out.extend(play::checks());
     out.extend(specials::checks());
     out.extend(sprite::checks());
+    out.extend(thing::checks());
     out
 }

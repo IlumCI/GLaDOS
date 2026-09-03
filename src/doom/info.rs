@@ -3888,6 +3888,16 @@ pub fn kind_of(doomednum: i16) -> Option<&'static Kind> {
     KINDS.iter().find(|k| k.doomednum == doomednum)
 }
 
+/// Which row a doomednum is, for a caller that wants to remember the
+/// answer rather than the number.
+///
+/// An object stores its row and not its doomednum: the row is what
+/// indexes this table, and several kinds share a doomednum of -1 because
+/// no map places them -- so a doomednum is not an identity and a row is.
+pub fn row_of(doomednum: i16) -> Option<u16> {
+    KINDS.iter().position(|k| k.doomednum == doomednum).map(|i| i as u16)
+}
+
 /// The sprite name and frame letter a state shows, or nothing.
 ///
 /// **State 0 is  and draws nothing.** It is DOOM's no-state, and
