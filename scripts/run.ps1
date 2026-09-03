@@ -36,7 +36,39 @@ param(
     # WHPX, best of nine: the decode path is flat across one, two and four, and
     # `logits` is bit-identical, which is what `smp.rs` claims for a split
     # matvec.
-    [int]$Smp = 4
+    [int]$Smp = 4,
+    # The accelerator, and it defaults to the fast one.
+    #
+    # This script ran under TCG for its whole life, silently, because nothing
+    # here ever passed `-accel`. WHPX -- the Windows Hypervisor Platform, which
+    # is what KVM is on Linux -- measures roughly **160x** faster on this
+    # workload: a forward-pass group is 286,370 ms under TCG and 1,795 under
+    # WHPX. Everything this project called "too slow to run here" was an
+    # untested assumption about the emulator, and the same assumption was built
+    # into the one script a person actually watches.
+    #
+    # `-Accel tcg` falls back where the hypervisor is unavailable, and
+    # `-Accel 'tcg,thread=multi'` is MTTCG -- which is worth knowing about and
+    # not worth using here: it parallelises the *translation* across vCPUs, and
+    # this kernel runs everything on the bootstrap processor, so there is no
+    # second thread of guest work for it to spread. It is still TCG.
+    [string]$Accel = 'whpx',
+    # `-cpu max` alongside it, because WHPX alone reports `avx2=0 fma=0` and
+    # the trainer's hardware gate then declines to run at all.
+    [string]$Cpu = 'max',
+    # A WAD to boot with, staged as `GLADOS\doom.wad`.
+    #
+    # `drive.py --wad` has done this for headless runs since DOOM existed here;
+    # this script could not, so the one path a person uses to *look* at it was
+    # the one that could not load a level. FreeDoom is the freely licensed one:
+    # `out\freedoom\freedoom-0.13.0\freedoom1.wad` after the recipe in
+    # CLAUDE.md.
+    [string]$Wad,
+    # Anything else to hand QEMU, for the things this script should not have an
+    # opinion about: `-QemuExtra '-full-screen'`, or
+    # `-QemuExtra '-display','gtk,show-menubar=off'` for a window with no
+    # chrome in it, which is what you want if you are recording.
+    [string[]]$QemuExtra = @()
 )
 
 $ErrorActionPreference = 'Stop'
@@ -161,9 +193,23 @@ $bootDir = Join-Path $esp 'EFI\BOOT'
 New-Item -ItemType Directory -Force -Path $bootDir | Out-Null
 Copy-Item $efi (Join-Path $bootDir 'BOOTX64.EFI') -Force
 
+# The WAD, under the one name the kernel looks for. Copied rather than linked
+# because the ESP is projected to the guest as a FAT volume and a junction on
+# the host side is not something that survives the projection.
+if ($Wad) {
+    if (-not (Test-Path $Wad)) { Write-Error "no such WAD: $Wad" }
+    $gladosDir = Join-Path $esp 'GLADOS'
+    New-Item -ItemType Directory -Force -Path $gladosDir | Out-Null
+    Copy-Item $Wad (Join-Path $gladosDir 'doom.wad') -Force
+    $mb = [math]::Round((Get-Item $Wad).Length / 1MB, 1)
+    Write-Host "wad  : $Wad ($mb MB)"
+}
+
 # --- launch ---
 $qemuArgs = @(
     '-machine', 'q35',
+    '-accel', $Accel,
+    '-cpu', $Cpu,
     '-m', $Memory,
     '-smp', $Smp
 )
@@ -204,6 +250,7 @@ $qemuArgs += @(
     # paging bug looks like an infinite boot loop with nothing to read.
     '-no-reboot'
 )
+if ($QemuExtra)   { $qemuArgs += $QemuExtra }
 if ($TraceFaults) { $qemuArgs += @('-d', 'int,cpu_reset') }
 if ($Gdb)         { $qemuArgs += @('-s', '-S') }
 

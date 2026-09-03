@@ -761,6 +761,15 @@ impl Renderer {
                     // as closed as a wall.
                     closed &= b.floor >= b.ceiling;
                     if closed {
+                        // **And as opaque as one.** This set `near` and closed
+                        // the column and left `solid` alone, so the wall stopped
+                        // being drawn through and sprites did not: a monster
+                        // behind a shut door was culled by nothing and clipped
+                        // to a window that `record_windows` never wrote, which
+                        // is the reset value -- the whole screen. It drew at
+                        // full height, through the door, and it looked exactly
+                        // like a cheat.
+                        self.solid[x as usize] = self.solid[x as usize].min(dist);
                         self.close(x);
                     }
                 }
@@ -974,12 +983,24 @@ impl Renderer {
     }
 
     /// Keep what each column was left open to, for the sprite pass.
+    ///
+    /// Copied **unconditionally**, and the condition that used to be here is
+    /// the bug it caused. It wrote only while `top <= bot`, so a column the
+    /// walk had closed kept the reset window -- row zero to the bottom of the
+    /// screen, which is to say no clipping at all. Any sprite behind whatever
+    /// closed it therefore drew in full. `close` leaves `top = 1, bot = 0`,
+    /// which is an empty range and rejects every row, so the honest thing is
+    /// to copy what the walk actually left.
+    ///
+    /// This is a backstop rather than the fix. A column closed by a wall or a
+    /// shut door is culled by `solid` before the window is consulted at all;
+    /// what this catches is the third case, a column narrowed to nothing by
+    /// two steps that between them leave no gap, where nothing calls `close`
+    /// and nothing sets `solid` and the column is nonetheless shut.
     fn record_windows(&mut self) {
         for x in 0..self.w {
-            if self.top[x] <= self.bot[x] {
-                self.win_top[x] = self.top[x];
-                self.win_bot[x] = self.bot[x];
-            }
+            self.win_top[x] = self.top[x];
+            self.win_bot[x] = self.bot[x];
         }
     }
 
