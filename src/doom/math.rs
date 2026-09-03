@@ -102,3 +102,38 @@ pub fn floor_i(x: f32) -> i32 {
         t
     }
 }
+
+/// Arctangent of `y/x` in radians, in `(-PI, PI]`.
+///
+/// Needed to pick which of a monster's eight facings the viewer sees, which is
+/// the angle from the eye to the thing minus the thing's own. The buckets are
+/// 45 degrees wide, so this only has to be right to a few degrees -- but a
+/// crude approximation would put the boundary in the wrong place and a
+/// monster would turn one frame early at one bearing and not another, which
+/// reads as a jitter rather than as an error.
+///
+/// The rational form `z / (1 + 0.28125 z^2)` over the octant where `|z| <= 1`,
+/// with the quadrant reconstructed around it. Maximum error about 0.004
+/// radians, a quarter of a degree, against buckets a hundred and eighty times
+/// that wide. No table: the eight-entry one this replaces would have to be
+/// interpolated to do better and would then cost more than the divide.
+pub fn atan2(y: f32, x: f32) -> f32 {
+    if x == 0.0 && y == 0.0 {
+        return 0.0;
+    }
+    let (ax, ay) = (if x < 0.0 { -x } else { x }, if y < 0.0 { -y } else { y });
+    // Fold into the octant where the ratio is at most one, so the
+    // approximation is used only where it is accurate.
+    let (z, folded) = if ax >= ay { (ay / ax, false) } else { (ax / ay, true) };
+    let mut a = z / (1.0 + 0.281_25 * z * z);
+    if folded {
+        a = PI / 2.0 - a;
+    }
+    if x < 0.0 {
+        a = PI - a;
+    }
+    if y < 0.0 {
+        a = -a;
+    }
+    a
+}

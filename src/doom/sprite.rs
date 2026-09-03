@@ -28,15 +28,15 @@
 use alloc::vec::Vec;
 
 use super::level::Level;
+use super::math;
 use super::pic::Patch;
 use super::wad::{Name, Wad};
 
 /// A doomednum, and the sprite a thing of that kind wears.
 ///
-/// Frame A rotation 0 in every case, because everything here is scenery or an
-/// item and those have exactly one picture. A monster would need its facing,
-/// which is the angle from the viewer to the thing minus the thing's own --
-/// and needs the eight rotations to exist in the WAD to be worth computing.
+/// Frame `A` in every case. Whether that frame has one picture or eight is a
+/// property of the WAD rather than of this table -- an item has a rotation-0
+/// lump and a monster has eight facings -- and `Frame` finds out by looking.
 const KINDS: &[(i16, &str)] = &[
     // Scenery, which is what a map is decorated with.
     (2035, "BAR1"), // exploding barrel
@@ -76,10 +76,8 @@ const KINDS: &[(i16, &str)] = &[
     (5, "BKEY"),    // blue key card
     (6, "YKEY"),    // yellow key card
     (13, "RKEY"),   // red key card
-    // Monsters. Frame A rotation 0 is wrong for these -- they have eight
-    // rotations and no rotation-0 lump at all -- so they resolve to nothing
-    // and draw nothing until facings are implemented. Listed anyway, because
-    // the absence is then a missing picture rather than a missing table row.
+    // Monsters, which have eight facings and no rotation-0 lump. They draw
+    // now: `Frame` decodes all eight and `pick` chooses by bearing.
     (3004, "POSS"), // zombieman
     (9, "SPOS"),    // shotgun guy
     (3001, "TROO"), // imp
@@ -179,11 +177,146 @@ impl Sprites {
         let full = core::str::from_utf8(&buf[..6]).ok()?;
         self.index_of(full)
     }
+
+    /// Frame `A` at one of the eight facings, and whether that lump is the
+    /// mirror of the one wanted.
+    ///
+    /// A sprite lump can serve two frames at once through an eight-character
+    /// name: `SARGA1D1` is frame A rotation 1, *and* frame D rotation 1 drawn
+    /// mirrored. id did that because a monster is symmetric about its facing,
+    /// so the picture of it turned 45 degrees left is the picture of it turned
+    /// 45 degrees right flipped -- which halves the art for the four
+    /// off-axis pairs. A reader that only matched the first pair would find
+    /// four of the eight facings and drop the rest.
+    ///
+    /// A scan rather than a lookup. The list is every sprite lump in the WAD
+    /// -- 853 in FreeDoom -- and this runs eight times per *sprite kind* when
+    /// a level loads, not per thing and never per frame.
+    pub fn facing(&self, name: &str, rot: u8) -> Option<(usize, bool)> {
+        let want = name.as_bytes();
+        if want.len() != 4 || !(1..=8).contains(&rot) {
+            return None;
+        }
+        let digit = b'0' + rot;
+        for (i, n) in self.names.iter().enumerate() {
+            let s = n.as_str().as_bytes();
+            if s.len() < 6 || s[..4] != want[..4] {
+                continue;
+            }
+            if s[4] == b'A' && s[5] == digit {
+                return Some((i, false));
+            }
+            if s.len() == 8 && s[6] == b'A' && s[7] == digit {
+                return Some((i, true));
+            }
+        }
+        None
+    }
 }
 
-/// One thing, decoded and ready to place.
+/// Every picture frame `A` of one sprite has.
+///
+/// A frame is either one picture seen from every angle or eight facings, and
+/// which it is comes from the WAD rather than from any table: a rotation-0
+/// lump means the first, its absence means the second. Decoded once per
+/// *kind* and shared by every thing wearing it, because a map has hundreds of
+/// things and twenty sorts of them -- decoding per thing would multiply the
+/// work by fifteen and the memory with it.
+pub struct Frame {
+    /// One picture for every angle.
+    all: Option<Patch>,
+    /// The eight facings, and whether each lump is mirrored. Index 0 is the
+    /// front, which is rotation *1* in a lump name.
+    rot: Vec<Option<(Patch, bool)>>,
+}
+
+impl Frame {
+    pub fn load(sprites: &Sprites, name: &str) -> Option<Frame> {
+        let one = |i: usize| -> Option<Patch> {
+            Patch::parse(sprites.name_at(i).copied()?, sprites.bytes(i)?)
+        };
+        let all = sprites.still(name).and_then(one);
+        let mut rot = Vec::new();
+        for r in 1..=8u8 {
+            rot.push(
+                sprites
+                    .facing(name, r)
+                    .and_then(|(i, flip)| Some((one(i)?, flip))),
+            );
+        }
+        if all.is_none() && rot.iter().all(|r| r.is_none()) {
+            return None;
+        }
+        Some(Frame { all, rot })
+    }
+
+    /// Whether this frame turns at all, for a caller that wants to say so.
+    pub fn turns(&self) -> bool {
+        self.all.is_none()
+    }
+
+    /// One facing by index, 0 being the front. For looking at all eight.
+    pub fn at(&self, rot: usize) -> Option<(&Patch, bool)> {
+        if let Some(p) = self.all.as_ref() {
+            return Some((p, false));
+        }
+        self.rot.get(rot).and_then(|o| o.as_ref()).map(|(p, f)| (p, *f))
+    }
+
+    /// How many of the eight the WAD actually stores a lump for, and how many
+    /// of those are mirrors. `SARGA2A8` is one lump serving two facings, so a
+    /// monster with five lumps has eight facings and three mirrors.
+    pub fn found(&self) -> (usize, usize) {
+        let have = self.rot.iter().filter(|r| r.is_some()).count();
+        let mirrored = self.rot.iter().filter(|r| matches!(r, Some((_, true)))).count();
+        (have, mirrored)
+    }
+
+    /// Which picture the viewer sees, and whether to draw it mirrored.
+    ///
+    /// `to_thing` is the bearing from the eye to the thing and `facing` is the
+    /// way the thing is pointing, both in radians. DOOM's own expression is
+    ///
+    /// ```text
+    /// rot = (ang - thing->angle + (unsigned)(ANG45/2)*9) >> 29
+    /// ```
+    ///
+    /// and the constant is what makes it work: `ANG45/2 * 9` is 202.5 degrees,
+    /// which is 180 to turn "where the viewer is" into "which way the thing
+    /// shows", plus 22.5 to put the *centre* of the front facing at the
+    /// boundary-free middle of its bucket rather than on the edge. Without the
+    /// half-bucket the sprite would flip between two facings whenever the
+    /// viewer stood exactly in front of it.
+    pub fn pick(&self, to_thing: f32, facing: f32) -> Option<(&Patch, bool)> {
+        if let Some(p) = self.all.as_ref() {
+            return Some((p, false));
+        }
+        let eighth = math::TAU / 8.0;
+        let mut a = to_thing - facing + eighth * 4.5;
+        a -= math::TAU * math::floor_i(a / math::TAU) as f32;
+        let want = ((a / eighth) as usize).min(7);
+        // Outward from the facing wanted, so a WAD missing one draws its
+        // nearest neighbour rather than nothing. Searching one direction only
+        // would bias every gap the same way round, which on a monster reads as
+        // it snapping to face you.
+        for k in 0..8usize {
+            let step = k.div_ceil(2);
+            let j = if k % 2 == 0 { want + step } else { want + 8 - step };
+            if let Some((p, f)) = self.rot[j % 8].as_ref() {
+                return Some((p, *f));
+            }
+        }
+        None
+    }
+}
+
+/// One thing, placed and pointing.
 pub struct Billboard {
-    pub patch: Patch,
+    /// Which entry of `Things::art` this wears.
+    pub art: usize,
+    /// The way it is pointing, in radians -- which for anything with eight
+    /// facings decides which of them the viewer sees.
+    pub angle: f32,
     /// Where it stands.
     pub x: f32,
     pub y: f32,
@@ -200,27 +333,64 @@ pub struct Billboard {
 /// Once rather than per frame: a patch decode allocates a vector per column,
 /// and a map has hundreds of things. The same trade `Pics` makes, for the same
 /// reason, and it is why this returns owned `Patch`es rather than indices.
-pub fn collect(lv: &Level, sprites: &Sprites) -> Vec<Billboard> {
-    let mut out = Vec::new();
+/// The things of a level, and the pictures they share.
+pub struct Things {
+    /// One per distinct sprite kind on the level.
+    pub art: Vec<Frame>,
+    pub items: Vec<Billboard>,
+}
+
+impl Things {
+    /// Nothing to draw, for a WAD with no sprite namespace at all.
+    pub fn none() -> Things {
+        Things { art: Vec::new(), items: Vec::new() }
+    }
+
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    /// How many of the kinds on this level turn to face the viewer.
+    pub fn turning(&self) -> usize {
+        self.art.iter().filter(|f| f.turns()).count()
+    }
+}
+
+pub fn collect(lv: &Level, sprites: &Sprites) -> Things {
+    let mut art: Vec<Frame> = Vec::new();
+    // Which `art` index each sprite name took, so a second imp shares the
+    // first one's eight decoded facings.
+    let mut seen: Vec<(&'static str, usize)> = Vec::new();
+    let mut items = Vec::new();
     for t in lv.things.iter() {
         let Some(name) = sprite_for(t.kind) else { continue };
-        let Some(i) = sprites.still(name) else { continue };
-        let Some(bytes) = sprites.bytes(i) else { continue };
-        let Some(nm) = sprites.name_at(i).copied() else { continue };
-        let Some(patch) = Patch::parse(nm, bytes) else { continue };
+        let idx = match seen.iter().find(|(n, _)| *n == name) {
+            Some((_, i)) => *i,
+            None => {
+                let Some(f) = Frame::load(sprites, name) else { continue };
+                art.push(f);
+                seen.push((name, art.len() - 1));
+                art.len() - 1
+            }
+        };
         // The floor of the sector it is standing in. A thing whose sector
         // cannot be found is dropped rather than placed at zero, which in a
         // map with a raised floor would bury it.
         let Some(sector) = lv.sector_at(t.x as i32, t.y as i32) else { continue };
-        out.push(Billboard {
-            patch,
+        items.push(Billboard {
+            art: idx,
+            angle: math::deg_to_rad(t.angle),
             x: t.x as f32,
             y: t.y as f32,
             z: sector.floor as f32,
             light: sector.light,
         });
     }
-    out
+    Things { art, items }
 }
 
 /// How many things on this level would draw, and how many were skipped for
@@ -234,7 +404,9 @@ pub fn census(lv: &Level, sprites: &Sprites) -> (usize, usize, usize) {
                     no_kind += 1;
                 }
             }
-            Some(n) => match sprites.still(n) {
+            // A kind draws if it has *any* picture: a rotation-0 lump, or
+            // at least one of the eight facings.
+            Some(n) => match Frame::load(sprites, n) {
                 Some(_) => drawn += 1,
                 None => no_lump += 1,
             },

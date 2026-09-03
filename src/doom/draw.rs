@@ -329,3 +329,61 @@ pub fn sprite(surf: &mut Surface, p: &super::pic::Patch, playpal: &[u8]) {
         }
     }
 }
+
+/// All eight facings of one sprite, four across and two down.
+///
+/// The check the counts cannot make. A census says every thing found a
+/// picture; it cannot say the picture is the *right* one, and a single frame
+/// of a level shows each monster from exactly one bearing -- so a facing
+/// picked from the wrong bucket, or a mirror drawn unmirrored, renders
+/// perfectly and is wrong. Laid out in order, a correct set reads as one
+/// figure turning through a full circle, and the second half mirrors the
+/// first wherever the WAD stored one lump for two facings.
+pub fn mugshot(
+    surf: &mut Surface,
+    frame: &super::sprite::Frame,
+    playpal: &[u8],
+) -> usize {
+    surf.set_palette_rgb(playpal);
+    let back = nearest(playpal, 0x20, 0x20, 0x28);
+    surf.clear(back);
+    let rule = nearest(playpal, 0x60, 0x60, 0x70);
+
+    let (w, h) = (surf.width(), surf.height());
+    let (cw, ch) = (w / 4, h / 2);
+    let mut drawn = 0;
+    for rot in 0..8usize {
+        let (cx, cy) = ((rot % 4) * cw, (rot / 4) * ch);
+        // A rule between the cells, so a sprite wider than its cell is
+        // obviously overflowing rather than mysteriously clipped.
+        for y in cy..(cy + ch).min(h) {
+            if cx > 0 && cx < w {
+                surf.pixels()[y * w + cx] = rule;
+            }
+        }
+        let Some((patch, flip)) = frame.at(rot) else { continue };
+        drawn += 1;
+        // Feet on the cell's floor and centred on its middle, which is where
+        // `left` and `top` put a sprite in the world too.
+        let ox = cx as i32 + cw as i32 / 2 - patch.left as i32;
+        let oy = cy as i32 + ch as i32 - 8 - patch.top as i32;
+        for sx in 0..patch.width {
+            let src = if flip { patch.width - 1 - sx } else { sx };
+            let Some(posts) = patch.columns.get(src) else { continue };
+            let px_ = ox + sx as i32;
+            if px_ < 0 || px_ >= w as i32 {
+                continue;
+            }
+            for post in posts.iter() {
+                for (i, v) in post.pixels.iter().enumerate() {
+                    let py_ = oy + (post.top + i) as i32;
+                    if py_ < 0 || py_ >= h as i32 {
+                        continue;
+                    }
+                    surf.pixels()[py_ as usize * w + px_ as usize] = *v;
+                }
+            }
+        }
+    }
+    drawn
+}

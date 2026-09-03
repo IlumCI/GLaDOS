@@ -220,7 +220,7 @@ pub fn run(
     surf: &mut Surface,
     lv: &Level,
     art: &Art<'_>,
-    things: &[super::sprite::Billboard],
+    things: &super::sprite::Things,
     limit_ms: u64,
     script: &[u8],
 ) -> Option<Stats> {

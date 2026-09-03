@@ -4380,7 +4380,8 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             // map` want none of it and used to be instant. A WAD with no
             // TEXTURE1 is a legal WAD -- a map-only PWAD has none -- so its
             // absence is reported rather than treated as an error.
-            let wants_pics = matches!(what, "tex" | "flat" | "sprite" | "view" | "play");
+            let wants_pics =
+                matches!(what, "tex" | "flat" | "sprite" | "mug" | "view" | "play");
             let pics = if wants_pics { crate::doom::pic::Pics::load(&w) } else { None };
             let flats = if wants_pics { Some(crate::doom::pic::Flats::load(&w)) } else { None };
             let sprites =
@@ -4600,6 +4601,55 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     });
                     kprintln!("  drew it");
                 }
+                // All eight facings of one sprite, side by side.
+                //
+                // The check a census cannot make. Counting says every thing
+                // found a picture; it cannot say the picture is the *right*
+                // one, and one frame of a level shows each monster from
+                // exactly one bearing -- so a facing taken from the wrong
+                // bucket, or a mirrored lump drawn unmirrored, renders
+                // perfectly and is wrong. FreeDoom is the ideal subject
+                // because it stores both forms: POSS has eight separate
+                // lumps, while SARG has five and gets its other three
+                // facings by mirroring.
+                "mug" => {
+                    let Some(sp) = sprites.as_ref() else {
+                        kprintln!("  this WAD has no sprites");
+                        return;
+                    };
+                    let named = args.first().map(|t| t.parse::<u64>().is_err()).unwrap_or(false);
+                    let name = if named { args[0] } else { "POSS" };
+                    let Some(frame) = crate::doom::sprite::Frame::load(sp, name) else {
+                        console::set_color(YELLOW);
+                        kprintln!("  no sprite called '{}' with a frame A", name);
+                        console::set_color(LTGRAY);
+                        return;
+                    };
+                    let (have, mirrored) = frame.found();
+                    kprintln!(
+                        "  {} -- {}",
+                        name,
+                        if frame.turns() {
+                            "turns to face the viewer"
+                        } else {
+                            "one picture for every angle"
+                        }
+                    );
+                    if frame.turns() {
+                        kprintln!("  {} of 8 facing(s), {} of them mirrored", have, mirrored);
+                    }
+                    let hold = num(if named { 1 } else { 0 }).unwrap_or(0);
+                    let mut drew = 0usize;
+                    crate::port::with_screen(|| {
+                        let Some(mut surf) = crate::port::Surface::new(320, 200) else {
+                            return;
+                        };
+                        drew = crate::doom::draw::mugshot(&mut surf, &frame, pal);
+                        surf.present();
+                        wait_or(hold);
+                    });
+                    kprintln!("  drew {}", drew);
+                }
                 "map" => {
                     let named = args.first().map(|t| t.parse::<u64>().is_err()).unwrap_or(false);
                     let name = if named { args[0] } else { "" };
@@ -4688,15 +4738,20 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     );
                     let billboards = match sprites.as_ref() {
                         Some(sp) => crate::doom::sprite::collect(&lv, sp),
-                        None => alloc::vec::Vec::new(),
+                        None => crate::doom::sprite::Things::none(),
                     };
                     if let Some(sp) = sprites.as_ref() {
                         let (drew, no_kind, no_lump) = crate::doom::sprite::census(&lv, sp);
                         kprintln!(
-                            "  {} thing(s) drawn, {} of unknown kind, {} with no rotation-0 lump",
+                            "  {} thing(s) drawn, {} of unknown kind, {} with no picture at all",
                             drew,
                             no_kind,
                             no_lump
+                        );
+                        kprintln!(
+                            "  {} of {} sprite kind(s) turn to face the viewer",
+                            billboards.turning(),
+                            billboards.art.len()
                         );
                     }
                     let mut lit = false;
@@ -4759,10 +4814,15 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     }
                     let billboards = match sprites.as_ref() {
                         Some(sp) => crate::doom::sprite::collect(&lv, sp),
-                        None => alloc::vec::Vec::new(),
+                        None => crate::doom::sprite::Things::none(),
                     };
                     kprintln!("  {}  --  W/S walk, A/D strafe, arrows turn, shift runs, Esc quits", lv.name);
-                    kprintln!("  {} thing(s) to draw", billboards.len());
+                    kprintln!(
+                        "  {} thing(s) to draw, {} of {} kind(s) turning",
+                        billboards.len(),
+                        billboards.turning(),
+                        billboards.art.len()
+                    );
                     if hold != 0 {
                         kprintln!("  (running for {} ms)", hold);
                     }

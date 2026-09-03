@@ -993,10 +993,11 @@ impl Renderer {
     pub fn things(
         &mut self,
         surf: &mut Surface,
-        billboards: &[super::sprite::Billboard],
+        things: &super::sprite::Things,
         view: &View,
         scale: f32,
     ) {
+        let billboards = &things.items;
         let (sin, cos) = (math::sin(view.angle), math::cos(view.angle));
         // Depth per thing, computed once, so the sort compares numbers rather
         // than recomputing a transform per comparison.
@@ -1017,6 +1018,10 @@ impl Renderer {
         for (i, depth) in order {
             let b = &billboards[i];
             let (dx, dy) = (b.x - view.x, b.y - view.y);
+            // Which of the thing's facings this bearing shows, and whether
+            // the lump for it is the mirror of one the WAD stores once.
+            let Some(art) = things.art.get(b.art) else { continue };
+            let Some((patch, flip)) = art.pick(math::atan2(dy, dx), b.angle) else { continue };
             let lat = dx * sin - dy * cos;
             let inv = 1.0 / depth;
             let (cx, cy) = (self.w as f32 / 2.0, self.h as f32 / 2.0);
@@ -1027,12 +1032,12 @@ impl Renderer {
             // thing's feet. Ignoring either is not subtle: the first hangs
             // every object half its width to one side, the second buries it
             // in the floor or floats it.
-            let x1f = cx + (lat - b.patch.left as f32) * px_per_unit;
-            let gzt = b.z + b.patch.top as f32;
+            let x1f = cx + (lat - patch.left as f32) * px_per_unit;
+            let gzt = b.z + patch.top as f32;
             let y1f = cy - (gzt - view.z) * px_per_unit;
 
             let xa = x1f.max(0.0) as i32;
-            let xb = ((x1f + b.patch.width as f32 * px_per_unit) as i32).min(self.w as i32 - 1);
+            let xb = ((x1f + patch.width as f32 * px_per_unit) as i32).min(self.w as i32 - 1);
             if xb < xa {
                 continue;
             }
@@ -1045,7 +1050,19 @@ impl Renderer {
                 }
                 let clipped = depth >= self.near[x as usize];
                 let col_i = ((x as f32 + 0.5 - x1f) / px_per_unit) as usize;
-                let Some(posts) = b.patch.columns.get(col_i) else { continue };
+                // Mirrored where the lump serves the opposite facing: a
+                // monster is symmetric about the way it points, so id stored
+                // one picture for each off-axis pair. Reading the column from
+                // the far end is the whole of drawing the other one.
+                let col_i = if flip {
+                    match patch.width.checked_sub(1).and_then(|w| w.checked_sub(col_i)) {
+                        Some(c) => c,
+                        None => continue,
+                    }
+                } else {
+                    col_i
+                };
+                let Some(posts) = patch.columns.get(col_i) else { continue };
                 // Walk the *destination* rows and ask each which source row it
                 // wants, rather than walking the source and placing each one.
                 // The two agree only while a sprite is being shrunk: magnify
@@ -1055,7 +1072,7 @@ impl Renderer {
                 // distance a test map happens to place an object at and
                 // obvious the moment you walk up to it.
                 let y_lo = y1f.max(0.0) as i32;
-                let y_hi = ((y1f + b.patch.height as f32 * px_per_unit)
+                let y_hi = ((y1f + patch.height as f32 * px_per_unit)
                     .min(self.h as f32 - 1.0)) as i32;
                 for y in y_lo..=y_hi {
                     if y < 0 {
