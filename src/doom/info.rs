@@ -3984,6 +3984,31 @@ pub fn kind_of(doomednum: i16) -> Option<&'static Kind> {
     KINDS.iter().find(|k| k.doomednum == doomednum)
 }
 
+/// A weapon, and the psprite states it lives in.
+///
+/// `flash` is `S_NULL` for the fist and the chainsaw, which is the
+/// table saying they do not light the room -- not a gap.
+pub struct WeaponStates {
+    pub up: u16,
+    pub down: u16,
+    pub ready: u16,
+    pub attack: u16,
+    pub flash: u16,
+}
+
+/// The nine weapons, in the order the number keys select them.
+pub const WEAPONS: [WeaponStates; 9] = [
+    WeaponStates { up: 4, down: 3, ready: 2, attack: 5, flash: 0 },
+    WeaponStates { up: 12, down: 11, ready: 10, attack: 13, flash: 17 },
+    WeaponStates { up: 20, down: 19, ready: 18, attack: 21, flash: 30 },
+    WeaponStates { up: 51, down: 50, ready: 49, attack: 52, flash: 55 },
+    WeaponStates { up: 59, down: 58, ready: 57, attack: 60, flash: 63 },
+    WeaponStates { up: 76, down: 75, ready: 74, attack: 77, flash: 79 },
+    WeaponStates { up: 83, down: 82, ready: 81, attack: 84, flash: 88 },
+    WeaponStates { up: 70, down: 69, ready: 67, attack: 71, flash: 0 },
+    WeaponStates { up: 34, down: 33, ready: 32, attack: 35, flash: 47 },
+];
+
 /// Which row a doomednum is, for a caller that wants to remember the
 /// answer rather than the number.
 ///

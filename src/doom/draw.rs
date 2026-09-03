@@ -387,3 +387,40 @@ pub fn mugshot(
     }
     drawn
 }
+
+/// The weapon in your hands, over everything else.
+///
+/// DOOM's `R_DrawPSprite`, and on a 320 by 200 view it collapses to almost
+/// nothing: the screen centre it adds and the 160 it subtracts cancel, so what
+/// is left is the patch's own offsets against `sx` and `sy`. That is why a
+/// pistol carries a left offset of -125 -- the number is not a nudge, it is
+/// the whole of the placement, and a reader that ignored it would draw the gun
+/// in a corner.
+///
+/// Integer-scaled to whatever the surface is, because DOOM's constants are for
+/// 320 by 200 and the surface is not obliged to be. Repeated rather than
+/// sampled, the choice the sprite path makes and for a reason that matters
+/// more here: a gun fills a quarter of the screen, so a gap in it is a hole
+/// you look through.
+pub fn weapon(surf: &mut Surface, p: &super::pic::Patch, sx: f32, sy: f32) {
+    let (w, h) = (surf.width(), surf.height());
+    let zoom = (w / 320).max(1);
+    let x0 = (sx - p.left as f32) as i32 * zoom as i32;
+    let y0 = (sy - p.top as f32) as i32 * zoom as i32;
+    for (cx, posts) in p.columns.iter().enumerate() {
+        for post in posts.iter() {
+            for (i, v) in post.pixels.iter().enumerate() {
+                for zy in 0..zoom {
+                    for zx in 0..zoom {
+                        let px = x0 + (cx * zoom + zx) as i32;
+                        let py = y0 + ((post.top + i) * zoom + zy) as i32;
+                        if px >= 0 && py >= 0 && (px as usize) < w && (py as usize) < h {
+                            let k = py as usize * w + px as usize;
+                            surf.pixels()[k] = *v;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

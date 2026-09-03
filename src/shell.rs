@@ -4927,6 +4927,10 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         Some(sp) => crate::doom::sprite::collect(&lv, sp),
                         None => crate::doom::sprite::Things::none(),
                     };
+                    let guns = match sprites.as_ref() {
+                        Some(sp) => crate::doom::weapon::Guns::load(sp),
+                        None => crate::doom::weapon::Guns::none(),
+                    };
                     kprintln!("  {}  --  W/S walk, A/D strafe, arrows turn, ctrl fires, Esc quits", lv.name);
                     kprintln!(
                         "  {} thing(s) to draw, {} of {} kind(s) turning, {} animating",
@@ -4955,6 +4959,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                             &mut lv,
                             &art,
                             &mut billboards,
+                            &guns,
                             hold,
                             &script,
                             watch,
@@ -4986,11 +4991,12 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                                 st.flips
                             );
                             kprintln!(
-                                "  {} shot(s), {} killed, {} thing(s) left of {}",
+                                "  {} shot(s), {} killed, {} thing(s) left of {}, {} gun frame(s)",
                                 st.shots,
                                 st.killed,
                                 st.remaining,
-                                began_with
+                                began_with,
+                                guns.len()
                             );
                             kprintln!(
                                 "  health {}, armour {}, {} bullet(s), {} key(s), {} picked up{}",

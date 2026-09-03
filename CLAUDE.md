@@ -727,8 +727,8 @@ update on top of itself.
 ### Ported programs, and the seam they reach through
 
 `src/port/` is everything a program written somewhere else may ask of this
-machine: an indexed `Surface` with its own palette, held keys, a monotonic
-clock, and the bytes of a file. **Anything under a ported tree may name
+machine: an indexed `Surface` with its own palette, held keys, **relative
+pointer motion**, a monotonic clock, and the bytes of a file. **Anything under a ported tree may name
 `crate::port` and nothing else**, and that is checked rather than intended:
 
 ```powershell
@@ -868,6 +868,75 @@ loop is **bounded here where upstream's is not**: id could rely on the shipped
 table having no zero-tic cycle, but this table is *generated*, there is no
 unwinder in this kernel and no watchdog, so an unbounded walk over a bad chain
 is a machine that stops with no message at all.
+
+**There is an inventory, and the pickups that can refuse are the half worth
+having.** `src/doom/player.rs` carries health, armour, ammunition, keys and
+which weapons are owned. The table is keyed by **sprite name**, which is id's
+own choice and looks like a mistake until the reason lands: a dropped weapon
+and a placed one are different objects with different doomednums and the same
+sprite, and "walking over `SHOT` gives you a shotgun" is true of both. A
+medikit at full health stays on the floor; a pocket at 200 bullets leaves the
+clip; a shotgun already owned is still taken, for the shells. A pickup that
+always disappears cannot tell a working rule from `return true`.
+
+Specials 26/27/28 and 32/33/34 are handled, which closed the last gap on
+FreeDoom E1M1: **8 distinct specials on 42 lines, 8 handled, 0 missing**, where
+it was 7 and 4 lines of blue door refused for want of an inventory to check.
+The colour is read off the original special number and the check runs *before*
+anything moves -- a lock tested after the door had been started would open it
+and then report that it had not. A refused door is also not **spent**: clearing
+a once-only special on a refusal would make the door forget it was ever a door
+and refuse forever with the key in hand.
+
+**Shooting is a hitscan, and three deviations are named rather than left to be
+found.** No vertical aim: DOOM's shot carries a slope and a two-sided line
+stops it when the *opening* does not admit it, where here a shot is level. No
+randomness: DOOM's pistol does `5 * (P_Random() % 3 + 1)` and this does 10
+every time, because inventing a different sequence would be a game that plays
+differently from every other copy of DOOM and would say so nowhere. And boxes
+rather than circles, twice -- a thing is hit when the ray crosses the *square*
+of its radius and a blast falls off by `max(|dx|,|dy|)` less the radius, both
+of which are DOOM's and both the same square the pickup test uses.
+
+**The rate of fire was predicted wrong and measured right, which is the whole
+argument for measuring.** The obvious reading is that a weapon fires once per
+attack chain, so a pistol's 19 tics would be 1.8 shots a second. A run holding
+the trigger for three seconds fired **eight** shots, not five. `A_ReFire` runs
+on *entry* to its state and restarts the chain there, so that state never
+spends its own tics while the trigger is down: the real cycle is `4+6+4 = 14`
+tics, which is 2.5 shots a second, which is exactly what DOOM's pistol does.
+`weapon::held_cycle` computes it and the claim asserts 14 -- the number is
+never written down, so a table that changed would fail there rather than
+quietly changing how the game plays.
+
+Only the **pistol and chaingun** actually fire; both are one bullet from one
+clip round, which is all the hitscan can do. The rest animate correctly and hit
+nothing, and `Psprite::armed` says which is which. A shotgun wired to fire a
+single bullet would be a bug that looks like a balance decision.
+
+**`port::mouse` is the fifth thing in the seam and the first added because a
+port asked.** It is relative and unclamped, which is the whole reason it
+exists: `dev::mouse` tracks a cursor, so its position stops at the edge of the
+screen -- right for a pointer, fatal for a player, who would turn until they
+faced the right-hand wall and then stop. The accumulator is fed inside `apply`,
+the one point PS/2 and USB HID already converge on. `MOUSE_TURN` is derived and
+not chosen: `G_BuildTiccmd` does `angleturn -= mousex * 8` and `angleturn`'s
+unit is 1/65536 of a turn, so eight of them is 0.0439 degrees. Measured:
+`mouse=400` turned the player from 180 degrees to 162, against 17.6 predicted.
+
+A `mouse` verb exists for the same reason `win keys` does -- serial cannot
+inject PS/2 packets -- and **the play script can release a key** now
+(`fire@200 -fire@400 fire@600`). It had to learn to the moment anything was
+edge-triggered: firing twice needs the trigger let go in between, and no
+held-key model can say that.
+
+**The weapon is drawn from the patch's own offsets and nothing else.** On a
+320 by 200 view DOOM's `R_DrawPSprite` collapses: the screen centre it adds and
+the 160 it subtracts cancel, leaving `x = sx - left` and `y = sy - top`. That
+is why a pistol carries a left offset of -125 and a top of -97 -- those numbers
+are not a nudge, they are the whole of the placement, and a reader that ignored
+them would draw the gun in a corner. Verified by looking, which is the only
+thing that settles it.
 
 **Which frame is showing gets a number, not a screenshot.** `doom play`
 reports how many times a sprite changed picture, and non-zero is the whole
@@ -1113,6 +1182,16 @@ best of nine decodes on SmolLM2 under WHPX read 50,819 us/token at one core,
 all three. The single-sample figures that suggested a cost (65 ms against
 95 ms) were the host's scheduler, which is the error `video bench` was
 rewritten to stop making.
+
+**A screenshot is taken when `drive.py` exits, which for a full-screen program
+means you get the desktop.** The bounded `ms` form returns before the harness
+does, so `--screenshot` catches whatever is on screen *after* the program gave
+the screen back -- a terminal, every time. To photograph the program itself,
+give it a duration longer than the harness will wait and let the **timeout** be
+the exit path: `doom play 600000` with `--timeout 420` lands about two minutes
+into the run. Boot alone is around 300 s against FreeDoom under WHPX, so a
+timeout under that photographs the boot log instead. Two runs and fifteen
+minutes were spent learning this.
 
 **A full-screen program needs a bounded form or nothing can test it.**
 `drive.py` sends the next command when it sees a prompt, so a program that

@@ -107,8 +107,8 @@ pub struct Player {
     pub used: bool,
     /// Health, armour, ammunition and keys.
     pub status: super::player::Status,
-    /// Whether Fire was held on the previous tic, for the same reason as Use.
-    pub firing: bool,
+    /// The gun in your hands, and its own state machine.
+    pub gun: super::weapon::Psprite,
     /// How many shots were taken, and how many things they killed.
     pub shots: usize,
     pub killed: usize,
@@ -131,7 +131,7 @@ impl Player {
             angle: math::deg_to_rad(t.angle),
             floor,
             used: false,
-            firing: false,
+            gun: super::weapon::Psprite::ready(super::player::Weapon::Pistol),
             shots: 0,
             killed: 0,
             status: super::player::Status::new(),
@@ -287,6 +287,66 @@ fn pickups(lv: &Level, p: &mut Player, things: &mut super::sprite::Things) {
     });
 }
 
+/// One weapon action, and whatever it sets off next.
+///
+/// Only the two weapons whose shot is a single bullet actually fire: the
+/// pistol and the chaingun. The rest animate, and `Psprite::armed` says which
+/// is which -- a shotgun wired to fire one bullet would be a bug that looks
+/// like a balance decision.
+fn weapon_action(
+    a: u8,
+    lv: &Level,
+    p: &mut Player,
+    things: &mut super::sprite::Things,
+    fire_down: bool,
+) -> Option<u8> {
+    use super::info;
+    let w = p.status.weapon;
+    match a {
+        // The ready state loops back to itself every tic, which is how DOOM
+        // notices the trigger going down at all.
+        info::A_WEAPONREADY | info::A_REFIRE => {
+            if fire_down && super::weapon::Psprite::loaded(w, &p.status) {
+                p.gun.attack(w);
+                // The state just entered may itself fire -- the chaingun's
+                // first attack frame does -- so its action is answered rather
+                // than waited for.
+                return p.gun.action();
+            }
+            // Nothing else to do: a refire state's `next` is the ready state,
+            // so letting go of the trigger returns the weapon on its own.
+            None
+        }
+        info::A_FIREPISTOL | info::A_FIRECGUN => {
+            if let Some(ammo) = w.ammo() {
+                if p.status.ammo[ammo as usize] == 0 {
+                    return None;
+                }
+                p.status.ammo[ammo as usize] -= 1;
+            }
+            p.shots += 1;
+            let mut fired: alloc::vec::Vec<Fired> = alloc::vec::Vec::new();
+            let hit = super::shoot::fire(
+                lv,
+                &mut things.objs,
+                p.x,
+                p.y,
+                p.angle,
+                super::shoot::PISTOL_DAMAGE,
+                &mut fired,
+            );
+            if let Some((_, died)) = hit {
+                if died {
+                    p.killed += 1;
+                }
+            }
+            p.killed += dispatch(lv, things, &mut fired);
+            None
+        }
+        _ => None,
+    }
+}
+
 /// Dispatch the actions a tic set off.
 ///
 /// One action so far, and it is the one that needed the mechanism: a barrel
@@ -392,48 +452,27 @@ fn tic(lv: &mut Level, p: &mut Player, th: &mut Thinkers, things: &mut super::sp
     }
     p.used = use_now;
 
-    // Fire, on the press rather than while held.
+    // Fire, through the weapon's own state machine.
     //
-    // **This is a deviation and not a simplification, so it is named here.**
-    // DOOM's pistol autofires: `A_WeaponReady` re-reads the attack button at
-    // the end of the firing sequence, so the *rate* is a property of the
-    // weapon's own state machine -- four states for the pistol, a different
-    // four for the shotgun -- and not of the key. Edge-triggering gives one
-    // shot per press, which is slower than DOOM and never faster, and it is
-    // what there is until the weapon states exist to be walked. Those arrive
-    // with the sprite that draws them, since a weapon whose rate is right and
-    // whose picture is absent is half a weapon either way.
-    let fire_now = held.down(keys::FIRE);
-    if fire_now && !p.firing {
-        let round = p.status.weapon.ammo();
-        let enough = match round {
-            Some(a) => p.status.ammo[a as usize] > 0,
-            None => true,
-        };
-        if enough {
-            if let Some(a) = round {
-                p.status.ammo[a as usize] -= 1;
-            }
-            p.shots += 1;
-            let mut fired: alloc::vec::Vec<Fired> = alloc::vec::Vec::new();
-            let hit = super::shoot::fire(
-                &*lv,
-                &mut things.objs,
-                p.x,
-                p.y,
-                p.angle,
-                super::shoot::PISTOL_DAMAGE,
-                &mut fired,
-            );
-            if let Some((_, died)) = hit {
-                if died {
-                    p.killed += 1;
-                }
-            }
-            p.killed += dispatch(&*lv, things, &mut fired);
+    // It was edge-triggered while there was no state machine to run, which was
+    // one shot per press -- slower than DOOM and never faster. DOOM's rate is
+    // how long the attack chain takes to walk back to the ready state, so the
+    // pistol's 19 tics and the chaingun's 8 are read out of the table rather
+    // than chosen. `A_ReFire` sits at the end of every chain and restarts it
+    // while the trigger is down, which is the whole of automatic fire.
+    let fire_down = held.down(keys::FIRE);
+    let mut act = p.gun.tick();
+    let mut steps = 0;
+    while let Some(a) = act {
+        steps += 1;
+        // Bounded for the reason every state walk here is: an action that set
+        // a state whose action set it back would be a machine that stops with
+        // no message.
+        if steps > 8 {
+            break;
         }
+        act = weapon_action(a, lv, p, things, fire_down);
     }
-    p.firing = fire_now;
 
     th.tick(lv);
     // The objects run on the same clock as the doors, which is the point of
@@ -522,6 +561,7 @@ pub fn run(
     lv: &mut Level,
     art: &Art<'_>,
     things: &mut super::sprite::Things,
+    guns: &super::weapon::Guns,
     limit_ms: u64,
     script: &[(u8, u64, bool)],
     watch: usize,
@@ -633,6 +673,10 @@ pub fn run(
         let v = p.view();
         r.frame(surf, &*lv, art, v, sky);
         r.things(surf, &*lv, &*things, &v, surf_scale);
+        // The gun, last, because it is in front of everything.
+        if let Some(patch) = guns.frame(p.gun.state) {
+            super::draw::weapon(surf, patch, p.gun.sx, p.gun.sy);
+        }
         // Whether anything actually changed picture this frame. Counted here
         // rather than asserted, because how many flips a run sees depends on
         // how long it ran and what is on the level -- what matters is that it
