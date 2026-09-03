@@ -783,12 +783,20 @@ Every count the kernel printed matched an independent host-side parse exactly,
 including the thing census decomposing to 292: 179 drawn, 49 of a doomednum
 the table does not carry, 52 monsters with no rotation-0 lump, 12 invisible.
 
-**And it showed the cost of the plane shortcut in a picture.** Floors and
-ceilings are drawn when a wall claims a column, so a subsector that no seg
-claims a column in leaves its plane undrawn -- stated when that trade was
-made, unreachable on a one-room map, and plainly visible on E1M1 as a black
-wedge left of centre. The fix is DOOM's own: visplanes collected during the
-walk rather than planes drawn opportunistically.
+**A claim made from a glance at that frame was wrong, and is recorded here
+because it is the exact error this file spends pages warning about.** A dark
+region left of centre on E1M1 was read as the per-column plane shortcut
+leaving a hole, and asserted as one -- into a release note -- without being
+measured. It is distant geometry shaded almost to black: the pixels are
+`(0,0,0)` and greys, the sky colour is `(0,0,23)`, and the count of
+sky-coloured pixels is *identical* before and after visplanes on both maps.
+Nothing was missing.
+
+The limitation is real in the code and visplanes do fix it; what does not
+exist is a picture of it happening. Judge that change on its differential
+instead: the test map renders **pixel-identical** through the span path, and
+E1M1 differs in 0.8% of pixels, all small shifts from stepping the texture
+coordinate along a span rather than recomputing it per pixel.
 
 **What is ported is the reader, and what is generated is the art. They are
 easy to confuse and worth separating once, plainly.** Ported: the patch
