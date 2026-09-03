@@ -754,6 +754,42 @@ a while on the reasoning that a flat picture is obviously flat; it was not, and
 it emits a real one now. Where there is no usable table, one is built by asking
 the palette for the nearest match to each colour dimmed.
 
+**Test it against FreeDoom, and that is not optional any more.** The generated
+WAD is a fixture with two textures in it; a real IWAD has a thousand, and the
+difference found things nothing else could:
+
+```powershell
+# 24 MB, freely licensed, and the release carries a signed CHECKSUM -- verify
+# the SHA-256 against it rather than trusting the transfer.
+.\tools\venv\Scripts\python.exe tools\drive.py --wad out\freedoom\freedoom-0.13.0\freedoom1.wad `
+  --qemu-extra "-accel whpx -cpu max -smp 4" --timeout 600 `
+  "initiative off" "agent stop" "doom view 0 900000"
+```
+
+The WAD is **not in this repository** and must not be: it is 28.8 MB of
+somebody else's art, and the same rule that keeps `DOOM1.WAD` out keeps this
+out. `out/freedoom/` is where it lands.
+
+What the real file exercises that the fixture structurally cannot: **14
+palettes** against one, **963 textures** so `TEXTURE2` is read at all,
+**1,049 patch names**, **`F1_START` nested immediately inside `F_START`** --
+which is the whole reason `pic::classify` counts depth instead of matching one
+spelling -- **654 two-sided linedefs** against one, **681 BSP nodes** against
+one, sector heights spanning 704 units against a flat 128, and `F_SKY1`
+ceilings, which nothing in the fixture has and which the flat reader has to
+decline to draw so the cleared sky shows through.
+
+Every count the kernel printed matched an independent host-side parse exactly,
+including the thing census decomposing to 292: 179 drawn, 49 of a doomednum
+the table does not carry, 52 monsters with no rotation-0 lump, 12 invisible.
+
+**And it showed the cost of the plane shortcut in a picture.** Floors and
+ceilings are drawn when a wall claims a column, so a subsector that no seg
+claims a column in leaves its plane undrawn -- stated when that trade was
+made, unreachable on a one-room map, and plainly visible on E1M1 as a black
+wedge left of centre. The fix is DOOM's own: visplanes collected during the
+walk rather than planes drawn opportunistically.
+
 **What is ported is the reader, and what is generated is the art. They are
 easy to confuse and worth separating once, plainly.** Ported: the patch
 column-and-post decoder, the TEXTURE1/PNAMES composite reader, the flat and
