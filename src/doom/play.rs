@@ -303,6 +303,8 @@ pub struct Stats {
     pub watched: i16,
     /// How many specials fired over the whole run.
     pub spawned: usize,
+    /// How many times a sprite changed picture.
+    pub flips: usize,
     /// Whether something ended the level.
     pub exited: bool,
     /// Whether the shading table came out of the WAD's own COLORMAP. Carried
@@ -363,6 +365,7 @@ pub fn run(
 
     let start = crate::port::now_us();
     let mut next_tic = start;
+    let mut last_phase = things.phase(0);
     let mut stats = Stats {
         frames: 0,
         tics: 0,
@@ -373,6 +376,7 @@ pub fn run(
         moving: 0,
         watched: 0,
         spawned: 0,
+        flips: 0,
         exited: false,
         lit_from_wad: r.lit_from_wad,
     };
@@ -420,7 +424,16 @@ pub fn run(
 
         let v = p.view();
         r.frame(surf, &*lv, art, v, sky);
-        r.things(surf, &*lv, things, &v, surf_scale);
+        r.things(surf, &*lv, things, &v, surf_scale, stats.tics);
+        // Whether anything actually changed picture this frame. Counted here
+        // rather than asserted, because how many flips a run sees depends on
+        // how long it ran and what is on the level -- what matters is that it
+        // is not zero on a level with animated things on it.
+        let phase = things.phase(stats.tics);
+        if phase != last_phase {
+            stats.flips += 1;
+            last_phase = phase;
+        }
         surf.present();
         stats.frames += 1;
 

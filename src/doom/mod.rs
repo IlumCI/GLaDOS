@@ -54,6 +54,7 @@
 //! a filesystem.
 
 pub mod draw;
+pub mod info;
 pub mod math;
 pub mod pic;
 pub mod play;
@@ -90,5 +91,6 @@ pub fn checks() -> alloc::vec::Vec<(&'static str, bool)> {
     out.extend(level::checks());
     out.extend(play::checks());
     out.extend(specials::checks());
+    out.extend(sprite::checks());
     out
 }

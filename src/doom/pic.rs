@@ -693,26 +693,8 @@ pub fn checks() -> Vec<(&'static str, bool)> {
             && classify("FLOOR4_8", false, FLAT_BYTES + 1) == Mark::Other,
     ));
 
-    // Sprites. The lump name *is* the directory -- four characters, a frame
-    // letter and a rotation digit -- so the two things worth asserting are
-    // that the name is built correctly and that a thing which is map data
-    // rather than an object resolves to nothing.
-    use super::sprite::sprite_for;
-    out.push((
-        "a scenery thing resolves to its sprite",
-        sprite_for(2035) == Some("BAR1") && sprite_for(2028) == Some("COLU"),
-    ));
-    out.push((
-        "a player start is not an object and draws nothing",
-        sprite_for(1).is_none()
-            && sprite_for(2).is_none()
-            && sprite_for(11).is_none()
-            && sprite_for(14).is_none(),
-    ));
-    out.push((
-        "and a doomednum nobody has a table row for draws nothing",
-        sprite_for(31337).is_none(),
-    ));
+    // The sprite claims moved to `sprite::checks`, where they belong now that
+    // that module has its own. They were here because it did not.
 
     // `floor_i`, because a texture coordinate wraps and the negative side of
     // the seam is exactly where a truncating cast is wrong.

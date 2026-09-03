@@ -4561,7 +4561,8 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     let idx = if named {
                         // A four-character name is a sprite; six is a lump.
                         let want = args[0];
-                        let found = if want.len() == 4 { sp.still(want) } else { sp.index_of(want) };
+                        let found =
+                            if want.len() == 4 { sp.still(want, b'A') } else { sp.index_of(want) };
                         match found {
                             Some(i) => i,
                             None => {
@@ -4627,7 +4628,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     };
                     let named = args.first().map(|t| t.parse::<u64>().is_err()).unwrap_or(false);
                     let name = if named { args[0] } else { "POSS" };
-                    let Some(frame) = crate::doom::sprite::Frame::load(sp, name) else {
+                    let Some(frame) = crate::doom::sprite::Frame::load(sp, name, b'A') else {
                         console::set_color(YELLOW);
                         kprintln!("  no sprite called '{}' with a frame A", name);
                         console::set_color(LTGRAY);
@@ -4812,17 +4813,20 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         None => crate::doom::sprite::Things::none(),
                     };
                     if let Some(sp) = sprites.as_ref() {
-                        let (drew, no_kind, no_lump) = crate::doom::sprite::census(&lv, sp);
+                        let (drew, placed, no_kind, no_lump) =
+                            crate::doom::sprite::census(&lv, sp);
                         kprintln!(
-                            "  {} thing(s) drawn, {} of unknown kind, {} with no picture at all",
+                            "  {} thing(s) drawn, {} start(s), {} of unknown kind, {} with no picture",
                             drew,
+                            placed,
                             no_kind,
                             no_lump
                         );
                         kprintln!(
-                            "  {} of {} sprite kind(s) turn to face the viewer",
+                            "  {} of {} sprite kind(s) turn to face the viewer, {} animate",
                             billboards.turning(),
-                            billboards.art.len()
+                            billboards.art.len(),
+                            billboards.animated()
                         );
                     }
                     let mut lit = false;
@@ -4836,7 +4840,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         lit = r.lit_from_wad;
                         r.frame(&mut surf, &lv, &art, view, sky);
                         let vscale = surf.width() as f32 / 2.0;
-                        r.things(&mut surf, &lv, &billboards, &view, vscale);
+                        r.things(&mut surf, &lv, &billboards, &view, vscale, 0);
                         surf.present();
                         wait_or(hold);
                     });
@@ -4907,10 +4911,11 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     };
                     kprintln!("  {}  --  W/S walk, A/D strafe, arrows turn, shift runs, Esc quits", lv.name);
                     kprintln!(
-                        "  {} thing(s) to draw, {} of {} kind(s) turning",
+                        "  {} thing(s) to draw, {} of {} kind(s) turning, {} animating",
                         billboards.len(),
                         billboards.turning(),
-                        billboards.art.len()
+                        billboards.art.len(),
+                        billboards.animated()
                     );
                     if hold != 0 {
                         kprintln!("  (running for {} ms)", hold);
@@ -4948,6 +4953,12 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                                 st.spawned,
                                 st.moving,
                                 if st.exited { ", LEVEL EXITED" } else { "" }
+                            );
+                            kprintln!(
+                                "  {} of {} kind(s) animate, {} frame change(s)",
+                                billboards.animated(),
+                                billboards.art.len(),
+                                st.flips
                             );
                             kprintln!(
                             "  ended at {},{} facing {} deg, lit by {}",

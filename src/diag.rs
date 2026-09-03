@@ -217,12 +217,19 @@ pub const SUITES: &[Suite] = &[
 fn doom_selftest() -> bool {
     use crate::kprintln;
     let mut ok = true;
+    let mut n = 0usize;
     for (what, good) in crate::doom::checks() {
+        n += 1;
         if !good {
             kprintln!("    FAIL: {}", what);
             ok = false;
         }
     }
+    // The count, because only failures print. A `checks()` that returned early
+    // -- an aggregator missing a module, a list built behind a condition that
+    // stopped holding -- passes in exactly the same silence as one that
+    // checked everything, and this suite aggregates five modules now.
+    kprintln!("    {} claim(s)", n);
     ok
 }
 
