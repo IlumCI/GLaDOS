@@ -241,3 +241,39 @@ pub fn texture(
     }
     Some(zoom)
 }
+
+/// One flat, as large as it will go and centred.
+///
+/// The eye-check that a wall texture's cannot stand in for. A flat is
+/// addressed by *world* position rather than by distance along a surface, so
+/// it has two failure modes a wall does not: a transposed pair of coordinates,
+/// and a mirrored axis -- DOOM negates world y to get the row, because north
+/// is up in the world and down in the picture. Both are invisible on anything
+/// symmetric, which is why `tools/mkwad.py` generates flats that are not.
+///
+/// Answers the zoom it used.
+pub fn flat(surf: &mut Surface, pixels: &[u8], playpal: &[u8]) -> Option<usize> {
+    let side = super::pic::FLAT_SIDE;
+    if pixels.len() < side * side {
+        return None;
+    }
+    surf.set_palette_rgb(playpal);
+    let back = nearest(playpal, 0x00, 0x30, 0x30);
+    surf.clear(back);
+
+    let (w, h) = (surf.width(), surf.height());
+    let zoom = (w / side).min(h / side).max(1);
+    let (dw, dh) = (side * zoom, side * zoom);
+    let (ox, oy) = ((w.saturating_sub(dw)) / 2, (h.saturating_sub(dh)) / 2);
+    for sy in 0..dh.min(h) {
+        for sx in 0..dw.min(w) {
+            let v = pixels[(sy / zoom) * side + (sx / zoom)];
+            let (px_, py_) = (ox + sx, oy + sy);
+            if px_ < w && py_ < h {
+                let i = py_ * w + px_;
+                surf.pixels()[i] = v;
+            }
+        }
+    }
+    Some(zoom)
+}

@@ -39,7 +39,7 @@
 
 use super::level::{Level, NONE, SUBSECTOR_BIT};
 use super::math;
-use super::pic::{Art, Pics, LIGHT_LEVELS};
+use super::pic::{Art, Pics, FLAT_SIDE, LIGHT_LEVELS};
 use crate::port::Surface;
 
 /// Where the eye is and which way it looks.
@@ -197,7 +197,7 @@ impl Renderer {
         // is DOOM's. `tan(45) == 1`, so it is simply half the width.
         let scale = self.w as f32 / 2.0;
         let (sin, cos) = (math::sin(view.angle), math::cos(view.angle));
-        self.walk(surf, lv, art.pics, &view, lv.root(), sin, cos, scale);
+        self.walk(surf, lv, art, &view, lv.root(), sin, cos, scale);
     }
 
     /// The BSP, near side first.
@@ -211,7 +211,7 @@ impl Renderer {
         &mut self,
         surf: &mut Surface,
         lv: &Level,
-        pics: Option<&Pics>,
+        art: &Art<'_>,
         view: &View,
         node: u16,
         sin: f32,
@@ -229,7 +229,7 @@ impl Renderer {
                         Some(g) => *g,
                         None => continue,
                     };
-                    self.seg(surf, lv, pics, view, &seg, sin, cos, scale);
+                    self.seg(surf, lv, art, view, &seg, sin, cos, scale);
                 }
             }
             return;
@@ -237,8 +237,8 @@ impl Renderer {
         let Some(n) = lv.nodes.get(node as usize) else { return };
         let near = n.side_of(view.x as i32, view.y as i32);
         let (a, b) = if near == 0 { (n.right, n.left) } else { (n.left, n.right) };
-        self.walk(surf, lv, pics, view, a, sin, cos, scale);
-        self.walk(surf, lv, pics, view, b, sin, cos, scale);
+        self.walk(surf, lv, art, view, a, sin, cos, scale);
+        self.walk(surf, lv, art, view, b, sin, cos, scale);
     }
 
     /// One seg: project it, clip it, and fill what it claims.
@@ -247,7 +247,7 @@ impl Renderer {
         &mut self,
         surf: &mut Surface,
         lv: &Level,
-        pics: Option<&Pics>,
+        art: &Art<'_>,
         view: &View,
         seg: &super::level::Seg,
         sin: f32,
@@ -258,6 +258,7 @@ impl Renderer {
         if seg.linedef == NONE {
             return;
         }
+        let pics = art.pics;
         let Some(line) = lv.linedefs.get(seg.linedef as usize) else { return };
         // Which face of the line this seg is: side 0 runs with the linedef, so
         // its sidedef is the right one. Getting this backwards puts every
@@ -368,6 +369,13 @@ impl Renderer {
             t.and_then(|i| pics.and_then(|p| p.def(i))).map(|d| d.height as f32).unwrap_or(0.0)
         };
 
+        // The sector's floor and ceiling pictures, resolved once for the seg.
+        // `None` is the sky, a missing flat, or a WAD with no flats at all,
+        // and in each case the cleared background stands -- which is exactly
+        // right for the sky and honest for the other two.
+        let ceil_flat = art.flat(&front.ceiling_pic);
+        let floor_flat = art.flat(&front.floor_pic);
+
         // Where texture row zero sits in world height, which is the whole of
         // DOOM's "pegging". The default anchors a texture where the geometry
         // it decorates begins and the flag moves it to the other end, so that
@@ -406,6 +414,27 @@ impl Renderer {
             };
             let wall_top = y_of(ceil);
             let wall_bot = y_of(floor);
+
+            // The front sector's ceiling above this wall and its floor below,
+            // in whatever of the column is still open. Before the wall rather
+            // than after, because `plane` reads the same window `close` is
+            // about to shut.
+            //
+            // Both branches below want exactly this: the part of the column
+            // above `wall_top` is the front sector's ceiling whether the wall
+            // is solid or a portal, and likewise below `wall_bot`. Anything
+            // seen *through* a portal belongs to the sector on the far side
+            // and is drawn when the traversal reaches its segs. Nothing is
+            // painted twice, because the window closes past `wall_top` and
+            // `wall_bot` immediately after.
+            if let Some(f) = ceil_flat {
+                let (a, b) = (self.top[x as usize], wall_top - 1);
+                self.plane(surf, f, x, a, b, ceil, view, sin, cos, scale, front.light);
+            }
+            if let Some(f) = floor_flat {
+                let (a, b) = (wall_bot + 1, self.bot[x as usize]);
+                self.plane(surf, f, x, a, b, floor, view, sin, cos, scale, front.light);
+            }
 
             match back {
                 // A solid wall: it fills the column and closes it.
@@ -517,6 +546,83 @@ impl Renderer {
             let row = math::floor_i(v).rem_euclid(th) as usize;
             px[y as usize * w + x as usize] = map[col[row] as usize];
             v += dv;
+        }
+    }
+
+    /// Paint a run of one column as a level plane: a floor or a ceiling.
+    ///
+    /// DOOM draws these as *horizontal* spans, for a good reason: distance is
+    /// constant along a screen row of a level plane, so one divide does a
+    /// whole span. This draws them column-wise and pays a divide per pixel,
+    /// deliberately. Horizontal spans need visplanes, and a visplane is a
+    /// second structure collected during the walk, keyed by picture and light
+    /// and height, merged where two agree and flushed at the end. The
+    /// per-column window this renderer already keeps says exactly which rows
+    /// are floor and which are ceiling at the moment a wall claims a column,
+    /// so drawing them there is a dozen lines against several hundred.
+    ///
+    /// The divide is what a 486 could not afford and this machine can: a full
+    /// screen of floor and ceiling is around fifty thousand of them.
+    ///
+    /// Two of the three multiplies hoist out of the loop anyway. With `k` the
+    /// column's lateral slope, the world offset at depth `z` is `z*(k*sin +
+    /// cos)` east and `z*(sin - k*cos)` north, and both factors are constant
+    /// down a column -- so a pixel costs one divide and two multiplies.
+    #[allow(clippy::too_many_arguments)]
+    fn plane(
+        &mut self,
+        surf: &mut Surface,
+        flat: &[u8],
+        x: i32,
+        y0: i32,
+        y1: i32,
+        height: f32,
+        view: &View,
+        sin: f32,
+        cos: f32,
+        scale: f32,
+        light: i16,
+    ) {
+        let lo = y0.max(self.top[x as usize]).max(0);
+        let hi = y1.min(self.bot[x as usize]).min(self.h as i32 - 1);
+        if lo > hi {
+            return;
+        }
+        let (cx, cy) = (self.w as f32 / 2.0, self.h as f32 / 2.0);
+        // Negative for a ceiling and positive for a floor, matching the sign
+        // of the row's offset from the horizon -- so one expression covers
+        // both and the quotient is a distance in front of the eye either way.
+        let rise = view.z - height;
+        let k = (x as f32 + 0.5 - cx) / scale;
+        let (ax, ay) = (k * sin + cos, sin - k * cos);
+        let mask = FLAT_SIDE as i32 - 1;
+        let w = self.w;
+        for y in lo..=hi {
+            let dy = y as f32 + 0.5 - cy;
+            // A level plane never reaches the horizon, and the row that would
+            // is a distance of infinity rather than a large number.
+            if (rise < 0.0) != (dy < 0.0) {
+                continue;
+            }
+            let z = rise * scale / dy;
+            if !(z > 0.0 && z < 1.0e6) {
+                continue;
+            }
+            let wx = view.x + z * ax;
+            // North is negated because a flat's rows run the other way: DOOM
+            // computes `-viewy - ...` for the row against `viewx + ...` for
+            // the column. A flat drawn without the flip is mirrored across the
+            // east-west axis, which on a symmetric pattern is invisible -- and
+            // is why `tools/mkwad.py` generates ones that are not symmetric.
+            let wy = -(view.y + z * ay);
+            let col = (math::floor_i(wx) & mask) as usize;
+            let row = (math::floor_i(wy) & mask) as usize;
+            let Some(v) = flat.get(row * FLAT_SIDE + col) else { continue };
+            let c = self.light[Self::level(z, light)][*v as usize];
+            let px = surf.pixels();
+            if let Some(slot) = px.get_mut(y as usize * w + x as usize) {
+                *slot = c;
+            }
         }
     }
 

@@ -39,9 +39,10 @@ renderer bugs later:**
     with linedef 0xFFFF, so each subsector is a closed polygon. These
     subsectors are open along x=0. Wall rendering does not care; anything that
     fills flats by walking a subsector's edges will.
-  * **No flats.** The sector names FLOOR4_8 and CEIL3_5 and there is no
-    F_START/F_END namespace here, so floors and ceilings have nothing to look
-    up. Walls do: `STARTAN3` is a real composed texture in this file.
+  * **No sprites.** There is no S_START/S_END namespace and no sprite lumps,
+    so a THING has nothing to draw. Walls, floors and ceilings all have real
+    pictures: `STARTAN3` is a composed texture and `FLOOR4_8`/`CEIL3_5` are
+    real flats.
   * **REJECT is all zero**, meaning no sector pair is rejected. That is the
     permissive answer and is always safe; it just does no work.
 
@@ -330,6 +331,88 @@ TEXTURES = [
 ]
 
 
+# --------------------------------------------------------------------------
+# Flats
+# --------------------------------------------------------------------------
+#
+# A flat is 64 by 64 raw pixels and nothing else -- no header, no dimensions,
+# no name inside it. The size *is* the format, which is why a flat lives in a
+# namespace (`F_START` to `F_END`) instead of being identifiable by content,
+# and why the only test a reader can apply is that the lump is 4096 bytes.
+#
+# So the patterns here have to catch what a wall texture's cannot. A wall is
+# addressed by (u along the wall, v down it) and a floor by (world x, world y),
+# and the second has two failure modes the first does not:
+#
+#   * **A transposed pair.** Feeding x where y belongs and vice versa is
+#     invisible on anything with four-fold symmetry -- a checkerboard, a grid,
+#     a noise field. So the pattern is deliberately different along each axis.
+#   * **A mirrored axis.** DOOM negates world y to get the flat's row, because
+#     north is up in the world and down in the picture. Getting that wrong
+#     mirrors every floor in the game across the east-west axis, which on a
+#     symmetric pattern is nothing at all.
+#
+# Hence a wedge: a diagonal that thickens toward one corner. Transposed it
+# leans the other way, mirrored it points the other way, and both read at a
+# glance.
+
+FLAT_SIDE = 64
+
+
+def floor_pixel(x, y):
+    """The floor: a plated grid with a wedge marking one corner."""
+    # The tile seam, so the 64-unit repeat is visible on a large floor and a
+    # wrong world-to-flat scale shows as the wrong number of tiles.
+    if x < 2 or y < 2:
+        return _idx(0, 5)
+    # The wedge. Filled below the diagonal, so the mass is toward the low-x,
+    # high-y corner -- and neither a transpose nor a mirror leaves it there.
+    if y > x + 8:
+        return _idx(5, 12 - (y - x) // 8)
+    # A dot grid, on a different pitch in each axis so the two cannot be
+    # swapped without the spacing changing.
+    if x % 16 == 8 and y % 8 == 4:
+        return _idx(4, 14)
+    return _idx(0, 2 + (x // 16))
+
+
+def ceil_pixel(x, y):
+    """The ceiling: darker, and unmistakably not the floor.
+
+    A renderer that swapped a sector's two pictures would otherwise draw a
+    perfectly plausible room.
+    """
+    if x < 2 or y < 2:
+        return _idx(0, 3)
+    if (x // 8 + y // 8) % 2 == 0:
+        return _idx(3, 5 + (y // 16))
+    return _idx(6, 3 + (x // 16))
+
+
+def make_flat(fn):
+    out = bytearray()
+    for y in range(FLAT_SIDE):
+        for x in range(FLAT_SIDE):
+            out.append(fn(x, y))
+    return bytes(out)
+
+
+# The names the map's sector already carries, so the flats resolve without
+# touching the map.
+FLATS = [
+    ("FLOOR4_8", floor_pixel),
+    ("CEIL3_5", ceil_pixel),
+]
+
+
+def flat_lumps():
+    out = [("F_START", b"")]
+    for n, fn in FLATS:
+        out.append((n, make_flat(fn)))
+    out.append(("F_END", b""))
+    return out
+
+
 def texture_lumps():
     names = [n for n, _ in PATCHES]
     out = [
@@ -547,6 +630,7 @@ def all_lumps():
     return (
         [("PLAYPAL", playpal()), ("COLORMAP", colormap())]
         + texture_lumps()
+        + flat_lumps()
         + map_lumps()
         # Two with one name, to exercise the rule that a lookup searches from
         # the end and the later one wins.
@@ -723,6 +807,48 @@ def check_map(lumps):
             raise ValueError(
                 f"linedef {i} is wound the wrong way: its right side faces out"
             )
+
+    # Flats, which have no header to check -- so what is checked is the one
+    # property a reader depends on: exactly 4096 bytes, inside the namespace,
+    # and named by the sector that wants them.
+    inside = False
+    seen = set()
+    for ln, body in lumps:
+        if ln == "F_START":
+            inside = True
+            continue
+        if ln == "F_END":
+            inside = False
+            continue
+        if inside:
+            if len(body) != 4096:
+                raise ValueError(f"flat {ln} is {len(body)} bytes, not 64x64")
+            seen.add(ln)
+    if seen:
+        (_fh, _ch, fpic, cpic) = (
+            struct.unpack("<hh", by["SECTORS"][:4])
+            + (
+                by["SECTORS"][4:12].rstrip(b"\x00").decode("ascii", "replace"),
+                by["SECTORS"][12:20].rstrip(b"\x00").decode("ascii", "replace"),
+            )
+        )
+        for want in (fpic, cpic):
+            if want not in seen:
+                raise ValueError(f"the sector names flat {want}, which is not in F_START..F_END")
+        # A flat that is the same in both axes cannot catch a transposed
+        # lookup, which is the mistake this file exists to make visible.
+        for ln, body in lumps:
+            if ln in seen:
+                flipped = bytes(
+                    body[x * 64 + y] for y in range(64) for x in range(64)
+                )
+                if flipped == body:
+                    raise ValueError(f"flat {ln} is symmetric, so a transpose would not show")
+                mirrored = bytes(
+                    body[(63 - y) * 64 + x] for y in range(64) for x in range(64)
+                )
+                if mirrored == body:
+                    raise ValueError(f"flat {ln} is mirror-symmetric, so a flip would not show")
 
     # The COLORMAP has to actually darken, which is the property the kernel
     # tests before it will use one -- so a regression here would silently send

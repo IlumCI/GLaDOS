@@ -765,6 +765,44 @@ the post loop at all -- a decoder that ignored posts and copied `width *
 height` bytes would pass on one. `doom tex [name]` composes one and blows it up
 to look at, which is the only check that settles a picture decoder.
 
+**Floors and ceilings are drawn column-wise, and that is a deliberate trade.**
+DOOM draws them as *horizontal* spans, because distance is constant along a
+screen row of a level plane, so one divide does a whole span. Horizontal spans
+need visplanes: a second structure collected during the BSP walk, keyed by
+picture and light and height, merged where two agree and flushed at the end.
+The per-column window the wall renderer already keeps says exactly which rows
+are floor and which are ceiling at the moment a wall claims a column, so
+drawing them there is a dozen lines against several hundred -- at the cost of a
+divide per pixel, which is what a 486 could not afford and this machine can. A
+full screen of floor and ceiling is around fifty thousand of them. Two of the
+three multiplies hoist out of the loop anyway, since the world offset at depth
+`z` is `z*(k*sin + cos)` east and `z*(sin - k*cos)` north with both factors
+constant down a column.
+
+**A flat is 64 by 64 and carries no header at all**, so its size *is* the
+format and the only way to know one is the `F_START`/`F_END` namespace it sits
+in. `pic::classify` is that rule as one function, because it is four conditions
+that all have to hold at once and none fails loudly -- the one that matters
+most is that a marker must begin with `F`, since `S_START` brackets sprites, a
+sprite is a patch, and any patch that happened to be 4096 bytes would be
+adopted as a floor by a rule that only looked for `_START`. Flats are
+*borrowed* from the WAD rather than copied, the opposite of the trade `Pics`
+makes and for the opposite reason: a wall texture is composed from patches and
+has to be built somewhere, while a flat is already exactly the bytes a renderer
+wants. `doom flat [name]` blows one up, and it catches two failures `doom tex`
+cannot -- a flat is addressed by world position, so its coordinates can be
+transposed or one axis mirrored (DOOM negates world y for the row), and neither
+shows on a symmetric picture. `mkwad.py --verify` refuses to emit a flat that
+is symmetric under either.
+
+**A full-screen program's own launch keystroke used to close it.** `wait_or`
+polled the keyboard ring without draining it first, so the Enter that ran
+`doom view` was still queued when the first frame landed and the picture was
+gone before anybody saw it -- which reads as a program that drew nothing rather
+than one that exited. It showed as three screenshot runs in five coming back
+with the desktop already restored, and it is a defect on the keyboard too, not
+an artefact of driving this over a serial line.
+
 `Surface` applies the palette in software, because the framebuffer is 32bpp
 only and there is no mode-setting -- the resolution and format are whatever
 UEFI handed over. It is cheap anyway: the palette is pre-encoded once into the

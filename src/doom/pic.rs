@@ -302,6 +302,171 @@ pub struct Art<'a> {
     pub playpal: &'a [u8],
     pub colormap: Option<&'a [u8]>,
     pub pics: Option<&'a Pics>,
+    pub flats: Option<&'a Flats>,
+}
+
+impl<'a> Art<'a> {
+    /// The pixels of a sector's floor or ceiling picture.
+    pub fn flat(&self, name: &Name) -> Option<&'static [u8]> {
+        self.flats?.by_name(name)
+    }
+}
+
+/// A flat is 64 by 64 and always exactly that.
+///
+/// Not a header anywhere -- the size is the format. A flat lump carries no
+/// dimensions at all, which is why the only test for one is that it is 4096
+/// bytes, and why a wrong lump read as a flat is a picture rather than an
+/// error.
+pub const FLAT_SIDE: usize = 64;
+pub const FLAT_BYTES: usize = FLAT_SIDE * FLAT_SIDE;
+
+/// The name a ceiling wears when it is not a ceiling.
+///
+/// DOOM has no sky flag: a sector whose ceiling names this is open to the sky,
+/// and the renderer draws the sky texture through the hole instead of a
+/// ceiling. It is a string comparison in the original too.
+pub const SKY_FLAT: &str = "F_SKY1";
+
+/// What one directory entry means to the flat namespace.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Mark {
+    /// A `*_START` marker: everything after it is in the namespace.
+    Open,
+    /// A `*_END` marker.
+    Close,
+    /// A lump the right size to be a flat.
+    Flat,
+    Other,
+}
+
+/// The whole of the namespace rule, as a function of one entry.
+///
+/// Pulled out because it is four conditions that all have to be right at once
+/// and none of them fails loudly:
+///
+/// * **Empty.** A marker is a zero-length lump. Without this a *flat* named
+///   something ending in `_END` would close the namespace it is inside.
+/// * **Begins with F.** `P_START` and `S_START` bracket patches and sprites,
+///   and both end in `_START` too. A rule that missed this would pull every
+///   sprite into the flat set -- and a sprite is a patch, so the ones that
+///   happened to be 4096 bytes would be *kept*, as garbage floors.
+/// * **Any `F*`, not just `F_`.** The registered game nests `F1_START` and
+///   `F2_START` inside the outer pair, and a PWAD spells it `FF_START`. This
+///   counts depth rather than matching one spelling, so all three work and a
+///   nested pair does not close the outer one.
+/// * **Exactly 4096 bytes.** A flat has no header at all, so its size is the
+///   only test there is.
+pub fn classify(name: &str, empty: bool, len: usize) -> Mark {
+    if empty && name.starts_with('F') {
+        if name.ends_with("_START") {
+            return Mark::Open;
+        }
+        if name.ends_with("_END") {
+            return Mark::Close;
+        }
+    }
+    if len == FLAT_BYTES {
+        Mark::Flat
+    } else {
+        Mark::Other
+    }
+}
+
+/// Floor and ceiling pictures.
+///
+/// Borrowed rather than copied. A `Wad` hands back `&'static [u8]` because the
+/// file is in LoaderData and never moves, so a few hundred flats cost a few
+/// hundred slice headers instead of a megabyte -- which is the opposite of the
+/// trade `Pics` makes, and for the opposite reason: a wall texture is
+/// *composed* from patches and has to be built somewhere, while a flat is
+/// already exactly the bytes a renderer wants.
+pub struct Flats {
+    names: Vec<Name>,
+    data: Vec<&'static [u8]>,
+    /// Lumps the right size to be a flat that no namespace claimed.
+    loose: Vec<(Name, &'static [u8])>,
+    /// Whether the WAD declared a flat namespace at all.
+    pub marked: bool,
+}
+
+impl Flats {
+    /// Every flat in the WAD.
+    ///
+    /// Flats live in a *namespace* -- between `F_START` and `F_END` -- rather
+    /// than being identifiable by anything in the lump, because there is
+    /// nothing in the lump: 4096 bytes of pixels and no header. The registered
+    /// game nests `F1_START`/`F2_START` pairs inside the outer one and a PWAD
+    /// usually spells it `FF_START`, so this counts depth over any `F*_START`
+    /// rather than matching one spelling.
+    ///
+    /// A WAD with no markers at all still works: `by_name` falls back to a
+    /// direct lookup, which is what a PWAD that simply drops a flat beside its
+    /// map needs. The fallback is second because a name can collide across
+    /// namespaces -- a patch and a flat may share one, and only the markers
+    /// tell them apart.
+    pub fn load(wad: &Wad) -> Flats {
+        let mut names = Vec::new();
+        let mut data = Vec::new();
+        let mut loose = Vec::new();
+        let mut depth = 0usize;
+        let mut marked = false;
+        for i in 0..wad.len() {
+            let Some(e) = wad.at(i) else { continue };
+            match classify(e.name.as_str(), e.is_empty(), e.len()) {
+                Mark::Open => {
+                    depth += 1;
+                    marked = true;
+                }
+                Mark::Close => depth = depth.saturating_sub(1),
+                Mark::Flat if depth > 0 => {
+                    names.push(e.name);
+                    data.push(wad.data(e));
+                }
+                // Right size, no namespace. Kept separately and consulted only
+                // after the namespace, because 4096 bytes is the whole of the
+                // test available -- a flat has no header at all -- and a name
+                // can legitimately belong to something else.
+                Mark::Flat => loose.push((e.name, wad.data(e))),
+                Mark::Other => {}
+            }
+        }
+        Flats { names, data, loose, marked }
+    }
+
+    pub fn len(&self) -> usize {
+        self.names.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.names.is_empty()
+    }
+
+    pub fn name_at(&self, i: usize) -> Option<&Name> {
+        self.names.get(i)
+    }
+
+    pub fn index_of(&self, name: &str) -> Option<usize> {
+        // Searched from the end, like `Wad::find`, so a PWAD's flat replaces
+        // the IWAD's of the same name rather than losing to it.
+        self.names.iter().rposition(|n| n.is(name))
+    }
+
+    pub fn at(&self, i: usize) -> Option<&'static [u8]> {
+        self.data.get(i).copied()
+    }
+
+    /// The pixels of a named flat, or nothing -- including for the sky, which
+    /// is a name and not a picture.
+    pub fn by_name(&self, name: &Name) -> Option<&'static [u8]> {
+        if name.is(SKY_FLAT) {
+            return None;
+        }
+        if let Some(i) = self.index_of(name.as_str()) {
+            return self.data.get(i).copied();
+        }
+        self.loose.iter().rev().find(|(n, _)| *n == *name).map(|(_, d)| *d)
+    }
 }
 
 /// How many light levels a DOOM `COLORMAP` holds before the two special ones
@@ -474,14 +639,45 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     // full brightness -- which reads as a bug in the renderer.
     let pal = [0u8; 768];
     let ident: Vec<u8> = (0..34).flat_map(|_| 0..=255u8).collect();
-    let art = Art { playpal: &pal, colormap: Some(&ident), pics: None };
+    let art = Art { playpal: &pal, colormap: Some(&ident), pics: None, flats: None };
     out.push(("an identity COLORMAP is not used for lighting", art.lighting_colormap().is_none()));
     let mut lit = ident.clone();
     lit[31 * 256] = 7;
-    let art = Art { playpal: &pal, colormap: Some(&lit), pics: None };
+    let art = Art { playpal: &pal, colormap: Some(&lit), pics: None, flats: None };
     out.push(("one that darkens anything is used", art.lighting_colormap().is_some()));
-    let art = Art { playpal: &pal, colormap: Some(&ident[..100]), pics: None };
+    let art = Art { playpal: &pal, colormap: Some(&ident[..100]), pics: None, flats: None };
     out.push(("a COLORMAP too short to hold 32 maps is refused", art.lighting_colormap().is_none()));
+
+    // The flat namespace. Four conditions that all have to hold at once, and
+    // the one that matters most is the third: `S_START` brackets sprites, a
+    // sprite is a patch, and a patch that happens to be 4096 bytes would be
+    // adopted as a floor by a rule that only looked for `_START`.
+    out.push((
+        "F_START opens the flat namespace and F_END closes it",
+        classify("F_START", true, 0) == Mark::Open && classify("F_END", true, 0) == Mark::Close,
+    ));
+    out.push((
+        "so do the nested and PWAD spellings",
+        classify("F1_START", true, 0) == Mark::Open
+            && classify("FF_START", true, 0) == Mark::Open
+            && classify("F2_END", true, 0) == Mark::Close,
+    ));
+    out.push((
+        "a sprite or patch marker does not",
+        classify("S_START", true, 0) == Mark::Other
+            && classify("P_START", true, 0) == Mark::Other
+            && classify("P_END", true, 0) == Mark::Other,
+    ));
+    out.push((
+        "a marker must be empty, so a flat cannot close its own namespace",
+        classify("FWATER_END", false, FLAT_BYTES) == Mark::Flat,
+    ));
+    out.push((
+        "and only 4096 bytes is a flat",
+        classify("FLOOR4_8", false, FLAT_BYTES) == Mark::Flat
+            && classify("FLOOR4_8", false, FLAT_BYTES - 1) == Mark::Other
+            && classify("FLOOR4_8", false, FLAT_BYTES + 1) == Mark::Other,
+    ));
 
     // `floor_i`, because a texture coordinate wraps and the negative side of
     // the seam is exactly where a truncating cast is wrong.

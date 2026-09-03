@@ -103,6 +103,17 @@ fn redraw(line: &str, cursor: usize) {
 /// keypress never gives the prompt back, and the keystroke that would end it
 /// is the one thing the harness cannot deliver.
 fn wait_or(ms: u64) {
+    // Throw away whatever is already queued before waiting for a key.
+    //
+    // Without this the keystroke that *starts* a full-screen program is the
+    // one that ends it. The Enter closing `doom view` is still in the ring
+    // when the first frame lands, so `pop_any` finds it immediately and the
+    // picture is gone before anybody has seen it -- which reads as a program
+    // that drew nothing rather than as one that exited. It showed up here as
+    // three screenshot runs out of five coming back with the desktop on
+    // screen and the prompt already returned, and it is a real defect on the
+    // keyboard too, not an artefact of driving this over a serial line.
+    while crate::dev::kbd::pop_any().is_some() {}
     let until = crate::port::clock::now_ms() + ms;
     loop {
         if crate::dev::kbd::pop_any().is_some() {
@@ -4369,12 +4380,14 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             // map` want none of it and used to be instant. A WAD with no
             // TEXTURE1 is a legal WAD -- a map-only PWAD has none -- so its
             // absence is reported rather than treated as an error.
-            let wants_pics = matches!(what, "tex" | "view" | "play");
+            let wants_pics = matches!(what, "tex" | "flat" | "view" | "play");
             let pics = if wants_pics { crate::doom::pic::Pics::load(&w) } else { None };
+            let flats = if wants_pics { Some(crate::doom::pic::Flats::load(&w)) } else { None };
             let art = crate::doom::pic::Art {
                 playpal: pal,
                 colormap: w.lump("COLORMAP"),
                 pics: pics.as_ref(),
+                flats: flats.as_ref(),
             };
             if wants_pics {
                 match &pics {
@@ -4384,6 +4397,14 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         p.patch_names.len()
                     ),
                     None => kprintln!("  no TEXTURE1/PNAMES, so walls draw flat"),
+                }
+                match flats.as_ref() {
+                    Some(f) if !f.is_empty() => kprintln!(
+                        "  {} flat(s){}",
+                        f.len(),
+                        if f.marked { "" } else { " (no F_START marker)" }
+                    ),
+                    _ => kprintln!("  no flats, so floors and ceilings stay open sky"),
                 }
             }
 
@@ -4456,6 +4477,58 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     });
                     if zoom == 0 {
                         kprintln!("  it has no pixels");
+                    } else {
+                        kprintln!("  drew it at {}x", zoom);
+                    }
+                }
+                // One flat, blown up. The companion to `tex`, and it catches
+                // two things `tex` cannot: a flat is addressed by world
+                // position, so its coordinates can be transposed or one of
+                // them mirrored, and neither shows on a symmetric picture.
+                "flat" => {
+                    let Some(f) = flats.as_ref().filter(|f| !f.is_empty()) else {
+                        kprintln!("  this WAD has no flats");
+                        return;
+                    };
+                    let named = args.first().map(|t| t.parse::<u64>().is_err()).unwrap_or(false);
+                    let idx = if named {
+                        match f.index_of(args[0]) {
+                            Some(i) => i,
+                            None => {
+                                console::set_color(YELLOW);
+                                kprintln!("  no flat called '{}'", args[0]);
+                                console::set_color(LTGRAY);
+                                for i in 0..f.len().min(12) {
+                                    if let Some(n) = f.name_at(i) {
+                                        kprintln!("    {}", n);
+                                    }
+                                }
+                                if f.len() > 12 {
+                                    kprintln!("    ... and {} more", f.len() - 12);
+                                }
+                                return;
+                            }
+                        }
+                    } else {
+                        0
+                    };
+                    let hold = num(if named { 1 } else { 0 }).unwrap_or(0);
+                    let Some(px) = f.at(idx) else { return };
+                    match f.name_at(idx) {
+                        Some(n) => kprintln!("  {} -- 64x64, {} bytes", n, px.len()),
+                        None => return,
+                    }
+                    let mut zoom = 0usize;
+                    crate::port::with_screen(|| {
+                        let Some(mut surf) = crate::port::Surface::new(320, 200) else {
+                            return;
+                        };
+                        zoom = crate::doom::draw::flat(&mut surf, px, pal).unwrap_or(0);
+                        surf.present();
+                        wait_or(hold);
+                    });
+                    if zoom == 0 {
+                        kprintln!("  it is not 64x64");
                     } else {
                         kprintln!("  drew it at {}x", zoom);
                     }
@@ -4644,7 +4717,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     }
                 }
                 other => kprintln!(
-                    "  no such action: {}  (try: pal, tex [name], map, view [deg], play)",
+                    "  no such action: {}  (try: pal, tex [name], flat [name], map, view [deg], play)",
                     other
                 ),
             }
