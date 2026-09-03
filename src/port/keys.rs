@@ -31,6 +31,8 @@ pub const UP: u8 = kbd::SC_UP;
 pub const DOWN: u8 = kbd::SC_DOWN;
 pub const CTRL: u8 = kbd::SC_LCTRL;
 pub const SHIFT: u8 = kbd::SC_LSHIFT;
+/// The key that opens a door. DOOM's Use is the space bar.
+pub const USE: u8 = kbd::SC_SPACE;
 
 /// Is that key held right now?
 pub fn down(code: u8) -> bool {

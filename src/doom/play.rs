@@ -33,6 +33,8 @@
 use super::level::{Level, NONE};
 use super::math;
 use super::pic::Art;
+use super::specials;
+use super::thinker::Thinkers;
 use super::render::{Renderer, View, EYE_HEIGHT};
 use crate::port::{keys, Surface};
 
@@ -80,6 +82,14 @@ pub struct Player {
     pub angle: f32,
     /// Height of the floor the player is standing on.
     pub floor: f32,
+    /// Whether Use was held on the previous tic.
+    ///
+    /// Use is an *edge*, not a state. Holding the key against a door would
+    /// otherwise re-trigger it thirty-five times a second, which for a
+    /// repeatable door means it never finishes opening -- each tic refuses
+    /// because the sector is busy, and the one tic it is not busy starts it
+    /// again. Doors that open and immediately shut, forever.
+    pub used: bool,
 }
 
 impl Player {
@@ -91,6 +101,7 @@ impl Player {
             y: t.y as f32,
             angle: math::deg_to_rad(t.angle),
             floor,
+            used: false,
         })
     }
 
@@ -200,7 +211,7 @@ fn try_move(lv: &Level, p: &mut Player, dx: f32, dy: f32) {
 }
 
 /// One tic of the world.
-fn tic(lv: &mut Level, p: &mut Player) {
+fn tic(lv: &mut Level, p: &mut Player, th: &mut Thinkers) {
     let held = keys::snapshot();
     let fast = held.down(keys::SHIFT);
     let turn = math::deg_to_rad(if fast { TURN_FAST as i16 } else { TURN as i16 });
@@ -240,8 +251,25 @@ fn tic(lv: &mut Level, p: &mut Player) {
         // a quarter turn clockwise.
         let dx = c * fwd + s * side;
         let dy = s * fwd - c * side;
+        let was = (p.x, p.y);
         try_move(&*lv, p, dx, dy);
+        // Anything crossed on the way. The *path* rather than the destination,
+        // because a trigger line is infinitely thin: at 25 units a tic a
+        // player can be on one side at the start of a tic and the other at the
+        // end without ever having been within a unit of the line itself.
+        if was != (p.x, p.y) {
+            specials::cross_lines(lv, th, was, (p.x, p.y));
+        }
     }
+
+    // Use, on the press rather than while held.
+    let use_now = held.down(keys::USE);
+    if use_now && !p.used {
+        specials::use_lines(lv, th, p.x, p.y, p.angle);
+    }
+    p.used = use_now;
+
+    th.tick(lv);
     // The floor under wherever we are, sampled **every** tic rather than only
     // on one where a movement key was held.
     //
@@ -266,6 +294,13 @@ pub struct Stats {
     pub x: f32,
     pub y: f32,
     pub deg: f32,
+    /// How many surfaces were still moving when the run ended, and how many
+    /// specials fired over the whole of it. Reported because a door is a
+    /// number rather than a picture: "the ceiling is at 124 after 70 tics" is
+    /// a test and a screenshot of a doorway is not.
+    pub moving: usize,
+    /// The height of the sector the run was asked to watch, at the end.
+    pub watched: i16,
     /// Whether the shading table came out of the WAD's own COLORMAP. Carried
     /// rather than printed, because nothing in this tree may reach the
     /// printing macro -- the shell does the talking.
@@ -285,12 +320,14 @@ pub fn run(
     art: &Art<'_>,
     things: &super::sprite::Things,
     limit_ms: u64,
-    script: &[u8],
+    script: &[(u8, u64)],
+    watch: usize,
 ) -> Option<Stats> {
     let mut p = Player::at(&*lv)?;
     surf.set_palette_rgb(art.playpal);
     let sky = super::draw::nearest(art.playpal, 0x10, 0x18, 0x60);
     let mut r = Renderer::new(surf, art);
+    let mut th = Thinkers::new(&*lv);
     // The same projection scale the walls use: a 90-degree field of view, so
     // half the width. Read once rather than per frame, and from the surface
     // rather than from a constant, because a different resolution would give
@@ -305,14 +342,34 @@ pub fn run(
     // before it -- the first version cleared on entry and silently threw the
     // script away, and the symptom was a player who stood perfectly still
     // while the tic counter said the world was running.
-    for k in script {
-        keys::force(*k, true);
+    //
+    // **A key can be scheduled rather than only held**, and that is not a
+    // convenience. Use is edge-triggered, so a script that holds it from the
+    // first tic spends the press immediately -- at the spawn point, sixty-four
+    // units being the whole reach, which on any real map is nowhere near the
+    // thing you meant to open. The press has to happen *after* the walking,
+    // and nothing in a held-key model can say that.
+    for (k, at) in script {
+        if *at == 0 {
+            keys::force(*k, true);
+        }
     }
+    let mut pending: alloc::vec::Vec<(u8, u64)> =
+        script.iter().copied().filter(|(_, at)| *at != 0).collect();
 
     let start = crate::port::now_us();
     let mut next_tic = start;
-    let mut stats =
-        Stats { frames: 0, tics: 0, ms: 0, x: p.x, y: p.y, deg: 0.0, lit_from_wad: r.lit_from_wad };
+    let mut stats = Stats {
+        frames: 0,
+        tics: 0,
+        ms: 0,
+        x: p.x,
+        y: p.y,
+        deg: 0.0,
+        moving: 0,
+        watched: 0,
+        lit_from_wad: r.lit_from_wad,
+    };
 
     loop {
         let now = crate::port::now_us();
@@ -323,11 +380,23 @@ pub fn run(
             break;
         }
 
+        // Anything the script scheduled for by now. Pressed and left down: a
+        // release would need a second time and nothing yet wants one.
+        let elapsed = (now - start) / 1000;
+        pending.retain(|(k, at)| {
+            if elapsed >= *at {
+                keys::force(*k, true);
+                false
+            } else {
+                true
+            }
+        });
+
         // Catch up on whole tics, so the world advances at 35 Hz whatever the
         // renderer manages.
         let mut ran = 0;
         while now >= next_tic && ran < MAX_CATCHUP {
-            tic(lv, &mut p);
+            tic(lv, &mut p, &mut th);
             next_tic += TIC_US;
             stats.tics += 1;
             ran += 1;
@@ -360,6 +429,12 @@ pub fn run(
         d += 360.0;
     }
     stats.deg = d;
+    stats.moving = th.len();
+    stats.watched = lv
+        .sectors
+        .get(watch)
+        .map(|s| s.ceiling)
+        .unwrap_or(0);
     Some(stats)
 }
 

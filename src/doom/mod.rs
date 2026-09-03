@@ -57,7 +57,9 @@ pub mod draw;
 pub mod math;
 pub mod pic;
 pub mod play;
+pub mod specials;
 pub mod render;
+pub mod thinker;
 pub mod sprite;
 pub mod level;
 pub mod wad;
@@ -87,5 +89,6 @@ pub fn checks() -> alloc::vec::Vec<(&'static str, bool)> {
     let mut out = pic::checks();
     out.extend(level::checks());
     out.extend(play::checks());
+    out.extend(specials::checks());
     out
 }

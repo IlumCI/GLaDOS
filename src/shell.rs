@@ -4793,9 +4793,26 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         }
                     };
                     let hold = num(0).unwrap_or(0);
+                    // A sector to report the ceiling height of, so a door is
+                    // checkable as a number. `doom play 3000 w watch=1`.
+                    let watch = args
+                        .iter()
+                        .find_map(|a| a.strip_prefix("watch="))
+                        .and_then(|n| n.parse::<usize>().ok())
+                        .unwrap_or(0);
                     // Keys named after the duration are held for the session.
-                    let mut script: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+                    // `w` holds from the start; `use@1500` presses at 1500 ms.
+                    // Options carrying `=` are not keys and are skipped.
+                    let mut script: alloc::vec::Vec<(u8, u64)> = alloc::vec::Vec::new();
                     for n in args.iter().skip(1) {
+                        if n.contains('=') {
+                            continue;
+                        }
+                        let (n, at) = match n.split_once('@') {
+                            Some((k, t)) => (k, t.parse::<u64>().unwrap_or(0)),
+                            None => (*n, 0),
+                        };
+                        let n = &n;
                         use crate::dev::kbd;
                         let c = match *n {
                             "w" => kbd::SC_W,
@@ -4805,12 +4822,13 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                             "left" => kbd::SC_LEFT,
                             "right" => kbd::SC_RIGHT,
                             "shift" => kbd::SC_LSHIFT,
+                            "use" | "space" => kbd::SC_SPACE,
                             _ => {
                                 kprintln!("  no key called '{}'", n);
                                 continue;
                             }
                         };
-                        script.push(c);
+                        script.push((c, at));
                     }
                     let billboards = match sprites.as_ref() {
                         Some(sp) => crate::doom::sprite::collect(&lv, sp),
@@ -4838,6 +4856,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                             &billboards,
                             hold,
                             &script,
+                            watch,
                         );
                     });
                     match out {
@@ -4852,7 +4871,11 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                                 fps
                             );
                             kprintln!(
-                                "  ended at {},{} facing {} deg, lit by {}",
+                                "  sector {} ceiling {}, {} still moving",
+                                watch, st.watched, st.moving
+                            );
+                            kprintln!(
+                            "  ended at {},{} facing {} deg, lit by {}",
                                 st.x as i32,
                                 st.y as i32,
                                 st.deg as i32,

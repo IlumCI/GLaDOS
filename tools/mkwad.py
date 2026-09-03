@@ -557,7 +557,7 @@ VERTEXES = [
 #
 # This was anticlockwise, with a comment claiming it was the other way, and it
 # cost a debugging session on a renderer that was right all along.
-LINEDEFS = [(1, 0), (2, 1), (3, 2), (4, 3), (5, 4), (0, 5), (4, 1)]
+LINEDEFS = [(1, 0), (2, 1), (3, 2), (4, 3), (5, 4), (0, 5), (1, 4)]
 
 # Linedef 6 is the divider, and it is the only two-sided line in the file.
 #
@@ -568,16 +568,26 @@ LINEDEFS = [(1, 0), (2, 1), (3, 2), (4, 3), (5, 4), (0, 5), (4, 1)]
 # reached. A map that exercises only the easy half of a renderer is a map that
 # reports the renderer works.
 #
-# It runs from vertex 4 (0, 512) to vertex 1 (0, -512), which are the two
+# It runs from vertex 1 (0, -512) to vertex 4 (0, 512), which are the two
 # vertices already sitting on the BSP's partition, so the tree does not change:
 # one node splitting x=0, one subsector either side, and now a sector either
 # side too.
 #
-# Direction decides which sidedef is which. Going from (0,512) to (0,-512) is
-# heading south, and the right of south is west -- so the *right* sidedef faces
-# x<0 and the *left* faces x>0. Getting that backwards swaps the two sectors,
-# which does not fail: it draws a step down where there is a step up.
+# **And it is a door.** Direction decides which sidedef is which: going north
+# from (0,-512) to (0,512), the right of north is east, so the *right* sidedef
+# faces x>0 -- the half the player stands in -- and the *left* faces x<0, the
+# sector that opens.
+#
+# That orientation is not cosmetic and it is not a free choice. A manual door
+# (special 1) operates on the line's **back** sector and refuses when the
+# player is on the back side, because a door drawn the other way round would
+# open the wall you are standing inside. This line ran south until doors
+# existed, which put the player's own half on the back and made the door
+# refuse from the only place you can reach it.
 DIVIDER = 6
+
+# DR Door Open Wait Close. Repeatable, manual, untagged.
+DOOR_SPECIAL = 1
 
 # Which sector each half is. 0 is the right (x>0), where the player stands.
 RIGHT_SECTOR, LEFT_SECTOR = 0, 1
@@ -585,8 +595,8 @@ RIGHT_SECTOR, LEFT_SECTOR = 0, 1
 # Which linedefs bound each subsector, and for the divider, which way its seg
 # runs. `(line, side)`, where side 1 means the seg runs against the linedef and
 # therefore takes the *left* sidedef.
-RIGHT_LINES = [(1, 0), (2, 0), (3, 0), (DIVIDER, 1)]   # x >= 0
-LEFT_LINES = [(4, 0), (5, 0), (0, 0), (DIVIDER, 0)]    # x <= 0
+RIGHT_LINES = [(1, 0), (2, 0), (3, 0), (DIVIDER, 0)]   # x >= 0
+LEFT_LINES = [(4, 0), (5, 0), (0, 0), (DIVIDER, 1)]    # x <= 0
 
 # Which sector each one-sided line belongs to, by the half it is in.
 LINE_SECTOR = {
@@ -640,11 +650,12 @@ def build_linedefs():
     out = b""
     for i, (a, b) in enumerate(LINEDEFS):
         if i == DIVIDER:
-            # Flag 4 is ML_TWOSIDED. Not impassable: the two halves are one
-            # room with a step between them, and a player has to be able to
-            # walk up it or the collision code cannot be tested either.
-            # Sidedef 6 is the right (facing the left half), 7 the left.
-            out += struct.pack("<HHHHHHH", a, b, 4, 0, 0, 6, 7)
+            # Flag 4 is ML_TWOSIDED, special 1 is DR Door Open Wait Close --
+            # the commonest line in DOOM and the one you press to open. Tag 0
+            # because a manual door names no tag: it operates on the sector
+            # behind the line it is written on.
+            # Sidedef 6 is the right (facing the player's half), 7 the left.
+            out += struct.pack("<HHHHHHH", a, b, 4, DOOR_SPECIAL, 0, 6, 7)
         else:
             # flag 1 is impassable, which every one-sided wall is.
             out += struct.pack("<HHHHHHH", a, b, 1, 0, 0, i, NO_SIDE)
@@ -667,16 +678,17 @@ def build_sidedefs():
         out += struct.pack("<hh", 0, 0)
         out += name8("-") + name8("-") + name8("STARTAN3")
         out += struct.pack("<H", LINE_SECTOR[i])
-    # 6: the divider's right side, which faces the left half.
-    out += struct.pack("<hh", 0, 0)
-    out += name8("BIGWALL") + name8("STARTAN3") + name8("-")
-    out += struct.pack("<H", LEFT_SECTOR)
-    # 7: its left side, facing the right half where the player stands. This is
-    # the one a `doom view` looks at: the upper is the ceiling dropping from
-    # 128 to 96 and the lower is the floor rising from 0 to 32.
+    # 6: the divider's right side, facing the right half where the player
+    # stands. This is the door's face -- its *upper* is what you look at while
+    # the door is shut, because a shut door is a ceiling lowered to the floor
+    # and the whole opening is upper texture.
     out += struct.pack("<hh", 0, 0)
     out += name8("BIGWALL") + name8("STARTAN3") + name8("-")
     out += struct.pack("<H", RIGHT_SECTOR)
+    # 7: its left side, inside the door sector.
+    out += struct.pack("<hh", 0, 0)
+    out += name8("BIGWALL") + name8("STARTAN3") + name8("-")
+    out += struct.pack("<H", LEFT_SECTOR)
     return out
 
 
@@ -692,8 +704,16 @@ def build_sectors():
     out = struct.pack("<hh", 0, 128)
     out += name8("FLOOR4_8") + name8("CEIL3_5")
     out += struct.pack("<hhh", 160, 0, 0)
-    # The far half: floor up 32, ceiling down 32, brighter, pictures swapped.
-    out += struct.pack("<hh", 32, 96)
+    # The far half is the **door**, and it starts shut: its ceiling is on its
+    # floor, so the opening has no height at all and `P_LineOpening` refuses
+    # to let anybody through.
+    #
+    # Its floor is 24 rather than 32 on purpose. Twenty-four is exactly DOOM's
+    # step limit, so the moment the door opens the player can walk in -- at 32
+    # the door would open onto a step too high to climb, and a test that opened
+    # the door correctly would still report the player stuck, which is the
+    # worst kind of fixture.
+    out += struct.pack("<hh", 24, 24)
     out += name8("CEIL3_5") + name8("FLOOR4_8")
     out += struct.pack("<hhh", 240, 0, 0)
     return out
@@ -1032,6 +1052,14 @@ def check_map(lumps):
         raise ValueError("the portal has no step: both floors are equal")
     if hts[0][1] == hts[1][1]:
         raise ValueError("the portal has no header: both ceilings are equal")
+    # The door has to start shut, or the fixture tests an opening rather than
+    # an opening *door*: a sector whose ceiling is already above its floor
+    # would let the player through before anything was triggered, and the run
+    # would pass whether or not a single special ever fired.
+    if fl & 4 and struct.unpack("<H", by["LINEDEFS"][two[0] * 14 + 6:two[0] * 14 + 8])[0] == 1:
+        shut = [h for h in hts if h[0] == h[1]]
+        if not shut:
+            raise ValueError("the door sector does not start shut")
 
     # Flats, which have no header to check -- so what is checked is the one
     # property a reader depends on: exactly 4096 bytes, inside the namespace,
