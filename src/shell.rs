@@ -4658,6 +4658,69 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     });
                     kprintln!("  drew {}", drew);
                 }
+                // What a map asks of the specials, against what is implemented.
+                // The honest measure of the environment work: not how many
+                // specials exist here, but how many a real level uses that do
+                // not.
+                "specials" => {
+                    let marker = first_map(&w);
+                    if marker.is_empty() {
+                        kprintln!("  no map marker in this WAD");
+                        return;
+                    }
+                    let lv = match crate::doom::level::Level::load(&w, &marker) {
+                        Ok(l) => l,
+                        Err(e) => {
+                            console::set_color(LTRED);
+                            kprintln!("  {}: {}", marker, e);
+                            console::set_color(LTGRAY);
+                            return;
+                        }
+                    };
+                    let mut seen: alloc::vec::Vec<(u16, usize)> = alloc::vec::Vec::new();
+                    for l in lv.linedefs.iter() {
+                        if l.special == 0 {
+                            continue;
+                        }
+                        match seen.iter_mut().find(|(s, _)| *s == l.special) {
+                            Some((_, n)) => *n += 1,
+                            None => seen.push((l.special, 1)),
+                        }
+                    }
+                    seen.sort_unstable_by_key(|(s, _)| *s);
+                    let (mut ok, mut miss, mut ok_lines, mut miss_lines) = (0, 0, 0, 0);
+                    for (sp, n) in seen.iter() {
+                        if crate::doom::specials::handled(*sp) {
+                            ok += 1;
+                            ok_lines += n;
+                        } else {
+                            miss += 1;
+                            miss_lines += n;
+                        }
+                    }
+                    kprintln!(
+                        "  {}: {} distinct special(s) on {} line(s)",
+                        lv.name,
+                        seen.len(),
+                        ok_lines + miss_lines
+                    );
+                    kprintln!("  handled: {} kind(s), {} line(s)", ok, ok_lines);
+                    kprintln!("  missing: {} kind(s), {} line(s)", miss, miss_lines);
+                    if miss > 0 {
+                        let mut shown = 0;
+                        for (sp, n) in seen.iter() {
+                            if crate::doom::specials::handled(*sp) {
+                                continue;
+                            }
+                            kprintln!("    {} x{}", sp, n);
+                            shown += 1;
+                            if shown == 16 {
+                                kprintln!("    ... and {} more kind(s)", miss - shown);
+                                break;
+                            }
+                        }
+                    }
+                }
                 "map" => {
                     let named = args.first().map(|t| t.parse::<u64>().is_err()).unwrap_or(false);
                     let name = if named { args[0] } else { "" };
@@ -4879,8 +4942,12 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                                 fps
                             );
                             kprintln!(
-                                "  sector {} ceiling {}, {} still moving",
-                                watch, st.watched, st.moving
+                                "  sector {} ceiling {}, {} special(s) fired, {} still moving{}",
+                                watch,
+                                st.watched,
+                                st.spawned,
+                                st.moving,
+                                if st.exited { ", LEVEL EXITED" } else { "" }
                             );
                             kprintln!(
                             "  ended at {},{} facing {} deg, lit by {}",

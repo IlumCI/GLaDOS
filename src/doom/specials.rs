@@ -417,6 +417,16 @@ pub fn cross_lines(
     any
 }
 
+/// Whether this special number is one we act on, under either trigger.
+///
+/// For a caller that wants to report what a map asks for against what is
+/// implemented -- which is the only honest measure of how far this has got.
+/// Counting the specials we *do* implement says nothing; counting the ones a
+/// real map uses that we do not is the number.
+pub fn handled(special: u16) -> bool {
+    lookup(special, Trigger::Use).is_some() || lookup(special, Trigger::Cross).is_some()
+}
+
 /// What `diag doom` asks of the special table.
 pub fn checks() -> alloc::vec::Vec<(&'static str, bool)> {
     let mut out: alloc::vec::Vec<(&'static str, bool)> = alloc::vec::Vec::new();

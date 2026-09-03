@@ -301,6 +301,10 @@ pub struct Stats {
     pub moving: usize,
     /// The height of the sector the run was asked to watch, at the end.
     pub watched: i16,
+    /// How many specials fired over the whole run.
+    pub spawned: usize,
+    /// Whether something ended the level.
+    pub exited: bool,
     /// Whether the shading table came out of the WAD's own COLORMAP. Carried
     /// rather than printed, because nothing in this tree may reach the
     /// printing macro -- the shell does the talking.
@@ -368,6 +372,8 @@ pub fn run(
         deg: 0.0,
         moving: 0,
         watched: 0,
+        spawned: 0,
+        exited: false,
         lit_from_wad: r.lit_from_wad,
     };
 
@@ -377,6 +383,12 @@ pub fn run(
             break;
         }
         if limit_ms != 0 && (now - start) / 1000 >= limit_ms {
+            break;
+        }
+        // The level is over. Stopping here rather than inside the special is
+        // what the flag exists for -- an exit fires from deep in a dispatch
+        // and the screen has to be handed back by whoever took it.
+        if lv.exited {
             break;
         }
 
@@ -430,6 +442,8 @@ pub fn run(
     }
     stats.deg = d;
     stats.moving = th.len();
+    stats.spawned = th.spawned;
+    stats.exited = lv.exited;
     stats.watched = lv
         .sectors
         .get(watch)

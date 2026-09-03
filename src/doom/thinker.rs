@@ -223,6 +223,12 @@ pub enum Thinker {
 /// Everything currently moving, and which sectors are spoken for.
 pub struct Thinkers {
     list: Vec<Thinker>,
+    /// How many thinkers have ever been started.
+    ///
+    /// Not `list.len()`, which is how many are moving *now* -- a door that
+    /// opened and finished before the run ended leaves no trace in the length,
+    /// and "did anything happen" is the question a test asks.
+    pub spawned: usize,
     /// One flag per sector: is something already moving it?
     ///
     /// DOOM's `sector.specialdata`, which is a pointer there and a bool here
@@ -233,7 +239,7 @@ pub struct Thinkers {
 
 impl Thinkers {
     pub fn new(lv: &Level) -> Thinkers {
-        Thinkers { list: Vec::new(), busy: alloc::vec![false; lv.sectors.len()] }
+        Thinkers { list: Vec::new(), spawned: 0, busy: alloc::vec![false; lv.sectors.len()] }
     }
 
     pub fn len(&self) -> usize {
@@ -268,6 +274,7 @@ impl Thinkers {
         // removes itself, which is what the original does and is simpler than
         // a special case that has to agree with the state machine.
         let _ = sec;
+        self.spawned += 1;
         self.list.push(Thinker::Door(Door {
             sector,
             kind,
@@ -328,6 +335,7 @@ impl Thinkers {
 
     fn push(&mut self, sector: usize, t: Thinker) {
         self.list.push(t);
+        self.spawned += 1;
         if let Some(b) = self.busy.get_mut(sector) {
             *b = true;
         }
