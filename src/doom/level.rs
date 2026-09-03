@@ -203,6 +203,12 @@ pub struct Level {
     /// Note the tag types disagree in the format: a linedef's is `u16` and a
     /// sector's is `i16`. Everything here compares as `i32`.
     pub tagged: Vec<(i32, Vec<u16>)>,
+    /// Whether something has ended the level.
+    ///
+    /// A flag rather than an immediate stop, because the exit fires from
+    /// inside a special and the run has to unwind to the loop that owns the
+    /// screen before it can hand it back.
+    pub exited: bool,
     pub things: Vec<Thing>,
     pub vertexes: Vec<Vertex>,
     pub linedefs: Vec<LineDef>,
@@ -454,6 +460,7 @@ impl Level {
             name,
             sector_lines,
             tagged,
+            exited: false,
             things,
             vertexes,
             linedefs,
@@ -542,6 +549,54 @@ impl Level {
             });
         }
         best.unwrap_or_else(|| self.sectors.get(sector).map(|s| s.ceiling).unwrap_or(0))
+    }
+
+    /// Every sector sharing a two-sided line with this one.
+    ///
+    /// The unit every moving-surface kind is defined in: a lift goes to the
+    /// *lowest neighbouring floor*, a door to the *lowest neighbouring
+    /// ceiling*, a stair to the *next highest*. DOOM has one of these per
+    /// question; this is the walk they share.
+    fn neighbours(&self, sector: usize) -> impl Iterator<Item = &Sector> + '_ {
+        self.sector_lines
+            .get(sector)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+            .iter()
+            .filter_map(move |&line| self.across(line, sector))
+            .filter_map(move |i| self.sectors.get(i))
+    }
+
+    /// The highest floor among a sector's neighbours, or its own if it has
+    /// none. DOOM's `P_FindHighestFloorSurrounding`.
+    pub fn highest_neighbour_floor(&self, sector: usize) -> i16 {
+        let own = self.sectors.get(sector).map(|s| s.floor).unwrap_or(0);
+        // Vanilla seeds this at -500 rather than at the sector's own height,
+        // and the difference is visible: a sector lower than everything around
+        // it lowers to -500 instead of staying put. Seeded from the neighbours
+        // and falling back to its own height, which is what the seed was
+        // standing in for.
+        self.neighbours(sector).map(|s| s.floor).max().unwrap_or(own)
+    }
+
+    /// The lowest floor among a sector's neighbours. Where a lift goes down to.
+    pub fn lowest_neighbour_floor(&self, sector: usize) -> i16 {
+        let own = self.sectors.get(sector).map(|s| s.floor).unwrap_or(0);
+        self.neighbours(sector).map(|s| s.floor).min().unwrap_or(own)
+    }
+
+    /// The lowest neighbouring floor that is still *above* a height.
+    ///
+    /// DOOM's `P_FindNextHighestFloor`, and what builds a staircase: each step
+    /// rises to the next one up rather than to the highest, so a flight of
+    /// eight becomes eight steps instead of one wall.
+    pub fn next_highest_neighbour_floor(&self, sector: usize, above: i16) -> i16 {
+        let own = self.sectors.get(sector).map(|s| s.floor).unwrap_or(above);
+        self.neighbours(sector)
+            .map(|s| s.floor)
+            .filter(|&h| h > above)
+            .min()
+            .unwrap_or(own)
     }
 
     /// Which sector a point is in, by index.
@@ -713,6 +768,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         name: Name::from_lump(b"TEST    "),
         sector_lines: by_sector,
         tagged: idx,
+        exited: false,
         things: Vec::new(),
         vertexes: alloc::vec![Vertex { x: 0, y: 0 }, Vertex { x: 64, y: 0 }],
         linedefs,

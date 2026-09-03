@@ -4055,9 +4055,17 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
         // reads held keys is a game no harness can drive. `win keys` sends
         // events; this sets state.
         //
-        // Held keys survive across commands on purpose. `keys hold w` then
-        // `doom play 2000` walks forward for two seconds, and where the player
-        // ends up is arithmetic rather than an opinion about a screenshot.
+        // Held keys survive across commands on purpose, and the point is that
+        // where something ends up becomes arithmetic rather than an opinion
+        // about a screenshot.
+        //
+        // **They do not survive into `doom play`, and this said they did.**
+        // `play::run` clears the down-map on entry -- deliberately, because a
+        // key the operator was leaning on is not a key the player pressed --
+        // and then applies its own script. So `keys hold w` before it is
+        // silently discarded; the keys go in the command instead,
+        // `doom play 2000 w`, or with a time, `doom play 4000 w use@1500`.
+        // The claim cost a run that reported a player who never moved.
         "keys" => {
             use crate::dev::kbd;
             let mut it = rest.split_whitespace();

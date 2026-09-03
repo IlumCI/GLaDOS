@@ -17,12 +17,17 @@
 
 use super::level::{Level, NONE};
 use super::math;
-use super::thinker::{DoorKind, Thinkers};
+use super::thinker::{DoorKind, FLOOR_SPEED, PlatKind, Thinkers};
 
 /// How far ahead of the player a Use reaches. DOOM's `USERANGE`.
 pub const USE_RANGE: f32 = 64.0;
 
 /// How a special is set off.
+///
+/// A switch and a manual door are both "press Use at it", and DOOM tells them
+/// apart by what they operate on rather than by how they are triggered: a
+/// manual door acts on the sector behind the line, a switch on a *tag* and
+/// swaps its own texture to show it was pressed. Both arrive here as `Use`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Trigger {
     /// Walking across the line.
@@ -31,10 +36,40 @@ pub enum Trigger {
     Use,
 }
 
+/// Where a floor is being sent.
+///
+/// Named rather than numeric because every one of these is a *query* against
+/// the neighbouring sectors, resolved when the special fires. A stair that
+/// stored an absolute height would be wrong the moment anything around it
+/// moved.
+#[derive(Clone, Copy)]
+enum FloorTo {
+    /// The highest floor around it. Named for what it *queries*, not for
+    /// which way the floor then moves: DOOM calls special 19 "lower floor to
+    /// highest floor", and a sector below its neighbours would rise to the
+    /// same destination. `spawn_floor` takes the direction from comparing the
+    /// destination to where the floor is now, so the query and the direction
+    /// stay separate and neither has to know about the other.
+    HighestNeighbour,
+    /// Down to the lowest floor around it.
+    LowestNeighbour,
+    /// Up to the lowest ceiling around it, or its own, whichever is lower.
+    LowestNeighbourCeiling,
+    /// Up to the next floor above the current one. What a staircase is built
+    /// from.
+    NextHighest,
+    /// Up by a fixed amount.
+    By(i16),
+}
+
 /// What a special does, once its trigger and repeatability are stripped off.
 #[derive(Clone, Copy)]
 enum Action {
     Door(DoorKind),
+    Plat(PlatKind),
+    Floor(FloorTo, i16),
+    /// End the level.
+    Exit,
 }
 
 /// What this special is, or nothing if it is one we do not do yet.
@@ -44,6 +79,7 @@ enum Action {
 /// twice -- there is no separate "used" flag anywhere in the format.
 fn lookup(special: u16, by: Trigger) -> Option<(Action, bool)> {
     use DoorKind::*;
+    use PlatKind::*;
     let (action, trigger, repeats) = match special {
         // Manual doors: the sector is the line's *back*, not a tag.
         1 => (Action::Door(Normal), Trigger::Use, true),
@@ -65,6 +101,49 @@ fn lookup(special: u16, by: Trigger) -> Option<(Action, bool)> {
         108 => (Action::Door(Normal), Trigger::Cross, false),
         109 => (Action::Door(Open), Trigger::Cross, false),
         110 => (Action::Door(Close), Trigger::Cross, false),
+
+        // Switches. Tagged, and they swap their own texture when pressed.
+        29 => (Action::Door(Normal), Trigger::Use, false),
+        63 => (Action::Door(Normal), Trigger::Use, true),
+        103 => (Action::Door(Open), Trigger::Use, false),
+        61 => (Action::Door(Open), Trigger::Use, true),
+        50 => (Action::Door(Close), Trigger::Use, false),
+        42 => (Action::Door(Close), Trigger::Use, true),
+
+        // Lifts.
+        10 => (Action::Plat(DownWaitUpStay), Trigger::Cross, false),
+        88 => (Action::Plat(DownWaitUpStay), Trigger::Cross, true),
+        21 => (Action::Plat(DownWaitUpStay), Trigger::Use, false),
+        62 => (Action::Plat(DownWaitUpStay), Trigger::Use, true),
+        53 => (Action::Plat(PerpetualRaise), Trigger::Cross, false),
+        87 => (Action::Plat(PerpetualRaise), Trigger::Cross, true),
+
+        // Floors.
+        23 => (Action::Floor(FloorTo::LowestNeighbour, FLOOR_SPEED), Trigger::Use, false),
+        60 => (Action::Floor(FloorTo::LowestNeighbour, FLOOR_SPEED), Trigger::Use, true),
+        38 => (Action::Floor(FloorTo::LowestNeighbour, FLOOR_SPEED), Trigger::Cross, false),
+        82 => (Action::Floor(FloorTo::LowestNeighbour, FLOOR_SPEED), Trigger::Cross, true),
+        19 => (Action::Floor(FloorTo::HighestNeighbour, FLOOR_SPEED), Trigger::Cross, false),
+        102 => (Action::Floor(FloorTo::HighestNeighbour, FLOOR_SPEED), Trigger::Use, false),
+        45 => (Action::Floor(FloorTo::HighestNeighbour, FLOOR_SPEED), Trigger::Cross, true),
+        70 => (Action::Floor(FloorTo::HighestNeighbour, FLOOR_SPEED * 4), Trigger::Cross, true),
+        5 => (Action::Floor(FloorTo::LowestNeighbourCeiling, FLOOR_SPEED), Trigger::Cross, false),
+        91 => (Action::Floor(FloorTo::LowestNeighbourCeiling, FLOOR_SPEED), Trigger::Cross, true),
+        18 => (Action::Floor(FloorTo::NextHighest, FLOOR_SPEED), Trigger::Use, false),
+        69 => (Action::Floor(FloorTo::NextHighest, FLOOR_SPEED), Trigger::Use, true),
+        119 => (Action::Floor(FloorTo::NextHighest, FLOOR_SPEED), Trigger::Cross, false),
+        128 => (Action::Floor(FloorTo::NextHighest, FLOOR_SPEED), Trigger::Cross, true),
+        58 => (Action::Floor(FloorTo::By(24), FLOOR_SPEED), Trigger::Cross, false),
+        92 => (Action::Floor(FloorTo::By(24), FLOOR_SPEED), Trigger::Cross, true),
+
+        // The way out. 52 is the ordinary exit switch; 11 the one you walk
+        // into; 51 and 124 go to the secret level, which is the same thing
+        // here because there is no level sequence yet.
+        11 => (Action::Exit, Trigger::Use, false),
+        51 => (Action::Exit, Trigger::Use, false),
+        52 => (Action::Exit, Trigger::Cross, false),
+        124 => (Action::Exit, Trigger::Cross, false),
+
         _ => return None,
     };
     if trigger != by {
@@ -125,9 +204,44 @@ pub fn activate(
     let Some((action, repeats)) = lookup(l.special, by) else { return false };
 
     let mut fired = false;
+    // Which sectors this operates on. A tag names them; no tag on a Use-line
+    // means the sector behind it. That single rule is what separates a manual
+    // door from a switch, and it is read off the line rather than from the
+    // special's number.
+    let targets: alloc::vec::Vec<u16> = lv.tagged(l.tag as i32).to_vec();
+
     match action {
+        Action::Exit => {
+            lv.exited = true;
+            fired = true;
+        }
+        Action::Plat(kind) => {
+            for s in targets.iter() {
+                if th.spawn_plat(lv, *s as usize, kind) {
+                    fired = true;
+                }
+            }
+        }
+        Action::Floor(to, speed) => {
+            for s in targets.iter() {
+                let i = *s as usize;
+                let Some(sec) = lv.sectors.get(i).copied() else { continue };
+                let dest = match to {
+                    FloorTo::LowestNeighbour => lv.lowest_neighbour_floor(i),
+                    FloorTo::HighestNeighbour => lv.highest_neighbour_floor(i),
+                    FloorTo::LowestNeighbourCeiling => {
+                        lv.lowest_neighbour_ceiling(i).min(sec.ceiling)
+                    }
+                    FloorTo::NextHighest => lv.next_highest_neighbour_floor(i, sec.floor),
+                    FloorTo::By(n) => sec.floor + n,
+                };
+                if th.spawn_floor(i, dest, speed, sec.floor) {
+                    fired = true;
+                }
+            }
+        }
         Action::Door(kind) => {
-            if by == Trigger::Use {
+            if by == Trigger::Use && targets.is_empty() {
                 if let Some(sector) = manual_sector(lv, line, px, py) {
                     // A manual door already moving is *reversed* rather than
                     // ignored, which is how you can pull a door back down on
@@ -140,14 +254,21 @@ pub fn activate(
                 }
             } else {
                 // Tagged: one line can open several doors at once.
-                let sectors: alloc::vec::Vec<u16> = lv.tagged(l.tag as i32).to_vec();
-                for s in sectors {
-                    if th.spawn_door(lv, s as usize, kind) {
+                for s in targets.iter() {
+                    if th.spawn_door(lv, *s as usize, kind) {
                         fired = true;
                     }
                 }
             }
         }
+    }
+
+    // A switch shows that it was pressed by swapping its own texture. Without
+    // it a switch you have thrown looks exactly like one you have not, which
+    // on a map with several is the difference between knowing where you are
+    // and not.
+    if fired && by == Trigger::Use && !targets.is_empty() {
+        flip_switch(lv, line);
     }
 
     // Spend a once-only special by clearing its number. There is no "already
@@ -159,6 +280,40 @@ pub fn activate(
         }
     }
     fired
+}
+
+/// Swap a switch's texture between its off and on faces.
+///
+/// DOOM ships a table pairing them (`SW1BRN1` with `SW2BRN1`, and so on), but
+/// every pair in it differs in exactly one character: the `1` or `2` after
+/// `SW`. Following the rule rather than carrying the table means a WAD with
+/// its own switches works without being listed, which is the same trade
+/// `pic::classify` makes about flats -- and if a WAD ever breaks the
+/// convention the switch simply does not change picture, which is cosmetic.
+///
+/// The face that carries the switch is whichever of the three textures is not
+/// blank, checked middle-first: a switch on a one-sided wall is a middle, one
+/// beside a step is a lower, and one over a doorway is an upper.
+fn flip_switch(lv: &mut Level, line: usize) {
+    let Some(l) = lv.linedefs.get(line).copied() else { return };
+    let Some(sd) = lv.sidedefs.get_mut(l.right as usize) else { return };
+    for slot in [&mut sd.middle, &mut sd.upper, &mut sd.lower] {
+        let n = slot.as_str();
+        if n.len() < 3 || !n.starts_with("SW") {
+            continue;
+        }
+        let flipped = match n.as_bytes()[2] {
+            b'1' => '2',
+            b'2' => '1',
+            _ => continue,
+        };
+        let mut buf = [b' '; 8];
+        let b = n.as_bytes();
+        buf[..b.len().min(8)].copy_from_slice(&b[..b.len().min(8)]);
+        buf[2] = flipped as u8;
+        *slot = super::wad::Name::from_lump(&buf);
+        return;
+    }
 }
 
 /// The line the player is trying to use, and use it.
@@ -304,6 +459,7 @@ pub fn checks() -> alloc::vec::Vec<(&'static str, bool)> {
         name: super::wad::Name::from_lump(b"TEST    "),
         sector_lines: alloc::vec::Vec::new(),
         tagged: alloc::vec::Vec::new(),
+        exited: false,
         things: alloc::vec::Vec::new(),
         // A line running north from the origin. Its right -- its front -- is
         // therefore east, which is +x.
@@ -326,6 +482,22 @@ pub fn checks() -> alloc::vec::Vec<(&'static str, bool)> {
         nodes: alloc::vec::Vec::new(),
         sectors: alloc::vec::Vec::new(),
     };
+    out.push((
+        "a lift and a floor are told apart from a door by their number",
+        matches!(lookup(21, Trigger::Use), Some((Action::Plat(_), _)))
+            && matches!(lookup(23, Trigger::Use), Some((Action::Floor(_, _), _)))
+            && matches!(lookup(1, Trigger::Use), Some((Action::Door(_), _))),
+    ));
+    out.push((
+        "the exit is reachable by walking into it and by pressing it",
+        matches!(lookup(52, Trigger::Cross), Some((Action::Exit, _)))
+            && matches!(lookup(11, Trigger::Use), Some((Action::Exit, _))),
+    ));
+    out.push((
+        "an SR switch repeats where its S1 twin does not",
+        lookup(63, Trigger::Use).map(|(_, r)| r) == Some(true)
+            && lookup(29, Trigger::Use).map(|(_, r)| r) == Some(false),
+    ));
     out.push((
         "east of a northward line is its front, and west is its back",
         side_of(&lv, 0, 25.0, 0.0) == Some(0) && side_of(&lv, 0, -25.0, 0.0) == Some(1),
