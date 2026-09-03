@@ -557,11 +557,42 @@ VERTEXES = [
 #
 # This was anticlockwise, with a comment claiming it was the other way, and it
 # cost a debugging session on a renderer that was right all along.
-LINEDEFS = [(1, 0), (2, 1), (3, 2), (4, 3), (5, 4), (0, 5)]
+LINEDEFS = [(1, 0), (2, 1), (3, 2), (4, 3), (5, 4), (0, 5), (4, 1)]
 
-# Which linedefs fall on which side of the partition x=0.
-RIGHT_LINES = [1, 2, 3]   # x >= 0
-LEFT_LINES = [4, 5, 0]    # x <= 0
+# Linedef 6 is the divider, and it is the only two-sided line in the file.
+#
+# **It is here because without it half the renderer had never run.** The room
+# was one sector bounded by six one-sided walls, so `back` was `None` at every
+# seg and the entire portal branch -- the upper step, the lower step, the
+# pegging rules for each, and the shut-door case -- was code no test had ever
+# reached. A map that exercises only the easy half of a renderer is a map that
+# reports the renderer works.
+#
+# It runs from vertex 4 (0, 512) to vertex 1 (0, -512), which are the two
+# vertices already sitting on the BSP's partition, so the tree does not change:
+# one node splitting x=0, one subsector either side, and now a sector either
+# side too.
+#
+# Direction decides which sidedef is which. Going from (0,512) to (0,-512) is
+# heading south, and the right of south is west -- so the *right* sidedef faces
+# x<0 and the *left* faces x>0. Getting that backwards swaps the two sectors,
+# which does not fail: it draws a step down where there is a step up.
+DIVIDER = 6
+
+# Which sector each half is. 0 is the right (x>0), where the player stands.
+RIGHT_SECTOR, LEFT_SECTOR = 0, 1
+
+# Which linedefs bound each subsector, and for the divider, which way its seg
+# runs. `(line, side)`, where side 1 means the seg runs against the linedef and
+# therefore takes the *left* sidedef.
+RIGHT_LINES = [(1, 0), (2, 0), (3, 0), (DIVIDER, 1)]   # x >= 0
+LEFT_LINES = [(4, 0), (5, 0), (0, 0), (DIVIDER, 0)]    # x <= 0
+
+# Which sector each one-sided line belongs to, by the half it is in.
+LINE_SECTOR = {
+    0: LEFT_SECTOR, 1: RIGHT_SECTOR, 2: RIGHT_SECTOR,
+    3: RIGHT_SECTOR, 4: LEFT_SECTOR, 5: LEFT_SECTOR,
+}
 
 
 def bam(x0, y0, x1, y1):
@@ -583,10 +614,15 @@ def build_vertexes():
 # kernel's table, and using the real numbers is what makes the table testable
 # with something other than itself.
 THINGS = [
-    (0, 0, 90, 1),          # the player, facing north
-    (0, 260, 0, 2035),      # a barrel straight ahead
-    (180, 200, 0, 2035),    # one off to the right
-    (-220, 150, 0, 2028),   # a lamp off to the left
+    # The player stands in the right half and faces *west*, at the divider, so
+    # the first thing a `doom view` shows is the portal: a step up, a ceiling
+    # coming down, and the far room's own light and flats through the gap.
+    # Not at the origin any more -- the origin is exactly on the partition,
+    # where which sector a point is in has no answer.
+    (300, 0, 180, 1),
+    (120, 120, 0, 2035),    # a barrel in the near half
+    (-200, -150, 0, 2035),  # one in the far half, standing 32 higher
+    (-260, 200, 0, 2028),   # a lamp in the far half
 ]
 
 
@@ -603,27 +639,64 @@ def build_things():
 def build_linedefs():
     out = b""
     for i, (a, b) in enumerate(LINEDEFS):
-        # flag 1 is impassable, which every one-sided wall is.
-        out += struct.pack("<HHHHHHH", a, b, 1, 0, 0, i, NO_SIDE)
+        if i == DIVIDER:
+            # Flag 4 is ML_TWOSIDED. Not impassable: the two halves are one
+            # room with a step between them, and a player has to be able to
+            # walk up it or the collision code cannot be tested either.
+            # Sidedef 6 is the right (facing the left half), 7 the left.
+            out += struct.pack("<HHHHHHH", a, b, 4, 0, 0, 6, 7)
+        else:
+            # flag 1 is impassable, which every one-sided wall is.
+            out += struct.pack("<HHHHHHH", a, b, 1, 0, 0, i, NO_SIDE)
     return out
 
 
 def build_sidedefs():
+    """One sidedef per one-sided line, then the divider's two.
+
+    A two-sided line names nothing in its *middle* slot here. That is the
+    masked mid-wall -- a grate or a railing -- and it is the one surface DOOM
+    draws after what is behind it rather than before. Naming a texture there
+    that the renderer then drew as solid would seal the opening, so it is left
+    as `-` until there is something that can draw it properly.
+    """
     out = b""
-    for _ in LINEDEFS:
+    for i, _ in enumerate(LINEDEFS):
+        if i == DIVIDER:
+            continue
         out += struct.pack("<hh", 0, 0)
         out += name8("-") + name8("-") + name8("STARTAN3")
-        out += struct.pack("<H", 0)
+        out += struct.pack("<H", LINE_SECTOR[i])
+    # 6: the divider's right side, which faces the left half.
+    out += struct.pack("<hh", 0, 0)
+    out += name8("BIGWALL") + name8("STARTAN3") + name8("-")
+    out += struct.pack("<H", LEFT_SECTOR)
+    # 7: its left side, facing the right half where the player stands. This is
+    # the one a `doom view` looks at: the upper is the ceiling dropping from
+    # 128 to 96 and the lower is the floor rising from 0 to 32.
+    out += struct.pack("<hh", 0, 0)
+    out += name8("BIGWALL") + name8("STARTAN3") + name8("-")
+    out += struct.pack("<H", RIGHT_SECTOR)
     return out
 
 
 def build_sectors():
-    return (
-        struct.pack("<hh", 0, 128)
-        + name8("FLOOR4_8")
-        + name8("CEIL3_5")
-        + struct.pack("<hhh", 160, 0, 0)
-    )
+    """Two, differing in every field a renderer reads.
+
+    Floor, ceiling, light and both pictures all change across the divider, so a
+    renderer that took any of them from the wrong sector draws something
+    visibly wrong rather than something subtly off. The flats are swapped
+    rather than new: a ceiling that is the floor's picture is unmistakable, and
+    it costs no more art.
+    """
+    out = struct.pack("<hh", 0, 128)
+    out += name8("FLOOR4_8") + name8("CEIL3_5")
+    out += struct.pack("<hhh", 160, 0, 0)
+    # The far half: floor up 32, ceiling down 32, brighter, pictures swapped.
+    out += struct.pack("<hh", 32, 96)
+    out += name8("CEIL3_5") + name8("FLOOR4_8")
+    out += struct.pack("<hhh", 240, 0, 0)
+    return out
 
 
 def build_segs():
@@ -635,12 +708,16 @@ def build_segs():
     """
     out = b""
     for group in (RIGHT_LINES, LEFT_LINES):
-        for li in group:
+        for (li, side) in group:
             a, b = LINEDEFS[li]
+            if side == 1:
+                # The seg runs against its linedef, so its vertices are
+                # reversed and it takes the *left* sidedef. This is how one
+                # two-sided line is a wall in two subsectors at once, seen from
+                # opposite directions.
+                a, b = b, a
             (x0, y0), (x1, y1) = VERTEXES[a], VERTEXES[b]
-            # direction 0: the seg runs the same way as its linedef, so its
-            # side is the linedef's right side, which is the one with a sidedef.
-            out += struct.pack("<HHHHHh", a, b, bam(x0, y0, x1, y1), li, 0, 0)
+            out += struct.pack("<HHHHHh", a, b, bam(x0, y0, x1, y1), li, side, 0)
     return out
 
 
@@ -928,6 +1005,33 @@ def check_map(lumps):
             raise ValueError(
                 f"linedef {i} is wound the wrong way: its right side faces out"
             )
+
+    # The portal. Without a two-sided line the whole `back` branch of the
+    # renderer is unreachable, so what is asserted is not just that the line
+    # exists but that it *steps*: same heights either side and the upper and
+    # lower are zero pixels tall, which draws identically to no portal at all.
+    two = [i for i in range(nlines)
+           if struct.unpack("<HHHHHHH", by["LINEDEFS"][i * 14:i * 14 + 14])[6] != NO_SIDE]
+    if len(two) != 1:
+        raise ValueError(f"expected exactly one two-sided line, found {len(two)}")
+    (_a, _b, fl, _sp, _tg, r, l) = struct.unpack(
+        "<HHHHHHH", by["LINEDEFS"][two[0] * 14:two[0] * 14 + 14])
+    if not fl & 4:
+        raise ValueError("the two-sided line does not carry ML_TWOSIDED")
+    secs = []
+    for sd in (r, l):
+        e = sd * SIZES["SIDEDEFS"] + 28
+        secs.append(struct.unpack("<H", by["SIDEDEFS"][e:e + 2])[0])
+    if secs[0] == secs[1]:
+        raise ValueError("both sides of the portal name the same sector")
+    hts = []
+    for sc in secs:
+        e = sc * SIZES["SECTORS"]
+        hts.append(struct.unpack("<hh", by["SECTORS"][e:e + 4]))
+    if hts[0][0] == hts[1][0]:
+        raise ValueError("the portal has no step: both floors are equal")
+    if hts[0][1] == hts[1][1]:
+        raise ValueError("the portal has no header: both ceilings are equal")
 
     # Flats, which have no header to check -- so what is checked is the one
     # property a reader depends on: exactly 4096 bytes, inside the namespace,
