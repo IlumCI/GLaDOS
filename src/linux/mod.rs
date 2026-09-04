@@ -28,8 +28,13 @@
 //! later, from data this produces rather than from first principles.
 
 pub mod elf;
+pub mod load;
+pub mod syscall;
 
 /// What `diag linux` asks of everything here.
 pub fn checks() -> alloc::vec::Vec<(&'static str, bool)> {
-    elf::checks()
+    let mut out = elf::checks();
+    out.extend(syscall::checks());
+    out.extend(load::checks());
+    out
 }

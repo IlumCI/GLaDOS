@@ -193,6 +193,24 @@ impl Exec {
         true
     }
 
+    /// Write at an offset rather than appending.
+    ///
+    /// `push` is right for a code generator, which emits in order and knows
+    /// nothing about where it will land. A *loader* is the other shape: an ELF
+    /// names an address per segment, the segments need not be adjacent, and
+    /// the gaps between them are `.bss` that must stay zeroed. Answers false
+    /// rather than truncating, because a segment written short is a program
+    /// that runs into whatever follows it.
+    pub fn write_at(&mut self, at: usize, bytes: &[u8]) -> bool {
+        let Some(end) = at.checked_add(bytes.len()) else { return false };
+        if end > self.size {
+            return false;
+        }
+        unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), self.ptr.add(at), bytes.len()) };
+        self.used = self.used.max(end);
+        true
+    }
+
     pub fn addr(&self) -> u64 {
         self.ptr as u64
     }

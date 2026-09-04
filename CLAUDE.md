@@ -1170,6 +1170,92 @@ other approach -- run-length plus a `rect` per run -- which is right for a
 drawing program and wrong for a rendered scene where every pixel differs from
 its neighbour.
 
+### Running a binary this kernel did not compile
+
+`src/linux/` is stage 0 of multi-binary support, and it is a **measuring
+instrument rather than a loader**. The expensive unknown in porting the Linux
+ABI is not the loader, which is a weekend; it is that Linux has no
+specification you can test against, so a subtly wrong `mmap` flag surfaces as a
+crash in a different subsystem an hour later. gVisor needed 237 of Linux's ~350
+calls to run containers. Before committing to a privilege model or a syscall
+subset, the thing worth owning is a trace of what a real binary actually asks
+for.
+
+**`syscall` traps from ring 0, and that is what makes this possible without
+building a userspace first.** The instruction loads `rip` from `IA32_LSTAR` and
+`cs` from `IA32_STAR[47:32]` whatever the current privilege level, so a guest
+already at CPL 0 traps exactly as one at CPL 3 would. `STAR[47:32]` is set to
+`KERNEL_CS`, and `syscall` derives SS as that plus eight, which is `KERNEL_DS` --
+so the guest lands on the descriptors it was already running under. That is not
+luck; it is what makes a same-ring trap cost nothing to set up.
+
+Three things a real syscall gets that this does not, each written down in
+`syscall.rs` rather than left to be discovered:
+
+- **No stack switch.** There is no privilege transition, so no `rsp0` reload.
+  The stub swaps to a stack of its own before touching anything, so a guest
+  that wrecked its stack pointer still reaches the dispatcher.
+- **That stack is one static, so the handler is not reentrant.** `IA32_FMASK`
+  clears `IF` on entry and stage 0 runs one guest with no threads. Both of
+  those stop being true later.
+- **A hostile guest is not contained.** At CPL 0 it can `wrmsr` and move
+  `LSTAR`, or `mov cr3`, or `cli`. Stage 0 contains bugs, not malice, and a
+  fault *is* the measurement.
+
+Return is **not** `sysret`, which forces CPL 3 on the way out and would drop
+the guest into a privilege level this kernel has no descriptors for. The stub
+restores flags from `r11` and jumps to `rcx`, which is what `sysret` does minus
+the privilege change. `exit_group` is a longjmp: `glados_enter_guest` parks the
+host's stack and callee-saved registers, and `glados_leave_guest` restores them,
+because there is no unwinder here and returning normally from a process that
+has exited is not a thing that can be expressed.
+
+Two refusals, and both are about the address space rather than about the file:
+
+- **Dynamically linked binaries.** The entry in the header is not where
+  execution starts, `ld.so` is, and loading one as though it were static jumps
+  into a PLT stub nobody filled in.
+- **Fixed-address executables.** An `ET_EXEC` insists on its own addresses,
+  classically `0x400000`, and this kernel is identity-mapped with one address
+  space -- so those are real physical bytes the frame allocator may already
+  have handed out. Honouring them is a change to the memory map, not to the
+  loader. A PIE asks for none of it, and nearly everything modern is one.
+
+`tools/mkelf.py` builds the fixtures by hand rather than by compiling, for the
+reason `mkwad.py` generates art: the negatives need to differ from the positive
+in **exactly one field**, and no compiler will emit a dynamically linked binary
+otherwise identical to a static one. `--verify` reads each back with a separate
+parser.
+
+```powershell
+.\tools\venv\Scripts\python.exe tools\mkelf.py out\hello.elf
+.\tools\venv\Scripts\python.exe tools\mkelf.py out\dyn.elf --kind dynamic
+.\tools\venv\Scripts\python.exe tools\mkelf.py out\fixed.elf --kind fixed
+.\tools\venv\Scripts\python.exe tools\mkfat.py .qemu\nvme.img out\hello.elf out\dyn.elf out\fixed.elf
+.\tools\venv\Scripts\python.exe tools\drive.py --qemu-extra "-accel whpx -cpu max" `
+  "initiative off" "fat get /HELLO.ELF /tmp/hello" "linux run /tmp/hello"
+```
+
+Measured, and every figure cross-checks against what `mkelf.py` printed:
+
+    [linux] 185 byte(s), 1 segment(s), 185 byte span at 0x17f5000, entry 0x17f5078
+    hello from ring 0
+        1 write            0x1 0x17f50a7 0x12 -> 18
+      231 exit_group       0x5 0x17f50a7 0x12 -> 0
+      exited 5 after 2 syscall(s)
+
+Entry is base + 120, the buffer is base + 167, `0x12` is the message's 18 bytes,
+and 5 is the exit code it was built with.
+
+**Every unimplemented call is recorded and refused with `-ENOSYS`, and that is
+the instrument.** A run ending in `-ENOSYS` on call 47 has said which call to
+implement next, which is the question stage 0 exists to answer. The trace is
+bounded at 1024 entries, because what matters is *which* calls appear rather
+than how often.
+
+`linux` reports whether the trap is armed, `linux run <path>` loads and runs,
+`linux trace` prints what the last guest asked for. `diag linux` is 25 claims.
+
 ### Testing
 
 There is no `cargo test`. This is a `no_std` UEFI binary with no host test

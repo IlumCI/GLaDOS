@@ -4390,6 +4390,80 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             }
             desk::trace("windows");
         }
+        "linux" => {
+            use crate::linux;
+            let mut words = rest.split_whitespace();
+            match words.next().unwrap_or("") {
+                "run" => {
+                    let Some(path) = words.next() else {
+                        kprintln!("  usage: linux run <path to an ELF in the namespace>");
+                        return;
+                    };
+                    let Some(bytes) = crate::sysbox::read_blob(path) else {
+                        kprintln!("  no such blob: {}", path);
+                        return;
+                    };
+                    match linux::load::load(&bytes) {
+                        Ok(g) => {
+                            console::set_color(YELLOW);
+                            kprintln!(
+                                "[linux] {} byte(s), {} segment(s), {} byte span at {:#x}, entry {:#x}",
+                                bytes.len(), g.segments, g.span, g.base, g.entry
+                            );
+                            console::set_color(LTGRAY);
+                            kprintln!("  ring 0, no isolation -- a fault here halts the machine");
+                            // Safety: the whole of stage 0 is this call. The
+                            // guest's pages are armed, so a fault at least
+                            // names them.
+                            let r = unsafe { linux::load::run(&g) };
+                            let calls = linux::syscall::trace();
+                            for c in &calls {
+                                kprintln!(
+                                    "  {:>3} {:<16} {:#x} {:#x} {:#x} -> {} {}",
+                                    c.nr,
+                                    linux::syscall::name_of(c.nr),
+                                    c.args[0], c.args[1], c.args[2],
+                                    c.ret as i64,
+                                    if c.served { "" } else { "(unimplemented)" }
+                                );
+                            }
+                            if r & linux::syscall::EXITED != 0 {
+                                kprintln!(
+                                    "  exited {} after {} syscall(s)",
+                                    r & 0xFFFF_FFFF, calls.len()
+                                );
+                            } else {
+                                kprintln!("  returned without exiting -- {} syscall(s)", calls.len());
+                            }
+                        }
+                        Err(why) => kprintln!("  will not run it: {}", why),
+                    }
+                }
+                "trace" => {
+                    let calls = linux::syscall::trace();
+                    kprintln!("  {} call(s) recorded", calls.len());
+                    for c in &calls {
+                        kprintln!(
+                            "  {:>3} {:<16} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} -> {}",
+                            c.nr, linux::syscall::name_of(c.nr),
+                            c.args[0], c.args[1], c.args[2], c.args[3], c.args[4], c.args[5],
+                            c.ret as i64
+                        );
+                    }
+                }
+                _ => {
+                    console::set_color(YELLOW);
+                    kprintln!("[linux]");
+                    console::set_color(LTGRAY);
+                    kprintln!(
+                        "  the syscall trap is {}",
+                        if linux::syscall::armed() { "armed" } else { "not armed yet" }
+                    );
+                    kprintln!("  linux run <path>   load a static PIE and run it at ring 0");
+                    kprintln!("  linux trace        what the last guest asked for");
+                }
+            }
+        }
         "tensor" => {
             let ok = crate::ai::selftest();
             if ok {
