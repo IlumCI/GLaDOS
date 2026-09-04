@@ -28,6 +28,14 @@ use alloc::vec::Vec;
 /// guest rather than a limit of the harness.
 const GUEST_STACK: usize = 16 * 1024;
 
+/// What `brk` may grow into.
+///
+/// A separate region rather than the bytes after the image, because in an
+/// identity map those bytes belong to whatever the frame allocator gave them
+/// to. 256 KiB is enough for any allocator's first few arenas and small
+/// enough that a guest which runs away hits the ceiling instead of the heap.
+const GUEST_BRK: usize = 256 * 1024;
+
 /// The tag a guest's pages are registered under, so `cpu::code::locate` can
 /// name them in a fault report. Reads as `LNX` in a hex dump, which is the
 /// only reason a tag is a number rather than a pointer.
@@ -37,6 +45,7 @@ pub struct Guest {
     /// Held because dropping it frees the pages the guest is running from.
     _image: Exec,
     _stack: Exec,
+    _brk: Exec,
     pub base: u64,
     pub entry: u64,
     pub stack_top: u64,
@@ -66,6 +75,9 @@ pub fn load(bytes: &[u8]) -> Result<Guest, &'static str> {
         // on the first run and wrong on the second.
     }
 
+    let brk = Exec::new(GUEST_BRK).ok_or("no room for a break region")?;
+    syscall::install(brk.addr(), GUEST_BRK);
+
     let stack = Exec::new(GUEST_STACK).ok_or("no room for a stack")?;
     let stack_top = syscall::build_stack(stack.addr() as *mut u8, GUEST_STACK);
     let entry = base + (img.entry - lo);
@@ -74,6 +86,7 @@ pub fn load(bytes: &[u8]) -> Result<Guest, &'static str> {
     Ok(Guest {
         _image: image,
         _stack: stack,
+        _brk: brk,
         base,
         entry,
         stack_top,

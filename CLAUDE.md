@@ -1247,6 +1247,74 @@ Measured, and every figure cross-checks against what `mkelf.py` printed:
 Entry is base + 120, the buffer is base + 167, `0x12` is the message's 18 bytes,
 and 5 is the exit code it was built with.
 
+**Memory: `brk`, `mmap`, `munmap`, `arch_prctl`.** The four a static musl
+binary reaches before `main`, and three of them carry a decision worth knowing.
+
+`brk` **never returns an error**, because Linux's does not. It answers the
+resulting break, which on failure is the *unchanged* one, and libc decides it
+failed by comparing that against what it asked for. Returning `-ENOMEM` instead
+would hand musl `0xFFFFFFFFFFFFFFF4` as a heap address and it would believe it.
+One honest deviation: the break is a separate region rather than the bytes
+after the image, because in an identity map those bytes belong to whatever the
+frame allocator gave them to. Every allocator asks `brk(0)` and grows from the
+answer, so nothing notices -- but a program assuming adjacency would be wrong.
+
+`mmap` serves anonymous private memory and refuses three things for reasons
+about this machine rather than about the arguments: a file-backed mapping needs
+an fd table that does not exist, `MAP_FIXED` needs an address one address space
+can promise (the same objection that makes the loader decline `ET_EXEC`), and a
+zero length is `EINVAL` because it is `EINVAL` on Linux. `munmap` refuses a
+partial unmap rather than approximating it -- splitting one allocation in two
+is not something the heap underneath can express. A guest that exits still
+holding mappings is the ordinary case, so teardown is where they are actually
+reclaimed.
+
+**`arch_prctl` is where "the guest and the kernel share everything" stops being
+an architectural note and becomes a specific call that has to say no.**
+`ARCH_SET_FS` is honoured, because that is how thread-local storage works and
+musl calls it before `main`; the base goes into `IA32_FS_BASE` and the kernel's
+own value is parked by `run` and restored at teardown, since the register
+belongs to the machine and not to the guest.
+
+`ARCH_SET_GS` is **refused**, and not out of caution. `cpu::percpu` points GS at
+each core's own block and `gs:[0]` is how the allocator discovers which core it
+is billing. There is no privilege boundary here to stop a guest overwriting it,
+so a guest setting GS would leave the next kernel allocation reading its
+thread-local storage as a per-core structure. Reading GS is refused too, for
+the smaller reason that it hands a kernel pointer to code with no business
+holding one.
+
+That restore is checked rather than assumed: `diag census` -- whose first claim
+is "per-core storage is up, so allocations can be attributed" -- passes on a
+boot where a guest has already set FS.
+
+Measured, on the `--kind memory` fixture, which uses every result rather than
+merely receiving it (the break is written to, the mapping is written and read
+back, and FS is set through one call and read through another):
+
+    brk, mmap and arch_prctl all answered; FS read back
+       12 brk              0x0 ...        -> 46190592
+       12 brk              0x2c0e000 ...  -> 46194688
+        9 mmap             0x0 0x2000 0x3 -> 25141248
+      158 arch_prctl       0x1002 ...     -> 0
+      158 arch_prctl       0x1003 ...     -> 0
+       11 munmap           0x17fa000 ...  -> 0
+        1 write            0x1 ... 0x34   -> 52
+      231 exit_group       0x7 ...        -> 0
+      exited 7 after 8 syscall(s)
+
+The break grew by exactly 4096, the mapping came back page-aligned, and exit 7
+is the branch the guest only reaches if the FS base it set came back through
+the call that reads it.
+
+**`mprotect` is deliberately still unimplemented**, and it is the next
+judgement call rather than an oversight. Every page here is `PRESENT |
+WRITABLE` and executable -- there is no NX constant in `mem::paging` and
+EFER.NXE is never enabled -- so returning 0 would be claiming an enforcement
+that does not exist, and musl's guard pages would not guard. Refusing it stops
+any real allocator. Neither answer is honest yet, which is the argument for
+doing page permissions before pretending either way.
+
 **Every unimplemented call is recorded and refused with `-ENOSYS`, and that is
 the instrument.** A run ending in `-ENOSYS` on call 47 has said which call to
 implement next, which is the question stage 0 exists to answer. The trace is
@@ -1254,7 +1322,7 @@ bounded at 1024 entries, because what matters is *which* calls appear rather
 than how often.
 
 `linux` reports whether the trap is armed, `linux run <path>` loads and runs,
-`linux trace` prints what the last guest asked for. `diag linux` is 25 claims.
+`linux trace` prints what the last guest asked for. `diag linux` is 40 claims.
 
 ### Testing
 

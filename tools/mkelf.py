@@ -66,6 +66,129 @@ def code(msg_rva, entry_rva, exit_code):
     return bytes(out), lea_end, disp
 
 
+# A very small emitter, for the one fixture that needs more than a straight
+# line. Every instruction here is fixed-length, so laying the program out and
+# patching the two displacements afterwards needs no second pass.
+REG = dict(rax=0, rcx=1, rdx=2, rbx=3, rsp=4, rbp=5, rsi=6, rdi=7,
+           r8=8, r9=9, r10=10, r11=11)
+
+
+def _rex(w=1, r=0, x=0, b=0):
+    return 0x40 | (w << 3) | (r << 2) | (x << 1) | b
+
+
+def mov_imm(reg, imm):
+    """mov reg, imm32 (sign-extended to 64)."""
+    n = REG[reg]
+    return bytes([_rex(b=n >> 3), 0xC7, 0xC0 | (n & 7)]) + struct.pack("<i", imm)
+
+
+def mov_rr(dst, src):
+    d, sr = REG[dst], REG[src]
+    return bytes([_rex(r=sr >> 3, b=d >> 3), 0x89, 0xC0 | ((sr & 7) << 3) | (d & 7)])
+
+
+def add_imm(reg, imm):
+    n = REG[reg]
+    return bytes([_rex(b=n >> 3), 0x81, 0xC0 | (n & 7)]) + struct.pack("<i", imm)
+
+
+def store8(base, imm8):
+    """mov byte [base], imm8 -- base must be a low register that is not rsp/rbp."""
+    n = REG[base]
+    assert n < 8 and n not in (4, 5)
+    return bytes([0xC6, n & 7, imm8])
+
+
+def load64(dst, base):
+    """mov dst, [base]"""
+    d, b = REG[dst], REG[base]
+    assert b < 8 and b not in (4, 5)
+    return bytes([_rex(r=d >> 3), 0x8B, ((d & 7) << 3) | (b & 7)])
+
+
+def cmp_rr(a, b):
+    ra, rb = REG[a], REG[b]
+    return bytes([_rex(r=rb >> 3, b=ra >> 3), 0x39, 0xC0 | ((rb & 7) << 3) | (ra & 7)])
+
+
+def lea_rip(reg, disp):
+    n = REG[reg]
+    return bytes([_rex(r=n >> 3), 0x8D, 0x05 | ((n & 7) << 3)]) + struct.pack("<i", disp)
+
+
+SYSCALL = b"\x0f\x05"
+HLT = b"\xf4"
+MSG_OK = b"brk, mmap and arch_prctl all answered; FS read back\n"
+MSG_BAD = b"FS did not read back\n"
+
+
+def mem_code(entry_rva, ok_rva, bad_rva):
+    """Ask for memory three different ways, and prove each one answered.
+
+    The shape is deliberate: every call's result is *used* rather than merely
+    received. The break is written to, the mapping is written to and read back,
+    and FS is set and then read back through a different call -- so a stub that
+    returned a plausible number without doing anything fails here rather than
+    passing quietly.
+    """
+    c = bytearray()
+    # brk(0), then grow by a page. rbx keeps the first break.
+    c += mov_imm("rax", 12) + mov_imm("rdi", 0) + SYSCALL
+    c += mov_rr("rbx", "rax")
+    c += mov_rr("rdi", "rax") + add_imm("rdi", 4096)
+    c += mov_imm("rax", 12) + SYSCALL
+    # Write into the break region. If brk handed back an address that is not
+    # real memory, this is where the machine stops.
+    c += store8("rbx", 0x41)
+
+    # mmap(NULL, 8192, RW, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
+    c += mov_imm("rax", 9)
+    c += mov_imm("rdi", 0)
+    c += mov_imm("rsi", 8192)
+    c += mov_imm("rdx", 3)
+    c += mov_imm("r10", 0x22)
+    c += mov_imm("r8", -1)
+    c += mov_imm("r9", 0)
+    c += SYSCALL
+    c += mov_rr("rbx", "rax")          # rbx = the mapping
+
+    # arch_prctl(ARCH_SET_FS, mapping), then ARCH_GET_FS into the mapping.
+    c += mov_imm("rax", 158) + mov_imm("rdi", 0x1002) + mov_rr("rsi", "rbx") + SYSCALL
+    c += mov_imm("rax", 158) + mov_imm("rdi", 0x1003) + mov_rr("rsi", "rbx") + SYSCALL
+
+    # Did the base come back through a different call than set it?
+    c += load64("rax", "rbx")
+    c += cmp_rr("rax", "rbx")
+    jne_at = len(c)
+    c += b"\x0f\x85" + struct.pack("<i", 0)   # patched below
+
+    # ok: give the mapping back, say so, exit 7.
+    c += mov_rr("rdi", "rbx") + mov_imm("rsi", 8192) + mov_imm("rax", 11) + SYSCALL
+    c += mov_imm("rax", 1) + mov_imm("rdi", 1)
+    ok_lea = len(c)
+    c += lea_rip("rsi", 0)
+    ok_end = len(c)
+    c += mov_imm("rdx", len(MSG_OK)) + SYSCALL
+    c += mov_imm("rax", 231) + mov_imm("rdi", 7) + SYSCALL + HLT
+
+    bad_at = len(c)
+    c += mov_imm("rax", 1) + mov_imm("rdi", 1)
+    bad_lea = len(c)
+    c += lea_rip("rsi", 0)
+    bad_end = len(c)
+    c += mov_imm("rdx", len(MSG_BAD)) + SYSCALL
+    c += mov_imm("rax", 231) + mov_imm("rdi", 8) + SYSCALL + HLT
+
+    # Three displacements, all measured from the end of their own instruction,
+    # which is the one thing about RIP-relative addressing that is easy to get
+    # wrong by exactly four.
+    struct.pack_into("<i", c, jne_at + 2, bad_at - (jne_at + 6))
+    struct.pack_into("<i", c, ok_lea + 3, ok_rva - (entry_rva + ok_end))
+    struct.pack_into("<i", c, bad_lea + 3, bad_rva - (entry_rva + bad_end))
+    return bytes(c)
+
+
 def build(kind="static"):
     interp = b"/lib64/ld-linux-x86-64.so.2\x00"
     phnum = 2 if kind == "dynamic" else 1
@@ -73,11 +196,19 @@ def build(kind="static"):
     # Lay the body out first so the message address is known before the code
     # that points at it is emitted.
     body_at = entry
-    probe, _, _ = code(0, 0, EXIT_CODE)
-    msg_rva = body_at + len(probe)
-    text, lea_end, disp = code(msg_rva, entry, EXIT_CODE)
-
-    body = text + MESSAGE
+    if kind == "memory":
+        probe = mem_code(0, 0, 0)
+        ok_rva = body_at + len(probe)
+        bad_rva = ok_rva + len(MSG_OK)
+        text = mem_code(entry, ok_rva, bad_rva)
+        assert len(text) == len(probe), (len(text), len(probe))
+        body = text + MSG_OK + MSG_BAD
+        msg_rva, disp, lea_end = ok_rva, 0, 0
+    else:
+        probe, _, _ = code(0, 0, EXIT_CODE)
+        msg_rva = body_at + len(probe)
+        text, lea_end, disp = code(msg_rva, entry, EXIT_CODE)
+        body = text + MESSAGE
     if kind == "dynamic":
         interp_off = body_at + len(body)
         body += interp
@@ -177,6 +308,20 @@ def verify(path):
     # RIP-relative lea says it is. Off by four here and the guest writes
     # whatever follows, which reads as a working loader printing garbage.
     rel_entry = entry - va
+    if MSG_OK in b:
+        # The memory fixture: two messages, two leas, and the check that
+        # matters is that both point at their own text.
+        for msg in (MSG_OK, MSG_BAD):
+            claim("a message is present and NUL-free: %r" % msg[:18],
+                  msg in b and b"\x00" not in msg)
+        # Ten: brk twice, mmap, arch_prctl twice, munmap, then a write and
+        # an exit on each of the two branches. Counted rather than asserted
+        # loosely, because an emitter that dropped one instruction would
+        # still produce a file that parses, runs, and does less than it says.
+        claim("it makes exactly the ten syscalls it is written to make",
+              b.count(SYSCALL) == 10)
+        claim("it ends in hlt on both paths", b.count(b"\xf4") >= 2)
+        return ok
     lea_at = rel_entry + 14
     claim("the lea is where the layout put it", b[lea_at:lea_at + 3] == b"\x48\x8d\x35")
     disp = struct.unpack_from("<i", b, lea_at + 3)[0]
@@ -199,7 +344,8 @@ def verify(path):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("out")
-    ap.add_argument("--kind", choices=["static", "dynamic", "fixed"], default="static")
+    ap.add_argument("--kind", choices=["static", "dynamic", "fixed", "memory"],
+                    default="static")
     ap.add_argument("--verify", action="store_true")
     a = ap.parse_args()
 

@@ -43,10 +43,24 @@ const IA32_FMASK: u32 = 0xC000_0084;
 /// `EFER.SCE`. Without it `syscall` is an invalid opcode.
 const EFER_SCE: u64 = 1;
 
+/// The segment-base MSRs. `FS` is the guest's to set; `GS` is emphatically
+/// not -- see `sys_arch_prctl`.
+const IA32_FS_BASE: u32 = 0xC000_0100;
+
+const ARCH_SET_GS: u64 = 0x1001;
+const ARCH_SET_FS: u64 = 0x1002;
+const ARCH_GET_FS: u64 = 0x1003;
+const ARCH_GET_GS: u64 = 0x1004;
+
+const MAP_FIXED: u64 = 0x10;
+const MAP_ANONYMOUS: u64 = 0x20;
+
 /// Linux's numbers, for the calls stage 0 answers or expects to meet first.
 pub const SYS_WRITE: u64 = 1;
 pub const SYS_BRK: u64 = 12;
 pub const SYS_EXIT: u64 = 60;
+pub const SYS_MMAP: u64 = 9;
+pub const SYS_MUNMAP: u64 = 11;
 pub const SYS_ARCH_PRCTL: u64 = 158;
 pub const SYS_EXIT_GROUP: u64 = 231;
 
@@ -54,6 +68,9 @@ pub const SYS_EXIT_GROUP: u64 = 231;
 /// `rax` rather than through any side channel.
 const ENOSYS: u64 = (-38i64) as u64;
 const EBADF: u64 = (-9i64) as u64;
+const EPERM: u64 = (-1i64) as u64;
+const ENOMEM: u64 = (-12i64) as u64;
+const EINVAL: u64 = (-22i64) as u64;
 
 /// What the guest had in its registers when it trapped.
 ///
@@ -183,6 +200,86 @@ static mut GLADOS_HOST_RSP: u64 = 0;
 struct Stack([u8; 16 * 1024]);
 static mut SYSCALL_STACK: Stack = Stack([0; 16 * 1024]);
 
+/// One anonymous mapping the guest asked for and has not given back.
+pub struct Mapping {
+    pub at: u64,
+    pub len: usize,
+}
+
+/// What a guest owns besides its image.
+///
+/// **One guest at a time**, which is why this is a global rather than
+/// something the dispatcher is handed. The dispatcher is called from three
+/// lines of assembly and has nowhere to carry a handle; the constraint is real
+/// and is the same one that makes the handler's single static stack safe.
+pub struct Space {
+    /// Where `brk` began, where it stands, and where it may not pass.
+    pub brk_start: u64,
+    pub brk_now: u64,
+    pub brk_end: u64,
+    pub maps: Vec<Mapping>,
+    /// `FS` base as the kernel left it. A guest sets `FS` for its
+    /// thread-local storage and the register is the *machine's*, not the
+    /// guest's, so it is put back on the way out.
+    pub saved_fs: u64,
+}
+
+static SPACE: Racy<Option<Space>> = Racy::new(None);
+
+/// Hand the dispatcher the region `brk` will grow into.
+pub fn install(brk_start: u64, brk_bytes: usize) {
+    unsafe {
+        *SPACE.get() = Some(Space {
+            brk_start,
+            brk_now: brk_start,
+            brk_end: brk_start + brk_bytes as u64,
+            maps: Vec::new(),
+            saved_fs: 0,
+        });
+    }
+}
+
+/// Give back everything the guest still held, and put `FS` back.
+///
+/// A guest that exits without unmapping is the ordinary case, not an error --
+/// `exit_group` is how programs end -- so the teardown is where mappings are
+/// actually reclaimed and `munmap` is only the early return of one.
+pub fn teardown() -> usize {
+    let mut freed = 0;
+    unsafe {
+        if let Some(sp) = SPACE.get().as_mut() {
+            for m in sp.maps.drain(..) {
+                free_pages(m.at, m.len);
+                freed += 1;
+            }
+            crate::cpu::wrmsr(IA32_FS_BASE, sp.saved_fs);
+        }
+        *SPACE.get() = None;
+    }
+    freed
+}
+
+fn page_up(n: usize) -> usize {
+    n.max(1).div_ceil(4096) * 4096
+}
+
+fn alloc_pages(len: usize) -> Option<u64> {
+    use alloc::alloc::{alloc_zeroed, Layout};
+    let layout = Layout::from_size_align(page_up(len), 4096).ok()?;
+    let p = unsafe { alloc_zeroed(layout) };
+    if p.is_null() {
+        return None;
+    }
+    Some(p as u64)
+}
+
+fn free_pages(at: u64, len: usize) {
+    use alloc::alloc::{dealloc, Layout};
+    if let Ok(layout) = Layout::from_size_align(page_up(len), 4096) {
+        unsafe { dealloc(at as *mut u8, layout) };
+    }
+}
+
 /// One recorded call. **The whole point of stage 0.**
 #[derive(Clone, Copy)]
 pub struct Call {
@@ -263,6 +360,108 @@ fn sys_write(fd: u64, buf: u64, len: usize) -> u64 {
     len as u64
 }
 
+/// Grow or query the break.
+///
+/// **Linux's `brk` never returns an error.** It answers the resulting break,
+/// which on failure is the *unchanged* one -- and libc decides it failed by
+/// comparing that against what it asked for. Returning `-ENOMEM` here instead
+/// would hand musl a break of `0xFFFFFFFFFFFFFFF4` and it would believe it,
+/// which is the difference between a refused allocation and a wild pointer.
+///
+/// One honest deviation: on Linux the break begins immediately after the
+/// image, and here it is a separate region. Nothing reads it that way -- every
+/// allocator asks `brk(0)` and grows from the answer -- but a program that
+/// assumed adjacency would be wrong, so it is written down rather than left to
+/// be discovered.
+fn sys_brk(want: u64) -> u64 {
+    let sp = unsafe { SPACE.get() };
+    let Some(sp) = sp.as_mut() else { return 0 };
+    if want >= sp.brk_start && want <= sp.brk_end {
+        sp.brk_now = want;
+    }
+    sp.brk_now
+}
+
+/// Anonymous private memory, and nothing else.
+///
+/// Three refusals, each for a reason about this machine rather than about the
+/// arguments. A file-backed mapping needs an fd table that does not exist. A
+/// `MAP_FIXED` needs an address one address space can promise, which is the
+/// same objection that makes the loader decline `ET_EXEC`. And a zero length
+/// is `EINVAL` on Linux, so it is `EINVAL` here.
+fn sys_mmap(addr: u64, len: u64, _prot: u64, flags: u64, fd: u64, _off: u64) -> u64 {
+    if len == 0 {
+        return EINVAL;
+    }
+    if flags & MAP_ANONYMOUS == 0 || fd as i64 != -1 {
+        return ENOSYS;
+    }
+    if flags & MAP_FIXED != 0 && addr != 0 {
+        return ENOMEM;
+    }
+    let Some(at) = alloc_pages(len as usize) else { return ENOMEM };
+    let sp = unsafe { SPACE.get() };
+    match sp.as_mut() {
+        Some(sp) => sp.maps.push(Mapping { at, len: len as usize }),
+        None => {
+            free_pages(at, len as usize);
+            return ENOMEM;
+        }
+    }
+    at
+}
+
+/// Give a whole mapping back. Partial unmapping is refused rather than
+/// approximated: splitting one allocation into two is not something the heap
+/// underneath can express, and silently unmapping more than was asked is worse
+/// than saying no.
+fn sys_munmap(at: u64, len: u64) -> u64 {
+    let sp = unsafe { SPACE.get() };
+    let Some(sp) = sp.as_mut() else { return EINVAL };
+    match sp.maps.iter().position(|m| m.at == at && m.len == len as usize) {
+        Some(i) => {
+            let m = sp.maps.remove(i);
+            free_pages(m.at, m.len);
+            0
+        }
+        None => EINVAL,
+    }
+}
+
+/// Set or read a segment base -- and refuse one of them.
+///
+/// `ARCH_SET_FS` is how thread-local storage works and musl calls it before
+/// `main`, so it is honoured: the base goes straight into `IA32_FS_BASE` and
+/// the kernel's own value is restored at teardown, because the register
+/// belongs to the machine rather than to the guest.
+///
+/// **`ARCH_SET_GS` is refused, and that is the most specific thing stage 0 has
+/// found so far.** `GS` is not free here: `cpu::percpu` points it at each
+/// core's own block, `gs:[0]` is how the allocator discovers which core it is
+/// billing, and there is no privilege boundary to stop a guest overwriting it.
+/// A guest setting `GS` would leave the next kernel allocation reading its
+/// thread-local storage as a per-core structure -- so this is the first place
+/// where "the guest and the kernel share everything" stops being an
+/// architectural note and becomes a specific call that has to say no.
+///
+/// Reading `GS` is refused for the smaller reason that it hands out a kernel
+/// pointer to code that has no business with one.
+fn sys_arch_prctl(code: u64, addr: u64) -> u64 {
+    match code {
+        ARCH_SET_FS => {
+            unsafe { crate::cpu::wrmsr(IA32_FS_BASE, addr) };
+            0
+        }
+        ARCH_GET_FS => {
+            let base = unsafe { crate::cpu::rdmsr(IA32_FS_BASE) };
+            unsafe { (addr as *mut u64).write(base) };
+            0
+        }
+        ARCH_SET_GS | ARCH_GET_GS => EPERM,
+        _ => EINVAL,
+    }
+}
+
 /// Called from the stub. Not public API: the only caller is three lines of
 /// assembly above, and the `sysv64` pinning is why `rdi` is the frame.
 #[no_mangle]
@@ -272,6 +471,10 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
 
     let (ret, served) = match nr {
         SYS_WRITE => (sys_write(f.rdi, f.rsi, f.rdx as usize), true),
+        SYS_BRK => (sys_brk(f.rdi), true),
+        SYS_MMAP => (sys_mmap(f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9), true),
+        SYS_MUNMAP => (sys_munmap(f.rdi, f.rsi), true),
+        SYS_ARCH_PRCTL => (sys_arch_prctl(f.rdi, f.rsi), true),
         SYS_EXIT | SYS_EXIT_GROUP => {
             record(Call { nr, args, ret: 0, served: true });
             // Does not return. The host's stack and callee-saved registers
@@ -306,7 +509,18 @@ pub const EXITED: u64 = 1 << 32;
 /// more directly.
 pub unsafe fn run(entry: u64, stack_top: u64) -> u64 {
     arm();
-    unsafe { glados_enter_guest(entry, stack_top) }
+    // The guest is about to be allowed to write `FS`, and `FS` is a register
+    // of this machine that the kernel goes on using afterwards. Parked here
+    // rather than inside `arch_prctl`, so a guest that sets it forty times
+    // still restores the one value that was true before any of them.
+    unsafe {
+        if let Some(sp) = SPACE.get().as_mut() {
+            sp.saved_fs = crate::cpu::rdmsr(IA32_FS_BASE);
+        }
+    }
+    let code = unsafe { glados_enter_guest(entry, stack_top) };
+    teardown();
+    code
 }
 
 /// What `diag linux` asks of the trap, without taking one.
@@ -358,6 +572,86 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         EXITED > u32::MAX as u64 && (255u64 | EXITED) != 255,
     ));
 
+    // brk, on a region installed for the check and torn down after it. The
+    // claim that earns its place is the failure mode: Linux answers the
+    // *unchanged* break rather than an error, and an implementation returning
+    // -ENOMEM would hand libc 0xFFFFFFFFFFFFFFF4 as a heap address.
+    {
+        let region = 0x10_0000u64;
+        install(region, 4096 * 4);
+        let first = sys_brk(0);
+        let grown = sys_brk(region + 8192);
+        let refused = sys_brk(region + 1_000_000);
+        let back = sys_brk(region);
+        out.push((
+            "brk answers the current break when asked for nothing",
+            first == region,
+        ));
+        out.push(("brk grows to exactly what was asked for", grown == region + 8192));
+        out.push((
+            "a brk past the end answers the unchanged break, never an error",
+            refused == region + 8192 && (refused as i64) > 0,
+        ));
+        out.push(("brk shrinks as well as grows", back == region));
+        // Teardown would wrmsr FS from a Space whose saved value is zero, and
+        // this check installed one by hand rather than through `run`.
+        unsafe { *SPACE.get() = None };
+    }
+
+    // mmap's three refusals, each about this machine rather than the argument.
+    {
+        install(0x10_0000, 4096);
+        let file_backed = sys_mmap(0, 4096, 3, MAP_ANONYMOUS, 3, 0);
+        let fixed = sys_mmap(0x40_0000, 4096, 3, MAP_ANONYMOUS | MAP_FIXED, u64::MAX, 0);
+        let empty = sys_mmap(0, 0, 3, MAP_ANONYMOUS, u64::MAX, 0);
+        out.push(("a file-backed mapping is refused, there being no fd table", (file_backed as i64) < 0));
+        out.push(("MAP_FIXED is refused, for the reason ET_EXEC is", (fixed as i64) < 0));
+        out.push(("a zero-length mapping is EINVAL, as Linux has it", empty == EINVAL));
+
+        let at = sys_mmap(0, 8192, 3, MAP_ANONYMOUS, u64::MAX, 0);
+        let got = (at as i64) > 0 && at % 4096 == 0;
+        // It has to be real memory, and it has to be zeroed: an allocator
+        // handed dirty pages produces a program that works once.
+        let zeroed = got && unsafe { core::slice::from_raw_parts(at as *const u8, 8192) }.iter().all(|b| *b == 0);
+        out.push(("an anonymous mapping is page-aligned and zeroed", got && zeroed));
+        out.push((
+            "a partial unmap is refused rather than approximated",
+            sys_munmap(at, 4096) == EINVAL,
+        ));
+        out.push(("unmapping the whole thing gives it back", sys_munmap(at, 8192) == 0));
+        out.push((
+            "unmapping what was never mapped is EINVAL",
+            sys_munmap(at, 8192) == EINVAL,
+        ));
+        unsafe { *SPACE.get() = None };
+    }
+
+    // arch_prctl, and the refusal that is the point of it.
+    {
+        let mut slot = 0u64;
+        let was = unsafe { crate::cpu::rdmsr(IA32_FS_BASE) };
+        let set = sys_arch_prctl(ARCH_SET_FS, 0xDEAD_0000);
+        let got = sys_arch_prctl(ARCH_GET_FS, &mut slot as *mut u64 as u64);
+        unsafe { crate::cpu::wrmsr(IA32_FS_BASE, was) };
+        out.push((
+            "a guest may set FS for its thread-local storage, and read it back",
+            set == 0 && got == 0 && slot == 0xDEAD_0000,
+        ));
+        out.push((
+            "a guest may not touch GS, which is where this kernel keeps its per-core block",
+            sys_arch_prctl(ARCH_SET_GS, 0x1000) == EPERM
+                && sys_arch_prctl(ARCH_GET_GS, 0) == EPERM,
+        ));
+        out.push((
+            "an arch_prctl nobody implements is EINVAL and not a silent success",
+            sys_arch_prctl(0x9999, 0) == EINVAL,
+        ));
+        out.push((
+            "FS is unchanged by the checks that moved it",
+            unsafe { crate::cpu::rdmsr(IA32_FS_BASE) } == was,
+        ));
+    }
+
     // The handler's stack has to be aligned, because the stub's `sub rsp, 8`
     // assumes a 16-aligned top and corrects for exactly nine pushes.
     let top = unsafe { core::ptr::addr_of!(SYSCALL_STACK.0) as u64 + (16 * 1024) };
@@ -398,9 +692,9 @@ pub fn name_of(nr: u64) -> &'static str {
     match nr {
         SYS_WRITE => "write",
         SYS_BRK => "brk",
-        9 => "mmap",
+        SYS_MMAP => "mmap",
         10 => "mprotect",
-        11 => "munmap",
+        SYS_MUNMAP => "munmap",
         SYS_EXIT => "exit",
         SYS_ARCH_PRCTL => "arch_prctl",
         218 => "set_tid_address",
