@@ -1506,7 +1506,7 @@ than how often.
 
 `linux` reports whether the trap is armed, `linux run <path> [args...]` loads
 and runs, `linux trace` prints what the last guest asked for. `diag linux` is
-79 claims.
+86 claims.
 
 ### A filesystem a program written for Linux recognises
 
@@ -1635,6 +1635,103 @@ and the locals sit underneath it. The alternative was keeping seven live values
 in registers across a `write`, and the syscall ABI hands back only `rbx`,
 `rbp`, `r10`-`r15` and `rsi`/`rdi`/`rdx` -- of which two are the arguments the
 write needs.
+
+### What a guest gets for asking wrongly
+
+`--kind fsabuse` is the third program and it is the one that matters, because
+`cat` and `grep` only ever ask for things that work. A projection over a store
+that is not a filesystem fails at the *edges*, and an edge is exactly what no
+program written to use the thing normally will reach. So the negatives are the
+subject: fifteen checks, each folding one bit into a mask, and the exit code is
+the mask. Zero means every one of them answered what Linux answers.
+
+**One of them stopped the machine, from ring 3, with two ordinary calls.**
+`lseek` past the end of a file is legal -- this module says so, in a comment,
+two functions above the bug -- and `read` then indexed a slice at the cursor
+without clamping it:
+
+    linux run /tmp/fsabuse /tmp/lines.txt
+    *** PANIC *** panicked at src\linux\syscall.rs:725:52:
+    range start index 1048576 out of range for slice of length 54
+
+That is a guest at CPL 3 halting a kernel that has no unwinder, and there is
+nothing exotic in it: seek, then read. The measurement is the point rather than
+the fix, which is one `min`. Nothing about ring 3, page rights or bounds checks
+was wrong; the pointer never left the kernel. It was an ordinary Rust index on
+a value the guest chooses, and the only thing that finds those is a program
+written to choose badly.
+
+Four more the same run turned up, none of which crashes and all of which lie:
+
+- **`write` looked at the descriptor number and not at the descriptor.** It
+  compared `fd` against 1 and 2, which is right until a guest does the thing
+  every shell does: `close(1)` then `open(...)` hands the file descriptor 1,
+  and writing to it printed the guest's redirected output to the terminal and
+  reported success. `close(1)` alone was worse, since a write to a descriptor
+  that is not open has to be `EBADF`.
+- **`fstat` reported stdin, stdout and stderr as empty regular files**, under a
+  comment saying that reporting them as empty regular files is what makes a
+  program believe stdout is seekable. The comment was right and was describing
+  the code beside it. They are pipes now, which is the answer that agrees with
+  `lseek` on them returning `ESPIPE`.
+- **`newfstatat` ignored its directory descriptor.** `openat` refuses a
+  relative path against a real one, because resolving it needs the directory's
+  own path; `newfstatat` resolved it against the working directory instead and
+  answered confidently about a file that exists and is not the one asked for.
+- **`read_cstr` refused a legal path sitting near the end of an image.** It
+  checked reachability a page at a time, which is right for the speed -- a
+  4 KB path checked per byte is four thousand page-table walks -- and demands
+  that the whole rest of the page be owned. A region does not have to end on a
+  page boundary: the image's is the ELF span, so a path constant in the last
+  partial page of a binary is entirely legal and got `EFAULT`, which reads as
+  a pointer bug in the program rather than a bounds check being too eager. It
+  falls back to a byte at a time when the page-wide check overshoots. Found by
+  the fixture opening a path it carries at the very end of its own image,
+  which is a shape `cat` and `grep` do not have because their paths arrive in
+  `argv`.
+- **And it had one failure with three causes.** An unreachable pointer, a
+  string with no terminator and bytes that are not UTF-8 all became `EFAULT`,
+  which sends a program to look at its pointer arithmetic for a filename that
+  was merely Latin-1. `EFAULT`, `ENAMETOOLONG` and `ENOENT` now, the last
+  because a Linux path is bytes and a namespace keyed by `String` genuinely
+  cannot hold one.
+
+And two costs rather than bugs. `stat` learned a file's size by reading the
+file, so `stat` on a 600 MB checkpoint allocated 600 MB to look at a `usize`;
+`sysbox::blob_len` answers it without the copy. And an open descriptor *is* its
+contents here, so sixty-four of them against an unbounded file size is a guest
+taking the heap with a loop of `open` -- `OPEN_MAX_BYTES` caps the total at
+64 MiB and answers `ENOMEM`, which Linux can return and would not return for
+this reason.
+
+**The aux vector was empty and that was not a safe default.** A static libc has
+no dynamic linker to ask, so everything it cannot compute it reads from there:
+`AT_PAGESZ` becomes musl's `libc.page_size`, which it divides by, and
+`AT_RANDOM` is where the stack guard comes from. A vector holding nothing but
+`AT_NULL` hands a real binary a page size of zero. It now carries `AT_PAGESZ`,
+`AT_CLKTCK` (from `crate::TIMER_HZ`, the interrupt rate, and deliberately not
+from `lapic::timer_hz()`, which is the calibrated APIC frequency and is in the
+millions), the four ids and `AT_SECURE` as zero, `AT_RANDOM` pointing at
+sixteen bytes of `rng::fill` on the guest's own stack, `AT_ENTRY`, and the
+`AT_PHDR`/`AT_PHENT`/`AT_PHNUM` group.
+
+Two details there are load-bearing. `AT_PHDR` is a *runtime* address, so it is
+the segment containing the header table plus the offset into it -- `base +
+phoff` is the same number only when the first segment starts at file offset
+zero, which is true of every fixture here and is not a property of the format.
+And when no loadable segment covers the table the whole group is omitted rather
+than pointed at zero, because `dl_iterate_phdr` walks what it is given either
+way and an absent vector is the one a libc knows how to cope with.
+
+**None of it has been read by a real libc on this machine**, since every
+fixture is hand-written and consumes none of it. That is a bet placed where the
+ABI says to place it, and it is worth saying so rather than letting the section
+read like evidence.
+
+One piece of dead code came out with it. `build_stack` padded down when
+`(sp + words * 8) % 8 != 0`, which cannot hold: `sp` is sixteen-aligned and
+every word is eight bytes. It read as an alignment fix and was a tautology,
+which is the more expensive kind of dead code because it stops anybody looking.
 
 ### Testing
 

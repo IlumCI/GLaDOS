@@ -84,6 +84,16 @@ pub struct Image {
     pub segments: Vec<Segment>,
     /// The interpreter this binary wants, if it wants one.
     pub interp: Option<String>,
+    /// Where the program header table sits in the file, and its shape.
+    ///
+    /// Kept because `AT_PHDR` is a promise to the guest that it can find its
+    /// own headers at runtime, and `dl_iterate_phdr` is how a static binary
+    /// walks its own `PT_GNU_EH_FRAME` to unwind. Read here rather than
+    /// re-derived by whoever needs it, since re-reading a file the loader has
+    /// already validated is how two parsers start disagreeing.
+    pub phoff: usize,
+    pub phentsize: usize,
+    pub phnum: usize,
 }
 
 impl Image {
@@ -213,7 +223,7 @@ pub fn parse(bytes: &[u8]) -> Result<Image, &'static str> {
         }
         segments.push(Segment { offset, vaddr, filesz, memsz, flags, align });
     }
-    Ok(Image { entry, kind, segments, interp })
+    Ok(Image { entry, kind, segments, interp, phoff, phentsize, phnum })
 }
 
 /// What `diag linux` asks of the parser.

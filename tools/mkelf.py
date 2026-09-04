@@ -70,7 +70,7 @@ def code(msg_rva, entry_rva, exit_code):
 # line. Every instruction here is fixed-length, so laying the program out and
 # patching the two displacements afterwards needs no second pass.
 REG = dict(rax=0, rcx=1, rdx=2, rbx=3, rsp=4, rbp=5, rsi=6, rdi=7,
-           r8=8, r9=9, r10=10, r11=11)
+           r8=8, r9=9, r10=10, r11=11, r12=12, r13=13, r14=14, r15=15)
 
 
 def _rex(w=1, r=0, x=0, b=0):
@@ -136,8 +136,7 @@ def load_abs(dst, addr):
 def load_stack(dst, disp8):
     """mov dst, [rsp+disp8]. Needs a SIB byte because rm=100 means SIB."""
     n = REG[dst]
-    assert n < 8
-    return bytes([_rex(), 0x8B, 0x40 | ((n & 7) << 3) | 4, 0x24, disp8])
+    return bytes([_rex(r=n >> 3), 0x8B, 0x40 | ((n & 7) << 3) | 4, 0x24, disp8])
 
 
 def sub_imm(reg, imm):
@@ -194,6 +193,16 @@ def sub_rr(dst, src):
 
 
 JE, JGE, JG = 0x84, 0x8D, 0x8F
+
+
+def cmp_imm32(reg, imm):
+    n = REG[reg]
+    return bytes([_rex(b=n >> 3), 0x81, 0xF8 | (n & 7)]) + struct.pack("<i", imm)
+
+
+def or_imm32(reg, imm):
+    n = REG[reg]
+    return bytes([_rex(b=n >> 3), 0x81, 0xC8 | (n & 7)]) + struct.pack("<i", imm)
 
 
 SYSCALL = b"\x0f\x05"
@@ -480,6 +489,159 @@ def cat_code(entry_rva, usage_rva, _b):
     return bytes(c)
 
 
+DOTS = b"/../etc/passwd\x00"
+
+
+def fsabuse_code(entry_rva, empty_rva, dots_rva):
+    """Ask the filesystem for every wrong thing, and report which one it got
+    wrong as a bitmask.
+
+    The other fixtures each prove one property. This one exists because a
+    projection over a store that is not a filesystem fails at the *edges*, and
+    an edge is exactly what no program written to use the thing normally will
+    ever reach. So the negatives are the subject: a cursor past the end, a
+    negative seek, a write to a read-only store, a path that walks upwards, a
+    pointer the guest does not own, a directory call on a file, and the shell's
+    redirect, which is the one arrangement in which a descriptor number and the
+    thing behind it stop agreeing.
+
+    A bitmask instead of an early exit, because the first failure is not the
+    only interesting one and a fixture that stops at it takes a boot to report
+    each subsequent one. Zero means every negative held.
+
+    Every check runs against a descriptor that is still open afterwards, and
+    two of them (`3` and `4`) are there to say so: a kernel that survived the
+    abuse by quietly breaking the file would pass everything else.
+    """
+    c = bytearray()
+    bit = [0]
+
+    def fails_unless(cc, n):
+        """Emit `jcc over; or rbp, 1 << n; over:` -- so rbp accumulates the
+        checks that did *not* answer what Linux answers."""
+        j = len(c)
+        c.extend(jcc(cc))
+        c.extend(or_imm32("rbp", 1 << n))
+        struct.pack_into("<i", c, j + 2, len(c) - (j + 6))
+        bit[0] = max(bit[0], n + 1)
+
+    def call(nr, rdi=None, rsi=None, rdx=None):
+        c.extend(mov_imm("rax", nr))
+        for reg, v in (("rdi", rdi), ("rsi", rsi), ("rdx", rdx)):
+            if v is None:
+                continue
+            c.extend(mov_rr(reg, v) if isinstance(v, str) else mov_imm(reg, v))
+        c.extend(SYSCALL)
+
+    c += load_stack("r12", 16)                 # argv[1], the path
+    c += cmp_imm8("r12", 0)
+    j_bad = len(c)
+    c += jcc(JE)
+
+    c += sub_imm("rsp", 256)
+    c += mov_rr("r13", "rsp")                  # a scratch buffer
+    c += mov_imm("rbp", 0)                     # the failure mask
+
+    call(2, "r12", 0, 0)                       # open(path, O_RDONLY)
+    c += cmp_imm8("rax", 0)
+    j_bad2 = len(c)
+    c += jcc(JL)
+    c += mov_rr("rbx", "rax")
+
+    # 0: seeking past the end is legal and answers the position asked for.
+    call(8, "rbx", 0x100000, 0)
+    c += cmp_imm32("rax", 0x100000)
+    fails_unless(JE, 0)
+
+    # 1: and reading there answers zero. This is the one that mattered: the
+    # cursor indexed a slice directly, so two legal calls panicked in ring 0.
+    call(0, "rbx", "r13", 16)
+    c += cmp_imm8("rax", 0)
+    fails_unless(JE, 1)
+
+    # 2: a seek before the start is EINVAL rather than a huge unsigned cursor.
+    call(8, "rbx", -1, 0)
+    c += cmp_imm8("rax", -22)
+    fails_unless(JE, 2)
+
+    # 3, 4: the descriptor still works, so the abuse above broke nothing.
+    call(8, "rbx", 0, 0)
+    c += cmp_imm8("rax", 0)
+    fails_unless(JE, 3)
+    call(0, "rbx", "r13", 16)
+    c += cmp_imm8("rax", 0)
+    fails_unless(JG, 4)
+
+    # 5: opening for writing is refused, since a write here is a new root hash.
+    call(2, "r12", 1, 0)
+    c += cmp_imm8("rax", -13)
+    fails_unless(JE, 5)
+
+    # 6: an empty path is ENOENT, not a descriptor for the working directory.
+    c += mov_imm("rax", 2)
+    e_lea = len(c)
+    c += lea_rip("rdi", 0)
+    e_end = len(c)
+    c += mov_imm("rsi", 0) + mov_imm("rdx", 0) + SYSCALL
+    c += cmp_imm8("rax", -2)
+    fails_unless(JE, 6)
+
+    # 7: and one that walks upwards is refused rather than normalised.
+    c += mov_imm("rax", 2)
+    d_lea = len(c)
+    c += lea_rip("rdi", 0)
+    d_end = len(c)
+    c += mov_imm("rsi", 0) + mov_imm("rdx", 0) + SYSCALL
+    c += cmp_imm8("rax", -2)
+    fails_unless(JE, 7)
+
+    # 8: a read into a page the guest does not own is EFAULT. 0x1000 is real,
+    # mapped and the kernel's, which is the point -- a wild address would fault
+    # on its own and prove nothing about the check.
+    call(0, "rbx", 0x1000, 16)
+    c += cmp_imm8("rax", -14)
+    fails_unless(JE, 8)
+
+    # 9: a directory call on a file is ENOTDIR.
+    call(217, "rbx", "r13", 128)
+    c += cmp_imm8("rax", -20)
+    fails_unless(JE, 9)
+
+    # 10, 11: fstat answers, and says regular file. st_uid follows st_mode and
+    # is zero, so eight bytes at 24 is the mode alone.
+    call(5, "rbx", "r13", None)
+    c += cmp_imm8("rax", 0)
+    fails_unless(JE, 10)
+    c += load_q("rax", "r13", 24)
+    c += cmp_imm32("rax", 0o100644)
+    fails_unless(JE, 11)
+
+    # 12, 13, 14: the redirect. Closing stdout and opening a file must hand
+    # back descriptor 1, and a write to it must be EBADF -- the arrangement in
+    # which a call that only looked at the *number* printed a guest's
+    # redirected output to the terminal and reported success.
+    call(3, 1, None, None)
+    c += cmp_imm8("rax", 0)
+    fails_unless(JE, 12)
+    call(2, "r12", 0, 0)
+    c += cmp_imm8("rax", 1)
+    fails_unless(JE, 13)
+    call(1, 1, "r13", 4)
+    c += cmp_imm8("rax", -9)
+    fails_unless(JE, 14)
+
+    c += mov_imm("rax", 231) + mov_rr("rdi", "rbp") + SYSCALL + HLT
+
+    bad = len(c)
+    c += mov_imm("rax", 231) + mov_imm("rdi", 255) + SYSCALL + HLT
+
+    struct.pack_into("<i", c, j_bad + 2, bad - (j_bad + 6))
+    struct.pack_into("<i", c, j_bad2 + 2, bad - (j_bad2 + 6))
+    struct.pack_into("<i", c, e_lea + 3, empty_rva - (entry_rva + e_end))
+    struct.pack_into("<i", c, d_lea + 3, dots_rva - (entry_rva + d_end))
+    return bytes(c)
+
+
 MSG_GREP = b"grep: needs a pattern and a path\n"
 
 
@@ -644,7 +806,14 @@ def build(kind="static"):
     # Lay the body out first so the message address is known before the code
     # that points at it is emitted.
     body_at = entry
-    if kind == "grep":
+    if kind == "fsabuse":
+        probe = fsabuse_code(0, 0, 0)
+        empty_rva = body_at + len(probe)
+        text = fsabuse_code(entry, empty_rva, empty_rva + 1)
+        assert len(text) == len(probe), (len(text), len(probe))
+        body = text + b"\x00" + DOTS
+        msg_rva, disp, lea_end = empty_rva, 0, 0
+    elif kind == "grep":
         probe = grep_code(0, 0, 0)
         usage_rva = body_at + len(probe)
         text = grep_code(entry, usage_rva, 0)
@@ -797,6 +966,28 @@ def verify(path):
     # RIP-relative lea says it is. Off by four here and the guest writes
     # whatever follows, which reads as a working loader printing garbage.
     rel_entry = entry - va
+    if DOTS in b:
+        claim("it opens the path it was handed, read-only",
+              bytes([0x4C, 0x8B, 0x64, 0x24, 0x10]) in b            # r12 <- argv[1]
+              and bytes([0x48, 0xC7, 0xC0, 2, 0, 0, 0]) in b)
+        claim("it seeks a megabyte past the end and expects that to be allowed",
+              bytes([0x48, 0xC7, 0xC6, 0x00, 0x00, 0x10, 0x00]) in b
+              and bytes([0x48, 0x3D]) not in b)                     # cmp via 81 /7
+        claim("it asks for every refusal by its own errno",
+              all(bytes([0x48, 0x83, 0xF8, e & 0xFF]) in b
+                  for e in (-22, -13, -2, -14, -20, -9)))
+        claim("it names a page it does not own, and a real one",
+              bytes([0x48, 0xC7, 0xC6, 0x00, 0x10, 0x00, 0x00]) in b)
+        claim("it checks st_mode against S_IFREG|0644 read out of the block",
+              bytes([0x49, 0x8B, 0x45, 0x18]) in b                  # [r13+24]
+              and struct.pack("<i", 0o100644) in b)
+        claim("fifteen checks, each folding one bit into the mask it exits with",
+              sum(1 for i in range(15)
+                  if bytes([0x48, 0x81, 0xCD]) + struct.pack("<i", 1 << i) in b) == 15)
+        claim("it exits with the mask rather than a constant, and 255 on misuse",
+              bytes([0x48, 0x89, 0xEF]) in b                        # rdi <- rbp
+              and bytes([0x48, 0xC7, 0xC7, 255, 0, 0, 0]) in b)
+        return ok
     if MSG_GREP in b:
         claim("it reads a pattern and a path off the stack before moving rsp",
               bytes([0x48, 0x8B, 0x5C, 0x24, 0x10]) in b
@@ -908,7 +1099,8 @@ def main():
     ap.add_argument("out")
     ap.add_argument("--kind",
                     choices=["static", "dynamic", "fixed", "memory", "rogue",
-                             "protect", "wild", "spin", "cat", "grep"],
+                             "protect", "wild", "spin", "cat", "grep",
+                             "fsabuse"],
                     default="static")
     ap.add_argument("--verify", action="store_true")
     a = ap.parse_args()

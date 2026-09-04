@@ -930,6 +930,28 @@ pub fn listing(path: &str) -> Vec<(String, bool, usize)> {
     .unwrap_or_default()
 }
 
+/// How many bytes a blob holds, without copying it out.
+///
+/// `read_blob` clones, which is right for a caller that wants the contents and
+/// ruinous for one that only wants the length: `stat` on a file asks exactly
+/// that question, and answering it through `read_blob` allocates the whole
+/// file to look at a `usize`. A 600 MB checkpoint is a legal thing to `stat`
+/// and not a legal thing to copy on a machine with one address space.
+///
+/// `None` for a directory as well as for a missing path, since a directory has
+/// no byte count and answering zero would be indistinguishable from an empty
+/// file.
+pub fn blob_len(path: &str) -> Option<usize> {
+    with(|s| {
+        let p = parse(&s.cwd, path);
+        match tree::resolve(&s.root, &p) {
+            Some(Node::Blob(b)) => Some(b.len()),
+            _ => None,
+        }
+    })
+    .flatten()
+}
+
 /// Whether a path names a directory.
 pub fn is_dir(path: &str) -> bool {
     with(|s| {

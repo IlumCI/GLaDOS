@@ -99,11 +99,33 @@ const ENOTDIR: u64 = (-20i64) as u64;
 const EISDIR: u64 = (-21i64) as u64;
 const ENOTTY: u64 = (-25i64) as u64;
 const ESPIPE: u64 = (-29i64) as u64;
+const ENAMETOOLONG: u64 = (-36i64) as u64;
 
 /// `O_WRONLY` and `O_RDWR`. This view is read-only, so both are refused.
 const O_WRONLY: u64 = 1;
 const O_RDWR: u64 = 2;
 const O_DIRECTORY: u64 = 0x10000;
+
+/// How many bytes every open descriptor may hold between them.
+///
+/// An open file here *is* its contents: `read_blob` answers a `Vec`, so a
+/// descriptor costs the size of the file for as long as it is open. Sixty-four
+/// descriptors against an unbounded file size is a guest taking the heap with
+/// nothing more exotic than a loop of `open`, and there is no OOM killer in
+/// this kernel and one address space to lose.
+///
+/// The answer is `ENOMEM`, which Linux's `open` genuinely can return. It would
+/// not return it for *this* reason, and that is the deviation: on Linux the
+/// cost of an open descriptor does not scale with the file.
+const OPEN_MAX_BYTES: usize = 64 * 1024 * 1024;
+
+/// The most `getdents64` will build in one call, whatever the guest offers.
+///
+/// The guest's buffer length is the room the records must fit in, and the
+/// records are built in the kernel heap first. A guest that owns a large
+/// mapping can therefore ask this call to allocate as much as it owns, which
+/// is a second copy of memory the machine already gave it.
+const DENTS_MAX: usize = 1 << 20;
 
 /// How many descriptors a guest may hold, and how long a path may be.
 const MAX_FDS: usize = 64;
@@ -518,7 +540,19 @@ fn record(c: Call) {
 /// other fd is `-EBADF` rather than silently accepted -- a write to fd 7 that
 /// reported success would be a program whose output vanished.
 fn sys_write(fd: u64, buf: u64, len: usize) -> u64 {
-    if fd != 1 && fd != 2 {
+    // **Ask the table, not the number.** This compared `fd` against 1 and 2,
+    // which is right until a guest does the one thing every shell does:
+    // `close(1)` then `open(...)` hands the file descriptor 1, and a write to
+    // it went to the console -- output the guest had redirected, printed to
+    // the terminal, reported as successful. `close(1)` alone was worse, since
+    // writes to a descriptor that is not open have to be `EBADF`.
+    let sink = with_fds(|fds, _| {
+        matches!(
+            fds.get(fd as usize),
+            Some(Some(super::fs::Fd::Stdout)) | Some(Some(super::fs::Fd::Stderr))
+        )
+    });
+    if sink != Some(true) {
         return EBADF;
     }
     // A zero-length write succeeds without the pointer being looked at, which
@@ -553,36 +587,61 @@ fn sys_write(fd: u64, buf: u64, len: usize) -> u64 {
 /// Refuses an unterminated string rather than reading to the end of the page,
 /// since a path with no NUL is a bug in the caller and guessing where it ends
 /// invents a filename.
-fn read_cstr(at: u64) -> Option<String> {
+///
+/// **Three failures, three errnos, and they were one.** This answered `None`
+/// for an unreachable pointer, for a string with no terminator, and for bytes
+/// that are not UTF-8, and every caller turned that into `EFAULT`. Two of
+/// those are not `EFAULT`: the pointer was fine and the program is told to go
+/// looking at its pointer arithmetic. A Linux path is bytes rather than text,
+/// so a Latin-1 filename is a perfectly legal thing to ask for and an
+/// impossible thing to store in a namespace keyed by `String` -- `ENOENT` is
+/// the true answer there, since no such name can exist here.
+fn read_cstr(at: u64) -> Result<String, u64> {
     let mut out = alloc::vec::Vec::new();
     let mut p = at;
     let mut checked_to = at;
     while out.len() < PATH_MAX {
         if p >= checked_to {
-            // Cover to the end of this page, or to the byte after it if the
-            // string started mid-page.
+            // Cover to the end of this page, and fall back to a byte at a time
+            // when that overshoots.
+            //
+            // **The fast path alone was wrong, and wrong on ordinary
+            // programs.** A region does not have to end on a page boundary --
+            // the image's is the ELF span, so a path constant in the last
+            // partial page of a binary is entirely legal and entirely
+            // unreadable to a check that demands the whole rest of the page.
+            // It presented as `open` answering `EFAULT` for a string the guest
+            // could read perfectly well itself, which reads as a pointer bug
+            // in the program. Found by the fixture that opens a path it
+            // carries at the very end of its own image.
             let end = (p & !(PAGE - 1)) + PAGE;
-            if !reachable(p, (end - p) as usize, false) {
-                return None;
+            if reachable(p, (end - p) as usize, false) {
+                checked_to = end;
+            } else if reachable(p, 1, false) {
+                checked_to = p + 1;
+            } else {
+                return Err(EFAULT);
             }
-            checked_to = end;
         }
         let b = unsafe { core::ptr::read_volatile(p as *const u8) };
         if b == 0 {
-            return core::str::from_utf8(&out).ok().map(String::from);
+            return core::str::from_utf8(&out).map(String::from).map_err(|_| ENOENT);
         }
         out.push(b);
         p += 1;
     }
-    None
+    Err(ENAMETOOLONG)
 }
 
 /// The descriptor table, or nothing when no guest is running.
 fn with_fds<T>(f: impl FnOnce(&mut Vec<Option<super::fs::Fd>>, &str) -> T) -> Option<T> {
     let sp = unsafe { SPACE.get() };
-    let sp = sp.as_mut()?;
-    let cwd = sp.cwd.clone();
-    Some(f(&mut sp.fds, &cwd))
+    // Destructured rather than borrowed twice, which is also why the working
+    // directory is no longer cloned here. It was, because `&mut sp.fds` and
+    // `&sp.cwd` are two borrows of one `sp` -- so every `read` in a guest's
+    // copy loop allocated and freed a string it never looked at.
+    let Space { fds, cwd, .. } = sp.as_mut()?;
+    Some(f(fds, cwd))
 }
 
 /// Open a path in the namespace and hand back a descriptor.
@@ -595,9 +654,19 @@ fn with_fds<T>(f: impl FnOnce(&mut Vec<Option<super::fs::Fd>>, &str) -> T) -> Op
 /// should be a deliberate design, so for now `O_WRONLY` and `O_RDWR` answer
 /// `EACCES` and say why here.
 fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u64 {
-    let Some(raw) = read_cstr(path_at) else { return EFAULT };
+    let raw = match read_cstr(path_at) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
     if flags & (O_WRONLY | O_RDWR) != 0 {
         return EACCES;
+    }
+    // An empty path is `ENOENT` on Linux, and here it would otherwise resolve
+    // to the working directory: `open("")` would hand back a descriptor for
+    // `/`, which is a plausible-looking answer to a call that asked for
+    // nothing.
+    if raw.is_empty() {
+        return ENOENT;
     }
     let cwd_relative = !raw.starts_with('/');
     if cwd_relative && (dirfd as i64) != super::fs::AT_FDCWD {
@@ -615,6 +684,20 @@ fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u64 {
         let entry = if is_dir {
             super::fs::Fd::Dir { path: path.clone(), entries: sysbox::listing(&path), at: 0 }
         } else {
+            // Asked before the copy is made, not after: the point is to not
+            // allocate the file, so a check that reads it first and then
+            // measures has already lost.
+            let Some(size) = sysbox::blob_len(&path) else { return ENOENT };
+            let held: usize = fds
+                .iter()
+                .filter_map(|f| match f {
+                    Some(super::fs::Fd::File { data, .. }) => Some(data.len()),
+                    _ => None,
+                })
+                .sum();
+            if held.saturating_add(size) > OPEN_MAX_BYTES {
+                return ENOMEM;
+            }
             let Some(data) = sysbox::read_blob(&path) else { return ENOENT };
             super::fs::Fd::File { path: path.clone(), data, at: 0 }
         };
@@ -660,11 +743,18 @@ fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
         // pipe sees.
         Some(Some(super::fs::Fd::Stdin)) => 0,
         Some(Some(super::fs::Fd::File { data, at, .. })) => {
-            let n = (data.len() - (*at).min(data.len())).min(len as usize);
+            // **The cursor is clamped before it indexes, and that is not
+            // belt and braces.** `lseek` past the end is legal and this module
+            // says so two functions down, so `*at > data.len()` is a state a
+            // guest reaches with two ordinary calls -- and `data[*at..]` on
+            // that state is a panic, in ring 0, with no unwinder. Two legal
+            // syscalls stopped the machine.
+            let from = (*at).min(data.len());
+            let n = (data.len() - from).min(len as usize);
             unsafe {
-                core::ptr::copy_nonoverlapping(data[*at..].as_ptr(), buf as *mut u8, n);
+                core::ptr::copy_nonoverlapping(data[from..].as_ptr(), buf as *mut u8, n);
             }
-            *at += n;
+            *at = at.saturating_add(n);
             n as u64
         }
         Some(Some(super::fs::Fd::Dir { .. })) => EISDIR,
@@ -692,6 +782,20 @@ fn sys_lseek(fd: u64, off: u64, whence: u64) -> u64 {
             *at = want as usize;
             want as u64
         }
+        // A directory's cursor is an entry index, which is what `d_off`
+        // reports, so the two agree. Only a rewind is honoured: `seekdir` to
+        // an arbitrary index would need the index to stay meaningful across
+        // the snapshot the directory was opened with, and inventing that is
+        // how `telldir` starts handing out positions that name the wrong file.
+        // `rewinddir` is the one every program actually uses.
+        Some(Some(super::fs::Fd::Dir { at, .. })) => {
+            if whence == 0 && off == 0 {
+                *at = 0;
+                0
+            } else {
+                EINVAL
+            }
+        }
         // A stream has no position. `ESPIPE` is what libc turns into "illegal
         // seek", and it is how a program discovers stdout is not a file.
         Some(Some(_)) => ESPIPE,
@@ -700,11 +804,11 @@ fn sys_lseek(fd: u64, off: u64, whence: u64) -> u64 {
     .unwrap_or(EBADF)
 }
 
-fn write_stat(buf: u64, is_dir: bool, size: usize, ino: u64) -> u64 {
+fn write_stat(buf: u64, kind: super::fs::Kind, size: usize, ino: u64) -> u64 {
     if !reachable(buf, 144, true) {
         return EFAULT;
     }
-    let b = super::fs::stat_bytes(is_dir, size, ino);
+    let b = super::fs::stat_bytes(kind, size, ino);
     unsafe { core::ptr::copy_nonoverlapping(b.as_ptr(), buf as *mut u8, 144) };
     0
 }
@@ -712,31 +816,51 @@ fn write_stat(buf: u64, is_dir: bool, size: usize, ino: u64) -> u64 {
 fn sys_fstat(fd: u64, buf: u64) -> u64 {
     let found = with_fds(|fds, _| match fds.get(fd as usize) {
         Some(Some(super::fs::Fd::File { path, data, .. })) => {
-            Some((false, data.len(), super::fs::ino_of(path)))
+            Some((super::fs::Kind::File, data.len(), super::fs::ino_of(path)))
         }
-        Some(Some(super::fs::Fd::Dir { path, .. })) => Some((true, 0, super::fs::ino_of(path))),
-        // The standard three are character devices as far as anything asking
-        // is concerned, and reporting them as empty regular files is what
-        // makes a program believe stdout is seekable.
-        Some(Some(_)) => Some((false, 0, 1)),
+        Some(Some(super::fs::Fd::Dir { path, .. })) => {
+            Some((super::fs::Kind::Dir, 0, super::fs::ino_of(path)))
+        }
+        // The standard three report as pipes, which is the only answer that
+        // agrees with the rest of this module: `lseek` on them is `ESPIPE` and
+        // `read` on stdin is a permanent end of file.
+        Some(Some(_)) => Some((super::fs::Kind::Fifo, 0, 1)),
         _ => None,
     })
     .flatten();
     match found {
-        Some((d, n, ino)) => write_stat(buf, d, n, ino),
+        Some((k, n, ino)) => write_stat(buf, k, n, ino),
         None => EBADF,
     }
 }
 
-fn sys_statat(path_at: u64, buf: u64) -> u64 {
-    let Some(raw) = read_cstr(path_at) else { return EFAULT };
+fn sys_statat(dirfd: u64, path_at: u64, buf: u64) -> u64 {
+    let raw = match read_cstr(path_at) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    // The same two refusals `openat` makes, for the same reasons and stated
+    // once each. They were absent here, so `newfstatat` would take a relative
+    // path with a real descriptor and resolve it against the working
+    // directory -- answering confidently about a file that exists and is not
+    // the one asked for, which is worse than refusing.
+    if raw.is_empty() {
+        return ENOENT;
+    }
+    if !raw.starts_with('/') && (dirfd as i64) != super::fs::AT_FDCWD {
+        return ENOSYS;
+    }
     let found = with_fds(|_, cwd| super::fs::resolve(cwd, &raw)).flatten();
     let Some(path) = found else { return ENOENT };
     if sysbox::is_dir(&path) {
-        return write_stat(buf, true, 0, super::fs::ino_of(&path));
+        return write_stat(buf, super::fs::Kind::Dir, 0, super::fs::ino_of(&path));
     }
-    match sysbox::read_blob(&path) {
-        Some(d) => write_stat(buf, false, d.len(), super::fs::ino_of(&path)),
+    // `blob_len` rather than `read_blob`: the only field wanted here is the
+    // size, and reading the blob to find it copies the whole file into the
+    // heap and drops it. `stat` on a large checkpoint is an ordinary thing for
+    // a program to do and was an allocation of the whole checkpoint.
+    match sysbox::blob_len(&path) {
+        Some(n) => write_stat(buf, super::fs::Kind::File, n, super::fs::ino_of(&path)),
         None => ENOENT,
     }
 }
@@ -745,6 +869,12 @@ fn sys_getdents64(fd: u64, buf: u64, len: u64) -> u64 {
     if !reachable(buf, len as usize, true) {
         return EFAULT;
     }
+    // The records are built in the kernel before being copied out, so the
+    // guest's buffer length is a length this kernel allocates. Capped, since a
+    // guest owning a large mapping could otherwise ask for a second copy of it
+    // on the heap; short reads are the ordinary case for this call anyway and
+    // the caller's loop already handles them.
+    let room = (len as usize).min(DENTS_MAX);
     with_fds(|fds, _| match fds.get_mut(fd as usize) {
         Some(Some(super::fs::Fd::Dir { path, entries, at })) => {
             let mut out = alloc::vec::Vec::new();
@@ -755,7 +885,10 @@ fn sys_getdents64(fd: u64, buf: u64, len: u64) -> u64 {
                     full.push('/');
                 }
                 full.push_str(name);
-                if !super::fs::dirent(&mut out, len as usize, super::fs::ino_of(&full), *is_dir, name) {
+                let next = (*at + 1) as u64;
+                if !super::fs::dirent(
+                    &mut out, room, super::fs::ino_of(&full), next, *is_dir, name,
+                ) {
                     break;
                 }
                 *at += 1;
@@ -985,8 +1118,10 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         SYS_CLOSE => (sys_close(f.rdi), true),
         SYS_LSEEK => (sys_lseek(f.rdi, f.rsi, f.rdx), true),
         SYS_FSTAT => (sys_fstat(f.rdi, f.rsi), true),
-        SYS_STAT | SYS_LSTAT => (sys_statat(f.rdi, f.rsi), true),
-        SYS_NEWFSTATAT => (sys_statat(f.rsi, f.rdx), true),
+        SYS_STAT | SYS_LSTAT => {
+            (sys_statat(super::fs::AT_FDCWD as u64, f.rdi, f.rsi), true)
+        }
+        SYS_NEWFSTATAT => (sys_statat(f.rdi, f.rsi, f.rdx), true),
         SYS_GETDENTS64 => (sys_getdents64(f.rdi, f.rsi, f.rdx), true),
         SYS_IOCTL => (sys_ioctl(f.rdi, f.rsi, f.rdx), true),
         // One process, and it is the guest. Reporting a pid at all is what
@@ -1389,10 +1524,11 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     let mut small = [0u8; 64];
     out.push((
         "a stack too small for the initial frame is refused",
-        build_stack(small.as_mut_ptr(), 64, &["x"]).is_none(),
+        build_stack(small.as_mut_ptr(), 64, &["x"], Aux::default()).is_none(),
     ));
     let mut big = [0u8; 512];
-    let sp = build_stack(big.as_mut_ptr(), 512, &["cat", "/ai/about"]);
+    let aux = Aux { phdr: 0x1000, phent: 56, phnum: 2, entry: 0x1078 };
+    let sp = build_stack(big.as_mut_ptr(), 512, &["cat", "/ai/about"], aux);
     out.push((
         "and one large enough answers a 16-byte-aligned pointer inside itself",
         sp.is_some_and(|v| v % 16 == 0 && v >= big.as_ptr() as u64
@@ -1411,6 +1547,69 @@ pub fn checks() -> Vec<(&'static str, bool)> {
                 && core::slice::from_raw_parts(a0, 3) == b"cat"
                 && core::slice::from_raw_parts(a1, 9) == b"/ai/about"
         }),
+    ));
+    // The aux vector, read back the way a libc reads it: walk pairs from after
+    // the envp terminator until AT_NULL, and look up by key rather than by
+    // position, since nothing promises an order.
+    let auxv = |key: u64| -> Option<u64> {
+        let v = sp?;
+        unsafe {
+            let p = v as *const u64;
+            let n = p.read() as usize;
+            let mut i = 3 + n;
+            loop {
+                let k = p.add(i).read();
+                if k == AT_NULL {
+                    return None;
+                }
+                if k == key {
+                    return Some(p.add(i + 1).read());
+                }
+                i += 2;
+            }
+        }
+    };
+    out.push((
+        "the aux vector answers a page size, so a libc does not divide by zero",
+        auxv(AT_PAGESZ) == Some(PAGE),
+    ));
+    out.push((
+        "and the entry and header table the loader placed, by key rather than by position",
+        auxv(AT_ENTRY) == Some(0x1078)
+            && auxv(AT_PHDR) == Some(0x1000)
+            && auxv(AT_PHNUM) == Some(2)
+            && auxv(AT_PHENT) == Some(56),
+    ));
+    out.push((
+        "AT_RANDOM points at sixteen bytes inside this stack, since libc reads its guard there",
+        auxv(AT_RANDOM).is_some_and(|r| {
+            r >= big.as_ptr() as u64 && r + 16 <= big.as_ptr() as u64 + 512
+        }),
+    ));
+    out.push((
+        "a header table no segment covers omits the whole group rather than pointing at nothing",
+        {
+            let mut small = [0u8; 512];
+            let none = Aux { phdr: 0, phent: 56, phnum: 2, entry: 0 };
+            let s2 = build_stack(small.as_mut_ptr(), 512, &["x"], none);
+            s2.is_some_and(|v| unsafe {
+                let p = v as *const u64;
+                let n = p.read() as usize;
+                let mut i = 3 + n;
+                let mut seen_phdr = false;
+                let mut seen_pagesz = false;
+                loop {
+                    let k = p.add(i).read();
+                    if k == AT_NULL {
+                        break;
+                    }
+                    seen_phdr |= k == AT_PHDR || k == AT_PHNUM || k == AT_PHENT;
+                    seen_pagesz |= k == AT_PAGESZ;
+                    i += 2;
+                }
+                !seen_phdr && seen_pagesz
+            })
+        },
     ));
 
     // The stub and `glados_enter_guest` carry their selectors as literals,
@@ -1459,17 +1658,55 @@ pub fn checks() -> Vec<(&'static str, bool)> {
 /// that never reads its arguments does not care -- and building it anyway
 /// costs six words and means the first program that *does* read them finds
 /// something shaped correctly rather than a fault.
-pub fn build_stack(base: *mut u8, size: usize, args: &[&str]) -> Option<u64> {
+/// What the auxiliary vector has to say, gathered by the loader.
+///
+/// **Empty was not a safe default and that is why this exists.** A static libc
+/// has no dynamic linker to ask, so everything it cannot compute it reads from
+/// here: `AT_PAGESZ` becomes `libc.page_size`, which musl divides by, and
+/// `AT_RANDOM` is where the stack guard comes from. A vector holding nothing
+/// but `AT_NULL` hands a real binary a page size of zero.
+///
+/// Nothing here has been consumed by a real libc on this machine -- every
+/// fixture is hand-written and reads none of it -- so this is a bet placed
+/// where the ABI says it should be placed, and it is worth saying so.
+#[derive(Clone, Copy, Default)]
+pub struct Aux {
+    /// Where the program headers landed at runtime, or zero when no loadable
+    /// segment covers them. Zero omits the whole `AT_PHDR`/`AT_PHENT`/
+    /// `AT_PHNUM` group, since a header pointer into nothing is worse than an
+    /// absent one: the absent one a libc can cope with.
+    pub phdr: u64,
+    pub phent: u64,
+    pub phnum: u64,
+    pub entry: u64,
+}
+
+const AT_NULL: u64 = 0;
+const AT_PHDR: u64 = 3;
+const AT_PHENT: u64 = 4;
+const AT_PHNUM: u64 = 5;
+const AT_PAGESZ: u64 = 6;
+const AT_ENTRY: u64 = 9;
+const AT_UID: u64 = 11;
+const AT_EUID: u64 = 12;
+const AT_GID: u64 = 13;
+const AT_EGID: u64 = 14;
+const AT_CLKTCK: u64 = 17;
+const AT_SECURE: u64 = 23;
+const AT_RANDOM: u64 = 25;
+
+pub fn build_stack(base: *mut u8, size: usize, args: &[&str], aux: Aux) -> Option<u64> {
+    let bottom = base as usize;
+    let mut top = bottom.checked_add(size)?;
+
     // Strings first, at the very top, because the pointer array below has to
     // name them and nothing may move afterwards.
-    let mut top = base as usize + size;
     let mut ptrs = alloc::vec::Vec::with_capacity(args.len());
     for a in args.iter().rev() {
-        let n = a.len() + 1;
-        if top < base as usize + n {
+        top = top.checked_sub(a.len() + 1)?;
+        if top < bottom {
             return None;
         }
-        top -= n;
         unsafe {
             core::ptr::copy_nonoverlapping(a.as_ptr(), top as *mut u8, a.len());
             core::ptr::write((top + a.len()) as *mut u8, 0);
@@ -1478,17 +1715,58 @@ pub fn build_stack(base: *mut u8, size: usize, args: &[&str]) -> Option<u64> {
     }
     ptrs.reverse();
 
-    // argc, argv[..], NULL, envp NULL, AT_NULL pair. Sixteen-byte aligned at
-    // `rsp`, which the ABI requires and which a guest using SSE depends on.
-    let words = 1 + ptrs.len() + 1 + 1 + 2;
-    let mut sp = (top - words * 8) & !0xF;
-    if sp < base as usize + 64 {
+    // Sixteen bytes for `AT_RANDOM`, which is where a libc takes its stack
+    // guard from. `fill` and not `fill_secret`: this is a canary rather than
+    // key material, and `fill_secret` refuses until the entropy pool has been
+    // credited, which on a headless boot is never -- so the strict call would
+    // make every guest fail to start in exchange for a stronger guarantee than
+    // a canary needs.
+    top = top.checked_sub(16)?;
+    if top < bottom {
         return None;
     }
-    // Realign upward is not possible without moving strings, so pad down to
-    // the next 16 and accept the few wasted bytes.
-    if (sp + words * 8) % 8 != 0 {
-        sp -= 8;
+    let random = top as u64;
+    unsafe {
+        crate::rng::fill(core::slice::from_raw_parts_mut(random as *mut u8, 16));
+    }
+
+    let mut pairs = alloc::vec::Vec::new();
+    pairs.push((AT_PAGESZ, PAGE));
+    // The scheduler's tick, which is what `times()` would be denominated in
+    // if it existed. Taken from `crate::TIMER_HZ`, the interrupt rate, and
+    // deliberately not from `lapic::timer_hz()`, which is the calibrated APIC
+    // frequency and is in the millions -- a confusion this tree has already
+    // paid for once, in the Oracle.
+    pairs.push((AT_CLKTCK, crate::TIMER_HZ as u64));
+    // One process, no privilege boundary above it, nothing dropped. A libc
+    // reads `AT_SECURE` to decide whether to trust the environment, and here
+    // there is one environment.
+    for id in [AT_UID, AT_EUID, AT_GID, AT_EGID, AT_SECURE] {
+        pairs.push((id, 0));
+    }
+    pairs.push((AT_RANDOM, random));
+    if aux.entry != 0 {
+        pairs.push((AT_ENTRY, aux.entry));
+    }
+    if aux.phdr != 0 && aux.phnum != 0 {
+        pairs.push((AT_PHDR, aux.phdr));
+        pairs.push((AT_PHENT, aux.phent));
+        pairs.push((AT_PHNUM, aux.phnum));
+    }
+    pairs.push((AT_NULL, 0));
+
+    // argc, argv[..], its NULL, envp's NULL, then the pairs. `rsp` itself is
+    // sixteen-byte aligned at entry, which is what the ABI asks of a process
+    // rather than of a function -- there is no return address under it.
+    //
+    // A line here used to pad down when `(sp + words * 8) % 8 != 0`, which is
+    // a condition that cannot hold: `sp` is sixteen-aligned and every word is
+    // eight bytes. It read as an alignment fix and was a tautology, which is
+    // the more expensive kind of dead code because it stops anybody looking.
+    let words = 1 + ptrs.len() + 1 + 1 + pairs.len() * 2;
+    let sp = top.checked_sub(words * 8)? & !0xF;
+    if sp < bottom {
+        return None;
     }
     unsafe {
         let p = sp as *mut u64;
@@ -1498,8 +1776,10 @@ pub fn build_stack(base: *mut u8, size: usize, args: &[&str]) -> Option<u64> {
         }
         p.add(1 + ptrs.len()).write(0); // argv terminator
         p.add(2 + ptrs.len()).write(0); // envp terminator
-        p.add(3 + ptrs.len()).write(0); // AT_NULL
-        p.add(4 + ptrs.len()).write(0);
+        for (i, (k, v)) in pairs.iter().enumerate() {
+            p.add(3 + ptrs.len() + i * 2).write(*k);
+            p.add(4 + ptrs.len() + i * 2).write(*v);
+        }
     }
     Some(sp as u64)
 }

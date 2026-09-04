@@ -92,8 +92,6 @@ pub fn load(bytes: &[u8], args: &[&str]) -> Result<Guest, &'static str> {
 
     let brk = Exec::new(GUEST_BRK).ok_or("no room for a break region")?;
     let stack = Exec::new(GUEST_STACK).ok_or("no room for a stack")?;
-    let stack_top = syscall::build_stack(stack.addr() as *mut u8, GUEST_STACK, args)
-        .ok_or("the stack is too small for the arguments")?;
     // The entry has to land inside what was actually placed. A file is free to
     // name one outside its own segments, and jumping there would leave the
     // fault reporter naming a range this loader never armed.
@@ -102,6 +100,32 @@ pub fn load(bytes: &[u8], args: &[&str]) -> Result<Guest, &'static str> {
         return Err("the entry point is outside every segment the file loads");
     }
     let entry = base + off;
+
+    // `AT_PHDR` is a runtime address, so it is the segment that contains the
+    // header table plus the offset into it. `base + phoff` is the same number
+    // only when the first segment starts at file offset zero, which is true of
+    // every fixture here and is not a property of the format -- and a header
+    // pointer that is wrong is worse than one that is absent, because
+    // `dl_iterate_phdr` walks it either way.
+    let table = img.phnum.checked_mul(img.phentsize).and_then(|n| n.checked_add(img.phoff));
+    let phdr = table.and_then(|end| {
+        img.segments
+            .iter()
+            .find(|s| img.phoff >= s.offset && end <= s.offset + s.filesz)
+            .map(|s| base + (s.vaddr - lo) + (img.phoff - s.offset) as u64)
+    });
+    let stack_top = syscall::build_stack(
+        stack.addr() as *mut u8,
+        GUEST_STACK,
+        args,
+        syscall::Aux {
+            phdr: phdr.unwrap_or(0),
+            phent: img.phentsize as u64,
+            phnum: phdr.map_or(0, |_| img.phnum as u64),
+            entry,
+        },
+    )
+    .ok_or("the stack is too small for the arguments")?;
     image.arm(TAG_GUEST);
 
     Ok(Guest {
@@ -166,6 +190,9 @@ pub fn checks() -> Vec<(&'static str, bool)> {
                 align: 4096,
             })
             .collect(),
+        phoff: 64,
+        phentsize: 56,
+        phnum: segs,
         interp: if interp { Some(alloc::string::String::from("/lib/ld.so")) } else { None },
     };
 

@@ -108,13 +108,40 @@ pub fn resolve(cwd: &str, path: &str) -> Option<String> {
 pub const MODE_FILE: u32 = 0o100_644;
 /// `S_IFDIR | 0755`.
 pub const MODE_DIR: u32 = 0o040_755;
+/// `S_IFIFO | 0600`, which is what the standard three are here.
+///
+/// They were reported as empty regular files, under a comment saying that
+/// reporting them as empty regular files is what makes a program believe
+/// stdout is seekable. The comment was right and was describing the code
+/// beside it. A pipe is the shape that agrees with the rest of this module:
+/// `lseek` on one answers `ESPIPE`, `read` on stdin answers zero forever, and
+/// libc picks full buffering for it, all of which are true here.
+pub const MODE_FIFO: u32 = 0o010_600;
+
+/// What kind of thing a `stat` is describing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    File,
+    Dir,
+    Fifo,
+}
+
+impl Kind {
+    pub fn mode(self) -> u32 {
+        match self {
+            Kind::File => MODE_FILE,
+            Kind::Dir => MODE_DIR,
+            Kind::Fifo => MODE_FIFO,
+        }
+    }
+}
 
 /// Linux's `struct stat` for x86-64, filled in as far as this store can.
 ///
 /// 144 bytes, and the layout is fixed by the ABI rather than chosen. Writing
 /// it a field short is not a smaller answer, it is a different structure, and
 /// libc reads past the end of what was written.
-pub fn stat_bytes(is_dir: bool, size: usize, ino: u64) -> [u8; 144] {
+pub fn stat_bytes(kind: Kind, size: usize, ino: u64) -> [u8; 144] {
     let mut b = [0u8; 144];
     let put64 = |b: &mut [u8; 144], at: usize, v: u64| {
         b[at..at + 8].copy_from_slice(&v.to_le_bytes());
@@ -125,7 +152,7 @@ pub fn stat_bytes(is_dir: bool, size: usize, ino: u64) -> [u8; 144] {
     put64(&mut b, 0, 1); // st_dev
     put64(&mut b, 8, ino); // st_ino
     put64(&mut b, 16, 1); // st_nlink
-    put32(&mut b, 24, if is_dir { MODE_DIR } else { MODE_FILE });
+    put32(&mut b, 24, kind.mode());
     put32(&mut b, 28, 0); // st_uid
     put32(&mut b, 32, 0); // st_gid
     put64(&mut b, 48, size as u64); // st_size
@@ -142,14 +169,20 @@ pub fn stat_bytes(is_dir: bool, size: usize, ino: u64) -> [u8; 144] {
 /// walking the buffer adds `d_reclen` to its cursor. An unpadded record leaves
 /// the next one misaligned and the guest reads a name out of the middle of an
 /// inode.
-pub fn dirent(out: &mut Vec<u8>, room: usize, ino: u64, is_dir: bool, name: &str) -> bool {
+pub fn dirent(out: &mut Vec<u8>, room: usize, ino: u64, next: u64, is_dir: bool, name: &str) -> bool {
     let len = (19 + name.len() + 1).next_multiple_of(8);
     if out.len() + len > room {
         return false;
     }
     let start = out.len();
     out.extend_from_slice(&ino.to_le_bytes());
-    out.extend_from_slice(&(start as i64 + len as i64).to_le_bytes());
+    // `d_off` is the cursor a later `lseek` would restore to reach the *next*
+    // entry, and here the cursor is an entry index rather than a byte offset.
+    // It was the offset of the next record inside this buffer, which is a
+    // number that means nothing outside the one call that produced it -- so
+    // `telldir` would hand back a position `seekdir` could not use, and the
+    // two would disagree silently.
+    out.extend_from_slice(&next.to_le_bytes());
     out.extend_from_slice(&(len as u16).to_le_bytes());
     out.push(if is_dir { 4 } else { 8 }); // DT_DIR / DT_REG
     out.extend_from_slice(name.as_bytes());
@@ -197,31 +230,42 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         resolve("/", "/").as_deref() == Some("/") && resolve("/", "").as_deref() == Some("/"),
     ));
 
-    // The stat block is an ABI, so its size and the two fields a program
-    // actually branches on are asserted rather than assumed.
-    let f = stat_bytes(false, 1234, 7);
-    let d = stat_bytes(true, 0, 9);
+    // The stat block is an ABI, so its size and the fields a program actually
+    // branches on are asserted rather than assumed.
+    let f = stat_bytes(Kind::File, 1234, 7);
+    let d = stat_bytes(Kind::Dir, 0, 9);
+    let s3 = stat_bytes(Kind::Fifo, 0, 1);
     out.push(("a stat block is the 144 bytes the ABI fixes", f.len() == 144));
+    let mode = |b: &[u8; 144]| u32::from_le_bytes([b[24], b[25], b[26], b[27]]);
     out.push((
         "st_mode says regular or directory, and st_size is where libc looks",
-        u32::from_le_bytes([f[24], f[25], f[26], f[27]]) == MODE_FILE
-            && u32::from_le_bytes([d[24], d[25], d[26], d[27]]) == MODE_DIR
+        mode(&f) == MODE_FILE
+            && mode(&d) == MODE_DIR
             && u64::from_le_bytes(f[48..56].try_into().unwrap()) == 1234,
     ));
     out.push((
+        "the standard three are pipes, which is what agrees with ESPIPE on them",
+        mode(&s3) == MODE_FIFO && mode(&s3) != MODE_FILE,
+    ));
+    out.push((
         "a one-byte file is one 512-byte block, since that is the unit callers divide by",
-        u64::from_le_bytes(stat_bytes(false, 1, 1)[64..72].try_into().unwrap()) == 1,
+        u64::from_le_bytes(stat_bytes(Kind::File, 1, 1)[64..72].try_into().unwrap()) == 1,
     ));
 
     // Directory entries, and the padding a guest's cursor depends on.
     let mut buf = Vec::new();
-    let ok1 = dirent(&mut buf, 4096, 1, true, "ai");
+    let ok1 = dirent(&mut buf, 4096, 1, 1, true, "ai");
     let first = buf.len();
-    let ok2 = dirent(&mut buf, 4096, 2, false, "a-rather-longer-name.txt");
+    let ok2 = dirent(&mut buf, 4096, 2, 2, false, "a-rather-longer-name.txt");
     out.push(("two entries fit and both are eight-byte multiples", ok1 && ok2 && first % 8 == 0 && buf.len() % 8 == 0));
     out.push((
         "the record length in the first entry steps exactly to the second",
         u16::from_le_bytes([buf[16], buf[17]]) as usize == first,
+    ));
+    out.push((
+        "d_off is the cursor that reaches the next entry, not a place in this buffer",
+        u64::from_le_bytes(buf[8..16].try_into().unwrap()) == 1
+            && u64::from_le_bytes(buf[first + 8..first + 16].try_into().unwrap()) == 2,
     ));
     out.push((
         "the type byte separates a directory from a file",
@@ -229,7 +273,14 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     ));
     out.push((
         "an entry that will not fit is refused rather than truncated",
-        !dirent(&mut Vec::new(), 8, 1, false, "toolong"),
+        !dirent(&mut Vec::new(), 8, 1, 1, false, "toolong"),
+    ));
+    out.push((
+        "and a room of zero refuses without touching the buffer",
+        {
+            let mut v = Vec::new();
+            !dirent(&mut v, 0, 1, 1, false, "x") && v.is_empty()
+        },
     ));
 
     out.push((
