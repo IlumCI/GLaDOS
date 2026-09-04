@@ -25,6 +25,10 @@ const WRITE_THROUGH: u64 = 1 << 3;
 const CACHE_DISABLE: u64 = 1 << 4;
 /// PS bit. On a PD entry this means "this is a 2 MiB page", not a pointer to a PT.
 const HUGE: u64 = 1 << 7;
+/// Bit 63. Means no-execute, but only once `EFER.NXE` is on.
+const NX: u64 = 1 << 63;
+/// The physical address field of a 2 MiB entry is bits 51:21, not 51:12.
+const ADDR_MASK_2M: u64 = 0x000F_FFFF_FFE0_0000;
 
 /// Memory types from the UEFI map that represent real RAM, and may therefore
 /// be cached write-back. Everything else is treated as device memory.
@@ -170,6 +174,227 @@ pub fn map_range(phys_start: u64, len: u64, uncached: bool) -> bool {
     // page, but this runs once per device, not in any hot path.
     unsafe { crate::cpu::write_cr3(pml4_phys) };
     true
+}
+
+/// What a range of pages may be used for.
+#[derive(Clone, Copy, PartialEq)]
+pub struct Perm {
+    pub present: bool,
+    pub write: bool,
+    pub exec: bool,
+}
+
+impl Perm {
+    pub const RW: Perm = Perm { present: true, write: true, exec: false };
+    pub const RO: Perm = Perm { present: true, write: false, exec: false };
+    pub const RX: Perm = Perm { present: true, write: false, exec: true };
+    pub const RWX: Perm = Perm { present: true, write: true, exec: true };
+    pub const NONE: Perm = Perm { present: false, write: false, exec: false };
+
+    fn bits(&self) -> u64 {
+        let mut f = 0;
+        if self.present {
+            f |= PRESENT;
+        }
+        if self.write {
+            f |= WRITABLE;
+        }
+        if !self.exec {
+            f |= NX;
+        }
+        f
+    }
+}
+
+/// Turn one 2 MiB entry into five hundred and twelve 4 KiB ones covering the
+/// same bytes with the same rights.
+///
+/// **This is the whole reason per-page permissions were not free here.** The
+/// identity map is built out of 2 MiB pages because that is one entry per two
+/// megabytes and no page tables to walk, which is exactly right for a map that
+/// never changes. Changing the rights on a single 4 KiB page inside one means
+/// the 2 MiB entry has to stop existing first.
+///
+/// The split is invisible: same physical bytes, same flags, same cacheability.
+/// A reader who did not know it happened would see no difference, which is the
+/// property that makes it safe to do underneath a running kernel.
+unsafe fn split_large(pd: &mut [u64; ENTRIES], i2: usize) -> bool {
+    let e = pd[i2];
+    if e & PRESENT == 0 {
+        return false;
+    }
+    if e & HUGE == 0 {
+        return true;
+    }
+    let base = e & ADDR_MASK_2M;
+    // Everything except the address and the size bit carries over, so
+    // uncached device memory stays uncached through the split.
+    let flags = e & !(ADDR_MASK_2M | HUGE);
+    let Some(pt_phys) = alloc_table() else { return false };
+    unsafe {
+        let pt = table(pt_phys);
+        for (j, slot) in pt.iter_mut().enumerate() {
+            *slot = (base + (j as u64) * PAGE_SIZE) | flags;
+        }
+    }
+    pd[i2] = pt_phys | PRESENT | WRITABLE;
+    true
+}
+
+/// The entry governing one address, splitting a huge page if it has to.
+unsafe fn entry_for(addr: u64, split: bool) -> Option<&'static mut u64> {
+    let pml4_phys = crate::cpu::read_cr3() & ADDR_MASK;
+    let (i4, i3, i2, i1) = (
+        ((addr >> 39) & 511) as usize,
+        ((addr >> 30) & 511) as usize,
+        ((addr >> 21) & 511) as usize,
+        ((addr >> 12) & 511) as usize,
+    );
+    unsafe {
+        let pml4 = table(pml4_phys);
+        if pml4[i4] & PRESENT == 0 {
+            return None;
+        }
+        let pdpt = table(pml4[i4] & ADDR_MASK);
+        if pdpt[i3] & PRESENT == 0 || pdpt[i3] & HUGE != 0 {
+            return None;
+        }
+        let pd = table(pdpt[i3] & ADDR_MASK);
+        if pd[i2] & PRESENT == 0 {
+            return None;
+        }
+        if pd[i2] & HUGE != 0 {
+            if !split {
+                // Report the 2 MiB entry itself, which is right for a query:
+                // its rights are the rights of every address inside it.
+                return Some(&mut pd[i2]);
+            }
+            if !split_large(pd, i2) {
+                return None;
+            }
+        }
+        let pt = table(pd[i2] & ADDR_MASK);
+        Some(&mut pt[i1])
+    }
+}
+
+/// What a given address may be used for right now.
+///
+/// Reads the tables rather than a shadow of them, so it cannot disagree with
+/// the hardware about a page somebody else changed.
+pub fn query(addr: u64) -> Option<Perm> {
+    let e = *unsafe { entry_for(addr, false) }?;
+    Some(Perm {
+        present: e & PRESENT != 0,
+        write: e & WRITABLE != 0,
+        // A page is executable when NX is clear, and also when NX means
+        // nothing because the feature was never enabled. Reporting a page as
+        // non-executable while the processor happily runs it would be a
+        // comfortable lie.
+        exec: e & NX == 0 || !crate::cpu::nx_on(),
+    })
+}
+
+/// Make a range obey `perm`, one 4 KiB page at a time.
+///
+/// The range is rounded outward to whole pages, because a permission is a
+/// property of a page and half a page cannot have one. Answers false on the
+/// first page it cannot reach, having already changed the ones before it: a
+/// partial application is visible in `query` rather than rolled back, since
+/// unwinding page-table edits needs a second copy of the state that would be
+/// exactly as likely to be wrong.
+pub fn protect(at: u64, len: usize, perm: Perm) -> bool {
+    if len == 0 {
+        return true;
+    }
+    let start = at & !(PAGE_SIZE - 1);
+    let Some(sum) = at.checked_add(len as u64) else { return false };
+    let end = sum.div_ceil(PAGE_SIZE) * PAGE_SIZE;
+    let keep = !(PRESENT | WRITABLE | NX);
+    let mut addr = start;
+    while addr < end {
+        let Some(e) = (unsafe { entry_for(addr, true) }) else { return false };
+        *e = (*e & keep) | perm.bits();
+        // Per page rather than a CR3 reload, because a reload flushes every
+        // translation in the machine and this can be called with a guest's
+        // whole heap. Skipping it entirely is the failure that matters: the
+        // old translation stays cached and the change is silently unenforced.
+        unsafe { crate::cpu::invlpg(addr) };
+        addr += PAGE_SIZE;
+    }
+    true
+}
+
+/// What `diag paging` asks of all of it.
+///
+/// The claim that earns its place writes to a page it has just made
+/// read-only, under `recover::guard`, and requires the fault to arrive.
+/// Everything else here is arithmetic; that one is the only evidence that any
+/// of it is enforced rather than merely recorded.
+pub fn checks() -> alloc::vec::Vec<(&'static str, bool)> {
+    use alloc::alloc::{alloc_zeroed, dealloc, Layout};
+    let mut out = alloc::vec::Vec::new();
+
+    out.push(("ring 0 respects the read-only bit (CR0.WP)", crate::cpu::wp_on()));
+    out.push((
+        "no-execute is on, or this part does not implement it",
+        crate::cpu::nx_on() || !crate::cpu::nx_supported(),
+    ));
+
+    let Ok(layout) = Layout::from_size_align(2 * PAGE_SIZE as usize, PAGE_SIZE as usize) else {
+        out.push(("a page could not be laid out for the checks", false));
+        return out;
+    };
+    let page = unsafe { alloc_zeroed(layout) };
+    if page.is_null() {
+        out.push(("a page could not be taken for the checks", false));
+        return out;
+    }
+    let at = page as u64;
+
+    let before = query(at);
+    out.push((
+        "an ordinary heap page starts present and writable",
+        before.is_some_and(|p| p.present && p.write),
+    ));
+
+    // Splitting is invisible: the bytes under a 2 MiB entry survive being
+    // described by five hundred and twelve entries instead of one.
+    unsafe { core::ptr::write_volatile(page, 0xA5) };
+    let split_ok = protect(at, PAGE_SIZE as usize, Perm::RW);
+    let survived = unsafe { core::ptr::read_volatile(page) } == 0xA5;
+    out.push(("splitting a huge page keeps the bytes underneath it", split_ok && survived));
+    out.push((
+        "and the neighbouring page inside the same 2 MiB entry is still writable",
+        query(at + PAGE_SIZE).is_some_and(|p| p.present && p.write),
+    ));
+
+    // The one that matters.
+    let ro = protect(at, PAGE_SIZE as usize, Perm::RO);
+    out.push(("a page can be made read-only", ro && query(at).is_some_and(|p| !p.write)));
+    let read_still_works = unsafe { core::ptr::read_volatile(page) } == 0xA5;
+    out.push(("a read-only page can still be read", read_still_works));
+
+    let caught = crate::cpu::recover::guard(|| unsafe {
+        core::ptr::write_volatile(page, 0x5A);
+    });
+    out.push((
+        "writing to a read-only page faults, from ring 0, which is the whole point",
+        caught.is_err(),
+    ));
+    out.push((
+        "and the write did not land",
+        unsafe { core::ptr::read_volatile(page) } == 0xA5,
+    ));
+
+    // Put it back, or the heap hands out a page nothing may write to.
+    let restored = protect(at, 2 * PAGE_SIZE as usize, Perm::RW);
+    out.push((
+        "and it can be given back, so the heap is not poisoned by the check",
+        restored && query(at).is_some_and(|p| p.write),
+    ));
+    unsafe { dealloc(page, layout) };
+    out
 }
 
 fn alloc_table() -> Option<u64> {

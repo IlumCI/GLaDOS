@@ -52,6 +52,9 @@ const ARCH_SET_FS: u64 = 0x1002;
 const ARCH_GET_FS: u64 = 0x1003;
 const ARCH_GET_GS: u64 = 0x1004;
 
+const PROT_WRITE: u64 = 2;
+const PROT_EXEC: u64 = 4;
+
 const MAP_FIXED: u64 = 0x10;
 const MAP_ANONYMOUS: u64 = 0x20;
 
@@ -60,6 +63,7 @@ pub const SYS_WRITE: u64 = 1;
 pub const SYS_BRK: u64 = 12;
 pub const SYS_EXIT: u64 = 60;
 pub const SYS_MMAP: u64 = 9;
+pub const SYS_MPROTECT: u64 = 10;
 pub const SYS_MUNMAP: u64 = 11;
 pub const SYS_ARCH_PRCTL: u64 = 158;
 pub const SYS_EXIT_GROUP: u64 = 231;
@@ -291,6 +295,35 @@ fn owns(at: u64, len: usize) -> bool {
     unsafe { SPACE.get().as_ref().is_some_and(|s| s.owns(at, len)) }
 }
 
+/// Whether the kernel may touch this range on the guest's behalf.
+///
+/// Two questions, and the second one only became askable once `mprotect` was
+/// real. `owns` says the loader handed this range over. This adds: **and the
+/// guest has not since taken the rights away from itself.**
+///
+/// Without it a guest can kill the machine with an entirely legal pair of
+/// calls: `mprotect` a page of its own to `PROT_NONE`, then pass a pointer
+/// into it to `write`. The range is one it owns, so the region check says yes,
+/// and the kernel then reads a page that is not present. `EFAULT` is what
+/// Linux answers and it is what this answers.
+fn reachable(at: u64, len: usize, need_write: bool) -> bool {
+    if !owns(at, len) {
+        return false;
+    }
+    let Some(end) = at.checked_add(len as u64) else { return false };
+    let mut page = at & !(PAGE - 1);
+    while page < end {
+        match crate::mem::paging::query(page) {
+            Some(p) if p.present && (!need_write || p.write) => {}
+            _ => return false,
+        }
+        page += PAGE;
+    }
+    true
+}
+
+const PAGE: u64 = 4096;
+
 /// Hand the dispatcher every region the loader gave this guest.
 ///
 /// Called from `run` rather than from `load`, and that ordering is the fix for
@@ -322,8 +355,19 @@ pub fn teardown() -> usize {
     unsafe {
         if let Some(sp) = SPACE.get().as_mut() {
             for m in sp.maps.drain(..) {
+                // A guest is free to exit having mprotected its mappings to
+                // something the heap cannot reuse. Handing a read-only or
+                // absent page back to the allocator would poison it for
+                // whatever asks next, and the symptom would appear in an
+                // unrelated subsystem hours later.
+                crate::mem::paging::protect(m.at, m.len, crate::mem::paging::Perm::RW);
                 free_pages(m.at, m.len);
                 freed += 1;
+            }
+            // The image, stack and break came from `Exec` allocations the
+            // `Guest` still owns and will drop, so they go back the same way.
+            for r in [sp.image, sp.stack, Region { at: sp.brk_start, len: (sp.brk_end - sp.brk_start) as usize }] {
+                crate::mem::paging::protect(r.at, r.len, crate::mem::paging::Perm::RWX);
             }
             crate::cpu::wrmsr(IA32_FS_BASE, sp.saved_fs);
         }
@@ -432,7 +476,8 @@ fn sys_write(fd: u64, buf: u64, len: usize) -> u64 {
     if len == 0 {
         return 0;
     }
-    if !owns(buf, len) {
+    // Read-only is enough: this call reads the buffer and prints it.
+    if !reachable(buf, len, false) {
         return EFAULT;
     }
     let bytes = unsafe { core::slice::from_raw_parts(buf as *const u8, len) };
@@ -517,6 +562,43 @@ fn sys_munmap(at: u64, len: u64) -> u64 {
     }
 }
 
+/// Change what a range of the guest's own memory may be used for.
+///
+/// **This was unimplemented on purpose until page rights existed**, and the
+/// reason is worth keeping: every page in this kernel was writable and
+/// executable, so answering 0 would have claimed an enforcement that did not
+/// exist and musl's guard pages would have guarded nothing, while refusing
+/// stops any real allocator. Both answers were lies. Now there is a third.
+///
+/// `PROT_NONE` clears the present bit, so the page genuinely faults. That is
+/// the whole point of a guard page and it is also why `reachable` exists: a
+/// guest that hides a page from itself and then hands the kernel a pointer
+/// into it gets `EFAULT` rather than taking the machine down.
+///
+/// The range must be one the loader gave this guest. Linux answers `ENOMEM`
+/// for a range with no mapping under it, so that is what comes back.
+fn sys_mprotect(at: u64, len: u64, prot: u64) -> u64 {
+    if at % PAGE != 0 {
+        return EINVAL;
+    }
+    if len == 0 {
+        return 0;
+    }
+    if !owns(at, len as usize) {
+        return ENOMEM;
+    }
+    let perm = crate::mem::paging::Perm {
+        present: prot != 0,
+        write: prot & PROT_WRITE != 0,
+        exec: prot & PROT_EXEC != 0,
+    };
+    if crate::mem::paging::protect(at, len as usize, perm) {
+        0
+    } else {
+        ENOMEM
+    }
+}
+
 /// Set or read a segment base -- and refuse one of them.
 ///
 /// `ARCH_SET_FS` is how thread-local storage works and musl calls it before
@@ -545,7 +627,9 @@ fn sys_arch_prctl(code: u64, addr: u64) -> u64 {
             // Eight bytes written wherever the guest points. Unchecked, this
             // is a kernel-corrupting primitive handed to the program: it could
             // name a page table, the heap's free list, or the model's weights.
-            if !owns(addr, 8) {
+            // Eight bytes are written, so write rights are required and a
+            // read-only page is refused as firmly as an absent one.
+            if !reachable(addr, 8, true) {
                 return EFAULT;
             }
             let base = unsafe { crate::cpu::rdmsr(IA32_FS_BASE) };
@@ -568,6 +652,7 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         SYS_WRITE => (sys_write(f.rdi, f.rsi, f.rdx as usize), true),
         SYS_BRK => (sys_brk(f.rdi), true),
         SYS_MMAP => (sys_mmap(f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9), true),
+        SYS_MPROTECT => (sys_mprotect(f.rdi, f.rsi, f.rdx), true),
         SYS_MUNMAP => (sys_munmap(f.rdi, f.rsi), true),
         SYS_ARCH_PRCTL => (sys_arch_prctl(f.rdi, f.rsi), true),
         SYS_EXIT | SYS_EXIT_GROUP => {
@@ -793,6 +878,47 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         ));
         unsafe { *SPACE.get() = None };
     }
+    // mprotect, on a page taken for the check and given straight back.
+    {
+        use alloc::alloc::{alloc_zeroed, dealloc, Layout};
+        if let Ok(layout) = Layout::from_size_align(4096, 4096) {
+            let mem = unsafe { alloc_zeroed(layout) };
+            if !mem.is_null() {
+                let at = mem as u64;
+                let owned = Region { at, len: 4096 };
+                install(owned, owned, owned);
+                out.push(("a page the guest owns starts reachable", reachable(at, 8, true)));
+                out.push((
+                    "mprotect to PROT_NONE is accepted",
+                    sys_mprotect(at, 4096, 0) == 0,
+                ));
+                out.push((
+                    "and the kernel then refuses to touch it on the guest's behalf",
+                    !reachable(at, 8, true) && sys_write(1, at, 8) == EFAULT,
+                ));
+                out.push((
+                    "read-only is refused for a write and allowed for a read",
+                    sys_mprotect(at, 4096, 1) == 0
+                        && !reachable(at, 8, true)
+                        && reachable(at, 8, false),
+                ));
+                out.push((
+                    "an unaligned mprotect is EINVAL",
+                    sys_mprotect(at + 1, 4096, 3) == EINVAL,
+                ));
+                out.push((
+                    "a range the guest does not own is ENOMEM",
+                    sys_mprotect(at + 0x100_0000, 4096, 3) == ENOMEM,
+                ));
+                let back = sys_mprotect(at, 4096, PROT_WRITE | 1) == 0;
+                out.push(("and read-write can be given back", back && reachable(at, 8, true)));
+                unsafe { *SPACE.get() = None };
+                crate::mem::paging::protect(at, 4096, crate::mem::paging::Perm::RWX);
+                unsafe { dealloc(mem, layout) };
+            }
+        }
+    }
+
     out.push((
         "with no guest running, no address is owned at all",
         !owns(0x1000, 8),
@@ -858,7 +984,7 @@ pub fn name_of(nr: u64) -> &'static str {
         SYS_WRITE => "write",
         SYS_BRK => "brk",
         SYS_MMAP => "mmap",
-        10 => "mprotect",
+        SYS_MPROTECT => "mprotect",
         SYS_MUNMAP => "munmap",
         SYS_EXIT => "exit",
         SYS_ARCH_PRCTL => "arch_prctl",

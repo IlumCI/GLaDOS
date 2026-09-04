@@ -1170,6 +1170,49 @@ other approach -- run-length plus a `rect` per run -- which is right for a
 drawing program and wrong for a rendered scene where every pixel differs from
 its neighbour.
 
+### Page rights, and whether they are enforced
+
+Two bits decide whether a permission means anything here, and neither was on.
+
+**`CR0.WP` is on now.** Without it a write from ring 0 ignores the R/W bit
+entirely, and every instruction in this kernel runs at ring 0, as does every
+guest binary. A page marked read-only without `CR0.WP` is a page marked
+read-only in a comment. It also catches a class of kernel bug for free once
+anything is read-only: writing through a stale pointer into constant data
+becomes a fault at the write rather than a wrong answer somewhere later.
+
+**`EFER.NXE` is on**, gated on `CPUID.80000001H:EDX[20]` for the reason
+`dev::power` gates its MSRs -- writing a reserved bit of `EFER` raises #GP and
+every vector but `#BP` here is fatal. Boot prints `page rights  wp=1  nx=1`.
+
+Turning both on changes nothing the day it happens, which is the point:
+everything is mapped writable and nothing had ever set bit 63, so the map means
+exactly what it meant a moment earlier.
+
+**The identity map is built from 2 MiB pages, and that is why this was not
+free.** One entry per two megabytes with no page table to walk is exactly right
+for a map that never changes. Changing the rights on one 4 KiB page inside it
+means the 2 MiB entry has to stop existing first, so `split_large` replaces it
+with 512 entries covering the same bytes with the same flags, including
+cacheability, so uncached device memory survives the split. A reader who did not
+know it happened would see no difference, which is what makes it safe to do
+underneath a running kernel.
+
+`paging::protect(at, len, perm)` applies rights per page and `invlpg`s each one.
+Per page rather than a CR3 reload, because a reload flushes every translation in
+the machine and this gets called with a guest's whole heap. Skipping it is the
+failure that matters: the old translation stays cached and the change is
+silently unenforced. `paging::query` reads the tables back rather than a shadow,
+so it cannot disagree with the hardware.
+
+**`diag paging` is 10 claims and one of them faults on purpose.** It makes a
+heap page read-only, writes to it inside `cpu::recover::guard`, and requires the
+fault to arrive and the write not to land. Everything else about page tables can
+be asserted by reading them back; enforcement cannot, and a permission nobody
+has watched the processor refuse is a permission written in a comment. The check
+puts the page back afterwards, because leaving a read-only page in the heap
+poisons whatever asks for it next.
+
 ### Running a binary this kernel did not compile
 
 `src/linux/` is stage 0 of multi-binary support, and it is a **measuring
@@ -1355,13 +1398,29 @@ would otherwise leave `SPACE` naming memory freed when its `Guest` dropped, so
 the next thing to consult it would be reading a dangling range it believed it
 had verified.
 
-**`mprotect` is deliberately still unimplemented**, and it is the next
-judgement call rather than an oversight. Every page here is `PRESENT |
-WRITABLE` and executable -- there is no NX constant in `mem::paging` and
-EFER.NXE is never enabled -- so returning 0 would be claiming an enforcement
-that does not exist, and musl's guard pages would not guard. Refusing it stops
-any real allocator. Neither answer is honest yet, which is the argument for
-doing page permissions before pretending either way.
+**`mprotect` is real now, and making it real meant page rights existed.** It
+was unimplemented on purpose, because every page in this kernel was writable
+and executable: answering 0 would have claimed an enforcement that did not
+exist and musl's guard pages would have guarded nothing, while refusing stops
+any real allocator. Both answers were lies. See the page-rights section above
+for the third option.
+
+`PROT_NONE` clears the present bit, so the page genuinely faults. That is what
+a guard page is for, and it is also why `reachable` had to grow: a guest that
+hides a page from itself and then hands the kernel a pointer into it now gets
+`EFAULT` rather than taking the machine down on two entirely legal calls.
+`--kind protect` proves exactly that from the guest's side:
+
+        9 mmap        0x0 0x2000 0x3  -> 46436352
+      158 arch_prctl  0x1003 0x2c49000 -> 0
+       10 mprotect    0x2c49000 0x1000 0x0 -> 0
+      158 arch_prctl  0x1003 0x2c49000 -> -14
+      exited 11 after 6 syscall(s)
+
+`teardown` puts the rights back before freeing. A guest is free to exit having
+mprotected its mappings to something the heap cannot reuse, and handing a
+read-only or absent page back to the allocator would poison it for whatever
+asks next, with the symptom appearing in an unrelated subsystem hours later.
 
 **Every unimplemented call is recorded and refused with `-ENOSYS`, and that is
 the instrument.** A run ending in `-ENOSYS` on call 47 has said which call to
@@ -1370,7 +1429,7 @@ bounded at 1024 entries, because what matters is *which* calls appear rather
 than how often.
 
 `linux` reports whether the trap is armed, `linux run <path>` loads and runs,
-`linux trace` prints what the last guest asked for. `diag linux` is 53 claims.
+`linux trace` prints what the last guest asked for. `diag linux` is 60 claims.
 
 ### Testing
 

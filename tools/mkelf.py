@@ -128,6 +128,8 @@ HLT = b"\xf4"
 MSG_OK = b"brk, mmap and arch_prctl all answered; FS read back\n"
 MSG_GUARDED = b"both wild pointers were refused with EFAULT\n"
 MSG_UNGUARDED = b"a wild pointer got through\n"
+MSG_PROT = b"mprotect PROT_NONE took the page away from the kernel too\n"
+MSG_NOPROT = b"the page was still reachable after PROT_NONE\n"
 MSG_BAD = b"FS did not read back\n"
 
 
@@ -246,6 +248,66 @@ def rogue_code(entry_rva, ok_rva, bad_rva):
     return bytes(c)
 
 
+def protect_code(entry_rva, ok_rva, bad_rva):
+    """Hide a page from yourself, then check the kernel agrees.
+
+    The probe is arch_prctl(ARCH_GET_FS, p) rather than a write, because that
+    call posts eight bytes *into* p and so needs the page present and
+    writable. It answers 0 while the mapping is ordinary and -14 once the
+    guest has mprotected it away.
+
+    That pair is the whole point. A kernel that only checked "did the loader
+    hand this range over" would still say yes after PROT_NONE, then read a
+    page that is not present, and take the machine down on a pair of entirely
+    legal calls.
+    """
+    c = bytearray()
+    # mmap(NULL, 8192, RW, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
+    c += mov_imm("rax", 9) + mov_imm("rdi", 0) + mov_imm("rsi", 8192)
+    c += mov_imm("rdx", 3) + mov_imm("r10", 0x22) + mov_imm("r8", -1)
+    c += mov_imm("r9", 0) + SYSCALL
+    c += mov_rr("rbx", "rax")
+
+    jumps = []
+
+    def expect(imm):
+        c.extend(cmp_imm8("rax", imm))
+        jumps.append(len(c))
+        c.extend(b"\x0f\x85" + struct.pack("<i", 0))
+
+    # It is reachable to begin with.
+    c += mov_imm("rax", 158) + mov_imm("rdi", 0x1003) + mov_rr("rsi", "rbx") + SYSCALL
+    expect(0)
+    # Take it away: mprotect(p, 4096, PROT_NONE)
+    c += mov_rr("rdi", "rbx") + mov_imm("rsi", 4096) + mov_imm("rdx", 0)
+    c += mov_imm("rax", 10) + SYSCALL
+    expect(0)
+    # And now the kernel must refuse to touch it.
+    c += mov_imm("rax", 158) + mov_imm("rdi", 0x1003) + mov_rr("rsi", "rbx") + SYSCALL
+    expect(-14)
+
+    c += mov_imm("rax", 1) + mov_imm("rdi", 1)
+    ok_lea = len(c)
+    c += lea_rip("rsi", 0)
+    ok_end = len(c)
+    c += mov_imm("rdx", len(MSG_PROT)) + SYSCALL
+    c += mov_imm("rax", 231) + mov_imm("rdi", 11) + SYSCALL + HLT
+
+    bad_at = len(c)
+    c += mov_imm("rax", 1) + mov_imm("rdi", 1)
+    bad_lea = len(c)
+    c += lea_rip("rsi", 0)
+    bad_end = len(c)
+    c += mov_imm("rdx", len(MSG_NOPROT)) + SYSCALL
+    c += mov_imm("rax", 231) + mov_imm("rdi", 12) + SYSCALL + HLT
+
+    for j in jumps:
+        struct.pack_into("<i", c, j + 2, bad_at - (j + 6))
+    struct.pack_into("<i", c, ok_lea + 3, ok_rva - (entry_rva + ok_end))
+    struct.pack_into("<i", c, bad_lea + 3, bad_rva - (entry_rva + bad_end))
+    return bytes(c)
+
+
 def build(kind="static"):
     interp = b"/lib64/ld-linux-x86-64.so.2\x00"
     phnum = 2 if kind == "dynamic" else 1
@@ -253,7 +315,15 @@ def build(kind="static"):
     # Lay the body out first so the message address is known before the code
     # that points at it is emitted.
     body_at = entry
-    if kind == "rogue":
+    if kind == "protect":
+        probe = protect_code(0, 0, 0)
+        ok_rva = body_at + len(probe)
+        bad_rva = ok_rva + len(MSG_PROT)
+        text = protect_code(entry, ok_rva, bad_rva)
+        assert len(text) == len(probe), (len(text), len(probe))
+        body = text + MSG_PROT + MSG_NOPROT
+        msg_rva, disp, lea_end = ok_rva, 0, 0
+    elif kind == "rogue":
         probe = rogue_code(0, 0, 0)
         ok_rva = body_at + len(probe)
         bad_rva = ok_rva + len(MSG_GUARDED)
@@ -373,6 +443,16 @@ def verify(path):
     # RIP-relative lea says it is. Off by four here and the guest writes
     # whatever follows, which reads as a working loader printing garbage.
     rel_entry = entry - va
+    if MSG_PROT in b:
+        claim("it maps, hides and re-probes the same page",
+              b.count(SYSCALL) == 8)
+        claim("it checks two answers against 0 and one against EFAULT",
+              b.count(bytes([0x48, 0x83, 0xF8, 0x00])) == 2
+              and b.count(bytes([0x48, 0x83, 0xF8, 0xF2])) == 1)
+        claim("it exits 11 when the kernel agreed and 12 when it did not",
+              bytes([0x48, 0xC7, 0xC7, 11, 0, 0, 0]) in b
+              and bytes([0x48, 0xC7, 0xC7, 12, 0, 0, 0]) in b)
+        return ok
     if MSG_GUARDED in b:
         claim("it probes two guest pointers it was never given",
               b.count(b"\x00\x10\x00\x00") >= 2)
@@ -420,7 +500,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("out")
     ap.add_argument("--kind",
-                    choices=["static", "dynamic", "fixed", "memory", "rogue"],
+                    choices=["static", "dynamic", "fixed", "memory", "rogue",
+                             "protect"],
                     default="static")
     ap.add_argument("--verify", action="store_true")
     a = ap.parse_args()

@@ -209,6 +209,11 @@ pub const SUITES: &[Suite] = &[
         about: "the ELF reader, and every field a hostile file could lie about",
         run: linux_selftest,
     },
+    Suite {
+        name: "paging",
+        about: "page rights, and a write to a read-only page that has to fault",
+        run: paging_selftest,
+    },
 ];
 
 /// The ported picture decoder.
@@ -234,6 +239,27 @@ fn doom_selftest() -> bool {
     // -- an aggregator missing a module, a list built behind a condition that
     // stopped holding -- passes in exactly the same silence as one that
     // checked everything, and this suite aggregates five modules now.
+    kprintln!("    {} claim(s)", n);
+    ok
+}
+
+/// Page rights, and whether they are enforced or merely recorded.
+///
+/// This one genuinely faults on purpose, inside `recover::guard`, because a
+/// permission nobody has watched the processor refuse is a permission written
+/// in a comment. Everything else about page tables can be asserted by reading
+/// them back; enforcement cannot.
+fn paging_selftest() -> bool {
+    use crate::kprintln;
+    let mut ok = true;
+    let mut n = 0usize;
+    for (what, good) in crate::mem::paging::checks() {
+        n += 1;
+        if !good {
+            kprintln!("    FAIL: {}", what);
+            ok = false;
+        }
+    }
     kprintln!("    {} claim(s)", n);
     ok
 }
@@ -270,7 +296,7 @@ fn linux_selftest() -> bool {
 /// says it exists to prevent. A `static` cannot be read in a const context, so
 /// the array cannot be measured directly; naming its length is the next best
 /// thing and it is now the only place the number appears.
-const SLOTS: usize = 34;
+const SLOTS: usize = 35;
 
 /// One slot per suite. Indexed by position in `SUITES`, which is a constant,
 /// so the table cannot get out of step with the list.

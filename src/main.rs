@@ -1089,6 +1089,23 @@ fn install_paging(boot: &BootInfo, frames: &mut mem::frame::EarlyFrames) {
                 limit / (1024 * 1024),
                 frames.allocated_frames()
             );
+            // Both change what a page table entry *means*, so they go on
+            // immediately after the map this kernel built becomes the map the
+            // processor is using, and before anything has a chance to rely on
+            // a permission that was not being enforced.
+            //
+            // Neither changes anything today. Everything is mapped writable
+            // and nothing has ever set bit 63, so the map means exactly what
+            // it meant a moment earlier. What they buy is that read-only and
+            // no-execute stop being decorative the first time anything asks
+            // for them.
+            cpu::enable_wp();
+            let nx = cpu::enable_nx();
+            kprintln!(
+                "[boot] page rights  wp={}  nx={}",
+                if cpu::wp_on() { 1 } else { 0 },
+                if nx { 1 } else { 0 }
+            );
         }
         None => {
             console::set_color(LTRED);

@@ -105,6 +105,79 @@ pub fn without_interrupts<R>(f: impl FnOnce() -> R) -> R {
 /// The `xchg` dance around `rbx` is not optional: LLVM reserves that register
 /// internally, so `out("ebx")` is rejected outright. We stash it, run cpuid,
 /// then swap the result out and the original back.
+/// # Safety
+/// Clearing a bit the kernel depends on -- paging, protected mode -- is the
+/// last thing this machine does.
+pub unsafe fn write_cr0(v: u64) {
+    unsafe { asm!("mov cr0, {}", in(reg) v, options(nostack, preserves_flags)) };
+}
+
+/// Drop one page's translation from the TLB.
+///
+/// # Safety
+/// Harmless on any address. Wrong only by omission: a permission change
+/// without this leaves the old translation cached and the change silently
+/// unenforced for as long as the entry survives.
+pub unsafe fn invlpg(at: u64) {
+    unsafe { asm!("invlpg [{}]", in(reg) at, options(nostack, preserves_flags)) };
+}
+
+/// `CR0.WP`. Whether ring 0 respects the read-only bit in a page table entry.
+const CR0_WP: u64 = 1 << 16;
+/// `EFER.NXE`. Whether bit 63 of a page table entry means no-execute.
+const EFER_NXE: u64 = 1 << 11;
+const IA32_EFER: u32 = 0xC000_0080;
+
+/// Make read-only mean read-only, even here.
+///
+/// **Without `CR0.WP`, a write from ring 0 ignores the R/W bit entirely.**
+/// Every instruction in this kernel runs at ring 0, and so does every guest
+/// binary, so a page marked read-only without this is a page marked read-only
+/// in a comment. Turning it on costs nothing today, because the identity map
+/// makes everything writable, and it is what any future read-only page rests
+/// on.
+///
+/// It also catches a class of kernel bug for free, once anything is marked
+/// read-only: writing through a stale pointer into constant data becomes a
+/// fault at the write instead of a wrong answer somewhere later.
+pub fn enable_wp() {
+    unsafe { write_cr0(read_cr0() | CR0_WP) };
+}
+
+pub fn wp_on() -> bool {
+    read_cr0() & CR0_WP != 0
+}
+
+/// Whether this part implements no-execute at all. CPUID.80000001H:EDX[20].
+pub fn nx_supported() -> bool {
+    cpuid(0x8000_0001, 0)[3] & (1 << 20) != 0
+}
+
+/// Make bit 63 of a page table entry mean no-execute.
+///
+/// Gated on CPUID for the reason `dev::power` gates its MSRs: writing a
+/// reserved bit of `EFER` raises #GP, and every vector but `#BP` here is
+/// fatal. Answers whether it is on afterwards.
+///
+/// Safe to turn on at any point, and this is worth stating because it looks
+/// like it should not be: enabling `NXE` changes the meaning of bit 63 in
+/// every entry that already exists, and nothing in this kernel has ever set
+/// it. So the map means exactly what it meant a moment earlier.
+pub fn enable_nx() -> bool {
+    if !nx_supported() {
+        return false;
+    }
+    unsafe {
+        let efer = rdmsr(IA32_EFER);
+        wrmsr(IA32_EFER, efer | EFER_NXE);
+        rdmsr(IA32_EFER) & EFER_NXE != 0
+    }
+}
+
+pub fn nx_on() -> bool {
+    unsafe { rdmsr(IA32_EFER) & EFER_NXE != 0 }
+}
+
 pub fn cpuid(leaf: u32, sub: u32) -> [u32; 4] {
     let eax: u32;
     let ebx_slot: u64;
