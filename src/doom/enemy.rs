@@ -163,7 +163,7 @@ fn do_move(lv: &Level, objs: &mut Objs, i: usize, q: &Quarry) -> bool {
         (
             o.x + XSPEED[dir as usize] * speed,
             o.y + YSPEED[dir as usize] * speed,
-            o.z_floor(lv),
+            o.z,
         )
     };
     // The player is solid too, and is not in the object list.

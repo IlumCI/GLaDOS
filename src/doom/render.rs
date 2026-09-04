@@ -1050,10 +1050,12 @@ impl Renderer {
             // Height and light read live from the sector, so a thing standing
             // on a lift rides it and one in a room that darkens goes dark.
             let Some(sec) = lv.sectors.get(b.sector) else { continue };
-            // Feet, which for something hanging from the ceiling is not the
-            // floor. Read live from the sector either way, so a thing on a
-            // lift rides it and one in a room that darkens goes dark.
-            let bz = b.z(sec.floor as f32, sec.ceiling as f32);
+            // Feet, read off the object rather than computed from the sector.
+            // It was computed until things could fly, and the light still is:
+            // a thing in a room that darkens goes dark, and one on a lift now
+            // rides it because `motion::z_movement` pushes it up rather than
+            // because the arithmetic never let it fall behind.
+            let bz = b.z;
             let blight = sec.light;
             let lat = dx * sin - dy * cos;
             let inv = 1.0 / depth;

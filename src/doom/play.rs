@@ -285,8 +285,7 @@ fn pickups(lv: &Level, p: &mut Player, things: &mut super::sprite::Things) {
         if (px - o.x).abs() >= reach || (py - o.y).abs() >= reach {
             return true;
         }
-        let Some(sec) = lv.sectors.get(o.sector) else { return true };
-        let delta = o.z(sec.floor as f32, sec.ceiling as f32) - pz;
+        let delta = o.z - pz;
         if delta > HEIGHT || delta < -REACH_DOWN {
             return true;
         }
@@ -520,6 +519,12 @@ fn tic(lv: &mut Level, p: &mut Player, th: &mut Thinkers, things: &mut super::sp
     // The objects run on the same clock as the doors, which is the point of
     // there being one: a thing animating off the frame rate would speed up
     // whenever the player looked at a wall.
+    // Everything that carries momentum moves, before the state machines run.
+    // DOOM's order: a missile arriving at a wall this tic explodes on it
+    // rather than a tic later.
+    let mut hits: alloc::vec::Vec<(usize, super::motion::Hit)> = alloc::vec::Vec::new();
+    super::motion::run(&*lv, &mut things.objs, &mut hits);
+
     let mut fired: alloc::vec::Vec<Fired> = alloc::vec::Vec::new();
     things.tick(&mut fired);
     // A barrel entering its explosion state fifteen tics after it died, and

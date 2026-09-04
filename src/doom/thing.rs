@@ -56,6 +56,29 @@ pub struct Obj {
     pub tics: i16,
     pub x: f32,
     pub y: f32,
+    /// Where its feet are.
+    ///
+    /// **Stored, and it was derived until projectiles needed it.** A thing
+    /// standing on the floor can have its height computed from the sector it
+    /// is in, which is what this did, and it is exactly right for anything
+    /// that never leaves the ground. A rocket leaves the ground.
+    ///
+    /// The derived form was not merely simpler, it was *free*: a lift raising
+    /// a sector carried whatever stood in it with no code at all. That is
+    /// paid for now by `motion::z_movement`, which clamps a thing up to its
+    /// floor and drops it under gravity when the floor falls away -- DOOM's
+    /// own arrangement, and the reason the lift is a test rather than an
+    /// incidental.
+    pub z: f32,
+    /// How fast it is going, per tic.
+    ///
+    /// Zero for everything the map places: a barrel does not drift and a
+    /// monster walks by having its position set, not by being pushed. What
+    /// carries momentum is what was *spawned* -- a missile -- and the thrust
+    /// a blast would give a corpse, which is not modelled.
+    pub momx: f32,
+    pub momy: f32,
+    pub momz: f32,
     /// The way it is pointing, in radians.
     pub angle: f32,
     /// The sector it stands in, rather than the height and light that sector
@@ -106,17 +129,37 @@ impl Obj {
     /// Answers nothing for a kind whose spawn state is `S_NULL`, which is a
     /// real row rather than a missing one -- a teleport destination is an
     /// object whose whole job is to be a marker.
-    pub fn spawn(kind: u16, x: f32, y: f32, angle: f32, sector: usize) -> Option<Obj> {
+    pub fn spawn(
+        kind: u16,
+        x: f32,
+        y: f32,
+        angle: f32,
+        sector: usize,
+        floor: f32,
+        ceiling: f32,
+    ) -> Option<Obj> {
         let k = info::KINDS.get(kind as usize)?;
         if k.spawn == 0 {
             return None;
         }
+        // On the floor, or hanging from the ceiling. DOOM decides this at
+        // spawn and never again: a hanging corpse whose ceiling later moves
+        // does not follow it.
+        let z = if k.flags & info::MF_SPAWNCEILING != 0 {
+            ceiling - k.height as f32
+        } else {
+            floor
+        };
         let mut o = Obj {
             kind,
             state: 0,
             tics: 0,
             x,
             y,
+            z,
+            momx: 0.0,
+            momy: 0.0,
+            momz: 0.0,
             angle,
             sector,
             health: k.health,
@@ -305,12 +348,30 @@ impl Obj {
         self.flags & info::MF_COUNTKILL != 0
     }
 
-    /// Where its feet are, looked up in the level.
-    pub fn z_floor(&self, lv: &super::level::Level) -> f32 {
-        match lv.sectors.get(self.sector) {
-            Some(sec) => self.z(sec.floor as f32, sec.ceiling as f32),
-            None => 0.0,
-        }
+    /// The floor of the sector it is standing in.
+    ///
+    /// Not the same as `z` any more: a thing in the air is above its floor,
+    /// which is the whole point of there being two numbers.
+    pub fn floor_under(&self, lv: &super::level::Level) -> f32 {
+        lv.sectors.get(self.sector).map(|s| s.floor as f32).unwrap_or(0.0)
+    }
+
+    /// And the ceiling over it.
+    pub fn ceiling_over(&self, lv: &super::level::Level) -> f32 {
+        lv.sectors
+            .get(self.sector)
+            .map(|s| s.ceiling as f32)
+            .unwrap_or(0.0)
+    }
+
+    /// Whether it falls. A missile does not, and neither does a lost soul.
+    pub fn falls(&self) -> bool {
+        self.flags & info::MF_NOGRAVITY == 0
+    }
+
+    /// Whether it is a missile in flight.
+    pub fn missile(&self) -> bool {
+        self.flags & info::MF_MISSILE != 0
     }
 
     /// The four-character sprite name the state it is in wears.
@@ -318,18 +379,6 @@ impl Obj {
         info::frame_of(self.state).map(|(n, _)| n)
     }
 
-    /// Where its feet are, given the sector it stands in.
-    ///
-    /// Takes the two heights rather than the level, so this file needs to know
-    /// nothing about maps -- which is what keeps the state machine testable
-    /// without one.
-    pub fn z(&self, floor: f32, ceiling: f32) -> f32 {
-        if self.hangs() {
-            ceiling - self.height()
-        } else {
-            floor
-        }
-    }
 }
 
 /// An action that fired, by whom, and where.
@@ -472,6 +521,10 @@ fn bare() -> Obj {
         tics: 0,
         x: 0.0,
         y: 0.0,
+        z: 0.0,
+        momx: 0.0,
+        momy: 0.0,
+        momz: 0.0,
         angle: 0.0,
         sector: 0,
         health: 0,
@@ -541,7 +594,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     // destination is exactly this: a real row with a real doomednum.
     out.push((
         "a marker is a kind that spawns into nothing",
-        info::row_of(14).is_some_and(|r| Obj::spawn(r, 0.0, 0.0, 0.0, 0).is_none()),
+        info::row_of(14).is_some_and(|r| Obj::spawn(r, 0.0, 0.0, 0.0, 0, 0.0, 128.0).is_none()),
     ));
 
     // And one that does not is. A barrel spawns, is alive, and has health to
@@ -549,7 +602,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     out.push((
         "a barrel spawns with health and a state",
         info::row_of(2035)
-            .and_then(|r| Obj::spawn(r, 0.0, 0.0, 0.0, 0))
+            .and_then(|r| Obj::spawn(r, 0.0, 0.0, 0.0, 0, 0.0, 128.0))
             .is_some_and(|o| o.state != 0 && o.health > 0 && o.tics > 0),
     ));
 

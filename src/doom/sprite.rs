@@ -432,12 +432,15 @@ pub fn collect(lv: &Level, sprites: &Sprites) -> Things {
         // is dropped rather than placed at zero, which in a map with a raised
         // floor would bury it.
         let Some(sector) = lv.sector_index_at(t.x as i32, t.y as i32) else { continue };
+        let Some(sec) = lv.sectors.get(sector) else { continue };
         let Some(o) = Obj::spawn(
             row,
             t.x as f32,
             t.y as f32,
             math::deg_to_rad(t.angle),
             sector,
+            sec.floor as f32,
+            sec.ceiling as f32,
         ) else {
             continue;
         };

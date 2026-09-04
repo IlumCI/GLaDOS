@@ -57,6 +57,7 @@ pub mod draw;
 pub mod enemy;
 pub mod info;
 pub mod math;
+pub mod motion;
 pub mod pic;
 pub mod play;
 pub mod player;
@@ -98,6 +99,7 @@ pub fn checks() -> alloc::vec::Vec<(&'static str, bool)> {
     out.extend(play::checks());
     out.extend(player::checks());
     out.extend(enemy::checks());
+    out.extend(motion::checks());
     out.extend(rng::checks());
     out.extend(shoot::checks());
     out.extend(specials::checks());
