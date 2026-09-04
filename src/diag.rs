@@ -204,6 +204,11 @@ pub const SUITES: &[Suite] = &[
         about: "the picture decoder, the level indexes, and the line opening",
         run: doom_selftest,
     },
+    Suite {
+        name: "linux",
+        about: "the ELF reader, and every field a hostile file could lie about",
+        run: linux_selftest,
+    },
 ];
 
 /// The ported picture decoder.
@@ -233,6 +238,28 @@ fn doom_selftest() -> bool {
     ok
 }
 
+/// The reader for binaries this kernel did not compile.
+///
+/// Same bargain as `doom_selftest`: the claims answer names and verdicts and
+/// the talking happens here. A foreign-binary parser is the one place in this
+/// tree where every negative matters more than the positive, so the count is
+/// printed for the reason it is printed there -- a list that returned early
+/// passes in exactly the same silence as one that checked everything.
+fn linux_selftest() -> bool {
+    use crate::kprintln;
+    let mut ok = true;
+    let mut n = 0usize;
+    for (what, good) in crate::linux::checks() {
+        n += 1;
+        if !good {
+            kprintln!("    FAIL: {}", what);
+            ok = false;
+        }
+    }
+    kprintln!("    {} claim(s)", n);
+    ok
+}
+
 /// How many suites there are, and therefore how many verdict slots.
 ///
 /// One number rather than two, because the assertion below used to compare
@@ -243,7 +270,7 @@ fn doom_selftest() -> bool {
 /// says it exists to prevent. A `static` cannot be read in a const context, so
 /// the array cannot be measured directly; naming its length is the next best
 /// thing and it is now the only place the number appears.
-const SLOTS: usize = 33;
+const SLOTS: usize = 34;
 
 /// One slot per suite. Indexed by position in `SUITES`, which is a constant,
 /// so the table cannot get out of step with the list.

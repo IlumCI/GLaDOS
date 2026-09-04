@@ -30,6 +30,7 @@ mod gfx;
 mod gpu;
 mod json;
 mod aiksi;
+mod linux;
 mod log;
 mod mem;
 mod net;
