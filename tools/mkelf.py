@@ -117,9 +117,17 @@ def lea_rip(reg, disp):
     return bytes([_rex(r=n >> 3), 0x8D, 0x05 | ((n & 7) << 3)]) + struct.pack("<i", disp)
 
 
+def cmp_imm8(reg, imm):
+    """cmp reg, imm8 sign-extended to 64."""
+    n = REG[reg]
+    return bytes([_rex(b=n >> 3), 0x83, 0xF8 | (n & 7), imm & 0xFF])
+
+
 SYSCALL = b"\x0f\x05"
 HLT = b"\xf4"
 MSG_OK = b"brk, mmap and arch_prctl all answered; FS read back\n"
+MSG_GUARDED = b"both wild pointers were refused with EFAULT\n"
+MSG_UNGUARDED = b"a wild pointer got through\n"
 MSG_BAD = b"FS did not read back\n"
 
 
@@ -189,6 +197,55 @@ def mem_code(entry_rva, ok_rva, bad_rva):
     return bytes(c)
 
 
+def rogue_code(entry_rva, ok_rva, bad_rva):
+    """Hand the kernel two pointers nothing ever gave us.
+
+    0x1000 is a real, mapped, kernel-owned page in an identity-mapped machine,
+    which is exactly what makes it the right probe: it is not a wild address
+    that would fault on its own, it is a *valid* address the guest has no
+    business naming. An unchecked kernel would happily print whatever lives
+    there, or post the FS base into it.
+
+    Both calls must answer -14 (EFAULT). The program exits 9 when the guard
+    held and 10 when it did not, so the harness reads a number rather than
+    a paragraph.
+    """
+    c = bytearray()
+    # write(1, 0x1000, 16) through a page nothing handed us
+    c += mov_imm("rax", 1) + mov_imm("rdi", 1) + mov_imm("rsi", 0x1000)
+    c += mov_imm("rdx", 16) + SYSCALL
+    c += cmp_imm8("rax", -14)
+    j1 = len(c)
+    c += b"\x0f\x85" + struct.pack("<i", 0)
+
+    # arch_prctl(ARCH_GET_FS, 0x1000): eight bytes posted into kernel memory
+    c += mov_imm("rax", 158) + mov_imm("rdi", 0x1003) + mov_imm("rsi", 0x1000) + SYSCALL
+    c += cmp_imm8("rax", -14)
+    j2 = len(c)
+    c += b"\x0f\x85" + struct.pack("<i", 0)
+
+    c += mov_imm("rax", 1) + mov_imm("rdi", 1)
+    ok_lea = len(c)
+    c += lea_rip("rsi", 0)
+    ok_end = len(c)
+    c += mov_imm("rdx", len(MSG_GUARDED)) + SYSCALL
+    c += mov_imm("rax", 231) + mov_imm("rdi", 9) + SYSCALL + HLT
+
+    bad_at = len(c)
+    c += mov_imm("rax", 1) + mov_imm("rdi", 1)
+    bad_lea = len(c)
+    c += lea_rip("rsi", 0)
+    bad_end = len(c)
+    c += mov_imm("rdx", len(MSG_UNGUARDED)) + SYSCALL
+    c += mov_imm("rax", 231) + mov_imm("rdi", 10) + SYSCALL + HLT
+
+    struct.pack_into("<i", c, j1 + 2, bad_at - (j1 + 6))
+    struct.pack_into("<i", c, j2 + 2, bad_at - (j2 + 6))
+    struct.pack_into("<i", c, ok_lea + 3, ok_rva - (entry_rva + ok_end))
+    struct.pack_into("<i", c, bad_lea + 3, bad_rva - (entry_rva + bad_end))
+    return bytes(c)
+
+
 def build(kind="static"):
     interp = b"/lib64/ld-linux-x86-64.so.2\x00"
     phnum = 2 if kind == "dynamic" else 1
@@ -196,7 +253,15 @@ def build(kind="static"):
     # Lay the body out first so the message address is known before the code
     # that points at it is emitted.
     body_at = entry
-    if kind == "memory":
+    if kind == "rogue":
+        probe = rogue_code(0, 0, 0)
+        ok_rva = body_at + len(probe)
+        bad_rva = ok_rva + len(MSG_GUARDED)
+        text = rogue_code(entry, ok_rva, bad_rva)
+        assert len(text) == len(probe), (len(text), len(probe))
+        body = text + MSG_GUARDED + MSG_UNGUARDED
+        msg_rva, disp, lea_end = ok_rva, 0, 0
+    elif kind == "memory":
         probe = mem_code(0, 0, 0)
         ok_rva = body_at + len(probe)
         bad_rva = ok_rva + len(MSG_OK)
@@ -308,6 +373,16 @@ def verify(path):
     # RIP-relative lea says it is. Off by four here and the guest writes
     # whatever follows, which reads as a working loader printing garbage.
     rel_entry = entry - va
+    if MSG_GUARDED in b:
+        claim("it probes two guest pointers it was never given",
+              b.count(b"\x00\x10\x00\x00") >= 2)
+        claim("it compares each answer against EFAULT",
+              b.count(bytes([0x48, 0x83, 0xF8, 0xF2])) == 2)
+        claim("it exits 9 when guarded and 10 when not",
+              bytes([0x48, 0xC7, 0xC7, 9, 0, 0, 0]) in b
+              and bytes([0x48, 0xC7, 0xC7, 10, 0, 0, 0]) in b)
+        claim("it ends in hlt on both paths", b.count(b"\xf4") >= 2)
+        return ok
     if MSG_OK in b:
         # The memory fixture: two messages, two leas, and the check that
         # matters is that both point at their own text.
@@ -344,7 +419,8 @@ def verify(path):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("out")
-    ap.add_argument("--kind", choices=["static", "dynamic", "fixed", "memory"],
+    ap.add_argument("--kind",
+                    choices=["static", "dynamic", "fixed", "memory", "rogue"],
                     default="static")
     ap.add_argument("--verify", action="store_true")
     a = ap.parse_args()

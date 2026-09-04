@@ -1231,6 +1231,8 @@ parser.
 .\tools\venv\Scripts\python.exe tools\mkelf.py out\hello.elf
 .\tools\venv\Scripts\python.exe tools\mkelf.py out\dyn.elf --kind dynamic
 .\tools\venv\Scripts\python.exe tools\mkelf.py out\fixed.elf --kind fixed
+.\tools\venv\Scripts\python.exe tools\mkelf.py out\mem.elf --kind memory
+.\tools\venv\Scripts\python.exe tools\mkelf.py out\rogue.elf --kind rogue
 .\tools\venv\Scripts\python.exe tools\mkfat.py .qemu\nvme.img out\hello.elf out\dyn.elf out\fixed.elf
 .\tools\venv\Scripts\python.exe tools\drive.py --qemu-extra "-accel whpx -cpu max" `
   "initiative off" "fat get /HELLO.ELF /tmp/hello" "linux run /tmp/hello"
@@ -1307,6 +1309,52 @@ The break grew by exactly 4096, the mapping came back page-aligned, and exit 7
 is the branch the guest only reaches if the FS base it set came back through
 the call that reads it.
 
+**Every guest pointer is bounds-checked, and that is the whole of the
+hardening.** A guest at ring 0 shares an address space with the kernel, so a
+pointer it passes is not merely possibly-invalid: it is a pointer at anything
+at all, the page tables and the model's weights included. `Space` records every
+range the loader handed out (image, stack, break, and each live mapping) and
+`owns` is asked before any syscall reads or writes through a guest address.
+`EFAULT` otherwise, as Linux has it.
+
+It cannot stop a guest dereferencing a bad pointer *itself*, and nothing at CPL
+0 can. What it stops is the kernel doing it on the guest's behalf, which is the
+difference between a crashed program and a corrupted kernel.
+
+Two calls needed it and neither had it: `write` built a slice straight from
+`rsi`, and `arch_prctl(ARCH_GET_FS)` wrote eight bytes wherever `rsi` pointed,
+which is a kernel-corrupting primitive handed to the program.
+
+`--kind rogue` proves it from the guest's side rather than only in a claim. It
+asks for `0x1000`, which is deliberately a *real, mapped, kernel-owned* page:
+not a wild address that would fault on its own, a valid one the guest has no
+business naming. An unchecked kernel prints whatever lives there.
+
+    both wild pointers were refused with EFAULT
+        1 write        0x1 0x1000 0x10 -> -14
+      158 arch_prctl   0x1003 0x1000 0x10 -> -14
+        1 write        0x1 0x17f511f 0x2c -> 44
+      231 exit_group   0x9 -> 0
+      exited 9 after 4 syscall(s)
+
+**`sys_write` used to swallow bytes and report success.** `for chunk in
+core::str::from_utf8(bytes)` iterates a `Result`, so the body ran zero times on
+the error arm: a guest writing Latin-1 or raw bytes printed *nothing* and still
+got the full length back. That is the worst shape this call can take, because
+the guest has no way to find out. Lossy conversion now.
+
+Three more gates, each closing an arithmetic hole a hostile file could reach:
+a segment whose `vaddr + memsz` overflows is refused at parse, where the field
+is read; an image span over 64 MiB is refused by the loader with a reason about
+the file rather than about the machine; and `mmap` caps its length, because
+page rounding multiplies and would wrap for a length near `usize::MAX`, handing
+back a small allocation for a huge request.
+
+`install` moved from `load` to `run`. A guest that was loaded and never run
+would otherwise leave `SPACE` naming memory freed when its `Guest` dropped, so
+the next thing to consult it would be reading a dangling range it believed it
+had verified.
+
 **`mprotect` is deliberately still unimplemented**, and it is the next
 judgement call rather than an oversight. Every page here is `PRESENT |
 WRITABLE` and executable -- there is no NX constant in `mem::paging` and
@@ -1322,7 +1370,7 @@ bounded at 1024 entries, because what matters is *which* calls appear rather
 than how often.
 
 `linux` reports whether the trap is armed, `linux run <path>` loads and runs,
-`linux trace` prints what the last guest asked for. `diag linux` is 40 claims.
+`linux trace` prints what the last guest asked for. `diag linux` is 53 claims.
 
 ### Testing
 

@@ -71,6 +71,16 @@ const EBADF: u64 = (-9i64) as u64;
 const EPERM: u64 = (-1i64) as u64;
 const ENOMEM: u64 = (-12i64) as u64;
 const EINVAL: u64 = (-22i64) as u64;
+const EFAULT: u64 = (-14i64) as u64;
+
+/// The largest single mapping a guest may ask for.
+///
+/// Not a policy about greed. `page_up` rounds up and multiplies, which wraps
+/// for a length near `usize::MAX`, so an unbounded request would quietly
+/// produce a *small* allocation and hand back a pointer to far less memory
+/// than the guest was told it had. A cap makes that unreachable at the one
+/// place it can be checked cheaply.
+const MAP_MAX: u64 = 64 * 1024 * 1024;
 
 /// What the guest had in its registers when it trapped.
 ///
@@ -206,13 +216,39 @@ pub struct Mapping {
     pub len: usize,
 }
 
-/// What a guest owns besides its image.
+/// A range this kernel handed to the guest.
+#[derive(Clone, Copy)]
+pub struct Region {
+    pub at: u64,
+    pub len: usize,
+}
+
+impl Region {
+    fn holds(&self, at: u64, end: u64) -> bool {
+        at >= self.at && end <= self.at.saturating_add(self.len as u64)
+    }
+}
+
+/// The three ranges a loader hands over, kept together so a caller cannot
+/// pass them in the wrong order.
+#[derive(Clone, Copy)]
+pub struct Regions {
+    pub image: Region,
+    pub stack: Region,
+    pub brk: Region,
+}
+
+/// What a guest owns.
 ///
 /// **One guest at a time**, which is why this is a global rather than
 /// something the dispatcher is handed. The dispatcher is called from three
 /// lines of assembly and has nowhere to carry a handle; the constraint is real
 /// and is the same one that makes the handler's single static stack safe.
 pub struct Space {
+    /// Every range the loader gave this guest, which is the whole of what
+    /// `owns` is allowed to say yes to.
+    pub image: Region,
+    pub stack: Region,
     /// Where `brk` began, where it stands, and where it may not pass.
     pub brk_start: u64,
     pub brk_now: u64,
@@ -224,15 +260,52 @@ pub struct Space {
     pub saved_fs: u64,
 }
 
+impl Space {
+    /// Whether a range the guest named is one this kernel actually gave it.
+    ///
+    /// **This is the whole of the hardening.** A guest at ring 0 shares an
+    /// address space with the kernel, so a pointer it passes is not merely
+    /// possibly-invalid, it is a pointer at anything at all: the page tables,
+    /// the heap's free list, the model's weights. Every syscall that reads or
+    /// writes through a guest-supplied address asks this first and answers
+    /// `EFAULT` when the answer is no.
+    ///
+    /// It cannot stop a guest dereferencing that pointer *itself*, and nothing
+    /// at CPL 0 can. What it stops is the kernel doing it on the guest's
+    /// behalf, which is the part that turns a bad argument into a corrupted
+    /// kernel rather than a crashed program.
+    pub fn owns(&self, at: u64, len: usize) -> bool {
+        let Some(end) = at.checked_add(len as u64) else { return false };
+        self.image.holds(at, end)
+            || self.stack.holds(at, end)
+            || (at >= self.brk_start && end <= self.brk_end)
+            || self.maps.iter().any(|m| Region { at: m.at, len: m.len }.holds(at, end))
+    }
+}
+
 static SPACE: Racy<Option<Space>> = Racy::new(None);
 
-/// Hand the dispatcher the region `brk` will grow into.
-pub fn install(brk_start: u64, brk_bytes: usize) {
+/// Whether the running guest owns this range. False when nothing is running,
+/// which is the right answer: with no guest there is no address it may name.
+fn owns(at: u64, len: usize) -> bool {
+    unsafe { SPACE.get().as_ref().is_some_and(|s| s.owns(at, len)) }
+}
+
+/// Hand the dispatcher every region the loader gave this guest.
+///
+/// Called from `run` rather than from `load`, and that ordering is the fix for
+/// a real hazard: a guest that was loaded and never run would otherwise leave
+/// `SPACE` naming memory freed when its `Guest` dropped, and the next thing to
+/// read it would be reading a dangling range it believed it had verified.
+pub fn install(image: Region, stack: Region, brk: Region) {
+    teardown();
     unsafe {
         *SPACE.get() = Some(Space {
-            brk_start,
-            brk_now: brk_start,
-            brk_end: brk_start + brk_bytes as u64,
+            image,
+            stack,
+            brk_start: brk.at,
+            brk_now: brk.at,
+            brk_end: brk.at.saturating_add(brk.len as u64),
             maps: Vec::new(),
             saved_fs: 0,
         });
@@ -353,10 +426,23 @@ fn sys_write(fd: u64, buf: u64, len: usize) -> u64 {
     if fd != 1 && fd != 2 {
         return EBADF;
     }
-    let bytes = unsafe { core::slice::from_raw_parts(buf as *const u8, len) };
-    for chunk in core::str::from_utf8(bytes) {
-        crate::kprint!("{}", chunk);
+    // A zero-length write succeeds without the pointer being looked at, which
+    // is what Linux does and what an allocator flushing an empty buffer
+    // expects.
+    if len == 0 {
+        return 0;
     }
+    if !owns(buf, len) {
+        return EFAULT;
+    }
+    let bytes = unsafe { core::slice::from_raw_parts(buf as *const u8, len) };
+    // **Lossy, and the first version of this was silently not.** `from_utf8`
+    // answers a `Result`, and iterating a `Result` runs the body zero times on
+    // the error arm -- so a guest writing Latin-1 or raw bytes printed nothing
+    // at all and still got the full length back. A write that reports success
+    // and produces no output is the worst shape this call can take, because
+    // the guest has no way to find out.
+    crate::kprint!("{}", alloc::string::String::from_utf8_lossy(bytes));
     len as u64
 }
 
@@ -392,6 +478,9 @@ fn sys_brk(want: u64) -> u64 {
 fn sys_mmap(addr: u64, len: u64, _prot: u64, flags: u64, fd: u64, _off: u64) -> u64 {
     if len == 0 {
         return EINVAL;
+    }
+    if len > MAP_MAX {
+        return ENOMEM;
     }
     if flags & MAP_ANONYMOUS == 0 || fd as i64 != -1 {
         return ENOSYS;
@@ -453,6 +542,12 @@ fn sys_arch_prctl(code: u64, addr: u64) -> u64 {
             0
         }
         ARCH_GET_FS => {
+            // Eight bytes written wherever the guest points. Unchecked, this
+            // is a kernel-corrupting primitive handed to the program: it could
+            // name a page table, the heap's free list, or the model's weights.
+            if !owns(addr, 8) {
+                return EFAULT;
+            }
             let base = unsafe { crate::cpu::rdmsr(IA32_FS_BASE) };
             unsafe { (addr as *mut u64).write(base) };
             0
@@ -578,7 +673,8 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     // -ENOMEM would hand libc 0xFFFFFFFFFFFFFFF4 as a heap address.
     {
         let region = 0x10_0000u64;
-        install(region, 4096 * 4);
+        let fake = Region { at: region, len: 4096 * 4 };
+        install(fake, fake, fake);
         let first = sys_brk(0);
         let grown = sys_brk(region + 8192);
         let refused = sys_brk(region + 1_000_000);
@@ -600,7 +696,8 @@ pub fn checks() -> Vec<(&'static str, bool)> {
 
     // mmap's three refusals, each about this machine rather than the argument.
     {
-        install(0x10_0000, 4096);
+        let fake = Region { at: 0x10_0000, len: 4096 };
+        install(fake, fake, fake);
         let file_backed = sys_mmap(0, 4096, 3, MAP_ANONYMOUS, 3, 0);
         let fixed = sys_mmap(0x40_0000, 4096, 3, MAP_ANONYMOUS | MAP_FIXED, u64::MAX, 0);
         let empty = sys_mmap(0, 0, 3, MAP_ANONYMOUS, u64::MAX, 0);
@@ -629,10 +726,16 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     // arch_prctl, and the refusal that is the point of it.
     {
         let mut slot = 0u64;
+        let at = &mut slot as *mut u64 as u64;
+        // GET_FS writes eight bytes through a guest pointer, so it is bounds
+        // checked now, so the destination has to be a range the guest owns.
+        let owned = Region { at, len: 8 };
+        install(owned, owned, owned);
         let was = unsafe { crate::cpu::rdmsr(IA32_FS_BASE) };
         let set = sys_arch_prctl(ARCH_SET_FS, 0xDEAD_0000);
-        let got = sys_arch_prctl(ARCH_GET_FS, &mut slot as *mut u64 as u64);
+        let got = sys_arch_prctl(ARCH_GET_FS, at);
         unsafe { crate::cpu::wrmsr(IA32_FS_BASE, was) };
+        unsafe { *SPACE.get() = None };
         out.push((
             "a guest may set FS for its thread-local storage, and read it back",
             set == 0 && got == 0 && slot == 0xDEAD_0000,
@@ -651,6 +754,63 @@ pub fn checks() -> Vec<(&'static str, bool)> {
             unsafe { crate::cpu::rdmsr(IA32_FS_BASE) } == was,
         ));
     }
+
+    // Guest pointers, which is where a ring-0 guest is most dangerous to the
+    // kernel rather than to itself. A range the loader never handed out has to
+    // be refused before anything dereferences it.
+    {
+        let mut backing = [0u64; 64];
+        let at = backing.as_mut_ptr() as u64;
+        install(
+            Region { at, len: 512 },
+            Region { at, len: 512 },
+            Region { at, len: 512 },
+        );
+        out.push(("a range inside what the loader gave out is owned", owns(at, 8)));
+        out.push(("a range that runs off the end is not", !owns(at + 508, 8)));
+        out.push(("a range below it is not", !owns(at - 8, 8)));
+        out.push(("a null pointer is not", !owns(0, 8)));
+        out.push((
+            "a length that overflows the address is refused rather than wrapping",
+            !owns(u64::MAX - 4, 64),
+        ));
+        // The two calls that dereference a guest pointer.
+        out.push((
+            "a write through a pointer the guest does not own is EFAULT",
+            sys_write(1, 0, 16) == EFAULT,
+        ));
+        out.push((
+            "and arch_prctl will not post the FS base to one either",
+            sys_arch_prctl(ARCH_GET_FS, 0) == EFAULT,
+        ));
+        out.push((
+            "a zero-length write succeeds without the pointer being looked at",
+            sys_write(1, 0, 0) == 0,
+        ));
+        out.push((
+            "a mapping larger than the cap is refused, so the page rounding cannot wrap",
+            sys_mmap(0, MAP_MAX + 1, 3, MAP_ANONYMOUS, u64::MAX, 0) == ENOMEM,
+        ));
+        unsafe { *SPACE.get() = None };
+    }
+    out.push((
+        "with no guest running, no address is owned at all",
+        !owns(0x1000, 8),
+    ));
+    // A stack too small to hold the frame answers None rather than writing a
+    // truncated one somewhere the guest will not look.
+    let mut small = [0u8; 64];
+    out.push((
+        "a stack too small for the initial frame is refused",
+        build_stack(small.as_mut_ptr(), 64).is_none(),
+    ));
+    let mut big = [0u8; 512];
+    let sp = build_stack(big.as_mut_ptr(), 512);
+    out.push((
+        "and one large enough answers a 16-byte-aligned pointer inside itself",
+        sp.is_some_and(|v| v % 16 == 0 && v >= big.as_ptr() as u64
+            && v < big.as_ptr() as u64 + 512),
+    ));
 
     // The handler's stack has to be aligned, because the stub's `sub rsp, 8`
     // assumes a 16-aligned top and corrects for exactly nine pushes.
@@ -671,19 +831,24 @@ pub fn checks() -> Vec<(&'static str, bool)> {
 /// that never reads its arguments does not care -- and building it anyway
 /// costs six words and means the first program that *does* read them finds
 /// something shaped correctly rather than a fault.
-pub fn build_stack(top: *mut u8, size: usize) -> u64 {
+pub fn build_stack(base: *mut u8, size: usize) -> Option<u64> {
+    // Five words of frame plus eight of headroom. Answering `None` rather than
+    // clamping, because a stack too small to hold the frame is a caller bug
+    // and writing a truncated one would put argc somewhere the guest is not
+    // looking.
     let words = size / 8;
-    let base = top as *mut u64;
-    // Leave a gap below the very top: some prologues read a little above rsp.
-    let at = words.saturating_sub(8);
+    if words < 16 {
+        return None;
+    }
+    let at = words - 8;
     unsafe {
-        let p = base.add(at);
+        let p = (base as *mut u64).add(at);
         p.write(0); // argc
         p.add(1).write(0); // argv terminator
         p.add(2).write(0); // envp terminator
         p.add(3).write(0); // AT_NULL
         p.add(4).write(0);
-        p as u64
+        Some(p as u64)
     }
 }
 

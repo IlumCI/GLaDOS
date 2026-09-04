@@ -41,7 +41,18 @@ const GUEST_BRK: usize = 256 * 1024;
 /// only reason a tag is a number rather than a pointer.
 const TAG_GUEST: u64 = 0x4C4E_5800;
 
+/// The largest image this will place.
+///
+/// A file is free to claim a segment at address 0 and another at 2^40, and the
+/// span between them is what the allocation is sized from. `Exec::new` would
+/// fail on it anyway, but failing with "no room for the image" describes the
+/// machine when the truth is about the file.
+const MAX_SPAN: usize = 64 * 1024 * 1024;
+
 pub struct Guest {
+    /// Every range handed to this guest, which is what bounds-checks its
+    /// pointers once it is running.
+    regions: syscall::Regions,
     /// Held because dropping it frees the pages the guest is running from.
     _image: Exec,
     _stack: Exec,
@@ -58,13 +69,17 @@ pub fn load(bytes: &[u8]) -> Result<Guest, &'static str> {
     let img = elf::parse(bytes)?;
     syscall::runnable(&img)?;
     let (lo, hi) = img.span().ok_or("nothing to load")?;
-    let span = (hi - lo) as usize;
+    let span = hi.checked_sub(lo).ok_or("the segments span a range that runs backwards")? as usize;
+    if span > MAX_SPAN {
+        return Err("the image claims a span larger than this will place");
+    }
 
     let mut image = Exec::new(span).ok_or("no room for the image")?;
     let base = image.addr();
     for s in &img.segments {
-        let at = (s.vaddr - lo) as usize;
-        let from = bytes.get(s.offset..s.offset + s.filesz).ok_or("segment past the file")?;
+        let at = s.vaddr.checked_sub(lo).ok_or("a segment sits below the image's own base")? as usize;
+        let end = s.offset.checked_add(s.filesz).ok_or("a segment's file range overflows")?;
+        let from = bytes.get(s.offset..end).ok_or("segment past the file")?;
         if !image.write_at(at, from) {
             return Err("a segment does not fit inside the span its own headers describe");
         }
@@ -76,14 +91,25 @@ pub fn load(bytes: &[u8]) -> Result<Guest, &'static str> {
     }
 
     let brk = Exec::new(GUEST_BRK).ok_or("no room for a break region")?;
-    syscall::install(brk.addr(), GUEST_BRK);
-
     let stack = Exec::new(GUEST_STACK).ok_or("no room for a stack")?;
-    let stack_top = syscall::build_stack(stack.addr() as *mut u8, GUEST_STACK);
-    let entry = base + (img.entry - lo);
+    let stack_top =
+        syscall::build_stack(stack.addr() as *mut u8, GUEST_STACK).ok_or("the stack is too small")?;
+    // The entry has to land inside what was actually placed. A file is free to
+    // name one outside its own segments, and jumping there would leave the
+    // fault reporter naming a range this loader never armed.
+    let off = img.entry.checked_sub(lo).ok_or("the entry point sits below the image")?;
+    if off as usize >= span {
+        return Err("the entry point is outside every segment the file loads");
+    }
+    let entry = base + off;
     image.arm(TAG_GUEST);
 
     Ok(Guest {
+        regions: syscall::Regions {
+            image: syscall::Region { at: base, len: span },
+            stack: syscall::Region { at: stack.addr(), len: GUEST_STACK },
+            brk: syscall::Region { at: brk.addr(), len: GUEST_BRK },
+        },
         _image: image,
         _stack: stack,
         _brk: brk,
@@ -104,6 +130,9 @@ pub fn load(bytes: &[u8]) -> Result<Guest, &'static str> {
 /// them.
 pub unsafe fn run(g: &Guest) -> u64 {
     syscall::clear_trace();
+    // Installed here rather than in `load`, so a guest that was loaded and
+    // never run leaves nothing naming memory its `Guest` has since freed.
+    syscall::install(g.regions.image, g.regions.stack, g.regions.brk);
     unsafe { syscall::run(g.entry, g.stack_top) }
 }
 

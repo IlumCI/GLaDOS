@@ -203,6 +203,14 @@ pub fn parse(bytes: &[u8]) -> Result<Image, &'static str> {
         if memsz < filesz {
             return Err("a segment smaller in memory than on disk");
         }
+        // A `vaddr` near the top of the address space plus a `memsz` wraps, and
+        // `span` would then report a range that runs backwards -- which the
+        // loader turns into a subtraction that underflows and an offset far
+        // outside its own allocation. Checked here, where the field is read,
+        // rather than at every later arithmetic site.
+        if vaddr.checked_add(memsz as u64).is_none() {
+            return Err("a segment's address range overflows");
+        }
         segments.push(Segment { offset, vaddr, filesz, memsz, flags, align });
     }
     Ok(Image { entry, kind, segments, interp })
@@ -277,6 +285,13 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     out.push((
         "a segment smaller in memory than on disk is refused",
         parse(&good(&|b| b[64 + 40..64 + 48].copy_from_slice(&1u64.to_le_bytes()))).is_err(),
+    ));
+    out.push((
+        "a segment whose address range overflows is refused",
+        parse(&good(&|b| {
+            b[64 + 16..64 + 24].copy_from_slice(&(u64::MAX - 16).to_le_bytes());
+        }))
+        .is_err(),
     ));
     out.push((
         "a program header entry too small to hold one is refused",
