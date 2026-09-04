@@ -1205,7 +1205,7 @@ failure that matters: the old translation stays cached and the change is
 silently unenforced. `paging::query` reads the tables back rather than a shadow,
 so it cannot disagree with the hardware.
 
-**`diag paging` is 10 claims and one of them faults on purpose.** It makes a
+**`diag paging` is 13 claims and one of them faults on purpose.** It makes a
 heap page read-only, writes to it inside `cpu::recover::guard`, and requires the
 fault to arrive and the write not to land. Everything else about page tables can
 be asserted by reading them back; enforcement cannot, and a permission nobody
@@ -1504,16 +1504,145 @@ implement next, which is the question stage 0 exists to answer. The trace is
 bounded at 1024 entries, because what matters is *which* calls appear rather
 than how often.
 
-`linux` reports whether the trap is armed, `linux run <path>` loads and runs,
-`linux trace` prints what the last guest asked for. `diag linux` is 60 claims.
+`linux` reports whether the trap is armed, `linux run <path> [args...]` loads
+and runs, `linux trace` prints what the last guest asked for. `diag linux` is
+79 claims.
+
+### A filesystem a program written for Linux recognises
+
+`src/linux/fs.rs`. The store underneath is not a filesystem and `sysbox::tree`
+says so in its own header: a content-addressed Merkle tree where a copy is
+O(1), a snapshot is a hash, and `rm` detaches a name rather than destroying
+anything. None of that has an `open`. A Linux program expects the opposite set
+of things -- a path resolves to an inode, an inode has a size and a mode, a
+descriptor is a small integer with a cursor in it, and reading advances the
+cursor. This module is the translation, and it is a **view rather than a second
+store**: nothing here owns any bytes, every read goes to the tree and every
+listing comes from `sysbox::listing`.
+
+The descriptor table lives in `Space` beside the memory regions and is seeded
+with the three standard ones at `install`, so a guest that never opens anything
+still has somewhere to write. They are `Fd` variants rather than table entries
+with a magic path, which is what makes `lseek` on stdout answer `ESPIPE` from
+the type system instead of from a string comparison.
+
+Twelve calls, plus two that exist to stop a runtime concluding it failed to
+start: `read`, `open`, `openat`, `close`, `lseek`, `fstat`, `stat`, `lstat`,
+`newfstatat`, `getdents64`, `ioctl`, and `getpid`/`set_tid_address` answering 1
+because there is one process and it is the guest.
+
+**Opening for writing is refused, and that is a decision rather than a gap.** A
+write to a content-addressed store is a new root hash, so honouring `O_WRONLY`
+would give a guest binary a route to the namespace that goes around every gate
+`sysbox` puts in front of the shell -- the sandbox, the applet table, the
+snapshot. `EACCES`, and the day a guest needs to write, what it needs is a
+scratch subtree with the same jail an Aiksi program gets, not this call quietly
+growing a second meaning.
+
+**A descriptor-relative `openat` is refused too**, with `ENOSYS` and for a
+smaller reason: resolving one needs the directory's own path kept per open
+descriptor, and resolving it against the working directory instead would open a
+real file that is not the one the guest named. `AT_FDCWD` and absolute paths
+are the whole of what works.
+
+**An open file holds its whole contents.** `read_blob` answers a `Vec`, so the
+honest options were to keep that or to teach the store ranged reads. Keeping it
+makes `read` a slice and `lseek` an integer, and it means a guest opening a
+600 MB model file takes 600 MB of heap. What a guest reads today is
+configuration and text. When that stops being true this is the first thing to
+change, and it is written down here rather than discovered by an allocation
+failure.
+
+**There are no permissions, owners or times.** Everything reports mode 0644 or
+0755, uid 0 and a zero timestamp. A program branching on any of those gets a
+consistent answer rather than a true one, which is the right trade while the
+alternative is inventing a field the store does not have.
+
+**A path containing `..` is refused rather than normalised.** A tree with O(1)
+copies has no single parent to walk back to, so there is no correct answer, and
+a normalised path resolves to somewhere the guest did not name. `.` and doubled
+separators do collapse, since those have one answer.
+
+**`struct stat` is 144 bytes and the layout is an ABI rather than a choice.**
+Writing it a field short is not a smaller answer, it is a different structure,
+and libc reads past the end of what was written. `st_blocks` is in 512-byte
+units because that is what `du`-shaped callers divide by, so a one-byte file is
+one block and not zero.
+
+**A `linux_dirent64` is padded to eight because the kernel pads.** A guest
+walking the buffer adds `d_reclen` to its cursor, so an unpadded record leaves
+the next one misaligned and the guest reads a name out of the middle of an
+inode. `getdents64` snapshots the listing at `open`, since a directory that
+changed under a half-finished walk would hand out a shifting list and the tree
+has no cursor to offer instead.
+
+**Inode numbers are the first eight bytes of the SHA-256 of the path**, with
+the low bit set so none is zero. The tree has no inodes; what programs use the
+number for is telling two paths apart and spotting hard links, and a hash of
+the path answers both.
+
+`build_stack` lays out real argc, argv, envp and auxv, and the shell passes the
+path as argv[0] because that is what a program expects and what busybox
+dispatches on.
+
+**Two programs, and they are the measurement.** `tools/mkelf.py --kind cat` and
+`--kind grep` are hand-assembled the way every other fixture is. `cat` is the
+smallest thing that exercises the whole projection at once: a path travels from
+the shell through argv into `openat`, the namespace resolves it, `read`
+advances a cursor across several calls, and end of file is a zero return rather
+than an error.
+
+    glados> linux run /tmp/cat /tmp/lines.txt
+    alpha
+    the quick brown fox
+    beta
+    jumps over the lazy dog
+        2 open      0x2c5cff1 0x0 0x0 -> 3
+        0 read      0x3 0x2c5cdb0 0x100 -> 54
+        1 write     0x1 0x2c5cdb0 0x36 -> 54
+        0 read      0x3 0x2c5cdb0 0x100 -> 0
+        3 close     0x3 -> 0
+      exited 3 after 6 syscall(s)
+
+`grep` is the one that checks the bytes are *right* rather than merely present.
+A naive substring search over a line buffer answers differently for every
+one-byte change in the file, so a read that lost a byte, doubled one or stopped
+early shows up as a wrong set of lines instead of as plausible output:
+
+    glados> linux run /tmp/grep the /tmp/lines.txt
+    the quick brown fox
+    jumps over the lazy dog
+        2 open      0x2c5cff1 0x0 0x0 -> 3
+        0 read      0x3 0x2c5bfa0 0x1000 -> 54
+        3 close     0x3 -> 0
+        1 write     0x1 0x2c5bfa6 0x14 -> 20
+        1 write     0x1 0x2c5bfbf 0x17 -> 23
+      exited 0 after 6 syscall(s)
+
+Every number is checkable against the file. The buffer is at `0x2c5bfa0`, so
+the first match is written from +6, which is exactly past `alpha\n`, and the
+second from +31, which is past `beta\n`; 20 is `the quick brown fox` with its
+newline and 23 is `jumps over the lazy dog` without one, because the file ends
+there and a final line carries no separator.
+
+The exit codes are grep's own -- 0 matched, 1 did not, 2 could not -- which is
+what makes the negatives worth running. `grep zebra` exits 1 having written
+nothing, `grep` with no arguments prints usage to fd 2 and exits 2, and a
+missing file gets `-2` out of `open` and never reaches `read` or `close`.
+
+The fixture is a real frame rather than register juggling: `rbp` is the buffer
+and the locals sit underneath it. The alternative was keeping seven live values
+in registers across a `write`, and the syscall ABI hands back only `rbx`,
+`rbp`, `r10`-`r15` and `rsi`/`rdi`/`rdx` -- of which two are the arguments the
+write needs.
 
 ### Testing
 
 There is no `cargo test`. This is a `no_std` UEFI binary with no host test
 runner, so **verification is the boot selftests plus driving QEMU.**
 
-At boot the system runs **twenty-six selftest sections**, and `diag` offers
-**thirty-three named suites** on demand, most of them the same checks (the `aiksi` section covers the capability gate by name and never by
+At boot the system runs **twenty-eight selftest sections**, and `diag` offers
+**thirty-six named suites** on demand, most of them the same checks (the `aiksi` section covers the capability gate by name and never by
 calling -- half that table pokes memory, drives I/O ports or paints over the
 screen, and a suite that called every row to prove it exists would be
 scribbling on the machine to do it), printing `ok` or `FAIL` per line: heap, timer, clock, the namespace's

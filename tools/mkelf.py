@@ -133,6 +133,69 @@ def load_abs(dst, addr):
     return bytes([_rex(r=n >> 3), 0x8B, 0x04 | ((n & 7) << 3), 0x25]) + struct.pack("<I", addr)
 
 
+def load_stack(dst, disp8):
+    """mov dst, [rsp+disp8]. Needs a SIB byte because rm=100 means SIB."""
+    n = REG[dst]
+    assert n < 8
+    return bytes([_rex(), 0x8B, 0x40 | ((n & 7) << 3) | 4, 0x24, disp8])
+
+
+def sub_imm(reg, imm):
+    n = REG[reg]
+    return bytes([_rex(b=n >> 3), 0x81, 0xE8 | (n & 7)]) + struct.pack("<i", imm)
+
+
+def jcc(cc, rel=0):
+    """Two-byte conditional jump with a 32-bit displacement."""
+    return bytes([0x0F, cc]) + struct.pack("<i", rel)
+
+
+JL, JLE, JNE = 0x8C, 0x8E, 0x85
+
+
+def jmp(rel=0):
+    return bytes([0xE9]) + struct.pack("<i", rel)
+
+
+def load_byte(dst, base, index):
+    """movzx dst, byte [base + index].
+
+    A disp8 of zero rather than mod=00, which costs a byte and removes a
+    footgun: with mod=00 a SIB base of 101 means "no base, disp32 follows",
+    so an addressing mode that works for every other register silently reads
+    an absolute address when the base happens to be rbp.
+    """
+    d, bs, ix = REG[dst], REG[base], REG[index]
+    assert ix != REG["rsp"], "an index of 100 means no index at all"
+    return bytes([_rex(r=d >> 3, x=ix >> 3, b=bs >> 3), 0x0F, 0xB6,
+                  0x40 | ((d & 7) << 3) | 4, ((ix & 7) << 3) | (bs & 7), 0x00])
+
+
+def load_q(dst, base, disp8):
+    d, bs = REG[dst], REG[base]
+    return bytes([_rex(r=d >> 3, b=bs >> 3), 0x8B,
+                  0x40 | ((d & 7) << 3) | (bs & 7), disp8 & 0xFF])
+
+
+def store_q(base, disp8, src):
+    sr, bs = REG[src], REG[base]
+    return bytes([_rex(r=sr >> 3, b=bs >> 3), 0x89,
+                  0x40 | ((sr & 7) << 3) | (bs & 7), disp8 & 0xFF])
+
+
+def add_rr(dst, src):
+    d, sr = REG[dst], REG[src]
+    return bytes([_rex(r=sr >> 3, b=d >> 3), 0x01, 0xC0 | ((sr & 7) << 3) | (d & 7)])
+
+
+def sub_rr(dst, src):
+    d, sr = REG[dst], REG[src]
+    return bytes([_rex(r=sr >> 3, b=d >> 3), 0x29, 0xC0 | ((sr & 7) << 3) | (d & 7)])
+
+
+JE, JGE, JG = 0x84, 0x8D, 0x8F
+
+
 SYSCALL = b"\x0f\x05"
 HLT = b"\xf4"
 MSG_OK = b"brk, mmap and arch_prctl all answered; FS read back\n"
@@ -353,6 +416,227 @@ def spin_code(entry_rva, _a, _b):
     return bytes([0xEB, 0xFE])
 
 
+MSG_USAGE = b"cat: needs a path\n"
+
+
+def cat_code(entry_rva, usage_rva, _b):
+    """Open argv[1], read it in chunks, write each chunk to stdout.
+
+    A real `cat` in eighty-odd bytes. It is the smallest program that proves
+    the whole filesystem projection at once: a path travels from the shell
+    through argv into `openat`, the namespace resolves it, `read` advances a
+    cursor across several calls, and end of file is a zero return rather than
+    an error.
+
+    argv[1] is loaded *before* the buffer is carved off the stack, because
+    `sub rsp` moves the very thing being indexed.
+    """
+    c = bytearray()
+    c += load_stack("rbx", 16)             # argv[1]
+    c += mov_imm("rax", 0)
+    c += cmp_rr("rbx", "rax")
+    j_usage = len(c)
+    c += jcc(JLE if False else 0x84)       # je -> no argument
+    c += sub_imm("rsp", 512)               # a read buffer
+
+    c += mov_imm("rax", 2) + mov_rr("rdi", "rbx")
+    c += mov_imm("rsi", 0) + mov_imm("rdx", 0) + SYSCALL
+    c += cmp_imm8("rax", 0)
+    j_bad = len(c)
+    c += jcc(JL)
+    c += mov_rr("rbx", "rax")              # the descriptor
+
+    loop = len(c)
+    c += mov_imm("rax", 0) + mov_rr("rdi", "rbx")
+    c += mov_rr("rsi", "rsp") + mov_imm("rdx", 256) + SYSCALL
+    c += cmp_imm8("rax", 0)
+    j_done = len(c)
+    c += jcc(JLE)
+    c += mov_rr("rdx", "rax")
+    c += mov_imm("rax", 1) + mov_imm("rdi", 1) + mov_rr("rsi", "rsp") + SYSCALL
+    j_loop = len(c)
+    c += jmp()
+
+    done = len(c)
+    c += mov_imm("rax", 3) + mov_rr("rdi", "rbx") + SYSCALL
+    c += mov_imm("rax", 231) + mov_imm("rdi", 3) + SYSCALL + HLT
+
+    bad = len(c)
+    c += mov_imm("rax", 231) + mov_imm("rdi", 14) + SYSCALL + HLT
+
+    usage = len(c)
+    c += mov_imm("rax", 1) + mov_imm("rdi", 2)
+    u_lea = len(c)
+    c += lea_rip("rsi", 0)
+    u_end = len(c)
+    c += mov_imm("rdx", len(MSG_USAGE)) + SYSCALL
+    c += mov_imm("rax", 231) + mov_imm("rdi", 15) + SYSCALL + HLT
+
+    struct.pack_into("<i", c, j_usage + 2, usage - (j_usage + 6))
+    struct.pack_into("<i", c, j_bad + 2, bad - (j_bad + 6))
+    struct.pack_into("<i", c, j_done + 2, done - (j_done + 6))
+    struct.pack_into("<i", c, j_loop + 1, loop - (j_loop + 5))
+    struct.pack_into("<i", c, u_lea + 3, usage_rva - (entry_rva + u_end))
+    return bytes(c)
+
+
+MSG_GREP = b"grep: needs a pattern and a path\n"
+
+
+def grep_code(entry_rva, usage_rva, _b):
+    """Print every line of argv[2] containing argv[1].
+
+    Where `cat` proves a path can travel from the shell into the namespace and
+    come back as bytes, this proves the bytes are *right*: a naive substring
+    search over a line buffer answers differently for every one-byte change in
+    the file, so a read that lost a byte, doubled one, or stopped early shows
+    up as a wrong set of lines rather than as plausible output.
+
+    It is a real frame: rbp is the buffer, and the locals live underneath it.
+    The alternative was juggling seven live values in registers across a
+    `write`, and the ABI only promises rbx, rbp, r10-r12 and rsi/rdi/rdx back
+    -- of which two are the arguments the write needs.
+
+    Exit codes are grep's own: 0 when something matched, 1 when nothing did,
+    2 on an error. A program answering 0 for "no matches" would make the
+    difference between an empty file and a working search invisible.
+    """
+    c = bytearray()
+    c += load_stack("rbx", 16)             # argv[1], the pattern
+    c += load_stack("rdi", 24)             # argv[2], the path
+    c += cmp_imm8("rbx", 0)
+    j_u1 = len(c)
+    c += jcc(JE)
+    c += cmp_imm8("rdi", 0)
+    j_u2 = len(c)
+    c += jcc(JE)
+
+    c += mov_imm("rax", 2) + mov_imm("rsi", 0) + mov_imm("rdx", 0) + SYSCALL
+    c += cmp_imm8("rax", 0)
+    j_bad = len(c)
+    c += jcc(JL)
+    c += mov_rr("r9", "rax")               # the descriptor
+
+    # The buffer, then the locals below it. rsp is left below both, so the
+    # frame is whole and nothing a syscall does can reach into it.
+    c += sub_imm("rsp", 4096)
+    c += mov_rr("rbp", "rsp")
+    c += sub_imm("rsp", 64)
+
+    c += mov_imm("rax", 0) + mov_rr("rdi", "r9") + mov_rr("rsi", "rbp")
+    c += mov_imm("rdx", 4096) + SYSCALL
+    c += mov_rr("r10", "rax")              # bytes read
+
+    # Close before scanning: the file is in hand, and holding a descriptor
+    # open across the search would prove nothing the open already proved.
+    c += mov_imm("rax", 3) + mov_rr("rdi", "r9") + SYSCALL
+
+    c += mov_imm("rax", 0) + store_q("rbp", -16, "rax")   # matches so far
+    c += cmp_imm8("r10", 0)
+    j_empty = len(c)
+    c += jcc(JLE)
+
+    c += mov_imm("rsi", 0)                 # the line starts here
+    line = len(c)
+    c += cmp_rr("rsi", "r10")
+    j_fin = len(c)
+    c += jcc(JGE)
+    c += mov_rr("rdi", "rsi")
+    nl = len(c)
+    c += cmp_rr("rdi", "r10")
+    j_have1 = len(c)
+    c += jcc(JGE)
+    c += load_byte("r8", "rbp", "rdi")
+    c += cmp_imm8("r8", 10)
+    j_have2 = len(c)
+    c += jcc(JE)
+    c += add_imm("rdi", 1)
+    j_nl = len(c)
+    c += jmp()
+
+    # The line is [rsi, rdi). Try the pattern at every start inside it.
+    have = len(c)
+    c += mov_rr("rdx", "rsi")
+    tryat = len(c)
+    c += cmp_rr("rdx", "rdi")
+    j_nextline1 = len(c)
+    c += jcc(JG)
+    c += mov_rr("rax", "rdx") + mov_imm("rcx", 0)
+    cmpl = len(c)
+    c += load_byte("r8", "rbx", "rcx")
+    c += cmp_imm8("r8", 0)                 # off the end of the pattern: a hit
+    j_match = len(c)
+    c += jcc(JE)
+    c += cmp_rr("rax", "rdi")              # off the end of the line: no hit
+    j_nextat1 = len(c)
+    c += jcc(JGE)
+    c += load_byte("r9", "rbp", "rax")
+    c += cmp_rr("r8", "r9")
+    j_nextat2 = len(c)
+    c += jcc(JNE)
+    c += add_imm("rax", 1) + add_imm("rcx", 1)
+    j_cmpl = len(c)
+    c += jmp()
+
+    nextat = len(c)
+    c += add_imm("rdx", 1)
+    j_tryat = len(c)
+    c += jmp()
+
+    match = len(c)
+    c += store_q("rbp", -24, "rsi") + store_q("rbp", -32, "rdi")
+    c += mov_rr("rdx", "rdi") + sub_rr("rdx", "rsi")
+    c += cmp_rr("rdi", "r10")              # a final line carries no newline
+    j_nonl = len(c)
+    c += jcc(JGE)
+    c += add_imm("rdx", 1)
+    nonl = len(c)
+    c += add_rr("rsi", "rbp")
+    c += mov_imm("rax", 1) + mov_imm("rdi", 1) + SYSCALL
+    c += load_q("rax", "rbp", -16) + add_imm("rax", 1) + store_q("rbp", -16, "rax")
+    c += load_q("rsi", "rbp", -24) + load_q("rdi", "rbp", -32)
+
+    # One line printed per matching line, not per occurrence, which is what
+    # grep does and why the match arm falls through to here.
+    nextline = len(c)
+    c += mov_rr("rsi", "rdi") + add_imm("rsi", 1)
+    j_line = len(c)
+    c += jmp()
+
+    fin = len(c)
+    c += load_q("rax", "rbp", -16)
+    c += cmp_imm8("rax", 0)
+    j_none = len(c)
+    c += jcc(JE)
+    c += mov_imm("rax", 231) + mov_imm("rdi", 0) + SYSCALL + HLT
+
+    none = len(c)
+    c += mov_imm("rax", 231) + mov_imm("rdi", 1) + SYSCALL + HLT
+
+    bad = len(c)
+    c += mov_imm("rax", 231) + mov_imm("rdi", 2) + SYSCALL + HLT
+
+    usage = len(c)
+    c += mov_imm("rax", 1) + mov_imm("rdi", 2)
+    u_lea = len(c)
+    c += lea_rip("rsi", 0)
+    u_end = len(c)
+    c += mov_imm("rdx", len(MSG_GREP)) + SYSCALL
+    c += mov_imm("rax", 231) + mov_imm("rdi", 2) + SYSCALL + HLT
+
+    for site, target in ((j_u1, usage), (j_u2, usage), (j_bad, bad),
+                         (j_empty, fin), (j_fin, fin), (j_have1, have),
+                         (j_have2, have), (j_nextline1, nextline),
+                         (j_match, match), (j_nextat1, nextat),
+                         (j_nextat2, nextat), (j_nonl, nonl), (j_none, none)):
+        struct.pack_into("<i", c, site + 2, target - (site + 6))
+    for site, target in ((j_nl, nl), (j_cmpl, cmpl), (j_tryat, tryat),
+                         (j_line, line)):
+        struct.pack_into("<i", c, site + 1, target - (site + 5))
+    struct.pack_into("<i", c, u_lea + 3, usage_rva - (entry_rva + u_end))
+    return bytes(c)
+
+
 def build(kind="static"):
     interp = b"/lib64/ld-linux-x86-64.so.2\x00"
     phnum = 2 if kind == "dynamic" else 1
@@ -360,7 +644,21 @@ def build(kind="static"):
     # Lay the body out first so the message address is known before the code
     # that points at it is emitted.
     body_at = entry
-    if kind == "spin":
+    if kind == "grep":
+        probe = grep_code(0, 0, 0)
+        usage_rva = body_at + len(probe)
+        text = grep_code(entry, usage_rva, 0)
+        assert len(text) == len(probe), (len(text), len(probe))
+        body = text + MSG_GREP
+        msg_rva, disp, lea_end = usage_rva, 0, 0
+    elif kind == "cat":
+        probe = cat_code(0, 0, 0)
+        usage_rva = body_at + len(probe)
+        text = cat_code(entry, usage_rva, 0)
+        assert len(text) == len(probe), (len(text), len(probe))
+        body = text + MSG_USAGE
+        msg_rva, disp, lea_end = usage_rva, 0, 0
+    elif kind == "spin":
         text = spin_code(entry, 0, 0)
         body = text
         msg_rva, disp, lea_end = body_at, 0, 0
@@ -499,6 +797,48 @@ def verify(path):
     # RIP-relative lea says it is. Off by four here and the guest writes
     # whatever follows, which reads as a working loader printing garbage.
     rel_entry = entry - va
+    if MSG_GREP in b:
+        claim("it reads a pattern and a path off the stack before moving rsp",
+              bytes([0x48, 0x8B, 0x5C, 0x24, 0x10]) in b
+              and bytes([0x48, 0x8B, 0x7C, 0x24, 0x18]) in b)
+        claim("it builds a frame: 4096 bytes of buffer, then locals under it",
+              bytes([0x48, 0x81, 0xEC, 0x00, 0x10, 0x00, 0x00]) in b
+              and bytes([0x48, 0x89, 0xE5]) in b
+              and bytes([0x48, 0x81, 0xEC, 0x40, 0x00, 0x00, 0x00]) in b)
+        claim("it reads the file and the pattern a byte at a time, indexed",
+              bytes([0x4C, 0x0F, 0xB6, 0x44, 0x3D, 0x00]) in b     # [rbp+rdi]
+              and bytes([0x4C, 0x0F, 0xB6, 0x44, 0x0B, 0x00]) in b # [rbx+rcx]
+              and bytes([0x4C, 0x0F, 0xB6, 0x4C, 0x05, 0x00]) in b)# [rbp+rax]
+        claim("it splits on 0x0a and nothing else",
+              bytes([0x49, 0x83, 0xF8, 0x0A]) in b)
+        claim("it saves the two loop registers a write would take, and reloads them",
+              bytes([0x48, 0x89, 0x75, 0xE8]) in b     # [rbp-24] <- rsi
+              and bytes([0x48, 0x89, 0x7D, 0xE0]) in b # [rbp-32] <- rdi
+              and bytes([0x48, 0x8B, 0x75, 0xE8]) in b
+              and bytes([0x48, 0x8B, 0x7D, 0xE0]) in b)
+        claim("it makes the calls a grep makes: open, read, close, write, exit",
+              b.count(SYSCALL) == 9)
+        claim("it answers grep's own codes: 0 matched, 1 did not, 2 could not",
+              bytes([0x48, 0xC7, 0xC7, 0, 0, 0, 0]) in b
+              and bytes([0x48, 0xC7, 0xC7, 1, 0, 0, 0]) in b
+              and bytes([0x48, 0xC7, 0xC7, 2, 0, 0, 0]) in b)
+        return ok
+    if MSG_USAGE in b:
+        claim("it reads argv[1] off the stack before moving rsp",
+              bytes([0x48, 0x8B, 0x5C, 0x24, 0x10]) in b)
+        claim("it carves a read buffer out of the stack",
+              bytes([0x48, 0x81, 0xEC, 0x00, 0x02, 0x00, 0x00]) in b)
+        # open, read, write, close, exit on the good path; exit on the failed
+        # open; write and exit on the no-argument path. Counted because an
+        # emitter that dropped one still produces a file that runs and does
+        # less than it claims.
+        claim("it makes the eight calls its three paths add up to",
+              b.count(SYSCALL) == 8)
+        claim("it exits 3 on success, 14 when the open fails, 15 with no argument",
+              bytes([0x48, 0xC7, 0xC7, 3, 0, 0, 0]) in b
+              and bytes([0x48, 0xC7, 0xC7, 14, 0, 0, 0]) in b
+              and bytes([0x48, 0xC7, 0xC7, 15, 0, 0, 0]) in b)
+        return ok
     if len(b) == entry + 2 and b[entry:] == bytes([0xEB, 0xFE]):
         claim("it is two bytes of jmp-to-self and nothing else", True)
         claim("it makes no syscall at all", SYSCALL not in b)
@@ -568,7 +908,7 @@ def main():
     ap.add_argument("out")
     ap.add_argument("--kind",
                     choices=["static", "dynamic", "fixed", "memory", "rogue",
-                             "protect", "wild", "spin"],
+                             "protect", "wild", "spin", "cat", "grep"],
                     default="static")
     ap.add_argument("--verify", action="store_true")
     a = ap.parse_args()

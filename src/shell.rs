@@ -4403,7 +4403,12 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         kprintln!("  no such blob: {}", path);
                         return;
                     };
-                    match linux::load::load(&bytes) {
+                    // Everything after the path is the guest's argv, with the
+                    // path itself as argv[0], which is what a program expects
+                    // and what busybox dispatches on.
+                    let mut argv: alloc::vec::Vec<&str> = alloc::vec![path];
+                    argv.extend(words.clone());
+                    match linux::load::load(&bytes, &argv) {
                         Ok(g) => {
                             console::set_color(YELLOW);
                             kprintln!(

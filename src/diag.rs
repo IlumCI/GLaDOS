@@ -206,7 +206,7 @@ pub const SUITES: &[Suite] = &[
     },
     Suite {
         name: "linux",
-        about: "the ELF reader, and every field a hostile file could lie about",
+        about: "the ELF reader, the syscall surface, and the POSIX view of the namespace",
         run: linux_selftest,
     },
     Suite {

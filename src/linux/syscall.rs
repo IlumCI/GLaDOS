@@ -35,6 +35,8 @@
 use super::elf;
 use crate::sync::Racy;
 use core::sync::atomic::{AtomicBool, Ordering};
+use crate::sysbox;
+use alloc::string::String;
 use alloc::vec::Vec;
 
 const IA32_EFER: u32 = 0xC000_0080;
@@ -60,7 +62,20 @@ const MAP_FIXED: u64 = 0x10;
 const MAP_ANONYMOUS: u64 = 0x20;
 
 /// Linux's numbers, for the calls stage 0 answers or expects to meet first.
+pub const SYS_READ: u64 = 0;
 pub const SYS_WRITE: u64 = 1;
+pub const SYS_OPEN: u64 = 2;
+pub const SYS_CLOSE: u64 = 3;
+pub const SYS_STAT: u64 = 4;
+pub const SYS_FSTAT: u64 = 5;
+pub const SYS_LSTAT: u64 = 6;
+pub const SYS_LSEEK: u64 = 8;
+pub const SYS_IOCTL: u64 = 16;
+pub const SYS_GETPID: u64 = 39;
+pub const SYS_GETDENTS64: u64 = 217;
+pub const SYS_SET_TID_ADDRESS: u64 = 218;
+pub const SYS_OPENAT: u64 = 257;
+pub const SYS_NEWFSTATAT: u64 = 262;
 pub const SYS_BRK: u64 = 12;
 pub const SYS_EXIT: u64 = 60;
 pub const SYS_MMAP: u64 = 9;
@@ -77,6 +92,22 @@ const EPERM: u64 = (-1i64) as u64;
 const ENOMEM: u64 = (-12i64) as u64;
 const EINVAL: u64 = (-22i64) as u64;
 const EFAULT: u64 = (-14i64) as u64;
+const ENOENT: u64 = (-2i64) as u64;
+const EACCES: u64 = (-13i64) as u64;
+const EMFILE: u64 = (-24i64) as u64;
+const ENOTDIR: u64 = (-20i64) as u64;
+const EISDIR: u64 = (-21i64) as u64;
+const ENOTTY: u64 = (-25i64) as u64;
+const ESPIPE: u64 = (-29i64) as u64;
+
+/// `O_WRONLY` and `O_RDWR`. This view is read-only, so both are refused.
+const O_WRONLY: u64 = 1;
+const O_RDWR: u64 = 2;
+const O_DIRECTORY: u64 = 0x10000;
+
+/// How many descriptors a guest may hold, and how long a path may be.
+const MAX_FDS: usize = 64;
+const PATH_MAX: usize = 4096;
 
 /// The largest single mapping a guest may ask for.
 ///
@@ -261,6 +292,11 @@ pub struct Space {
     pub brk_now: u64,
     pub brk_end: u64,
     pub maps: Vec<Mapping>,
+    /// Open descriptors. 0, 1 and 2 are filled at `install`, so a guest that
+    /// never opens anything still has somewhere to write.
+    pub fds: Vec<Option<super::fs::Fd>>,
+    /// Where a relative path starts from.
+    pub cwd: String,
     /// `FS` base as the kernel left it. A guest sets `FS` for its
     /// thread-local storage and the register is the *machine's*, not the
     /// guest's, so it is put back on the way out.
@@ -343,6 +379,14 @@ pub fn install(image: Region, stack: Region, brk: Region) {
             brk_now: brk.at,
             brk_end: brk.at.saturating_add(brk.len as u64),
             maps: Vec::new(),
+            fds: {
+                let mut v = Vec::with_capacity(MAX_FDS);
+                v.push(Some(super::fs::Fd::Stdin));
+                v.push(Some(super::fs::Fd::Stdout));
+                v.push(Some(super::fs::Fd::Stderr));
+                v
+            },
+            cwd: String::from("/"),
             saved_fs: 0,
         });
     }
@@ -496,6 +540,254 @@ fn sys_write(fd: u64, buf: u64, len: usize) -> u64 {
     // the guest has no way to find out.
     crate::kprint!("{}", alloc::string::String::from_utf8_lossy(bytes));
     len as u64
+}
+
+/// Copy a NUL-terminated path out of guest memory.
+///
+/// Checked a page at a time rather than a byte at a time, because `reachable`
+/// walks the page tables and a path is up to four kilobytes: per byte that is
+/// four thousand walks to read a filename. Checked at all because the pointer
+/// is the guest's, and a path is the one argument every file call starts by
+/// dereferencing.
+///
+/// Refuses an unterminated string rather than reading to the end of the page,
+/// since a path with no NUL is a bug in the caller and guessing where it ends
+/// invents a filename.
+fn read_cstr(at: u64) -> Option<String> {
+    let mut out = alloc::vec::Vec::new();
+    let mut p = at;
+    let mut checked_to = at;
+    while out.len() < PATH_MAX {
+        if p >= checked_to {
+            // Cover to the end of this page, or to the byte after it if the
+            // string started mid-page.
+            let end = (p & !(PAGE - 1)) + PAGE;
+            if !reachable(p, (end - p) as usize, false) {
+                return None;
+            }
+            checked_to = end;
+        }
+        let b = unsafe { core::ptr::read_volatile(p as *const u8) };
+        if b == 0 {
+            return core::str::from_utf8(&out).ok().map(String::from);
+        }
+        out.push(b);
+        p += 1;
+    }
+    None
+}
+
+/// The descriptor table, or nothing when no guest is running.
+fn with_fds<T>(f: impl FnOnce(&mut Vec<Option<super::fs::Fd>>, &str) -> T) -> Option<T> {
+    let sp = unsafe { SPACE.get() };
+    let sp = sp.as_mut()?;
+    let cwd = sp.cwd.clone();
+    Some(f(&mut sp.fds, &cwd))
+}
+
+/// Open a path in the namespace and hand back a descriptor.
+///
+/// **Read-only, and that is a decision rather than a gap.** The namespace is
+/// content-addressed and snapshotted, so a write is not a store into a file,
+/// it is a new object and a new root hash. Letting a guest do that through a
+/// POSIX `write` would give it a way to change the tree that bypasses every
+/// gate `sysbox` puts in front of the shell. When guests get to write it
+/// should be a deliberate design, so for now `O_WRONLY` and `O_RDWR` answer
+/// `EACCES` and say why here.
+fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u64 {
+    let Some(raw) = read_cstr(path_at) else { return EFAULT };
+    if flags & (O_WRONLY | O_RDWR) != 0 {
+        return EACCES;
+    }
+    let cwd_relative = !raw.starts_with('/');
+    if cwd_relative && (dirfd as i64) != super::fs::AT_FDCWD {
+        // A descriptor-relative open needs the directory's path, which means
+        // keeping one per open directory. Refused rather than resolved against
+        // the wrong place.
+        return ENOSYS;
+    }
+    with_fds(|fds, cwd| {
+        let Some(path) = super::fs::resolve(cwd, &raw) else { return ENOENT };
+        let is_dir = sysbox::is_dir(&path);
+        if flags & O_DIRECTORY != 0 && !is_dir {
+            return ENOTDIR;
+        }
+        let entry = if is_dir {
+            super::fs::Fd::Dir { path: path.clone(), entries: sysbox::listing(&path), at: 0 }
+        } else {
+            let Some(data) = sysbox::read_blob(&path) else { return ENOENT };
+            super::fs::Fd::File { path: path.clone(), data, at: 0 }
+        };
+        // Lowest free descriptor, which is what POSIX promises and what any
+        // program doing `close(0); open(...)` to redirect depends on.
+        let slot = fds.iter().position(|f| f.is_none());
+        match slot {
+            Some(i) => {
+                fds[i] = Some(entry);
+                i as u64
+            }
+            None if fds.len() < MAX_FDS => {
+                fds.push(Some(entry));
+                (fds.len() - 1) as u64
+            }
+            None => EMFILE,
+        }
+    })
+    .unwrap_or(EBADF)
+}
+
+fn sys_close(fd: u64) -> u64 {
+    with_fds(|fds, _| match fds.get_mut(fd as usize) {
+        Some(slot @ Some(_)) => {
+            *slot = None;
+            0
+        }
+        _ => EBADF,
+    })
+    .unwrap_or(EBADF)
+}
+
+fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
+    if len == 0 {
+        return 0;
+    }
+    if !reachable(buf, len as usize, true) {
+        return EFAULT;
+    }
+    with_fds(|fds, _| match fds.get_mut(fd as usize) {
+        // Nothing types at a guest, so stdin is permanently at end of file.
+        // Zero is the honest answer and is what a program reading a closed
+        // pipe sees.
+        Some(Some(super::fs::Fd::Stdin)) => 0,
+        Some(Some(super::fs::Fd::File { data, at, .. })) => {
+            let n = (data.len() - (*at).min(data.len())).min(len as usize);
+            unsafe {
+                core::ptr::copy_nonoverlapping(data[*at..].as_ptr(), buf as *mut u8, n);
+            }
+            *at += n;
+            n as u64
+        }
+        Some(Some(super::fs::Fd::Dir { .. })) => EISDIR,
+        _ => EBADF,
+    })
+    .unwrap_or(EBADF)
+}
+
+fn sys_lseek(fd: u64, off: u64, whence: u64) -> u64 {
+    with_fds(|fds, _| match fds.get_mut(fd as usize) {
+        Some(Some(super::fs::Fd::File { data, at, .. })) => {
+            let base = match whence {
+                0 => 0i64,                 // SEEK_SET
+                1 => *at as i64,           // SEEK_CUR
+                2 => data.len() as i64,    // SEEK_END
+                _ => return EINVAL,
+            };
+            let want = base.saturating_add(off as i64);
+            if want < 0 {
+                return EINVAL;
+            }
+            // Seeking past the end is legal and reads answer zero there, which
+            // is what makes a sparse write possible on Linux and is harmless
+            // on a view that cannot write.
+            *at = want as usize;
+            want as u64
+        }
+        // A stream has no position. `ESPIPE` is what libc turns into "illegal
+        // seek", and it is how a program discovers stdout is not a file.
+        Some(Some(_)) => ESPIPE,
+        _ => EBADF,
+    })
+    .unwrap_or(EBADF)
+}
+
+fn write_stat(buf: u64, is_dir: bool, size: usize, ino: u64) -> u64 {
+    if !reachable(buf, 144, true) {
+        return EFAULT;
+    }
+    let b = super::fs::stat_bytes(is_dir, size, ino);
+    unsafe { core::ptr::copy_nonoverlapping(b.as_ptr(), buf as *mut u8, 144) };
+    0
+}
+
+fn sys_fstat(fd: u64, buf: u64) -> u64 {
+    let found = with_fds(|fds, _| match fds.get(fd as usize) {
+        Some(Some(super::fs::Fd::File { path, data, .. })) => {
+            Some((false, data.len(), super::fs::ino_of(path)))
+        }
+        Some(Some(super::fs::Fd::Dir { path, .. })) => Some((true, 0, super::fs::ino_of(path))),
+        // The standard three are character devices as far as anything asking
+        // is concerned, and reporting them as empty regular files is what
+        // makes a program believe stdout is seekable.
+        Some(Some(_)) => Some((false, 0, 1)),
+        _ => None,
+    })
+    .flatten();
+    match found {
+        Some((d, n, ino)) => write_stat(buf, d, n, ino),
+        None => EBADF,
+    }
+}
+
+fn sys_statat(path_at: u64, buf: u64) -> u64 {
+    let Some(raw) = read_cstr(path_at) else { return EFAULT };
+    let found = with_fds(|_, cwd| super::fs::resolve(cwd, &raw)).flatten();
+    let Some(path) = found else { return ENOENT };
+    if sysbox::is_dir(&path) {
+        return write_stat(buf, true, 0, super::fs::ino_of(&path));
+    }
+    match sysbox::read_blob(&path) {
+        Some(d) => write_stat(buf, false, d.len(), super::fs::ino_of(&path)),
+        None => ENOENT,
+    }
+}
+
+fn sys_getdents64(fd: u64, buf: u64, len: u64) -> u64 {
+    if !reachable(buf, len as usize, true) {
+        return EFAULT;
+    }
+    with_fds(|fds, _| match fds.get_mut(fd as usize) {
+        Some(Some(super::fs::Fd::Dir { path, entries, at })) => {
+            let mut out = alloc::vec::Vec::new();
+            while *at < entries.len() {
+                let (name, is_dir, _) = &entries[*at];
+                let mut full = path.clone();
+                if !full.ends_with('/') {
+                    full.push('/');
+                }
+                full.push_str(name);
+                if !super::fs::dirent(&mut out, len as usize, super::fs::ino_of(&full), *is_dir, name) {
+                    break;
+                }
+                *at += 1;
+            }
+            // Zero means end of directory, which is how a caller's loop stops.
+            // It must not be returned while entries remain, so a buffer too
+            // small for even one entry is EINVAL rather than a silent end.
+            if out.is_empty() && *at < entries.len() {
+                return EINVAL;
+            }
+            unsafe { core::ptr::copy_nonoverlapping(out.as_ptr(), buf as *mut u8, out.len()) };
+            out.len() as u64
+        }
+        Some(Some(_)) => ENOTDIR,
+        _ => EBADF,
+    })
+    .unwrap_or(EBADF)
+}
+
+/// Nothing here is a terminal.
+///
+/// `ENOTTY` is the answer that makes a program treat its output as a pipe:
+/// full buffering, no colour, no width probing. That is true here and it is
+/// also the useful answer, because the alternative is claiming a terminal and
+/// then being asked its window size.
+fn sys_ioctl(fd: u64, _req: u64, _arg: u64) -> u64 {
+    let known = with_fds(|fds, _| matches!(fds.get(fd as usize), Some(Some(_)))).unwrap_or(false);
+    if known {
+        ENOTTY
+    } else {
+        EBADF
+    }
 }
 
 /// Grow or query the break.
@@ -687,6 +979,19 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
 
     let (ret, served) = match nr {
         SYS_WRITE => (sys_write(f.rdi, f.rsi, f.rdx as usize), true),
+        SYS_READ => (sys_read(f.rdi, f.rsi, f.rdx), true),
+        SYS_OPEN => (sys_openat(super::fs::AT_FDCWD as u64, f.rdi, f.rsi, f.rdx), true),
+        SYS_OPENAT => (sys_openat(f.rdi, f.rsi, f.rdx, f.r10), true),
+        SYS_CLOSE => (sys_close(f.rdi), true),
+        SYS_LSEEK => (sys_lseek(f.rdi, f.rsi, f.rdx), true),
+        SYS_FSTAT => (sys_fstat(f.rdi, f.rsi), true),
+        SYS_STAT | SYS_LSTAT => (sys_statat(f.rdi, f.rsi), true),
+        SYS_NEWFSTATAT => (sys_statat(f.rsi, f.rdx), true),
+        SYS_GETDENTS64 => (sys_getdents64(f.rdi, f.rsi, f.rdx), true),
+        SYS_IOCTL => (sys_ioctl(f.rdi, f.rsi, f.rdx), true),
+        // One process, and it is the guest. Reporting a pid at all is what
+        // stops a runtime deciding it failed to start.
+        SYS_GETPID | SYS_SET_TID_ADDRESS => (1, true),
         SYS_BRK => (sys_brk(f.rdi), true),
         SYS_MMAP => (sys_mmap(f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9), true),
         SYS_MPROTECT => (sys_mprotect(f.rdi, f.rsi, f.rdx), true),
@@ -1084,14 +1389,28 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     let mut small = [0u8; 64];
     out.push((
         "a stack too small for the initial frame is refused",
-        build_stack(small.as_mut_ptr(), 64).is_none(),
+        build_stack(small.as_mut_ptr(), 64, &["x"]).is_none(),
     ));
     let mut big = [0u8; 512];
-    let sp = build_stack(big.as_mut_ptr(), 512);
+    let sp = build_stack(big.as_mut_ptr(), 512, &["cat", "/ai/about"]);
     out.push((
         "and one large enough answers a 16-byte-aligned pointer inside itself",
         sp.is_some_and(|v| v % 16 == 0 && v >= big.as_ptr() as u64
             && v < big.as_ptr() as u64 + 512),
+    ));
+    out.push((
+        "argc and the argv pointers are where the ABI says, and the strings are real",
+        sp.is_some_and(|v| unsafe {
+            let p = v as *const u64;
+            let argc = p.read();
+            let a0 = p.add(1).read() as *const u8;
+            let a1 = p.add(2).read() as *const u8;
+            let term = p.add(3).read();
+            argc == 2
+                && term == 0
+                && core::slice::from_raw_parts(a0, 3) == b"cat"
+                && core::slice::from_raw_parts(a1, 9) == b"/ai/about"
+        }),
     ));
 
     // The stub and `glados_enter_guest` carry their selectors as literals,
@@ -1140,31 +1459,68 @@ pub fn checks() -> Vec<(&'static str, bool)> {
 /// that never reads its arguments does not care -- and building it anyway
 /// costs six words and means the first program that *does* read them finds
 /// something shaped correctly rather than a fault.
-pub fn build_stack(base: *mut u8, size: usize) -> Option<u64> {
-    // Five words of frame plus eight of headroom. Answering `None` rather than
-    // clamping, because a stack too small to hold the frame is a caller bug
-    // and writing a truncated one would put argc somewhere the guest is not
-    // looking.
-    let words = size / 8;
-    if words < 16 {
+pub fn build_stack(base: *mut u8, size: usize, args: &[&str]) -> Option<u64> {
+    // Strings first, at the very top, because the pointer array below has to
+    // name them and nothing may move afterwards.
+    let mut top = base as usize + size;
+    let mut ptrs = alloc::vec::Vec::with_capacity(args.len());
+    for a in args.iter().rev() {
+        let n = a.len() + 1;
+        if top < base as usize + n {
+            return None;
+        }
+        top -= n;
+        unsafe {
+            core::ptr::copy_nonoverlapping(a.as_ptr(), top as *mut u8, a.len());
+            core::ptr::write((top + a.len()) as *mut u8, 0);
+        }
+        ptrs.push(top as u64);
+    }
+    ptrs.reverse();
+
+    // argc, argv[..], NULL, envp NULL, AT_NULL pair. Sixteen-byte aligned at
+    // `rsp`, which the ABI requires and which a guest using SSE depends on.
+    let words = 1 + ptrs.len() + 1 + 1 + 2;
+    let mut sp = (top - words * 8) & !0xF;
+    if sp < base as usize + 64 {
         return None;
     }
-    let at = words - 8;
-    unsafe {
-        let p = (base as *mut u64).add(at);
-        p.write(0); // argc
-        p.add(1).write(0); // argv terminator
-        p.add(2).write(0); // envp terminator
-        p.add(3).write(0); // AT_NULL
-        p.add(4).write(0);
-        Some(p as u64)
+    // Realign upward is not possible without moving strings, so pad down to
+    // the next 16 and accept the few wasted bytes.
+    if (sp + words * 8) % 8 != 0 {
+        sp -= 8;
     }
+    unsafe {
+        let p = sp as *mut u64;
+        p.write(ptrs.len() as u64);
+        for (i, v) in ptrs.iter().enumerate() {
+            p.add(1 + i).write(*v);
+        }
+        p.add(1 + ptrs.len()).write(0); // argv terminator
+        p.add(2 + ptrs.len()).write(0); // envp terminator
+        p.add(3 + ptrs.len()).write(0); // AT_NULL
+        p.add(4 + ptrs.len()).write(0);
+    }
+    Some(sp as u64)
 }
 
 /// Name the calls stage 0 knows about, for a trace a person has to read.
 pub fn name_of(nr: u64) -> &'static str {
     match nr {
+        SYS_READ => "read",
         SYS_WRITE => "write",
+        SYS_OPEN => "open",
+        SYS_CLOSE => "close",
+        SYS_STAT => "stat",
+        SYS_FSTAT => "fstat",
+        SYS_LSTAT => "lstat",
+        SYS_LSEEK => "lseek",
+        SYS_IOCTL => "ioctl",
+        SYS_GETPID => "getpid",
+        SYS_GETDENTS64 => "getdents64",
+        SYS_SET_TID_ADDRESS => "set_tid_address",
+        SYS_OPENAT => "openat",
+        SYS_NEWFSTATAT => "newfstatat",
         SYS_BRK => "brk",
         SYS_MMAP => "mmap",
         SYS_MPROTECT => "mprotect",

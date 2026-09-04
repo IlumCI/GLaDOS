@@ -65,7 +65,7 @@ pub struct Guest {
 }
 
 /// Place an image and answer where its entry landed.
-pub fn load(bytes: &[u8]) -> Result<Guest, &'static str> {
+pub fn load(bytes: &[u8], args: &[&str]) -> Result<Guest, &'static str> {
     let img = elf::parse(bytes)?;
     syscall::runnable(&img)?;
     let (lo, hi) = img.span().ok_or("nothing to load")?;
@@ -92,8 +92,8 @@ pub fn load(bytes: &[u8]) -> Result<Guest, &'static str> {
 
     let brk = Exec::new(GUEST_BRK).ok_or("no room for a break region")?;
     let stack = Exec::new(GUEST_STACK).ok_or("no room for a stack")?;
-    let stack_top =
-        syscall::build_stack(stack.addr() as *mut u8, GUEST_STACK).ok_or("the stack is too small")?;
+    let stack_top = syscall::build_stack(stack.addr() as *mut u8, GUEST_STACK, args)
+        .ok_or("the stack is too small for the arguments")?;
     // The entry has to land inside what was actually placed. A file is free to
     // name one outside its own segments, and jumping there would leave the
     // fault reporter naming a range this loader never armed.
