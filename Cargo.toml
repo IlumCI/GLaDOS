@@ -1,6 +1,6 @@
 [package]
 name = "glados"
-version = "1.3.2"
+version = "1.3.3"
 edition = "2021"
 description = "A from-scratch ring-0 operating system for the MSI MS-16R8"
 
