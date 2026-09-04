@@ -130,6 +130,15 @@ pub fn load(bytes: &[u8]) -> Result<Guest, &'static str> {
 /// them.
 pub unsafe fn run(g: &Guest) -> u64 {
     syscall::clear_trace();
+    // Open exactly the guest's own three regions to ring 3 and nothing else.
+    // Every other page in the machine keeps a clear U bit, which is what makes
+    // the guest unable to reach the kernel rather than merely discouraged from
+    // trying.
+    for r in [g.regions.image, g.regions.stack, g.regions.brk] {
+        if !crate::mem::paging::protect(r.at, r.len, crate::mem::paging::Perm::USER_RWX) {
+            return 0;
+        }
+    }
     // Installed here rather than in `load`, so a guest that was loaded and
     // never run leaves nothing naming memory its `Guest` has since freed.
     syscall::install(g.regions.image, g.regions.stack, g.regions.brk);

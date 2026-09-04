@@ -214,6 +214,11 @@ pub const SUITES: &[Suite] = &[
         about: "page rights, and a write to a read-only page that has to fault",
         run: paging_selftest,
     },
+    Suite {
+        name: "gdt",
+        about: "the ring-3 descriptors, and the order sysret dictates",
+        run: gdt_selftest,
+    },
 ];
 
 /// The ported picture decoder.
@@ -239,6 +244,25 @@ fn doom_selftest() -> bool {
     // -- an aggregator missing a module, a list built behind a condition that
     // stopped holding -- passes in exactly the same silence as one that
     // checked everything, and this suite aggregates five modules now.
+    kprintln!("    {} claim(s)", n);
+    ok
+}
+
+/// The descriptor table, checked as bit fields rather than by loading it.
+///
+/// Every one of these is a silent triple fault if it is wrong, which is the
+/// worst diagnostic this machine has: an instant reboot with nothing printed.
+fn gdt_selftest() -> bool {
+    use crate::kprintln;
+    let mut ok = true;
+    let mut n = 0usize;
+    for (what, good) in crate::cpu::gdt::checks() {
+        n += 1;
+        if !good {
+            kprintln!("    FAIL: {}", what);
+            ok = false;
+        }
+    }
     kprintln!("    {} claim(s)", n);
     ok
 }
@@ -296,7 +320,7 @@ fn linux_selftest() -> bool {
 /// says it exists to prevent. A `static` cannot be read in a const context, so
 /// the array cannot be measured directly; naming its length is the next best
 /// thing and it is now the only place the number appears.
-const SLOTS: usize = 35;
+const SLOTS: usize = 36;
 
 /// One slot per suite. Indexed by position in `SUITES`, which is a constant,
 /// so the table cannot get out of step with the list.

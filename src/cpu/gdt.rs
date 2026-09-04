@@ -19,6 +19,31 @@ pub const KERNEL_CS: u16 = 0x08;
 pub const KERNEL_DS: u16 = 0x10;
 pub const TSS_SEL: u16 = 0x18;
 
+/// The three ring-3 descriptors, and **their order is dictated by `sysret`
+/// rather than chosen.**
+///
+/// `sysret` does not take selectors. It computes them from `IA32_STAR[63:48]`:
+/// the stack selector is that value plus eight and the 64-bit code selector is
+/// that value plus sixteen, both with RPL forced to 3. So the base slot has to
+/// be a 32-bit code descriptor nobody uses, followed by user data, followed by
+/// user code, in exactly that sequence. Reordering them to something tidier
+/// gives a `sysret` that lands in a data segment.
+///
+/// They sit after the TSS because the TSS descriptor is sixteen bytes and
+/// occupies two slots, and moving it would re-address `TSS_SEL` in two tables
+/// that have to agree.
+pub const SYSRET_BASE: u16 = 0x28;
+/// Unused by anything: it exists because `sysret` counts from it.
+pub const USER_CS32: u16 = 0x28;
+pub const USER_DS: u16 = 0x30;
+pub const USER_CS: u16 = 0x38;
+
+/// A selector as ring 3 must see it. The requested privilege level is part of
+/// the selector, so a descriptor at DPL 3 loaded with RPL 0 still faults.
+pub const fn ring3(sel: u16) -> u16 {
+    sel | 3
+}
+
 /// IST slot (1-based, as the IDT encodes it) for the double-fault handler.
 pub const IST_DOUBLE_FAULT: u8 = 1;
 /// IST slot for the page-fault handler, so a stack overflow is still reportable.
@@ -35,7 +60,12 @@ pub struct DescriptorTablePointer {
 #[derive(Clone, Copy)]
 pub struct Tss {
     reserved0: u32,
-    /// Stack pointers for CPL 0/1/2. Unused: we never leave ring 0.
+    /// Stack pointers for CPL 0/1/2.
+    ///
+    /// `rsp[0]` is loaded by the processor when an interrupt arrives from a
+    /// less privileged ring, so it is what a guest running at ring 3 depends
+    /// on. It said "unused: we never leave ring 0" for a long time and that
+    /// stopped being true.
     pub rsp: [u64; 3],
     reserved1: u64,
     /// The seven interrupt stack table entries.
@@ -70,18 +100,90 @@ static DF_STACK: Racy<Stack> = Racy::new(Stack([0; STACK_SIZE]));
 static PF_STACK: Racy<Stack> = Racy::new(Stack([0; STACK_SIZE]));
 
 static TSS: Racy<Tss> = Racy::new(Tss::new());
-// 0: null, 1: code, 2: data, 3+4: TSS (system descriptors are 16 bytes).
-static GDT: Racy<[u64; 5]> = Racy::new([0; 5]);
+// 0: null, 1: code, 2: data, 3+4: TSS (system descriptors are 16 bytes),
+// 5: user code32, 6: user data, 7: user code64. The last three are in that
+// order because `sysret` derives its selectors by adding to SYSRET_BASE.
+static GDT: Racy<[u64; 8]> = Racy::new([0; 8]);
 
 /// Long-mode ring-0 code: present, DPL 0, code segment, L bit set.
 const DESC_KERNEL_CODE: u64 = 0x00AF_9B00_0000_FFFF;
 /// Long-mode ring-0 data: present, DPL 0, data segment, writable.
 const DESC_KERNEL_DATA: u64 = 0x00CF_9300_0000_FFFF;
+/// Compatibility-mode ring-3 code. Present only so `sysret` has something to
+/// count from; nothing ever loads it.
+const DESC_USER_CODE32: u64 = 0x00CF_FA00_0000_FFFF;
+/// Ring-3 data: the same as the kernel's but DPL 3 (access 0x93 -> 0xF3).
+const DESC_USER_DATA: u64 = 0x00CF_F300_0000_FFFF;
+/// Long-mode ring-3 code: the same as the kernel's but DPL 3 (0x9B -> 0xFB).
+const DESC_USER_CODE64: u64 = 0x00AF_FB00_0000_FFFF;
+
+/// The stack the processor switches to when an interrupt arrives from ring 3.
+///
+/// Unlike the IST stacks this one is not for surviving a broken stack. It is
+/// the ordinary kernel stack for a ring-3 entry, and without it an interrupt
+/// taken in a guest would push its frame onto the guest's own stack, which is
+/// the guest's to corrupt.
+static RSP0_STACK: Racy<Stack> = Racy::new(Stack([0; STACK_SIZE]));
 
 fn stack_top(s: &Stack) -> u64 {
     let base = s.0.as_ptr() as u64;
     // Stacks grow down, so hand out the far end, 16-byte aligned.
     (base + STACK_SIZE as u64) & !0xF
+}
+
+/// What `diag gdt` asks of the table, without loading anything.
+///
+/// Every claim here is about a bit field, and every one of them is a silent
+/// triple fault if it is wrong: a descriptor at the wrong DPL, or the three
+/// ring-3 slots in the wrong order, produces a machine that reboots with no
+/// message the first time anything selects them.
+pub fn checks() -> alloc::vec::Vec<(&'static str, bool)> {
+    let mut out = alloc::vec::Vec::new();
+    // The access byte lives at bits 40..48. DPL is bits 45..47.
+    let dpl = |d: u64| ((d >> 45) & 3) as u8;
+    let present = |d: u64| (d >> 47) & 1 == 1;
+    let long = |d: u64| (d >> 53) & 1 == 1;
+
+    out.push((
+        "the kernel descriptors are DPL 0 and the user ones DPL 3",
+        dpl(DESC_KERNEL_CODE) == 0
+            && dpl(DESC_KERNEL_DATA) == 0
+            && dpl(DESC_USER_CODE64) == 3
+            && dpl(DESC_USER_DATA) == 3
+            && dpl(DESC_USER_CODE32) == 3,
+    ));
+    out.push((
+        "every descriptor is present, and only the 64-bit code ones set L",
+        present(DESC_KERNEL_CODE)
+            && present(DESC_USER_CODE64)
+            && present(DESC_USER_DATA)
+            && long(DESC_KERNEL_CODE)
+            && long(DESC_USER_CODE64)
+            && !long(DESC_USER_DATA)
+            && !long(DESC_USER_CODE32),
+    ));
+    // The one that would be a silent reboot. `sysret` adds 8 for SS and 16 for
+    // CS, so the three slots have to sit in that order and nowhere else.
+    out.push((
+        "sysret's arithmetic lands on the user data and code selectors",
+        SYSRET_BASE + 8 == USER_DS && SYSRET_BASE + 16 == USER_CS,
+    ));
+    out.push((
+        "and those selectors index the slots the table actually fills",
+        USER_CS32 as usize / 8 == 5 && USER_DS as usize / 8 == 6 && USER_CS as usize / 8 == 7,
+    ));
+    out.push((
+        "a ring-3 selector carries RPL 3, since a DPL-3 descriptor at RPL 0 still faults",
+        ring3(USER_CS) == 0x3B && ring3(USER_DS) == 0x33 && ring3(KERNEL_CS) == 0x0B,
+    ));
+    out.push((
+        "the ring-3 entry stack is set and 16-byte aligned",
+        unsafe {
+            let r = TSS.get().rsp[0];
+            r != 0 && r % 16 == 0
+        },
+    ));
+    out
 }
 
 /// Build the two halves of a 16-byte 64-bit TSS descriptor.
@@ -98,7 +200,7 @@ fn tss_descriptor(base: u64) -> (u64, u64) {
 /// One core's tables, built by the bootstrap processor and loaded by the core
 /// itself.
 struct CoreTables {
-    gdt: [u64; 5],
+    gdt: [u64; 8],
     tss: Tss,
 }
 
@@ -130,7 +232,7 @@ pub fn prepare(cores: usize) {
         let df = Box::leak(alloc::vec![0u8; STACK_SIZE].into_boxed_slice());
         let pf = Box::leak(alloc::vec![0u8; STACK_SIZE].into_boxed_slice());
 
-        let t = Box::leak(Box::new(CoreTables { gdt: [0; 5], tss: Tss::new() }));
+        let t = Box::leak(Box::new(CoreTables { gdt: [0; 8], tss: Tss::new() }));
         t.tss.ist[(IST_DOUBLE_FAULT - 1) as usize] =
             (df.as_ptr() as u64 + STACK_SIZE as u64) & !0xF;
         t.tss.ist[(IST_PAGE_FAULT - 1) as usize] =
@@ -142,6 +244,14 @@ pub fn prepare(cores: usize) {
         let (lo, hi) = tss_descriptor(&t.tss as *const Tss as u64);
         t.gdt[3] = lo;
         t.gdt[4] = hi;
+        t.gdt[5] = DESC_USER_CODE32;
+        t.gdt[6] = DESC_USER_DATA;
+        t.gdt[7] = DESC_USER_CODE64;
+
+        // Its own ring-3 entry stack, for the same reason it has its own IST
+        // stacks: two cores sharing one would interleave their frames.
+        let r0 = Box::leak(alloc::vec![0u8; STACK_SIZE].into_boxed_slice());
+        t.tss.rsp[0] = (r0.as_ptr() as u64 + STACK_SIZE as u64) & !0xF;
 
         unsafe { TABLES.get()[cpu] = t as *mut CoreTables };
     }
@@ -205,9 +315,14 @@ pub fn init() {
         let (lo, hi) = tss_descriptor(tss as *const Tss as u64);
         gdt[3] = lo;
         gdt[4] = hi;
+        gdt[5] = DESC_USER_CODE32;
+        gdt[6] = DESC_USER_DATA;
+        gdt[7] = DESC_USER_CODE64;
+
+        tss.rsp[0] = stack_top(RSP0_STACK.get());
 
         let ptr = DescriptorTablePointer {
-            limit: (size_of::<[u64; 5]>() - 1) as u16,
+            limit: (size_of::<[u64; 8]>() - 1) as u16,
             base: gdt.as_ptr() as u64,
         };
         asm!("lgdt [{}]", in(reg) &ptr, options(readonly, nostack, preserves_flags));

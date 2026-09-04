@@ -1213,6 +1213,64 @@ has watched the processor refuse is a permission written in a comment. The check
 puts the page back afterwards, because leaving a read-only page in the heap
 poisons whatever asks for it next.
 
+### Ring 3, in one address space
+
+Stage 1. A guest runs at CPL 3 and the identity map stays exactly as it was:
+no second set of page tables, no CR3 swap, no TLB shootdown to design. What
+separates the guest from the kernel is the U bit, and it is on the guest's own
+pages and on nothing else in the machine.
+
+**The GDT grew from five entries to eight, and their order is dictated rather
+than chosen.** `sysret` takes no selectors. It derives them from
+`IA32_STAR[63:48]`: stack is that plus eight, 64-bit code is that plus sixteen,
+both with RPL forced to 3. So the layout is a 32-bit code descriptor nobody
+uses, then user data, then user code, in that sequence. Tidying it gives a
+`sysret` that lands in a data segment. `TSS.rsp[0]` is set for the first time,
+because an interrupt taken in a guest would otherwise push its frame onto the
+guest's own stack.
+
+`diag gdt` checks the bit fields rather than loading anything, because every
+one of these is a silent triple fault: an instant reboot with nothing printed.
+
+**The U bit is ANDed down all four levels**, so a leaf marked user under a
+directory that is not stays unreachable. `protect` therefore opens the PML4,
+PDPT and PD entries along the way when the leaf is going to be user-accessible.
+That is safe for the same reason it is necessary: every other page under those
+directories still has a clear U bit of its own, and the leaf is the gate.
+
+In: `iretq` with a hand-built ring-3 frame. Out: `sysretq`, which was the wrong
+instruction while guests ran at ring 0 and is the right one now. The selectors
+are literals in the assembly because `global_asm!` cannot see a Rust constant,
+so a claim asserts the literals against the constants.
+
+**Two real bugs surfaced only because the guest moved to ring 3.**
+
+`sys_mmap` never marked what it handed out as user-accessible. The loader opens
+the image, stack and break before the guest starts, and a mapping made after
+that is covered by none of them. At ring 0 the U bit meant nothing so this was
+invisible; the first ring-3 guest to call `mmap` took a protection violation
+reading its own memory.
+
+And **a `static mut` written only by assembly can be folded away.**
+`GLADOS_HOST_RSP` is written by `glados_enter_guest` and by nothing in Rust, so
+the optimiser sees an initialiser of zero, no writer, and is entitled to
+constant-fold every read to `false`. It did. The question "is a guest running"
+is an `AtomicBool` that Rust both writes and reads now, and reading the parked
+stack pointer from Rust is gone.
+
+**What stage 1 was supposed to buy and does not yet: surviving a guest fault.**
+The isolation half is measured. A ring-3 guest reading a kernel address takes a
+`#PF` with `cs=0x3b` and `cr2` at the address it reached for, so it cannot read
+kernel memory, and the fault reporter names the guest's pages by their `Exec`
+tag. What does not work is killing only the guest: longjmping out of the fault
+handler through `syscall::kill` reaches `glados_leave_guest` and then takes a
+`#GP` at ring 0 on the way back. The hook is disabled and the reason is written
+at the site. Ruled out already, so do not re-test: the branch is reached, a raw
+port write inside it emits, and `running()` answers true.
+
+So a guest fault still stops the machine, exactly as at stage 0. Not a
+regression, and the one thing stage 1 was for, which is why it is named here.
+
 ### Running a binary this kernel did not compile
 
 `src/linux/` is stage 0 of multi-binary support, and it is a **measuring

@@ -32,7 +32,7 @@ PF_X, PF_W, PF_R = 1, 2, 4
 EHDR = 64
 PHENT = 56
 
-MESSAGE = b"hello from ring 0\n"
+MESSAGE = b"hello from ring 3\n"
 # Distinctive, and not 0 or 1: an exit code the harness reads back has to be
 # distinguishable from "the guest never ran" and from "something returned
 # success by accident".
@@ -123,6 +123,16 @@ def cmp_imm8(reg, imm):
     return bytes([_rex(b=n >> 3), 0x83, 0xF8 | (n & 7), imm & 0xFF])
 
 
+def load_abs(dst, addr):
+    """mov dst, [addr] with an absolute 32-bit address.
+
+    Needs a SIB byte: 64-bit mode has no plain absolute addressing, so
+    modrm 0x04 selects SIB and SIB 0x25 selects "no base, no index, disp32".
+    """
+    n = REG[dst]
+    return bytes([_rex(r=n >> 3), 0x8B, 0x04 | ((n & 7) << 3), 0x25]) + struct.pack("<I", addr)
+
+
 SYSCALL = b"\x0f\x05"
 HLT = b"\xf4"
 MSG_OK = b"brk, mmap and arch_prctl all answered; FS read back\n"
@@ -130,6 +140,7 @@ MSG_GUARDED = b"both wild pointers were refused with EFAULT\n"
 MSG_UNGUARDED = b"a wild pointer got through\n"
 MSG_PROT = b"mprotect PROT_NONE took the page away from the kernel too\n"
 MSG_NOPROT = b"the page was still reachable after PROT_NONE\n"
+MSG_ESCAPED = b"the guest read kernel memory and lived\n"
 MSG_BAD = b"FS did not read back\n"
 
 
@@ -308,6 +319,30 @@ def protect_code(entry_rva, ok_rva, bad_rva):
     return bytes(c)
 
 
+def wild_code(entry_rva, msg_rva, _unused):
+    """Read a kernel page directly, with no syscall in the way.
+
+    0x1000 is mapped and belongs to the kernel, and its U bit is clear, so at
+    ring 3 this instruction must fault. Nothing here checks a return value
+    because there is nothing to return to: the kernel is expected to kill this
+    guest at the load.
+
+    Reaching the write below therefore means the guest read kernel memory and
+    carried on, which is isolation not working. It says so and exits 13, and a
+    run that reports 13 is a run that failed.
+    """
+    c = bytearray()
+    c += load_abs("rax", 0x1000)
+    c += mov_imm("rax", 1) + mov_imm("rdi", 1)
+    lea_at = len(c)
+    c += lea_rip("rsi", 0)
+    lea_end = len(c)
+    c += mov_imm("rdx", len(MSG_ESCAPED)) + SYSCALL
+    c += mov_imm("rax", 231) + mov_imm("rdi", 13) + SYSCALL + HLT
+    struct.pack_into("<i", c, lea_at + 3, msg_rva - (entry_rva + lea_end))
+    return bytes(c)
+
+
 def build(kind="static"):
     interp = b"/lib64/ld-linux-x86-64.so.2\x00"
     phnum = 2 if kind == "dynamic" else 1
@@ -315,7 +350,14 @@ def build(kind="static"):
     # Lay the body out first so the message address is known before the code
     # that points at it is emitted.
     body_at = entry
-    if kind == "protect":
+    if kind == "wild":
+        probe = wild_code(0, 0, 0)
+        msg_rva = body_at + len(probe)
+        text = wild_code(entry, msg_rva, 0)
+        assert len(text) == len(probe), (len(text), len(probe))
+        body = text + MSG_ESCAPED
+        disp, lea_end = 0, 0
+    elif kind == "protect":
         probe = protect_code(0, 0, 0)
         ok_rva = body_at + len(probe)
         bad_rva = ok_rva + len(MSG_PROT)
@@ -443,6 +485,13 @@ def verify(path):
     # RIP-relative lea says it is. Off by four here and the guest writes
     # whatever follows, which reads as a working loader printing garbage.
     rel_entry = entry - va
+    if MSG_ESCAPED in b:
+        claim("it reads an absolute kernel address with no syscall in the way",
+              bytes([0x48, 0x8B, 0x04, 0x25, 0x00, 0x10, 0x00, 0x00]) in b)
+        claim("the fault is expected before the write, so reaching it is the failure",
+              b.index(bytes([0x48, 0x8B, 0x04, 0x25])) < b.index(MSG_ESCAPED))
+        claim("it exits 13 if it gets that far", bytes([0x48, 0xC7, 0xC7, 13, 0, 0, 0]) in b)
+        return ok
     if MSG_PROT in b:
         claim("it maps, hides and re-probes the same page",
               b.count(SYSCALL) == 8)
@@ -501,7 +550,7 @@ def main():
     ap.add_argument("out")
     ap.add_argument("--kind",
                     choices=["static", "dynamic", "fixed", "memory", "rogue",
-                             "protect"],
+                             "protect", "wild"],
                     default="static")
     ap.add_argument("--verify", action="store_true")
     a = ap.parse_args()

@@ -26,14 +26,15 @@
 //!
 //! ### Returning
 //!
-//! Not with `sysret`, which forces CPL 3 on the way out and would drop a guest
-//! this kernel deliberately keeps at ring 0 into a privilege level it has no
-//! descriptors for. `syscall` leaves the return address in `rcx` and the old
-//! flags in `r11`, so the stub restores the flags and jumps to `rcx` -- which
-//! is what `sysret` does minus the privilege change.
+//! With `sysretq`, which forces CPL 3 on the way out. That was the reason not
+//! to use it while guests ran at ring 0 and this kernel had no ring-3
+//! descriptors; both of those stopped being true at stage 1. It takes the
+//! return address from `rcx` and the flags from `r11`, which is where
+//! `syscall` left them, and derives CS and SS from `IA32_STAR[63:48]`.
 
 use super::elf;
 use crate::sync::Racy;
+use core::sync::atomic::{AtomicBool, Ordering};
 use alloc::vec::Vec;
 
 const IA32_EFER: u32 = 0xC000_0080;
@@ -143,9 +144,7 @@ glados_syscall_entry:
     pop rcx
     pop r11
     mov rsp, [rip + GLADOS_GUEST_RSP]
-    push r11
-    popfq
-    jmp rcx
+    sysretq
 
     .globl glados_enter_guest
 glados_enter_guest:
@@ -156,12 +155,18 @@ glados_enter_guest:
     push r14
     push r15
     mov [rip + GLADOS_HOST_RSP], rsp
-    mov rsp, rsi
+    push 0x33
+    push rsi
+    push 0x202
+    push 0x3b
+    push rdi
     xor eax, eax
     xor ecx, ecx
     xor edx, edx
     xor ebx, ebx
     xor ebp, ebp
+    xor esi, esi
+    xor edi, edi
     xor r8d, r8d
     xor r9d, r9d
     xor r10d, r10d
@@ -170,9 +175,7 @@ glados_enter_guest:
     xor r13d, r13d
     xor r14d, r14d
     xor r15d, r15d
-    mov rsi, rdi
-    xor edi, edi
-    jmp rsi
+    iretq
 
     .globl glados_leave_guest
 glados_leave_guest:
@@ -426,7 +429,11 @@ pub fn arm() {
         let top = core::ptr::addr_of!(SYSCALL_STACK.0) as u64 + (16 * 1024);
         core::ptr::write(core::ptr::addr_of_mut!(GLADOS_SYSCALL_STACK), top);
 
-        let star = (crate::cpu::gdt::KERNEL_CS as u64) << 32;
+        // Bits 47:32 are what `syscall` loads. Bits 63:48 are what `sysret`
+        // counts from, and it counts to selectors that only exist because the
+        // GDT was widened for them.
+        let star = (crate::cpu::gdt::KERNEL_CS as u64) << 32
+            | (crate::cpu::gdt::SYSRET_BASE as u64) << 48;
         crate::cpu::wrmsr(IA32_STAR, star);
         crate::cpu::wrmsr(IA32_LSTAR, glados_syscall_entry as usize as u64);
         // Clear IF, TF and DF on entry. IF because the handler runs on one
@@ -520,7 +527,7 @@ fn sys_brk(want: u64) -> u64 {
 /// `MAP_FIXED` needs an address one address space can promise, which is the
 /// same objection that makes the loader decline `ET_EXEC`. And a zero length
 /// is `EINVAL` on Linux, so it is `EINVAL` here.
-fn sys_mmap(addr: u64, len: u64, _prot: u64, flags: u64, fd: u64, _off: u64) -> u64 {
+fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, _off: u64) -> u64 {
     if len == 0 {
         return EINVAL;
     }
@@ -534,6 +541,24 @@ fn sys_mmap(addr: u64, len: u64, _prot: u64, flags: u64, fd: u64, _off: u64) -> 
         return ENOMEM;
     }
     let Some(at) = alloc_pages(len as usize) else { return ENOMEM };
+    // **Open it to ring 3, or the guest cannot touch what it just asked for.**
+    // The loader opens the image, stack and break before the guest starts, and
+    // a mapping made after that is not covered by any of them. At ring 0 this
+    // was invisible, because the U bit meant nothing; the first ring-3 guest to
+    // call `mmap` took a protection violation reading its own memory.
+    let perm = crate::mem::paging::Perm {
+        present: true,
+        write: prot & PROT_WRITE != 0,
+        exec: prot & PROT_EXEC != 0,
+        user: true,
+    };
+    if !crate::mem::paging::protect(at, page_up(len as usize), perm) {
+        // Partially applied rights are still rights, so close it on the way
+        // out rather than handing the allocator whatever the walk managed.
+        crate::mem::paging::protect(at, page_up(len as usize), crate::mem::paging::Perm::RW);
+        free_pages(at, len as usize);
+        return ENOMEM;
+    }
     let sp = unsafe { SPACE.get() };
     match sp.as_mut() {
         Some(sp) => sp.maps.push(Mapping { at, len: len as usize }),
@@ -555,6 +580,14 @@ fn sys_munmap(at: u64, len: u64) -> u64 {
     match sp.maps.iter().position(|m| m.at == at && m.len == len as usize) {
         Some(i) => {
             let m = sp.maps.remove(i);
+            // **Close it before giving it back.** `teardown` does this for a
+            // guest that exits still holding mappings, and this path was
+            // missed: an explicit unmap returned pages to the allocator with
+            // their U bit still set, so the next thing to be handed that
+            // memory -- kernel or otherwise -- came with ring-3 access
+            // attached. A `diag all` caught it and `diag paging` alone did
+            // not, because it only shows up once something else has run.
+            crate::mem::paging::protect(m.at, m.len, crate::mem::paging::Perm::RW);
             free_pages(m.at, m.len);
             0
         }
@@ -591,6 +624,10 @@ fn sys_mprotect(at: u64, len: u64, prot: u64) -> u64 {
         present: prot != 0,
         write: prot & PROT_WRITE != 0,
         exec: prot & PROT_EXEC != 0,
+        // A guest's own memory stays reachable from ring 3 whatever it does to
+        // the other three bits. Clearing this would hide the page from the
+        // guest while leaving it visible to the kernel, which is backwards.
+        user: true,
     };
     if crate::mem::paging::protect(at, len as usize, perm) {
         0
@@ -680,6 +717,38 @@ extern "sysv64" {
 /// Set on the way out so an exit code of zero is still distinguishable from
 /// "the guest never called exit at all".
 pub const EXITED: u64 = 1 << 32;
+/// Set instead when the guest died of a fault.
+pub const FAULTED: u64 = 1 << 33;
+
+/// Whether a guest is on the stack right now.
+///
+/// A plain atomic that Rust both writes and reads, rather than a look at the
+/// stack pointer `glados_enter_guest` parked. That indirection is deliberate:
+/// the fault handler asks this question from inside an interrupt gate on an
+/// IST stack, having just come from ring 3, and it must not depend on reading
+/// a `static mut` whose only writer is assembly. The first version did, and it
+/// took a #GP inside the read on exactly that path.
+static GUEST_RUNNING: AtomicBool = AtomicBool::new(false);
+
+pub fn running() -> bool {
+    GUEST_RUNNING.load(Ordering::Relaxed)
+}
+
+/// End a guest that faulted, and go back to whoever started it.
+///
+/// **This is what ring 3 buys.** At ring 0 a guest fault was the machine's
+/// fault too: it shared an address space with the kernel and could have
+/// already corrupted anything, so the only honest response was to stop. At
+/// ring 3 the kernel is intact by construction, because the guest could not
+/// reach it, so the guest dies and the machine carries on.
+///
+/// # Safety
+/// Only from a fault handler, and only when `running` is true.
+pub unsafe fn kill(vector: u64) -> ! {
+    // Raw port write: no formatter, no lock, nothing that can fault.
+    GUEST_RUNNING.store(false, Ordering::Relaxed);
+    unsafe { glados_leave_guest(FAULTED | vector) }
+}
 
 /// Run a loaded image until it exits.
 ///
@@ -698,7 +767,21 @@ pub unsafe fn run(entry: u64, stack_top: u64) -> u64 {
             sp.saved_fs = crate::cpu::rdmsr(IA32_FS_BASE);
         }
     }
+    // `syscall` clears IF through FMASK and `exit_group` leaves through a
+    // longjmp rather than through the stub's tail, so nothing on that path
+    // puts the flag back. Saved and restored around the whole run, which is
+    // also what makes a faulting guest survivable: the handler that killed it
+    // arrived through a gate that cleared IF too.
+    let flags: u64;
+    unsafe {
+        core::arch::asm!("pushfq; pop {}", out(reg) flags, options(nomem, preserves_flags))
+    };
+    GUEST_RUNNING.store(true, Ordering::Relaxed);
     let code = unsafe { glados_enter_guest(entry, stack_top) };
+    GUEST_RUNNING.store(false, Ordering::Relaxed);
+    if flags & (1 << 9) != 0 {
+        crate::cpu::enable_interrupts();
+    }
     teardown();
     code
 }
@@ -936,6 +1019,25 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         "and one large enough answers a 16-byte-aligned pointer inside itself",
         sp.is_some_and(|v| v % 16 == 0 && v >= big.as_ptr() as u64
             && v < big.as_ptr() as u64 + 512),
+    ));
+
+    // The stub and `glados_enter_guest` carry their selectors as literals,
+    // because `global_asm!` cannot see a Rust constant. So the literals are
+    // asserted against the constants instead: 0x3b and 0x33 in that assembly
+    // are the only two numbers in this module that nothing else checks, and
+    // getting either wrong is a triple fault on the `iretq`.
+    out.push((
+        "the ring-3 selectors written into the assembly are the ones the GDT holds",
+        crate::cpu::gdt::ring3(crate::cpu::gdt::USER_CS) == 0x3B
+            && crate::cpu::gdt::ring3(crate::cpu::gdt::USER_DS) == 0x33,
+    ));
+    out.push((
+        "the flags the guest starts with have interrupts on, so it can be preempted",
+        0x202u64 & (1 << 9) != 0,
+    ));
+    out.push((
+        "a fault code is distinguishable from an exit code",
+        FAULTED != EXITED && (FAULTED | 14) & 0xFFFF_FFFF == 14,
     ));
 
     // The handler's stack has to be aligned, because the stub's `sub rsp, 8`

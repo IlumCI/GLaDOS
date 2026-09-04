@@ -4411,7 +4411,9 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                                 bytes.len(), g.segments, g.span, g.base, g.entry
                             );
                             console::set_color(LTGRAY);
-                            kprintln!("  ring 0, no isolation -- a fault here halts the machine");
+                            kprintln!(
+                                "  ring 3, one address space -- only its own pages carry the U bit"
+                            );
                             // Safety: the whole of stage 0 is this call. The
                             // guest's pages are armed, so a fault at least
                             // names them.
@@ -4427,7 +4429,14 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                                     if c.served { "" } else { "(unimplemented)" }
                                 );
                             }
-                            if r & linux::syscall::EXITED != 0 {
+                            if r & linux::syscall::FAULTED != 0 {
+                                console::set_color(YELLOW);
+                                kprintln!(
+                                    "  killed by fault {:#04x} after {} syscall(s), machine intact",
+                                    r & 0xFFFF_FFFF, calls.len()
+                                );
+                                console::set_color(LTGRAY);
+                            } else if r & linux::syscall::EXITED != 0 {
                                 kprintln!(
                                     "  exited {} after {} syscall(s)",
                                     r & 0xFFFF_FFFF, calls.len()

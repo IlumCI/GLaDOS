@@ -25,6 +25,8 @@ const WRITE_THROUGH: u64 = 1 << 3;
 const CACHE_DISABLE: u64 = 1 << 4;
 /// PS bit. On a PD entry this means "this is a 2 MiB page", not a pointer to a PT.
 const HUGE: u64 = 1 << 7;
+/// U/S. Clear means ring 3 may not touch this page at all.
+const USER: u64 = 1 << 2;
 /// Bit 63. Means no-execute, but only once `EFER.NXE` is on.
 const NX: u64 = 1 << 63;
 /// The physical address field of a 2 MiB entry is bits 51:21, not 51:12.
@@ -182,14 +184,27 @@ pub struct Perm {
     pub present: bool,
     pub write: bool,
     pub exec: bool,
+    /// Whether ring 3 may touch it.
+    ///
+    /// **The U bit is ANDed down every level of the walk**, so a page marked
+    /// user under a directory that is not stays unreachable from ring 3. That
+    /// is why `protect` opens the PML4, PDPT and PD entries along the way and
+    /// not only the leaf. It is also why doing so is safe: every other page
+    /// under those directories still has a clear U bit of its own, and the
+    /// leaf is the gate.
+    pub user: bool,
 }
 
 impl Perm {
-    pub const RW: Perm = Perm { present: true, write: true, exec: false };
-    pub const RO: Perm = Perm { present: true, write: false, exec: false };
-    pub const RX: Perm = Perm { present: true, write: false, exec: true };
-    pub const RWX: Perm = Perm { present: true, write: true, exec: true };
-    pub const NONE: Perm = Perm { present: false, write: false, exec: false };
+    pub const RW: Perm = Perm { present: true, write: true, exec: false, user: false };
+    pub const RO: Perm = Perm { present: true, write: false, exec: false, user: false };
+    pub const RX: Perm = Perm { present: true, write: false, exec: true, user: false };
+    pub const RWX: Perm = Perm { present: true, write: true, exec: true, user: false };
+    pub const NONE: Perm = Perm { present: false, write: false, exec: false, user: false };
+    /// What a guest's own pages get, and the only pages in the machine ring 3
+    /// can reach.
+    pub const USER_RWX: Perm = Perm { present: true, write: true, exec: true, user: true };
+    pub const USER_RW: Perm = Perm { present: true, write: true, exec: false, user: true };
 
     fn bits(&self) -> u64 {
         let mut f = 0;
@@ -201,6 +216,9 @@ impl Perm {
         }
         if !self.exec {
             f |= NX;
+        }
+        if self.user {
+            f |= USER;
         }
         f
     }
@@ -243,6 +261,16 @@ unsafe fn split_large(pd: &mut [u64; ENTRIES], i2: usize) -> bool {
 
 /// The entry governing one address, splitting a huge page if it has to.
 unsafe fn entry_for(addr: u64, split: bool) -> Option<&'static mut u64> {
+    unsafe { entry_for_user(addr, split, false) }
+}
+
+/// As `entry_for`, and when `open` is set every directory on the way down is
+/// marked user-accessible so the leaf's own U bit can take effect.
+///
+/// Opening a directory grants nothing by itself. The processor ANDs the U bit
+/// across all four levels, so a directory marked user still hands ring 3
+/// exactly the leaves whose own U bit is set, which is none of the kernel's.
+unsafe fn entry_for_user(addr: u64, split: bool, open: bool) -> Option<&'static mut u64> {
     let pml4_phys = crate::cpu::read_cr3() & ADDR_MASK;
     let (i4, i3, i2, i1) = (
         ((addr >> 39) & 511) as usize,
@@ -255,9 +283,15 @@ unsafe fn entry_for(addr: u64, split: bool) -> Option<&'static mut u64> {
         if pml4[i4] & PRESENT == 0 {
             return None;
         }
+        if open {
+            pml4[i4] |= USER;
+        }
         let pdpt = table(pml4[i4] & ADDR_MASK);
         if pdpt[i3] & PRESENT == 0 || pdpt[i3] & HUGE != 0 {
             return None;
+        }
+        if open {
+            pdpt[i3] |= USER;
         }
         let pd = table(pdpt[i3] & ADDR_MASK);
         if pd[i2] & PRESENT == 0 {
@@ -273,6 +307,14 @@ unsafe fn entry_for(addr: u64, split: bool) -> Option<&'static mut u64> {
                 return None;
             }
         }
+        // **After the split, and that ordering is the whole of it.** Marked
+        // before, this bit is part of the flags `split_large` copies into all
+        // five hundred and twelve new entries, so opening one page to ring 3
+        // opened the entire 2 MiB region around it. A claim caught it: the
+        // page beside the opened one came back user-accessible.
+        if open {
+            pd[i2] |= USER;
+        }
         let pt = table(pd[i2] & ADDR_MASK);
         Some(&mut pt[i1])
     }
@@ -285,6 +327,7 @@ unsafe fn entry_for(addr: u64, split: bool) -> Option<&'static mut u64> {
 pub fn query(addr: u64) -> Option<Perm> {
     let e = *unsafe { entry_for(addr, false) }?;
     Some(Perm {
+        user: e & USER != 0,
         present: e & PRESENT != 0,
         write: e & WRITABLE != 0,
         // A page is executable when NX is clear, and also when NX means
@@ -310,10 +353,10 @@ pub fn protect(at: u64, len: usize, perm: Perm) -> bool {
     let start = at & !(PAGE_SIZE - 1);
     let Some(sum) = at.checked_add(len as u64) else { return false };
     let end = sum.div_ceil(PAGE_SIZE) * PAGE_SIZE;
-    let keep = !(PRESENT | WRITABLE | NX);
+    let keep = !(PRESENT | WRITABLE | NX | USER);
     let mut addr = start;
     while addr < end {
-        let Some(e) = (unsafe { entry_for(addr, true) }) else { return false };
+        let Some(e) = (unsafe { entry_for_user(addr, true, perm.user) }) else { return false };
         *e = (*e & keep) | perm.bits();
         // Per page rather than a CR3 reload, because a reload flushes every
         // translation in the machine and this can be called with a guest's
@@ -385,6 +428,21 @@ pub fn checks() -> alloc::vec::Vec<(&'static str, bool)> {
     out.push((
         "and the write did not land",
         unsafe { core::ptr::read_volatile(page) } == 0xA5,
+    ));
+
+    // The U bit, and the property that makes it worth having.
+    let opened = protect(at, PAGE_SIZE as usize, Perm::USER_RW);
+    out.push((
+        "a page can be opened to ring 3",
+        opened && query(at).is_some_and(|p| p.user),
+    ));
+    out.push((
+        "and the page beside it is not opened with it, since the leaf is the gate",
+        query(at + PAGE_SIZE).is_some_and(|p| !p.user),
+    ));
+    out.push((
+        "closing it takes the U bit back off",
+        protect(at, PAGE_SIZE as usize, Perm::RW) && query(at).is_some_and(|p| !p.user),
     ));
 
     // Put it back, or the heap hands out a page nothing may write to.

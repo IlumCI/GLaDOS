@@ -194,6 +194,28 @@ fn emit(out: &mut dyn FnMut(core::fmt::Arguments), r: &Report) {
 /// The console #GP itself is a real bug and is not fixed here. It is older
 /// than any of this and belongs to the console, not to the reporter.
 fn fault(frame: &InterruptStackFrame, vector: u8, name: &str, err: Option<u64>) -> ! {
+    // **A guest fault should kill only the guest, and does not yet.**
+    //
+    // The isolation half works and is measured: a ring-3 guest reading a
+    // kernel address takes a #PF with `cs=0x3b` and `cr2` at the address it
+    // reached for, so it cannot read kernel memory. What does not work is
+    // surviving that. Longjmping out of this handler through
+    // `syscall::kill` reaches `glados_leave_guest` and then takes a #GP at
+    // ring 0 somewhere on the way back, which the report below then cannot
+    // print because the console faults inside an interrupt gate here.
+    //
+    // Three things were ruled out on the way and are worth not re-testing:
+    // the branch is reached (`cs & 3 == 3` holds and a raw port write inside
+    // it emits), `running()` answers true, and reading the asm-written
+    // `GLADOS_HOST_RSP` from Rust was a genuine second bug -- the optimiser
+    // can fold it, since nothing in Rust writes it -- which is why that
+    // question is an `AtomicBool` now and not a look at the parked stack.
+    //
+    // So a guest fault still stops the machine, exactly as it did at stage 0.
+    // That is not a regression, and it is the one thing stage 1 was supposed
+    // to buy, so it stays named here rather than quietly missing.
+    let _ = crate::linux::syscall::running();
+
     // A program the machine wrote for itself is the thing most likely to fault
     // here, and stopping the machine for one is the wrong answer. If the task
     // is inside a guard, land there instead of reporting.
