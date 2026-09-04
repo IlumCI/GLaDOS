@@ -194,6 +194,16 @@ impl Opening {
 
 /// Would the player standing here be inside a wall?
 fn blocked(lv: &Level, x: f32, y: f32, z: f32) -> bool {
+    blocked_for(lv, x, y, z, RADIUS, HEIGHT)
+}
+
+/// The same question for anything of a given size.
+///
+/// The player's numbers were constants inside this until monsters needed to
+/// ask it too, and their sizes differ -- a demon is 30 units across where the
+/// player is 16, which is the difference between fitting through a doorway and
+/// not.
+pub fn blocked_for(lv: &Level, x: f32, y: f32, z: f32, radius: f32, height: f32) -> bool {
     for l in lv.linedefs.iter() {
         // A one-sided line is always a wall, whatever its flags say -- there
         // is nothing on the other side to walk into. A two-sided one is a wall
@@ -203,7 +213,7 @@ fn blocked(lv: &Level, x: f32, y: f32, z: f32) -> bool {
         else {
             continue;
         };
-        if dist_to_seg(x, y, a.x as f32, a.y as f32, b.x as f32, b.y as f32) >= RADIUS {
+        if dist_to_seg(x, y, a.x as f32, a.y as f32, b.x as f32, b.y as f32) >= radius {
             continue;
         }
         if wall {
@@ -215,8 +225,8 @@ fn blocked(lv: &Level, x: f32, y: f32, z: f32) -> bool {
         // squeezed to nothing -- was walked straight through. Nothing looked
         // wrong; the door was just scenery.
         let Some(o) = Opening::of(lv, l) else { return true };
-        let too_short = o.top - o.bottom < HEIGHT;
-        let no_headroom = o.top - z < HEIGHT;
+        let too_short = o.top - o.bottom < height;
+        let no_headroom = o.top - z < height;
         let step_too_high = o.bottom - z > MAX_STEP;
         if too_short || no_headroom || step_too_high {
             return true;
@@ -287,6 +297,16 @@ fn pickups(lv: &Level, p: &mut Player, things: &mut super::sprite::Things) {
     });
 }
 
+/// Where the player is, for the monsters to aim at.
+fn quarry(p: &Player) -> super::enemy::Quarry {
+    super::enemy::Quarry {
+        x: p.x,
+        y: p.y,
+        z: p.floor,
+        alive: p.status.health > 0,
+    }
+}
+
 /// One weapon action, and whatever it sets off next.
 ///
 /// Only the two weapons whose shot is a single bullet actually fire: the
@@ -332,7 +352,7 @@ fn weapon_action(
                 p.x,
                 p.y,
                 p.angle,
-                super::shoot::PISTOL_DAMAGE,
+                super::shoot::bullet_damage(),
                 &mut fired,
             );
             if let Some((_, died)) = hit {
@@ -340,7 +360,13 @@ fn weapon_action(
                     p.killed += 1;
                 }
             }
-            p.killed += dispatch(lv, things, &mut fired);
+            let q = quarry(p);
+            let (k, _) = dispatch(lv, things, &mut fired, &q);
+            p.killed += k;
+            // A shot is heard. Without this a monster facing away from you is
+            // deaf, which is the one place having no audio driver changes
+            // behaviour rather than merely being quiet.
+            super::enemy::alert(lv, &mut things.objs, p.x, p.y);
             None
         }
         _ => None,
@@ -361,10 +387,12 @@ fn dispatch(
     lv: &Level,
     things: &mut super::sprite::Things,
     fired: &mut alloc::vec::Vec<Fired>,
-) -> usize {
+    q: &super::enemy::Quarry,
+) -> (usize, i32) {
     const ROUNDS: usize = 8;
-    let mut killed = 0usize;
+    let (mut killed, mut hurt) = (0usize, 0i32);
     let mut next: alloc::vec::Vec<Fired> = alloc::vec::Vec::new();
+    let mut scratch: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
     for _ in 0..ROUNDS {
         if fired.is_empty() {
             break;
@@ -373,12 +401,26 @@ fn dispatch(
         for f in fired.iter() {
             if f.action == super::info::A_EXPLODE {
                 killed += super::shoot::blast(lv, &mut things.objs, f.x, f.y, &mut next);
+                continue;
+            }
+            // Everything else is a monster acting on itself. An action that
+            // sets a state runs the *new* state's action too, which is DOOM's
+            // `P_SetMobjState` -- so whatever it sets off is queued for the
+            // next round rather than recursed into, and the round cap is what
+            // stops a cycle of two states setting each other.
+            scratch.clear();
+            hurt += super::enemy::act(f.action, lv, &mut things.objs, f.who, q, &mut scratch);
+            if let Some(o) = things.objs.list.get(f.who) {
+                let (x, y) = (o.x, o.y);
+                for a in scratch.iter() {
+                    next.push(Fired { action: *a, who: f.who, x, y });
+                }
             }
         }
         core::mem::swap(fired, &mut next);
     }
     fired.clear();
-    killed
+    (killed, hurt)
 }
 
 /// One tic of the world.
@@ -481,9 +523,16 @@ fn tic(lv: &mut Level, p: &mut Player, th: &mut Thinkers, things: &mut super::sp
     let mut fired: alloc::vec::Vec<Fired> = alloc::vec::Vec::new();
     things.tick(&mut fired);
     // A barrel entering its explosion state fifteen tics after it died, and
-    // whatever that takes with it. Counted on the player, because a chain
-    // reaction somebody started is theirs.
-    p.killed += dispatch(&*lv, things, &mut fired);
+    // every monster looking, chasing and shooting. Counted on the player,
+    // because a chain reaction somebody started is theirs.
+    let q = quarry(p);
+    let (killed, hurt) = dispatch(&*lv, things, &mut fired, &q);
+    p.killed += killed;
+    // Only now, once every action has been dispatched by index.
+    things.objs.sweep();
+    if hurt > 0 && p.status.health > 0 {
+        p.status.hurt(hurt);
+    }
     // The floor under wherever we are, sampled **every** tic rather than only
     // on one where a movement key was held.
     //
@@ -541,6 +590,17 @@ pub struct Stats {
     /// finishes its animation and comes off, so this falls where `killed`
     /// rises, and the two disagreeing is a thing that died and stayed.
     pub remaining: usize,
+    /// How many monsters are on the level, and how many have noticed you.
+    pub monsters: usize,
+    pub awake: usize,
+    /// How close the nearest live monster got by the end.
+    pub nearest: f32,
+    /// Damage taken over the run, before armour, and whether it was fatal.
+    pub hurt_by: i32,
+    pub died: bool,
+    /// How much of the random table the run spent. Two runs of one script that
+    /// disagree about this have taken different paths through the game.
+    pub rolls: usize,
     /// The colour of the last door that refused for want of a key.
     pub refused: Option<super::player::Colour>,
     /// Whether the shading table came out of the WAD's own COLORMAP. Carried
@@ -576,6 +636,11 @@ pub fn run(
     // rather than from a constant, because a different resolution would give
     // the sprites a different field of view from the geometry.
     let surf_scale = surf.width() as f32 / 2.0;
+
+    // The random sequence, from the start. Two runs of one script then fire
+    // the same shots and take the same damage, which is what makes a headless
+    // run's numbers a fact about the code rather than about this boot.
+    super::rng::reset();
 
     // Anything held when the game started belongs to whoever was typing, not
     // to the player.
@@ -622,6 +687,12 @@ pub fn run(
         shots: 0,
         killed: 0,
         remaining: 0,
+        monsters: 0,
+        awake: 0,
+        nearest: 0.0,
+        hurt_by: 0,
+        died: false,
+        rolls: 0,
         refused: None,
         exited: false,
         lit_from_wad: r.lit_from_wad,
@@ -716,6 +787,13 @@ pub fn run(
     stats.shots = p.shots;
     stats.killed = p.killed;
     stats.remaining = things.len();
+    let (monsters, awake) = things.objs.monsters();
+    stats.monsters = monsters;
+    stats.awake = awake;
+    stats.nearest = things.objs.nearest_monster(p.x, p.y);
+    stats.hurt_by = p.status.hurt_by;
+    stats.died = p.status.health <= 0;
+    stats.rolls = super::rng::spent();
     stats.refused = p.refused;
     stats.exited = lv.exited;
     stats.watched = lv

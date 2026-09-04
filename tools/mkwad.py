@@ -561,6 +561,78 @@ def key_pixel(bright):
     return px
 
 
+# A zombieman, in every frame its state chains reach.
+#
+# **Twenty-one frames, and all of them rotation 0.** A real zombieman has eight
+# facings per frame and this has one seen from everywhere, which is wrong and
+# is deliberately wrong: the eight-facing path is already exercised by FreeDoom
+# (`doom mug POSS` draws all eight), and what the fixture is for is the *state
+# machine* -- whether the thing looks, chases, shoots, flinches and dies. A
+# frame that does not exist is a frame the object is dropped for, so the whole
+# alphabet has to be here or the test is about nothing.
+#
+# The poses are crude and the *distinctions* are not: the walk cycle moves its
+# legs, the attack frame puts an arm out and the one after it adds a muzzle
+# flash, pain leans, and the two death chains sink. Anything that plays the
+# wrong chain is visible rather than merely different.
+ZOMBIE_FRAMES = "ABCDEFGHIJKLMNOPQRSTU"
+
+
+def zombie_pixel(frame):
+    """One frame of the zombieman, as a pixel function."""
+    walk = "ABCD".find(frame)          # the four-step walk cycle
+    fire = "EF".find(frame)            # arm out, then the flash
+    hurt = frame == "G"
+    die = "HIJKL".find(frame)          # ordinary death
+    gib = "MNOPQRSTU".find(frame)      # the messy one
+
+    # How far the body has collapsed, 0 upright to 1 flat.
+    down = 0.0
+    if die >= 0:
+        down = (die + 1) / 5.0
+    elif gib >= 0:
+        down = (gib + 1) / 9.0
+
+    def px(x, y):
+        cx = SPRITE_W // 2
+        floor = SPRITE_H - 1
+        # Standing height shrinks as it falls.
+        tall = int(44 * (1.0 - down))
+        top = floor - tall
+        if tall < 4:
+            # A heap on the ground, and the gib chain leaves a wider one.
+            wide = 16 if gib >= 0 else 10
+            if floor - 4 <= y <= floor and abs(x - cx) < wide:
+                return _idx(1, 4)
+            return TRANSPARENT
+
+        # Head.
+        if top <= y < top + 8 and abs(x - cx) < 5:
+            return _idx(7, 9 if not hurt else 12)
+        # Torso.
+        if top + 8 <= y < floor - 12 and abs(x - cx) < 7:
+            # Leaning when in pain, which is the whole of that frame.
+            lean = 3 if hurt else 0
+            if abs(x - cx - lean) < 7:
+                return _idx(2, 6 + (y % 3))
+            return TRANSPARENT
+        # Legs, alternating with the walk cycle.
+        if floor - 12 <= y <= floor:
+            step = 0 if walk < 0 else (walk % 2) * 3
+            if abs(x - (cx - 4 + step)) < 3 or abs(x - (cx + 4 - step)) < 3:
+                return _idx(3, 5)
+            return TRANSPARENT
+        # The arm, out to the right while attacking.
+        if fire >= 0 and top + 10 <= y < top + 16 and cx + 6 <= x < cx + 18:
+            return _idx(2, 8)
+        # The flash, on the second attack frame only.
+        if fire == 1 and top + 9 <= y < top + 17 and cx + 18 <= x < cx + 24:
+            return _idx(4, 15)
+        return TRANSPARENT
+
+    return px
+
+
 # `left` is half the width, so the sprite is centred on the thing. `top` is the
 # full height, so the bottom edge sits on the floor.
 SPRITES = [
@@ -571,6 +643,8 @@ SPRITES = [
     ("MEDIA0", medi_pixel, SPRITE_W // 2, SPRITE_H),
     ("BKEYA0", key_pixel(True), SPRITE_W // 2, SPRITE_H),
     ("BKEYB0", key_pixel(False), SPRITE_W // 2, SPRITE_H),
+] + [
+    ("POSS%s0" % f, zombie_pixel(f), SPRITE_W // 2, SPRITE_H) for f in ZOMBIE_FRAMES
 ]
 
 
@@ -735,6 +809,14 @@ THINGS = [
     (250, 0, 0, 2007),      # a clip
     (200, 0, 0, 2012),      # a medikit, which full health will not take
     (150, 0, 0, 5),         # the blue key the door wants
+    # A zombieman, placed where it can see the player and pointed at them.
+    #
+    # Both halves matter. `A_Look` wants sight *and* the player inside its
+    # front 180 degrees, so a monster facing the wall would never notice
+    # anybody and the test would report a monster that does nothing -- which
+    # is exactly what a broken `A_Look` reports too. The bearing from here to
+    # the player start is 45 degrees, so that is where it is pointed.
+    (100, -200, 45, 3004)
 ]
 
 
@@ -1232,13 +1314,40 @@ def check_map(lumps):
     if not chained:
         raise ValueError("no two barrels are close enough for one to set off the other")
 
+    # A monster, and every frame its state chains can reach. The first frame
+    # alone is not enough: a monster whose *death* frames are missing dies into
+    # nothing, and one whose walk frames are missing stops being drawn the
+    # moment it notices you -- both of which look like the AI failing rather
+    # than like a WAD that is short of a lump.
+    ZOMBIE = 3004
+    monsters = [
+        i for i in range(len(by["THINGS"]) // 10)
+        if struct.unpack_from("<5h", by["THINGS"], i * 10)[3] == ZOMBIE
+    ]
+    if not monsters:
+        raise ValueError("no monster on the map, so nothing can be chased by anything")
+    have = {n for n, _ in lumps}
+    for f in ZOMBIE_FRAMES:
+        want = "POSS%s0" % f
+        if want not in have:
+            raise ValueError(f"the zombieman needs {want} and this WAD has no such lump")
+    # And it has to be able to see the player, or it never wakes. Both are in
+    # the near half, which is one convex space, so line of sight is the sign
+    # of x and nothing more.
+    mx, my, _mk = struct.unpack_from("<5h", by["THINGS"], monsters[0] * 10)[:3]
+    if mx <= 0 or sx <= 0:
+        raise ValueError(
+            f"the monster at {mx},{my} and the player at {sx},{sy} are not in the "
+            f"same half, so the divider stands between them"
+        )
+
     # Every pickup placed must have the sprite lump its first frame wants, or
     # the thing is dropped at level load and the run reports nothing rather
     # than reporting a failure. The table is small and explicit on purpose:
     # deriving it would mean carrying a copy of `mobjinfo` in this file.
     FIRST_FRAME = {
         2007: "CLIPA0", 2012: "MEDIA0", 5: "BKEYA0",
-        2035: "BAR1A0", 2028: "COLUA0",
+        2035: "BAR1A0", 2028: "COLUA0", 3004: "POSSA0",
     }
     have = {n for n, _ in lumps}
     for i in range(len(by["THINGS"]) // 10):

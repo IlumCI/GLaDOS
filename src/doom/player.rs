@@ -132,6 +132,13 @@ pub struct Status {
     /// How many things have been picked up. A counter rather than a log,
     /// because what a headless run needs to report is that a pickup happened.
     pub picked: usize,
+    /// Total damage taken over the run, before armour.
+    ///
+    /// Kept beside `health` because they answer different questions: health
+    /// says whether you are alive, and this says whether anything ever hit
+    /// you. A run that ends at 100 health has either killed everything or been
+    /// shot at by nothing, and the two are worth telling apart.
+    pub hurt_by: i32,
 }
 
 impl Default for Status {
@@ -158,6 +165,7 @@ impl Status {
             weapon: Weapon::Pistol,
             backpack: false,
             picked: 0,
+            hurt_by: 0,
         }
     }
 
@@ -236,6 +244,33 @@ impl Status {
             self.weapon = w;
         }
         got_ammo || got_weapon
+    }
+
+    /// Take damage, armour first. True means this killed you.
+    ///
+    /// DOOM's `P_DamageMobj` for the player half. The armour absorbs a
+    /// **fraction** and is spent doing it: a third for the green jacket, a
+    /// half for the blue, and when it runs out the type goes with it. So
+    /// armour is not extra health -- it is a discount that expires, and the
+    /// two behave very differently as they run low.
+    pub fn hurt(&mut self, damage: i32) -> bool {
+        if damage <= 0 {
+            return false;
+        }
+        let mut left = damage;
+        if self.armour_type > 0 && self.armour > 0 {
+            let mut saved = if self.armour_type == 1 { left / 3 } else { left / 2 };
+            if self.armour <= saved {
+                // The last of it, and the jacket is gone with it.
+                saved = self.armour;
+                self.armour_type = 0;
+            }
+            self.armour -= saved;
+            left -= saved;
+        }
+        self.health -= left;
+        self.hurt_by += damage;
+        self.health <= 0
     }
 
     /// Walking over a thing wearing this sprite. True means it was taken and

@@ -54,6 +54,7 @@
 //! a filesystem.
 
 pub mod draw;
+pub mod enemy;
 pub mod info;
 pub mod math;
 pub mod pic;
@@ -62,6 +63,7 @@ pub mod player;
 pub mod shoot;
 pub mod specials;
 pub mod render;
+pub mod rng;
 pub mod thing;
 pub mod weapon;
 pub mod thinker;
@@ -95,6 +97,8 @@ pub fn checks() -> alloc::vec::Vec<(&'static str, bool)> {
     out.extend(level::checks());
     out.extend(play::checks());
     out.extend(player::checks());
+    out.extend(enemy::checks());
+    out.extend(rng::checks());
     out.extend(shoot::checks());
     out.extend(specials::checks());
     out.extend(sprite::checks());

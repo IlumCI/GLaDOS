@@ -888,12 +888,10 @@ and then report that it had not. A refused door is also not **spent**: clearing
 a once-only special on a refusal would make the door forget it was ever a door
 and refuse forever with the key in hand.
 
-**Shooting is a hitscan, and three deviations are named rather than left to be
+**Shooting is a hitscan, and two deviations are named rather than left to be
 found.** No vertical aim: DOOM's shot carries a slope and a two-sided line
 stops it when the *opening* does not admit it, where here a shot is level. No
-randomness: DOOM's pistol does `5 * (P_Random() % 3 + 1)` and this does 10
-every time, because inventing a different sequence would be a game that plays
-differently from every other copy of DOOM and would say so nowhere. And boxes
+pellet spread, so the shotgun's seven-bullet cone does not exist. And boxes
 rather than circles, twice -- a thing is hit when the ray crosses the *square*
 of its radius and a blast falls off by `max(|dx|,|dy|)` less the radius, both
 of which are DOOM's and both the same square the pickup test uses.
@@ -913,6 +911,61 @@ Only the **pistol and chaingun** actually fire; both are one bullet from one
 clip round, which is all the hitscan can do. The rest animate correctly and hit
 nothing, and `Psprite::armed` says which is which. A shotgun wired to fire a
 single bullet would be a bug that looks like a balance decision.
+
+**Monsters look, chase and shoot.** `src/doom/enemy.rs` is DOOM's own AI, and
+the shape of it is the part worth knowing: a monster does not steer. It picks
+one of **eight** compass directions, walks it for a random number of tics, and
+picks again when blocked -- trying the direct route, then the two cardinal
+components, then the way it was already going, then everything else in a
+randomly chosen order, refusing to turn straight around unless nothing works.
+That is why DOOM's monsters catch on doorframes and take corners in two moves.
+Steering them with a heading would look smoother and would not be DOOM.
+
+Three things are deliberately absent and each is named in the file. **No
+infighting**: upstream's `target` is a pointer because a monster hit by another
+turns on it, and here it is a `bool`, because there is one player and monsters
+cannot hurt each other. **No projectiles**: an imp's fireball is a thing with
+momentum and nothing in this port moves under its own power, so the imp chases
+and claws and never throws -- easier than it should be rather than strange.
+And **no sound**, which for once changes behaviour rather than being quiet:
+DOOM wakes monsters by flooding the noise of a shot through connected sectors,
+so `alert` keeps the flood and drops the sound, waking whatever is in the
+player's sector or adjoining it. Without it a monster facing away is deaf.
+
+**The random table is DOOM's, and it is what makes a run repeatable.** It was
+deferred twice with the note that inventing a sequence would produce a game
+that plays differently from every other copy. The larger reason turned out to
+be the harness: `rng::reset` at the top of every run means two runs of one
+script take the same path, and `spent()` reports how much of the table was
+used, so two runs that *disagree* about that number have diverged before
+anything else shows it. Measured: two identical scripts spent 17 draws each and
+reported the same damage to the byte; a third that also fired spent 48.
+
+That number is why a coincidence did not become a claim. Three runs each
+reported exactly **27 damage taken**, which looked like a cap. It was not:
+6 seconds gives 27, 15 gives 57, 30 gives 114 and kills the player. Two short
+runs happened to land on the same total, and the roll counter is what made it
+cheap to find out rather than plausible to assume.
+
+Measured, on the fixture and on FreeDoom E1M1:
+
+    fixture   1 monster, 1 awake, nearest 42 (from 283), 27 damage in 6 s
+    E1M1      53 monsters, 126 damage in 10 s walking forward, PLAYER DIED
+
+The fixture's zombieman is placed *pointed at* the player, and that is not
+decoration: `A_Look` wants sight **and** the player inside its front 180
+degrees, so a monster facing the wall never notices anybody -- which is exactly
+what a broken `A_Look` looks like too. `mkwad.py --verify` asserts the
+placement, the line of sight, and that every one of the 21 frames its state
+chains can reach exists, because a monster missing its death frames dies into
+nothing and one missing its walk frames vanishes the moment it notices you.
+
+**Removal is deferred to the end of a tic**, and it had to be. Actions are
+dispatched by index, and the first version removed objects as it swept -- so an
+index handed out early in a tic named a different object by the end of it, and
+the action most worth dispatching is fired by something on its way off the
+level. `Objs::tick` marks, the caller dispatches, `sweep` takes them. DOOM
+removes its thinkers at the end of a tic for the same reason.
 
 **`port::mouse` is the fifth thing in the seam and the first added because a
 port asked.** It is relative and unclamped, which is the whole reason it

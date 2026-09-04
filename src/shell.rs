@@ -4999,6 +4999,15 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                                 guns.len()
                             );
                             kprintln!(
+                                "  {} monster(s), {} awake, nearest {}, {} damage taken{}",
+                                st.monsters,
+                                st.awake,
+                                if st.nearest.is_finite() { st.nearest as i32 } else { -1 },
+                                st.hurt_by,
+                                if st.died { ", PLAYER DIED" } else { "" }
+                            );
+                            kprintln!("  {} random draw(s) spent", st.rolls);
+                            kprintln!(
                                 "  health {}, armour {}, {} bullet(s), {} key(s), {} picked up{}",
                                 st.health,
                                 st.armour,

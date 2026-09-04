@@ -32,11 +32,11 @@
 //! a balcony it is not, and the difference is a shot that hits something
 //! standing above you.
 //!
-//! **There is no randomness.** DOOM's pistol does `5 * (P_Random() % 3 + 1)`,
-//! so 5, 10 or 15. This does 10 every time. The random table is DOOM's own
-//! 256 bytes and inventing a different sequence would be a game that plays
-//! differently from every other copy, so it arrives when the monsters that
-//! need it do.
+//! **The randomness is DOOM's own**, from the table in `rng`. A bullet does
+//! `5 * (P_Random() % 3 + 1)`, so 5, 10 or 15, drawn from the same 256 bytes
+//! every copy of DOOM has ever used. What it does not have is the *spread*: a
+//! shotgun's seven pellets each want their own angle, and nothing here fires
+//! more than one bullet at a time.
 
 use alloc::vec::Vec;
 
@@ -49,9 +49,16 @@ use super::thing::{Fired, Objs};
 /// How far a shot reaches. DOOM's `MISSILERANGE`, 32 map blocks.
 pub const RANGE: f32 = 32.0 * 64.0;
 
-/// What the pistol takes off. See the note above about randomness -- this is
-/// the middle of DOOM's three outcomes rather than one of them.
-pub const PISTOL_DAMAGE: i32 = 10;
+/// What one bullet takes off: DOOM's `5 * (P_Random() % 3 + 1)`, so 5, 10 or
+/// 15.
+///
+/// A function and not a constant now that there is a table to draw from. It
+/// was 10 -- the middle outcome -- while there was none, which is the right
+/// stand-in and is not the same game: a zombieman has 20 health, so a fixed 10
+/// kills in exactly two shots every time where DOOM takes two, three or four.
+pub fn bullet_damage() -> i32 {
+    5 * (super::rng::p_random() % 3 + 1)
+}
 
 /// How far a barrel's blast reaches, and how much it does at the centre.
 /// DOOM's `A_Explode` passes 128 for both, which is why one number does.
@@ -180,7 +187,7 @@ pub fn fire(
     let died = objs.list[i].hurt(damage, &mut acts);
     let (hx, hy) = (objs.list[i].x, objs.list[i].y);
     for a in acts.drain(..) {
-        out.push(Fired { action: a, x: hx, y: hy });
+        out.push(Fired { action: a, who: i, x: hx, y: hy });
     }
     Some((i, died))
 }
@@ -220,14 +227,14 @@ pub fn blast(lv: &Level, objs: &mut Objs, x: f32, y: f32, out: &mut Vec<Fired>) 
             hurt += 1;
         }
         for a in acts.drain(..) {
-            out.push(Fired { action: a, x: tx, y: ty });
+            out.push(Fired { action: a, who: i, x: tx, y: ty });
         }
     }
     hurt
 }
 
 /// Whether a straight line between two points meets no wall.
-fn visible(lv: &Level, x1: f32, y1: f32, x2: f32, y2: f32) -> bool {
+pub fn visible(lv: &Level, x1: f32, y1: f32, x2: f32, y2: f32) -> bool {
     let (dx, dy) = (x2 - x1, y2 - y1);
     let len = math::sqrt(dx * dx + dy * dy);
     if len <= 0.0 {

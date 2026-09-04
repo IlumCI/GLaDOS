@@ -516,7 +516,7 @@ impl Level {
     }
 
     /// The sector on the other side of a line from this one, if there is one.
-    fn across(&self, line: u16, from: usize) -> Option<usize> {
+    pub fn across(&self, line: u16, from: usize) -> Option<usize> {
         let l = self.linedefs.get(line as usize)?;
         let side = |i: u16| -> Option<usize> {
             if i == NONE {
@@ -557,7 +557,7 @@ impl Level {
     /// *lowest neighbouring floor*, a door to the *lowest neighbouring
     /// ceiling*, a stair to the *next highest*. DOOM has one of these per
     /// question; this is the walk they share.
-    fn neighbours(&self, sector: usize) -> impl Iterator<Item = &Sector> + '_ {
+    pub fn neighbours(&self, sector: usize) -> impl Iterator<Item = &Sector> + '_ {
         self.sector_lines
             .get(sector)
             .map(|v| v.as_slice())

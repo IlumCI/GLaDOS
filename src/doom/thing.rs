@@ -80,6 +80,24 @@ pub struct Obj {
     /// Its own height, for the same reason. A corpse is a quarter as tall,
     /// which is what lets you walk over one.
     pub height: i16,
+    /// Which of the eight compass directions it is walking in, or `NO_DIR`.
+    pub movedir: u8,
+    /// How many more tics to keep walking that way before choosing again.
+    pub movecount: i32,
+    /// Tics before it will consider shooting. Counted down by `A_Chase`, and
+    /// it is why a monster that has just noticed you does not fire instantly.
+    pub reaction: i16,
+    /// How long it stays interested in its current target.
+    pub threshold: i32,
+    /// Whether it has noticed the player. See `enemy.rs` for why this is a
+    /// flag and not a pointer.
+    pub target: bool,
+    /// Marked for removal at the end of the tic.
+    ///
+    /// Not removed where it is decided, which is the whole point: the caller
+    /// dispatches actions by index, and a list that shrank underneath it would
+    /// hand every later action to the wrong object.
+    pub remove: bool,
 }
 
 impl Obj {
@@ -104,6 +122,12 @@ impl Obj {
             health: k.health,
             flags: k.flags,
             height: k.height,
+            movedir: super::enemy::NO_DIR,
+            movecount: 0,
+            reaction: k.reaction,
+            threshold: 0,
+            target: false,
+            remove: false,
         };
         let mut fired = Vec::new();
         o.set_state(k.spawn, &mut fired).then_some(o)
@@ -111,22 +135,38 @@ impl Obj {
 
     /// Take damage. True means this killed it.
     ///
-    /// DOOM's `P_DamageMobj`, without the thrust and without the pain state.
-    /// The thrust needs momentum, which nothing here has yet. The pain state
-    /// needs `P_Random` against `painchance`, and the random table is DOOM's
-    /// own 256-byte one -- it arrives with the monsters that need it, because
-    /// a generator that invented its own sequence would be a game that plays
-    /// differently from every other copy of DOOM and would say so nowhere.
+    /// DOOM's `P_DamageMobj`, without the thrust -- that needs momentum, and
+    /// nothing here carries any.
+    ///
+    /// The **pain state** is here now that there is a random table to ask.
+    /// `painchance` is a threshold out of 255 rather than a probability out of
+    /// 100: a zombieman is 200, so it flinches about four times in five, and a
+    /// baron of hell is 50. Getting the comparison the wrong way round gives
+    /// monsters that flinch when they should not, which reads as them being
+    /// easy rather than as a bug.
+    ///
+    /// The draw happens **whether or not** the thing has a pain state, because
+    /// what matters is the index: DOOM spends the byte and then decides, so a
+    /// version that checked first would consume a different number of bytes
+    /// and every later roll in the game would differ.
     pub fn hurt(&mut self, amount: i32, fired: &mut Vec<u8>) -> bool {
         if self.flags & info::MF_SHOOTABLE == 0 || self.health <= 0 {
             return false;
         }
         self.health = self.health.saturating_sub(amount as i16);
-        if self.health > 0 {
-            return false;
+        if self.health <= 0 {
+            self.kill(fired);
+            return true;
         }
-        self.kill(fired);
-        true
+        let chance = self.row().map(|k| k.painchance).unwrap_or(0);
+        let roll = super::rng::p_random();
+        if roll < chance as i32 && self.flags & info::MF_SKULLFLY == 0 {
+            self.flags |= info::MF_JUSTHIT;
+            if let Some(pain) = self.row().map(|k| k.pain).filter(|p| *p != 0) {
+                self.set_state(pain, fired);
+            }
+        }
+        false
     }
 
     /// DOOM's `P_KillMobj`, less the item a monster drops.
@@ -204,7 +244,7 @@ impl Obj {
 
 impl Obj {
     /// The row of `info::KINDS` this is, if it is one.
-    fn row(&self) -> Option<&'static info::Kind> {
+    pub fn row(&self) -> Option<&'static info::Kind> {
         info::KINDS.get(self.kind as usize)
     }
 
@@ -251,6 +291,28 @@ impl Obj {
         self.height as f32
     }
 
+    /// How far it walks in one tic.
+    ///
+    /// Units per tic for anything that walks, which is everything that walks.
+    /// The field is fixed point for missiles and this is not one -- see the
+    /// note on `Kind::speed`.
+    pub fn speed(&self) -> f32 {
+        self.row().map(|k| k.speed as f32).unwrap_or(0.0)
+    }
+
+    /// Whether it is a monster that counts toward the kill total.
+    pub fn monster(&self) -> bool {
+        self.flags & info::MF_COUNTKILL != 0
+    }
+
+    /// Where its feet are, looked up in the level.
+    pub fn z_floor(&self, lv: &super::level::Level) -> f32 {
+        match lv.sectors.get(self.sector) {
+            Some(sec) => self.z(sec.floor as f32, sec.ceiling as f32),
+            None => 0.0,
+        }
+    }
+
     /// The four-character sprite name the state it is in wears.
     pub fn sprite(&self) -> Option<&'static str> {
         info::frame_of(self.state).map(|(n, _)| n)
@@ -270,9 +332,18 @@ impl Obj {
     }
 }
 
-/// An action that fired, and where.
+/// An action that fired, by whom, and where.
+///
+/// **Both** the index and the position, because the two actions that exist
+/// want different things and neither substitutes for the other: a monster's
+/// `A_Chase` has to move the object, which needs the index, and a barrel's
+/// `A_Explode` happens at a place the object is about to leave, which needs
+/// the position.
+///
+/// The index is only sound because the sweep is deferred -- see `Objs::tick`.
 pub struct Fired {
     pub action: u8,
+    pub who: usize,
     pub x: f32,
     pub y: f32,
 }
@@ -299,39 +370,75 @@ impl Objs {
         self.list.is_empty()
     }
 
-    /// Advance every object by one tic, dropping anything that ran out of
-    /// states, and report every action that fired.
+    /// Advance every object by one tic and report every action that fired.
     ///
-    /// An action is reported by **where it happened**, not by which object it
-    /// belongs to. An index would be the obvious choice and would be wrong:
-    /// the sweep removes objects as it goes, so an index handed out early in a
-    /// tic names a different object by the end of it -- and the action that
-    /// most wants dispatching, a barrel exploding, is fired by an object on
-    /// its way off the level. A position cannot go stale.
+    /// **Nothing is removed here**, and that is the design rather than an
+    /// oversight. Actions are dispatched by index after this returns, and the
+    /// first version removed as it went -- so an index handed out early in a
+    /// tic named a different object by the end of it, and the action most
+    /// worth dispatching is fired by an object on its way off the level.
+    /// Anything that ran out of states is *marked*, and `sweep` takes them
+    /// once the caller has finished. DOOM removes its thinkers at the end of a
+    /// tic for the same reason.
     pub fn tick(&mut self, out: &mut Vec<Fired>) {
         let mut scratch: Vec<u8> = Vec::new();
-        let mut i = 0;
-        while i < self.list.len() {
+        for i in 0..self.list.len() {
+            if self.list[i].remove {
+                continue;
+            }
             scratch.clear();
             let alive = self.list[i].tick(&mut scratch);
             for a in scratch.iter() {
                 out.push(Fired {
                     action: *a,
+                    who: i,
                     x: self.list[i].x,
                     y: self.list[i].y,
                 });
             }
-            if alive {
-                i += 1;
-            } else {
-                self.list.remove(i);
+            if !alive {
+                self.list[i].remove = true;
             }
         }
+    }
+
+    /// Take away everything marked during the tic.
+    pub fn sweep(&mut self) {
+        self.list.retain(|o| !o.remove);
     }
 
     /// How many of them have been killed.
     pub fn dead(&self) -> usize {
         self.list.iter().filter(|o| o.dead()).count()
+    }
+
+    /// How far the nearest live monster is from a point.
+    ///
+    /// The one number that says a monster *approached* rather than merely
+    /// woke: it shoots from where it stood if `A_Chase` never moves it, and
+    /// damage alone cannot tell those apart.
+    pub fn nearest_monster(&self, x: f32, y: f32) -> f32 {
+        let mut best = f32::INFINITY;
+        for o in self.list.iter() {
+            if !o.monster() || o.health <= 0 {
+                continue;
+            }
+            let (dx, dy) = (o.x - x, o.y - y);
+            let d = super::math::sqrt(dx * dx + dy * dy);
+            if d < best {
+                best = d;
+            }
+        }
+        best
+    }
+
+    /// How many monsters are on the level, and how many have noticed you.
+    pub fn monsters(&self) -> (usize, usize) {
+        let live = self.list.iter().filter(|o| o.monster() && o.health > 0);
+        (
+            self.list.iter().filter(|o| o.monster()).count(),
+            live.filter(|o| o.target).count(),
+        )
     }
 
     /// The states every object is in, added up.
@@ -370,6 +477,12 @@ fn bare() -> Obj {
         health: 0,
         flags: 0,
         height: 0,
+        movedir: super::enemy::NO_DIR,
+        movecount: 0,
+        reaction: 0,
+        threshold: 0,
+        target: false,
+        remove: false,
     }
 }
 
