@@ -3,14 +3,26 @@
 //! The whole loader is "allocate the span, copy the segments, jump", and the
 //! two interesting decisions are both refusals.
 //!
-//! **Fixed-address executables are declined.** An `ET_EXEC` insists on the
-//! addresses in its own headers -- classically `0x400000` -- and this kernel is
-//! identity-mapped with one address space, so those addresses are *real
-//! physical RAM the frame allocator may already have handed out*. Honouring
-//! them means reserving a range nothing else may ever take, which is a change
-//! to the memory map rather than to the loader. A position-independent
-//! executable asks for none of that: it can be placed at whatever the heap
-//! returns, and nearly everything modern is built that way.
+//! **Fixed-address executables are placed where they insist, when the machine
+//! can promise the range.** An `ET_EXEC` demands the addresses in its own
+//! headers -- classically `0x400000` -- and this kernel is identity-mapped with
+//! one address space, so those addresses are real physical RAM. That was
+//! refused for a long time under a reason that was true of what the kernel
+//! *knew* rather than of the machine: nothing here could answer "does anything
+//! own four megabytes at four megabytes", so declining was the only honest
+//! answer available.
+//!
+//! `mem::fixed` answers it now, from the firmware's map less what boot took,
+//! and the refusal became a measurement. It matters more than it sounds:
+//! nearly every prebuilt static binary in the world is non-PIE, busybox's own
+//! included, so this was not a corner case but most of the software this
+//! loader exists to run.
+//!
+//! The claim is exclusive and released at teardown. One at a time, which is
+//! the same one-guest assumption the syscall stack and `SPACE` already rest
+//! on -- and unlike them it is a real constraint rather than a simplification,
+//! because two binaries both insisting on `0x400000` cannot coexist in one
+//! address space however clever the loader is.
 //!
 //! **Dynamically linked binaries are declined**, because the entry point in
 //! the header is not where execution starts -- `ld.so` is -- and loading one as
@@ -49,12 +61,38 @@ const TAG_GUEST: u64 = 0x4C4E_5800;
 /// machine when the truth is about the file.
 const MAX_SPAN: usize = 64 * 1024 * 1024;
 
+/// Where a guest's image came from, because the two are freed differently.
+///
+/// A PIE lives in an `Exec` taken from the heap and goes back when it drops. A
+/// fixed image lives at an address the heap never owned, so what has to happen
+/// is a `mem::fixed::release`. Keeping both in one enum means `Guest`'s drop
+/// cannot forget which -- the alternative was two `Option`s and an invariant
+/// that exactly one is set, which is the same thing written so it can be got
+/// wrong.
+enum Image {
+    Placed(Exec),
+    Fixed { at: u64, len: usize },
+}
+
+impl Drop for Image {
+    fn drop(&mut self) {
+        if let Image::Fixed { at, len } = *self {
+            // Put the rights back before the range leaves this guest's hands,
+            // for the reason `syscall::teardown` gives about mappings: a page
+            // left user-accessible or read-only is a page the next tenant
+            // inherits, and the symptom lands somewhere else entirely.
+            crate::mem::paging::protect(at, len, crate::mem::paging::Perm::RWX);
+            crate::mem::fixed::release(at);
+        }
+    }
+}
+
 pub struct Guest {
     /// Every range handed to this guest, which is what bounds-checks its
     /// pointers once it is running.
     regions: syscall::Regions,
     /// Held because dropping it frees the pages the guest is running from.
-    _image: Exec,
+    _image: Image,
     _stack: Exec,
     _brk: Exec,
     pub base: u64,
@@ -74,14 +112,45 @@ pub fn load(bytes: &[u8], args: &[&str]) -> Result<Guest, &'static str> {
         return Err("the image claims a span larger than this will place");
     }
 
-    let mut image = Exec::new(span).ok_or("no room for the image")?;
-    let base = image.addr();
+    // A PIE goes wherever the heap has room; a fixed image goes where its
+    // headers insist or nowhere at all. `lo` is that address, and it is the
+    // same number the segments are already written relative to, so the copy
+    // loop below is identical for both.
+    let (mut placed, base) = if img.relocatable() {
+        let e = Exec::new(span).ok_or("no room for the image")?;
+        let at = e.addr();
+        (Some(e), at)
+    } else {
+        crate::mem::fixed::claim(lo, span)?;
+        // Zeroed here because `Exec::new` zeroes and the `.bss` tail depends on
+        // it. This range is whatever the last tenant left, and a program whose
+        // globals start as somebody else's memory is one that works once.
+        unsafe { core::ptr::write_bytes(lo as *mut u8, 0, span) };
+        (None, lo)
+    };
     for s in &img.segments {
         let at = s.vaddr.checked_sub(lo).ok_or("a segment sits below the image's own base")? as usize;
         let end = s.offset.checked_add(s.filesz).ok_or("a segment's file range overflows")?;
         let from = bytes.get(s.offset..end).ok_or("segment past the file")?;
-        if !image.write_at(at, from) {
-            return Err("a segment does not fit inside the span its own headers describe");
+        let fits = at.checked_add(from.len()).is_some_and(|e| e <= span);
+        match placed.as_mut() {
+            Some(e) => {
+                if !e.write_at(at, from) {
+                    return Err("a segment does not fit inside the span its own headers describe");
+                }
+            }
+            None => {
+                if !fits {
+                    return Err("a segment does not fit inside the span its own headers describe");
+                }
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        from.as_ptr(),
+                        (base + at as u64) as *mut u8,
+                        from.len(),
+                    )
+                };
+            }
         }
         // The `.bss` tail needs no work: `Exec::new` allocates zeroed, and the
         // span was sized from `memsz`. Worth stating rather than leaving to be
@@ -100,6 +169,11 @@ pub fn load(bytes: &[u8], args: &[&str]) -> Result<Guest, &'static str> {
         return Err("the entry point is outside every segment the file loads");
     }
     let entry = base + off;
+
+    // A fixed image is not registered with `cpu::code`, which addresses heap
+    // ranges by tag and offset. Saying so rather than leaving a fault report
+    // to name the wrong thing: an rip inside one reports as being in neither
+    // the kernel image nor generated code, which is exactly true.
 
     // `AT_PHDR` is a runtime address, so it is the segment that contains the
     // header table plus the offset into it. `base + phoff` is the same number
@@ -126,7 +200,13 @@ pub fn load(bytes: &[u8], args: &[&str]) -> Result<Guest, &'static str> {
         },
     )
     .ok_or("the stack is too small for the arguments")?;
-    image.arm(TAG_GUEST);
+    let image = match placed {
+        Some(mut e) => {
+            e.arm(TAG_GUEST);
+            Image::Placed(e)
+        }
+        None => Image::Fixed { at: base, len: span },
+    };
 
     Ok(Guest {
         regions: syscall::Regions {

@@ -12,6 +12,14 @@ use crate::uefi::MemoryDescriptor;
 /// low pages later for AP trampolines (real-mode entry has to live under 1 MiB).
 const MIN_PHYS: u64 = 0x10_0000;
 
+/// How many separate handouts are remembered.
+///
+/// Boot makes very few: the page tables take one frame at a time and the heap
+/// takes one span, so a dozen is generous. Runs of frames that abut are merged
+/// rather than each taking a slot, which is what makes that true -- the page
+/// table walk is one contiguous run in practice.
+const MAX_HANDOUTS: usize = 16;
+
 pub struct EarlyFrames {
     mmap: *const u8,
     mmap_size: usize,
@@ -19,6 +27,18 @@ pub struct EarlyFrames {
     idx: usize,
     cursor: u64,
     allocated: usize,
+    /// Every range handed out, so somebody else can compute what is left.
+    ///
+    /// A bump allocator never frees, so its history *is* its state, and that is
+    /// the only reason a list this short can be complete. `mem::fixed` needs it
+    /// because the forward-only cursor cannot answer questions about addresses
+    /// behind it, and those are exactly the addresses a fixed-address binary
+    /// asks for.
+    handouts: [(u64, u64); MAX_HANDOUTS],
+    handout_n: usize,
+    /// Set when a handout could not be recorded, so the snapshot can refuse to
+    /// be trusted rather than describe memory it does not know is taken.
+    handouts_lost: bool,
 }
 
 impl EarlyFrames {
@@ -26,7 +46,47 @@ impl EarlyFrames {
     /// `mmap` must point at `mmap_size` bytes of UEFI memory descriptors with
     /// the firmware-reported `desc_size` stride, and boot services must be gone.
     pub unsafe fn new(mmap: *const u8, mmap_size: usize, desc_size: usize) -> Self {
-        Self { mmap, mmap_size, desc_size, idx: 0, cursor: 0, allocated: 0 }
+        Self {
+            mmap,
+            mmap_size,
+            desc_size,
+            idx: 0,
+            cursor: 0,
+            allocated: 0,
+            handouts: [(0, 0); MAX_HANDOUTS],
+            handout_n: 0,
+            handouts_lost: false,
+        }
+    }
+
+    /// Record a handout, merging it onto the previous one when they abut.
+    fn note(&mut self, at: u64, len: u64) {
+        if self.handout_n > 0 {
+            let last = &mut self.handouts[self.handout_n - 1];
+            if last.0 + last.1 == at {
+                last.1 += len;
+                return;
+            }
+        }
+        if self.handout_n >= MAX_HANDOUTS {
+            self.handouts_lost = true;
+            return;
+        }
+        self.handouts[self.handout_n] = (at, len);
+        self.handout_n += 1;
+    }
+
+    /// Every range this allocator gave out, or `None` if any was not recorded.
+    ///
+    /// `None` rather than a short list, because a caller subtracting these from
+    /// the firmware's map would otherwise report memory as free that is holding
+    /// the page tables. Wrong in the one direction that cannot be survived.
+    pub fn handouts(&self) -> Option<&[(u64, u64)]> {
+        if self.handouts_lost {
+            None
+        } else {
+            Some(&self.handouts[..self.handout_n])
+        }
     }
 
     fn count(&self) -> usize {
@@ -134,6 +194,7 @@ impl EarlyFrames {
             let base = self.cursor;
             self.cursor += want;
             self.allocated += pages;
+            self.note(base, want);
             unsafe { core::ptr::write_bytes(base as *mut u8, 0, want as usize) };
             return Some(base);
         }
@@ -170,6 +231,7 @@ impl EarlyFrames {
             let frame = self.cursor;
             self.cursor += PAGE_SIZE;
             self.allocated += 1;
+            self.note(frame, PAGE_SIZE);
 
             // Page tables must start empty: a stale non-zero entry is a mapping
             // we never intended and will not be able to explain later.

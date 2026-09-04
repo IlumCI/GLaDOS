@@ -419,6 +419,28 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     install_paging(&boot, &mut frames);
     init_heap(&mut frames);
 
+    // Record what is left, while the firmware's map is still readable and
+    // while the one allocator that took anything from it is still in scope.
+    // After this the map is never consulted again, and `mem::fixed` is the
+    // only thing that can say whether a fixed-address image is placeable.
+    //
+    // Refused rather than approximated when the allocator lost a handout: a
+    // free set that is missing a taken range would place a guest on top of the
+    // page tables, and the symptom would be the machine rewriting its own
+    // translations while a program runs.
+    match frames.handouts() {
+        Some(taken) => unsafe {
+            mem::fixed::snapshot(boot.mmap, boot.mmap_size, boot.desc_size, taken)
+        },
+        None => kprintln!("[boot] placement table skipped: the early allocator lost a handout"),
+    }
+    let (free, run) = mem::fixed::totals();
+    kprintln!(
+        "[boot] placeable  {} MiB free below the heap and above it, largest run {} MiB",
+        free / 1024 / 1024,
+        run / 1024 / 1024,
+    );
+
     let acpi = unsafe { acpi::parse(boot.rsdp) };
 
     banner(&boot, &acpi);
