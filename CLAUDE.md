@@ -3251,6 +3251,24 @@ from those runs do not belong in a claim.
   `theme::text_w_of` and `theme::head_chars`/`tail_chars`.
 - **`extern "C"` on `x86_64-unknown-uefi` is Microsoft x64 and not System V.**
   The context switch is pinned to `extern "sysv64"` explicitly.
+- **A longjmp into inlined code has no calling convention to lean on.**
+  `recover::guard` saved the registers a callee must preserve, which is the
+  right list for a function boundary and the wrong question entirely: `guard`
+  is inlined into its callers, so there is no boundary, and the compiler is
+  free to keep a caller's live value in `rax` or `r9` across a call that no
+  longer exists. It saves **every** general-purpose register now, and the
+  landing code restores every one -- `rcx` last, through itself, with the jump
+  target pushed onto the already-restored stack so `ret` can take it.
+  This was found twice, both times as a wild pointer in a subsystem with
+  nothing to do with faults: a PML4 walk with an index out of `rsi`, then the
+  heap's free list walked from a cursor out of `r9`. The second appeared
+  because an unrelated file changed what the register allocator did, which is
+  the tell that a list of registers was never going to be the answer.
+  `mem::paging::checks` is the only thing in the tree that faults on purpose
+  with real work live around it, so `diag paging` is where this shows up and
+  `diag recover` passes throughout. A probe written as a function cannot catch
+  it: the probe's own prologue saves those registers and its epilogue puts them
+  back whether or not the pad restored anything.
 - **Do not take the max over every UEFI memory descriptor.** OVMF describes
   `Reserved` space to 1 TiB; using it as a map limit exceeds one PDPT and the
   identity map silently fails, falling back to firmware tables that map page 0,

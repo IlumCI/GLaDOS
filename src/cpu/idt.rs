@@ -230,24 +230,39 @@ fn fault(frame: &InterruptStackFrame, vector: u8, name: &str, err: Option<u64>) 
     // it is abandoned, which also works when the fault arrived on an interrupt
     // stack as the page-fault vector does.
     if let Some(pad) = super::recover::take(vector) {
-        // Restores every callee-saved register, not only the stack. `rcx` is
-        // the cursor because it is caller-saved, so it is not one of the
-        // registers being written; picking one of those would have the block
-        // pointer overwritten halfway through reading it.
+        // Restores **every** general-purpose register, not a set chosen from
+        // a calling convention: `guard` is inlined into its callers, so the
+        // longjmp crosses no ABI boundary and a caller's live value can be
+        // sitting in `rax` or `r9` as easily as in `rbx`.
         //
-        // `rsp` moves second-to-last and the jump target is already in `rax`,
-        // so nothing is read from the abandoned stack after the switch.
+        // `rcx` is the cursor and is therefore restored last, from its own
+        // slot through itself. That leaves nothing to hold the jump target, so
+        // the target is pushed onto the already-restored stack and `ret` takes
+        // it: eight bytes below `rsp`, which nothing owns, written with
+        // interrupts still off because the gate cleared them and `guard` does
+        // not `sti` until it has landed.
+        //
+        // The offsets are asserted against the structure in `recover.rs`.
         unsafe {
             core::arch::asm!(
-                "mov rbx, [rcx]",
-                "mov r12, [rcx + 8]",
-                "mov r13, [rcx + 16]",
-                "mov r14, [rcx + 24]",
-                "mov r15, [rcx + 32]",
-                "mov rbp, [rcx + 40]",
-                "mov rax, [rcx + 48]",
-                "mov rsp, [rcx + 56]",
-                "jmp rax",
+                "mov rax, [rcx]",
+                "mov rbx, [rcx + 8]",
+                "mov rdx, [rcx + 24]",
+                "mov rsi, [rcx + 32]",
+                "mov rdi, [rcx + 40]",
+                "mov rbp, [rcx + 48]",
+                "mov r8,  [rcx + 56]",
+                "mov r9,  [rcx + 64]",
+                "mov r10, [rcx + 72]",
+                "mov r11, [rcx + 80]",
+                "mov r12, [rcx + 88]",
+                "mov r13, [rcx + 96]",
+                "mov r14, [rcx + 104]",
+                "mov r15, [rcx + 112]",
+                "mov rsp, [rcx + 128]",
+                "push [rcx + 120]",
+                "mov rcx, [rcx + 16]",
+                "ret",
                 in("rcx") pad,
                 options(noreturn),
             );
