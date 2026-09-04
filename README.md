@@ -15,7 +15,7 @@ bootloader, no ELF loading, no relocation and no handoff ABI. The model,
 tokenizer and root certificates are read before `ExitBootServices`, because
 that call is the last moment a filesystem exists.
 
-108 files of Rust, about 50,000 lines. TempleOS is the obvious ancestor, and
+181 files of Rust, about 115,000 lines. TempleOS is the obvious ancestor, and
 the identity map here exists for the reason Terry Davis gave for his.
 
 ---
