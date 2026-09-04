@@ -1258,18 +1258,36 @@ constant-fold every read to `false`. It did. The question "is a guest running"
 is an `AtomicBool` that Rust both writes and reads now, and reading the parked
 stack pointer from Rust is gone.
 
-**What stage 1 was supposed to buy and does not yet: surviving a guest fault.**
-The isolation half is measured. A ring-3 guest reading a kernel address takes a
-`#PF` with `cs=0x3b` and `cr2` at the address it reached for, so it cannot read
-kernel memory, and the fault reporter names the guest's pages by their `Exec`
-tag. What does not work is killing only the guest: longjmping out of the fault
-handler through `syscall::kill` reaches `glados_leave_guest` and then takes a
-`#GP` at ring 0 on the way back. The hook is disabled and the reason is written
-at the site. Ruled out already, so do not re-test: the branch is reached, a raw
-port write inside it emits, and `running()` answers true.
+**A guest fault kills the guest and nothing else.**
 
-So a guest fault still stops the machine, exactly as at stage 0. Not a
-regression, and the one thing stage 1 was for, which is why it is named here.
+    linux run /tmp/wild
+      ring 3, one address space -- only its own pages carry the U bit
+      killed by fault 0x0e after 0 syscall(s), machine intact
+
+The guest reached for `0x1000`, which is mapped, kernel-owned and has a clear
+U bit, took a `#PF` at ring 3, and was ended. `mem` answers afterwards and
+`diag paging` still passes, which is the part worth checking: at ring 0 the
+same fault stopped the machine, because a guest sharing an address space with
+the kernel might already have corrupted anything. At ring 3 the kernel is
+intact by construction, so ending the guest is the honest response.
+
+**Getting there took finding an ABI bug that looked like a ring-3 bug for a
+long time.** `syscall::kill` was calling `glados_leave_guest` through its
+`extern "sysv64"` declaration. This target is Windows-ABI, so an ordinary Rust
+function is Microsoft x64, where `xmm6`-`xmm15` are non-volatile; `sysv64`
+treats them as scratch. The compiler therefore spilled all ten across the call,
+a 160-byte `movaps` prologue wanting the stack 16-byte aligned, and on the
+stack a guest fault arrives on it is not. A misaligned `movaps` raises
+`#GP(0)`, which is exactly the fault that was stopping the machine.
+
+`exit_group` never met it, because it leaves from `glados_syscall_dispatch`,
+which is already `sysv64` and so has nothing to preserve. That asymmetry is
+what made it look like ring 3 was at fault. The longjmp is written out inline
+now: no prologue, nothing spilled, no alignment it cannot have.
+
+What settled it was `llvm-objdump` on the image at the faulting RVA, which the
+fault reporter prints. Reasoning about segments and stacks produced four wrong
+hypotheses first; one disassembly produced the answer.
 
 ### Running a binary this kernel did not compile
 

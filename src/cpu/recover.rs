@@ -36,14 +36,35 @@ use core::sync::atomic::{AtomicU64, Ordering};
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct Pad {
-    rsp: u64,
+    /// **Every callee-saved register, not just the stack.**
+    ///
+    /// `guard`'s own epilogue restores whatever `guard` spilled, so for a long
+    /// time saving `rsp` and `rbp` looked sufficient. It is not. A register the
+    /// *caller* is using and `guard` never touched is one `guard` had no reason
+    /// to spill, so nothing puts it back after a fault -- and the fault path is
+    /// a large amount of kernel code that will happily use it.
+    ///
+    /// It surfaced as `diag recover` reporting FAILED with all five of its
+    /// claims printing `ok`: the accumulator the claims were folded into lived
+    /// in a callee-saved register, the caught fault clobbered it, and the
+    /// verdict was garbage while every line of evidence said pass.
+    ///
+    /// The order here is the order the landing code reads them in, so changing
+    /// one means changing both.
+    rbx: u64,
+    r12: u64,
+    r13: u64,
+    r14: u64,
+    r15: u64,
     rbp: u64,
     rip: u64,
+    rsp: u64,
     /// Set while this task is inside `guard`. Nothing is recovered otherwise.
     armed: u64,
 }
 
-const EMPTY: Pad = Pad { rsp: 0, rbp: 0, rip: 0, armed: 0 };
+const EMPTY: Pad =
+    Pad { rbx: 0, r12: 0, r13: 0, r14: 0, r15: 0, rbp: 0, rip: 0, rsp: 0, armed: 0 };
 const SLOTS: usize = crate::task::MAX_TASKS;
 
 static PADS: crate::sync::Racy<[Pad; SLOTS]> = crate::sync::Racy::new([EMPTY; SLOTS]);
@@ -70,7 +91,15 @@ fn slot() -> Option<usize> {
 ///
 /// Called from the fault handler. Reads only, and clears the arm so a fault
 /// while unwinding is fatal rather than an endless loop through the same pad.
-pub fn take(vector: u8) -> Option<(u64, u64, u64)> {
+/// The landing block for this task, if it is inside a guard.
+///
+/// Answers a pointer rather than the values, because the landing code restores
+/// eight registers and passing eight through `asm!` operands would need eight
+/// registers it is about to overwrite. Reading them from memory needs one.
+///
+/// The block lives in `PADS`, which is static, so it stays readable after the
+/// landing code has moved `rsp` off the interrupt stack.
+pub fn take(vector: u8) -> Option<*const u64> {
     // Only the vectors a program can plausibly cause. A machine check or a
     // double fault says the machine is wrong rather than the program.
     if !matches!(vector, 0 | 5 | 6 | 13 | 14 | 17 | 19) {
@@ -84,7 +113,7 @@ pub fn take(vector: u8) -> Option<(u64, u64, u64)> {
     pads[i].armed = 0;
     LAST.store(vector as u64, Ordering::Relaxed);
     COUNT.fetch_add(1, Ordering::Relaxed);
-    Some((pads[i].rsp, pads[i].rbp, pads[i].rip))
+    Some(&pads[i].rbx as *const u64)
 }
 
 /// What the last recovered fault was.
@@ -120,11 +149,15 @@ pub fn guard<F: FnOnce()>(f: F) -> Result<(), &'static str> {
         return Ok(());
     };
 
-    let rsp: u64;
-    let rbp: u64;
+    let (rsp, rbp, rbx, r12, r13, r14, r15): (u64, u64, u64, u64, u64, u64, u64);
     unsafe {
         core::arch::asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack, preserves_flags));
         core::arch::asm!("mov {}, rbp", out(reg) rbp, options(nomem, nostack, preserves_flags));
+        core::arch::asm!("mov {}, rbx", out(reg) rbx, options(nomem, nostack, preserves_flags));
+        core::arch::asm!("mov {}, r12", out(reg) r12, options(nomem, nostack, preserves_flags));
+        core::arch::asm!("mov {}, r13", out(reg) r13, options(nomem, nostack, preserves_flags));
+        core::arch::asm!("mov {}, r14", out(reg) r14, options(nomem, nostack, preserves_flags));
+        core::arch::asm!("mov {}, r15", out(reg) r15, options(nomem, nostack, preserves_flags));
     }
 
     // The pad's address is taken with `lea` against a local label, so it is
@@ -140,7 +173,7 @@ pub fn guard<F: FnOnce()>(f: F) -> Result<(), &'static str> {
 
     {
         let pads = unsafe { PADS.get() };
-        pads[i] = Pad { rsp, rbp, rip: land, armed: 1 };
+        pads[i] = Pad { rbx, r12, r13, r14, r15, rbp, rip: land, rsp, armed: 1 };
     }
 
     f();

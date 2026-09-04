@@ -214,7 +214,9 @@ fn fault(frame: &InterruptStackFrame, vector: u8, name: &str, err: Option<u64>) 
     // So a guest fault still stops the machine, exactly as it did at stage 0.
     // That is not a regression, and it is the one thing stage 1 was supposed
     // to buy, so it stays named here rather than quietly missing.
-    let _ = crate::linux::syscall::running();
+    if frame.cs & 3 == 3 && crate::linux::syscall::running() {
+        unsafe { crate::linux::syscall::kill(vector as u64) }
+    }
 
     // A program the machine wrote for itself is the thing most likely to fault
     // here, and stopping the machine for one is the wrong answer. If the task
@@ -227,15 +229,26 @@ fn fault(frame: &InterruptStackFrame, vector: u8, name: &str, err: Option<u64>) 
     // that was live when the guard was set, so the frame and everything above
     // it is abandoned, which also works when the fault arrived on an interrupt
     // stack as the page-fault vector does.
-    if let Some((rsp, rbp, rip)) = super::recover::take(vector) {
+    if let Some(pad) = super::recover::take(vector) {
+        // Restores every callee-saved register, not only the stack. `rcx` is
+        // the cursor because it is caller-saved, so it is not one of the
+        // registers being written; picking one of those would have the block
+        // pointer overwritten halfway through reading it.
+        //
+        // `rsp` moves second-to-last and the jump target is already in `rax`,
+        // so nothing is read from the abandoned stack after the switch.
         unsafe {
             core::arch::asm!(
-                "mov rsp, {rsp}",
-                "mov rbp, {rbp}",
-                "jmp {rip}",
-                rsp = in(reg) rsp,
-                rbp = in(reg) rbp,
-                rip = in(reg) rip,
+                "mov rbx, [rcx]",
+                "mov r12, [rcx + 8]",
+                "mov r13, [rcx + 16]",
+                "mov r14, [rcx + 24]",
+                "mov r15, [rcx + 32]",
+                "mov rbp, [rcx + 40]",
+                "mov rax, [rcx + 48]",
+                "mov rsp, [rcx + 56]",
+                "jmp rax",
+                in("rcx") pad,
                 options(noreturn),
             );
         }

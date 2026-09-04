@@ -745,9 +745,37 @@ pub fn running() -> bool {
 /// # Safety
 /// Only from a fault handler, and only when `running` is true.
 pub unsafe fn kill(vector: u64) -> ! {
-    // Raw port write: no formatter, no lock, nothing that can fault.
     GUEST_RUNNING.store(false, Ordering::Relaxed);
-    unsafe { glados_leave_guest(FAULTED | vector) }
+    // **Inline, and calling `glados_leave_guest` through its declaration was
+    // the bug.** This target is Windows-ABI, so an ordinary Rust function is
+    // Microsoft x64, where xmm6-xmm15 are non-volatile. `glados_leave_guest`
+    // is `sysv64`, which treats them as scratch, so the compiler must spill
+    // all ten across the call: a 160-byte `movaps` prologue wanting the stack
+    // 16-byte aligned. On the stack a guest fault arrives on it is not, and a
+    // misaligned `movaps` raises #GP(0) -- which is precisely the fault that
+    // was stopping the machine instead of the guest.
+    //
+    // `exit_group` never met it, because it leaves from
+    // `glados_syscall_dispatch`, which is already `sysv64` and so has nothing
+    // to preserve. That asymmetry is what made this look like a ring-3
+    // problem for a long time. It is an ABI problem.
+    //
+    // Written out, the longjmp has no prologue, spills nothing, and needs no
+    // alignment it cannot have.
+    unsafe {
+        core::arch::asm!(
+            "mov rsp, [rip + GLADOS_HOST_RSP]",
+            "pop r15",
+            "pop r14",
+            "pop r13",
+            "pop r12",
+            "pop rbx",
+            "pop rbp",
+            "ret",
+            in("rax") FAULTED | vector,
+            options(noreturn),
+        )
+    }
 }
 
 /// Run a loaded image until it exits.
