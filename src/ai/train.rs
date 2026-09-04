@@ -1258,6 +1258,46 @@ impl Trial {
     /// deliberate and it matches how sequential fine-tuning is actually done:
     /// a new task is a new run, and Adam's moments describe the loss surface
     /// of the task that built them.
+    /// Blend two adapters of the same rank into a third.
+    ///
+    /// **Averaging the factors is not averaging the function they compute**,
+    /// and that is exactly why a chimera is judged rather than assumed. `B.A`
+    /// is bilinear, so the mean of two factorisations is not the mean of their
+    /// products; a chimera is best understood as a cheap mutation operator
+    /// that happens to land near two things that worked, not as an
+    /// interpolation between them.
+    ///
+    /// It costs no forward passes, which is the whole reason it is affordable
+    /// to breed several and let the archive and the tribunal say no to all of
+    /// them.
+    ///
+    /// `s` is recomputed rather than blended, because it caches
+    /// `m / |W0 + B.A|` against the frozen rows -- a blended `s` would describe
+    /// neither parent's geometry and would be wrong in a way nothing downstream
+    /// could detect.
+    pub fn breed(&self, x: &Dora, y: &Dora) -> Option<Dora> {
+        if x.r != y.r
+            || x.a.len() != y.a.len()
+            || x.b.len() != y.b.len()
+            || x.m.len() != y.m.len()
+        {
+            return None;
+        }
+        let mut out = x.clone();
+        for i in 0..out.a.len() {
+            out.a[i] = 0.5 * (x.a[i] + y.a[i]);
+        }
+        for i in 0..out.b.len() {
+            out.b[i] = 0.5 * (x.b[i] + y.b[i]);
+        }
+        for i in 0..out.m.len() {
+            out.m[i] = 0.5 * (x.m[i] + y.m[i]);
+        }
+        let mat = self.mat();
+        out.refresh(&mat, false);
+        Some(out)
+    }
+
     pub fn train_masked(&self, b: &Budget, start: Option<&Dora>, mask: &[bool]) -> Fit {
         let mat = self.mat();
         let mut dora = match start {

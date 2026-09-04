@@ -1173,7 +1173,7 @@ pub fn mcnemar(broke: usize, fixed: usize) -> f32 {
 pub fn clean_fixes_needed() -> usize {
     let mut f = MIN_FIXED;
     while f < 1024 {
-        if mcnemar(0, f) >= MCNEMAR_95 {
+        if mcnemar(0, f) >= bar_in_force() {
             return f;
         }
         f += 1;
@@ -1522,6 +1522,174 @@ pub fn run(
     }
 }
 
+/// J1, as one function.
+///
+/// Written out because the storm asks the same question of a dozen candidates
+/// a generation, and a second copy of this ladder would be a second definition
+/// of "better beyond noise" -- free to drift from the nightly one with nothing
+/// to say the two had parted.
+///
+/// The bar is read rather than constant, which is the point of the judge axis:
+/// a criterion the loop adopted and the judges ignored would be a certificate
+/// about nothing.
+fn judge_one(n_val: usize, fixed: usize, broke: usize) -> (bool, &'static str) {
+    if n_val == 0 {
+        // Nothing was held out to judge against. A property of how the trial
+        // was asked for rather than of the variant: a subsample too small to
+        // reach the validation slice leaves the margin with no evidence at
+        // all, in either direction.
+        (false, "no validation decisions")
+    } else if fixed <= broke {
+        (false, "no net repair")
+    } else if fixed - broke < MIN_FIXED {
+        (false, "net repair below the floor")
+    } else if mcnemar(broke, fixed) < bar_in_force() {
+        (false, "inside the noise")
+    } else {
+        (true, "beyond the noise")
+    }
+}
+
+/// How many chimeras one storm may breed.
+///
+/// Capped because breeding is quadratic in survivors and costs nothing:
+/// a generation of twelve pairs into sixty-six, all scorable, none trained,
+/// and the tribunal would be handed whichever noise came out highest. Six is
+/// enough to cross the ranks that actually survived and few enough that the
+/// generation is still mostly things that were trained.
+const MAX_CHIMERAS: usize = 6;
+
+/// What one storm did.
+pub struct StormReport {
+    pub trained: usize,
+    pub descendants: usize,
+    pub chimeras: usize,
+    pub lit: usize,
+    pub best: f32,
+    pub verdict: &'static str,
+    pub adopted: bool,
+}
+
+/// One generation of the whole apparatus, on one `prepare`.
+///
+/// **The economics are the reason this exists as a command.** The base weights
+/// are frozen, so a hidden state is a constant, a constant is cached once, and
+/// a cached decision replays against any candidate for the price of a dot
+/// product. Eight grid points, the descendants and every chimera therefore
+/// cost *one* preparation and no forward passes at all -- which is what makes
+/// scoring a dozen variants a night affordable when producing one costs 214
+/// seconds under TCG.
+///
+/// Chimeras carry an honest `Fit` of zero epochs and zero loss, because they
+/// were never trained. Reporting an inherited loss would make the ledger say
+/// an optimiser reached a number it never saw.
+pub fn storm(e: &mut super::Engine, b: &Budget, points: usize) -> Result<StormReport, Refused> {
+    let t = super::train::prepare(e, b).map_err(Refused::Train)?;
+    let incumbent = e.model.adapters.as_ref().and_then(|a| t.gather(a));
+    let n_val = t.slice_size(Slice::Validation);
+
+    // Generation order is the grid's own order, then descendants, then
+    // chimeras. Declared rather than sorted, so a later run breeds the same
+    // pairs from the same survivors rather than plausible ones.
+    let mut gen: Vec<(super::adapter::Dora, usize)> = Vec::new();
+    let take = points.min(GRID.len());
+    for p in GRID.iter().take(take) {
+        let bi = super::train::Budget {
+            epochs: p.epochs,
+            millis: b.millis,
+            examples: b.examples,
+            lr: p.lr,
+            rank: p.rank,
+            alpha: p.alpha,
+        };
+        let fit = t.train(&bi);
+        gen.push((fit.dora, p.rank));
+    }
+    let trained = gen.len();
+
+    // Descendants: trained *from* the incumbent rather than from scratch, so
+    // they start where the machine already is. None if there is no incumbent,
+    // which is the ordinary case on a fresh machine and not a failure.
+    let mut descendants = 0;
+    if let Some(inc) = incumbent.as_ref() {
+        let mask = alloc::vec![true; t.live_rows()];
+        let fit = t.train_masked(b, Some(inc), &mask);
+        gen.push((fit.dora, b.rank));
+        descendants = 1;
+    }
+
+    // Chimeras, from same-rank survivors paired in generation order.
+    let mut chimeras = 0;
+    let mut bred: Vec<(super::adapter::Dora, usize)> = Vec::new();
+    'outer: for i in 0..gen.len() {
+        for j in (i + 1)..gen.len() {
+            if gen[i].1 != gen[j].1 {
+                continue;
+            }
+            if let Some(d) = t.breed(&gen[i].0, &gen[j].0) {
+                bred.push((d, gen[i].1));
+                chimeras += 1;
+                if chimeras >= MAX_CHIMERAS {
+                    break 'outer;
+                }
+            }
+        }
+    }
+    gen.extend(bred);
+
+    // Score every one of them, and offer each to its cell.
+    let parent = ensure_head(e);
+    let mut best: Option<(usize, f32, usize, usize)> = None;
+    for (idx, (d, rank)) in gen.iter().enumerate() {
+        let (broke, fixed, _, _) = t.paired(incumbent.as_ref(), Some(d), Slice::Validation);
+        let score = t.score(Some(d), Slice::Validation);
+        // The address is of the *variant node*, so what the cell points at is
+        // the same kind of object the ledger names and `rollback` walks.
+        let v = Variant {
+            parent,
+            adapter: Some(sha256::hash(&t.scatter(d, &e.model.cfg, b.alpha).to_blob())),
+            policy: sysbox::read_blob("/ai/agent/policy").map(|p| sha256::hash(&p)),
+            skills: None,
+            corpus: sysbox::hash_of(super::vocab::CORPUS),
+            deep: false,
+            core: super::voter::installed().map(|c| c.hash),
+            core_seen: true,
+            lambda: b.lr,
+            rank: *rank as u8,
+            epochs: 0,
+            rule: b.rank as u8,
+            born: crate::dev::rtc::now().map(|d| crate::dev::rtc::unix_seconds(&d)).unwrap_or(0),
+        };
+        let vh = v.hash();
+        if offer(&vh, *rank, fixed, broke, score) {
+            v.store();
+        }
+        if best.is_none_or(|(_, s, _, _)| score > s) {
+            best = Some((idx, score, fixed, broke));
+        }
+    }
+
+    // The best of the generation goes in front of the tribunal, which is the
+    // same J1 the nightly loop uses and not a softer one.
+    let (verdict, adopted) = match best {
+        Some((_, _, fixed, broke)) => {
+            let (ok, why) = judge_one(n_val, fixed, broke);
+            (why, ok)
+        }
+        None => ("nothing was bred", false),
+    };
+    let (lit, archive_best) = archive_census();
+    Ok(StormReport {
+        trained,
+        descendants,
+        chimeras,
+        lit,
+        best: archive_best,
+        verdict,
+        adopted,
+    })
+}
+
 /// Run one trial: train a candidate, judge it, record the certificate, and
 /// adopt only if all four judges agree.
 ///
@@ -1580,21 +1748,7 @@ pub fn trial(
     let (broke, fixed, _, _) = t.paired(incumbent.as_ref(), Some(&fit.dora), Slice::Validation);
     let chi = mcnemar(broke, fixed);
     let n_val = t.slice_size(Slice::Validation);
-    let (j1, j1_why) = if n_val == 0 {
-        // Nothing was held out to judge against. This is a property of how
-        // the trial was asked for rather than of the variant: a subsample too
-        // small to reach the validation slice leaves the margin with no
-        // evidence at all, in either direction.
-        (false, "no validation decisions")
-    } else if fixed <= broke {
-        (false, "no net repair")
-    } else if fixed - broke < MIN_FIXED {
-        (false, "net repair below the floor")
-    } else if chi < MCNEMAR_95 {
-        (false, "inside the noise")
-    } else {
-        (true, "beyond the noise")
-    };
+    let (j1, j1_why) = judge_one(n_val, fixed, broke);
 
     // --- J2: does it still do the same thing unasked? -------------------
     let (goals_held, goals_total) = t.guards_hold(Some(&fit.dora));
@@ -2037,7 +2191,7 @@ pub fn trial_deep(
         (false, "no net repair")
     } else if fixed - broke < MIN_FIXED {
         (false, "net repair below the floor")
-    } else if chi < MCNEMAR_95 {
+    } else if chi < bar_in_force() {
         (false, "inside the noise")
     } else {
         (true, "beyond the noise")
@@ -2319,7 +2473,7 @@ pub fn trial_config(e: &mut super::Engine, rule: u8) -> Result<Certificate, &'st
     // *gain* real. `MIN_FIXED` says a net repair under four is not a repair;
     // it says just as well that a net loss over four is not nothing.
     let net_loss = v.broke.saturating_sub(v.fixed);
-    let lost = net_loss >= MIN_FIXED || (v.broke > v.fixed && v.chi >= MCNEMAR_95);
+    let lost = net_loss >= MIN_FIXED || (v.broke > v.fixed && v.chi >= bar_in_force());
     let j1 = !lost;
     let j1_why = if lost { "it costs accuracy" } else { "accuracy is unchanged beyond noise" };
 
@@ -2802,6 +2956,76 @@ pub fn descriptor(rank: usize, fixed: usize, broke: usize) -> (usize, usize) {
 pub fn cell_of(rank: usize, fixed: usize, broke: usize) -> usize {
     let (band, behaviour) = descriptor(rank, fixed, broke);
     band * REPAIR_BANDS + behaviour
+}
+
+/// Where the cell-winners live: one file per cell, named by index.
+pub const ARCHIVE: &str = "/ai/godel/archive";
+
+/// What occupies a cell.
+pub struct Elite {
+    pub variant: [u8; 32],
+    pub score: f32,
+}
+
+fn cell_path(i: usize) -> String {
+    let mut s = String::from(ARCHIVE);
+    s.push('/');
+    push_u32(&mut s, i as u32);
+    s
+}
+
+/// What is sitting in a cell, if anything.
+pub fn cell(i: usize) -> Option<Elite> {
+    let bytes = sysbox::read_blob(&cell_path(i))?;
+    let text = core::str::from_utf8(&bytes).ok()?;
+    let mut it = text.split_whitespace();
+    let variant = from_hex32(it.next()?)?;
+    let score = it.next()?.parse::<f32>().ok()?;
+    Some(Elite { variant, score })
+}
+
+/// Offer a variant to the cell its behaviour puts it in.
+///
+/// **A variant earns a cell by beating whatever is in that cell**, not by
+/// beating the champion, and that is the whole difference between an archive
+/// and a hill-climb. A rank-4 adapter that repairs a different set of
+/// decisions than the rank-32 one survives on its own terms instead of being
+/// discarded over a margin inside the noise -- and the loop ends up
+/// illuminating the space rather than walking uphill in it.
+///
+/// Cells hold addresses in the same DAG the ledger names, so an elite from
+/// three weeks ago is still reachable and still re-derivable. The archive
+/// stores a pointer to evidence, never a copy of a conclusion.
+pub fn offer(variant: &[u8; 32], rank: usize, fixed: usize, broke: usize, score: f32) -> bool {
+    let i = cell_of(rank, fixed, broke);
+    // Strictly better, so a rerun that reproduces an elite exactly leaves the
+    // cell alone. The archive then records when something was first found
+    // rather than when it was last recomputed, which is the fact worth having.
+    if cell(i).is_some_and(|e| e.score >= score) {
+        return false;
+    }
+    let mut text = String::new();
+    text.push_str(&hex32(variant));
+    text.push(' ');
+    push_f6(&mut text, score);
+    text.push('\n');
+    sysbox::write_text(&cell_path(i), &text);
+    true
+}
+
+/// How many cells are lit, and the best score in any of them.
+pub fn archive_census() -> (usize, f32) {
+    let mut lit = 0;
+    let mut best = 0.0f32;
+    for i in 0..CELLS {
+        if let Some(e) = cell(i) {
+            lit += 1;
+            if e.score > best {
+                best = e.score;
+            }
+        }
+    }
+    (lit, best)
 }
 
 // ---------------------------------------------------------------------------

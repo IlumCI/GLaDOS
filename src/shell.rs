@@ -3050,6 +3050,63 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     }
                     godel::report_trial(&b);
                 }
+                // The whole apparatus in one command: a generation trained
+                // against one set of cached features, bred, filed, and the
+                // best of it put in front of the same judge the nightly loop
+                // uses.
+                "storm" => {
+                    // `godel storm [points] [examples]`. Examples is bounded
+                    // and not "all" by default, which the first run of this
+                    // command found the hard way: `prepare` over the whole
+                    // corpus is about twenty-two minutes under WHPX, so a
+                    // storm that defaulted to it could not finish inside any
+                    // harness timeout and printed nothing at all. A command
+                    // somebody types has to answer.
+                    let mut b = crate::ai::train::Budget::default();
+                    let mut points = 8usize;
+                    let mut nth = 0usize;
+                    for w in words.clone() {
+                        if let Ok(v) = w.parse::<usize>() {
+                            if nth == 0 {
+                                points = v;
+                            } else {
+                                b.examples = v;
+                            }
+                            nth += 1;
+                        }
+                    }
+                    if b.examples == 0 {
+                        b.examples = 64;
+                    }
+                    kprintln!(
+                        "  {} point(s) over {} example(s) -- one prepare, then no forward passes",
+                        points, b.examples
+                    );
+                    match crate::ai::with_engine(|e| godel::storm(e, &b, points)) {
+                        Some(Ok(r)) => {
+                            console::set_color(YELLOW);
+                            kprintln!(
+                                "[storm]  {} trained, {} descendant(s) of the incumbent, {} chimera(s) bred",
+                                r.trained, r.descendants, r.chimeras
+                            );
+                            console::set_color(LTGRAY);
+                            kprintln!(
+                                "         archive: {} cell(s) lit; best validation {}%",
+                                r.lit,
+                                (r.best * 100.0) as u32
+                            );
+                            kprintln!(
+                                "         tribunal: the best was {} -- {}",
+                                if r.adopted { "accepted" } else { "rejected" },
+                                r.verdict
+                            );
+                        }
+                        Some(Err(why)) => kprintln!("  no storm: {}", why.why()),
+                        // The mind is mid-thought and holds the engine. Not an
+                        // error, and not a storm either.
+                        None => kprintln!("  the engine is claimed -- try again when the mind is idle"),
+                    }
+                }
                 // What the loop has left to try, which is the question the
                 // status line could not answer before there was a search.
                 "space" => {

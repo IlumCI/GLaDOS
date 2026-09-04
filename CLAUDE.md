@@ -313,20 +313,100 @@ and a core the machine wrote were never tried unattended at all -- "search
 space exhausted" was the end of self-improvement, eight points and then
 nothing, every night forever.
 
-`godel::next_proposal` starts from the number of verdicts already recorded and
-takes the first kind from there that has work, so which axis a given night
-takes is a function of the ledger rather than of a coin -- the same
-re-derivability argument that makes `frontier` walk a declared grid. An
-exhausted axis costs one skipped slot rather than an idle night, and the loop
-stops only when every axis is out of moves. Order is cheap-and-declared before
-expensive-and-composed: a grid point and a rule change are minutes, a deep
-trial is two passes over the corpus, and composing a core spends a dozen
-decodes writing something that may not survive its first judge.
+**The rotation is a ranking now, not a round.** `next_proposal` reaches for
+the axis whose next verdict the ledger can *least* predict:
+`axis_uncertainty` is a Laplace-smoothed Beta posterior folded to a distance
+from the coin-flip, so an axis that has said yes to everything and one that
+has said no to everything are equally predictable and equally uninformative,
+and the axis near 50% is where the information is. Fairness traded for
+information, stated as such in the code.
 
-`godel next` reports where the rotation stands without taking a turn. It
-deliberately does not ask the last slot whether it has work, because finding
-out costs those decodes -- a command answering "what would you do tonight"
-must not spend the night doing it.
+Smoothing is what stops that becoming starvation -- `+1` over `+2` keeps a
+saturated axis strictly above zero -- and ties break by slot, so the order is
+total and a later run reconstructs the same one rather than a plausible one.
+The composed core is **exempt and always last**: producing its candidate costs
+a dozen decodes, so it is reached for when everything cheaper is out of moves,
+never because it looked uncertain.
+
+The counts come out of the ledger, which could not previously say which axis a
+line came from -- five judges wrote lines in the same shape. Certificates carry
+an `axis=` now, and the line carries the MAP-Elites `cell=` the variant lands
+in, derived at render time from columns already there. Lines written before
+that field count for nothing, which undercounts the early history rather than
+guessing at it: an axis whose record is invisible reads as untried, an untried
+axis is maximally uncertain, so it gets reached for and measured.
+
+On a fresh machine this is a no-op. Every axis is untried, therefore maximally
+uncertain, therefore ties break by slot and `adapter` goes first -- exactly
+what `ledger_len() % KINDS` did.
+
+`godel next` reports where the ranking stands without taking a turn, and says
+whether the bar is frozen or open. It deliberately does not ask the last slot
+whether it has work, because finding out costs those decodes -- a command
+answering "what would you do tonight" must not spend the night doing it.
+
+**The criterion holds still while the agent moves.** A loop that may rewrite
+its own bar at any moment converges on an evaluator that says yes to
+everything, and a ledger full of those adoptions would be *true*. So the bar is
+frozen inside an epoch of `EPOCH_LEN` = 5 trials -- one per other axis -- and
+questionable only at the edge. `is_boundary` is a pure function of ledger
+length, so where the loop stands is re-derivable from the record; genesis is
+excluded, because at length zero there is no agent to protect.
+
+At a boundary the loop may propose a bar in `[0.5, 12.0]` off a declared
+six-point grid. Coarse deliberately: a continuum lets the bar creep down by a
+hundredth a night, every step honestly certified, and the sum of them is
+exactly the drift the axis exists to catch.
+
+`judge_verdict` is pure and asks three questions of a cross-evaluation matrix
+-- the same candidate under both bars, plus a held-out anchor reading neither
+bar can see. **Sane**, finite and in range. **Moves**, the two bars actually
+disagree about this candidate, since a bar that admits and refuses what the
+standing one did is a certificate with no content. And **honest**: loosening is
+admitted only when the newly-admitted variant genuinely improves held-out
+accuracy, tightening only when the newly-refused one genuinely was not a gain.
+Without the third this axis is a machine for lowering its own bar.
+
+All seven outcomes are asserted at boot with no model and no NVMe, the way
+`update::decide` is.
+
+**The price is the test-slice budget, and charging it there is the point.**
+Every other axis reads the anchor after a variant has already won, as
+confirmation. Here the anchor *is* the evidence, because both bars are what is
+under suspicion -- so `read_anchor` spends one read to score both sides, and
+after three a criterion change cannot be grounded at all. The one
+non-renewable resource in the building is what a moving criterion is billed
+against. A bar adopted on a stale read is refused.
+
+**`bar_in_force()` reaches the judges**, or the axis would be a certificate
+about nothing: J1 in `trial`, `trial_deep` and `trial_config` reads it rather
+than `MCNEMAR_95`, which stays the default and the constant. A stored bar
+outside the range is *ignored rather than clamped* -- clamping would let a
+hand-edited file slide the bar to the nearest legal number and report nothing.
+
+**The archive illuminates instead of hill-climbing.** Twelve cells, four rank
+bands crossed with three repair behaviours, where behaviour is the *fraction*
+of touched decisions that were repairs. A variant earns a cell by beating
+whatever is in that cell rather than by beating the champion, so a rank-4
+adapter that repairs a different set of decisions than the rank-32 one survives
+on its own terms instead of being discarded over a margin inside the noise.
+Cells hold addresses in the same DAG the ledger names, so an elite from three
+weeks ago is still reachable and still re-derivable.
+
+`godel storm [n]` is the whole apparatus in one command: one `prepare`, n grid
+points against those cached features, descendants trained from the incumbent,
+chimeras bred by blending the low-rank factors of same-rank survivors (capped
+at six, paired in generation order), everything scored on validation, cell
+winners offered to the archive, and the best of the generation put in front of
+the same J1 the nightly loop uses.
+
+Chimeras carry an honest `Fit` of zero epochs and zero loss because they were
+never trained -- and **averaging factors is not averaging the function they
+compute**, since `B.A` is bilinear. A chimera is a cheap mutation operator that
+lands near two things that worked, which is exactly why it is judged rather
+than assumed. `s` is recomputed rather than blended, because it caches
+`m / |W0 + B.A|` against the frozen rows and a blended one would describe
+neither parent.
 
 Widening this had to come last, and the ordering is the point rather than an
 accident: an axis in the rotation without a judge in front of it is a machine
