@@ -107,6 +107,8 @@ pub const WINDOW: &str = "/ai/godel/window";
 /// already run. Asking "have I tried this?" has to be answerable before paying
 /// for the answer.
 pub const TRIED: &str = "/ai/godel/tried";
+/// The bar the judges are using, when it is not the constant.
+pub const BAR: &str = "/ai/godel/bar";
 
 /// What to try, as opposed to what came out.
 ///
@@ -160,6 +162,9 @@ pub enum ProposalKind {
     /// `skill::bench`: it is a program, it runs under the powers it will
     /// really have, it repeats, and it is cheap.
     Skill([u8; 32]),
+    /// Move the bar the other five answer to. Judged by `judge_verdict` on a
+    /// cross-evaluation matrix, and reachable only at an epoch boundary.
+    Judge(f32),
     /// Change how the council combines its cores. Judged on calibration by
     /// `harness::rule_bench`, because accuracy is not what this axis moves.
     Config(u8),
@@ -243,6 +248,17 @@ impl Proposal {
     }
 
     /// A proposal to change how the council combines its cores.
+    /// A proposal to move the bar the other judges answer to.
+    ///
+    /// The training knobs are zero for the reason a core's are: nothing is
+    /// trained. `rule` is zero rather than the one in force, so a bar is
+    /// identified by the bar alone -- otherwise the same criterion proposed
+    /// under two routing rules would be two points, and the marker directory
+    /// would let the loop propose it twice.
+    pub fn judge(bar: f32) -> Proposal {
+        Proposal { lr: 0.0, rank: 0, alpha: 0.0, epochs: 0, rule: 0, kind: ProposalKind::Judge(bar) }
+    }
+
     pub fn config(rule: u8) -> Proposal {
         Proposal { lr: 0.0, rank: 0, alpha: 0.0, epochs: 0, rule, kind: ProposalKind::Config(rule) }
     }
@@ -292,6 +308,11 @@ impl Proposal {
                 s.push('\n');
             }
             ProposalKind::Deep => s.push_str("deep 1\n"),
+            ProposalKind::Judge(bar) => {
+                s.push_str("judge ");
+                push_f6(&mut s, bar);
+                s.push('\n');
+            }
             ProposalKind::Skill(h) => {
                 s.push_str("skill ");
                 s.push_str(&hex32(&h));
@@ -465,16 +486,20 @@ pub fn space_selftest() -> bool {
         return false;
     }
 
-    // The rotation covers every axis and repeats nothing within a lap.
+    // The surprise ordering is a permutation, not merely a ranking.
     //
-    // What this guards is a rotation that looks like it walks five kinds and
-    // walks one: an offset computed the wrong way round, or a `KINDS` that
-    // stopped matching the arms, would leave the loop doing exactly what it
-    // did before -- adapter points until they run out and then nothing -- and
-    // the only symptom would be a ledger that never mentions the other four.
-    let mut seen_kinds = [false; KINDS];
-    for len in 0..KINDS {
-        seen_kinds[len % KINDS] = true;
+    // What this guards is the insertion sort quietly losing a slot. An order
+    // that came back `[0, 0, 1, 2]` would leave `deep` unreachable for the
+    // rest of the machine's life, every night would still look like work, and
+    // the only symptom would be a ledger that never mentions the axis -- the
+    // same failure the old round-robin claim was written against, in the shape
+    // the new ordering can fail in.
+    let mut seen_kinds = [false; RANKED];
+    for slot in surprise_order() {
+        if slot >= RANKED {
+            return false;
+        }
+        seen_kinds[slot] = true;
     }
     if !seen_kinds.iter().all(|s| *s) {
         return false;
@@ -1044,6 +1069,16 @@ fn set_head(h: &[u8; 32]) {
 /// that only says why something was rejected is a certificate that cannot be
 /// argued with, and the point of writing them down is that they can be.
 pub struct Certificate {
+    /// Which axis produced this, as it appears in the ledger.
+    ///
+    /// **The ledger could not say.** Five judges wrote lines in the same shape
+    /// and nothing in the file distinguished a night spent on the adapter grid
+    /// from one spent on a routing rule, so "which axes have actually been
+    /// tried" was a question the record could not answer -- and the surprise
+    /// ordering is exactly that question asked every night. A field rather
+    /// than an inference from the other columns, because a deep trial and an
+    /// adapter trial can render identical numbers.
+    pub axis: &'static str,
     pub parent: Option<[u8; 32]>,
     pub variant: [u8; 32],
     pub decisions: usize,
@@ -1288,6 +1323,14 @@ fn render_certificate(c: &Certificate, seq: u32, hour: u8) -> String {
     s.push_str(&c.parent.map(|h| short(&h)).unwrap_or(String::from("root....")));
     s.push_str(" variant=");
     s.push_str(&short(&c.variant));
+    s.push_str(" axis=");
+    s.push_str(c.axis);
+    // Derived at render time from columns already here rather than stored, so
+    // a cell can never disagree with the counts it was computed from, and an
+    // old line re-read under a changed `descriptor` reports where that variant
+    // would land *now* -- which is what a reader comparing epochs wants.
+    s.push_str(" cell=");
+    push_u32(&mut s, cell_of(c.rank, c.fixed, c.broke) as u32);
     s.push_str(" n=");
     push_u32(&mut s, c.validation as u32);
     s.push_str(" pred=");
@@ -1464,6 +1507,10 @@ pub fn run(
             trial_core(e, &h).map_err(Refused::Judge)
         }
         ProposalKind::Deep => trial_deep(e, b, p),
+        ProposalKind::Judge(bar) => {
+            p.mark();
+            trial_judge(e, b, bar)
+        }
         ProposalKind::Skill(h) => {
             p.mark();
             trial_skill(&h).map_err(Refused::Judge)
@@ -1606,6 +1653,7 @@ pub fn trial(
     let vhash = variant.hash();
 
     let mut cert = Certificate {
+        axis: "adapter",
         parent,
         variant: vhash,
         decisions: t.decisions(),
@@ -1796,6 +1844,7 @@ pub fn trial_core(e: &mut super::Engine, h: &[u8; 32]) -> Result<Certificate, &'
     let vhash = variant.hash();
 
     let mut cert = Certificate {
+        axis: "core",
         parent,
         variant: vhash,
         decisions: verdict.n,
@@ -2056,6 +2105,7 @@ pub fn trial_deep(
     let vhash = variant.hash();
 
     let mut cert = Certificate {
+        axis: "deep",
         parent,
         variant: vhash,
         decisions: n,
@@ -2156,6 +2206,7 @@ pub fn trial_skill(h: &[u8; 32]) -> Result<Certificate, &'static str> {
     let vhash = variant.hash();
 
     let mut cert = Certificate {
+        axis: "skill",
         parent,
         variant: vhash,
         // Two runs, which is what J3 compared. Not routing decisions, and the
@@ -2305,6 +2356,7 @@ pub fn trial_config(e: &mut super::Engine, rule: u8) -> Result<Certificate, &'st
     let vhash = variant.hash();
 
     let mut cert = Certificate {
+        axis: "rule",
         parent,
         variant: vhash,
         decisions: v.n,
@@ -2526,6 +2578,256 @@ pub fn ledger_len() -> usize {
 /// expensive one and no middle.
 const DEEP_GRID: &[(f32, usize, f32, usize)] = &[(0.02, 4, 8.0, 4), (0.01, 8, 16.0, 6)];
 
+// ---------------------------------------------------------------------------
+// Red Queen epochs: the criterion holds still while the agent moves.
+// ---------------------------------------------------------------------------
+
+/// How many trials run against a frozen criterion before the criterion itself
+/// may be re-examined.
+///
+/// **A bar that can move at any moment chases the proposal it is meant to
+/// judge.** Nothing in the loop prevents it: a night that cannot find a
+/// variant clearing 3.84 can always find a reason 3.20 was the better number,
+/// and a month of that converges on an evaluator that says yes to everything
+/// while the ledger fills with adoptions. That record would be *true*, and it
+/// would describe criterion drift rather than improvement, and nothing in the
+/// file would distinguish the two.
+///
+/// So the bar is frozen inside an epoch and questionable only at its edge.
+/// Five, because there are five other axes -- adapter, rule, skill, deep,
+/// composed core -- so an epoch reads as "try each kind once, then look at the
+/// criterion".
+pub const EPOCH_LEN: usize = 5;
+
+/// Whether the loop stands where it is allowed to question its own bar.
+pub fn at_epoch_boundary() -> bool {
+    is_boundary(ledger_len())
+}
+
+/// A pure function of how many verdicts have been recorded.
+///
+/// Of the *ledger*, deliberately, and not of a counter kept beside it. Where
+/// the loop stands must be re-derivable from the record for the same reason
+/// the rotation is: a reader asking "why did it question the bar that night"
+/// has to be able to answer from the file, and a counter that drifted from the
+/// ledger would leave the two disagreeing with nothing to say which was right.
+///
+/// Genesis is excluded. At length zero there is no agent to protect and no
+/// epoch behind it to have improved anything, so a bar change there would be
+/// grounded in nothing at all.
+fn is_boundary(n: usize) -> bool {
+    n > 0 && n % EPOCH_LEN == 0
+}
+
+// ---------------------------------------------------------------------------
+// The unbound judge, and the anchor that catches it drifting.
+// ---------------------------------------------------------------------------
+
+/// The narrowest bar a criterion may take.
+///
+/// Not zero. A bar of zero admits every candidate whose repairs outnumber its
+/// breaks by any margin at all, which abolishes the criterion rather than
+/// loosening it -- and does so while still looking like a threshold.
+pub const JUDGE_MIN: f32 = 0.5;
+
+/// And the widest. A bar above this refuses everything the corpus can produce
+/// evidence for, which switches the loop off as effectively as `set_enabled`
+/// and leaves no sign that it happened.
+pub const JUDGE_MAX: f32 = 12.0;
+
+/// Finite, and inside the range a criterion may take.
+pub fn sane_bar(v: f32) -> bool {
+    v.is_finite() && v >= JUDGE_MIN && v <= JUDGE_MAX
+}
+
+/// The bar the judges are using tonight.
+///
+/// `MCNEMAR_95` remains the constant it was -- what moves is this reading, so
+/// a tree that has never adopted a bar change behaves exactly as it did before
+/// this axis existed, and the default is still the number from the table.
+///
+/// A stored value outside the sane range is **ignored rather than clamped**.
+/// Clamping would let a corrupt or hand-edited file slide the bar to the
+/// nearest legal number and report nothing; refusing it puts the machine back
+/// on the constant, which is the one value no trial ever chose.
+pub fn bar_in_force() -> f32 {
+    sysbox::read_blob(BAR)
+        .and_then(|b| core::str::from_utf8(&b).ok().and_then(|t| t.trim().parse::<f32>().ok()))
+        .filter(|v| sane_bar(*v))
+        .unwrap_or(MCNEMAR_95)
+}
+
+/// The same candidate scored under both bars, plus a reading neither bar can
+/// see.
+///
+/// **This is what makes unbinding the judge affordable.** A trial that only
+/// asked "does the proposed bar admit this variant" would be a proposal
+/// grading itself. The matrix adds a column the bars do not participate in --
+/// held-out accuracy from the anchor -- and the verdict becomes a question
+/// about whether the bars and the anchor agree, which is answerable.
+pub struct Cross {
+    /// The bar in force when the trial started.
+    pub standing: f32,
+    /// The bar being proposed.
+    pub proposed: f32,
+    /// The candidate's paired counts, from which chi follows.
+    pub fixed: usize,
+    pub broke: usize,
+    /// Held-out accuracy of the candidate, and of the incumbent it would
+    /// replace, on the slice neither bar can see.
+    pub anchor_candidate: f32,
+    pub anchor_incumbent: f32,
+}
+
+impl Cross {
+    /// The paired statistic for this candidate. One definition, shared.
+    pub fn chi(&self) -> f32 {
+        mcnemar(self.broke, self.fixed)
+    }
+
+    /// Whether a given bar admits this candidate.
+    ///
+    /// The direction test is not decoration. Chi is symmetric, so a variant
+    /// that broke twelve and repaired one clears 3.84 exactly as convincingly
+    /// as one that repaired twelve and broke one; a bar alone cannot tell them
+    /// apart and was never meant to.
+    pub fn admits(&self, bar: f32) -> bool {
+        self.fixed > self.broke && self.chi() >= bar
+    }
+
+    /// What the anchor says the candidate was actually worth.
+    pub fn anchor_gain(&self) -> f32 {
+        self.anchor_candidate - self.anchor_incumbent
+    }
+}
+
+/// Whether a proposed bar may be adopted, and why.
+///
+/// Pure, so every outcome below is asserted at boot with no model, no corpus
+/// and no NVMe -- the way `update::decide` is. A criterion that can only be
+/// checked by running the loop overnight is a criterion nobody checks.
+///
+/// Three questions, and the third is the whole of it:
+///
+/// - **sane** -- finite, inside `[JUDGE_MIN, JUDGE_MAX]`. A bar of zero
+///   abolishes the criterion; one too high freezes the loop.
+/// - **moves** -- the two bars actually disagree about this candidate. A bar
+///   that admits and refuses exactly what the standing one did has changed
+///   nothing, and adopting it writes a certificate with no content.
+/// - **honest** -- the change agrees with the anchor. Loosening is admitted
+///   only when the newly-admitted variant genuinely improves held-out
+///   accuracy; tightening only when the newly-refused variant genuinely was
+///   not a gain.
+///
+/// Without the third this axis is a machine for lowering its own bar and
+/// recording the result as progress.
+pub fn judge_verdict(c: &Cross) -> (bool, &'static str) {
+    if !sane_bar(c.proposed) {
+        return (false, "the proposed bar is outside the range a criterion may take");
+    }
+    let now = c.admits(c.standing);
+    let then = c.admits(c.proposed);
+    if now == then {
+        return (false, "the proposed bar admits and refuses what the standing one did");
+    }
+    // Admission is monotone in the bar, so `then && !now` is a loosening and
+    // the other way round a tightening. Derived from the matrix rather than
+    // from comparing the two numbers, so the direction and the effect can
+    // never disagree about which case this is.
+    if then {
+        if c.anchor_gain() > 0.0 {
+            (true, "a looser bar admits a variant the anchor confirms")
+        } else {
+            (false, "drift: a looser bar admits a variant the anchor rejects")
+        }
+    } else if c.anchor_gain() > 0.0 {
+        (false, "a tighter bar would refuse a genuine gain")
+    } else {
+        (true, "a tighter bar refuses a variant the anchor does not support")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MAP-Elites: illuminate the space instead of climbing it.
+// ---------------------------------------------------------------------------
+
+/// Rank bands. Four, because rank is what decides whether a variant can be
+/// carried at all (`J4`), and these are the four answers that matter: nearly
+/// free, cheap, real, and expensive.
+pub const RANK_BANDS: usize = 4;
+
+/// Repair behaviours: mostly breaking, mixed, mostly repairing.
+pub const REPAIR_BANDS: usize = 3;
+
+/// Twelve cells.
+pub const CELLS: usize = RANK_BANDS * REPAIR_BANDS;
+
+/// Which cell a variant belongs in.
+///
+/// **The behaviour axis is the fraction of touched decisions that were repairs
+/// rather than breaks**, not the count. A rank-4 adapter that moves nine
+/// decisions and repairs eight, and a rank-32 one that moves ninety and
+/// repairs eighty, are the same *behaviour* at very different prices -- and a
+/// hill-climber keeping a single champion throws the cheap one away over a
+/// margin inside the noise. An archive keeps both, so a later reader can ask
+/// what the price bought instead of taking it on trust.
+pub fn descriptor(rank: usize, fixed: usize, broke: usize) -> (usize, usize) {
+    let band = match rank {
+        0..=4 => 0,
+        5..=8 => 1,
+        9..=16 => 2,
+        _ => 3,
+    };
+    let touched = fixed + broke;
+    // A variant that moved nothing is not a perfect repairer. It is the most
+    // breaking-shaped thing there is, because it bought nothing at all, and
+    // filing it in the top band would let an adapter that does nothing sit in
+    // the cell reserved for the ones that work.
+    let behaviour = if touched == 0 {
+        0
+    } else {
+        let share = fixed as f32 / touched as f32;
+        if share < 0.5 {
+            0
+        } else if share < 0.8 {
+            1
+        } else {
+            2
+        }
+    };
+    (band, behaviour)
+}
+
+/// The cell index, for a flat archive.
+pub fn cell_of(rank: usize, fixed: usize, broke: usize) -> usize {
+    let (band, behaviour) = descriptor(rank, fixed, broke);
+    band * REPAIR_BANDS + behaviour
+}
+
+// ---------------------------------------------------------------------------
+// Bayesian surprise: reach for the axis whose verdict is least predictable.
+// ---------------------------------------------------------------------------
+
+/// How unpredictable an axis's next verdict is, from its own record.
+///
+/// A Laplace-smoothed Beta posterior mean folded to a distance from the
+/// coin-flip. An axis that has said yes to everything and one that has said no
+/// to everything are equally predictable and equally uninformative; the axis
+/// sitting near 50% is the one whose next trial actually tells you something.
+///
+/// **This trades fairness for information, and the trade is the point.** The
+/// old rotation gave every axis a turn in sequence, which is fair and spends
+/// nights confirming what the ledger already says.
+///
+/// The smoothing is what stops that becoming starvation. `+1` over `+2` keeps
+/// even a saturated axis strictly above zero, so an axis that has refused
+/// twenty proposals still outranks nothing and still comes up once the others
+/// are out of moves.
+fn axis_uncertainty(att: u32, adopt: u32) -> f32 {
+    let rate = (adopt as f32 + 1.0) / (att as f32 + 2.0);
+    1.0 - (rate - 0.5).abs() * 2.0
+}
+
 fn next_deep() -> Option<Proposal> {
     DEEP_GRID
         .iter()
@@ -2570,8 +2872,107 @@ fn next_skill() -> Option<Proposal> {
     None
 }
 
-/// How many kinds the rotation walks.
-const KINDS: usize = 5;
+/// The axes, in slot order, as they are written in the ledger.
+///
+/// Strings rather than a discriminant because they go in the record and a
+/// ledger of integers is a ledger nobody reads. The order is the slot order,
+/// and ties in the surprise ranking break by it, so the ordering is total and
+/// a later run reconstructs the same one rather than a plausible one.
+pub const AXIS_NAMES: [&str; 6] = ["adapter", "rule", "skill", "deep", "core", "judge"];
+
+/// How many axes the surprise ranking covers.
+///
+/// Four, not six. `core` is exempt and stays last regardless of how uncertain
+/// it looks, and `judge` is not ranked at all -- it is reachable only at an
+/// epoch boundary and is asked before the ranking runs.
+const RANKED: usize = 4;
+
+/// Which axis a ledger line came from.
+fn axis_of(line: &str) -> Option<usize> {
+    let at = line.find(" axis=")? + 6;
+    let rest = &line[at..];
+    let end = rest.find(' ').unwrap_or(rest.len());
+    AXIS_NAMES.iter().position(|n| *n == &rest[..end])
+}
+
+/// Attempts and adoptions per axis, counted out of the ledger.
+///
+/// From the *record*, not from a tally kept beside it -- the discipline
+/// `is_boundary` follows, for the same reason. A counter in its own file could
+/// disagree with the ledger, and then the loop's account of why it chose an
+/// axis would be unfalsifiable exactly where it most needs not to be.
+///
+/// Lines written before the axis was recorded carry no `axis=` field and count
+/// for nothing. That undercounts the early history rather than guessing at it,
+/// and it is the right direction to be wrong in: an axis whose record is
+/// invisible reads as untried, an untried axis is maximally uncertain, so it
+/// gets reached for and measured. The loop recovers by looking rather than by
+/// assuming.
+fn axis_counts() -> [(u32, u32); AXIS_NAMES.len()] {
+    let mut out = [(0u32, 0u32); AXIS_NAMES.len()];
+    for line in ledger_tail(usize::MAX) {
+        if let Some(i) = axis_of(&line) {
+            out[i].0 += 1;
+            if line.contains(" ADOPT") {
+                out[i].1 += 1;
+            }
+        }
+    }
+    out
+}
+
+/// The four findable axes, most surprising first.
+///
+/// An insertion sort over four elements, written out rather than reached for:
+/// `sort_by` over an `f32` comparator wants a total order `f32` does not have,
+/// and the tie rule here is a decision rather than a detail.
+fn surprise_order() -> [usize; RANKED] {
+    let counts = axis_counts();
+    let mut order = [0usize, 1, 2, 3];
+    for i in 1..RANKED {
+        let mut j = i;
+        while j > 0 {
+            let (a, b) = (order[j - 1], order[j]);
+            let ua = axis_uncertainty(counts[a].0, counts[a].1);
+            let ub = axis_uncertainty(counts[b].0, counts[b].1);
+            // Strictly greater, so equal uncertainty leaves the earlier slot
+            // where it is and the order stays a function of the record.
+            if ub > ua {
+                order.swap(j - 1, j);
+                j -= 1;
+            } else {
+                break;
+            }
+        }
+    }
+    order
+}
+
+/// The bars the loop may propose, coarsest first.
+///
+/// Six declared points rather than a continuum, and that is the safeguard
+/// rather than the simplification. A continuum lets the loop creep the bar
+/// down by a hundredth a night -- every step passing `moves` on some candidate
+/// somewhere, every step honestly certified, and the sum of them being exactly
+/// the drift this axis exists to catch.
+const JUDGE_GRID: [f32; 6] = [1.0, 2.0, 3.0, 5.0, 8.0, 12.0];
+
+/// A bar to put in front of the tribunal, or none.
+///
+/// **`None` everywhere except an epoch boundary.** That is what makes the
+/// freeze real rather than advisory: the axis cannot be reached from any other
+/// route, so the check in `next_proposal` is belt and braces rather than the
+/// only guard.
+///
+/// The bar in force is skipped, because judging a criterion against itself
+/// answers `moves` in advance and spends a night doing it.
+fn next_judge() -> Option<Proposal> {
+    if !at_epoch_boundary() {
+        return None;
+    }
+    let now = bar_in_force();
+    JUDGE_GRID.iter().filter(|b| **b != now).map(|b| Proposal::judge(*b)).find(|p| !p.tried())
+}
 
 /// The next thing to try tonight, over every axis the loop can judge.
 ///
@@ -2597,23 +2998,27 @@ const KINDS: usize = 5;
 /// the corpus and a composed core spends a dozen decodes writing something
 /// that may not survive its first judge.
 pub fn next_proposal() -> Option<Proposal> {
-    let start = ledger_len() % KINDS;
-    for i in 0..KINDS {
-        let candidate = match (start + i) % KINDS {
+    // The criterion first, and only at the edge of an epoch. Inside one this
+    // costs a modulo and the axes below are reached exactly as they were.
+    if let Some(p) = next_judge() {
+        return Some(p);
+    }
+    for slot in surprise_order() {
+        let candidate = match slot {
             0 => frontier(),
             1 => next_config(),
             2 => next_skill(),
-            3 => next_deep(),
-            // Last, and the only one that *makes* its candidate rather than
-            // finding one: composing costs decodes whether or not the result
-            // is worth judging.
-            _ => author_core(),
+            _ => next_deep(),
         };
         if candidate.is_some() {
             return candidate;
         }
     }
-    None
+    // Last, and exempt from the ranking. Composing a core costs a dozen
+    // constrained decodes whether or not the result survives its first judge,
+    // so it is reached for when everything cheaper is out of moves -- never
+    // because it happened to look uncertain.
+    author_core()
 }
 
 /// Where the rotation stands, without taking a turn.
@@ -2622,16 +3027,23 @@ pub fn next_proposal() -> Option<Proposal> {
 /// work: finding out costs a dozen constrained decodes, because composing a
 /// core *is* the work. A command that answers "what would you do tonight"
 /// must not spend the night doing it.
-pub fn rotation() -> (usize, [(&'static str, bool); 4]) {
-    (
-        ledger_len() % KINDS,
-        [
-            ("adapter", frontier().is_some()),
-            ("rule", next_config().is_some()),
-            ("skill", next_skill().is_some()),
-            ("deep", next_deep().is_some()),
-        ],
-    )
+pub fn rotation() -> (bool, [(&'static str, f32, bool); RANKED]) {
+    let counts = axis_counts();
+    let mut out = [("", 0.0f32, false); RANKED];
+    for (i, slot) in surprise_order().iter().enumerate() {
+        let has = match slot {
+            0 => frontier().is_some(),
+            1 => next_config().is_some(),
+            2 => next_skill().is_some(),
+            _ => next_deep().is_some(),
+        };
+        out[i] = (
+            AXIS_NAMES[*slot],
+            axis_uncertainty(counts[*slot].0, counts[*slot].1),
+            has,
+        );
+    }
+    (at_epoch_boundary(), out)
 }
 
 /// The lineage of the current head, newest first.
@@ -2664,6 +3076,140 @@ pub fn test_status() -> (u32, u32, bool) {
 pub fn read_test(t: &Trial, dora: Option<&super::adapter::Dora>) -> (f32, u32, bool) {
     let n = spend_test_read();
     (t.score(dora, Slice::Test), n, n <= TEST_READS)
+}
+
+/// Score both sides of a bar proposal on the held-out slice, for one read.
+///
+/// **One consultation, two scores.** `read_test` spends a read per adapter,
+/// which is right when the question is "how good is this variant". Here the
+/// question is whether the bars agree with the anchor, and that needs the
+/// candidate and the incumbent measured against each other -- charging two
+/// reads for one look at the slice would exhaust a three-read budget in a
+/// night and a half, and would overstate what was spent. The slice is read
+/// once either way.
+fn read_anchor(
+    t: &Trial,
+    incumbent: Option<&super::adapter::Dora>,
+    candidate: Option<&super::adapter::Dora>,
+) -> (f32, f32, u32, bool) {
+    let n = spend_test_read();
+    (t.score(candidate, Slice::Test), t.score(incumbent, Slice::Test), n, n <= TEST_READS)
+}
+
+/// Judge a proposed bar on a matrix neither bar can grade itself on.
+///
+/// **The price is deliberate, and it is the test-slice budget.** Every other
+/// axis reads the anchor only after a variant has already won on validation,
+/// as an after-the-fact confirmation that costs nothing if the answer is
+/// boring. Here the anchor *is* the evidence: both bars are the thing under
+/// suspicion, so there is no cheaper reading that could settle the question.
+/// A judge-trial therefore spends a read to exist at all, and after three of
+/// them a criterion change cannot be grounded any more.
+///
+/// Charging it there is the point rather than a side effect. The one
+/// non-renewable resource in the building is what a moving criterion is
+/// billed against, so a loop that spends its nights rewriting its own bar runs
+/// out of the ability to justify doing so -- while the axes that improve the
+/// agent against a fixed bar go on costing nothing.
+pub fn trial_judge(e: &mut super::Engine, b: &Budget, bar: f32) -> Result<Certificate, Refused> {
+    let t = super::train::prepare(e, b).map_err(Refused::Train)?;
+    TRIALS.fetch_add(1, Ordering::Relaxed);
+
+    // The candidate is a freshly trained variant rather than a stored one,
+    // because the matrix has to be about a decision the bars would actually
+    // face. Re-scoring an old elite would be cheaper and would ask a different
+    // question: whether the bars disagree about something already decided.
+    let incumbent = e.model.adapters.as_ref().and_then(|a| t.gather(a));
+    let fit = t.train(b);
+    let (broke, fixed, _, _) = t.paired(incumbent.as_ref(), Some(&fit.dora), Slice::Validation);
+    let (anchor_candidate, anchor_incumbent, read, fresh) =
+        read_anchor(&t, incumbent.as_ref(), Some(&fit.dora));
+
+    let standing = bar_in_force();
+    let cross =
+        Cross { standing, proposed: bar, fixed, broke, anchor_candidate, anchor_incumbent };
+    let (honest, why) = judge_verdict(&cross);
+    let moves = cross.admits(standing) != cross.admits(bar);
+    let n_val = t.slice_size(Slice::Validation);
+
+    // A bar change grounded on a stale read is not grounded. The budget is
+    // what makes the anchor evidence rather than decoration, so a reading past
+    // it may still be printed and may not be acted on.
+    let adopted = honest && fresh && n_val > 0;
+
+    let parent = ensure_head(e);
+    let carried = parent.and_then(|p| Variant::load(&p));
+    let variant = Variant {
+        parent,
+        adapter: carried.as_ref().and_then(|x| x.adapter),
+        policy: sysbox::read_blob("/ai/agent/policy").map(|p| sha256::hash(&p)),
+        skills: carried.as_ref().and_then(|x| x.skills),
+        corpus: sysbox::hash_of(super::vocab::CORPUS),
+        deep: carried.as_ref().map(|x| x.deep).unwrap_or(false),
+        core: super::voter::installed().map(|c| c.hash),
+        core_seen: true,
+        lambda: 0.0,
+        rank: 0,
+        epochs: 0,
+        // The bar rides in the node's `rule` slot as a whole number of
+        // hundredths, so a lineage records which criterion each variant was
+        // judged under. Without it, "the loop improved for a month" and "the
+        // loop lowered its bar in week two" are the same chain of hashes.
+        rule: (bar * 100.0) as u8,
+        born: crate::dev::rtc::now().map(|d| crate::dev::rtc::unix_seconds(&d)).unwrap_or(0),
+    };
+    let vhash = variant.hash();
+
+    let mut cert = Certificate {
+        axis: "judge",
+        parent,
+        variant: vhash,
+        decisions: n_val,
+        validation: n_val,
+        predicted: cross.anchor_gain() > 0.0,
+        fixed,
+        broke,
+        mcnemar: cross.chi(),
+        // J1 carries the verdict itself, because on this axis the verdict is
+        // one sentence and the other judges are its preconditions.
+        j1: honest,
+        j1_why: why,
+        // J2: the two bars actually disagree about this candidate.
+        goals_held: usize::from(moves),
+        goals_total: 1,
+        j2: moves,
+        // J3: sane, and asked of the number before anything is measured.
+        j3: sane_bar(bar),
+        j3_why: if sane_bar(bar) { "the bar is inside the range" } else { "the bar is outside the range" },
+        // J4: nothing resident changes. A criterion is a number in a file, so
+        // the judge that asks whether this machine can carry the variant has
+        // nothing to weigh and says so rather than abstaining.
+        resident_kib: 0,
+        rank: 0,
+        j4: true,
+        epochs: 0,
+        capped: false,
+        adopted,
+        test_acc: anchor_candidate,
+        test_read: read,
+        test_fresh: fresh,
+    };
+
+    if adopted {
+        let mut text = String::new();
+        push_f6(&mut text, bar);
+        text.push('\n');
+        sysbox::write_text(BAR, &text);
+        variant.store();
+        set_head(&vhash);
+        ADOPTIONS.fetch_add(1, Ordering::Relaxed);
+    } else {
+        cert.adopted = false;
+    }
+    let seq = ledger_len() as u32 + 1;
+    let hour = crate::dev::rtc::now().map(|d| d.hour).unwrap_or(0);
+    ledger_append(&render_certificate(&cert, seq, hour));
+    Ok(cert)
 }
 
 /// Eight hex characters of an address, for anything that has to fit on a line.
@@ -2847,6 +3393,99 @@ pub fn selftest() -> bool {
     claim(
         "an even split is no evidence at all",
         mcnemar(7, 7) == 0.0 && mcnemar(0, 0) == 0.0,
+    );
+
+    // ---- Red Queen epochs ---------------------------------------------
+    //
+    // The boundary is a function of the ledger, so these are the whole of it.
+    claim(
+        "an epoch boundary is every fifth verdict, and genesis is not one",
+        !is_boundary(0)
+            && !is_boundary(1)
+            && is_boundary(EPOCH_LEN)
+            && is_boundary(EPOCH_LEN * 3)
+            && !is_boundary(EPOCH_LEN + 1),
+    );
+
+    // ---- the unbound judge ---------------------------------------------
+    //
+    // Nine repairs against two breaks gives chi 3.27, under the standing 3.84
+    // and over a proposed 3.0: that is a loosening, and it is the exact shape
+    // a loop lowering its own bar would produce. Twelve against one gives
+    // 7.69, over the standing bar and under a proposed 10.0: a tightening.
+    // Both candidates are held fixed and only the bar and the anchor move, so
+    // each claim below isolates one question.
+    let cross = |proposed: f32, fixed: usize, broke: usize, gain: f32| Cross {
+        standing: MCNEMAR_95,
+        proposed,
+        fixed,
+        broke,
+        anchor_candidate: 0.60 + gain,
+        anchor_incumbent: 0.60,
+    };
+    claim(
+        "a bar of zero abolishes the criterion and is refused",
+        !judge_verdict(&cross(0.0, 9, 2, 0.04)).0,
+    );
+    claim(
+        "a bar too high freezes the loop and is refused",
+        !judge_verdict(&cross(50.0, 9, 2, 0.04)).0,
+    );
+    claim(
+        "a bar that changes nothing about the candidate is refused",
+        !judge_verdict(&cross(3.9, 9, 2, 0.04)).0,
+    );
+    claim(
+        "drift: a looser bar admitting what the anchor rejects is refused",
+        judge_verdict(&cross(3.0, 9, 2, -0.01))
+            == (false, "drift: a looser bar admits a variant the anchor rejects"),
+    );
+    claim(
+        "a looser bar admitting what the anchor confirms is adopted",
+        judge_verdict(&cross(3.0, 9, 2, 0.04)).0,
+    );
+    claim(
+        "a tighter bar that would refuse a genuine gain is refused",
+        judge_verdict(&cross(10.0, 12, 1, 0.04))
+            == (false, "a tighter bar would refuse a genuine gain"),
+    );
+    claim(
+        "a tighter bar refusing what the anchor does not support is adopted",
+        judge_verdict(&cross(10.0, 12, 1, -0.02)).0,
+    );
+    claim(
+        "a bar outside the range is refused before anything else is asked",
+        !sane_bar(0.0) && !sane_bar(f32::INFINITY) && sane_bar(MCNEMAR_95),
+    );
+
+    // ---- the archive ----------------------------------------------------
+    claim(
+        "a cheap variant and an expensive one that repair alike share a behaviour and not a cell",
+        descriptor(4, 8, 1).1 == descriptor(32, 80, 10).1
+            && descriptor(4, 8, 1) != descriptor(32, 80, 10),
+    );
+    claim(
+        "a variant that moved nothing is not filed as a perfect repairer",
+        descriptor(8, 0, 0).1 == 0,
+    );
+    claim(
+        "every cell a descriptor can name is inside the archive",
+        cell_of(64, 100, 0) < CELLS && cell_of(0, 0, 0) < CELLS && CELLS == 12,
+    );
+
+    // ---- Bayesian surprise ----------------------------------------------
+    claim(
+        "an axis at the coin-flip is where the information is",
+        axis_uncertainty(10, 5) > axis_uncertainty(10, 9)
+            && axis_uncertainty(10, 5) > axis_uncertainty(10, 1),
+    );
+    claim(
+        "an axis that has refused everything still outranks nothing",
+        axis_uncertainty(20, 0) > 0.0,
+    );
+    claim(
+        "an axis nobody has tried is as uncertain as the loop can be",
+        axis_uncertainty(0, 0) >= axis_uncertainty(10, 5),
     );
 
     let h = sha256::hash(b"a variant");
