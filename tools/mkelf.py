@@ -343,6 +343,16 @@ def wild_code(entry_rva, msg_rva, _unused):
     return bytes(c)
 
 
+def spin_code(entry_rva, _a, _b):
+    """Loop forever, asking for nothing.
+
+    Two bytes: `jmp .`. It makes no syscall, so nothing the kernel can refuse
+    ever happens, and before the deadline existed this owned the machine with
+    no key left to press.
+    """
+    return bytes([0xEB, 0xFE])
+
+
 def build(kind="static"):
     interp = b"/lib64/ld-linux-x86-64.so.2\x00"
     phnum = 2 if kind == "dynamic" else 1
@@ -350,7 +360,11 @@ def build(kind="static"):
     # Lay the body out first so the message address is known before the code
     # that points at it is emitted.
     body_at = entry
-    if kind == "wild":
+    if kind == "spin":
+        text = spin_code(entry, 0, 0)
+        body = text
+        msg_rva, disp, lea_end = body_at, 0, 0
+    elif kind == "wild":
         probe = wild_code(0, 0, 0)
         msg_rva = body_at + len(probe)
         text = wild_code(entry, msg_rva, 0)
@@ -485,6 +499,10 @@ def verify(path):
     # RIP-relative lea says it is. Off by four here and the guest writes
     # whatever follows, which reads as a working loader printing garbage.
     rel_entry = entry - va
+    if len(b) == entry + 2 and b[entry:] == bytes([0xEB, 0xFE]):
+        claim("it is two bytes of jmp-to-self and nothing else", True)
+        claim("it makes no syscall at all", SYSCALL not in b)
+        return ok
     if MSG_ESCAPED in b:
         claim("it reads an absolute kernel address with no syscall in the way",
               bytes([0x48, 0x8B, 0x04, 0x25, 0x00, 0x10, 0x00, 0x00]) in b)
@@ -550,7 +568,7 @@ def main():
     ap.add_argument("out")
     ap.add_argument("--kind",
                     choices=["static", "dynamic", "fixed", "memory", "rogue",
-                             "protect", "wild"],
+                             "protect", "wild", "spin"],
                     default="static")
     ap.add_argument("--verify", action="store_true")
     a = ap.parse_args()

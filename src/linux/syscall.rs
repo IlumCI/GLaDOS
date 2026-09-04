@@ -717,6 +717,40 @@ extern "sysv64" {
 /// Set on the way out so an exit code of zero is still distinguishable from
 /// "the guest never called exit at all".
 pub const EXITED: u64 = 1 << 32;
+/// Set when the guest was killed for running past its deadline.
+pub const OVERRAN: u64 = 1 << 34;
+
+/// How long a guest may run before the timer takes the machine back.
+///
+/// **Without this a guest that never makes a syscall owns the machine.** Every
+/// fixture so far ends by asking for something, so nothing had noticed; a real
+/// binary with a bug in its startup loop would simply never give the shell
+/// back, and there is no key to press because the guest is what is running.
+///
+/// Five seconds at 100 Hz. Long enough that no correct program here meets it,
+/// short enough that meeting it is an inconvenience rather than a reboot. It
+/// is a stage-1 number: a guest that legitimately computes for a minute needs
+/// this to be a policy rather than a constant, and there is no such guest yet.
+const DEADLINE_TICKS: u64 = 500;
+
+static DEADLINE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Whether the running guest has outstayed its welcome.
+pub fn overran(now: u64) -> bool {
+    let d = DEADLINE.load(Ordering::Relaxed);
+    d != 0 && now >= d && GUEST_RUNNING.load(Ordering::Relaxed)
+}
+
+/// End a guest that would not stop on its own.
+///
+/// # Safety
+/// Only from an interrupt taken **at ring 3**, so the guest itself was
+/// executing. Called while the kernel is working on the guest's behalf it
+/// would abandon whatever that work was holding.
+pub unsafe fn kill_overrun() -> ! {
+    unsafe { kill_with(OVERRAN) }
+}
+
 /// Set instead when the guest died of a fault.
 pub const FAULTED: u64 = 1 << 33;
 
@@ -745,6 +779,15 @@ pub fn running() -> bool {
 /// # Safety
 /// Only from a fault handler, and only when `running` is true.
 pub unsafe fn kill(vector: u64) -> ! {
+    unsafe { kill_with(FAULTED | vector) }
+}
+
+/// The longjmp both reasons share.
+///
+/// # Safety
+/// Only while a guest is running, and only from a context that may abandon its
+/// stack.
+unsafe fn kill_with(code: u64) -> ! {
     GUEST_RUNNING.store(false, Ordering::Relaxed);
     // **Inline, and calling `glados_leave_guest` through its declaration was
     // the bug.** This target is Windows-ABI, so an ordinary Rust function is
@@ -772,7 +815,7 @@ pub unsafe fn kill(vector: u64) -> ! {
             "pop rbx",
             "pop rbp",
             "ret",
-            in("rax") FAULTED | vector,
+            in("rax") code,
             options(noreturn),
         )
     }
@@ -805,7 +848,9 @@ pub unsafe fn run(entry: u64, stack_top: u64) -> u64 {
         core::arch::asm!("pushfq; pop {}", out(reg) flags, options(nomem, preserves_flags))
     };
     GUEST_RUNNING.store(true, Ordering::Relaxed);
+    DEADLINE.store(crate::dev::lapic::ticks() + DEADLINE_TICKS, Ordering::Relaxed);
     let code = unsafe { glados_enter_guest(entry, stack_top) };
+    DEADLINE.store(0, Ordering::Relaxed);
     GUEST_RUNNING.store(false, Ordering::Relaxed);
     if flags & (1 << 9) != 0 {
         crate::cpu::enable_interrupts();
@@ -1062,6 +1107,14 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     out.push((
         "the flags the guest starts with have interrupts on, so it can be preempted",
         0x202u64 & (1 << 9) != 0,
+    ));
+    out.push((
+        "an overrun is distinguishable from a fault and from an exit",
+        OVERRAN != FAULTED && OVERRAN != EXITED && (OVERRAN | 5) & 0xFFFF_FFFF == 5,
+    ));
+    out.push((
+        "no deadline is set when nothing is running, so nothing can be killed",
+        !overran(u64::MAX),
     ));
     out.push((
         "a fault code is distinguishable from an exit code",

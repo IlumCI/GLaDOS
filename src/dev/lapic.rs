@@ -122,12 +122,25 @@ pub fn timer_hz() -> u64 {
     unsafe { *TIMER_HZ.get() }
 }
 
-extern "x86-interrupt" fn timer_isr(_frame: idt::InterruptStackFrame) {
-    TICKS.fetch_add(1, Ordering::Relaxed);
+extern "x86-interrupt" fn timer_isr(frame: idt::InterruptStackFrame) {
+    let now = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
     // EOI before scheduling, not after: the switch below may not return for a
     // long time, and leaving the interrupt in service would block every
     // further interrupt at this priority in the meantime.
     eoi();
+
+    // A guest that never makes a syscall owns the machine, and there is no key
+    // to press because the guest is what is running. The timer is the only
+    // thing that still gets a turn, so it is where the deadline lives.
+    //
+    // **Only from ring 3**, which is the whole of the safety argument: the
+    // saved CS says the guest itself was executing rather than the kernel
+    // working on its behalf, so there is no lock held and no half-finished
+    // allocation to abandon. An interrupt arriving during a syscall simply
+    // lets the deadline pass and catches it on the next tick outside one.
+    if frame.cs & 3 == 3 && crate::linux::syscall::overran(now) {
+        unsafe { crate::linux::syscall::kill_overrun() }
+    }
     crate::task::tick();
 }
 

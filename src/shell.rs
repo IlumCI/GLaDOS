@@ -4429,7 +4429,14 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                                     if c.served { "" } else { "(unimplemented)" }
                                 );
                             }
-                            if r & linux::syscall::FAULTED != 0 {
+                            if r & linux::syscall::OVERRAN != 0 {
+                                console::set_color(YELLOW);
+                                kprintln!(
+                                    "  killed for running too long after {} syscall(s), machine intact",
+                                    calls.len()
+                                );
+                                console::set_color(LTGRAY);
+                            } else if r & linux::syscall::FAULTED != 0 {
                                 console::set_color(YELLOW);
                                 kprintln!(
                                     "  killed by fault {:#04x} after {} syscall(s), machine intact",
