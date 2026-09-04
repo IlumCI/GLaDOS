@@ -1820,9 +1820,11 @@ pub fn runnable(img: &elf::Image) -> Result<(), &'static str> {
     if img.dynamic() {
         return Err("dynamically linked: the entry point is ld.so, which stage 0 has no loader for");
     }
-    if !img.relocatable() {
-        return Err("fixed addresses: a single address space has no free range to promise it");
-    }
+    // A fixed address is no longer refused here. Whether one can be honoured is
+    // a question about this machine's memory map rather than about the file, so
+    // `load` asks `mem::fixed` and reports what it said -- "that physical range
+    // is not free on this machine" names the actual obstacle, where the blanket
+    // refusal named a design decision that had stopped being one.
     if img.segments.is_empty() {
         return Err("nothing to load");
     }
