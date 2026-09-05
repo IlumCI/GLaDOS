@@ -1728,6 +1728,25 @@ words about this loader: "a file-backed mapping is refused, there being no fd
 table" and "MAP_FIXED is refused, for the reason ET_EXEC is". They are nine
 claims now, about the refusals that remain and about the shape a linker uses.
 
+**Which libc is not a decision this kernel makes.** A libc is userspace: it is
+linked into the binary or named by it in `PT_INTERP`, and `load` reads that
+path and loads whatever is there. So musl and glibc can both be installed and
+each program takes its own, which works today and needed no code. What cannot
+happen is two of them inside one process, so "use whichever is faster" is a
+per-program question and never a per-call one. `linux libc` says which are
+installed, a successful run names the interpreter it used and where it landed,
+and a refusal names the path the binary wanted -- which the error itself cannot
+do, its type being a `&'static str`.
+
+What glibc will additionally ask of the syscall surface is a *prediction* and
+is written down as one in `out/release/PLAN-native-linux.md`, which is a
+working note rather than repository content, like every planning document
+here. The short version: musl is a subset, so doing it first is the first half
+of the same road and glibc later is additive rows in the `-ENOSYS` trace. The
+one thing that cannot be worked around is a binary built against glibc that
+cannot be rebuilt, and the game logic this target eventually loads is exactly
+that kind of object.
+
 **No real `ld.so` has run here yet.** Everything it needs on the first two
 calls is answered; what has not been measured is the third onward, and that is
 the whole reason the `-ENOSYS` trace exists rather than a guess about what it

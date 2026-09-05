@@ -210,6 +210,45 @@ fn place(bytes: &[u8]) -> Result<Placed, &'static str> {
     Ok(Placed { img, hold, base, lo, span })
 }
 
+/// The interpreter paths the world actually uses, and which libc each is.
+///
+/// **Not a list of what is supported.** Nothing in this loader is
+/// libc-specific and it has never looked at these strings: `PT_INTERP` names a
+/// path, the path is read out of the namespace, and whatever is there is
+/// loaded. This is a list of what to *check for*, so an operator can be told
+/// what is installed rather than guessing a path and finding out from a
+/// refusal.
+///
+/// Both may be present at once and they do not interact, because a libc is
+/// userspace and the choice was made by whoever built the binary. What cannot
+/// happen is two of them in one process: two mallocs each certain it owns the
+/// break, two thread-local layouts, two `errno`s. So "use whichever is faster"
+/// is a per-program question and never a per-call one.
+pub const INTERPRETERS: &[(&str, &str)] = &[
+    ("/lib/ld-musl-x86_64.so.1", "musl"),
+    ("/lib64/ld-linux-x86-64.so.2", "glibc"),
+    // Some distributions put the same object here and symlink the other way
+    // round, and a binary built on one of those names this path in its header.
+    ("/lib/ld-linux-x86-64.so.2", "glibc, in /lib"),
+];
+
+/// Which of them this machine actually has.
+pub fn installed() -> Vec<(&'static str, &'static str, bool)> {
+    INTERPRETERS
+        .iter()
+        .map(|&(path, what)| (path, what, crate::sysbox::blob_len(path).is_some()))
+        .collect()
+}
+
+/// What interpreter a file asks for, without loading anything.
+///
+/// Exists for the *refusal* rather than for the loading. "The interpreter this
+/// binary names is not in the namespace" is true and useless without the name
+/// in it, and the error type is a `&'static str` that cannot carry one.
+pub fn wants(bytes: &[u8]) -> Option<alloc::string::String> {
+    elf::parse(bytes).ok().and_then(|i| i.interp)
+}
+
 /// Place a program, its interpreter if it wants one, and build its stack.
 pub fn load(bytes: &[u8], args: &[&str]) -> Result<Guest, &'static str> {
     let prog = place(bytes)?;
@@ -396,6 +435,21 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     out.push((
         "the span of a gapped image covers both segments, not the larger one",
         two.span() == Some((0, 4096 + 4096)),
+    ));
+
+    // Two properties of the interpreter table, both of which would be silent.
+    // A duplicate path reports one file twice and reads as two libcs
+    // installed; a relative one resolves against a working directory that does
+    // not exist yet, since `PT_INTERP` is read before there is a guest.
+    out.push((
+        "no interpreter path is listed twice, so two rows cannot mean one file",
+        INTERPRETERS.iter().enumerate().all(|(i, (p, _))| {
+            INTERPRETERS.iter().skip(i + 1).all(|(q, _)| p != q)
+        }),
+    ));
+    out.push((
+        "and every one of them is absolute, there being nothing to resolve against",
+        INTERPRETERS.iter().all(|(p, _)| p.starts_with('/')),
     ));
     out
 }

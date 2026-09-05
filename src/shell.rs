@@ -4448,6 +4448,17 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                                 bytes.len(), g.segments, g.span, g.base, g.entry
                             );
                             console::set_color(LTGRAY);
+                            // Which interpreter, and where it went. Said out
+                            // loud because "it ran" and "it ran under the libc
+                            // you meant" are different facts, and on a machine
+                            // carrying two of them the second is the one
+                            // nobody can check any other way.
+                            if let Some((path, base, entry)) = &g.interp {
+                                kprintln!(
+                                    "  interpreter {} at {:#x}, its entry {:#x}",
+                                    path, base, entry
+                                );
+                            }
                             kprintln!(
                                 "  ring 3, one address space -- only its own pages carry the U bit"
                             );
@@ -4489,7 +4500,53 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                                 kprintln!("  returned without exiting -- {} syscall(s)", calls.len());
                             }
                         }
-                        Err(why) => kprintln!("  will not run it: {}", why),
+                        Err(why) => {
+                            kprintln!("  will not run it: {}", why);
+                            // Name the path it wanted. The refusal cannot: its
+                            // error type is a `&'static str`, and a message
+                            // about "the interpreter this binary names"
+                            // without the name in it sends somebody looking
+                            // for a file they cannot identify.
+                            if let Some(want) = linux::load::wants(&bytes) {
+                                let here = crate::sysbox::blob_len(&want).is_some();
+                                kprintln!(
+                                    "  it asks for {}, which is {}",
+                                    want,
+                                    if here { "here" } else { "not in the namespace" }
+                                );
+                                if !here {
+                                    kprintln!("  'linux libc' lists what this machine has");
+                                }
+                            }
+                        }
+                    }
+                }
+                "libc" => {
+                    console::set_color(YELLOW);
+                    kprintln!("[libc]");
+                    console::set_color(LTGRAY);
+                    kprintln!("  Nothing here chooses a libc. A binary names its interpreter and");
+                    kprintln!("  the loader loads whatever is at that path, so both may be");
+                    kprintln!("  installed and each program takes its own. What cannot happen is");
+                    kprintln!("  two of them inside one process.");
+                    let mut n = 0;
+                    for (path, what, here) in linux::load::installed() {
+                        if here {
+                            n += 1;
+                            console::set_color(LTGREEN);
+                        } else {
+                            console::set_color(LTGRAY);
+                        }
+                        kprintln!(
+                            "  {:<30} {:<22} {}",
+                            path,
+                            what,
+                            if here { "installed" } else { "absent" }
+                        );
+                    }
+                    console::set_color(LTGRAY);
+                    if n == 0 {
+                        kprintln!("  none of them, so only static binaries run here");
                     }
                 }
                 "trace" => {
@@ -4512,7 +4569,13 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         "  the syscall trap is {}",
                         if linux::syscall::armed() { "armed" } else { "not armed yet" }
                     );
-                    kprintln!("  linux run <path>   load a static PIE and run it at ring 0");
+                    for (path, what, here) in linux::load::installed() {
+                        if here {
+                            kprintln!("  {} is installed ({})", path, what);
+                        }
+                    }
+                    kprintln!("  linux run <path>   load a binary and run it at ring 3");
+                    kprintln!("  linux libc         which interpreters this machine has");
                     kprintln!("  linux trace        what the last guest asked for");
                 }
             }
