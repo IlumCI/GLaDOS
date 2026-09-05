@@ -426,6 +426,377 @@ impl Regs<'_> {
     }
 }
 
+/// The parts of bringing this chip up that can be checked without one.
+///
+/// **Everything the chip answers is unverifiable here and everything it is
+/// *asked* is not**, so the two are separated on purpose. A register write
+/// returns success whether or not a radio is listening; the efuse layout, the
+/// packet-buffer arithmetic and the firmware header are decisions with one
+/// right answer, and getting them wrong is what makes a driver fail in a way
+/// nobody can debug over a USB cable.
+///
+/// So this module is the half with claims on it. `Regs` below is the half that
+/// has never touched hardware, and says so.
+pub mod init {
+    use alloc::vec::Vec;
+
+    /// The efuse is one-time-programmable memory holding the MAC address and
+    /// this chip's own calibration, and it is stored *packed*: a run of
+    /// sections, each a header naming an offset and which of its four words
+    /// are present, so a chip programmed twice carries both writes and the
+    /// later one wins.
+    ///
+    /// Decoding it is therefore a replay rather than a copy, and it is the one
+    /// piece of bring-up where a plausible-looking mistake yields a plausible
+    /// -looking MAC address. Linux calls this `rtl8xxxu_read_efuse`.
+    pub const EFUSE_MAP_LEN: usize = 512;
+    /// Where the MAC address sits once the map is rebuilt, for the 8188E.
+    pub const EFUSE_MAC_OFFSET: usize = 0xD7;
+
+    /// Rebuild the 512-byte map from the packed efuse contents.
+    ///
+    /// `0xFF` is erased memory and ends the walk. The extended header form --
+    /// low nibble `0x0F` -- carries the offset's high bits in a second byte,
+    /// which is what lets an offset exceed sixteen sections.
+    pub fn efuse_decode(raw: &[u8]) -> [u8; EFUSE_MAP_LEN] {
+        let mut map = [0xFFu8; EFUSE_MAP_LEN];
+        let mut i = 0usize;
+        while i < raw.len() {
+            let header = raw[i];
+            i += 1;
+            if header == 0xFF {
+                break;
+            }
+            let (offset, word_en) = if header & 0x1F == 0x0F {
+                // Extended: the next byte carries offset[7:4] and the word
+                // enables. A truncated extension is the end of the data
+                // rather than a reason to read past it.
+                if i >= raw.len() {
+                    break;
+                }
+                let ext = raw[i];
+                i += 1;
+                ((((ext & 0xF0) >> 1) | (header >> 5)) as usize, ext & 0x0F)
+            } else {
+                ((header >> 4) as usize, header & 0x0F)
+            };
+            for word in 0..4 {
+                // A *clear* bit means the word is present. Inverted from what
+                // the name suggests, and the source of the classic bug where
+                // the map comes out entirely erased.
+                if word_en & (1 << word) != 0 {
+                    continue;
+                }
+                if i + 1 >= raw.len() {
+                    return map;
+                }
+                let at = offset * 8 + word * 2;
+                if at + 1 < EFUSE_MAP_LEN {
+                    map[at] = raw[i];
+                    map[at + 1] = raw[i + 1];
+                }
+                i += 2;
+            }
+        }
+        map
+    }
+
+    /// The MAC address out of a decoded map, or nothing when it is not one.
+    ///
+    /// Refused rather than returned when the bytes are erased or a multicast
+    /// address: an all-`FF` MAC is what an unprogrammed efuse reads as, and a
+    /// driver that adopts it transmits frames every AP ignores while looking
+    /// like it works.
+    pub fn efuse_mac(map: &[u8; EFUSE_MAP_LEN]) -> Option<[u8; 6]> {
+        let mut mac = [0u8; 6];
+        mac.copy_from_slice(&map[EFUSE_MAC_OFFSET..EFUSE_MAC_OFFSET + 6]);
+        if mac == [0xFF; 6] || mac == [0; 6] || mac[0] & 1 != 0 {
+            return None;
+        }
+        Some(mac)
+    }
+
+    /// The chip's transmit buffer is 128-byte pages threaded into a linked
+    /// list, and the LLT is that list: entry *n* holds the number of the page
+    /// that follows *n*.
+    ///
+    /// Total pages, and how the boundary splits them between queues. These are
+    /// the 8188E's numbers from Linux's `rtl8188e_init_queue_reserved_page`;
+    /// `TX_PAGE_BOUNDARY` is what `REG_TRXFF_BNDY` is programmed with, and it
+    /// is the register `CR_INIT` deliberately leaves the MAC enables waiting
+    /// on.
+    pub const TX_TOTAL_PAGES: u8 = 169;
+    pub const TX_PAGE_BOUNDARY: u8 = TX_TOTAL_PAGES + 1;
+
+    /// The highest LLT entry there is. The list runs past the transmit pages,
+    /// because the buffer above the boundary is a ring the MAC uses for
+    /// beacons or loopback, and it has to be threaded too.
+    pub const LLT_LAST_ENTRY: u8 = 176;
+
+    /// What the chip reads as *end of list* rather than as a page number.
+    pub const LLT_END: u8 = 0xFF;
+
+    /// The chain to write into the LLT: `(index, next)` pairs, in order.
+    ///
+    /// Three runs and they are not interchangeable. Every page below the
+    /// boundary points at its successor. The last transmit page **ends the
+    /// list** with `LLT_END` rather than pointing anywhere, which is the part
+    /// I first got wrong: a transmit list that ran on into the ring would let
+    /// a long frame spill into the beacon buffer. Then the ring above the
+    /// boundary chains forward, and its last entry points back *at the
+    /// boundary*, which is what makes it a ring.
+    ///
+    /// Untestable against the part, checkable as arithmetic, which is the
+    /// whole reason it is a function returning a list rather than a loop that
+    /// writes registers.
+    pub fn llt_chain(boundary: u8, last: u8) -> Vec<(u8, u8)> {
+        let mut out = Vec::new();
+        if boundary == 0 || boundary > last {
+            return out;
+        }
+        for i in 0..boundary - 1 {
+            out.push((i, i + 1));
+        }
+        out.push((boundary - 1, LLT_END));
+        for i in boundary..last {
+            out.push((i, i + 1));
+        }
+        out.push((last, boundary));
+        out
+    }
+
+    /// A firmware image, as `rtl8188eufw.bin` presents itself.
+    ///
+    /// The blob is **not in this repository and never will be**, for the same
+    /// reason no WAD is: it is Realtek's, redistributable but not ours. It
+    /// travels on the boot volume beside the model, and `parse` is what makes
+    /// a truncated download fail here rather than as a chip that never
+    /// answers.
+    pub struct Firmware<'a> {
+        pub signature: u16,
+        pub version: u16,
+        pub subversion: u8,
+        pub body: &'a [u8],
+    }
+
+    /// The header is 32 bytes and the signature identifies the part.
+    pub const FW_HEADER_LEN: usize = 32;
+    /// What an 8188E image says it is. Two values because Realtek shipped
+    /// both, and refusing one of them would refuse half the images in the
+    /// world for no reason.
+    pub const FW_SIGNATURE_88E: [u16; 2] = [0x88E1, 0x88E0];
+    /// The chip takes the body in pages of this size.
+    pub const FW_PAGE: usize = 4096;
+
+    pub fn fw_parse(image: &[u8]) -> Option<Firmware<'_>> {
+        if image.len() <= FW_HEADER_LEN {
+            return None;
+        }
+        let signature = u16::from_le_bytes([image[0], image[1]]);
+        if !FW_SIGNATURE_88E.contains(&signature) {
+            return None;
+        }
+        Some(Firmware {
+            signature,
+            version: u16::from_le_bytes([image[4], image[5]]),
+            subversion: image[6],
+            body: &image[FW_HEADER_LEN..],
+        })
+    }
+
+    /// How many pages a body takes, and how long the last one is.
+    ///
+    /// The chip is told the page number and the remainder separately, so a
+    /// body that is an exact multiple of the page size is the case worth
+    /// getting right: it has no short last page, and a loop that writes one
+    /// anyway uploads four kilobytes of nothing over the end.
+    pub fn fw_pages(body: &[u8]) -> (usize, usize) {
+        (body.len() / FW_PAGE, body.len() % FW_PAGE)
+    }
+
+    /// 2.4 GHz channel numbers this chip will tune.
+    ///
+    /// One to fourteen exists in the spec and fourteen is Japan-only and
+    /// 802.11b-only, so it is excluded rather than offered: a scan that probes
+    /// it in a country that forbids it is a transmission that should not
+    /// happen, and this driver has no regulatory database to know better.
+    pub fn channel_ok(ch: u8) -> bool {
+        (1..=13).contains(&ch)
+    }
+
+    /// The centre frequency of a channel, in MHz. Reported rather than
+    /// programmed -- the radio is tuned by register, not by frequency -- and
+    /// it is what makes a scan result legible.
+    pub fn channel_mhz(ch: u8) -> Option<u16> {
+        if !channel_ok(ch) {
+            return None;
+        }
+        Some(2407 + 5 * ch as u16)
+    }
+
+    /// What `diag wifi` asks of the half that can be asked.
+    pub fn checks() -> Vec<(&'static str, bool)> {
+        let mut out = Vec::new();
+
+        // One section at offset 1, all four words present. A clear bit means
+        // present, which is the inversion this decoder exists to get right.
+        let raw = [0x10u8, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22, 0xFF];
+        let m = efuse_decode(&raw);
+        out.push((
+            "an efuse section lands at offset times eight, four words wide",
+            m[8] == 0xAA && m[9] == 0xBB && m[14] == 0x11 && m[15] == 0x22,
+        ));
+        out.push((
+            "a word whose enable bit is set is absent, and stays erased",
+            {
+                // Word 0 disabled: its bytes keep 0xFF and the rest shift up.
+                let r = [0x11u8, 0xCC, 0xDD, 0xFF];
+                let m = efuse_decode(&r);
+                m[8] == 0xFF && m[9] == 0xFF && m[10] == 0xCC && m[11] == 0xDD
+            },
+        ));
+        out.push((
+            "a later section overwrites an earlier one, since the efuse is a replay",
+            {
+                let r = [0x10u8, 1, 1, 0, 0, 0, 0, 0, 0, 0x10, 2, 2, 0, 0, 0, 0, 0, 0, 0xFF];
+                efuse_decode(&r)[8] == 2
+            },
+        ));
+        out.push((
+            "an extended header carries the offset's high bits",
+            {
+                // header 0x2F: low nibble 0x0F marks extended, high bits 0x01.
+                // ext 0x30: offset[7:4] = 3, all four words present.
+                let r = [0x2Fu8, 0x30, 0x99, 0x88, 0, 0, 0, 0, 0, 0, 0xFF];
+                let m = efuse_decode(&r);
+                let at = (((0x30u8 & 0xF0) >> 1) | (0x2Fu8 >> 5)) as usize * 8;
+                m[at] == 0x99 && m[at + 1] == 0x88
+            },
+        ));
+        out.push((
+            "a truncated section stops the walk rather than reading past the end",
+            {
+                let _ = efuse_decode(&[0x10, 0xAA]);
+                let _ = efuse_decode(&[0x0F]);
+                let _ = efuse_decode(&[]);
+                true
+            },
+        ));
+        out.push((
+            "an unprogrammed efuse yields no MAC rather than a broadcast one",
+            {
+                let all = [0xFFu8; EFUSE_MAP_LEN];
+                let mut zero = [0u8; EFUSE_MAP_LEN];
+                zero[EFUSE_MAC_OFFSET] = 0;
+                efuse_mac(&all).is_none() && efuse_mac(&zero).is_none()
+            },
+        ));
+        out.push((
+            "and a multicast address is refused, since no card may own one",
+            {
+                let mut m = [0u8; EFUSE_MAP_LEN];
+                m[EFUSE_MAC_OFFSET..EFUSE_MAC_OFFSET + 6]
+                    .copy_from_slice(&[0x01, 0x22, 0x33, 0x44, 0x55, 0x66]);
+                let mut ok = [0u8; EFUSE_MAP_LEN];
+                ok[EFUSE_MAC_OFFSET..EFUSE_MAC_OFFSET + 6]
+                    .copy_from_slice(&[0x00, 0x22, 0x33, 0x44, 0x55, 0x66]);
+                efuse_mac(&m).is_none() && efuse_mac(&ok).is_some()
+            },
+        ));
+
+        let chain = llt_chain(TX_PAGE_BOUNDARY, LLT_LAST_ENTRY);
+        out.push((
+            "every entry of the link list is written, and none of them twice",
+            chain.len() == LLT_LAST_ENTRY as usize + 1
+                && (0..=LLT_LAST_ENTRY).all(|i| {
+                    chain.iter().filter(|&&(e, _)| e == i).count() == 1
+                }),
+        ));
+        out.push((
+            "every page but two points at the next one",
+            chain.iter().all(|&(i, n)| {
+                i == TX_PAGE_BOUNDARY - 1 || i == LLT_LAST_ENTRY || n == i + 1
+            }),
+        ));
+        out.push((
+            "the last transmit page ends the list rather than running on into the ring",
+            chain
+                .iter()
+                .any(|&(i, n)| i == TX_PAGE_BOUNDARY - 1 && n == LLT_END),
+        ));
+        out.push((
+            "and the last entry closes the ring at the boundary, rather than at zero",
+            chain
+                .iter()
+                .any(|&(i, n)| i == LLT_LAST_ENTRY && n == TX_PAGE_BOUNDARY),
+        ));
+        out.push((
+            "nothing above the boundary is reachable from the transmit list",
+            {
+                let mut at = 0u8;
+                let mut seen = 0usize;
+                loop {
+                    match chain.iter().find(|&&(i, _)| i == at) {
+                        Some(&(_, n)) if n != LLT_END && seen <= LLT_LAST_ENTRY as usize => {
+                            at = n;
+                            seen += 1;
+                        }
+                        _ => break,
+                    }
+                }
+                at == TX_PAGE_BOUNDARY - 1 && seen == TX_PAGE_BOUNDARY as usize - 1
+            },
+        ));
+        out.push((
+            "a boundary past the last entry describes nothing rather than a wrong list",
+            llt_chain(20, 10).is_empty() && llt_chain(0, 10).is_empty(),
+        ));
+
+        let mut img = alloc::vec![0u8; FW_HEADER_LEN + 5000];
+        img[0..2].copy_from_slice(&FW_SIGNATURE_88E[0].to_le_bytes());
+        img[4..6].copy_from_slice(&11u16.to_le_bytes());
+        img[6] = 1;
+        out.push((
+            "a firmware image is its header and a body, and the version is read",
+            fw_parse(&img).is_some_and(|f| {
+                f.version == 11 && f.subversion == 1 && f.body.len() == 5000
+            }),
+        ));
+        out.push((
+            "an image with the wrong signature is refused, not uploaded",
+            {
+                let mut bad = img.clone();
+                bad[0] = 0x00;
+                bad[1] = 0x00;
+                fw_parse(&bad).is_none()
+            },
+        ));
+        out.push((
+            "and one with no body at all is refused rather than uploaded empty",
+            fw_parse(&img[..FW_HEADER_LEN]).is_none() && fw_parse(&[]).is_none(),
+        ));
+        out.push((
+            "a body of exactly one page has no short last page",
+            fw_pages(&alloc::vec![0u8; FW_PAGE]) == (1, 0)
+                && fw_pages(&alloc::vec![0u8; FW_PAGE + 7]) == (1, 7)
+                && fw_pages(&[]) == (0, 0),
+        ));
+
+        out.push((
+            "channel 14 is not offered, since nothing here knows the regulatory domain",
+            channel_ok(1) && channel_ok(13) && !channel_ok(14) && !channel_ok(0),
+        ));
+        out.push((
+            "and a channel's frequency is the one the spec gives it",
+            channel_mhz(1) == Some(2412)
+                && channel_mhz(6) == Some(2437)
+                && channel_mhz(13) == Some(2472)
+                && channel_mhz(14).is_none(),
+        ));
+        out
+    }
+}
+
 /// The descriptors that wrap a frame on its way to and from the chip.
 ///
 /// Every constant these use is in `rtl8188eu_tables`, extracted from Linux by
