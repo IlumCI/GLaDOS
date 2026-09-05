@@ -73,6 +73,10 @@ pub const SYS_FSTAT: u64 = 5;
 pub const SYS_LSTAT: u64 = 6;
 pub const SYS_LSEEK: u64 = 8;
 pub const SYS_IOCTL: u64 = 16;
+pub const SYS_PREAD64: u64 = 17;
+pub const SYS_SET_ROBUST_LIST: u64 = 273;
+pub const SYS_RSEQ: u64 = 334;
+pub const SYS_PRLIMIT64: u64 = 302;
 pub const SYS_GETPID: u64 = 39;
 pub const SYS_GETDENTS64: u64 = 217;
 pub const SYS_SET_TID_ADDRESS: u64 = 218;
@@ -1692,6 +1696,115 @@ fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
     .unwrap_or(EBADF)
 }
 
+/// Read at an offset, leaving the cursor where it was.
+///
+/// **What a dynamic linker uses to read a library's headers**, and the call
+/// glibc stopped on: it has the file open, it wants bytes from a known place,
+/// and it does not want to put the cursor back afterwards. `lseek`, `read`,
+/// `lseek` is the same thing done in three calls that can be interrupted
+/// between any two of them, which is why the atomic form exists.
+///
+/// The failure this replaces is worth keeping, because the instrument nearly
+/// missed it. Every call around this one was implemented and every one of them
+/// succeeded, so the run did not end in a fault or a refusal that named a
+/// missing feature -- it ended in glibc printing "cannot read file data: Error
+/// 38" about a library it had already found, opened and read the first 832
+/// bytes of. Error 38 is `ENOSYS`, and the guest reported our gap more clearly
+/// than our own trace did.
+fn sys_pread64(fd: u64, buf: u64, len: u64, off: u64) -> u64 {
+    if len == 0 {
+        return 0;
+    }
+    // Linux answers `EINVAL` for a negative offset rather than treating it as
+    // an enormous unsigned one, which is what the cast would otherwise do to a
+    // program that passed -1 by mistake.
+    if (off as i64) < 0 {
+        return EINVAL;
+    }
+    if !reachable(buf, len as usize, true) {
+        return EFAULT;
+    }
+    with_fds(|fds, _| match fds.get(fd as usize) {
+        Some(Some(super::fs::Fd::File(body))) => {
+            let f = body.borrow();
+            // Past the end is zero rather than an error, the same answer
+            // `read` gives there. The cursor is not touched, which is the
+            // whole of the difference between this call and that one.
+            let from = (off as usize).min(f.data.len());
+            let n = (f.data.len() - from).min(len as usize);
+            unsafe { core::ptr::copy_nonoverlapping(f.data[from..].as_ptr(), buf as *mut u8, n) };
+            n as u64
+        }
+        Some(Some(super::fs::Fd::Dir(_))) => EISDIR,
+        // A stream has no offsets to read at. `ESPIPE` is what `lseek` on one
+        // answers and this is the same fact said by a different call.
+        Some(Some(_)) => ESPIPE,
+        _ => EBADF,
+    })
+    .unwrap_or(EBADF)
+}
+
+/// Where a thread keeps the mutexes it must release if it dies holding them.
+///
+/// Accepted and stored nowhere, which is honest for the same reason
+/// `rt_sigaction` is: the list exists so the *kernel* can walk it when a
+/// thread dies without unlocking, and there is one thread here, no futexes,
+/// and no second thread to be left waiting. Refusing would stop a libc that
+/// registers this before `main` over a cleanup that can never be needed.
+///
+/// The length is checked because Linux checks it. A libc passing the wrong
+/// size is a libc built against a different `struct robust_list_head`, and
+/// accepting that quietly is how a disagreement about a structure becomes a
+/// disagreement about memory later.
+fn sys_set_robust_list(_head: u64, len: u64) -> u64 {
+    if len != 24 {
+        return EINVAL;
+    }
+    0
+}
+
+/// Resource limits, answered rather than invented.
+///
+/// glibc asks for `RLIMIT_STACK` before `main` and sizes things from it, so
+/// `ENOSYS` here is not a neutral answer. Three of these are facts this kernel
+/// actually knows -- the stack and break are regions the loader handed out and
+/// the descriptor table has a real ceiling -- and the rest are genuinely
+/// unbounded, because nothing here bounds them.
+///
+/// **Setting one is refused.** A limit this kernel cannot enforce is a limit
+/// it must not claim to have accepted: a guest told its stack is now 8 MiB
+/// would grow into whatever is next in the heap. `EPERM` is what Linux answers
+/// a process that may not raise a hard limit, which is the nearest true thing.
+fn sys_prlimit64(_pid: u64, resource: u64, new: u64, old: u64) -> u64 {
+    const RLIMIT_DATA: u64 = 2;
+    const RLIMIT_STACK: u64 = 3;
+    const RLIMIT_NOFILE: u64 = 7;
+    const RLIM_INFINITY: u64 = u64::MAX;
+    if new != 0 {
+        return EPERM;
+    }
+    if old == 0 {
+        return EINVAL;
+    }
+    if !reachable(old, 16, true) {
+        return EFAULT;
+    }
+    let Some(sp) = (unsafe { SPACE.get() }).as_ref() else { return EINVAL };
+    let n = match resource {
+        RLIMIT_STACK => sp.stack.len as u64,
+        RLIMIT_DATA => sp.brk_end.saturating_sub(sp.brk_start),
+        RLIMIT_NOFILE => MAX_FDS as u64,
+        _ => RLIM_INFINITY,
+    };
+    // Soft and hard are the same number, because there is nothing here that
+    // could raise one to reach the other.
+    unsafe {
+        core::ptr::write_unaligned(old as *mut u64, n);
+        core::ptr::write_unaligned((old + 8) as *mut u64, n);
+    }
+    0
+}
+
 fn sys_lseek(fd: u64, off: u64, whence: u64) -> u64 {
     with_fds(|fds, _| match fds.get_mut(fd as usize) {
         Some(Some(super::fs::Fd::File(body))) => {
@@ -2181,6 +2294,15 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         SYS_NEWFSTATAT => (sys_statat(f.rdi, f.rsi, f.rdx, f.r10), true),
         SYS_GETDENTS64 => (sys_getdents64(f.rdi, f.rsi, f.rdx), true),
         SYS_IOCTL => (sys_ioctl(f.rdi, f.rsi, f.rdx), true),
+        SYS_PREAD64 => (sys_pread64(f.rdi, f.rsi, f.rdx, f.r10), true),
+        SYS_SET_ROBUST_LIST => (sys_set_robust_list(f.rdi, f.rsi), true),
+        SYS_PRLIMIT64 => (sys_prlimit64(f.rdi, f.rsi, f.rdx, f.r10), true),
+        // **`rseq` stays refused, and that is the right answer rather than a
+        // gap.** Linux itself answers `ENOSYS` whenever `CONFIG_RSEQ` is off,
+        // so every libc that registers one already copes with being told no,
+        // and restartable sequences are a per-CPU optimisation this kernel has
+        // no way to honour. Named here so nobody implements it to make a line
+        // in the trace go away.
         SYS_WRITEV => (sys_writev(f.rdi, f.rsi, f.rdx), true),
         SYS_READV => (sys_readv(f.rdi, f.rsi, f.rdx), true),
         SYS_SOCKET => (sys_socket(f.rdi, f.rsi, f.rdx), true),
@@ -2305,6 +2427,74 @@ pub unsafe fn kill_overrun() -> ! {
 /// Set instead when the guest died of a fault.
 pub const FAULTED: u64 = 1 << 33;
 
+/// What killed the last guest, kept so the report can say more than a vector.
+///
+/// A guest that dies takes its registers with it: the longjmp abandons the
+/// stack the fault arrived on, so anything not copied out here is gone by the
+/// time anybody prints anything. "killed by fault 0x0e" is true and says
+/// nothing -- it is the same line for a null dereference, a stack overflow and
+/// a jump into a page that was never mapped.
+#[derive(Clone, Copy)]
+pub struct Fault {
+    pub vector: u64,
+    pub error: u64,
+    /// The address reached for, which is only meaningful for a page fault.
+    pub cr2: u64,
+    pub rip: u64,
+    pub rsp: u64,
+}
+
+static LAST_FAULT: Racy<Option<Fault>> = Racy::new(None);
+
+/// The same three addresses said in words, resolved while the space was still
+/// installed.
+///
+/// `run` tears the space down on the line after the guest returns, and
+/// `locate` reads the space, so resolving at print time answered "no guest"
+/// three times about a guest that had just died. The strings are made in
+/// `run`, one line earlier, which is the only moment both the fault and the
+/// map it should be read against exist together.
+static FAULT_AT: Racy<Option<(String, String, String)>> = Racy::new(None);
+
+pub fn last_fault() -> Option<Fault> {
+    unsafe { *LAST_FAULT.get() }
+}
+
+/// Where the rip, the faulting address and the stack pointer were, in words.
+pub fn fault_where() -> Option<(String, String, String)> {
+    unsafe { (*FAULT_AT.get()).clone() }
+}
+
+/// Which of the guest's own ranges an address falls in.
+///
+/// An address on its own is a number. `0x30d6000` means nothing until it is
+/// "inside the interpreter, at +0x2000", and that is the difference between a
+/// fault report and a diagnosis -- the same reason `cpu::code::locate` exists
+/// for the kernel's own faults.
+pub fn locate(at: u64) -> alloc::string::String {
+    let Some(sp) = (unsafe { SPACE.get() }).as_ref() else {
+        return alloc::string::String::from("no guest");
+    };
+    let hit = |r: Region, what: &str| -> Option<alloc::string::String> {
+        (at >= r.at && at < r.at.saturating_add(r.len as u64))
+            .then(|| alloc::format!("{} +{:#x}", what, at - r.at))
+    };
+    hit(sp.image, "image")
+        .or_else(|| sp.interp.and_then(|r| hit(r, "interpreter")))
+        .or_else(|| hit(sp.stack, "stack"))
+        .or_else(|| {
+            (at >= sp.brk_start && at < sp.brk_end)
+                .then(|| alloc::format!("break +{:#x}", at - sp.brk_start))
+        })
+        .or_else(|| {
+            sp.maps.iter().find_map(|m| {
+                (at >= m.at && at < m.at.saturating_add(m.len as u64))
+                    .then(|| alloc::format!("a mapping at {:#x} +{:#x}", m.at, at - m.at))
+            })
+        })
+        .unwrap_or_else(|| alloc::string::String::from("nothing this guest owns"))
+}
+
 /// Whether a guest is on the stack right now.
 ///
 /// A plain atomic that Rust both writes and reads, rather than a look at the
@@ -2329,7 +2519,10 @@ pub fn running() -> bool {
 ///
 /// # Safety
 /// Only from a fault handler, and only when `running` is true.
-pub unsafe fn kill(vector: u64) -> ! {
+pub unsafe fn kill(f: Fault) -> ! {
+    let vector = f.vector;
+    // Copied out before the longjmp, which abandons the stack this arrived on.
+    unsafe { *LAST_FAULT.get() = Some(f) };
     unsafe { kill_with(FAULTED | vector) }
 }
 
@@ -2398,6 +2591,10 @@ pub unsafe fn run(entry: u64, stack_top: u64) -> u64 {
     unsafe {
         core::arch::asm!("pushfq; pop {}", out(reg) flags, options(nomem, preserves_flags))
     };
+    unsafe {
+        *LAST_FAULT.get() = None;
+        *FAULT_AT.get() = None;
+    }
     GUEST_RUNNING.store(true, Ordering::Relaxed);
     DEADLINE.store(crate::dev::lapic::ticks() + DEADLINE_TICKS, Ordering::Relaxed);
     let code = unsafe { glados_enter_guest(entry, stack_top) };
@@ -2405,6 +2602,13 @@ pub unsafe fn run(entry: u64, stack_top: u64) -> u64 {
     GUEST_RUNNING.store(false, Ordering::Relaxed);
     if flags & (1 << 9) != 0 {
         crate::cpu::enable_interrupts();
+    }
+    // Before the teardown on the next line, because that is what `locate`
+    // reads. This is the only point where the fault and the map it has to be
+    // read against are both alive.
+    unsafe {
+        *FAULT_AT.get() =
+            last_fault().map(|f| (locate(f.rip), locate(f.cr2), locate(f.rsp)));
     }
     teardown();
     code
@@ -2527,6 +2731,34 @@ pub fn checks() -> Vec<(&'static str, bool)> {
             "MAP_FIXED where nothing can promise the address is ENOMEM",
             sys_mmap(0x1000_0000_0000, 4096, 3, MAP_ANONYMOUS | MAP_FIXED, u64::MAX, 0) == ENOMEM,
         ));
+    }
+
+    // `pread64`, against the descriptors `install` seeds. What cannot be
+    // checked here is the offset arithmetic on a real file, because that needs
+    // a namespace and this runs at boot; the glibc run is what settles that,
+    // and it is named in the commit rather than left implied.
+    {
+        let mut buf = [0u8; 64];
+        let at = buf.as_mut_ptr() as u64;
+        let owned = Region { at, len: 64 };
+        install(Regions { image: owned, stack: owned, brk: owned, interp: None });
+        out.push((
+            "pread on a stream is ESPIPE, the same answer lseek gives it",
+            sys_pread64(0, at, 8, 0) == ESPIPE,
+        ));
+        out.push((
+            "a negative offset is EINVAL rather than an enormous unsigned one",
+            sys_pread64(0, at, 8, (-1i64) as u64) == EINVAL,
+        ));
+        out.push((
+            "and a descriptor nobody opened is EBADF",
+            sys_pread64(99, at, 8, 0) == EBADF,
+        ));
+        out.push((
+            "a zero-length read answers zero without touching the pointer",
+            sys_pread64(99, 0, 0, 0) == 0,
+        ));
+        teardown();
     }
 
     // The exact sequence a dynamic linker performs, which is the one shape
@@ -2989,6 +3221,41 @@ const AT_RANDOM: u64 = 25;
 const ENVIRON: [&str; 5] =
     ["PATH=/bin:/usr/bin:/tmp", "HOME=/", "PWD=/", "TERM=dumb", "USER=root"];
 
+/// Extra variables, on top of the five above.
+///
+/// Added because the guest's own diagnostics are better than ours and there
+/// was no way to switch them on. `ld.so` narrates everything it does under
+/// `LD_DEBUG`, in its own vocabulary, about its own data structures -- which
+/// is a far better account of why a linker failed than any trace of syscalls
+/// can be, and it costs one environment variable rather than a kernel change
+/// per question.
+///
+/// Separate from `ENVIRON` rather than replacing it, so the five facts about
+/// this machine stay facts and cannot be switched off by accident.
+static EXTRA_ENV: Racy<Vec<String>> = Racy::new(Vec::new());
+
+/// Set one, replacing any earlier setting of the same name. An empty value
+/// removes it, which is how a variable is unset rather than set to nothing --
+/// `LD_DEBUG=` and no `LD_DEBUG` mean different things to `ld.so`.
+pub fn set_env(entry: &str) {
+    let name = match entry.split_once('=') {
+        Some((n, _)) => n,
+        None => entry,
+    };
+    let v = unsafe { EXTRA_ENV.get() };
+    v.retain(|e| !(e.starts_with(name) && e.as_bytes().get(name.len()) == Some(&b'=')));
+    if entry.contains('=') && !entry.ends_with('=') {
+        v.push(String::from(entry));
+    }
+}
+
+/// What a guest will be given, the fixed five and the added ones.
+pub fn environ() -> Vec<String> {
+    let mut out: Vec<String> = ENVIRON.iter().map(|e| String::from(*e)).collect();
+    out.extend(unsafe { EXTRA_ENV.get() }.iter().cloned());
+    out
+}
+
 pub fn build_stack(base: *mut u8, size: usize, args: &[&str], aux: Aux) -> Option<u64> {
     let bottom = base as usize;
     let mut top = bottom.checked_add(size)?;
@@ -3006,8 +3273,9 @@ pub fn build_stack(base: *mut u8, size: usize, args: &[&str], aux: Aux) -> Optio
         }
         Some(*top as u64)
     };
-    let mut envs = alloc::vec::Vec::with_capacity(ENVIRON.len());
-    for e in ENVIRON.iter().rev() {
+    let env = environ();
+    let mut envs = alloc::vec::Vec::with_capacity(env.len());
+    for e in env.iter().rev() {
         envs.push(put(&mut top, e)?);
     }
     envs.reverse();
@@ -3110,6 +3378,10 @@ pub fn name_of(nr: u64) -> &'static str {
         SYS_LSTAT => "lstat",
         SYS_LSEEK => "lseek",
         SYS_IOCTL => "ioctl",
+        SYS_PREAD64 => "pread64",
+        SYS_SET_ROBUST_LIST => "set_robust_list",
+        SYS_PRLIMIT64 => "prlimit64",
+        SYS_RSEQ => "rseq",
         SYS_GETPID => "getpid",
         SYS_DUP => "dup",
         SYS_WRITEV => "writev",

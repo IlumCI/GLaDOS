@@ -4492,6 +4492,21 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                                 );
                                 console::set_color(LTGRAY);
                             } else if r & linux::syscall::FAULTED != 0 {
+                                // Said before the summary line, because the
+                                // address is the whole of what a person wants
+                                // and the vector is what they already knew.
+                                if let (Some(f), Some((at_rip, at_cr2, at_rsp))) =
+                                    (linux::syscall::last_fault(), linux::syscall::fault_where())
+                                {
+                                    kprintln!("  rip {:#x} in {}", f.rip, at_rip);
+                                    if f.vector == 14 {
+                                        kprintln!(
+                                            "  reached for {:#x}, which is {} (error {:#x})",
+                                            f.cr2, at_cr2, f.error
+                                        );
+                                    }
+                                    kprintln!("  rsp {:#x} in {}", f.rsp, at_rsp);
+                                }
                                 console::set_color(YELLOW);
                                 kprintln!(
                                     "  killed by fault {:#04x} after {} syscall(s), machine intact",
@@ -4526,6 +4541,22 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                                 }
                             }
                         }
+                    }
+                }
+                "env" => {
+                    let rest: alloc::vec::Vec<&str> = words.collect();
+                    for e in &rest {
+                        linux::syscall::set_env(e);
+                    }
+                    console::set_color(YELLOW);
+                    kprintln!("[env] what the next guest is handed");
+                    console::set_color(LTGRAY);
+                    for e in linux::syscall::environ() {
+                        kprintln!("  {}", e);
+                    }
+                    if rest.is_empty() {
+                        kprintln!("  'linux env K=V' sets one, 'linux env K=' removes it");
+                        kprintln!("  'linux env LD_DEBUG=all' makes ld.so narrate its own work");
                     }
                 }
                 "libc" => {
@@ -4590,6 +4621,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     }
                     kprintln!("  linux run <path>   load a binary and run it at ring 3");
                     kprintln!("  linux libc         which interpreters this machine has");
+                    kprintln!("  linux env [K=V]    what the next guest is handed");
                     kprintln!("  linux trace        what the last guest asked for");
                 }
             }
