@@ -2480,12 +2480,14 @@ pub const FAULTED: u64 = 1 << 33;
 /// a jump into a page that was never mapped.
 #[derive(Clone, Copy)]
 pub struct Fault {
-    pub vector: u64,
-    pub error: u64,
-    /// The address reached for, which is only meaningful for a page fault.
+    /// Everything the stub and the CPU between them produced, whole rather
+    /// than five fields picked in advance. Which register matters is not
+    /// knowable at the time of the fault: the last one that mattered here was
+    /// `rdi`, and nobody would have thought to keep it.
+    pub regs: crate::cpu::idt::Frame,
+    /// The address reached for, which is only meaningful for a page fault and
+    /// is the one thing not in the register block.
     pub cr2: u64,
-    pub rip: u64,
-    pub rsp: u64,
 }
 
 static LAST_FAULT: Racy<Option<Fault>> = Racy::new(None);
@@ -2513,6 +2515,19 @@ static FAULT_STACK: Racy<Option<Vec<(u64, u64, String)>>> = Racy::new(None);
 
 pub fn fault_stack() -> Option<Vec<(u64, u64, String)>> {
     unsafe { (*FAULT_STACK.get()).clone() }
+}
+
+/// Each general-purpose register, named, with what it points at.
+///
+/// Resolved beside the stack words and for the same reason: `locate` reads the
+/// space and the space is gone two lines later. The first version of this
+/// resolved at print time and answered "no guest" fifteen times about a guest
+/// that had just died, which is the identical mistake made twice, once for
+/// three addresses and once for fifteen.
+static FAULT_REGS: Racy<Option<Vec<(&'static str, u64, String)>>> = Racy::new(None);
+
+pub fn fault_regs() -> Option<Vec<(&'static str, u64, String)>> {
+    unsafe { (*FAULT_REGS.get()).clone() }
 }
 
 pub fn last_fault() -> Option<Fault> {
@@ -2579,7 +2594,7 @@ pub fn running() -> bool {
 /// # Safety
 /// Only from a fault handler, and only when `running` is true.
 pub unsafe fn kill(f: Fault) -> ! {
-    let vector = f.vector;
+    let vector = f.regs.vector;
     // Copied out before the longjmp, which abandons the stack this arrived on.
     unsafe { *LAST_FAULT.get() = Some(f) };
     unsafe { kill_with(FAULTED | vector) }
@@ -2653,6 +2668,7 @@ pub unsafe fn run(entry: u64, stack_top: u64) -> u64 {
     unsafe {
         *LAST_FAULT.get() = None;
         *FAULT_AT.get() = None;
+        *FAULT_REGS.get() = None;
     }
     GUEST_RUNNING.store(true, Ordering::Relaxed);
     DEADLINE.store(crate::dev::lapic::ticks() + DEADLINE_TICKS, Ordering::Relaxed);
@@ -2667,9 +2683,22 @@ pub unsafe fn run(entry: u64, stack_top: u64) -> u64 {
     // read against are both alive.
     unsafe {
         *FAULT_AT.get() =
-            last_fault().map(|f| (locate(f.rip), locate(f.cr2), locate(f.rsp)));
+            last_fault().map(|f| (locate(f.regs.rip), locate(f.cr2), locate(f.regs.rsp)));
+        *FAULT_REGS.get() = last_fault().map(|f| {
+            let g = f.regs;
+            [
+                ("rax", g.rax), ("rbx", g.rbx), ("rcx", g.rcx),
+                ("rdx", g.rdx), ("rsi", g.rsi), ("rdi", g.rdi),
+                ("rbp", g.rbp), ("r8 ", g.r8), ("r9 ", g.r9),
+                ("r10", g.r10), ("r11", g.r11), ("r12", g.r12),
+                ("r13", g.r13), ("r14", g.r14), ("r15", g.r15),
+            ]
+            .into_iter()
+            .map(|(n, v)| (n, v, locate(v)))
+            .collect()
+        });
         *FAULT_STACK.get() = last_fault().and_then(|f| {
-            let base = f.rsp & !7;
+            let base = f.regs.rsp & !7;
             let mut out = Vec::new();
             for i in 0..24u64 {
                 let at = base + i * 8;

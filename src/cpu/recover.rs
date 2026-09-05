@@ -297,6 +297,24 @@ pub fn selftest() -> bool {
         *ok &= good;
     }
 
+    // The fault stubs are indexed by arithmetic rather than named one at a
+    // time, so the stride has to be what it claims. Every stub begins with a
+    // `push imm8`, which is `0x6a`, and a stride that had drifted would put
+    // something else at one of these addresses -- silently, and only for the
+    // vectors past the drift.
+    claim(
+        &mut ok,
+        {
+            let base = crate::cpu::idt::stub_base();
+            (0..32u64).all(|v| unsafe {
+                core::ptr::read_volatile(
+                    (base + v * crate::cpu::idt::STUB_STRIDE) as *const u8,
+                ) == 0x6a
+            })
+        },
+        "every fault stub is where the stride says it is",
+    );
+
     let before = caught();
     let mut ran = false;
     let r = guard(|| {

@@ -4498,14 +4498,30 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                                 if let (Some(f), Some((at_rip, at_cr2, at_rsp))) =
                                     (linux::syscall::last_fault(), linux::syscall::fault_where())
                                 {
-                                    kprintln!("  rip {:#x} in {}", f.rip, at_rip);
-                                    if f.vector == 14 {
+                                    let g = f.regs;
+                                    kprintln!("  rip {:#x} in {}", g.rip, at_rip);
+                                    if g.vector == 14 {
                                         kprintln!(
                                             "  reached for {:#x}, which is {} (error {:#x})",
-                                            f.cr2, at_cr2, f.error
+                                            f.cr2, at_cr2, g.err
                                         );
                                     }
-                                    kprintln!("  rsp {:#x} in {}", f.rsp, at_rsp);
+                                    kprintln!("  rsp {:#x} in {}", g.rsp, at_rsp);
+                                    // Every register, each said in words when
+                                    // it points at something the guest owns.
+                                    // Which one matters is not knowable in
+                                    // advance -- the last one that did was
+                                    // `rdi`, holding a null nobody had asked
+                                    // about.
+                                    for (name, v, what) in
+                                        linux::syscall::fault_regs().unwrap_or_default()
+                                    {
+                                        if what.starts_with("nothing") {
+                                            kprintln!("    {} {:#018x}", name, v);
+                                        } else {
+                                            kprintln!("    {} {:#018x}  {}", name, v, what);
+                                        }
+                                    }
                                     // Only the words that point at something
                                     // are printed. A stack is mostly saved
                                     // registers and small integers, and
@@ -4517,7 +4533,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                                             if !what.starts_with("nothing") {
                                                 kprintln!(
                                                     "    [rsp+{:#04x}] {:#018x}  {}",
-                                                    at - f.rsp,
+                                                    at - f.regs.rsp,
                                                     v,
                                                     what
                                                 );

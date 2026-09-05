@@ -10,12 +10,13 @@
 //! Every handler here is currently fatal except `#BP`. Once demand paging or
 //! task switching exists, `#PF` will need to become resumable.
 //!
-//! Known gap: the `x86-interrupt` ABI gives us the hardware-pushed frame, but
-//! the general-purpose registers are already clobbered by the compiler's
-//! prologue by the time Rust code runs. Capturing those needs a naked assembly
-//! stub per vector that pushes all sixteen GPRs and passes a pointer to them.
-//! Worth doing, deliberately not done yet -- RIP plus CR2 diagnoses the large
-//! majority of early faults.
+//! Every fault arrives through an assembly stub that pushes all fifteen
+//! general-purpose registers first, so a report says what the machine was
+//! holding and not only where it was. That was a named gap here for a long
+//! time, on the reasoning that RIP plus CR2 diagnoses most early faults --
+//! true, and the ones it does not diagnose are the expensive ones. The last
+//! of them needed a disassembly of somebody else's dynamic linker to learn
+//! that `rdi` was zero.
 
 use super::gdt::{self, IST_DOUBLE_FAULT, IST_PAGE_FAULT};
 use super::{read_cr2, read_cr3};
@@ -106,11 +107,7 @@ struct Report<'a> {
     vector: u8,
     name: &'a str,
     err: Option<u64>,
-    rip: u64,
-    cs: u64,
-    rsp: u64,
-    ss: u64,
-    rflags: u64,
+    f: &'a Frame,
     cr2: u64,
     cr3: u64,
 }
@@ -140,9 +137,18 @@ fn emit(out: &mut dyn FnMut(core::fmt::Arguments), r: &Report) {
         None => {}
     }
 
-    out(format_args!("  rip   {:#018x}   cs  {:#06x}", r.rip, r.cs));
-    out(format_args!("  rsp   {:#018x}   ss  {:#06x}", r.rsp, r.ss));
-    out(format_args!("  flags {:#018x}", r.rflags));
+    out(format_args!("  rip   {:#018x}   cs  {:#06x}", r.f.rip, r.f.cs));
+    out(format_args!("  rsp   {:#018x}   ss  {:#06x}", r.f.rsp, r.f.ss));
+    out(format_args!("  flags {:#018x}", r.f.rflags));
+    // Three to a line, in the order a disassembly names them rather than the
+    // order they were pushed, because the reader is holding an instruction
+    // and asking what its operands were.
+    let g = r.f;
+    out(format_args!("  rax {:#018x}  rbx {:#018x}  rcx {:#018x}", g.rax, g.rbx, g.rcx));
+    out(format_args!("  rdx {:#018x}  rsi {:#018x}  rdi {:#018x}", g.rdx, g.rsi, g.rdi));
+    out(format_args!("  rbp {:#018x}  r8  {:#018x}  r9  {:#018x}", g.rbp, g.r8, g.r9));
+    out(format_args!("  r10 {:#018x}  r11 {:#018x}  r12 {:#018x}", g.r10, g.r11, g.r12));
+    out(format_args!("  r13 {:#018x}  r14 {:#018x}  r15 {:#018x}", g.r13, g.r14, g.r15));
     if r.vector != 14 {
         out(format_args!("  cr2   {:#018x}", r.cr2));
     }
@@ -155,7 +161,7 @@ fn emit(out: &mut dyn FnMut(core::fmt::Arguments), r: &Report) {
     use super::code::Where;
     let base = IMAGE_BASE.load(Ordering::Relaxed);
     let size = IMAGE_SIZE.load(Ordering::Relaxed);
-    match super::code::locate(r.rip, base, size, super::code::lookup(r.rip)) {
+    match super::code::locate(r.f.rip, base, size, super::code::lookup(r.f.rip)) {
         Where::Generated { tag, off } => {
             out(format_args!("  in generated code {:016x} at +{:#x}", tag, off));
         }
@@ -202,9 +208,202 @@ fn emit(out: &mut dyn FnMut(core::fmt::Arguments), r: &Report) {
 /// already been written and `REPORTING` turns the failure into one line and a
 /// halt instead of an endless loop.
 ///
+
+/// Every register a fault can report, in the order the stub pushes them.
+///
+/// **This closes the gap named at the top of this file.** The
+/// `extern "x86-interrupt"` ABI hands Rust the hardware frame and nothing
+/// else: by the time the body runs, the compiler's prologue has been over the
+/// general-purpose registers, so a report could say *where* a fault happened
+/// and never *with what*. That has cost this tree real time -- the last one
+/// took a disassembly of somebody else's dynamic linker to learn that `rdi`
+/// was zero, which is a number the processor was holding the whole time.
+///
+/// The field order is the push order reversed, because a push moves down: the
+/// last register pushed sits at the lowest address and so comes first here.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Frame {
+    pub r15: u64,
+    pub r14: u64,
+    pub r13: u64,
+    pub r12: u64,
+    pub r11: u64,
+    pub r10: u64,
+    pub r9: u64,
+    pub r8: u64,
+    pub rbp: u64,
+    pub rdi: u64,
+    pub rsi: u64,
+    pub rdx: u64,
+    pub rcx: u64,
+    pub rbx: u64,
+    pub rax: u64,
+    /// Pushed by the stub, because the CPU does not say which vector it is.
+    pub vector: u64,
+    /// The CPU's error code, or a zero the stub pushed so that both shapes of
+    /// vector produce one layout. `pushes_error` says which of the two it is,
+    /// and printing a fabricated zero as though the CPU meant it is exactly
+    /// the kind of confident wrong number this file exists to avoid.
+    pub err: u64,
+    pub rip: u64,
+    pub cs: u64,
+    pub rflags: u64,
+    pub rsp: u64,
+    pub ss: u64,
+}
+
+/// Which vectors push an error code. The rest get a zero from the stub.
+fn pushes_error(v: u64) -> bool {
+    matches!(v, 8 | 10 | 11 | 12 | 13 | 14 | 17 | 21 | 29 | 30)
+}
+
+fn vector_name(v: u64) -> &'static str {
+    match v {
+        0 => "#DE divide error",
+        1 => "#DB debug",
+        2 => "NMI",
+        3 => "#BP breakpoint",
+        4 => "#OF overflow",
+        5 => "#BR bound range exceeded",
+        6 => "#UD invalid opcode",
+        7 => "#NM device not available",
+        8 => "#DF double fault",
+        10 => "#TS invalid TSS",
+        11 => "#NP segment not present",
+        12 => "#SS stack-segment fault",
+        13 => "#GP general protection fault",
+        14 => "#PF page fault",
+        16 => "#MF x87 floating point",
+        17 => "#AC alignment check",
+        18 => "#MC machine check",
+        19 => "#XM SIMD floating point",
+        20 => "#VE virtualization",
+        21 => "#CP control protection",
+        _ => "reserved vector",
+    }
+}
+
+/// How far apart the stubs are. Every one is padded to this, so the handler
+/// for vector *v* is `glados_fault_stubs + v * STUB_STRIDE` and the table
+/// needs no thirty-two symbols.
+pub const STUB_STRIDE: u64 = 16;
+
+// One stub per vector, each pushing a fake error code where the CPU pushes
+// none so that a single tail can serve both shapes, then the vector number,
+// then jumping to the common tail.
+//
+// **The alignment is load-bearing and is not obvious.** The CPU aligns the
+// stack to sixteen before pushing, then pushes five words without an error
+// code or six with one -- so the two shapes arrive eight bytes out of phase.
+// The fake push puts them back in phase, the vector push and fifteen register
+// pushes come to 128 bytes, and the tail therefore calls with `rsp` sixteen-
+// aligned, which is what the System V ABI wants at a call. Getting this wrong
+// gives a `movaps` fault inside the reporter, which this tree has already
+// paid for once on a different path.
+core::arch::global_asm!(
+    r#"
+.macro FSTUB vec, haserr
+    .balign 16
+    .if \haserr == 0
+    push 0
+    .endif
+    push \vec
+    jmp glados_fault_common
+.endm
+
+.globl glados_fault_stubs
+.balign 16
+glados_fault_stubs:
+FSTUB 0, 0
+FSTUB 1, 0
+FSTUB 2, 0
+FSTUB 3, 0
+FSTUB 4, 0
+FSTUB 5, 0
+FSTUB 6, 0
+FSTUB 7, 0
+FSTUB 8, 1
+FSTUB 9, 0
+FSTUB 10, 1
+FSTUB 11, 1
+FSTUB 12, 1
+FSTUB 13, 1
+FSTUB 14, 1
+FSTUB 15, 0
+FSTUB 16, 0
+FSTUB 17, 1
+FSTUB 18, 0
+FSTUB 19, 0
+FSTUB 20, 0
+FSTUB 21, 1
+FSTUB 22, 0
+FSTUB 23, 0
+FSTUB 24, 0
+FSTUB 25, 0
+FSTUB 26, 0
+FSTUB 27, 0
+FSTUB 28, 0
+FSTUB 29, 1
+FSTUB 30, 1
+FSTUB 31, 0
+
+glados_fault_common:
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    cld
+    mov rdi, rsp
+    call glados_fault_entry
+    ud2
+"#
+);
+
+extern "C" {
+    fn glados_fault_stubs();
+}
+
+/// Where the stub table starts, for the claim that checks its stride.
+pub fn stub_base() -> u64 {
+    glados_fault_stubs as *const () as u64
+}
+
+/// Where every fault arrives now.
+///
+/// `sysv64` and not the default: this target is Windows-ABI, so an ordinary
+/// `extern "C"` would expect its argument in `rcx`, and the stub puts it in
+/// `rdi`. That mistake is silent -- the report would name a frame made of
+/// whatever was in `rcx` -- and it is the third time this tree has had to be
+/// careful about exactly this.
+///
+/// # Safety
+/// Called only from `glados_fault_common`, with `rdi` holding the stack
+/// pointer at which that stub finished pushing.
+#[no_mangle]
+pub unsafe extern "sysv64" fn glados_fault_entry(f: *const Frame) -> ! {
+    // The pointer is the stub's own stack pointer, so what it names outlives
+    // every use below: nothing here returns.
+    fault(unsafe { &*f })
+}
+
 /// The console #GP itself is a real bug and is not fixed here. It is older
 /// than any of this and belongs to the console, not to the reporter.
-fn fault(frame: &InterruptStackFrame, vector: u8, name: &str, err: Option<u64>) -> ! {
+fn fault(f: &Frame) -> ! {
+    let vector = f.vector as u8;
+    let name = vector_name(f.vector);
+    let err = pushes_error(f.vector).then_some(f.err);
     // **A guest fault kills only the guest, and this is where.** That was
     // written here as not working for a while and it works now: a real
     // dynamically linked binary faulted at ring 3 and the shell printed its
@@ -221,14 +420,11 @@ fn fault(frame: &InterruptStackFrame, vector: u8, name: &str, err: Option<u64>) 
     // Everything the report needs is copied out *here*, because the longjmp
     // abandons this stack. A vector alone is the same line for a null
     // dereference, a stack overflow and a jump into nothing.
-    if frame.cs & 3 == 3 && crate::linux::syscall::running() {
+    if f.cs & 3 == 3 && crate::linux::syscall::running() {
         unsafe {
             crate::linux::syscall::kill(crate::linux::syscall::Fault {
-                vector: vector as u64,
-                error: err.unwrap_or(0),
+                regs: *f,
                 cr2: read_cr2(),
-                rip: frame.rip,
-                rsp: frame.rsp,
             })
         }
     }
@@ -300,18 +496,7 @@ fn fault(frame: &InterruptStackFrame, vector: u8, name: &str, err: Option<u64>) 
     }
 
     // Copy out of the packed/borrowed frame before formatting.
-    let r = Report {
-        vector,
-        name,
-        err,
-        rip: frame.rip,
-        cs: frame.cs,
-        rsp: frame.rsp,
-        ss: frame.ss,
-        rflags: frame.rflags,
-        cr2: read_cr2(),
-        cr3: read_cr3(),
-    };
+    let r = Report { vector, name, err, f, cr2: read_cr2(), cr3: read_cr3() };
 
     emit(&mut |a| crate::serial::_print(format_args!("{}
 ", a)), &r);
@@ -352,42 +537,6 @@ fn describe_page_fault(e: u64) -> &'static str {
     }
 }
 
-macro_rules! fatal {
-    ($name:ident, $vec:expr, $msg:expr) => {
-        extern "x86-interrupt" fn $name(frame: InterruptStackFrame) -> ! {
-            fault(&frame, $vec, $msg, None)
-        }
-    };
-}
-
-macro_rules! fatal_err {
-    ($name:ident, $vec:expr, $msg:expr) => {
-        extern "x86-interrupt" fn $name(frame: InterruptStackFrame, err: u64) -> ! {
-            fault(&frame, $vec, $msg, Some(err))
-        }
-    };
-}
-
-fatal!(divide_error, 0, "#DE divide error");
-fatal!(debug_exception, 1, "#DB debug");
-fatal!(nmi, 2, "NMI");
-fatal!(overflow, 4, "#OF overflow");
-fatal!(bound_range, 5, "#BR bound range exceeded");
-fatal!(invalid_opcode, 6, "#UD invalid opcode");
-fatal!(device_not_available, 7, "#NM device not available");
-fatal_err!(double_fault, 8, "#DF double fault");
-fatal_err!(invalid_tss, 10, "#TS invalid TSS");
-fatal_err!(segment_not_present, 11, "#NP segment not present");
-fatal_err!(stack_fault, 12, "#SS stack-segment fault");
-fatal_err!(general_protection, 13, "#GP general protection fault");
-fatal_err!(page_fault, 14, "#PF page fault");
-fatal!(x87_floating_point, 16, "#MF x87 floating point");
-fatal_err!(alignment_check, 17, "#AC alignment check");
-fatal!(machine_check, 18, "#MC machine check");
-fatal!(simd_floating_point, 19, "#XM SIMD floating point");
-fatal!(virtualization, 20, "#VE virtualization");
-fatal_err!(control_protection, 21, "#CP control protection");
-fatal!(reserved_vector, 15, "reserved vector");
 
 /// `int3`. Deliberately resumable -- it is a debugging aid, not a failure.
 extern "x86-interrupt" fn breakpoint(frame: InterruptStackFrame) {
@@ -401,33 +550,23 @@ pub fn init() {
     unsafe {
         let idt = IDT.get();
 
-        idt[0].set(divide_error as *const () as u64, 0);
-        idt[1].set(debug_exception as *const () as u64, 0);
-        idt[2].set(nmi as *const () as u64, 0);
-        idt[3].set(breakpoint as *const () as u64, 0);
-        idt[4].set(overflow as *const () as u64, 0);
-        idt[5].set(bound_range as *const () as u64, 0);
-        idt[6].set(invalid_opcode as *const () as u64, 0);
-        idt[7].set(device_not_available as *const () as u64, 0);
-        // The two that must never run on the current stack.
-        idt[8].set(double_fault as *const () as u64, IST_DOUBLE_FAULT);
-        idt[10].set(invalid_tss as *const () as u64, 0);
-        idt[11].set(segment_not_present as *const () as u64, 0);
-        idt[12].set(stack_fault as *const () as u64, 0);
-        idt[13].set(general_protection as *const () as u64, 0);
-        idt[14].set(page_fault as *const () as u64, IST_PAGE_FAULT);
-        idt[16].set(x87_floating_point as *const () as u64, 0);
-        idt[17].set(alignment_check as *const () as u64, 0);
-        idt[18].set(machine_check as *const () as u64, 0);
-        idt[19].set(simd_floating_point as *const () as u64, 0);
-        idt[20].set(virtualization as *const () as u64, 0);
-        idt[21].set(control_protection as *const () as u64, 0);
-
-        // Vectors 9, 15, 22..=31 are reserved. Catch them rather than letting
-        // a stray one become a double fault with no explanation.
-        for v in [9usize, 15, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31] {
-            idt[v].set(reserved_vector as *const () as u64, 0);
+        // Every vector through its own stub, at a fixed stride from one
+        // symbol. Thirty-two `set` lines naming thirty-two functions was a
+        // list that had to agree with another list; this is arithmetic, and
+        // `recover::selftest` checks the stride is what it says.
+        let stubs = glados_fault_stubs as *const () as u64;
+        for v in 0..32usize {
+            let ist = match v {
+                // The two that must never run on the current stack.
+                8 => IST_DOUBLE_FAULT,
+                14 => IST_PAGE_FAULT,
+                _ => 0,
+            };
+            idt[v].set(stubs + v as u64 * STUB_STRIDE, ist);
         }
+        // `int3` is the one that is not a failure, so it keeps a handler that
+        // returns rather than one that halts.
+        idt[3].set(breakpoint as *const () as u64, 0);
 
         let ptr = gdt::DescriptorTablePointer {
             limit: (size_of::<[Entry; 256]>() - 1) as u16,
