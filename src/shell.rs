@@ -6209,6 +6209,19 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 kprintln!("  no such file");
             }
         }
+        // Walk every page table entry and report the first the processor
+        // would refuse, plus the four entries governing an address. Exists
+        // because two confident hypotheses about a reserved-bit fault were
+        // both measured and both wrong, and nobody had read the entry.
+        "pagemap" => {
+            let a = rest.trim();
+            let at = if a.is_empty() {
+                None
+            } else {
+                u64::from_str_radix(a.strip_prefix("0x").unwrap_or(a), 16).ok()
+            };
+            mem::paging::report(at);
+        }
         "fault" => {
             console::set_color(LTRED);
             kprintln!("  this will halt the machine.");

@@ -124,6 +124,17 @@ fn emit(out: &mut dyn FnMut(core::fmt::Arguments), r: &Report) {
         Some(e) if r.vector == 14 => {
             out(format_args!("  error {:#018x}  {}", e, describe_page_fault(e)));
             out(format_args!("  cr2   {:#018x}   <-- faulting address", r.cr2));
+            // **The translation, because a page fault report without it is
+            // missing the only thing that explains a reserved-bit fault.**
+            // Two hypotheses about one such fault were measured and both were
+            // wrong, and the entry was never read because nothing printed it.
+            // Four numbers, from the tables the faulting core was actually
+            // using, which is the point: an audit run afterwards on another
+            // core is a different question.
+            let (w, n) = crate::mem::paging::walk(r.cr3, r.cr2);
+            for (i, e) in w[..n].iter().enumerate() {
+                out(format_args!("  {}  {:#018x}", ["pml4", "pdpt", "  pd", "  pt"][i], e));
+            }
         }
         Some(e) => out(format_args!("  error {:#018x}", e)),
         None => {}

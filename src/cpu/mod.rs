@@ -148,9 +148,48 @@ pub fn wp_on() -> bool {
     read_cr0() & CR0_WP != 0
 }
 
+/// The machine's physical address width, from `CPUID.80000008H:EAX[7:0]`.
+///
+/// Asked rather than assumed because it is what decides which bits of a page
+/// table entry are *reserved*, and a check against the wrong width either
+/// waves corruption through or invents it. Answers 36 when the leaf is absent,
+/// which is the architectural minimum and the conservative direction: it
+/// reserves more bits rather than fewer.
+pub fn phys_addr_bits() -> u32 {
+    if cpuid(0x8000_0000, 0)[0] < 0x8000_0008 {
+        return 36;
+    }
+    let bits = cpuid(0x8000_0008, 0)[0] & 0xFF;
+    if (36..=52).contains(&bits) { bits } else { 36 }
+}
+
 /// Whether this part implements no-execute at all. CPUID.80000001H:EDX[20].
 pub fn nx_supported() -> bool {
     cpuid(0x8000_0001, 0)[3] & (1 << 20) != 0
+}
+
+/// Give this core the same page-rights configuration the bootstrap one has.
+///
+/// **`CR0.WP` and `EFER.NXE` are per-core, exactly as `CR4` and `XCR0` are,
+/// and only the second pair was ever carried over.** The trampoline sets
+/// `EFER.LME` to reach long mode and nothing else, so an application processor
+/// ran with `NXE` off while the bootstrap processor ran with it on -- and bit
+/// 63 of a page table entry is *no-execute* under one and *reserved* under the
+/// other. The same table, read by two cores, one of which faults.
+///
+/// It cost a release gate to find, through two wrong hypotheses. Nothing
+/// showed it while the map was built from 2 MiB pages that never carried the
+/// bit; `diag paging` is the only thing in the tree that writes `NX` into a
+/// 4 KiB entry, and it frees those pages back to the heap, so the next thing
+/// to allocate sixteen megabytes and read it from four cores was `diag smp`.
+/// The audit found nothing because it runs on the bootstrap processor, where
+/// the entry is perfectly legal.
+///
+/// Answers what it managed, so a caller can report a core that is not the same
+/// machine as the others rather than assuming it is.
+pub fn adopt_page_rights() -> (bool, bool) {
+    enable_wp();
+    (wp_on(), enable_nx())
 }
 
 /// Make bit 63 of a page table entry mean no-execute.

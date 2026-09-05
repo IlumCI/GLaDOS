@@ -259,6 +259,163 @@ unsafe fn split_large(pd: &mut [u64; ENTRIES], i2: usize) -> bool {
     true
 }
 
+/// Walk every live entry and report the first that the processor would refuse.
+///
+/// **Written because reasoning about this failed twice.** `diag paging`
+/// followed by `diag smp` faults with "reserved bit set in a page table
+/// entry", and two confident hypotheses -- a stale paging-structure cache on
+/// the worker cores, then the split leaving a bad directory entry -- were both
+/// measured and both wrong. What was never done was reading the entry, which
+/// is what this does.
+///
+/// Reserved is exactly what the manual says it is, per level. Everything above
+/// the machine's physical address width is reserved, and a 2 MiB entry
+/// additionally reserves bits 20:13, because those are part of the address
+/// field of a 4 KiB entry and mean nothing when `PS` is set. Bit 63 is `NX`
+/// and is legal only once `EFER.NXE` is on, which is the one check here that
+/// depends on machine state rather than on the entry.
+///
+/// Answers the number of entries walked and the first fault found, so a caller
+/// can tell "nothing wrong" from "nothing looked at".
+pub fn audit() -> (usize, Option<(u64, u64, &'static str)>) {
+    // Physical address width, from CPUID rather than assumed: a reserved-bit
+    // check against the wrong width either misses corruption or invents it.
+    let maxphys = crate::cpu::phys_addr_bits();
+    let above = if maxphys >= 52 { 0 } else { !((1u64 << maxphys) - 1) };
+    // Bit 63 is NX and bits 62:52 are reserved on every level.
+    let hi_reserved = (above | 0x7FF0_0000_0000_0000) & !NX;
+    let nx_ok = crate::cpu::nx_on();
+
+    let mut seen = 0usize;
+    let mut bad = None;
+    let mut note = |seen: &mut usize, bad: &mut Option<(u64, u64, &'static str)>,
+                    at: u64, e: u64, huge: bool| {
+        *seen += 1;
+        if bad.is_some() {
+            return;
+        }
+        if e & hi_reserved != 0 {
+            *bad = Some((at, e, "a bit above the physical address width is set"));
+        } else if e & NX != 0 && !nx_ok {
+            *bad = Some((at, e, "NX is set while EFER.NXE is off"));
+        } else if huge && e & 0x001F_E000 != 0 {
+            *bad = Some((at, e, "a large page with bits 20:13 set"));
+        }
+    };
+
+    let pml4 = unsafe { table(crate::cpu::read_cr3() & ADDR_MASK) };
+    for (i4, &e4) in pml4.iter().enumerate() {
+        if e4 & PRESENT == 0 {
+            continue;
+        }
+        let a4 = (i4 as u64) << 39;
+        note(&mut seen, &mut bad, a4, e4, false);
+        let pdpt = unsafe { table(e4 & ADDR_MASK) };
+        for (i3, &e3) in pdpt.iter().enumerate() {
+            if e3 & PRESENT == 0 {
+                continue;
+            }
+            let a3 = a4 | ((i3 as u64) << 30);
+            note(&mut seen, &mut bad, a3, e3, e3 & HUGE != 0);
+            if e3 & HUGE != 0 {
+                continue;
+            }
+            let pd = unsafe { table(e3 & ADDR_MASK) };
+            for (i2, &e2) in pd.iter().enumerate() {
+                if e2 & PRESENT == 0 {
+                    continue;
+                }
+                let a2 = a3 | ((i2 as u64) << 21);
+                note(&mut seen, &mut bad, a2, e2, e2 & HUGE != 0);
+                if e2 & HUGE != 0 {
+                    continue;
+                }
+                let pt = unsafe { table(e2 & ADDR_MASK) };
+                for (i1, &e1) in pt.iter().enumerate() {
+                    if e1 & PRESENT == 0 {
+                        continue;
+                    }
+                    note(&mut seen, &mut bad, a2 | ((i1 as u64) << 12), e1, false);
+                }
+            }
+        }
+    }
+    (seen, bad)
+}
+
+/// The four entries the processor would walk for one address, raw.
+///
+/// Answers what is *there* rather than what it means, and stops at the first
+/// entry that is not present or is a leaf, so the count says how far the walk
+/// got. Takes `cr3` as an argument rather than reading it, because the one
+/// caller that matters is a fault reporter holding the value from the frame.
+pub fn walk(cr3: u64, at: u64) -> ([u64; 4], usize) {
+    let mut out = [0u64; 4];
+    let idx = [
+        ((at >> 39) & 511) as usize,
+        ((at >> 30) & 511) as usize,
+        ((at >> 21) & 511) as usize,
+        ((at >> 12) & 511) as usize,
+    ];
+    let mut phys = cr3 & ADDR_MASK;
+    for level in 0..4 {
+        let e = unsafe { table(phys)[idx[level]] };
+        out[level] = e;
+        if e & PRESENT == 0 {
+            return (out, level + 1);
+        }
+        // A leaf at PDPT or PD level ends the walk; there is nothing below it.
+        if level >= 1 && level <= 2 && e & HUGE != 0 {
+            return (out, level + 1);
+        }
+        phys = e & ADDR_MASK;
+    }
+    (out, 4)
+}
+
+/// Print what `audit` found, and the four entries governing one address.
+pub fn report(at: Option<u64>) {
+    let (seen, bad) = audit();
+    match bad {
+        None => crate::kprintln!("  {} entr(ies), none the processor would refuse", seen),
+        Some((a, e, why)) => crate::kprintln!(
+            "  {} entr(ies), and {:#x} is governed by {:#018x}: {}",
+            seen,
+            a,
+            e,
+            why
+        ),
+    }
+    let Some(at) = at else { return };
+    let pml4_phys = crate::cpu::read_cr3() & ADDR_MASK;
+    let (i4, i3, i2, i1) = (
+        ((at >> 39) & 511) as usize,
+        ((at >> 30) & 511) as usize,
+        ((at >> 21) & 511) as usize,
+        ((at >> 12) & 511) as usize,
+    );
+    unsafe {
+        let pml4 = table(pml4_phys);
+        crate::kprintln!("  {:#x}  pml4[{}] {:#018x}", at, i4, pml4[i4]);
+        if pml4[i4] & PRESENT == 0 {
+            return;
+        }
+        let pdpt = table(pml4[i4] & ADDR_MASK);
+        crate::kprintln!("          pdpt[{}] {:#018x}", i3, pdpt[i3]);
+        if pdpt[i3] & PRESENT == 0 || pdpt[i3] & HUGE != 0 {
+            return;
+        }
+        let pd = table(pdpt[i3] & ADDR_MASK);
+        crate::kprintln!("            pd[{}] {:#018x}{}", i2, pd[i2],
+            if pd[i2] & HUGE != 0 { "  (2 MiB)" } else { "" });
+        if pd[i2] & PRESENT == 0 || pd[i2] & HUGE != 0 {
+            return;
+        }
+        let pt = table(pd[i2] & ADDR_MASK);
+        crate::kprintln!("            pt[{}] {:#018x}", i1, pt[i1]);
+    }
+}
+
 /// The entry governing one address, splitting a huge page if it has to.
 unsafe fn entry_for(addr: u64, split: bool) -> Option<&'static mut u64> {
     unsafe { entry_for_user(addr, split, false) }
@@ -445,11 +602,25 @@ pub fn checks() -> alloc::vec::Vec<(&'static str, bool)> {
         protect(at, PAGE_SIZE as usize, Perm::RW) && query(at).is_some_and(|p| !p.user),
     ));
 
-    // Put it back, or the heap hands out a page nothing may write to.
-    let restored = protect(at, 2 * PAGE_SIZE as usize, Perm::RW);
+    // Put it back **executable**, or the heap hands out a page nothing may
+    // write to -- or, as it turned out, nothing may run from.
+    //
+    // This restored `RW`, which is precisely non-executable, so every run of
+    // this suite left an `NX` page in the heap and the next thing to allocate
+    // one and jump into it died on an instruction fetch. `diag code` and the
+    // Aiksi JIT both do exactly that. It stayed hidden because the bit only
+    // means anything where `EFER.NXE` is on, and until the application
+    // processors started adopting the bootstrap core's page rights the
+    // question of which core was reading the entry decided the answer.
+    //
+    // `RWX` is what a heap page is here, and `syscall::teardown` already says
+    // the same thing for the same reason. The claim below checks it, because
+    // "restored" was true of a page that had lost a right nobody was asking
+    // about at the time.
+    let restored = protect(at, 2 * PAGE_SIZE as usize, Perm::RWX);
     out.push((
         "and it can be given back, so the heap is not poisoned by the check",
-        restored && query(at).is_some_and(|p| p.write),
+        restored && query(at).is_some_and(|p| p.write && p.exec),
     ));
     unsafe { dealloc(page, layout) };
     out
