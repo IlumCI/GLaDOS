@@ -3600,6 +3600,27 @@ from those runs do not belong in a claim.
   `theme::text_w_of` and `theme::head_chars`/`tail_chars`.
 - **`extern "C"` on `x86_64-unknown-uefi` is Microsoft x64 and not System V.**
   The context switch is pinned to `extern "sysv64"` explicitly.
+- **`diag paging` followed by `diag smp` faults, and it is not fixed.** The
+  exact reproduction, in one boot, with no guest involved:
+
+      diag smp     passed
+      diag paging  passed
+      diag smp     #PF, reserved bit set in a page table entry
+
+  Two worker cores fault at once on an address inside the sixteen-megabyte
+  matrix, at a rip in the AVX2 int8 kernel. It needs the sweep run *twice* to
+  show up under `diag all`, which is why it sat unseen: nothing had ever run
+  `diag all` twice in one boot, and the release gate for 1.3.4 is the first
+  thing that did.
+  What is ruled out. It is not the Linux work: it reproduces with no guest
+  ever loaded, and the same sequence passes on 1.3.3's code. It is not a
+  stale TLB or paging-structure cache on the workers -- reloading `CR3` at
+  `smp::claim_and_run`, which fully flushes both since nothing here sets the
+  `GLOBAL` bit, changes nothing. That leaves the entry being genuinely corrupt
+  *in memory*, with core 0 not faulting only because its own TLB still holds
+  the translation from before the corruption. The suspicion is `split_large`
+  or the `protect` that `paging::checks` runs around its deliberate fault, and
+  the next step is reading the offending entry rather than reasoning about it.
 - **A longjmp into inlined code has no calling convention to lean on.**
   `recover::guard` saved the registers a callee must preserve, which is the
   right list for a function boundary and the wrong question entirely: `guard`
