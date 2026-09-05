@@ -1660,11 +1660,81 @@ zeroed. And a binary naming a real `/lib64/ld-linux-x86-64.so.2` is refused
 with **"the interpreter this binary names is not in the namespace"**, which is
 a fact about the machine rather than a design decision.
 
-**No real `ld.so` has run here**, and the next rung is why: it would `mmap`
-itself and every library it loads, and `mmap` refuses both `MAP_FIXED` and
-file-backed mappings today. That is the immediate next piece of work and it is
-the last thing between here and finding out, from an `-ENOSYS` trace rather
-than from a guess, what a real dynamic linker actually wants.
+### The two calls a linker makes before anything else
+
+`mmap` served exactly one shape for a long time: anonymous, no address, no
+file. That is enough for an allocator and nothing else, and it is precisely the
+pair of refusals a dynamic linker meets on its first two calls. It reserves a
+span with one anonymous mapping, then writes each segment of each library over
+part of that span with `MAP_FIXED`, and every one of those segments is
+file-backed.
+
+Both refusals went the way `ET_EXEC` went, and for the same reason: each was
+true of what the kernel *knew* rather than of the machine.
+
+**`MAP_FIXED` has three cases and the middle one is the point.** An address
+inside memory the guest already holds is re-laid in place, which is not an
+attack but the ordinary case, and it records nothing because whatever holds
+those pages still holds them. An address nothing holds goes to
+`mem::fixed::claim`, the only thing here that can promise a virtual address,
+since virtual is physical. Anything else is `ENOMEM`. Zero and unaligned are
+`EINVAL` rather than hints: rounding would put a library's segment a page off
+its own headers.
+
+**A file mapping is a copy, and that is a real deviation.** Linux maps the page
+cache, so two processes mapping one file share pages. Here an open file already
+*is* its contents -- `fs.rs` says so and gives the reason -- so there is no
+cache to point at. `MAP_PRIVATE` is exactly a copy and so is exactly right,
+which is what `ld.so` uses for every library it loads. A **shared writable**
+file mapping is refused with `ENODEV`, because honouring it means writing back
+into a store keyed by content, which is a new root hash per modified page. A
+mapping running past the end of the file is zero-filled rather than refused,
+since that is how a shared object's `.bss` is made.
+
+`Mapping` carries where its pages came from, because the two go back different
+ways and getting it wrong is silent: freeing a placed range to the heap hands
+the allocator memory it never owned. `give_back` is the one place that knows,
+and it puts the **rights back first** -- the mistake this tree has now made in
+three separate places.
+
+`mkelf.py --kind maps` is eleven checks folding into a mask, `fsabuse`'s idiom
+for its reason: zero means every one answered what Linux answers. It maps **its
+own file** through `argv[0]`, so it needs nothing staged beside it and the
+bytes it checks are ones it can be certain of.
+
+    glados> linux run /tmp/maps
+        9 mmap    0x0        0x2000 0x3 -> 46522368
+        9 mmap    0x2c5e000  0x1000 0x3 -> 46522368
+        2 open    0x2c5cfbd  0x0    0x0 -> 3
+        9 mmap    0x0        0x1000 0x1 -> 46534656
+        9 mmap    0x0        0x1000 0x3 -> -19
+        9 mmap    0x1234     0x1000 0x3 -> -22
+        9 mmap    0x0        0x1000 0x3 -> -22
+        9 mmap    0x0        0x1000 0x1 -> -9
+       11 munmap  0x2c5e000  0x2000     -> 0
+      231 exit_group 0x0 -> 0
+      exited 0 after 10 syscall(s)
+
+46522368 is `0x2c5e000`, so the reservation and the fixed mapping over it
+answered the same address. Then a private file mapping, and four refusals by
+their own errno: `ENODEV` for shared-and-writable, `EINVAL` twice for an
+unaligned fixed address and a fixed address of zero, `EBADF` for a descriptor
+nobody opened. The `munmap` of the whole reservation returning 0 is the check
+that the fixed mapping laid over part of it left **one** record rather than
+two.
+
+**Two claims in `diag linux` used to assert the opposite** and both said so in
+words about this loader: "a file-backed mapping is refused, there being no fd
+table" and "MAP_FIXED is refused, for the reason ET_EXEC is". They are nine
+claims now, about the refusals that remain and about the shape a linker uses.
+
+**No real `ld.so` has run here yet.** Everything it needs on the first two
+calls is answered; what has not been measured is the third onward, and that is
+the whole reason the `-ENOSYS` trace exists rather than a guess about what it
+wants next. Getting one onto the machine is the next piece of work, and the
+honest expectation is that it will name several calls nobody here has thought
+of, which is what happened with busybox and is the argument for the instrument.
+
 
 ### A filesystem a program written for Linux recognises
 

@@ -58,6 +58,8 @@ const ARCH_GET_GS: u64 = 0x1004;
 const PROT_WRITE: u64 = 2;
 const PROT_EXEC: u64 = 4;
 
+const MAP_SHARED: u64 = 0x01;
+const MAP_PRIVATE: u64 = 0x02;
 const MAP_FIXED: u64 = 0x10;
 const MAP_ANONYMOUS: u64 = 0x20;
 
@@ -140,6 +142,7 @@ const EROFS: u64 = (-30i64) as u64;
 const EEXIST: u64 = (-17i64) as u64;
 const ERANGE: u64 = (-34i64) as u64;
 const ENOTEMPTY: u64 = (-39i64) as u64;
+const ENODEV: u64 = (-19i64) as u64;
 const EAFNOSUPPORT: u64 = (-97i64) as u64;
 const EPROTONOSUPPORT: u64 = (-93i64) as u64;
 const ENOTSOCK: u64 = (-88i64) as u64;
@@ -326,6 +329,21 @@ static mut SYSCALL_STACK: Stack = Stack([0; 16 * 1024]);
 pub struct Mapping {
     pub at: u64,
     pub len: usize,
+    /// Where the pages came from, because the two go back different ways and
+    /// getting it wrong is silent: freeing a placed range to the heap hands
+    /// the allocator memory it never owned.
+    pub from: Source,
+}
+
+/// Which pool a mapping's pages came out of.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Source {
+    /// The kernel heap, through `alloc_pages`. Where an ordinary `mmap` goes.
+    Heap,
+    /// A physical range `mem::fixed` promised. The only way to answer
+    /// `MAP_FIXED` at all, since virtual is physical here and the address the
+    /// guest names is real memory somebody may already own.
+    Fixed,
 }
 
 /// A range this kernel handed to the guest.
@@ -507,8 +525,7 @@ pub fn teardown() -> usize {
                 // absent page back to the allocator would poison it for
                 // whatever asks next, and the symptom would appear in an
                 // unrelated subsystem hours later.
-                crate::mem::paging::release_to_heap(m.at, m.len);
-                free_pages(m.at, m.len);
+                give_back(m.at, m.len, Some(m.from));
                 freed += 1;
             }
             // The image, stack and break came from `Exec` allocations the
@@ -1792,20 +1809,87 @@ fn sys_brk(want: u64) -> u64 {
 /// `MAP_FIXED` needs an address one address space can promise, which is the
 /// same objection that makes the loader decline `ET_EXEC`. And a zero length
 /// is `EINVAL` on Linux, so it is `EINVAL` here.
-fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, _off: u64) -> u64 {
+fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off: u64) -> u64 {
     if len == 0 {
         return EINVAL;
     }
     if len > MAP_MAX {
         return ENOMEM;
     }
-    if flags & MAP_ANONYMOUS == 0 || fd as i64 != -1 {
-        return ENOSYS;
+    let anon = flags & MAP_ANONYMOUS != 0;
+
+    // **A file mapping is a copy, and that is a real deviation.** Linux maps
+    // the page cache, so two processes mapping one file share pages and a
+    // write through `MAP_SHARED` is visible to the other. Here an open file
+    // already *is* its contents -- `fs.rs` says so and gives the reason -- so
+    // there is no cache to point at and the honest thing is to copy. What that
+    // costs is stated rather than hidden: a shared writable file mapping is
+    // refused, because honouring it would mean writing back into a
+    // content-addressed store, which is a new root hash per modified page.
+    // `MAP_PRIVATE` is exactly a copy, so it is exactly right, and it is what
+    // `ld.so` uses for every library it loads.
+    let backing = if anon {
+        None
+    } else {
+        if off % PAGE != 0 {
+            return EINVAL;
+        }
+        if flags & MAP_SHARED != 0 && prot & PROT_WRITE != 0 {
+            return ENODEV;
+        }
+        let Some(sp) = (unsafe { SPACE.get() }).as_ref() else { return ENOMEM };
+        match sp.fds.get(fd as usize).and_then(|f| f.as_ref()) {
+            Some(super::fs::Fd::File(b)) => {
+                let f = b.borrow();
+                // A mapping may run past the end of the file, and the tail is
+                // zero rather than an error -- that is how the `.bss` of a
+                // shared object is made, so refusing it would refuse every
+                // library there is.
+                let from = (off as usize).min(f.data.len());
+                let to = from.saturating_add(len as usize).min(f.data.len());
+                Some(f.data[from..to].to_vec())
+            }
+            // A directory or a socket has no bytes to map. `ENODEV` is what
+            // Linux answers for a file whose type does not support it.
+            Some(_) => return ENODEV,
+            None => return EBADF,
+        }
+    };
+
+    // Where it goes. Three cases and the middle one is the whole reason this
+    // stopped being a refusal: `ld.so` reserves a span with one anonymous
+    // mapping and then writes each segment of a library over it with
+    // `MAP_FIXED`, so an address inside memory the guest already holds is not
+    // an attack, it is the ordinary case.
+    let (at, from) = if flags & MAP_FIXED != 0 {
+        if addr == 0 || addr % PAGE != 0 {
+            return EINVAL;
+        }
+        if owns(addr, len as usize) {
+            // Its own memory, laid out again. Nothing is claimed and nothing
+            // is recorded, because whatever already holds these pages still
+            // holds them and will still free them.
+            (addr, None)
+        } else if crate::mem::fixed::claim(addr, len as usize).is_ok() {
+            // Whatever the last tenant left. `alloc_pages` zeroes and this
+            // does not, and a program whose fresh memory starts as somebody
+            // else's is one that works exactly once.
+            unsafe { core::ptr::write_bytes(addr as *mut u8, 0, page_up(len as usize)) };
+            (addr, Some(Source::Fixed))
+        } else {
+            return ENOMEM;
+        }
+    } else {
+        // A non-fixed `addr` is a hint, and this ignores it. Linux is entitled
+        // to as well, every allocator copes, and honouring it would spend a
+        // placement claim on a suggestion.
+        let Some(at) = alloc_pages(len as usize) else { return ENOMEM };
+        (at, Some(Source::Heap))
+    };
+
+    if let Some(b) = backing {
+        unsafe { core::ptr::copy_nonoverlapping(b.as_ptr(), at as *mut u8, b.len()) };
     }
-    if flags & MAP_FIXED != 0 && addr != 0 {
-        return ENOMEM;
-    }
-    let Some(at) = alloc_pages(len as usize) else { return ENOMEM };
     // **Open it to ring 3, or the guest cannot touch what it just asked for.**
     // The loader opens the image, stack and break before the guest starts, and
     // a mapping made after that is not covered by any of them. At ring 0 this
@@ -1820,19 +1904,49 @@ fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, _off: u64) -> u
     if !crate::mem::paging::protect(at, page_up(len as usize), perm) {
         // Partially applied rights are still rights, so close it on the way
         // out rather than handing the allocator whatever the walk managed.
-        crate::mem::paging::release_to_heap(at, page_up(len as usize));
-        free_pages(at, len as usize);
+        give_back(at, len as usize, from);
         return ENOMEM;
     }
-    let sp = unsafe { SPACE.get() };
-    match sp.as_mut() {
-        Some(sp) => sp.maps.push(Mapping { at, len: len as usize }),
-        None => {
-            free_pages(at, len as usize);
-            return ENOMEM;
+    match from {
+        // Re-laid over memory the guest already holds: no new record, because
+        // a second entry naming the same pages would be freed twice.
+        None => at,
+        Some(from) => {
+            let sp = unsafe { SPACE.get() };
+            match sp.as_mut() {
+                Some(sp) => {
+                    sp.maps.push(Mapping { at, len: len as usize, from });
+                    at
+                }
+                None => {
+                    give_back(at, len as usize, Some(from));
+                    ENOMEM
+                }
+            }
         }
     }
-    at
+}
+
+/// Put a mapping's pages back where they came from, rights first.
+///
+/// **Rights first, always.** A page handed back still carrying its U bit is
+/// one the next tenant inherits with ring-3 access attached, and the symptom
+/// lands in an unrelated subsystem hours later -- which this tree has now paid
+/// for three times, in `munmap`, in teardown, and in the guest's image.
+fn give_back(at: u64, len: usize, from: Option<Source>) {
+    match from {
+        // Somebody else's pages, laid out again. They keep their rights
+        // because they keep their owner.
+        None => {}
+        Some(Source::Heap) => {
+            crate::mem::paging::release_to_heap(at, page_up(len));
+            free_pages(at, len);
+        }
+        Some(Source::Fixed) => {
+            crate::mem::paging::protect(at, page_up(len), crate::mem::paging::Perm::RWX);
+            crate::mem::fixed::release(at);
+        }
+    }
 }
 
 /// Give a whole mapping back. Partial unmapping is refused rather than
@@ -1852,8 +1966,7 @@ fn sys_munmap(at: u64, len: u64) -> u64 {
             // memory -- kernel or otherwise -- came with ring-3 access
             // attached. A `diag all` caught it and `diag paging` alone did
             // not, because it only shows up once something else has run.
-            crate::mem::paging::release_to_heap(m.at, m.len);
-            free_pages(m.at, m.len);
+            give_back(m.at, m.len, Some(m.from));
             0
         }
         None => EINVAL,
@@ -2269,16 +2382,74 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         unsafe { *SPACE.get() = None };
     }
 
-    // mmap's three refusals, each about this machine rather than the argument.
+    // mmap's refusals, and the two shapes that stopped being refusals. Two of
+    // these used to assert the opposite and both were about this loader rather
+    // than about the call, which is why they went the way `ET_EXEC` went.
     {
         let fake = Region { at: 0x10_0000, len: 4096 };
         install(Regions { image: fake, stack: fake, brk: fake, interp: None });
-        let file_backed = sys_mmap(0, 4096, 3, MAP_ANONYMOUS, 3, 0);
-        let fixed = sys_mmap(0x40_0000, 4096, 3, MAP_ANONYMOUS | MAP_FIXED, u64::MAX, 0);
-        let empty = sys_mmap(0, 0, 3, MAP_ANONYMOUS, u64::MAX, 0);
-        out.push(("a file-backed mapping is refused, there being no fd table", (file_backed as i64) < 0));
-        out.push(("MAP_FIXED is refused, for the reason ET_EXEC is", (fixed as i64) < 0));
-        out.push(("a zero-length mapping is EINVAL, as Linux has it", empty == EINVAL));
+        out.push((
+            "a zero-length mapping is EINVAL, as Linux has it",
+            sys_mmap(0, 0, 3, MAP_ANONYMOUS, u64::MAX, 0) == EINVAL,
+        ));
+        out.push((
+            "a file mapping needs a descriptor somebody opened",
+            sys_mmap(0, 4096, 1, MAP_PRIVATE, 99, 0) == EBADF,
+        ));
+        out.push((
+            "and an offset into it that is a whole page, since a mapping starts on one",
+            sys_mmap(0, 4096, 1, MAP_PRIVATE, 99, 1) == EINVAL,
+        ));
+        // Refused before the descriptor is even looked at, because the reason
+        // is about the store rather than about the file: a shared writable
+        // mapping would have to write back into something keyed by content,
+        // which is a new root hash per modified page.
+        out.push((
+            "a shared writable file mapping is refused, and not by pretending the fd is bad",
+            sys_mmap(0, 4096, 3, MAP_SHARED, 99, 0) == ENODEV,
+        ));
+        out.push((
+            "MAP_FIXED at zero is EINVAL rather than treated as a hint",
+            sys_mmap(0, 4096, 3, MAP_ANONYMOUS | MAP_FIXED, u64::MAX, 0) == EINVAL,
+        ));
+        out.push((
+            "and an unaligned one is refused rather than rounded to a page",
+            sys_mmap(0x1234, 4096, 3, MAP_ANONYMOUS | MAP_FIXED, u64::MAX, 0) == EINVAL,
+        ));
+        // A range no memory map can promise. Far above anything the firmware
+        // ever declares conventional, so this is a fact about arithmetic
+        // rather than about the machine underneath.
+        out.push((
+            "MAP_FIXED where nothing can promise the address is ENOMEM",
+            sys_mmap(0x1000_0000_0000, 4096, 3, MAP_ANONYMOUS | MAP_FIXED, u64::MAX, 0) == ENOMEM,
+        ));
+    }
+
+    // The shape a dynamic linker actually uses: reserve a span, then lay each
+    // segment of a library out over part of it. A real page rather than the
+    // fake region above, because this one gets its rights marked and a fake
+    // pointing at 0x100000 would mark the low megabyte.
+    if let Some(own) = alloc_pages(8192) {
+        let mine = Region { at: own, len: 8192 };
+        install(Regions { image: mine, stack: mine, brk: mine, interp: None });
+        out.push((
+            "MAP_FIXED over memory the guest already holds answers that address",
+            sys_mmap(own, 4096, 3, MAP_ANONYMOUS | MAP_FIXED, u64::MAX, 0) == own,
+        ));
+        out.push((
+            "and records nothing, because something already holds those pages",
+            unsafe { SPACE.get() }.as_ref().is_some_and(|sp| sp.maps.is_empty()),
+        ));
+        // Rights back before the page goes back, which is the mistake this
+        // tree has now made three times in three different places.
+        crate::mem::paging::release_to_heap(own, 8192);
+        free_pages(own, 8192);
+        teardown();
+    }
+
+    {
+        let fake = Region { at: 0x10_0000, len: 4096 };
+        install(Regions { image: fake, stack: fake, brk: fake, interp: None });
 
         let at = sys_mmap(0, 8192, 3, MAP_ANONYMOUS, u64::MAX, 0);
         let got = (at as i64) > 0 && at % 4096 == 0;

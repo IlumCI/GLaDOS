@@ -244,6 +244,145 @@ INTERP_FIXTURE = b"/tmp/loader\x00"
 INTERP_REAL = b"/lib64/ld-linux-x86-64.so.2\x00"
 
 
+def maps_code(entry_rva, _a, _b):
+    """Ask for memory the two ways `ld.so` does, and prove each answered.
+
+    `mmap` served exactly one shape for a long time: anonymous, no address, no
+    file. That is enough for an allocator and nothing else, and it is the pair
+    of refusals a dynamic linker meets on its first two calls -- it reserves a
+    span, then writes each segment of a library over it with `MAP_FIXED`, and
+    every one of those segments is file-backed.
+
+    Eleven checks, each folding one bit into a mask, and the exit code is the
+    mask -- `fsabuse`'s idiom, for its reason: zero means every one of them
+    answered what Linux answers, and any other number says exactly which did
+    not. The negatives are most of the list, because the positives are the
+    calls a program makes when everything is fine and the refusals are what
+    nothing written to use this normally will ever reach.
+
+    It maps **its own file**, through `argv[0]`, so the fixture needs nothing
+    staged beside it and the bytes it checks are ones it can be certain of: a
+    file-backed mapping of an ELF begins with an ELF header or the mapping is
+    not of that file.
+    """
+    PROT_READ = 1
+    MAP_SHARED, MAP_PRIVATE, MAP_FIXED, MAP_ANON = 1, 2, 0x10, 0x20
+    EBADF, ENODEV, EINVAL = -9, -19, -22
+    out = bytearray()
+
+    def fwd(at):
+        out[at + 2:at + 6] = struct.pack("<i", len(out) - (at + 6))
+
+    def mmap_call(addr_reg, addr_imm, length, prot, flags, fd_reg, fd_imm):
+        b = bytearray()
+        b += mov_imm("rax", 9)
+        b += mov_rr("rdi", addr_reg) if addr_reg else mov_imm("rdi", addr_imm)
+        b += mov_imm("rsi", length)
+        b += mov_imm("rdx", prot)
+        b += mov_imm("r10", flags)
+        b += mov_rr("r8", fd_reg) if fd_reg else mov_imm("r8", fd_imm)
+        b += mov_imm("r9", 0)
+        b += SYSCALL
+        return bytes(b)
+
+    def fold(bit, cc):
+        """Fold `bit` unless the comparison just made took `cc`."""
+        ok = len(out)
+        out.extend(jcc(cc, 0))
+        out.extend(or_imm32("rbp", 1 << bit))
+        fwd(ok)
+
+    out += mov_imm("rbp", 0)
+
+    # 0. The reservation. Two pages, so the fixed mapping below lands inside it
+    #    rather than replacing the whole thing.
+    out += mmap_call(None, 0, 0x2000, 3, MAP_PRIVATE | MAP_ANON, None, -1)
+    out += mov_rr("r13", "rax")
+    out += cmp_imm32("rax", 0)
+    fold(0, JG)
+
+    # 1. And laying a page of it out again in place, which is the call that was
+    #    refused outright and the one a linker cannot do without.
+    out += mmap_call("r13", 0, 0x1000, 3, MAP_PRIVATE | MAP_ANON | MAP_FIXED, None, -1)
+    out += cmp_rr("rax", "r13")
+    fold(1, JE)
+
+    # 2. It is real memory afterwards, not merely an address.
+    out += mov_imm("rcx", 0x5A5A)
+    out += store_q("r13", 0, "rcx")
+    out += load_q("rdx", "r13", 0)
+    out += cmp_rr("rdx", "rcx")
+    fold(2, JE)
+
+    # 3. Its own file, by the path it was invoked with.
+    out += mov_imm("rax", 2)
+    out += load_stack("rdi", 8)                      # argv[0]
+    out += mov_imm("rsi", 0)
+    out += mov_imm("rdx", 0)
+    out += SYSCALL
+    out += mov_rr("r14", "rax")
+    out += cmp_imm32("rax", 0)
+    fold(3, JGE)
+
+    # 4. A private file mapping.
+    out += mmap_call(None, 0, 0x1000, PROT_READ, MAP_PRIVATE, "r14", 0)
+    out += mov_rr("r15", "rax")
+    out += cmp_imm32("rax", 0)
+    past = len(out)
+    out += jcc(JG, 0)
+    out += or_imm32("rbp", 1 << 4)
+    out += or_imm32("rbp", 1 << 5)
+    skip = len(out)
+    out += jmp(0)
+    fwd(past)
+
+    # 5. And it holds this file. Reading through a mapping that was refused
+    #    would fault, so this is only reached when 4 held -- which is why the
+    #    branch above folds both bits and jumps over it.
+    out += load_d("rcx", "r15", 0)
+    out += cmp_imm32("rcx", 0x464C457F)
+    fold(5, JE)
+    out[skip + 1:skip + 5] = struct.pack("<i", len(out) - (skip + 5))
+
+    # 6. A shared writable file mapping is refused, because honouring it means
+    #    writing back into a store keyed by content.
+    out += mmap_call(None, 0, 0x1000, 3, MAP_SHARED, "r14", 0)
+    out += cmp_imm8("rax", ENODEV)
+    fold(6, JE)
+
+    # 7. An unaligned fixed address is refused rather than rounded. Rounding
+    #    would put a library's segment a page off its own headers.
+    out += mmap_call(None, 0x1234, 0x1000, 3, MAP_PRIVATE | MAP_ANON | MAP_FIXED, None, -1)
+    out += cmp_imm8("rax", EINVAL)
+    fold(7, JE)
+
+    # 8. And so is a fixed address of zero, which is how a null pointer arrives
+    #    at this call.
+    out += mmap_call(None, 0, 0x1000, 3, MAP_PRIVATE | MAP_ANON | MAP_FIXED, None, -1)
+    out += cmp_imm8("rax", EINVAL)
+    fold(8, JE)
+
+    # 9. A file mapping on a descriptor nobody opened.
+    out += mmap_call(None, 0, 0x1000, PROT_READ, MAP_PRIVATE, None, 99)
+    out += cmp_imm8("rax", EBADF)
+    fold(9, JE)
+
+    # 10. The reservation comes back whole, which also says the fixed mapping
+    #     laid over part of it left one record rather than two.
+    out += mov_imm("rax", 11)
+    out += mov_rr("rdi", "r13")
+    out += mov_imm("rsi", 0x2000)
+    out += SYSCALL
+    out += cmp_imm32("rax", 0)
+    fold(10, JE)
+
+    out += mov_imm("rax", 231)
+    out += mov_rr("rdi", "rbp")
+    out += SYSCALL
+    out += HLT
+    return bytes(out)
+
+
 def loader_code(entry_rva, msg_rva, _b):
     """Stand in for ld.so: read the aux vector, check it, jump to the program.
 
@@ -968,6 +1107,10 @@ def build(kind="static"):
         assert len(text) == len(probe), (len(text), len(probe))
         body = text + MSG_USAGE
         msg_rva, disp, lea_end = usage_rva, 0, 0
+    elif kind == "maps":
+        text = maps_code(entry, 0, 0)
+        body = text
+        msg_rva, disp, lea_end = body_at, 0, 0
     elif kind == "loader":
         probe = loader_code(0, 0, 0)
         msg_rva = body_at + len(probe)
@@ -1136,6 +1279,30 @@ def verify(path):
               bytes([0x48, 0x89, 0xEF]) in b                        # rdi <- rbp
               and bytes([0x48, 0xC7, 0xC7, 255, 0, 0, 0]) in b)
         return ok
+    # ENODEV is asked for by nothing else in this file, which makes it the one
+    # byte pattern that identifies this fixture rather than merely suiting it.
+    if bytes([0x48, 0x83, 0xF8, 0xED]) in b:
+        claim("it reserves a span and then lays a page of it out again in place",
+              bytes([0x48, 0xC7, 0xC6, 0x00, 0x20, 0x00, 0x00]) in b     # rsi = 0x2000
+              and bytes([0x49, 0xC7, 0xC2, 0x22, 0, 0, 0]) in b          # r10 = PRIVATE|ANON
+              and bytes([0x49, 0xC7, 0xC2, 0x32, 0, 0, 0]) in b          # and again with FIXED
+              and bytes([0x4C, 0x89, 0xEF]) in b)                        # rdi <- r13
+        claim("it maps its own file, by the path it was invoked with",
+              bytes([0x48, 0x8B, 0x7C, 0x24, 0x08]) in b                 # rdi <- [rsp+8]
+              and bytes([0x48, 0xC7, 0xC0, 2, 0, 0, 0]) in b)            # open
+        claim("and checks the mapping holds an ELF header rather than merely existing",
+              bytes([0x41, 0x8B, 0x4F, 0x00]) in b                       # ecx <- [r15]
+              and struct.pack("<i", 0x464C457F) in b)
+        claim("it asks for every refusal by its own errno",
+              all(bytes([0x48, 0x83, 0xF8, e & 0xFF]) in b
+                  for e in (-9, -19, -22)))
+        claim("eleven checks, each folding one bit into the mask it exits with",
+              sum(1 for i in range(11)
+                  if bytes([0x48, 0x81, 0xCD]) + struct.pack("<i", 1 << i) in b) == 11)
+        claim("it exits with the mask rather than a constant",
+              bytes([0x48, 0x89, 0xEF]) in b
+              and bytes([0x48, 0xC7, 0xC0, 231, 0, 0, 0]) in b)
+        return ok
     if MSG_LD in b:
         claim("it walks the stack in rbx and never moves rsp, which the program needs",
               bytes([0x48, 0x89, 0xE3]) in b                       # mov rbx, rsp
@@ -1269,7 +1436,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("out")
     ap.add_argument("--kind",
-                    choices=["static", "dynamic", "interp", "loader",
+                    choices=["static", "dynamic", "interp", "loader", "maps",
                              "fixed", "memory", "rogue",
                              "protect", "wild", "spin", "cat", "grep",
                              "fsabuse"],

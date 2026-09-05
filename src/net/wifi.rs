@@ -34,7 +34,6 @@
 //! tractable. Until the GF63 boots and prints a vendor and device id, every
 //! sentence after this one would be a guess.
 
-use crate::dev::pci;
 
 /// PCI class 0x02 is a network controller; subclass 0x80 is "other", which is
 /// where essentially every wireless card lands. Ethernet is subclass 0x00.
