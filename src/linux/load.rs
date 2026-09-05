@@ -24,12 +24,24 @@
 //! because two binaries both insisting on `0x400000` cannot coexist in one
 //! address space however clever the loader is.
 //!
-//! **Dynamically linked binaries are declined**, because the entry point in
-//! the header is not where execution starts -- `ld.so` is -- and loading one as
-//! though it were static jumps into a PLT stub nobody has filled in.
+//! **A dynamically linked binary gets its interpreter placed beside it.**
+//! This was the second refusal, and the reason given was correct: the entry in
+//! the header is not where execution starts, `ld.so` is, and loading one as
+//! though it were static jumps into a PLT stub nobody has filled in. The
+//! answer is not to implement linking, it is to load the linker -- `PT_INTERP`
+//! names a path, the path is a file in the namespace, and a second image at a
+//! second base is the whole of it.
 //!
-//! Neither refusal is permanent and both are stated at the point of refusal
-//! rather than discovered as a fault.
+//! Three numbers have to be right and all three are silent when wrong.
+//! `AT_ENTRY` is the *program's* entry, not the interpreter's, or `ld.so`
+//! relocates everything correctly and jumps back into itself. `AT_BASE` is
+//! where the interpreter landed, and it is the only way an unrelocated
+//! `ET_DYN` can find its own `_DYNAMIC`. And the address jumped to is the
+//! interpreter's, which is the one thing that is obviously wrong when wrong.
+//!
+//! What is still missing before a real `ld.so` gets anywhere: `mmap` with
+//! `MAP_FIXED` and file-backed mappings, which is how it lays out everything
+//! it loads afterwards. Refused today, and the next rung.
 
 use super::{elf, syscall};
 use crate::cpu::code::Exec;
@@ -93,17 +105,38 @@ pub struct Guest {
     regions: syscall::Regions,
     /// Held because dropping it frees the pages the guest is running from.
     _image: Image,
+    /// The interpreter's pages, held for exactly the same reason.
+    _interp: Option<Image>,
     _stack: Exec,
     _brk: Exec,
     pub base: u64,
+    /// Where execution starts, which is the interpreter's entry when there is
+    /// one and the program's otherwise.
     pub entry: u64,
+    /// The interpreter, when there is one: what it was called, where it went,
+    /// and where its own entry landed. Reported rather than kept private,
+    /// because "which ld.so did it find" is the first question when a
+    /// dynamically linked program does nothing.
+    pub interp: Option<(alloc::string::String, u64, u64)>,
     pub stack_top: u64,
     pub span: usize,
     pub segments: usize,
 }
 
-/// Place an image and answer where its entry landed.
-pub fn load(bytes: &[u8], args: &[&str]) -> Result<Guest, &'static str> {
+/// One image in memory: what it said about itself and where it went.
+struct Placed {
+    img: elf::Image,
+    hold: Image,
+    base: u64,
+    lo: u64,
+    span: usize,
+}
+
+/// Put one image in memory. Shared by the program and its interpreter, because
+/// the two differ in nothing a loader cares about: both are ELF, both may be
+/// `ET_DYN` or `ET_EXEC`, and both are copied segment by segment relative to
+/// their own lowest address.
+fn place(bytes: &[u8]) -> Result<Placed, &'static str> {
     let img = elf::parse(bytes)?;
     syscall::runnable(&img)?;
     let (lo, hi) = img.span().ok_or("nothing to load")?;
@@ -159,8 +192,6 @@ pub fn load(bytes: &[u8], args: &[&str]) -> Result<Guest, &'static str> {
         // on the first run and wrong on the second.
     }
 
-    let brk = Exec::new(GUEST_BRK).ok_or("no room for a break region")?;
-    let stack = Exec::new(GUEST_STACK).ok_or("no room for a stack")?;
     // The entry has to land inside what was actually placed. A file is free to
     // name one outside its own segments, and jumping there would leave the
     // fault reporter naming a range this loader never armed.
@@ -168,7 +199,46 @@ pub fn load(bytes: &[u8], args: &[&str]) -> Result<Guest, &'static str> {
     if off as usize >= span {
         return Err("the entry point is outside every segment the file loads");
     }
-    let entry = base + off;
+
+    let hold = match placed {
+        Some(mut e) => {
+            e.arm(TAG_GUEST);
+            Image::Placed(e)
+        }
+        None => Image::Fixed { at: base, len: span },
+    };
+    Ok(Placed { img, hold, base, lo, span })
+}
+
+/// Place a program, its interpreter if it wants one, and build its stack.
+pub fn load(bytes: &[u8], args: &[&str]) -> Result<Guest, &'static str> {
+    let prog = place(bytes)?;
+    let (img, base, lo, span) = (&prog.img, prog.base, prog.lo, prog.span);
+
+    // The interpreter, if the program named one. Read through `sysbox` rather
+    // than through `fs::resolve`, because there is no guest yet to have a
+    // working directory: `PT_INTERP` is always absolute, and a relative one
+    // would be a file resolved against nothing.
+    let interp = match img.interp.as_deref() {
+        None => None,
+        Some(path) => {
+            let bytes = crate::sysbox::read_blob(path)
+                .ok_or("the interpreter this binary names is not in the namespace")?;
+            let p = place(&bytes)?;
+            // An interpreter that itself wants an interpreter is refused
+            // rather than followed. Nothing real does it, the recursion has no
+            // natural bound, and a loader that chased it would run out of
+            // stack in ring 0, which is a triple fault and not a message.
+            if p.img.dynamic() {
+                return Err("the interpreter names an interpreter of its own");
+            }
+            Some((alloc::string::String::from(path), p))
+        }
+    };
+
+    let brk = Exec::new(GUEST_BRK).ok_or("no room for a break region")?;
+    let stack = Exec::new(GUEST_STACK).ok_or("no room for a stack")?;
+    let prog_entry = base + (img.entry - lo);
 
     // A fixed image is not registered with `cpu::code`, which addresses heap
     // ranges by tag and offset. Saying so rather than leaving a fault report
@@ -196,16 +266,29 @@ pub fn load(bytes: &[u8], args: &[&str]) -> Result<Guest, &'static str> {
             phdr: phdr.unwrap_or(0),
             phent: img.phentsize as u64,
             phnum: phdr.map_or(0, |_| img.phnum as u64),
-            entry,
+            // The program's entry even when the interpreter is what runs. This
+            // is the field `ld.so` jumps to when it has finished, so swapping
+            // the two gives a linker that relocates everything and then
+            // re-enters itself.
+            entry: prog_entry,
+            base: interp.as_ref().map_or(0, |(_, p)| p.base),
         },
     )
     .ok_or("the stack is too small for the arguments")?;
-    let image = match placed {
-        Some(mut e) => {
-            e.arm(TAG_GUEST);
-            Image::Placed(e)
-        }
-        None => Image::Fixed { at: base, len: span },
+
+    // Execution starts at the interpreter when there is one. Everything above
+    // this line treats the two images identically and this is the one place
+    // that does not, which is why it is a single expression rather than
+    // threaded through `place`.
+    let entry = interp.as_ref().map_or(prog_entry, |(_, p)| p.base + (p.img.entry - p.lo));
+    let segments = img.segments.len() + interp.as_ref().map_or(0, |(_, p)| p.img.segments.len());
+    let (interp_named, interp_hold, interp_region) = match interp {
+        None => (None, None, None),
+        Some((path, p)) => (
+            Some((path, p.base, p.base + (p.img.entry - p.lo))),
+            Some(p.hold),
+            Some(syscall::Region { at: p.base, len: p.span }),
+        ),
     };
 
     Ok(Guest {
@@ -213,15 +296,18 @@ pub fn load(bytes: &[u8], args: &[&str]) -> Result<Guest, &'static str> {
             image: syscall::Region { at: base, len: span },
             stack: syscall::Region { at: stack.addr(), len: GUEST_STACK },
             brk: syscall::Region { at: brk.addr(), len: GUEST_BRK },
+            interp: interp_region,
         },
-        _image: image,
+        _image: prog.hold,
+        _interp: interp_hold,
         _stack: stack,
         _brk: brk,
         base,
         entry,
+        interp: interp_named,
         stack_top,
         span,
-        segments: img.segments.len(),
+        segments,
     })
 }
 
@@ -238,14 +324,21 @@ pub unsafe fn run(g: &Guest) -> u64 {
     // Every other page in the machine keeps a clear U bit, which is what makes
     // the guest unable to reach the kernel rather than merely discouraged from
     // trying.
-    for r in [g.regions.image, g.regions.stack, g.regions.brk] {
+    // The interpreter's pages are opened on exactly the same terms as the
+    // program's. Forgetting it is not a subtle failure: `ld.so` takes a
+    // protection violation on its first instruction, which reads as a bad
+    // entry address rather than as a missing U bit.
+    for r in [Some(g.regions.image), Some(g.regions.stack), Some(g.regions.brk), g.regions.interp]
+        .into_iter()
+        .flatten()
+    {
         if !crate::mem::paging::protect(r.at, r.len, crate::mem::paging::Perm::USER_RWX) {
             return 0;
         }
     }
     // Installed here rather than in `load`, so a guest that was loaded and
     // never run leaves nothing naming memory its `Guest` has since freed.
-    syscall::install(g.regions.image, g.regions.stack, g.regions.brk);
+    syscall::install(g.regions);
     unsafe { syscall::run(g.entry, g.stack_top) }
 }
 
@@ -281,8 +374,12 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         syscall::runnable(&img(elf::ET_DYN, false, 1)).is_ok(),
     ));
     out.push((
-        "a dynamically linked binary is refused, naming the interpreter as the reason",
-        syscall::runnable(&img(elf::ET_DYN, true, 1)).is_err(),
+        "a dynamically linked binary is no longer refused on sight either",
+        syscall::runnable(&img(elf::ET_DYN, true, 1)).is_ok(),
+    ));
+    out.push((
+        "and it is still recognised as wanting one, which is what decides the entry",
+        img(elf::ET_DYN, true, 1).dynamic() && !img(elf::ET_DYN, false, 1).dynamic(),
     ));
     out.push((
         "a fixed-address executable is no longer refused on sight, since the map can answer",

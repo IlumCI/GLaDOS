@@ -16,6 +16,8 @@ happened to differ some other way.
 
     python tools/mkelf.py out/hello.elf
     python tools/mkelf.py out/dyn.elf   --kind dynamic
+    python tools/mkelf.py out/prog.elf  --kind interp   # wants /tmp/loader
+    python tools/mkelf.py out/loader.elf --kind loader  # and is what runs first
     python tools/mkelf.py out/fixed.elf --kind fixed
     python tools/mkelf.py out/hello.elf --verify
 """
@@ -205,6 +207,26 @@ def or_imm32(reg, imm):
     return bytes([_rex(b=n >> 3), 0x81, 0xC8 | (n & 7)]) + struct.pack("<i", imm)
 
 
+def load_d(dst, base, disp8):
+    """mov dst32, [base+disp8]. No REX.W, so the upper half is zeroed.
+
+    Thirty-two bits because the thing worth reading four bytes of is an ELF
+    magic, and a 64-bit load would drag in the class and endianness bytes after
+    it -- which are also fixed, but comparing eight bytes against a constant
+    tests four fields while claiming to test one.
+    """
+    d, bs = REG[dst], REG[base]
+    pre = bytes([_rex(w=0, r=d >> 3, b=bs >> 3)]) if (d >> 3 or bs >> 3) else b""
+    return pre + bytes([0x8B, 0x40 | ((d & 7) << 3) | (bs & 7), disp8 & 0xFF])
+
+
+def jmp_reg(reg):
+    """jmp reg. The one instruction an interpreter cannot do without."""
+    n = REG[reg]
+    pre = bytes([_rex(w=0, b=n >> 3)]) if n >> 3 else b""
+    return pre + bytes([0xFF, 0xE0 | (n & 7)])
+
+
 SYSCALL = b"\x0f\x05"
 HLT = b"\xf4"
 MSG_OK = b"brk, mmap and arch_prctl all answered; FS read back\n"
@@ -214,6 +236,125 @@ MSG_PROT = b"mprotect PROT_NONE took the page away from the kernel too\n"
 MSG_NOPROT = b"the page was still reachable after PROT_NONE\n"
 MSG_ESCAPED = b"the guest read kernel memory and lived\n"
 MSG_BAD = b"FS did not read back\n"
+MSG_LD = b"ld: an interpreter ran, with a base and an entry\n"
+# Where `--kind interp` says its interpreter is. A path in the namespace
+# rather than a real one, because the point is to exercise the mechanism
+# with something whose behaviour is known to the byte.
+INTERP_FIXTURE = b"/tmp/loader\x00"
+INTERP_REAL = b"/lib64/ld-linux-x86-64.so.2\x00"
+
+
+def loader_code(entry_rva, msg_rva, _b):
+    """Stand in for ld.so: read the aux vector, check it, jump to the program.
+
+    This is the smallest thing that is genuinely an interpreter. It does no
+    linking, because linking is not what the kernel side of `PT_INTERP` gets
+    wrong -- what it gets wrong is the three numbers, and all three are silent
+    when wrong. `AT_ENTRY` swapped with the interpreter's own entry gives a
+    linker that re-enters itself forever. `AT_BASE` absent gives an `ET_DYN`
+    that cannot find its own `_DYNAMIC` and relocates against zero. And a
+    kernel that jumped to the program rather than the interpreter would run
+    the program correctly, which looks exactly like success.
+
+    So each is checked and each has its own exit code, and the last thing it
+    does is jump where it was told. **`rsp` is never touched**: the program on
+    the other side of that jump expects to find `argc` where the kernel left
+    it, so the walk uses `rbx` and gives the stack back untouched.
+    """
+    AT_NULL, AT_BASE, AT_ENTRY = 0, 7, 9
+    out = bytearray()
+
+    def patch_fwd(at):
+        """Point a jcc emitted at `at` here."""
+        out[at + 2:at + 6] = struct.pack("<i", len(out) - (at + 6))
+
+    def patch_back(at, to):
+        out[at + 1:at + 5] = struct.pack("<i", to - (at + 5))
+
+    out += mov_rr("rbx", "rsp")
+    out += add_imm("rbx", 8)                    # past argc
+    # argv then envp, each a NULL-terminated array of pointers, so one loop
+    # shape does both and the count in argc is never needed.
+    for _ in range(2):
+        top = len(out)
+        out += load_q("rcx", "rbx", 0)
+        out += cmp_imm32("rcx", 0)
+        done = len(out)
+        out += jcc(JE, 0)
+        out += add_imm("rbx", 8)
+        back = len(out)
+        out += jmp(0)
+        patch_back(back, top)
+        patch_fwd(done)
+        out += add_imm("rbx", 8)                # step over the NULL itself
+
+    # rbx now stands on the first aux key. Walk it by key rather than by
+    # position, which is the only way that is right: the kernel is free to
+    # order these however it likes and a reader that counted would break the
+    # day one was added.
+    out += mov_imm("r12", 0)                    # AT_ENTRY
+    out += mov_imm("r13", 0)                    # AT_BASE
+    top = len(out)
+    out += load_q("rcx", "rbx", 0)
+    out += cmp_imm32("rcx", AT_NULL)
+    done = len(out)
+    out += jcc(JE, 0)
+    out += cmp_imm32("rcx", AT_BASE)
+    skip = len(out)
+    out += jcc(JNE, 0)
+    out += load_q("r13", "rbx", 8)
+    patch_fwd(skip)
+    out += cmp_imm32("rcx", AT_ENTRY)
+    skip = len(out)
+    out += jcc(JNE, 0)
+    out += load_q("r12", "rbx", 8)
+    patch_fwd(skip)
+    out += add_imm("rbx", 16)
+    back = len(out)
+    out += jmp(0)
+    patch_back(back, top)
+    patch_fwd(done)
+
+    def exit_with(n):
+        """exit_group(n), for a check that did not hold."""
+        return mov_imm("rax", 231) + mov_imm("rdi", n) + SYSCALL
+
+    # AT_BASE present.
+    out += cmp_imm32("r13", 0)
+    ok = len(out)
+    out += jcc(JNE, 0)
+    out += exit_with(21)
+    patch_fwd(ok)
+    # And pointing at the interpreter's own ELF header, which is the check that
+    # makes it a base rather than a number: the first loadable segment starts
+    # at file offset zero, so the header is in memory at exactly this address.
+    out += load_d("rcx", "r13", 0)
+    out += cmp_imm32("rcx", 0x464C457F)
+    ok = len(out)
+    out += jcc(JE, 0)
+    out += exit_with(22)
+    patch_fwd(ok)
+    # AT_ENTRY present.
+    out += cmp_imm32("r12", 0)
+    ok = len(out)
+    out += jcc(JNE, 0)
+    out += exit_with(23)
+    patch_fwd(ok)
+
+    out += mov_imm("rax", 1)
+    out += mov_imm("rdi", 1)
+    lea_at = len(out)
+    out += lea_rip("rsi", 0)
+    lea_end = entry_rva + len(out)
+    out += mov_imm("rdx", len(MSG_LD))
+    out += SYSCALL
+    out[lea_at + 3:lea_at + 7] = struct.pack("<i", msg_rva - lea_end)
+
+    # And hand over. `syscall` clobbers rcx and r11 and leaves r12 alone, which
+    # is why the entry lives there.
+    out += jmp_reg("r12")
+    out += HLT
+    return bytes(out)
 
 
 def mem_code(entry_rva, ok_rva, bad_rva):
@@ -800,8 +941,8 @@ def grep_code(entry_rva, usage_rva, _b):
 
 
 def build(kind="static"):
-    interp = b"/lib64/ld-linux-x86-64.so.2\x00"
-    phnum = 2 if kind == "dynamic" else 1
+    interp = INTERP_FIXTURE if kind == "interp" else INTERP_REAL
+    phnum = 2 if kind in ("dynamic", "interp") else 1
     entry = EHDR + PHENT * phnum
     # Lay the body out first so the message address is known before the code
     # that points at it is emitted.
@@ -827,6 +968,13 @@ def build(kind="static"):
         assert len(text) == len(probe), (len(text), len(probe))
         body = text + MSG_USAGE
         msg_rva, disp, lea_end = usage_rva, 0, 0
+    elif kind == "loader":
+        probe = loader_code(0, 0, 0)
+        msg_rva = body_at + len(probe)
+        text = loader_code(entry, msg_rva, 0)
+        assert len(text) == len(probe), (len(text), len(probe))
+        body = text + MSG_LD
+        disp, lea_end = 0, 0
     elif kind == "spin":
         text = spin_code(entry, 0, 0)
         body = text
@@ -867,7 +1015,7 @@ def build(kind="static"):
         msg_rva = body_at + len(probe)
         text, lea_end, disp = code(msg_rva, entry, EXIT_CODE)
         body = text + MESSAGE
-    if kind == "dynamic":
+    if kind in ("dynamic", "interp"):
         interp_off = body_at + len(body)
         body += interp
     total = body_at + len(body)
@@ -903,7 +1051,7 @@ def build(kind="static"):
     struct.pack_into("<Q", ph, 40, total)          # p_memsz
     struct.pack_into("<Q", ph, 48, 0x1000)         # p_align
     phs += ph
-    if kind == "dynamic":
+    if kind in ("dynamic", "interp"):
         pi = bytearray(PHENT)
         struct.pack_into("<I", pi, 0, PT_INTERP)
         struct.pack_into("<I", pi, 4, PF_R)
@@ -987,6 +1135,26 @@ def verify(path):
         claim("it exits with the mask rather than a constant, and 255 on misuse",
               bytes([0x48, 0x89, 0xEF]) in b                        # rdi <- rbp
               and bytes([0x48, 0xC7, 0xC7, 255, 0, 0, 0]) in b)
+        return ok
+    if MSG_LD in b:
+        claim("it walks the stack in rbx and never moves rsp, which the program needs",
+              bytes([0x48, 0x89, 0xE3]) in b                       # mov rbx, rsp
+              and bytes([0x48, 0x89, 0xE5]) not in b               # no frame pointer
+              and bytes([0x48, 0x81, 0xEC]) not in b)              # no sub rsp
+        claim("it looks the aux vector up by key, so the order it arrives in cannot matter",
+              all(bytes([0x48, 0x81, 0xF9]) + struct.pack("<i", k) in b
+                  for k in (0, 7, 9)))
+        claim("it reads the value beside each key, not the key after it",
+              bytes([0x4C, 0x8B, 0x6B, 0x08]) in b                 # r13 <- [rbx+8]
+              and bytes([0x4C, 0x8B, 0x63, 0x08]) in b             # r12 <- [rbx+8]
+              and bytes([0x48, 0x81, 0xC3, 0x10, 0, 0, 0]) in b)   # rbx += 16
+        claim("it checks AT_BASE points at an ELF header rather than merely being set",
+              bytes([0x41, 0x8B, 0x4D, 0x00]) in b                 # ecx <- [r13]
+              and struct.pack("<i", 0x464C457F) in b)
+        claim("each check has an exit code of its own, so a failure says which",
+              all(bytes([0x48, 0xC7, 0xC7, n, 0, 0, 0]) in b for n in (21, 22, 23)))
+        claim("and the last thing it does is jump to the entry it was handed",
+              b.rindex(bytes([0x41, 0xFF, 0xE4])) > b.rindex(SYSCALL))
         return ok
     if MSG_GREP in b:
         claim("it reads a pattern and a path off the stack before moving rsp",
@@ -1089,6 +1257,9 @@ def verify(path):
     if interp is not None:
         claim("the dynamic fixture names an interpreter, NUL-terminated",
               interp.endswith(b"\x00"))
+        if interp == INTERP_FIXTURE:
+            claim("and this one names a path the namespace can actually hold",
+                  interp.startswith(b"/tmp/"))
     if e_type == ET_EXEC:
         claim("the fixed fixture insists on a non-zero base", va != 0)
     return ok
@@ -1098,7 +1269,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("out")
     ap.add_argument("--kind",
-                    choices=["static", "dynamic", "fixed", "memory", "rogue",
+                    choices=["static", "dynamic", "interp", "loader",
+                             "fixed", "memory", "rogue",
                              "protect", "wild", "spin", "cat", "grep",
                              "fsabuse"],
                     default="static")

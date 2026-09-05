@@ -44,6 +44,17 @@ use crate::sync::Racy;
 /// range that is listed is genuinely free.
 const MAX_RANGES: usize = 48;
 
+/// How many ranges may be held at once.
+///
+/// It was one, on the argument that one guest runs at a time. That argument is
+/// about *guests* and the thing being counted is *ranges*, and a single guest
+/// wants several the moment it is dynamically linked: the program at the
+/// address its headers insist on, the interpreter beside it, and one per
+/// `MAP_FIXED` the interpreter makes while laying out a library. Sixteen, so a
+/// program with a handful of libraries fits and a runaway one is refused
+/// rather than growing an allocation inside the placement table.
+const MAX_CLAIMS: usize = 16;
+
 #[derive(Clone, Copy)]
 struct Range {
     at: u64,
@@ -55,11 +66,14 @@ struct Free {
     n: usize,
     /// What a guest has taken out of the free set and not yet given back.
     ///
-    /// One entry, because one guest runs at a time -- the same assumption the
-    /// syscall stack and `SPACE` already rest on, and the one that has to stop
-    /// being true before threads arrive. Stated here rather than left implicit
-    /// so it turns up in the same grep as the others.
-    claim: Option<Range>,
+    /// Still one guest at a time, which is the same assumption the syscall
+    /// stack and `SPACE` rest on and the one that has to stop being true
+    /// before threads arrive. What changed is that one guest stopped being one
+    /// range: an interpreter is a second image at a second address, and every
+    /// `MAP_FIXED` it makes afterwards is a third and a fourth. Stated here
+    /// rather than left implicit so it turns up in the same grep as the
+    /// others.
+    claims: [Option<Range>; MAX_CLAIMS],
     /// Whether `snapshot` ever ran. A machine that never called it must refuse
     /// everything rather than treat an empty table as "nothing is free", which
     /// is the same answer for the opposite reason.
@@ -69,7 +83,7 @@ struct Free {
 static FREE: Racy<Free> = Racy::new(Free {
     ranges: [Range { at: 0, end: 0 }; MAX_RANGES],
     n: 0,
-    claim: None,
+    claims: [None; MAX_CLAIMS],
     ready: false,
 });
 
@@ -87,7 +101,7 @@ pub unsafe fn snapshot(
 ) {
     let f = unsafe { FREE.get() };
     f.n = 0;
-    f.claim = None;
+    f.claims = [None; MAX_CLAIMS];
     f.ready = true;
     if desc_size == 0 {
         return;
@@ -155,9 +169,6 @@ pub fn claim(at: u64, len: usize) -> Result<(), &'static str> {
     if !f.ready {
         return Err("the free physical ranges were never recorded");
     }
-    if f.claim.is_some() {
-        return Err("another fixed-address image already holds a range");
-    }
     let start = at & !(PAGE_SIZE - 1);
     let Some(sum) = at.checked_add(len as u64) else {
         return Err("the range runs past the end of the address space");
@@ -169,20 +180,44 @@ pub fn claim(at: u64, len: usize) -> Result<(), &'static str> {
         // guessing which would be inventing a reason.
         return Err("that physical range is not free on this machine");
     }
-    f.claim = Some(Range { at: start, end });
+    // Overlap against what is already held, which the single-entry version
+    // got for free by refusing everything. It is the claim worth having now:
+    // an interpreter placed over the program it was loaded to run does not
+    // fault, the second copy simply wins, and what shows is a jump into the
+    // middle of somebody else's code.
+    if f.claims.iter().flatten().any(|c| start < c.end && end > c.at) {
+        return Err("that range overlaps one already held");
+    }
+    let Some(slot) = f.claims.iter().position(|c| c.is_none()) else {
+        return Err("no room to record another claim");
+    };
+    f.claims[slot] = Some(Range { at: start, end });
     Ok(())
 }
 
 /// Give a claimed range back. Answers false when nothing held it.
 pub fn release(at: u64) -> bool {
     let f = unsafe { FREE.get() };
-    match f.claim {
-        Some(r) if r.at == (at & !(PAGE_SIZE - 1)) => {
-            f.claim = None;
+    let want = at & !(PAGE_SIZE - 1);
+    match f.claims.iter().position(|c| matches!(c, Some(r) if r.at == want)) {
+        Some(i) => {
+            f.claims[i] = None;
             true
         }
-        _ => false,
+        None => false,
     }
+}
+
+/// How many ranges are held, and how many bytes they cover.
+pub fn held() -> (usize, u64) {
+    let f = unsafe { FREE.get() };
+    let mut n = 0;
+    let mut bytes = 0;
+    for c in f.claims.iter().flatten() {
+        n += 1;
+        bytes += c.end - c.at;
+    }
+    (n, bytes)
 }
 
 /// Free conventional bytes, and the largest single run, for a report.
@@ -213,9 +248,12 @@ pub fn report() {
             (r.end - r.at) / 1024 / 1024
         );
     }
-    match f.claim {
-        Some(c) => crate::kprintln!("  claimed {:#x}..{:#x}", c.at, c.end),
-        None => crate::kprintln!("  {} range(s), nothing claimed", f.n),
+    let (n, _) = held();
+    if n == 0 {
+        crate::kprintln!("  {} range(s), nothing claimed", f.n);
+    }
+    for c in f.claims.iter().flatten() {
+        crate::kprintln!("  claimed {:#x}..{:#x}", c.at, c.end);
     }
 }
 
@@ -227,12 +265,12 @@ pub fn report() {
 pub fn checks() -> alloc::vec::Vec<(&'static str, bool)> {
     let mut out = alloc::vec::Vec::new();
     let f = unsafe { FREE.get() };
-    let saved = (f.ranges, f.n, f.claim, f.ready);
+    let saved = (f.ranges, f.n, f.claims, f.ready);
 
     // A synthetic map: one region with a hole punched in the middle, which is
     // the shape a handout makes and the one the subtraction has to get right.
     f.n = 0;
-    f.claim = None;
+    f.claims = [None; MAX_CLAIMS];
     f.ready = true;
     push(f, 0x10_0000, 0x40_0000);
     push(f, 0x50_0000, 0x90_0000);
@@ -242,10 +280,41 @@ pub fn checks() -> alloc::vec::Vec<(&'static str, bool)> {
         claim(0x60_0000, 0x1000).is_ok(),
     ));
     out.push((
-        "and a second claim is refused while the first stands",
-        claim(0x20_0000, 0x1000).is_err(),
+        "and a second, somewhere else, is held alongside it",
+        claim(0x20_0000, 0x1000).is_ok(),
     ));
-    out.push(("releasing the claim gives it back", release(0x60_0000)));
+    out.push((
+        "one that overlaps a held range is refused, from either side",
+        claim(0x60_0800, 0x1000).is_err() && claim(0x5f_f000, 0x2000).is_err(),
+    ));
+    out.push((
+        "and one that merely abuts it is not",
+        claim(0x61_0000, 0x1000).is_ok(),
+    ));
+    out.push(("releasing one gives that one back", release(0x60_0000)));
+    out.push((
+        "and leaves the others held",
+        claim(0x20_0000, 0x1000).is_err() && claim(0x61_0000, 0x1000).is_err(),
+    ));
+    out.push((
+        "so the freed range, and only it, is claimable again",
+        claim(0x60_0000, 0x1000).is_ok(),
+    ));
+    out.push((
+        "a table with every slot full refuses the next one rather than growing",
+        {
+            let mut at = 0x70_0000u64;
+            while claim(at, 0x1000).is_ok() {
+                at += 0x2000;
+            }
+            held().0 == MAX_CLAIMS && claim(at, 0x1000).is_err()
+        },
+    ));
+    f.claims = [None; MAX_CLAIMS];
+    out.push((
+        "releasing the claim gives it back",
+        claim(0x60_0000, 0x1000).is_ok() && release(0x60_0000),
+    ));
     out.push((
         "releasing something nobody claimed is false rather than a panic",
         !release(0x60_0000),
@@ -283,7 +352,7 @@ pub fn checks() -> alloc::vec::Vec<(&'static str, bool)> {
 
     f.ranges = saved.0;
     f.n = saved.1;
-    f.claim = saved.2;
+    f.claims = saved.2;
     f.ready = saved.3;
     out
 }

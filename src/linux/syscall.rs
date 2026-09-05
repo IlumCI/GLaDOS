@@ -348,6 +348,15 @@ pub struct Regions {
     pub image: Region,
     pub stack: Region,
     pub brk: Region,
+    /// The interpreter, when the program asked for one.
+    ///
+    /// A fourth region rather than a second `Space`, because it is one process
+    /// with two images in it: `ld.so` and the program share a break, a
+    /// descriptor table and every pointer either passes to the kernel. Making
+    /// it optional rather than a zero-length region is the difference between
+    /// "there is no interpreter" and "there is one and it is empty", and only
+    /// the first is ever true.
+    pub interp: Option<Region>,
 }
 
 /// What a guest owns.
@@ -360,6 +369,10 @@ pub struct Space {
     /// Every range the loader gave this guest, which is the whole of what
     /// `owns` is allowed to say yes to.
     pub image: Region,
+    /// The interpreter's image, if the program wanted one. A pointer into it
+    /// is as legitimate as one into the program: `ld.so` passes the kernel its
+    /// own strings and structures constantly.
+    pub interp: Option<Region>,
     pub stack: Region,
     /// Where `brk` began, where it stands, and where it may not pass.
     pub brk_start: u64,
@@ -394,6 +407,7 @@ impl Space {
     pub fn owns(&self, at: u64, len: usize) -> bool {
         let Some(end) = at.checked_add(len as u64) else { return false };
         self.image.holds(at, end)
+            || self.interp.is_some_and(|r| r.holds(at, end))
             || self.stack.holds(at, end)
             || (at >= self.brk_start && end <= self.brk_end)
             || self.maps.iter().any(|m| Region { at: m.at, len: m.len }.holds(at, end))
@@ -443,12 +457,14 @@ const PAGE: u64 = 4096;
 /// a real hazard: a guest that was loaded and never run would otherwise leave
 /// `SPACE` naming memory freed when its `Guest` dropped, and the next thing to
 /// read it would be reading a dangling range it believed it had verified.
-pub fn install(image: Region, stack: Region, brk: Region) {
+pub fn install(r: Regions) {
+    let brk = r.brk;
     teardown();
     unsafe {
         *SPACE.get() = Some(Space {
-            image,
-            stack,
+            image: r.image,
+            interp: r.interp,
+            stack: r.stack,
             brk_start: brk.at,
             brk_now: brk.at,
             brk_end: brk.at.saturating_add(brk.len as u64),
@@ -2233,7 +2249,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     {
         let region = 0x10_0000u64;
         let fake = Region { at: region, len: 4096 * 4 };
-        install(fake, fake, fake);
+        install(Regions { image: fake, stack: fake, brk: fake, interp: None });
         let first = sys_brk(0);
         let grown = sys_brk(region + 8192);
         let refused = sys_brk(region + 1_000_000);
@@ -2256,7 +2272,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     // mmap's three refusals, each about this machine rather than the argument.
     {
         let fake = Region { at: 0x10_0000, len: 4096 };
-        install(fake, fake, fake);
+        install(Regions { image: fake, stack: fake, brk: fake, interp: None });
         let file_backed = sys_mmap(0, 4096, 3, MAP_ANONYMOUS, 3, 0);
         let fixed = sys_mmap(0x40_0000, 4096, 3, MAP_ANONYMOUS | MAP_FIXED, u64::MAX, 0);
         let empty = sys_mmap(0, 0, 3, MAP_ANONYMOUS, u64::MAX, 0);
@@ -2289,7 +2305,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         // GET_FS writes eight bytes through a guest pointer, so it is bounds
         // checked now, so the destination has to be a range the guest owns.
         let owned = Region { at, len: 8 };
-        install(owned, owned, owned);
+        install(Regions { image: owned, stack: owned, brk: owned, interp: None });
         let was = unsafe { crate::cpu::rdmsr(IA32_FS_BASE) };
         let set = sys_arch_prctl(ARCH_SET_FS, 0xDEAD_0000);
         let got = sys_arch_prctl(ARCH_GET_FS, at);
@@ -2320,11 +2336,8 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     {
         let mut backing = [0u64; 64];
         let at = backing.as_mut_ptr() as u64;
-        install(
-            Region { at, len: 512 },
-            Region { at, len: 512 },
-            Region { at, len: 512 },
-        );
+        let one = Region { at, len: 512 };
+        install(Regions { image: one, stack: one, brk: one, interp: None });
         out.push(("a range inside what the loader gave out is owned", owns(at, 8)));
         out.push(("a range that runs off the end is not", !owns(at + 508, 8)));
         out.push(("a range below it is not", !owns(at - 8, 8)));
@@ -2360,7 +2373,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
             if !mem.is_null() {
                 let at = mem as u64;
                 let owned = Region { at, len: 4096 };
-                install(owned, owned, owned);
+                install(Regions { image: owned, stack: owned, brk: owned, interp: None });
                 out.push(("a page the guest owns starts reachable", reachable(at, 8, true)));
                 out.push((
                     "mprotect to PROT_NONE is accepted",
@@ -2405,7 +2418,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         build_stack(small.as_mut_ptr(), 64, &["x"], Aux::default()).is_none(),
     ));
     let mut big = [0u8; 512];
-    let aux = Aux { phdr: 0x1000, phent: 56, phnum: 2, entry: 0x1078 };
+    let aux = Aux { phdr: 0x1000, phent: 56, phnum: 2, entry: 0x1078, base: 0 };
     let sp = build_stack(big.as_mut_ptr(), 512, &["cat", "/ai/about"], aux);
     out.push((
         "and one large enough answers a 16-byte-aligned pointer inside itself",
@@ -2483,7 +2496,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         "a header table no segment covers omits the whole group rather than pointing at nothing",
         {
             let mut small = [0u8; 512];
-            let none = Aux { phdr: 0, phent: 56, phnum: 2, entry: 0 };
+            let none = Aux { phdr: 0, phent: 56, phnum: 2, entry: 0, base: 0 };
             let s2 = build_stack(small.as_mut_ptr(), 512, &["x"], none);
             s2.is_some_and(|v| unsafe {
                 let p = v as *const u64;
@@ -2575,7 +2588,19 @@ pub struct Aux {
     pub phdr: u64,
     pub phent: u64,
     pub phnum: u64,
+    /// The *program's* entry, which is not where execution starts once there
+    /// is an interpreter. Getting these two the wrong way round gives a
+    /// `ld.so` that relocates everything correctly and then jumps back into
+    /// itself.
     pub entry: u64,
+    /// Where the interpreter was loaded, or zero when there is none.
+    ///
+    /// This is how `ld.so` finds its own relocations: it is a `ET_DYN` object
+    /// that has not been relocated by anybody, so the only way it can locate
+    /// its own `_DYNAMIC` is by being told where it landed. Zero omits the
+    /// entry, which is what Linux does for a static binary and what a libc
+    /// reads as "you are the program".
+    pub base: u64,
 }
 
 const AT_NULL: u64 = 0;
@@ -2583,6 +2608,7 @@ const AT_PHDR: u64 = 3;
 const AT_PHENT: u64 = 4;
 const AT_PHNUM: u64 = 5;
 const AT_PAGESZ: u64 = 6;
+const AT_BASE: u64 = 7;
 const AT_ENTRY: u64 = 9;
 const AT_UID: u64 = 11;
 const AT_EUID: u64 = 12;
@@ -2670,6 +2696,13 @@ pub fn build_stack(base: *mut u8, size: usize, args: &[&str], aux: Aux) -> Optio
         pairs.push((AT_PHDR, aux.phdr));
         pairs.push((AT_PHENT, aux.phent));
         pairs.push((AT_PHNUM, aux.phnum));
+    }
+    // Omitted rather than zeroed when there is no interpreter, which is what
+    // Linux does and what a libc reads as "you are the program". A zero would
+    // be read as an interpreter loaded at address zero, and the first thing
+    // `ld.so` does with this number is add it to an offset.
+    if aux.base != 0 {
+        pairs.push((AT_BASE, aux.base));
     }
     pairs.push((AT_NULL, 0));
 
@@ -2772,15 +2805,18 @@ pub fn name_of(nr: u64) -> &'static str {
 /// Whether an image is one stage 0 can actually run, and why not when it is
 /// not. Split out from the loader so the refusal is testable without a heap.
 pub fn runnable(img: &elf::Image) -> Result<(), &'static str> {
-    if img.dynamic() {
-        return Err("dynamically linked: the entry point is ld.so, which stage 0 has no loader for");
-    }
+    // A dynamically linked binary is no longer refused here. It used to be,
+    // under a reason about this loader rather than about the file -- the entry
+    // in the header is not where execution starts, `ld.so` is -- and that
+    // stopped being true when `load` learned to place the interpreter beside
+    // the program and jump to *its* entry. What can still fail is finding the
+    // interpreter, which is a fact about the namespace and is reported there.
+    if img.segments.is_empty() {
     // A fixed address is no longer refused here. Whether one can be honoured is
     // a question about this machine's memory map rather than about the file, so
     // `load` asks `mem::fixed` and reports what it said -- "that physical range
     // is not free on this machine" names the actual obstacle, where the blanket
     // refusal named a design decision that had stopped being one.
-    if img.segments.is_empty() {
         return Err("nothing to load");
     }
     Ok(())

@@ -1329,16 +1329,19 @@ host's stack and callee-saved registers, and `glados_leave_guest` restores them,
 because there is no unwinder here and returning normally from a process that
 has exited is not a thing that can be expressed.
 
-Two refusals, and both are about the address space rather than about the file:
+Both of the loader's original refusals are gone, and each went the same way:
+the reason given was true of what the kernel *knew* rather than of the machine,
+and the fix was to make the thing knowable.
 
-- **Dynamically linked binaries.** The entry in the header is not where
-  execution starts, `ld.so` is, and loading one as though it were static jumps
-  into a PLT stub nobody filled in.
 - **Fixed-address executables.** An `ET_EXEC` insists on its own addresses,
   classically `0x400000`, and this kernel is identity-mapped with one address
-  space -- so those are real physical bytes the frame allocator may already
-  have handed out. Honouring them is a change to the memory map, not to the
-  loader. A PIE asks for none of it, and nearly everything modern is one.
+  space, so those are real physical bytes. Nothing could answer "does anything
+  own four megabytes at four megabytes" until `mem::fixed` did. See the
+  placement section below.
+- **Dynamically linked binaries.** The entry in the header is not where
+  execution starts, `ld.so` is, and loading one as though it were static jumps
+  into a PLT stub nobody filled in. The answer is not to implement linking, it
+  is to load the linker. See below.
 
 `tools/mkelf.py` builds the fixtures by hand rather than by compiling, for the
 reason `mkwad.py` generates art: the negatives need to differ from the positive
@@ -1597,6 +1600,71 @@ which is to say `sh` running anything that is not a builtin. That is not a
 syscall away: `fork` needs two address spaces, and one address space is the
 founding claim of this system rather than a shortcut it took. Nothing else in
 the measured surface is blocked on a decision that large.
+
+### Loading the loader
+
+`PT_INTERP` names a path, the path is a file in the namespace, and a second
+image at a second base is the whole of it. `load` places the program, places
+the interpreter beside it, and jumps to the *interpreter's* entry. `dlopen`
+then works because it is `ld.so`'s problem rather than ours, which is the whole
+reason to load an interpreter instead of writing a linker -- and `dlopen` is
+what Half-Life needs, since the game logic lives in `hl.so`.
+
+**Three numbers have to be right and all three are silent when wrong.**
+`AT_ENTRY` is the *program's* entry, not the interpreter's, or `ld.so`
+relocates everything correctly and jumps back into itself. `AT_BASE` is where
+the interpreter landed, and it is the only way an unrelocated `ET_DYN` can find
+its own `_DYNAMIC`; it is **omitted rather than zeroed** when there is no
+interpreter, because zero reads as "loaded at address zero" and the first thing
+done with it is add it to an offset. And the address jumped to is the
+interpreter's, which is the one of the three that is obvious when wrong.
+
+`mem::fixed` had to learn to hold more than one range first. It held exactly
+one, on the argument that one guest runs at a time -- an argument about
+*guests* where the thing being counted is *ranges*, and one guest stops being
+one range the moment it is dynamically linked. Sixteen now, with an overlap
+check, which the single-entry version got for free by refusing everything: an
+interpreter placed over the program it was loaded to run does not fault, the
+second copy simply wins, and what shows is a jump into the middle of somebody
+else's code.
+
+**Two hand-assembled fixtures, because the pair is the test.**
+`mkelf.py --kind loader` is a stand-in for `ld.so`: it walks the aux vector by
+key (never by position -- the kernel may order them however it likes), checks
+`AT_BASE` is present *and points at an ELF header*, checks `AT_ENTRY` is
+present, prints, and jumps. Each check has its own exit code, so a failure says
+which. It never touches `rsp`, because the program on the other side of that
+jump expects to find `argc` where the kernel left it. `--kind interp` is the
+ordinary hello program with a `PT_INTERP` naming `/tmp/loader`.
+
+    glados> linux run /tmp/prog
+    [linux] 253 byte(s), 2 segment(s), 253 byte span at 0x2c18000, entry 0x2c19078
+    ld: an interpreter ran, with a base and an entry
+    hello from ring 3
+        1 write       0x1 0x2c19194 0x31 -> 49
+        1 write       0x1 0x2c180df 0x12 -> 18
+      231 exit_group  0x5 -> 0
+      exited 5 after 3 syscall(s)
+
+Every number is checkable against what `mkelf.py` printed. The interpreter was
+placed at `0x2c19000` and its entry is `+0x78`, which is the `0x2c19078` the
+loader reports -- an address outside the program's own 253 bytes, which is the
+whole claim. The first write comes from `+404` of the interpreter and the
+second from `+223` of the program, which are the two message offsets the
+fixture builder named, and 5 is the program's own exit code.
+
+Two negatives, and both matter more than the positive. Running the interpreter
+*alone* exits **21**, which is its own code for "there was no `AT_BASE`" --
+that is the check that the entry is omitted for a static binary rather than
+zeroed. And a binary naming a real `/lib64/ld-linux-x86-64.so.2` is refused
+with **"the interpreter this binary names is not in the namespace"**, which is
+a fact about the machine rather than a design decision.
+
+**No real `ld.so` has run here**, and the next rung is why: it would `mmap`
+itself and every library it loads, and `mmap` refuses both `MAP_FIXED` and
+file-backed mappings today. That is the immediate next piece of work and it is
+the last thing between here and finding out, from an `-ENOSYS` trace rather
+than from a guess, what a real dynamic linker actually wants.
 
 ### A filesystem a program written for Linux recognises
 
