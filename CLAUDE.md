@@ -1506,7 +1506,97 @@ than how often.
 
 `linux` reports whether the trap is armed, `linux run <path> [args...]` loads
 and runs, `linux trace` prints what the last guest asked for. `diag linux` is
-86 claims.
+91 claims.
+
+### It runs busybox
+
+An unmodified static binary, fetched from busybox.net and touched by nothing
+here, running at ring 3.
+
+    linux run /tmp/busybox uname -a
+    GLaDOS glados 1.3.4 one address space, no processes x86_64 GNU/Linux
+
+    linux run /tmp/busybox hexdump -C /tmp/lines.txt
+    00000000  61 6c 70 68 61 0a 74 68  65 20 71 75 69 63 6b 20  |alpha.the quick |
+    00000010  62 72 6f 77 6e 20 66 6f  78 0a 62 65 74 61 0a 6a  |brown fox.beta.j|
+    00000020  75 6d 70 73 20 6f 76 65  72 20 74 68 65 20 6c 61  |umps over the la|
+    00000030  7a 79 20 64 6f 67                                 |zy dog|
+
+    linux run /tmp/busybox sha256sum /tmp/lines.txt
+    6ecb6686ad1673a0f3c021fc356890758853980fd6465b3b5a04fd859682733a
+
+**That digest is the one the host computes over the same file**, which is the
+first end-to-end check of this path against an implementation nobody here
+wrote: the bytes went from FAT into the namespace, out through the projection,
+through busybox's own hash at ring 3, and back through `writev`.
+
+**`ET_EXEC` is placed rather than refused, and busybox is why.** Its prebuilt
+is non-PIE with an entry at `0x4038b1`, and so is nearly every prebuilt static
+binary in the world, so the blanket refusal was not a corner case -- it was
+most of the software this loader exists to run. See the placement section
+below.
+
+**Forty-six syscalls, and not one of them was guessed.** Sixteen applets were
+swept, every gap they named was implemented, and nothing else was. That is
+what stage 0 was built to make possible, and the one number worth keeping is
+that after the work `sysinfo` was the only call left unserved in the whole
+sweep.
+
+The shape of the finding was the useful part twice over. `ls` ran perfectly on
+its first attempt -- opened the directory, walked it with two `getdents64`
+calls, `lstat`ed every entry, exited 0 -- and printed nothing at all, because
+everything it had to say went through `writev`. A program that works and is
+silent is the worst shape a missing syscall can take. And `hexdump` reported
+"Function not implemented" about a file it was holding open, because it does
+`dup2(fd, 0)` to read its input as stdin.
+
+**A guest may write, inside `/tmp`.** Writes were refused everywhere on the
+grounds that a write to a content-addressed store is a new root hash, so an
+unrestricted `O_WRONLY` routes a guest binary around every gate `sysbox` puts
+in front of the shell. The reason was sound and what it argued for was a jail
+rather than a refusal. `/tmp` because that is already the scratch area, and
+everywhere else is `EROFS` -- checked on the *resolved* path, so a relative one
+cannot be written to climb out, which works because `resolve` refuses `..`
+outright.
+
+    cp /tmp/lines.txt /tmp/copy.txt  then  ls /tmp
+    busybox  copy.txt  lines.txt  newdir
+    mkdir /ai/nope
+    mkdir: can't create directory '/ai/nope': Read-only file system
+
+Writes buffer in the body and commit on the **last** `close`, because the store
+is keyed by content: every commit rewrites the whole blob and gives it a new
+address, so a program writing a kilobyte a byte at a time would leave a
+thousand objects behind. The `Rc` count is what "last" means. `teardown`
+flushes as well, since exiting without closing is the ordinary case.
+
+**A descriptor's body lives behind `Rc<RefCell<..>>`, and that is what makes
+`dup` correct.** On Linux a duplicated descriptor shares one open file
+description, so the two numbers share a cursor. The body used to sit inside the
+`Fd`, where `dup` could only copy it, and two independent cursors is a program
+reading everything twice. `Rc` and not `Arc`, for the reason `Interp` gives
+about its functions: one guest, one task, nothing crossing a core.
+
+**The environment is five variables and each is a fact rather than a default.**
+It was empty, which is not neutral: `sh` resolves through `PATH`, and a program
+with no `HOME` writes its dotfiles into the working directory. `TERM=dumb`
+because `ioctl` already says there is no terminal, and `PWD=/` because there is
+no `chdir`.
+
+Two answers that are deliberately shaped rather than complete.
+`rt_sigaction` and `rt_sigprocmask` are accepted and never deliver, which is
+honest because nothing here can raise a signal at a guest: no other process to
+send one, no terminal to generate one, and a fault ends the guest rather than
+being offered to it. Refusing would stop `sh` before it starts over a promise
+about events that cannot happen. And `nanosleep` spins on the timer tick,
+because there is no guest scheduler to block against, so it costs the CPU it is
+not using.
+
+**What is still missing, and it is one thing.** `fork`, `execve` and `wait4`,
+which is to say `sh` running anything that is not a builtin. That is not a
+syscall away: `fork` needs two address spaces, and one address space is the
+founding claim of this system rather than a shortcut it took. Nothing else in
+the measured surface is blocked on a decision that large.
 
 ### A filesystem a program written for Linux recognises
 
@@ -1733,13 +1823,46 @@ One piece of dead code came out with it. `build_stack` padded down when
 every word is eight bytes. It read as an alignment fix and was a tautology,
 which is the more expensive kind of dead code because it stops anybody looking.
 
+### Placing an image where it insists
+
+`src/mem/fixed.rs`. A non-PIE binary demands the addresses in its own headers,
+and this kernel is identity-mapped, so those are real physical bytes. That was
+refused under a reason true of what the kernel *knew* rather than of the
+machine: nothing could answer "does anything own four megabytes at four
+megabytes".
+
+**The frame allocator cannot answer it, and why is the interesting part.**
+`EarlyFrames` is a bump allocator whose cursor is forward-only by design -- its
+own doc explains why rewinding would be worse than the bug it has -- so by the
+end of boot it sits past the heap, three hundred megabytes up, and everything
+behind it reads as unavailable. That includes large conventional regions it
+merely stepped over while looking for one span big enough for the heap.
+`0x400000` is exactly such an address: untouched, and invisible to the only
+thing you would think to ask.
+
+So the free set is computed the other way round: every conventional region the
+firmware declared, minus the handful of ranges boot actually took. The
+allocator records its handouts, which it can do precisely because it never
+frees -- a bump allocator's history is a short list. `handouts()` answers `None`
+if one was ever dropped and the snapshot is skipped rather than approximated,
+because a free set missing a taken range would place a guest on top of the live
+page tables.
+
+    [boot] placeable  7 MiB free below the heap and above it, largest run 6 MiB
+
+Seven megabytes on this map, which is what the firmware calls conventional less
+the page tables and the heap. `mem` prints the table and `diag place` asserts
+the arithmetic against a synthetic map -- synthetic on purpose, since a claim
+written against the real one would assert something about QEMU and fail on the
+GF63 for a correct reason.
+
 ### Testing
 
 There is no `cargo test`. This is a `no_std` UEFI binary with no host test
 runner, so **verification is the boot selftests plus driving QEMU.**
 
 At boot the system runs **twenty-eight selftest sections**, and `diag` offers
-**thirty-six named suites** on demand, most of them the same checks (the `aiksi` section covers the capability gate by name and never by
+**thirty-seven named suites** on demand, most of them the same checks (the `aiksi` section covers the capability gate by name and never by
 calling -- half that table pokes memory, drives I/O ports or paints over the
 screen, and a suite that called every row to prove it exists would be
 scribbling on the machine to do it), printing `ok` or `FAIL` per line: heap, timer, clock, the namespace's
