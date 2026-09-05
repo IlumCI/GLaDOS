@@ -78,6 +78,15 @@ pub const SYS_DUP: u64 = 32;
 pub const SYS_WRITEV: u64 = 20;
 pub const SYS_RT_SIGACTION: u64 = 13;
 pub const SYS_READV: u64 = 19;
+pub const SYS_SOCKET: u64 = 41;
+pub const SYS_CONNECT: u64 = 42;
+pub const SYS_SENDTO: u64 = 44;
+pub const SYS_RECVFROM: u64 = 45;
+pub const SYS_SHUTDOWN: u64 = 48;
+pub const SYS_GETSOCKNAME: u64 = 51;
+pub const SYS_GETPEERNAME: u64 = 52;
+pub const SYS_SETSOCKOPT: u64 = 54;
+pub const SYS_GETSOCKOPT: u64 = 55;
 pub const SYS_ACCESS: u64 = 21;
 pub const SYS_SENDFILE: u64 = 40;
 pub const SYS_FACCESSAT: u64 = 269;
@@ -124,11 +133,21 @@ const ENOTDIR: u64 = (-20i64) as u64;
 const EISDIR: u64 = (-21i64) as u64;
 const ENOTTY: u64 = (-25i64) as u64;
 const ESPIPE: u64 = (-29i64) as u64;
+const ENOTCONN: u64 = (-107i64) as u64;
+const EAGAIN: u64 = (-11i64) as u64;
 const ENAMETOOLONG: u64 = (-36i64) as u64;
 const EROFS: u64 = (-30i64) as u64;
 const EEXIST: u64 = (-17i64) as u64;
 const ERANGE: u64 = (-34i64) as u64;
 const ENOTEMPTY: u64 = (-39i64) as u64;
+const EAFNOSUPPORT: u64 = (-97i64) as u64;
+const EPROTONOSUPPORT: u64 = (-93i64) as u64;
+const ENOTSOCK: u64 = (-88i64) as u64;
+const ECONNREFUSED: u64 = (-111i64) as u64;
+const ETIMEDOUT: u64 = (-110i64) as u64;
+const ENETDOWN: u64 = (-100i64) as u64;
+const EISCONN: u64 = (-106i64) as u64;
+const ENOBUFS: u64 = (-105i64) as u64;
 
 /// `O_WRONLY` and `O_RDWR`. This view is read-only, so both are refused.
 const O_WRONLY: u64 = 1;
@@ -589,6 +608,9 @@ fn sys_write(fd: u64, buf: u64, len: usize) -> u64 {
     // it went to the console -- output the guest had redirected, printed to
     // the terminal, reported as successful. `close(1)` alone was worse, since
     // writes to a descriptor that is not open have to be `EBADF`.
+    if is_socket(fd) {
+        return sys_send(fd, buf, len as u64);
+    }
     let sink = with_fds(|fds, _| {
         matches!(
             fds.get(fd as usize),
@@ -1005,6 +1027,205 @@ fn sys_writev(fd: u64, iov: u64, cnt: u64) -> u64 {
     total
 }
 
+// --- sockets -------------------------------------------------------------
+//
+// **The obstacle was never the syscalls.** `net::tcp` held one control block
+// and `connect` aborted whatever was open, so a guest could not have two
+// sockets -- which is most of what a socket is for. The stack holds a table of
+// sixteen now, routed by four-tuple, and this is the surface over it.
+//
+// Outbound only, and that is the stack's shape rather than a decision made
+// here: there is no `Listen` state, so `bind`/`listen`/`accept` would be
+// answering for a passive open that does not exist. They are absent rather
+// than stubbed, because a `listen` that returns 0 and never accepts anything
+// is worse than one that says it cannot.
+
+/// `sockaddr_in`: family, port and address, the last two big-endian.
+fn read_sockaddr(at: u64, len: u64) -> Result<(crate::net::Ipv4, u16), u64> {
+    if len < 16 {
+        return Err(EINVAL);
+    }
+    if !reachable(at, 16, false) {
+        return Err(EFAULT);
+    }
+    let b = unsafe { core::slice::from_raw_parts(at as *const u8, 16) };
+    let family = u16::from_le_bytes([b[0], b[1]]);
+    if family != 2 {
+        return Err(EAFNOSUPPORT);
+    }
+    let port = u16::from_be_bytes([b[2], b[3]]);
+    Ok(([b[4], b[5], b[6], b[7]], port))
+}
+
+fn write_sockaddr(at: u64, len_at: u64, ip: crate::net::Ipv4, port: u16) -> u64 {
+    if at == 0 || len_at == 0 {
+        return 0;
+    }
+    if !reachable(len_at, 4, true) || !reachable(at, 16, true) {
+        return EFAULT;
+    }
+    let mut b = [0u8; 16];
+    b[0..2].copy_from_slice(&2u16.to_le_bytes());
+    b[2..4].copy_from_slice(&port.to_be_bytes());
+    b[4..8].copy_from_slice(&ip);
+    unsafe {
+        core::ptr::copy_nonoverlapping(b.as_ptr(), at as *mut u8, 16);
+        core::ptr::write_volatile(len_at as *mut u32, 16);
+    }
+    0
+}
+
+/// Turn a stack error into the errno a program expects to read.
+fn sock_err(e: crate::net::tcp::Error) -> u64 {
+    use crate::net::tcp::Error as E;
+    match e {
+        E::NoNic => ENETDOWN,
+        E::Timeout => ETIMEDOUT,
+        E::Refused => ECONNREFUSED,
+        E::Reset => ECONNREFUSED,
+        E::NotConnected => ENOTCONN,
+        E::NoSlot => ENOBUFS,
+    }
+}
+
+fn is_socket(fd: u64) -> bool {
+    with_fds(|fds, _| matches!(fds.get(fd as usize), Some(Some(super::fs::Fd::Socket(_)))))
+        .unwrap_or(false)
+}
+
+fn sys_socket(domain: u64, kind: u64, proto: u64) -> u64 {
+    if domain != 2 {
+        return EAFNOSUPPORT;
+    }
+    // `SOCK_STREAM` with the close-on-exec and non-blocking bits masked off:
+    // there is no `exec` for the first to matter to, and the second is
+    // answered by every call taking its own timeout.
+    if kind & 0xFF != 1 {
+        return EPROTONOSUPPORT;
+    }
+    if proto != 0 && proto != 6 {
+        return EPROTONOSUPPORT;
+    }
+    let entry = super::fs::Fd::Socket(alloc::rc::Rc::new(core::cell::RefCell::new(
+        super::fs::Sock { conn: None },
+    )));
+    with_fds(|fds, _| match fds.iter().position(|f| f.is_none()) {
+        Some(i) => {
+            fds[i] = Some(entry);
+            i as u64
+        }
+        None if fds.len() < MAX_FDS => {
+            fds.push(Some(entry));
+            (fds.len() - 1) as u64
+        }
+        None => EMFILE,
+    })
+    .unwrap_or(EBADF)
+}
+
+/// The handle behind a descriptor, or the errno saying why there is not one.
+fn sock_of(fd: u64) -> Result<alloc::rc::Rc<core::cell::RefCell<super::fs::Sock>>, u64> {
+    with_fds(|fds, _| match fds.get(fd as usize) {
+        Some(Some(super::fs::Fd::Socket(b))) => Ok(b.clone()),
+        Some(Some(_)) => Err(ENOTSOCK),
+        _ => Err(EBADF),
+    })
+    .unwrap_or(Err(EBADF))
+}
+
+fn sys_connect(fd: u64, at: u64, len: u64) -> u64 {
+    let sock = match sock_of(fd) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if sock.borrow().conn.is_some() {
+        return EISCONN;
+    }
+    let (ip, port) = match read_sockaddr(at, len) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    // The borrow ends before the connect: opening one pumps the stack, which
+    // can deliver to another socket, which would want this same table.
+    match crate::net::tcp::open(ip, port, SOCK_TIMEOUT_MS) {
+        Ok(h) => {
+            sock.borrow_mut().conn = Some(h);
+            0
+        }
+        Err(e) => sock_err(e),
+    }
+}
+
+/// How long a socket call waits before answering.
+///
+/// One number rather than `SO_RCVTIMEO`, because there is no scheduler to
+/// block a guest against: a wait here is this task spinning the stack, and a
+/// guest that asked for an unbounded one would own the machine until its
+/// deadline killed it. Ten seconds is longer than any handshake and shorter
+/// than the guest deadline that would otherwise end the argument.
+const SOCK_TIMEOUT_MS: u64 = 10_000;
+
+fn sys_send(fd: u64, buf: u64, len: u64) -> u64 {
+    if len == 0 {
+        return 0;
+    }
+    if !reachable(buf, len as usize, false) {
+        return EFAULT;
+    }
+    let sock = match sock_of(fd) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let Some(h) = sock.borrow().conn else { return ENOTCONN };
+    let data = unsafe { core::slice::from_raw_parts(buf as *const u8, len as usize) };
+    match crate::net::tcp::send_at(h, data, SOCK_TIMEOUT_MS) {
+        Ok(()) => len,
+        Err(e) => sock_err(e),
+    }
+}
+
+fn sys_recv(fd: u64, buf: u64, len: u64) -> u64 {
+    if len == 0 {
+        return 0;
+    }
+    if !reachable(buf, len as usize, true) {
+        return EFAULT;
+    }
+    let sock = match sock_of(fd) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let Some(h) = sock.borrow().conn else { return ENOTCONN };
+    let got = crate::net::tcp::recv_at(h, SOCK_TIMEOUT_MS);
+    if got.is_empty() {
+        // Zero means end of file, and only end of file. A timeout with the
+        // peer still there is `EAGAIN`, because a program reading zero from a
+        // live connection concludes the other end hung up.
+        return if crate::net::tcp::peer_done(h) { 0 } else { EAGAIN };
+    }
+    let n = got.len().min(len as usize);
+    unsafe { core::ptr::copy_nonoverlapping(got.as_ptr(), buf as *mut u8, n) };
+    // Anything past the guest's buffer would need pushing back, which this
+    // stack has nowhere to put. Refused as short rather than lost: the caller
+    // asked for `len` and got `len`, and the rest is still on the connection.
+    n as u64
+}
+
+fn sys_shutdown(fd: u64, _how: u64) -> u64 {
+    let sock = match sock_of(fd) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let taken = sock.borrow_mut().conn.take();
+    match taken {
+        Some(h) => {
+            crate::net::tcp::close_at(h, SOCK_TIMEOUT_MS);
+            0
+        }
+        None => ENOTCONN,
+    }
+}
+
 /// Scatter-read: one call, a vector of buffers.
 ///
 /// The mirror of `writev` and it arrived for the same reason: `hexdump` reads
@@ -1325,6 +1546,9 @@ fn sys_close(fd: u64) -> u64 {
 fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
     if len == 0 {
         return 0;
+    }
+    if is_socket(fd) {
+        return sys_recv(fd, buf, len);
     }
     if !reachable(buf, len as usize, true) {
         return EFAULT;
@@ -1726,6 +1950,17 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         SYS_IOCTL => (sys_ioctl(f.rdi, f.rsi, f.rdx), true),
         SYS_WRITEV => (sys_writev(f.rdi, f.rsi, f.rdx), true),
         SYS_READV => (sys_readv(f.rdi, f.rsi, f.rdx), true),
+        SYS_SOCKET => (sys_socket(f.rdi, f.rsi, f.rdx), true),
+        SYS_CONNECT => (sys_connect(f.rdi, f.rsi, f.rdx), true),
+        SYS_SENDTO => (sys_send(f.rdi, f.rsi, f.rdx), true),
+        SYS_RECVFROM => (sys_recv(f.rdi, f.rsi, f.rdx), true),
+        SYS_SHUTDOWN => (sys_shutdown(f.rdi, f.rsi), true),
+        // Accepted and stored nowhere. Every option a program sets here is
+        // about buffering, keepalive or timeouts, and this stack answers all
+        // three its own way -- refusing would stop programs that set them as a
+        // formality, which is most of them.
+        SYS_SETSOCKOPT => (0, true),
+        SYS_GETSOCKOPT => (0, true),
         SYS_ACCESS => (sys_access(f.rdi, f.rsi), true),
         SYS_FACCESSAT => (sys_access(f.rsi, f.rdx), true),
         SYS_SENDFILE => (sys_sendfile(f.rdi, f.rsi, f.rdx, f.r10), true),
@@ -2488,6 +2723,13 @@ pub fn name_of(nr: u64) -> &'static str {
         SYS_DUP => "dup",
         SYS_WRITEV => "writev",
         SYS_READV => "readv",
+        SYS_SOCKET => "socket",
+        SYS_CONNECT => "connect",
+        SYS_SENDTO => "sendto",
+        SYS_RECVFROM => "recvfrom",
+        SYS_SHUTDOWN => "shutdown",
+        SYS_SETSOCKOPT => "setsockopt",
+        SYS_GETSOCKOPT => "getsockopt",
         SYS_ACCESS => "access",
         SYS_FACCESSAT => "faccessat",
         SYS_SENDFILE => "sendfile",

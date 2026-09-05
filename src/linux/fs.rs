@@ -86,6 +86,17 @@ pub struct File {
     pub dirty: bool,
 }
 
+/// What a socket descriptor holds.
+///
+/// The connection is an `Option` because `socket` and `connect` are two calls:
+/// a descriptor exists before it names anything, and a program is entitled to
+/// close one it never connected. `None` after a close as well, so a second
+/// close is `EBADF` rather than a second teardown of a handle the table has
+/// already given to somebody else.
+pub struct Sock {
+    pub conn: Option<crate::net::tcp::Handle>,
+}
+
 pub struct Dir {
     pub path: String,
     /// Name, whether it is a directory, and size. Snapshotted at `open`,
@@ -120,6 +131,10 @@ pub enum Fd {
     Stderr,
     File(Rc<RefCell<File>>),
     Dir(Rc<RefCell<Dir>>),
+    /// Behind the same refcount as a file, and for the same reason: `dup2` on
+    /// a socket is how a program puts one on stdin, and two descriptors have
+    /// to name one connection rather than two copies of a handle.
+    Socket(Rc<RefCell<Sock>>),
 }
 
 impl Fd {
@@ -138,6 +153,7 @@ impl Fd {
             Fd::Stderr => Fd::Stderr,
             Fd::File(b) => Fd::File(b.clone()),
             Fd::Dir(b) => Fd::Dir(b.clone()),
+            Fd::Socket(b) => Fd::Socket(b.clone()),
         }
     }
 
@@ -148,6 +164,19 @@ impl Fd {
     /// committing early would publish a half-written file under a hash that
     /// the next write immediately invalidates.
     pub fn flush(&self) -> bool {
+        // A socket's "flush" is closing its connection, and it happens on the
+        // last descriptor naming it for the same reason a file's write does:
+        // a `dup`ed socket closed once is still open.
+        if let Fd::Socket(b) = self {
+            if Rc::strong_count(b) > 1 {
+                return false;
+            }
+            if let Some(h) = b.borrow_mut().conn.take() {
+                crate::net::tcp::close_at(h, 300);
+                return true;
+            }
+            return false;
+        }
         let Fd::File(b) = self else { return false };
         if Rc::strong_count(b) > 1 {
             return false;
