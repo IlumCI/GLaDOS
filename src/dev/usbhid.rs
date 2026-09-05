@@ -108,6 +108,7 @@ pub fn probe(ecam: u64) -> Result<usize, &'static str> {
                 continue;
             }
         };
+        xhci::note_device(&dev, (0, 0, 0));
         let mut claimed = false;
 
         for i in 0..dev.num_configs {
@@ -128,6 +129,10 @@ pub fn probe(ecam: u64) -> Result<usize, &'static str> {
                 Ok(()) => {
                     claimed = true;
                     found += 1;
+                    // HID 0x03, boot subclass 0x01, protocol 1 keyboard or
+                    // 2 mouse. Recorded on success only: a device whose setup
+                    // was refused is not a keyboard this machine has.
+                    xhci::note_device(&dev, (0x03, 0x01, hid.protocol));
                 }
                 Err(e) => {
                     crate::kprintln!("  hid    port {} refused setup: {}", port, e);

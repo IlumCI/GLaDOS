@@ -216,31 +216,81 @@ pub fn init(ecam: u64, roots: Option<&[u8]>) {
         lo.up = true;
     }
 
-    // Try each driver in turn and take the first that answers. The e1000 is
-    // first only because it is what QEMU emulates, so the common development
-    // case costs one probe; on the GF63 it misses and the Realtek answers.
-    let driver: Option<(Box<dyn Nic>, &str)> = match crate::dev::e1000::probe(ecam) {
-        Ok(n) => Some((Box::new(n), "e1000")),
-        Err(e1000_err) => match crate::dev::rtl8168::probe(ecam) {
-            Ok(n) => Some((Box::new(n), "rtl8168")),
-            // USB last, and only when no PCI card answered. Bringing up the
-            // xHCI controller resets it, so a machine with a working wired card
-            // should not have its USB bus reset during boot for nothing -- and
-            // `usb` on the shell resets it again, which would take the
-            // interface out from under this driver.
-            Err(rtl_err) => match crate::dev::xhci::probe_net(ecam) {
-                Ok(n) => Some((Box::new(n), "usb-ecm")),
-                Err(usb_err) => {
-                    kprintln!("  eth0   no supported NIC");
-                    kprintln!(
-                        "         e1000 {:?}, rtl8168 {:?}, usb {}",
-                        e1000_err, rtl_err, usb_err
-                    );
-                    None
-                }
-            },
-        },
-    };
+    // Which drivers to try, and in what order, is a question about the machine
+    // rather than about this file. It was a nested match -- e1000, else
+    // rtl8168, else USB -- which is a preference list written for one laptop:
+    // on a machine carrying only the Realtek it paid for a full Intel sweep to
+    // learn nothing, and on a machine carrying neither it said "no supported
+    // NIC" without ever saying what *was* there.
+    //
+    // The registry sweeps once and answers both. `drivers_for` is in bus
+    // order, so a machine with two cards tries the one the firmware enumerated
+    // first, which is as good a rule as any and is at least a fact.
+    crate::dev::registry::scan_pci(ecam);
+    let (all, driven, partial, known) = crate::dev::registry::tally();
+    kprintln!(
+        "  bus    {} device(s): {} driven, {} partly, {} with no driver ('devices')",
+        all, driven, partial, known
+    );
+
+    let mut refused: Vec<(&str, alloc::string::String)> = Vec::new();
+    let mut driver: Option<(Box<dyn Nic>, &str)> = None;
+    for name in crate::dev::registry::drivers_for(crate::dev::registry::Role::Ethernet) {
+        // Dispatch by name rather than by function pointer, because a `Nic` is
+        // built by four probes with four error types and no common signature
+        // to store. The registry decides *whether*; this decides *how*.
+        let built: Result<Box<dyn Nic>, alloc::string::String> = match name {
+            "e1000" => crate::dev::e1000::probe(ecam)
+                .map(|d| Box::new(d) as Box<dyn Nic>)
+                .map_err(|e| alloc::format!("{:?}", e)),
+            "rtl8168" => crate::dev::rtl8168::probe(ecam)
+                .map(|d| Box::new(d) as Box<dyn Nic>)
+                .map_err(|e| alloc::format!("{:?}", e)),
+            // Anything the table names and this match does not is a row added
+            // without its arm. Said out loud rather than skipped, because the
+            // silent version is a driver that exists and is never tried.
+            _ => Err(alloc::string::String::from("no probe wired to this name")),
+        };
+        match built {
+            Ok(nic) => {
+                driver = Some((nic, name));
+                break;
+            }
+            Err(why) => refused.push((name, why)),
+        }
+    }
+
+    // USB last, and only when no PCI card answered. Bringing up the xHCI
+    // controller resets it, so a machine with a working wired card should not
+    // have its USB bus reset during boot for nothing -- and `usb` on the shell
+    // resets it again, which would take the interface out from under this
+    // driver.
+    if driver.is_none() {
+        match crate::dev::xhci::probe_net(ecam) {
+            Ok(nic) => driver = Some((Box::new(nic), "usb-ecm")),
+            Err(usb_err) => refused.push(("usb-ecm", alloc::format!("{}", usb_err))),
+        }
+    }
+
+    if driver.is_none() {
+        kprintln!("  eth0   no supported NIC");
+        for (name, why) in &refused {
+            kprintln!("         {:<9} {}", name, why);
+        }
+        // The registry knows about parts nothing here drives, and this is the
+        // moment somebody wants to hear it: "no NIC" beside "there is a
+        // Broadcom in this machine and it wants a firmware blob" is a very
+        // different message from "no NIC" alone.
+        for (node, gap) in crate::dev::registry::gaps() {
+            if matches!(
+                node.entry.map(|e| e.role),
+                Some(crate::dev::registry::Role::Ethernet)
+                    | Some(crate::dev::registry::Role::Wireless)
+            ) {
+                kprintln!("         {} -- {}", node.what(), gap);
+            }
+        }
+    }
 
     match driver {
         None => {}
@@ -768,14 +818,32 @@ pub fn report_hardware(heading: bool) {
         kprintln!("  USB is listed only after an enumeration ('usb' to run one)");
     }
     for h in &hw {
-        match h.driver {
-            Some(d) => {
+        // Three states and three colours, because there are three: driven,
+        // driven as far as it goes, and named with no driver at all. Green for
+        // a part that is carrying traffic and yellow for everything else --
+        // the middle case used to print green, which said the dongle worked.
+        match (h.driver, h.gap) {
+            (Some(d), None) => {
                 console::set_color(LTGREEN);
                 kprintln!("  {}  {:04x}:{:04x}  {}  -- {}", h.bus, h.vendor, h.device, h.what, d);
             }
-            None => {
+            (Some(d), Some(why)) => {
                 console::set_color(YELLOW);
-                kprintln!("  {}  {:04x}:{:04x}  {}  -- no driver", h.bus, h.vendor, h.device, h.what);
+                kprintln!(
+                    "  {}  {:04x}:{:04x}  {}  -- {}, {}",
+                    h.bus, h.vendor, h.device, h.what, d, why
+                );
+            }
+            (None, why) => {
+                console::set_color(YELLOW);
+                kprintln!(
+                    "  {}  {:04x}:{:04x}  {}  -- {}",
+                    h.bus,
+                    h.vendor,
+                    h.device,
+                    h.what,
+                    why.unwrap_or("no driver")
+                );
             }
         }
         console::set_color(LTGRAY);

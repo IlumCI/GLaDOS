@@ -60,9 +60,9 @@ use core::ptr::read_volatile;
 /// specifically. The earlier interfaces (0x00 UHCI, 0x10 OHCI, 0x20 EHCI) are
 /// different controllers entirely and are not driven here -- on this laptop
 /// everything is routed through xHCI anyway, which is what USB 3 requires.
-const CLASS_SERIAL_BUS: u8 = 0x0C;
-const SUBCLASS_USB: u8 = 0x03;
-const PROGIF_XHCI: u8 = 0x30;
+// Class 0c, subclass 03, programming interface 30 is xHCI, and that triple
+// now lives as a row in `dev::registry` rather than as three constants beside
+// a private bus sweep.
 
 /// Capability register offsets, from the base of the MMIO block.
 const CAPLENGTH: u64 = 0x00;
@@ -111,17 +111,7 @@ pub enum InitError {
 
 /// Find the first xHCI controller and read what it says about itself.
 pub fn probe(ecam: u64) -> Result<Caps, InitError> {
-    let mut found: Option<pci::Device> = None;
-    pci::scan(ecam, 255, |d| {
-        if d.class == CLASS_SERIAL_BUS
-            && d.subclass == SUBCLASS_USB
-            && d.prog_if == PROGIF_XHCI
-            && found.is_none()
-        {
-            found = Some(d);
-        }
-    });
-    let dev = found.ok_or(InitError::NotFound)?;
+    let dev = super::registry::claimed_by(ecam, "xhci").ok_or(InitError::NotFound)?;
 
     let bar = pci::bar(ecam, &dev, 0).ok_or(InitError::NoBar)?;
     if bar == 0 {
@@ -228,6 +218,27 @@ fn usb_note(vid: u16, pid: u16) {
     }
 }
 
+/// Tell the device registry about an enumerated USB device.
+///
+/// The class triple comes from an *interface* descriptor rather than from the
+/// device one, and enumeration finishes before any configuration is read -- so
+/// the first call for a device passes zeros, which is exactly what a device
+/// that defers to its interfaces reports and which deliberately matches no
+/// class rule. Whoever parses a configuration afterwards calls again with what
+/// it found, and the registry replaces the entry for that port and slot.
+///
+/// This is the whole of USB's side of the registry, and it is *pushed* rather
+/// than swept for a reason with teeth: enumerating the bus resets the
+/// controller and drops whatever link is on it. A registry that went and
+/// looked would take the network down to find out what the network is.
+pub fn note_device(dev: &Device, class: (u8, u8, u8)) {
+    crate::dev::registry::note_usb(
+        dev.port,
+        dev.slot,
+        crate::dev::registry::Ident::of_usb(dev.vid, dev.pid, class.0, class.1, class.2),
+    );
+}
+
 /// What `usb` prints.
 pub fn report(ecam: u64) {
     use crate::gfx::console::{self, LTGRAY, LTGREEN, LTRED, WHITE, YELLOW};
@@ -327,6 +338,7 @@ pub fn report(ecam: u64) {
                 // A vendor-specific interface has no class code to key off, so
                 // the id list is the whole of the detection.
                 usb_note(dev.vid, dev.pid);
+                note_device(&dev, (0, 0, 0));
                 if let Some(name) = super::rtl8188eu::identify(dev.vid, dev.pid) {
                     kprintln!("    {} -- wireless", name);
                     // One register read is the whole point of getting this far:
@@ -1576,6 +1588,7 @@ pub fn probe_net(ecam: u64) -> Result<UsbNet, &'static str> {
         // This walk already visits every attached device, so noting the
         // wireless ones costs a comparison and saves a second bus reset.
         usb_note(dev.vid, dev.pid);
+        note_device(&dev, (0, 0, 0));
         let mut kept = false;
         for i in 0..dev.num_configs {
             let Some(Ok((buf, total))) = with_ctl(|c| c.config_descriptor(&mut dev, i)) else {
@@ -1605,6 +1618,10 @@ pub fn probe_net(ecam: u64) -> Result<UsbNet, &'static str> {
                 }
             }
             with_ctl(|c2| c2.configure_bulk(&mut dev, ep_in, ep_out)).unwrap_or(Err("gone"))?;
+            // CDC 0x02, ECM subclass 0x06. Said now rather than at enumeration
+            // because this is the first moment anything has read a descriptor
+            // that says so.
+            note_device(&dev, (0x02, 0x06, 0x00));
             let (vid, pid) = (dev.vid, dev.pid);
             claim_port(dev.port);
             let nic = UsbNet::new(dev, mac).ok_or("out of memory")?;

@@ -3494,6 +3494,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             kprintln!("machine");
             console::set_color(WHITE);
             kprintln!("  mem uptime tasks cpu acpi pci video date reboot shutdown");
+            kprintln!("  devices       every device, what it is, and what drives it");
             kprintln!("  fault         deliberately dereference null");
             kprintln!("  clear refresh echo <text>");
             kprintln!("  log [all|save]  everything printed since power-on; the console keeps one screen");
@@ -3737,6 +3738,24 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
         "abstract" => abstract_cmd(rest),
         "study" => study_cmd(rest),
         "work" => work_cmd(rest),
+        // `pci` lists what is on the bus. This says what each thing *is* and
+        // what would drive it, which is the question somebody actually has --
+        // and it covers USB, which `pci` structurally cannot.
+        "devices" => {
+            console::set_color(YELLOW);
+            kprintln!("[devices]");
+            console::set_color(WHITE);
+            match acpi.as_ref().and_then(|a| a.mcfg) {
+                Some(ecam) => {
+                    // Re-swept rather than reported from boot: config-space
+                    // reads have no side effects, and a stale inventory is
+                    // exactly the thing this command exists to replace.
+                    crate::dev::registry::scan_pci(ecam);
+                }
+                None => kprintln!("  no MCFG, so nothing has swept PCI"),
+            }
+            crate::dev::registry::report();
+        }
         "pci" => match acpi.as_ref().and_then(|a| a.mcfg) {
             Some(ecam) => {
                 console::set_color(YELLOW);

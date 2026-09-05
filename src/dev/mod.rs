@@ -7,6 +7,7 @@ pub mod kbd;
 pub mod lapic;
 pub mod nvme;
 pub mod pci;
+pub mod registry;
 pub mod pic;
 pub mod rtc;
 pub mod mouse;

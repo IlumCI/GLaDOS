@@ -520,14 +520,11 @@ pub enum InitError {
 
 /// Find and bring up the first NVMe controller.
 pub fn init(ecam: u64) -> Result<(), InitError> {
-    // Class 01h subclass 08h: NVM Express.
-    let mut found: Option<pci::Device> = None;
-    pci::scan(ecam, 255, |d| {
-        if d.class == 0x01 && d.subclass == 0x08 && found.is_none() {
-            found = Some(d);
-        }
-    });
-    let dev = found.ok_or(InitError::NoController)?;
+    // Class 01h subclass 08h prog-if 02h: NVM Express. Matched by programming
+    // interface rather than by id, which is why an SSD nobody here has heard
+    // of still works -- and the reason the registry keeps three kinds of rule
+    // rather than one.
+    let dev = super::registry::claimed_by(ecam, "nvme").ok_or(InitError::NoController)?;
 
     let bar = pci::bar(ecam, &dev, 0).ok_or(InitError::NoBar)?;
     if bar == 0 {

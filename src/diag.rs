@@ -215,6 +215,11 @@ pub const SUITES: &[Suite] = &[
         run: paging_selftest,
     },
     Suite {
+        name: "devices",
+        about: "the driver table: which rule claims which device, and which claims none",
+        run: devices_selftest,
+    },
+    Suite {
         name: "wifi",
         about: "the half of the wireless bring-up that can be checked without a radio",
         run: wifi_selftest,
@@ -297,6 +302,21 @@ fn gdt_selftest() -> bool {
 /// subtraction and the refusals, which are the same everywhere.
 /// The efuse layout, the packet-buffer arithmetic, the firmware header and the
 /// channel table. Not the register writes, which no machine here can answer.
+fn devices_selftest() -> bool {
+    use crate::kprintln;
+    let mut ok = true;
+    let mut n = 0usize;
+    for (what, good) in crate::dev::registry::checks() {
+        n += 1;
+        if !good {
+            kprintln!("    FAIL: {}", what);
+            ok = false;
+        }
+    }
+    kprintln!("    {} claim(s) over {} row(s)", n, crate::dev::registry::TABLE.len());
+    ok
+}
+
 fn wifi_selftest() -> bool {
     use crate::kprintln;
     let mut ok = true;
@@ -389,7 +409,7 @@ fn linux_selftest() -> bool {
 /// says it exists to prevent. A `static` cannot be read in a const context, so
 /// the array cannot be measured directly; naming its length is the next best
 /// thing and it is now the only place the number appears.
-const SLOTS: usize = 39;
+const SLOTS: usize = 40;
 
 /// One slot per suite. Indexed by position in `SUITES`, which is a constant,
 /// so the table cannot get out of step with the list.

@@ -52,59 +52,23 @@ pub enum Probe {
     },
 }
 
-/// Name the vendor, and say what is known about the driver situation.
-///
-/// The strings are chosen to be useful rather than decorative: whether a
-/// driver is plausible depends almost entirely on whether the part needs
-/// signed firmware.
-fn describe(vendor: u16, device: u16) -> &'static str {
-    match vendor {
-        // Intel wireless is the likeliest thing in a 2022 MSI laptop, and the
-        // hardest case: everything from Wireless-AC onward needs a signed blob.
-        0x8086 => match device {
-            // Discrete M.2 cards on the PCIe bus.
-            0x2723 => "Intel Wi-Fi 6 AX200 (discrete)",
-            // CNVi: the MAC and baseband live in the PCH and the M.2 module
-            // carries only the radio. Confirmed present on the GF63 as
-            // 8086:51f0 at 00:14.3. Worth calling out rather than filing under
-            // "Intel wireless": a CNVi part is not a self-contained NIC, so
-            // there is no card to drive on its own -- the driver talks to the
-            // chipset over an interface Intel does not document, and the
-            // firmware blob is still required on top of that.
-            0x51f0 | 0x54f0 => "Intel Wi-Fi 6E, CNVi in the PCH (Alder Lake-P)",
-            0x02f0 | 0x4df0 | 0xa0f0 => "Intel Wi-Fi 6 AX201, CNVi in the PCH",
-            _ => "Intel wireless (firmware blob required)",
-        },
-        0x10ec => "Realtek wireless",
-        0x14e4 => "Broadcom wireless",
-        0x168c => "Qualcomm Atheros wireless",
-        0x17cb => "Qualcomm wireless",
-        0x1814 => "Ralink/MediaTek wireless",
-        0x14c3 => "MediaTek wireless",
-        _ => "unrecognised wireless controller",
-    }
-}
-
 pub fn probe(ecam: u64) -> Probe {
-    let mut found: Option<(u16, u16)> = None;
-    // Every other caller walks all 255 buses, and this one must too. A
-    // wireless card sits behind a PCIe root port, so its bus number is
-    // assigned by the firmware and is routinely well above 8 on a laptop --
-    // stopping early would report "no wireless controller" on a machine that
-    // has one, which is the single question this module exists to answer.
-    pci::scan(ecam, 255, |d| {
-        if d.class == CLASS_NETWORK && d.subclass == SUBCLASS_OTHER && found.is_none() {
-            found = Some((d.vendor, d.device));
-        }
-    });
-    match found {
-        None => Probe::None,
-        Some((vendor, device)) => Probe::Unsupported {
-            vendor,
-            device,
-            what: describe(vendor, device),
-        },
+    use crate::dev::registry::{self, Role};
+    if !registry::scanned() {
+        registry::scan_pci(ecam);
     }
+    // The first wireless part the registry knows about. It used to be the
+    // first PCI function of class 02:80, with a `describe` beside it holding a
+    // second copy of the same vendor table -- which is how a machine ends up
+    // with two files that disagree about what is fitted.
+    for n in registry::nodes() {
+        let Some(e) = n.entry else { continue };
+        if e.role != Role::Wireless {
+            continue;
+        }
+        return Probe::Unsupported { vendor: n.id.vendor, device: n.id.device, what: e.what };
+    }
+    Probe::None
 }
 
 /// Every piece of networking hardware on the machine, and what drives it.
@@ -130,6 +94,12 @@ pub struct Hardware {
     /// the honest answer for hardware we can see and cannot use, which is most
     /// of the wireless in this machine.
     pub driver: Option<&'static str>,
+    /// Why there is no driver, or what the driver there is cannot do yet.
+    ///
+    /// A driver name alone was not enough once the registry started telling
+    /// the two apart: `rtl8188eu` claims the dongle and cannot carry a frame,
+    /// so a row showing a driver and nothing else reads as a part that works.
+    pub gap: Option<&'static str>,
 }
 
 /// Ethernet parts this tree can actually drive, by id.
@@ -160,56 +130,31 @@ fn describe_ethernet(vendor: u16, device: u16) -> &'static str {
 
 /// Walk both buses and describe everything that carries packets.
 pub fn hardware() -> alloc::vec::Vec<Hardware> {
+    use crate::dev::registry::{self, Role, Support};
     let mut out = alloc::vec::Vec::new();
-    if let Some(ecam) = crate::net::ecam() {
-        pci::scan(ecam, 255, |d| {
-            if d.class != CLASS_NETWORK {
-                return;
-            }
-            let (bus, what, driver) = match d.subclass {
-                0x00 => (
-                    "PCI",
-                    alloc::string::String::from(describe_ethernet(d.vendor, d.device)),
-                    ethernet_driver(d.vendor, d.device),
-                ),
-                SUBCLASS_OTHER => (
-                    "PCI",
-                    alloc::string::String::from(describe(d.vendor, d.device)),
-                    None,
-                ),
-                // Token ring, FDDI, ATM and friends. Named rather than hidden:
-                // an unrecognised network device is still a fact about the
-                // machine, and hiding it is how a report starts lying by
-                // omission.
-                _ => (
-                    "PCI",
-                    alloc::format!("network controller, subclass {:02x}", d.subclass),
-                    None,
-                ),
-            };
-            out.push(Hardware { vendor: d.vendor, device: d.device, bus, what, driver });
-        });
-    }
-    // USB, from what the last enumeration recorded. Not enumerated here: doing
-    // so resets the controller and drops whatever link is on it.
-    if let Some((vendor, device)) = crate::dev::xhci::usb_ethernet() {
+    for n in registry::nodes() {
+        let role = n.entry.map(|e| e.role);
+        // Network-ish by role where a row claims it, and by PCI class where
+        // none does. The second half is what stops a card nobody has heard of
+        // dropping out of the report entirely: token ring, FDDI and whatever
+        // else class 0x02 covers are still facts about the machine, and hiding
+        // one is how a report starts lying by omission.
+        let networky = matches!(role, Some(Role::Ethernet) | Some(Role::Wireless))
+            || (n.id.bus == registry::Bus::Pci && n.id.class == CLASS_NETWORK);
+        if !networky {
+            continue;
+        }
         out.push(Hardware {
-            vendor,
-            device,
-            bus: "USB",
-            what: alloc::string::String::from("CDC ethernet adapter"),
-            driver: Some("usb-ecm"),
-        });
-    }
-    if let Some(Some((vendor, device, what))) = crate::dev::xhci::usb_wireless() {
-        out.push(Hardware {
-            vendor,
-            device,
-            bus: "USB",
-            what: alloc::string::String::from(what),
-            // Recognised, brought up, and unable to carry a frame. Naming the
-            // driver here would claim more than is true.
-            driver: None,
+            vendor: n.id.vendor,
+            device: n.id.device,
+            bus: n.id.bus.name(),
+            what: n.what(),
+            driver: n.entry.and_then(|e| e.support.driver()),
+            gap: n.entry.and_then(|e| match &e.support {
+                Support::Driver(_) => None,
+                Support::Partial(_, why) => Some(*why),
+                Support::Known(why) => Some(*why),
+            }),
         });
     }
     out

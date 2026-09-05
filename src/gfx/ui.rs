@@ -976,9 +976,13 @@ fn hardware_rows() -> Vec<Widget> {
     }
     let mut out = Vec::new();
     for h in &hw {
-        let (value, tone) = match h.driver {
-            Some(d) => (alloc::format!("{}  ({})", h.what, d), Tone::Ok),
-            None => (alloc::format!("{}  no driver", h.what), Tone::Warn),
+        let (value, tone) = match (h.driver, h.gap) {
+            (Some(d), None) => (alloc::format!("{}  ({})", h.what, d), Tone::Ok),
+            (Some(d), Some(why)) => (alloc::format!("{}  ({}, {})", h.what, d, why), Tone::Warn),
+            (None, why) => (
+                alloc::format!("{}  {}", h.what, why.unwrap_or("no driver")),
+                Tone::Warn,
+            ),
         };
         out.push(Widget::Status {
             name: alloc::format!("{} {:04x}:{:04x}", h.bus, h.vendor, h.device),

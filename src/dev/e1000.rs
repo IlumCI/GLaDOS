@@ -209,17 +209,12 @@ pub enum InitError {
     NoMac,
 }
 
-/// Intel parts this driver is known to match. QEMU's default is 100E.
-const SUPPORTED: [u16; 4] = [0x100E, 0x1533, 0x10D3, 0x153A];
-
 pub fn probe(ecam: u64) -> Result<E1000, InitError> {
-    let mut found: Option<pci::Device> = None;
-    pci::scan(ecam, 255, |d| {
-        if d.vendor == 0x8086 && SUPPORTED.contains(&d.device) && found.is_none() {
-            found = Some(d);
-        }
-    });
-    let dev = found.ok_or(InitError::NotFound)?;
+    // The id list moved to `dev::registry`, which is the one place that knows
+    // what any device on the bus is. It used to live here as a private array
+    // beside a private sweep, which is fine for one driver and is how a
+    // machine ends up with no answer to "what is fitted and what drives it".
+    let dev = super::registry::claimed_by(ecam, "e1000").ok_or(InitError::NotFound)?;
 
     let bar = pci::bar(ecam, &dev, 0).ok_or(InitError::NoBar)?;
     if bar == 0 {

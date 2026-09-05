@@ -35,11 +35,10 @@ use super::pci;
 use crate::net::iface::{Kind, Nic};
 use alloc::vec::Vec;
 
-const VENDOR_REALTEK: u16 = 0x10EC;
-/// The RTL8168/8111 family. 0x8161 and 0x8136 (RTL810x Fast Ethernet) use the
-/// same register layout, so they are accepted too -- a machine that has one
-/// instead is better served by a driver that tries than by one that refuses.
-const DEVICES: [u16; 4] = [0x8168, 0x8161, 0x8167, 0x8136];
+// The id list moved to `dev::registry` as `RTL8168_IDS`, and with it the note
+// that 0x8161 and 0x8136 use the same register layout so this driver takes
+// them too. It is not duplicated here: two lists agreeing by hand is how a
+// machine ends up being told it has a driver it does not.
 
 // --- registers, offsets from the MMIO base -------------------------------
 
@@ -260,13 +259,7 @@ impl Nic for Rtl8168 {
 }
 
 pub fn probe(ecam: u64) -> Result<Rtl8168, InitError> {
-    let mut found = None;
-    pci::scan(ecam, 255, |d| {
-        if d.vendor == VENDOR_REALTEK && DEVICES.contains(&d.device) && found.is_none() {
-            found = Some(d);
-        }
-    });
-    let dev = found.ok_or(InitError::NotFound)?;
+    let dev = super::registry::claimed_by(ecam, "rtl8168").ok_or(InitError::NotFound)?;
 
     // BAR2 is the memory window on every part in this family. BAR0 is a
     // legacy I/O port range and BAR1 is its upper half; using either would

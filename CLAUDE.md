@@ -1862,7 +1862,7 @@ There is no `cargo test`. This is a `no_std` UEFI binary with no host test
 runner, so **verification is the boot selftests plus driving QEMU.**
 
 At boot the system runs **twenty-eight selftest sections**, and `diag` offers
-**thirty-seven named suites** on demand, most of them the same checks (the `aiksi` section covers the capability gate by name and never by
+**forty named suites** on demand, most of them the same checks (the `aiksi` section covers the capability gate by name and never by
 calling -- half that table pokes memory, drives I/O ports or paints over the
 screen, and a suite that called every row to prove it exists would be
 scribbling on the machine to do it), printing `ok` or `FAIL` per line: heap, timer, clock, the namespace's
@@ -3033,12 +3033,102 @@ trial the initiative loop runs at night is bounded to a small budget: an
 unbounded one would leave the shell answering "another task holds it" for the
 length of it.
 
+### Which driver claims which device
+
+`src/dev/registry.rs`. Every driver used to answer that for itself: sweep all
+256 PCI buses, compare against a private array of ids, take the first hit.
+Nine drivers, nine sweeps, nine private lists, and **no single place that could
+say what the machine contains**. That is survivable on one laptop and stops
+being survivable the moment the answer has to be right on a machine nobody here
+has ever booted.
+
+**The matching rule is data.** A row is a bus, a rule, a role, a name and a
+support level, and adding hardware support is adding a row. Three kinds of
+rule, because hardware identifies itself three ways and which one applies is a
+property of the part rather than a choice: NVMe reports a programming interface
+every conforming controller reports, so one row drives every SSD in the world;
+an RTL8188EU dongle reports a vendor-specific interface and no useful class at
+all, so the id list *is* the detection. Getting that backwards is how a driver
+misses hardware it could drive, or claims hardware it cannot.
+
+**Specificity is ranked rather than resolved by table order.** An e1000
+satisfies both `Ids(0x8086, ...)` and `Class(0x02, 0x00)` and the specific one
+has to win. Order works right up until somebody inserts a row in the wrong
+place and a generic "ethernet controller, unrecognised" silently shadows the
+driver that would have worked, so a row may be added anywhere.
+
+**Three levels of support, because there really are three.** `Driver` works.
+`Known` means recognised with nothing behind it, and carries the *reason* --
+"needs a signed blob" and "nobody has written it yet" are completely different
+futures, and the reason is the most valuable field in the file. `Partial` is
+the middle this tree keeps landing in: the RTL8188EU dongle is identified, its
+registers are readable, its firmware parses, and it cannot carry a frame.
+Filing that under `Driver` is a lie an operator only discovers when the network
+does not work; filing it under `Known` throws the work away.
+
+    glados> devices
+      8 device(s)
+      USB usb5.1    0525:a4a2 driven   usb-ecm    CDC ethernet adapter
+      PCI 00:00.0   8086:29c0 known    -          host bridge
+      PCI 00:01.0   1234:1111 partial  gfx        VGA-compatible display controller
+      PCI 00:02.0   1b36:0010 driven   nvme       NVMe controller
+      PCI 00:03.0   1b36:000d driven   xhci       xHCI USB 3 controller
+      PCI 00:1f.2   8086:2922 known    -          SATA controller in AHCI mode
+      what is missing:
+        SATA controller in AHCI mode  no AHCI driver yet, and this is why some machines have no disk
+
+That last line is the point of the whole file. It is the largest hole in the
+table, it is entirely tractable -- AHCI is published and needs no firmware --
+and until the registry existed nothing said it: a laptop with a SATA SSD and no
+NVMe reaches a shell with no store, no model and nowhere to save, and the boot
+log gave no hint why.
+
+**USB is pushed, never swept.** Enumerating the bus resets the controller and
+drops whatever link is on it, so a registry that went and looked would take the
+network down to find out what the network is. `xhci::note_device` is called by
+whoever was already enumerating, with zeros for the class triple -- which is
+exactly what a device deferring to its interfaces reports, and which
+deliberately matches no class rule -- and again with the real triple once a
+configuration has been parsed.
+
+**`net::init` no longer carries a preference list.** It was a nested match:
+e1000, else rtl8168, else USB. That is a preference written for one laptop; on
+a machine carrying only the Realtek it paid for a full Intel sweep to learn
+nothing, and on a machine carrying neither it reported "no supported NIC"
+without ever saying what *was* there. `drivers_for(Role::Ethernet)` answers in
+bus order, every refusal is listed by name, and the ethernet and wireless gaps
+print underneath.
+
+`wifi.rs` kept a second copy of both id lists under a comment arguing the
+duplication was deliberate. The objection it made -- that a probe saying
+"supported" while the driver fails for another reason is worse than a short
+list -- is answered by `Partial`, and by the registry never claiming a device
+works, only that a row describes it. Both copies are gone and `hardware()`
+reads the registry.
+
+`diag devices` is 14 claims over 34 rows. Two of them are about the table
+rather than about any device, and they are the ones worth knowing: **every row
+is reachable** by some device, because a rule that cannot win against the rest
+of the table is documentation pretending to be code, and **no two rows of equal
+specificity overlap**. Everything is asserted against synthetic idents rather
+than against the real bus, for the reason `mem::fixed` gives about its own map:
+a claim about the machine underneath would pass here and fail on the next
+laptop, which is precisely the failure this module exists to stop.
+
+**What it deliberately does not do is bind.** `lookup` answers which row
+describes a device; whether that driver then initialises is the driver's own
+business and it can still fail for a dozen reasons a table cannot predict. The
+registry says "this is an e1000 and `e1000` claims it", never "the network
+works".
+
 ### Networking (`src/net/`)
 
 Interfaces live in `iface`: `lo`, `eth0`, `wlan0`. A driver implements
-`iface::Nic`; `net::init` tries e1000 (QEMU) then rtl8168 (the GF63's real
-card, `10ec:8168`). Routing picks an interface by destination, and every layer
-above asks for a source address instead of assuming one exists.
+`iface::Nic`; `net::init` asks `dev::registry` which drivers the fitted
+hardware wants and tries those, in bus order, rather than the hardcoded
+e1000-then-rtl8168 chain it used to carry. Routing picks an interface by
+destination, and every layer above asks for a source address instead of
+assuming one exists.
 
 **`poll` never dispatches into a transport state machine. It queues.** Sending
 calls `send_ipv4` then `resolve`, and `resolve` calls `poll` while waiting for
@@ -3051,8 +3141,8 @@ or inside a blocking call. There is no interrupt-driven receive.
 
 The wireless card is CNVi, so the MAC is in the PCH and the M.2 module is a
 radio. `net/wifi.rs` identifies hardware and refuses to pretend; `hardware()`
-lists every network part on PCI and USB with what drives each, and boot prints
-it.
+projects `dev::registry` down to the network parts, so the naming lives in one
+table rather than two, and boot prints it.
 
 For the USB dongle, everything above the transport is finished and checked at
 boot: `net/ieee80211.rs` builds probe requests and parses beacons,
