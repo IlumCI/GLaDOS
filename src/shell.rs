@@ -3595,6 +3595,19 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             let (used, total) = mem::heap::HEAP.stats();
             kprintln!("  heap  {} B used / {} B total", used, total);
             kprintln!("  free  {} KiB", (total - used) / 1024);
+            // Where a fixed-address image may be placed, which the heap figures
+            // above say nothing about: they describe one contiguous allocation
+            // the kernel already owns, and this is everything it does not.
+            // Printed here rather than behind its own verb because the question
+            // "will this binary load" is a memory question and nobody would
+            // think to look anywhere else.
+            let (free, run) = mem::fixed::totals();
+            kprintln!(
+                "  placeable  {} MiB, largest run {} MiB",
+                free / 1024 / 1024,
+                run / 1024 / 1024
+            );
+            mem::fixed::report();
         }
         "uptime" => {
             let t = lapic::ticks();

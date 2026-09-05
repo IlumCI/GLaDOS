@@ -215,6 +215,11 @@ pub const SUITES: &[Suite] = &[
         run: paging_selftest,
     },
     Suite {
+        name: "place",
+        about: "which physical ranges a fixed-address image may be placed at",
+        run: place_selftest,
+    },
+    Suite {
         name: "gdt",
         about: "the ring-3 descriptors, and the order sysret dictates",
         run: gdt_selftest,
@@ -273,6 +278,28 @@ fn gdt_selftest() -> bool {
 /// permission nobody has watched the processor refuse is a permission written
 /// in a comment. Everything else about page tables can be asserted by reading
 /// them back; enforcement cannot.
+/// The placement table's arithmetic, against a synthetic map.
+///
+/// Synthetic on purpose. The real table is this machine's firmware map less
+/// what this boot took, so a claim written against it would assert something
+/// about QEMU and fail on the GF63 for a correct reason -- and the map is
+/// exactly the thing that cannot be reproduced here. What is checked is the
+/// subtraction and the refusals, which are the same everywhere.
+fn place_selftest() -> bool {
+    use crate::kprintln;
+    let mut ok = true;
+    let mut n = 0usize;
+    for (what, good) in crate::mem::fixed::checks() {
+        n += 1;
+        if !good {
+            kprintln!("    FAIL: {}", what);
+            ok = false;
+        }
+    }
+    kprintln!("    {} claim(s)", n);
+    ok
+}
+
 fn paging_selftest() -> bool {
     use crate::kprintln;
     let mut ok = true;
@@ -320,7 +347,7 @@ fn linux_selftest() -> bool {
 /// says it exists to prevent. A `static` cannot be read in a const context, so
 /// the array cannot be measured directly; naming its length is the next best
 /// thing and it is now the only place the number appears.
-const SLOTS: usize = 36;
+const SLOTS: usize = 37;
 
 /// One slot per suite. Indexed by position in `SUITES`, which is a constant,
 /// so the table cannot get out of step with the list.

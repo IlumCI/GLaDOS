@@ -74,6 +74,17 @@ pub const SYS_IOCTL: u64 = 16;
 pub const SYS_GETPID: u64 = 39;
 pub const SYS_GETDENTS64: u64 = 217;
 pub const SYS_SET_TID_ADDRESS: u64 = 218;
+pub const SYS_DUP: u64 = 32;
+pub const SYS_WRITEV: u64 = 20;
+pub const SYS_UNAME: u64 = 63;
+pub const SYS_FCNTL: u64 = 72;
+pub const SYS_GETTIMEOFDAY: u64 = 96;
+pub const SYS_CLOCK_GETTIME: u64 = 228;
+pub const SYS_DUP2: u64 = 33;
+pub const SYS_GETUID: u64 = 102;
+pub const SYS_GETGID: u64 = 104;
+pub const SYS_GETEUID: u64 = 107;
+pub const SYS_GETEGID: u64 = 108;
 pub const SYS_OPENAT: u64 = 257;
 pub const SYS_NEWFSTATAT: u64 = 262;
 pub const SYS_BRK: u64 = 12;
@@ -719,6 +730,243 @@ fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u64 {
     .unwrap_or(EBADF)
 }
 
+/// Duplicate a descriptor onto the lowest free number, or onto a given one.
+///
+/// **The standard three duplicate and a file does not, and that is a real
+/// limitation rather than laziness.** On Linux a duplicated descriptor shares
+/// one *open file description*, so the two numbers share a cursor: reading
+/// through one advances the other. Here the cursor lives inside the `Fd`, so
+/// copying it would give two independent cursors -- a program doing
+/// `dup2(fd, 0)` and then reading both would silently read everything twice.
+///
+/// Sharing needs the body behind a refcount, which is a change to the shape of
+/// the table rather than to this call. Until then a stream duplicates, because
+/// a stream has no cursor to disagree about, and that is exactly what the shell
+/// idiom `dup2(1, 2)` needs.
+/// Gather-write: one call, a vector of buffers.
+///
+/// **This is why `ls` printed nothing.** It ran to completion, opened the
+/// directory, walked it with `getdents64` and `lstat`, and exited 0 -- and
+/// produced no output at all, because everything it had to say went through a
+/// call that answered `-ENOSYS`. A program that works perfectly and is silent
+/// is the worst shape a missing syscall can take, and it is exactly the shape
+/// the `-ENOSYS` trace exists to make visible.
+///
+/// Every pointer is checked twice over: once for the vector itself, and once
+/// per buffer, because the vector is guest memory holding guest pointers and
+/// neither is trustworthy.
+fn sys_writev(fd: u64, iov: u64, cnt: u64) -> u64 {
+    // Linux's own bound. Refused rather than clamped: a caller that asked for
+    // more than this has a bug, and writing the first thousand of its buffers
+    // would hide it behind a short count.
+    if cnt > 1024 {
+        return EINVAL;
+    }
+    if cnt == 0 {
+        return 0;
+    }
+    let Some(bytes) = (cnt as usize).checked_mul(16) else { return EINVAL };
+    if !reachable(iov, bytes, false) {
+        return EFAULT;
+    }
+    let mut total: u64 = 0;
+    for i in 0..cnt as usize {
+        let at = iov + (i * 16) as u64;
+        let (base, len) = unsafe {
+            (
+                core::ptr::read_volatile(at as *const u64),
+                core::ptr::read_volatile((at + 8) as *const u64),
+            )
+        };
+        if len == 0 {
+            continue;
+        }
+        let n = sys_write(fd, base, len as usize);
+        // An error on the first buffer is the call's error; after that, Linux
+        // reports the short count, because those bytes really were written and
+        // saying otherwise would have the caller send them twice.
+        if (n as i64) < 0 {
+            return if total == 0 { n } else { total };
+        }
+        total += n;
+        if n < len {
+            break;
+        }
+    }
+    total
+}
+
+/// `struct utsname`: six fields of 65 bytes, NUL-padded.
+///
+/// **It says GLaDOS, and a program that gates on "Linux" will now find out.**
+/// Reporting the kernel this is not would buy compatibility with anything
+/// checking the string, and this tree does not do that anywhere else -- the
+/// wireless driver refuses to pretend it can associate, and the battery code
+/// refuses to invent a reading. The release is the real build version, so a
+/// bug report carries something true.
+fn sys_uname(buf: u64) -> u64 {
+    const N: usize = 65;
+    if !reachable(buf, N * 6, true) {
+        return EFAULT;
+    }
+    let mut b = [0u8; N * 6];
+    let mut put = |i: usize, v: &str| {
+        let n = v.len().min(N - 1);
+        b[i * N..i * N + n].copy_from_slice(&v.as_bytes()[..n]);
+    };
+    put(0, "GLaDOS");
+    put(1, "glados");
+    put(2, crate::VERSION);
+    put(3, "one address space, no processes");
+    put(4, "x86_64");
+    put(5, "(none)");
+    unsafe { core::ptr::copy_nonoverlapping(b.as_ptr(), buf as *mut u8, N * 6) };
+    0
+}
+
+/// Seconds and a sub-second part, from whichever clock was asked for.
+///
+/// Two sources and they are not interchangeable. The RTC gives a wall clock in
+/// whole seconds and nothing finer; the timer tick gives 10 ms resolution and
+/// counts from boot. So `CLOCK_REALTIME` is the RTC and its nanoseconds are
+/// always zero, which is honest, and `CLOCK_MONOTONIC` is the tick, which
+/// actually moves. A caller timing something short with `REALTIME` will
+/// measure zero, and that is a property of the hardware rather than of this
+/// call.
+fn clock_pair(which: u64) -> Option<(u64, u64)> {
+    match which {
+        // CLOCK_REALTIME and its coarse twin.
+        0 | 5 => {
+            let dt = crate::dev::rtc::now()?;
+            Some((crate::dev::rtc::unix_seconds(&dt) as u64, 0))
+        }
+        // MONOTONIC, its coarse and raw twins, and the two process clocks --
+        // one guest, no threads, so process time and uptime are the same
+        // number and answering it is better than a program giving up.
+        1 | 2 | 3 | 4 | 6 | 7 => {
+            let t = crate::dev::lapic::ticks();
+            let hz = crate::TIMER_HZ as u64;
+            Some((t / hz, (t % hz) * (1_000_000_000 / hz)))
+        }
+        _ => None,
+    }
+}
+
+fn sys_clock_gettime(which: u64, at: u64) -> u64 {
+    let Some((sec, nsec)) = clock_pair(which) else { return EINVAL };
+    if !reachable(at, 16, true) {
+        return EFAULT;
+    }
+    unsafe {
+        core::ptr::write_volatile(at as *mut u64, sec);
+        core::ptr::write_volatile((at + 8) as *mut u64, nsec);
+    }
+    0
+}
+
+fn sys_gettimeofday(tv: u64, tz: u64) -> u64 {
+    // The timezone argument has been obsolete since 4.4BSD and glibc passes
+    // NULL. A caller that passes one gets it zeroed rather than refused, since
+    // refusing a field nobody means anything by would fail the whole call.
+    if tz != 0 {
+        if !reachable(tz, 8, true) {
+            return EFAULT;
+        }
+        unsafe { core::ptr::write_volatile(tz as *mut u64, 0) };
+    }
+    if tv == 0 {
+        return 0;
+    }
+    let Some((sec, nsec)) = clock_pair(0) else { return EINVAL };
+    if !reachable(tv, 16, true) {
+        return EFAULT;
+    }
+    unsafe {
+        core::ptr::write_volatile(tv as *mut u64, sec);
+        core::ptr::write_volatile((tv + 8) as *mut u64, nsec / 1000);
+    }
+    0
+}
+
+/// The handful of `fcntl` commands a program uses before it does anything.
+///
+/// `F_SETFD` accepts `FD_CLOEXEC` and stores nothing, and that is honest
+/// rather than lazy: close-on-exec is a promise about what survives an `exec`,
+/// and there is no `exec` here for anything to survive. The day there is, this
+/// has to start remembering, and it is written down here so that day finds it.
+fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> u64 {
+    let known = with_fds(|fds, _| matches!(fds.get(fd as usize), Some(Some(_)))).unwrap_or(false);
+    if !known {
+        return EBADF;
+    }
+    match cmd {
+        0 => sys_dup(fd, None).max_free_from(arg), // F_DUPFD
+        1 => 0,                                    // F_GETFD, nothing is close-on-exec
+        2 => 0,                                    // F_SETFD, accepted and not stored
+        3 => 0,                                    // F_GETFL, everything here is O_RDONLY
+        4 => 0,                                    // F_SETFL, no flag it could set applies
+        _ => EINVAL,
+    }
+}
+
+trait MinFd {
+    fn max_free_from(self, floor: u64) -> u64;
+}
+
+impl MinFd for u64 {
+    /// `F_DUPFD` promises the lowest free descriptor *at or above* a floor,
+    /// where `dup` promises the lowest free one. Rather than a second search,
+    /// the result of `dup` is moved up when it landed too low -- which costs
+    /// one extra descriptor briefly and cannot loop.
+    fn max_free_from(self, floor: u64) -> u64 {
+        if (self as i64) < 0 || self >= floor {
+            return self;
+        }
+        let moved = sys_dup(self, None);
+        sys_close(self);
+        moved
+    }
+}
+
+fn sys_dup(from: u64, to: Option<u64>) -> u64 {
+    with_fds(|fds, _| {
+        let copy = match fds.get(from as usize) {
+            Some(Some(super::fs::Fd::Stdin)) => super::fs::Fd::Stdin,
+            Some(Some(super::fs::Fd::Stdout)) => super::fs::Fd::Stdout,
+            Some(Some(super::fs::Fd::Stderr)) => super::fs::Fd::Stderr,
+            Some(Some(_)) => return ENOSYS,
+            _ => return EBADF,
+        };
+        let slot = match to {
+            // `dup2(n, n)` is a no-op that answers `n`, and it has to be
+            // checked before the close: the obvious order shuts the descriptor
+            // and then duplicates what is no longer there.
+            Some(n) if n == from => return n,
+            Some(n) => {
+                if n as usize >= MAX_FDS {
+                    return EBADF;
+                }
+                let n = n as usize;
+                if fds.len() <= n {
+                    fds.resize_with(n + 1, || None);
+                }
+                n
+            }
+            None => match fds.iter().position(|f| f.is_none()) {
+                Some(i) => i,
+                None if fds.len() < MAX_FDS => {
+                    fds.push(None);
+                    fds.len() - 1
+                }
+                None => return EMFILE,
+            },
+        };
+        fds[slot] = Some(copy);
+        slot as u64
+    })
+    .unwrap_or(EBADF)
+}
+
 fn sys_close(fd: u64) -> u64 {
     with_fds(|fds, _| match fds.get_mut(fd as usize) {
         Some(slot @ Some(_)) => {
@@ -1124,9 +1372,21 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         SYS_NEWFSTATAT => (sys_statat(f.rdi, f.rsi, f.rdx), true),
         SYS_GETDENTS64 => (sys_getdents64(f.rdi, f.rsi, f.rdx), true),
         SYS_IOCTL => (sys_ioctl(f.rdi, f.rsi, f.rdx), true),
+        SYS_WRITEV => (sys_writev(f.rdi, f.rsi, f.rdx), true),
+        SYS_UNAME => (sys_uname(f.rdi), true),
+        SYS_FCNTL => (sys_fcntl(f.rdi, f.rsi, f.rdx), true),
+        SYS_GETTIMEOFDAY => (sys_gettimeofday(f.rdi, f.rsi), true),
+        SYS_CLOCK_GETTIME => (sys_clock_gettime(f.rdi, f.rsi), true),
+        SYS_DUP => (sys_dup(f.rdi, None), true),
+        SYS_DUP2 => (sys_dup(f.rdi, Some(f.rsi)), true),
         // One process, and it is the guest. Reporting a pid at all is what
         // stops a runtime deciding it failed to start.
         SYS_GETPID | SYS_SET_TID_ADDRESS => (1, true),
+        // Root, and every id the same. There is no privilege boundary above a
+        // guest here to be anything else, which is the same fact `AT_SECURE`
+        // reports as zero and `stat` reports as uid 0 -- said once per place
+        // that asks rather than three different ways.
+        SYS_GETUID | SYS_GETGID | SYS_GETEUID | SYS_GETEGID => (0, true),
         SYS_BRK => (sys_brk(f.rdi), true),
         SYS_MMAP => (sys_mmap(f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9), true),
         SYS_MPROTECT => (sys_mprotect(f.rdi, f.rsi, f.rdx), true),
@@ -1167,11 +1427,21 @@ pub const OVERRAN: u64 = 1 << 34;
 /// binary with a bug in its startup loop would simply never give the shell
 /// back, and there is no key to press because the guest is what is running.
 ///
-/// Five seconds at 100 Hz. Long enough that no correct program here meets it,
-/// short enough that meeting it is an inconvenience rather than a reboot. It
-/// is a stage-1 number: a guest that legitimately computes for a minute needs
-/// this to be a policy rather than a constant, and there is no such guest yet.
-const DEADLINE_TICKS: u64 = 500;
+/// Thirty seconds at 100 Hz, and the number moved because a real program met
+/// it while doing nothing wrong.
+///
+/// It was five, on the reasoning that no correct program here would take that
+/// long -- true of every hand-written fixture and false of the first binary
+/// nobody here wrote. BusyBox printing its own applet list makes about seven
+/// hundred `write` calls of a word each, every one of them painting the
+/// console, and it was killed two thirds of the way through: `killed for
+/// running too long after 70 syscall(s)`. Nothing was wrong with the guest and
+/// nothing was wrong with the kernel. The harness was measuring the console.
+///
+/// Still a constant rather than a policy, and still a stage-1 number. A guest
+/// that legitimately computes for a minute needs `linux run` to take a limit,
+/// and thirty seconds only moves the point at which that becomes true.
+const DEADLINE_TICKS: u64 = 3000;
 
 static DEADLINE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
@@ -1797,6 +2067,17 @@ pub fn name_of(nr: u64) -> &'static str {
         SYS_LSEEK => "lseek",
         SYS_IOCTL => "ioctl",
         SYS_GETPID => "getpid",
+        SYS_DUP => "dup",
+        SYS_WRITEV => "writev",
+        SYS_UNAME => "uname",
+        SYS_FCNTL => "fcntl",
+        SYS_GETTIMEOFDAY => "gettimeofday",
+        SYS_CLOCK_GETTIME => "clock_gettime",
+        SYS_DUP2 => "dup2",
+        SYS_GETUID => "getuid",
+        SYS_GETGID => "getgid",
+        SYS_GETEUID => "geteuid",
+        SYS_GETEGID => "getegid",
         SYS_GETDENTS64 => "getdents64",
         SYS_SET_TID_ADDRESS => "set_tid_address",
         SYS_OPENAT => "openat",
