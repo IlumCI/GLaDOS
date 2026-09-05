@@ -4468,6 +4468,13 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                             let r = unsafe { linux::load::run(&g) };
                             let calls = linux::syscall::trace();
                             for c in &calls {
+                                if let Some(p) = c.path() {
+                                    kprintln!(
+                                        "  {:>3} {:<16} {} -> {}",
+                                        c.nr, linux::syscall::name_of(c.nr), p, c.ret as i64
+                                    );
+                                    continue;
+                                }
                                 kprintln!(
                                     "  {:>3} {:<16} {:#x} {:#x} {:#x} -> {} {}",
                                     c.nr,
@@ -4553,6 +4560,13 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     let calls = linux::syscall::trace();
                     kprintln!("  {} call(s) recorded", calls.len());
                     for c in &calls {
+                        if let Some(p) = c.path() {
+                            kprintln!(
+                                "  {:>3} {:<16} {} -> {}",
+                                c.nr, linux::syscall::name_of(c.nr), p, c.ret as i64
+                            );
+                            continue;
+                        }
                         kprintln!(
                             "  {:>3} {:<16} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} -> {}",
                             c.nr, linux::syscall::name_of(c.nr),

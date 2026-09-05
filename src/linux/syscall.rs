@@ -143,6 +143,9 @@ const EEXIST: u64 = (-17i64) as u64;
 const ERANGE: u64 = (-34i64) as u64;
 const ENOTEMPTY: u64 = (-39i64) as u64;
 const ENODEV: u64 = (-19i64) as u64;
+
+/// `AT_EMPTY_PATH`: operate on the descriptor rather than on a path under it.
+const AT_EMPTY_PATH: u64 = 0x1000;
 const EAFNOSUPPORT: u64 = (-97i64) as u64;
 const EPROTONOSUPPORT: u64 = (-93i64) as u64;
 const ENOTSOCK: u64 = (-88i64) as u64;
@@ -528,9 +531,30 @@ pub fn teardown() -> usize {
                 give_back(m.at, m.len, Some(m.from));
                 freed += 1;
             }
-            // The image, stack and break came from `Exec` allocations the
-            // `Guest` still owns and will drop, so they go back the same way.
-            for r in [sp.image, sp.stack, Region { at: sp.brk_start, len: (sp.brk_end - sp.brk_start) as usize }] {
+            // The image, stack, interpreter and break came from `Exec`
+            // allocations the `Guest` still owns and will drop, so the pages go
+            // back the same way -- but their *rights* do not, and nothing else
+            // puts them back.
+            //
+            // **The interpreter was missing from this list and it cost a
+            // halted machine.** `run` opens four regions and this restored
+            // three, so a real `ld.so` that mprotected its own RELRO read-only
+            // handed that page to the heap still read-only. The guest exited
+            // cleanly, `fat get` allocated, landed on it, and took a `#PF` at
+            // ring 0 with `CR0.WP` on -- in a shell command, with no guest
+            // running, several seconds after the thing that caused it. Fourth
+            // time this tree has made this mistake and the first time the two
+            // lists were different lengths, which is why the loop takes the
+            // whole set now rather than three of it.
+            for r in [
+                Some(sp.image),
+                sp.interp,
+                Some(sp.stack),
+                Some(Region { at: sp.brk_start, len: (sp.brk_end - sp.brk_start) as usize }),
+            ]
+            .into_iter()
+            .flatten()
+            {
                 crate::mem::paging::protect(r.at, r.len, crate::mem::paging::Perm::RWX);
             }
             crate::cpu::wrmsr(IA32_FS_BASE, sp.saved_fs);
@@ -570,6 +594,48 @@ pub struct Call {
     /// Whether this kernel actually answered, or recorded the question and
     /// returned `-ENOSYS`. Both are measurements and only one is a service.
     pub served: bool,
+    /// The path this call named, for the calls that name one.
+    ///
+    /// **Captured rather than pointed at, and that is the whole point.** The
+    /// trace recorded six numbers, which is enough while a guest is asking for
+    /// syscalls it may not get and useless the moment it is asking for
+    /// *files*: a real `ld.so` searching for a library makes a dozen
+    /// identical-looking `openat` calls that differ only in a string, and the
+    /// pointer is into guest memory that is freed before anybody reads the
+    /// trace. So the bytes are copied at the call.
+    ///
+    /// Sixty-four is chosen against the thing being measured rather than
+    /// against `PATH_MAX`: the longest path a library search actually tries is
+    /// about thirty-five characters, and a trace entry is not the place to
+    /// spend four kilobytes each.
+    pub path: [u8; PATH_SNIP],
+    pub path_len: u8,
+}
+
+pub const PATH_SNIP: usize = 64;
+
+impl Call {
+    /// The path it named, or nothing.
+    pub fn path(&self) -> Option<&str> {
+        if self.path_len == 0 {
+            return None;
+        }
+        core::str::from_utf8(&self.path[..self.path_len as usize]).ok()
+    }
+}
+
+/// Which argument of a call is a path, for the calls that take one.
+///
+/// A table rather than a match inside the dispatcher, because the dispatcher
+/// already decides what a call *does* and this decides what it is *about*.
+/// Descriptor-relative calls put the path second, which is the detail that
+/// makes reading `openat`'s first argument produce a plausible empty string.
+fn path_arg(nr: u64) -> Option<usize> {
+    Some(match nr {
+        SYS_OPEN | SYS_STAT | SYS_LSTAT | SYS_ACCESS => 0,
+        SYS_OPENAT | SYS_NEWFSTATAT => 1,
+        _ => return None,
+    })
 }
 
 static TRACE: Racy<Vec<Call>> = Racy::new(Vec::new());
@@ -624,7 +690,19 @@ pub fn clear_trace() {
     unsafe { TRACE.get().clear() }
 }
 
-fn record(c: Call) {
+fn record(mut c: Call) {
+    // Read the path *here*, after the call has run and while the guest's
+    // memory is still its own. `read_cstr` is bounds-checked, so a guest
+    // passing rubbish costs an `EFAULT` this quietly drops rather than a
+    // kernel reading whatever the number pointed at.
+    if let Some(i) = path_arg(c.nr) {
+        if let Ok(s) = read_cstr(c.args[i]) {
+            let b = s.as_bytes();
+            let n = b.len().min(PATH_SNIP);
+            c.path[..n].copy_from_slice(&b[..n]);
+            c.path_len = n as u8;
+        }
+    }
     let t = unsafe { TRACE.get() };
     if t.len() < TRACE_CAP {
         t.push(c);
@@ -1689,17 +1767,27 @@ fn sys_fstat(fd: u64, buf: u64) -> u64 {
     }
 }
 
-fn sys_statat(dirfd: u64, path_at: u64, buf: u64) -> u64 {
+fn sys_statat(dirfd: u64, path_at: u64, buf: u64, flags: u64) -> u64 {
     let raw = match read_cstr(path_at) {
         Ok(v) => v,
         Err(e) => return e,
     };
-    // The same two refusals `openat` makes, for the same reasons and stated
-    // once each. They were absent here, so `newfstatat` would take a relative
-    // path with a real descriptor and resolve it against the working
-    // directory -- answering confidently about a file that exists and is not
-    // the one asked for, which is worse than refusing.
+    // **An empty path with `AT_EMPTY_PATH` means the descriptor itself**, and
+    // this is where a real `ld.so` stopped. glibc opens a library, reads its
+    // header, and then asks how big it is with
+    // `newfstatat(fd, "", buf, AT_EMPTY_PATH)` rather than `fstat` -- so a
+    // kernel that resolves the empty string answers `ENOENT` about a file it
+    // has open, and the linker reports "error while loading shared libraries"
+    // about a library it just found. The whole `-ENOSYS` instrument could not
+    // see it, because every call involved was implemented and every one of
+    // them succeeded except the last.
+    //
+    // The flags argument was not merely unhandled, it was never passed: the
+    // dispatcher dropped `r10` on the floor and this took three arguments.
     if raw.is_empty() {
+        if flags & AT_EMPTY_PATH != 0 {
+            return sys_fstat(dirfd, buf);
+        }
         return ENOENT;
     }
     if !raw.starts_with('/') && (dirfd as i64) != super::fs::AT_FDCWD {
@@ -1887,6 +1975,18 @@ fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off: u64) -> u6
         (at, Some(Source::Heap))
     };
 
+    // **Writable first, then copy, then the rights that were asked for.** The
+    // copy used to come first, which is correct for a fresh allocation and
+    // wrong for the one case `MAP_FIXED` exists to serve. A linker reserves a
+    // span with `PROT_NONE` and then lays each segment of a library over it,
+    // so by the time the file bytes arrive the guest has already made those
+    // pages unwritable -- and the kernel, copying on the guest's behalf, took
+    // a `#PF` at ring 0 with `CR0.WP` on. Nothing about it was the guest's
+    // fault and no bounds check could have caught it: the range was one the
+    // guest owned and the pointer was one the kernel chose.
+    if backing.is_some() {
+        crate::mem::paging::protect(at, page_up(len as usize), crate::mem::paging::Perm::RWX);
+    }
     if let Some(b) = backing {
         unsafe { core::ptr::copy_nonoverlapping(b.as_ptr(), at as *mut u8, b.len()) };
     }
@@ -1895,8 +1995,12 @@ fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off: u64) -> u6
     // a mapping made after that is not covered by any of them. At ring 0 this
     // was invisible, because the U bit meant nothing; the first ring-3 guest to
     // call `mmap` took a protection violation reading its own memory.
+    //
+    // `PROT_NONE` takes the page away rather than leaving it readable, which
+    // is what `mprotect` already does and what makes a reservation a
+    // reservation. Leaving it present is how a guard page guards nothing.
     let perm = crate::mem::paging::Perm {
-        present: true,
+        present: prot != 0,
         write: prot & PROT_WRITE != 0,
         exec: prot & PROT_EXEC != 0,
         user: true,
@@ -2072,9 +2176,9 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         SYS_LSEEK => (sys_lseek(f.rdi, f.rsi, f.rdx), true),
         SYS_FSTAT => (sys_fstat(f.rdi, f.rsi), true),
         SYS_STAT | SYS_LSTAT => {
-            (sys_statat(super::fs::AT_FDCWD as u64, f.rdi, f.rsi), true)
+            (sys_statat(super::fs::AT_FDCWD as u64, f.rdi, f.rsi, 0), true)
         }
-        SYS_NEWFSTATAT => (sys_statat(f.rdi, f.rsi, f.rdx), true),
+        SYS_NEWFSTATAT => (sys_statat(f.rdi, f.rsi, f.rdx, f.r10), true),
         SYS_GETDENTS64 => (sys_getdents64(f.rdi, f.rsi, f.rdx), true),
         SYS_IOCTL => (sys_ioctl(f.rdi, f.rsi, f.rdx), true),
         SYS_WRITEV => (sys_writev(f.rdi, f.rsi, f.rdx), true),
@@ -2130,7 +2234,7 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         SYS_MUNMAP => (sys_munmap(f.rdi, f.rsi), true),
         SYS_ARCH_PRCTL => (sys_arch_prctl(f.rdi, f.rsi), true),
         SYS_EXIT | SYS_EXIT_GROUP => {
-            record(Call { nr, args, ret: 0, served: true });
+            record(Call { nr, args, ret: 0, served: true, path: [0; PATH_SNIP], path_len: 0 });
             // Does not return. The host's stack and callee-saved registers
             // were parked by `glados_enter_guest`, so this is a longjmp back
             // into whoever started the guest -- there is no unwinder here and
@@ -2143,7 +2247,7 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         // implement next, which is the question stage 0 exists to answer.
         _ => (ENOSYS, false),
     };
-    record(Call { nr, args, ret, served });
+    record(Call { nr, args, ret, served, path: [0; PATH_SNIP], path_len: 0 });
     f.rax = ret;
 }
 
@@ -2423,6 +2527,89 @@ pub fn checks() -> Vec<(&'static str, bool)> {
             "MAP_FIXED where nothing can promise the address is ENOMEM",
             sys_mmap(0x1000_0000_0000, 4096, 3, MAP_ANONYMOUS | MAP_FIXED, u64::MAX, 0) == ENOMEM,
         ));
+    }
+
+    // The exact sequence a dynamic linker performs, which is the one shape
+    // `MAP_FIXED` exists for and the one nothing had ever run: reserve a span
+    // with no rights at all, then lay something over part of it. Anonymous
+    // rather than file-backed, because what is being checked is that the
+    // rights of the reservation do not survive into the mapping laid over it,
+    // and a `PROT_NONE` page that stays `PROT_NONE` is a program that faults
+    // on its own code.
+    if let Some(two) = alloc_pages(8192) {
+        let mine = Region { at: two, len: 8192 };
+        install(Regions { image: mine, stack: mine, brk: mine, interp: None });
+        let reserved =
+            sys_mmap(two, 8192, 0, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, u64::MAX, 0) == two;
+        let gone = crate::mem::paging::query(two).is_some_and(|p| !p.present);
+        let over = sys_mmap(two, 4096, 3, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, u64::MAX, 0);
+        let writable = crate::mem::paging::query(two).is_some_and(|p| p.present && p.write);
+        out.push((
+            "a PROT_NONE reservation takes the page away rather than leaving it readable",
+            reserved && gone,
+        ));
+        out.push((
+            "and a mapping laid over it gets the rights it asked for, not the ones it replaced",
+            over == two && writable,
+        ));
+        teardown();
+        crate::mem::paging::release_to_heap(two, 8192);
+        free_pages(two, 8192);
+    }
+
+    // `newfstatat` on a descriptor with no path. stdin is enough to check it,
+    // since what is being asked is whether the *descriptor* is consulted at
+    // all rather than what it says.
+    {
+        let mut buf = [0u8; 144];
+        let at = buf.as_mut_ptr() as u64;
+        let owned = Region { at, len: 144 };
+        install(Regions { image: owned, stack: owned, brk: owned, interp: None });
+        // The empty path has to live *inside* what the guest owns, because
+        // `read_cstr` bounds-checks it like any other guest pointer. Pointing
+        // at a local outside the region answered `EFAULT` before any of the
+        // logic under test ran, and all three claims failed for a reason that
+        // had nothing to do with what they were asking.
+        let p = at;
+        out.push((
+            "an empty path with AT_EMPTY_PATH stats the descriptor, as ld.so asks it to",
+            sys_statat(0, p, at, AT_EMPTY_PATH) == 0,
+        ));
+        // The path and the destination are one buffer, so a successful stat
+        // writes 144 bytes over the NUL the next claim reads as its path.
+        buf[0] = 0;
+        out.push((
+            "and without the flag it is still ENOENT, which is what Linux answers",
+            sys_statat(0, p, at, 0) == ENOENT,
+        ));
+        buf[0] = 0;
+        out.push((
+            "with the flag and a descriptor nobody opened it is EBADF, not success",
+            sys_statat(99, p, at, AT_EMPTY_PATH) == EBADF,
+        ));
+        teardown();
+    }
+
+    // Teardown puts rights back on every region, and the interpreter is the
+    // one that was missed. Two pages so the interpreter's is a different page
+    // from the image's, because a claim where both are the same address passes
+    // while the interpreter is not restored at all.
+    if let Some(two) = alloc_pages(8192) {
+        let img = Region { at: two, len: 4096 };
+        let interp = Region { at: two + 4096, len: 4096 };
+        install(Regions { image: img, stack: img, brk: img, interp: Some(interp) });
+        // PROT_READ. A real `ld.so` does exactly this to its own RELRO, which
+        // is how the page that halted the machine got its rights.
+        let asked = sys_mprotect(two + 4096, 4096, 1) == 0;
+        let took = crate::mem::paging::query(two + 4096).is_some_and(|p| !p.write);
+        teardown();
+        let back = crate::mem::paging::query(two + 4096).is_some_and(|p| p.write);
+        out.push((
+            "a page the interpreter made read-only is writable again after teardown",
+            asked && took && back,
+        ));
+        crate::mem::paging::release_to_heap(two, 8192);
+        free_pages(two, 8192);
     }
 
     // The shape a dynamic linker actually uses: reserve a span, then lay each
