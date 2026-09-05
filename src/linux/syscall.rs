@@ -472,7 +472,7 @@ pub fn teardown() -> usize {
                 // absent page back to the allocator would poison it for
                 // whatever asks next, and the symptom would appear in an
                 // unrelated subsystem hours later.
-                crate::mem::paging::protect(m.at, m.len, crate::mem::paging::Perm::RW);
+                crate::mem::paging::release_to_heap(m.at, m.len);
                 free_pages(m.at, m.len);
                 freed += 1;
             }
@@ -1580,7 +1580,7 @@ fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, _off: u64) -> u
     if !crate::mem::paging::protect(at, page_up(len as usize), perm) {
         // Partially applied rights are still rights, so close it on the way
         // out rather than handing the allocator whatever the walk managed.
-        crate::mem::paging::protect(at, page_up(len as usize), crate::mem::paging::Perm::RW);
+        crate::mem::paging::release_to_heap(at, page_up(len as usize));
         free_pages(at, len as usize);
         return ENOMEM;
     }
@@ -1612,7 +1612,7 @@ fn sys_munmap(at: u64, len: u64) -> u64 {
             // memory -- kernel or otherwise -- came with ring-3 access
             // attached. A `diag all` caught it and `diag paging` alone did
             // not, because it only shows up once something else has run.
-            crate::mem::paging::protect(m.at, m.len, crate::mem::paging::Perm::RW);
+            crate::mem::paging::release_to_heap(m.at, m.len);
             free_pages(m.at, m.len);
             0
         }

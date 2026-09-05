@@ -1106,10 +1106,11 @@ fn install_paging(boot: &BootInfo, frames: &mut mem::frame::EarlyFrames) {
             // Reaching this line means the map covered our code, our stack and
             // the framebuffer -- if it had not, we would already be gone.
             kprintln!(
-                "[boot] paging active  cr3={:#x}  mapped {} MiB  ({} frames)",
+                "[boot] paging active  cr3={:#x}  mapped {} MiB  ({} frames, 1 GiB pages {})",
                 cpu::read_cr3(),
                 limit / (1024 * 1024),
-                frames.allocated_frames()
+                frames.allocated_frames(),
+                if cpu::gib_pages_supported() { "yes" } else { "no" }
             );
             // Both change what a page table entry *means*, so they go on
             // immediately after the map this kernel built becomes the map the

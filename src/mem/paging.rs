@@ -31,6 +31,12 @@ const USER: u64 = 1 << 2;
 const NX: u64 = 1 << 63;
 /// The physical address field of a 2 MiB entry is bits 51:21, not 51:12.
 const ADDR_MASK_2M: u64 = 0x000F_FFFF_FFE0_0000;
+/// And of a 1 GiB entry, bits 51:30.
+const ADDR_MASK_1G: u64 = 0x000F_FFFF_C000_0000;
+/// Bits a leaf entry must leave clear below its address field: 20:13 for a
+/// 2 MiB page, 29:13 for a 1 GiB one. Setting one is a reserved-bit fault.
+const RSVD_2M: u64 = 0x001F_E000;
+const RSVD_1G: u64 = 0x3FFF_E000;
 
 /// Memory types from the UEFI map that represent real RAM, and may therefore
 /// be cached write-back. Everything else is treated as device memory.
@@ -98,7 +104,41 @@ pub fn build_identity_map(
         table(pml4_phys)[0] = pdpt_phys | PRESENT | WRITABLE;
     }
 
+    // A gigabyte with one entry, where the whole gigabyte is plain RAM.
+    //
+    // **This is not a speed claim.** What it buys is TLB reach: the identity
+    // map is what every access in this kernel walks, and covering four
+    // gigabytes takes 2048 entries at 2 MiB against 4 at 1 GiB. Whether that
+    // is worth anything depends entirely on how much memory is being touched,
+    // and everything that can run *here* -- a 16 MiB matvec, a 135 MB model --
+    // already fits in this machine's L2 TLB at 2 MiB. The case where it should
+    // matter is the one that cannot be measured from here: generation streams
+    // the whole checkpoint per token, and 570 MB is 285 entries at 2 MiB
+    // against one at 1 GiB.
+    //
+    // Three conditions, and the second two are correctness rather than taste.
+    // The first gigabyte is never a single page, because page 0 has to stay
+    // absent and that needs a page table underneath. And a gigabyte holding
+    // *any* device memory cannot be one entry, because cacheability is a
+    // property of the entry: one MMIO byte would either make the whole
+    // gigabyte uncacheable or make a register file write-back, and the second
+    // is the bug `addr_is_ram` exists to prevent.
+    let gib_ok = crate::cpu::gib_pages_supported();
     for gib in 0..gibs {
+        if gib_ok && gib > 0 {
+            let base = gib as u64 * GIB;
+            let all_ram = (0..ENTRIES).all(|i| {
+                let phys = base + i as u64 * LARGE_PAGE_SIZE;
+                let fb = phys < fb_end && (phys + LARGE_PAGE_SIZE) > fb_start;
+                !fb && addr_is_ram(phys, mmap, mmap_size, desc_size)
+            });
+            if all_ram {
+                unsafe {
+                    table(pdpt_phys)[gib] = base | PRESENT | WRITABLE | HUGE;
+                }
+                continue;
+            }
+        }
         let pd_phys = frames.alloc()?;
         unsafe {
             table(pdpt_phys)[gib] = pd_phys | PRESENT | WRITABLE;
@@ -236,6 +276,39 @@ impl Perm {
 /// The split is invisible: same physical bytes, same flags, same cacheability.
 /// A reader who did not know it happened would see no difference, which is the
 /// property that makes it safe to do underneath a running kernel.
+/// Replace a 1 GiB entry with a page directory covering the same bytes.
+///
+/// The same bargain `split_large` makes one level down, and it exists for the
+/// same reason: a map built from gigabytes cannot have the rights on one page
+/// changed until the gigabyte stops being one entry. Everything but the
+/// address and the size bit carries over, so cacheability survives -- though a
+/// gigabyte that needed uncacheable bytes was never made a single entry in the
+/// first place.
+unsafe fn split_gig(pdpt: &mut [u64; ENTRIES], i3: usize) -> bool {
+    let e = pdpt[i3];
+    if e & PRESENT == 0 {
+        return false;
+    }
+    if e & HUGE == 0 {
+        return true;
+    }
+    let base = e & ADDR_MASK_1G;
+    let flags = e & !(ADDR_MASK_1G | HUGE);
+    let Some(pd_phys) = alloc_table() else { return false };
+    unsafe {
+        let pd = table(pd_phys);
+        for (j, slot) in pd.iter_mut().enumerate() {
+            // Still 2 MiB pages, so `HUGE` goes back on: this splits one level,
+            // and `split_large` takes it the rest of the way if anybody needs
+            // 4 KiB. Splitting straight to 4 KiB would cost 512 page tables to
+            // change the rights on one page.
+            *slot = (base + (j as u64) * LARGE_PAGE_SIZE) | flags | HUGE;
+        }
+    }
+    pdpt[i3] = pd_phys | PRESENT | WRITABLE;
+    true
+}
+
 unsafe fn split_large(pd: &mut [u64; ENTRIES], i2: usize) -> bool {
     let e = pd[i2];
     if e & PRESENT == 0 {
@@ -288,8 +361,11 @@ pub fn audit() -> (usize, Option<(u64, u64, &'static str)>) {
 
     let mut seen = 0usize;
     let mut bad = None;
+    // `huge` is the mask of bits this level's leaf must leave clear, which
+    // differs between a 2 MiB and a 1 GiB entry and is zero for a table
+    // pointer. Passed rather than inferred, since the level is what decides it.
     let mut note = |seen: &mut usize, bad: &mut Option<(u64, u64, &'static str)>,
-                    at: u64, e: u64, huge: bool| {
+                    at: u64, e: u64, huge: u64| {
         *seen += 1;
         if bad.is_some() {
             return;
@@ -298,8 +374,8 @@ pub fn audit() -> (usize, Option<(u64, u64, &'static str)>) {
             *bad = Some((at, e, "a bit above the physical address width is set"));
         } else if e & NX != 0 && !nx_ok {
             *bad = Some((at, e, "NX is set while EFER.NXE is off"));
-        } else if huge && e & 0x001F_E000 != 0 {
-            *bad = Some((at, e, "a large page with bits 20:13 set"));
+        } else if e & huge != 0 {
+            *bad = Some((at, e, "a large page with reserved bits below its address"));
         }
     };
 
@@ -309,14 +385,14 @@ pub fn audit() -> (usize, Option<(u64, u64, &'static str)>) {
             continue;
         }
         let a4 = (i4 as u64) << 39;
-        note(&mut seen, &mut bad, a4, e4, false);
+        note(&mut seen, &mut bad, a4, e4, 0);
         let pdpt = unsafe { table(e4 & ADDR_MASK) };
         for (i3, &e3) in pdpt.iter().enumerate() {
             if e3 & PRESENT == 0 {
                 continue;
             }
             let a3 = a4 | ((i3 as u64) << 30);
-            note(&mut seen, &mut bad, a3, e3, e3 & HUGE != 0);
+            note(&mut seen, &mut bad, a3, e3, if e3 & HUGE != 0 { RSVD_1G } else { 0 });
             if e3 & HUGE != 0 {
                 continue;
             }
@@ -326,7 +402,7 @@ pub fn audit() -> (usize, Option<(u64, u64, &'static str)>) {
                     continue;
                 }
                 let a2 = a3 | ((i2 as u64) << 21);
-                note(&mut seen, &mut bad, a2, e2, e2 & HUGE != 0);
+                note(&mut seen, &mut bad, a2, e2, if e2 & HUGE != 0 { RSVD_2M } else { 0 });
                 if e2 & HUGE != 0 {
                     continue;
                 }
@@ -335,7 +411,7 @@ pub fn audit() -> (usize, Option<(u64, u64, &'static str)>) {
                     if e1 & PRESENT == 0 {
                         continue;
                     }
-                    note(&mut seen, &mut bad, a2 | ((i1 as u64) << 12), e1, false);
+                    note(&mut seen, &mut bad, a2 | ((i1 as u64) << 12), e1, 0);
                 }
             }
         }
@@ -444,8 +520,19 @@ unsafe fn entry_for_user(addr: u64, split: bool, open: bool) -> Option<&'static 
             pml4[i4] |= USER;
         }
         let pdpt = table(pml4[i4] & ADDR_MASK);
-        if pdpt[i3] & PRESENT == 0 || pdpt[i3] & HUGE != 0 {
+        if pdpt[i3] & PRESENT == 0 {
             return None;
+        }
+        if pdpt[i3] & HUGE != 0 {
+            // A gigabyte answered as itself is right for a query -- its rights
+            // are the rights of every address inside it -- and useless for a
+            // change, which is what `split` asks for.
+            if !split {
+                return Some(&mut pdpt[i3]);
+            }
+            if !split_gig(pdpt, i3) {
+                return None;
+            }
         }
         if open {
             pdpt[i3] |= USER;
@@ -475,6 +562,24 @@ unsafe fn entry_for_user(addr: u64, split: bool, open: bool) -> Option<&'static 
         let pt = table(pd[i2] & ADDR_MASK);
         Some(&mut pt[i1])
     }
+}
+
+/// Put a range back the way the heap expects to find it, before freeing it.
+///
+/// **Three separate bugs were one bug: a page handed back to the allocator
+/// carrying a right it did not start with.** First `munmap` returning pages
+/// with the `U` bit still on. Then `paging::checks` restoring `RW`, which is
+/// precisely non-executable, so the next thing to allocate a page and jump
+/// into it died on an instruction fetch. Then guest teardown doing the same to
+/// every mapping a guest had made.
+///
+/// Every one of those looked like corruption somewhere else, because the
+/// symptom lands on whoever asks for memory next. So this is one function with
+/// the reason on it rather than a `Perm` chosen correctly at three call sites,
+/// and `RWX` is what a heap page is here: present, writable, and executable,
+/// because `cpu::code` and the Aiksi JIT both run code out of it.
+pub fn release_to_heap(at: u64, len: usize) -> bool {
+    protect(at, len, Perm::RWX)
 }
 
 /// What a given address may be used for right now.
@@ -600,6 +705,23 @@ pub fn checks() -> alloc::vec::Vec<(&'static str, bool)> {
     out.push((
         "closing it takes the U bit back off",
         protect(at, PAGE_SIZE as usize, Perm::RW) && query(at).is_some_and(|p| !p.user),
+    ));
+
+    out.push((
+        "a gigabyte can be split into two-megabyte pages, and the bytes survive",
+        {
+            // Against the live map: `protect` on any heap address walks the
+            // gigabyte containing it, so if this machine mapped one the split
+            // has already happened by now and the bytes above still read back.
+            let second = unsafe { page.add(PAGE_SIZE as usize) };
+            unsafe { core::ptr::write_volatile(second, 0x3Cu8) };
+            let back = unsafe { core::ptr::read_volatile(second) };
+            back == 0x3C && query(at + PAGE_SIZE).is_some_and(|p| p.present)
+        },
+    ));
+    out.push((
+        "and whatever level it landed on, the entry has no reserved bits set",
+        audit().1.is_none(),
     ));
 
     // Put it back **executable**, or the heap hands out a page nothing may

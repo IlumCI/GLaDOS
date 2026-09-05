@@ -163,6 +163,12 @@ pub fn phys_addr_bits() -> u32 {
     if (36..=52).contains(&bits) { bits } else { 36 }
 }
 
+/// Whether this part can map a whole gigabyte with one entry.
+/// CPUID.80000001H:EDX[26].
+pub fn gib_pages_supported() -> bool {
+    cpuid(0x8000_0001, 0)[3] & (1 << 26) != 0
+}
+
 /// Whether this part implements no-execute at all. CPUID.80000001H:EDX[20].
 pub fn nx_supported() -> bool {
     cpuid(0x8000_0001, 0)[3] & (1 << 20) != 0
