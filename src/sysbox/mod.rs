@@ -952,6 +952,24 @@ pub fn blob_len(path: &str) -> Option<usize> {
     .flatten()
 }
 
+/// Create an empty directory, failing if the name is taken.
+///
+/// `write_blob` already creates intermediate directories, so this exists for
+/// the one case that has no blob at the end of it: `mkdir`. Refusing an
+/// existing name rather than replacing it is what `EEXIST` is, and replacing a
+/// directory that has things in it would be a silent recursive delete.
+pub fn make_dir(path: &str) -> bool {
+    with(|s| {
+        let p = parse(&s.cwd, path);
+        if tree::resolve(&s.root, &p).is_some() {
+            return false;
+        }
+        note(&s.root, &p);
+        tree::put(&mut s.root, &p, Node::Dir(Vec::new())).is_ok()
+    })
+    .unwrap_or(false)
+}
+
 /// Whether a path names a directory.
 pub fn is_dir(path: &str) -> bool {
     with(|s| {

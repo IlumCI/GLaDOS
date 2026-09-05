@@ -285,8 +285,8 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         syscall::runnable(&img(elf::ET_DYN, true, 1)).is_err(),
     ));
     out.push((
-        "a fixed-address executable is refused, because one address space cannot promise it",
-        syscall::runnable(&img(elf::ET_EXEC, false, 1)).is_err(),
+        "a fixed-address executable is no longer refused on sight, since the map can answer",
+        syscall::runnable(&img(elf::ET_EXEC, false, 1)).is_ok(),
     ));
     out.push((
         "an image with nothing loadable is refused rather than run at its entry",

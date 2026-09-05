@@ -76,6 +76,20 @@ pub const SYS_GETDENTS64: u64 = 217;
 pub const SYS_SET_TID_ADDRESS: u64 = 218;
 pub const SYS_DUP: u64 = 32;
 pub const SYS_WRITEV: u64 = 20;
+pub const SYS_RT_SIGACTION: u64 = 13;
+pub const SYS_READV: u64 = 19;
+pub const SYS_ACCESS: u64 = 21;
+pub const SYS_SENDFILE: u64 = 40;
+pub const SYS_FACCESSAT: u64 = 269;
+pub const SYS_RT_SIGPROCMASK: u64 = 14;
+pub const SYS_NANOSLEEP: u64 = 35;
+pub const SYS_GETCWD: u64 = 79;
+pub const SYS_MKDIR: u64 = 83;
+pub const SYS_RMDIR: u64 = 84;
+pub const SYS_UNLINK: u64 = 87;
+pub const SYS_GETPPID: u64 = 110;
+pub const SYS_GETGROUPS: u64 = 115;
+pub const SYS_CLOCK_NANOSLEEP: u64 = 230;
 pub const SYS_UNAME: u64 = 63;
 pub const SYS_FCNTL: u64 = 72;
 pub const SYS_GETTIMEOFDAY: u64 = 96;
@@ -111,11 +125,19 @@ const EISDIR: u64 = (-21i64) as u64;
 const ENOTTY: u64 = (-25i64) as u64;
 const ESPIPE: u64 = (-29i64) as u64;
 const ENAMETOOLONG: u64 = (-36i64) as u64;
+const EROFS: u64 = (-30i64) as u64;
+const EEXIST: u64 = (-17i64) as u64;
+const ERANGE: u64 = (-34i64) as u64;
+const ENOTEMPTY: u64 = (-39i64) as u64;
 
 /// `O_WRONLY` and `O_RDWR`. This view is read-only, so both are refused.
 const O_WRONLY: u64 = 1;
 const O_RDWR: u64 = 2;
 const O_DIRECTORY: u64 = 0x10000;
+const O_CREAT: u64 = 0x40;
+const O_TRUNC: u64 = 0x200;
+const O_APPEND: u64 = 0x400;
+const O_EXCL: u64 = 0x80;
 
 /// How many bytes every open descriptor may hold between them.
 ///
@@ -434,6 +456,16 @@ pub fn teardown() -> usize {
     let mut freed = 0;
     unsafe {
         if let Some(sp) = SPACE.get().as_mut() {
+            // A guest that writes and exits without closing is the ordinary
+            // case, not an error, so this is where those bytes actually reach
+            // the store. Dropped in order, because `flush` only commits the
+            // last name for a body and two names left open would otherwise
+            // both decline.
+            for slot in sp.fds.iter_mut() {
+                if let Some(f) = slot.take() {
+                    f.flush();
+                }
+            }
             for m in sp.maps.drain(..) {
                 // A guest is free to exit having mprotected its mappings to
                 // something the heap cannot reuse. Handing a read-only or
@@ -564,7 +596,9 @@ fn sys_write(fd: u64, buf: u64, len: usize) -> u64 {
         )
     });
     if sink != Some(true) {
-        return EBADF;
+        // Not a stream, so it is either a file open for writing or an error,
+        // and both answers live in one place rather than being decided twice.
+        return write_file(fd, buf, len);
     }
     // A zero-length write succeeds without the pointer being looked at, which
     // is what Linux does and what an allocator flushing an empty buffer
@@ -669,9 +703,7 @@ fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u64 {
         Ok(v) => v,
         Err(e) => return e,
     };
-    if flags & (O_WRONLY | O_RDWR) != 0 {
-        return EACCES;
-    }
+    let wants_write = flags & (O_WRONLY | O_RDWR) != 0 || flags & (O_CREAT | O_TRUNC) != 0;
     // An empty path is `ENOENT` on Linux, and here it would otherwise resolve
     // to the working directory: `open("")` would hand back a descriptor for
     // `/`, which is a plausible-looking answer to a call that asked for
@@ -688,29 +720,68 @@ fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u64 {
     }
     with_fds(|fds, cwd| {
         let Some(path) = super::fs::resolve(cwd, &raw) else { return ENOENT };
+        // The jail, checked on the resolved path and before anything is
+        // created. `EROFS` rather than `EACCES`, because the objection is to
+        // where the file is rather than to who is asking.
+        if wants_write && !super::fs::writable(&path) {
+            return EROFS;
+        }
         let is_dir = sysbox::is_dir(&path);
         if flags & O_DIRECTORY != 0 && !is_dir {
             return ENOTDIR;
         }
         let entry = if is_dir {
-            super::fs::Fd::Dir { path: path.clone(), entries: sysbox::listing(&path), at: 0 }
+            if wants_write {
+                return EISDIR;
+            }
+            super::fs::Fd::Dir(alloc::rc::Rc::new(core::cell::RefCell::new(super::fs::Dir {
+                path: path.clone(),
+                entries: sysbox::listing(&path),
+                at: 0,
+            })))
         } else {
             // Asked before the copy is made, not after: the point is to not
             // allocate the file, so a check that reads it first and then
             // measures has already lost.
-            let Some(size) = sysbox::blob_len(&path) else { return ENOENT };
+            let size = sysbox::blob_len(&path);
+            if size.is_none() && flags & O_CREAT == 0 {
+                return ENOENT;
+            }
+            if size.is_some() && flags & (O_CREAT | O_EXCL) == (O_CREAT | O_EXCL) {
+                return EEXIST;
+            }
             let held: usize = fds
                 .iter()
                 .filter_map(|f| match f {
-                    Some(super::fs::Fd::File { data, .. }) => Some(data.len()),
+                    Some(super::fs::Fd::File(b)) => Some(b.borrow().data.len()),
                     _ => None,
                 })
                 .sum();
-            if held.saturating_add(size) > OPEN_MAX_BYTES {
+            if held.saturating_add(size.unwrap_or(0)) > OPEN_MAX_BYTES {
                 return ENOMEM;
             }
-            let Some(data) = sysbox::read_blob(&path) else { return ENOENT };
-            super::fs::Fd::File { path: path.clone(), data, at: 0 }
+            // A truncating or brand-new open does not read what is there, which
+            // is the whole point of `O_TRUNC` and is also the only way to
+            // rewrite a file larger than the open-bytes budget.
+            let data = if flags & O_TRUNC != 0 || size.is_none() {
+                alloc::vec::Vec::new()
+            } else {
+                match sysbox::read_blob(&path) {
+                    Some(d) => d,
+                    None => return ENOENT,
+                }
+            };
+            let at = if flags & O_APPEND != 0 { data.len() } else { 0 };
+            // A file created but never written still has to exist, since a
+            // program doing `open(O_CREAT); close()` means `touch`.
+            let fresh = size.is_none() || flags & O_TRUNC != 0;
+            super::fs::Fd::File(alloc::rc::Rc::new(core::cell::RefCell::new(super::fs::File {
+                path: path.clone(),
+                data,
+                at,
+                writable: wants_write,
+                dirty: wants_write && fresh,
+            })))
         };
         // Lowest free descriptor, which is what POSIX promises and what any
         // program doing `close(0); open(...)` to redirect depends on.
@@ -732,17 +803,155 @@ fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u64 {
 
 /// Duplicate a descriptor onto the lowest free number, or onto a given one.
 ///
-/// **The standard three duplicate and a file does not, and that is a real
-/// limitation rather than laziness.** On Linux a duplicated descriptor shares
-/// one *open file description*, so the two numbers share a cursor: reading
-/// through one advances the other. Here the cursor lives inside the `Fd`, so
+/// **Everything duplicates now, sharing one open file description.** A file
+/// used to be refused here, because the cursor lived inside the `Fd` and
 /// copying it would give two independent cursors -- a program doing
 /// `dup2(fd, 0)` and then reading both would silently read everything twice.
+/// Refusing was better than getting it wrong and it still cost a real applet:
+/// `hexdump` does exactly that `dup2` to read its file as stdin, and got
+/// `ENOSYS`. `fs::Fd` puts the body behind an `Rc<RefCell<..>>`, so `share`
+/// hands out another name for one body and the cursor is genuinely shared.
+/// Make a directory, remove one, or unlink a name.
 ///
-/// Sharing needs the body behind a refcount, which is a change to the shape of
-/// the table rather than to this call. Until then a stream duplicates, because
-/// a stream has no cursor to disagree about, and that is exactly what the shell
-/// idiom `dup2(1, 2)` needs.
+/// One function because they are one decision three times over: resolve, check
+/// the jail, then ask the tree. Splitting them would put the `EROFS` check in
+/// three places, which is how one of them ends up missing it.
+fn sys_name_op(path_at: u64, op: u8) -> u64 {
+    let raw = match read_cstr(path_at) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if raw.is_empty() {
+        return ENOENT;
+    }
+    let found = with_fds(|_, cwd| super::fs::resolve(cwd, &raw)).flatten();
+    let Some(path) = found else { return ENOENT };
+    if !super::fs::writable(&path) {
+        return EROFS;
+    }
+    let is_dir = sysbox::is_dir(&path);
+    match op {
+        b'm' => {
+            if is_dir || sysbox::blob_len(&path).is_some() {
+                return EEXIST;
+            }
+            if sysbox::make_dir(&path) { 0 } else { EPERM }
+        }
+        b'r' => {
+            if !is_dir {
+                return ENOTDIR;
+            }
+            // `rmdir` removes an empty directory and nothing else. The tree
+            // would happily detach a full one, and that would be a recursive
+            // delete wearing the name of the safe call.
+            if !sysbox::listing(&path).is_empty() {
+                return ENOTEMPTY;
+            }
+            if sysbox::detach(&path) { 0 } else { EPERM }
+        }
+        _ => {
+            if is_dir {
+                return EISDIR;
+            }
+            if sysbox::blob_len(&path).is_none() {
+                return ENOENT;
+            }
+            if sysbox::detach(&path) { 0 } else { EPERM }
+        }
+    }
+}
+
+/// The working directory, which is `/` and has never been anything else.
+///
+/// There is no `chdir`, so this is a constant -- and it is still worth serving,
+/// because `pwd` exits 1 without it and every program that resolves a relative
+/// path for a message calls it.
+fn sys_getcwd(buf: u64, len: u64) -> u64 {
+    let cwd = with_fds(|_, cwd| alloc::string::String::from(cwd)).unwrap_or_default();
+    let n = cwd.len() + 1;
+    if (len as usize) < n {
+        return ERANGE;
+    }
+    if !reachable(buf, n, true) {
+        return EFAULT;
+    }
+    unsafe {
+        core::ptr::copy_nonoverlapping(cwd.as_ptr(), buf as *mut u8, cwd.len());
+        core::ptr::write((buf as *mut u8).add(cwd.len()), 0);
+    }
+    // Linux answers the length including the terminator, where glibc's wrapper
+    // answers the buffer. A caller reading the raw return and getting zero
+    // would think it failed.
+    n as u64
+}
+
+/// Sleep, by spinning on the timer tick.
+///
+/// **Honest about what it is.** There is no guest scheduler to block against:
+/// the guest owns the machine until it traps, so "sleeping" is a busy wait that
+/// gives the tick a chance to fire. It costs the CPU it is not using, which is
+/// the trade a kernel with one runnable guest has, and it is bounded by the
+/// same deadline everything else is.
+fn sys_nanosleep(req: u64) -> u64 {
+    if !reachable(req, 16, false) {
+        return EFAULT;
+    }
+    let (sec, nsec) = unsafe {
+        (
+            core::ptr::read_volatile(req as *const u64),
+            core::ptr::read_volatile((req + 8) as *const u64),
+        )
+    };
+    if nsec >= 1_000_000_000 {
+        return EINVAL;
+    }
+    let hz = crate::TIMER_HZ as u64;
+    let want = sec.saturating_mul(hz) + nsec * hz / 1_000_000_000;
+    let until = crate::dev::lapic::ticks().saturating_add(want);
+    while crate::dev::lapic::ticks() < until {
+        core::hint::spin_loop();
+    }
+    0
+}
+
+/// Write through a descriptor that names a file.
+///
+/// Buffered into the body and committed by `close`, for the reason `fs::File`
+/// gives: the store is keyed by content, so every commit rewrites the whole
+/// blob and gives it a new address. A program writing a kilobyte one byte at a
+/// time would otherwise produce a thousand objects.
+fn write_file(fd: u64, buf: u64, len: usize) -> u64 {
+    if len == 0 {
+        return 0;
+    }
+    if !reachable(buf, len, false) {
+        return EFAULT;
+    }
+    with_fds(|fds, _| {
+        let Some(Some(super::fs::Fd::File(body))) = fds.get(fd as usize) else { return EBADF };
+        let mut f = body.borrow_mut();
+        if !f.writable {
+            return EBADF;
+        }
+        let at = f.at;
+        // A write past the end zero-fills the gap, which is what a sparse file
+        // reads back as and what `lseek` past the end plus a write means.
+        if f.data.len() < at {
+            f.data.resize(at, 0);
+        }
+        let src = unsafe { core::slice::from_raw_parts(buf as *const u8, len) };
+        let end = at + len;
+        if f.data.len() < end {
+            f.data.resize(end, 0);
+        }
+        f.data[at..end].copy_from_slice(src);
+        f.at = end;
+        f.dirty = true;
+        len as u64
+    })
+    .unwrap_or(EBADF)
+}
+
 /// Gather-write: one call, a vector of buffers.
 ///
 /// **This is why `ls` printed nothing.** It ran to completion, opened the
@@ -794,6 +1003,139 @@ fn sys_writev(fd: u64, iov: u64, cnt: u64) -> u64 {
         }
     }
     total
+}
+
+/// Scatter-read: one call, a vector of buffers.
+///
+/// The mirror of `writev` and it arrived for the same reason: `hexdump` reads
+/// its input through this, so without it the applet opened the file,
+/// `dup2`ed it onto stdin, and then reported "Function not implemented"
+/// about a file it was holding open.
+fn sys_readv(fd: u64, iov: u64, cnt: u64) -> u64 {
+    if cnt > 1024 {
+        return EINVAL;
+    }
+    if cnt == 0 {
+        return 0;
+    }
+    let Some(bytes) = (cnt as usize).checked_mul(16) else { return EINVAL };
+    if !reachable(iov, bytes, false) {
+        return EFAULT;
+    }
+    let mut total: u64 = 0;
+    for i in 0..cnt as usize {
+        let at = iov + (i * 16) as u64;
+        let (base, len) = unsafe {
+            (
+                core::ptr::read_volatile(at as *const u64),
+                core::ptr::read_volatile((at + 8) as *const u64),
+            )
+        };
+        if len == 0 {
+            continue;
+        }
+        let n = sys_read(fd, base, len);
+        if (n as i64) < 0 {
+            return if total == 0 { n } else { total };
+        }
+        total += n;
+        // Short means the source is out, and asking again would answer zero.
+        if n < len {
+            break;
+        }
+    }
+    total
+}
+
+/// Whether a path exists, and whether the guest could do the named thing to it.
+///
+/// The mode bits are answered from the jail rather than from permissions,
+/// because there are none: everything readable is readable by the one uid
+/// there is, and `W_OK` outside `/tmp` is the only "no" this can honestly
+/// give. That makes `access(p, W_OK)` a real test of the write jail, which is
+/// what a program uses it for.
+fn sys_access(path_at: u64, mode: u64) -> u64 {
+    let raw = match read_cstr(path_at) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if raw.is_empty() {
+        return ENOENT;
+    }
+    let found = with_fds(|_, cwd| super::fs::resolve(cwd, &raw)).flatten();
+    let Some(path) = found else { return ENOENT };
+    if !sysbox::is_dir(&path) && sysbox::blob_len(&path).is_none() {
+        return ENOENT;
+    }
+    // W_OK is bit 1. X_OK is granted on directories and refused on files,
+    // since nothing here can be executed by name.
+    if mode & 2 != 0 && !super::fs::writable(&path) {
+        return EACCES;
+    }
+    if mode & 1 != 0 && !sysbox::is_dir(&path) {
+        return EACCES;
+    }
+    0
+}
+
+/// Copy between two descriptors without the bytes going through the guest.
+///
+/// Both ends are already in the kernel here, so this is what it claims to be
+/// rather than an optimisation that pretends: no guest buffer is involved and
+/// no guest pointer is dereferenced. `cat` reaches for it first and falls back
+/// to `read`/`write` when it fails, which is why it worked without this and
+/// still spent a refused call every time.
+fn sys_sendfile(out: u64, into: u64, off_at: u64, count: u64) -> u64 {
+    if off_at != 0 {
+        // An explicit offset means "read from here and do not move the
+        // cursor", which needs a second cursor this table does not keep.
+        // Refused rather than served from the wrong place.
+        return ENOSYS;
+    }
+    let taken = with_fds(|fds, _| match fds.get(into as usize) {
+        Some(Some(super::fs::Fd::File(b))) => {
+            let f = &mut *b.borrow_mut();
+            let from = f.at.min(f.data.len());
+            let n = (f.data.len() - from).min(count as usize);
+            let chunk = f.data[from..from + n].to_vec();
+            f.at = from + n;
+            Some(chunk)
+        }
+        Some(Some(_)) => None,
+        _ => None,
+    })
+    .flatten();
+    let Some(chunk) = taken else { return EINVAL };
+    if chunk.is_empty() {
+        return 0;
+    }
+    let sink = with_fds(|fds, _| {
+        matches!(
+            fds.get(out as usize),
+            Some(Some(super::fs::Fd::Stdout)) | Some(Some(super::fs::Fd::Stderr))
+        )
+    });
+    if sink == Some(true) {
+        crate::kprint!("{}", alloc::string::String::from_utf8_lossy(&chunk));
+        return chunk.len() as u64;
+    }
+    with_fds(|fds, _| {
+        let Some(Some(super::fs::Fd::File(b))) = fds.get(out as usize) else { return EBADF };
+        let f = &mut *b.borrow_mut();
+        if !f.writable {
+            return EBADF;
+        }
+        let at = f.at;
+        let end = at + chunk.len();
+        if f.data.len() < end {
+            f.data.resize(end, 0);
+        }
+        f.data[at..end].copy_from_slice(&chunk);
+        f.at = end;
+        f.dirty = true;
+        chunk.len() as u64
+    })
+    .unwrap_or(EBADF)
 }
 
 /// `struct utsname`: six fields of 65 bytes, NUL-padded.
@@ -931,10 +1273,7 @@ impl MinFd for u64 {
 fn sys_dup(from: u64, to: Option<u64>) -> u64 {
     with_fds(|fds, _| {
         let copy = match fds.get(from as usize) {
-            Some(Some(super::fs::Fd::Stdin)) => super::fs::Fd::Stdin,
-            Some(Some(super::fs::Fd::Stdout)) => super::fs::Fd::Stdout,
-            Some(Some(super::fs::Fd::Stderr)) => super::fs::Fd::Stderr,
-            Some(Some(_)) => return ENOSYS,
+            Some(Some(f)) => f.share(),
             _ => return EBADF,
         };
         let slot = match to {
@@ -970,6 +1309,11 @@ fn sys_dup(from: u64, to: Option<u64>) -> u64 {
 fn sys_close(fd: u64) -> u64 {
     with_fds(|fds, _| match fds.get_mut(fd as usize) {
         Some(slot @ Some(_)) => {
+            // Committed here rather than on every write, and only when this is
+            // the last name for the body. `flush` decides both.
+            if let Some(f) = slot.as_ref() {
+                f.flush();
+            }
             *slot = None;
             0
         }
@@ -990,7 +1334,9 @@ fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
         // Zero is the honest answer and is what a program reading a closed
         // pipe sees.
         Some(Some(super::fs::Fd::Stdin)) => 0,
-        Some(Some(super::fs::Fd::File { data, at, .. })) => {
+        Some(Some(super::fs::Fd::File(body))) => {
+            let f = &mut *body.borrow_mut();
+            let (data, at) = (&f.data, &mut f.at);
             // **The cursor is clamped before it indexes, and that is not
             // belt and braces.** `lseek` past the end is legal and this module
             // says so two functions down, so `*at > data.len()` is a state a
@@ -1005,7 +1351,7 @@ fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
             *at = at.saturating_add(n);
             n as u64
         }
-        Some(Some(super::fs::Fd::Dir { .. })) => EISDIR,
+        Some(Some(super::fs::Fd::Dir(_))) => EISDIR,
         _ => EBADF,
     })
     .unwrap_or(EBADF)
@@ -1013,7 +1359,9 @@ fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
 
 fn sys_lseek(fd: u64, off: u64, whence: u64) -> u64 {
     with_fds(|fds, _| match fds.get_mut(fd as usize) {
-        Some(Some(super::fs::Fd::File { data, at, .. })) => {
+        Some(Some(super::fs::Fd::File(body))) => {
+            let f = &mut *body.borrow_mut();
+            let (data, at) = (&f.data, &mut f.at);
             let base = match whence {
                 0 => 0i64,                 // SEEK_SET
                 1 => *at as i64,           // SEEK_CUR
@@ -1036,9 +1384,9 @@ fn sys_lseek(fd: u64, off: u64, whence: u64) -> u64 {
         // the snapshot the directory was opened with, and inventing that is
         // how `telldir` starts handing out positions that name the wrong file.
         // `rewinddir` is the one every program actually uses.
-        Some(Some(super::fs::Fd::Dir { at, .. })) => {
+        Some(Some(super::fs::Fd::Dir(body))) => {
             if whence == 0 && off == 0 {
-                *at = 0;
+                body.borrow_mut().at = 0;
                 0
             } else {
                 EINVAL
@@ -1063,11 +1411,13 @@ fn write_stat(buf: u64, kind: super::fs::Kind, size: usize, ino: u64) -> u64 {
 
 fn sys_fstat(fd: u64, buf: u64) -> u64 {
     let found = with_fds(|fds, _| match fds.get(fd as usize) {
-        Some(Some(super::fs::Fd::File { path, data, .. })) => {
-            Some((super::fs::Kind::File, data.len(), super::fs::ino_of(path)))
+        Some(Some(super::fs::Fd::File(b))) => {
+            let f = b.borrow();
+            Some((super::fs::Kind::File, f.data.len(), super::fs::ino_of(&f.path)))
         }
-        Some(Some(super::fs::Fd::Dir { path, .. })) => {
-            Some((super::fs::Kind::Dir, 0, super::fs::ino_of(path)))
+        Some(Some(super::fs::Fd::Dir(b))) => {
+            let d = b.borrow();
+            Some((super::fs::Kind::Dir, 0, super::fs::ino_of(&d.path)))
         }
         // The standard three report as pipes, which is the only answer that
         // agrees with the rest of this module: `lseek` on them is `ESPIPE` and
@@ -1124,7 +1474,9 @@ fn sys_getdents64(fd: u64, buf: u64, len: u64) -> u64 {
     // the caller's loop already handles them.
     let room = (len as usize).min(DENTS_MAX);
     with_fds(|fds, _| match fds.get_mut(fd as usize) {
-        Some(Some(super::fs::Fd::Dir { path, entries, at })) => {
+        Some(Some(super::fs::Fd::Dir(body))) => {
+            let d = &mut *body.borrow_mut();
+            let (path, entries, at) = (&d.path, &d.entries, &mut d.at);
             let mut out = alloc::vec::Vec::new();
             while *at < entries.len() {
                 let (name, is_dir, _) = &entries[*at];
@@ -1373,6 +1725,27 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         SYS_GETDENTS64 => (sys_getdents64(f.rdi, f.rsi, f.rdx), true),
         SYS_IOCTL => (sys_ioctl(f.rdi, f.rsi, f.rdx), true),
         SYS_WRITEV => (sys_writev(f.rdi, f.rsi, f.rdx), true),
+        SYS_READV => (sys_readv(f.rdi, f.rsi, f.rdx), true),
+        SYS_ACCESS => (sys_access(f.rdi, f.rsi), true),
+        SYS_FACCESSAT => (sys_access(f.rsi, f.rdx), true),
+        SYS_SENDFILE => (sys_sendfile(f.rdi, f.rsi, f.rdx, f.r10), true),
+        SYS_GETCWD => (sys_getcwd(f.rdi, f.rsi), true),
+        SYS_MKDIR => (sys_name_op(f.rdi, b'm'), true),
+        SYS_RMDIR => (sys_name_op(f.rdi, b'r'), true),
+        SYS_UNLINK => (sys_name_op(f.rdi, b'u'), true),
+        SYS_NANOSLEEP => (sys_nanosleep(f.rdi), true),
+        SYS_CLOCK_NANOSLEEP => (sys_nanosleep(f.rdx), true),
+        // **Accepted and never delivered, which is the honest shape.** A
+        // handler is recorded nowhere because nothing here can raise a signal
+        // at a guest: there is no other process to send one, no terminal to
+        // generate one, and a fault ends the guest rather than being offered
+        // to it. Refusing instead would stop `sh` before it starts, over a
+        // promise about events that cannot happen.
+        SYS_RT_SIGACTION | SYS_RT_SIGPROCMASK => (0, true),
+        // No parent, and no group but the one. `getppid` answering zero is
+        // what a process reparented to nothing reports.
+        SYS_GETPPID => (0, true),
+        SYS_GETGROUPS => (0, true),
         SYS_UNAME => (sys_uname(f.rdi), true),
         SYS_FCNTL => (sys_fcntl(f.rdi, f.rsi, f.rdx), true),
         SYS_GETTIMEOFDAY => (sys_gettimeofday(f.rdi, f.rsi), true),
@@ -1826,7 +2199,12 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         unsafe {
             let p = v as *const u64;
             let n = p.read() as usize;
-            let mut i = 3 + n;
+            // argc, argv, its NULL, then the environment and its NULL.
+            let mut i = 2 + n;
+            while p.add(i).read() != 0 {
+                i += 1;
+            }
+            i += 1;
             loop {
                 let k = p.add(i).read();
                 if k == AT_NULL {
@@ -1842,6 +2220,16 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     out.push((
         "the aux vector answers a page size, so a libc does not divide by zero",
         auxv(AT_PAGESZ) == Some(PAGE),
+    ));
+    out.push((
+        "the environment is between argv and the aux vector, where a libc looks",
+        sp.is_some_and(|v| unsafe {
+            let p = v as *const u64;
+            let n = p.read() as usize;
+            let first = p.add(2 + n).read();
+            first != 0
+                && core::slice::from_raw_parts(first as *const u8, 4) == b"PATH"
+        }),
     ));
     out.push((
         "and the entry and header table the loader placed, by key rather than by position",
@@ -1865,7 +2253,11 @@ pub fn checks() -> Vec<(&'static str, bool)> {
             s2.is_some_and(|v| unsafe {
                 let p = v as *const u64;
                 let n = p.read() as usize;
-                let mut i = 3 + n;
+                let mut i = 2 + n;
+                while p.add(i).read() != 0 {
+                    i += 1;
+                }
+                i += 1;
                 let mut seen_phdr = false;
                 let mut seen_pagesz = false;
                 loop {
@@ -1965,23 +2357,44 @@ const AT_CLKTCK: u64 = 17;
 const AT_SECURE: u64 = 23;
 const AT_RANDOM: u64 = 25;
 
+/// What a guest finds in `environ`.
+///
+/// **It was empty, and an empty environment is not a neutral one.** `env`
+/// printed nothing, which is at least true, but `sh` resolves commands through
+/// `PATH` and a program with no `HOME` writes its dotfiles into the working
+/// directory. These are the smallest set that make a shell behave, and each is
+/// a fact about this machine rather than a plausible-looking default:
+/// `TERM=dumb` because there is no terminal here at all and `ioctl` says so,
+/// `PWD=/` because there is no `chdir`, and `PATH` naming directories that may
+/// well be empty, which is what a search path is for.
+const ENVIRON: [&str; 5] =
+    ["PATH=/bin:/usr/bin:/tmp", "HOME=/", "PWD=/", "TERM=dumb", "USER=root"];
+
 pub fn build_stack(base: *mut u8, size: usize, args: &[&str], aux: Aux) -> Option<u64> {
     let bottom = base as usize;
     let mut top = bottom.checked_add(size)?;
 
     // Strings first, at the very top, because the pointer array below has to
     // name them and nothing may move afterwards.
-    let mut ptrs = alloc::vec::Vec::with_capacity(args.len());
-    for a in args.iter().rev() {
-        top = top.checked_sub(a.len() + 1)?;
-        if top < bottom {
+    let mut put = |top: &mut usize, v: &str| -> Option<u64> {
+        *top = top.checked_sub(v.len() + 1)?;
+        if *top < bottom {
             return None;
         }
         unsafe {
-            core::ptr::copy_nonoverlapping(a.as_ptr(), top as *mut u8, a.len());
-            core::ptr::write((top + a.len()) as *mut u8, 0);
+            core::ptr::copy_nonoverlapping(v.as_ptr(), *top as *mut u8, v.len());
+            core::ptr::write((*top + v.len()) as *mut u8, 0);
         }
-        ptrs.push(top as u64);
+        Some(*top as u64)
+    };
+    let mut envs = alloc::vec::Vec::with_capacity(ENVIRON.len());
+    for e in ENVIRON.iter().rev() {
+        envs.push(put(&mut top, e)?);
+    }
+    envs.reverse();
+    let mut ptrs = alloc::vec::Vec::with_capacity(args.len());
+    for a in args.iter().rev() {
+        ptrs.push(put(&mut top, a)?);
     }
     ptrs.reverse();
 
@@ -2033,7 +2446,7 @@ pub fn build_stack(base: *mut u8, size: usize, args: &[&str], aux: Aux) -> Optio
     // a condition that cannot hold: `sp` is sixteen-aligned and every word is
     // eight bytes. It read as an alignment fix and was a tautology, which is
     // the more expensive kind of dead code because it stops anybody looking.
-    let words = 1 + ptrs.len() + 1 + 1 + pairs.len() * 2;
+    let words = 1 + ptrs.len() + 1 + envs.len() + 1 + pairs.len() * 2;
     let sp = top.checked_sub(words * 8)? & !0xF;
     if sp < bottom {
         return None;
@@ -2045,10 +2458,15 @@ pub fn build_stack(base: *mut u8, size: usize, args: &[&str], aux: Aux) -> Optio
             p.add(1 + i).write(*v);
         }
         p.add(1 + ptrs.len()).write(0); // argv terminator
-        p.add(2 + ptrs.len()).write(0); // envp terminator
+        let e0 = 2 + ptrs.len();
+        for (i, v) in envs.iter().enumerate() {
+            p.add(e0 + i).write(*v);
+        }
+        p.add(e0 + envs.len()).write(0); // envp terminator
+        let a0 = e0 + envs.len() + 1;
         for (i, (k, v)) in pairs.iter().enumerate() {
-            p.add(3 + ptrs.len() + i * 2).write(*k);
-            p.add(4 + ptrs.len() + i * 2).write(*v);
+            p.add(a0 + i * 2).write(*k);
+            p.add(a0 + i * 2 + 1).write(*v);
         }
     }
     Some(sp as u64)
@@ -2069,6 +2487,20 @@ pub fn name_of(nr: u64) -> &'static str {
         SYS_GETPID => "getpid",
         SYS_DUP => "dup",
         SYS_WRITEV => "writev",
+        SYS_READV => "readv",
+        SYS_ACCESS => "access",
+        SYS_FACCESSAT => "faccessat",
+        SYS_SENDFILE => "sendfile",
+        SYS_GETCWD => "getcwd",
+        SYS_MKDIR => "mkdir",
+        SYS_RMDIR => "rmdir",
+        SYS_UNLINK => "unlink",
+        SYS_NANOSLEEP => "nanosleep",
+        SYS_CLOCK_NANOSLEEP => "clock_nanosleep",
+        SYS_RT_SIGACTION => "rt_sigaction",
+        SYS_RT_SIGPROCMASK => "rt_sigprocmask",
+        SYS_GETPPID => "getppid",
+        SYS_GETGROUPS => "getgroups",
         SYS_UNAME => "uname",
         SYS_FCNTL => "fcntl",
         SYS_GETTIMEOFDAY => "gettimeofday",

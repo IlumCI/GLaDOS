@@ -32,8 +32,34 @@
 //! forward. A path containing `..` is refused rather than normalised, because
 //! a tree with O(1) copies has no single parent to walk back to.
 
+use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::cell::RefCell;
+
+/// The one subtree a guest may write to.
+///
+/// **Writes were refused everywhere and that stopped being the right answer.**
+/// The reason given was sound: a write to a content-addressed store is a new
+/// root hash, so an unrestricted `O_WRONLY` hands a guest binary a route to the
+/// namespace that goes around every gate `sysbox` puts in front of the shell.
+/// What it argued for was a jail rather than a refusal, and `mkdir` failing was
+/// the measurement that made that concrete.
+///
+/// `/tmp` because that is already the scratch area: it is where `fat get` puts
+/// what it fetches and where a guest's own binary lives. Everything else is
+/// `EROFS`, which is the errno for exactly this and which every program already
+/// knows how to report.
+pub const WRITE_ROOT: &str = "/tmp";
+
+/// Whether a resolved path is inside the writable subtree.
+///
+/// Checked on the *resolved* path rather than the one the guest typed, so a
+/// relative path cannot climb out by being written differently. `resolve`
+/// refuses `..` outright, which is what makes one check enough.
+pub fn writable(path: &str) -> bool {
+    path == WRITE_ROOT || path.starts_with("/tmp/")
+}
 
 /// `AT_FDCWD`, the descriptor that means "relative to the working directory".
 pub const AT_FDCWD: i64 = -100;
@@ -44,29 +70,95 @@ pub const AT_FDCWD: i64 = -100;
 /// they are variants rather than an entry in the table with a magic path: a
 /// guest that `lseek`s on stdout should get `ESPIPE` from the type system
 /// rather than from a path comparison.
+pub struct File {
+    pub path: String,
+    pub data: Vec<u8>,
+    pub at: usize,
+    /// Whether this description may be written through.
+    pub writable: bool,
+    /// Set the moment a write lands, cleared when the blob is committed.
+    ///
+    /// Writes buffer here and go to the store on the last `close` rather than
+    /// per call, because a store keyed by content rewrites the whole blob and
+    /// gives it a new address: a program writing a kilobyte one byte at a time
+    /// would produce a thousand objects and a thousand hashes of everything
+    /// before them.
+    pub dirty: bool,
+}
+
+pub struct Dir {
+    pub path: String,
+    /// Name, whether it is a directory, and size. Snapshotted at `open`,
+    /// because a directory that changed under a half-finished `getdents64`
+    /// would hand the guest a shifting list and there is no cursor the tree
+    /// could offer instead.
+    pub entries: Vec<(String, bool, usize)>,
+    pub at: usize,
+}
+
+/// What a descriptor refers to.
+///
+/// The three standard ones are not files and never become files, which is why
+/// they are variants rather than an entry in the table with a magic path: a
+/// guest that `lseek`s on stdout should get `ESPIPE` from the type system
+/// rather than from a path comparison.
+///
+/// **The body is behind an `Rc<RefCell<..>>` and that is what makes `dup`
+/// correct.** On Linux a duplicated descriptor shares one *open file
+/// description*, so the two numbers share a cursor: reading through one
+/// advances the other. The body used to live inside the `Fd`, so `dup` could
+/// only copy it, and two independent cursors is a program reading everything
+/// twice. It was refused rather than got wrong, which was the right call and
+/// still cost a real applet: `hexdump` does `dup2(fd, 0)` to read its file as
+/// stdin, and got `ENOSYS`.
+///
+/// `Rc` and not `Arc` for the reason `Interp` gives about its functions: one
+/// guest, one task, nothing crossing a core.
 pub enum Fd {
     Stdin,
     Stdout,
     Stderr,
-    File {
-        path: String,
-        data: Vec<u8>,
-        at: usize,
-    },
-    Dir {
-        path: String,
-        /// Name, whether it is a directory, and size. Snapshotted at `open`,
-        /// because a directory that changed under a half-finished
-        /// `getdents64` would hand the guest a shifting list and there is no
-        /// cursor the tree could offer instead.
-        entries: Vec<(String, bool, usize)>,
-        at: usize,
-    },
+    File(Rc<RefCell<File>>),
+    Dir(Rc<RefCell<Dir>>),
 }
 
 impl Fd {
     pub fn is_dir(&self) -> bool {
-        matches!(self, Fd::Dir { .. })
+        matches!(self, Fd::Dir(_))
+    }
+
+    /// A second name for the same open file description.
+    ///
+    /// The whole of `dup`: the streams have no state to share so they copy,
+    /// and everything else hands out another reference to one body.
+    pub fn share(&self) -> Fd {
+        match self {
+            Fd::Stdin => Fd::Stdin,
+            Fd::Stdout => Fd::Stdout,
+            Fd::Stderr => Fd::Stderr,
+            Fd::File(b) => Fd::File(b.clone()),
+            Fd::Dir(b) => Fd::Dir(b.clone()),
+        }
+    }
+
+    /// Commit a written file, if this is the last name for it.
+    ///
+    /// Answers whether anything was written. The `Rc` count is the test: while
+    /// another descriptor still names this body the bytes are not final, and
+    /// committing early would publish a half-written file under a hash that
+    /// the next write immediately invalidates.
+    pub fn flush(&self) -> bool {
+        let Fd::File(b) = self else { return false };
+        if Rc::strong_count(b) > 1 {
+            return false;
+        }
+        let mut f = b.borrow_mut();
+        if !f.dirty || !f.writable {
+            return false;
+        }
+        f.dirty = false;
+        let data = f.data.clone();
+        crate::sysbox::write_blob(&f.path, data)
     }
 }
 
@@ -286,6 +378,52 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     out.push((
         "an inode number is stable for a path and different between paths",
         ino_of("/a") == ino_of("/a") && ino_of("/a") != ino_of("/b") && ino_of("/a") != 0,
+    ));
+
+    out.push((
+        "the writable subtree is /tmp and its own name, and nothing above it",
+        writable("/tmp")
+            && writable("/tmp/x")
+            && writable("/tmp/a/b")
+            && !writable("/")
+            && !writable("/ai/about")
+            && !writable("/tmpish"),
+    ));
+    out.push((
+        "two names for one body share a cursor, which is the whole of dup",
+        {
+            let a = Fd::File(Rc::new(RefCell::new(File {
+                path: String::from("/tmp/x"),
+                data: alloc::vec![1, 2, 3, 4],
+                at: 0,
+                writable: false,
+                dirty: false,
+            })));
+            let b = a.share();
+            if let Fd::File(f) = &a {
+                f.borrow_mut().at = 3;
+            }
+            matches!(&b, Fd::File(f) if f.borrow().at == 3)
+        },
+    ));
+    out.push((
+        "and a stream shares nothing, since it has no cursor to disagree about",
+        matches!(Fd::Stdout.share(), Fd::Stdout),
+    ));
+    out.push((
+        "a body with another name outstanding does not commit yet",
+        {
+            let a = Fd::File(Rc::new(RefCell::new(File {
+                path: String::from("/tmp/never-written"),
+                data: Vec::new(),
+                at: 0,
+                writable: true,
+                dirty: true,
+            })));
+            let _b = a.share();
+            // Two names, so the flush declines and nothing reaches the store.
+            !a.flush()
+        },
     ));
     out
 }
