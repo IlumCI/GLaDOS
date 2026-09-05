@@ -77,6 +77,7 @@ pub const SYS_PREAD64: u64 = 17;
 pub const SYS_SET_ROBUST_LIST: u64 = 273;
 pub const SYS_RSEQ: u64 = 334;
 pub const SYS_PRLIMIT64: u64 = 302;
+pub const SYS_GETRANDOM: u64 = 318;
 pub const SYS_GETPID: u64 = 39;
 pub const SYS_GETDENTS64: u64 = 217;
 pub const SYS_SET_TID_ADDRESS: u64 = 218;
@@ -1756,6 +1757,32 @@ fn sys_pread64(fd: u64, buf: u64, len: u64, off: u64) -> u64 {
 /// size is a libc built against a different `struct robust_list_head`, and
 /// accepting that quietly is how a disagreement about a structure becomes a
 /// disagreement about memory later.
+/// Random bytes, from the same generator everything else here uses.
+///
+/// glibc asks for these and copes with `ENOSYS` by falling back to `AT_RANDOM`
+/// and the clock, which is a worse answer than the one this machine can
+/// actually give. `rng::fill` rather than `fill_secret`: a stack guard and a
+/// hash seed want unpredictability without depending on it, and `fill_secret`
+/// refuses before the entropy threshold is met, which would turn a working
+/// program into a refused one on a machine nobody has typed at.
+///
+/// `GRND_RANDOM` and `GRND_NONBLOCK` are accepted and ignored, because there
+/// is one pool here and it never blocks. Answering the full count is therefore
+/// always true rather than optimistic.
+fn sys_getrandom(buf: u64, len: u64, _flags: u64) -> u64 {
+    if len == 0 {
+        return 0;
+    }
+    if !reachable(buf, len as usize, true) {
+        return EFAULT;
+    }
+    let n = (len as usize).min(1 << 20);
+    let mut tmp = alloc::vec![0u8; n];
+    crate::rng::fill(&mut tmp);
+    unsafe { core::ptr::copy_nonoverlapping(tmp.as_ptr(), buf as *mut u8, n) };
+    n as u64
+}
+
 fn sys_set_robust_list(_head: u64, len: u64) -> u64 {
     if len != 24 {
         return EINVAL;
@@ -2097,11 +2124,27 @@ fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off: u64) -> u6
     // a `#PF` at ring 0 with `CR0.WP` on. Nothing about it was the guest's
     // fault and no bounds check could have caught it: the range was one the
     // guest owned and the pointer was one the kernel chose.
-    if backing.is_some() {
+    // Writable for the length of the fill, whichever kind it is. An anonymous
+    // mapping is *zeroed* by Linux and this only got that for free while every
+    // mapping came from `alloc_pages`: laid over memory the guest already
+    // holds, the pages keep whatever was there. For a library that is the tail
+    // of the file showing through where `.bss` should be, which is a
+    // zero-initialised variable that silently is not.
+    if from.is_none() || backing.is_some() {
         crate::mem::paging::protect(at, page_up(len as usize), crate::mem::paging::Perm::RWX);
     }
-    if let Some(b) = backing {
-        unsafe { core::ptr::copy_nonoverlapping(b.as_ptr(), at as *mut u8, b.len()) };
+    match &backing {
+        Some(b) => unsafe {
+            core::ptr::copy_nonoverlapping(b.as_ptr(), at as *mut u8, b.len());
+            // Past the end of the file is zero, which is how a shared object's
+            // `.bss` is made when it shares a page with `.data`.
+            let tail = page_up(len as usize).saturating_sub(b.len());
+            core::ptr::write_bytes((at + b.len() as u64) as *mut u8, 0, tail);
+        },
+        None if from.is_none() => unsafe {
+            core::ptr::write_bytes(at as *mut u8, 0, page_up(len as usize))
+        },
+        None => {}
     }
     // **Open it to ring 3, or the guest cannot touch what it just asked for.**
     // The loader opens the image, stack and break before the guest starts, and
@@ -2297,6 +2340,7 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         SYS_PREAD64 => (sys_pread64(f.rdi, f.rsi, f.rdx, f.r10), true),
         SYS_SET_ROBUST_LIST => (sys_set_robust_list(f.rdi, f.rsi), true),
         SYS_PRLIMIT64 => (sys_prlimit64(f.rdi, f.rsi, f.rdx, f.r10), true),
+        SYS_GETRANDOM => (sys_getrandom(f.rdi, f.rsi, f.rdx), true),
         // **`rseq` stays refused, and that is the right answer rather than a
         // gap.** Linux itself answers `ENOSYS` whenever `CONFIG_RSEQ` is off,
         // so every libc that registers one already copes with being told no,
@@ -2456,6 +2500,21 @@ static LAST_FAULT: Racy<Option<Fault>> = Racy::new(None);
 /// map it should be read against exist together.
 static FAULT_AT: Racy<Option<(String, String, String)>> = Racy::new(None);
 
+/// The words around the guest's stack pointer when it died, each said in
+/// words as well as in hex.
+///
+/// **Because a return address is the only thing that names the caller here.**
+/// There is no unwinder and no symbols, so "who called this with a null" is
+/// answerable only by reading the stack the call left behind -- and the stack
+/// is freed by the teardown two lines after the guest returns. Sixteen words
+/// either side is enough to hold a small frame and the return address above
+/// it, and small enough that the report stays readable.
+static FAULT_STACK: Racy<Option<Vec<(u64, u64, String)>>> = Racy::new(None);
+
+pub fn fault_stack() -> Option<Vec<(u64, u64, String)>> {
+    unsafe { (*FAULT_STACK.get()).clone() }
+}
+
 pub fn last_fault() -> Option<Fault> {
     unsafe { *LAST_FAULT.get() }
 }
@@ -2609,6 +2668,22 @@ pub unsafe fn run(entry: u64, stack_top: u64) -> u64 {
     unsafe {
         *FAULT_AT.get() =
             last_fault().map(|f| (locate(f.rip), locate(f.cr2), locate(f.rsp)));
+        *FAULT_STACK.get() = last_fault().and_then(|f| {
+            let base = f.rsp & !7;
+            let mut out = Vec::new();
+            for i in 0..24u64 {
+                let at = base + i * 8;
+                // Read only what the guest actually owns and can be read: the
+                // stack pointer of a program that died badly is not
+                // necessarily a stack pointer.
+                if !reachable(at, 8, false) {
+                    continue;
+                }
+                let v = core::ptr::read_unaligned(at as *const u64);
+                out.push((at, v, locate(v)));
+            }
+            (!out.is_empty()).then_some(out)
+        });
     }
     teardown();
     code
@@ -3381,6 +3456,7 @@ pub fn name_of(nr: u64) -> &'static str {
         SYS_PREAD64 => "pread64",
         SYS_SET_ROBUST_LIST => "set_robust_list",
         SYS_PRLIMIT64 => "prlimit64",
+        SYS_GETRANDOM => "getrandom",
         SYS_RSEQ => "rseq",
         SYS_GETPID => "getpid",
         SYS_DUP => "dup",

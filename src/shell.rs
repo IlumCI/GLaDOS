@@ -4506,6 +4506,24 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                                         );
                                     }
                                     kprintln!("  rsp {:#x} in {}", f.rsp, at_rsp);
+                                    // Only the words that point at something
+                                    // are printed. A stack is mostly saved
+                                    // registers and small integers, and
+                                    // listing those buries the one or two
+                                    // that are addresses -- which are the
+                                    // whole reason to look.
+                                    if let Some(ws) = linux::syscall::fault_stack() {
+                                        for (at, v, what) in ws {
+                                            if !what.starts_with("nothing") {
+                                                kprintln!(
+                                                    "    [rsp+{:#04x}] {:#018x}  {}",
+                                                    at - f.rsp,
+                                                    v,
+                                                    what
+                                                );
+                                            }
+                                        }
+                                    }
                                 }
                                 console::set_color(YELLOW);
                                 kprintln!(

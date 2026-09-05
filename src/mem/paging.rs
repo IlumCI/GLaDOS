@@ -636,9 +636,55 @@ pub fn protect(at: u64, len: usize, perm: Perm) -> bool {
 /// read-only, under `recover::guard`, and requires the fault to arrive.
 /// Everything else here is arithmetic; that one is the only evidence that any
 /// of it is enforced rather than merely recorded.
+/// Whether changing a range's rights leaves its contents alone.
+///
+/// **Written for one address.** A real `ld.so` faulted reading a null out of
+/// `GOT[1]`, which lives in the last sixteen bytes of the last page of the
+/// range its RELRO `mprotect` covers -- and `GOT[2]`, eight bytes further on,
+/// was intact. That is the shape of a boundary bug: something lost at the end
+/// of a range and nothing lost in the middle. So this fills two pages with a
+/// pattern that is a function of the address, changes the rights, and checks
+/// every byte -- with the first and last words called out separately, because
+/// "all bytes survived" and "the last word survived" are the same claim only
+/// until they are not.
+///
+/// It also checks the rights actually changed, since a `protect` that quietly
+/// did nothing would preserve contents perfectly.
+fn protect_keeps_contents() -> (bool, bool, bool) {
+    use alloc::alloc::{alloc_zeroed, dealloc, Layout};
+    let Ok(layout) = Layout::from_size_align(8192, 4096) else { return (false, false, false) };
+    let mem = unsafe { alloc_zeroed(layout) };
+    if mem.is_null() {
+        return (false, false, false);
+    }
+    let at = mem as u64;
+    let pat = |i: usize| -> u8 { ((at as usize).wrapping_add(i).wrapping_mul(31) & 0xFF) as u8 };
+    for i in 0..8192 {
+        unsafe { core::ptr::write_volatile(mem.add(i), pat(i)) };
+    }
+    let applied = protect(at, 8192, Perm { present: true, write: false, exec: false, user: false })
+        && query(at).is_some_and(|p| !p.write)
+        && query(at + 4096).is_some_and(|p| !p.write);
+    let all = (0..8192).all(|i| unsafe { core::ptr::read_volatile(mem.add(i)) } == pat(i));
+    // The last word of the range, on its own, because that is the one the
+    // linker read as zero.
+    let last = (8192 - 8..8192).all(|i| unsafe { core::ptr::read_volatile(mem.add(i)) } == pat(i));
+    protect(at, 8192, Perm::RWX);
+    unsafe { dealloc(mem, layout) };
+    (applied, all, last)
+}
+
 pub fn checks() -> alloc::vec::Vec<(&'static str, bool)> {
     use alloc::alloc::{alloc_zeroed, dealloc, Layout};
     let mut out = alloc::vec::Vec::new();
+
+    let (applied, all, last) = protect_keeps_contents();
+    out.push(("changing a range's rights actually changes them", applied));
+    out.push(("and leaves every byte of it exactly as it was", all));
+    out.push((
+        "including the last word, which is where a linker keeps GOT[1]",
+        last,
+    ));
 
     out.push(("ring 0 respects the read-only bit (CR0.WP)", crate::cpu::wp_on()));
     out.push((
