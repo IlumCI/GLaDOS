@@ -3388,10 +3388,31 @@ pub const OVERRAN: u64 = 1 << 34;
 /// running too long after 70 syscall(s)`. Nothing was wrong with the guest and
 /// nothing was wrong with the kernel. The harness was measuring the console.
 ///
-/// Still a constant rather than a policy, and still a stage-1 number. A guest
-/// that legitimately computes for a minute needs `linux run` to take a limit,
-/// and thirty seconds only moves the point at which that becomes true.
+/// The default rather than a constant now, which is what the paragraph above
+/// asked for: a guest that legitimately computes for a minute needed a way to
+/// say so, and thirty seconds only moved the point at which that became true.
 const DEADLINE_TICKS: u64 = 3000;
+
+/// How long the next guest may run, in ticks, or zero for no limit at all.
+///
+/// **Zero is dangerous and is offered anyway.** The deadline is the only thing
+/// that ends a runaway, so a guest with no limit that never makes a syscall
+/// takes the machine and nothing short of a reboot gets it back. It exists
+/// because the alternative is worse for one specific job: a program that draws
+/// and then holds the screen is killed mid-frame at thirty seconds, so there
+/// has never been a photograph of anything a guest rendered.
+static LIMIT: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(DEADLINE_TICKS);
+
+/// Set the limit for the next guest. Answers what it now is, in ticks.
+pub fn set_limit(ticks: u64) -> u64 {
+    LIMIT.store(ticks, Ordering::Release);
+    ticks
+}
+
+pub fn limit() -> u64 {
+    LIMIT.load(Ordering::Acquire)
+}
 
 static DEADLINE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
@@ -3626,7 +3647,13 @@ pub unsafe fn run(entry: u64, stack_top: u64) -> u64 {
         *FAULT_REGS.get() = None;
     }
     GUEST_RUNNING.store(true, Ordering::Relaxed);
-    DEADLINE.store(crate::dev::lapic::ticks() + DEADLINE_TICKS, Ordering::Relaxed);
+    // Zero means no deadline, and `overran` already reads a zero `DEADLINE`
+    // as "nothing to enforce", so the two agree without a second condition.
+    let want = limit();
+    DEADLINE.store(
+        if want == 0 { 0 } else { crate::dev::lapic::ticks() + want },
+        Ordering::Relaxed,
+    );
     // Scheduled input is measured from here, which is the only moment that
     // means anything to it: a script armed at the prompt has no idea how long
     // the harness will take to send the next line.

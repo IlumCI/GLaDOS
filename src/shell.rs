@@ -4593,6 +4593,35 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         kprintln!("  'linux env LD_DEBUG=all' makes ld.so narrate its own work");
                     }
                 }
+                "deadline" => {
+                    let arg = words.next().unwrap_or("");
+                    console::set_color(YELLOW);
+                    kprintln!("[deadline] how long the next guest may run");
+                    console::set_color(LTGRAY);
+                    let hz = crate::TIMER_HZ as u64;
+                    match arg {
+                        "" => {}
+                        "off" => {
+                            linux::syscall::set_limit(0);
+                            kprintln!("  no limit -- a guest that does not return takes the");
+                            kprintln!("  machine, and only a reboot gets it back. This is how");
+                            kprintln!("  a rendered frame gets photographed and it is the only");
+                            kprintln!("  reason it is offered.");
+                        }
+                        n => match n.parse::<u64>() {
+                            Ok(secs) if secs > 0 && secs <= 3600 => {
+                                linux::syscall::set_limit(secs * hz);
+                            }
+                            _ => kprintln!("  'linux deadline <seconds>' up to 3600, or 'off'"),
+                        },
+                    }
+                    let t = linux::syscall::limit();
+                    if t == 0 {
+                        kprintln!("  currently: no limit");
+                    } else {
+                        kprintln!("  currently: {} s ({} ticks)", t / hz, t);
+                    }
+                }
                 "feed" => {
                     // The only way an event reaches a *running* guest. A
                     // device opens at the present, so anything typed at the
