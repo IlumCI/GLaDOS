@@ -30,16 +30,19 @@
 //!
 //! ### What is here so far
 //!
-//! The wire format and the object space: how a message is framed, how each
-//! argument type is laid out, and which ids belong to whom. That is everything
-//! underneath the interfaces, and it is worth having on its own because it can
-//! be checked completely with no display, no client and no socket -- the same
-//! bargain `unix.rs` took, transport first and protocol after.
+//! The wire format, the object space, and the two interfaces a connection
+//! bootstraps through: `wl_display` and `wl_registry`. That is everything a
+//! client does before it has asked for anything, and it is worth having on its
+//! own because it can be checked completely with no display, no client and no
+//! socket -- the same bargain `unix.rs` took, transport first and protocol
+//! after.
 //!
-//! Nothing yet answers a request. `wl_display`, `wl_registry`, `wl_compositor`,
-//! `wl_surface` and `wl_shm` come next, and after those `xdg_shell`, which is
-//! what gives a window a title and a place to sit.
+//! Nothing draws yet. `wl_compositor`, `wl_surface` and `wl_shm` come next,
+//! which is where `gfx::compose` gets reached and there is a picture, and
+//! after those `xdg_shell`, which is what gives a window a title and a place
+//! to sit.
 
+pub mod client;
 pub mod object;
 pub mod wire;
 
@@ -47,5 +50,6 @@ pub mod wire;
 pub fn checks() -> alloc::vec::Vec<(&'static str, bool)> {
     let mut out = wire::checks();
     out.extend(object::checks());
+    out.extend(client::checks());
     out
 }

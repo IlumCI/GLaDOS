@@ -88,6 +88,16 @@ pub enum Error {
     IdExhausted,
     /// An opcode the interface does not have.
     NoMethod,
+    /// Bytes left after the last argument the request declares.
+    Trailing,
+    /// A null where the request has no null to offer.
+    NilArgument,
+    /// A registry name nothing was ever published under.
+    NoGlobal,
+    /// A bind naming an interface the global does not speak.
+    WrongInterface,
+    /// A bind above the version advertised, or at nothing.
+    BadVersion,
 }
 
 /// `wl_display.error` codes, from the core protocol.
@@ -100,7 +110,12 @@ impl Error {
     /// The `wl_display.error` code to send before disconnecting.
     pub fn code(self) -> u32 {
         match self {
-            Error::NoObject | Error::IdInUse | Error::IdRange => ERR_INVALID_OBJECT,
+            Error::NoObject
+            | Error::IdInUse
+            | Error::IdRange
+            | Error::NoGlobal
+            | Error::WrongInterface
+            | Error::BadVersion => ERR_INVALID_OBJECT,
             Error::NoMethod => ERR_INVALID_METHOD,
             Error::TooLarge | Error::IdExhausted => ERR_NO_MEMORY,
             _ => ERR_IMPLEMENTATION,

@@ -156,6 +156,28 @@ impl Table {
         Ok(())
     }
 
+    /// Every live id speaking one interface.
+    ///
+    /// A scan rather than an index, because the one caller is `publish`: a
+    /// global arriving has to reach every registry the client holds, and a
+    /// global arriving is rare where a lookup by id happens on every message.
+    /// Answers an owned list on purpose, so the caller can send events without
+    /// still borrowing the table it is about to change.
+    pub fn ids_of(&self, iface: &str) -> Vec<u32> {
+        let mut out = Vec::new();
+        for (i, slot) in self.client.iter().enumerate() {
+            if matches!(slot, Some(e) if e.iface == iface) {
+                out.push(i as u32);
+            }
+        }
+        for (i, slot) in self.server.iter().enumerate() {
+            if matches!(slot, Some(e) if e.iface == iface) {
+                out.push(SERVER_BASE + i as u32);
+            }
+        }
+        out
+    }
+
     /// How many objects are alive.
     pub fn live(&self) -> usize {
         self.client.iter().flatten().count() + self.server.iter().flatten().count()
