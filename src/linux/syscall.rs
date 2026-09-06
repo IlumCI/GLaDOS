@@ -237,13 +237,36 @@ pub struct Frame {
     pub rip: u64,
     /// The guest's flags. `syscall` put them in `r11`.
     pub rflags: u64,
+    // The callee-saved six, and they are here for exactly one caller.
+    //
+    // **`fork` cannot be written without them.** SysV says these survive a
+    // call, and they do -- the dispatcher is compiled Rust and spills them
+    // like any other function -- so the *guest* never notices they are absent
+    // from this frame. What notices is a child that has to resume with its
+    // parent's registers: by the time a handler runs, the guest's `rbx` is
+    // somewhere on the kernel stack and what the register holds is the
+    // kernel's own value. Reading them at that point gives a plausible number
+    // that is not the guest's, which is the worst shape this could take.
+    //
+    // Six more pushes on the hottest path in the guest ABI, paid by every
+    // syscall so that one of them can work. The alternative was a second
+    // entry point for `fork` alone, which means two stubs that must agree
+    // about a frame layout -- the arrangement `model.rs` warns about twice.
+    pub rbx: u64,
+    pub rbp: u64,
+    pub r12: u64,
+    pub r13: u64,
+    pub r14: u64,
+    pub r15: u64,
 }
 
 // The stub, and every line of it is load-bearing.
 //
 // `mov rdi, rsp` is taken *before* the alignment `sub`, so the dispatcher gets
-// the frame and not the padding. The `sub rsp, 8` is there because nine pushes
-// from a 16-aligned top leaves rsp at 8 mod 16, and SysV wants it 16-aligned
+// the frame and not the padding. The `sub rsp, 8` is there because fifteen
+// pushes from a 16-aligned top leaves rsp at 8 mod 16 -- 120 bytes, and 120
+// mod 16 is 8, which is why adding the callee-saved six did not change it;
+// nine pushes was 72, and 72 mod 16 is 8 as well. SysV wants it 16-aligned
 // at the `call` -- getting that wrong does not fault, it misaligns every SSE
 // spill the dispatcher makes, which on this machine surfaces as #GP inside
 // unrelated Rust code.
@@ -253,6 +276,12 @@ core::arch::global_asm!(
 glados_syscall_entry:
     mov [rip + GLADOS_GUEST_RSP], rsp
     mov rsp, [rip + GLADOS_SYSCALL_STACK]
+    push r15
+    push r14
+    push r13
+    push r12
+    push rbp
+    push rbx
     push r11
     push rcx
     push r9
@@ -275,6 +304,12 @@ glados_syscall_entry:
     pop r9
     pop rcx
     pop r11
+    pop rbx
+    pop rbp
+    pop r12
+    pop r13
+    pop r14
+    pop r15
     mov rsp, [rip + GLADOS_GUEST_RSP]
     sysretq
 
@@ -3831,14 +3866,25 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     // in the assembly would hand the dispatcher `rsi` where it expects `rdi`
     // and produce a syscall trace that is subtly and consistently wrong.
     out.push((
-        "the trap frame is nine words, in the order the stub pushes them",
-        core::mem::size_of::<Frame>() == 72,
+        "the trap frame is fifteen words, in the order the stub pushes them",
+        core::mem::size_of::<Frame>() == 120,
     ));
-    let f = Frame { rax: 0, rdi: 1, rsi: 2, rdx: 3, r10: 4, r8: 5, r9: 6, rip: 7, rflags: 8 };
-    let words = unsafe { core::slice::from_raw_parts(&f as *const Frame as *const u64, 9) };
+    // 120 is also what keeps the stub's alignment `sub` correct: 120 mod 16 is
+    // 8, exactly as 72 was, which is why six more pushes changed nothing about
+    // it. Asserted rather than left in a comment, because a sixteenth field
+    // would make the frame 128, leave rsp already aligned, and the `sub` would
+    // then *mis*align it -- a fault inside the dispatcher's first SSE spill,
+    // a long way from the field somebody added.
+    out.push((
+        "and its size still leaves the stub's alignment sub correct",
+        core::mem::size_of::<Frame>() % 16 == 8,
+    ));
+    let f = Frame { rax: 0, rdi: 1, rsi: 2, rdx: 3, r10: 4, r8: 5, r9: 6, rip: 7, rflags: 8,
+        rbx: 9, rbp: 10, r12: 11, r13: 12, r14: 13, r15: 14 };
+    let words = unsafe { core::slice::from_raw_parts(&f as *const Frame as *const u64, 15) };
     out.push((
         "the frame reads back as the register file it describes",
-        words == [0, 1, 2, 3, 4, 5, 6, 7, 8],
+        words == [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
     ));
 
     // The selector arithmetic. `syscall` derives SS from CS by adding eight,
