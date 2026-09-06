@@ -548,7 +548,7 @@ pub fn own_space() -> bool {
 /// 0 has no isolation of any kind: a guest that faults halts the machine, and
 /// the fault report will at least name the guest's pages because `load` armed
 /// them.
-pub unsafe fn run(g: &Guest) -> u64 {
+pub unsafe fn run(g: &mut Guest) -> u64 {
     syscall::clear_trace();
     // Open exactly the guest's own three regions to ring 3 and nothing else.
     // Every other page in the machine keeps a clear U bit, which is what makes
@@ -581,7 +581,9 @@ pub unsafe fn run(g: &Guest) -> u64 {
     ];
     // Installed here rather than in `load`, so a guest that was loaded and
     // never run leaves nothing naming memory its `Guest` has since freed.
-    syscall::install(g.regions);
+    // The tables go with it: from here on the guest table entry owns them, so
+    // `mmap` can map into them and `teardown` frees them with everything else.
+    syscall::install(g.regions, g.space.take());
     // After `install`, which clears the space these names describe.
     let argv: Vec<&str> = g.argv.iter().map(|s| s.as_str()).collect();
     syscall::name_guest(
@@ -609,8 +611,9 @@ pub unsafe fn run(g: &Guest) -> u64 {
     // is strictly tighter than before, since ring 3 can now only reach those
     // pages through the root the guest actually runs on.
     let me = crate::task::current();
-    if let Some(s) = &g.space {
-        crate::task::set_root(me, s.root());
+    let root = syscall::guest_root();
+    if root != 0 {
+        crate::task::set_root(me, root);
     }
     for (r, already) in regions {
         let Some(r) = r else { continue };
@@ -620,7 +623,7 @@ pub unsafe fn run(g: &Guest) -> u64 {
         if !crate::mem::paging::protect(r.at, r.len, crate::mem::paging::Perm::USER_RWX) {
             // The root has to come off before this returns, or the shell goes
             // on running under a space that is about to be dropped.
-            if g.space.is_some() {
+            if root != 0 {
                 crate::task::set_root(me, 0);
             }
             return 0;
@@ -635,7 +638,7 @@ pub unsafe fn run(g: &Guest) -> u64 {
     // walking. `syscall::run` returns on both paths that exist -- a guest that
     // exits and a guest killed by a fault both leave through the longjmp -- so
     // this runs in the case that matters as well as the ordinary one.
-    if g.space.is_some() {
+    if root != 0 {
         crate::task::set_root(me, 0);
     }
     out

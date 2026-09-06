@@ -4441,7 +4441,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     let mut argv: alloc::vec::Vec<&str> = alloc::vec![path];
                     argv.extend(words.clone());
                     match linux::load::load(&bytes, &argv) {
-                        Ok(g) => {
+                        Ok(mut g) => {
                             console::set_color(YELLOW);
                             kprintln!(
                                 "[linux] {} byte(s), {} segment(s), {} byte span at {:#x}, entry {:#x}",
@@ -4471,7 +4471,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                             // Safety: the whole of stage 0 is this call. The
                             // guest's pages are armed, so a fault at least
                             // names them.
-                            let r = unsafe { linux::load::run(&g) };
+                            let r = unsafe { linux::load::run(&mut g) };
                             let calls = linux::syscall::trace();
                             for c in &calls {
                                 if let Some(p) = c.path() {

@@ -452,6 +452,14 @@ pub enum Source {
     /// releasing it through `mem::fixed` releases a claim nobody ever made.
     /// All it owes is the U bit, taken back off.
     Device,
+    /// Heap pages the guest sees somewhere else entirely.
+    ///
+    /// A fourth source because it goes back a fourth way, and it carries the
+    /// address to go back *to*: the guest's `at` is an arena address that no
+    /// allocator ever handed out, so freeing that number would hand the heap
+    /// something it never owned. The pages to release are the backing's, and
+    /// this is the only place that still knows which they were.
+    Backed(u64),
 }
 
 /// A range this kernel handed to the guest.
@@ -538,6 +546,23 @@ pub struct Space {
     pub interp_mapped: bool,
     pub stack_mapped: bool,
     pub brk_mapped: bool,
+    /// This guest's page tables, when it has its own.
+    ///
+    /// **Owned here rather than by `Guest`, because `mmap` needs them.** A
+    /// mapping made during a syscall has to go into the running guest's own
+    /// tables, and the intermediate tables it creates have to be freed when
+    /// the guest is -- which means the thing that owns them must be reachable
+    /// from the syscall path and must die with the guest. That is this entry.
+    /// `Guest` hands them over at `install` and `teardown` drops them.
+    pub tables: Option<crate::mem::space::Space>,
+    /// The next free address in the guest's mmap arena.
+    ///
+    /// A bump cursor and never reused, which is a real limitation with a
+    /// number on it: the arena is 510 GiB below the next slot, so a guest
+    /// would have to map and unmap that much before it wrapped. Reclaiming
+    /// means a free list, and a free list is worth building when something
+    /// runs out rather than before.
+    pub mmap_next: u64,
     pub image_path: String,
     pub interp_path: Option<String>,
     /// `FS` base as the kernel left it. A guest sets `FS` for its
@@ -591,6 +616,12 @@ impl Space {
 /// here. It grows on demand and never shrinks, which is the same bargain
 /// `thread`'s pool makes: a slot vacated by a guest that exited is taken by
 /// the next one.
+/// Where a guest's `mmap` arena begins, one slot past the stack.
+///
+/// Named here rather than in `load` because this is what hands addresses out
+/// of it. The slots below are the loader's business and this one is not.
+pub const GUEST_MMAP_AT: u64 = crate::mem::space::WINDOW + 0x5000_0000;
+
 static TABLE: Racy<Vec<Option<Space>>> = Racy::new(Vec::new());
 
 /// Which slot the syscall path is speaking for.
@@ -610,6 +641,14 @@ unsafe fn guest_slot() -> &'static mut Option<Space> {
         t.push(None);
     }
     &mut t[i]
+}
+
+/// The running guest's page-table root, or 0 for the kernel's.
+pub fn guest_root() -> u64 {
+    match unsafe { guest_slot() }.as_ref().and_then(|sp| sp.tables.as_ref()) {
+        Some(t) => t.root(),
+        None => 0,
+    }
 }
 
 /// Which guest the syscall path is speaking for.
@@ -732,7 +771,7 @@ const PAGE: u64 = 4096;
 /// a real hazard: a guest that was loaded and never run would otherwise leave
 /// `SPACE` naming memory freed when its `Guest` dropped, and the next thing to
 /// read it would be reading a dangling range it believed it had verified.
-pub fn install(r: Regions) {
+pub fn install(r: Regions, tables: Option<crate::mem::space::Space>) {
     let brk = r.brk;
     teardown();
     unsafe {
@@ -743,6 +782,8 @@ pub fn install(r: Regions) {
             interp_mapped: r.interp_mapped,
             stack_mapped: r.stack_mapped,
             brk_mapped: r.brk_mapped,
+            tables,
+            mmap_next: GUEST_MMAP_AT,
             stack: r.stack,
             brk_start: brk.at,
             brk_now: brk.at,
@@ -3146,8 +3187,38 @@ fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off: u64) -> u6
         // A non-fixed `addr` is a hint, and this ignores it. Linux is entitled
         // to as well, every allocator copes, and honouring it would spend a
         // placement claim on a suggestion.
-        let Some(at) = alloc_pages(len as usize) else { return ENOMEM };
-        (at, Some(Source::Heap))
+        let Some(phys) = alloc_pages(len as usize) else { return ENOMEM };
+        // **With a space, the guest is told an arena address rather than the
+        // heap address the pages actually have.** That is the last thing
+        // standing between this and `fork`: a child gets its parent's mappings
+        // at the same addresses, and "wherever the heap had room" is a
+        // different number in each of them.
+        let want = page_up(len as usize) as u64;
+        let arena = unsafe { guest_slot() }.as_mut().and_then(|sp| {
+            let t = sp.tables.as_mut()?;
+            let at = sp.mmap_next;
+            let mut off = 0u64;
+            while off < want {
+                if !t.map_page(at + off, phys + off, true, true) {
+                    // Partly mapped and going no further. The tables are the
+                    // guest's and die with it, so what has to be undone here
+                    // is the pages -- the caller frees them on `None`.
+                    return None;
+                }
+                off += 4096;
+            }
+            sp.mmap_next = at + want;
+            Some(at)
+        });
+        match arena {
+            Some(at) => (at, Some(Source::Backed(phys))),
+            None if guest_root() != 0 => {
+                free_pages(phys, len as usize);
+                return ENOMEM;
+            }
+            // No space, so the guest sees the heap address, as it always did.
+            None => (phys, Some(Source::Heap)),
+        }
     };
 
     // **Writable first, then copy, then the rights that were asked for.** The
@@ -3261,6 +3332,14 @@ fn give_back(at: u64, len: usize, from: Option<Source>) {
         // asked for it, and it still belongs to the display either way.
         Some(Source::Device) => {
             crate::mem::paging::protect(at, page_up(len), crate::mem::paging::Perm::RWX);
+        }
+        // The backing, at its own address. Nothing is done about the guest's
+        // mapping of it: those page tables belong to the guest's `Space` and
+        // die with it, so unmapping here would be tidying something that is
+        // about to be freed wholesale.
+        Some(Source::Backed(phys)) => {
+            crate::mem::paging::release_to_heap(phys, page_up(len));
+            free_pages(phys, len);
         }
     }
 }
@@ -3927,7 +4006,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     {
         let region = 0x10_0000u64;
         let fake = Region { at: region, len: 4096 * 4 };
-        install(Regions { image: fake, stack: fake, brk: fake, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false });
+        install(Regions { image: fake, stack: fake, brk: fake, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false }, None);
         let first = sys_brk(0);
         let grown = sys_brk(region + 8192);
         let refused = sys_brk(region + 1_000_000);
@@ -3952,7 +4031,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     // than about the call, which is why they went the way `ET_EXEC` went.
     {
         let fake = Region { at: 0x10_0000, len: 4096 };
-        install(Regions { image: fake, stack: fake, brk: fake, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false });
+        install(Regions { image: fake, stack: fake, brk: fake, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false }, None);
         out.push((
             "a zero-length mapping is EINVAL, as Linux has it",
             sys_mmap(0, 0, 3, MAP_ANONYMOUS, u64::MAX, 0) == EINVAL,
@@ -3996,7 +4075,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         let mut buf = [0u8; SYSINFO_LEN];
         let at = buf.as_mut_ptr() as u64;
         let owned = Region { at, len: SYSINFO_LEN };
-        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false });
+        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false }, None);
 
         let bare = sys_time(0);
         let through = sys_time(at);
@@ -4052,7 +4131,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         let mut buf = [0u8; 64];
         let at = buf.as_mut_ptr() as u64;
         let owned = Region { at, len: 64 };
-        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false });
+        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false }, None);
         out.push((
             "pread on a stream is ESPIPE, the same answer lseek gives it",
             sys_pread64(0, at, 8, 0) == ESPIPE,
@@ -4081,7 +4160,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         let mut buf = [0xAAu8; 160];
         let at = buf.as_mut_ptr() as u64;
         let owned = Region { at, len: 160 };
-        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false });
+        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false }, None);
         name_guest(&["/tmp/g/bb"], "/tmp/g/bb", None);
         // Three separate strings rather than one rewritten in place: the last
         // time claims here shared a buffer, the first one's write took the NUL
@@ -4143,7 +4222,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     // on its own code.
     if let Some(two) = alloc_pages(8192) {
         let mine = Region { at: two, len: 8192 };
-        install(Regions { image: mine, stack: mine, brk: mine, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false });
+        install(Regions { image: mine, stack: mine, brk: mine, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false }, None);
         let reserved =
             sys_mmap(two, 8192, 0, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, u64::MAX, 0) == two;
         let gone = crate::mem::paging::query(two).is_some_and(|p| !p.present);
@@ -4169,7 +4248,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         let mut buf = [0u8; 144];
         let at = buf.as_mut_ptr() as u64;
         let owned = Region { at, len: 144 };
-        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false });
+        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false }, None);
         // The empty path has to live *inside* what the guest owns, because
         // `read_cstr` bounds-checks it like any other guest pointer. Pointing
         // at a local outside the region answered `EFAULT` before any of the
@@ -4202,7 +4281,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     if let Some(two) = alloc_pages(8192) {
         let img = Region { at: two, len: 4096 };
         let interp = Region { at: two + 4096, len: 4096 };
-        install(Regions { image: img, stack: img, brk: img, interp: Some(interp), image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false });
+        install(Regions { image: img, stack: img, brk: img, interp: Some(interp), image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false }, None);
         // PROT_READ. A real `ld.so` does exactly this to its own RELRO, which
         // is how the page that halted the machine got its rights.
         let asked = sys_mprotect(two + 4096, 4096, 1) == 0;
@@ -4223,7 +4302,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     // pointing at 0x100000 would mark the low megabyte.
     if let Some(own) = alloc_pages(8192) {
         let mine = Region { at: own, len: 8192 };
-        install(Regions { image: mine, stack: mine, brk: mine, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false });
+        install(Regions { image: mine, stack: mine, brk: mine, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false }, None);
         out.push((
             "MAP_FIXED over memory the guest already holds answers that address",
             sys_mmap(own, 4096, 3, MAP_ANONYMOUS | MAP_FIXED, u64::MAX, 0) == own,
@@ -4241,7 +4320,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
 
     {
         let fake = Region { at: 0x10_0000, len: 4096 };
-        install(Regions { image: fake, stack: fake, brk: fake, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false });
+        install(Regions { image: fake, stack: fake, brk: fake, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false }, None);
 
         let at = sys_mmap(0, 8192, 3, MAP_ANONYMOUS, u64::MAX, 0);
         let got = (at as i64) > 0 && at % 4096 == 0;
@@ -4268,7 +4347,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         // GET_FS writes eight bytes through a guest pointer, so it is bounds
         // checked now, so the destination has to be a range the guest owns.
         let owned = Region { at, len: 8 };
-        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false });
+        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false }, None);
         let was = unsafe { crate::cpu::rdmsr(IA32_FS_BASE) };
         let set = sys_arch_prctl(ARCH_SET_FS, 0xDEAD_0000);
         let got = sys_arch_prctl(ARCH_GET_FS, at);
@@ -4300,7 +4379,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         let mut backing = [0u64; 64];
         let at = backing.as_mut_ptr() as u64;
         let one = Region { at, len: 512 };
-        install(Regions { image: one, stack: one, brk: one, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false });
+        install(Regions { image: one, stack: one, brk: one, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false }, None);
         out.push(("a range inside what the loader gave out is owned", owns(at, 8)));
         out.push(("a range that runs off the end is not", !owns(at + 508, 8)));
         out.push(("a range below it is not", !owns(at - 8, 8)));
@@ -4336,7 +4415,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
             if !mem.is_null() {
                 let at = mem as u64;
                 let owned = Region { at, len: 4096 };
-                install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false });
+                install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false }, None);
                 out.push(("a page the guest owns starts reachable", reachable(at, 8, true)));
                 out.push((
                     "mprotect to PROT_NONE is accepted",
