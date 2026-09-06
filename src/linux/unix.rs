@@ -23,12 +23,21 @@
 //! safe the day a guest is allowed onto a second core, and `smp.rs` already
 //! says what that costs.
 //!
-//! ### What is deliberately not here yet
+//! ### Passing descriptors
 //!
-//! `SCM_RIGHTS`, which is how a process passes a file descriptor over one of
-//! these. Wine uses it -- wineserver hands out handles to shared memory that
-//! way -- so this is not finished for Wine's purposes, and saying so is
-//! cheaper than discovering it inside a failed startup.
+//! `SCM_RIGHTS` is how a process hands a file descriptor to another one, and
+//! it is not a side feature: Wayland passes every buffer that way, so a
+//! compositor cannot exist without it, and wineserver hands out shared-memory
+//! handles the same way.
+//!
+//! **A descriptor is attached to a position in the byte stream, not to the
+//! connection.** That is the part worth getting right. A sender that writes a
+//! header and a buffer descriptor together expects the receiver to see them
+//! together; deliver the descriptor early and the receiver has a buffer it
+//! cannot yet name, deliver it late and it has a message referring to one it
+//! has not been given. So each batch is stamped with the byte count it
+//! travelled behind, and a read hands over exactly the batches its bytes have
+//! now passed.
 
 use alloc::collections::VecDeque;
 use alloc::rc::Rc;
@@ -52,11 +61,37 @@ pub struct Pipe {
     to_a: VecDeque<u8>,
     a_open: bool,
     b_open: bool,
+    /// Descriptors in flight, each stamped with the byte count it sits behind.
+    ///
+    /// Two queues for the same reason the bytes have two: a descriptor going
+    /// one way has nothing to do with one going the other, and a single queue
+    /// would hand a sender its own attachment back.
+    fds_to_b: VecDeque<(u64, Vec<super::fs::Fd>)>,
+    fds_to_a: VecDeque<(u64, Vec<super::fs::Fd>)>,
+    /// Bytes ever written into each direction, which is what a stamp counts
+    /// against. Monotonic, so a wrap would need 16 exabytes through one
+    /// socket.
+    sent_to_b: u64,
+    sent_to_a: u64,
+    /// Bytes ever taken out of each direction.
+    read_a: u64,
+    read_b: u64,
 }
 
 impl Pipe {
     fn new() -> Pipe {
-        Pipe { to_b: VecDeque::new(), to_a: VecDeque::new(), a_open: true, b_open: true }
+        Pipe {
+            to_b: VecDeque::new(),
+            to_a: VecDeque::new(),
+            a_open: true,
+            b_open: true,
+            fds_to_b: VecDeque::new(),
+            fds_to_a: VecDeque::new(),
+            sent_to_b: 0,
+            sent_to_a: 0,
+            read_a: 0,
+            read_b: 0,
+        }
     }
 }
 
@@ -213,9 +248,12 @@ pub fn read(pipe: &Rc<RefCell<Pipe>>, side: Side, out: &mut [u8]) -> Result<usiz
         return if far_open { Err(EAGAIN) } else { Ok(0) };
     }
     let n = out.len().min(q.len());
-    for (i, slot) in out.iter_mut().enumerate().take(n) {
+    for slot in out.iter_mut().take(n) {
         *slot = q.pop_front().unwrap_or(0);
-        let _ = i;
+    }
+    match side {
+        Side::A => p.read_a += n as u64,
+        Side::B => p.read_b += n as u64,
     }
     Ok(n)
 }
@@ -249,7 +287,64 @@ pub fn write(pipe: &Rc<RefCell<Pipe>>, side: Side, data: &[u8]) -> Result<usize,
     for b in &data[..n] {
         q.push_back(*b);
     }
+    match side {
+        Side::A => p.sent_to_b += n as u64,
+        Side::B => p.sent_to_a += n as u64,
+    }
     Ok(n)
+}
+
+/// Attach descriptors to what has just been written.
+///
+/// **Called after the bytes, and that ordering is the contract.** The stamp is
+/// the byte count they travel behind, so attaching before the write would
+/// stamp them at the previous message's end and hand them over one read too
+/// early -- a receiver holding a descriptor for a message it has not seen.
+pub fn attach(pipe: &Rc<RefCell<Pipe>>, side: Side, fds: Vec<super::fs::Fd>) {
+    if fds.is_empty() {
+        return;
+    }
+    let mut p = pipe.borrow_mut();
+    let (at, q) = match side {
+        Side::A => (p.sent_to_b, &mut p.fds_to_b),
+        Side::B => (p.sent_to_a, &mut p.fds_to_a),
+    };
+    q.push_back((at, fds));
+}
+
+/// Take every batch this end's reads have now caught up with.
+///
+/// A batch stamped at or below what has been read is one whose bytes are in
+/// the receiver's hands, so the descriptors belong with them.
+pub fn collect(pipe: &Rc<RefCell<Pipe>>, side: Side) -> Vec<super::fs::Fd> {
+    let mut p = pipe.borrow_mut();
+    let read = match side {
+        Side::A => p.read_a,
+        Side::B => p.read_b,
+    };
+    let q = match side {
+        Side::A => &mut p.fds_to_a,
+        Side::B => &mut p.fds_to_b,
+    };
+    let mut out = Vec::new();
+    while let Some((at, _)) = q.front() {
+        if *at > read {
+            break;
+        }
+        if let Some((_, fds)) = q.pop_front() {
+            out.extend(fds);
+        }
+    }
+    out
+}
+
+/// Whether anything is waiting to be handed over, for a claim.
+pub fn pending_fds(pipe: &Rc<RefCell<Pipe>>, side: Side) -> usize {
+    let p = pipe.borrow();
+    match side {
+        Side::A => p.fds_to_a.len(),
+        Side::B => p.fds_to_b.len(),
+    }
 }
 
 /// How many bytes are readable at this end, for `poll`-shaped questions.
@@ -346,6 +441,43 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         read(&sp, ss, &mut buf) == Ok(0),
     ));
     out.push(("writing to a closed peer is EPIPE", write(&sp, ss, b"x") == Err(-32)));
+
+    // ---- descriptor passing, which Wayland cannot do without ----
+    let (pa, pb) = pair();
+    write(&pa, Side::A, b"hdr").ok();
+    attach(&pa, Side::A, alloc::vec![super::fs::Fd::Stdout]);
+    write(&pa, Side::A, b"more").ok();
+    attach(&pa, Side::A, alloc::vec![super::fs::Fd::Stderr]);
+    out.push(("two batches can be in flight at once", pending_fds(&pb, Side::B) == 2));
+    out.push((
+        "nothing is handed over before its bytes are read",
+        collect(&pb, Side::B).is_empty(),
+    ));
+    let mut b3 = [0u8; 3];
+    read(&pb, Side::B, &mut b3).ok();
+    // Three bytes read is exactly the first batch's stamp, and not the
+    // second's. A collector that ignored the stamps would hand over both.
+    out.push((
+        "reading a message's bytes releases that message's descriptors",
+        collect(&pb, Side::B).len() == 1,
+    ));
+    out.push((
+        "and not the next message's, which has not been read yet",
+        pending_fds(&pb, Side::B) == 1,
+    ));
+    let mut b4 = [0u8; 4];
+    read(&pb, Side::B, &mut b4).ok();
+    out.push((
+        "the second batch follows its own bytes",
+        collect(&pb, Side::B).len() == 1,
+    ));
+    out.push(("and nothing is left over", pending_fds(&pb, Side::B) == 0));
+    // The other direction has to be untouched by all of that: one queue for
+    // both would have handed the sender its own attachment back.
+    out.push((
+        "a descriptor sent one way never appears on the other",
+        pending_fds(&pa, Side::A) == 0,
+    ));
 
     unbind("/tmp/t.sock");
     out.push(("the name is free once unbound", bound_names() == 0));

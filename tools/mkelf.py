@@ -1129,6 +1129,117 @@ def sock_code(entry_rva, msg_rva, _unused):
     return bytes(c)
 
 
+MSG_SCM = b"scm: this line was written through a descriptor that arrived over a socket\n"
+
+
+def scm_code(entry_rva, msg_rva, _unused):
+    """Send `stdout` across a socket and write through what comes out.
+
+    **The proof is that this message appears at all.** The descriptor written
+    to at the end is not one this program opened -- it is whatever number
+    `recvmsg` handed back, and the only way it can reach the console is if the
+    kernel cloned the sender's open file description and installed it in the
+    receiver's table under a new name. A fixture that checked a return code
+    could pass on a kernel that invented a plausible number.
+
+    Two scratch areas rather than one, and that is arithmetic rather than
+    taste: `store_q` takes a signed byte displacement, so every field has to
+    sit within 127 of whichever base register points at it. One area for the
+    sending structures and one for the receiving keeps every offset small.
+    """
+    AF_UNIX, SOCK_STREAM = 1, 1
+    NAME, NAMELEN, IOV, IOVLEN, CONTROL, CONTROLLEN, FLAGS = 0, 8, 16, 24, 32, 40, 48
+    CMSG = 20                                   # 16 header + one 4-byte fd
+    c = bytearray()
+    leas = []
+
+    def lea(reg, off):
+        leas.append((len(c), off))
+        return lea_rip(reg, 0)
+
+    # --- socketpair(AF_UNIX, SOCK_STREAM, 0, &sv) ---
+    c += mov_imm("rax", 53) + mov_imm("rdi", AF_UNIX) + mov_imm("rsi", SOCK_STREAM)
+    c += mov_imm("rdx", 0)
+    c += lea("r10", 96)                         # sv lives at S+96
+    c += SYSCALL
+    c += cmp_imm8("rax", 0)
+    j0 = len(c); c += jcc(JNE, 0)
+
+    # rbx = the sending area; r12/r13 = the two descriptors.
+    c += lea("rbx", 0)
+    c += load_d("r12", "rbx", 96)
+    c += load_d("r13", "rbx", 100)
+
+    # iov = { &ping, 1 }
+    c += lea("rax", 96 + 8)                     # the one byte we send
+    c += store_q("rbx", 0, "rax")
+    c += mov_imm("rax", 1) + store_q("rbx", 8, "rax")
+    # msghdr
+    c += mov_imm("rax", 0)
+    c += store_q("rbx", 16 + NAME, "rax")
+    c += store_q("rbx", 16 + NAMELEN, "rax")
+    c += store_q("rbx", 16 + FLAGS, "rax")
+    c += mov_rr("rax", "rbx") + store_q("rbx", 16 + IOV, "rax")
+    c += mov_imm("rax", 1) + store_q("rbx", 16 + IOVLEN, "rax")
+    c += mov_rr("rax", "rbx") + add_imm("rax", 72)
+    c += store_q("rbx", 16 + CONTROL, "rax")
+    c += mov_imm("rax", CMSG) + store_q("rbx", 16 + CONTROLLEN, "rax")
+    # cmsghdr { len, SOL_SOCKET, SCM_RIGHTS, fd = 1 }
+    c += mov_imm("rax", CMSG) + store_q("rbx", 72, "rax")
+    c += mov_imm("rax", 1) + store_q("rbx", 88, "rax")     # the fd, stdout
+    # level and type are two u32 in one word; 1 | (1 << 32) is both at once,
+    # and mov_imm sign-extends a 32-bit immediate so it has to be built.
+    c += mov_imm("rax", 1)
+    c += bytes([0x48, 0xC1, 0xE0, 0x20])                    # shl rax, 32
+    c += add_imm("rax", 1)
+    c += store_q("rbx", 80, "rax")
+
+    c += mov_imm("rax", 46) + mov_rr("rdi", "r12")
+    c += mov_rr("rsi", "rbx") + add_imm("rsi", 16)
+    c += mov_imm("rdx", 0) + SYSCALL
+    c += cmp_imm8("rax", 1)
+    j1 = len(c); c += jcc(JNE, 0)
+
+    # --- the receiving side, in its own area ---
+    c += lea("rbp", 200)
+    c += mov_rr("rax", "rbp") + add_imm("rax", 96)
+    c += store_q("rbp", 0, "rax")                           # iov.base = rbuf
+    c += mov_imm("rax", 16) + store_q("rbp", 8, "rax")
+    c += mov_imm("rax", 0)
+    c += store_q("rbp", 16 + NAME, "rax")
+    c += store_q("rbp", 16 + NAMELEN, "rax")
+    c += store_q("rbp", 16 + FLAGS, "rax")
+    c += mov_rr("rax", "rbp") + store_q("rbp", 16 + IOV, "rax")
+    c += mov_imm("rax", 1) + store_q("rbp", 16 + IOVLEN, "rax")
+    c += mov_rr("rax", "rbp") + add_imm("rax", 72)
+    c += store_q("rbp", 16 + CONTROL, "rax")
+    c += mov_imm("rax", CMSG) + store_q("rbp", 16 + CONTROLLEN, "rax")
+
+    c += mov_imm("rax", 47) + mov_rr("rdi", "r13")
+    c += mov_rr("rsi", "rbp") + add_imm("rsi", 16)
+    c += mov_imm("rdx", 0) + SYSCALL
+    c += cmp_imm8("rax", 1)
+    j2 = len(c); c += jcc(JNE, 0)
+
+    # The descriptor the kernel installed, out of the control buffer.
+    c += load_d("r14", "rbp", 88)
+    c += mov_imm("rax", 1) + mov_rr("rdi", "r14")
+    c += lea("rsi", 104)                        # the message
+    c += mov_imm("rdx", len(MSG_SCM)) + SYSCALL
+    c += cmp_imm32("rax", len(MSG_SCM))
+    j3 = len(c); c += jcc(JNE, 0)
+    c += mov_imm("rax", 60) + mov_imm("rdi", 9) + SYSCALL + HLT
+
+    bad_at = len(c)
+    c += mov_imm("rax", 60) + mov_imm("rdi", 4) + SYSCALL + HLT
+
+    for at in (j0, j1, j2, j3):
+        struct.pack_into("<i", c, at + 2, bad_at - (at + 6))
+    for at, off in leas:
+        struct.pack_into("<i", c, at + 3, msg_rva + off - (entry_rva + at + 7))
+    return bytes(c)
+
+
 def spin_code(entry_rva, _a, _b):
     """Loop forever, asking for nothing.
 
@@ -2474,6 +2585,16 @@ def build(kind="static"):
         text = spin_code(entry, 0, 0)
         body = text
         msg_rva, disp, lea_end = body_at, 0, 0
+    elif kind == "scm":
+        probe = scm_code(0, 0, 0)
+        msg_rva = body_at + len(probe)
+        text = scm_code(entry, msg_rva, 0)
+        assert len(text) == len(probe), (len(text), len(probe))
+        # S+0..96 sending structures, S+96 sv, S+104 the message, then the
+        # receiving area at S+200.
+        body = text + bytes(96) + bytes(8) + MSG_SCM
+        body += bytes(200 - len(body) + len(text)) + bytes(112)
+        disp, lea_end = 0, 0
     elif kind == "sock":
         probe = sock_code(0, 0, 0)
         msg_rva = body_at + len(probe)
@@ -2985,6 +3106,18 @@ def verify(path):
         claim("and ends in hlt, so a syscall that returns is visible",
               b.endswith(HLT))
         return ok
+    if MSG_SCM in b:
+        claim("it makes a socketpair", mov_imm("rax", 53) in b)
+        claim("it sends with sendmsg", mov_imm("rax", 46) in b)
+        claim("and receives with recvmsg", mov_imm("rax", 47) in b)
+        claim("it builds a control message of the right size",
+              mov_imm("rax", 20) in b)
+        claim("it reads the descriptor out of the control buffer rather than "
+              "assuming a number",
+              load_d("r14", "rbp", 88) in b)
+        claim("every step is checked, so a wrong count exits 4",
+              b.count(cmp_imm8("rax", 1)) >= 2)
+        return ok
     if MSG_SOCK in b:
         claim("it names AF_UNIX in the address it binds", SOCKADDR_UN in b)
         claim("it binds", mov_imm("rax", 49) in b)
@@ -3110,6 +3243,7 @@ def main():
                     choices=["static", "dynamic", "interp", "loader", "maps",
                              "fixed", "memory", "rogue",
                              "protect", "wild", "spin", "fork", "exec", "wnohang", "signal", "sock",
+                             "scm",
                              "cat", "grep",
                              "fsabuse", "fb", "ev", "thread", "gl"],
                     default="static")

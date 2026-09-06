@@ -93,6 +93,8 @@ pub const SYS_READV: u64 = 19;
 pub const SYS_SOCKET: u64 = 41;
 pub const SYS_CONNECT: u64 = 42;
 pub const SYS_ACCEPT: u64 = 43;
+pub const SYS_SENDMSG: u64 = 46;
+pub const SYS_RECVMSG: u64 = 47;
 pub const SYS_BIND: u64 = 49;
 pub const SYS_LISTEN: u64 = 50;
 pub const SYS_SOCKETPAIR: u64 = 53;
@@ -2136,6 +2138,277 @@ fn sys_socketpair(domain: u64, kind: u64, _proto: u64, sv: u64) -> u64 {
     0
 }
 
+/// `struct msghdr`, `struct iovec` and `struct cmsghdr`, which are three
+/// layouts a caller compiled against the real headers already agrees with.
+///
+/// Written out because every one of them has a hole in it that is easy to
+/// miss: `msg_namelen` is a `u32` followed by four bytes of padding, and
+/// `cmsg_level` and `cmsg_type` are two `int`s packed into the word after a
+/// `size_t`. A structure read one field out of step produces a control
+/// message that looks well-formed and names the wrong descriptors.
+/// Too big for the control buffer offered.
+const EMSGSIZE: u64 = (-90i64) as u64;
+
+mod msg {
+    pub const NAME: u64 = 0;
+    pub const NAMELEN: u64 = 8;
+    pub const IOV: u64 = 16;
+    pub const IOVLEN: u64 = 24;
+    pub const CONTROL: u64 = 32;
+    pub const CONTROLLEN: u64 = 40;
+    pub const FLAGS: u64 = 48;
+    pub const SIZE: usize = 56;
+
+    pub const IOV_BASE: u64 = 0;
+    pub const IOV_LEN: u64 = 8;
+    pub const IOV_SIZE: u64 = 16;
+
+    pub const CMSG_LEN: u64 = 0;
+    pub const CMSG_LEVEL: u64 = 8;
+    pub const CMSG_TYPE: u64 = 12;
+    /// `CMSG_DATA` is the header rounded up to eight, which for a 16-byte
+    /// header is 16 -- but the rounding is written out rather than folded in,
+    /// because it is what makes a second control message land in the right
+    /// place.
+    pub const CMSG_DATA: u64 = 16;
+
+    pub const SOL_SOCKET: u32 = 1;
+    pub const SCM_RIGHTS: u32 = 1;
+
+    pub fn align8(n: u64) -> u64 {
+        (n + 7) & !7
+    }
+}
+
+/// The bytes an `iovec` array describes, gathered into one buffer.
+///
+/// Bounded at `IOV_MAX`, which Linux also bounds, and refused rather than
+/// clamped: a caller that asked to send more than this and got a short count
+/// would have to guess whether the rest was dropped or never attempted.
+fn gather(iov: u64, cnt: u64) -> Result<Vec<u8>, u64> {
+    const IOV_MAX: u64 = 1024;
+    if cnt > IOV_MAX {
+        return Err(EINVAL);
+    }
+    let mut out = Vec::new();
+    for i in 0..cnt {
+        let e = iov + i * msg::IOV_SIZE;
+        if !reachable(e, msg::IOV_SIZE as usize, false) {
+            return Err(EFAULT);
+        }
+        let base = unsafe { core::ptr::read((e + msg::IOV_BASE) as *const u64) };
+        let len = unsafe { core::ptr::read((e + msg::IOV_LEN) as *const u64) } as usize;
+        if len == 0 {
+            continue;
+        }
+        if !reachable(base, len, false) {
+            return Err(EFAULT);
+        }
+        out.extend_from_slice(unsafe { core::slice::from_raw_parts(base as *const u8, len) });
+    }
+    Ok(out)
+}
+
+/// Total room an `iovec` array offers, and a writer for filling it.
+fn scatter(iov: u64, cnt: u64, data: &[u8]) -> Result<usize, u64> {
+    const IOV_MAX: u64 = 1024;
+    if cnt > IOV_MAX {
+        return Err(EINVAL);
+    }
+    let mut done = 0usize;
+    for i in 0..cnt {
+        if done == data.len() {
+            break;
+        }
+        let e = iov + i * msg::IOV_SIZE;
+        if !reachable(e, msg::IOV_SIZE as usize, false) {
+            return Err(EFAULT);
+        }
+        let base = unsafe { core::ptr::read((e + msg::IOV_BASE) as *const u64) };
+        let len = unsafe { core::ptr::read((e + msg::IOV_LEN) as *const u64) } as usize;
+        let n = len.min(data.len() - done);
+        if n == 0 {
+            continue;
+        }
+        if !reachable(base, n, true) {
+            return Err(EFAULT);
+        }
+        unsafe { core::ptr::copy_nonoverlapping(data[done..].as_ptr(), base as *mut u8, n) };
+        done += n;
+    }
+    Ok(done)
+}
+
+/// Pull `SCM_RIGHTS` descriptors out of a control buffer.
+fn control_fds(at: u64, len: u64) -> Result<Vec<super::fs::Fd>, u64> {
+    let mut out = Vec::new();
+    if at == 0 || len < msg::CMSG_DATA {
+        return Ok(out);
+    }
+    if !reachable(at, len as usize, false) {
+        return Err(EFAULT);
+    }
+    let mut off = 0u64;
+    while off + msg::CMSG_DATA <= len {
+        let h = at + off;
+        let clen = unsafe { core::ptr::read((h + msg::CMSG_LEN) as *const u64) };
+        let level = unsafe { core::ptr::read((h + msg::CMSG_LEVEL) as *const u32) };
+        let kind = unsafe { core::ptr::read((h + msg::CMSG_TYPE) as *const u32) };
+        // A length that does not cover its own header, or runs past the
+        // buffer, ends the walk rather than being trusted -- the field is the
+        // guest's and a loop that believed it would read whatever follows.
+        if clen < msg::CMSG_DATA || off + clen > len {
+            break;
+        }
+        if level == msg::SOL_SOCKET && kind == msg::SCM_RIGHTS {
+            let n = ((clen - msg::CMSG_DATA) / 4) as usize;
+            for i in 0..n {
+                let fd = unsafe {
+                    core::ptr::read((h + msg::CMSG_DATA + (i * 4) as u64) as *const u32)
+                } as u64;
+                // **Cloned, not moved.** The sender keeps its descriptor; what
+                // travels is another name for the same open file description,
+                // which is what `SCM_RIGHTS` means and why `Fd::share` exists.
+                let Some(f) = with_fds(|fds, _| {
+                    fds.get(fd as usize).and_then(|x| x.as_ref()).map(|x| x.share())
+                })
+                .flatten() else {
+                    return Err(EBADF);
+                };
+                out.push(f);
+            }
+        }
+        off += msg::align8(clen);
+    }
+    Ok(out)
+}
+
+/// Put descriptors into the table and describe them in a control buffer.
+fn write_control(at: u64, room: u64, fds: Vec<super::fs::Fd>) -> Result<u64, u64> {
+    if fds.is_empty() {
+        return Ok(0);
+    }
+    let need = msg::CMSG_DATA + (fds.len() * 4) as u64;
+    if at == 0 || room < need {
+        // Linux sets `MSG_CTRUNC` and drops them. Dropping a descriptor
+        // silently is how a receiver ends up with a message referring to a
+        // buffer it was never given, so this refuses the call instead and
+        // says which way it failed.
+        return Err(EMSGSIZE);
+    }
+    if !reachable(at, need as usize, true) {
+        return Err(EFAULT);
+    }
+    let mut nums = Vec::new();
+    for f in fds {
+        let n = install_fd(f);
+        if n >= MAX_FDS as u64 {
+            return Err(EMFILE);
+        }
+        nums.push(n as u32);
+    }
+    unsafe {
+        core::ptr::write((at + msg::CMSG_LEN) as *mut u64, need);
+        core::ptr::write((at + msg::CMSG_LEVEL) as *mut u32, msg::SOL_SOCKET);
+        core::ptr::write((at + msg::CMSG_TYPE) as *mut u32, msg::SCM_RIGHTS);
+        for (i, n) in nums.iter().enumerate() {
+            core::ptr::write((at + msg::CMSG_DATA + (i * 4) as u64) as *mut u32, *n);
+        }
+    }
+    Ok(need)
+}
+
+fn unix_stream(fd: u64) -> Option<(alloc::rc::Rc<core::cell::RefCell<super::unix::Pipe>>,
+                                   super::unix::Side)> {
+    let sock = unix_sock(fd)?;
+    let b = sock.borrow();
+    match &*b {
+        super::unix::Sock::Stream { pipe, side } => Some((pipe.clone(), *side)),
+        _ => None,
+    }
+}
+
+fn sys_sendmsg(fd: u64, hdr: u64, _flags: u64) -> u64 {
+    let Some((pipe, side)) = unix_stream(fd) else { return ENOTCONN };
+    if !reachable(hdr, msg::SIZE, false) {
+        return EFAULT;
+    }
+    let iov = unsafe { core::ptr::read((hdr + msg::IOV) as *const u64) };
+    let cnt = unsafe { core::ptr::read((hdr + msg::IOVLEN) as *const u64) };
+    let ctl = unsafe { core::ptr::read((hdr + msg::CONTROL) as *const u64) };
+    let ctl_len = unsafe { core::ptr::read((hdr + msg::CONTROLLEN) as *const u64) };
+    let data = match gather(iov, cnt) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let fds = match control_fds(ctl, ctl_len) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let n = match super::unix::write(&pipe, side, &data) {
+        Ok(n) => n,
+        Err(e) => return e as u64,
+    };
+    // **After the bytes.** The attachment is stamped with what it travels
+    // behind, so attaching first would stamp it at the previous message's end
+    // and release it a read too early.
+    super::unix::attach(&pipe, side, fds);
+    n as u64
+}
+
+fn sys_recvmsg(fd: u64, hdr: u64, flags: u64) -> u64 {
+    const MSG_DONTWAIT: u64 = 0x40;
+    let Some((pipe, side)) = unix_stream(fd) else { return ENOTCONN };
+    if !reachable(hdr, msg::SIZE, true) {
+        return EFAULT;
+    }
+    let iov = unsafe { core::ptr::read((hdr + msg::IOV) as *const u64) };
+    let cnt = unsafe { core::ptr::read((hdr + msg::IOVLEN) as *const u64) };
+    let ctl = unsafe { core::ptr::read((hdr + msg::CONTROL) as *const u64) };
+    let ctl_len = unsafe { core::ptr::read((hdr + msg::CONTROLLEN) as *const u64) };
+
+    let mut room = 0usize;
+    for i in 0..cnt.min(1024) {
+        let e = iov + i * msg::IOV_SIZE;
+        if !reachable(e, msg::IOV_SIZE as usize, false) {
+            return EFAULT;
+        }
+        room += unsafe { core::ptr::read((e + msg::IOV_LEN) as *const u64) } as usize;
+    }
+    let mut buf = alloc::vec![0u8; room.min(64 * 1024)];
+    let got = loop {
+        match super::unix::read(&pipe, side, &mut buf) {
+            Ok(n) => break n,
+            Err(-11) => {}
+            Err(e) => return e as u64,
+        }
+        if flags & MSG_DONTWAIT != 0 {
+            return EAGAIN;
+        }
+        if overran(crate::dev::lapic::ticks()) {
+            unsafe { kill_blocked() }
+        }
+        crate::task::yield_now();
+    };
+    if let Err(e) = scatter(iov, cnt, &buf[..got]) {
+        return e;
+    }
+    // Only now, because `collect` answers by what this end has read and the
+    // read above is what moved that line.
+    let fds = super::unix::collect(&pipe, side);
+    let wrote = match write_control(ctl, ctl_len, fds) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    unsafe {
+        core::ptr::write((hdr + msg::CONTROLLEN) as *mut u64, wrote);
+        core::ptr::write((hdr + msg::FLAGS) as *mut u32, 0);
+        core::ptr::write((hdr + msg::NAMELEN) as *mut u32, 0);
+        let _ = msg::NAME;
+    }
+    got as u64
+}
+
 fn sys_socket(domain: u64, kind: u64, proto: u64) -> u64 {
     // `AF_UNIX`, which is what wineserver speaks and what nothing on a wire
     // ever sees. Answered before the `AF_INET` path rather than inside it,
@@ -4054,6 +4327,8 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         SYS_SOCKET => (sys_socket(f.rdi, f.rsi, f.rdx), true),
         SYS_CONNECT => (sys_connect(f.rdi, f.rsi, f.rdx), true),
         SYS_BIND => (sys_bind(f.rdi, f.rsi, f.rdx), true),
+        SYS_SENDMSG => (sys_sendmsg(f.rdi, f.rsi, f.rdx), true),
+        SYS_RECVMSG => (sys_recvmsg(f.rdi, f.rsi, f.rdx), true),
         SYS_LISTEN => (sys_listen(f.rdi), true),
         SYS_ACCEPT => (sys_accept4(f.rdi, f.rsi, f.rdx, 0), true),
         SYS_ACCEPT4 => (sys_accept4(f.rdi, f.rsi, f.rdx, f.r10), true),
@@ -5486,6 +5761,8 @@ pub fn name_of(nr: u64) -> &'static str {
         SYS_SOCKET => "socket",
         SYS_CONNECT => "connect",
         SYS_BIND => "bind",
+        SYS_SENDMSG => "sendmsg",
+        SYS_RECVMSG => "recvmsg",
         SYS_LISTEN => "listen",
         SYS_ACCEPT => "accept",
         SYS_ACCEPT4 => "accept4",
