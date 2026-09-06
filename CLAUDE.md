@@ -1672,14 +1672,39 @@ Three refusals that are decisions:
   take whatever the stack happened to hold. glibc always supplies one; a
   hand-written program that does not gets its signal dropped rather than a wild
   jump.
-- **One signal at a time.** The interrupted frame is saved in the kernel rather
-  than on the guest's stack, so a second delivered before `rt_sigreturn` would
-  overwrite the first one's state. It waits instead.
+**The frame is on the guest's stack, in Linux's own layout.** It was in the
+kernel first, one deep, which served an ordinary handler and served Wine not
+at all -- Wine reads `uc_mcontext` to find out where a fault happened and what
+the registers were, and a handler cannot read a context it cannot reach.
 
-That last one is also **why this does not yet serve Wine.** Linux pushes a
-`ucontext` and a `siginfo` onto the guest's stack and a handler may read them;
-Wine reads them, which is how it emulates memory it has taken away. Serving
-that means putting the frame where Linux puts it.
+`sigcontext` is 256 bytes with a fixed register order, `ucontext` is 304, the
+whole `rt_sigframe` is 440 with `siginfo` on the end. Those are an **ABI rather
+than a choice**: a handler compiled against the real header reads
+`uc_mcontext.rip` at a fixed offset, and a frame one field short is not a
+smaller frame, it is a different structure with everything after the gap
+misread. 128 bytes of red zone are stepped over, and the frame lands at 8 mod
+16 so the handler starts with its stack exactly as a `call` leaves it.
+
+Two things fall out. **Signals nest**, since each delivery builds its own
+frame. And `rt_sigreturn` reads its state back *out of that frame*, so a
+handler that edits `uc_mcontext` changes where the program resumes -- which is
+not a curiosity, it is the mechanism Wine's fault emulation runs on.
+
+`rt_sigreturn` masks the flags it will restore. `sysretq` loads them from
+`r11`, so a frame claiming `IF` clear or `IOPL` 3 would be a guest choosing its
+own interrupt state, which is a way out of ring 3 that does not involve a
+syscall.
+
+The fixture tests exactly that mechanism rather than a flag: **the handler
+writes to `uc_mcontext.rax` and returns, and the program checks `rax`
+afterwards.** Four things have to be right at once for that to work -- the
+handler receives a real `ucontext` in `rdx`, the offset is Linux's 144, the
+frame is on the guest's own stack and writable, and `rt_sigreturn` reads back
+out of it rather than out of a kernel copy. There is no arrangement of
+three-right-one-wrong that passes.
+
+    signal: the handler edited uc_mcontext and it stuck
+      exited 9 after 5 syscall(s)
 
 `SIGCHLD` is the first signal this machine can honestly raise, and it is
 ignored by default -- which is why a parent that installs no handler is not

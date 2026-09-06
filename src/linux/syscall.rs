@@ -916,7 +916,9 @@ pub fn clone_guest(
         // addressed to the parent.
         signals: super::signal::State {
             pending: 0,
-            saved: None,
+            // Not inside a handler, whatever the parent was doing: the child
+            // resumes at the fork, not at the parent's interrupted frame.
+            depth: 0,
             ..p.signals
         },
         holder: None,
