@@ -30,12 +30,14 @@
 pub mod elf;
 pub mod fs;
 pub mod load;
+pub mod proc;
 pub mod syscall;
 
 /// What `diag linux` asks of everything here.
 pub fn checks() -> alloc::vec::Vec<(&'static str, bool)> {
     let mut out = elf::checks();
     out.extend(fs::checks());
+    out.extend(proc::checks());
     out.extend(syscall::checks());
     out.extend(load::checks());
     out

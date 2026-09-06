@@ -81,6 +81,8 @@ pub const SYS_GETRANDOM: u64 = 318;
 pub const SYS_TIME: u64 = 201;
 pub const SYS_SYSINFO: u64 = 99;
 pub const SYS_SCHED_GETAFFINITY: u64 = 204;
+pub const SYS_READLINK: u64 = 89;
+pub const SYS_READLINKAT: u64 = 267;
 pub const SYS_GETPID: u64 = 39;
 pub const SYS_GETDENTS64: u64 = 217;
 pub const SYS_SET_TID_ADDRESS: u64 = 218;
@@ -413,6 +415,15 @@ pub struct Space {
     pub fds: Vec<Option<super::fs::Fd>>,
     /// Where a relative path starts from.
     pub cwd: String,
+    /// What the guest was invoked as, and what it was loaded from.
+    ///
+    /// Kept because `/proc/self/exe` and `/proc/self/cmdline` are the only way
+    /// a program can find its own binary, and neither is answerable from a
+    /// register: `argv` lives on a stack the kernel built and then stopped
+    /// tracking.
+    pub argv: Vec<String>,
+    pub image_path: String,
+    pub interp_path: Option<String>,
     /// `FS` base as the kernel left it. A guest sets `FS` for its
     /// thread-local storage and the register is the *machine's*, not the
     /// guest's, so it is put back on the way out.
@@ -444,6 +455,54 @@ impl Space {
 }
 
 static SPACE: Racy<Option<Space>> = Racy::new(None);
+
+/// Say what the running guest is, for the `/proc` files that describe it.
+///
+/// Separate from `install` rather than another argument to it, because these
+/// are names and that takes ranges: the loader knows both, and folding them
+/// into one call would mean `Regions` carrying strings it has no use for.
+pub fn name_guest(argv: &[&str], image: &str, interp: Option<&str>) {
+    if let Some(sp) = unsafe { SPACE.get() }.as_mut() {
+        sp.argv = argv.iter().map(|a| String::from(*a)).collect();
+        sp.image_path = String::from(image);
+        sp.interp_path = interp.map(String::from);
+    }
+}
+
+/// The path the running guest was loaded from, if one is running.
+pub fn guest_image() -> Option<String> {
+    let sp = unsafe { SPACE.get() }.as_ref()?;
+    (!sp.image_path.is_empty()).then(|| sp.image_path.clone())
+}
+
+pub fn guest_argv() -> Vec<String> {
+    unsafe { SPACE.get() }.as_ref().map(|s| s.argv.clone()).unwrap_or_default()
+}
+
+/// Every range the guest owns, with a name for the ones that have one.
+///
+/// In ascending address order, because that is the order `/proc/self/maps` is
+/// read in and a reader scanning for a containing range may stop at the first
+/// one past its address.
+pub fn guest_regions() -> Vec<(u64, usize, String)> {
+    let Some(sp) = (unsafe { SPACE.get() }).as_ref() else { return Vec::new() };
+    let mut out: Vec<(u64, usize, String)> = Vec::new();
+    out.push((sp.image.at, sp.image.len, sp.image_path.clone()));
+    if let (Some(r), Some(p)) = (sp.interp, sp.interp_path.as_ref()) {
+        out.push((r.at, r.len, p.clone()));
+    }
+    out.push((sp.stack.at, sp.stack.len, String::from("[stack]")));
+    out.push((
+        sp.brk_start,
+        sp.brk_end.saturating_sub(sp.brk_start) as usize,
+        String::from("[heap]"),
+    ));
+    for m in &sp.maps {
+        out.push((m.at, m.len, String::new()));
+    }
+    out.sort_by_key(|(at, _, _)| *at);
+    out
+}
 
 /// Whether the running guest owns this range. False when nothing is running,
 /// which is the right answer: with no guest there is no address it may name.
@@ -506,6 +565,9 @@ pub fn install(r: Regions) {
                 v
             },
             cwd: String::from("/"),
+            argv: Vec::new(),
+            image_path: String::new(),
+            interp_path: None,
             saved_fs: 0,
         });
     }
@@ -861,6 +923,54 @@ fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u64 {
     }
     with_fds(|fds, cwd| {
         let Some(path) = super::fs::resolve(cwd, &raw) else { return ENOENT };
+        // **Before the store, because these are answers rather than blobs.**
+        // Nothing under `/proc` is writable, listed by `sysbox` or in a
+        // snapshot, and asking the store about it first would answer `ENOENT`
+        // for a path that does exist.
+        if super::proc::claims(&path) {
+            if wants_write {
+                return EROFS;
+            }
+            let entry = if super::proc::is_dir(&path) {
+                if flags & O_DIRECTORY == 0 && false {
+                    return EISDIR;
+                }
+                super::fs::Fd::Dir(alloc::rc::Rc::new(core::cell::RefCell::new(
+                    super::fs::Dir {
+                        path: path.clone(),
+                        entries: super::proc::entries(&path),
+                        at: 0,
+                    },
+                )))
+            } else {
+                if flags & O_DIRECTORY != 0 {
+                    return ENOTDIR;
+                }
+                // Generated here and held like any other file, which is the
+                // whole reason this costs so little: `read` and `lseek` are
+                // already written against a `Vec` and neither knows the
+                // difference.
+                let Some(data) = super::proc::read(&path) else { return ENOENT };
+                super::fs::Fd::File(alloc::rc::Rc::new(core::cell::RefCell::new(
+                    super::fs::File {
+                        path: path.clone(),
+                        data,
+                        at: 0,
+                        writable: false,
+                        dirty: false,
+                    },
+                )))
+            };
+            let Some(slot) = fds.iter().position(|f| f.is_none()) else {
+                if fds.len() >= MAX_FDS {
+                    return EMFILE;
+                }
+                fds.push(Some(entry));
+                return (fds.len() - 1) as u64;
+            };
+            fds[slot] = Some(entry);
+            return slot as u64;
+        }
         // The jail, checked on the resolved path and before anything is
         // created. `EROFS` rather than `EACCES`, because the objection is to
         // where the file is rather than to who is asking.
@@ -1779,6 +1889,49 @@ fn sys_pread64(fd: u64, buf: u64, len: u64, off: u64) -> u64 {
 /// different question. A machine whose clock cannot be read answers zero,
 /// which is what Linux reports before anything has set the time, and is the
 /// one wrong answer that is honestly wrong rather than plausibly wrong.
+/// Read a symlink, of which this machine has exactly one.
+///
+/// `/proc/self/exe`, and it is a symlink rather than a file because that is
+/// what Linux makes it and what every program reaching for its own path
+/// expects. Everything else is `EINVAL`, which is what Linux answers for a
+/// path that exists and is not a link -- distinct from `ENOENT`, and the
+/// distinction is load-bearing: a program told `EINVAL` knows the file is
+/// there and stops looking, where `ENOENT` sends it hunting.
+///
+/// **The answer is not NUL-terminated.** `readlink` returns a length and
+/// writes exactly that many bytes, and a terminator written past it would
+/// land in the caller's buffer beyond what it was told was used.
+fn sys_readlinkat(dirfd: u64, path_at: u64, buf: u64, size: u64) -> u64 {
+    let raw = match read_cstr(path_at) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if raw.is_empty() {
+        return ENOENT;
+    }
+    if !raw.starts_with('/') && (dirfd as i64) != super::fs::AT_FDCWD {
+        return ENOSYS;
+    }
+    if size == 0 {
+        return EINVAL;
+    }
+    let found = with_fds(|_, cwd| super::fs::resolve(cwd, &raw)).flatten();
+    let Some(path) = found else { return ENOENT };
+    let Some(target) = super::proc::link(&path) else {
+        return if super::proc::claims(&path) || sysbox::blob_len(&path).is_some() {
+            EINVAL
+        } else {
+            ENOENT
+        };
+    };
+    let n = target.len().min(size as usize);
+    if !reachable(buf, n, true) {
+        return EFAULT;
+    }
+    unsafe { core::ptr::copy_nonoverlapping(target.as_ptr(), buf as *mut u8, n) };
+    n as u64
+}
+
 fn sys_time(tloc: u64) -> u64 {
     let secs = crate::dev::rtc::now()
         .map(|dt| crate::dev::rtc::unix_seconds(&dt) as u64)
@@ -2027,6 +2180,17 @@ fn sys_statat(dirfd: u64, path_at: u64, buf: u64, flags: u64) -> u64 {
     }
     let found = with_fds(|_, cwd| super::fs::resolve(cwd, &raw)).flatten();
     let Some(path) = found else { return ENOENT };
+    if super::proc::claims(&path) {
+        if super::proc::is_dir(&path) {
+            return write_stat(buf, super::fs::Kind::Dir, 0, super::fs::ino_of(&path));
+        }
+        // The size is the content's, which means making it. These are all a
+        // few hundred bytes, and reporting zero the way Linux does for most of
+        // `/proc` would make `wc -c` answer nothing about a file with bytes in
+        // it.
+        let n = super::proc::read(&path).map(|d| d.len()).unwrap_or(0);
+        return write_stat(buf, super::fs::Kind::File, n, super::fs::ino_of(&path));
+    }
     if sysbox::is_dir(&path) {
         return write_stat(buf, super::fs::Kind::Dir, 0, super::fs::ino_of(&path));
     }
@@ -2434,6 +2598,10 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         SYS_PRLIMIT64 => (sys_prlimit64(f.rdi, f.rsi, f.rdx, f.r10), true),
         SYS_GETRANDOM => (sys_getrandom(f.rdi, f.rsi, f.rdx), true),
         SYS_TIME => (sys_time(f.rdi), true),
+        SYS_READLINK => {
+            (sys_readlinkat(super::fs::AT_FDCWD as u64, f.rdi, f.rsi, f.rdx), true)
+        }
+        SYS_READLINKAT => (sys_readlinkat(f.rdi, f.rsi, f.rdx, f.r10), true),
         SYS_SYSINFO => (sys_sysinfo(f.rdi), true),
         SYS_SCHED_GETAFFINITY => (sys_sched_getaffinity(f.rdi, f.rsi, f.rdx), true),
         // **`rseq` stays refused, and that is the right answer rather than a
@@ -3010,6 +3178,68 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         out.push((
             "a zero-length read answers zero without touching the pointer",
             sys_pread64(99, 0, 0, 0) == 0,
+        ));
+        teardown();
+    }
+
+    // `readlink`, which has exactly one answer on this machine and three ways
+    // to get it wrong. The sentinel past the end is the interesting one: the
+    // call returns a length and writes that many bytes, so a terminator would
+    // land in the caller's buffer past what it was told was used -- and a
+    // caller that then trusts the string reads whatever was already there.
+    {
+        let mut buf = [0xAAu8; 160];
+        let at = buf.as_mut_ptr() as u64;
+        let owned = Region { at, len: 160 };
+        install(Regions { image: owned, stack: owned, brk: owned, interp: None });
+        name_guest(&["/tmp/g/bb"], "/tmp/g/bb", None);
+        // Three separate strings rather than one rewritten in place: the last
+        // time claims here shared a buffer, the first one's write took the NUL
+        // the next two read as their path.
+        let put = |off: usize, s: &str| unsafe {
+            core::ptr::copy_nonoverlapping(s.as_ptr(), (at as usize + off) as *mut u8, s.len());
+            *((at as usize + off + s.len()) as *mut u8) = 0;
+        };
+        put(96, "/proc/self/exe");
+        put(120, "/proc/self/maps");
+        put(144, "/nowhere");
+
+        let n = sys_readlinkat(super::fs::AT_FDCWD as u64, at + 96, at, 64);
+        out.push((
+            "readlink answers the length it wrote, and /proc/self/exe is the image",
+            n == 9 && &buf[..9] == b"/tmp/g/bb",
+        ));
+        out.push((
+            "and writes no terminator, since the length is the whole of the answer",
+            buf[9] == 0xAA,
+        ));
+
+        buf = [0xAAu8; 160];
+        put(96, "/proc/self/exe");
+        let short = sys_readlinkat(super::fs::AT_FDCWD as u64, at + 96, at, 4);
+        out.push((
+            "a buffer shorter than the target truncates rather than refusing, as Linux does",
+            short == 4 && &buf[..4] == b"/tmp" && buf[4] == 0xAA,
+        ));
+
+        put(120, "/proc/self/maps");
+        put(144, "/nowhere");
+        out.push((
+            "a path that exists and is not a link is EINVAL, which stops a caller hunting",
+            sys_readlinkat(super::fs::AT_FDCWD as u64, at + 120, at, 64) == EINVAL,
+        ));
+        out.push((
+            "and one that does not exist at all is ENOENT, which is a different fact",
+            sys_readlinkat(super::fs::AT_FDCWD as u64, at + 144, at, 64) == ENOENT,
+        ));
+        put(96, "/proc/self/exe");
+        out.push((
+            "a zero-size buffer is EINVAL rather than a successful write of nothing",
+            sys_readlinkat(super::fs::AT_FDCWD as u64, at + 96, at, 0) == EINVAL,
+        ));
+        out.push((
+            "and a destination the guest does not own is EFAULT before anything is copied",
+            sys_readlinkat(super::fs::AT_FDCWD as u64, at + 96, 0x1000, 64) == EFAULT,
         ));
         teardown();
     }
@@ -3636,6 +3866,8 @@ pub fn name_of(nr: u64) -> &'static str {
         SYS_PRLIMIT64 => "prlimit64",
         SYS_GETRANDOM => "getrandom",
         SYS_TIME => "time",
+        SYS_READLINK => "readlink",
+        SYS_READLINKAT => "readlinkat",
         SYS_SYSINFO => "sysinfo",
         SYS_SCHED_GETAFFINITY => "sched_getaffinity",
         SYS_RSEQ => "rseq",

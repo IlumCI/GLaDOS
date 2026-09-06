@@ -1508,8 +1508,17 @@ bounded at 1024 entries, because what matters is *which* calls appear rather
 than how often.
 
 `linux` reports whether the trap is armed, `linux run <path> [args...]` loads
-and runs, `linux trace` prints what the last guest asked for. `diag linux` is
-91 claims.
+and runs, `linux trace` prints what the last guest asked for, `linux libc` says
+which interpreters are installed, and `linux env NAME=VALUE` adds a variable to
+what the next guest is handed. `diag linux` is 134 claims.
+
+**The trace records the path, not only the pointer.** A row read `257 openat
+0x2d23faa 0x0 0x0` and the useful half of it was in the guest's memory, so
+finding out which file a run failed on meant reading a register dump against a
+disassembly. `Call` carries the first 48 bytes of a path argument now, filled
+where the call is recorded rather than where it is dispatched, and `path_arg`
+is the one table saying which register holds one. It named `newfstatat` as the
+call that had silently dropped its flags, in a single run.
 
 ### It runs busybox
 
@@ -1539,11 +1548,27 @@ binary in the world, so the blanket refusal was not a corner case -- it was
 most of the software this loader exists to run. See the placement section
 below.
 
-**Forty-six syscalls, and not one of them was guessed.** Sixteen applets were
-swept, every gap they named was implemented, and nothing else was. That is
-what stage 0 was built to make possible, and the one number worth keeping is
-that after the work `sysinfo` was the only call left unserved in the whole
-sweep.
+**Sixty-two syscalls, and not one of them was guessed.** Sixteen applets were
+swept under musl and twenty-eight more under glibc, every gap they named was
+implemented, and nothing else was. That is what stage 0 was built to make
+possible.
+
+The second sweep is the one worth reading, because the surface it named was
+*small*: twenty-eight applets across two boots left exactly three calls
+unserved, and each was answered from something this machine knows rather than
+from a plausible constant. `time` reads the RTC. `sysinfo` reports uptime and
+the kernel heap, and leaves the three load averages **zero rather than
+invented**, because nothing here samples a run queue and a fabricated number
+is read by whatever graphs it. `sched_getaffinity` answers the cores that came
+up at boot -- which is a question about permission rather than about
+capability, so it is honest even though nothing can yet schedule a guest onto
+a second core -- and returns the *bytes it wrote*, which is what a libc uses
+to know how much of a larger `cpu_set_t` it must clear itself.
+
+`rseq` is refused on purpose and is the one refusal in the list. It is a
+per-thread structure the kernel writes to from the scheduler, and answering 0
+without doing that gives glibc a sequence number that never moves. `-ENOSYS`
+is a value glibc's own startup handles; a stale `rseq` area is not.
 
 The shape of the finding was the useful part twice over. `ls` ran perfectly on
 its first attempt -- opened the directory, walked it with two `getdents64`
@@ -1747,13 +1772,113 @@ one thing that cannot be worked around is a binary built against glibc that
 cannot be rebuilt, and the game logic this target eventually loads is exactly
 that kind of object.
 
-**No real `ld.so` has run here yet.** Everything it needs on the first two
-calls is answered; what has not been measured is the third onward, and that is
-the whole reason the `-ENOSYS` trace exists rather than a guess about what it
-wants next. Getting one onto the machine is the next piece of work, and the
-honest expectation is that it will name several calls nobody here has thought
-of, which is what happened with busybox and is the argument for the instrument.
+**Both real interpreters have run, and this said they had not for a while
+after they did.** `tools/libc.py` fetches musl's and glibc's from Alpine and
+Debian, computes the *closure* rather than a list somebody wrote down (which
+is how Debian's busybox turned out to need `libresolv.so.2` as well), and
+stages a dynamic busybox for each. Neither is in this repository, for the
+reason no WAD is.
 
+    linux run /tmp/m/busybox uname -a         # musl, ld-musl-x86_64.so.1
+    linux run /tmp/g/busybox sha256sum /tmp/g/busybox
+
+The second is the check that settles it: glibc's linker relocated a 772 KB
+binary through this kernel's `mmap`, and busybox then hashed *its own file*
+byte for byte to the digest the host computes over the same bytes.
+
+**glibc needs `LD_BIND_NOW=1` and musl does not**, which is a real limit and
+is stated rather than worked around. busybox is BIND_NOW already; `libc.so.6`
+is lazily bound, so its first call through the PLT enters
+`_dl_runtime_resolve_xsavec`, which reads `GOT[1]` for the link map -- and
+`GOT[1]` is zero here while `GOT[2]` beside it is not. That was located
+precisely (glibc's `DT_PLTGOT` is `0x1d2fe8`, inside a `PT_GNU_RELRO` ending
+`0x1d3000`, so the two words are the last sixteen bytes of the RELRO range)
+and the boundary hypothesis it suggests was **tested and refuted**: three new
+`diag paging` claims pass, and `protect` loses no bytes at a range end. Why
+the linker leaves that word zero is open. `LD_BIND_NOW` resolves everything up
+front and is arguably what a game wants anyway.
+
+Four kernel bugs came out of that pair of runs and none was reachable any
+other way. `teardown` did not restore the *interpreter's* page rights, so a
+guest's RELRO page went back to the heap read-only and the next `fat get`
+faulted at ring 0 -- the fourth instance in this tree of the same class, which
+is why `give_back` now says so at the top. `newfstatat`'s flags never reached
+it, so `AT_EMPTY_PATH` could not work. `mmap` copied file bytes *before*
+applying rights, so glibc's `PROT_NONE` reservation with a `MAP_FIXED` overlay
+made the kernel fault on the guest's behalf. And `locate` answered "no guest"
+about a guest that had just died, because `run` calls `teardown` on the line
+after the guest returns -- made twice, once for three addresses and once for
+fifteen registers, and fixed the same way both times by resolving before
+teardown.
+
+**The fault report carries every register now, and that is what found the
+last one.** `Fault` used to keep five fields picked in advance; which one
+matters is not knowable at the time, and the one that mattered was `rdi`
+holding a zero nobody had thought to ask about. `cpu::idt` emits 32 stubs from
+one `global_asm!` macro at a fixed 16-byte stride, each pushing a fake error
+code where the CPU pushes none so both shapes are in phase, then fifteen GPRs
+-- vector plus fifteen pushes is 128 bytes, which is what leaves the tail
+16-aligned for the SysV call. Get that wrong and the reporter takes a `movaps`
+#GP inside itself. `diag recover` asserts the stride by reading the first byte
+of each stub. The entry is `extern "sysv64"` and not `extern "C"`, for the
+fourth time in this tree.
+
+### The four `/proc` files that can be answered honestly
+
+`src/linux/proc.rs`, and the rule it opens with is the whole design:
+
+> **A field this machine does not know means the file does not exist.**
+
+`/proc/stat`, `/proc/loadavg`, `/proc/cpuinfo` and `/proc/uptime` are text
+formats with no way to say "I do not know": omit a field and a parser breaks,
+invent one and it gets believed, and there is no `Option` in a text file. A
+missing `/proc/stat` sends a program down a fallback it already has. So the
+table is four entries and grows when something asks, which is the `-ENOSYS`
+discipline applied to paths instead of call numbers.
+
+**`/proc/self/exe` is the reason the module exists**, being the only one of
+the four with no syscall alternative: there is no call that answers "where is
+my own binary", so a program looking for its data directory beside itself has
+this and nothing else. It is a symlink, so `readlink` is the usual way in, and
+`open` on it gives the image, both of which work here.
+
+What makes it cheap is a property `fs.rs` already had for its own reasons: an
+open file *is* its whole contents, so a synthetic file is only a different way
+of filling that `Vec`. No second kind of descriptor, no second `read` path,
+and `lseek` works on these for free. The hook sits **before** the store in
+`sys_openat`, since asking a content-addressed tree about `/proc` answers
+`ENOENT` about a path that does exist.
+
+`/proc/self/maps` is truthful and therefore strange. A guest shares one
+address space with the kernel, so these are the real addresses of real pages
+sitting wherever the heap put them rather than at the tidy `0x400000` a reader
+expects; and the rights come from `paging::query` rather than from what was
+asked for at `mmap`, because `mprotect` moves them afterwards and a linker
+spends its last act doing exactly that. Ends are rounded up to a page, which
+is *more* truthful and not less -- rights are applied per page, so the guest
+owns the whole of its last partial one, and every parser of this file was
+written against a kernel whose ranges are page-aligned.
+
+    linux run /tmp/g/busybox cat /proc/self/maps
+    000002d20000-000002d24000 rwxp 00000000 00:00 0 [stack]
+    00000300c000-0000030ca000 rwxp 00000000 00:00 14267663290916959693 /tmp/g/busybox
+    0000030ff000-000003134000 rwxp 00000000 00:00 9676539629617231489 /lib64/ld-linux-x86-64.so.2
+    000003134000-000003174000 rwxp 00000000 00:00 0 [heap]
+
+    linux run /tmp/g/busybox readlink /proc/self/exe   ->  /tmp/g/busybox
+    linux run /tmp/g/busybox wc -c /proc/self/cmdline  ->  40
+
+That 40 is the check worth keeping, because busybox computed it: the four
+argv strings are 14, 2, 2 and 18 characters and each carries a NUL, and a
+`joined` that dropped the final separator would answer 39 while looking
+perfectly reasonable.
+
+**`claims` is a property of the path and never of what is running**, which it
+was not at first: it asked `link` and `read`, both of which consult the live
+guest, so `/proc/self/exe` was claimed while a guest ran and unclaimed
+otherwise. `diag linux` caught that, running with no guest installed. The
+other direction would have been much worse -- a listing offering a name that
+`openat` then routed to the store.
 
 ### A filesystem a program written for Linux recognises
 

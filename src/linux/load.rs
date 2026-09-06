@@ -121,6 +121,10 @@ pub struct Guest {
     pub stack_top: u64,
     pub span: usize,
     pub segments: usize,
+    /// What it was invoked as, kept for `/proc/self/cmdline` and for
+    /// `/proc/self/exe`, neither of which is answerable once the stack the
+    /// kernel built has been handed over.
+    pub argv: Vec<alloc::string::String>,
 }
 
 /// One image in memory: what it said about itself and where it went.
@@ -331,6 +335,7 @@ pub fn load(bytes: &[u8], args: &[&str]) -> Result<Guest, &'static str> {
     };
 
     Ok(Guest {
+        argv: args.iter().map(|a| alloc::string::String::from(*a)).collect(),
         regions: syscall::Regions {
             image: syscall::Region { at: base, len: span },
             stack: syscall::Region { at: stack.addr(), len: GUEST_STACK },
@@ -378,6 +383,13 @@ pub unsafe fn run(g: &Guest) -> u64 {
     // Installed here rather than in `load`, so a guest that was loaded and
     // never run leaves nothing naming memory its `Guest` has since freed.
     syscall::install(g.regions);
+    // After `install`, which clears the space these names describe.
+    let argv: Vec<&str> = g.argv.iter().map(|s| s.as_str()).collect();
+    syscall::name_guest(
+        &argv,
+        argv.first().copied().unwrap_or(""),
+        g.interp.as_ref().map(|(p, _, _)| p.as_str()),
+    );
     unsafe { syscall::run(g.entry, g.stack_top) }
 }
 
