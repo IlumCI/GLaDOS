@@ -777,7 +777,12 @@ GL_IMPORTS = [
 # byte Mesa meant. Distinct from the red-green-blue the framebuffer fixture
 # paints, so a screenshot cannot confuse the two.
 GL_CLEAR = (0.0, 1.0, 1.0, 1.0)
-GL_EXPECT = 0xFF00FFFF          # B,G,R,A = 255,255,0,255 read as a word
+# **The low 24 bits, and the alpha is dropped on purpose.** `load_d` zero-
+# extends a dword into a 64-bit register while `cmp rax, imm32` *sign*-extends
+# its immediate, so any expected value with bit 31 set can never compare equal
+# -- and 0xFF00FFFF has it, because alpha is 255. Masking to B, G and R avoids
+# the trap and drops nothing that matters: the fourth byte is not scanned out.
+GL_EXPECT = 0x00FFFF            # B,G,R = 255,255,0, which is cyan
 
 
 def gl_code(text_at, got_at, rodata_at):
@@ -803,7 +808,13 @@ def gl_code(text_at, got_at, rodata_at):
     """
     O_RDWR, PROT_RW, MAP_PRIVATE_ANON = 2, 3, 0x22
     OSMESA_BGRA, GL_UNSIGNED_BYTE, GL_COLOR_BUFFER_BIT = 1, 0x1401, 0x4000
-    FBIOGET_VSCREENINFO = 0x80CC4600        # _IOR('F', 0x00, 204) as glibc has it
+    # **A plain number, not an `_IOR` encoding.** `linux/fb.h` spells the
+    # framebuffer ioctls as bare constants 0x4600 upward rather than through
+    # the `_IOC` macros, so there is no direction or size in the top bits. The
+    # encoded form was answered with `ENOTTY`, the geometry stayed zero, the
+    # `mmap` for the pixel buffer came back `EINVAL`, and this program read
+    # `[-22]`. Every part of that was correct except the constant.
+    FBIOGET_VSCREENINFO = 0x4600
     SYS_MMAP, SYS_OPEN, SYS_IOCTL, SYS_WRITE, SYS_EXIT = 9, 2, 16, 1, 231
     out = bytearray()
 
@@ -856,9 +867,7 @@ def gl_code(text_at, got_at, rodata_at):
     # 1. And its geometry, asked for rather than assumed.
     out += mov_imm("rax", SYS_IOCTL)
     out += mov_rr("rdi", "r13")
-    out += mov_imm("rsi", FBIOGET_VSCREENINFO - (1 << 32))
-    out += shl_imm("rsi", 32)
-    out += shr_imm("rsi", 32)
+    out += mov_imm("rsi", FBIOGET_VSCREENINFO)
     out += mov_rr("rdx", "r15")
     out += SYSCALL
     out += cmp_imm8("rax", 0)
@@ -909,7 +918,9 @@ def gl_code(text_at, got_at, rodata_at):
     # 6. The claim. Mesa wrote into a buffer this program allocated, in the
     #    byte order it was asked for, and the first pixel is the colour.
     out += load_d("rax", "rbx", 0)
-    out += cmp_imm32("rax", GL_EXPECT - (1 << 32))
+    out += shl_imm("rax", 40)
+    out += shr_imm("rax", 40)
+    out += cmp_imm32("rax", GL_EXPECT)
     fold(5, JE)
     # 7. And the last pixel too, so a clear that touched one row is not
     #    mistaken for a clear that touched the screen.
@@ -923,7 +934,9 @@ def gl_code(text_at, got_at, rodata_at):
     out += sub_imm("rdx", 4)
     out += add_rr("rcx", "rdx")
     out += load_d("rax", "rcx", 0)
-    out += cmp_imm32("rax", GL_EXPECT - (1 << 32))
+    out += shl_imm("rax", 40)
+    out += shr_imm("rax", 40)
+    out += cmp_imm32("rax", GL_EXPECT)
     fold(6, JE)
 
     # 8. On the screen, with no conversion in between.
