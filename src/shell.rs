@@ -4453,6 +4453,12 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                             // you meant" are different facts, and on a machine
                             // carrying two of them the second is the one
                             // nobody can check any other way.
+                            if let Some(phys) = g.image_backing {
+                                kprintln!(
+                                    "  image mapped at {:#x}, backed by heap pages at {:#x}",
+                                    g.base, phys
+                                );
+                            }
                             if let Some((path, base, entry)) = &g.interp {
                                 kprintln!(
                                     "  interpreter {} at {:#x}, its entry {:#x}",

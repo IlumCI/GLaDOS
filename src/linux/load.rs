@@ -84,6 +84,16 @@ const MAX_SPAN: usize = 64 * 1024 * 1024;
 enum Image {
     Placed(Exec),
     Fixed { at: u64, len: usize },
+    /// A fixed-address image living on ordinary heap pages, mapped at the
+    /// address its headers insist on inside the guest's own space.
+    ///
+    /// **This is what stops `0x400000` being a global resource.** `Fixed`
+    /// takes the physical range through `mem::fixed::claim`, so the address a
+    /// non-PIE binary demands can be held by exactly one guest on the whole
+    /// machine, and the placeable run bounds how large it may be -- 6 MiB
+    /// here. Backed by the heap and mapped per space, neither is true: two
+    /// guests can each have their own, and the size is the heap's business.
+    Mapped { backing: Exec, at: u64, len: usize },
 }
 
 impl Drop for Image {
@@ -103,6 +113,17 @@ pub struct Guest {
     /// Every range handed to this guest, which is what bounds-checks its
     /// pointers once it is running.
     regions: syscall::Regions,
+    /// The guest's own page-table root, when it has one.
+    ///
+    /// Held here rather than made in `run` because a `Mapped` image is mapped
+    /// into it at load time and the mapping has to outlive the placement.
+    /// Declared **before** the images it maps, so it drops first: the tables
+    /// point at the backing's pages, and freeing those while a root still
+    /// names them would leave the next translation reading the allocator's
+    /// memory. Nothing is installed by then, so this is a tidiness argument
+    /// rather than a live hazard -- but it is the same ordering `give_back`
+    /// exists to get right, and it costs a field declaration.
+    space: Option<crate::mem::space::Space>,
     /// Held because dropping it frees the pages the guest is running from.
     _image: Image,
     /// The interpreter's pages, held for exactly the same reason.
@@ -119,6 +140,13 @@ pub struct Guest {
     /// dynamically linked program does nothing.
     pub interp: Option<(alloc::string::String, u64, u64)>,
     pub stack_top: u64,
+    /// Where the image really lives when it is mapped rather than placed.
+    ///
+    /// Reported because the two are indistinguishable from the outside and
+    /// they are not the same fact: a placed image *is* physical `0x400000`
+    /// and holds it against the whole machine, a mapped one is heap pages the
+    /// guest merely sees there. "It ran" says nothing about which happened.
+    pub image_backing: Option<u64>,
     pub span: usize,
     pub segments: usize,
     /// What it was invoked as, kept for `/proc/self/cmdline` and for
@@ -140,7 +168,7 @@ struct Placed {
 /// the two differ in nothing a loader cares about: both are ELF, both may be
 /// `ET_DYN` or `ET_EXEC`, and both are copied segment by segment relative to
 /// their own lowest address.
-fn place(bytes: &[u8]) -> Result<Placed, &'static str> {
+fn place(bytes: &[u8], virtual_fixed: bool) -> Result<Placed, &'static str> {
     let img = elf::parse(bytes)?;
     syscall::runnable(&img)?;
     let (lo, hi) = img.span().ok_or("nothing to load")?;
@@ -157,6 +185,14 @@ fn place(bytes: &[u8]) -> Result<Placed, &'static str> {
         let e = Exec::new(span).ok_or("no room for the image")?;
         let at = e.addr();
         (Some(e), at)
+    } else if virtual_fixed {
+        // Heap pages, and the guest is told the address its headers wanted.
+        // The segment copy below is unchanged, because it writes into the
+        // allocation at offsets relative to `lo` either way -- the only thing
+        // that differs is which address the guest will see them at, and that
+        // is settled later by the mapping rather than here by the write.
+        let e = Exec::new(span).ok_or("no room for the image")?;
+        (Some(e), lo)
     } else {
         crate::mem::fixed::claim(lo, span)?;
         // Zeroed here because `Exec::new` zeroes and the `.bss` tail depends on
@@ -207,7 +243,11 @@ fn place(bytes: &[u8]) -> Result<Placed, &'static str> {
     let hold = match placed {
         Some(mut e) => {
             e.arm(TAG_GUEST);
-            Image::Placed(e)
+            if img.relocatable() {
+                Image::Placed(e)
+            } else {
+                Image::Mapped { backing: e, at: lo, len: span }
+            }
         }
         None => Image::Fixed { at: base, len: span },
     };
@@ -253,9 +293,45 @@ pub fn wants(bytes: &[u8]) -> Option<alloc::string::String> {
     elf::parse(bytes).ok().and_then(|i| i.interp)
 }
 
+/// Map a heap-backed fixed image at the address its headers insist on.
+///
+/// Page at a time because `map_low` asks `mem::fixed::is_free` per page, and
+/// that question is the guard: an image whose span reaches memory the kernel
+/// is using is refused here rather than shadowing it. `user` and `writable`
+/// are set at the leaf, so this region needs no `paging::protect` afterwards
+/// -- and must not get one, since `protect` edits whatever CR3 names and
+/// would set the U bit on the *identity* mapping of that address in the
+/// kernel's own tables, which is a page the guest was never given.
+fn map_image(s: &mut crate::mem::space::Space, im: &Image) -> Result<(), &'static str> {
+    let Image::Mapped { backing, at, len } = im else {
+        return Ok(());
+    };
+    let phys = backing.addr();
+    let mut off = 0u64;
+    while off < *len as u64 {
+        s.map_low(at + off, phys + off, true, true)
+            .map_err(|_| "the guest's image cannot be mapped where its headers insist")?;
+        off += 4096;
+    }
+    Ok(())
+}
+
 /// Place a program, its interpreter if it wants one, and build its stack.
 pub fn load(bytes: &[u8], args: &[&str]) -> Result<Guest, &'static str> {
-    let prog = place(bytes)?;
+    // A space is needed *before* placement, because a fixed image backed by
+    // heap pages has to be mapped into one and there is nowhere else to put
+    // that mapping.
+    let mut space = if own_space() {
+        match crate::mem::space::Space::sharing_kernel() {
+            Some(s) => Some(s),
+            None => return Err("no room for a page-table root of the guest's own"),
+        }
+    } else {
+        None
+    };
+    let virt = space.is_some();
+
+    let prog = place(bytes, virt)?;
     let (img, base, lo, span) = (&prog.img, prog.base, prog.lo, prog.span);
 
     // The interpreter, if the program named one. Read through `sysbox` rather
@@ -267,7 +343,7 @@ pub fn load(bytes: &[u8], args: &[&str]) -> Result<Guest, &'static str> {
         Some(path) => {
             let bytes = crate::sysbox::read_blob(path)
                 .ok_or("the interpreter this binary names is not in the namespace")?;
-            let p = place(&bytes)?;
+            let p = place(&bytes, virt)?;
             // An interpreter that itself wants an interpreter is refused
             // rather than followed. Nothing real does it, the recursion has no
             // natural bound, and a loader that chased it would run out of
@@ -277,6 +353,18 @@ pub fn load(bytes: &[u8], args: &[&str]) -> Result<Guest, &'static str> {
             }
             Some((alloc::string::String::from(path), p))
         }
+    };
+
+    if let Some(sp) = space.as_mut() {
+        map_image(sp, &prog.hold)?;
+        if let Some((_, p)) = interp.as_ref() {
+            map_image(sp, &p.hold)?;
+        }
+    }
+
+    let backing_of = match &prog.hold {
+        Image::Mapped { backing, .. } => Some(backing.addr()),
+        _ => None,
     };
 
     let brk = Exec::new(GUEST_BRK).ok_or("no room for a break region")?;
@@ -342,6 +430,7 @@ pub fn load(bytes: &[u8], args: &[&str]) -> Result<Guest, &'static str> {
             brk: syscall::Region { at: brk.addr(), len: GUEST_BRK },
             interp: interp_region,
         },
+        space,
         _image: prog.hold,
         _interp: interp_hold,
         _stack: stack,
@@ -350,6 +439,10 @@ pub fn load(bytes: &[u8], args: &[&str]) -> Result<Guest, &'static str> {
         entry,
         interp: interp_named,
         stack_top,
+        image_backing: match &backing_of {
+            Some(x) => Some(*x),
+            None => None,
+        },
         span,
         segments,
     })
@@ -393,10 +486,25 @@ pub unsafe fn run(g: &Guest) -> u64 {
     // program's. Forgetting it is not a subtle failure: `ld.so` takes a
     // protection violation on its first instruction, which reads as a bad
     // entry address rather than as a missing U bit.
-    for r in [Some(g.regions.image), Some(g.regions.stack), Some(g.regions.brk), g.regions.interp]
-        .into_iter()
-        .flatten()
-    {
+    // **A mapped image is skipped here, and skipping it is required rather
+    // than an optimisation.** Its U bit was set at the leaf when `map_low`
+    // built the mapping, inside the guest's own tables. `protect` edits
+    // whatever CR3 names, which at this point is still the kernel's, so
+    // running it on that address would open the *identity* mapping of it --
+    // a page the guest was never given and the kernel may be using.
+    let mapped_image = matches!(g._image, Image::Mapped { .. });
+    let mapped_interp = matches!(g._interp, Some(Image::Mapped { .. }));
+    let regions = [
+        (Some(g.regions.image), mapped_image),
+        (Some(g.regions.stack), false),
+        (Some(g.regions.brk), false),
+        (g.regions.interp, mapped_interp),
+    ];
+    for (r, already) in regions {
+        let Some(r) = r else { continue };
+        if already {
+            continue;
+        }
         if !crate::mem::paging::protect(r.at, r.len, crate::mem::paging::Perm::USER_RWX) {
             return 0;
         }
@@ -416,13 +524,8 @@ pub unsafe fn run(g: &Guest) -> u64 {
     // that is the same edit either way -- but doing it before the switch keeps
     // the U bits going into the kernel's map exactly as they always have, so
     // the only thing this changes is which root the guest runs under.
-    let space = if own_space() {
-        crate::mem::space::Space::sharing_kernel()
-    } else {
-        None
-    };
     let me = crate::task::current();
-    if let Some(s) = &space {
+    if let Some(s) = &g.space {
         crate::task::set_root(me, s.root());
     }
 
@@ -434,10 +537,9 @@ pub unsafe fn run(g: &Guest) -> u64 {
     // walking. `syscall::run` returns on both paths that exist -- a guest that
     // exits and a guest killed by a fault both leave through the longjmp -- so
     // this runs in the case that matters as well as the ordinary one.
-    if space.is_some() {
+    if g.space.is_some() {
         crate::task::set_root(me, 0);
     }
-    drop(space);
     out
 }
 

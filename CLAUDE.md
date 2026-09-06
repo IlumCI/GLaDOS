@@ -1788,9 +1788,42 @@ Reversed, the allocator gets the page the processor is walking. `syscall::run`
 returns on both paths that exist -- a guest that exits and a guest killed by a
 fault both leave through the longjmp -- so it runs in the case that matters.
 
-What is left for `fork` is mapping a guest's image into its space at the
-addresses the ELF asks for rather than leaning on the identity map, and then
-the three calls. **`smp::init` passes CR3 to a starting application processor**
+**A fixed image is mapped rather than placed**, when a guest has a space.
+`Image::Mapped` backs it with ordinary heap pages and maps them at the address
+the headers insist on, inside that guest's own tables.
+
+The decomposition that made this small is worth keeping: **only the image has
+an address the file demands.** The stack, the break and every `mmap` are at
+addresses the *kernel* chooses, so two guests never collide there, and a PIE
+already goes wherever the heap has room. `0x400000` is the whole problem, and
+it is one region.
+
+    space off   [linux] 185 byte(s) ... at 0x400000
+    space on    image mapped at 0x400000, backed by heap pages at 0x2c17000
+    space on    image mapped at 0x400000, backed by heap pages at 0x2c15000
+
+All three printed `hello from ring 3` and exited 5 after 2 syscalls. The third
+line is the result: one virtual address, two different physical backings, which
+is exactly what two guests at once will need. `mem::fixed` is not consulted at
+all on that path, so neither the machine-wide claim on `0x400000` nor the 6 MiB
+placeable run bounds a fixed image any more.
+
+**A mapped region must not be `protect`ed and that is required, not an
+optimisation.** Its U bit is set at the leaf by `map_low`, inside the guest's
+tables. `paging::protect` edits whatever CR3 names, which at that point is
+still the kernel's, so running it on `0x400000` would open the *identity*
+mapping of that address -- a page the guest was never given.
+
+`Guest` declares `space` **before** the images it maps, so it drops first: the
+tables point at the backing's pages and freeing those while a root still names
+them would leave the next translation reading the allocator's memory. Nothing
+is installed by then, so it is tidiness rather than a live hazard, and it is
+the same ordering `give_back` exists to get right.
+
+What is left for `fork` is the three calls, plus a `SPACE` that can hold more
+than one guest at a time -- it is a single static today, so nothing can yet
+demonstrate two live guests sharing `0x400000` even though the memory now
+allows it. **`smp::init` passes CR3 to a starting application processor**
 (`smp.rs:557`), which is harmless today because APs start at boot before any
 space exists, and would not be if anything ever started one later.
 
