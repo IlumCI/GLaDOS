@@ -339,8 +339,24 @@ fn body() {
 /// No `WNOHANG` and no resource usage. Both are refusals this kernel can make
 /// honestly -- there is no rusage to report and nothing here samples one --
 /// and a shell that asked for either would rather be told than handed zeros.
-pub fn wait(pid: i64, status: u64) -> u64 {
+/// `WNOHANG`: answer now, even when the answer is "nothing yet".
+///
+/// The one option a shell actually needs. `WUNTRACED` and `WCONTINUED` report
+/// stops and continues, and nothing here can stop a guest short of ending it,
+/// so a kernel accepting them would be promising events it cannot produce.
+pub const WNOHANG: u64 = 1;
+
+pub fn wait(pid: i64, status: u64, options: u64) -> u64 {
     const ECHILD: u64 = (-10i64) as u64;
+    const EINVAL: u64 = (-22i64) as u64;
+
+    // Refused rather than ignored. A caller that asked to be told about a
+    // stopped child and is simply never told has been given a wait that looks
+    // like it works and silently never fires -- the shape this tree keeps
+    // recording as the worst kind of wrong.
+    if options & !WNOHANG != 0 {
+        return EINVAL;
+    }
 
     loop {
         let found = {
@@ -368,6 +384,13 @@ pub fn wait(pid: i64, status: u64) -> u64 {
         };
         if !any {
             return ECHILD;
+        }
+        // **Zero, and it has to be zero rather than `ECHILD`.** A child exists
+        // and has not finished, which is a different fact from having no
+        // children at all: a shell polling with `WNOHANG` treats `ECHILD` as
+        // "it is gone, stop asking" and would drop the child on the floor.
+        if options & WNOHANG != 0 {
+            return 0;
         }
         // A yield loop rather than a wait queue, the bargain `futex` and
         // `nanosleep` already make here and for the same reason: there is no

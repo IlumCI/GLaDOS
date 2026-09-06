@@ -854,6 +854,92 @@ def exec_code(entry_rva, msg_rva, _unused):
     return bytes(c)
 
 
+MSG_POLLED = b"wait4: WNOHANG said not-yet, then handed over the child\n"
+MSG_INSTANT = b"wait4: the child was already gone on the first poll\n"
+
+
+def wnohang_code(entry_rva, msg_rva, _unused):
+    """Poll for a child instead of blocking on it.
+
+    **The parent never yields between `fork` and its first poll**, so the
+    child -- which lives on another task -- cannot have run yet, and a correct
+    `WNOHANG` has to answer zero. Answering the pid there would mean reaping a
+    child that had not finished; answering `ECHILD` would mean claiming it
+    never existed, and a shell reads that as "stop asking" and drops it.
+
+    The count is the evidence. `r13` tallies the not-yet answers and the exit
+    code reports which of two things happened, because only one of them tests
+    anything: exit 9 means `WNOHANG` genuinely returned zero at least once and
+    then produced the right pid, exit 5 means the child had already finished by
+    the first poll and the run proved only that blocking was not required.
+    """
+    c = bytearray()
+    c += mov_imm("rax", 57) + SYSCALL           # fork()
+    c += cmp_imm8("rax", 0)
+    jne_at = len(c)
+    c += jcc(JNE, 0)
+    jne_end = len(c)
+    # ---- the child: leave at once, so the parent's poll has something to
+    # find without the child needing to do anything observable ----
+    c += mov_imm("rax", 60) + mov_imm("rdi", 7) + SYSCALL + HLT
+
+    parent_at = len(c)
+    c += mov_rr("r12", "rax")                   # the pid
+    c += mov_imm("r13", 0)                      # not-yet answers
+    poll_at = len(c)
+    c += mov_imm("rax", 61)                     # wait4
+    c += mov_rr("rdi", "r12")
+    c += mov_imm("rsi", 0)                      # no status
+    c += mov_imm("rdx", 1)                      # WNOHANG
+    c += mov_imm("r10", 0)
+    c += SYSCALL
+    c += cmp_imm8("rax", 0)
+    jne2_at = len(c)
+    c += jcc(JNE, 0)                            # something came back
+    jne2_end = len(c)
+    c += add_imm("r13", 1)
+    back_at = len(c)
+    c += jmp(0)
+    back_end = len(c)
+
+    got_at = len(c)
+    c += cmp_rr("rax", "r12")                   # our child, not another
+    jne3_at = len(c)
+    c += jcc(JNE, 0)
+    jne3_end = len(c)
+    c += cmp_imm8("r13", 0)
+    je_at = len(c)
+    c += jcc(0x84, 0)                           # JE -> the instant path
+    je_end = len(c)
+    c += mov_imm("rax", 1) + mov_imm("rdi", 1)
+    lea1_at = len(c)
+    c += lea_rip("rsi", 0)
+    lea1_end = len(c)
+    c += mov_imm("rdx", len(MSG_POLLED)) + SYSCALL
+    c += mov_imm("rax", 60) + mov_imm("rdi", 9) + SYSCALL + HLT
+
+    instant_at = len(c)
+    c += mov_imm("rax", 1) + mov_imm("rdi", 1)
+    lea2_at = len(c)
+    c += lea_rip("rsi", 0)
+    lea2_end = len(c)
+    c += mov_imm("rdx", len(MSG_INSTANT)) + SYSCALL
+    c += mov_imm("rax", 60) + mov_imm("rdi", 5) + SYSCALL + HLT
+
+    bad_at = len(c)
+    c += mov_imm("rax", 60) + mov_imm("rdi", 3) + SYSCALL + HLT
+
+    struct.pack_into("<i", c, jne_at + 2, parent_at - jne_end)
+    struct.pack_into("<i", c, jne2_at + 2, got_at - jne2_end)
+    struct.pack_into("<i", c, back_at + 1, poll_at - back_end)
+    struct.pack_into("<i", c, jne3_at + 2, bad_at - jne3_end)
+    struct.pack_into("<i", c, je_at + 2, instant_at - je_end)
+    struct.pack_into("<i", c, lea1_at + 3, msg_rva - (entry_rva + lea1_end))
+    struct.pack_into("<i", c, lea2_at + 3,
+                     msg_rva + len(MSG_POLLED) - (entry_rva + lea2_end))
+    return bytes(c)
+
+
 def spin_code(entry_rva, _a, _b):
     """Loop forever, asking for nothing.
 
@@ -2199,6 +2285,13 @@ def build(kind="static"):
         text = spin_code(entry, 0, 0)
         body = text
         msg_rva, disp, lea_end = body_at, 0, 0
+    elif kind == "wnohang":
+        probe = wnohang_code(0, 0, 0)
+        msg_rva = body_at + len(probe)
+        text = wnohang_code(entry, msg_rva, 0)
+        assert len(text) == len(probe), (len(text), len(probe))
+        body = text + MSG_POLLED + MSG_INSTANT
+        disp, lea_end = 0, 0
     elif kind == "exec":
         probe = exec_code(0, 0, 0)
         msg_rva = body_at + len(probe)
@@ -2687,6 +2780,21 @@ def verify(path):
         claim("and ends in hlt, so a syscall that returns is visible",
               b.endswith(HLT))
         return ok
+    if MSG_POLLED in b:
+        claim("it asks for WNOHANG rather than blocking",
+              mov_imm("rdx", 1) in b)
+        claim("it polls the pid fork gave it", mov_rr("rdi", "r12") in b)
+        claim("it counts the not-yet answers, which is the evidence",
+              add_imm("r13", 1) in b)
+        claim("and reports the two outcomes apart",
+              MSG_POLLED in b and MSG_INSTANT in b)
+        # fork and the child's exit, the wait4, then two writes and three
+        # exits across the tails: polled, already-gone, and disagreed.
+        claim("it makes the eight calls its four paths add up to",
+              b.count(SYSCALL) == 8)
+        claim("its code ends in hlt, so a syscall that returns is visible",
+              b[b.index(MSG_POLLED) - 1:b.index(MSG_POLLED)] == HLT)
+        return ok
     if MSG_EXEC_BACK in b:
         claim("it names the program it is becoming", EXEC_PATH in b)
         # Two calls on the failure path and one on the success path, which is
@@ -2759,7 +2867,7 @@ def main():
     ap.add_argument("--kind",
                     choices=["static", "dynamic", "interp", "loader", "maps",
                              "fixed", "memory", "rogue",
-                             "protect", "wild", "spin", "fork", "exec", "cat", "grep",
+                             "protect", "wild", "spin", "fork", "exec", "wnohang", "cat", "grep",
                              "fsabuse", "fb", "ev", "thread", "gl"],
                     default="static")
     ap.add_argument("--verify", action="store_true")

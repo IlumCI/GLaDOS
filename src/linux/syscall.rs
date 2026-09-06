@@ -3834,7 +3834,7 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         // than it asked for, not less. The reverse -- answering `fork` with
         // `vfork` semantics -- is what would corrupt a parent.
         SYS_VFORK => (super::fork::fork(f), true),
-        SYS_WAIT4 => (super::fork::wait(f.rdi as i64, f.rsi), true),
+        SYS_WAIT4 => (super::fork::wait(f.rdi as i64, f.rsi, f.rdx), true),
         // Returns into a different program rather than to its caller, so the
         // frame it was handed is the thing it edits.
         SYS_EXECVE => (super::load::exec(f), true),
