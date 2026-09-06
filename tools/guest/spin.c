@@ -1,11 +1,31 @@
 /* Everything at once: SDL2 gets the window, Mesa draws into it, the `glados`
  * video driver puts it on the framebuffer.
  *
- * The point of this one is that it *moves*. Every still picture so far proves
- * a frame reached the display and says nothing about whether a second one
- * can: a program that renders once and a program that renders sixty times
- * look identical in a screenshot. A spinning triangle is the smallest thing
- * that cannot be faked by a single blit.
+ * **A solid under perspective, and that is the point of the shape.** The first
+ * version of this turned three flat triangles about Z, which proves the
+ * rasteriser fills and interpolates and says nothing whatever about a third
+ * dimension: an orthographic Z rotation is a 2D rotation with extra words, and
+ * it would look identical on an engine with no depth buffer, no frustum and a
+ * matrix stack that only ever multiplied two of three axes.
+ *
+ * A square pyramid tilted and spun about its own Y needs all of it, and each
+ * piece fails visibly rather than subtly:
+ *
+ *   - **`glFrustum`**, so the near base corner is genuinely larger than the far
+ *     one. Under `glOrtho` a spinning pyramid reads as a flat quadrilateral
+ *     changing shape, which is what the old demo could not have told you.
+ *   - **The depth buffer.** Four faces meet at the apex and two of them face
+ *     away at any moment. Without depth testing the last one drawn wins, so
+ *     the far face paints over the near one for half of every turn -- a
+ *     flicker, not an error.
+ *   - **The full modelview stack**, since translate-then-tilt-then-spin is
+ *     three matrices composed in an order that is wrong in an obvious way if
+ *     composed backwards: the pyramid orbits the camera instead of turning in
+ *     place.
+ *
+ * Culling is deliberately off. The solid is closed and convex, so back faces
+ * are invisible either way and enabling it would change no pixel while adding
+ * a winding convention that can be quietly wrong.
  *
  * Mesa renders straight into the SDL window's own surface. They agree about
  * the format by construction -- `SDL_PIXELFORMAT_RGB888` is `0xXXRRGGBB`,
@@ -30,11 +50,18 @@
 #define GL_TRIANGLES 0x0004
 #define GL_PROJECTION 0x1701
 #define GL_MODELVIEW 0x1700
+#define GL_SMOOTH 0x1D01
 #define GL_VERSION 0x1F02
 #define GL_RENDERER 0x1F01
 
 typedef struct osmesa_context *OSMesaContext;
 extern OSMesaContext OSMesaCreateContext(unsigned f, OSMesaContext share);
+/* The Ext form because the depth buffer is half the demonstration and the
+ * plain one leaves its size to Mesa. Asking for it is how a context with no
+ * depth bits becomes a refusal here rather than a pyramid that renders
+ * inside out. */
+extern OSMesaContext OSMesaCreateContextExt(unsigned f, int depth, int stencil,
+                                            int accum, OSMesaContext share);
 extern int OSMesaMakeCurrent(OSMesaContext c, void *b, unsigned t, int w, int h);
 extern void OSMesaPixelStore(int name, int value);
 extern const unsigned char *glGetString(unsigned name);
@@ -42,15 +69,68 @@ extern void glViewport(int x, int y, int w, int h);
 extern void glClearColor(float r, float g, float b, float a);
 extern void glClear(unsigned mask);
 extern void glEnable(unsigned cap);
+extern void glShadeModel(unsigned mode);
 extern void glMatrixMode(unsigned mode);
 extern void glLoadIdentity(void);
-extern void glOrtho(double l, double r, double b, double t, double n, double f);
+extern void glFrustum(double l, double r, double b, double t, double n, double f);
+extern void glTranslatef(float x, float y, float z);
 extern void glRotatef(float a, float x, float y, float z);
 extern void glBegin(unsigned mode);
 extern void glEnd(void);
 extern void glColor3f(float r, float g, float b);
 extern void glVertex3f(float x, float y, float z);
 extern void glFinish(void);
+
+/* Apex plus four base corners. The apex is warm and each corner is its own
+ * hue, so every one of the four side faces is a *different* gradient -- which
+ * is what makes the rotation legible frame to frame, and what would show a
+ * matrix stack rotating the geometry while leaving the colours behind. */
+static const float APEX[3] = {0.00f, 0.95f, 0.00f};
+static const float BASE[4][3] = {
+    {-0.85f, -0.55f, -0.85f},
+    { 0.85f, -0.55f, -0.85f},
+    { 0.85f, -0.55f,  0.85f},
+    {-0.85f, -0.55f,  0.85f},
+};
+static const float APEX_C[3] = {1.00f, 0.72f, 0.30f};
+static const float BASE_C[4][3] = {
+    {0.05f, 0.55f, 0.95f},
+    {0.95f, 0.30f, 0.15f},
+    {0.15f, 0.80f, 0.45f},
+    {0.75f, 0.35f, 0.90f},
+};
+
+static void corner(int i)
+{
+    glColor3f(BASE_C[i][0], BASE_C[i][1], BASE_C[i][2]);
+    glVertex3f(BASE[i][0], BASE[i][1], BASE[i][2]);
+}
+
+static void pyramid(void)
+{
+    glBegin(GL_TRIANGLES);
+    for (int i = 0; i < 4; i++) {
+        glColor3f(APEX_C[0], APEX_C[1], APEX_C[2]);
+        glVertex3f(APEX[0], APEX[1], APEX[2]);
+        corner(i);
+        corner((i + 1) % 4);
+    }
+    /* The underside, at a quarter brightness. It is only ever visible when the
+     * tilt carries it into view, so a base drawn as bright as the sides would
+     * make "we are looking at the bottom" indistinguishable from "we are
+     * looking at a face" -- and that distinction is exactly what the depth
+     * buffer is deciding. */
+    for (int t = 0; t < 2; t++) {
+        int idx[3] = {0, t + 1, t + 2};
+        for (int k = 0; k < 3; k++) {
+            int i = idx[k];
+            glColor3f(BASE_C[i][0] * 0.25f, BASE_C[i][1] * 0.25f,
+                      BASE_C[i][2] * 0.25f);
+            glVertex3f(BASE[i][0], BASE[i][1], BASE[i][2]);
+        }
+    }
+    glEnd();
+}
 
 int main(int argc, char **argv)
 {
@@ -70,16 +150,17 @@ int main(int argc, char **argv)
         return 2;
     }
 
-    OSMesaContext ctx = OSMesaCreateContext(OSMESA_BGRA, 0);
+    /* 16 bits of depth, no stencil, no accumulation. */
+    OSMesaContext ctx = OSMesaCreateContextExt(OSMESA_BGRA, 16, 0, 0, 0);
     /* Straight into SDL's surface. No intermediate buffer, because the two
      * agree about the byte order and the pitch. */
-    if (!ctx || !OSMesaMakeCurrent(ctx, s->pixels, GL_UNSIGNED_BYTE,
-                                   s->pitch / 4, s->h)) {
+    int vw = s->pitch / 4, vh = s->h;
+    if (!ctx || !OSMesaMakeCurrent(ctx, s->pixels, GL_UNSIGNED_BYTE, vw, vh)) {
         printf("no context\n");
         return 3;
     }
     /* GL's origin is bottom-left, a framebuffer's is top-left. On a scene
-     * with a triangle at the top this is the difference between right and
+     * with an apex at the top this is the difference between right and
      * upside down. */
     OSMesaPixelStore(OSMESA_Y_UP, 0);
 
@@ -87,12 +168,18 @@ int main(int argc, char **argv)
            glGetString(GL_VERSION), SDL_GetCurrentVideoDriver());
     printf("%dx%d, %d seconds\n", s->w, s->h, seconds);
 
-    glViewport(0, 0, s->pitch / 4, s->h);
+    glViewport(0, 0, vw, vh);
     glEnable(GL_DEPTH_TEST);
+    glShadeModel(GL_SMOOTH);
+
+    /* A 50-degree vertical field of view, written out rather than computed:
+     * tan(25 degrees) is 0.4663, and hardcoding it costs one comment and saves
+     * depending on libm resolving inside the guest. */
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
-    double aspect = (double)s->w / (double)s->h;
-    glOrtho(-aspect, aspect, -1.0, 1.0, -1.0, 1.0);
+    double top = 0.4663, near = 1.0;
+    double right = top * ((double)vw / (double)vh);
+    glFrustum(-right, right, -top, top, near, 20.0);
     glMatrixMode(GL_MODELVIEW);
 
     Uint32 start = SDL_GetTicks();
@@ -109,25 +196,19 @@ int main(int argc, char **argv)
             }
         }
 
-        float angle = (float)(now - start) * 0.09f;
+        float angle = (float)(now - start) * 0.05f;
         glClearColor(0.03f, 0.05f, 0.09f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        /* Three of them, a third of a turn apart, each gouraud shaded. One
-         * flat triangle would show the rasteriser fills; this shows it
-         * interpolates, and that the matrix stack works. */
-        for (int i = 0; i < 3; i++) {
-            glLoadIdentity();
-            glRotatef(angle + 120.0f * i, 0.0f, 0.0f, 1.0f);
-            glBegin(GL_TRIANGLES);
-            glColor3f(1.0f, 0.42f, 0.05f);
-            glVertex3f(0.0f, 0.80f, 0.0f);
-            glColor3f(0.05f, 0.65f, 0.95f);
-            glVertex3f(-0.69f, -0.40f, 0.0f);
-            glColor3f(0.97f, 0.97f, 0.97f);
-            glVertex3f(0.69f, -0.40f, 0.0f);
-            glEnd();
-        }
+        /* Read bottom-up: spin about its own Y, tilt the result, push it away
+         * from the eye. Composed the other way round the pyramid orbits the
+         * camera, which is the loud failure this ordering has. */
+        glLoadIdentity();
+        glTranslatef(0.0f, 0.0f, -3.2f);
+        glRotatef(22.0f, 1.0f, 0.0f, 0.0f);
+        glRotatef(angle, 0.0f, 1.0f, 0.0f);
+        pyramid();
+
         glFinish();
         SDL_UpdateWindowSurface(win);
         frames++;
