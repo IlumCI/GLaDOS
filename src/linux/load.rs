@@ -355,6 +355,27 @@ pub fn load(bytes: &[u8], args: &[&str]) -> Result<Guest, &'static str> {
     })
 }
 
+/// Whether a guest gets a page-table root of its own.
+///
+/// **Off by default, and that is the whole point of it being a switch.** The
+/// space a guest gets here *shares* every mapping with the kernel's, so on and
+/// off should be indistinguishable in every observable way -- which is exactly
+/// what makes it worth having: a fixture that behaves identically both ways
+/// says the guest lifecycle survives a non-kernel CR3, and that is the thing
+/// that has to be true before any of it diverges. Defaulting on would make the
+/// first divergence bug and the first "does this work at all" bug arrive
+/// together, with nothing to tell them apart.
+static OWN_SPACE: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+pub fn set_own_space(on: bool) {
+    OWN_SPACE.store(on, core::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn own_space() -> bool {
+    OWN_SPACE.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 /// Run it to completion.
 ///
 /// # Safety
@@ -390,7 +411,34 @@ pub unsafe fn run(g: &Guest) -> u64 {
         argv.first().copied().unwrap_or(""),
         g.interp.as_ref().map(|(p, _, _)| p.as_str()),
     );
-    unsafe { syscall::run(g.entry, g.stack_top) }
+    // On its own root, if asked. **After `protect`**, deliberately: `protect`
+    // edits whatever CR3 names, and while a space shares the kernel's tables
+    // that is the same edit either way -- but doing it before the switch keeps
+    // the U bits going into the kernel's map exactly as they always have, so
+    // the only thing this changes is which root the guest runs under.
+    let space = if own_space() {
+        crate::mem::space::Space::sharing_kernel()
+    } else {
+        None
+    };
+    let me = crate::task::current();
+    if let Some(s) = &space {
+        crate::task::set_root(me, s.root());
+    }
+
+    let out = unsafe { syscall::run(g.entry, g.stack_top) };
+
+    // Clear the root *before* the space drops, and the order is the whole of
+    // it: `set_root` puts the kernel's back immediately, and only then may the
+    // tables be freed. Reversed, the allocator gets the page the processor is
+    // walking. `syscall::run` returns on both paths that exist -- a guest that
+    // exits and a guest killed by a fault both leave through the longjmp -- so
+    // this runs in the case that matters as well as the ordinary one.
+    if space.is_some() {
+        crate::task::set_root(me, 0);
+    }
+    drop(space);
+    out
 }
 
 /// What `diag linux` asks of the refusals.

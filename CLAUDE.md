@@ -1756,8 +1756,43 @@ goes the read is legal and the value says what happened. A page mapped only in
 the space would fault at ring 0 with no recovery, which is a suite that halts
 instead of reporting.
 
-Thirty-two claims. What is left for `fork` is `load.rs` mapping into a space
-rather than leaning on the identity map, and the three calls themselves.
+Thirty-two claims.
+
+**A guest runs on a root of its own**, behind `linux space on|off`, off by
+default. The space *shares* every mapping with the kernel's, so on and off
+should be indistinguishable -- which is exactly what makes the switch worth
+having. A fixture behaving identically both ways says the guest lifecycle
+survives a non-kernel CR3, and that has to hold before anything diverges;
+defaulting it on would make the first divergence bug and the first
+"does this work at all" bug arrive together with nothing to tell them apart.
+
+Measured, on unmodified busybox under glibc:
+
+    uname -a     exited 0 after  60 syscall(s)   both ways
+    sha256sum    exited 0 after 251 syscall(s)   both ways
+    b01eaede758499526db8c8ccd159b0f773ef0ecb29c25952e5c1042f5168e4ec
+
+That digest is the host's over the same bytes, so a real dynamically linked
+binary relocated a 1.9 MB libc through `mmap`, hashed its own file at ring 3
+under a private root, and got it right.
+
+**One diff looked real and was not**, which is worth recording because it will
+happen again: an earlier pair differed by `[mind t1] disabled` printed from
+another task *into the middle of a line*, splitting `257` into `25` and `7`.
+Console interleaving between tasks, and the tell was that the split fell
+mid-token rather than at a boundary.
+
+Cleanup order is the load-bearing part: `set_root(me, 0)` puts the kernel's
+root back immediately, and only then may the space drop and free its tables.
+Reversed, the allocator gets the page the processor is walking. `syscall::run`
+returns on both paths that exist -- a guest that exits and a guest killed by a
+fault both leave through the longjmp -- so it runs in the case that matters.
+
+What is left for `fork` is mapping a guest's image into its space at the
+addresses the ELF asks for rather than leaning on the identity map, and then
+the three calls. **`smp::init` passes CR3 to a starting application processor**
+(`smp.rs:557`), which is harmless today because APs start at boot before any
+space exists, and would not be if anything ever started one later.
 
 ### OpenGL, which turns out not to be kernel work at all
 

@@ -4593,6 +4593,27 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         kprintln!("  'linux env LD_DEBUG=all' makes ld.so narrate its own work");
                     }
                 }
+                "space" => {
+                    let arg = words.next().unwrap_or("");
+                    console::set_color(YELLOW);
+                    kprintln!("[space] whether a guest gets a page-table root of its own");
+                    console::set_color(LTGRAY);
+                    match arg {
+                        "on" => linux::load::set_own_space(true),
+                        "off" => linux::load::set_own_space(false),
+                        "" => {}
+                        _ => kprintln!("  'linux space [on|off]'"),
+                    }
+                    if linux::load::own_space() {
+                        kprintln!("  on -- the next guest runs on a root of its own");
+                        kprintln!("  It shares every mapping with the kernel's, so nothing");
+                        kprintln!("  observable should change. That is the test: a fixture");
+                        kprintln!("  behaving identically says the guest lifecycle survives a");
+                        kprintln!("  non-kernel CR3, which has to hold before anything diverges.");
+                    } else {
+                        kprintln!("  off -- guests run on the kernel's root, as they always have");
+                    }
+                }
                 "deadline" => {
                     let arg = words.next().unwrap_or("");
                     console::set_color(YELLOW);
