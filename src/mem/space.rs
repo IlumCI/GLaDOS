@@ -135,20 +135,88 @@ impl Space {
         crate::cpu::read_cr3() & ADDR_MASK == self.root & ADDR_MASK
     }
 
+    /// True if this space allocated `phys`, so writing to it changes nothing
+    /// the kernel or another space can see.
+    ///
+    /// **This is the one invariant the low half rests on.** A table reached
+    /// from this root is either one of ours or one we inherited by copying a
+    /// pointer, and the two are indistinguishable from the entry alone. Every
+    /// edit that could damage somebody else's map is gated on this answer
+    /// rather than on where the address happens to be.
+    fn owns_table(&self, phys: u64) -> bool {
+        phys == self.root || self.owned.iter().any(|p| *p as u64 == phys)
+    }
+
+    /// Turn a 2 MiB entry in a table *we own* into a page table covering the
+    /// same bytes with the same flags, and answer where it is.
+    ///
+    /// The 512 entries are written out rather than left absent, because the
+    /// large page was mapping real memory and dropping it would unmap the
+    /// other 2 MiB less a page. `paging::split_large` does this one level
+    /// down for the kernel's own map; this is the same bargain against a
+    /// table this space owns, which is what makes it safe to do at all.
+    fn split(&mut self, table: u64, idx: usize) -> Option<u64> {
+        if !self.owns_table(table) {
+            return None;
+        }
+        let t = unsafe { &mut *(table as *mut [u64; ENTRIES]) };
+        let old = t[idx];
+        let base = old & ADDR_MASK;
+        let flags = old & !ADDR_MASK & !HUGE;
+        let (ptr, phys) = page()?;
+        self.owned.push(ptr);
+        let pt = unsafe { &mut *(phys as *mut [u64; ENTRIES]) };
+        for (i, slot) in pt.iter_mut().enumerate() {
+            *slot = (base + (i as u64) * 4096) | flags;
+        }
+        t[idx] = phys | PRESENT | WRITABLE | USER;
+        Some(phys)
+    }
+
+    /// Take a private copy of a table this space is sharing, and point the
+    /// parent's entry at it.
+    ///
+    /// Copy-on-write, one level at a time, and it is what makes a low mapping
+    /// possible at all: the descent starts at the root, which this space
+    /// always owns, so each step either finds a table it already owns or makes
+    /// one. By the time a leaf is written, every table above it is this
+    /// space's own and the kernel's are untouched. The parent must be owned or
+    /// the rewrite would be visible to everybody, which is the same gate
+    /// `split` applies and for the same reason.
+    fn privatise(&mut self, parent: u64, idx: usize, shared: u64) -> Option<u64> {
+        if !self.owns_table(parent) {
+            return None;
+        }
+        let (ptr, mine) = page()?;
+        self.owned.push(ptr);
+        unsafe {
+            let from = &*(shared as *const [u64; ENTRIES]);
+            let to = &mut *(mine as *mut [u64; ENTRIES]);
+            to.copy_from_slice(from);
+            (&mut *(parent as *mut [u64; ENTRIES]))[idx] = mine | PRESENT | WRITABLE | USER;
+        }
+        Some(mine)
+    }
+
     /// Find or create the next table down, and answer where it is.
     fn step(&mut self, table: u64, idx: usize) -> Option<u64> {
-        let t = unsafe { &mut *(table as *mut [u64; ENTRIES]) };
-        let e = t[idx];
+        let e = unsafe { (&*(table as *const [u64; ENTRIES]))[idx] };
         if e & PRESENT != 0 {
             if e & HUGE != 0 {
-                // A large page already covers this. Splitting one is
-                // `paging::split_large`'s job and it would be splitting a
-                // table this space may be *sharing*, so refusing is the only
-                // answer that cannot damage the kernel's map.
-                return None;
+                // A large page covers this. Splitting a table we *share* would
+                // edit the kernel's own map through a root nobody thinks of as
+                // the kernel's, so `split` refuses unless this space owns the
+                // table. Refusing is the only answer that cannot damage
+                // somebody else's mappings.
+                return self.split(table, idx);
             }
-            return Some(e & ADDR_MASK);
+            let next = e & ADDR_MASK;
+            if self.owns_table(next) {
+                return Some(next);
+            }
+            return self.privatise(table, idx, next);
         }
+        let t = unsafe { &mut *(table as *mut [u64; ENTRIES]) };
         let (ptr, phys) = page()?;
         self.owned.push(ptr);
         // The U bit is ANDed down all four levels, so an intermediate without
@@ -161,23 +229,53 @@ impl Space {
 
     /// Map one 4 KiB page at `at`, privately to this space.
     ///
-    /// **Refused below `WINDOW`, and that refusal is the safety argument for
-    /// this whole module.** The top-level entries were *copied* from the
-    /// kernel, so they point at the kernel's own PDPTs: creating a table under
-    /// entry 0 would create it inside the kernel's map, every space would see
-    /// it, and the private mapping would not be private at all. Worse, it
-    /// would be an edit to live kernel page tables made through a root nobody
-    /// thinks of as the kernel's. A space that wants its own low addresses has
-    /// to privatise that subtree first, which is a different and larger piece
-    /// of work.
+    /// **Above `WINDOW` only.** Not because the tables could not take it --
+    /// `step` privatises its way down and the kernel's are never touched --
+    /// but because of what a low address *means*: the kernel is identity
+    /// mapped, so shadowing virtual `0x2c00000` in a space points the kernel's
+    /// own heap pointer at somebody else's page for as long as that space is
+    /// installed. The tables would be perfectly correct and the machine would
+    /// be reading the wrong memory. Whether an address is safe to shadow is a
+    /// question about what the kernel is using, and `map_low` is the entry
+    /// point that asks it.
     pub fn map_page(&mut self, at: u64, phys: u64, writable: bool, user: bool) -> bool {
-        if at < WINDOW || at % 4096 != 0 || phys % 4096 != 0 {
+        if at < WINDOW {
+            return false;
+        }
+        self.map_at(at, phys, writable, user)
+    }
+
+    /// Map one page at a *low* address, the way a process needs.
+    ///
+    /// This is the placement half of `fork`, and the guard is the whole of it.
+    /// `mem::fixed::is_free` answers whether anything on this machine is using
+    /// that physical memory, which -- the kernel being identity mapped -- is
+    /// exactly the question "is it safe to shadow this virtual address". It is
+    /// a *query* and deliberately not a `claim`: two spaces both wanting
+    /// `0x400000` is the ordinary case for processes and reserving it would
+    /// refuse the second for no reason. What stays global is the physical
+    /// page each of them maps to, and those come from the allocator.
+    pub fn map_low(&mut self, at: u64, phys: u64, writable: bool, user: bool)
+        -> Result<(), &'static str>
+    {
+        if at % 4096 != 0 {
+            return Err("a low mapping has to start on a page boundary");
+        }
+        if !super::fixed::is_free(at, 4096) {
+            return Err("the kernel is using that address, so shadowing it would move its own memory");
+        }
+        if self.map_at(at, phys, writable, user) {
+            Ok(())
+        } else {
+            Err("the tables could not be built")
+        }
+    }
+
+    fn map_at(&mut self, at: u64, phys: u64, writable: bool, user: bool) -> bool {
+        if at % 4096 != 0 || phys % 4096 != 0 {
             return false;
         }
         let i4 = ((at >> 39) & 511) as usize;
-        if i4 == 0 {
-            return false;
-        }
         let (i3, i2, i1) = (
             ((at >> 30) & 511) as usize,
             ((at >> 21) & 511) as usize,
@@ -395,6 +493,70 @@ pub fn checks() -> alloc::vec::Vec<(&'static str, bool)> {
         "the window is still unmapped in the kernel's root",
         super::paging::query(WINDOW).is_none(),
     ));
+
+    // ---- the low half, which is where a process actually lives ----
+    //
+    // 0x400000 is busybox's own base and every non-PIE binary's, and
+    // `mem::fixed` reports it inside the placeable run. The claim that earns
+    // its place is the refusal: shadowing an address the kernel is using
+    // builds perfectly correct tables and points the kernel's own pointer at
+    // somebody else's page, which is not a diagnosable failure.
+    let heap_addr = (&*probe as *const u64 as u64) & !0xFFF;
+    out.push((
+        "an address the kernel is using is refused for a low mapping",
+        Space::sharing_kernel()
+            .map(|mut s| s.map_low(heap_addr, heap_addr, true, false).is_err())
+            .unwrap_or(false),
+    ));
+    out.push((
+        "and map_page still refuses the low half outright",
+        Space::sharing_kernel()
+            .map(|mut s| !s.map_page(0x400000, 0x400000, true, false))
+            .unwrap_or(false),
+    ));
+
+    if let (Some((cp, cphys)), Some((dp, dphys)), Some(mut low_a), Some(mut low_b)) =
+        (page(), page(), Space::sharing_kernel(), Space::sharing_kernel())
+    {
+        unsafe {
+            core::ptr::write_volatile(cphys as *mut u64, 0x1111_2222_3333_u64);
+            core::ptr::write_volatile(dphys as *mut u64, 0x4444_5555_6666_u64);
+        }
+        let ra = low_a.map_low(0x400000, cphys, true, false);
+        let rb = low_b.map_low(0x400000, dphys, true, false);
+        out.push((
+            "two spaces each map 0x400000, the address a non-PIE binary insists on",
+            ra.is_ok() && rb.is_ok(),
+        ));
+        let sa = low_a.with(|| unsafe { core::ptr::read_volatile(0x400000 as *const u64) });
+        let sb = low_b.with(|| unsafe { core::ptr::read_volatile(0x400000 as *const u64) });
+        out.push((
+            "the first reads its own page through 0x400000",
+            sa == 0x1111_2222_3333_u64,
+        ));
+        out.push((
+            "and the second reads a different one through the same address",
+            sb == 0x4444_5555_6666_u64,
+        ));
+        // The kernel's own map must be exactly as it was. This is what the
+        // copy-on-write descent is for, and a failure here means a table was
+        // edited in place that somebody else was sharing.
+        out.push((
+            "the kernel's own root still maps 0x400000 as it always did",
+            super::paging::query(0x400000).is_some(),
+        ));
+        let heap_still: alloc::vec::Vec<u64> = (0..256).collect();
+        out.push((
+            "and the kernel's heap is unharmed by any of it",
+            heap_still.len() == 256 && heap_still[255] == 255,
+        ));
+        drop(low_a);
+        drop(low_b);
+        give_back(cp);
+        give_back(dp);
+    } else {
+        out.push(("two low spaces and two pages could be built", false));
+    }
 
     // Dropping a live space must restore before it frees. Installed through a
     // raw activate rather than `with`, then dropped: the failure this catches

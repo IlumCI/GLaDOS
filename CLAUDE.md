@@ -1707,12 +1707,35 @@ own, a write through one lands in that space's page, and it leaves the other
 alone. That last one is what would catch a leaf pointing at the wrong frame,
 which reads identically to a correct one until something writes.
 
-**What is left for `fork` is placement.** A process wants its own `0x400000`,
-and that address is inside the identity map's own subtree, so privatising it
-means giving a space its own page directories for a region the kernel is also
-using. `mem::fixed` already computes that `0x106000..0x800000` is free, which
-is the evidence that the region is available; what does not exist yet is a
-space whose low entries are its own.
+**And the low half, which is where a process actually lives.** `map_low` maps
+`0x400000` -- busybox's own base, and every non-PIE binary's -- privately per
+space. Two spaces each hold it, each reads its own page through it, and the
+kernel's map is untouched.
+
+`step` privatises its way down, one table at a time: the descent starts at the
+root, which a space always owns, so each step either finds a table it already
+owns or takes a private copy and repoints the parent. By the time a leaf is
+written every table above it belongs to this space. A 2 MiB entry in the way is
+split into 512 real entries carrying the same flags, so the rest of the large
+page keeps mapping what it mapped -- `paging::split_large`'s bargain, one level
+down, against a table this space owns. **Both are gated on `owns_table`**, and
+that single predicate is what stops any of it editing a table somebody else is
+sharing.
+
+**The guard on a low address is about meaning rather than about tables.** The
+tables would be perfectly correct either way; the hazard is that the kernel is
+identity mapped, so shadowing virtual `0x2c00000` in a space points the
+kernel's own heap pointer at somebody else's page for as long as that space is
+installed. `mem::fixed::is_free` answers whether anything is using that
+physical memory, which is exactly the question, and it is a **query rather than
+a `claim`**: two spaces both wanting `0x400000` is the ordinary case for
+processes, and reserving it would refuse the second for no reason. `claim` and
+`is_free` share their two predicates so they cannot disagree about one address.
+Measured after a run: `4 range(s), nothing claimed`.
+
+Twenty-seven claims. What is left for `fork` is no longer the address space at
+all: it is a per-task root in `schedule`, `load.rs` mapping into a space rather
+than relying on the identity map, and the three calls themselves.
 
 ### OpenGL, which turns out not to be kernel work at all
 

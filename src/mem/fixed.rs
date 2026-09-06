@@ -160,6 +160,37 @@ fn push(f: &mut Free, at: u64, end: u64) {
     f.n += 1;
 }
 
+fn in_free_range(f: &Free, start: u64, end: u64) -> bool {
+    f.ranges[..f.n].iter().any(|r| start >= r.at && end <= r.end)
+}
+
+fn overlaps_claim(f: &Free, start: u64, end: u64) -> bool {
+    f.claims.iter().flatten().any(|c| start < c.end && end > c.at)
+}
+
+/// Whether nothing on this machine is using `[at, at+len)`.
+///
+/// **A question, where `claim` is a reservation, and the difference is the
+/// point.** An address space that wants to shadow a low address needs to know
+/// the kernel is not using it, and it must *not* reserve it: virtual
+/// `0x400000` stops being a global resource the moment two spaces map it to
+/// different physical pages, so two of them claiming it would refuse the
+/// second for no reason. What stays global is the physical memory, which is
+/// what this reads -- and it reads the same two predicates `claim` does, so
+/// the two cannot come to different conclusions about one address.
+pub fn is_free(at: u64, len: usize) -> bool {
+    let f = unsafe { FREE.get() };
+    if !f.ready {
+        return false;
+    }
+    let start = at & !(PAGE_SIZE - 1);
+    let Some(sum) = at.checked_add(len as u64) else {
+        return false;
+    };
+    let end = sum.div_ceil(PAGE_SIZE) * PAGE_SIZE;
+    in_free_range(f, start, end) && !overlaps_claim(f, start, end)
+}
+
 /// Take `len` bytes at exactly `at`, or answer why not.
 ///
 /// Rounded outward to whole pages, because the caller is going to mark page
@@ -174,7 +205,7 @@ pub fn claim(at: u64, len: usize) -> Result<(), &'static str> {
         return Err("the range runs past the end of the address space");
     };
     let end = sum.div_ceil(PAGE_SIZE) * PAGE_SIZE;
-    if !f.ranges[..f.n].iter().any(|r| start >= r.at && end <= r.end) {
+    if !in_free_range(f, start, end) {
         // Deliberately one message rather than "not conventional" versus
         // "already taken": the two are indistinguishable from here and
         // guessing which would be inventing a reason.
@@ -185,7 +216,7 @@ pub fn claim(at: u64, len: usize) -> Result<(), &'static str> {
     // an interpreter placed over the program it was loaded to run does not
     // fault, the second copy simply wins, and what shows is a jump into the
     // middle of somebody else's code.
-    if f.claims.iter().flatten().any(|c| start < c.end && end > c.at) {
+    if overlaps_claim(f, start, end) {
         return Err("that range overlaps one already held");
     }
     let Some(slot) = f.claims.iter().position(|c| c.is_none()) else {
