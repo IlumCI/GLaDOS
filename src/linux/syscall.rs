@@ -121,6 +121,8 @@ pub const SYS_CLONE: u64 = 56;
 pub const SYS_FORK: u64 = 57;
 pub const SYS_VFORK: u64 = 58;
 pub const SYS_EXECVE: u64 = 59;
+pub const SYS_RT_SIGRETURN: u64 = 15;
+pub const SYS_KILL: u64 = 62;
 pub const SYS_WAIT4: u64 = 61;
 pub const SYS_FUTEX: u64 = 202;
 pub const SYS_GETTID: u64 = 186;
@@ -229,6 +231,7 @@ const MAP_MAX: u64 = 64 * 1024 * 1024;
 /// itself rather than a copy of it -- the dispatcher writes `rax` back here and
 /// the stub pops it into the guest.
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct Frame {
     pub rax: u64,
     pub rdi: u64,
@@ -646,6 +649,8 @@ pub struct Space {
     /// executing from. So the new one lives here and dies with the entry --
     /// which also makes a second `execve` free the first one's pages, because
     /// replacing this field drops what it held.
+    /// Handlers, masks and the frame a handler interrupted.
+    pub signals: super::signal::State,
     pub holder: Option<alloc::boxed::Box<super::load::Guest>>,
     /// Heap ranges this guest owns outright, freed when it is torn down.
     ///
@@ -776,6 +781,15 @@ pub unsafe fn guest_slot() -> &'static mut Option<Space> {
 ///
 /// See `Space::holder`. Replacing what was there drops it, which is how the
 /// pages of a program that has been exec'd over are freed.
+/// End the running guest now, with a code.
+///
+/// # Safety
+/// Longjmps out of whatever is running it, so no allocation, borrow or lock
+/// may be live at the call.
+pub unsafe fn kill_guest_now(code: u64) -> ! {
+    unsafe { glados_leave_guest(code | EXITED) }
+}
+
 pub fn hold_guest(g: super::load::Guest) {
     if let Some(sp) = unsafe { guest_slot() }.as_mut() {
         sp.holder = Some(alloc::boxed::Box::new(g));
@@ -827,6 +841,7 @@ pub fn replace_guest(
         stack_mapped: r.stack_mapped,
         brk_mapped: r.brk_mapped,
         tables,
+        signals: super::signal::State::default(),
         holder: None,
         owned: alloc::vec::Vec::new(),
         mmap_next: GUEST_MMAP_AT,
@@ -896,6 +911,14 @@ pub fn clone_guest(
         brk_mapped: p.brk_mapped,
         // Not inherited: the child's memory was *copied*, so it owns pages
         // rather than an image, and they are in `owned` instead.
+        // A child inherits its parent's handlers and mask, as Linux has
+        // it, and inherits none of its pending signals -- those were
+        // addressed to the parent.
+        signals: super::signal::State {
+            pending: 0,
+            saved: None,
+            ..p.signals
+        },
         holder: None,
         tables: Some(tables),
         owned,
@@ -1062,6 +1085,7 @@ pub fn install(r: Regions, tables: Option<crate::mem::space::Space>) {
             stack_mapped: r.stack_mapped,
             brk_mapped: r.brk_mapped,
             tables,
+            signals: super::signal::State::default(),
             holder: None,
             owned: alloc::vec::Vec::new(),
             mmap_next: GUEST_MMAP_AT,
@@ -3808,7 +3832,16 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         // generate one, and a fault ends the guest rather than being offered
         // to it. Refusing instead would stop `sh` before it starts, over a
         // promise about events that cannot happen.
-        SYS_RT_SIGACTION | SYS_RT_SIGPROCMASK => (0, true),
+        // Recorded and delivered now. The refusal above this used to say
+        // nothing could raise a signal at a guest -- no other process, no
+        // terminal, and a fault ends the guest. `fork` is what made the first
+        // clause false, and a child exiting is an event its parent is owed.
+        SYS_RT_SIGACTION => (super::signal::sigaction(f.rdi, f.rsi, f.rdx, f.r10), true),
+        SYS_RT_SIGPROCMASK => {
+            (super::signal::sigprocmask(f.rdi, f.rsi, f.rdx, f.r10), true)
+        }
+        SYS_RT_SIGRETURN => (super::signal::sigreturn(f), true),
+        SYS_KILL => (super::signal::kill(f.rdi as i64, f.rsi), true),
         // No parent, and no group but the one. `getppid` answering zero is
         // what a process reparented to nothing reports.
         SYS_GETPPID => (0, true),
@@ -3876,6 +3909,20 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
     };
     record(Call { nr, args, ret, served, path: [0; PATH_SNIP], path_len: 0 });
     f.rax = ret;
+    // **On the way out, and this is the only place it can be.** The guest's
+    // whole register state is in this frame, its stack pointer is parked in
+    // `GLADOS_GUEST_RSP`, and the return is about to `sysretq` somewhere --
+    // so redirecting it into a handler costs three stores and no new
+    // assembly. `rt_sigreturn` is excluded because it has just *restored* a
+    // frame, and delivering on top of that would lose it.
+    //
+    // The price is that a guest making no syscalls receives no signals. On
+    // Linux the timer would interrupt it; here the run deadline is what ends
+    // a runaway, and buying delivery for one branch on an existing path is
+    // the trade.
+    if nr != SYS_RT_SIGRETURN {
+        super::signal::deliver(f);
+    }
 }
 
 extern "sysv64" {
@@ -5204,6 +5251,8 @@ pub fn name_of(nr: u64) -> &'static str {
         SYS_CLOCK_NANOSLEEP => "clock_nanosleep",
         SYS_RT_SIGACTION => "rt_sigaction",
         SYS_RT_SIGPROCMASK => "rt_sigprocmask",
+        SYS_RT_SIGRETURN => "rt_sigreturn",
+        SYS_KILL => "kill",
         SYS_GETPPID => "getppid",
         SYS_GETGROUPS => "getgroups",
         SYS_UNAME => "uname",

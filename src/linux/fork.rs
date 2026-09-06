@@ -46,6 +46,8 @@ struct Slot {
     stack: u64,
     /// The guest table entry this child speaks for.
     guest: usize,
+    /// The entry that forked it, so its exit can be reported there.
+    parent: usize,
     work: Option<Resume>,
     live: bool,
     pid: u64,
@@ -54,7 +56,8 @@ struct Slot {
 }
 
 static SLOTS: Racy<[Slot; MAX_CHILDREN]> = Racy::new(
-    [Slot { task: None, stack: 0, guest: 0, work: None, live: false, pid: 0, status: None };
+    [Slot { task: None, stack: 0, guest: 0, parent: 0, work: None, live: false,
+            pid: 0, status: None };
         MAX_CHILDREN],
 );
 
@@ -237,6 +240,7 @@ pub fn fork(f: &Frame) -> u64 {
     {
         let s = unsafe { SLOTS.get() };
         s[idx].guest = child;
+        s[idx].parent = parent;
         s[idx].work = Some(resume);
         s[idx].live = true;
         s[idx].pid = pid;
@@ -322,16 +326,36 @@ fn body() {
         crate::task::set_root(me, 0);
         syscall::set_current_guest(prev);
 
-        {
+        let parent = {
             let s = unsafe { SLOTS.get() };
             s[i].status = Some((code & 0xFF) as i32);
             s[i].live = false;
-        }
+            s[i].parent
+        };
+        // **A child finishing is the first signal this machine can honestly
+        // raise.** Ignored by default, which is why a parent that never
+        // installs a handler is not killed by its own children finishing.
+        super::signal::raise_at(parent, super::signal::SIGCHLD);
         LIVE.fetch_sub(1, Ordering::Release);
         if flags & (1 << 9) != 0 {
             crate::cpu::enable_interrupts();
         }
     }
+}
+
+/// Which guest entry a pid names, for `kill`.
+///
+/// Pid 1 is the guest the shell started, which `getpid` has always answered
+/// for and which has no slot here -- it was never forked.
+pub fn guest_of_pid(pid: i64) -> Option<usize> {
+    if pid == 1 {
+        return Some(0);
+    }
+    if pid <= 0 {
+        return None;
+    }
+    let s = unsafe { SLOTS.get() };
+    s.iter().find(|x| x.pid == pid as u64).map(|x| x.guest)
 }
 
 /// `wait4`, in the one shape a shell needs: wait for any child, or for one.

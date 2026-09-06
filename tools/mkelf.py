@@ -940,6 +940,112 @@ def wnohang_code(entry_rva, msg_rva, _unused):
     return bytes(c)
 
 
+MSG_SIGNAL = b"signal: the handler ran and rt_sigreturn put it back\n"
+
+
+def signal_code(entry_rva, msg_rva, _unused):
+    """Install a handler, raise the signal at itself, and prove both halves.
+
+    Two things have to be true and one flag cannot show both, so the fixture
+    is arranged so that each is checked by a different mechanism.
+
+    **The handler ran** is the flag: eight bytes in the image that only the
+    handler writes. Nothing on the main path can set it, so reading one back
+    is proof the kernel redirected a return into the handler.
+
+    **`rt_sigreturn` put the frame back** is the fact that the program gets to
+    read the flag at all. The handler ends in `ret`, which lands on the
+    restorer the kernel pushed, which asks for `rt_sigreturn`; if that did not
+    restore `rip` and `rsp`, control never reaches the comparison below and
+    the run produces no output at all. A fixture that only checked the flag
+    could pass with a handler that never returned.
+
+    `rbx` is deliberately live across the whole thing -- it holds the flag's
+    address before the signal is raised and is used after -- so a
+    `rt_sigreturn` that lost the callee-saved registers reads the flag from
+    somewhere else and fails rather than passing quietly.
+    """
+    SA_RESTORER = 0x04000000
+    SIGUSR1 = 10
+    c = bytearray()
+
+    # act.handler, act.flags, act.restorer, act.mask
+    lea_act = len(c)
+    c += lea_rip("rbx", 0)
+    lea_act_end = len(c)
+    lea_h = len(c)
+    c += lea_rip("rax", 0)
+    lea_h_end = len(c)
+    c += store_q("rbx", 0, "rax")
+    c += mov_imm("rax", SA_RESTORER)
+    c += store_q("rbx", 8, "rax")
+    lea_r = len(c)
+    c += lea_rip("rax", 0)
+    lea_r_end = len(c)
+    c += store_q("rbx", 16, "rax")
+    c += mov_imm("rax", 0)
+    c += store_q("rbx", 24, "rax")
+
+    # rt_sigaction(SIGUSR1, act, NULL, 8)
+    c += mov_imm("rax", 13)
+    c += mov_imm("rdi", SIGUSR1)
+    c += mov_rr("rsi", "rbx")
+    c += mov_imm("rdx", 0)
+    c += mov_imm("r10", 8)
+    c += SYSCALL
+
+    # rbx now holds the flag, and holds it across the signal.
+    lea_flag = len(c)
+    c += lea_rip("rbx", 0)
+    lea_flag_end = len(c)
+
+    # kill(1, SIGUSR1) -- delivery happens on the way out of this very call.
+    c += mov_imm("rax", 62)
+    c += mov_imm("rdi", 1)
+    c += mov_imm("rsi", SIGUSR1)
+    c += SYSCALL
+
+    c += load64("rax", "rbx")
+    c += cmp_imm8("rax", 1)
+    jne_at = len(c)
+    c += jcc(JNE, 0)
+    jne_end = len(c)
+    c += mov_imm("rax", 1) + mov_imm("rdi", 1)
+    lea_msg = len(c)
+    c += lea_rip("rsi", 0)
+    lea_msg_end = len(c)
+    c += mov_imm("rdx", len(MSG_SIGNAL)) + SYSCALL
+    c += mov_imm("rax", 60) + mov_imm("rdi", 9) + SYSCALL + HLT
+
+    bad_at = len(c)
+    c += mov_imm("rax", 60) + mov_imm("rdi", 4) + SYSCALL + HLT
+
+    # The handler: set the flag and return to the restorer.
+    handler_at = len(c)
+    c += mov_imm("rax", 1)
+    lea_fh = len(c)
+    c += lea_rip("rcx", 0)
+    lea_fh_end = len(c)
+    c += store_q("rcx", 0, "rax")
+    c += bytes([0xC3])                          # ret -> the restorer
+
+    # The restorer: what glibc supplies and what a handler returns through.
+    restorer_at = len(c)
+    c += mov_imm("rax", 15) + SYSCALL + HLT
+
+    flag_rva = msg_rva + len(MSG_SIGNAL)
+    act_rva = flag_rva + 8
+
+    struct.pack_into("<i", c, lea_act + 3, act_rva - (entry_rva + lea_act_end))
+    struct.pack_into("<i", c, lea_h + 3, entry_rva + handler_at - (entry_rva + lea_h_end))
+    struct.pack_into("<i", c, lea_r + 3, entry_rva + restorer_at - (entry_rva + lea_r_end))
+    struct.pack_into("<i", c, lea_flag + 3, flag_rva - (entry_rva + lea_flag_end))
+    struct.pack_into("<i", c, lea_fh + 3, flag_rva - (entry_rva + lea_fh_end))
+    struct.pack_into("<i", c, lea_msg + 3, msg_rva - (entry_rva + lea_msg_end))
+    struct.pack_into("<i", c, jne_at + 2, bad_at - jne_end)
+    return bytes(c)
+
+
 def spin_code(entry_rva, _a, _b):
     """Loop forever, asking for nothing.
 
@@ -2285,6 +2391,14 @@ def build(kind="static"):
         text = spin_code(entry, 0, 0)
         body = text
         msg_rva, disp, lea_end = body_at, 0, 0
+    elif kind == "signal":
+        probe = signal_code(0, 0, 0)
+        msg_rva = body_at + len(probe)
+        text = signal_code(entry, msg_rva, 0)
+        assert len(text) == len(probe), (len(text), len(probe))
+        # message, then eight bytes of flag, then the 32-byte sigaction.
+        body = text + MSG_SIGNAL + bytes(8) + bytes(32)
+        disp, lea_end = 0, 0
     elif kind == "wnohang":
         probe = wnohang_code(0, 0, 0)
         msg_rva = body_at + len(probe)
@@ -2780,6 +2894,21 @@ def verify(path):
         claim("and ends in hlt, so a syscall that returns is visible",
               b.endswith(HLT))
         return ok
+    if MSG_SIGNAL in b:
+        claim("it installs a handler with rt_sigaction", mov_imm("rax", 13) in b)
+        claim("and raises the signal at itself with kill",
+              mov_imm("rax", 62) in b)
+        claim("it supplies a restorer, without which a handler cannot return",
+              mov_imm("rax", 0x04000000) in b)
+        claim("the restorer asks for rt_sigreturn", mov_imm("rax", 15) in b)
+        claim("the handler ends in ret, so it returns through it",
+              bytes([0xC3]) in b)
+        claim("it exits 4 on the path where the flag was never set",
+              mov_imm("rdi", 4) in b)
+        # sigaction, kill, write, exit, the failure exit, and the sigreturn.
+        claim("it makes the six calls its paths add up to",
+              b.count(SYSCALL) == 6)
+        return ok
     if MSG_POLLED in b:
         claim("it asks for WNOHANG rather than blocking",
               mov_imm("rdx", 1) in b)
@@ -2867,7 +2996,8 @@ def main():
     ap.add_argument("--kind",
                     choices=["static", "dynamic", "interp", "loader", "maps",
                              "fixed", "memory", "rogue",
-                             "protect", "wild", "spin", "fork", "exec", "wnohang", "cat", "grep",
+                             "protect", "wild", "spin", "fork", "exec", "wnohang", "signal",
+                             "cat", "grep",
                              "fsabuse", "fb", "ev", "thread", "gl"],
                     default="static")
     ap.add_argument("--verify", action="store_true")

@@ -1636,14 +1636,69 @@ with no `HOME` writes its dotfiles into the working directory. `TERM=dumb`
 because `ioctl` already says there is no terminal, and `PWD=/` because there is
 no `chdir`.
 
-Two answers that are deliberately shaped rather than complete.
-`rt_sigaction` and `rt_sigprocmask` are accepted and never deliver, which is
-honest because nothing here can raise a signal at a guest: no other process to
-send one, no terminal to generate one, and a fault ends the guest rather than
-being offered to it. Refusing would stop `sh` before it starts over a promise
-about events that cannot happen. And `nanosleep` spins on the timer tick,
-because there is no guest scheduler to block against, so it costs the CPU it is
-not using.
+`nanosleep` spins on the timer tick, because there is no guest scheduler to
+block against, so it costs the CPU it is not using.
+
+**Signals used to be accepted and never delivered, and that paragraph is worth
+keeping because of how it stopped being true.** It read: "nothing here can
+raise a signal at a guest: no other process to send one, no terminal to
+generate one, and a fault ends the guest rather than being offered to it." The
+reasoning was sound and `fork` falsified the first clause. There are other
+processes now, so a child exiting is an event its parent is owed, and `kill`
+has somebody to talk to. See below.
+
+### Signals
+
+`src/linux/signal.rs`. `rt_sigaction`, `rt_sigprocmask`, `rt_sigreturn` and
+`kill`, with delivery **on the way out of a syscall** -- the one moment the
+guest's whole register state is already in a `Frame` the kernel owns, its stack
+pointer is parked in `GLADOS_GUEST_RSP`, and the return is about to `sysretq`
+somewhere. Redirecting it into a handler costs three stores and no new
+assembly. Delivering from the timer would mean building a frame around an
+interrupted ring-3 context, which is a second entry path to keep in step with
+the first.
+
+The price is stated rather than hidden: **a guest that makes no syscalls
+receives no signals.** A program spinning in a loop cannot be interrupted,
+which on Linux it could. The run deadline still ends a runaway.
+
+Three refusals that are decisions:
+
+- **`SIGKILL` and `SIGSTOP` cannot be caught, blocked or ignored.** Not a
+  courtesy -- `SIGKILL` exists so there is one thing a process cannot argue
+  with, and a kernel that let a handler take it has removed the only guarantee
+  the call makes.
+- **A handler with no `sa_restorer` is not entered.** The `ret` ending it would
+  take whatever the stack happened to hold. glibc always supplies one; a
+  hand-written program that does not gets its signal dropped rather than a wild
+  jump.
+- **One signal at a time.** The interrupted frame is saved in the kernel rather
+  than on the guest's stack, so a second delivered before `rt_sigreturn` would
+  overwrite the first one's state. It waits instead.
+
+That last one is also **why this does not yet serve Wine.** Linux pushes a
+`ucontext` and a `siginfo` onto the guest's stack and a handler may read them;
+Wine reads them, which is how it emulates memory it has taken away. Serving
+that means putting the frame where Linux puts it.
+
+`SIGCHLD` is the first signal this machine can honestly raise, and it is
+ignored by default -- which is why a parent that installs no handler is not
+killed by its own children finishing.
+
+Measured, on `mkelf.py --kind signal`:
+
+    13 rt_sigaction  0xa 0x8010000191 0x0 -> 0
+    62 kill          0x1 0xa 0x0 -> 0
+    15 rt_sigreturn  0xa 0x0 0x0 -> 0
+    signal: the handler ran and rt_sigreturn put it back
+      exited 9 after 5 syscall(s)
+
+Exit 9 needs both halves and neither can fake the other. A flag only the
+handler writes proves it ran; *reaching the comparison at all* proves
+`rt_sigreturn` restored `rip` and `rsp`, since the handler ends in `ret` onto
+the restorer. The flag's address is held in `rbx` across the signal on purpose,
+so a `rt_sigreturn` that lost the callee-saved registers reads it from
+somewhere else and fails rather than passing quietly.
 
 **What is still missing, and it is one thing.** `fork`, `execve` and `wait4`,
 which is to say `sh` running anything that is not a builtin. That is not a

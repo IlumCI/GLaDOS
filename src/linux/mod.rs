@@ -34,6 +34,7 @@ pub mod dev;
 pub mod input;
 pub mod thread;
 pub mod fork;
+pub mod signal;
 pub mod proc;
 pub mod syscall;
 
