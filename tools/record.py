@@ -60,6 +60,33 @@ def dump(sock: socket.socket, path: Path) -> None:
         pass
 
 
+def stop(proc: subprocess.Popen) -> None:
+    """End `drive.py` **and the QEMU under it**.
+
+    `terminate()` alone leaks the emulator, and the leak is expensive out of
+    all proportion to itself: the serial and monitor ports are fixed at 45454
+    and 45455, so the survivor holds them and the *next* run attaches to the
+    wrong guest's serial and sits there until it times out with every command
+    unsent. That reads exactly like a kernel that hung on boot, and the only
+    tell is `.qemu/qemu-stderr.log` saying "Failed to find an available port".
+    It cost two runs before it was worth writing this.
+
+    On Windows `terminate()` is `TerminateProcess`, which is immediate and
+    gives `drive.py` no chance to clean up after itself, so the child has to be
+    taken explicitly -- `taskkill /T` is the tree. Elsewhere the process group
+    is the same idea.
+    """
+    if sys.platform == "win32":
+        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                       capture_output=True)
+    else:
+        proc.terminate()
+    try:
+        proc.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--frames", type=int, default=40)
@@ -106,7 +133,7 @@ def main() -> int:
         time.sleep(1.0)
     else:
         print(f"the guest never reached {cmds[-1]!r} within {a.wait:.0f}s")
-        proc.terminate()
+        stop(proc)
         return 1
 
     if a.settle:
@@ -121,11 +148,7 @@ def main() -> int:
             got.append(p)
     print(f"  {len(got)} frame(s)")
 
-    proc.terminate()
-    try:
-        proc.wait(timeout=30)
-    except subprocess.TimeoutExpired:
-        proc.kill()
+    stop(proc)
 
     if not got:
         return 1
