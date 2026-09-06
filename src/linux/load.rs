@@ -60,6 +60,26 @@ const GUEST_STACK: usize = 16 * 1024;
 /// enough that a guest which runs away hits the ceiling instead of the heap.
 const GUEST_BRK: usize = 256 * 1024;
 
+/// Where a guest's own memory lives when it has a space, and why it is here.
+///
+/// **Every guest gets the same two addresses, and that is the whole point.**
+/// `fork` hands a child its parent's memory at the *same* virtual addresses,
+/// which is impossible while a region's address is wherever the heap happened
+/// to put it. A fixed layout makes two guests interchangeable in the only way
+/// that matters.
+///
+/// Above `space::WINDOW`, because `build_identity_map` hangs everything off
+/// PML4 entry 0 and one entry spans 512 GiB -- so every address the kernel
+/// maps has a top-level index of zero, and nothing up here can collide with
+/// kernel memory. That is also why `map_page` needs no `is_free` check for
+/// these, where a fixed image at `0x400000` does: down there the question
+/// "is the kernel using this" is a real one, and up here it cannot be.
+///
+/// Far apart rather than adjacent so a stack that overruns lands on nothing
+/// instead of on the break, which is a fault rather than a corruption.
+const GUEST_BRK_AT: u64 = crate::mem::space::WINDOW + 0x1000_0000;
+const GUEST_STACK_AT: u64 = crate::mem::space::WINDOW + 0x2000_0000;
+
 /// The tag a guest's pages are registered under, so `cpu::code::locate` can
 /// name them in a fault report. Reads as `LNX` in a hex dump, which is the
 /// only reason a tag is a number rather than a pointer.
@@ -369,6 +389,26 @@ pub fn load(bytes: &[u8], args: &[&str]) -> Result<Guest, &'static str> {
 
     let brk = Exec::new(GUEST_BRK).ok_or("no room for a break region")?;
     let stack = Exec::new(GUEST_STACK).ok_or("no room for a stack")?;
+
+    // Where the guest will see them, which is where the kernel put them only
+    // when there is no space to map them into.
+    let (stack_at, brk_at) = match space.as_mut() {
+        Some(sp) => {
+            for (backing, at, len) in
+                [(stack.addr(), GUEST_STACK_AT, GUEST_STACK), (brk.addr(), GUEST_BRK_AT, GUEST_BRK)]
+            {
+                let mut off = 0u64;
+                while off < len as u64 {
+                    if !sp.map_page(at + off, backing + off, true, true) {
+                        return Err("the guest's stack or break could not be mapped");
+                    }
+                    off += 4096;
+                }
+            }
+            (GUEST_STACK_AT, GUEST_BRK_AT)
+        }
+        None => (stack.addr(), brk.addr()),
+    };
     let prog_entry = base + (img.entry - lo);
 
     // A fixed image is not registered with `cpu::code`, which addresses heap
@@ -391,6 +431,7 @@ pub fn load(bytes: &[u8], args: &[&str]) -> Result<Guest, &'static str> {
     });
     let stack_top = syscall::build_stack(
         stack.addr() as *mut u8,
+        stack_at,
         GUEST_STACK,
         args,
         syscall::Aux {
@@ -426,11 +467,13 @@ pub fn load(bytes: &[u8], args: &[&str]) -> Result<Guest, &'static str> {
         argv: args.iter().map(|a| alloc::string::String::from(*a)).collect(),
         regions: syscall::Regions {
             image: syscall::Region { at: base, len: span },
-            stack: syscall::Region { at: stack.addr(), len: GUEST_STACK },
-            brk: syscall::Region { at: brk.addr(), len: GUEST_BRK },
+            stack: syscall::Region { at: stack_at, len: GUEST_STACK },
+            brk: syscall::Region { at: brk_at, len: GUEST_BRK },
             interp: interp_region,
             image_mapped: matches!(prog.hold, Image::Mapped { .. }),
             interp_mapped: matches!(interp_hold, Some(Image::Mapped { .. })),
+            stack_mapped: virt,
+            brk_mapped: virt,
         },
         space,
         _image: prog.hold,
@@ -494,23 +537,21 @@ pub unsafe fn run(g: &Guest) -> u64 {
     // whatever CR3 names, which at this point is still the kernel's, so
     // running it on that address would open the *identity* mapping of it --
     // a page the guest was never given and the kernel may be using.
-    let mapped_image = matches!(g._image, Image::Mapped { .. });
-    let mapped_interp = matches!(g._interp, Some(Image::Mapped { .. }));
+    // **Read off `Regions` rather than recomputed here.** The first version of
+    // this asked the `Image` enum whether the image was mapped and then wrote
+    // `false` for the stack and the break, which was true right up until they
+    // moved into the guest arena -- and then `protect` was called on
+    // `WINDOW + 0x2000_0000` against the *kernel's* root, where nothing is
+    // mapped at all. It failed, `run` returned 0, and the guest never started:
+    // "returned without exiting -- 0 syscall(s)", with no fault and nothing
+    // naming the region. Two facts about one thing in two places, and the copy
+    // that was not updated is the one that decided.
     let regions = [
-        (Some(g.regions.image), mapped_image),
-        (Some(g.regions.stack), false),
-        (Some(g.regions.brk), false),
-        (g.regions.interp, mapped_interp),
+        (Some(g.regions.image), g.regions.image_mapped),
+        (Some(g.regions.stack), g.regions.stack_mapped),
+        (Some(g.regions.brk), g.regions.brk_mapped),
+        (g.regions.interp, g.regions.interp_mapped),
     ];
-    for (r, already) in regions {
-        let Some(r) = r else { continue };
-        if already {
-            continue;
-        }
-        if !crate::mem::paging::protect(r.at, r.len, crate::mem::paging::Perm::USER_RWX) {
-            return 0;
-        }
-    }
     // Installed here rather than in `load`, so a guest that was loaded and
     // never run leaves nothing naming memory its `Guest` has since freed.
     syscall::install(g.regions);
@@ -521,14 +562,42 @@ pub unsafe fn run(g: &Guest) -> u64 {
         argv.first().copied().unwrap_or(""),
         g.interp.as_ref().map(|(p, _, _)| p.as_str()),
     );
-    // On its own root, if asked. **After `protect`**, deliberately: `protect`
-    // edits whatever CR3 names, and while a space shares the kernel's tables
-    // that is the same edit either way -- but doing it before the switch keeps
-    // the U bits going into the kernel's map exactly as they always have, so
-    // the only thing this changes is which root the guest runs under.
+    // **The root goes on before `protect`, and getting that backwards cost a
+    // reproduction.** `paging::entry_for_user` opens the U bit on every level
+    // down to the leaf, starting with `pml4[i4]` of whatever `read_cr3()`
+    // names -- and `Space::sharing_kernel` *copies* the kernel's PML4 entries
+    // when it is built. So protecting first set U on the kernel's entry 0 and
+    // left the guest's copy of that entry with U clear, the bit is ANDed down
+    // all four levels, and every page under it was unreachable from ring 3.
+    //
+    // What that looked like: the *first* guest of a boot died fetching its
+    // interpreter's first instruction, `error 0x15` -- present, user, fetch
+    // refused -- and the second identical command worked, because by then the
+    // kernel's entry 0 carried U and the second space copied it. The same
+    // binary passing and failing in one boot is what said the variable was
+    // ordering rather than the command.
+    //
+    // Done under the guest's own root, the U bits land in the space's PML4
+    // where they belong, and the kernel's own entry 0 is left alone -- which
+    // is strictly tighter than before, since ring 3 can now only reach those
+    // pages through the root the guest actually runs on.
     let me = crate::task::current();
     if let Some(s) = &g.space {
         crate::task::set_root(me, s.root());
+    }
+    for (r, already) in regions {
+        let Some(r) = r else { continue };
+        if already {
+            continue;
+        }
+        if !crate::mem::paging::protect(r.at, r.len, crate::mem::paging::Perm::USER_RWX) {
+            // The root has to come off before this returns, or the shell goes
+            // on running under a space that is about to be dropped.
+            if g.space.is_some() {
+                crate::task::set_root(me, 0);
+            }
+            return 0;
+        }
     }
 
     let out = unsafe { syscall::run(g.entry, g.stack_top) };

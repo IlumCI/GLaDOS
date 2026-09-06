@@ -1810,9 +1810,37 @@ placeable run bounds a fixed image any more.
 
 **A mapped region must not be `protect`ed and that is required, not an
 optimisation.** Its U bit is set at the leaf by `map_low`, inside the guest's
-tables. `paging::protect` edits whatever CR3 names, which at that point is
-still the kernel's, so running it on `0x400000` would open the *identity*
-mapping of that address -- a page the guest was never given.
+tables. `paging::protect` edits whatever CR3 names, so running it on
+`0x400000` from the kernel's root would open the *identity* mapping of that
+address -- a page the guest was never given.
+
+**And rights for the regions that are *not* mapped go on under the guest's own
+root, which cost a reproduction to learn.** `entry_for_user` opens the U bit at
+every level down to the leaf, starting with `pml4[i4]` of whatever `read_cr3()`
+names, and `Space::sharing_kernel` **copies** the kernel's PML4 entries when it
+is built. Protect first and the U bit lands on the kernel's entry 0 while the
+guest's copy of that entry keeps it clear -- and the bit is ANDed down all four
+levels, so every page under it is unreachable from ring 3 however the leaf is
+marked.
+
+What it looked like is the part worth remembering. The **first** guest of a
+boot died fetching its interpreter's first instruction, `error 0x15` (present,
+user, fetch refused), and the second identical command worked. Three things
+made it hard:
+
+- **The evidence names the wrong level.** A fault reports an address, not which
+  table denied it, so a leaf with correct rights looks like the whole story.
+- **It read as a property of the command.** `uname -a` failed and `sha256sum`
+  passed in one boot, which is about *ordering* and looks like it is about the
+  programs. Two observations differing in more than one thing cannot say which
+  one mattered -- the same coincidence the DOOM damage counter records.
+- **It heals itself.** The first guest's `protect` leaves U set on the kernel's
+  entry 0 for good, so every later space copies it already open. A bug that
+  cannot happen twice is invisible to any test that runs twice.
+
+Doing it under the guest's root is also strictly tighter: the U bits land in
+the space's own PML4 and the kernel's entry 0 is left alone, so ring 3 reaches
+those pages only through the root the guest actually runs on.
 
 `Guest` declares `space` **before** the images it maps, so it drops first: the
 tables point at the backing's pages and freeing those while a root still names

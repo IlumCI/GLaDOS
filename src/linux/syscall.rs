@@ -498,6 +498,8 @@ pub struct Regions {
     /// being harmless is not a reason to write the pair inconsistently.
     pub image_mapped: bool,
     pub interp_mapped: bool,
+    pub stack_mapped: bool,
+    pub brk_mapped: bool,
 }
 
 /// What a guest owns.
@@ -534,6 +536,8 @@ pub struct Space {
     pub argv: Vec<String>,
     pub image_mapped: bool,
     pub interp_mapped: bool,
+    pub stack_mapped: bool,
+    pub brk_mapped: bool,
     pub image_path: String,
     pub interp_path: Option<String>,
     /// `FS` base as the kernel left it. A guest sets `FS` for its
@@ -737,6 +741,8 @@ pub fn install(r: Regions) {
             interp: r.interp,
             image_mapped: r.image_mapped,
             interp_mapped: r.interp_mapped,
+            stack_mapped: r.stack_mapped,
+            brk_mapped: r.brk_mapped,
             stack: r.stack,
             brk_start: brk.at,
             brk_now: brk.at,
@@ -812,10 +818,10 @@ pub fn teardown() -> usize {
             for r in [
                 (Some(sp.image), sp.image_mapped),
                 (sp.interp, sp.interp_mapped),
-                (Some(sp.stack), false),
+                (Some(sp.stack), sp.stack_mapped),
                 (
                     Some(Region { at: sp.brk_start, len: (sp.brk_end - sp.brk_start) as usize }),
-                    false,
+                    sp.brk_mapped,
                 ),
             ]
             .into_iter()
@@ -3921,7 +3927,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     {
         let region = 0x10_0000u64;
         let fake = Region { at: region, len: 4096 * 4 };
-        install(Regions { image: fake, stack: fake, brk: fake, interp: None, image_mapped: false, interp_mapped: false });
+        install(Regions { image: fake, stack: fake, brk: fake, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false });
         let first = sys_brk(0);
         let grown = sys_brk(region + 8192);
         let refused = sys_brk(region + 1_000_000);
@@ -3946,7 +3952,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     // than about the call, which is why they went the way `ET_EXEC` went.
     {
         let fake = Region { at: 0x10_0000, len: 4096 };
-        install(Regions { image: fake, stack: fake, brk: fake, interp: None, image_mapped: false, interp_mapped: false });
+        install(Regions { image: fake, stack: fake, brk: fake, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false });
         out.push((
             "a zero-length mapping is EINVAL, as Linux has it",
             sys_mmap(0, 0, 3, MAP_ANONYMOUS, u64::MAX, 0) == EINVAL,
@@ -3990,7 +3996,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         let mut buf = [0u8; SYSINFO_LEN];
         let at = buf.as_mut_ptr() as u64;
         let owned = Region { at, len: SYSINFO_LEN };
-        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false });
+        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false });
 
         let bare = sys_time(0);
         let through = sys_time(at);
@@ -4046,7 +4052,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         let mut buf = [0u8; 64];
         let at = buf.as_mut_ptr() as u64;
         let owned = Region { at, len: 64 };
-        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false });
+        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false });
         out.push((
             "pread on a stream is ESPIPE, the same answer lseek gives it",
             sys_pread64(0, at, 8, 0) == ESPIPE,
@@ -4075,7 +4081,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         let mut buf = [0xAAu8; 160];
         let at = buf.as_mut_ptr() as u64;
         let owned = Region { at, len: 160 };
-        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false });
+        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false });
         name_guest(&["/tmp/g/bb"], "/tmp/g/bb", None);
         // Three separate strings rather than one rewritten in place: the last
         // time claims here shared a buffer, the first one's write took the NUL
@@ -4137,7 +4143,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     // on its own code.
     if let Some(two) = alloc_pages(8192) {
         let mine = Region { at: two, len: 8192 };
-        install(Regions { image: mine, stack: mine, brk: mine, interp: None, image_mapped: false, interp_mapped: false });
+        install(Regions { image: mine, stack: mine, brk: mine, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false });
         let reserved =
             sys_mmap(two, 8192, 0, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, u64::MAX, 0) == two;
         let gone = crate::mem::paging::query(two).is_some_and(|p| !p.present);
@@ -4163,7 +4169,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         let mut buf = [0u8; 144];
         let at = buf.as_mut_ptr() as u64;
         let owned = Region { at, len: 144 };
-        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false });
+        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false });
         // The empty path has to live *inside* what the guest owns, because
         // `read_cstr` bounds-checks it like any other guest pointer. Pointing
         // at a local outside the region answered `EFAULT` before any of the
@@ -4196,7 +4202,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     if let Some(two) = alloc_pages(8192) {
         let img = Region { at: two, len: 4096 };
         let interp = Region { at: two + 4096, len: 4096 };
-        install(Regions { image: img, stack: img, brk: img, interp: Some(interp), image_mapped: false, interp_mapped: false });
+        install(Regions { image: img, stack: img, brk: img, interp: Some(interp), image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false });
         // PROT_READ. A real `ld.so` does exactly this to its own RELRO, which
         // is how the page that halted the machine got its rights.
         let asked = sys_mprotect(two + 4096, 4096, 1) == 0;
@@ -4217,7 +4223,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     // pointing at 0x100000 would mark the low megabyte.
     if let Some(own) = alloc_pages(8192) {
         let mine = Region { at: own, len: 8192 };
-        install(Regions { image: mine, stack: mine, brk: mine, interp: None, image_mapped: false, interp_mapped: false });
+        install(Regions { image: mine, stack: mine, brk: mine, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false });
         out.push((
             "MAP_FIXED over memory the guest already holds answers that address",
             sys_mmap(own, 4096, 3, MAP_ANONYMOUS | MAP_FIXED, u64::MAX, 0) == own,
@@ -4235,7 +4241,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
 
     {
         let fake = Region { at: 0x10_0000, len: 4096 };
-        install(Regions { image: fake, stack: fake, brk: fake, interp: None, image_mapped: false, interp_mapped: false });
+        install(Regions { image: fake, stack: fake, brk: fake, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false });
 
         let at = sys_mmap(0, 8192, 3, MAP_ANONYMOUS, u64::MAX, 0);
         let got = (at as i64) > 0 && at % 4096 == 0;
@@ -4262,7 +4268,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         // GET_FS writes eight bytes through a guest pointer, so it is bounds
         // checked now, so the destination has to be a range the guest owns.
         let owned = Region { at, len: 8 };
-        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false });
+        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false });
         let was = unsafe { crate::cpu::rdmsr(IA32_FS_BASE) };
         let set = sys_arch_prctl(ARCH_SET_FS, 0xDEAD_0000);
         let got = sys_arch_prctl(ARCH_GET_FS, at);
@@ -4294,7 +4300,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         let mut backing = [0u64; 64];
         let at = backing.as_mut_ptr() as u64;
         let one = Region { at, len: 512 };
-        install(Regions { image: one, stack: one, brk: one, interp: None, image_mapped: false, interp_mapped: false });
+        install(Regions { image: one, stack: one, brk: one, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false });
         out.push(("a range inside what the loader gave out is owned", owns(at, 8)));
         out.push(("a range that runs off the end is not", !owns(at + 508, 8)));
         out.push(("a range below it is not", !owns(at - 8, 8)));
@@ -4330,7 +4336,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
             if !mem.is_null() {
                 let at = mem as u64;
                 let owned = Region { at, len: 4096 };
-                install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false });
+                install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false });
                 out.push(("a page the guest owns starts reachable", reachable(at, 8, true)));
                 out.push((
                     "mprotect to PROT_NONE is accepted",
@@ -4372,11 +4378,17 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     let mut small = [0u8; 64];
     out.push((
         "a stack too small for the initial frame is refused",
-        build_stack(small.as_mut_ptr(), 64, &["x"], Aux::default()).is_none(),
+        {
+            let p = small.as_mut_ptr();
+            build_stack(p, p as u64, 64, &["x"], Aux::default()).is_none()
+        },
     ));
     let mut big = [0u8; 512];
     let aux = Aux { phdr: 0x1000, phent: 56, phnum: 2, entry: 0x1078, base: 0 };
-    let sp = build_stack(big.as_mut_ptr(), 512, &["cat", "/ai/about"], aux);
+    let sp = {
+        let p = big.as_mut_ptr();
+        build_stack(p, p as u64, 512, &["cat", "/ai/about"], aux)
+    };
     out.push((
         "and one large enough answers a 16-byte-aligned pointer inside itself",
         sp.is_some_and(|v| v % 16 == 0 && v >= big.as_ptr() as u64
@@ -4454,7 +4466,10 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         {
             let mut small = [0u8; 512];
             let none = Aux { phdr: 0, phent: 56, phnum: 2, entry: 0, base: 0 };
-            let s2 = build_stack(small.as_mut_ptr(), 512, &["x"], none);
+            let s2 = {
+                let p = small.as_mut_ptr();
+                build_stack(p, p as u64, 512, &["x"], none)
+            };
             s2.is_some_and(|v| unsafe {
                 let p = v as *const u64;
                 let n = p.read() as usize;
@@ -4623,9 +4638,35 @@ pub fn environ() -> Vec<String> {
     out
 }
 
-pub fn build_stack(base: *mut u8, size: usize, args: &[&str], aux: Aux) -> Option<u64> {
+/// Lay out argc, argv, envp and the aux vector on a guest's stack.
+///
+/// **`base` is where the kernel writes and `guest_base` is where the guest
+/// will see it, and they are only the same number by accident.** Every
+/// pointer this lays down names memory on this same stack -- argv entries
+/// point at strings a few bytes above them, `AT_RANDOM` points at sixteen
+/// bytes of canary -- so if the stack is mapped somewhere else in the guest's
+/// own tables, every one of those has to be written as the guest's address
+/// while the write itself goes to the backing. Pass `guest_base == base as
+/// u64` for a stack the guest sees where the kernel put it, which is what an
+/// identity-mapped guest wants and what this did before it could be asked
+/// anything else.
+///
+/// Getting this wrong is silent in the worst way: the stack is laid out
+/// perfectly, `argc` is right, and every pointer in it names an address in
+/// the *kernel's* heap that the guest cannot reach. What shows is a fault on
+/// argv[0] inside libc's startup, which reads as a bad loader rather than as
+/// a stack built at the wrong base.
+pub fn build_stack(
+    base: *mut u8,
+    guest_base: u64,
+    size: usize,
+    args: &[&str],
+    aux: Aux,
+) -> Option<u64> {
     let bottom = base as usize;
     let mut top = bottom.checked_add(size)?;
+    // Where the guest will see an address the kernel is writing at.
+    let seen = |x: usize| guest_base + (x - bottom) as u64;
 
     // Strings first, at the very top, because the pointer array below has to
     // name them and nothing may move afterwards.
@@ -4638,7 +4679,7 @@ pub fn build_stack(base: *mut u8, size: usize, args: &[&str], aux: Aux) -> Optio
             core::ptr::copy_nonoverlapping(v.as_ptr(), *top as *mut u8, v.len());
             core::ptr::write((*top + v.len()) as *mut u8, 0);
         }
-        Some(*top as u64)
+        Some(seen(*top))
     };
     let env = environ();
     let mut envs = alloc::vec::Vec::with_capacity(env.len());
@@ -4662,9 +4703,11 @@ pub fn build_stack(base: *mut u8, size: usize, args: &[&str], aux: Aux) -> Optio
     if top < bottom {
         return None;
     }
-    let random = top as u64;
+    // Two addresses for one thing: the canary is filled through the backing
+    // and named to the guest at the address it will read it from.
+    let random = seen(top);
     unsafe {
-        crate::rng::fill(core::slice::from_raw_parts_mut(random as *mut u8, 16));
+        crate::rng::fill(core::slice::from_raw_parts_mut(top as *mut u8, 16));
     }
 
     let mut pairs = alloc::vec::Vec::new();
@@ -4730,7 +4773,7 @@ pub fn build_stack(base: *mut u8, size: usize, args: &[&str], aux: Aux) -> Optio
             p.add(a0 + i * 2 + 1).write(*v);
         }
     }
-    Some(sp as u64)
+    Some(seen(sp))
 }
 
 /// Name the calls stage 0 knows about, for a trace a person has to read.
