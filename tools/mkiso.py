@@ -402,6 +402,31 @@ def build_iso(out_path, efi_img, efi_size, label):
         out.write(b'\x00' * ISO_SECTOR)             # LBA 23, spare
 
 
+def declared_payload_names():
+    """Every filename the tracked payload manifests name.
+
+    Read out of `payload/*.txt` rather than written down here, because
+    `payload.py record` produces those and CI verifies the fetched payload
+    against one. A list beside them would be a second copy of an answer that
+    already exists, free to drift from the one the release actually checks --
+    the failure this tree keeps recording under a different name each time.
+
+    The union across manifests rather than one of them, since a build names a
+    single manifest and this has to answer for whichever it was.
+    """
+    root = Path(__file__).resolve().parent.parent / 'payload'
+    names = set()
+    for man in sorted(root.glob('*.txt')):
+        for line in man.read_text(encoding='utf-8').splitlines():
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            parts = line.split()
+            if len(parts) >= 3:
+                names.add(parts[2])
+    return names
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('output')
@@ -409,6 +434,8 @@ def main():
     ap.add_argument('--payload', help='directory copied to \\GLADOS\\')
     ap.add_argument('--no-license', action='store_true',
                     help='build a payload with no licence file in it')
+    ap.add_argument('--allow', action='append', default=[], metavar='NAME',
+                    help='place a payload file no manifest names; repeatable')
     ap.add_argument('--label', default='GLADOS')
     ap.add_argument('--cluster', type=int, default=0,
                     help='cluster size; 0 picks the smallest that fits')
@@ -448,6 +475,42 @@ def main():
                 + '  Copy licenses/qwen3-apache-2.0.txt in as LICENSE.TXT, or pass '
                   '--no-license' + chr(10)
                 + '  if this payload genuinely has no licensed content in it.')
+        # An allowlist, and it has to be one. A denylist spelling out `xash*`,
+        # `hl*` and `*.wad` grants by default, so the first thing it misses is
+        # something like `libref_soft.so` -- a name with nothing in it saying
+        # what it belongs to. The same argument `eval.rs` makes about BUILTINS.
+        #
+        # Two separate reasons, and the second is the durable one. Xash3D and
+        # Half-Life are a milestone and a demo: what they measure is that a
+        # program written elsewhere runs here, and that is a claim about the
+        # kernel rather than a thing to install on somebody's laptop. And
+        # Xash3D-FWGS is GPL-3.0-or-later while this kernel is not, so putting
+        # it on the install image puts obligations on the whole disc that
+        # nobody has decided to take on -- and Half-Life's own data is Valve's,
+        # under exactly the rule that keeps DOOM1.WAD out of this repository.
+        #
+        # CI is already covered, since `payload.py verify` refuses an
+        # undeclared file before this runs. This is the hand-run case, which
+        # had nothing at all: `mkiso.py --payload esp/GLADOS` shipped whatever
+        # happened to be sitting in that directory.
+        allowed = declared_payload_names()
+        if not allowed:
+            raise SystemExit(
+                'no payload manifests under payload/' + chr(10)
+                + '  Nothing can say which files belong on the image, so this '
+                  'refuses rather than' + chr(10)
+                + '  placing the directory unchecked.')
+        allowed |= set(args.allow)
+        stray = [f.name for f in files if f.name not in allowed]
+        if stray:
+            raise SystemExit(
+                'not payload content: ' + ', '.join(sorted(stray)) + chr(10)
+                + '  The install image carries the kernel, the weights and '
+                  'their licences.' + chr(10)
+                + '  Demos and ported engines are measurements, and they are '
+                  'not shipped in it.' + chr(10)
+                + '  Record it with tools/payload.py if it genuinely belongs, '
+                  'or pass --allow NAME.')
         for f in files:
             g.children.append(Entry(f.name, f.stat().st_size, f))
             payload_bytes += f.stat().st_size

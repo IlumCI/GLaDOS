@@ -735,6 +735,31 @@ full `convert.py --seq 32768` run, which is how that claim was settled.
 **Verify runs before the stamp**, and that order is not cosmetic: stamping
 changes four bytes, so a digest taken afterwards could never match.
 
+**The image carries the kernel, the weights and their licences, and that is
+the whole list.** Ported engines are measurements: `src/doom/` exists to find
+out whether software written somewhere else survives being brought over, and
+`tools/xash.py` and `tools/guest/spin.c` exist to find out whether a binary
+this kernel did not compile can reach the screen. What they establish is a
+fact about the kernel, and none of them is a thing to install on somebody's
+laptop.
+
+Two mechanisms, and they cover different halves. `payload.py verify` refuses a
+file the manifest does not name, which covers CI because it runs before
+`mkiso.py`. The hand-run case had nothing, so `mkiso.py` now reads the union of
+`payload/*.txt` and refuses to place anything outside it -- an **allowlist**,
+for the reason `eval.rs` gives about `BUILTINS`: a denylist naming `xash*` and
+`*.wad` grants by default, and the first thing it misses is a name like
+`libref_soft.so` with nothing in it saying what it belongs to. `--allow NAME`
+is the deliberate exception, and a file that genuinely belongs gets recorded
+with `payload.py` instead.
+
+The licence half is the durable reason rather than the scope half.
+Xash3D-FWGS is GPL-3.0-or-later and this kernel is not, so shipping it on the
+install image puts obligations on the whole disc that nobody has decided to
+take on; Half-Life's own data is Valve's, under exactly the rule that keeps
+`DOOM1.WAD` out of this repository. Neither is a thing to discover after a
+release is cut.
+
 Two figures worth knowing before adding a payload. The 2B ISO is 1.90 GB
 against GitHub's **2 GB per-asset limit**, so about 100 MB of headroom and a
 larger model does not fit this route. And `HEAP_LADDER`'s 320 MiB is the first
