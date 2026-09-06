@@ -75,10 +75,15 @@ const GUEST_BRK: usize = 256 * 1024;
 /// these, where a fixed image at `0x400000` does: down there the question
 /// "is the kernel using this" is a real one, and up here it cannot be.
 ///
-/// Far apart rather than adjacent so a stack that overruns lands on nothing
-/// instead of on the break, which is a fault rather than a corruption.
-const GUEST_BRK_AT: u64 = crate::mem::space::WINDOW + 0x1000_0000;
-const GUEST_STACK_AT: u64 = crate::mem::space::WINDOW + 0x2000_0000;
+/// Far apart rather than adjacent so a region that overruns lands on nothing
+/// instead of on its neighbour, which is a fault rather than a corruption.
+/// A slot is 256 MiB against a `MAX_SPAN` of 64 MiB, so four times the largest
+/// image this loader will place -- chosen so the spacing does not have to be
+/// revisited the first time somebody raises that cap.
+const GUEST_IMAGE_AT: u64 = crate::mem::space::WINDOW + 0x1000_0000;
+const GUEST_INTERP_AT: u64 = crate::mem::space::WINDOW + 0x2000_0000;
+const GUEST_BRK_AT: u64 = crate::mem::space::WINDOW + 0x3000_0000;
+const GUEST_STACK_AT: u64 = crate::mem::space::WINDOW + 0x4000_0000;
 
 /// The tag a guest's pages are registered under, so `cpu::code::locate` can
 /// name them in a fault report. Reads as `LNX` in a hex dump, which is the
@@ -188,7 +193,7 @@ struct Placed {
 /// the two differ in nothing a loader cares about: both are ELF, both may be
 /// `ET_DYN` or `ET_EXEC`, and both are copied segment by segment relative to
 /// their own lowest address.
-fn place(bytes: &[u8], virtual_fixed: bool) -> Result<Placed, &'static str> {
+fn place(bytes: &[u8], arena: Option<u64>) -> Result<Placed, &'static str> {
     let img = elf::parse(bytes)?;
     syscall::runnable(&img)?;
     let (lo, hi) = img.span().ok_or("nothing to load")?;
@@ -202,10 +207,18 @@ fn place(bytes: &[u8], virtual_fixed: bool) -> Result<Placed, &'static str> {
     // same number the segments are already written relative to, so the copy
     // loop below is identical for both.
     let (mut placed, base) = if img.relocatable() {
+        // A PIE goes wherever it is told. Without a space that is the heap
+        // address it landed on, which is what this always did; with one it is
+        // the arena slot, so that two guests carry the same one. Relocation
+        // does not care either way -- `ld.so` is handed whichever number this
+        // returns and relocates against it.
         let e = Exec::new(span).ok_or("no room for the image")?;
-        let at = e.addr();
+        let at = match arena {
+            Some(a) => a,
+            None => e.addr(),
+        };
         (Some(e), at)
-    } else if virtual_fixed {
+    } else if arena.is_some() {
         // Heap pages, and the guest is told the address its headers wanted.
         // The segment copy below is unchanged, because it writes into the
         // allocation at offsets relative to `lo` either way -- the only thing
@@ -263,10 +276,13 @@ fn place(bytes: &[u8], virtual_fixed: bool) -> Result<Placed, &'static str> {
     let hold = match placed {
         Some(mut e) => {
             e.arm(TAG_GUEST);
-            if img.relocatable() {
-                Image::Placed(e)
+            // Mapped whenever there is a space to map into, PIE or not.
+            // `base` already says where: the arena slot for a PIE, and the
+            // address the headers insist on for a fixed image.
+            if arena.is_some() {
+                Image::Mapped { backing: e, at: base, len: span }
             } else {
-                Image::Mapped { backing: e, at: lo, len: span }
+                Image::Placed(e)
             }
         }
         None => Image::Fixed { at: base, len: span },
@@ -329,8 +345,19 @@ fn map_image(s: &mut crate::mem::space::Space, im: &Image) -> Result<(), &'stati
     let phys = backing.addr();
     let mut off = 0u64;
     while off < *len as u64 {
-        s.map_low(at + off, phys + off, true, true)
-            .map_err(|_| "the guest's image cannot be mapped where its headers insist")?;
+        // Two doors, and which one is a property of the address rather than a
+        // choice. Inside the arena nothing can collide with the kernel, so
+        // `map_page` is right and `map_low`'s `is_free` question would be
+        // asked of physical memory that does not exist. Below it -- a fixed
+        // image at `0x400000` -- the question is real and has to be asked.
+        let ok = if at + off >= crate::mem::space::WINDOW {
+            s.map_page(at + off, phys + off, true, true)
+        } else {
+            s.map_low(at + off, phys + off, true, true).is_ok()
+        };
+        if !ok {
+            return Err("the guest's image cannot be mapped where it has to go");
+        }
         off += 4096;
     }
     Ok(())
@@ -351,7 +378,7 @@ pub fn load(bytes: &[u8], args: &[&str]) -> Result<Guest, &'static str> {
     };
     let virt = space.is_some();
 
-    let prog = place(bytes, virt)?;
+    let prog = place(bytes, virt.then_some(GUEST_IMAGE_AT))?;
     let (img, base, lo, span) = (&prog.img, prog.base, prog.lo, prog.span);
 
     // The interpreter, if the program named one. Read through `sysbox` rather
@@ -363,7 +390,7 @@ pub fn load(bytes: &[u8], args: &[&str]) -> Result<Guest, &'static str> {
         Some(path) => {
             let bytes = crate::sysbox::read_blob(path)
                 .ok_or("the interpreter this binary names is not in the namespace")?;
-            let p = place(&bytes, virt)?;
+            let p = place(&bytes, virt.then_some(GUEST_INTERP_AT))?;
             // An interpreter that itself wants an interpreter is refused
             // rather than followed. Nothing real does it, the recursion has no
             // natural bound, and a loader that chased it would run out of
