@@ -32,6 +32,7 @@ pub mod fs;
 pub mod load;
 pub mod dev;
 pub mod input;
+pub mod thread;
 pub mod proc;
 pub mod syscall;
 
@@ -41,6 +42,7 @@ pub fn checks() -> alloc::vec::Vec<(&'static str, bool)> {
     out.extend(fs::checks());
     out.extend(dev::checks());
     out.extend(input::checks());
+    out.extend(thread::checks());
     out.extend(proc::checks());
     out.extend(syscall::checks());
     out.extend(load::checks());

@@ -82,6 +82,26 @@ pub enum State {
     Handoff(u8),
 }
 
+/// The ring-3 entry state a task carries across a switch.
+///
+/// Four words the syscall stub reaches through fixed globals. With one guest
+/// they are constants; with two guest threads they are three ways to corrupt
+/// each other, because a thread that blocks inside a syscall leaves them live
+/// while another thread enters one. Swapped here rather than through `swapgs`
+/// and a per-thread block, since GS already belongs to `cpu::percpu` and a
+/// guest is refused it for that reason.
+///
+/// It lives on `Task` for the same reason `fpu` does: the scheduler is the one
+/// place that knows a switch is happening, and a hook called from there would
+/// be an indirect call on the hottest path in the kernel to save four stores.
+#[derive(Clone, Copy, Default)]
+pub struct Ring3 {
+    pub guest_rsp: u64,
+    pub syscall_stack: u64,
+    pub host_rsp: u64,
+    pub fs_base: u64,
+}
+
 #[derive(Clone, Copy)]
 pub struct Task {
     pub rsp: u64,
@@ -108,6 +128,14 @@ pub struct Task {
     /// is who *may* run this; `idle` is whether it should be run only when
     /// nothing else can be. Conflating them starved the shell once already.
     pub idle: bool,
+    /// Present while this task is executing a guest, absent otherwise.
+    ///
+    /// An `Option` rather than four always-live words, so a machine with no
+    /// guest pays one predictable branch per switch and no MSR access at all.
+    /// `IA32_FS_BASE` is two `wrmsr`s, which is a few hundred cycles on a path
+    /// that runs at least a hundred times a second and has nothing to do with
+    /// guests.
+    pub ring3: Option<Ring3>,
     /// XSAVE/FXSAVE image for this task's x87, SSE and AVX state.
     ///
     /// Necessary because preemption breaks the assumption the rest of the
@@ -135,6 +163,7 @@ const EMPTY: Task = Task {
     pin: -1,
     idle: false,
     fpu: core::ptr::null_mut(),
+    ring3: None,
 };
 
 /// Allocate a zeroed, 64-byte aligned extended-state image.
@@ -230,6 +259,7 @@ pub fn init(name: &'static str) {
             pin: 0,
             idle: false,
             fpu,
+            ring3: None,
         };
     }
     COUNT.store(1, Ordering::Release);
@@ -374,6 +404,7 @@ pub fn adopt_idle(cpu: usize) -> bool {
             pin: cpu as i16,
             idle: true,
             fpu,
+            ring3: None,
         };
     }
     CURRENT[cpu].store(slot, Ordering::Release);
@@ -443,6 +474,7 @@ pub fn spawn(name: &'static str, entry: fn()) -> Option<usize> {
             pin: 0,
             idle: false,
             fpu: alloc_fpu_area(),
+            ring3: None,
         };
     }
 
@@ -486,6 +518,43 @@ extern "C" fn trampoline() -> ! {
 
 pub fn enable() {
     ENABLED.store(1, Ordering::Release);
+}
+
+/// Give a task the syscall stack a guest thread will run its handler on.
+///
+/// Set when the pool grows rather than when a thread starts, because the stack
+/// belongs to the kernel task and outlives every guest thread that borrows it.
+pub fn set_ring3(idx: usize, syscall_stack: u64) {
+    let mut t = TASKS.lock_irq();
+    if idx < MAX_TASKS {
+        let mut r = t[idx].ring3.unwrap_or_default();
+        r.syscall_stack = syscall_stack;
+        t[idx].ring3 = Some(r);
+    }
+}
+
+/// Start or stop carrying ring-3 state on the running task.
+///
+/// Taken when a guest is entered and given back when it leaves, so a task that
+/// is not running one costs nothing at a switch.
+pub fn ring3_active(on: bool, syscall_stack: u64) {
+    let me = current();
+    let mut t = TASKS.lock_irq();
+    if on {
+        let mut r = t[me].ring3.unwrap_or_default();
+        if syscall_stack != 0 {
+            r.syscall_stack = syscall_stack;
+        }
+        t[me].ring3 = Some(r);
+    } else {
+        t[me].ring3 = None;
+    }
+}
+
+/// The syscall stack this task was given, or zero.
+pub fn ring3_stack() -> u64 {
+    let me = current();
+    TASKS.lock_irq()[me].ring3.map(|r| r.syscall_stack).unwrap_or(0)
 }
 
 /// Which task this core is running.
@@ -550,7 +619,7 @@ fn schedule() {
         return;
     }
 
-    let (save, load, out_fpu, in_fpu) = {
+    let (save, load, out_fpu, in_fpu, out_r3, in_r3) = {
         let mut t = TASKS.lock_irq();
         let n = COUNT.load(Ordering::Acquire);
 
@@ -598,7 +667,15 @@ fn schedule() {
         // controller which core it is on.
         crate::cpu::percpu::set_task(next as u64);
 
-        (&mut t[cur].rsp as *mut u64, t[next].rsp, t[cur].fpu, t[next].fpu)
+        (
+            &mut t[cur].rsp as *mut u64,
+            t[next].rsp,
+            t[cur].fpu,
+            t[next].fpu,
+            if t[cur].ring3.is_some() { Some(&mut t[cur]) } else { None }
+                .map(|x| x.ring3.as_mut().unwrap() as *mut Ring3),
+            t[next].ring3,
+        )
     };
 
     unsafe {
@@ -615,6 +692,17 @@ fn schedule() {
         // `glados_switch_context` is pure integer assembly.
         if !out_fpu.is_null() {
             crate::cpu::xsave_to(out_fpu);
+        }
+        // The ring-3 entry state, beside the FPU area and for the same
+        // reason: this is the one place that knows a switch is happening.
+        // Ordered the same way too -- save the outgoing, load the incoming,
+        // and only then switch stacks, so neither half runs while `CURRENT`
+        // names somebody else.
+        if out_r3.is_some() || in_r3.is_some() {
+            if let Some(p) = out_r3 {
+                *p = crate::linux::syscall::ring3_now();
+            }
+            crate::linux::syscall::ring3_load(in_r3);
         }
         if !in_fpu.is_null() {
             crate::cpu::xrstor_from(in_fpu);

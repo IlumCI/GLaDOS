@@ -1626,6 +1626,90 @@ syscall away: `fork` needs two address spaces, and one address space is the
 founding claim of this system rather than a shortcut it took. Nothing else in
 the measured surface is blocked on a decision that large.
 
+### Threads, which one address space makes easier rather than harder
+
+`src/linux/thread.rs`. The asymmetry is worth stating because it is easy to
+read "no processes" as "no concurrency": `fork` needs two address spaces and
+this system has one, while `CLONE_VM` asks to *share* one, which this kernel
+grants by doing nothing at all. So the constraint that makes `fork` impossible
+is the same one that makes a thread nearly free.
+
+A thread needs four things and three were already here. A stack, which the
+guest allocates. A scheduler, which `task.rs` has been preempting at 100 Hz
+since long before any guest existed. Its own `FS`, which `arch_prctl` already
+sets and which now has to survive a switch. And **its own syscall entry
+state**, which is the piece that did not exist -- `syscall.rs` says so in its
+own header: "that stack is one static, so the handler is not reentrant ...
+stage 0 runs one guest with no threads. Both of those stop being true later."
+
+**The entry path is per-task now and no assembly changed.** Three globals
+carry a syscall across the ring boundary: where the guest's `rsp` went, which
+stack the handler runs on, and where to longjmp back to. With one guest they
+are constants; with two threads they are three ways to corrupt each other,
+because a thread that blocks inside a syscall leaves them live while another
+enters one. They are saved and restored by `schedule`, beside the FPU area and
+in the same order, which is what makes them per-task: a global only read while
+its own task is running *is* per-task as long as somebody swaps it. The
+alternative was `swapgs` and a per-thread block, which collides with
+`cpu::percpu` owning GS -- the same reason a guest is refused `ARCH_SET_GS`.
+
+**A pool, not a task per thread.** `MAX_TASKS` is 24 and a kernel task that
+returns is not reclaimed, it spins in `yield_now` forever. Reclaiming slots
+means teaching the scheduler about a finished task, and the outgoing task's
+state is written unconditionally in `schedule`, so that is surgery on the most
+delicate loop here. Instead a finished thread parks its task and the next
+`clone` takes it back: the limit is eight *concurrent* threads rather than
+eight ever created, and a machine that never runs one spawns nothing.
+
+`clone` returns twice, in two threads, at the same instruction, and only `rax`
+tells them apart. The child arrives with every register zero except `rsp`,
+because `glados_enter_guest` clears them, so it cannot be handed anything in a
+register -- and its entry is the *parent's* return address, which `syscall`
+left in `rcx`, so nothing has to be invented.
+
+`futex` is `WAIT` and `WAKE`, and a waiter watches two things: the wake counter
+*and* the word itself. Needing both is the point -- the counter alone loses a
+wake when its small table is full, and the word alone misses a wake that
+changed nothing. It is a yield loop rather than a sleep queue, the same bargain
+`nanosleep` makes and for the same reason.
+
+Joining is `CLONE_CHILD_CLEARTID` plus that futex, which is what `pthread_join`
+is underneath: the kernel writing zero to the word when a thread ends is the
+whole of the notification, and a kernel that ignores it leaves a library
+waiting forever on a thread that finished.
+
+    linux run /tmp/th
+        9 mmap        0x0 0x2000 0x3 -> 46600192
+       56 clone       0x200f00 ... -> -38    no CLONE_THREAD, so a process
+       56 clone       0x210f00 0x0 -> -22    no stack
+       56 clone       0x210f00 ... -> 4      a thread, and its id
+      186 gettid                  -> 1       the main thread's id is its pid
+      202 futex       ...+9 0x80  -> -22     a word that is not aligned
+       24 sched_yield             -> 0
+       60 exit        0x0         -> 0       <- the child, on its own stack
+      202 futex       ...+8 0x80  -> 0       woken by the kernel clearing ctid
+      231 exit_group  0x0         -> 0
+      exited 0 after 10 syscall(s)
+
+Zero is the mask, so all ten checks answered, and the last of them is the
+whole claim: one page, two threads, and a value in it that could only have
+been put there by the other one. Three runs in one boot, and the interesting
+difference between them is the ordering -- in two the child finished before
+the parent waited and the futex correctly answered `EAGAIN`, in one the parent
+genuinely blocked and was woken. Both are right and a fixture that accepted
+only the second would have been testing that the child is slow.
+
+**Two bugs, and the first took the whole machine.** `run` saves and restores
+`RFLAGS` around a guest because `syscall` clears `IF` through `FMASK` and
+`exit` leaves through a longjmp that restores a stack rather than a processor
+state. `run_thread` did not, so a pool task went back to its `hlt` with
+interrupts off, which is a core that never wakes -- no prompt, no timer, and
+the run deadline could not fire because firing is something an interrupt does.
+And the handler stack lived on the `Task`, which stops carrying ring-3 state
+the moment a thread ends: the second thread to use a pool slot entered its
+first syscall with the stack at zero and pushed onto a null pointer. It ran
+perfectly once, which is the worst number of times for a thing to work.
+
 ### Loading the loader
 
 `PT_INTERP` names a path, the path is a file in the namespace, and a second

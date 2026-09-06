@@ -117,6 +117,11 @@ pub const SYS_GETTIMEOFDAY: u64 = 96;
 pub const SYS_CLOCK_GETTIME: u64 = 228;
 pub const SYS_DUP2: u64 = 33;
 pub const SYS_DUP3: u64 = 292;
+pub const SYS_CLONE: u64 = 56;
+pub const SYS_FUTEX: u64 = 202;
+pub const SYS_GETTID: u64 = 186;
+pub const SYS_TGKILL: u64 = 234;
+pub const SYS_SCHED_YIELD: u64 = 24;
 pub const SYS_GETUID: u64 = 102;
 pub const SYS_GETGID: u64 = 104;
 pub const SYS_GETEUID: u64 = 107;
@@ -148,6 +153,7 @@ const ENOTTY: u64 = (-25i64) as u64;
 const ESPIPE: u64 = (-29i64) as u64;
 const ENOTCONN: u64 = (-107i64) as u64;
 const EAGAIN: u64 = (-11i64) as u64;
+const EINTR: u64 = (-4i64) as u64;
 const ENAMETOOLONG: u64 = (-36i64) as u64;
 const EROFS: u64 = (-30i64) as u64;
 const EEXIST: u64 = (-17i64) as u64;
@@ -342,6 +348,47 @@ static mut GLADOS_HOST_RSP: u64 = 0;
 #[repr(align(16))]
 struct Stack([u8; 16 * 1024]);
 static mut SYSCALL_STACK: Stack = Stack([0; 16 * 1024]);
+
+/// The three globals the stub reaches through, as one value.
+///
+/// Read and written by the scheduler at a switch. That is what makes them
+/// per-task without any assembly changing: a global that is only live while
+/// its own task is running *is* per-task, provided somebody swaps it at the
+/// boundary.
+pub fn ring3_now() -> crate::task::Ring3 {
+    unsafe {
+        crate::task::Ring3 {
+            guest_rsp: core::ptr::read(core::ptr::addr_of!(GLADOS_GUEST_RSP)),
+            syscall_stack: core::ptr::read(core::ptr::addr_of!(GLADOS_SYSCALL_STACK)),
+            host_rsp: core::ptr::read(core::ptr::addr_of!(GLADOS_HOST_RSP)),
+            fs_base: crate::cpu::rdmsr(IA32_FS_BASE),
+        }
+    }
+}
+
+/// Put a task's entry state back, or leave the kernel's own `FS` alone.
+///
+/// `None` means the incoming task is not running a guest, and then only `FS`
+/// matters -- the other three are dead until somebody enters ring 3 again, and
+/// writing them would be a store nobody reads. `FS` is different because the
+/// kernel itself uses it, so a task switched into after a guest set `FS` must
+/// get the kernel's value back or the next allocation reads thread-local
+/// storage as a per-core block.
+pub fn ring3_load(r: Option<crate::task::Ring3>) {
+    match r {
+        Some(r) => unsafe {
+            core::ptr::write(core::ptr::addr_of_mut!(GLADOS_GUEST_RSP), r.guest_rsp);
+            core::ptr::write(core::ptr::addr_of_mut!(GLADOS_SYSCALL_STACK), r.syscall_stack);
+            core::ptr::write(core::ptr::addr_of_mut!(GLADOS_HOST_RSP), r.host_rsp);
+            crate::cpu::wrmsr(IA32_FS_BASE, r.fs_base);
+        },
+        None => {
+            if let Some(sp) = unsafe { SPACE.get().as_ref() } {
+                unsafe { crate::cpu::wrmsr(IA32_FS_BASE, sp.saved_fs) };
+            }
+        }
+    }
+}
 
 /// One anonymous mapping the guest asked for and has not given back.
 pub struct Mapping {
@@ -599,6 +646,7 @@ pub fn teardown() -> usize {
     // reboot.
     super::dev::hold_screen(false);
     super::input::stop();
+    super::thread::reset();
     let mut freed = 0;
     unsafe {
         if let Some(sp) = SPACE.get().as_mut() {
@@ -1831,6 +1879,194 @@ impl MinFd for u64 {
 /// here for a descriptor to survive, so the flag names an event that cannot
 /// happen. Any other flag is `EINVAL`, because a flag this does not implement
 /// is one the caller is relying on.
+/// Start a thread, and refuse everything else `clone` can mean.
+///
+/// **`fork` is the one thing this system cannot grow into.** One address space
+/// is its founding claim rather than a shortcut, and a `clone` without
+/// `CLONE_VM` is asking for a second one. `CLONE_THREAD` is the other half: a
+/// clone without it becomes a process, and there are none. Both are refused
+/// with `ENOSYS` rather than approximated, because a thread handed back for a
+/// process request is two names for one address space and a program free to
+/// write through both.
+fn sys_clone(flags: u64, stack: u64, ptid: u64, ctid: u64, tls: u64, rip: u64) -> u64 {
+    if !super::thread::is_thread(flags) {
+        return ENOSYS;
+    }
+    if ptid != 0 && !reachable(ptid, 4, true) {
+        return EFAULT;
+    }
+    if ctid != 0 && !reachable(ctid, 4, true) {
+        return EFAULT;
+    }
+    if stack == 0 || stack % 16 != 0 {
+        // Answered before the reachability check, because the objection is to
+        // the argument rather than to what it names -- and `EFAULT` about a
+        // null stack sends a caller looking at its memory map.
+        return EINVAL;
+    }
+    if !owns(stack.saturating_sub(4096), 4096) {
+        // The stack is the guest's own memory or it is nothing this kernel
+        // will jump onto. Checked one page below the top, since a stack
+        // pointer names the byte past the last usable one.
+        return EFAULT;
+    }
+    match super::thread::spawn(flags, stack, ptid, ctid, tls, rip) {
+        Ok(tid) => tid,
+        Err(e) => e,
+    }
+}
+
+/// How many addresses a futex wait queue can name at once.
+const FUTEX_SLOTS: usize = 32;
+/// (address, how many times it has been woken).
+static FUTEX: Racy<[(u64, u64); FUTEX_SLOTS]> = Racy::new([(0, 0); FUTEX_SLOTS]);
+
+fn futex_bump(addr: u64) -> u64 {
+    let t = unsafe { &mut *FUTEX.get() };
+    if let Some(e) = t.iter_mut().find(|e| e.0 == addr) {
+        e.1 += 1;
+        return e.1;
+    }
+    if let Some(e) = t.iter_mut().find(|e| e.0 == 0) {
+        *e = (addr, 1);
+        return 1;
+    }
+    // Out of slots. Every waiter re-reads the word it is waiting on as well,
+    // so a lost wake costs latency rather than correctness -- which is the
+    // whole reason the value check is there and not merely belt and braces.
+    0
+}
+
+fn futex_count(addr: u64) -> u64 {
+    let t = unsafe { &*FUTEX.get() };
+    t.iter().find(|e| e.0 == addr).map(|e| e.1).unwrap_or(0)
+}
+
+/// Wait on a word, or wake whoever is waiting on one.
+///
+/// **Two conditions end a wait, and needing both is the point.** A waiter
+/// watches the wake counter *and* re-reads the word: the counter alone loses a
+/// wake when the table is full, and the word alone misses a wake that changed
+/// nothing. glibc's mutexes and `pthread_join` change the word, so in practice
+/// the second is what fires and the first is what makes an unusual wake work.
+///
+/// The wait is a yield loop rather than a real sleep queue, which is the same
+/// bargain `nanosleep` makes and for the same reason: there is no guest
+/// scheduler to block against, so a wait is this kernel's wait. It costs a
+/// context switch per tick per waiter, and it cannot deadlock the machine
+/// because the run deadline reaches it.
+fn sys_futex(uaddr: u64, op: u64, val: u64, timeout: u64) -> u64 {
+    const FUTEX_WAIT: u64 = 0;
+    const FUTEX_WAKE: u64 = 1;
+    const PRIVATE: u64 = 128;
+    const CLOCK_REALTIME: u64 = 256;
+    let kind = op & !(PRIVATE | CLOCK_REALTIME);
+    if uaddr % 4 != 0 {
+        return EINVAL;
+    }
+    if !reachable(uaddr, 4, false) {
+        return EFAULT;
+    }
+    match kind {
+        FUTEX_WAIT => {
+            let seen = unsafe { core::ptr::read_volatile(uaddr as *const u32) };
+            if seen as u64 != val {
+                // Already changed. `EAGAIN` and not zero, because a caller
+                // that slept would re-check and a caller told zero would not.
+                return EAGAIN;
+            }
+            let woken = futex_count(uaddr);
+            // A relative timeout, and a zero pointer means forever.
+            let until = if timeout != 0 && reachable(timeout, 16, false) {
+                let (sec, nsec) = unsafe {
+                    (
+                        core::ptr::read_volatile(timeout as *const u64),
+                        core::ptr::read_volatile((timeout + 8) as *const u64),
+                    )
+                };
+                let hz = crate::TIMER_HZ as u64;
+                Some(
+                    crate::dev::lapic::ticks()
+                        + sec.saturating_mul(hz)
+                        + nsec * hz / 1_000_000_000,
+                )
+            } else {
+                None
+            };
+            loop {
+                let now = unsafe { core::ptr::read_volatile(uaddr as *const u32) };
+                if now as u64 != val || futex_count(uaddr) != woken {
+                    return 0;
+                }
+                if let Some(t) = until {
+                    if crate::dev::lapic::ticks() >= t {
+                        return ETIMEDOUT;
+                    }
+                }
+                if super::thread::exiting() {
+                    return EINTR;
+                }
+                // The same escape the input wait has, and the same reason: a
+                // guest blocked in the kernel is invisible to the deadline
+                // check in the timer, which only fires from ring 3.
+                if overran(crate::dev::lapic::ticks()) {
+                    unsafe { kill_blocked() }
+                }
+                crate::task::yield_now();
+            }
+        }
+        FUTEX_WAKE => {
+            futex_bump(uaddr);
+            // How many were woken. There is no queue to count, so this answers
+            // what was asked for, which is what a caller uses to decide
+            // whether to bother with a syscall next time -- and over-reporting
+            // is the safe direction, since it makes a caller do less.
+            val.min(super::thread::live() as u64 + 1)
+        }
+        _ => ENOSYS,
+    }
+}
+
+/// Run one guest thread to its end, on the task the pool gave it.
+///
+/// The counterpart of `run` for the main thread, and deliberately not the same
+/// function: `run` parks the kernel's `FS`, arms the trap, sets the deadline
+/// and tears the space down afterwards, and every one of those belongs to the
+/// process rather than to a thread.
+pub fn run_thread(w: super::thread::Work, stack: u64) {
+    // **`exit` leaves through a longjmp and the flags do not come back.**
+    // `syscall` clears IF through `FMASK` and `glados_leave_guest` restores a
+    // stack rather than a processor state, so a thread that ends returns here
+    // with interrupts off. `run` saves and restores them around the whole run
+    // and says why; this did not, and the cost was the entire machine: the
+    // pool task went back to its `hlt` with IF clear, which is a core that
+    // never wakes again. No prompt, no timer, and the run deadline -- the one
+    // thing that ends a runaway -- was never going to fire, because firing is
+    // something an interrupt does.
+    let flags: u64;
+    unsafe {
+        core::arch::asm!("pushfq; pop {}", out(reg) flags, options(nomem, preserves_flags))
+    };
+    crate::task::ring3_active(true, stack);
+    unsafe {
+        core::ptr::write(core::ptr::addr_of_mut!(GLADOS_SYSCALL_STACK), stack);
+        crate::cpu::wrmsr(IA32_FS_BASE, w.fs);
+    }
+    let _ = unsafe { glados_enter_guest(w.rip, w.rsp) };
+    // **Clearing this is the whole of how `pthread_join` works.** The joiner
+    // futex-waits on the word, and the kernel zeroing it is the notification;
+    // a kernel that ignored `CLONE_CHILD_CLEARTID` leaves a library waiting
+    // forever on a thread that finished.
+    if w.ctid != 0 && owns(w.ctid, 4) {
+        unsafe { core::ptr::write_volatile(w.ctid as *mut u32, 0) };
+        futex_bump(w.ctid);
+    }
+    crate::task::ring3_active(false, 0);
+    if flags & (1 << 9) != 0 {
+        crate::cpu::enable_interrupts();
+    }
+}
+
 fn sys_dup3(from: u64, to: u64, flags: u64) -> u64 {
     const O_CLOEXEC: u64 = 0o2_000_000;
     if flags & !O_CLOEXEC != 0 {
@@ -3066,6 +3302,19 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         SYS_DUP => (sys_dup(f.rdi, None), true),
         SYS_DUP2 => (sys_dup(f.rdi, Some(f.rsi)), true),
         SYS_DUP3 => (sys_dup3(f.rdi, f.rsi, f.rdx), true),
+        // `rcx` is where `syscall` stashed the return address, which is where
+        // the child resumes: a cloned thread does not start at an entry point,
+        // it returns from `clone` on a different stack with `rax` zero.
+        SYS_CLONE => (sys_clone(f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.rip), true),
+        SYS_FUTEX => (sys_futex(f.rdi, f.rsi, f.rdx, f.r10), true),
+        SYS_GETTID => (super::thread::current_tid(), true),
+        // A thread yielding to another is a thing this kernel can actually do,
+        // which is unusual in this file: most scheduling calls are answered
+        // with a shape rather than an action.
+        SYS_SCHED_YIELD => {
+            crate::task::yield_now();
+            (0, true)
+        }
         // One process, and it is the guest. Reporting a pid at all is what
         // stops a runtime deciding it failed to start.
         SYS_GETPID | SYS_SET_TID_ADDRESS => (1, true),
@@ -3368,7 +3617,29 @@ pub unsafe fn run(entry: u64, stack_top: u64) -> u64 {
     // means anything to it: a script armed at the prompt has no idea how long
     // the harness will take to send the next line.
     super::input::start(crate::dev::lapic::ticks());
+    // **The main thread carries its entry state as well.** It is the one that
+    // looked like it did not need to: with a single guest the three globals
+    // are constants, so nothing swaps them and nothing notices. The moment a
+    // child runs while the main thread sits inside a syscall, the child's
+    // entry overwrites where the main thread's `rsp` went and where it must
+    // longjmp back to, and the main thread returns onto a stack that is not
+    // its own.
+    crate::task::ring3_active(true, unsafe {
+        core::ptr::read(core::ptr::addr_of!(GLADOS_SYSCALL_STACK))
+    });
     let code = unsafe { glados_enter_guest(entry, stack_top) };
+    crate::task::ring3_active(false, 0);
+    // **Every thread has to be gone before the space is.** A child still
+    // running would be reading regions `teardown` is about to hand back, and
+    // `exit_group` only asks the others to stop -- ending a thread means
+    // longjmping out of its own stack, which only that thread can do.
+    // Bounded, because a thread that makes no syscall never notices the ask
+    // and the alternative is a shell that never comes back.
+    super::thread::begin_exit();
+    let give_up = crate::dev::lapic::ticks() + 200;
+    while super::thread::live() > 0 && crate::dev::lapic::ticks() < give_up {
+        crate::task::yield_now();
+    }
     DEADLINE.store(0, Ordering::Relaxed);
     GUEST_RUNNING.store(false, Ordering::Relaxed);
     if flags & (1 << 9) != 0 {
@@ -4334,6 +4605,11 @@ pub fn name_of(nr: u64) -> &'static str {
         SYS_CLOCK_GETTIME => "clock_gettime",
         SYS_DUP2 => "dup2",
         SYS_DUP3 => "dup3",
+        SYS_CLONE => "clone",
+        SYS_FUTEX => "futex",
+        SYS_GETTID => "gettid",
+        SYS_TGKILL => "tgkill",
+        SYS_SCHED_YIELD => "sched_yield",
         SYS_GETUID => "getuid",
         SYS_GETGID => "getgid",
         SYS_GETEUID => "geteuid",

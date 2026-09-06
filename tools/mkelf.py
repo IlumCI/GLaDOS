@@ -736,6 +736,170 @@ def spin_code(entry_rva, _a, _b):
 MSG_USAGE = b"cat: needs a path\n"
 
 
+def thread_code(entry_rva, _a, _b):
+    """Start a thread, let it write to shared memory, and join it.
+
+    Ten checks folding into a mask, and the shape of the program is the test:
+    `clone` returns *twice*, in two threads, at the same instruction, and the
+    only thing that tells them apart is `rax`. Everything after that fork in
+    the code is one path or the other.
+
+    The child arrives with **every register zero except `rsp`**, because
+    `glados_enter_guest` clears them, so it cannot be handed anything in a
+    register. The parent leaves the shared address on the child's own stack
+    before cloning and the child reads it from `[rsp-16]` -- sixteen and not
+    eight, since the child's first `push` would land on eight.
+
+    Joining is `CLONE_CHILD_CLEARTID` plus a futex, which is exactly what
+    `pthread_join` is underneath: the parent sets the word to a sentinel,
+    waits on it, and the kernel zeroing it when the thread ends is the whole
+    of the notification.
+    """
+    PROT_RW, MAP_PRIVATE_ANON = 3, 0x22
+    CLONE_THREAD_SHAPE = 0x100 | 0x200 | 0x400 | 0x800 | 0x10000 | 0x200000
+    FUTEX_WAIT_PRIVATE = 128
+    MARK = 0x1234
+    ENOSYS, EINVAL = -38, -22
+    SYS_MMAP, SYS_CLONE, SYS_FUTEX = 9, 56, 202
+    SYS_GETTID, SYS_EXIT, SYS_YIELD, SYS_EXIT_GROUP = 186, 60, 24, 231
+    out = bytearray()
+
+    def fwd(at):
+        out[at + 2:at + 6] = struct.pack("<i", len(out) - (at + 6))
+
+    def fold(bit, cc):
+        ok = len(out)
+        out.extend(jcc(cc, 0))
+        out.extend(or_imm32("rbp", 1 << bit))
+        fwd(ok)
+
+    def sysc(nr, *args):
+        b = bytearray()
+        b += mov_imm("rax", nr)
+        for reg, a in zip(("rdi", "rsi", "rdx", "r10", "r8", "r9"), args):
+            b += mov_rr(reg, a) if isinstance(a, str) else mov_imm(reg, a)
+        b += SYSCALL
+        return bytes(b)
+
+    out += mov_imm("rbp", 0)
+
+    # 0. Two pages. The first holds the word the child writes and the word the
+    #    join waits on; the second is the child's stack, which grows down from
+    #    its top.
+    out += sysc(SYS_MMAP, 0, 0x2000, PROT_RW, MAP_PRIVATE_ANON, -1, 0)
+    out += mov_rr("rbx", "rax")
+    out += cmp_imm8("rbx", 0)
+    fold(0, JG)
+
+    # The child's stack top, and the shared address left on it where the child
+    # can reach it with no registers of its own.
+    out += mov_rr("r13", "rbx")
+    out += add_imm("r13", 0x2000)
+    out += mov_rr("r14", "r13")
+    out += sub_imm("r14", 16)
+    out += store_q("r14", 0, "rbx")
+
+    # The sentinel the join waits on. Linux does not write this at clone time;
+    # a thread library sets it to the child's id and this sets it to one, since
+    # what matters is only that the kernel's zero is distinguishable.
+    out += mov_imm("rax", 1)
+    out += store_d("rbx", 8, "rax")
+    out += mov_imm("rax", 0)
+    out += store_d("rbx", 0, "rax")
+
+    # 1. A clone that is not a thread. `CLONE_THREAD` dropped asks for a
+    #    process, and there are none here, so it is refused rather than
+    #    answered with a thread -- which would be two names for one address
+    #    space and a program free to write through both.
+    out += mov_rr("r15", "rbx")
+    out += add_imm("r15", 8)
+    out += sysc(SYS_CLONE, CLONE_THREAD_SHAPE & ~0x10000, "r13", 0, "r15", 0)
+    out += cmp_imm32("rax", ENOSYS)
+    fold(1, JE)
+
+    # 2. And a stack of zero, whose fault would otherwise land several frames
+    #    into the thread function and read as a bug in the program.
+    out += sysc(SYS_CLONE, CLONE_THREAD_SHAPE, 0, 0, "r15", 0)
+    out += cmp_imm32("rax", EINVAL)
+    fold(2, JE)
+
+    # 3. The real one. Both threads return here; only `rax` tells them apart.
+    out += sysc(SYS_CLONE, CLONE_THREAD_SHAPE, "r13", 0, "r15", 0)
+    out += cmp_imm8("rax", 0)
+    child = len(out)
+    out += jcc(JE, 0)
+
+    # ---- parent ----------------------------------------------------------
+    out += mov_rr("r12", "rax")
+    out += cmp_imm8("r12", 1)
+    fold(3, JG)
+
+    # 4. The main thread's id is its process id, or a library concludes it is
+    #    not the main thread and takes a different path entirely.
+    out += sysc(SYS_GETTID)
+    out += cmp_imm8("rax", 1)
+    fold(4, JE)
+
+    # 5. A futex on a word that is not four-aligned cannot be one.
+    out += mov_rr("rdi", "rbx")
+    out += add_imm("rdi", 9)
+    out += sysc(SYS_FUTEX, "rdi", FUTEX_WAIT_PRIVATE, 1, 0)
+    out += cmp_imm32("rax", EINVAL)
+    fold(5, JE)
+
+    # 6. Yielding is a thing this kernel can really do, which is unusual in
+    #    this file -- most scheduling calls get a shape rather than an action.
+    out += sysc(SYS_YIELD)
+    out += cmp_imm8("rax", 0)
+    fold(6, JE)
+
+    # 7. The join. Blocks while the word is the sentinel and returns when the
+    #    kernel clears it, which is `pthread_join` with the library removed.
+    #
+    #    **`EAGAIN` is a pass and finding that out cost a run.** It means the
+    #    word was already not the sentinel, which here means the child finished
+    #    before the parent got round to waiting -- a race the futex interface
+    #    exists to make safe rather than an error. A real `pthread_join` loops
+    #    on exactly this, so a fixture that treated it as a failure would be
+    #    testing that the child is slow.
+    out += sysc(SYS_FUTEX, "r15", FUTEX_WAIT_PRIVATE, 1, 0)
+    out += cmp_imm8("rax", 0)
+    already = len(out)
+    out += jcc(JE, 0)
+    out += cmp_imm32("rax", -11)
+    fold(7, JE)
+    fwd(already)
+
+    # 8. Cleared by the kernel rather than by anybody in this program.
+    out += load_d("rax", "rbx", 8)
+    out += cmp_imm8("rax", 0)
+    fold(8, JE)
+
+    # 9. And the child really ran, in the parent's own address space. This is
+    #    the whole claim: one page, two threads, and a value that could only
+    #    have been put there by the other one.
+    out += load_d("rax", "rbx", 0)
+    out += cmp_imm32("rax", MARK)
+    fold(9, JE)
+
+    out += sysc(SYS_EXIT_GROUP, "rbp")
+    out += HLT
+
+    # ---- child -----------------------------------------------------------
+    fwd(child)
+    # Nothing but `rsp` survived, so the shared address comes off the stack.
+    # `load_stack` and not `load_q`: rm=100 means a SIB byte follows, so `rsp`
+    # as a base needs the form that writes one. `load_q` would encode an
+    # index-scaled address nobody asked for.
+    out += load_stack("rbx", 0xF0)             # [rsp-16]
+    out += mov_imm("rax", MARK)
+    out += store_d("rbx", 0, "rax")
+    # `exit` and not `exit_group`: this thread is done and the process is not.
+    out += sysc(SYS_EXIT, 0)
+    out += HLT
+    return bytes(out)
+
+
 def ev_code(entry_rva, _a, _b):
     """Open the keyboard, ask it what it is, and block until somebody types.
 
@@ -1501,6 +1665,10 @@ def build(kind="static"):
         assert len(text) == len(probe), (len(text), len(probe))
         body = text + MSG_USAGE
         msg_rva, disp, lea_end = usage_rva, 0, 0
+    elif kind == "thread":
+        text = thread_code(entry, 0, 0)
+        body = text
+        msg_rva, disp, lea_end = body_at, 0, 0
     elif kind == "ev":
         text = ev_code(entry, 0, 0)
         body = text
@@ -1812,6 +1980,31 @@ def verify(path):
               b.count(SYSCALL) == 10)
         claim("it ends in hlt on both paths", b.count(b"\xf4") >= 2)
         return ok
+    # The thread shape is a constant nothing else here loads, which makes it
+    # the identifier rather than merely a hint.
+    if bytes([0x48, 0xC7, 0xC7]) + struct.pack("<I", 0x210F00) in b:
+        claim("it asks for a thread: shared address space, shared thread group",
+              bytes([0x48, 0xC7, 0xC7]) + struct.pack("<I", 0x210F00) in b)
+        claim("and for the two things that are not, so both refusals are checked",
+              bytes([0x48, 0xC7, 0xC7]) + struct.pack("<I", 0x210F00 & ~0x10000) in b)
+        claim("ten checks, each folding one bit into the mask it exits with",
+              sum(1 for i in range(10)
+                  if bytes([0x48, 0x81, 0xCD]) + struct.pack("<i", 1 << i) in b) == 10)
+        # The child cannot be handed anything in a register, so the only way it
+        # reaches shared memory is off its own stack.
+        claim("the child reads the shared address from its stack, having no registers",
+              bytes([0x48, 0x8B, 0x5C, 0x24, 0xF0]) in b)
+        claim("the child exits and the parent exit_groups, which are different calls",
+              bytes([0x48, 0xC7, 0xC0, 60, 0, 0, 0]) in b
+              and bytes([0x48, 0xC7, 0xC0, 231, 0, 0, 0]) in b)
+        claim("it joins with a futex rather than by spinning on the word",
+              bytes([0x48, 0xC7, 0xC0, 202, 0, 0, 0]) in b
+              and bytes([0x48, 0xC7, 0xC6, 128, 0, 0, 0]) in b)
+        claim("it exits with the mask rather than a constant",
+              bytes([0x48, 0x89, 0xEF]) in b)
+        claim("and ends in hlt on both paths, so a syscall that returns is visible",
+              b.count(HLT) >= 2)
+        return ok
     # `EVIOCGVERSION` sign-corrected: nothing else in this file loads that
     # constant, which makes it the identifier rather than merely a hint.
     if bytes([0x48, 0xC7, 0xC6]) + struct.pack("<i", 0x80044501 - (1 << 32)) in b:
@@ -1905,7 +2098,7 @@ def main():
                     choices=["static", "dynamic", "interp", "loader", "maps",
                              "fixed", "memory", "rogue",
                              "protect", "wild", "spin", "cat", "grep",
-                             "fsabuse", "fb", "ev"],
+                             "fsabuse", "fb", "ev", "thread"],
                     default="static")
     ap.add_argument("--verify", action="store_true")
     a = ap.parse_args()
