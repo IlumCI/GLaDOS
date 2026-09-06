@@ -92,6 +92,11 @@ pub const SYS_RT_SIGACTION: u64 = 13;
 pub const SYS_READV: u64 = 19;
 pub const SYS_SOCKET: u64 = 41;
 pub const SYS_CONNECT: u64 = 42;
+pub const SYS_ACCEPT: u64 = 43;
+pub const SYS_BIND: u64 = 49;
+pub const SYS_LISTEN: u64 = 50;
+pub const SYS_SOCKETPAIR: u64 = 53;
+pub const SYS_ACCEPT4: u64 = 288;
 pub const SYS_SENDTO: u64 = 44;
 pub const SYS_RECVFROM: u64 = 45;
 pub const SYS_SHUTDOWN: u64 = 48;
@@ -1352,6 +1357,27 @@ fn sys_write(fd: u64, buf: u64, len: usize) -> u64 {
     if is_socket(fd) {
         return sys_send(fd, buf, len as u64);
     }
+    // A Unix socket, which is a different transport with the same shape.
+    // A short write is real here -- the queue is bounded -- so the count is
+    // the answer and a caller that ignores it loses the tail.
+    if let Some(sock) = unix_sock(fd) {
+        let stream = {
+            let b = sock.borrow();
+            match &*b {
+                super::unix::Sock::Stream { pipe, side } => Some((pipe.clone(), *side)),
+                _ => None,
+            }
+        };
+        let Some((pipe, side)) = stream else { return ENOTCONN };
+        if !reachable(buf, len, false) {
+            return EFAULT;
+        }
+        let data = unsafe { core::slice::from_raw_parts(buf as *const u8, len) };
+        return match super::unix::write(&pipe, side, data) {
+            Ok(n) => n as u64,
+            Err(e) => e as u64,
+        };
+    }
     let sink = with_fds(|fds, _| {
         matches!(
             fds.get(fd as usize),
@@ -1956,7 +1982,176 @@ fn is_socket(fd: u64) -> bool {
         .unwrap_or(false)
 }
 
+/// Put a descriptor in the table and answer its number.
+fn install_fd(entry: super::fs::Fd) -> u64 {
+    with_fds(|fds, _| match fds.iter().position(|f| f.is_none()) {
+        Some(i) => {
+            fds[i] = Some(entry);
+            i as u64
+        }
+        None if fds.len() < MAX_FDS => {
+            fds.push(Some(entry));
+            (fds.len() - 1) as u64
+        }
+        None => EMFILE,
+    })
+    .unwrap_or(EFAULT)
+}
+
+/// The `AF_UNIX` socket a descriptor names, if it is one.
+fn unix_sock(fd: u64) -> Option<alloc::rc::Rc<core::cell::RefCell<super::unix::Sock>>> {
+    with_fds(|fds, _| match fds.get(fd as usize) {
+        Some(Some(super::fs::Fd::Unix(b))) => Some(b.clone()),
+        _ => None,
+    })
+    .flatten()
+}
+
+/// Read a `sockaddr_un` out of guest memory.
+///
+/// **The path is a fixed 108-byte array and not a string**, so a name is
+/// whatever precedes the first NUL inside it. Reading to the end of the
+/// buffer instead gives a name with trailing zeros in it, which binds and
+/// then never matches what anybody connects to -- silently, because both
+/// operations agree with each other and disagree with everybody else.
+///
+/// Linux's abstract namespace, where a leading NUL means a name with no file
+/// behind it, is refused rather than approximated: Wine does not use it and a
+/// name this cannot represent is better said than half-kept.
+fn sockaddr_un(at: u64, len: u64) -> Result<String, u64> {
+    const EINVAL: u64 = (-22i64) as u64;
+    if len < 3 || len > 110 {
+        return Err(EINVAL);
+    }
+    if !reachable(at, len as usize, false) {
+        return Err(EFAULT);
+    }
+    let family = unsafe { core::ptr::read(at as *const u16) };
+    if family != 1 {
+        return Err(EAFNOSUPPORT);
+    }
+    let mut out = String::new();
+    for i in 0..(len as usize - 2).min(108) {
+        let c = unsafe { core::ptr::read((at + 2 + i as u64) as *const u8) };
+        if c == 0 {
+            break;
+        }
+        out.push(c as char);
+    }
+    if out.is_empty() {
+        return Err(EINVAL);
+    }
+    Ok(out)
+}
+
+fn sys_bind(fd: u64, at: u64, len: u64) -> u64 {
+    let Some(sock) = unix_sock(fd) else { return ENOTSOCK };
+    let path = match sockaddr_un(at, len) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    match super::unix::bind(&sock, &path) {
+        Ok(()) => 0,
+        Err(e) => e as u64,
+    }
+}
+
+fn sys_listen(fd: u64) -> u64 {
+    let Some(sock) = unix_sock(fd) else { return ENOTSOCK };
+    match super::unix::listen(&sock) {
+        Ok(()) => 0,
+        Err(e) => e as u64,
+    }
+}
+
+/// `accept4`, which `accept` is the flagless case of.
+///
+/// **Blocking is a yield loop and non-blocking is one look**, which is the
+/// same bargain `futex` and `nanosleep` make here. A server that blocks costs
+/// the CPU it is not using; one that passes `SOCK_NONBLOCK` gets `EAGAIN` and
+/// decides for itself.
+fn sys_accept4(fd: u64, addr: u64, alen: u64, flags: u64) -> u64 {
+    const SOCK_NONBLOCK: u64 = 0o4000;
+    let Some(sock) = unix_sock(fd) else { return ENOTSOCK };
+    loop {
+        match super::unix::accept(&sock) {
+            Err(e) => return e as u64,
+            Ok(Some((pipe, side))) => {
+                // The peer of a Unix socket has no address worth reporting --
+                // a client that never bound has no name at all. Linux writes
+                // a `sockaddr_un` of length 2 holding just the family, which
+                // is what a caller passing a buffer expects to find.
+                if addr != 0 && alen != 0 && reachable(addr, 2, true) && reachable(alen, 4, true) {
+                    unsafe {
+                        core::ptr::write(addr as *mut u16, 1);
+                        core::ptr::write(alen as *mut u32, 2);
+                    }
+                }
+                let entry = super::fs::Fd::Unix(alloc::rc::Rc::new(core::cell::RefCell::new(
+                    super::unix::Sock::Stream { pipe, side },
+                )));
+                return install_fd(entry);
+            }
+            Ok(None) => {
+                if flags & SOCK_NONBLOCK != 0 {
+                    return EAGAIN;
+                }
+                if unsafe { kill_if_overdue() } {
+                    return EAGAIN;
+                }
+                crate::task::yield_now();
+            }
+        }
+    }
+}
+
+fn sys_socketpair(domain: u64, kind: u64, _proto: u64, sv: u64) -> u64 {
+    if domain != 1 {
+        return EAFNOSUPPORT;
+    }
+    if kind & 0xFF != 1 {
+        return EPROTONOSUPPORT;
+    }
+    if !reachable(sv, 8, true) {
+        return EFAULT;
+    }
+    let (a, b) = super::unix::pair();
+    let mk = |pipe, side| {
+        super::fs::Fd::Unix(alloc::rc::Rc::new(core::cell::RefCell::new(
+            super::unix::Sock::Stream { pipe, side },
+        )))
+    };
+    let fa = install_fd(mk(a, super::unix::Side::A));
+    if fa > MAX_FDS as u64 {
+        return fa;
+    }
+    let fb = install_fd(mk(b, super::unix::Side::B));
+    if fb > MAX_FDS as u64 {
+        return fb;
+    }
+    unsafe {
+        core::ptr::write(sv as *mut u32, fa as u32);
+        core::ptr::write((sv + 4) as *mut u32, fb as u32);
+    }
+    0
+}
+
 fn sys_socket(domain: u64, kind: u64, proto: u64) -> u64 {
+    // `AF_UNIX`, which is what wineserver speaks and what nothing on a wire
+    // ever sees. Answered before the `AF_INET` path rather than inside it,
+    // because the two share a syscall number and nothing else.
+    if domain == 1 {
+        if kind & 0xFF != 1 {
+            return EPROTONOSUPPORT;
+        }
+        if proto != 0 {
+            return EPROTONOSUPPORT;
+        }
+        let entry = super::fs::Fd::Unix(alloc::rc::Rc::new(core::cell::RefCell::new(
+            super::unix::Sock::Fresh,
+        )));
+        return install_fd(entry);
+    }
     if domain != 2 {
         return EAFNOSUPPORT;
     }
@@ -1997,6 +2192,28 @@ fn sock_of(fd: u64) -> Result<alloc::rc::Rc<core::cell::RefCell<super::fs::Sock>
 }
 
 fn sys_connect(fd: u64, at: u64, len: u64) -> u64 {
+    // `AF_UNIX` first, because the two share a syscall number and nothing
+    // else: `sock_of` below demands a TCP socket and would refuse this one
+    // with a message about the wrong thing.
+    if let Some(sock) = unix_sock(fd) {
+        let path = match sockaddr_un(at, len) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        {
+            let b = sock.borrow();
+            if matches!(*b, super::unix::Sock::Stream { .. }) {
+                return EISCONN;
+            }
+        }
+        return match super::unix::connect(&path) {
+            Ok((pipe, side)) => {
+                *sock.borrow_mut() = super::unix::Sock::Stream { pipe, side };
+                0
+            }
+            Err(e) => e as u64,
+        };
+    }
     let sock = match sock_of(fd) {
         Ok(v) => v,
         Err(e) => return e,
@@ -2675,6 +2892,32 @@ fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
             // against, so a wait is this kernel's wait, and a busy loop here
             // starves the resident mind and the clock for as long as nobody
             // touches the keyboard.
+            crate::task::yield_now();
+        }
+    }
+    // A Unix socket waits the way an event device does and for the same
+    // reason: what it is short of is not bytes at an offset, it is bytes that
+    // have not been written yet. Handled before the table below, because the
+    // loop has to re-look each turn rather than borrow across a yield.
+    if let Some(sock) = unix_sock(fd) {
+        let stream = {
+            let b = sock.borrow();
+            match &*b {
+                super::unix::Sock::Stream { pipe, side } => Some((pipe.clone(), *side)),
+                _ => None,
+            }
+        };
+        let Some((pipe, side)) = stream else { return ENOTCONN };
+        loop {
+            let out = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, len as usize) };
+            match super::unix::read(&pipe, side, out) {
+                Ok(n) => return n as u64,
+                Err(-11) => {}
+                Err(e) => return e as u64,
+            }
+            if overran(crate::dev::lapic::ticks()) {
+                unsafe { kill_blocked() }
+            }
             crate::task::yield_now();
         }
     }
@@ -3810,6 +4053,11 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         SYS_READV => (sys_readv(f.rdi, f.rsi, f.rdx), true),
         SYS_SOCKET => (sys_socket(f.rdi, f.rsi, f.rdx), true),
         SYS_CONNECT => (sys_connect(f.rdi, f.rsi, f.rdx), true),
+        SYS_BIND => (sys_bind(f.rdi, f.rsi, f.rdx), true),
+        SYS_LISTEN => (sys_listen(f.rdi), true),
+        SYS_ACCEPT => (sys_accept4(f.rdi, f.rsi, f.rdx, 0), true),
+        SYS_ACCEPT4 => (sys_accept4(f.rdi, f.rsi, f.rdx, f.r10), true),
+        SYS_SOCKETPAIR => (sys_socketpair(f.rdi, f.rsi, f.rdx, f.r10), true),
         SYS_SENDTO => (sys_send(f.rdi, f.rsi, f.rdx), true),
         SYS_RECVFROM => (sys_recv(f.rdi, f.rsi, f.rdx), true),
         SYS_SHUTDOWN => (sys_shutdown(f.rdi, f.rsi), true),
@@ -5237,6 +5485,11 @@ pub fn name_of(nr: u64) -> &'static str {
         SYS_READV => "readv",
         SYS_SOCKET => "socket",
         SYS_CONNECT => "connect",
+        SYS_BIND => "bind",
+        SYS_LISTEN => "listen",
+        SYS_ACCEPT => "accept",
+        SYS_ACCEPT4 => "accept4",
+        SYS_SOCKETPAIR => "socketpair",
         SYS_SENDTO => "sendto",
         SYS_RECVFROM => "recvfrom",
         SYS_SHUTDOWN => "shutdown",

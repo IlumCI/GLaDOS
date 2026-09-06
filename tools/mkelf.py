@@ -1031,6 +1031,104 @@ def signal_code(entry_rva, msg_rva, _unused):
     return bytes(c)
 
 
+# `sockaddr_un`: AF_UNIX as a little-endian u16, then the path. Written as
+# data rather than built at runtime, because it is data -- and a fixture that
+# assembled it would be testing its own arithmetic as much as the kernel's.
+SOCKADDR_UN = b"\x01\x00/tmp/w.sock\x00"
+MSG_PING = b"ping"
+MSG_SOCK = b"unix: bound, listened, connected, accepted, and both ways\n"
+
+
+def sock_code(entry_rva, msg_rva, _unused):
+    """A server and a client in one program, and bytes in both directions.
+
+    One process rather than two on purpose. `fork` and the socket layer are
+    separate things and testing them together would mean a failure in either
+    looks like a failure in both -- this asks only whether the syscalls agree
+    with the transport underneath them.
+
+    **The second direction is the claim worth having.** Everything up to the
+    first read passes on a socket whose two ends share one queue, which is the
+    mistake a pair of buffers is there to prevent. A reply travelling back and
+    arriving intact is what says there are two.
+    """
+    AF_UNIX, SOCK_STREAM = 1, 1
+    addr_len = len(SOCKADDR_UN)
+    c = bytearray()
+    leas = []
+
+    def lea(reg, target_off):
+        leas.append((len(c), target_off))
+        out = lea_rip(reg, 0)
+        return out
+
+    # s1 = socket(AF_UNIX, SOCK_STREAM, 0)
+    c += mov_imm("rax", 41) + mov_imm("rdi", AF_UNIX) + mov_imm("rsi", SOCK_STREAM)
+    c += mov_imm("rdx", 0) + SYSCALL
+    c += mov_rr("r12", "rax")
+    # bind(s1, addr, len)
+    c += mov_imm("rax", 49) + mov_rr("rdi", "r12")
+    c += lea("rsi", 0)
+    c += mov_imm("rdx", addr_len) + SYSCALL
+    c += cmp_imm8("rax", 0)
+    j_bind = len(c); c += jcc(JNE, 0)
+    # listen(s1, 1)
+    c += mov_imm("rax", 50) + mov_rr("rdi", "r12") + mov_imm("rsi", 1) + SYSCALL
+    c += cmp_imm8("rax", 0)
+    j_listen = len(c); c += jcc(JNE, 0)
+    # s2 = socket(...)
+    c += mov_imm("rax", 41) + mov_imm("rdi", AF_UNIX) + mov_imm("rsi", SOCK_STREAM)
+    c += mov_imm("rdx", 0) + SYSCALL
+    c += mov_rr("r13", "rax")
+    # connect(s2, addr, len)
+    c += mov_imm("rax", 42) + mov_rr("rdi", "r13")
+    c += lea("rsi", 0)
+    c += mov_imm("rdx", addr_len) + SYSCALL
+    c += cmp_imm8("rax", 0)
+    j_conn = len(c); c += jcc(JNE, 0)
+    # s3 = accept(s1, NULL, NULL)
+    c += mov_imm("rax", 43) + mov_rr("rdi", "r12") + mov_imm("rsi", 0)
+    c += mov_imm("rdx", 0) + SYSCALL
+    c += mov_rr("r14", "rax")
+    # write(s2, "ping", 4)
+    c += mov_imm("rax", 1) + mov_rr("rdi", "r13")
+    c += lea("rsi", addr_len)
+    c += mov_imm("rdx", 4) + SYSCALL
+    c += cmp_imm8("rax", 4)
+    j_w1 = len(c); c += jcc(JNE, 0)
+    # read(s3, buf, 16)
+    c += mov_imm("rax", 0) + mov_rr("rdi", "r14")
+    c += lea("rsi", addr_len + 4 + len(MSG_SOCK))
+    c += mov_imm("rdx", 16) + SYSCALL
+    c += cmp_imm8("rax", 4)
+    j_r1 = len(c); c += jcc(JNE, 0)
+    # the reply, the other way
+    c += mov_imm("rax", 1) + mov_rr("rdi", "r14")
+    c += lea("rsi", addr_len)
+    c += mov_imm("rdx", 4) + SYSCALL
+    c += cmp_imm8("rax", 4)
+    j_w2 = len(c); c += jcc(JNE, 0)
+    c += mov_imm("rax", 0) + mov_rr("rdi", "r13")
+    c += lea("rsi", addr_len + 4 + len(MSG_SOCK))
+    c += mov_imm("rdx", 16) + SYSCALL
+    c += cmp_imm8("rax", 4)
+    j_r2 = len(c); c += jcc(JNE, 0)
+    # say so and leave
+    c += mov_imm("rax", 1) + mov_imm("rdi", 1)
+    c += lea("rsi", addr_len + 4)
+    c += mov_imm("rdx", len(MSG_SOCK)) + SYSCALL
+    c += mov_imm("rax", 60) + mov_imm("rdi", 9) + SYSCALL + HLT
+
+    bad_at = len(c)
+    c += mov_imm("rax", 60) + mov_imm("rdi", 4) + SYSCALL + HLT
+
+    for at in (j_bind, j_listen, j_conn, j_w1, j_r1, j_w2, j_r2):
+        struct.pack_into("<i", c, at + 2, bad_at - (at + 6))
+    for at, off in leas:
+        struct.pack_into("<i", c, at + 3, msg_rva + off - (entry_rva + at + 7))
+    return bytes(c)
+
+
 def spin_code(entry_rva, _a, _b):
     """Loop forever, asking for nothing.
 
@@ -2376,6 +2474,14 @@ def build(kind="static"):
         text = spin_code(entry, 0, 0)
         body = text
         msg_rva, disp, lea_end = body_at, 0, 0
+    elif kind == "sock":
+        probe = sock_code(0, 0, 0)
+        msg_rva = body_at + len(probe)
+        text = sock_code(entry, msg_rva, 0)
+        assert len(text) == len(probe), (len(text), len(probe))
+        # the address, the four bytes it sends, the message, then a buffer.
+        body = text + SOCKADDR_UN + MSG_PING + MSG_SOCK + bytes(16)
+        disp, lea_end = 0, 0
     elif kind == "signal":
         probe = signal_code(0, 0, 0)
         msg_rva = body_at + len(probe)
@@ -2879,6 +2985,24 @@ def verify(path):
         claim("and ends in hlt, so a syscall that returns is visible",
               b.endswith(HLT))
         return ok
+    if MSG_SOCK in b:
+        claim("it names AF_UNIX in the address it binds", SOCKADDR_UN in b)
+        claim("it binds", mov_imm("rax", 49) in b)
+        claim("it listens", mov_imm("rax", 50) in b)
+        claim("it connects", mov_imm("rax", 42) in b)
+        claim("it accepts", mov_imm("rax", 43) in b)
+        # Two writes and two reads: the reply is what proves the queues are
+        # two rather than one, and a fixture with a single direction passes
+        # on a socket that is wired straight back to its sender.
+        claim("it sends in both directions",
+              b.count(mov_imm("rax", 1) + mov_rr("rdi", "r13")) >= 1
+              and b.count(mov_imm("rax", 1) + mov_rr("rdi", "r14")) >= 1)
+        claim("every step is checked, so a wrong count exits 4 rather than "
+              "carrying on",
+              b.count(cmp_imm8("rax", 4)) == 4)
+        claim("its code ends in hlt, so a syscall that returns is visible",
+              b[b.index(SOCKADDR_UN) - 1:b.index(SOCKADDR_UN)] == HLT)
+        return ok
     if MSG_SIGNAL in b:
         claim("it installs a handler with rt_sigaction", mov_imm("rax", 13) in b)
         claim("and raises the signal at itself with kill",
@@ -2985,7 +3109,7 @@ def main():
     ap.add_argument("--kind",
                     choices=["static", "dynamic", "interp", "loader", "maps",
                              "fixed", "memory", "rogue",
-                             "protect", "wild", "spin", "fork", "exec", "wnohang", "signal",
+                             "protect", "wild", "spin", "fork", "exec", "wnohang", "signal", "sock",
                              "cat", "grep",
                              "fsabuse", "fb", "ev", "thread", "gl"],
                     default="static")

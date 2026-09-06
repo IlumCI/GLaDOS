@@ -141,6 +141,14 @@ pub enum Fd {
     /// a socket is how a program puts one on stdin, and two descriptors have
     /// to name one connection rather than two copies of a handle.
     Socket(Rc<RefCell<Sock>>),
+    /// A `AF_UNIX` socket: the state, and which end of a connection it is
+    /// once it has one.
+    ///
+    /// The side lives beside the socket rather than inside it because a
+    /// `Sock::Stream` and its side are two facts with one lifetime, and
+    /// `accept` produces a descriptor whose socket is brand new while
+    /// `connect` mutates one that already existed.
+    Unix(Rc<RefCell<crate::linux::unix::Sock>>),
     /// A `/dev` node, which is a function rather than a body of bytes.
     ///
     /// Deliberately not a `File` with contents. `/dev/zero` is infinite and
@@ -193,6 +201,9 @@ impl Fd {
             Fd::File(b) => Fd::File(b.clone()),
             Fd::Dir(b) => Fd::Dir(b.clone()),
             Fd::Socket(b) => Fd::Socket(b.clone()),
+            // Another name for one end, which is what `dup` on a socket means
+            // everywhere: two descriptors, one connection.
+            Fd::Unix(b) => Fd::Unix(b.clone()),
             Fd::Dev(b) => Fd::Dev(b.clone()),
         }
     }
