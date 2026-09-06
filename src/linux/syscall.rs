@@ -155,6 +155,9 @@ const ERANGE: u64 = (-34i64) as u64;
 const ENOTEMPTY: u64 = (-39i64) as u64;
 const ENODEV: u64 = (-19i64) as u64;
 const ENOSPC: u64 = (-28i64) as u64;
+/// `O_NONBLOCK`, which on an event device is the difference between a program
+/// that polls and one that waits.
+const O_NONBLOCK: u64 = 0o4000;
 
 /// `AT_EMPTY_PATH`: operate on the descriptor rather than on a path under it.
 const AT_EMPTY_PATH: u64 = 0x1000;
@@ -595,6 +598,7 @@ pub fn teardown() -> usize {
     // with the last frame of a dead program on it and no way back short of a
     // reboot.
     super::dev::hold_screen(false);
+    super::input::stop();
     let mut freed = 0;
     unsafe {
         if let Some(sp) = SPACE.get().as_mut() {
@@ -920,6 +924,19 @@ fn with_fds<T>(f: impl FnOnce(&mut Vec<Option<super::fs::Fd>>, &str) -> T) -> Op
 /// Put a new description in the lowest free slot, which is what makes
 /// `close(1)` then `open(...)` hand back 1 and is the whole of how a shell
 /// redirects.
+/// The device and blocking mode behind a descriptor, when it names an event
+/// stream and nothing otherwise.
+fn input_fd(fd: u64) -> Option<(super::input::Dev, bool)> {
+    with_fds(|fds, _| match fds.get(fd as usize) {
+        Some(Some(super::fs::Fd::Dev(b))) => {
+            let f = b.borrow();
+            super::dev::is_input(f.node).map(|d| (d, f.nonblock))
+        }
+        _ => None,
+    })
+    .flatten()
+}
+
 fn place_fd(fds: &mut Vec<Option<super::fs::Fd>>, entry: super::fs::Fd) -> u64 {
     match fds.iter().position(|f| f.is_none()) {
         Some(slot) => {
@@ -972,8 +989,21 @@ fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u64 {
             if flags & O_DIRECTORY != 0 {
                 return ENOTDIR;
             }
+            // An input device opens at the *present*, not at the beginning
+            // of time: a program that received every keystroke since boot the
+            // moment it started would look possessed. Everything else opens
+            // at offset zero, which is where a framebuffer's top-left is.
+            let at = match super::dev::is_input(n) {
+                Some(d) => super::input::now_at(d) as usize,
+                None => 0,
+            };
             let entry = super::fs::Fd::Dev(alloc::rc::Rc::new(core::cell::RefCell::new(
-                super::fs::DevFile { path: path.clone(), node: n, at: 0 },
+                super::fs::DevFile {
+                    path: path.clone(),
+                    node: n,
+                    at,
+                    nonblock: flags & O_NONBLOCK != 0,
+                },
             )));
             return place_fd(fds, entry);
         }
@@ -1874,6 +1904,52 @@ fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
     if !reachable(buf, len as usize, true) {
         return EFAULT;
     }
+    // An event device is read through its own path, because two things here do
+    // not fit a call that takes an offset: the cursor is a sequence number
+    // rather than a position, and a blocking reader has to wait.
+    if let Some((d, nonblock)) = input_fd(fd) {
+        if (len as usize) < super::input::EVENT_LEN {
+            // Linux answers this rather than delivering part of a record. A
+            // reader walks the stream by a fixed stride, so half an event is
+            // not less data, it is garbage from there on.
+            return EINVAL;
+        }
+        loop {
+            let out = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, len as usize) };
+            let n = with_fds(|fds, _| match fds.get(fd as usize) {
+                Some(Some(super::fs::Fd::Dev(b))) => {
+                    let f = &mut *b.borrow_mut();
+                    let mut cur = f.at as u64;
+                    let n = super::input::read(d, &mut cur, out);
+                    f.at = cur as usize;
+                    n
+                }
+                _ => 0,
+            })
+            .unwrap_or(0);
+            if n > 0 {
+                return n as u64;
+            }
+            if nonblock {
+                return EAGAIN;
+            }
+            // **A blocked guest is killable, and it was not.** The run
+            // deadline is checked from the timer interrupt and only when the
+            // saved CS says ring 3, so a guest sitting in a kernel wait was
+            // never a guest that had overrun -- it was invisible to the one
+            // thing that ends a runaway. A blocking read on a device nothing
+            // feeds therefore took the machine, with the shell gone and no key
+            // able to bring it back. Found by writing exactly that program.
+            if overran(crate::dev::lapic::ticks()) {
+                unsafe { kill_blocked() }
+            }
+            // **Yield rather than spin.** There is no guest scheduler to block
+            // against, so a wait is this kernel's wait, and a busy loop here
+            // starves the resident mind and the clock for as long as nobody
+            // touches the keyboard.
+            crate::task::yield_now();
+        }
+    }
     with_fds(|fds, _| match fds.get_mut(fd as usize) {
         // Nothing types at a guest, so stdin is permanently at end of file.
         // Zero is the honest answer and is what a program reading a closed
@@ -2218,6 +2294,13 @@ fn sys_lseek(fd: u64, off: u64, whence: u64) -> u64 {
         // uses it to size anything.
         Some(Some(super::fs::Fd::Dev(body))) => {
             let d = &mut *body.borrow_mut();
+            // An event stream has no position, so this is `ESPIPE` for the
+            // same reason stdout is. It matters more here than it reads:
+            // `DevFile.at` is a sequence number for these, so honouring a seek
+            // would move a reader to an event that never happened.
+            if super::dev::is_input(d.node).is_some() {
+                return ESPIPE;
+            }
             let base = match whence {
                 0 => 0i64,
                 1 => d.at as i64,
@@ -2384,6 +2467,90 @@ fn sys_getdents64(fd: u64, buf: u64, len: u64) -> u64 {
 /// full buffering, no colour, no width probing. That is true here and it is
 /// also the useful answer, because the alternative is claiming a terminal and
 /// then being asked its window size.
+/// What an evdev device answers about itself.
+///
+/// **These are the interface, and the events are the easy half.** A program
+/// classifies a device by reading its capability bitmaps and nothing else, so
+/// a mouse that fails to advertise `REL_X` is opened, read from successfully,
+/// and ignored -- which looks exactly like input that does not arrive.
+///
+/// Requests are matched on type and number with the size masked away, because
+/// the length-carrying ones encode it in the request itself: `EVIOCGNAME(64)`
+/// and `EVIOCGNAME(256)` are different numbers naming one thing.
+fn input_ioctl(d: super::input::Dev, req: u64, arg: u64) -> u64 {
+    use super::input as ev;
+    let want = ev::request_len(req);
+    let nr = ev::request(req);
+
+    // Everything below writes into the caller's buffer, so one bounds check
+    // covers the lot -- and a zero length is a request for nothing, which is
+    // not an error and must not become a check against a null pointer.
+    let mut give = |bytes: &[u8]| -> u64 {
+        let n = bytes.len().min(want);
+        if n == 0 {
+            return 0;
+        }
+        if !reachable(arg, n, true) {
+            return EFAULT;
+        }
+        unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), arg as *mut u8, n) };
+        n as u64
+    };
+
+    match nr {
+        ev::EVIOC_VERSION => {
+            if !reachable(arg, 4, true) {
+                return EFAULT;
+            }
+            unsafe { core::ptr::write_unaligned(arg as *mut u32, ev::EV_VERSION) };
+            0
+        }
+        ev::EVIOC_ID => give(&ev::ident(d)),
+        // The name is returned *with* its terminator and the length includes
+        // it, which is what libevdev measures the string by.
+        ev::EVIOC_NAME => {
+            let mut b = [0u8; 64];
+            let n = ev::name(d).len().min(63);
+            b[..n].copy_from_slice(&ev::name(d).as_bytes()[..n]);
+            give(&b[..n + 1])
+        }
+        // No physical location and no unique id. `ENOENT` is what a driver
+        // without them answers, and libinput treats it as absent rather than
+        // as a failure -- where an empty string would be a device claiming to
+        // sit at the empty path.
+        ev::EVIOC_PHYS | ev::EVIOC_UNIQ => ENOENT,
+        // No input properties. Zeroes rather than a refusal: this is a
+        // bitmask, and "none set" is a complete and true answer.
+        ev::EVIOC_PROP => {
+            let zero = [0u8; 8];
+            give(&zero[..zero.len().min(want)])
+        }
+        ev::EVIOC_KEYSTATE => {
+            let mut b = [0u8; 96];
+            ev::key_state(d, &mut b);
+            give(&b[..b.len().min(want.max(1))])
+        }
+        // `EVIOCGBIT(ev, len)` is one number per event type, so the family is
+        // a contiguous run and the type is the offset into it.
+        n if n >= ev::EVIOC_BIT && n < ev::EVIOC_BIT + 0x20 => {
+            let mut b = [0u8; 96];
+            ev::bits(d, n - ev::EVIOC_BIT, &mut b);
+            give(&b[..b.len().min(want.max(1))])
+        }
+        // **Accepted and a no-op, which is honest here.** A grab asks for
+        // exclusive access so a compositor does not also see the events. There
+        // is one guest and the desktop has already stood down for it, so the
+        // exclusivity a grab asks for is a fact rather than a request --
+        // refusing would stop SDL, which grabs for relative mouse mode.
+        ev::EVIOC_GRAB => 0,
+        // Which clock timestamps come from. There is one clock here and it is
+        // monotonic, which is what `CLOCK_MONOTONIC` asks for and near enough
+        // to what `CLOCK_REALTIME` asks for that refusing would be worse.
+        ev::EVIOC_SETCLOCK => 0,
+        _ => ENOTTY,
+    }
+}
+
 /// The four requests a framebuffer program makes, and `ENOTTY` for everything
 /// else.
 ///
@@ -2399,6 +2566,9 @@ fn sys_ioctl(fd: u64, req: u64, arg: u64) -> u64 {
     let known = with_fds(|fds, _| matches!(fds.get(fd as usize), Some(Some(_)))).unwrap_or(false);
     if !known {
         return EBADF;
+    }
+    if let Some(d) = node.flatten().and_then(super::dev::is_input) {
+        return input_ioctl(d, req, arg);
     }
     let Some(Some(super::dev::Node::Fb)) = node else { return ENOTTY };
     match req {
@@ -2978,6 +3148,18 @@ pub unsafe fn kill_overrun() -> ! {
     unsafe { kill_with(OVERRAN) }
 }
 
+/// End a guest that blocked past its deadline.
+///
+/// # Safety
+/// Only from a wait inside a syscall that holds nothing. That is a *different*
+/// condition from the one `kill_overrun` asks for rather than a weaker one:
+/// there the guarantee is that the kernel was not running at all, and here it
+/// is that this particular loop has no allocation in flight, no borrow of
+/// `SPACE` live and no lock taken across the yield.
+pub unsafe fn kill_blocked() -> ! {
+    unsafe { kill_with(OVERRAN) }
+}
+
 /// Set instead when the guest died of a fault.
 pub const FAULTED: u64 = 1 << 33;
 
@@ -3182,6 +3364,10 @@ pub unsafe fn run(entry: u64, stack_top: u64) -> u64 {
     }
     GUEST_RUNNING.store(true, Ordering::Relaxed);
     DEADLINE.store(crate::dev::lapic::ticks() + DEADLINE_TICKS, Ordering::Relaxed);
+    // Scheduled input is measured from here, which is the only moment that
+    // means anything to it: a script armed at the prompt has no idea how long
+    // the harness will take to send the next line.
+    super::input::start(crate::dev::lapic::ticks());
     let code = unsafe { glados_enter_guest(entry, stack_top) };
     DEADLINE.store(0, Ordering::Relaxed);
     GUEST_RUNNING.store(false, Ordering::Relaxed);

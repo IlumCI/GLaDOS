@@ -54,10 +54,17 @@ pub enum Node {
     Zero,
     Random,
     Fb,
+    /// A keyboard or a pointer, as `/dev/input/event0` and `event1`.
+    ///
+    /// Numbered rather than named, because that is what evdev is: a program
+    /// walks `/dev/input` opening every `event*` it finds and asks each one
+    /// what it is. Naming them `keyboard` and `mouse` would be friendlier and
+    /// would mean nothing enumerated them.
+    Input(super::input::Dev),
 }
 
 pub fn is_dir(path: &str) -> bool {
-    path == "/dev"
+    matches!(path, "/dev" | "/dev/input")
 }
 
 /// Which node a path names, as a pure function of the path.
@@ -72,6 +79,8 @@ pub fn node(path: &str) -> Option<Node> {
         "/dev/zero" => Some(Node::Zero),
         "/dev/random" | "/dev/urandom" => Some(Node::Random),
         "/dev/fb0" => Some(Node::Fb),
+        "/dev/input/event0" => Some(Node::Input(super::input::Dev::Keyboard)),
+        "/dev/input/event1" => Some(Node::Input(super::input::Dev::Pointer)),
         _ => None,
     }
 }
@@ -82,13 +91,17 @@ pub fn claims(path: &str) -> bool {
 
 /// What a listing of `/dev` answers, in the shape `Dir` wants.
 pub fn entries(dir: &str) -> Vec<(String, bool, usize)> {
-    if dir != "/dev" {
-        return Vec::new();
+    let file = |n: &str| (n.to_string(), false, 0usize);
+    match dir {
+        "/dev" => {
+            let mut v: Vec<_> =
+                ["fb0", "null", "random", "urandom", "zero"].iter().map(|n| file(n)).collect();
+            v.insert(2, ("input".to_string(), true, 0usize));
+            v
+        }
+        "/dev/input" => alloc::vec![file("event0"), file("event1")],
+        _ => Vec::new(),
     }
-    ["fb0", "null", "random", "urandom", "zero"]
-        .iter()
-        .map(|n| (n.to_string(), false, 0usize))
-        .collect()
 }
 
 /// What `stat` reports as the size.
@@ -102,6 +115,18 @@ pub fn size(n: Node) -> usize {
     match n {
         Node::Fb => fb().map(|f| f.3).unwrap_or(0),
         _ => 0,
+    }
+}
+
+/// Whether a node delivers events rather than bytes at an offset.
+///
+/// The two are read by different code and it is worth asking rather than
+/// matching in four places: an input device has no position, so `read` takes
+/// a sequence number and `lseek` on it is meaningless.
+pub fn is_input(n: Node) -> Option<super::input::Dev> {
+    match n {
+        Node::Input(d) => Some(d),
+        _ => None,
     }
 }
 
@@ -283,6 +308,10 @@ pub fn read(n: Node, at: usize, buf: &mut [u8]) -> usize {
             unsafe { core::ptr::copy_nonoverlapping((base + at as u64) as *const u8, buf.as_mut_ptr(), n) };
             n
         }
+        // Read through `sys_read` rather than here, because an event stream
+        // needs the descriptor's own cursor advanced and a blocking caller put
+        // to sleep, neither of which fits a call that takes an offset.
+        Node::Input(_) => 0,
     }
 }
 
@@ -297,6 +326,11 @@ pub fn write(n: Node, at: usize, buf: &[u8]) -> usize {
         // goes into the kernel's generator is a capability nothing has asked
         // for and the answer a program checks is the byte count.
         Node::Random => buf.len(),
+        // Writing to an input device is how a program sets LEDs and
+        // autorepeat, and there is no keyboard LED path here. Everything is
+        // taken and discarded rather than refused, because a refusal makes a
+        // library conclude the device is broken and stop reading it.
+        Node::Input(_) => buf.len(),
         Node::Fb => {
             let Some((base, _, _, len, _, _)) = fb() else { return 0 };
             if at >= len {
@@ -357,6 +391,18 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     let mut out = Vec::new();
 
     out.push((
+        "the input devices are numbered, since that is what an enumerator walks",
+        node("/dev/input/event0") == Some(Node::Input(super::input::Dev::Keyboard))
+            && node("/dev/input/event1") == Some(Node::Input(super::input::Dev::Pointer))
+            && node("/dev/input/event2").is_none()
+            && is_dir("/dev/input")
+            && entries("/dev/input").len() == 2,
+    ));
+    out.push((
+        "and /dev/input is listed as a directory, or nothing walks into it",
+        entries("/dev").iter().any(|(n, d, _)| n == "input" && *d),
+    ));
+    out.push((
         "every /dev node is named by the path alone, so the table cannot change shape",
         node("/dev/fb0") == Some(Node::Fb)
             && node("/dev/null") == Some(Node::Null)
@@ -367,9 +413,13 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     ));
     out.push((
         "and a listing offers only names that answer",
-        entries("/dev").iter().all(|(n, d, _)| {
-            !d && claims(&alloc::format!("/dev/{}", n))
-        }) && entries("/tmp").is_empty(),
+        entries("/dev")
+            .iter()
+            .all(|(n, _, _)| claims(&alloc::format!("/dev/{}", n)))
+            && entries("/dev/input")
+                .iter()
+                .all(|(n, d, _)| !d && claims(&alloc::format!("/dev/input/{}", n)))
+            && entries("/tmp").is_empty(),
     ));
 
     // The two structures are an ABI rather than a choice, the same argument

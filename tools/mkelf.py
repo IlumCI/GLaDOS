@@ -736,6 +736,172 @@ def spin_code(entry_rva, _a, _b):
 MSG_USAGE = b"cat: needs a path\n"
 
 
+def ev_code(entry_rva, _a, _b):
+    """Open the keyboard, ask it what it is, and block until somebody types.
+
+    Twelve checks folding into a mask, and the interesting one is not a check
+    at all: the sixth `read` has no `O_NONBLOCK` and nothing has happened yet,
+    so the guest goes to sleep inside the kernel and comes back when the timer
+    delivers a scheduled scancode. That path -- block, feed, wake -- is the
+    whole of what an input device is for, and nothing else in this tree
+    exercises a guest waiting on anything.
+
+    Run it with `linux feed shift@300 -shift@900` armed beforehand. Shift
+    rather than a letter on purpose: `kbd::decode` returns early for the
+    modifiers before it pushes a character, so the feed leaves nothing in the
+    shell's own input ring for `drive.py` to trip over.
+
+    The field checks are one 32-bit compare each, which falls out of the
+    layout: `type` and `code` are adjacent `__u16` at offset 16, so a press of
+    the left shift key is exactly `0x002A0001` read as a dword.
+    """
+    O_RDONLY = 0
+    EINVAL, ESPIPE = -22, -29
+    EV_KEY_LEFTSHIFT = (42 << 16) | 1        # type EV_KEY, code KEY_LEFTSHIFT
+    SYS_OPEN, SYS_READ, SYS_IOCTL, SYS_LSEEK, SYS_EXIT = 2, 0, 16, 8, 231
+    out = bytearray()
+
+    def fwd(at):
+        out[at + 2:at + 6] = struct.pack("<i", len(out) - (at + 6))
+
+    def fold(bit, cc):
+        ok = len(out)
+        out.extend(jcc(cc, 0))
+        out.extend(or_imm32("rbp", 1 << bit))
+        fwd(ok)
+
+    def mov_u32(reg, v):
+        """mov reg, v as an unsigned 32-bit value.
+
+        `mov_imm` sign-extends, and every evdev request has bit 31 set, so a
+        plain load would hand the kernel `0xFFFFFFFF80044501` where Linux is
+        handed `0x80044501`. The masking in the dispatcher would forgive it and
+        that is exactly why it is not forgiven here: a fixture should pass what
+        a real program passes.
+        """
+        b = bytearray()
+        b += mov_imm(reg, v - (1 << 32) if v >= (1 << 31) else v)
+        b += shl_imm(reg, 32)
+        b += shr_imm(reg, 32)
+        return bytes(b)
+
+    def sysc(nr, *args):
+        b = bytearray()
+        b += mov_imm("rax", nr)
+        for reg, a in zip(("rdi", "rsi", "rdx", "r10", "r8", "r9"), args):
+            if isinstance(a, str):
+                b += mov_rr(reg, a)
+            elif isinstance(a, bytes):
+                b += a if reg in a.decode("latin-1", "ignore") else a
+            else:
+                b += mov_imm(reg, a)
+        b += SYSCALL
+        return bytes(b)
+
+    out += mov_imm("rbp", 0)
+    # 384 bytes: an eight-event read buffer at +0, and the path and the ioctl
+    # scratch past it. Reached through registers because rm=100 means a SIB
+    # byte and none of these emitters writes one.
+    out += sub_imm("rsp", 0x180)
+    out += mov_rr("rbx", "rsp")
+    out += mov_rr("r15", "rsp")
+    out += add_imm("r15", 256)
+
+    for i, part in enumerate((b"/dev", b"/inp", b"ut/e", b"vent")):
+        out += mov_imm("rax", int.from_bytes(part, "little"))
+        out += store_d("r15", i * 4, "rax")
+    out += mov_imm("rax", int.from_bytes(b"0\x00\x00\x00", "little"))
+    out += store_d("r15", 16, "rax")
+    out += mov_rr("rdi", "r15")
+
+    # 0. Blocking, deliberately. `O_NONBLOCK` would turn the whole point of
+    #    this fixture into a spin loop.
+    out += sysc(SYS_OPEN, "rdi", O_RDONLY, 0)
+    out += mov_rr("r12", "rax")
+    out += cmp_imm8("r12", 0)
+    fold(0, JGE)
+
+    # Scratch for the ioctls, clear of the path.
+    out += mov_rr("r14", "r15")
+    out += add_imm("r14", 64)
+
+    # 1. EVIOCGVERSION, which is the one request whose answer is a constant.
+    out += mov_imm("rax", SYS_IOCTL)
+    out += mov_rr("rdi", "r12")
+    out += mov_u32("rsi", 0x80044501)
+    out += mov_rr("rdx", "r14")
+    out += SYSCALL
+    out += load_d("rax", "r14", 0)
+    out += cmp_imm32("rax", 0x0001_0001)
+    fold(1, JE)
+
+    # 2. EVIOCGBIT(0, 8): which event types exist. A keyboard is EV_SYN and
+    #    EV_KEY and nothing else, so the first byte is exactly 3 -- and a 4 in
+    #    there would be EV_REL, which would make this a mouse.
+    out += mov_imm("rax", 0)
+    out += store_d("r14", 0, "rax")
+    out += mov_imm("rax", SYS_IOCTL)
+    out += mov_rr("rdi", "r12")
+    out += mov_u32("rsi", 0x80084520)
+    out += mov_rr("rdx", "r14")
+    out += SYSCALL
+    out += load_d("rax", "r14", 0)
+    out += cmp_imm8("rax", 3)
+    fold(2, JE)
+
+    # 3. EVIOCGNAME(32) answers the length it wrote, terminator included.
+    out += mov_imm("rax", SYS_IOCTL)
+    out += mov_rr("rdi", "r12")
+    out += mov_u32("rsi", 0x80204506)
+    out += mov_rr("rdx", "r14")
+    out += SYSCALL
+    out += cmp_imm8("rax", 0)
+    fold(3, JG)
+
+    # 4. A buffer too small for one record is EINVAL rather than a short read.
+    #    A reader walks this stream by a fixed stride, so half a record is not
+    #    less data, it is garbage from there on.
+    out += sysc(SYS_READ, "r12", "rbx", 16)
+    out += cmp_imm32("rax", EINVAL)
+    fold(4, JE)
+
+    # 5. And an event stream has no position.
+    out += sysc(SYS_LSEEK, "r12", 0, 0)
+    out += cmp_imm32("rax", ESPIPE)
+    fold(5, JE)
+
+    # 6-9. The read that blocks. Nothing has happened yet, so the guest sleeps
+    #    inside the kernel and returns when the timer delivers the press.
+    out += sysc(SYS_READ, "r12", "rbx", 192)
+    out += cmp_imm8("rax", 0)
+    fold(6, JG)
+    out += load_d("rax", "rbx", 16)
+    out += cmp_imm32("rax", EV_KEY_LEFTSHIFT)
+    fold(7, JE)
+    out += load_d("rax", "rbx", 20)
+    out += cmp_imm8("rax", 1)
+    fold(8, JE)
+    # The SYN that closes the packet. A reader batches until it sees one, so a
+    # device that never sends it delivers nothing while appearing to work.
+    out += load_d("rax", "rbx", 40)
+    out += cmp_imm8("rax", 0)
+    fold(9, JE)
+
+    # 10-11. Block again for the release, which is the event that matters
+    #    most: a key whose release nobody delivered is a key held forever.
+    out += sysc(SYS_READ, "r12", "rbx", 192)
+    out += load_d("rax", "rbx", 16)
+    out += cmp_imm32("rax", EV_KEY_LEFTSHIFT)
+    fold(10, JE)
+    out += load_d("rax", "rbx", 20)
+    out += cmp_imm8("rax", 0)
+    fold(11, JE)
+
+    out += sysc(SYS_EXIT, "rbp")
+    out += HLT
+    return bytes(out)
+
+
 def fb_code(entry_rva, _a, _b):
     """Open the screen, ask it what it is, and draw three bands on it.
 
@@ -1335,6 +1501,10 @@ def build(kind="static"):
         assert len(text) == len(probe), (len(text), len(probe))
         body = text + MSG_USAGE
         msg_rva, disp, lea_end = usage_rva, 0, 0
+    elif kind == "ev":
+        text = ev_code(entry, 0, 0)
+        body = text
+        msg_rva, disp, lea_end = body_at, 0, 0
     elif kind == "fb":
         text = fb_code(entry, 0, 0)
         body = text
@@ -1642,6 +1812,40 @@ def verify(path):
               b.count(SYSCALL) == 10)
         claim("it ends in hlt on both paths", b.count(b"\xf4") >= 2)
         return ok
+    # `EVIOCGVERSION` sign-corrected: nothing else in this file loads that
+    # constant, which makes it the identifier rather than merely a hint.
+    if bytes([0x48, 0xC7, 0xC6]) + struct.pack("<i", 0x80044501 - (1 << 32)) in b:
+        claim("it names /dev/input/event0, in dwords because mov_imm is imm32",
+              bytes([0x48, 0xC7, 0xC0]) + b"/dev" in b
+              and bytes([0x48, 0xC7, 0xC0]) + b"/inp" in b
+              and bytes([0x48, 0xC7, 0xC0]) + b"vent" in b)
+        claim("it asks the version, the type bitmap and the name",
+              bytes([0x48, 0xC7, 0xC6]) + struct.pack("<i", 0x80044501 - (1 << 32)) in b
+              and bytes([0x48, 0xC7, 0xC6]) + struct.pack("<i", 0x80084520 - (1 << 32)) in b
+              and bytes([0x48, 0xC7, 0xC6]) + struct.pack("<i", 0x80204506 - (1 << 32)) in b)
+        # The request has bit 31 set and `mov_imm` sign-extends, so the pair of
+        # shifts is what makes the guest pass what a real program passes
+        # rather than the same number with 32 ones on the front.
+        claim("and clears the sign extension, so the request is the one Linux gets",
+              bytes([0x48, 0xC1, 0xE6, 0x20]) in b and bytes([0x48, 0xC1, 0xEE, 0x20]) in b)
+        claim("it opens blocking, since a non-blocking read would test nothing",
+              bytes([0x48, 0xC7, 0xC6, 0, 0, 0, 0]) in b)
+        claim("twelve checks, each folding one bit into the mask it exits with",
+              sum(1 for i in range(12)
+                  if bytes([0x48, 0x81, 0xCD]) + struct.pack("<i", 1 << i) in b) == 12)
+        # type and code are adjacent __u16 at offset 16, so a press of the left
+        # shift key is one dword. A fixture comparing them separately would
+        # pass on a stream whose fields had been swapped.
+        claim("it checks type and code as one dword, which the layout allows",
+              bytes([0x48, 0x81, 0xF8]) + struct.pack("<I", (42 << 16) | 1) in b)
+        claim("it reads twice, so the release is checked and not only the press",
+              b.count(bytes([0x48, 0xC7, 0xC2, 192, 0, 0, 0])) == 2)
+        claim("it makes the nine calls its checks add up to", b.count(SYSCALL) == 9)
+        claim("it exits with the mask rather than a constant",
+              bytes([0x48, 0x89, 0xEF]) in b)
+        claim("and ends in hlt, so a syscall that returns is visible",
+              b.endswith(HLT))
+        return ok
     # `mov rsi, 0x4600` is FBIOGET_VSCREENINFO and nothing else in this file
     # asks for it, which makes it the identifier rather than merely a hint.
     if bytes([0x48, 0xC7, 0xC6, 0x00, 0x46, 0x00, 0x00]) in b:
@@ -1701,7 +1905,7 @@ def main():
                     choices=["static", "dynamic", "interp", "loader", "maps",
                              "fixed", "memory", "rogue",
                              "protect", "wild", "spin", "cat", "grep",
-                             "fsabuse", "fb"],
+                             "fsabuse", "fb", "ev"],
                     default="static")
     ap.add_argument("--verify", action="store_true")
     a = ap.parse_args()

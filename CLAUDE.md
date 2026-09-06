@@ -1880,10 +1880,10 @@ otherwise. `diag linux` caught that, running with no guest installed. The
 other direction would have been much worse -- a listing offering a name that
 `openat` then routed to the store.
 
-### `/dev`, and a screen a Linux program can draw on
+### `/dev`, a screen to draw on and a keyboard to read
 
-`src/linux/dev.rs`. Five nodes, synthetic like `/proc` and under the same rule,
-and one of them is the display: `/dev/fb0`, the smallest well-specified way for
+`src/linux/dev.rs`. Seven nodes, synthetic like `/proc` and under the same
+rule, and one of them is the display: `/dev/fb0`, the smallest well-specified way for
 a program written somewhere else to put pixels on this machine.
 
 There is no `/dev/tty`, no `/dev/dri` and no `/dev/snd`, and that is the rule
@@ -1976,6 +1976,96 @@ the caller and the newer call refuses it.
 `/dev/fb0` does not put an unmodified SDL2 program on screen. What it does is
 make the class of program that talks to a framebuffer directly work, and give
 everything visual afterwards something to stand on.
+
+### The other half: `/dev/input/event0` and `event1`
+
+`src/linux/input.rs`. A screen with no input is a picture. Two evdev devices,
+a keyboard and a pointer, fed from the two places this kernel's own drivers
+already converge: `kbd::decode` for every scancode and `mouse::apply` for
+every packet, the latter being the point `port::mouse` already hangs off for
+the reason it gives -- PS/2 and USB HID both arrive there and a second copy
+would be the one nobody tested.
+
+**The ioctls are the interface and the events are the easy half.** A program
+classifies a device by reading its capability bitmaps and nothing else, so a
+mouse that fails to advertise `REL_X` is opened, read from successfully, and
+ignored, which looks exactly like input that does not arrive. The name is
+decoration.
+
+Three things are silent when wrong and each has a claim:
+
+- **`SYN_REPORT` is load-bearing.** A reader batches events until it sees one
+  and treats the batch as a single state change, so a device that never
+  synchronises delivers nothing while working perfectly at the `read` level.
+- **evdev's `REL_Y` grows downward** where `mouse::apply`'s `dy` grows up, so
+  the sign is flipped on the way in. Getting it wrong gives a game whose mouse
+  look is inverted, which reads as a preference somebody forgot to expose.
+- **A Linux keycode *is* a set-1 scancode, for the main block only.** That is
+  historical rather than lucky: the keycodes were assigned to match, so
+  `KEY_ESC` is 1 and `KEY_A` is 30 exactly as the wire has them. It stops at
+  the `E0`-prefixed keys, which is why those need a table and only those do.
+
+A descriptor opens at the *present*, so a program does not receive every key
+pressed since boot the moment it starts, and a reader that falls behind the
+256-entry ring is told `SYN_DROPPED` rather than handed a gap -- a release
+nobody delivered is a key held forever.
+
+**`linux feed` is how any of this is driven, and it had to exist.** A guest
+owns the machine while it runs and `drive.py` sends the next command only when
+it sees a prompt, so anything typed arrives before the guest starts or after
+it has gone -- and a device opening at the present means events pushed
+beforehand are events nobody sees. It is the same answer `win keys` and
+`doom play`'s timed script are, and it borrows their spelling:
+
+```
+linux feed shift@400 -shift@1200
+linux run /tmp/ev
+```
+
+Delivery is from the **timer interrupt**, the only thing that gets a turn
+while a guest runs, and it goes through `kbd::inject_scancode` rather than
+straight into the ring, so what is exercised is the path a real key takes.
+Shift and control rather than letters, because `kbd::decode` returns early for
+the modifiers before it pushes a character and the feed therefore leaves
+nothing in the shell's own input ring for the harness to trip over.
+
+`mkelf.py --kind ev` is twelve checks folding into a mask, and the interesting
+one is not a check: the sixth `read` has no `O_NONBLOCK` and nothing has
+happened yet, so the guest sleeps inside the kernel and comes back when the
+timer delivers. Nothing else in this tree exercises a guest waiting on
+anything.
+
+    linux feed shift@400 -shift@1200
+    linux run /tmp/ev
+        2 open   /dev/input/event0 -> 3
+       16 ioctl  0x3 0x80044501 -> 0     EVIOCGVERSION
+       16 ioctl  0x3 0x80084520 -> 8     EVIOCGBIT(0): EV_SYN|EV_KEY, so a keyboard
+       16 ioctl  0x3 0x80204506 -> 19    EVIOCGNAME
+        0 read   0x3 ... 0x10   -> -22   a buffer too small for one record
+        8 lseek  0x3 0x0 0x0    -> -29   an event stream has no position
+        0 read   0x3 ... 0xc0   -> 48    blocked, then the press and its SYN
+        0 read   0x3 ... 0xc0   -> 48    blocked again, then the release
+      exited 0 after 9 syscall(s)
+
+**Two real bugs came out of driving it and one is much bigger than evdev.**
+
+`overran` is checked from the timer interrupt and only when the saved CS says
+ring 3, so **a guest blocked in a syscall was invisible to the one thing that
+ends a runaway**. A blocking read on a device nothing feeds took the machine:
+shell gone, no key able to bring it back, reboot the only way out. The wait
+loop checks the deadline itself now and ends the guest through `kill_blocked`,
+whose safety note is deliberately a *different* condition from
+`kill_overrun`'s rather than a weaker one -- there the guarantee is that the
+kernel was not running at all, here it is that this particular loop holds no
+allocation, no borrow of `SPACE` and no lock across the yield.
+
+And **"at teardown" is not "at the end of a run"**: `install` calls `teardown`
+at the head of itself to abandon any previous space, so the `stop` that swept
+a spent script swept it a microsecond *before* the guest it was armed for
+began. The counters found that in one run where reasoning had produced three
+wrong theories -- `service` reported 9,346 ticks seen and 0 delivered, which
+says the timer was fine and the script was gone. Anything else that hangs
+cleanup off `teardown` has the same trap waiting.
 
 ### A filesystem a program written for Linux recognises
 

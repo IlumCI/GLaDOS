@@ -153,7 +153,21 @@ pub enum Fd {
 pub struct DevFile {
     pub path: String,
     pub node: super::dev::Node,
+    /// A byte offset for the framebuffer and an event sequence number for an
+    /// input device.
+    ///
+    /// One field with two meanings, which is the sort of thing this tree
+    /// normally splits. It stays one because the two never coexist on a
+    /// descriptor and because `lseek` is the only caller that could confuse
+    /// them, and `lseek` on an input device is refused for saying so.
     pub at: usize,
+    /// Whether a read that has nothing to give answers `EAGAIN` rather than
+    /// waiting.
+    ///
+    /// Kept per description rather than per node, because two programs can
+    /// hold the same device open with different ideas about blocking and
+    /// `dup` has to carry the flag along with the cursor.
+    pub nonblock: bool,
 }
 
 impl Fd {

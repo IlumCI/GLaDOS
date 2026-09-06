@@ -457,6 +457,10 @@ fn decode(scancode: u8) {
         // change: this path covers the arrow keys, and it threw every release
         // away, so nothing above could ever know an arrow was still held.
         set_down(scancode & !SC_RELEASE, !released);
+        // Every transition, before the early return below throws releases
+        // away. A guest reading evdev needs the release most of all: a key
+        // whose release nobody delivered is a key held forever.
+        crate::linux::input::key(0xE000 | (scancode & !SC_RELEASE) as u16, !released);
         if released {
             return;
         }
@@ -482,6 +486,10 @@ fn decode(scancode: u8) {
 
     let released = scancode & SC_RELEASE != 0;
     let code = scancode & !SC_RELEASE;
+
+    // Before the match, deliberately. Every arm below returns early for the
+    // modifiers, and shift, control and alt are exactly the keys a game binds.
+    crate::linux::input::key(code as u16, !released);
 
     match code {
         SC_LSHIFT | SC_RSHIFT => {

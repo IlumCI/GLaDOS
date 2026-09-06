@@ -4593,6 +4593,33 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         kprintln!("  'linux env LD_DEBUG=all' makes ld.so narrate its own work");
                     }
                 }
+                "feed" => {
+                    // The only way an event reaches a *running* guest. A
+                    // device opens at the present, so anything typed at the
+                    // prompt beforehand is deliberately not delivered, and
+                    // `drive.py` cannot type while a guest holds the machine.
+                    let spec: alloc::vec::Vec<&str> = words.collect();
+                    let spec = spec.join(" ");
+                    console::set_color(YELLOW);
+                    kprintln!("[feed] scheduled input for the next guest");
+                    console::set_color(LTGRAY);
+                    if spec.is_empty() {
+                        kprintln!("  'linux feed shift@200 -shift@400' arms a script in");
+                        kprintln!("  milliseconds from now, a leading minus being a release.");
+                        kprintln!("  Keys: shift rshift ctrl rctrl up down left right.");
+                        kprintln!("  The modifiers leave nothing in the shell's own input ring;");
+                        kprintln!("  the arrows do, so a script using them costs one junk line.");
+                        kprintln!("  {} still armed", linux::input::armed());
+                        let (t, f, b) = linux::input::feed_stats();
+                        kprintln!("  {} tick(s) seen, {} delivered, base {}", t, f, b);
+                        kprintln!("  now {}", crate::dev::lapic::ticks());
+                    } else {
+                        match linux::input::arm(&spec) {
+                            Ok(n) => kprintln!("  {} step(s) armed", n),
+                            Err(e) => kprintln!("  {}", e),
+                        }
+                    }
+                }
                 "libc" => {
                     console::set_color(YELLOW);
                     kprintln!("[libc]");

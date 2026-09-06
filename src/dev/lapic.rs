@@ -141,6 +141,12 @@ extern "x86-interrupt" fn timer_isr(frame: idt::InterruptStackFrame) {
     if frame.cs & 3 == 3 && crate::linux::syscall::overran(now) {
         unsafe { crate::linux::syscall::kill_overrun() }
     }
+    // Scheduled input, for the same reason the deadline above lives here: a
+    // running guest owns the machine and the timer is the only thing that
+    // still gets a turn. Unlike the deadline this runs whatever the saved CS
+    // says, because a guest blocked in a read is sitting in the kernel and
+    // that is precisely when it is waiting to be fed.
+    crate::linux::input::service(now);
     crate::task::tick();
 }
 

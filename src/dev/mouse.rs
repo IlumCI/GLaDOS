@@ -155,6 +155,12 @@ pub fn apply(dx: i32, dy: i32, left: bool, right: bool, wheel: i32) {
     if left != s.left || right != s.right {
         s.moved = true;
     }
+    // Both states, because evdev reports transitions and this is handed
+    // state: a packet arrives for every movement, so emitting a press per
+    // packet would give a guest a hundred clicks a second. Placed here for
+    // the reason the relative accumulator above is -- one convergence point
+    // for PS/2 and USB HID, and a second copy would be the untested one.
+    crate::linux::input::pointer(dx, dy, wheel, left, right, s.left, s.right);
     s.left = left;
     s.right = right;
 }
