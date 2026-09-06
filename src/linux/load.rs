@@ -429,6 +429,8 @@ pub fn load(bytes: &[u8], args: &[&str]) -> Result<Guest, &'static str> {
             stack: syscall::Region { at: stack.addr(), len: GUEST_STACK },
             brk: syscall::Region { at: brk.addr(), len: GUEST_BRK },
             interp: interp_region,
+            image_mapped: matches!(prog.hold, Image::Mapped { .. }),
+            interp_mapped: matches!(interp_hold, Some(Image::Mapped { .. })),
         },
         space,
         _image: prog.hold,

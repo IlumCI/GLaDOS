@@ -383,7 +383,7 @@ pub fn ring3_load(r: Option<crate::task::Ring3>) {
             crate::cpu::wrmsr(IA32_FS_BASE, r.fs_base);
         },
         None => {
-            if let Some(sp) = unsafe { SPACE.get().as_ref() } {
+            if let Some(sp) = unsafe { guest_slot().as_ref() } {
                 unsafe { crate::cpu::wrmsr(IA32_FS_BASE, sp.saved_fs) };
             }
         }
@@ -448,6 +448,21 @@ pub struct Regions {
     /// "there is no interpreter" and "there is one and it is empty", and only
     /// the first is ever true.
     pub interp: Option<Region>,
+    /// Whether the image lives in the guest's own page tables rather than in
+    /// the identity map.
+    ///
+    /// **`teardown` needs this and it is not cosmetic.** It puts page rights
+    /// back on every region, which is right for a region the loader opened in
+    /// the kernel's map and wrong for one that was never there: the address of
+    /// a mapped image is a *guest* virtual address, so restoring rights on it
+    /// reaches the identity mapping of the same number -- a kernel page the
+    /// guest never had. Today that only clears a U bit nobody set and splits a
+    /// 2 MiB entry for nothing, which is why it is a tidiness bug rather than
+    /// a fault. It is the same mistake `run` has to avoid in the other
+    /// direction, where it would *grant* ring 3 a kernel page, and one of them
+    /// being harmless is not a reason to write the pair inconsistently.
+    pub image_mapped: bool,
+    pub interp_mapped: bool,
 }
 
 /// What a guest owns.
@@ -482,6 +497,8 @@ pub struct Space {
     /// register: `argv` lives on a stack the kernel built and then stopped
     /// tracking.
     pub argv: Vec<String>,
+    pub image_mapped: bool,
+    pub interp_mapped: bool,
     pub image_path: String,
     pub interp_path: Option<String>,
     /// `FS` base as the kernel left it. A guest sets `FS` for its
@@ -514,7 +531,78 @@ impl Space {
     }
 }
 
-static SPACE: Racy<Option<Space>> = Racy::new(None);
+/// Every guest this machine is holding, and which one the syscall path means.
+///
+/// **A table rather than one slot, because `fork` is two guests alive at
+/// once.** Everything else was ready for that before this was: a guest's
+/// memory is its own page-table root, and a fixed image is mapped rather than
+/// holding physical `0x400000` against the machine. What remained was that
+/// there was exactly one `Space` to describe a guest with, so a second one had
+/// nowhere to be recorded.
+///
+/// The syscall path always means the *running* guest, which is why the 25
+/// places that reach for this did not have to change: `guest_slot` answers the
+/// current slot and they go on saying what they said. Switching guests is
+/// therefore one store, and it belongs beside the CR3 switch rather than
+/// inside any of them.
+///
+/// A `Vec` rather than a fixed array because `Space` holds `Vec`s and
+/// `String`s, so an array of `None` needs a const initialiser it cannot have,
+/// and because the bound that matters is the heap rather than a number chosen
+/// here. It grows on demand and never shrinks, which is the same bargain
+/// `thread`'s pool makes: a slot vacated by a guest that exited is taken by
+/// the next one.
+static TABLE: Racy<Vec<Option<Space>>> = Racy::new(Vec::new());
+
+/// Which slot the syscall path is speaking for.
+static CURRENT_GUEST: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+/// The running guest's slot, grown into existence if this is its first use.
+///
+/// # Safety
+/// Same contract `Racy::get` carries: no other live reference, and never from
+/// an interrupt that can preempt another caller.
+#[allow(clippy::mut_from_ref)]
+unsafe fn guest_slot() -> &'static mut Option<Space> {
+    let t = unsafe { TABLE.get() };
+    let i = CURRENT_GUEST.load(core::sync::atomic::Ordering::Relaxed);
+    while t.len() <= i {
+        t.push(None);
+    }
+    &mut t[i]
+}
+
+/// Which guest the syscall path is speaking for.
+pub fn current_guest() -> usize {
+    CURRENT_GUEST.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Speak for a different guest from now on.
+///
+/// Deliberately does **not** touch CR3. The page-table root belongs to the
+/// task and `task::set_root` owns it; folding the two together would give two
+/// things one name, and the first time they needed to move apart -- a kernel
+/// reading a guest's memory without running it -- the fold would be the bug.
+pub fn set_current_guest(i: usize) {
+    CURRENT_GUEST.store(i, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// The lowest slot holding no guest, growing the table if every one is taken.
+pub fn free_guest_slot() -> usize {
+    let t = unsafe { TABLE.get() };
+    if let Some(i) = t.iter().position(|g| g.is_none()) {
+        return i;
+    }
+    t.push(None);
+    t.len() - 1
+}
+
+/// How many guests are live, which is what a `fork` claim counts.
+pub fn live_guests() -> usize {
+    let t = unsafe { TABLE.get() };
+    t.iter().filter(|g| g.is_some()).count()
+}
 
 /// Say what the running guest is, for the `/proc` files that describe it.
 ///
@@ -522,7 +610,7 @@ static SPACE: Racy<Option<Space>> = Racy::new(None);
 /// are names and that takes ranges: the loader knows both, and folding them
 /// into one call would mean `Regions` carrying strings it has no use for.
 pub fn name_guest(argv: &[&str], image: &str, interp: Option<&str>) {
-    if let Some(sp) = unsafe { SPACE.get() }.as_mut() {
+    if let Some(sp) = unsafe { guest_slot() }.as_mut() {
         sp.argv = argv.iter().map(|a| String::from(*a)).collect();
         sp.image_path = String::from(image);
         sp.interp_path = interp.map(String::from);
@@ -531,12 +619,12 @@ pub fn name_guest(argv: &[&str], image: &str, interp: Option<&str>) {
 
 /// The path the running guest was loaded from, if one is running.
 pub fn guest_image() -> Option<String> {
-    let sp = unsafe { SPACE.get() }.as_ref()?;
+    let sp = unsafe { guest_slot() }.as_ref()?;
     (!sp.image_path.is_empty()).then(|| sp.image_path.clone())
 }
 
 pub fn guest_argv() -> Vec<String> {
-    unsafe { SPACE.get() }.as_ref().map(|s| s.argv.clone()).unwrap_or_default()
+    unsafe { guest_slot() }.as_ref().map(|s| s.argv.clone()).unwrap_or_default()
 }
 
 /// Every range the guest owns, with a name for the ones that have one.
@@ -545,7 +633,7 @@ pub fn guest_argv() -> Vec<String> {
 /// read in and a reader scanning for a containing range may stop at the first
 /// one past its address.
 pub fn guest_regions() -> Vec<(u64, usize, String)> {
-    let Some(sp) = (unsafe { SPACE.get() }).as_ref() else { return Vec::new() };
+    let Some(sp) = (unsafe { guest_slot() }).as_ref() else { return Vec::new() };
     let mut out: Vec<(u64, usize, String)> = Vec::new();
     out.push((sp.image.at, sp.image.len, sp.image_path.clone()));
     if let (Some(r), Some(p)) = (sp.interp, sp.interp_path.as_ref()) {
@@ -567,7 +655,7 @@ pub fn guest_regions() -> Vec<(u64, usize, String)> {
 /// Whether the running guest owns this range. False when nothing is running,
 /// which is the right answer: with no guest there is no address it may name.
 fn owns(at: u64, len: usize) -> bool {
-    unsafe { SPACE.get().as_ref().is_some_and(|s| s.owns(at, len)) }
+    unsafe { guest_slot().as_ref().is_some_and(|s| s.owns(at, len)) }
 }
 
 /// Whether the kernel may touch this range on the guest's behalf.
@@ -609,9 +697,11 @@ pub fn install(r: Regions) {
     let brk = r.brk;
     teardown();
     unsafe {
-        *SPACE.get() = Some(Space {
+        *guest_slot() = Some(Space {
             image: r.image,
             interp: r.interp,
+            image_mapped: r.image_mapped,
+            interp_mapped: r.interp_mapped,
             stack: r.stack,
             brk_start: brk.at,
             brk_now: brk.at,
@@ -649,7 +739,7 @@ pub fn teardown() -> usize {
     super::thread::reset();
     let mut freed = 0;
     unsafe {
-        if let Some(sp) = SPACE.get().as_mut() {
+        if let Some(sp) = guest_slot().as_mut() {
             // A guest that writes and exits without closing is the ordinary
             // case, not an error, so this is where those bytes actually reach
             // the store. Dropped in order, because `flush` only commits the
@@ -685,19 +775,22 @@ pub fn teardown() -> usize {
             // lists were different lengths, which is why the loop takes the
             // whole set now rather than three of it.
             for r in [
-                Some(sp.image),
-                sp.interp,
-                Some(sp.stack),
-                Some(Region { at: sp.brk_start, len: (sp.brk_end - sp.brk_start) as usize }),
+                (Some(sp.image), sp.image_mapped),
+                (sp.interp, sp.interp_mapped),
+                (Some(sp.stack), false),
+                (
+                    Some(Region { at: sp.brk_start, len: (sp.brk_end - sp.brk_start) as usize }),
+                    false,
+                ),
             ]
             .into_iter()
-            .flatten()
+            .filter_map(|(r, mapped)| if mapped { None } else { r })
             {
                 crate::mem::paging::protect(r.at, r.len, crate::mem::paging::Perm::RWX);
             }
             crate::cpu::wrmsr(IA32_FS_BASE, sp.saved_fs);
         }
-        *SPACE.get() = None;
+        *guest_slot() = None;
     }
     freed
 }
@@ -951,7 +1044,7 @@ fn read_cstr(at: u64) -> Result<String, u64> {
 
 /// The descriptor table, or nothing when no guest is running.
 fn with_fds<T>(f: impl FnOnce(&mut Vec<Option<super::fs::Fd>>, &str) -> T) -> Option<T> {
-    let sp = unsafe { SPACE.get() };
+    let sp = unsafe { guest_slot() };
     // Destructured rather than borrowed twice, which is also why the working
     // directory is no longer cloned here. It was, because `&mut sp.fds` and
     // `&sp.cwd` are two borrows of one `sp` -- so every `read` in a guest's
@@ -2472,7 +2565,7 @@ fn sys_prlimit64(_pid: u64, resource: u64, new: u64, old: u64) -> u64 {
     if !reachable(old, 16, true) {
         return EFAULT;
     }
-    let Some(sp) = (unsafe { SPACE.get() }).as_ref() else { return EINVAL };
+    let Some(sp) = (unsafe { guest_slot() }).as_ref() else { return EINVAL };
     let n = match resource {
         RLIMIT_STACK => sp.stack.len as u64,
         RLIMIT_DATA => sp.brk_end.saturating_sub(sp.brk_start),
@@ -2867,7 +2960,7 @@ fn sys_ioctl(fd: u64, req: u64, arg: u64) -> u64 {
 /// assumed adjacency would be wrong, so it is written down rather than left to
 /// be discovered.
 fn sys_brk(want: u64) -> u64 {
-    let sp = unsafe { SPACE.get() };
+    let sp = unsafe { guest_slot() };
     let Some(sp) = sp.as_mut() else { return 0 };
     if want >= sp.brk_start && want <= sp.brk_end {
         sp.brk_now = want;
@@ -2913,7 +3006,7 @@ fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off: u64) -> u6
     // handed the pages the display controller is already scanning out, and a
     // frame it writes is on screen as it writes it.
     if !anon {
-        let dev = (unsafe { SPACE.get() })
+        let dev = (unsafe { guest_slot() })
             .as_ref()
             .and_then(|sp| sp.fds.get(fd as usize))
             .and_then(|f| f.as_ref())
@@ -2949,7 +3042,7 @@ fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off: u64) -> u6
                 return ENOMEM;
             }
             super::dev::hold_screen(true);
-            let sp = unsafe { SPACE.get() }.as_mut();
+            let sp = unsafe { guest_slot() }.as_mut();
             if let Some(sp) = sp {
                 sp.maps.push(Mapping { at, len: span, from: Source::Device });
             }
@@ -2966,7 +3059,7 @@ fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off: u64) -> u6
         if flags & MAP_SHARED != 0 && prot & PROT_WRITE != 0 {
             return ENODEV;
         }
-        let Some(sp) = (unsafe { SPACE.get() }).as_ref() else { return ENOMEM };
+        let Some(sp) = (unsafe { guest_slot() }).as_ref() else { return ENOMEM };
         match sp.fds.get(fd as usize).and_then(|f| f.as_ref()) {
             Some(super::fs::Fd::File(b)) => {
                 let f = b.borrow();
@@ -3073,7 +3166,7 @@ fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off: u64) -> u6
         // a second entry naming the same pages would be freed twice.
         None => at,
         Some(from) => {
-            let sp = unsafe { SPACE.get() };
+            let sp = unsafe { guest_slot() };
             match sp.as_mut() {
                 Some(sp) => {
                     // **The pages handed out, not the length asked for.**
@@ -3136,7 +3229,7 @@ fn give_back(at: u64, len: usize, from: Option<Source>) {
 /// underneath can express, and silently unmapping more than was asked is worse
 /// than saying no.
 fn sys_munmap(at: u64, len: u64) -> u64 {
-    let sp = unsafe { SPACE.get() };
+    let sp = unsafe { guest_slot() };
     let Some(sp) = sp.as_mut() else { return EINVAL };
     match sp.maps.iter().position(|m| m.at == at && m.len == len as usize) {
         Some(i) => {
@@ -3522,7 +3615,7 @@ pub fn fault_where() -> Option<(String, String, String)> {
 /// fault report and a diagnosis -- the same reason `cpu::code::locate` exists
 /// for the kernel's own faults.
 pub fn locate(at: u64) -> alloc::string::String {
-    let Some(sp) = (unsafe { SPACE.get() }).as_ref() else {
+    let Some(sp) = (unsafe { guest_slot() }).as_ref() else {
         return alloc::string::String::from("no guest");
     };
     let hit = |r: Region, what: &str| -> Option<alloc::string::String> {
@@ -3628,7 +3721,7 @@ pub unsafe fn run(entry: u64, stack_top: u64) -> u64 {
     // rather than inside `arch_prctl`, so a guest that sets it forty times
     // still restores the one value that was true before any of them.
     unsafe {
-        if let Some(sp) = SPACE.get().as_mut() {
+        if let Some(sp) = guest_slot().as_mut() {
             sp.saved_fs = crate::cpu::rdmsr(IA32_FS_BASE);
         }
     }
@@ -3782,7 +3875,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     {
         let region = 0x10_0000u64;
         let fake = Region { at: region, len: 4096 * 4 };
-        install(Regions { image: fake, stack: fake, brk: fake, interp: None });
+        install(Regions { image: fake, stack: fake, brk: fake, interp: None, image_mapped: false, interp_mapped: false });
         let first = sys_brk(0);
         let grown = sys_brk(region + 8192);
         let refused = sys_brk(region + 1_000_000);
@@ -3799,7 +3892,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         out.push(("brk shrinks as well as grows", back == region));
         // Teardown would wrmsr FS from a Space whose saved value is zero, and
         // this check installed one by hand rather than through `run`.
-        unsafe { *SPACE.get() = None };
+        unsafe { *guest_slot() = None };
     }
 
     // mmap's refusals, and the two shapes that stopped being refusals. Two of
@@ -3807,7 +3900,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     // than about the call, which is why they went the way `ET_EXEC` went.
     {
         let fake = Region { at: 0x10_0000, len: 4096 };
-        install(Regions { image: fake, stack: fake, brk: fake, interp: None });
+        install(Regions { image: fake, stack: fake, brk: fake, interp: None, image_mapped: false, interp_mapped: false });
         out.push((
             "a zero-length mapping is EINVAL, as Linux has it",
             sys_mmap(0, 0, 3, MAP_ANONYMOUS, u64::MAX, 0) == EINVAL,
@@ -3851,7 +3944,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         let mut buf = [0u8; SYSINFO_LEN];
         let at = buf.as_mut_ptr() as u64;
         let owned = Region { at, len: SYSINFO_LEN };
-        install(Regions { image: owned, stack: owned, brk: owned, interp: None });
+        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false });
 
         let bare = sys_time(0);
         let through = sys_time(at);
@@ -3907,7 +4000,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         let mut buf = [0u8; 64];
         let at = buf.as_mut_ptr() as u64;
         let owned = Region { at, len: 64 };
-        install(Regions { image: owned, stack: owned, brk: owned, interp: None });
+        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false });
         out.push((
             "pread on a stream is ESPIPE, the same answer lseek gives it",
             sys_pread64(0, at, 8, 0) == ESPIPE,
@@ -3936,7 +4029,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         let mut buf = [0xAAu8; 160];
         let at = buf.as_mut_ptr() as u64;
         let owned = Region { at, len: 160 };
-        install(Regions { image: owned, stack: owned, brk: owned, interp: None });
+        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false });
         name_guest(&["/tmp/g/bb"], "/tmp/g/bb", None);
         // Three separate strings rather than one rewritten in place: the last
         // time claims here shared a buffer, the first one's write took the NUL
@@ -3998,7 +4091,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     // on its own code.
     if let Some(two) = alloc_pages(8192) {
         let mine = Region { at: two, len: 8192 };
-        install(Regions { image: mine, stack: mine, brk: mine, interp: None });
+        install(Regions { image: mine, stack: mine, brk: mine, interp: None, image_mapped: false, interp_mapped: false });
         let reserved =
             sys_mmap(two, 8192, 0, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, u64::MAX, 0) == two;
         let gone = crate::mem::paging::query(two).is_some_and(|p| !p.present);
@@ -4024,7 +4117,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         let mut buf = [0u8; 144];
         let at = buf.as_mut_ptr() as u64;
         let owned = Region { at, len: 144 };
-        install(Regions { image: owned, stack: owned, brk: owned, interp: None });
+        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false });
         // The empty path has to live *inside* what the guest owns, because
         // `read_cstr` bounds-checks it like any other guest pointer. Pointing
         // at a local outside the region answered `EFAULT` before any of the
@@ -4057,7 +4150,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     if let Some(two) = alloc_pages(8192) {
         let img = Region { at: two, len: 4096 };
         let interp = Region { at: two + 4096, len: 4096 };
-        install(Regions { image: img, stack: img, brk: img, interp: Some(interp) });
+        install(Regions { image: img, stack: img, brk: img, interp: Some(interp), image_mapped: false, interp_mapped: false });
         // PROT_READ. A real `ld.so` does exactly this to its own RELRO, which
         // is how the page that halted the machine got its rights.
         let asked = sys_mprotect(two + 4096, 4096, 1) == 0;
@@ -4078,14 +4171,14 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     // pointing at 0x100000 would mark the low megabyte.
     if let Some(own) = alloc_pages(8192) {
         let mine = Region { at: own, len: 8192 };
-        install(Regions { image: mine, stack: mine, brk: mine, interp: None });
+        install(Regions { image: mine, stack: mine, brk: mine, interp: None, image_mapped: false, interp_mapped: false });
         out.push((
             "MAP_FIXED over memory the guest already holds answers that address",
             sys_mmap(own, 4096, 3, MAP_ANONYMOUS | MAP_FIXED, u64::MAX, 0) == own,
         ));
         out.push((
             "and records nothing, because something already holds those pages",
-            unsafe { SPACE.get() }.as_ref().is_some_and(|sp| sp.maps.is_empty()),
+            unsafe { guest_slot() }.as_ref().is_some_and(|sp| sp.maps.is_empty()),
         ));
         // Rights back before the page goes back, which is the mistake this
         // tree has now made three times in three different places.
@@ -4096,7 +4189,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
 
     {
         let fake = Region { at: 0x10_0000, len: 4096 };
-        install(Regions { image: fake, stack: fake, brk: fake, interp: None });
+        install(Regions { image: fake, stack: fake, brk: fake, interp: None, image_mapped: false, interp_mapped: false });
 
         let at = sys_mmap(0, 8192, 3, MAP_ANONYMOUS, u64::MAX, 0);
         let got = (at as i64) > 0 && at % 4096 == 0;
@@ -4113,7 +4206,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
             "unmapping what was never mapped is EINVAL",
             sys_munmap(at, 8192) == EINVAL,
         ));
-        unsafe { *SPACE.get() = None };
+        unsafe { *guest_slot() = None };
     }
 
     // arch_prctl, and the refusal that is the point of it.
@@ -4123,12 +4216,12 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         // GET_FS writes eight bytes through a guest pointer, so it is bounds
         // checked now, so the destination has to be a range the guest owns.
         let owned = Region { at, len: 8 };
-        install(Regions { image: owned, stack: owned, brk: owned, interp: None });
+        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false });
         let was = unsafe { crate::cpu::rdmsr(IA32_FS_BASE) };
         let set = sys_arch_prctl(ARCH_SET_FS, 0xDEAD_0000);
         let got = sys_arch_prctl(ARCH_GET_FS, at);
         unsafe { crate::cpu::wrmsr(IA32_FS_BASE, was) };
-        unsafe { *SPACE.get() = None };
+        unsafe { *guest_slot() = None };
         out.push((
             "a guest may set FS for its thread-local storage, and read it back",
             set == 0 && got == 0 && slot == 0xDEAD_0000,
@@ -4155,7 +4248,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         let mut backing = [0u64; 64];
         let at = backing.as_mut_ptr() as u64;
         let one = Region { at, len: 512 };
-        install(Regions { image: one, stack: one, brk: one, interp: None });
+        install(Regions { image: one, stack: one, brk: one, interp: None, image_mapped: false, interp_mapped: false });
         out.push(("a range inside what the loader gave out is owned", owns(at, 8)));
         out.push(("a range that runs off the end is not", !owns(at + 508, 8)));
         out.push(("a range below it is not", !owns(at - 8, 8)));
@@ -4181,7 +4274,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
             "a mapping larger than the cap is refused, so the page rounding cannot wrap",
             sys_mmap(0, MAP_MAX + 1, 3, MAP_ANONYMOUS, u64::MAX, 0) == ENOMEM,
         ));
-        unsafe { *SPACE.get() = None };
+        unsafe { *guest_slot() = None };
     }
     // mprotect, on a page taken for the check and given straight back.
     {
@@ -4191,7 +4284,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
             if !mem.is_null() {
                 let at = mem as u64;
                 let owned = Region { at, len: 4096 };
-                install(Regions { image: owned, stack: owned, brk: owned, interp: None });
+                install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false });
                 out.push(("a page the guest owns starts reachable", reachable(at, 8, true)));
                 out.push((
                     "mprotect to PROT_NONE is accepted",
@@ -4217,7 +4310,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
                 ));
                 let back = sys_mprotect(at, 4096, PROT_WRITE | 1) == 0;
                 out.push(("and read-write can be given back", back && reachable(at, 8, true)));
-                unsafe { *SPACE.get() = None };
+                unsafe { *guest_slot() = None };
                 crate::mem::paging::protect(at, 4096, crate::mem::paging::Perm::RWX);
                 unsafe { dealloc(mem, layout) };
             }
