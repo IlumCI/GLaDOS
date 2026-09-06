@@ -558,6 +558,61 @@ pub fn checks() -> alloc::vec::Vec<(&'static str, bool)> {
         out.push(("two low spaces and two pages could be built", false));
     }
 
+    // ---- the per-task root, carried across real context switches ----
+    //
+    // Everything above installs a root for the length of one call with
+    // interrupts off. This is the other thing entirely: a task *running* on
+    // its own root, preempted, and coming back on it.
+    //
+    // **Shaped so that a failure is a wrong value rather than a dead
+    // machine.** The obvious test maps a page only the space has, and if
+    // `schedule` failed to switch, the read faults at ring 0 with no
+    // recovery -- a suite that halts instead of reporting. Here 0x400000 is
+    // mapped in *both*: the kernel's identity map reaches the real physical
+    // page, and the space reaches a private one. Whichever way the switch
+    // goes the read is legal, and which value comes back says what happened.
+    if let (Some((ep, ephys)), Some(mut mine)) = (page(), Space::sharing_kernel()) {
+        const PRIVATE: u64 = 0x9999_1234_5678_u64;
+        const KERNELS: u64 = 0x7777_8765_4321_u64;
+        unsafe { core::ptr::write_volatile(ephys as *mut u64, PRIVATE) };
+        // Physical 0x400000 is inside the placeable run, so nothing owns it
+        // and writing a marker there is safe. It is what the read must find
+        // if the switch did not happen.
+        let identity_ok = super::fixed::is_free(0x400000, 4096);
+        if identity_ok {
+            unsafe { core::ptr::write_volatile(0x400000 as *mut u64, KERNELS) };
+        }
+        let mapped = mine.map_low(0x400000, ephys, true, false).is_ok();
+        out.push(("a task root could be prepared over 0x400000", mapped && identity_ok));
+
+        let me = crate::task::current();
+        crate::task::set_root(me, mine.root());
+        // Round trip through the scheduler: this task goes out, something
+        // else runs on the kernel's root, and we come back.
+        crate::task::yield_now();
+        let on_mine = crate::cpu::read_cr3() & ADDR_MASK == mine.root();
+        let seen = unsafe { core::ptr::read_volatile(0x400000 as *const u64) };
+        crate::task::set_root(me, 0);
+        crate::task::yield_now();
+        let back = crate::cpu::read_cr3() & ADDR_MASK == boot;
+        let after = unsafe { core::ptr::read_volatile(0x400000 as *const u64) };
+
+        out.push(("schedule brought this task back on its own root", on_mine));
+        out.push((
+            "and 0x400000 read the space's page rather than the machine's",
+            seen == PRIVATE,
+        ));
+        out.push(("clearing the root put the kernel's back", back));
+        out.push((
+            "and 0x400000 reads the real page again afterwards",
+            after == KERNELS,
+        ));
+        drop(mine);
+        give_back(ep);
+    } else {
+        out.push(("a task root could be prepared over 0x400000", false));
+    }
+
     // Dropping a live space must restore before it frees. Installed through a
     // raw activate rather than `with`, then dropped: the failure this catches
     // is a root freed while the processor walks it, which does not produce a

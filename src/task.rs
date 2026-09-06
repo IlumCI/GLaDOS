@@ -136,6 +136,21 @@ pub struct Task {
     /// that runs at least a hundred times a second and has nothing to do with
     /// guests.
     pub ring3: Option<Ring3>,
+    /// Which page-table root this task runs on, or 0 for the kernel's.
+    ///
+    /// **Every root here must map everything the kernel's does**, and that is
+    /// a precondition rather than a hope: `schedule` writes CR3 while running
+    /// kernel code on a kernel stack, so a root missing either of them makes
+    /// the write the last instruction this machine executes.
+    /// `mem::space::Space::sharing_kernel` guarantees it by construction, and
+    /// `map_low`'s `is_free` guard is what stops divergence taking it away.
+    ///
+    /// Zero rather than `Option<u64>` because the comparison is the fast path:
+    /// with no space anywhere in the machine both sides are 0, the branch in
+    /// `schedule` is not taken, and CR3 is never even read. The same bargain
+    /// `ring3` makes one field up, for the same reason -- a hundred switches a
+    /// second that have nothing to do with guests.
+    pub root: u64,
     /// XSAVE/FXSAVE image for this task's x87, SSE and AVX state.
     ///
     /// Necessary because preemption breaks the assumption the rest of the
@@ -164,6 +179,7 @@ const EMPTY: Task = Task {
     idle: false,
     fpu: core::ptr::null_mut(),
     ring3: None,
+    root: 0,
 };
 
 /// Allocate a zeroed, 64-byte aligned extended-state image.
@@ -260,6 +276,7 @@ pub fn init(name: &'static str) {
             idle: false,
             fpu,
             ring3: None,
+            root: 0,
         };
     }
     COUNT.store(1, Ordering::Release);
@@ -405,6 +422,7 @@ pub fn adopt_idle(cpu: usize) -> bool {
             idle: true,
             fpu,
             ring3: None,
+            root: 0,
         };
     }
     CURRENT[cpu].store(slot, Ordering::Release);
@@ -475,6 +493,7 @@ pub fn spawn(name: &'static str, entry: fn()) -> Option<usize> {
             idle: false,
             fpu: alloc_fpu_area(),
             ring3: None,
+            root: 0,
         };
     }
 
@@ -524,6 +543,46 @@ pub fn enable() {
 ///
 /// Set when the pool grows rather than when a thread starts, because the stack
 /// belongs to the kernel task and outlives every guest thread that borrows it.
+/// Put a task on its own page-table root, or back on the kernel's with 0.
+///
+/// **The caller keeps the `Space` alive for as long as this is set.** Nothing
+/// here can hold it: `Task` is `Copy`-ish plain data behind a `Spin` and a
+/// `Space` owns heap allocations with a `Drop` that frees page tables. So the
+/// hazard is a space dropped while a task still names its root, and what the
+/// processor then walks is freed memory -- the same shape as the `Drop` note
+/// in `mem::space`, one level up and not preventable from this side.
+///
+/// Answers false for an index that is not a task rather than panicking, since
+/// the only caller that can get it wrong is a shell verb.
+pub fn set_root(idx: usize, root: u64) -> bool {
+    let mut t = TASKS.lock_irq();
+    if idx >= MAX_TASKS || t[idx].state == State::Unused {
+        return false;
+    }
+    t[idx].root = root;
+    // **On the running task this takes effect now, and it has to.**
+    // `schedule`'s fast path skips the CR3 write when both roots read zero,
+    // which is only sound while a task's recorded root describes the CR3 it is
+    // actually on. Recording a change and leaving the write to the next switch
+    // breaks exactly that: clearing the current task's root back to the
+    // kernel's left both sides reading zero, the branch untaken, and the
+    // machine running on a root nothing named any more. Found by the claim
+    // rather than by reasoning -- the switch *to* a private root passed and
+    // the switch back failed, which is the asymmetry that says the record and
+    // the register had disagreed.
+    if idx == current() {
+        let want = if root == 0 { crate::mem::space::kernel_root() } else { root };
+        unsafe { crate::mem::paging::activate(want) };
+    }
+    true
+}
+
+/// Which root a task is on, or 0 for the kernel's.
+pub fn root_of(idx: usize) -> u64 {
+    let t = TASKS.lock_irq();
+    if idx < MAX_TASKS { t[idx].root } else { 0 }
+}
+
 pub fn set_ring3(idx: usize, syscall_stack: u64) {
     let mut t = TASKS.lock_irq();
     if idx < MAX_TASKS {
@@ -619,7 +678,7 @@ fn schedule() {
         return;
     }
 
-    let (save, load, out_fpu, in_fpu, out_r3, in_r3) = {
+    let (save, load, out_fpu, in_fpu, out_r3, in_r3, out_root, in_root) = {
         let mut t = TASKS.lock_irq();
         let n = COUNT.load(Ordering::Acquire);
 
@@ -675,6 +734,8 @@ fn schedule() {
             if t[cur].ring3.is_some() { Some(&mut t[cur]) } else { None }
                 .map(|x| x.ring3.as_mut().unwrap() as *mut Ring3),
             t[next].ring3,
+            t[cur].root,
+            t[next].root,
         )
     };
 
@@ -706,6 +767,30 @@ fn schedule() {
         }
         if !in_fpu.is_null() {
             crate::cpu::xrstor_from(in_fpu);
+        }
+        // The address space, last, and immediately before the stacks change.
+        //
+        // Safe here for one reason and it is worth stating rather than
+        // implying: every root a task may carry maps everything the kernel's
+        // does, so the code executing this instruction, the stack under it and
+        // the incoming task's stack are all mapped identically either side of
+        // the write. `Space::sharing_kernel` is what makes that true and
+        // `map_low` is careful not to take it away.
+        //
+        // Guarded on both being zero rather than always comparing against
+        // `kernel_root()`, and not only to save a `mov from cr3`: with no
+        // space anywhere in the machine nothing has ever sampled the kernel's
+        // root, and asking for it from in here would sample whatever CR3
+        // happens to hold. Same shape as the ring-3 branch above.
+        if out_root != 0 || in_root != 0 {
+            let want = if in_root == 0 {
+                crate::mem::space::kernel_root()
+            } else {
+                in_root
+            };
+            if want != crate::cpu::read_cr3() & 0x000F_FFFF_FFFF_F000 {
+                crate::mem::paging::activate(want);
+            }
         }
         glados_switch_context(save, load);
     }

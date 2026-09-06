@@ -1733,9 +1733,31 @@ processes, and reserving it would refuse the second for no reason. `claim` and
 `is_free` share their two predicates so they cannot disagree about one address.
 Measured after a run: `4 range(s), nothing claimed`.
 
-Twenty-seven claims. What is left for `fork` is no longer the address space at
-all: it is a per-task root in `schedule`, `load.rs` mapping into a space rather
-than relying on the identity map, and the three calls themselves.
+**A task runs on its own root now.** `Task` carries one (0 meaning the
+kernel's), `schedule` writes CR3 immediately before switching stacks, and
+`set_root` takes effect at once on the running task. Safe there for one reason,
+stated rather than implied: every root a task may carry maps everything the
+kernel's does, so the code executing the write, the stack under it and the
+incoming stack are mapped identically either side. `sharing_kernel` makes that
+true and `map_low`'s guard is what stops divergence taking it away.
+
+**The claim caught a real bug in the scheduler change, which is what it was
+for.** `schedule` skips the CR3 write when both roots read zero, and that is
+only sound while a task's recorded root describes the CR3 it is on. Clearing
+the running task's root to the kernel's left both sides reading zero, the
+branch untaken, and the machine on a root nothing named any more. The tell was
+the asymmetry: the switch *to* a private root passed and the switch back
+failed. Hence `set_root` activating immediately for the current task.
+
+The test is shaped so a failure is a wrong value rather than a dead machine.
+`0x400000` is mapped in **both** roots -- the identity map reaches the real
+physical page, the space reaches a private one -- so whichever way the switch
+goes the read is legal and the value says what happened. A page mapped only in
+the space would fault at ring 0 with no recovery, which is a suite that halts
+instead of reporting.
+
+Thirty-two claims. What is left for `fork` is `load.rs` mapping into a space
+rather than leaning on the identity map, and the three calls themselves.
 
 ### OpenGL, which turns out not to be kernel work at all
 
