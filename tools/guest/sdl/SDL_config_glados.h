@@ -20,9 +20,15 @@
  * - **Input is `SDL_INPUT_LINUXEV`**, which is evdev, which is exactly what
  *   `/dev/input/event0` and `event1` are. SDL's own code, unmodified, reading
  *   the devices this kernel grew last.
- * - **Audio is dummy.** There is no sound hardware driver here at all, and a
- *   driver that opened something and produced silence would be worse than one
- *   that says so.
+ * - **Audio is dummy, and the reason is a missing driver rather than missing
+ *   hardware.** `dev::registry` carries the row already: an HD Audio
+ *   controller, class 04:03, `Support::Known("no audio stack")` -- recognised,
+ *   with nothing behind it. That distinction is the whole point of the
+ *   registry and it is worth keeping straight here, because "no sound
+ *   hardware" reads as impossible where "no driver yet" reads as a job.
+ *   Intel HDA is published, needs no signed blob, and QEMU emulates
+ *   `intel-hda`, so unlike the wireless dongle it could be exercised from
+ *   this desk.
  * - **Threads are pthreads**, which is `clone` and `futex`, which arrived a
  *   few commits ago and are the reason this is possible at all.
  */
