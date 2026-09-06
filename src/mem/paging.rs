@@ -16,17 +16,17 @@ use super::frame::EarlyFrames;
 use super::{GIB, LARGE_PAGE_SIZE, PAGE_SIZE};
 use crate::uefi::MemoryDescriptor;
 
-const PRESENT: u64 = 1 << 0;
-const WRITABLE: u64 = 1 << 1;
+pub(crate) const PRESENT: u64 = 1 << 0;
+pub(crate) const WRITABLE: u64 = 1 << 1;
 /// PWT -- page write-through.
 const WRITE_THROUGH: u64 = 1 << 3;
 /// PCD -- page cache disable. Together with PWT this gives strong uncacheable,
 /// which is mandatory for memory-mapped device registers.
 const CACHE_DISABLE: u64 = 1 << 4;
 /// PS bit. On a PD entry this means "this is a 2 MiB page", not a pointer to a PT.
-const HUGE: u64 = 1 << 7;
+pub(crate) const HUGE: u64 = 1 << 7;
 /// U/S. Clear means ring 3 may not touch this page at all.
-const USER: u64 = 1 << 2;
+pub(crate) const USER: u64 = 1 << 2;
 /// Bit 63. Means no-execute, but only once `EFER.NXE` is on.
 const NX: u64 = 1 << 63;
 /// The physical address field of a 2 MiB entry is bits 51:21, not 51:12.
@@ -71,7 +71,7 @@ fn addr_is_ram(addr: u64, mmap: *const u8, mmap_size: usize, desc_size: usize) -
 }
 
 const ENTRIES: usize = 512;
-const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+pub(crate) const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
 #[inline]
 unsafe fn table(phys: u64) -> &'static mut [u64; ENTRIES] {

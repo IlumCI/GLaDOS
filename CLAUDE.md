@@ -1651,6 +1651,69 @@ syscall away: `fork` needs two address spaces, and one address space is the
 founding claim of this system rather than a shortcut it took. Nothing else in
 the measured surface is blocked on a decision that large.
 
+**That paragraph is now half true, and which half is the useful part.**
+`src/mem/space.rs` exists: a second address space builds, CR3 moves to it, and
+two spaces map one virtual address to different physical memory. So the
+mechanism is no longer the obstacle and this file should stop saying it is.
+What remains is *placement*, which is a smaller and more specific problem than
+"one address space" made it sound. See the section below.
+
+### A second address space
+
+`src/mem/space.rs`, and the thing it removed was an assumption rather than a
+line of code. `paging::activate` had exactly one caller in the whole tree,
+`main.rs`, at the moment the identity map replaces the firmware's -- so
+"can this machine switch address spaces at all" had never been asked, and
+`fork` was refused on the strength of an answer nobody had measured.
+
+Two pieces, and the order between them is the design.
+
+**Sharing.** `Space::sharing_kernel` copies the kernel's 512 top-level
+entries, which are *pointers* to the PDPTs it already built, so both roots walk
+the identical tables underneath. Exactly one copy of every mapping exists, a
+`protect` through one root is visible through the other because it is the same
+entry, and nothing can drift. That is what made the switch safe to prove on its
+own before anything depended on it.
+
+**Divergence.** `map_page` gives a space a mapping the kernel's root does not
+have, which is what a process actually needs. It is confined to `WINDOW`
+(512 GiB, PML4 entry 1) **and the confinement is the entire safety argument**:
+`build_identity_map` hangs everything off entry 0, so every address the kernel
+maps has a top-level index of zero, and anything at or above the window is
+unmapped in every root that has not asked for it. A mistake there faults on an
+address nothing owns instead of quietly landing in the heap.
+
+A mapping below the window is **refused**, and that refusal is the point. The
+top-level entries were copied, so they point at the kernel's own PDPTs:
+creating a table under entry 0 would create it inside the kernel's map, every
+space would see it, and the "private" mapping would not be private at all.
+
+Three details that are silent when wrong, each with a claim:
+
+- **The root has to be identity-mapped**, because CR3 takes a physical address
+  while every write to the table goes through a virtual one. It is, because the
+  heap is inside the identity map, the same property `cpu::code` leans on to
+  execute from a heap allocation. Checked rather than assumed, since the day it
+  stops being true the processor walks whatever lives at that physical address.
+- **`Drop` restores CR3 before it frees.** Freeing a table the processor is
+  still walking hands the allocator memory the next translation will read. The
+  fourth instance in this tree of "put it back before giving it away".
+- **The U bit is set on intermediates** and gated at the leaf, because it is
+  ANDed down all four levels.
+
+Twenty claims, and the five that earn their place are the divergent ones: two
+spaces map one address, to genuinely different physical pages, each reads its
+own, a write through one lands in that space's page, and it leaves the other
+alone. That last one is what would catch a leaf pointing at the wrong frame,
+which reads identically to a correct one until something writes.
+
+**What is left for `fork` is placement.** A process wants its own `0x400000`,
+and that address is inside the identity map's own subtree, so privatising it
+means giving a space its own page directories for a region the kernel is also
+using. `mem::fixed` already computes that `0x106000..0x800000` is free, which
+is the evidence that the region is available; what does not exist yet is a
+space whose low entries are its own.
+
 ### OpenGL, which turns out not to be kernel work at all
 
 **Every OpenGL on Linux is a userspace shared object.** In software mode

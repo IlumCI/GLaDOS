@@ -239,6 +239,11 @@ pub const SUITES: &[Suite] = &[
         about: "the ring-3 descriptors, and the order sysret dictates",
         run: gdt_selftest,
     },
+    Suite {
+        name: "space",
+        about: "a second address space, and CR3 moving after boot",
+        run: space_selftest,
+    },
 ];
 
 /// The ported picture decoder.
@@ -347,6 +352,21 @@ fn sockets_selftest() -> bool {
     ok
 }
 
+fn space_selftest() -> bool {
+    use crate::kprintln;
+    let mut ok = true;
+    let mut n = 0usize;
+    for (what, good) in crate::mem::space::checks() {
+        n += 1;
+        if !good {
+            kprintln!("    FAIL: {}", what);
+            ok = false;
+        }
+    }
+    kprintln!("    {} claim(s)", n);
+    ok
+}
+
 fn place_selftest() -> bool {
     use crate::kprintln;
     let mut ok = true;
@@ -409,7 +429,7 @@ fn linux_selftest() -> bool {
 /// says it exists to prevent. A `static` cannot be read in a const context, so
 /// the array cannot be measured directly; naming its length is the next best
 /// thing and it is now the only place the number appears.
-const SLOTS: usize = 40;
+const SLOTS: usize = 41;
 
 /// One slot per suite. Indexed by position in `SUITES`, which is a constant,
 /// so the table cannot get out of step with the list.
