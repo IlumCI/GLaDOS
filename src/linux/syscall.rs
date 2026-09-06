@@ -120,6 +120,7 @@ pub const SYS_DUP3: u64 = 292;
 pub const SYS_CLONE: u64 = 56;
 pub const SYS_FORK: u64 = 57;
 pub const SYS_VFORK: u64 = 58;
+pub const SYS_EXECVE: u64 = 59;
 pub const SYS_WAIT4: u64 = 61;
 pub const SYS_FUTEX: u64 = 202;
 pub const SYS_GETTID: u64 = 186;
@@ -635,6 +636,17 @@ pub struct Space {
     /// from the syscall path and must die with the guest. That is this entry.
     /// `Guest` hands them over at `install` and `teardown` drops them.
     pub tables: Option<crate::mem::space::Space>,
+    /// The `Guest` an `execve` built, held so its pages outlive the call.
+    ///
+    /// **Only `execve` fills this, and the reason is that nothing else has to.**
+    /// A guest started by `linux run` is described by a `Guest` the shell holds
+    /// on its own stack for as long as the run lasts. One that replaced itself
+    /// has no such owner: the shell's `Guest` describes the program that just
+    /// stopped existing, and dropping it would free the image the guest is now
+    /// executing from. So the new one lives here and dies with the entry --
+    /// which also makes a second `execve` free the first one's pages, because
+    /// replacing this field drops what it held.
+    pub holder: Option<alloc::boxed::Box<super::load::Guest>>,
     /// Heap ranges this guest owns outright, freed when it is torn down.
     ///
     /// A forked child's memory. The parent's image, stack and break belong to
@@ -750,6 +762,81 @@ pub unsafe fn guest_slot() -> &'static mut Option<Space> {
 ///
 /// # Safety
 /// `stack` must be the top of a stack this task alone will use.
+/// Where the guest's stack pointer will be restored from on the way out.
+///
+/// `execve` is the only caller and it is how the new program gets a fresh
+/// stack: the stub ends `mov rsp, [GLADOS_GUEST_RSP]` then `sysretq`, so
+/// setting this and the frame's `rip` is the whole of "return into a
+/// different program" -- no second entry stub, no longjmp, and the syscall
+/// that never returns returns like any other.
+///
+/// # Safety
+/// `v` must be a stack the running guest owns.
+/// Hand a guest the `Guest` describing what it is now executing.
+///
+/// See `Space::holder`. Replacing what was there drops it, which is how the
+/// pages of a program that has been exec'd over are freed.
+pub fn hold_guest(g: super::load::Guest) {
+    if let Some(sp) = unsafe { guest_slot() }.as_mut() {
+        sp.holder = Some(alloc::boxed::Box::new(g));
+    }
+}
+
+pub unsafe fn set_guest_rsp(v: u64) {
+    unsafe { core::ptr::write(core::ptr::addr_of_mut!(GLADOS_GUEST_RSP), v) };
+}
+
+/// Give this guest a different image, keeping what `execve` says survives.
+///
+/// **Not `install`, and the difference is the point.** `install` calls
+/// `teardown`, which stands down the screen, the input script, the thread
+/// pool *and the child table* -- right for a guest that is finishing and
+/// wrong for one that is merely becoming a different program. A child that
+/// execs would clear its own parent's record of it.
+///
+/// Descriptors and the working directory survive, because that is what Linux
+/// promises across an exec; everything that describes memory is replaced. The
+/// old pages and the old tables go here, which is the one moment both the old
+/// and the new are in hand.
+pub fn replace_guest(
+    r: Regions,
+    tables: Option<crate::mem::space::Space>,
+) -> bool {
+    let slot = unsafe { guest_slot() };
+    let Some(old) = slot.as_mut() else { return false };
+    let fds = core::mem::take(&mut old.fds);
+    let cwd = core::mem::take(&mut old.cwd);
+    let saved_fs = old.saved_fs;
+    for (at, len) in core::mem::take(&mut old.owned) {
+        free_pages(at, len);
+    }
+    let brk = r.brk;
+    *slot = Some(Space {
+        image: r.image,
+        interp: r.interp,
+        stack: r.stack,
+        brk_start: brk.at,
+        brk_now: brk.at,
+        brk_end: brk.at.saturating_add(brk.len as u64),
+        maps: Vec::new(),
+        fds,
+        cwd,
+        argv: Vec::new(),
+        image_mapped: r.image_mapped,
+        interp_mapped: r.interp_mapped,
+        stack_mapped: r.stack_mapped,
+        brk_mapped: r.brk_mapped,
+        tables,
+        holder: None,
+        owned: alloc::vec::Vec::new(),
+        mmap_next: GUEST_MMAP_AT,
+        image_path: String::new(),
+        interp_path: None,
+        saved_fs,
+    });
+    true
+}
+
 pub unsafe fn set_syscall_stack(stack: u64) {
     unsafe { core::ptr::write(core::ptr::addr_of_mut!(GLADOS_SYSCALL_STACK), stack) };
 }
@@ -807,6 +894,9 @@ pub fn clone_guest(
         interp_mapped: p.interp_mapped,
         stack_mapped: p.stack_mapped,
         brk_mapped: p.brk_mapped,
+        // Not inherited: the child's memory was *copied*, so it owns pages
+        // rather than an image, and they are in `owned` instead.
+        holder: None,
         tables: Some(tables),
         owned,
         mmap_next: p.mmap_next,
@@ -936,7 +1026,7 @@ pub fn owns(at: u64, len: usize) -> bool {
 /// into it to `write`. The range is one it owns, so the region check says yes,
 /// and the kernel then reads a page that is not present. `EFAULT` is what
 /// Linux answers and it is what this answers.
-fn reachable(at: u64, len: usize, need_write: bool) -> bool {
+pub fn reachable(at: u64, len: usize, need_write: bool) -> bool {
     if !owns(at, len) {
         return false;
     }
@@ -972,6 +1062,7 @@ pub fn install(r: Regions, tables: Option<crate::mem::space::Space>) {
             stack_mapped: r.stack_mapped,
             brk_mapped: r.brk_mapped,
             tables,
+            holder: None,
             owned: alloc::vec::Vec::new(),
             mmap_next: GUEST_MMAP_AT,
             stack: r.stack,
@@ -1287,7 +1378,7 @@ fn sys_write(fd: u64, buf: u64, len: usize) -> u64 {
 /// so a Latin-1 filename is a perfectly legal thing to ask for and an
 /// impossible thing to store in a namespace keyed by `String` -- `ENOENT` is
 /// the true answer there, since no such name can exist here.
-fn read_cstr(at: u64) -> Result<String, u64> {
+pub fn read_cstr(at: u64) -> Result<String, u64> {
     let mut out = alloc::vec::Vec::new();
     let mut p = at;
     let mut checked_to = at;
@@ -3744,6 +3835,9 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         // `vfork` semantics -- is what would corrupt a parent.
         SYS_VFORK => (super::fork::fork(f), true),
         SYS_WAIT4 => (super::fork::wait(f.rdi as i64, f.rsi), true),
+        // Returns into a different program rather than to its caller, so the
+        // frame it was handed is the thing it edits.
+        SYS_EXECVE => (super::load::exec(f), true),
         SYS_FUTEX => (sys_futex(f.rdi, f.rsi, f.rdx, f.r10), true),
         SYS_GETTID => (super::thread::current_tid(), true),
         // A thread yielding to another is a thing this kernel can actually do,
@@ -5122,6 +5216,7 @@ pub fn name_of(nr: u64) -> &'static str {
         SYS_FORK => "fork",
         SYS_VFORK => "vfork",
         SYS_WAIT4 => "wait4",
+        SYS_EXECVE => "execve",
         SYS_FUTEX => "futex",
         SYS_GETTID => "gettid",
         SYS_TGKILL => "tgkill",

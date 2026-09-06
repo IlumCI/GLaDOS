@@ -815,6 +815,45 @@ def fork_code(entry_rva, msg_rva, _unused):
     return bytes(c)
 
 
+EXEC_PATH = b"/tmp/fixed\x00"
+MSG_EXEC_BACK = b"execve: it came back, so it failed\n"
+
+
+def exec_code(entry_rva, msg_rva, _unused):
+    """Become another program, and say so if it does not happen.
+
+    **Success is somebody else's output.** `execve` that works produces no
+    line from this program at all -- what appears is `/tmp/fixed` printing
+    `hello from ring 3` and exiting 5, from an image this one never had. That
+    is a much stronger signal than a message here would be, because there is
+    no way to fake it from inside a program that failed to be replaced.
+
+    The failure path is the one that prints. `execve` returning at all means
+    it did not happen, so the message says exactly that and exits 4, and a run
+    reporting 4 is a run that failed however plausible its output looks.
+    """
+    c = bytearray()
+    c += mov_imm("rax", 59)                     # execve
+    lea_at = len(c)
+    c += lea_rip("rdi", 0)                      # the path
+    lea_end = len(c)
+    c += mov_imm("rsi", 0)                      # no argv
+    c += mov_imm("rdx", 0)                      # no envp
+    c += SYSCALL
+    # Only reached when execve refused.
+    c += mov_imm("rax", 1) + mov_imm("rdi", 1)
+    lea2_at = len(c)
+    c += lea_rip("rsi", 0)
+    lea2_end = len(c)
+    c += mov_imm("rdx", len(MSG_EXEC_BACK)) + SYSCALL
+    c += mov_imm("rax", 60) + mov_imm("rdi", 4) + SYSCALL + HLT
+
+    struct.pack_into("<i", c, lea_at + 3, msg_rva - (entry_rva + lea_end))
+    struct.pack_into("<i", c, lea2_at + 3,
+                     msg_rva + len(EXEC_PATH) - (entry_rva + lea2_end))
+    return bytes(c)
+
+
 def spin_code(entry_rva, _a, _b):
     """Loop forever, asking for nothing.
 
@@ -2160,6 +2199,13 @@ def build(kind="static"):
         text = spin_code(entry, 0, 0)
         body = text
         msg_rva, disp, lea_end = body_at, 0, 0
+    elif kind == "exec":
+        probe = exec_code(0, 0, 0)
+        msg_rva = body_at + len(probe)
+        text = exec_code(entry, msg_rva, 0)
+        assert len(text) == len(probe), (len(text), len(probe))
+        body = text + EXEC_PATH + MSG_EXEC_BACK
+        disp, lea_end = 0, 0
     elif kind == "fork":
         probe = fork_code(0, 0, 0)
         msg_rva = body_at + len(probe)
@@ -2641,6 +2687,21 @@ def verify(path):
         claim("and ends in hlt, so a syscall that returns is visible",
               b.endswith(HLT))
         return ok
+    if MSG_EXEC_BACK in b:
+        claim("it names the program it is becoming", EXEC_PATH in b)
+        # Two calls on the failure path and one on the success path, which is
+        # the whole of it: a fixture that wrote something before the execve
+        # would make a working exec indistinguishable from a broken one.
+        claim("it makes three calls: the execve and the two it only reaches "
+              "when that returns",
+              b.count(SYSCALL) == 3)
+        claim("and it asks for execve rather than something adjacent",
+              mov_imm("rax", 59) in b)
+        claim("it exits 4 on the path that means failure",
+              mov_imm("rdi", 4) in b)
+        claim("its code ends in hlt, so a syscall that returns is visible",
+              b[b.index(EXEC_PATH) - 1:b.index(EXEC_PATH)] == HLT)
+        return ok
     # Identified by its own message, the way every other branch here is:
     # `verify` reads the file back and has no idea what it was asked to build.
     if MSG_FORK_CHILD in b:
@@ -2698,7 +2759,7 @@ def main():
     ap.add_argument("--kind",
                     choices=["static", "dynamic", "interp", "loader", "maps",
                              "fixed", "memory", "rogue",
-                             "protect", "wild", "spin", "fork", "cat", "grep",
+                             "protect", "wild", "spin", "fork", "exec", "cat", "grep",
                              "fsabuse", "fb", "ev", "thread", "gl"],
                     default="static")
     ap.add_argument("--verify", action="store_true")

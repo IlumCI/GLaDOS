@@ -644,6 +644,154 @@ pub unsafe fn run(g: &mut Guest) -> u64 {
     out
 }
 
+/// Read a NULL-terminated array of C string pointers out of guest memory.
+///
+/// Bounded at `MAX_ARGS` rather than trusted, because the terminator is the
+/// guest's to supply and a missing one is an unbounded walk through whatever
+/// follows the array. `EFAULT` on anything unreachable, which is the answer
+/// Linux gives and the one a libc knows how to report.
+fn read_vec(at: u64) -> Result<Vec<alloc::string::String>, u64> {
+    const MAX_ARGS: usize = 256;
+    const EFAULT: u64 = (-14i64) as u64;
+    const E2BIG: u64 = (-7i64) as u64;
+    let mut out = Vec::new();
+    if at == 0 {
+        return Ok(out);
+    }
+    let mut p = at;
+    loop {
+        if out.len() >= MAX_ARGS {
+            return Err(E2BIG);
+        }
+        if !syscall::reachable(p, 8, false) {
+            return Err(EFAULT);
+        }
+        let entry = unsafe { core::ptr::read(p as *const u64) };
+        if entry == 0 {
+            return Ok(out);
+        }
+        out.push(syscall::read_cstr(entry)?);
+        p += 8;
+    }
+}
+
+/// `execve`: become a different program, without returning.
+///
+/// **It returns like any other syscall and that is the trick.** The stub ends
+/// `mov rsp, [GLADOS_GUEST_RSP]` then `sysretq`, and `sysretq` takes its
+/// destination from `rcx` and its flags from `r11` -- both of which are fields
+/// of the frame this was handed. So setting the frame's `rip` and the guest's
+/// stack pointer *is* the jump: no second entry stub, no longjmp, and no
+/// special case anywhere in the return path.
+///
+/// The ordering is the delicate part and every step of it is forced:
+///
+/// 1. Read the path and the vectors **first**, while the old image is still
+///    mapped. They live in the memory this is about to replace.
+/// 2. Load the new image, which can still fail -- and a failed `execve` must
+///    leave the caller running, so nothing is torn down until this succeeds.
+/// 3. Replace the guest entry, which frees the old pages and takes the new
+///    tables.
+/// 4. Install the new root, and only then apply page rights: `entry_for_user`
+///    opens the U bit on whatever `read_cr3()` names, and doing it first would
+///    open it on the *old* root the guest is about to stop using.
+pub fn exec(f: &mut syscall::Frame) -> u64 {
+    const EFAULT: u64 = (-14i64) as u64;
+    const ENOENT: u64 = (-2i64) as u64;
+    const ENOEXEC: u64 = (-8i64) as u64;
+    const ENOMEM: u64 = (-12i64) as u64;
+
+    let path = match syscall::read_cstr(f.rdi) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if path.is_empty() {
+        return ENOENT;
+    }
+    let argv = match read_vec(f.rsi) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    // The environment is read and then **not used**, which is a deviation
+    // worth stating rather than hiding: this machine's environment is
+    // `syscall::environ`, five variables each a fact about it, and a guest
+    // handing over its own would replace facts with whatever it inherited.
+    // Read anyway so an unreachable pointer is still `EFAULT`, which is what
+    // a caller checking its own arguments expects.
+    if f.rdx != 0 && read_vec(f.rdx).is_err() {
+        return EFAULT;
+    }
+
+    let Some(bytes) = crate::sysbox::read_blob(&path) else { return ENOENT };
+    let args: Vec<&str> = if argv.is_empty() {
+        alloc::vec![path.as_str()]
+    } else {
+        argv.iter().map(|a| a.as_str()).collect()
+    };
+    // Everything that can fail happens before anything is destroyed. A failed
+    // `execve` returns to a caller that is still whole, which is the one thing
+    // every program using it relies on -- it is how a shell reports "command
+    // not found" from the child rather than losing it.
+    let mut g = match load(&bytes, &args) {
+        Ok(g) => g,
+        Err(_) => return ENOEXEC,
+    };
+
+    let regions = g.regions;
+    if !syscall::replace_guest(regions, g.space.take()) {
+        return ENOMEM;
+    }
+    syscall::name_guest(&args, &path, g.interp.as_ref().map(|(p, _, _)| p.as_str()));
+
+    let me = crate::task::current();
+    let root = syscall::guest_root();
+    if root != 0 {
+        crate::task::set_root(me, root);
+    }
+    for (r, mapped) in [
+        (Some(regions.image), regions.image_mapped),
+        (Some(regions.stack), regions.stack_mapped),
+        (Some(regions.brk), regions.brk_mapped),
+        (regions.interp, regions.interp_mapped),
+    ] {
+        let Some(r) = r else { continue };
+        if mapped {
+            continue;
+        }
+        if !crate::mem::paging::protect(r.at, r.len, crate::mem::paging::Perm::USER_RWX) {
+            return ENOMEM;
+        }
+    }
+
+    // Read out before the `Guest` is handed over, since moving it is what
+    // keeps its pages alive and there is nothing left to ask afterwards.
+    let (entry, stack_top) = (g.entry, g.stack_top);
+    // The image's backing pages outlive this call and have no owner otherwise
+    // -- the `Guest` the shell holds describes the program that just stopped
+    // existing. Handed to the guest entry, which frees them with it.
+    syscall::hold_guest(g);
+
+    // And the jump. Every register the stub restores is cleared, because a
+    // program entered at `_start` reads its arguments off the stack and a
+    // libc that found something in `rbx` would be entitled to believe it.
+    f.rip = entry;
+    f.rflags = 0x202;
+    f.rdi = 0;
+    f.rsi = 0;
+    f.rdx = 0;
+    f.r10 = 0;
+    f.r8 = 0;
+    f.r9 = 0;
+    f.rbx = 0;
+    f.rbp = 0;
+    f.r12 = 0;
+    f.r13 = 0;
+    f.r14 = 0;
+    f.r15 = 0;
+    unsafe { syscall::set_guest_rsp(stack_top) };
+    0
+}
+
 /// What `diag linux` asks of the refusals.
 ///
 /// The loader itself needs a heap and an image, so what is asserted here is
