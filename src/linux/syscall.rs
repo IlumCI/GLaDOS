@@ -116,6 +116,7 @@ pub const SYS_FCNTL: u64 = 72;
 pub const SYS_GETTIMEOFDAY: u64 = 96;
 pub const SYS_CLOCK_GETTIME: u64 = 228;
 pub const SYS_DUP2: u64 = 33;
+pub const SYS_DUP3: u64 = 292;
 pub const SYS_GETUID: u64 = 102;
 pub const SYS_GETGID: u64 = 104;
 pub const SYS_GETEUID: u64 = 107;
@@ -153,6 +154,7 @@ const EEXIST: u64 = (-17i64) as u64;
 const ERANGE: u64 = (-34i64) as u64;
 const ENOTEMPTY: u64 = (-39i64) as u64;
 const ENODEV: u64 = (-19i64) as u64;
+const ENOSPC: u64 = (-28i64) as u64;
 
 /// `AT_EMPTY_PATH`: operate on the descriptor rather than on a path under it.
 const AT_EMPTY_PATH: u64 = 0x1000;
@@ -357,6 +359,14 @@ pub enum Source {
     /// `MAP_FIXED` at all, since virtual is physical here and the address the
     /// guest names is real memory somebody may already own.
     Fixed,
+    /// The display's own aperture, handed out by `/dev/fb0`.
+    ///
+    /// A third source because it goes back a third way, and the two it is not
+    /// are both actively wrong: freeing it to the heap hands the allocator
+    /// several megabytes of somebody else's memory-mapped registers, and
+    /// releasing it through `mem::fixed` releases a claim nobody ever made.
+    /// All it owes is the U bit, taken back off.
+    Device,
 }
 
 /// A range this kernel handed to the guest.
@@ -579,6 +589,12 @@ pub fn install(r: Regions) {
 /// `exit_group` is how programs end -- so the teardown is where mappings are
 /// actually reclaimed and `munmap` is only the early return of one.
 pub fn teardown() -> usize {
+    // **Before anything else, and unconditionally.** A guest that took the
+    // display and then faulted is exactly the case this has to cover, and a
+    // release conditional on a tidy exit would leave the desktop stood down
+    // with the last frame of a dead program on it and no way back short of a
+    // reboot.
+    super::dev::hold_screen(false);
     let mut freed = 0;
     unsafe {
         if let Some(sp) = SPACE.get().as_mut() {
@@ -901,6 +917,25 @@ fn with_fds<T>(f: impl FnOnce(&mut Vec<Option<super::fs::Fd>>, &str) -> T) -> Op
 /// gate `sysbox` puts in front of the shell. When guests get to write it
 /// should be a deliberate design, so for now `O_WRONLY` and `O_RDWR` answer
 /// `EACCES` and say why here.
+/// Put a new description in the lowest free slot, which is what makes
+/// `close(1)` then `open(...)` hand back 1 and is the whole of how a shell
+/// redirects.
+fn place_fd(fds: &mut Vec<Option<super::fs::Fd>>, entry: super::fs::Fd) -> u64 {
+    match fds.iter().position(|f| f.is_none()) {
+        Some(slot) => {
+            fds[slot] = Some(entry);
+            slot as u64
+        }
+        None => {
+            if fds.len() >= MAX_FDS {
+                return EMFILE;
+            }
+            fds.push(Some(entry));
+            (fds.len() - 1) as u64
+        }
+    }
+}
+
 fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u64 {
     let raw = match read_cstr(path_at) {
         Ok(v) => v,
@@ -927,18 +962,34 @@ fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u64 {
         // Nothing under `/proc` is writable, listed by `sysbox` or in a
         // snapshot, and asking the store about it first would answer `ENOENT`
         // for a path that does exist.
-        if super::proc::claims(&path) {
+        // **A device is opened for writing and that is not the jail's
+        // business.** `/tmp` is the whole of where a guest may write because
+        // everywhere else is the content-addressed store, and a new root hash
+        // per write is the objection. A character device is not in the store,
+        // so the objection does not apply -- and `/dev/fb0` opened read-only
+        // is a framebuffer nothing can draw on.
+        if let Some(n) = super::dev::node(&path) {
+            if flags & O_DIRECTORY != 0 {
+                return ENOTDIR;
+            }
+            let entry = super::fs::Fd::Dev(alloc::rc::Rc::new(core::cell::RefCell::new(
+                super::fs::DevFile { path: path.clone(), node: n, at: 0 },
+            )));
+            return place_fd(fds, entry);
+        }
+        if super::proc::claims(&path) || super::dev::is_dir(&path) {
             if wants_write {
                 return EROFS;
             }
-            let entry = if super::proc::is_dir(&path) {
-                if flags & O_DIRECTORY == 0 && false {
-                    return EISDIR;
-                }
+            let entry = if super::proc::is_dir(&path) || super::dev::is_dir(&path) {
                 super::fs::Fd::Dir(alloc::rc::Rc::new(core::cell::RefCell::new(
                     super::fs::Dir {
                         path: path.clone(),
-                        entries: super::proc::entries(&path),
+                        entries: if super::dev::is_dir(&path) {
+                            super::dev::entries(&path)
+                        } else {
+                            super::proc::entries(&path)
+                        },
                         at: 0,
                     },
                 )))
@@ -961,15 +1012,7 @@ fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u64 {
                     },
                 )))
             };
-            let Some(slot) = fds.iter().position(|f| f.is_none()) else {
-                if fds.len() >= MAX_FDS {
-                    return EMFILE;
-                }
-                fds.push(Some(entry));
-                return (fds.len() - 1) as u64;
-            };
-            fds[slot] = Some(entry);
-            return slot as u64;
+            return place_fd(fds, entry);
         }
         // The jail, checked on the resolved path and before anything is
         // created. `EROFS` rather than `EACCES`, because the objection is to
@@ -1177,6 +1220,27 @@ fn write_file(fd: u64, buf: u64, len: usize) -> u64 {
     }
     if !reachable(buf, len, false) {
         return EFAULT;
+    }
+    if let Some(r) = with_fds(|fds, _| match fds.get(fd as usize) {
+        Some(Some(super::fs::Fd::Dev(body))) => {
+            let d = &mut *body.borrow_mut();
+            let src = unsafe { core::slice::from_raw_parts(buf as *const u8, len) };
+            let n = super::dev::write(d.node, d.at, src);
+            // Zero from a device that was given bytes means there was nowhere
+            // to put them, which for the framebuffer is a cursor past the end
+            // of video memory. `ENOSPC` rather than a short write of nothing,
+            // because a copy loop treats zero as "try again" and spins.
+            if n == 0 {
+                return Some(ENOSPC);
+            }
+            d.at = d.at.saturating_add(n);
+            Some(n as u64)
+        }
+        _ => None,
+    })
+    .flatten()
+    {
+        return r;
     }
     with_fds(|fds, _| {
         let Some(Some(super::fs::Fd::File(body))) = fds.get(fd as usize) else { return EBADF };
@@ -1720,6 +1784,34 @@ impl MinFd for u64 {
     }
 }
 
+/// `dup2` with a flags argument, and one deliberate difference.
+///
+/// **`dup3(n, n, 0)` is `EINVAL` where `dup2(n, n)` answers `n`.** That is the
+/// whole reason the call exists as well as `dup2`: the no-op case hides a bug
+/// in the caller, so the newer call refuses it. Getting this backwards would
+/// be invisible in every program that never makes the mistake, which is all of
+/// them until one does.
+///
+/// It was found by driving rather than by reading a list. glibc's `dup2` calls
+/// `dup3` where the descriptors differ, so `busybox dd` reached `dup2` and
+/// `busybox hexdump` reached this and stopped -- two applets in one sweep,
+/// taking two different routes to the same thing.
+///
+/// `O_CLOEXEC` is accepted and does nothing, honestly: there is no `execve`
+/// here for a descriptor to survive, so the flag names an event that cannot
+/// happen. Any other flag is `EINVAL`, because a flag this does not implement
+/// is one the caller is relying on.
+fn sys_dup3(from: u64, to: u64, flags: u64) -> u64 {
+    const O_CLOEXEC: u64 = 0o2_000_000;
+    if flags & !O_CLOEXEC != 0 {
+        return EINVAL;
+    }
+    if from == to {
+        return EINVAL;
+    }
+    sys_dup(from, Some(to))
+}
+
 fn sys_dup(from: u64, to: Option<u64>) -> u64 {
     with_fds(|fds, _| {
         let copy = match fds.get(from as usize) {
@@ -1802,6 +1894,13 @@ fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
                 core::ptr::copy_nonoverlapping(data[from..].as_ptr(), buf as *mut u8, n);
             }
             *at = at.saturating_add(n);
+            n as u64
+        }
+        Some(Some(super::fs::Fd::Dev(body))) => {
+            let d = &mut *body.borrow_mut();
+            let out = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, len as usize) };
+            let n = super::dev::read(d.node, d.at, out);
+            d.at = d.at.saturating_add(n);
             n as u64
         }
         Some(Some(super::fs::Fd::Dir(_))) => EISDIR,
@@ -2112,6 +2211,26 @@ fn sys_lseek(fd: u64, off: u64, whence: u64) -> u64 {
                 EINVAL
             }
         }
+        // A device seeks, which is how `cat > /dev/fb0` reaches the bottom
+        // half of the screen. The end is video memory's for the framebuffer
+        // and zero for the rest, which have no end -- `SEEK_END` on
+        // `/dev/zero` answering zero is what Linux does and is why nothing
+        // uses it to size anything.
+        Some(Some(super::fs::Fd::Dev(body))) => {
+            let d = &mut *body.borrow_mut();
+            let base = match whence {
+                0 => 0i64,
+                1 => d.at as i64,
+                2 => super::dev::size(d.node) as i64,
+                _ => return EINVAL,
+            };
+            let want = base.saturating_add(off as i64);
+            if want < 0 {
+                return EINVAL;
+            }
+            d.at = want as usize;
+            want as u64
+        }
         // A stream has no position. `ESPIPE` is what libc turns into "illegal
         // seek", and it is how a program discovers stdout is not a file.
         Some(Some(_)) => ESPIPE,
@@ -2138,6 +2257,10 @@ fn sys_fstat(fd: u64, buf: u64) -> u64 {
         Some(Some(super::fs::Fd::Dir(b))) => {
             let d = b.borrow();
             Some((super::fs::Kind::Dir, 0, super::fs::ino_of(&d.path)))
+        }
+        Some(Some(super::fs::Fd::Dev(b))) => {
+            let d = b.borrow();
+            Some((super::fs::Kind::Char, super::dev::size(d.node), super::fs::ino_of(&d.path)))
         }
         // The standard three report as pipes, which is the only answer that
         // agrees with the rest of this module: `lseek` on them is `ESPIPE` and
@@ -2180,6 +2303,12 @@ fn sys_statat(dirfd: u64, path_at: u64, buf: u64, flags: u64) -> u64 {
     }
     let found = with_fds(|_, cwd| super::fs::resolve(cwd, &raw)).flatten();
     let Some(path) = found else { return ENOENT };
+    if let Some(n) = super::dev::node(&path) {
+        return write_stat(buf, super::fs::Kind::Char, super::dev::size(n), super::fs::ino_of(&path));
+    }
+    if super::dev::is_dir(&path) {
+        return write_stat(buf, super::fs::Kind::Dir, 0, super::fs::ino_of(&path));
+    }
     if super::proc::claims(&path) {
         if super::proc::is_dir(&path) {
             return write_stat(buf, super::fs::Kind::Dir, 0, super::fs::ino_of(&path));
@@ -2255,12 +2384,66 @@ fn sys_getdents64(fd: u64, buf: u64, len: u64) -> u64 {
 /// full buffering, no colour, no width probing. That is true here and it is
 /// also the useful answer, because the alternative is claiming a terminal and
 /// then being asked its window size.
-fn sys_ioctl(fd: u64, _req: u64, _arg: u64) -> u64 {
+/// The four requests a framebuffer program makes, and `ENOTTY` for everything
+/// else.
+///
+/// `ENOTTY` rather than `EINVAL` for an unknown request, because that is how a
+/// program asks "are you a terminal" and gets told no -- which is what every
+/// runtime here does on startup and what `isatty` is built from.
+fn sys_ioctl(fd: u64, req: u64, arg: u64) -> u64 {
+    let node = with_fds(|fds, _| match fds.get(fd as usize) {
+        Some(Some(super::fs::Fd::Dev(b))) => Some(b.borrow().node),
+        Some(Some(_)) => None,
+        _ => None,
+    });
     let known = with_fds(|fds, _| matches!(fds.get(fd as usize), Some(Some(_)))).unwrap_or(false);
-    if known {
-        ENOTTY
-    } else {
-        EBADF
+    if !known {
+        return EBADF;
+    }
+    let Some(Some(super::dev::Node::Fb)) = node else { return ENOTTY };
+    match req {
+        super::dev::FBIOGET_VSCREENINFO => {
+            let Some(v) = super::dev::var_screeninfo() else { return ENODEV };
+            if !reachable(arg, super::dev::VAR_LEN, true) {
+                return EFAULT;
+            }
+            unsafe { core::ptr::copy_nonoverlapping(v.as_ptr(), arg as *mut u8, v.len()) };
+            0
+        }
+        super::dev::FBIOGET_FSCREENINFO => {
+            let Some(f) = super::dev::fix_screeninfo() else { return ENODEV };
+            if !reachable(arg, super::dev::FIX_LEN, true) {
+                return EFAULT;
+            }
+            unsafe { core::ptr::copy_nonoverlapping(f.as_ptr(), arg as *mut u8, f.len()) };
+            0
+        }
+        // **Read-only, and the refusal is the feature.** There is no
+        // mode-setting on this machine: the geometry is whatever the firmware
+        // left. Answering 0 to a mode this display cannot enter leaves a
+        // program drawing at the wrong size forever with nothing reporting it,
+        // which is strictly worse than a failure it can branch on.
+        super::dev::FBIOPUT_VSCREENINFO => {
+            if !reachable(arg, super::dev::VAR_LEN, false) {
+                return EFAULT;
+            }
+            let want =
+                unsafe { core::slice::from_raw_parts(arg as *const u8, super::dev::VAR_LEN) };
+            if super::dev::mode_matches(want) {
+                0
+            } else {
+                EINVAL
+            }
+        }
+        // Unblanking is what a program does before it draws, so it is taken as
+        // the moment the screen changes hands. Every other blanking level is
+        // accepted and does nothing, there being no panel power control here
+        // that is not the whole machine's.
+        super::dev::FBIOBLANK => {
+            super::dev::hold_screen(arg == 0);
+            0
+        }
+        _ => ENOTTY,
     }
 }
 
@@ -2312,6 +2495,62 @@ fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off: u64) -> u6
     // content-addressed store, which is a new root hash per modified page.
     // `MAP_PRIVATE` is exactly a copy, so it is exactly right, and it is what
     // `ld.so` uses for every library it loads.
+    // **The device branch, before the refusal that does not apply to it.** A
+    // shared writable file mapping is refused everywhere else because writing
+    // back into a content-addressed store is a new root hash per page. The
+    // framebuffer is not in the store, and `MAP_SHARED` on it is not an
+    // awkward case to tolerate -- it is the entire point of the device, and
+    // the one thing every program that draws does.
+    //
+    // What comes back is the aperture itself. This kernel is identity-mapped,
+    // so there is nothing to translate and nothing to copy: the guest is
+    // handed the pages the display controller is already scanning out, and a
+    // frame it writes is on screen as it writes it.
+    if !anon {
+        let dev = (unsafe { SPACE.get() })
+            .as_ref()
+            .and_then(|sp| sp.fds.get(fd as usize))
+            .and_then(|f| f.as_ref())
+            .and_then(|f| match f {
+                super::fs::Fd::Dev(b) => Some(b.borrow().node),
+                _ => None,
+            });
+        if let Some(n) = dev {
+            if n != super::dev::Node::Fb {
+                // The other three have no memory to map. `ENODEV` is what
+                // Linux answers for a device whose driver has no `mmap`.
+                return ENODEV;
+            }
+            let Some((base, _, _, len, _, _)) = super::dev::fb() else { return ENODEV };
+            if off as usize >= len {
+                return EINVAL;
+            }
+            // Fixed placement is refused rather than emulated: the aperture is
+            // where it is, and a guest naming a different address is asking
+            // for a copy that would never reach the screen.
+            if flags & MAP_FIXED != 0 && addr != base + off {
+                return EINVAL;
+            }
+            let at = base + off;
+            let span = page_up((len - off as usize).min(len as usize));
+            let perm = crate::mem::paging::Perm {
+                present: true,
+                write: prot & PROT_WRITE != 0,
+                exec: false,
+                user: true,
+            };
+            if !crate::mem::paging::protect(at, span, perm) {
+                return ENOMEM;
+            }
+            super::dev::hold_screen(true);
+            let sp = unsafe { SPACE.get() }.as_mut();
+            if let Some(sp) = sp {
+                sp.maps.push(Mapping { at, len: span, from: Source::Device });
+            }
+            return at;
+        }
+    }
+
     let backing = if anon {
         None
     } else {
@@ -2461,6 +2700,13 @@ fn give_back(at: u64, len: usize, from: Option<Source>) {
         Some(Source::Fixed) => {
             crate::mem::paging::protect(at, page_up(len), crate::mem::paging::Perm::RWX);
             crate::mem::fixed::release(at);
+        }
+        // Kernel-only again, and nothing freed. `Perm::RWX` carries
+        // `user: false`, which is the whole of what has to be undone: the
+        // aperture was already present, writable and executable before a guest
+        // asked for it, and it still belongs to the display either way.
+        Some(Source::Device) => {
+            crate::mem::paging::protect(at, page_up(len), crate::mem::paging::Perm::RWX);
         }
     }
 }
@@ -2649,6 +2895,7 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         SYS_CLOCK_GETTIME => (sys_clock_gettime(f.rdi, f.rsi), true),
         SYS_DUP => (sys_dup(f.rdi, None), true),
         SYS_DUP2 => (sys_dup(f.rdi, Some(f.rsi)), true),
+        SYS_DUP3 => (sys_dup3(f.rdi, f.rsi, f.rdx), true),
         // One process, and it is the guest. Reporting a pid at all is what
         // stops a runtime deciding it failed to start.
         SYS_GETPID | SYS_SET_TID_ADDRESS => (1, true),
@@ -3900,6 +4147,7 @@ pub fn name_of(nr: u64) -> &'static str {
         SYS_GETTIMEOFDAY => "gettimeofday",
         SYS_CLOCK_GETTIME => "clock_gettime",
         SYS_DUP2 => "dup2",
+        SYS_DUP3 => "dup3",
         SYS_GETUID => "getuid",
         SYS_GETGID => "getgid",
         SYS_GETEUID => "geteuid",

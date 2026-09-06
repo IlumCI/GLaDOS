@@ -30,6 +30,7 @@
 pub mod elf;
 pub mod fs;
 pub mod load;
+pub mod dev;
 pub mod proc;
 pub mod syscall;
 
@@ -37,6 +38,7 @@ pub mod syscall;
 pub fn checks() -> alloc::vec::Vec<(&'static str, bool)> {
     let mut out = elf::checks();
     out.extend(fs::checks());
+    out.extend(dev::checks());
     out.extend(proc::checks());
     out.extend(syscall::checks());
     out.extend(load::checks());

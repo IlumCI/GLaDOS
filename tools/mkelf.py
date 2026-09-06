@@ -220,6 +220,34 @@ def load_d(dst, base, disp8):
     return pre + bytes([0x8B, 0x40 | ((d & 7) << 3) | (bs & 7), disp8 & 0xFF])
 
 
+def store_d(base, disp8, src):
+    """mov [base+disp8], src32. No REX.W, so four bytes rather than eight."""
+    sr, bs = REG[src], REG[base]
+    pre = bytes([_rex(w=0, r=sr >> 3, b=bs >> 3)]) if (sr >> 3 or bs >> 3) else b""
+    return pre + bytes([0x89, 0x40 | ((sr & 7) << 3) | (bs & 7), disp8 & 0xFF])
+
+
+def shl_cl(reg):
+    """shl reg, cl. The one instruction a variable pixel layout needs.
+
+    A framebuffer program is told where each colour channel sits and shifts by
+    that, rather than assuming. Assuming is how red and blue get swapped, and
+    a swapped picture is the failure that looks like art.
+    """
+    n = REG[reg]
+    return bytes([_rex(b=n >> 3), 0xD3, 0xE0 | (n & 7)])
+
+
+def shl_imm(reg, imm8):
+    n = REG[reg]
+    return bytes([_rex(b=n >> 3), 0xC1, 0xE0 | (n & 7), imm8 & 0xFF])
+
+
+def shr_imm(reg, imm8):
+    n = REG[reg]
+    return bytes([_rex(b=n >> 3), 0xC1, 0xE8 | (n & 7), imm8 & 0xFF])
+
+
 def jmp_reg(reg):
     """jmp reg. The one instruction an interpreter cannot do without."""
     n = REG[reg]
@@ -708,6 +736,206 @@ def spin_code(entry_rva, _a, _b):
 MSG_USAGE = b"cat: needs a path\n"
 
 
+def fb_code(entry_rva, _a, _b):
+    """Open the screen, ask it what it is, and draw three bands on it.
+
+    Thirteen checks folding into a mask, `fsabuse`'s idiom for its reason:
+    zero means every one answered what Linux answers. But this fixture has a
+    second job the others do not, and it is the more important one --
+
+    **the bands are the only thing that can settle the pixel format.** A
+    driver reports where each colour channel sits inside a word, and a driver
+    that has red and blue the wrong way round produces no error anywhere: the
+    ioctls succeed, the mapping is real, every check passes, and the picture
+    is merely a strange colour. So this shifts by the offsets it was *told*
+    rather than by ones it assumes, and paints red, green and blue in that
+    order down the screen. A run that comes back blue-green-red has found a
+    bug that no exit code could.
+
+    Held on screen only when given an argument, because the harness takes its
+    screenshot after the guest has exited and `teardown` puts the desktop
+    back. `linux run /tmp/fb hold` sleeps instead, so a short `--timeout` is
+    what photographs it -- the recipe `doom play` already needed.
+    """
+    O_RDWR = 2
+    MAP_SHARED = 1
+    GETV, PUTV, GETF = 0x4600, 0x4601, 0x4602
+    TCGETS = 0x5401
+    EINVAL, ENOTTY = -22, -25
+    SYS_OPEN, SYS_IOCTL, SYS_MMAP, SYS_NANOSLEEP, SYS_EXIT = 2, 16, 9, 35, 231
+    out = bytearray()
+
+    def fwd(at):
+        out[at + 2:at + 6] = struct.pack("<i", len(out) - (at + 6))
+
+    def fold(bit, cc):
+        """Fold `bit` unless the comparison just made took `cc`."""
+        ok = len(out)
+        out.extend(jcc(cc, 0))
+        out.extend(or_imm32("rbp", 1 << bit))
+        fwd(ok)
+
+    def sysc(nr, *args):
+        """One syscall. Each argument is an int or a register name."""
+        b = bytearray()
+        b += mov_imm("rax", nr)
+        for reg, a in zip(("rdi", "rsi", "rdx", "r10", "r8", "r9"), args):
+            b += mov_rr(reg, a) if isinstance(a, str) else mov_imm(reg, a)
+        b += SYSCALL
+        return bytes(b)
+
+    # argc first, before the frame moves. A fixture that reads it afterwards
+    # reads whatever it just allocated.
+    out += load_stack("rax", 0)
+    out += mov_imm("rbp", 0)
+    # 320 bytes: fb_var_screeninfo at +0, fb_fix_screeninfo at +160, and the
+    # 48 past that for the path, the timespec and argc. Both structures are
+    # reached through a base register rather than rsp, because rm=100 means a
+    # SIB byte and none of these emitters writes one.
+    out += sub_imm("rsp", 0x140)
+    out += mov_rr("rbx", "rsp")
+    out += mov_rr("r15", "rsp")
+    out += add_imm("r15", 160)
+    out += store_q("r15", 112, "rax")
+
+    # "/dev/fb0", two dwords and a terminator, since `mov_imm` is imm32.
+    out += mov_imm("rax", int.from_bytes(b"/dev", "little"))
+    out += store_d("r15", 96, "rax")
+    out += mov_imm("rax", int.from_bytes(b"/fb0", "little"))
+    out += store_d("r15", 100, "rax")
+    out += mov_imm("rax", 0)
+    out += store_d("r15", 104, "rax")
+    out += mov_rr("rdi", "r15")
+    out += add_imm("rdi", 96)
+
+    # 0. Opened for writing, which the `/tmp` jail has to make an exception
+    #    for: a device is not the store, so a new root hash is not the cost.
+    out += sysc(SYS_OPEN, "rdi", O_RDWR, 0)
+    out += mov_rr("r12", "rax")
+    out += cmp_imm8("r12", 0)
+    fold(0, JGE)
+
+    # 1-3. The fixed half: what cannot change while the display is running.
+    out += sysc(SYS_IOCTL, "r12", GETF, "r15")
+    out += cmp_imm8("rax", 0)
+    fold(1, JE)
+    out += load_d("rcx", "r15", 48)                       # line_length
+    out += cmp_imm8("rcx", 0)
+    fold(2, JG)
+    out += load_d("r13", "r15", 24)                       # smem_len
+    out += cmp_rr("r13", "rcx")
+    fold(3, JGE)
+
+    # 4-6. The variable half.
+    out += sysc(SYS_IOCTL, "r12", GETV, "rbx")
+    out += cmp_imm8("rax", 0)
+    fold(4, JE)
+    out += load_d("rax", "rbx", 24)                       # bits_per_pixel
+    out += cmp_imm8("rax", 32)
+    fold(5, JE)
+    out += load_d("rax", "rbx", 0)                        # xres
+    out += cmp_imm8("rax", 0)
+    fold(6, JG)
+
+    # 7. Handing back the mode it was just given is accepted, or every
+    #    well-behaved program that sets the mode it already has fails.
+    out += sysc(SYS_IOCTL, "r12", PUTV, "rbx")
+    out += cmp_imm8("rax", 0)
+    fold(7, JE)
+
+    # 8. And a mode this display cannot enter is refused. The important one:
+    #    a driver that says yes and does nothing leaves the program drawing at
+    #    a geometry the hardware does not have, forever, with no error.
+    out += load_d("rax", "rbx", 0)
+    out += add_imm("rax", 16)
+    out += store_d("rbx", 0, "rax")
+    out += sysc(SYS_IOCTL, "r12", PUTV, "rbx")
+    out += cmp_imm32("rax", EINVAL)
+    fold(8, JE)
+    out += load_d("rax", "rbx", 0)
+    out += sub_imm("rax", 16)
+    out += store_d("rbx", 0, "rax")
+
+    # 9. A request this is not answers ENOTTY, which is how `isatty` works.
+    out += sysc(SYS_IOCTL, "r12", TCGETS, "rbx")
+    out += cmp_imm32("rax", ENOTTY)
+    fold(9, JE)
+
+    # 10-11. Shared *and* writable, which is refused for every file in this
+    #    namespace and is the whole point of a framebuffer. And what comes
+    #    back is `smem_start` itself -- the guest is handed the pages the
+    #    display is scanning out, not a copy of them.
+    out += sysc(SYS_MMAP, 0, "r13", 3, MAP_SHARED, "r12", 0)
+    out += mov_rr("r14", "rax")
+    out += cmp_imm8("r14", 0)
+    fold(10, JG)
+    out += load_q("rcx", "r15", 16)
+    out += cmp_rr("r14", "rcx")
+    fold(11, JE)
+
+    def band(offset_at, end_reg_setup):
+        """255 in one channel, written eight bytes at a time from r9 to r10."""
+        b = bytearray()
+        b += load_d("rcx", "rbx", offset_at)
+        b += mov_imm("rax", 255)
+        b += shl_cl("rax")
+        # Two pixels per store. The shifted value has a zero low half after
+        # `shl 32`, so an add is an or and saves an emitter.
+        b += mov_rr("rdx", "rax")
+        b += shl_imm("rdx", 32)
+        b += add_rr("rax", "rdx")
+        b += end_reg_setup
+        top = len(b)
+        b += store_q("r9", 0, "rax")
+        b += add_imm("r9", 8)
+        b += cmp_rr("r9", "r10")
+        rel = top - (len(b) + 6)
+        b += jcc(JL, rel)
+        return bytes(b)
+
+    # A quarter of video memory, rounded down to a whole number of stores.
+    # Shifts rather than a divide, because there is no divide here and a
+    # quarter is exactly what two of them give.
+    out += mov_rr("r8", "r13")
+    out += shr_imm("r8", 5)
+    out += shl_imm("r8", 3)
+    out += mov_rr("r9", "r14")
+    out += mov_rr("r10", "r14")
+    out += add_rr("r10", "r8")
+    out += band(32, b"")                                  # red, top quarter
+    # 12. What was written is there to be read back, which is the check that
+    #     the mapping is memory rather than a hole that swallows stores.
+    out += load_q("rdx", "r14", 0)
+    out += cmp_rr("rdx", "rax")
+    fold(12, JE)
+    out += band(44, add_rr("r10", "r8"))                  # green
+    out += band(56, add_rr("r10", "r8"))                  # blue
+
+    # Held only when asked, since the harness photographs what is on screen
+    # after the guest has gone and `teardown` puts the desktop back.
+    out += load_q("rax", "r15", 112)
+    out += cmp_imm8("rax", 1)
+    keep = len(out)
+    out += jcc(JLE, 0)
+    # Ten minutes, which is longer than any harness run. The exit path for a
+    # held fixture is deliberately the *timeout*, because `drive.py` takes its
+    # screenshot when it stops and `teardown` puts the desktop back the moment
+    # the guest returns -- a shorter sleep is a race with the harness for the
+    # one frame worth photographing.
+    out += mov_imm("rax", 600)
+    out += store_q("r15", 96, "rax")
+    out += mov_imm("rax", 0)
+    out += store_q("r15", 104, "rax")
+    out += mov_rr("rdi", "r15")
+    out += add_imm("rdi", 96)
+    out += sysc(SYS_NANOSLEEP, "rdi", 0)
+    fwd(keep)
+
+    out += sysc(SYS_EXIT, "rbp")
+    out += HLT
+    return bytes(out)
+
+
 def cat_code(entry_rva, usage_rva, _b):
     """Open argv[1], read it in chunks, write each chunk to stdout.
 
@@ -1107,6 +1335,10 @@ def build(kind="static"):
         assert len(text) == len(probe), (len(text), len(probe))
         body = text + MSG_USAGE
         msg_rva, disp, lea_end = usage_rva, 0, 0
+    elif kind == "fb":
+        text = fb_code(entry, 0, 0)
+        body = text
+        msg_rva, disp, lea_end = body_at, 0, 0
     elif kind == "maps":
         text = maps_code(entry, 0, 0)
         body = text
@@ -1410,6 +1642,36 @@ def verify(path):
               b.count(SYSCALL) == 10)
         claim("it ends in hlt on both paths", b.count(b"\xf4") >= 2)
         return ok
+    # `mov rsi, 0x4600` is FBIOGET_VSCREENINFO and nothing else in this file
+    # asks for it, which makes it the identifier rather than merely a hint.
+    if bytes([0x48, 0xC7, 0xC6, 0x00, 0x46, 0x00, 0x00]) in b:
+        claim("it names /dev/fb0, in two dwords because mov_imm is imm32",
+              bytes([0x48, 0xC7, 0xC0]) + b"/dev" in b
+              and bytes([0x48, 0xC7, 0xC0]) + b"/fb0" in b)
+        claim("it asks the framebuffer all three of its questions",
+              bytes([0x48, 0xC7, 0xC6, 0x00, 0x46, 0x00, 0x00]) in b   # GET_VSCREEN
+              and bytes([0x48, 0xC7, 0xC6, 0x01, 0x46, 0x00, 0x00]) in b  # PUT
+              and bytes([0x48, 0xC7, 0xC6, 0x02, 0x46, 0x00, 0x00]) in b) # GET_FSCREEN
+        claim("thirteen checks, each folding one bit into the mask it exits with",
+              sum(1 for i in range(13)
+                  if bytes([0x48, 0x81, 0xCD]) + struct.pack("<i", 1 << i) in b) == 13)
+        # MAP_SHARED with PROT_READ|PROT_WRITE, which every other file in this
+        # namespace is refused and which is the entire point of this device.
+        claim("it maps the screen shared and writable, not private",
+              bytes([0x48, 0xC7, 0xC2, 3, 0, 0, 0]) in b
+              and bytes([0x49, 0xC7, 0xC2, 1, 0, 0, 0]) in b)
+        # The check the picture exists to make. A fixture that shifted by a
+        # constant would draw the right bands on a screen laid out the way it
+        # assumed and say nothing about one that is not.
+        claim("it shifts by the channel offset it was told, rather than a constant",
+              bytes([0x48, 0xD3, 0xE0]) in b)
+        claim("it makes the nine calls its checks and its hold add up to",
+              b.count(SYSCALL) == 9)
+        claim("it exits with the mask rather than a constant",
+              bytes([0x48, 0x89, 0xEF]) in b)
+        claim("and ends in hlt, so a syscall that returns is visible",
+              b.endswith(HLT))
+        return ok
     lea_at = rel_entry + 14
     claim("the lea is where the layout put it", b[lea_at:lea_at + 3] == b"\x48\x8d\x35")
     disp = struct.unpack_from("<i", b, lea_at + 3)[0]
@@ -1439,7 +1701,7 @@ def main():
                     choices=["static", "dynamic", "interp", "loader", "maps",
                              "fixed", "memory", "rogue",
                              "protect", "wild", "spin", "cat", "grep",
-                             "fsabuse"],
+                             "fsabuse", "fb"],
                     default="static")
     ap.add_argument("--verify", action="store_true")
     a = ap.parse_args()

@@ -598,6 +598,18 @@ impl Framebuffer {
 
     /// Pixels per scan line, which is often greater than `width()`.
     #[inline]
+    /// Where the aperture is.
+    ///
+    /// Exposed for exactly one caller: `/dev/fb0` hands a Linux guest the real
+    /// framebuffer rather than a shadow, and `smem_start` in
+    /// `fb_fix_screeninfo` is that address. Nothing above the compositor
+    /// should want this -- every drawing path in this tree goes through the
+    /// back buffer, and a second writer to the aperture is the bug
+    /// `paint_clock` was fixed for.
+    pub fn addr(&self) -> u64 {
+        self.base as u64
+    }
+
     pub const fn stride(&self) -> u32 {
         self.stride
     }

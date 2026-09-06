@@ -1880,6 +1880,103 @@ otherwise. `diag linux` caught that, running with no guest installed. The
 other direction would have been much worse -- a listing offering a name that
 `openat` then routed to the store.
 
+### `/dev`, and a screen a Linux program can draw on
+
+`src/linux/dev.rs`. Five nodes, synthetic like `/proc` and under the same rule,
+and one of them is the display: `/dev/fb0`, the smallest well-specified way for
+a program written somewhere else to put pixels on this machine.
+
+There is no `/dev/tty`, no `/dev/dri` and no `/dev/snd`, and that is the rule
+rather than an omission -- each is a real interface with real semantics nothing
+here can supply, and a node that opens and then does nothing is worse than an
+absent one, which sends a program down a fallback it already has.
+
+**A guest gets the actual framebuffer, not a shadow.** This kernel is
+identity-mapped, so virtual is physical and `smem_start` can be the aperture's
+own address rather than a lie about a buffer somewhere else; a frame the guest
+writes is on screen as it writes it, with no copy anywhere. The price is that
+the desktop must stand down while that is true, which is `gfx::exclusive` --
+the same flag `port::with_screen` sets for DOOM and the editor, split into two
+halves here because a guest holds the screen across many syscalls rather than
+for the length of one call. It is taken on the first write or mapping rather
+than at `open`, since a program that merely `stat`s the device has not asked
+for the machine, and released in `teardown` **unconditionally**, because a
+guest that took the display and then faulted is exactly the case that matters.
+
+Three decisions where the alternative was worse:
+
+- **`MAP_SHARED` with `PROT_WRITE` is refused for every file here** and is the
+  entire point of this device. The objection everywhere else is that writing
+  back into a content-addressed store is a new root hash per page; the
+  framebuffer is not in the store, so the objection does not apply. The device
+  branch of `sys_mmap` therefore sits *before* that refusal.
+- **`FBIOPUT_VSCREENINFO` accepts only the mode already running.** There is no
+  mode-setting on this machine: the geometry is whatever the firmware left.
+  Answering 0 to a mode this display cannot enter is the worst of the three
+  available answers, because the program then draws at a geometry the hardware
+  does not have, forever, with nothing reporting it.
+- **A mapping of the aperture is `Source::Device`**, a third kind, because the
+  two it is not are both actively wrong: freeing it to the heap hands the
+  allocator several megabytes of the display's memory, and releasing it
+  through `mem::fixed` releases a claim nobody made. All it owes is the U bit,
+  taken back off.
+
+**The pixel layout is the field that is silently wrong.** `Format` names the
+order of *bytes in memory* and `fb_bitfield` names bit positions inside a
+little-endian word, so the two run in opposite directions and reversing them
+swaps red and blue -- with no error, no fault, and a picture that is merely a
+strange colour. `mkelf.py --kind fb` is the answer: thirteen checks folding
+into a mask, and then three bands painted by shifting 255 by the offsets the
+driver *told* it, in the order red, green, blue. A run that comes back
+blue-green-red has found a bug no exit code could.
+
+    glados> linux run /tmp/fb
+        2 open   /dev/fb0 -> 3
+       16 ioctl  0x3 0x4602 0x2c5bdf0 -> 0        FBIOGET_FSCREENINFO
+       16 ioctl  0x3 0x4600 0x2c5bd50 -> 0        FBIOGET_VSCREENINFO
+       16 ioctl  0x3 0x4601 0x2c5bd50 -> 0        the mode it was just given
+       16 ioctl  0x3 0x4601 0x2c5bd50 -> -22      a mode this display has not
+       16 ioctl  0x3 0x5401 0x2c5bd50 -> -25      TCGETS, so ENOTTY
+        9 mmap   0x0 0x3e8000 0x3 -> 2147483648
+      exited 0 after 8 syscall(s)
+
+Zero is the mask, so all thirteen answered. `0x3e8000` is 4,096,000, which is
+1280 x 800 x 4, and `2147483648` is `0x80000000`, the aperture itself rather
+than a copy of it -- which is one of the checks rather than a coincidence, and
+another is reading back through the mapping what was written through it.
+
+`--kind fb` with any argument sleeps for ten minutes instead of exiting, and
+that is how the picture gets photographed: `drive.py` screenshots when it
+stops, and `teardown` puts the desktop back the instant the guest returns, so
+the exit path for a held fixture has to be the **timeout**. The same recipe
+`doom play` needed.
+
+The other four nodes are cheap and each has exactly one correct behaviour.
+`/dev/random` and `/dev/urandom` are one node, which is a deviation with a date
+on it: they were different devices until Linux 5.6 and have behaved alike
+since. It reads through `rng::fill` rather than `fill_secret`, deliberately --
+the secret form refuses below the entropy threshold, and glibc's fallback for a
+failing `getrandom` is to open this and read it, so a refusal here leaves a
+program with no third option.
+
+Driven under glibc: `busybox ls -l /dev` reports all five as `crw-rw-rw-`,
+which is an independent reader agreeing they are character devices, and
+`busybox dd if=/dev/urandom of=/tmp/r.bin bs=16 count=1` reports `1+0 records
+in, 1+0 records out` and exits 0.
+
+**That sweep found `dup3` as well.** glibc's `dup2` calls `dup3` when the two
+descriptors differ, so `dd` reached `dup2` and `hexdump` reached `dup3` and
+stopped -- two applets in one run taking different routes to the same thing.
+The one difference that matters is inverted on purpose: `dup3(n, n, 0)` is
+`EINVAL` where `dup2(n, n)` answers `n`, because the no-op case hides a bug in
+the caller and the newer call refuses it.
+
+**What this does not get you, said plainly.** SDL2 has no framebuffer backend
+-- its video drivers are X11, Wayland, KMSDRM, offscreen and dummy -- so
+`/dev/fb0` does not put an unmodified SDL2 program on screen. What it does is
+make the class of program that talks to a framebuffer directly work, and give
+everything visual afterwards something to stand on.
+
 ### A filesystem a program written for Linux recognises
 
 `src/linux/fs.rs`. The store underneath is not a filesystem and `sysbox::tree`

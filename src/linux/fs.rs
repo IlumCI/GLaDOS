@@ -135,6 +135,25 @@ pub enum Fd {
     /// a socket is how a program puts one on stdin, and two descriptors have
     /// to name one connection rather than two copies of a handle.
     Socket(Rc<RefCell<Sock>>),
+    /// A `/dev` node, which is a function rather than a body of bytes.
+    ///
+    /// Deliberately not a `File` with contents. `/dev/zero` is infinite and
+    /// `/dev/fb0` is several megabytes of the display's own memory, so the
+    /// `Vec` a `File` carries would be either impossible or a copy of the
+    /// screen that nobody scans out.
+    Dev(Rc<RefCell<DevFile>>),
+}
+
+/// An open `/dev` node and where its cursor sits.
+///
+/// The cursor is shared through the `Rc` for the reason a file's is: `dup`
+/// makes a second name for one open file description, and a framebuffer
+/// program that writes a frame through two descriptors must not write the top
+/// half twice.
+pub struct DevFile {
+    pub path: String,
+    pub node: super::dev::Node,
+    pub at: usize,
 }
 
 impl Fd {
@@ -154,6 +173,7 @@ impl Fd {
             Fd::File(b) => Fd::File(b.clone()),
             Fd::Dir(b) => Fd::Dir(b.clone()),
             Fd::Socket(b) => Fd::Socket(b.clone()),
+            Fd::Dev(b) => Fd::Dev(b.clone()),
         }
     }
 
@@ -238,6 +258,10 @@ pub const MODE_DIR: u32 = 0o040_755;
 /// `lseek` on one answers `ESPIPE`, `read` on stdin answers zero forever, and
 /// libc picks full buffering for it, all of which are true here.
 pub const MODE_FIFO: u32 = 0o010_600;
+/// `S_IFCHR` plus 0666, which is what `/dev/null` and `/dev/fb0` carry on a
+/// real system. Writable in the mode bits because they genuinely are, and this
+/// module has no owners to check it against anyway.
+pub const MODE_CHAR: u32 = 0o020_666;
 
 /// What kind of thing a `stat` is describing.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -245,6 +269,14 @@ pub enum Kind {
     File,
     Dir,
     Fifo,
+    /// A character device, which is what everything under `/dev` is.
+    ///
+    /// It has to be its own kind rather than a regular file of size zero,
+    /// because that is precisely how a program decides whether to `mmap` a
+    /// thing or read it: `S_ISCHR` is the test SDL and every framebuffer
+    /// program makes before touching `/dev/fb0`, and a driver reporting a
+    /// regular file gets skipped.
+    Char,
 }
 
 impl Kind {
@@ -253,6 +285,7 @@ impl Kind {
             Kind::File => MODE_FILE,
             Kind::Dir => MODE_DIR,
             Kind::Fifo => MODE_FIFO,
+            Kind::Char => MODE_CHAR,
         }
     }
 }
