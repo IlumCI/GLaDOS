@@ -78,6 +78,9 @@ pub const SYS_SET_ROBUST_LIST: u64 = 273;
 pub const SYS_RSEQ: u64 = 334;
 pub const SYS_PRLIMIT64: u64 = 302;
 pub const SYS_GETRANDOM: u64 = 318;
+pub const SYS_TIME: u64 = 201;
+pub const SYS_SYSINFO: u64 = 99;
+pub const SYS_SCHED_GETAFFINITY: u64 = 204;
 pub const SYS_GETPID: u64 = 39;
 pub const SYS_GETDENTS64: u64 = 217;
 pub const SYS_SET_TID_ADDRESS: u64 = 218;
@@ -1769,6 +1772,95 @@ fn sys_pread64(fd: u64, buf: u64, len: u64, off: u64) -> u64 {
 /// `GRND_RANDOM` and `GRND_NONBLOCK` are accepted and ignored, because there
 /// is one pool here and it never blocks. Answering the full count is therefore
 /// always true rather than optimistic.
+/// Seconds since the epoch.
+///
+/// Answered from the RTC rather than from the tick counter, because the tick
+/// counter says how long this machine has been up and a timestamp is a
+/// different question. A machine whose clock cannot be read answers zero,
+/// which is what Linux reports before anything has set the time, and is the
+/// one wrong answer that is honestly wrong rather than plausibly wrong.
+fn sys_time(tloc: u64) -> u64 {
+    let secs = crate::dev::rtc::now()
+        .map(|dt| crate::dev::rtc::unix_seconds(&dt) as u64)
+        .unwrap_or(0);
+    // The pointer is optional, which is unusual enough to be worth saying: the
+    // value comes back in the return register either way, and a program that
+    // wants it in memory as well passes somewhere to put it.
+    if tloc != 0 {
+        if !reachable(tloc, 8, true) {
+            return EFAULT;
+        }
+        unsafe { core::ptr::write_unaligned(tloc as *mut u64, secs) };
+    }
+    secs
+}
+
+/// How big `struct sysinfo` is on x86-64.
+///
+/// One hundred and eight bytes of fields rounded up to eight, and the rounding
+/// is not optional: a libc reads the whole structure, so writing 108 leaves
+/// four bytes of whatever the guest had there being read as padding it will
+/// then ignore -- until some future field lives in them.
+const SYSINFO_LEN: usize = 112;
+
+/// What the machine can say about itself.
+///
+/// **Three of these are real and the rest are honestly zero**, which is the
+/// only interesting decision here. Uptime and the heap are facts. The load
+/// averages are not: there is no run-queue sampling in this kernel, and a
+/// fabricated number would be read by anything that graphs it. Swap is zero
+/// because there is none. `procs` is one because there is one.
+///
+/// `totalram` is the kernel heap rather than the machine's RAM, and that is a
+/// deviation worth naming: the heap is one contiguous allocation the kernel
+/// already owns, so it is what a guest could actually be given, and reporting
+/// the firmware's total would promise memory nothing here can hand out.
+fn sys_sysinfo(buf: u64) -> u64 {
+    if !reachable(buf, SYSINFO_LEN, true) {
+        return EFAULT;
+    }
+    let (used, total) = crate::mem::heap::HEAP.stats();
+    let uptime = crate::dev::lapic::ticks() / crate::TIMER_HZ as u64;
+    let mut b = [0u8; SYSINFO_LEN];
+    let mut put = |off: usize, v: u64| b[off..off + 8].copy_from_slice(&v.to_le_bytes());
+    put(0, uptime);
+    // 8..32 are the three load averages, left zero for the reason above.
+    put(32, total as u64);
+    put(40, total.saturating_sub(used) as u64);
+    // 48..80 are shared, buffer and both swap figures. None of them exist.
+    b[80..82].copy_from_slice(&1u16.to_le_bytes());
+    // 88..104 are the high-memory pair, which is a 32-bit concept.
+    b[104..108].copy_from_slice(&1u32.to_le_bytes());
+    unsafe { core::ptr::copy_nonoverlapping(b.as_ptr(), buf as *mut u8, SYSINFO_LEN) };
+    0
+}
+
+/// Which cores this process may run on.
+///
+/// Every one that answered at boot, which is the truthful answer even though
+/// nothing here can yet schedule a guest onto a second core: the question is
+/// about permission rather than about capability, and a guest that asked and
+/// was told "one" would size its thread pool for a machine this is not.
+///
+/// Answers the *bytes written* rather than zero, which is the part of this
+/// call that is easy to get wrong. A libc uses the return value to know how
+/// much of a much larger `cpu_set_t` it must clear itself.
+fn sys_sched_getaffinity(_pid: u64, len: u64, mask: u64) -> u64 {
+    // Linux insists on a whole number of longs, and it is worth insisting too:
+    // a length that is not one means the caller and this disagree about the
+    // shape of a bitmap, and a partial write is how that becomes silent.
+    if len < 8 || len % 8 != 0 {
+        return EINVAL;
+    }
+    if !reachable(mask, 8, true) {
+        return EFAULT;
+    }
+    let cores = crate::smp::online().clamp(1, 64);
+    let bits = if cores >= 64 { u64::MAX } else { (1u64 << cores) - 1 };
+    unsafe { core::ptr::write_unaligned(mask as *mut u64, bits) };
+    8
+}
+
 fn sys_getrandom(buf: u64, len: u64, _flags: u64) -> u64 {
     if len == 0 {
         return 0;
@@ -2341,6 +2433,9 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         SYS_SET_ROBUST_LIST => (sys_set_robust_list(f.rdi, f.rsi), true),
         SYS_PRLIMIT64 => (sys_prlimit64(f.rdi, f.rsi, f.rdx, f.r10), true),
         SYS_GETRANDOM => (sys_getrandom(f.rdi, f.rsi, f.rdx), true),
+        SYS_TIME => (sys_time(f.rdi), true),
+        SYS_SYSINFO => (sys_sysinfo(f.rdi), true),
+        SYS_SCHED_GETAFFINITY => (sys_sched_getaffinity(f.rdi, f.rsi, f.rdx), true),
         // **`rseq` stays refused, and that is the right answer rather than a
         // gap.** Linux itself answers `ENOSYS` whenever `CONFIG_RSEQ` is off,
         // so every libc that registers one already copes with being told no,
@@ -2835,6 +2930,60 @@ pub fn checks() -> Vec<(&'static str, bool)> {
             "MAP_FIXED where nothing can promise the address is ENOMEM",
             sys_mmap(0x1000_0000_0000, 4096, 3, MAP_ANONYMOUS | MAP_FIXED, u64::MAX, 0) == ENOMEM,
         ));
+    }
+
+    // The three the applet sweep asked for, each answered from something this
+    // machine knows rather than from a plausible constant.
+    {
+        let mut buf = [0u8; SYSINFO_LEN];
+        let at = buf.as_mut_ptr() as u64;
+        let owned = Region { at, len: SYSINFO_LEN };
+        install(Regions { image: owned, stack: owned, brk: owned, interp: None });
+
+        let bare = sys_time(0);
+        let through = sys_time(at);
+        out.push((
+            "time answers the same value whether or not it is given somewhere to put it",
+            bare == through
+                && u64::from_le_bytes(buf[..8].try_into().unwrap_or_default()) == through,
+        ));
+        out.push((
+            "and a pointer it does not own is EFAULT rather than a write through it",
+            sys_time(0x1000) == EFAULT,
+        ));
+
+        buf = [0u8; SYSINFO_LEN];
+        let ok = sys_sysinfo(at) == 0;
+        let field = |o: usize| u64::from_le_bytes(buf[o..o + 8].try_into().unwrap_or_default());
+        out.push((
+            "sysinfo reports one process, a unit of one, and a heap that is not empty",
+            ok && u16::from_le_bytes(buf[80..82].try_into().unwrap_or_default()) == 1
+                && u32::from_le_bytes(buf[104..108].try_into().unwrap_or_default()) == 1
+                && field(32) > 0,
+        ));
+        out.push((
+            "and free is never more than total, which a subtraction that wrapped would be",
+            field(40) <= field(32),
+        ));
+        out.push((
+            "the load averages are zero rather than invented, since nothing samples them",
+            field(8) == 0 && field(16) == 0 && field(24) == 0,
+        ));
+
+        buf = [0u8; SYSINFO_LEN];
+        out.push((
+            "sched_getaffinity answers the bytes it wrote, not zero",
+            sys_sched_getaffinity(0, 128, at) == 8,
+        ));
+        out.push((
+            "and names at least this core, whatever the rest of the machine did",
+            u64::from_le_bytes(buf[..8].try_into().unwrap_or_default()) & 1 == 1,
+        ));
+        out.push((
+            "a mask that is not a whole number of longs is refused rather than part-written",
+            sys_sched_getaffinity(0, 4, at) == EINVAL,
+        ));
+        teardown();
     }
 
     // `pread64`, against the descriptors `install` seeds. What cannot be
@@ -3486,6 +3635,9 @@ pub fn name_of(nr: u64) -> &'static str {
         SYS_SET_ROBUST_LIST => "set_robust_list",
         SYS_PRLIMIT64 => "prlimit64",
         SYS_GETRANDOM => "getrandom",
+        SYS_TIME => "time",
+        SYS_SYSINFO => "sysinfo",
+        SYS_SCHED_GETAFFINITY => "sched_getaffinity",
         SYS_RSEQ => "rseq",
         SYS_GETPID => "getpid",
         SYS_DUP => "dup",
