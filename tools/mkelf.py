@@ -750,6 +750,71 @@ def wild_code(entry_rva, msg_rva, _unused):
     return bytes(c)
 
 
+MSG_FORK_CHILD = b"fork: the child is here\n"
+MSG_FORK_PARENT = b"fork: the parent reaped exactly its own child\n"
+
+
+def fork_code(entry_rva, msg_rva, _unused):
+    """One call that returns twice, and a parent that proves which child it got.
+
+    The shape is the whole test. `fork` answers zero in the child and a pid in
+    the parent, so the branch below is the only thing telling two identical
+    instruction streams apart -- if the child came back with the parent's
+    return value both halves would take the same path and the run would look
+    like a program that simply printed twice.
+
+    The parent waits for **that** pid rather than for any child, and exits 9
+    only when `wait4` hands back the number `fork` gave it. A kernel that
+    invented a pid, or reaped the wrong entry, or answered the wait before the
+    child had run, fails there rather than printing something plausible.
+
+    Exit codes are the report: 9 is the parent having reaped its own child, 7
+    is the child, and 3 is a parent whose wait disagreed with its fork.
+    """
+    c = bytearray()
+    c += mov_imm("rax", 57) + SYSCALL          # fork()
+    c += cmp_imm8("rax", 0)
+    jne_at = len(c)
+    c += jcc(JNE, 0)                            # non-zero -> parent
+    jne_end = len(c)
+
+    # ---- the child ----
+    c += mov_imm("rax", 1) + mov_imm("rdi", 1)
+    lea1_at = len(c)
+    c += lea_rip("rsi", 0)
+    lea1_end = len(c)
+    c += mov_imm("rdx", len(MSG_FORK_CHILD)) + SYSCALL
+    c += mov_imm("rax", 60) + mov_imm("rdi", 7) + SYSCALL + HLT
+
+    # ---- the parent ----
+    parent_at = len(c)
+    c += mov_rr("r12", "rax")                   # keep the pid fork gave us
+    c += mov_imm("rax", 61)                     # wait4
+    c += mov_rr("rdi", "r12")                   # that child, not any child
+    c += mov_imm("rsi", 0)                      # no status word
+    c += mov_imm("rdx", 0) + mov_imm("r10", 0)
+    c += SYSCALL
+    c += cmp_rr("rax", "r12")                   # the same pid back?
+    jne2_at = len(c)
+    c += jcc(JNE, 0)
+    jne2_end = len(c)
+    c += mov_imm("rax", 1) + mov_imm("rdi", 1)
+    lea2_at = len(c)
+    c += lea_rip("rsi", 0)
+    lea2_end = len(c)
+    c += mov_imm("rdx", len(MSG_FORK_PARENT)) + SYSCALL
+    c += mov_imm("rax", 60) + mov_imm("rdi", 9) + SYSCALL + HLT
+    bad_at = len(c)
+    c += mov_imm("rax", 60) + mov_imm("rdi", 3) + SYSCALL + HLT
+
+    struct.pack_into("<i", c, jne_at + 2, parent_at - jne_end)
+    struct.pack_into("<i", c, jne2_at + 2, bad_at - jne2_end)
+    struct.pack_into("<i", c, lea1_at + 3, msg_rva - (entry_rva + lea1_end))
+    struct.pack_into("<i", c, lea2_at + 3,
+                     msg_rva + len(MSG_FORK_CHILD) - (entry_rva + lea2_end))
+    return bytes(c)
+
+
 def spin_code(entry_rva, _a, _b):
     """Loop forever, asking for nothing.
 
@@ -2095,6 +2160,13 @@ def build(kind="static"):
         text = spin_code(entry, 0, 0)
         body = text
         msg_rva, disp, lea_end = body_at, 0, 0
+    elif kind == "fork":
+        probe = fork_code(0, 0, 0)
+        msg_rva = body_at + len(probe)
+        text = fork_code(entry, msg_rva, 0)
+        assert len(text) == len(probe), (len(text), len(probe))
+        body = text + MSG_FORK_CHILD + MSG_FORK_PARENT
+        disp, lea_end = 0, 0
     elif kind == "wild":
         probe = wild_code(0, 0, 0)
         msg_rva = body_at + len(probe)
@@ -2569,6 +2641,35 @@ def verify(path):
         claim("and ends in hlt, so a syscall that returns is visible",
               b.endswith(HLT))
         return ok
+    # Identified by its own message, the way every other branch here is:
+    # `verify` reads the file back and has no idea what it was asked to build.
+    if MSG_FORK_CHILD in b:
+        # The branch is the whole fixture. Two identical instruction streams
+        # are told apart by one comparison, so a fixture without it would
+        # print twice and look like a working fork.
+        claim("it branches on what fork answered, which is all that separates "
+              "the two halves",
+              bytes([0x48, 0x83, 0xF8, 0x00]) in b)
+        claim("it waits for the pid fork gave it rather than for any child",
+              mov_rr("rdi", "r12") in b)
+        claim("and compares what wait4 answered against that same pid",
+              cmp_rr("rax", "r12") in b)
+        claim("the child's message is there", MSG_FORK_CHILD in b)
+        claim("and the parent's, which only a correct wait reaches",
+              MSG_FORK_PARENT in b)
+        # fork, then write+exit in the child, then wait4+write+exit in the
+        # parent, then the exit its disagreeing path takes. Seven, and the
+        # seventh is the one a fixture without a failure branch would not have.
+        claim("it makes the seven calls its three paths add up to",
+              b.count(SYSCALL) == 7)
+        claim("it carries three exits, so a disagreeing wait is reported "
+              "rather than silent",
+              b.count(mov_imm("rax", 60)) == 3)
+        # The two messages sit after the code, so the file does not end in
+        # `hlt` and this has to look where the code actually ends.
+        claim("its code ends in hlt, so a syscall that returns is visible",
+              b[b.index(MSG_FORK_CHILD) - 1:b.index(MSG_FORK_CHILD)] == HLT)
+        return ok
     lea_at = rel_entry + 14
     claim("the lea is where the layout put it", b[lea_at:lea_at + 3] == b"\x48\x8d\x35")
     disp = struct.unpack_from("<i", b, lea_at + 3)[0]
@@ -2597,7 +2698,7 @@ def main():
     ap.add_argument("--kind",
                     choices=["static", "dynamic", "interp", "loader", "maps",
                              "fixed", "memory", "rogue",
-                             "protect", "wild", "spin", "cat", "grep",
+                             "protect", "wild", "spin", "fork", "cat", "grep",
                              "fsabuse", "fb", "ev", "thread", "gl"],
                     default="static")
     ap.add_argument("--verify", action="store_true")

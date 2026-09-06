@@ -652,6 +652,28 @@ pub fn snapshot(index: usize) -> Option<Task> {
 /// outgoing task's stack pointer is known to have been written down. Doing it
 /// before the switch would publish a task whose `rsp` is stale and let another
 /// core resume a stack that is still being switched off.
+/// Every task, with the fields a stuck scheduler is diagnosed from.
+///
+/// Exists because a task that is never picked looks identical from the outside
+/// to a task that is picked and immediately blocks, and the only thing that
+/// tells them apart is `state`.
+pub fn dump() {
+    let t = TASKS.lock_irq();
+    let n = COUNT.load(Ordering::Acquire);
+    for (i, x) in t.iter().enumerate().take(n) {
+        let st = match x.state {
+            State::Unused => "unused",
+            State::Ready => "ready",
+            State::Running(_) => "running",
+            State::Handoff(_) => "handoff",
+        };
+        crate::kprintln!(
+            "  task {} {:<14} {:<8} pin {} idle {} root {:#x} switches {}",
+            i, x.name, st, x.pin, x.idle, x.root, x.switches
+        );
+    }
+}
+
 fn finish_handoff(cpu: usize) {
     let prev = PENDING[cpu].swap(NONE, Ordering::AcqRel);
     if prev == NONE {

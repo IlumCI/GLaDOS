@@ -125,6 +125,12 @@ pub struct Dir {
 ///
 /// `Rc` and not `Arc` for the reason `Interp` gives about its functions: one
 /// guest, one task, nothing crossing a core.
+/// Cloning one **shares** the open file description rather than copying it,
+/// which is what every variant holding an `Rc` already means and what `fork`
+/// needs: a parent and child that shared a cursor before the fork go on
+/// sharing it, so a child that reads advances the parent's offset, exactly as
+/// Linux has it.
+#[derive(Clone)]
 pub enum Fd {
     Stdin,
     Stdout,

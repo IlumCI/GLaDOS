@@ -118,6 +118,9 @@ pub const SYS_CLOCK_GETTIME: u64 = 228;
 pub const SYS_DUP2: u64 = 33;
 pub const SYS_DUP3: u64 = 292;
 pub const SYS_CLONE: u64 = 56;
+pub const SYS_FORK: u64 = 57;
+pub const SYS_VFORK: u64 = 58;
+pub const SYS_WAIT4: u64 = 61;
 pub const SYS_FUTEX: u64 = 202;
 pub const SYS_GETTID: u64 = 186;
 pub const SYS_TGKILL: u64 = 234;
@@ -344,6 +347,55 @@ glados_enter_guest:
     xor r15d, r15d
     iretq
 
+    // Enter a guest carrying registers, which is what a forked child is.
+    //
+    // `glados_enter_guest` zeroes everything, which is right for a program
+    // starting at its entry point and wrong for a child resuming inside
+    // libc's `fork` wrapper: SysV says `rbx`, `rbp` and `r12`-`r15` survive a
+    // call, so the code on the other side of that `syscall` instruction is
+    // entitled to find them intact. The caller-saved ones are zeroed here
+    // rather than carried, because the syscall convention clobbers them
+    // anyway and a child that inherited them would be relying on something
+    // the ABI does not promise.
+    //
+    // `rdi` holds the `Resume` and is therefore loaded last, after every
+    // field has been read out of it.
+    //
+    // The six pushes and `GLADOS_HOST_RSP` match `glados_enter_guest`
+    // exactly, so `glados_leave_guest` unwinds a child no differently from
+    // anything else. Getting that out of step would put the longjmp back onto
+    // a stack six words from where it belongs.
+    .globl glados_enter_guest_regs
+glados_enter_guest_regs:
+    push rbp
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    mov [rip + GLADOS_HOST_RSP], rsp
+    push 0x33
+    push qword ptr [rdi + 8]
+    push qword ptr [rdi + 16]
+    push 0x3b
+    push qword ptr [rdi + 0]
+    mov rax, [rdi + 24]
+    mov rbx, [rdi + 32]
+    mov rbp, [rdi + 40]
+    mov r12, [rdi + 48]
+    mov r13, [rdi + 56]
+    mov r14, [rdi + 64]
+    mov r15, [rdi + 72]
+    xor ecx, ecx
+    xor edx, edx
+    xor esi, esi
+    xor r8d, r8d
+    xor r9d, r9d
+    xor r10d, r10d
+    xor r11d, r11d
+    xor edi, edi
+    iretq
+
     .globl glados_leave_guest
 glados_leave_guest:
     mov rsp, [rip + GLADOS_HOST_RSP]
@@ -362,6 +414,29 @@ extern "sysv64" {
     fn glados_syscall_entry();
     /// Jump into the guest. Answers the exit code, when the guest exits.
     fn glados_enter_guest(entry: u64, stack_top: u64) -> u64;
+    /// Jump into a guest that is resuming rather than starting.
+    fn glados_enter_guest_regs(r: *const Resume) -> u64;
+}
+
+/// What a forked child resumes with.
+///
+/// Field order is the assembly's offsets, so this is the structure that stub
+/// reads rather than a description of it -- the same bargain `Frame` makes
+/// with the syscall stub, and a field reordered here without the offsets
+/// moving is a child that resumes with its stack pointer in `rbx`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Resume {
+    pub rip: u64,
+    pub rsp: u64,
+    pub rflags: u64,
+    pub rax: u64,
+    pub rbx: u64,
+    pub rbp: u64,
+    pub r12: u64,
+    pub r13: u64,
+    pub r14: u64,
+    pub r15: u64,
 }
 
 /// Where the guest's stack pointer went while the handler runs.
@@ -426,6 +501,11 @@ pub fn ring3_load(r: Option<crate::task::Ring3>) {
 }
 
 /// One anonymous mapping the guest asked for and has not given back.
+///
+/// `Clone` because `fork` copies the list wholesale: a child inherits every
+/// mapping its parent had, at the same addresses, and the pages behind them
+/// were duplicated before this list was.
+#[derive(Clone, Copy)]
 pub struct Mapping {
     pub at: u64,
     pub len: usize,
@@ -555,6 +635,15 @@ pub struct Space {
     /// from the syscall path and must die with the guest. That is this entry.
     /// `Guest` hands them over at `install` and `teardown` drops them.
     pub tables: Option<crate::mem::space::Space>,
+    /// Heap ranges this guest owns outright, freed when it is torn down.
+    ///
+    /// A forked child's memory. The parent's image, stack and break belong to
+    /// a `Guest` in the loader and go back when that drops; a child has no
+    /// `Guest` and never will, so the pages copied for it are recorded here
+    /// and nowhere else. Addresses are the *backings*, not what the guest
+    /// sees -- freeing an arena address would hand the heap a number no
+    /// allocator ever gave out.
+    pub owned: alloc::vec::Vec<(u64, usize)>,
     /// The next free address in the guest's mmap arena.
     ///
     /// A bump cursor and never reused, which is a real limitation with a
@@ -634,7 +723,7 @@ static CURRENT_GUEST: core::sync::atomic::AtomicUsize =
 /// Same contract `Racy::get` carries: no other live reference, and never from
 /// an interrupt that can preempt another caller.
 #[allow(clippy::mut_from_ref)]
-unsafe fn guest_slot() -> &'static mut Option<Space> {
+pub unsafe fn guest_slot() -> &'static mut Option<Space> {
     let t = unsafe { TABLE.get() };
     let i = CURRENT_GUEST.load(core::sync::atomic::Ordering::Relaxed);
     while t.len() <= i {
@@ -643,12 +732,112 @@ unsafe fn guest_slot() -> &'static mut Option<Space> {
     &mut t[i]
 }
 
+/// Jump into a guest that is resuming rather than starting.
+///
+/// # Safety
+/// `r` must describe a guest whose tables are the installed root.
+/// Install the stack a guest's syscalls will run on.
+///
+/// **`task::ring3_active` records this and does not install it.** The global
+/// is loaded by `schedule` on a switch, so a caller that arms a task and then
+/// enters a guest *without a switch in between* runs that guest's syscalls on
+/// whatever stack the last switch left behind. `run_thread` writes it for
+/// exactly this reason; `fork` did not, and the child's two syscalls landed on
+/// the parent's syscall stack and overwrote the kernel frame it was suspended
+/// on. The parent then resumed, `ret`'d into what the child had written, and
+/// took a ring-0 fault at `rip 0x1400` -- an address no image claims, which is
+/// what a `ret` off a smashed stack looks like.
+///
+/// # Safety
+/// `stack` must be the top of a stack this task alone will use.
+pub unsafe fn set_syscall_stack(stack: u64) {
+    unsafe { core::ptr::write(core::ptr::addr_of_mut!(GLADOS_SYSCALL_STACK), stack) };
+}
+
+pub unsafe fn enter_resumed(r: &Resume) -> u64 {
+    unsafe { glados_enter_guest_regs(r as *const Resume) }
+}
+
+/// Where the running guest's stack pointer went, for a `fork` that has to give
+/// its child the same one.
+pub fn guest_rsp() -> u64 {
+    unsafe { core::ptr::read(core::ptr::addr_of!(GLADOS_GUEST_RSP)) }
+}
+
+/// Whether the run deadline has passed, for a loop that would otherwise wait
+/// forever on a child that is never coming back.
+pub unsafe fn kill_if_overdue() -> bool {
+    let d = DEADLINE.load(Ordering::Relaxed);
+    d != 0 && crate::dev::lapic::ticks() >= d
+}
+
+/// Copy a guest entry into another slot, for `fork`.
+///
+/// **Descriptors are cloned and therefore shared**, because every `Fd` variant
+/// holds an `Rc` around the open file description -- which is what Linux means
+/// by a forked child inheriting them. Memory is the opposite: the caller has
+/// already copied it, and hands the pages in.
+///
+/// Frees what it was given if it cannot place it, so the caller has one thing
+/// to reason about rather than two.
+pub fn clone_guest(
+    parent: usize,
+    child: usize,
+    tables: crate::mem::space::Space,
+    owned: alloc::vec::Vec<(u64, usize)>,
+) -> bool {
+    let Some(p) = (unsafe { slot_at(parent) }).as_ref() else {
+        for (at, len) in owned {
+            free_pages(at, len);
+        }
+        return false;
+    };
+    let fresh = Space {
+        image: p.image,
+        interp: p.interp,
+        stack: p.stack,
+        brk_start: p.brk_start,
+        brk_now: p.brk_now,
+        brk_end: p.brk_end,
+        maps: p.maps.clone(),
+        fds: p.fds.clone(),
+        cwd: p.cwd.clone(),
+        argv: p.argv.clone(),
+        image_mapped: p.image_mapped,
+        interp_mapped: p.interp_mapped,
+        stack_mapped: p.stack_mapped,
+        brk_mapped: p.brk_mapped,
+        tables: Some(tables),
+        owned,
+        mmap_next: p.mmap_next,
+        image_path: p.image_path.clone(),
+        interp_path: p.interp_path.clone(),
+        saved_fs: p.saved_fs,
+    };
+    *unsafe { slot_at(child) } = Some(fresh);
+    true
+}
+
 /// The running guest's page-table root, or 0 for the kernel's.
 pub fn guest_root() -> u64 {
     match unsafe { guest_slot() }.as_ref().and_then(|sp| sp.tables.as_ref()) {
         Some(t) => t.root(),
         None => 0,
     }
+}
+
+/// One particular slot, which is how a `fork` reaches the child's.
+///
+/// # Safety
+/// As `guest_slot`, and additionally: `i` must not be the running guest while
+/// another reference to it is live.
+#[allow(clippy::mut_from_ref)]
+pub unsafe fn slot_at(i: usize) -> &'static mut Option<Space> {
+    let t = unsafe { TABLE.get() };
+    while t.len() <= i {
+        t.push(None);
+    }
+    &mut t[i]
 }
 
 /// Which guest the syscall path is speaking for.
@@ -732,7 +921,7 @@ pub fn guest_regions() -> Vec<(u64, usize, String)> {
 
 /// Whether the running guest owns this range. False when nothing is running,
 /// which is the right answer: with no guest there is no address it may name.
-fn owns(at: u64, len: usize) -> bool {
+pub fn owns(at: u64, len: usize) -> bool {
     unsafe { guest_slot().as_ref().is_some_and(|s| s.owns(at, len)) }
 }
 
@@ -783,6 +972,7 @@ pub fn install(r: Regions, tables: Option<crate::mem::space::Space>) {
             stack_mapped: r.stack_mapped,
             brk_mapped: r.brk_mapped,
             tables,
+            owned: alloc::vec::Vec::new(),
             mmap_next: GUEST_MMAP_AT,
             stack: r.stack,
             brk_start: brk.at,
@@ -819,6 +1009,7 @@ pub fn teardown() -> usize {
     super::dev::hold_screen(false);
     super::input::stop();
     super::thread::reset();
+    super::fork::reset();
     let mut freed = 0;
     unsafe {
         if let Some(sp) = guest_slot().as_mut() {
@@ -872,16 +1063,25 @@ pub fn teardown() -> usize {
             }
             crate::cpu::wrmsr(IA32_FS_BASE, sp.saved_fs);
         }
+        if let Some(sp) = guest_slot().as_mut() {
+            // A child's own pages. Taken before the entry is dropped, since
+            // dropping it drops the tables that map them and the order does
+            // not matter for the heap but does for reading this.
+            for (at, len) in core::mem::take(&mut sp.owned) {
+                free_pages(at, len);
+                freed += len;
+            }
+        }
         *guest_slot() = None;
     }
     freed
 }
 
-fn page_up(n: usize) -> usize {
+pub fn page_up(n: usize) -> usize {
     n.max(1).div_ceil(4096) * 4096
 }
 
-fn alloc_pages(len: usize) -> Option<u64> {
+pub fn alloc_pages(len: usize) -> Option<u64> {
     use alloc::alloc::{alloc_zeroed, Layout};
     let layout = Layout::from_size_align(page_up(len), 4096).ok()?;
     let p = unsafe { alloc_zeroed(layout) };
@@ -891,7 +1091,7 @@ fn alloc_pages(len: usize) -> Option<u64> {
     Some(p as u64)
 }
 
-fn free_pages(at: u64, len: usize) {
+pub fn free_pages(at: u64, len: usize) {
     use alloc::alloc::{dealloc, Layout};
     if let Ok(layout) = Layout::from_size_align(page_up(len), 4096) {
         unsafe { dealloc(at as *mut u8, layout) };
@@ -3533,6 +3733,17 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         // the child resumes: a cloned thread does not start at an entry point,
         // it returns from `clone` on a different stack with `rax` zero.
         SYS_CLONE => (sys_clone(f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.rip), true),
+        // The whole frame, because a child resumes with its parent's
+        // registers and this is the only place that still has them.
+        SYS_FORK => (super::fork::fork(f), true),
+        // **`vfork` is answered as `fork`, and that is safe in the direction
+        // that matters.** `vfork` promises the parent will be suspended and
+        // the two will share memory until the child execs or exits; a caller
+        // who gets a full copy and a running parent has been given *more*
+        // than it asked for, not less. The reverse -- answering `fork` with
+        // `vfork` semantics -- is what would corrupt a parent.
+        SYS_VFORK => (super::fork::fork(f), true),
+        SYS_WAIT4 => (super::fork::wait(f.rdi as i64, f.rsi), true),
         SYS_FUTEX => (sys_futex(f.rdi, f.rsi, f.rdx, f.r10), true),
         SYS_GETTID => (super::thread::current_tid(), true),
         // A thread yielding to another is a thing this kernel can actually do,
@@ -4908,6 +5119,9 @@ pub fn name_of(nr: u64) -> &'static str {
         SYS_DUP2 => "dup2",
         SYS_DUP3 => "dup3",
         SYS_CLONE => "clone",
+        SYS_FORK => "fork",
+        SYS_VFORK => "vfork",
+        SYS_WAIT4 => "wait4",
         SYS_FUTEX => "futex",
         SYS_GETTID => "gettid",
         SYS_TGKILL => "tgkill",
