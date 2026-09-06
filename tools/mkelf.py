@@ -248,6 +248,33 @@ def shr_imm(reg, imm8):
     return bytes([_rex(b=n >> 3), 0xC1, 0xE8 | (n & 7), imm8 & 0xFF])
 
 
+def imul_rr(dst, src):
+    """imul dst, src. The screen's area is a multiplication and there is no
+    other way to get one."""
+    d, sr = REG[dst], REG[src]
+    return bytes([_rex(r=d >> 3, b=sr >> 3), 0x0F, 0xAF, 0xC0 | ((d & 7) << 3) | (sr & 7)])
+
+
+def movss_rip(xmm, disp=0):
+    """movss xmm, [rip+disp32]. Four floats is what `glClearColor` wants.
+
+    The System V convention puts floating-point arguments in `xmm0`-`xmm7`,
+    which is the one thing in this file that cannot be done with the integer
+    registers -- and a GL call that takes colours takes floats.
+    """
+    return bytes([0xF3, 0x0F, 0x10, 0x05 | (xmm << 3)]) + struct.pack("<i", disp)
+
+
+def call_rip(disp=0):
+    """call [rip+disp32]: an indirect call through a GOT slot.
+
+    How a dynamically linked program reaches a library, with no PLT stub in
+    between. That works here because the loader is asked to bind everything at
+    load time, so the slot holds the real address before anything runs.
+    """
+    return bytes([0xFF, 0x15]) + struct.pack("<i", disp)
+
+
 def jmp_reg(reg):
     """jmp reg. The one instruction an interpreter cannot do without."""
     n = REG[reg]
@@ -734,6 +761,189 @@ def spin_code(entry_rva, _a, _b):
 
 
 MSG_USAGE = b"cat: needs a path\n"
+
+
+GL_IMPORTS = [
+    "OSMesaCreateContext",
+    "OSMesaMakeCurrent",
+    "glClearColor",
+    "glClear",
+    "glFinish",
+]
+
+# Cyan, and chosen so nothing rounds. `glClearColor` takes floats in 0..1 and
+# a half would land on 127 or 128 depending on how Mesa converts; ones and
+# zeroes come out as 255 and 0 under any rule, so the byte this checks is the
+# byte Mesa meant. Distinct from the red-green-blue the framebuffer fixture
+# paints, so a screenshot cannot confuse the two.
+GL_CLEAR = (0.0, 1.0, 1.0, 1.0)
+GL_EXPECT = 0xFF00FFFF          # B,G,R,A = 255,255,0,255 read as a word
+
+
+def gl_code(text_at, got_at, rodata_at):
+    """Ask a real Mesa to clear the screen, and put the result on it.
+
+    Eight checks folding into a mask, and what it proves is not any one of them:
+    it is that `libOSMesa` -- four megabytes of somebody else's C, fetched from
+    a Debian archive and touched by nothing here -- loaded through this
+    kernel's `ld.so` path, ran at ring 3, and wrote pixels into a buffer this
+    program owns.
+
+    **`OSMESA_BGRA` is why the blit is a `write` and not a conversion.** Mesa
+    will hand back any byte order asked for, and the one this display uses is
+    the one `dev.rs` reports in `fb_var_screeninfo` -- so the buffer Mesa fills
+    is already in the framebuffer's own layout and goes to `/dev/fb0`
+    unmodified. Getting that argument wrong costs a colour swap and nothing
+    else, which is exactly the failure the band fixture was built to catch.
+
+    The width comes from `xres_virtual` rather than `xres`, deliberately.
+    `xres_virtual` is the stride in pixels, so `w * 4` is exactly
+    `line_length` and the blit lands square; using the visible width on a
+    display whose stride is wider shears the picture one row at a time.
+    """
+    O_RDWR, PROT_RW, MAP_PRIVATE_ANON = 2, 3, 0x22
+    OSMESA_BGRA, GL_UNSIGNED_BYTE, GL_COLOR_BUFFER_BIT = 1, 0x1401, 0x4000
+    FBIOGET_VSCREENINFO = 0x80CC4600        # _IOR('F', 0x00, 204) as glibc has it
+    SYS_MMAP, SYS_OPEN, SYS_IOCTL, SYS_WRITE, SYS_EXIT = 9, 2, 16, 1, 231
+    out = bytearray()
+
+    def fwd(at):
+        out[at + 2:at + 6] = struct.pack("<i", len(out) - (at + 6))
+
+    def fold(bit, cc):
+        ok = len(out)
+        out.extend(jcc(cc, 0))
+        out.extend(or_imm32("rbp", 1 << bit))
+        fwd(ok)
+
+    def sysc(nr, *args):
+        b = bytearray()
+        b += mov_imm("rax", nr)
+        for reg, a in zip(("rdi", "rsi", "rdx", "r10", "r8", "r9"), args):
+            b += mov_rr(reg, a) if isinstance(a, str) else mov_imm(reg, a)
+        b += SYSCALL
+        return bytes(b)
+
+    def call(name):
+        """One indirect call through this import's GOT slot."""
+        i = GL_IMPORTS.index(name)
+        here = text_at + len(out)
+        return call_rip(got_at + 8 * i - (here + 6))
+
+    def flt(i):
+        """The rip-relative displacement of one float in the read-only data."""
+        return rodata_at + 4 * i - (text_at + len(out) + 8)
+
+    out += mov_imm("rbp", 0)
+    out += sub_imm("rsp", 0x120)
+    out += mov_rr("r15", "rsp")            # fb_var_screeninfo scratch, 204 bytes
+    out += mov_rr("r14", "rsp")
+    out += add_imm("r14", 208)             # "/dev/fb0"
+
+    out += mov_imm("rax", int.from_bytes(b"/dev", "little"))
+    out += store_d("r14", 0, "rax")
+    out += mov_imm("rax", int.from_bytes(b"/fb0", "little"))
+    out += store_d("r14", 4, "rax")
+    out += mov_imm("rax", 0)
+    out += store_d("r14", 8, "rax")
+
+    # 0. The screen, opened for writing.
+    out += sysc(SYS_OPEN, "r14", O_RDWR, 0)
+    out += mov_rr("r13", "rax")
+    out += cmp_imm8("r13", 0)
+    fold(0, JGE)
+
+    # 1. And its geometry, asked for rather than assumed.
+    out += mov_imm("rax", SYS_IOCTL)
+    out += mov_rr("rdi", "r13")
+    out += mov_imm("rsi", FBIOGET_VSCREENINFO - (1 << 32))
+    out += shl_imm("rsi", 32)
+    out += shr_imm("rsi", 32)
+    out += mov_rr("rdx", "r15")
+    out += SYSCALL
+    out += cmp_imm8("rax", 0)
+    fold(1, JE)
+
+    out += load_d("r10", "r15", 8)         # xres_virtual, the stride in pixels
+    out += load_d("r11", "r15", 4)         # yres
+    out += mov_rr("r12", "r10")
+    out += imul_rr("r12", "r11")
+    out += shl_imm("r12", 2)               # bytes, four per pixel
+
+    # 2. Somewhere for Mesa to draw. Its own buffer, not the aperture: OSMesa
+    #    reads back as well as writes, and the screen is not a scratch pad.
+    out += sysc(SYS_MMAP, 0, "r12", PROT_RW, MAP_PRIVATE_ANON, -1, 0)
+    out += mov_rr("rbx", "rax")
+    out += cmp_imm8("rbx", 0)
+    fold(2, JG)
+
+    # 3. A context, in the display's own byte order.
+    out += mov_imm("rdi", OSMESA_BGRA)
+    out += mov_imm("rsi", 0)
+    out += call("OSMesaCreateContext")
+    out += mov_rr("r12", "rax")
+    out += cmp_imm8("r12", 0)
+    fold(3, JG)
+
+    # 4. Bound to the buffer. Everything after this draws into it.
+    out += load_d("r10", "r15", 8)
+    out += load_d("r11", "r15", 4)
+    out += mov_rr("rdi", "r12")
+    out += mov_rr("rsi", "rbx")
+    out += mov_imm("rdx", GL_UNSIGNED_BYTE)
+    out += mov_rr("rcx", "r10")
+    out += mov_rr("r8", "r11")
+    out += call("OSMesaMakeCurrent")
+    out += cmp_imm8("rax", 0)
+    fold(4, JG)
+
+    # 5. Four floats, in the four registers the ABI names for them. This is
+    #    the one call in any fixture here that cannot be made with integers.
+    for i in range(4):
+        out += movss_rip(i, flt(i))
+    out += call("glClearColor")
+    out += mov_imm("rdi", GL_COLOR_BUFFER_BIT)
+    out += call("glClear")
+    out += call("glFinish")
+
+    # 6. The claim. Mesa wrote into a buffer this program allocated, in the
+    #    byte order it was asked for, and the first pixel is the colour.
+    out += load_d("rax", "rbx", 0)
+    out += cmp_imm32("rax", GL_EXPECT - (1 << 32))
+    fold(5, JE)
+    # 7. And the last pixel too, so a clear that touched one row is not
+    #    mistaken for a clear that touched the screen.
+    out += mov_rr("rcx", "rbx")
+    out += mov_rr("rdx", "r12")
+    out += load_d("r10", "r15", 8)
+    out += load_d("r11", "r15", 4)
+    out += mov_rr("rdx", "r10")
+    out += imul_rr("rdx", "r11")
+    out += shl_imm("rdx", 2)
+    out += sub_imm("rdx", 4)
+    out += add_rr("rcx", "rdx")
+    out += load_d("rax", "rcx", 0)
+    out += cmp_imm32("rax", GL_EXPECT - (1 << 32))
+    fold(6, JE)
+
+    # 8. On the screen, with no conversion in between.
+    out += mov_rr("rdx", "r10")
+    out += imul_rr("rdx", "r11")
+    out += shl_imm("rdx", 2)
+    out += mov_rr("rax", "rdx")
+    out += mov_imm("rdi", SYS_WRITE)
+    out += mov_rr("r9", "rax")
+    out += mov_imm("rax", SYS_WRITE)
+    out += mov_rr("rdi", "r13")
+    out += mov_rr("rsi", "rbx")
+    out += mov_rr("rdx", "r9")
+    out += SYSCALL
+    out += cmp_rr("rax", "r9")
+    fold(7, JE)
+
+    out += sysc(SYS_EXIT, "rbp")
+    out += HLT
+    return bytes(out)
 
 
 def thread_code(entry_rva, _a, _b):
@@ -1637,7 +1847,187 @@ def grep_code(entry_rva, usage_rva, _b):
     return bytes(c)
 
 
+# What a loader has to be handed, and no more.
+DT_NULL, DT_NEEDED, DT_HASH, DT_STRTAB, DT_SYMTAB = 0, 1, 4, 5, 6
+DT_RELA, DT_RELASZ, DT_RELAENT, DT_STRSZ, DT_SYMENT = 7, 8, 9, 10, 11
+DT_FLAGS, DF_BIND_NOW = 30, 0x08
+# Every real linker emits this for an executable and it looks optional, which
+# is how it got left out. `ld.so` writes the address of its own debug
+# structure into the slot, and glibc reaches for `l_info[DT_DEBUG]` -- index 21
+# -- while setting up. A register dump named it exactly: `rdi` held 0xe8, and
+# 0xe8 is `&l->l_info[21]` for a `link_map` at zero.
+DT_DEBUG = 21
+R_X86_64_GLOB_DAT = 6
+PT_DYNAMIC, PT_PHDR = 2, 6
+
+
+def build_linked(imports, soname, code, rodata=b""):
+    """A real dynamically linked ELF, hand-built, with no linker anywhere.
+
+    **This is the thing that makes a library testable without a compiler**, and
+    it is the same argument this file already makes about static fixtures: no
+    toolchain will emit a binary that differs from another in exactly one
+    field, and none of them will emit one small enough to read.
+
+    The minimum a loader needs turns out to be six tables and nine dynamic
+    entries. `.dynstr` holds the names, `.dynsym` one undefined `FUNC` per
+    import, `.hash` a System V hash table -- which is required even when
+    nothing looks anything up, since `ld.so` refuses an object with neither
+    hash -- `.rela.dyn` one `R_X86_64_GLOB_DAT` per import pointing at a `.got`
+    slot, and `.dynamic` naming all of it.
+
+    No PLT and no lazy binding: `DF_BIND_NOW` asks the loader to fill every
+    slot before the program runs, so a call is `call [rip+slot]` and there is
+    no resolver trampoline to get right. That is also the arrangement this
+    machine already runs glibc under, for a reason recorded in CLAUDE.md.
+
+    The hash table is the part with a trap in it. One bucket means every name
+    collides, which is fine and is what makes it constructible: the chain then
+    walks every symbol in order, so `bucket[0]` is 1 and `chain[i]` is `i+1`
+    until the last, which is `STN_UNDEF` and terminates the walk. `nchain`
+    *must* equal the symbol count -- it is how the loader sizes `.dynsym` --
+    and getting it short reads as a symbol that does not exist.
+    """
+    interp = INTERP_REAL
+    nsym = len(imports) + 1
+
+    # Laid out before anything is emitted, because every table holds runtime
+    # addresses of the others and `.dynamic` holds addresses of them all.
+    ehdr = EHDR
+    # Four, and the first of them is the one that took a disassembly to find.
+    # glibc computes the main program's load address in exactly one place --
+    # `case PT_PHDR: main_map->l_addr = (Addr) phdr - ph->p_vaddr;` -- and
+    # there is no other. Without a `PT_PHDR` the base stays zero, so every
+    # address the loader derives from a `p_vaddr` is used raw: the fault was a
+    # `strcmp` against `PT_INTERP`'s string at 0xe8, which is 64 for the header
+    # plus three program headers, the file offset with nothing added to it.
+    #
+    # Every real linker emits one, which is why nothing else here needed it and
+    # why leaving it out looked harmless.
+    phnum = 4
+    at = ehdr + PHENT * phnum
+
+    def align(x, a):
+        return (x + a - 1) & ~(a - 1)
+
+    interp_at = at
+    at += len(interp)
+
+    dynstr = bytearray(b"\x00")
+    soname_off = len(dynstr)
+    dynstr += soname.encode() + b"\x00"
+    name_offs = []
+    for n in imports:
+        name_offs.append(len(dynstr))
+        dynstr += n.encode() + b"\x00"
+    dynstr_at = at
+    at += len(dynstr)
+
+    at = align(at, 8)
+    dynsym_at = at
+    at += 24 * nsym
+
+    hash_at = at
+    at += 8 + 4 + 4 * nsym          # nbucket, nchain, one bucket, nchain chains
+
+    at = align(at, 8)
+    rela_at = at
+    at += 24 * len(imports)
+
+    dynamic_at = at
+    ndyn = 12
+    at += 16 * ndyn
+
+    got_at = at
+    at += 8 * len(imports)
+
+    rodata_at = at
+    at += len(rodata)
+
+    text_at = align(at, 16)
+
+    # The code is emitted twice: once to learn its length, once with every
+    # displacement resolved. `mkelf.py` does this for the static fixtures too.
+    body = code(text_at, got_at, rodata_at)
+    total = text_at + len(body)
+
+    dsym = bytearray(24 * nsym)      # entry 0 is reserved and stays zero
+    for i, off in enumerate(name_offs, start=1):
+        struct.pack_into("<IBBHQQ", dsym, 24 * i, off, 0x12, 0, 0, 0, 0)
+
+    h = bytearray()
+    h += struct.pack("<II", 1, nsym)
+    h += struct.pack("<I", 1)                       # bucket[0] -> symbol 1
+    h += struct.pack("<I", 0)                       # chain[0], unused
+    for i in range(1, nsym):
+        h += struct.pack("<I", 0 if i == nsym - 1 else i + 1)
+
+    rela = bytearray()
+    for i in range(len(imports)):
+        rela += struct.pack("<QQq", got_at + 8 * i, ((i + 1) << 32) | R_X86_64_GLOB_DAT, 0)
+
+    dyn = bytearray()
+    for tag, val in (
+        (DT_NEEDED, soname_off),
+        (DT_HASH, hash_at),
+        (DT_STRTAB, dynstr_at),
+        (DT_SYMTAB, dynsym_at),
+        (DT_STRSZ, len(dynstr)),
+        (DT_SYMENT, 24),
+        (DT_RELA, rela_at),
+        (DT_RELASZ, len(rela)),
+        (DT_RELAENT, 24),
+        (DT_FLAGS, DF_BIND_NOW),
+        (DT_DEBUG, 0),
+        (DT_NULL, 0),
+    ):
+        dyn += struct.pack("<qQ", tag, val)
+    assert len(dyn) == 16 * ndyn, (len(dyn), ndyn)
+
+    out = bytearray(total)
+    out[interp_at:interp_at + len(interp)] = interp
+    out[dynstr_at:dynstr_at + len(dynstr)] = dynstr
+    out[dynsym_at:dynsym_at + len(dsym)] = dsym
+    out[hash_at:hash_at + len(h)] = h
+    out[rela_at:rela_at + len(rela)] = rela
+    out[dynamic_at:dynamic_at + len(dyn)] = dyn
+    out[rodata_at:rodata_at + len(rodata)] = rodata
+    out[text_at:text_at + len(body)] = body
+
+    hdr = bytearray(EHDR)
+    hdr[0:4] = b"\x7fELF"
+    hdr[4], hdr[5], hdr[6] = 2, 1, 1
+    hdr[7] = 0
+    struct.pack_into("<HHI", hdr, 16, ET_DYN, 0x3E, 1)
+    struct.pack_into("<QQQ", hdr, 24, text_at, ehdr, 0)
+    struct.pack_into("<IHHHHHH", hdr, 48, 0, EHDR, PHENT, phnum, 0, 0, 0)
+    out[0:EHDR] = hdr
+
+    # One segment, read-write-execute, covering everything. This kernel maps
+    # every page that way regardless, and a fixture that pretended otherwise
+    # would be describing a machine it is not running on.
+    p = bytearray()
+    # First, and the ELF specification says it must be: "if it is present, it
+    # must precede any loadable segment entry".
+    p += struct.pack("<IIQQQQQQ", PT_PHDR, 4, ehdr, ehdr, ehdr,
+                     PHENT * phnum, PHENT * phnum, 8)
+    p += struct.pack("<IIQQQQQQ", PT_LOAD, 7, 0, 0, 0, total, total, 0x1000)
+    p += struct.pack("<IIQQQQQQ", PT_DYNAMIC, 6, dynamic_at, dynamic_at,
+                     dynamic_at, len(dyn), len(dyn), 8)
+    p += struct.pack("<IIQQQQQQ", PT_INTERP, 4, interp_at, interp_at,
+                     interp_at, len(interp), len(interp), 1)
+    out[EHDR:EHDR + len(p)] = p
+    return bytes(out)
+
+
 def build(kind="static"):
+    if kind == "gl":
+        import struct as _s
+        rodata = b"".join(_s.pack("<f", v) for v in GL_CLEAR)
+        blob = build_linked(GL_IMPORTS, "libOSMesa.so.8", gl_code, rodata)
+        entry = _s.unpack_from("<Q", blob, 24)[0]
+        return blob, dict(entry=entry, msg=0, disp=0, lea_end=0, size=len(blob))
+
     interp = INTERP_FIXTURE if kind == "interp" else INTERP_REAL
     phnum = 2 if kind in ("dynamic", "interp") else 1
     entry = EHDR + PHENT * phnum
@@ -1980,6 +2370,103 @@ def verify(path):
               b.count(SYSCALL) == 10)
         claim("it ends in hlt on both paths", b.count(b"\xf4") >= 2)
         return ok
+    # A dynamically linked fixture, identified by the one import no other
+    # thing in this file names.
+    if b"OSMesaCreateContext" in b:
+        # Read back through a parser that is deliberately not the writer, the
+        # bargain `tokenizer.py --verify` makes. A dynamic section is a chain
+        # of addresses into other tables, so a writer that got one offset
+        # wrong produces a file `ld.so` rejects with no message at all.
+        phoff = struct.unpack_from("<Q", b, 32)[0]
+        phent, phnum = struct.unpack_from("<HH", b, 54)
+        loads, dyn, interp = [], None, None
+        for i in range(phnum):
+            at = phoff + i * phent
+            ty = struct.unpack_from("<I", b, at)[0]
+            off = struct.unpack_from("<Q", b, at + 8)[0]
+            va = struct.unpack_from("<Q", b, at + 16)[0]
+            fsz = struct.unpack_from("<Q", b, at + 32)[0]
+            if ty == PT_LOAD:
+                loads.append((off, va, fsz))
+            elif ty == 2:
+                dyn = (off, fsz)
+            elif ty == PT_INTERP:
+                interp = b[off:off + fsz]
+        phdrseg = None
+        for i in range(phnum):
+            at2 = phoff + i * phent
+            if struct.unpack_from("<I", b, at2)[0] == 6:
+                phdrseg = struct.unpack_from("<Q", b, at2 + 16)[0]
+        claim("it carries a PHDR, a LOAD, a DYNAMIC and an INTERP segment",
+              len(loads) == 1 and dyn is not None and interp == INTERP_REAL
+              and phdrseg is not None)
+        # The whole of how a loader finds the base: `AT_PHDR` minus this.
+        # Absent, the base is zero and every derived address is a file offset
+        # pretending to be a pointer.
+        claim("and PT_PHDR comes first and names the header table, or the base is zero",
+              struct.unpack_from("<I", b, phoff)[0] == 6 and phdrseg == EHDR)
+
+        ents = dict()
+        order = []
+        off, fsz = dyn
+        for i in range(fsz // 16):
+            t, v = struct.unpack_from("<qQ", b, off + i * 16)
+            order.append(t)
+            ents[t] = v
+        claim("the dynamic array ends in DT_NULL and nothing follows it",
+              order[-1] == 0 and order.count(0) == 1)
+        claim("it names every table a loader has to be handed",
+              all(t in ents for t in (1, 4, 5, 6, 7, 8, 9, 10, 11, 21)))
+        # Lazy binding needs a PLT and a resolver, and this has neither. The
+        # flag is what makes `call [rip+slot]` safe: every slot is filled
+        # before the program runs.
+        claim("and asks for everything to be bound before it runs, since it has no PLT",
+              ents.get(30, 0) & 0x08 != 0 and b"\xff\x15" in b)
+
+        strtab = ents[5]
+        def cstr(o):
+            e = b.index(b"\x00", strtab + o)
+            return b[strtab + o:e].decode("ascii", "replace")
+        claim("it needs libOSMesa and nothing else, the rest arriving through it",
+              [cstr(v) for t, v in zip(order, [ents[t] for t in order]) if t == 1] == []
+              or cstr(ents[1]) == "libOSMesa.so.8")
+
+        nsym = ents[8] // ents[9] + 1
+        names = [cstr(struct.unpack_from("<I", b, ents[6] + 24 * i)[0])
+                 for i in range(1, nsym)]
+        claim("it imports the five entry points it calls, and only those",
+              names == GL_IMPORTS)
+
+        nbucket, nchain = struct.unpack_from("<II", b, ents[4])
+        # The trap. `nchain` is how a loader sizes `.dynsym`, so a count one
+        # short is a symbol that silently does not exist -- and with a single
+        # bucket every name collides, which is what makes the chain walk the
+        # whole table and what makes it constructible by hand at all.
+        claim("the hash table's chain count is the symbol count, or a symbol vanishes",
+              nbucket == 1 and nchain == nsym)
+        first = struct.unpack_from("<I", b, ents[4] + 8)[0]
+        chain = [struct.unpack_from("<I", b, ents[4] + 12 + 4 * i)[0] for i in range(nsym)]
+        claim("and the chain walks every symbol once and then terminates",
+              first == 1 and chain[1:] == list(range(2, nsym)) + [0])
+
+        rels = [struct.unpack_from("<QQq", b, ents[7] + 24 * i) for i in range(ents[8] // 24)]
+        claim("one GLOB_DAT relocation per import, each naming its own symbol",
+              len(rels) == len(GL_IMPORTS)
+              and all(r[1] & 0xFFFFFFFF == 6 for r in rels)
+              and [r[1] >> 32 for r in rels] == list(range(1, nsym)))
+
+        claim("eight checks, each folding one bit into the mask it exits with",
+              sum(1 for i in range(8)
+                  if bytes([0x48, 0x81, 0xCD]) + struct.pack("<i", 1 << i) in b) == 8)
+        # The four floats, in the four registers the ABI names. This is the one
+        # call in any fixture here that integers cannot make.
+        claim("it loads four floats into xmm0 through xmm3 for the clear colour",
+              all(bytes([0xF3, 0x0F, 0x10, 0x05 | (i << 3)]) in b for i in range(4)))
+        claim("it asks Mesa for the display's own byte order, so the blit is a copy",
+              bytes([0x48, 0xC7, 0xC7, 1, 0, 0, 0]) in b)
+        claim("and ends in hlt, so a syscall that returns is visible",
+              b.endswith(HLT))
+        return ok
     # The thread shape is a constant nothing else here loads, which makes it
     # the identifier rather than merely a hint.
     if bytes([0x48, 0xC7, 0xC7]) + struct.pack("<I", 0x210F00) in b:
@@ -2098,7 +2585,7 @@ def main():
                     choices=["static", "dynamic", "interp", "loader", "maps",
                              "fixed", "memory", "rogue",
                              "protect", "wild", "spin", "cat", "grep",
-                             "fsabuse", "fb", "ev", "thread"],
+                             "fsabuse", "fb", "ev", "thread", "gl"],
                     default="static")
     ap.add_argument("--verify", action="store_true")
     a = ap.parse_args()

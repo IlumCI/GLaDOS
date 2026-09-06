@@ -1626,6 +1626,77 @@ syscall away: `fork` needs two address spaces, and one address space is the
 founding claim of this system rather than a shortcut it took. Nothing else in
 the measured surface is blocked on a decision that large.
 
+### OpenGL, which turns out not to be kernel work at all
+
+**Every OpenGL on Linux is a userspace shared object.** In software mode
+`libGL` rasterises into ordinary memory and asks the kernel for nothing but
+pages, so "implement GL" here is not a rasteriser to write, it is a library to
+get into the guest and a syscall trace to answer. The estimate that started
+this was 8,000 to 15,000 lines of kernel code, and it was wrong by all of it.
+
+`tools/gl.py` fetches one, and which one is decided by arithmetic rather than
+by preference. `fs.rs` holds an open file's whole contents and caps the total
+at 64 MiB, so:
+
+| | packages | installed |
+|---|---|---|
+| bookworm `libosmesa6` | 16 | **188 MiB** (112 of it `libLLVM15`) |
+| bookworm `libgl1` | 49 | 210 MiB, and drags X11 |
+| **stretch `libosmesa6` 13.0.6** | **6** | **8.2 MiB, no LLVM at all** |
+
+LLVM is there for llvmpipe, the JIT rasteriser, and Debian builds llvmpipe and
+softpipe into one object so the JIT cannot be declined. Mesa 13 predates that
+and its `libOSMesa` is the *classic* software rasteriser: no gallium, no LLVM,
+largest object 4 MiB. The whole closure with its glibc satellites is 8,033,864
+bytes across nine objects, and `gl.py --report` prints that beside the cap so
+the decision stays checkable.
+
+**OSMesa is the third door.** `libGL` gets its surface from GLX, which needs an
+X server, or EGL, which needs DRM, and there is neither here. `OSMesaMakeCurrent`
+takes *a buffer the caller owns*: every `gl*` call after it writes there, and
+the buffer reaches `/dev/fb0` with one `write`. Asking for `OSMESA_BGRA` makes
+Mesa's byte order the display's own, so the blit is a copy rather than a
+conversion -- which is the pixel-format work from `/dev/fb0` paying for itself.
+
+The closure is computed from `DT_NEEDED` rather than from package metadata,
+and it earned that again: nothing would have predicted `libOSMesa` needing
+`libgcrypt`, which it uses to hash its shader cache.
+
+### Calling a library with no compiler: a linked ELF, built by hand
+
+`mkelf.py --kind gl` and `build_linked`. There is no C toolchain on the
+development host and no usable WSL, so the choice was to fetch one or to teach
+the fixture builder to emit a dynamically linked object. The second is what
+this file already exists for: no toolchain will emit a binary that differs
+from another in exactly one field, and none will emit one small enough to read.
+
+The minimum a loader needs is six tables and twelve dynamic entries.
+`.dynstr`, `.dynsym` with one undefined `FUNC` per import, `.hash` -- required
+even when nothing is looked up, since `ld.so` refuses an object with neither
+hash -- `.rela.dyn` with one `R_X86_64_GLOB_DAT` per import, `.got`, and
+`.dynamic` naming all of it. No PLT and no lazy binding: `DF_BIND_NOW` has the
+loader fill every slot before the program runs, so a call is `call [rip+slot]`
+and there is no resolver trampoline to get right.
+
+Two traps, and both are silent:
+
+- **The hash table's `nchain` is how a loader sizes `.dynsym`.** One bucket
+  means every name collides, which is what makes it constructible by hand: the
+  chain then walks every symbol in order. A count one short is a symbol that
+  does not exist.
+- **`PT_PHDR`, and this one cost a disassembly.** glibc computes the main
+  program's load address in exactly one place, `case PT_PHDR: main_map->l_addr
+  = (Addr) phdr - ph->p_vaddr;`, and there is no fallback. Without it the base
+  stays zero and every address the loader derives from a `p_vaddr` is used raw.
+  The fault was a `#PF` reading `0xe8`, `ld.so` was in an SSE `strcmp`, and
+  `0xe8` is 64 for the ELF header plus three program headers -- the file offset
+  of `PT_INTERP`'s string with nothing added to it. Every real linker emits a
+  `PT_PHDR`, which is why nothing else here ever needed one.
+
+`DT_DEBUG` was the first theory and the run refuted it: the fault came back
+byte for byte identical, same rip and same fifteen registers. That is what the
+register dump is for.
+
 ### Threads, which one address space makes easier rather than harder
 
 `src/linux/thread.rs`. The asymmetry is worth stating because it is easy to

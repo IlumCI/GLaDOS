@@ -3076,7 +3076,21 @@ fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off: u64) -> u6
             let sp = unsafe { SPACE.get() };
             match sp.as_mut() {
                 Some(sp) => {
-                    sp.maps.push(Mapping { at, len: len as usize, from });
+                    // **The pages handed out, not the length asked for.**
+                    // `mmap` allocates whole pages and Linux rounds a
+                    // mapping's length up to one, so recording the raw length
+                    // leaves the tail of the last page owned by nobody --
+                    // and `owns` then refuses a `MAP_FIXED` laid over it.
+                    //
+                    // A real `ld.so` is what found this. It reserves a span
+                    // the exact size of a shared object, `0x4010` for glibc's
+                    // `libpthread` stub, then lays each segment over it; the
+                    // last of those covers `0x2fdf000` for two pages and the
+                    // second page is past `0x2fe0010`. The kernel answered
+                    // `ENOMEM`, `ld.so` said "failed to map segment from
+                    // shared object", and nothing about the message pointed
+                    // here.
+                    sp.maps.push(Mapping { at, len: page_up(len as usize), from });
                     at
                 }
                 None => {
