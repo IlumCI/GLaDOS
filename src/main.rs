@@ -41,6 +41,7 @@ mod recovery;
 mod rng;
 mod serial;
 mod shell;
+mod sky;
 mod smp;
 mod store;
 mod sync;
