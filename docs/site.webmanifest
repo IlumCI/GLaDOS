@@ -4,7 +4,7 @@
  "description": "An AI operating system in Rust, ring 0, bare metal.",
  "start_url": "https://glados.aperture.institute/",
  "display": "standalone",
- "background_color": "#0b0b0c",
+ "background_color": "#072A3C",
  "theme_color": "#f28c1e",
  "icons": [
   {

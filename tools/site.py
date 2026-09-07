@@ -242,11 +242,18 @@ def masthead_html(p):
     already implies: the institute is the publisher, GLaDOS is the thing
     published.
 
-    Drawn on white because the artwork is black on transparent and was made
-    for a light ground. Recolouring somebody's mark to fit a band we chose is
-    the wrong way round; the band moves instead. The amber has not gone
-    anywhere -- it is the tab strip's borders, every section bar, every link
-    and the footer.
+    Drawn on a light band because the artwork is black on transparent and was
+    made for a light ground. Recolouring somebody's mark to fit a band we
+    chose is the wrong way round; the band moves instead. In dark mode the
+    stylesheet inverts the file rather than loading a second one, which for
+    black on transparent is exactly a white version of the same artwork and
+    cannot drift from it.
+
+    The orange did not go anywhere when the site took the desktop's palette:
+    it is every section bar, every heading rule and every link. What changed
+    is what surrounds it -- the tab strip and the footer are the deep water
+    the desktop sits in, because `gfx::theme` puts warmth on the surfaces the
+    machine speaks through and keeps the room around them cool.
     """
     home = p or "./"
     return "\n".join([
@@ -259,12 +266,21 @@ def masthead_html(p):
     ])
 
 
+# A directory that is not its own tab, and the tab it belongs under. The
+# wallet is reached from one link at the foot of the token page and belongs
+# with it, so it takes the Token tab rather than a ninth of its own -- a tab
+# per page is how a strip of eight becomes a strip of twenty. Without this the
+# page renders with nothing active, which reads as "you are nowhere".
+UNDER = {"wallet/": "token/"}
+
+
 def section_of(relpath):
     """Which tab a page belongs under, from its own path."""
     rl = relpath.replace("\\", "/")
     if "/" not in rl:
         return "./"                       # index.html, credits.html, 404.html
-    return rl.split("/", 1)[0] + "/"
+    top = rl.split("/", 1)[0] + "/"
+    return UNDER.get(top, top)
 
 
 def nav_html(p, relpath):
