@@ -107,6 +107,8 @@ pub const SYS_GETPEERNAME: u64 = 52;
 pub const SYS_SETSOCKOPT: u64 = 54;
 pub const SYS_GETSOCKOPT: u64 = 55;
 pub const SYS_ACCESS: u64 = 21;
+pub const SYS_PIPE: u64 = 22;
+pub const SYS_PIPE2: u64 = 293;
 pub const SYS_POLL: u64 = 7;
 pub const SYS_SELECT: u64 = 23;
 pub const SYS_PSELECT6: u64 = 270;
@@ -1384,6 +1386,25 @@ fn sys_write(fd: u64, buf: u64, len: usize) -> u64 {
             Err(e) => e as u64,
         };
     }
+    // A pipe, which is the same transport with one end refused.
+    if let Some(end) = pipe_end(fd) {
+        let (pipe, writing) = {
+            let e = end.borrow();
+            (e.pipe.clone(), e.writing)
+        };
+        if !writing {
+            // Writing the read end, the mirror of the refusal in `sys_read`.
+            return EBADF;
+        }
+        if !reachable(buf, len, false) {
+            return EFAULT;
+        }
+        let data = unsafe { core::slice::from_raw_parts(buf as *const u8, len) };
+        return match super::unix::write(&pipe, super::fs::Fd::pipe_side(true), data) {
+            Ok(n) => n as u64,
+            Err(e) => e as u64,
+        };
+    }
     let sink = with_fds(|fds, _| {
         matches!(
             fds.get(fd as usize),
@@ -2011,6 +2032,70 @@ fn unix_sock(fd: u64) -> Option<alloc::rc::Rc<core::cell::RefCell<super::unix::S
         _ => None,
     })
     .flatten()
+}
+
+/// The pipe end a descriptor names, if it is one.
+fn pipe_end(fd: u64) -> Option<alloc::rc::Rc<core::cell::RefCell<super::fs::PipeEnd>>> {
+    with_fds(|fds, _| match fds.get(fd as usize) {
+        Some(Some(super::fs::Fd::Pipe(b))) => Some(b.clone()),
+        _ => None,
+    })
+    .flatten()
+}
+
+/// `pipe` and `pipe2`, which differ only in whether flags are offered.
+///
+/// The transport is the one `unix.rs` already has, with one direction unused.
+/// That is not a shortcut: a pipe genuinely is a bounded byte queue with a
+/// reader and a writer, and the only thing it adds over a socket pair is that
+/// each end may do exactly one of the two things.
+///
+/// **The write end closing is the whole protocol.** `head` stops a pipeline by
+/// closing its input; `cat` finds out because its next read answers zero. So
+/// the direction each end drives has to be right, and `Fd::pipe_side` is the
+/// one place that decides -- a pipe whose two ends shared a queue would work
+/// perfectly when talking to itself and deliver nothing across.
+fn do_pipe(at: u64, flags: u64) -> u64 {
+    const O_NONBLOCK: u64 = 0o4000;
+    const O_CLOEXEC: u64 = 0o2000000;
+    // Refused rather than ignored. `O_DIRECT` on a pipe changes it to packet
+    // mode, where a read returns one write's worth however much was asked
+    // for, and a program given byte-stream behaviour under that flag reads
+    // two messages glued together and cannot tell.
+    if flags & !(O_NONBLOCK | O_CLOEXEC) != 0 {
+        return EINVAL;
+    }
+    if !reachable(at, 8, true) {
+        return EFAULT;
+    }
+    let nonblock = flags & O_NONBLOCK != 0;
+    // Two handles onto one queue, which is what `pair` answers.
+    let (one, two) = super::unix::pair();
+    let make = |pipe, writing| {
+        super::fs::Fd::Pipe(alloc::rc::Rc::new(core::cell::RefCell::new(
+            super::fs::PipeEnd { pipe, writing, nonblock },
+        )))
+    };
+    let r = install_fd(make(one, false));
+    if (r as i64) < 0 {
+        return r;
+    }
+    let w = install_fd(make(two, true));
+    if (w as i64) < 0 {
+        // Put the first one back. A `pipe` that failed having installed one
+        // descriptor leaks it, and the guest never learns the number to close.
+        with_fds(|fds, _| {
+            if let Some(slot) = fds.get_mut(r as usize) {
+                *slot = None;
+            }
+        });
+        return w;
+    }
+    unsafe {
+        core::ptr::write_unaligned(at as *mut i32, r as i32);
+        core::ptr::write_unaligned((at + 4) as *mut i32, w as i32);
+    }
+    0
 }
 
 /// Read a `sockaddr_un` out of guest memory.
@@ -3418,6 +3503,32 @@ fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
             crate::task::yield_now();
         }
     }
+    // A pipe waits like a Unix socket, with one refusal on top.
+    if let Some(end) = pipe_end(fd) {
+        let (pipe, writing, nonblock) = {
+            let e = end.borrow();
+            (e.pipe.clone(), e.writing, e.nonblock)
+        };
+        if writing {
+            // **Reading the write end is `EBADF` and not an empty read.** The
+            // end was opened write-only, and answering zero would tell the
+            // program its input had ended.
+            return EBADF;
+        }
+        let side = super::fs::Fd::pipe_side(false);
+        loop {
+            let out = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, len as usize) };
+            match super::unix::read(&pipe, side, out) {
+                Ok(n) => return n as u64,
+                Err(-11) if !nonblock => {}
+                Err(e) => return e as u64,
+            }
+            if overran(crate::dev::lapic::ticks()) {
+                unsafe { kill_blocked() }
+            }
+            crate::task::yield_now();
+        }
+    }
     with_fds(|fds, _| match fds.get_mut(fd as usize) {
         // Nothing types at a guest, so stdin is permanently at end of file.
         // Zero is the honest answer and is what a program reading a closed
@@ -4568,6 +4679,8 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         SYS_GETSOCKOPT => (0, true),
         SYS_ACCESS => (sys_access(f.rdi, f.rsi), true),
         SYS_FACCESSAT => (sys_access(f.rsi, f.rdx), true),
+        SYS_PIPE => (do_pipe(f.rdi, 0), true),
+        SYS_PIPE2 => (do_pipe(f.rdi, f.rsi), true),
         SYS_POLL => (sys_poll(f.rdi, f.rsi, f.rdx), true),
         SYS_PPOLL => (sys_ppoll(f.rdi, f.rsi, f.rdx, f.r10, f.r8), true),
         SYS_SELECT => (sys_select(f.rdi, f.rsi, f.rdx, f.r10, f.r8), true),
@@ -6002,6 +6115,8 @@ pub fn name_of(nr: u64) -> &'static str {
         SYS_GETSOCKOPT => "getsockopt",
         SYS_ACCESS => "access",
         SYS_FACCESSAT => "faccessat",
+        SYS_PIPE => "pipe",
+        SYS_PIPE2 => "pipe2",
         SYS_POLL => "poll",
         SYS_PPOLL => "ppoll",
         SYS_SELECT => "select",

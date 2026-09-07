@@ -142,6 +142,37 @@ pub fn ready(fd: &Fd) -> u16 {
                 _ => 0,
             }
         }
+        Fd::Pipe(p) => {
+            let end = p.borrow();
+            let side = Fd::pipe_side(end.writing);
+            let gone = !super::unix::peer_open(&end.pipe, side);
+            if end.writing {
+                let mut m = 0;
+                if super::unix::room(&end.pipe, side) > 0 {
+                    m |= POLLOUT;
+                }
+                // A pipe whose reader has gone reports `POLLERR` rather than a
+                // hangup, which is Linux's split and is what a writer needs:
+                // the next write raises `EPIPE`, so calling it ready to write
+                // would send the program into exactly that error.
+                if gone {
+                    m |= POLLERR;
+                }
+                m
+            } else {
+                let mut m = 0;
+                if super::unix::readable(&end.pipe, side) > 0 {
+                    m |= POLLIN;
+                }
+                // Buffered bytes outlive the writer, so a hangup and readable
+                // together is the ordinary end of a pipeline: the reader is
+                // expected to drain what is left before it sees the zero.
+                if gone {
+                    m |= POLLHUP;
+                }
+                m
+            }
+        }
         Fd::Dev(d) => {
             let b = d.borrow();
             match b.node {
@@ -283,6 +314,47 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     out.push((
         "and the bytes it left behind are still readable, which is the ordinary end of a connection rather than a contradiction",
         hung & POLLIN != 0,
+    ));
+
+    // ---- a pipe, whose two ends report differently on purpose ----
+    let (pr, pw) = unix::pair();
+    let rd = |p: &alloc::rc::Rc<core::cell::RefCell<unix::Pipe>>| {
+        Fd::Pipe(alloc::rc::Rc::new(core::cell::RefCell::new(super::fs::PipeEnd {
+            pipe: p.clone(),
+            writing: false,
+            nonblock: false,
+        })))
+    };
+    let wr = |p: &alloc::rc::Rc<core::cell::RefCell<unix::Pipe>>| {
+        Fd::Pipe(alloc::rc::Rc::new(core::cell::RefCell::new(super::fs::PipeEnd {
+            pipe: p.clone(),
+            writing: true,
+            nonblock: false,
+        })))
+    };
+    out.push((
+        "a fresh pipe can be written and has nothing to read",
+        ready(&wr(&pw)) == POLLOUT && ready(&rd(&pr)) == 0,
+    ));
+    unix::write(&pw, Side::A, b"hi").ok();
+    out.push((
+        "and reads ready once the writer has put something in it",
+        ready(&rd(&pr)) == POLLIN,
+    ));
+    out.push((
+        "the writing end never reads ready, however full the pipe is, since it drives the other direction",
+        ready(&wr(&pw)) & POLLIN == 0,
+    ));
+    unix::close(&pw, Side::A);
+    out.push((
+        "a closed writer shows the reader a hangup, alongside the bytes still waiting",
+        ready(&rd(&pr)) == (POLLIN | POLLHUP),
+    ));
+    let (qr, qw) = unix::pair();
+    unix::close(&qr, Side::B);
+    out.push((
+        "and a closed reader shows the writer an error rather than a hangup, because its next write raises EPIPE and calling it writable would send it straight there",
+        ready(&wr(&qw)) & POLLERR != 0,
     ));
 
     // ---- a listening socket ----

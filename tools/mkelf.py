@@ -1366,6 +1366,101 @@ def poll_code(entry_rva, msg_rva, _unused):
     return bytes(c)
 
 
+MSG_PIPE = b"pipe: carried bytes, refused both wrong ways, ended on close\n"
+
+
+def pipe_code(entry_rva, msg_rva, _unused):
+    """A pipe, both refusals, and the end of file that closing produces.
+
+    **The last check is the one worth having.** A reader finds out a pipeline
+    has finished because the writer closed and its next read answers zero, and
+    nothing else tells it. A kernel that dropped the descriptor without telling
+    the transport leaves that read waiting forever on bytes nobody will send --
+    which is what `cat f | head` looks like when it hangs.
+
+    The two refusals in the middle are what separate a pipe from a socket
+    pair. Each end may do exactly one of the two things, and answering an empty
+    read on the write end instead of `EBADF` would tell the program its input
+    had ended when it never had any.
+    """
+    EBADF = -9
+    c = bytearray()
+    leas = []
+
+    def lea(reg, off):
+        leas.append((len(c), off))
+        return lea_rip(reg, 0)
+
+    # --- pipe(&fds) ---
+    c += mov_imm("rax", 22)
+    c += lea("rdi", 0)
+    c += SYSCALL
+    c += cmp_imm8("rax", 0)
+    j0 = len(c); c += jcc(JNE, 0)
+
+    c += lea("rbx", 0)
+    c += load_d("r12", "rbx", 0)           # the read end
+    c += load_d("r13", "rbx", 4)           # the write end
+
+    # --- four bytes across ---
+    c += mov_imm("rax", 1) + mov_rr("rdi", "r13")
+    c += lea("rsi", 24)
+    c += mov_imm("rdx", 4) + SYSCALL
+    c += cmp_imm8("rax", 4)
+    j1 = len(c); c += jcc(JNE, 0)
+
+    c += mov_imm("rax", 0) + mov_rr("rdi", "r12")
+    c += lea("rsi", 8)
+    c += mov_imm("rdx", 16) + SYSCALL
+    c += cmp_imm8("rax", 4)
+    j2 = len(c); c += jcc(JNE, 0)
+
+    # --- and the bytes are the ones that were sent ---
+    c += load_d("r14", "rbx", 8)
+    c += load_d("r15", "rbx", 24)
+    c += cmp_rr("r14", "r15")
+    j3 = len(c); c += jcc(JNE, 0)
+
+    # --- reading the write end ---
+    c += mov_imm("rax", 0) + mov_rr("rdi", "r13")
+    c += lea("rsi", 8)
+    c += mov_imm("rdx", 16) + SYSCALL
+    c += cmp_imm32("rax", EBADF)
+    j4 = len(c); c += jcc(JNE, 0)
+
+    # --- writing the read end ---
+    c += mov_imm("rax", 1) + mov_rr("rdi", "r12")
+    c += lea("rsi", 24)
+    c += mov_imm("rdx", 4) + SYSCALL
+    c += cmp_imm32("rax", EBADF)
+    j5 = len(c); c += jcc(JNE, 0)
+
+    # --- close the writer, and the reader must see the end ---
+    c += mov_imm("rax", 3) + mov_rr("rdi", "r13") + SYSCALL
+    c += cmp_imm8("rax", 0)
+    j6 = len(c); c += jcc(JNE, 0)
+
+    c += mov_imm("rax", 0) + mov_rr("rdi", "r12")
+    c += lea("rsi", 8)
+    c += mov_imm("rdx", 16) + SYSCALL
+    c += cmp_imm8("rax", 0)
+    j7 = len(c); c += jcc(JNE, 0)
+
+    c += mov_imm("rax", 1) + mov_imm("rdi", 1)
+    c += lea("rsi", 64)
+    c += mov_imm("rdx", len(MSG_PIPE)) + SYSCALL
+    c += mov_imm("rax", 60) + mov_imm("rdi", 9) + SYSCALL + HLT
+
+    bad_at = len(c)
+    c += mov_imm("rax", 60) + mov_imm("rdi", 4) + SYSCALL + HLT
+
+    for at in (j0, j1, j2, j3, j4, j5, j6, j7):
+        struct.pack_into("<i", c, at + 2, bad_at - (at + 6))
+    for at, off in leas:
+        struct.pack_into("<i", c, at + 3, msg_rva + off - (entry_rva + at + 7))
+    return bytes(c)
+
+
 def spin_code(entry_rva, _a, _b):
     """Loop forever, asking for nothing.
 
@@ -2711,6 +2806,15 @@ def build(kind="static"):
         text = spin_code(entry, 0, 0)
         body = text
         msg_rva, disp, lea_end = body_at, 0, 0
+    elif kind == "pipe":
+        probe = pipe_code(0, 0, 0)
+        msg_rva = body_at + len(probe)
+        text = pipe_code(entry, msg_rva, 0)
+        assert len(text) == len(probe), (len(text), len(probe))
+        # S+0 the two descriptors, S+8 a read buffer, S+24 the four bytes it
+        # sends, S+64 the message.
+        body = text + bytes(24) + b"ping" + bytes(36) + MSG_PIPE
+        disp, lea_end = 0, 0
     elif kind == "poll":
         probe = poll_code(0, 0, 0)
         msg_rva = body_at + len(probe)
@@ -3241,6 +3345,24 @@ def verify(path):
         claim("and ends in hlt, so a syscall that returns is visible",
               b.endswith(HLT))
         return ok
+    if MSG_PIPE in b:
+        claim("it calls pipe", mov_imm("rax", 22) in b)
+        claim("it sends four bytes and reads them back",
+              b.count(cmp_imm8("rax", 4)) == 2)
+        claim("it compares the bytes it read against the ones it sent, so a "
+              "pipe carrying the wrong bytes fails rather than passing on a count",
+              cmp_rr("r14", "r15") in b)
+        claim("it expects EBADF on each end used the wrong way",
+              b.count(cmp_imm32("rax", -9)) == 2)
+        claim("it closes the writer", mov_imm("rax", 3) in b)
+        # Three zero comparisons: pipe returning 0, close returning 0, and the
+        # read after the close. The last is the whole fixture.
+        claim("and requires a zero read afterwards, which is the only way a "
+              "reader learns a pipeline ended",
+              b.count(cmp_imm8("rax", 0)) == 3)
+        claim("its code ends in hlt, so a syscall that returns is visible",
+              b[b.index(b"ping") - 1:b.index(b"ping")] == bytes(1))
+        return ok
     if MSG_POLL in b:
         claim("it makes a socketpair to poll", mov_imm("rax", 53) in b)
         claim("it calls poll", mov_imm("rax", 7) in b)
@@ -3395,7 +3517,7 @@ def main():
                     choices=["static", "dynamic", "interp", "loader", "maps",
                              "fixed", "memory", "rogue",
                              "protect", "wild", "spin", "fork", "exec", "wnohang", "signal", "sock",
-                             "scm", "poll",
+                             "scm", "poll", "pipe",
                              "cat", "grep",
                              "fsabuse", "fb", "ev", "thread", "gl"],
                     default="static")

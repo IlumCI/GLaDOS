@@ -149,6 +149,16 @@ pub enum Fd {
     /// `accept` produces a descriptor whose socket is brand new while
     /// `connect` mutates one that already existed.
     Unix(Rc<RefCell<crate::linux::unix::Sock>>),
+    /// One end of a pipe.
+    ///
+    /// The transport underneath is a Unix socket's, with one direction taken
+    /// away -- and taking it away is the whole difference. Reading the write
+    /// end is `EBADF` rather than an empty read, because a program handed zero
+    /// there would conclude the pipeline had finished.
+    ///
+    /// Behind an `Rc` for the reason a socket is: `dup` makes a second name
+    /// for one end, and end-of-file has to wait for the last of them.
+    Pipe(Rc<RefCell<PipeEnd>>),
     /// A `/dev` node, which is a function rather than a body of bytes.
     ///
     /// Deliberately not a `File` with contents. `/dev/zero` is infinite and
@@ -164,6 +174,17 @@ pub enum Fd {
 /// makes a second name for one open file description, and a framebuffer
 /// program that writes a frame through two descriptors must not write the top
 /// half twice.
+/// One end of a pipe, and which end it is.
+pub struct PipeEnd {
+    pub pipe: Rc<RefCell<crate::linux::unix::Pipe>>,
+    pub writing: bool,
+    /// Whether a read that would wait answers `EAGAIN` instead.
+    ///
+    /// Per end rather than per descriptor, because `fcntl` sets it on the open
+    /// file description and `dup` makes a second name for that one thing.
+    pub nonblock: bool,
+}
+
 pub struct DevFile {
     pub path: String,
     pub node: super::dev::Node,
@@ -193,6 +214,21 @@ impl Fd {
     ///
     /// The whole of `dup`: the streams have no state to share so they copy,
     /// and everything else hands out another reference to one body.
+    /// Which side of the transport this end of a pipe drives.
+    ///
+    /// The writer is `A`, so its bytes land in the queue the reader drains and
+    /// the two never share a direction. One function rather than the mapping
+    /// written out at each of the four call sites, because a pipe that read
+    /// and wrote the same queue would work perfectly against itself and
+    /// deliver nothing to the other end.
+    pub fn pipe_side(writing: bool) -> crate::linux::unix::Side {
+        if writing {
+            crate::linux::unix::Side::A
+        } else {
+            crate::linux::unix::Side::B
+        }
+    }
+
     pub fn share(&self) -> Fd {
         match self {
             Fd::Stdin => Fd::Stdin,
@@ -204,6 +240,7 @@ impl Fd {
             // Another name for one end, which is what `dup` on a socket means
             // everywhere: two descriptors, one connection.
             Fd::Unix(b) => Fd::Unix(b.clone()),
+            Fd::Pipe(b) => Fd::Pipe(b.clone()),
             Fd::Dev(b) => Fd::Dev(b.clone()),
         }
     }
@@ -227,6 +264,35 @@ impl Fd {
                 return true;
             }
             return false;
+        }
+        // **A Unix socket's close never reached its transport, and that was a
+        // real bug rather than an omission.** The descriptor went away and the
+        // `Rc` dropped, but nothing set the far end's flag, so the peer went
+        // on believing the connection was open: a reader on the other side got
+        // `EAGAIN` forever where it was owed a zero. Nothing had noticed
+        // because every fixture so far closed both ends by exiting, and
+        // teardown frees the whole table at once.
+        if let Fd::Unix(b) = self {
+            if Rc::strong_count(b) > 1 {
+                return false;
+            }
+            if let crate::linux::unix::Sock::Stream { pipe, side } = &*b.borrow() {
+                crate::linux::unix::close(pipe, *side);
+                return true;
+            }
+            return false;
+        }
+        // The same for a pipe, where it is not a nicety: end of file *is* the
+        // protocol. `cat f | head` finishes because the writer's close is what
+        // the reader sees, and a reader that never sees it hangs holding a
+        // pipeline nobody will write to again.
+        if let Fd::Pipe(b) = self {
+            if Rc::strong_count(b) > 1 {
+                return false;
+            }
+            let end = b.borrow();
+            crate::linux::unix::close(&end.pipe, Fd::pipe_side(end.writing));
+            return true;
         }
         let Fd::File(b) = self else { return false };
         if Rc::strong_count(b) > 1 {
