@@ -7,9 +7,14 @@ Every image here came from somewhere, and the somewhere has to survive. A file
 copied into `docs/img/` by hand loses its author, its licence and its source
 URL the moment the person who copied it stops remembering, and the credits page
 then says whatever it said the last time anyone edited it. So the manifest
-below is the record: `mksite.py` reads the JSON this emits and renders the
-credit line from it, which means a caption cannot drift away from the file it
-describes without the build noticing.
+below is the record, and the JSON this emits is where a credit line comes from.
+
+**The generator that rendered the credits page from it is gone.** `mksite.py`
+was retired once it became clear nothing invoked it and it would have clobbered
+the hand-maintained site if anyone did. So the record here is still the source
+of truth for provenance, and `docs/credits.html` is now kept by hand against
+it. That is a downgrade and is written down rather than left to be discovered:
+a caption *can* now drift from the file it describes.
 
 Two sources.
 
@@ -22,7 +27,7 @@ ar5iv entries pull a figure out of the HTML rendering of an arXiv paper. There
 is no metadata API for those, so the manifest carries the citation.
 
 Pillow is imported only to downscale rasters. It is a dependency of this
-script, not of the site: `mksite.py` stays stdlib-only, and the images this
+script, not of the site: `site.py` stays stdlib-only, and the images this
 writes are committed, so nobody needs either one to build the site.
 
 Usage:
@@ -51,7 +56,8 @@ RASTER_WIDTH = 720
 # --- the manifest ---------------------------------------------------------
 #
 # key -> where it came from, and what page wants it. The `page` field is
-# documentation for whoever reads this file; mksite.py places figures itself.
+# documentation for whoever reads this file. Nothing places figures from it any
+# more, so it records intent rather than where the image ended up.
 
 COMMONS = {
     "priv-rings":       ("File:Priv rings.svg", "ring-0"),

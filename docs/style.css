@@ -250,7 +250,20 @@ dl.faq dd { margin: 3px 0 0 20px; }
 .listing td { padding: 2px 8px 2px 0; border-bottom: 1px solid #eee; }
 .icon { color: #777; display: inline-block; width: 2.6em; }
 
+/* Parked off-screen until focused, and it has to come back on focus or it is
+   decoration: a skip link nobody can see is one nobody can use, which is worse
+   than not having one because the markup claims otherwise. */
 .skip { position: absolute; left: -9999px; }
+.skip:focus {
+  left: 0;
+  top: 0;
+  z-index: 100;
+  padding: 8px 14px;
+  background: #fff;
+  color: #964b00;
+  border: 2px solid #f28c1e;
+  text-decoration: none;
+}
 
 @media (max-width: 45rem) {
   #sidebar { float: none; width: auto; }

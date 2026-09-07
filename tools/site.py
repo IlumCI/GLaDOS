@@ -550,6 +550,33 @@ def archive_tree(rel):
     ])
 
 
+def inline_md(text):
+    """The two Markdown spellings that actually reach the news column.
+
+    Release notes are written in Markdown and this column reproduces their
+    first paragraph, so `**bold**` and backticked code were arriving on the
+    front page as literal asterisks and backticks.
+
+    **Escaped first, converted second**, and that order is the whole safety
+    argument. `html.escape` has already turned any `<` into `&lt;`, so the only
+    tags in the result are the ones introduced here out of `*` and backtick
+    characters, which escaping does not touch.
+
+    Deliberately only these two. Measured across all fourteen published
+    releases: three bold spans, three code spans, and no links, italics or
+    underscore emphasis at all. Handling links would mean validating their
+    targets, which is real injection surface bought for a construct nothing
+    has ever used.
+
+    One known edge: the 320-character truncation above can cut a pair in half,
+    and a lone marker simply fails to match and renders as itself. That is the
+    same thing it did before and is not worth machinery.
+    """
+    text = re.sub(r"`([^`]+)`", r"<code>\1</code>", text)
+    text = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", text)
+    return text
+
+
 def news_items(releases, limit=None):
     """Dated entries, newest first. The body is the release's own summary line.
 
@@ -578,7 +605,8 @@ def news_items(releases, limit=None):
             '</div>' % (
                 html.escape(date),
                 html.escape(rel.get("name") or ("GLaDOS " + ver)),
-                html.escape(first) or "No summary was recorded for this release.",
+                inline_md(html.escape(first))
+                or "No summary was recorded for this release.",
                 a(rel["html_url"], "Release notes"),
                 "%d image%s" % (imgs, "" if imgs == 1 else "s"),
             ))
