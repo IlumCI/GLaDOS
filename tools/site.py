@@ -303,7 +303,17 @@ def stats_rows(releases):
         ("Registered", first),
         ("Releases", "%d" % len(releases)),
         ("Downloads", "%d" % total),
-        ("Source", "108 files, ~50,000 lines"),
+        # Counted rather than remembered, and it is worth saying how: this is
+        # every `.rs` under `src/`, which on the last count was 198 files and
+        # 131,869 lines. Re-measure before moving it --
+        #
+        #     find src -name '*.rs' | wc -l
+        #     find src -name '*.rs' -exec cat {} + | wc -l
+        #
+        # because the figure this replaced had been "108 files, ~50,000 lines"
+        # for long enough to be wrong by ninety files, and CLAUDE.md's own
+        # number was stale in the same direction by twenty-eight.
+        ("Source", "198 files, ~132,000 lines"),
     ]
 
 

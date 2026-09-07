@@ -4,18 +4,18 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Testing an operating system with no test runner</title>
-<meta name="description" content="No cargo test, no host runtime. Verification is twenty self-test sections at boot, a scripted emulator harness, a numeric oracle, and a differential harness with a canary that must fail.">
+<meta name="description" content="No cargo test, no host runtime. Verification is twenty-six self-test sections at boot, forty-two named diag suites, a scripted emulator harness, a numeric oracle, and a differential harness with a canary that must fail.">
 <meta name="keywords" content="OS testing, no test runner, boot self test, QEMU harness, numeric oracle, differential testing, WHPX">
 <link rel="canonical" href="https://glados.aperture.institute/wiki/testing.html">
 <meta name="robots" content="index,follow,max-image-preview:large">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="GLaDOS">
 <meta property="og:title" content="Testing an operating system with no test runner">
-<meta property="og:description" content="No cargo test, no host runtime. Verification is twenty self-test sections at boot, a scripted emulator harness, a numeric oracle, and a differential harness with a canary that must fail.">
+<meta property="og:description" content="No cargo test, no host runtime. Verification is twenty-six self-test sections at boot, forty-two named diag suites, a scripted emulator harness, a numeric oracle, and a differential harness with a canary that must fail.">
 <meta property="og:url" content="https://glados.aperture.institute/wiki/testing.html">
 <meta name="twitter:card" content="summary">
 <meta name="twitter:title" content="Testing an operating system with no test runner">
-<meta name="twitter:description" content="No cargo test, no host runtime. Verification is twenty self-test sections at boot, a scripted emulator harness, a numeric oracle, and a differential harness with a canary that must fail.">
+<meta name="twitter:description" content="No cargo test, no host runtime. Verification is twenty-six self-test sections at boot, forty-two named diag suites, a scripted emulator harness, a numeric oracle, and a differential harness with a canary that must fail.">
 <meta property="og:image" content="https://glados.aperture.institute/img/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
@@ -27,7 +27,7 @@
 <link rel="apple-touch-icon" sizes="180x180" href="../img/icon-180.png">
 <link rel="manifest" href="../site.webmanifest">
 <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://glados.aperture.institute/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://glados.aperture.institute/wiki/"},{"@type":"ListItem","position":3,"name":"Testing without a test runner","item":"https://glados.aperture.institute/wiki/testing.html"}]}</script>
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Testing an operating system with no test runner","description":"No cargo test, no host runtime. Verification is twenty self-test sections at boot, a scripted emulator harness, a numeric oracle, and a differential harness with a canary that must fail.","url":"https://glados.aperture.institute/wiki/testing.html","dateModified":"2026-08-30","keywords":"OS testing, no test runner, boot self test, QEMU harness, numeric oracle, differential testing, WHPX","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://glados.aperture.institute/"}}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Testing an operating system with no test runner","description":"No cargo test, no host runtime. Verification is twenty-six self-test sections at boot, forty-two named diag suites, a scripted emulator harness, a numeric oracle, and a differential harness with a canary that must fail.","url":"https://glados.aperture.institute/wiki/testing.html","dateModified":"2026-08-30","keywords":"OS testing, no test runner, boot self test, QEMU harness, numeric oracle, differential testing, WHPX","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://glados.aperture.institute/"}}</script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -49,7 +49,7 @@
 <div id="sidebar">
 <div class="box"><div class="t">Latest release</div><div class="bd"><table class="facts"><tr><td>Version</td><td>1.3.5</td></tr><tr><td>Released</td><td>2026-09-07</td></tr><tr><td>Images</td><td>3</td></tr></table><ul><li><a href="../download/">Download</a></li><li><a href="https://github.com/IlumCI/GLaDOS/releases/tag/v1.3.5">Release notes</a></li></ul></div></div>
 <div class="box"><div class="t">Project information</div><div class="bd"><table class="facts"><tr><td>Development status</td><td>3 - Alpha</td></tr><tr><td>Environment</td><td>Console, framebuffer</td></tr><tr><td>Intended audience</td><td>Developers, science/research</td></tr><tr><td>Licence</td><td>Other/proprietary, all rights reserved</td></tr><tr><td>Natural language</td><td>English</td></tr><tr><td>Operating system</td><td>x86-64 UEFI, bare metal</td></tr><tr><td>Programming language</td><td>Rust, Python</td></tr><tr><td>Topic</td><td>Operating systems, kernels, artificial intelligence</td></tr></table></div></div>
-<div class="box"><div class="t">Statistics</div><div class="bd"><table class="facts"><tr><td>Registered</td><td>2026-08-14</td></tr><tr><td>Releases</td><td>15</td></tr><tr><td>Downloads</td><td>627</td></tr><tr><td>Source</td><td>108 files, ~50,000 lines</td></tr></table></div></div>
+<div class="box"><div class="t">Statistics</div><div class="bd"><table class="facts"><tr><td>Registered</td><td>2026-08-14</td></tr><tr><td>Releases</td><td>15</td></tr><tr><td>Downloads</td><td>628</td></tr><tr><td>Source</td><td>198 files, ~132,000 lines</td></tr></table></div></div>
 <div class="box"><div class="t">Developers</div><div class="bd"><table class="facts"><tr><td>IlumCI</td><td>project admin, developer</td></tr></table></div></div>
 <div class="box"><div class="t">Documentation</div><div class="bd"><ul><li><a href="../wiki/glados-os.html">GLaDOS OS</a></li><li><a href="../wiki/kernel.html">The kernel</a></li><li><a href="../wiki/model.html">The model</a></li><li><a href="../wiki/agent.html">The agent</a></li><li><a href="../wiki/rsi.html">Self-improvement</a></li><li><a href="../wiki/aiksi.html">Aiksi, the language</a></li><li><a href="../wiki/">All 18 articles</a></li></ul></div></div>
 </div>
@@ -61,7 +61,7 @@
 <p>There is no <code>cargo test</code> here. This is a bare-metal binary with no host runtime, so a test that runs on the development machine is testing something other than the system. Verification is four instruments.</p>
 
 <h2 id="1-self-tests-at-boot">1. Self-tests at boot</h2>
-<p>Twenty sections run during boot, printing a claim and whether the machine met it. Thirteen of them are registered as named suites that can be re-run on demand. Heap, timer, clock, the Merkle addressing, fifteen sets of published cipher vectors, fault handling, constrained decoding, the agent loop, the linear probe, the situation planner, the initiative policy, the self-modification gate, corpus bundles, adapters, the backward kernels and the trainer's arithmetic.</p>
+<p>Twenty-six sections run during boot, printing a claim and whether the machine met it. <code>diag</code> registers forty-two named suites that can be re-run on demand, most of them the same checks. Heap, timer, clock, the Merkle addressing, fifteen sets of published cipher vectors, fault handling, constrained decoding, the agent loop, the linear probe, the situation planner, the initiative policy, the self-modification gate, corpus bundles, adapters, the backward kernels and the trainer's arithmetic.</p>
 <p>Registration is deliberately awkward: adding a suite requires a slot in a results table and a compile-time assertion that the two lengths match, so a suite added without a slot fails the build.</p>
 <p>Reading that output is the test suite, and skipping it has cost real time twice. A signature verification break sat visible in the log for a full debugging cycle while the output was being filtered to the section under work.</p>
 

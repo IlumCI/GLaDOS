@@ -4,18 +4,18 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>GLaDOS OS, a ring-0 Rust operating system with a language model in the kernel</title>
-<meta name="description" content="A from-scratch operating system in Rust for one laptop, built around a language model that lives inside the kernel. No user/kernel split, no syscalls, one address space.">
+<meta name="description" content="A from-scratch operating system in Rust for one laptop, built around a language model that lives inside the kernel. No privilege boundary of its own, and unmodified Linux binaries running at ring 3 beside it.">
 <meta name="keywords" content="GLaDOS OS, Rust operating system, ring 0, in-kernel LLM, UEFI kernel, hobby OS, Portal">
 <link rel="canonical" href="https://glados.aperture.institute/wiki/glados-os.html">
 <meta name="robots" content="index,follow,max-image-preview:large">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="GLaDOS">
 <meta property="og:title" content="GLaDOS OS, a ring-0 Rust operating system with a language model in the kernel">
-<meta property="og:description" content="A from-scratch operating system in Rust for one laptop, built around a language model that lives inside the kernel. No user/kernel split, no syscalls, one address space.">
+<meta property="og:description" content="A from-scratch operating system in Rust for one laptop, built around a language model that lives inside the kernel. No privilege boundary of its own, and unmodified Linux binaries running at ring 3 beside it.">
 <meta property="og:url" content="https://glados.aperture.institute/wiki/glados-os.html">
 <meta name="twitter:card" content="summary">
 <meta name="twitter:title" content="GLaDOS OS, a ring-0 Rust operating system with a language model in the kernel">
-<meta name="twitter:description" content="A from-scratch operating system in Rust for one laptop, built around a language model that lives inside the kernel. No user/kernel split, no syscalls, one address space.">
+<meta name="twitter:description" content="A from-scratch operating system in Rust for one laptop, built around a language model that lives inside the kernel. No privilege boundary of its own, and unmodified Linux binaries running at ring 3 beside it.">
 <meta property="og:image" content="https://glados.aperture.institute/img/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
@@ -27,7 +27,7 @@
 <link rel="apple-touch-icon" sizes="180x180" href="../img/icon-180.png">
 <link rel="manifest" href="../site.webmanifest">
 <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://glados.aperture.institute/"},{"@type":"ListItem","position":2,"name":"Wiki","item":"https://glados.aperture.institute/wiki/"},{"@type":"ListItem","position":3,"name":"GLaDOS OS","item":"https://glados.aperture.institute/wiki/glados-os.html"}]}</script>
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"GLaDOS OS, a ring-0 Rust operating system with a language model in the kernel","description":"A from-scratch operating system in Rust for one laptop, built around a language model that lives inside the kernel. No user/kernel split, no syscalls, one address space.","url":"https://glados.aperture.institute/wiki/glados-os.html","dateModified":"2026-08-30","keywords":"GLaDOS OS, Rust operating system, ring 0, in-kernel LLM, UEFI kernel, hobby OS, Portal","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://glados.aperture.institute/"}}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"GLaDOS OS, a ring-0 Rust operating system with a language model in the kernel","description":"A from-scratch operating system in Rust for one laptop, built around a language model that lives inside the kernel. No privilege boundary of its own, and unmodified Linux binaries running at ring 3 beside it.","url":"https://glados.aperture.institute/wiki/glados-os.html","dateModified":"2026-08-30","keywords":"GLaDOS OS, Rust operating system, ring 0, in-kernel LLM, UEFI kernel, hobby OS, Portal","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"GLaDOS","url":"https://glados.aperture.institute/"}}</script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -49,7 +49,7 @@
 <div id="sidebar">
 <div class="box"><div class="t">Latest release</div><div class="bd"><table class="facts"><tr><td>Version</td><td>1.3.5</td></tr><tr><td>Released</td><td>2026-09-07</td></tr><tr><td>Images</td><td>3</td></tr></table><ul><li><a href="../download/">Download</a></li><li><a href="https://github.com/IlumCI/GLaDOS/releases/tag/v1.3.5">Release notes</a></li></ul></div></div>
 <div class="box"><div class="t">Project information</div><div class="bd"><table class="facts"><tr><td>Development status</td><td>3 - Alpha</td></tr><tr><td>Environment</td><td>Console, framebuffer</td></tr><tr><td>Intended audience</td><td>Developers, science/research</td></tr><tr><td>Licence</td><td>Other/proprietary, all rights reserved</td></tr><tr><td>Natural language</td><td>English</td></tr><tr><td>Operating system</td><td>x86-64 UEFI, bare metal</td></tr><tr><td>Programming language</td><td>Rust, Python</td></tr><tr><td>Topic</td><td>Operating systems, kernels, artificial intelligence</td></tr></table></div></div>
-<div class="box"><div class="t">Statistics</div><div class="bd"><table class="facts"><tr><td>Registered</td><td>2026-08-14</td></tr><tr><td>Releases</td><td>15</td></tr><tr><td>Downloads</td><td>627</td></tr><tr><td>Source</td><td>108 files, ~50,000 lines</td></tr></table></div></div>
+<div class="box"><div class="t">Statistics</div><div class="bd"><table class="facts"><tr><td>Registered</td><td>2026-08-14</td></tr><tr><td>Releases</td><td>15</td></tr><tr><td>Downloads</td><td>628</td></tr><tr><td>Source</td><td>198 files, ~132,000 lines</td></tr></table></div></div>
 <div class="box"><div class="t">Developers</div><div class="bd"><table class="facts"><tr><td>IlumCI</td><td>project admin, developer</td></tr></table></div></div>
 <div class="box"><div class="t">Documentation</div><div class="bd"><ul><li><a href="../wiki/glados-os.html">GLaDOS OS</a></li><li><a href="../wiki/kernel.html">The kernel</a></li><li><a href="../wiki/model.html">The model</a></li><li><a href="../wiki/agent.html">The agent</a></li><li><a href="../wiki/rsi.html">Self-improvement</a></li><li><a href="../wiki/aiksi.html">Aiksi, the language</a></li><li><a href="../wiki/">All 18 articles</a></li></ul></div></div>
 </div>
@@ -58,8 +58,8 @@
 <div class="crumbs"><a href="../">GLaDOS</a> / <a href="../wiki/">Wiki</a> / GLaDOS OS</div>
 <div id="main">
 <h1>GLaDOS OS</h1>
-<p>An operating system written from nothing, in Rust, for one specific laptop. It boots as a UEFI application, runs entirely in ring 0, and has a language model living inside the kernel. There are no processes, no syscalls, and one address space. A tool call from the model is a function call.</p>
-<p>The tree is 108 files and roughly fifty thousand lines. The only code in the kernel that was not written here is Rust <code>core</code> and one file of RTL8188EU initialisation tables taken from Linux, which says so at the top of itself.</p>
+<p>An operating system written from nothing, in Rust, for one specific laptop. It boots as a UEFI application, runs entirely in ring 0, and has a language model living inside the kernel. Inside the kernel there is no privilege boundary and no process isolation: a tool call from the model is a function call. Beside it, since 1.3.4, unmodified Linux binaries run at ring 3 on page tables of their own, with a syscall surface ninety-seven calls wide.</p>
+<p>The tree is 198 files and about 132,000 lines, of which 178 files and 118,000 lines were written here. Three things were not. Rust <code>core</code>. One file of RTL8188EU initialisation tables taken from Linux, because there is no other source for them. And the DOOM port under <code>src/doom/</code>, 19 files adapted from room4doom, which is the largest of the three and is the point of that directory rather than an exception to the rule: it exists to find out whether software written somewhere else can be brought over without dissolving into the kernel, and code written here would answer nothing. Each says at the top of itself what it came from.</p>
 
 <h2 id="the-structural-choice">The structural choice</h2>
 <p>Most systems that put a model near an operating system put it in a process, hand it a shell, and let it type. That design has an interesting property: every capability the model has is mediated by text, and text has to be generated, parsed, and validated at each crossing.</p>
@@ -67,14 +67,14 @@
 <p>What that costs is described plainly on <a href="kernel.html">the ring 0 page</a>. There is no isolation here of any kind, and the documentation says so in every place a reader might otherwise assume otherwise.</p>
 
 <h2 id="boot">Boot</h2>
-<p>UEFI already delivers long mode, CPL 0 and an identity map, so the UEFI application is the kernel. There is no ELF loading, no relocation, and no handoff ABI. The model, the tokenizer and the root certificate bundle are read before <code>ExitBootServices</code>, because that is the last moment a filesystem exists. Everything after that runs on page tables the kernel built for itself.</p>
-<p>Boot prints twenty self-test sections. Thirteen of them can be re-run on demand with <code>diag</code>. Reading that output is the test suite, and it has caught real breakage more than once while somebody was grepping it down to the section they were working on.</p>
+<p>UEFI already delivers long mode, CPL 0 and an identity map, so the UEFI application is the kernel. On the boot path there is no ELF loading, no relocation and no handoff ABI; the ELF loader that exists now is for running other people's programs rather than for starting this one. The model, the tokenizer and the root certificate bundle are read before <code>ExitBootServices</code>, because that is the last moment a filesystem exists. Everything after that runs on page tables the kernel built for itself.</p>
+<p>Boot prints twenty-six self-test sections, and <code>diag</code> offers forty-two named suites on demand, most of them the same checks. Reading that output is the test suite, and it has caught real breakage more than once while somebody was grepping it down to the section they were working on.</p>
 
 <h2 id="what-is-in-it">What is in it</h2>
 <ul>
 <li><b>The model.</b> Qwen3-0.6B at int8, around 570 MB, referenced in place, with no copy on the heap. SmolLM2-135M is the small checkpoint for emulator work. Qwen3.5 hybrids load through a separate layer-major format.</li>
 <li><b>Aiksi</b>, the system language. Everything above the kernel is written in it. Source to tokens to AST to evaluation, with an allowlist of builtins and a capability gate that fits on one screen.</li>
-<li><b>A desktop.</b> Windows 98 icons and Start menu over Windows 3.1 bevels, composed into a heap back buffer and presented by row-span diff. Paintbrush, Write and Minesweeper are real applications with their own client areas.</li>
+<li><b>A desktop.</b> Frutiger Aero in Aperture's colours, composed into a heap back buffer and presented by row-span diff. Paintbrush, Write and Minesweeper are real applications with their own client areas.</li>
 <li><b>A network stack</b> from ARP up to TLS 1.3, all of it written here, with the certificate validation reporting what it established and saying so.</li>
 <li><b>Content-addressed storage</b> on NVMe, objects named by the hash of their contents, snapshots as a single root hash, writes locked to a claimed range by default.</li>
 <li><b>A self-modification loop</b> that proposes changes to the machine's own routing, adapters, skills and configuration, and adopts one only when four independent judges agree.</li>

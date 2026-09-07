@@ -51,7 +51,7 @@
 <div id="sidebar">
 <div class="box"><div class="t">Latest release</div><div class="bd"><table class="facts"><tr><td>Version</td><td>1.3.5</td></tr><tr><td>Released</td><td>2026-09-07</td></tr><tr><td>Images</td><td>3</td></tr></table><ul><li><a href="download/">Download</a></li><li><a href="https://github.com/IlumCI/GLaDOS/releases/tag/v1.3.5">Release notes</a></li></ul></div></div>
 <div class="box"><div class="t">Project information</div><div class="bd"><table class="facts"><tr><td>Development status</td><td>3 - Alpha</td></tr><tr><td>Environment</td><td>Console, framebuffer</td></tr><tr><td>Intended audience</td><td>Developers, science/research</td></tr><tr><td>Licence</td><td>Other/proprietary, all rights reserved</td></tr><tr><td>Natural language</td><td>English</td></tr><tr><td>Operating system</td><td>x86-64 UEFI, bare metal</td></tr><tr><td>Programming language</td><td>Rust, Python</td></tr><tr><td>Topic</td><td>Operating systems, kernels, artificial intelligence</td></tr></table></div></div>
-<div class="box"><div class="t">Statistics</div><div class="bd"><table class="facts"><tr><td>Registered</td><td>2026-08-14</td></tr><tr><td>Releases</td><td>15</td></tr><tr><td>Downloads</td><td>627</td></tr><tr><td>Source</td><td>108 files, ~50,000 lines</td></tr></table></div></div>
+<div class="box"><div class="t">Statistics</div><div class="bd"><table class="facts"><tr><td>Registered</td><td>2026-08-14</td></tr><tr><td>Releases</td><td>15</td></tr><tr><td>Downloads</td><td>628</td></tr><tr><td>Source</td><td>198 files, ~132,000 lines</td></tr></table></div></div>
 <div class="box"><div class="t">Developers</div><div class="bd"><table class="facts"><tr><td>IlumCI</td><td>project admin, developer</td></tr></table></div></div>
 <div class="box"><div class="t">Documentation</div><div class="bd"><ul><li><a href="wiki/glados-os.html">GLaDOS OS</a></li><li><a href="wiki/kernel.html">The kernel</a></li><li><a href="wiki/model.html">The model</a></li><li><a href="wiki/agent.html">The agent</a></li><li><a href="wiki/rsi.html">Self-improvement</a></li><li><a href="wiki/aiksi.html">Aiksi, the language</a></li><li><a href="wiki/">All 18 articles</a></li></ul></div></div>
 </div>
@@ -64,8 +64,8 @@
 <h2 class="sect">About</h2>
 <div class="panel">
 <p>GLaDOS is an operating system for x86-64, written from scratch in Rust, which boots on bare metal and runs entirely in ring 0. Its distinguishing feature is that a transformer lives in kernel space. The model is compiled into the same binary as the page tables and the disk driver, and shares an address space with both.</p>
-<p>That arrangement deletes most of the machinery an AI agent usually needs. There is no userspace to marshal arguments into, no wire format, no dispatcher and no process boundary to cross. When the model decides to run <code>ls</code>, the kernel calls <code>ls</code>, and the call costs what any other function call costs.</p>
-<p>What is underneath the paint is ordinary systems work. The TCP/IP stack, the TLS 1.3 client, the NVMe and xHCI drivers, the ACPI interpreter, the window manager, the system language and the inference code were all written for this project, which comes to 108 files of Rust and roughly fifty thousand lines. The name comes from <em>Portal</em>, and so does the look.</p>
+<p>That arrangement deletes most of the machinery an AI agent usually needs. Between the model and the machine there is no userspace to marshal arguments into, no wire format, no dispatcher and no process boundary to cross. When the model decides to run <code>ls</code>, the kernel calls <code>ls</code>, and the call costs what any other function call costs.</p>
+<p>What is underneath the paint is ordinary systems work. The TCP/IP stack, the TLS 1.3 client, the NVMe and xHCI drivers, the ACPI interpreter, the window manager, the system language and the inference code were all written for this project, which comes to 178 files of Rust and about 118,000 lines. Another 13,000 are a DOOM port adapted from somebody else's, and that is a measurement rather than a shortcut: it is there to find out whether software written elsewhere survives being brought over. The name comes from <em>Portal</em>, and so does the look.</p>
 </div>
 
 <h2 class="sect"><a href="download/">All downloads</a>Latest file releases</h2>
@@ -106,7 +106,7 @@
 <tr><td><a href="wiki/">Wiki</a></td><td>Twenty-five articles: every subsystem, how it works, and what it cost to find out.</td></tr>
 <tr><td><a href="screenshots/">Screenshots</a></td><td>The desktop, the shell, and the model answering from ring 0.</td></tr>
 <tr><td><a href="archive/">Archive</a></td><td>Mirror-style file index of images, sources and checksums.</td></tr>
-<tr><td><a href="token/">Token</a></td><td>The planned utility token, what it would gate, and what it deliberately would not.</td></tr>
+<tr><td><a href="token/">Token</a></td><td>The utility token, what it gates, and what it deliberately does not.</td></tr>
 <tr><td><a href="https://github.com/IlumCI/GLaDOS">Source code</a></td><td>All rights reserved, published to be read.</td></tr>
 </tbody>
 </table>
