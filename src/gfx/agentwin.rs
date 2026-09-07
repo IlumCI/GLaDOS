@@ -195,32 +195,43 @@ impl DeskApp for AuthorWin {
             return;
         };
 
-        theme::text(
+        // Every line in this panel is drawn at `dense()`, and the three above
+        // this comment were the exception until they were caught in a
+        // screenshot. `theme::text` draws at `CHROME_SCALE`, which is 2 and
+        // fixed; `lh` comes from `text_h_at(dense())`, which is 1 on anything
+        // shorter than 1000 pixels. So a 16-pixel line advanced by 10 and each
+        // one was written six pixels into the one above it -- on the GF63, in
+        // QEMU, and on every screen this project has ever been photographed
+        // on. The sibling window above says why the density is the panel's and
+        // not the chrome's; these lines simply never got the message when
+        // `dense()` arrived, and one line height for one scale is the only
+        // arrangement where that cannot happen again.
+        theme::text_over_at(
             fb,
             area.x,
             y,
             &alloc::format!("{} {}", if p.running { "writing" } else { "wrote" }, p.name),
             theme::TEXT,
-            theme::FACE,
+            dense(),
         );
         y += lh + lh / 2;
 
-        theme::text(
+        theme::text_over_at(
             fb,
             area.x,
             y,
             &alloc::format!("step {} of {}", p.step, p.budget),
             theme::TEXT,
-            theme::FACE,
+            dense(),
         );
         y += lh;
-        theme::text(
+        theme::text_over_at(
             fb,
             area.x,
             y,
             &alloc::format!("{} of {} clause(s) met", p.met, p.total),
             theme::TEXT,
-            theme::FACE,
+            dense(),
         );
         y += lh + lh / 2;
 
