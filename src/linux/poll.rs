@@ -92,6 +92,9 @@ pub fn ready(fd: &Fd) -> u16 {
             }
         }
         Fd::Dir(_) => POLLIN,
+        // Always ready both ways, like a regular file: there is nothing to
+        // wait for in memory that is already there.
+        Fd::Memfd(_) => POLLIN | POLLOUT,
         Fd::Socket(s) => {
             let b = s.borrow();
             match b.conn {

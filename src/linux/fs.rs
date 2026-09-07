@@ -161,6 +161,8 @@ pub enum Fd {
     Pipe(Rc<RefCell<PipeEnd>>),
     /// An `epoll` set, which is a descriptor naming a list of descriptors.
     Epoll(Rc<RefCell<crate::linux::epoll::Epoll>>),
+    /// An anonymous file made by `memfd_create`.
+    Memfd(Rc<RefCell<Memfd>>),
     /// A `/dev` node, which is a function rather than a body of bytes.
     ///
     /// Deliberately not a `File` with contents. `/dev/zero` is infinite and
@@ -176,6 +178,55 @@ pub enum Fd {
 /// makes a second name for one open file description, and a framebuffer
 /// program that writes a frame through two descriptors must not write the top
 /// half twice.
+/// An anonymous file: bytes with a size and a cursor, and no name in the store.
+///
+/// **This is the one file a guest may map shared and writable**, and the
+/// reason is the one `/dev/fb0` gives rather than an exception to it. Every
+/// other file here refuses `MAP_SHARED | PROT_WRITE` because writing back into
+/// a content-addressed store is a new root hash per modified page. A memfd is
+/// not in the store: it is heap pages that live and die with the descriptor,
+/// so the objection simply does not apply.
+///
+/// That matters beyond tidiness. It is how a Wayland client hands a
+/// compositor a buffer -- create, size, map, draw, pass the descriptor over a
+/// socket -- and every one of those steps except the last already existed.
+pub struct Memfd {
+    pub name: String,
+    /// Page-aligned backing, zero until `ftruncate` sizes it.
+    ///
+    /// Aligned from the start because a shared mapping hands out *these* pages:
+    /// this kernel is identity mapped, so "map this file here" is "give the
+    /// guest this address and open the U bit", exactly as the framebuffer
+    /// does. A `Vec` would be neither aligned nor pinned, and a reallocation
+    /// under a live mapping would leave the guest writing into freed memory.
+    pub at: u64,
+    pub len: usize,
+    pub cursor: usize,
+    /// How many live mappings there are. A resize while any exists is refused.
+    pub maps: usize,
+}
+
+impl Memfd {
+    /// The bytes, as a slice.
+    ///
+    /// # Safety
+    /// `at` and `len` describe a live allocation this structure owns, and the
+    /// identity map means the address is directly readable.
+    pub fn bytes(&self) -> &[u8] {
+        if self.len == 0 {
+            return &[];
+        }
+        unsafe { core::slice::from_raw_parts(self.at as *const u8, self.len) }
+    }
+
+    pub fn bytes_mut(&mut self) -> &mut [u8] {
+        if self.len == 0 {
+            return &mut [];
+        }
+        unsafe { core::slice::from_raw_parts_mut(self.at as *mut u8, self.len) }
+    }
+}
+
 /// One end of a pipe, and which end it is.
 pub struct PipeEnd {
     pub pipe: Rc<RefCell<crate::linux::unix::Pipe>>,
@@ -244,6 +295,7 @@ impl Fd {
             Fd::Unix(b) => Fd::Unix(b.clone()),
             Fd::Pipe(b) => Fd::Pipe(b.clone()),
             Fd::Epoll(b) => Fd::Epoll(b.clone()),
+            Fd::Memfd(b) => Fd::Memfd(b.clone()),
             Fd::Dev(b) => Fd::Dev(b.clone()),
         }
     }

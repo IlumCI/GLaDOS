@@ -107,6 +107,8 @@ pub const SYS_GETPEERNAME: u64 = 52;
 pub const SYS_SETSOCKOPT: u64 = 54;
 pub const SYS_GETSOCKOPT: u64 = 55;
 pub const SYS_ACCESS: u64 = 21;
+pub const SYS_FTRUNCATE: u64 = 77;
+pub const SYS_MEMFD_CREATE: u64 = 319;
 pub const SYS_EPOLL_CREATE: u64 = 213;
 pub const SYS_EPOLL_WAIT: u64 = 232;
 pub const SYS_EPOLL_CTL: u64 = 233;
@@ -562,6 +564,14 @@ pub enum Source {
     /// something it never owned. The pages to release are the backing's, and
     /// this is the only place that still knows which they were.
     Backed(u64),
+    /// Pages a `memfd` owns, which the guest sees at their own address.
+    ///
+    /// A fifth source because it goes back a fifth way, and the way is to do
+    /// almost nothing: the memfd allocated these pages and the memfd frees
+    /// them when its last descriptor closes. Freeing them here would take
+    /// memory still named by an open file. All the mapping owes is the U bit,
+    /// which is the same debt `Device` has for a completely different reason.
+    Shared,
 }
 
 /// A range this kernel handed to the guest.
@@ -1390,6 +1400,26 @@ fn sys_write(fd: u64, buf: u64, len: usize) -> u64 {
             Ok(n) => n as u64,
             Err(e) => e as u64,
         };
+    }
+    // An anonymous file. **A write past the end is short rather than growing
+    // the file**, which is a real deviation from Linux and is the same hazard
+    // `ftruncate` refuses for: growing moves the pages, and the address here
+    // *is* the memory. A caller that checks its return value copes; one that
+    // does not would have been wrong about a short write anyway.
+    if let Some(m) = memfd(fd) {
+        if !reachable(buf, len, false) {
+            return EFAULT;
+        }
+        let mut f = m.borrow_mut();
+        let at = f.cursor.min(f.len);
+        let n = (f.len - at).min(len);
+        if n > 0 {
+            unsafe {
+                core::ptr::copy_nonoverlapping(buf as *const u8, (f.at + at as u64) as *mut u8, n)
+            };
+        }
+        f.cursor = at + n;
+        return n as u64;
     }
     // A pipe, which is the same transport with one end refused.
     if let Some(end) = pipe_end(fd) {
@@ -2235,6 +2265,123 @@ fn sys_epoll_wait(epfd: u64, evs: u64, maxevents: u64, timeout: u64) -> u64 {
         }
         crate::task::yield_now();
     }
+}
+
+const EBUSY: u64 = (-16i64) as u64;
+
+/// The anonymous file a descriptor names, if it is one.
+fn memfd(fd: u64) -> Option<alloc::rc::Rc<core::cell::RefCell<super::fs::Memfd>>> {
+    with_fds(|fds, _| match fds.get(fd as usize) {
+        Some(Some(super::fs::Fd::Memfd(b))) => Some(b.clone()),
+        _ => None,
+    })
+    .flatten()
+}
+
+/// `memfd_create`, which is how a Wayland client makes a buffer.
+///
+/// `MFD_ALLOW_SEALING` is accepted and seals themselves are not implemented,
+/// which is stated rather than hidden: the flag only permits sealing later, so
+/// accepting it costs nothing, and `fcntl(F_ADD_SEALS)` fails the way it does
+/// on a kernel built without the feature. A compositor that required its
+/// clients to have sealed would be one written here, and it is not.
+fn sys_memfd_create(name: u64, flags: u64) -> u64 {
+    const MFD_CLOEXEC: u64 = 1;
+    const MFD_ALLOW_SEALING: u64 = 2;
+    if flags & !(MFD_CLOEXEC | MFD_ALLOW_SEALING) != 0 {
+        return EINVAL;
+    }
+    let name = match read_cstr(name) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+    install_fd(super::fs::Fd::Memfd(alloc::rc::Rc::new(core::cell::RefCell::new(
+        super::fs::Memfd { name, at: 0, len: 0, cursor: 0, maps: 0 },
+    ))))
+}
+
+/// `ftruncate`, which is the only way a `memfd` gets a size.
+///
+/// **Refused once the file has been mapped**, and that is the honest version
+/// of a hazard rather than a limitation for its own sake. Resizing moves the
+/// pages, and this kernel is identity mapped, so a guest holding a mapping
+/// would go on writing to the address the pages used to be at -- which the
+/// allocator has by then given to something else. Linux can move them because
+/// its mappings are indirections and it can rewrite them; here the address
+/// *is* the memory.
+///
+/// Every real user sizes before mapping, which is the order the call was
+/// designed around: create, size, map, draw.
+fn sys_ftruncate(fd: u64, len: u64) -> u64 {
+    if (len as i64) < 0 {
+        return EINVAL;
+    }
+    if let Some(m) = memfd(fd) {
+        let mut f = m.borrow_mut();
+        if f.maps > 0 {
+            return EBUSY;
+        }
+        // **`page_up(0)` is 4096, not 0.** It carries a `.max(1)`, so that
+        // `alloc_pages(0)` still returns a page rather than a null the caller
+        // would hand out -- correct there, and a trap here: the first sizing
+        // of an empty file compared `page_up(4096)` against `page_up(0)`,
+        // found them equal, took the "nothing moves" path and set the length
+        // without ever allocating. What that produced was a memfd reporting
+        // 4096 bytes at address zero, which `ftruncate` reported as success
+        // and `mmap` then refused. Found by printing the two fields rather
+        // than by reading the arithmetic, after three wrong guesses.
+        let want = if len == 0 { 0 } else { page_up(len as usize) };
+        let have = if f.at == 0 { 0 } else { page_up(f.len) };
+        if f.at != 0 && want == have {
+            // The same pages, a different visible length. Nothing moves.
+            f.len = len as usize;
+            return 0;
+        }
+        let fresh = if want == 0 {
+            0
+        } else {
+            match alloc_pages(want) {
+                Some(a) => a,
+                None => return ENOMEM,
+            }
+        };
+        if want > 0 {
+            // Growth reads as zeros, which is what `ftruncate` promises and
+            // what heap pages do not give for free -- they carry whatever the
+            // last owner left, and handing that to a guest is a disclosure as
+            // much as a wrong answer.
+            unsafe { core::ptr::write_bytes(fresh as *mut u8, 0, want) };
+            let keep = f.len.min(len as usize);
+            if keep > 0 && f.at != 0 {
+                unsafe {
+                    core::ptr::copy_nonoverlapping(f.at as *const u8, fresh as *mut u8, keep)
+                };
+            }
+        }
+        if f.at != 0 {
+            free_pages(f.at, have);
+        }
+        f.at = fresh;
+        f.len = len as usize;
+        return 0;
+    }
+    with_fds(|fds, _| match fds.get_mut(fd as usize) {
+        Some(Some(super::fs::Fd::File(b))) => {
+            let f = &mut *b.borrow_mut();
+            if !f.writable {
+                // Linux answers `EINVAL` rather than `EACCES` for a descriptor
+                // that was not opened for writing, and a program checking
+                // errno branches on which.
+                return EINVAL;
+            }
+            f.data.resize(len as usize, 0);
+            f.dirty = true;
+            0
+        }
+        Some(Some(_)) => EINVAL,
+        _ => EBADF,
+    })
+    .unwrap_or(EBADF)
 }
 
 /// Read a `sockaddr_un` out of guest memory.
@@ -3646,6 +3793,19 @@ fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
             crate::task::yield_now();
         }
     }
+    // An anonymous file is memory that is already there, so nothing waits.
+    if let Some(m) = memfd(fd) {
+        let mut f = m.borrow_mut();
+        let at = f.cursor.min(f.len);
+        let n = (f.len - at).min(len as usize);
+        if n > 0 {
+            unsafe {
+                core::ptr::copy_nonoverlapping((f.at + at as u64) as *const u8, buf as *mut u8, n)
+            };
+        }
+        f.cursor = at + n;
+        return n as u64;
+    }
     // A pipe waits like a Unix socket, with one refusal on top.
     if let Some(end) = pipe_end(fd) {
         let (pipe, writing, nonblock) = {
@@ -4443,6 +4603,50 @@ fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off: u64) -> u6
         }
     }
 
+    // A memfd, and the same argument as the framebuffer arriving a second
+    // time. The refusal below is about writing back into a content-addressed
+    // store; a memfd is not in the store, it is heap pages the descriptor
+    // owns, so `MAP_SHARED | PROT_WRITE` is exactly right for it. This is
+    // where a Wayland client's buffer comes from.
+    if !anon {
+        if let Some(m) = memfd(fd) {
+            const MAP_SHARED: u64 = 0x01;
+            if flags & MAP_SHARED == 0 {
+                // A private mapping of a memfd is a copy-on-write view, which
+                // is legal and which nothing has asked for. Refusing says so.
+                return EINVAL;
+            }
+            if off != 0 {
+                return EINVAL;
+            }
+            let mut f = m.borrow_mut();
+            let want = page_up(len as usize);
+            if want == 0 || f.at == 0 || want > page_up(f.len) {
+                return EINVAL;
+            }
+            let at = f.at;
+            let perm = crate::mem::paging::Perm {
+                present: true,
+                write: prot & PROT_WRITE != 0,
+                exec: false,
+                user: true,
+            };
+            if !crate::mem::paging::protect(at, want, perm) {
+                return ENOMEM;
+            }
+            // Only ever rises. It is what stops a later `ftruncate` moving
+            // pages the guest is holding an address into, and it is not
+            // decremented on unmap because `Source` cannot carry a reference
+            // back: `Mapping` is `Copy`, since `fork` duplicates the list.
+            f.maps += 1;
+            drop(f);
+            if let Some(sp) = (unsafe { guest_slot() }).as_mut() {
+                sp.maps.push(Mapping { at, len: want, from: Source::Shared });
+            }
+            return at;
+        }
+    }
+
     let backing = if anon {
         None
     } else {
@@ -4644,6 +4848,12 @@ fn give_back(at: u64, len: usize, from: Option<Source>) {
         Some(Source::Device) => {
             crate::mem::paging::protect(at, page_up(len), crate::mem::paging::Perm::RWX);
         }
+        // The same debt and nothing else. These pages belong to a `memfd`
+        // that is still open, or to one whose close will free them; taking
+        // them back here would pull memory out from under a live descriptor.
+        Some(Source::Shared) => {
+            crate::mem::paging::protect(at, page_up(len), crate::mem::paging::Perm::RWX);
+        }
         // The backing, at its own address. Nothing is done about the guest's
         // mapping of it: those page tables belong to the guest's `Space` and
         // die with it, so unmapping here would be tidying something that is
@@ -4822,6 +5032,8 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         SYS_GETSOCKOPT => (0, true),
         SYS_ACCESS => (sys_access(f.rdi, f.rsi), true),
         SYS_FACCESSAT => (sys_access(f.rsi, f.rdx), true),
+        SYS_FTRUNCATE => (sys_ftruncate(f.rdi, f.rsi), true),
+        SYS_MEMFD_CREATE => (sys_memfd_create(f.rdi, f.rsi), true),
         SYS_EPOLL_CREATE => (sys_epoll_create(f.rdi), true),
         SYS_EPOLL_CREATE1 => (sys_epoll_create1(f.rdi), true),
         SYS_EPOLL_CTL => (sys_epoll_ctl(f.rdi, f.rsi, f.rdx, f.r10), true),
@@ -6264,6 +6476,8 @@ pub fn name_of(nr: u64) -> &'static str {
         SYS_GETSOCKOPT => "getsockopt",
         SYS_ACCESS => "access",
         SYS_FACCESSAT => "faccessat",
+        SYS_FTRUNCATE => "ftruncate",
+        SYS_MEMFD_CREATE => "memfd_create",
         SYS_EPOLL_CREATE => "epoll_create",
         SYS_EPOLL_CREATE1 => "epoll_create1",
         SYS_EPOLL_CTL => "epoll_ctl",

@@ -1576,6 +1576,92 @@ def epoll_code(entry_rva, msg_rva, _unused):
     return bytes(c)
 
 
+MSG_MEMFD = b"memfd: mapped shared, and the descriptor read back what the mapping wrote\n"
+
+
+def memfd_code(entry_rva, msg_rva, _unused):
+    """Make an anonymous file, map it shared, and check the two views agree.
+
+    **Writing through the mapping and reading through the descriptor is the
+    whole claim.** A `memfd` that handed out a copy would pass every check
+    about sizes and addresses and then silently deliver a blank buffer to a
+    compositor, which is exactly the failure this exists to prevent: a Wayland
+    client draws into the mapping and the far side reads the descriptor.
+
+    The last check is the refusal. Resizing moves the pages, and on an
+    identity-mapped kernel the address *is* the memory, so a guest holding a
+    mapping across a resize would go on writing to pages the allocator has
+    given to something else. `EBUSY` says so instead.
+    """
+    EBUSY = -16
+    MAP_SHARED = 1
+    PROT_RW = 3
+    MARK = 0x5EEDFACE
+    c = bytearray()
+    leas = []
+
+    def lea(reg, off):
+        leas.append((len(c), off))
+        return lea_rip(reg, 0)
+
+    # --- memfd_create("buf", 0) ---
+    c += mov_imm("rax", 319)
+    c += lea("rdi", 16)
+    c += mov_imm("rsi", 0) + SYSCALL
+    c += cmp_imm8("rax", 0)
+    j0 = len(c); c += jcc(JL, 0)
+    c += mov_rr("r15", "rax")
+
+    c += lea("rbx", 0)
+
+    # --- give it a size ---
+    c += mov_imm("rax", 77) + mov_rr("rdi", "r15") + mov_imm("rsi", 4096) + SYSCALL
+    c += cmp_imm8("rax", 0)
+    j1 = len(c); c += jcc(JNE, 0)
+
+    # --- map it shared ---
+    c += mov_imm("rax", 9) + mov_imm("rdi", 0) + mov_imm("rsi", 4096)
+    c += mov_imm("rdx", PROT_RW) + mov_imm("r10", MAP_SHARED)
+    c += mov_rr("r8", "r15") + mov_imm("r9", 0) + SYSCALL
+    c += cmp_imm8("rax", 0)
+    j2 = len(c); c += jcc(JL, 0)
+    c += mov_rr("r14", "rax")
+
+    # --- write a mark through the mapping ---
+    c += mov_imm("rax", MARK)
+    c += store_q("r14", 0, "rax")
+
+    # --- and read it back through the descriptor ---
+    c += mov_imm("rax", 0) + mov_rr("rdi", "r15")
+    c += lea("rsi", 0)
+    c += mov_imm("rdx", 8) + SYSCALL
+    c += cmp_imm8("rax", 8)
+    j3 = len(c); c += jcc(JNE, 0)
+
+    c += load_d("r13", "rbx", 0)
+    c += cmp_imm32("r13", MARK)
+    j4 = len(c); c += jcc(JNE, 0)
+
+    # --- resizing while mapped ---
+    c += mov_imm("rax", 77) + mov_rr("rdi", "r15") + mov_imm("rsi", 8192) + SYSCALL
+    c += cmp_imm32("rax", EBUSY)
+    j5 = len(c); c += jcc(JNE, 0)
+
+    c += mov_imm("rax", 1) + mov_imm("rdi", 1)
+    c += lea("rsi", 32)
+    c += mov_imm("rdx", len(MSG_MEMFD)) + SYSCALL
+    c += mov_imm("rax", 60) + mov_imm("rdi", 9) + SYSCALL + HLT
+
+    bad_at = len(c)
+    c += mov_imm("rax", 60) + mov_imm("rdi", 4) + SYSCALL + HLT
+
+    for at in (j0, j1, j2, j3, j4, j5):
+        struct.pack_into("<i", c, at + 2, bad_at - (at + 6))
+    for at, off in leas:
+        struct.pack_into("<i", c, at + 3, msg_rva + off - (entry_rva + at + 7))
+    return bytes(c)
+
+
 def spin_code(entry_rva, _a, _b):
     """Loop forever, asking for nothing.
 
@@ -2921,6 +3007,14 @@ def build(kind="static"):
         text = spin_code(entry, 0, 0)
         body = text
         msg_rva, disp, lea_end = body_at, 0, 0
+    elif kind == "memfd":
+        probe = memfd_code(0, 0, 0)
+        msg_rva = body_at + len(probe)
+        text = memfd_code(entry, msg_rva, 0)
+        assert len(text) == len(probe), (len(text), len(probe))
+        # S+0 eight bytes read back, S+16 the name, S+32 the message.
+        body = text + bytes(16) + b"buf\x00" + bytes(12) + MSG_MEMFD
+        disp, lea_end = 0, 0
     elif kind == "epoll":
         probe = epoll_code(0, 0, 0)
         msg_rva = body_at + len(probe)
@@ -3469,6 +3563,22 @@ def verify(path):
         claim("and ends in hlt, so a syscall that returns is visible",
               b.endswith(HLT))
         return ok
+    if MSG_MEMFD in b:
+        claim("it makes an anonymous file", mov_imm("rax", 319) in b)
+        claim("it sizes it with ftruncate", mov_imm("rax", 77) in b)
+        claim("and maps it", mov_imm("rax", 9) in b)
+        claim("the mapping is shared, which is the only kind that aliases",
+              mov_imm("r10", 1) in b)
+        # The mark goes in through the mapping and comes out through a read.
+        # A memfd handing out a copy passes every size check and fails this.
+        claim("it writes a mark through the mapping and reads it back through "
+              "the descriptor, so a copy would fail where a size check would not",
+              store_q("r14", 0, "rax") in b and cmp_imm32("r13", 0x5EEDFACE) in b)
+        claim("it expects EBUSY for a resize while mapped",
+              cmp_imm32("rax", -16) in b)
+        claim("its code ends in hlt, so a syscall that returns is visible",
+              b[b.index(b"buf\x00") - 1:b.index(b"buf\x00")] == bytes(1))
+        return ok
     if MSG_EPOLL in b:
         claim("it makes a set with epoll_create1", mov_imm("rax", 291) in b)
         claim("and something to watch with pipe", mov_imm("rax", 22) in b)
@@ -3662,7 +3772,7 @@ def main():
                     choices=["static", "dynamic", "interp", "loader", "maps",
                              "fixed", "memory", "rogue",
                              "protect", "wild", "spin", "fork", "exec", "wnohang", "signal", "sock",
-                             "scm", "poll", "pipe", "epoll",
+                             "scm", "poll", "pipe", "epoll", "memfd",
                              "cat", "grep",
                              "fsabuse", "fb", "ev", "thread", "gl"],
                     default="static")
