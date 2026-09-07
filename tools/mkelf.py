@@ -1240,6 +1240,132 @@ def scm_code(entry_rva, msg_rva, _unused):
     return bytes(c)
 
 
+MSG_POLL = b"poll: unready, then ready, and select agreed\n"
+
+
+def poll_code(entry_rva, msg_rva, _unused):
+    """Ask `poll` about a socket before and after somebody writes to it.
+
+    **The whole claim is that the two answers differ.** A `poll` that always
+    said ready would pass any fixture checking one call, and it would send
+    every program built on it into a `read` that blocks forever. So this asks
+    once with nothing in the socket, writes one byte through the other end,
+    and asks again -- and the first answer has to be zero.
+
+    `revents` is checked as an exact word rather than a bit test, because the
+    field sits in the top half of the same `u32` as `events` and comparing the
+    pair at once says both that the right bit arrived and that the kernel left
+    `events` alone. A server that wrote its answer over the request would look
+    perfectly correct to a program that only reads `revents`, until the second
+    call reused the array.
+
+    One base register throughout: `store_q` takes a signed byte displacement,
+    so every field has to sit within 127 of it, and the whole working set here
+    is 64 bytes.
+    """
+    AF_UNIX, SOCK_STREAM = 1, 1
+    POLLIN = 0x001
+    POLLNVAL = 0x020
+    c = bytearray()
+    leas = []
+
+    def lea(reg, off):
+        leas.append((len(c), off))
+        return lea_rip(reg, 0)
+
+    # --- socketpair(AF_UNIX, SOCK_STREAM, 0, &sv) ---
+    c += mov_imm("rax", 53) + mov_imm("rdi", AF_UNIX) + mov_imm("rsi", SOCK_STREAM)
+    c += mov_imm("rdx", 0)
+    c += lea("r10", 16)
+    c += SYSCALL
+    c += cmp_imm8("rax", 0)
+    j0 = len(c); c += jcc(JNE, 0)
+
+    c += lea("rbx", 0)
+    c += load_d("r12", "rbx", 16)          # the writing end
+    c += load_d("r13", "rbx", 20)          # the end we poll
+
+    # pollfd[0] = { fd = sv[1], events = POLLIN, revents = 0 }
+    c += store_d("rbx", 0, "r13")
+    c += mov_imm("rax", POLLIN) + store_d("rbx", 4, "rax")
+
+    # --- poll with nothing in it: the answer that must be zero ---
+    c += mov_imm("rax", 7) + mov_rr("rdi", "rbx") + mov_imm("rsi", 1)
+    c += mov_imm("rdx", 0) + SYSCALL
+    c += cmp_imm8("rax", 0)
+    j1 = len(c); c += jcc(JNE, 0)
+
+    # --- one byte the other way ---
+    c += mov_imm("rax", 1) + mov_rr("rdi", "r12")
+    c += lea("rsi", 40)
+    c += mov_imm("rdx", 1) + SYSCALL
+    c += cmp_imm8("rax", 1)
+    j2 = len(c); c += jcc(JNE, 0)
+
+    # --- and now it is ready ---
+    c += mov_imm("rax", POLLIN) + store_d("rbx", 4, "rax")
+    c += mov_imm("rax", 7) + mov_rr("rdi", "rbx") + mov_imm("rsi", 1)
+    c += mov_imm("rdx", 0) + SYSCALL
+    c += cmp_imm8("rax", 1)
+    j3 = len(c); c += jcc(JNE, 0)
+    # events in the low half untouched, revents in the high half exactly POLLIN
+    c += load_d("r14", "rbx", 4)
+    c += cmp_imm32("r14", (POLLIN << 16) | POLLIN)
+    j4 = len(c); c += jcc(JNE, 0)
+
+    # --- select has to agree about the same socket ---
+    # fd_set: bit sv[1]. Built by shifting rather than assumed to be a known
+    # number, because the descriptor is whatever the kernel handed out.
+    c += mov_imm("rax", 1) + mov_rr("rcx", "r13")
+    c += shl_cl("rax")
+    c += store_q("rbx", 48, "rax")
+    c += mov_imm("rax", 0)
+    c += store_q("rbx", 24, "rax") + store_q("rbx", 32, "rax")   # timeval {0,0}
+    c += mov_imm("rax", 23) + mov_rr("rdi", "r13") + add_imm("rdi", 1)
+    c += lea("rsi", 48)
+    c += mov_imm("rdx", 0) + mov_imm("r10", 0)
+    c += lea("r8", 24)
+    c += SYSCALL
+    c += cmp_imm8("rax", 1)
+    j5 = len(c); c += jcc(JNE, 0)
+
+    # --- a descriptor nobody opened is reported in its own entry ---
+    c += mov_imm("rax", 99) + store_d("rbx", 8, "rax")
+    c += mov_imm("rax", POLLIN) + store_d("rbx", 12, "rax")
+    c += mov_imm("rax", POLLIN) + store_d("rbx", 4, "rax")
+    c += mov_imm("rax", 7) + mov_rr("rdi", "rbx") + mov_imm("rsi", 2)
+    c += mov_imm("rdx", 0) + SYSCALL
+    c += cmp_imm8("rax", 2)
+    j6 = len(c); c += jcc(JNE, 0)
+    c += load_d("r14", "rbx", 12)
+    c += cmp_imm32("r14", (POLLNVAL << 16) | POLLIN)
+    j7 = len(c); c += jcc(JNE, 0)
+
+    # --- and a negative one is skipped, which is how a program switches an
+    # entry off without rebuilding its array ---
+    c += mov_imm("rax", -1) + store_d("rbx", 8, "rax")
+    c += mov_imm("rax", POLLIN) + store_d("rbx", 12, "rax")
+    c += mov_imm("rax", POLLIN) + store_d("rbx", 4, "rax")
+    c += mov_imm("rax", 7) + mov_rr("rdi", "rbx") + mov_imm("rsi", 2)
+    c += mov_imm("rdx", 0) + SYSCALL
+    c += cmp_imm8("rax", 1)
+    j8 = len(c); c += jcc(JNE, 0)
+
+    c += mov_imm("rax", 1) + mov_imm("rdi", 1)
+    c += lea("rsi", 64)
+    c += mov_imm("rdx", len(MSG_POLL)) + SYSCALL
+    c += mov_imm("rax", 60) + mov_imm("rdi", 9) + SYSCALL + HLT
+
+    bad_at = len(c)
+    c += mov_imm("rax", 60) + mov_imm("rdi", 4) + SYSCALL + HLT
+
+    for at in (j0, j1, j2, j3, j4, j5, j6, j7, j8):
+        struct.pack_into("<i", c, at + 2, bad_at - (at + 6))
+    for at, off in leas:
+        struct.pack_into("<i", c, at + 3, msg_rva + off - (entry_rva + at + 7))
+    return bytes(c)
+
+
 def spin_code(entry_rva, _a, _b):
     """Loop forever, asking for nothing.
 
@@ -2585,6 +2711,15 @@ def build(kind="static"):
         text = spin_code(entry, 0, 0)
         body = text
         msg_rva, disp, lea_end = body_at, 0, 0
+    elif kind == "poll":
+        probe = poll_code(0, 0, 0)
+        msg_rva = body_at + len(probe)
+        text = poll_code(entry, msg_rva, 0)
+        assert len(text) == len(probe), (len(text), len(probe))
+        # S+0 two pollfds, S+16 sv, S+24 a timeval, S+40 the byte, S+48 an
+        # fd_set, S+64 the message.
+        body = text + bytes(64) + MSG_POLL
+        disp, lea_end = 0, 0
     elif kind == "scm":
         probe = scm_code(0, 0, 0)
         msg_rva = body_at + len(probe)
@@ -3106,6 +3241,23 @@ def verify(path):
         claim("and ends in hlt, so a syscall that returns is visible",
               b.endswith(HLT))
         return ok
+    if MSG_POLL in b:
+        claim("it makes a socketpair to poll", mov_imm("rax", 53) in b)
+        claim("it calls poll", mov_imm("rax", 7) in b)
+        claim("and select, so the two are checked against one socket",
+              mov_imm("rax", 23) in b)
+        # The pair of expectations is the fixture: zero before the write and
+        # one after. A poll that always answered ready would satisfy either
+        # one alone.
+        claim("it expects nothing ready before the write and one after",
+              cmp_imm8("rax", 0) in b and cmp_imm8("rax", 1) in b)
+        claim("it checks revents as a whole word, so events must survive too",
+              cmp_imm32("r14", 0x00010001) in b)
+        claim("it expects POLLNVAL for a descriptor nobody opened",
+              cmp_imm32("r14", 0x00200001) in b)
+        claim("its code ends in hlt, so a syscall that returns is visible",
+              b[b.index(MSG_POLL) - 1:b.index(MSG_POLL)] == bytes(1))
+        return ok
     if MSG_SCM in b:
         claim("it makes a socketpair", mov_imm("rax", 53) in b)
         claim("it sends with sendmsg", mov_imm("rax", 46) in b)
@@ -3243,7 +3395,7 @@ def main():
                     choices=["static", "dynamic", "interp", "loader", "maps",
                              "fixed", "memory", "rogue",
                              "protect", "wild", "spin", "fork", "exec", "wnohang", "signal", "sock",
-                             "scm",
+                             "scm", "poll",
                              "cat", "grep",
                              "fsabuse", "fb", "ev", "thread", "gl"],
                     default="static")

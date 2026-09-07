@@ -338,6 +338,32 @@ pub fn collect(pipe: &Rc<RefCell<Pipe>>, side: Side) -> Vec<super::fs::Fd> {
     out
 }
 
+/// How much may still be written this way before a write would block.
+///
+/// Its one caller is `poll`, which has to answer "would a write proceed"
+/// without performing one. Zero here and `write` answering `EAGAIN` are the
+/// same fact, so they read the same field rather than each deciding.
+pub fn room(pipe: &Rc<RefCell<Pipe>>, side: Side) -> usize {
+    let p = pipe.borrow();
+    let q = match side {
+        Side::A => &p.to_b,
+        Side::B => &p.to_a,
+    };
+    CAPACITY.saturating_sub(q.len())
+}
+
+/// Whether the far end is still there.
+///
+/// `poll` reports a departed peer as `POLLHUP`, which is how a program learns
+/// the connection ended without having to attempt a read to find out.
+pub fn peer_open(pipe: &Rc<RefCell<Pipe>>, side: Side) -> bool {
+    let p = pipe.borrow();
+    match side {
+        Side::A => p.b_open,
+        Side::B => p.a_open,
+    }
+}
+
 /// Whether anything is waiting to be handed over, for a claim.
 pub fn pending_fds(pipe: &Rc<RefCell<Pipe>>, side: Side) -> usize {
     let p = pipe.borrow();

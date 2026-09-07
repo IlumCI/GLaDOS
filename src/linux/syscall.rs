@@ -107,6 +107,10 @@ pub const SYS_GETPEERNAME: u64 = 52;
 pub const SYS_SETSOCKOPT: u64 = 54;
 pub const SYS_GETSOCKOPT: u64 = 55;
 pub const SYS_ACCESS: u64 = 21;
+pub const SYS_POLL: u64 = 7;
+pub const SYS_SELECT: u64 = 23;
+pub const SYS_PSELECT6: u64 = 270;
+pub const SYS_PPOLL: u64 = 271;
 pub const SYS_SENDFILE: u64 = 40;
 pub const SYS_FACCESSAT: u64 = 269;
 pub const SYS_RT_SIGPROCMASK: u64 = 14;
@@ -3112,6 +3116,226 @@ fn sys_close(fd: u64) -> u64 {
     .unwrap_or(EBADF)
 }
 
+/// The most descriptors either call will consider.
+///
+/// A cap rather than a trust: `nfds` is the guest's, and both calls size an
+/// allocation from it. Linux's own default limit is 1024 open files, so a
+/// program legitimately past this is one this machine could not have given the
+/// descriptors to in the first place.
+const MAX_WATCHED: u64 = 1024;
+
+/// What one descriptor can do, or nothing if it is not open.
+///
+/// Looked up afresh on every turn of a wait, because the entire point of these
+/// calls is that the answer changes while the guest is not running.
+fn fd_ready(fd: u64) -> Option<u16> {
+    with_fds(|fds, _| match fds.get(fd as usize) {
+        Some(Some(d)) => Some(super::poll::ready(d)),
+        _ => None,
+    })
+    .flatten()
+}
+
+/// Whether a wait that began at `start` has run out.
+fn expired(start: u64, limit: Option<u64>) -> bool {
+    match limit {
+        None => false,
+        Some(t) => crate::dev::lapic::ticks().wrapping_sub(start) >= t,
+    }
+}
+
+/// A `timespec` or `timeval` from the guest, as milliseconds.
+///
+/// One function for both because they differ only in the divisor of the second
+/// field, and writing it twice is how the two come to disagree about rounding.
+fn span_ms(at: u64, per_ms: u64) -> Option<i64> {
+    if !reachable(at, 16, false) {
+        return None;
+    }
+    let p = at as *const u64;
+    let (whole, frac) = unsafe { (core::ptr::read_unaligned(p), core::ptr::read_unaligned(p.add(1))) };
+    Some(whole.saturating_mul(1000).saturating_add(frac / per_ms) as i64)
+}
+
+fn sys_poll(fds: u64, nfds: u64, timeout: u64) -> u64 {
+    // The field is an `int`, so a wait of -1 arrives as 0xFFFFFFFF and has to
+    // be read back through i32 before it means "no limit" rather than
+    // "forty-nine days".
+    do_poll(fds, nfds, super::poll::ticks_for_ms(timeout as u32 as i32 as i64))
+}
+
+/// `ppoll`, whose signal mask cannot matter here.
+///
+/// Linux swaps the mask for the duration so a signal can break the wait. This
+/// kernel delivers signals **on the way out of a syscall**, and a guest
+/// blocked inside `poll` has not left one, so nothing can interrupt this wait
+/// whatever the mask says. Accepting the argument and ignoring it is therefore
+/// exact rather than lazy: there is no behaviour it could change. It stops
+/// being true the day delivery happens anywhere else, and `signal.rs` already
+/// records that the timer is the other candidate.
+fn sys_ppoll(fds: u64, nfds: u64, ts: u64, _mask: u64, _setsize: u64) -> u64 {
+    let limit = if ts == 0 {
+        None
+    } else {
+        match span_ms(ts, 1_000_000) {
+            Some(ms) => super::poll::ticks_for_ms(ms),
+            None => return EFAULT,
+        }
+    };
+    do_poll(fds, nfds, limit)
+}
+
+fn do_poll(fds: u64, nfds: u64, limit: Option<u64>) -> u64 {
+    use super::poll::{PFD_LEN, POLLNVAL};
+    if nfds > MAX_WATCHED {
+        return EINVAL;
+    }
+    let bytes = nfds as usize * PFD_LEN;
+    // Writable, because `revents` is written back into the guest's own array.
+    // That is the whole calling convention: the guest keeps one array across
+    // many calls and the kernel touches only the last field of each entry.
+    if bytes > 0 && !reachable(fds, bytes, true) {
+        return EFAULT;
+    }
+    let start = crate::dev::lapic::ticks();
+    loop {
+        let mut n = 0u64;
+        for i in 0..nfds as usize {
+            let at = fds + (i * PFD_LEN) as u64;
+            let raw = unsafe { core::ptr::read_unaligned(at as *const i32) };
+            let events = unsafe { core::ptr::read_unaligned((at + 4) as *const u16) };
+            // A negative descriptor is skipped with its answer cleared. That
+            // is how a program switches one entry off without rebuilding its
+            // array, and refusing it would break every caller that does.
+            let rev = if raw < 0 {
+                0
+            } else {
+                match fd_ready(raw as u64) {
+                    Some(state) => super::poll::wanted(state, events),
+                    // Not an error return. `poll` reports a bad descriptor in
+                    // that entry and answers about the rest, which is what
+                    // lets a program find out *which* one went bad.
+                    None => POLLNVAL,
+                }
+            };
+            unsafe { core::ptr::write_unaligned((at + 6) as *mut u16, rev) };
+            if rev != 0 {
+                n += 1;
+            }
+        }
+        if n > 0 {
+            return n;
+        }
+        if expired(start, limit) {
+            return 0;
+        }
+        // A blocked guest has to stay killable. The run deadline is checked
+        // from the timer and only for ring 3, so a guest sitting in a kernel
+        // wait is invisible to it -- the failure `sys_read`'s own loop
+        // records, which took the machine with no key able to bring it back.
+        if overran(crate::dev::lapic::ticks()) {
+            unsafe { kill_blocked() }
+        }
+        crate::task::yield_now();
+    }
+}
+
+fn sys_select(nfds: u64, r: u64, w: u64, e: u64, tv: u64) -> u64 {
+    let limit = if tv == 0 {
+        None
+    } else {
+        match span_ms(tv, 1000) {
+            Some(ms) => super::poll::ticks_for_ms(ms),
+            None => return EFAULT,
+        }
+    };
+    do_select(nfds, r, w, e, limit)
+}
+
+fn sys_pselect6(nfds: u64, r: u64, w: u64, e: u64, ts: u64) -> u64 {
+    // The sixth argument is a signal mask, and it cannot matter here for the
+    // reason `ppoll` gives.
+    let limit = if ts == 0 {
+        None
+    } else {
+        match span_ms(ts, 1_000_000) {
+            Some(ms) => super::poll::ticks_for_ms(ms),
+            None => return EFAULT,
+        }
+    };
+    do_select(nfds, r, w, e, limit)
+}
+
+fn do_select(nfds: u64, rp: u64, wp: u64, ep: u64, limit: Option<u64>) -> u64 {
+    use super::poll::{set_bytes, set_get, set_put, POLLHUP, POLLIN, POLLOUT, POLLPRI};
+    if nfds > MAX_WATCHED {
+        return EINVAL;
+    }
+    let nb = set_bytes(nfds as usize);
+    let mut want = [alloc::vec![0u8; nb], alloc::vec![0u8; nb], alloc::vec![0u8; nb]];
+    for (slot, p) in [rp, wp, ep].iter().enumerate() {
+        if *p != 0 && nb > 0 {
+            if !reachable(*p, nb, true) {
+                return EFAULT;
+            }
+            unsafe {
+                core::ptr::copy_nonoverlapping(*p as *const u8, want[slot].as_mut_ptr(), nb)
+            };
+        }
+    }
+    let start = crate::dev::lapic::ticks();
+    loop {
+        let mut out = [alloc::vec![0u8; nb], alloc::vec![0u8; nb], alloc::vec![0u8; nb]];
+        let mut n = 0u64;
+        for i in 0..nfds as usize {
+            let asked = [set_get(&want[0], i), set_get(&want[1], i), set_get(&want[2], i)];
+            if !asked.iter().any(|a| *a) {
+                continue;
+            }
+            // `select` has nowhere to put a per-descriptor answer, so a bad
+            // one fails the whole call. That is the opposite of `poll` above
+            // and both are what a libc expects.
+            let Some(state) = fd_ready(i as u64) else {
+                return EBADF;
+            };
+            // A hangup counts as readable here, deliberately. `select` has no
+            // bit for it, so end-of-connection reaches a program as a read
+            // that then returns zero -- which is exactly how every program
+            // written against `select` learns a peer has gone.
+            if asked[0] && state & (POLLIN | POLLHUP) != 0 {
+                set_put(&mut out[0], i);
+                n += 1;
+            }
+            if asked[1] && state & POLLOUT != 0 {
+                set_put(&mut out[1], i);
+                n += 1;
+            }
+            if asked[2] && state & POLLPRI != 0 {
+                set_put(&mut out[2], i);
+                n += 1;
+            }
+        }
+        // The sets are written back on the way out either way, since a timeout
+        // has to leave them empty rather than holding what the guest asked
+        // for. A caller that re-polled without clearing them would otherwise
+        // be told every descriptor it watches is ready.
+        if n > 0 || expired(start, limit) {
+            for (slot, p) in [rp, wp, ep].iter().enumerate() {
+                if *p != 0 && nb > 0 {
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(out[slot].as_ptr(), *p as *mut u8, nb)
+                    };
+                }
+            }
+            return n;
+        }
+        if overran(crate::dev::lapic::ticks()) {
+            unsafe { kill_blocked() }
+        }
+        crate::task::yield_now();
+    }
+}
+
 fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
     if len == 0 {
         return 0;
@@ -4344,6 +4568,10 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         SYS_GETSOCKOPT => (0, true),
         SYS_ACCESS => (sys_access(f.rdi, f.rsi), true),
         SYS_FACCESSAT => (sys_access(f.rsi, f.rdx), true),
+        SYS_POLL => (sys_poll(f.rdi, f.rsi, f.rdx), true),
+        SYS_PPOLL => (sys_ppoll(f.rdi, f.rsi, f.rdx, f.r10, f.r8), true),
+        SYS_SELECT => (sys_select(f.rdi, f.rsi, f.rdx, f.r10, f.r8), true),
+        SYS_PSELECT6 => (sys_pselect6(f.rdi, f.rsi, f.rdx, f.r10, f.r8), true),
         SYS_SENDFILE => (sys_sendfile(f.rdi, f.rsi, f.rdx, f.r10), true),
         SYS_GETCWD => (sys_getcwd(f.rdi, f.rsi), true),
         SYS_MKDIR => (sys_name_op(f.rdi, b'm'), true),
@@ -5774,6 +6002,10 @@ pub fn name_of(nr: u64) -> &'static str {
         SYS_GETSOCKOPT => "getsockopt",
         SYS_ACCESS => "access",
         SYS_FACCESSAT => "faccessat",
+        SYS_POLL => "poll",
+        SYS_PPOLL => "ppoll",
+        SYS_SELECT => "select",
+        SYS_PSELECT6 => "pselect6",
         SYS_SENDFILE => "sendfile",
         SYS_GETCWD => "getcwd",
         SYS_MKDIR => "mkdir",
