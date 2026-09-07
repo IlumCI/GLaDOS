@@ -305,6 +305,35 @@ def emit(chunk):
     sys.stdout.flush()
 
 
+def ports_held():
+    """Which of the two fixed ports something else already owns.
+
+    Asked *before* launching, because afterwards the failure is invisible. The
+    serial chardev is `server=on,wait=on`, so a second QEMU cannot bind the
+    port and exits -- and the `create_connection` below then succeeds anyway,
+    against the **stale** QEMU that still owns it. What that looks like is a
+    log with no boot output at all followed by a timeout with every command
+    unsent, which reads exactly like a guest that died early.
+
+    The existing `sock is None` guard cannot catch it: a socket was connected,
+    just to the wrong machine. This has cost two sessions, and the second one
+    spent two ten-minute runs on it.
+    """
+    held = []
+    for what, port in (("serial", PORT), ("monitor", MONITOR_PORT)):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # Deliberately no SO_REUSEADDR. On Windows it permits binding a port
+        # another process is listening on, which is the opposite of the
+        # question being asked here.
+        try:
+            s.bind(("127.0.0.1", port))
+        except OSError:
+            held.append(f"{what} on {port}")
+        finally:
+            s.close()
+    return held
+
+
 def main():
     # The default cp1252 stdout refuses characters the guest can now print,
     # which kills the session mid-run when output is redirected to a file.
@@ -681,6 +710,17 @@ def main():
         *(["-vga", "none", "-device", "VGA,xres=1920,yres=1080"] if hd else []),
         "-no-reboot",
     ]
+
+    held = ports_held()
+    if held:
+        raise SystemExit(
+            "[drive] " + " and ".join(held) + " already in use.\n"
+            "        Another drive.py, or a QEMU one left behind, still owns "
+            "it.\n"
+            "        Stop that first: this run would otherwise connect to "
+            "*that* guest's\n"
+            "        serial and time out with every command unsent."
+        )
 
     proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     sock = None
