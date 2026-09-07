@@ -1461,6 +1461,121 @@ def pipe_code(entry_rva, msg_rva, _unused):
     return bytes(c)
 
 
+MSG_EPOLL = b"epoll: waited, woke on a pipe, and the cookie came back whole\n"
+
+
+def epoll_code(entry_rva, msg_rva, _unused):
+    """Watch a pipe through an epoll set, and check what comes back.
+
+    **The cookie is the check that matters.** `struct epoll_event` is a 32-bit
+    mask and a 64-bit union, which every ordinary alignment rule says should be
+    padded to sixteen bytes; on x86-64 the header packs it, so `data` sits at
+    offset 4 and the whole thing is twelve. This registers `0x1234` and reads
+    it back from offset 4 of the returned event. A server that laid the
+    structure out the natural way would leave padding there and put the cookie
+    at 8, and the program would get whatever happened to be in the buffer --
+    which for a real client is a pointer it then dereferences.
+
+    The two refusals at the end are the ones a program can provoke by accident:
+    registering a descriptor twice, and adding the set to itself.
+    """
+    EEXIST, EINVAL = -17, -22
+    EPOLL_CTL_ADD = 1
+    EPOLLIN = 1
+    c = bytearray()
+    leas = []
+
+    def lea(reg, off):
+        leas.append((len(c), off))
+        return lea_rip(reg, 0)
+
+    # --- a set ---
+    c += mov_imm("rax", 291) + mov_imm("rdi", 0) + SYSCALL
+    c += cmp_imm8("rax", 0)
+    j0 = len(c); c += jcc(JL, 0)
+    c += mov_rr("r15", "rax")
+
+    # --- something to watch ---
+    c += mov_imm("rax", 22)
+    c += lea("rdi", 0)
+    c += SYSCALL
+    c += cmp_imm8("rax", 0)
+    j1 = len(c); c += jcc(JNE, 0)
+    c += lea("rbx", 0)
+    c += load_d("r12", "rbx", 0)
+    c += load_d("r13", "rbx", 4)
+
+    # --- the event to register: mask at 0, cookie at 4 ---
+    c += mov_imm("rax", EPOLLIN) + store_d("rbx", 8, "rax")
+    c += mov_imm("rax", 0x1234) + store_q("rbx", 12, "rax")
+
+    c += mov_imm("rax", 233) + mov_rr("rdi", "r15")
+    c += mov_imm("rsi", EPOLL_CTL_ADD) + mov_rr("rdx", "r12")
+    c += lea("r10", 8)
+    c += SYSCALL
+    c += cmp_imm8("rax", 0)
+    j2 = len(c); c += jcc(JNE, 0)
+
+    # --- nothing has happened, so nothing is reported ---
+    c += mov_imm("rax", 232) + mov_rr("rdi", "r15")
+    c += lea("rsi", 24)
+    c += mov_imm("rdx", 4) + mov_imm("r10", 0) + SYSCALL
+    c += cmp_imm8("rax", 0)
+    j3 = len(c); c += jcc(JNE, 0)
+
+    # --- now it has ---
+    c += mov_imm("rax", 1) + mov_rr("rdi", "r13")
+    c += lea("rsi", 80)
+    c += mov_imm("rdx", 4) + SYSCALL
+    c += cmp_imm8("rax", 4)
+    j4 = len(c); c += jcc(JNE, 0)
+
+    c += mov_imm("rax", 232) + mov_rr("rdi", "r15")
+    c += lea("rsi", 24)
+    c += mov_imm("rdx", 4) + mov_imm("r10", 0) + SYSCALL
+    c += cmp_imm8("rax", 1)
+    j5 = len(c); c += jcc(JNE, 0)
+
+    c += load_d("r14", "rbx", 24)
+    c += cmp_imm32("r14", EPOLLIN)
+    j6 = len(c); c += jcc(JNE, 0)
+    # Offset 4 of the event, which is 24 + 4. Padded to sixteen this would be
+    # whatever the buffer held, and the cookie would be four bytes further on.
+    c += load_d("r14", "rbx", 28)
+    c += cmp_imm32("r14", 0x1234)
+    j7 = len(c); c += jcc(JNE, 0)
+
+    # --- registering the same descriptor twice ---
+    c += mov_imm("rax", 233) + mov_rr("rdi", "r15")
+    c += mov_imm("rsi", EPOLL_CTL_ADD) + mov_rr("rdx", "r12")
+    c += lea("r10", 8)
+    c += SYSCALL
+    c += cmp_imm32("rax", EEXIST)
+    j8 = len(c); c += jcc(JNE, 0)
+
+    # --- and adding the set to itself ---
+    c += mov_imm("rax", 233) + mov_rr("rdi", "r15")
+    c += mov_imm("rsi", EPOLL_CTL_ADD) + mov_rr("rdx", "r15")
+    c += lea("r10", 8)
+    c += SYSCALL
+    c += cmp_imm32("rax", EINVAL)
+    j9 = len(c); c += jcc(JNE, 0)
+
+    c += mov_imm("rax", 1) + mov_imm("rdi", 1)
+    c += lea("rsi", 96)
+    c += mov_imm("rdx", len(MSG_EPOLL)) + SYSCALL
+    c += mov_imm("rax", 60) + mov_imm("rdi", 9) + SYSCALL + HLT
+
+    bad_at = len(c)
+    c += mov_imm("rax", 60) + mov_imm("rdi", 4) + SYSCALL + HLT
+
+    for at in (j0, j1, j2, j3, j4, j5, j6, j7, j8, j9):
+        struct.pack_into("<i", c, at + 2, bad_at - (at + 6))
+    for at, off in leas:
+        struct.pack_into("<i", c, at + 3, msg_rva + off - (entry_rva + at + 7))
+    return bytes(c)
+
+
 def spin_code(entry_rva, _a, _b):
     """Loop forever, asking for nothing.
 
@@ -2806,6 +2921,15 @@ def build(kind="static"):
         text = spin_code(entry, 0, 0)
         body = text
         msg_rva, disp, lea_end = body_at, 0, 0
+    elif kind == "epoll":
+        probe = epoll_code(0, 0, 0)
+        msg_rva = body_at + len(probe)
+        text = epoll_code(entry, msg_rva, 0)
+        assert len(text) == len(probe), (len(text), len(probe))
+        # S+0 two descriptors, S+8 the event registered, S+24 four events of
+        # room for what comes back, S+80 the bytes it sends, S+96 the message.
+        body = text + bytes(80) + b"ping" + bytes(12) + MSG_EPOLL
+        disp, lea_end = 0, 0
     elif kind == "pipe":
         probe = pipe_code(0, 0, 0)
         msg_rva = body_at + len(probe)
@@ -3345,6 +3469,27 @@ def verify(path):
         claim("and ends in hlt, so a syscall that returns is visible",
               b.endswith(HLT))
         return ok
+    if MSG_EPOLL in b:
+        claim("it makes a set with epoll_create1", mov_imm("rax", 291) in b)
+        claim("and something to watch with pipe", mov_imm("rax", 22) in b)
+        claim("it registers through epoll_ctl", mov_imm("rax", 233) in b)
+        claim("and waits with epoll_wait", mov_imm("rax", 232) in b)
+        # The cookie is read from offset 4 of the returned event, which is 24
+        # plus 4. Padded to sixteen it would be at 32, so this load is what
+        # tells the two layouts apart.
+        claim("it reads the cookie back from offset four of the event, which "
+              "is where a packed struct puts it and a padded one does not",
+              load_d("r14", "rbx", 28) in b
+              and cmp_imm32("r14", 0x1234) in b),
+        claim("it expects nothing before the write and one event after",
+              b.count(cmp_imm8("rax", 0)) >= 2 and cmp_imm8("rax", 1) in b)
+        claim("it expects EEXIST for a descriptor registered twice",
+              cmp_imm32("rax", -17) in b)
+        claim("and EINVAL for a set added to itself",
+              cmp_imm32("rax", -22) in b)
+        claim("its code ends in hlt, so a syscall that returns is visible",
+              b[b.index(b"ping") - 1:b.index(b"ping")] == bytes(1))
+        return ok
     if MSG_PIPE in b:
         claim("it calls pipe", mov_imm("rax", 22) in b)
         claim("it sends four bytes and reads them back",
@@ -3517,7 +3662,7 @@ def main():
                     choices=["static", "dynamic", "interp", "loader", "maps",
                              "fixed", "memory", "rogue",
                              "protect", "wild", "spin", "fork", "exec", "wnohang", "signal", "sock",
-                             "scm", "poll", "pipe",
+                             "scm", "poll", "pipe", "epoll",
                              "cat", "grep",
                              "fsabuse", "fb", "ev", "thread", "gl"],
                     default="static")

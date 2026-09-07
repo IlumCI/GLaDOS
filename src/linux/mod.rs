@@ -37,6 +37,7 @@ pub mod fork;
 pub mod signal;
 pub mod unix;
 pub mod poll;
+pub mod epoll;
 pub mod proc;
 pub mod syscall;
 
@@ -49,6 +50,7 @@ pub fn checks() -> alloc::vec::Vec<(&'static str, bool)> {
     out.extend(thread::checks());
     out.extend(unix::checks());
     out.extend(poll::checks());
+    out.extend(epoll::checks());
     out.extend(proc::checks());
     out.extend(syscall::checks());
     out.extend(load::checks());

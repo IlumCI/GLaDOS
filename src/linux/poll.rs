@@ -173,6 +173,23 @@ pub fn ready(fd: &Fd) -> u16 {
                 m
             }
         }
+        // An epoll set is readable when anything it watches is, which is how a
+        // program folds one event loop into another. The members are looked up
+        // through the descriptor table, which is safe only because
+        // `syscall::fd_ready` releases its borrow before asking -- and because
+        // `epoll_ctl` refuses to watch an epoll, so this cannot recurse.
+        Fd::Epoll(e) => {
+            let entries: alloc::vec::Vec<super::epoll::Watch> = e.borrow().entries().to_vec();
+            let mut m = 0;
+            for w in &entries {
+                let state = super::super::linux::syscall::fd_ready(w.fd).unwrap_or(POLLERR);
+                if super::epoll::report(w, state).is_some() {
+                    m = POLLIN;
+                    break;
+                }
+            }
+            m
+        }
         Fd::Dev(d) => {
             let b = d.borrow();
             match b.node {

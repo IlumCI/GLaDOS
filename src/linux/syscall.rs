@@ -107,6 +107,11 @@ pub const SYS_GETPEERNAME: u64 = 52;
 pub const SYS_SETSOCKOPT: u64 = 54;
 pub const SYS_GETSOCKOPT: u64 = 55;
 pub const SYS_ACCESS: u64 = 21;
+pub const SYS_EPOLL_CREATE: u64 = 213;
+pub const SYS_EPOLL_WAIT: u64 = 232;
+pub const SYS_EPOLL_CTL: u64 = 233;
+pub const SYS_EPOLL_PWAIT: u64 = 281;
+pub const SYS_EPOLL_CREATE1: u64 = 291;
 pub const SYS_PIPE: u64 = 22;
 pub const SYS_PIPE2: u64 = 293;
 pub const SYS_POLL: u64 = 7;
@@ -2098,6 +2103,140 @@ fn do_pipe(at: u64, flags: u64) -> u64 {
     0
 }
 
+/// The epoll set a descriptor names, if it is one.
+fn epoll_set(fd: u64) -> Option<alloc::rc::Rc<core::cell::RefCell<super::epoll::Epoll>>> {
+    with_fds(|fds, _| match fds.get(fd as usize) {
+        Some(Some(super::fs::Fd::Epoll(b))) => Some(b.clone()),
+        _ => None,
+    })
+    .flatten()
+}
+
+fn sys_epoll_create(size: u64) -> u64 {
+    // The hint has been ignored since 2.6.8 and a non-positive one is still
+    // refused, because a program passing zero computed a number wrongly rather
+    // than choosing a default.
+    if (size as i64) <= 0 {
+        return EINVAL;
+    }
+    make_epoll()
+}
+
+fn sys_epoll_create1(flags: u64) -> u64 {
+    const EPOLL_CLOEXEC: u64 = 0o2000000;
+    if flags & !EPOLL_CLOEXEC != 0 {
+        return EINVAL;
+    }
+    make_epoll()
+}
+
+fn make_epoll() -> u64 {
+    install_fd(super::fs::Fd::Epoll(alloc::rc::Rc::new(core::cell::RefCell::new(
+        super::epoll::Epoll::new(),
+    ))))
+}
+
+fn sys_epoll_ctl(epfd: u64, op: u64, fd: u64, ev: u64) -> u64 {
+    let Some(set) = epoll_set(epfd) else { return EBADF };
+    // A set watching itself would be asked its own readiness to compute its own
+    // readiness, so it is refused where Linux refuses it too.
+    if fd == epfd {
+        return EINVAL;
+    }
+    let target = with_fds(|fds, _| {
+        fds.get(fd as usize)
+            .and_then(|s| s.as_ref().map(|d| matches!(d, super::fs::Fd::Epoll(_))))
+    })
+    .flatten();
+    let Some(is_set) = target else { return EBADF };
+    // **Nesting is refused rather than depth-limited.** Linux allows an epoll
+    // inside an epoll to five levels; supporting that means carrying a depth
+    // check through every add, and nothing here has asked. Refusing says so
+    // where a silent wrong answer would not.
+    if is_set {
+        return EINVAL;
+    }
+    let (events, data) = if op == super::epoll::CTL_DEL {
+        (0u32, 0u64)
+    } else {
+        if !reachable(ev, super::epoll::EV_LEN, false) {
+            return EFAULT;
+        }
+        let b = unsafe { core::slice::from_raw_parts(ev as *const u8, super::epoll::EV_LEN) };
+        match super::epoll::get_event(b) {
+            Some(v) => v,
+            None => return EFAULT,
+        }
+    };
+    let mut s = set.borrow_mut();
+    let r = match op {
+        super::epoll::CTL_ADD => s.add(fd, events, data),
+        super::epoll::CTL_MOD => s.modify(fd, events, data),
+        super::epoll::CTL_DEL => s.remove(fd),
+        _ => Err(super::epoll::EINVAL),
+    };
+    match r {
+        Ok(()) => 0,
+        Err(e) => e as u64,
+    }
+}
+
+fn sys_epoll_wait(epfd: u64, evs: u64, maxevents: u64, timeout: u64) -> u64 {
+    let Some(set) = epoll_set(epfd) else { return EBADF };
+    if (maxevents as i64) <= 0 || maxevents > MAX_WATCHED {
+        return EINVAL;
+    }
+    let bytes = maxevents as usize * super::epoll::EV_LEN;
+    if !reachable(evs, bytes, true) {
+        return EFAULT;
+    }
+    let limit = super::poll::ticks_for_ms(timeout as u32 as i32 as i64);
+    let start = crate::dev::lapic::ticks();
+    loop {
+        // Copied out before asking, because answering for a member reaches the
+        // descriptor table and the set must not be borrowed across that.
+        let entries: alloc::vec::Vec<super::epoll::Watch> = set.borrow().entries().to_vec();
+        let out = unsafe { core::slice::from_raw_parts_mut(evs as *mut u8, bytes) };
+        let mut n = 0usize;
+        let mut fired: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+        for w in &entries {
+            if n >= maxevents as usize {
+                break;
+            }
+            let state = match fd_ready(w.fd) {
+                Some(s) => s,
+                // A watched descriptor that has since been closed. Linux drops
+                // the entry when the open file description goes; nothing here
+                // can observe that, so it is reported as an error instead --
+                // which at least lets the program find out and remove it. A
+                // silent never-ready entry is a program waiting forever on
+                // something that has gone.
+                None => super::poll::POLLERR,
+            };
+            if let Some(hit) = super::epoll::report(w, state) {
+                if super::epoll::put_event(out, n, hit, w.data) {
+                    n += 1;
+                    fired.push(w.fd);
+                }
+            }
+        }
+        if n > 0 {
+            let mut s = set.borrow_mut();
+            for fd in fired {
+                s.spend(fd);
+            }
+            return n as u64;
+        }
+        if expired(start, limit) {
+            return 0;
+        }
+        if overran(crate::dev::lapic::ticks()) {
+            unsafe { kill_blocked() }
+        }
+        crate::task::yield_now();
+    }
+}
+
 /// Read a `sockaddr_un` out of guest memory.
 ///
 /// **The path is a fixed 108-byte array and not a string**, so a name is
@@ -3213,12 +3352,16 @@ const MAX_WATCHED: u64 = 1024;
 ///
 /// Looked up afresh on every turn of a wait, because the entire point of these
 /// calls is that the answer changes while the guest is not running.
-fn fd_ready(fd: u64) -> Option<u16> {
-    with_fds(|fds, _| match fds.get(fd as usize) {
-        Some(Some(d)) => Some(super::poll::ready(d)),
-        _ => None,
-    })
-    .flatten()
+/// The descriptor is taken out of the table **before** it is asked, and the
+/// borrow released, which is required rather than tidy: an `epoll` instance's
+/// readiness is its members' readiness, so `poll::ready` reaches back into the
+/// table for it. Asking while the table were still borrowed is a second
+/// `RefCell` borrow and a panic in a kernel with no unwinder. `share` is an
+/// `Rc` bump, so the copy costs nothing.
+pub(crate) fn fd_ready(fd: u64) -> Option<u16> {
+    let d = with_fds(|fds, _| fds.get(fd as usize).and_then(|s| s.as_ref().map(|d| d.share())))
+        .flatten()?;
+    Some(super::poll::ready(&d))
 }
 
 /// Whether a wait that began at `start` has run out.
@@ -4679,6 +4822,12 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         SYS_GETSOCKOPT => (0, true),
         SYS_ACCESS => (sys_access(f.rdi, f.rsi), true),
         SYS_FACCESSAT => (sys_access(f.rsi, f.rdx), true),
+        SYS_EPOLL_CREATE => (sys_epoll_create(f.rdi), true),
+        SYS_EPOLL_CREATE1 => (sys_epoll_create1(f.rdi), true),
+        SYS_EPOLL_CTL => (sys_epoll_ctl(f.rdi, f.rsi, f.rdx, f.r10), true),
+        SYS_EPOLL_WAIT => (sys_epoll_wait(f.rdi, f.rsi, f.rdx, f.r10), true),
+        // The signal mask cannot matter here, for the reason `ppoll` gives.
+        SYS_EPOLL_PWAIT => (sys_epoll_wait(f.rdi, f.rsi, f.rdx, f.r10), true),
         SYS_PIPE => (do_pipe(f.rdi, 0), true),
         SYS_PIPE2 => (do_pipe(f.rdi, f.rsi), true),
         SYS_POLL => (sys_poll(f.rdi, f.rsi, f.rdx), true),
@@ -6115,6 +6264,11 @@ pub fn name_of(nr: u64) -> &'static str {
         SYS_GETSOCKOPT => "getsockopt",
         SYS_ACCESS => "access",
         SYS_FACCESSAT => "faccessat",
+        SYS_EPOLL_CREATE => "epoll_create",
+        SYS_EPOLL_CREATE1 => "epoll_create1",
+        SYS_EPOLL_CTL => "epoll_ctl",
+        SYS_EPOLL_WAIT => "epoll_wait",
+        SYS_EPOLL_PWAIT => "epoll_pwait",
         SYS_PIPE => "pipe",
         SYS_PIPE2 => "pipe2",
         SYS_POLL => "poll",

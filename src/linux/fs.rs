@@ -159,6 +159,8 @@ pub enum Fd {
     /// Behind an `Rc` for the reason a socket is: `dup` makes a second name
     /// for one end, and end-of-file has to wait for the last of them.
     Pipe(Rc<RefCell<PipeEnd>>),
+    /// An `epoll` set, which is a descriptor naming a list of descriptors.
+    Epoll(Rc<RefCell<crate::linux::epoll::Epoll>>),
     /// A `/dev` node, which is a function rather than a body of bytes.
     ///
     /// Deliberately not a `File` with contents. `/dev/zero` is infinite and
@@ -241,6 +243,7 @@ impl Fd {
             // everywhere: two descriptors, one connection.
             Fd::Unix(b) => Fd::Unix(b.clone()),
             Fd::Pipe(b) => Fd::Pipe(b.clone()),
+            Fd::Epoll(b) => Fd::Epoll(b.clone()),
             Fd::Dev(b) => Fd::Dev(b.clone()),
         }
     }
