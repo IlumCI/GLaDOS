@@ -80,6 +80,44 @@ WANT = [
      "glibc/lib/x86_64-linux-gnu/libresolv.so.2"),
     ("busybox-glibc", DEBIAN + "b/busybox/busybox_1.35.0-4+deb12u1+b1_amd64.deb",
      "bin/busybox", "glibc/bin/busybox"),
+    # **The three that are stubs, and are needed anyway.** Since glibc 2.34 the
+    # maths, threading and dynamic-loading halves live inside `libc.so.6`, and
+    # what is shipped under these names is a few hundred bytes that exist so an
+    # older `DT_NEEDED` still resolves. SDL2 names all three, so a loader that
+    # cannot find them stops before the program's first instruction -- and the
+    # error it gives names a library whose contents are, by then, empty.
+    ("glibc-libm", DEBIAN + "g/glibc/libc6_2.36-9+deb12u14_amd64.deb",
+     "lib/x86_64-linux-gnu/libm.so.6", "glibc/lib/x86_64-linux-gnu/libm.so.6"),
+    ("glibc-pthread", DEBIAN + "g/glibc/libc6_2.36-9+deb12u14_amd64.deb",
+     "lib/x86_64-linux-gnu/libpthread.so.0",
+     "glibc/lib/x86_64-linux-gnu/libpthread.so.0"),
+    ("glibc-dl", DEBIAN + "g/glibc/libc6_2.36-9+deb12u14_amd64.deb",
+     "lib/x86_64-linux-gnu/libdl.so.2", "glibc/lib/x86_64-linux-gnu/libdl.so.2"),
+]
+
+# What `stage` lays out, as (source under out/, flat name, where it goes in the
+# guest namespace).
+#
+# **Flat because FAT is.** `mkfat.py` writes 8.3 short names, so a tree cannot
+# travel as a tree: every file gets a short name here and is placed at its real
+# path by `fat get` on the other side. The guest path is what matters, since it
+# is what `ld.so` will go looking for.
+STAGE = [
+    ("glibc/lib64/ld-linux-x86-64.so.2", "ldglibc.so",
+     "/lib64/ld-linux-x86-64.so.2"),
+    ("glibc/lib/x86_64-linux-gnu/libc.so.6", "libc.so",
+     "/lib/x86_64-linux-gnu/libc.so.6"),
+    ("glibc/lib/x86_64-linux-gnu/libresolv.so.2", "libresol.so",
+     "/lib/x86_64-linux-gnu/libresolv.so.2"),
+    ("glibc/lib/x86_64-linux-gnu/libm.so.6", "libm.so",
+     "/lib/x86_64-linux-gnu/libm.so.6"),
+    ("glibc/lib/x86_64-linux-gnu/libpthread.so.0", "libpthr.so",
+     "/lib/x86_64-linux-gnu/libpthread.so.0"),
+    ("glibc/lib/x86_64-linux-gnu/libdl.so.2", "libdl.so",
+     "/lib/x86_64-linux-gnu/libdl.so.2"),
+    ("glibc/bin/busybox", "bbglibc.bin", "/tmp/busybox"),
+    ("musl/lib/ld-musl-x86_64.so.1", "ldmusl.so", "/lib/ld-musl-x86_64.so.1"),
+    ("musl/bin/busybox", "bbmusl.bin", "/tmp/mbusybox"),
 ]
 
 OUT = Path("out/libc")
@@ -342,15 +380,52 @@ def selftest() -> int:
     return 0 if ok else 1
 
 
+def stage() -> int:
+    """Copy what was fetched into flat short names, and print the recipe.
+
+    The recipe is the useful half. Getting a library tree into the guest is
+    nine `fat get` lines that have to name the right destination path, and a
+    line typed wrongly fails as `ld.so` reporting a library it cannot find --
+    which reads as a missing package rather than a typo. Printing them means
+    they are copied rather than remembered.
+    """
+    out = OUT / "stage"
+    out.mkdir(parents=True, exist_ok=True)
+    lines = []
+    missing = []
+    for src, flat, dst in STAGE:
+        f = OUT / src
+        if not f.is_file():
+            missing.append(src)
+            continue
+        (out / flat).write_bytes(f.read_bytes())
+        print(f"  {flat:14s} {f.stat().st_size:>10,} B   -> {dst}")
+        lines.append(f'"fat get /{flat.upper()} {dst}"')
+    if missing:
+        print("\n  not fetched yet, run `libc.py fetch`:")
+        for m in missing:
+            print(f"    {m}")
+        return 1
+    print("\n  stage into the test disk:")
+    print(f"    tools/mkfat.py .qemu/nvme.img {' '.join(str(out / f) for _, f, _ in STAGE)}")
+    print("\n  then, in the guest:")
+    print("    " + " \\\n    ".join(lines))
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("action", nargs="?", default="report",
-                    choices=["fetch", "report"])
+                    choices=["fetch", "report", "stage"])
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
     if a.selftest:
         return selftest()
-    return fetch() if a.action == "fetch" else report()
+    if a.action == "fetch":
+        return fetch()
+    if a.action == "stage":
+        return stage()
+    return report()
 
 
 if __name__ == "__main__":
