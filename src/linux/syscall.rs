@@ -3108,7 +3108,12 @@ fn sys_uname(buf: u64) -> u64 {
     put(0, "GLaDOS");
     put(1, "glados");
     put(2, crate::VERSION);
-    put(3, "one address space, no processes");
+    // **This said "one address space, no processes" until `fork` landed**, and
+    // by then it was the one string on the machine still claiming it. The same
+    // sentence was on two wiki pages for the same reason: it was true when
+    // written, nothing rechecked it, and a guest asking `uname` was told a
+    // fact about its host that its own existence disproved.
+    put(3, "ring 0, with guests at ring 3");
     put(4, "x86_64");
     put(5, "(none)");
     unsafe { core::ptr::copy_nonoverlapping(b.as_ptr(), buf as *mut u8, N * 6) };
