@@ -3,20 +3,30 @@
 A from-scratch, non-Unix, ring-0 operating system in Rust, built around a
 language model that runs inside the kernel.
 
-Everything sits at the same privilege level, in one address space, with no
-syscalls and no userspace to put anything in. The consequence that matters is
-what a tool call becomes: the sampler picks a name from the live applet table
-under a grammar compiled from that table, and the kernel calls the function.
-Nothing is serialised and nothing is parsed in between.
+Inside the kernel there is no privilege boundary and nothing to marshal across
+one. The consequence that matters is what a tool call becomes: the sampler
+picks a name from the live applet table under a grammar compiled from that
+table, and the kernel calls the function. Nothing is serialised and nothing is
+parsed in between.
+
+**There are two stories on this machine and neither is a retreat from the
+other.** The kernel has no boundary because removing it is the whole idea. A
+program written somewhere else has not earned the machine, so it gets ring 3,
+its own page-table root and a syscall surface -- 93 of Linux's roughly 350,
+enough that unmodified busybox, an SDL2 program and a dynamic linker all run
+here without knowing where they are.
 
 It boots as a UEFI application, which means it *is* the kernel. Firmware
-already delivers long mode, CPL 0 and an identity map, so there is no
-bootloader, no ELF loading, no relocation and no handoff ABI. The model,
-tokenizer and root certificates are read before `ExitBootServices`, because
-that call is the last moment a filesystem exists.
+already delivers long mode, CPL 0 and an identity map, so the boot path has no
+bootloader, no ELF loading, no relocation and no handoff ABI. The ELF loader
+that exists is for running other people's programs rather than for starting
+this one. The model, tokenizer and root certificates are read before
+`ExitBootServices`, because that call is the last moment a filesystem exists.
 
-181 files of Rust, about 115,000 lines. TempleOS is the obvious ancestor, and
-the identity map here exists for the reason Terry Davis gave for his.
+198 files of Rust, about 132,000 lines, of which 178 files and 118,000 lines
+were written for this project; the rest is a DOOM port and one file of Realtek
+register tables, both credited below. TempleOS is the obvious ancestor, and the
+identity map here exists for the reason Terry Davis gave for his.
 
 ---
 
@@ -34,7 +44,10 @@ Works, and verified:
 | Boot | UEFI application, own page tables, GDT/IDT, APIC timer, i8042 keyboard |
 | Memory | Physical frame allocator, identity paging to 4 GiB, coalescing heap |
 | Tasks | Cooperative and preemptive at 100 Hz, `sysv64` context switch |
-| Graphics | GOP framebuffer, Windows-styled desktop, window manager, taskbar, three apps |
+| Ring 3 | Guests at CPL 3 on a page-table root of their own, entered by `iretq` and left by `sysretq`, with a guest fault ending the guest and not the machine |
+| Linux ABI | 93 syscalls: `fork`, `execve`, `wait4`, threads and futexes, signals with a real `ucontext` on the guest's stack, pipes, `epoll`, Unix sockets with `SCM_RIGHTS`, `memfd`, `/proc`, `/dev/fb0`, evdev |
+| Ported | DOOM on FreeDoom, unmodified busybox under both musl and glibc, an SDL2 program drawing through the framebuffer |
+| Graphics | GOP framebuffer, a Frutiger Aero desktop, window manager, taskbar, ten apps |
 | Text | 325 glyphs at 8x8, UTF-8 in the console, Latin-1, Greek, box drawing and maths |
 | Storage | NVMe, content-addressed object store, Merkle trees, snapshots, ranged write gate |
 | Network | ARP, IPv4, ICMP, UDP, TCP, DHCP, DNS, TLS 1.3 with chain validation |
@@ -91,6 +104,12 @@ Does not work yet:
 - **An authored application reaching adoption.** The machine writes drafts and
   never adopts one. The planner's output is likewise stringified into a report
   rather than gating how much the loop attempts.
+- **A Wayland client on screen.** `src/sky/` has the wire format, the object
+  table, `wl_display`, `wl_registry` and `wl_callback`, and it says so at the
+  top of its own module: **nothing draws yet.** `wl_compositor`, `wl_surface`
+  and `wl_shm` come next, then `xdg_shell`. The compositor half is not the
+  problem -- `gfx::compose` already owns the screen and stacks windows -- and
+  until a client actually paints, none of that is evidence of anything.
 
 ---
 
@@ -171,9 +190,18 @@ was adopted or rejected, with all four judges' numbers in it.
 **The night branch rotates over every axis that has a judge.** It knew two jobs
 and one always won the tie, so the adapter grid was walked to exhaustion while
 the routing rule, deep training, a compiled skill and a core the machine wrote
-were never tried unattended at all. The rotation starts from the number of
-verdicts already recorded and takes the first kind that has work, so which axis
-a given night takes is a function of the ledger rather than of a coin.
+were never tried unattended at all.
+
+The rotation is a ranking rather than a round, and what it ranks by is worth
+stating: `next_proposal` reaches for the axis whose next verdict the ledger can
+*least* predict. An axis that has said yes to everything and one that has said
+no to everything are equally predictable and equally uninformative, so a
+Laplace-smoothed Beta posterior folded to a distance from the coin-flip puts
+the axis nearest 50% first. Fairness is traded for information deliberately.
+Smoothing is what stops that becoming starvation, ties break by slot so the
+order is total and re-derivable, and the composed core is exempt and always
+last, because producing its candidate costs a dozen decodes and is reached for
+when everything cheaper is out of moves.
 
 Two details that are load-bearing. The test slice carries a budget that lives
 in the ledger, because a loop which improves itself forever reads the held-out
@@ -196,6 +224,77 @@ runs under the powers an unadopted skill actually has, it repeats with the same
 value and step count and touched set, and it is cheap. Trust is keyed to the
 hash of the file, so editing a trusted skill revokes its trust by construction,
 and granting trust is a shell command that is never an applet.
+
+---
+
+## Running programs this kernel did not compile
+
+`src/linux/` began as a **measuring instrument rather than a loader.** The
+expensive unknown in porting the Linux ABI is not the loader, which is a
+weekend; it is that Linux has no specification you can test against, so a
+subtly wrong `mmap` flag surfaces as a crash in a different subsystem an hour
+later. gVisor needed 237 of Linux's roughly 350 calls to run containers. Before
+committing to a privilege model or a syscall subset, the thing worth owning is
+a trace of what a real binary actually asks for -- so every unimplemented call
+is recorded and refused with `-ENOSYS`, and a run that ends there has named the
+next call to implement.
+
+**The first sixty-two were not guessed.** Sixteen busybox applets were swept
+under musl and twenty-eight more under glibc, every gap they named was
+implemented, and nothing else was. The thirty-one after those are the one place
+this discipline was relaxed, and it is worth saying which way: processes,
+pipes, `epoll` and `memfd` were implemented for targets that have *not* run
+here yet -- Wine's server loop and a Wayland client -- rather than because a
+trace demanded them. SDL2 is the only one of that group that has since been
+run and confirmed. The shape of the findings was the useful part twice over. `ls` ran perfectly on its first attempt -- opened the
+directory, walked it, `lstat`ed every entry, exited 0 -- and printed nothing at
+all, because everything it had to say went through `writev`. A program that
+works and is silent is the worst shape a missing syscall can take.
+
+The evidence that this is real rather than a demo is a hash:
+
+```
+linux run /tmp/busybox sha256sum /tmp/busybox
+b01eaede758499526db8c8ccd159b0f773ef0ecb29c25952e5c1042f5168e4ec
+```
+
+That is the digest the development machine computes over the same bytes. A
+dynamically linked binary relocated a 1.9 MB libc through this kernel's `mmap`,
+hashed its own file at ring 3 under a private page-table root, and got it right.
+
+**Which libc is not a decision this kernel makes.** A libc is userspace: it is
+linked into the binary or named by it in `PT_INTERP`, and the loader reads that
+path and loads whatever is there. So musl and glibc are both installed and each
+program takes its own -- which works today and needed no code. Writing a dynamic
+linker was never the answer; loading `ld.so` was, and `dlopen` then becomes its
+problem rather than ours.
+
+**`fork` needed two address spaces, and one address space was the founding
+claim of this system rather than a shortcut it took.** `src/mem/space.rs` is
+what removed it. The decomposition that made it small is worth keeping: only
+the image has an address the file demands, because the stack, the break and
+every `mmap` are at addresses the kernel chooses. So `0x400000` is the whole
+problem, and it is one region.
+
+A guest fault ends the guest and nothing else:
+
+```
+linux run /tmp/wild
+  ring 3, one address space -- only its own pages carry the U bit
+  killed by fault 0x0e after 0 syscall(s), machine intact
+```
+
+At ring 0 the same fault stopped the machine, because a guest sharing an
+address space with the kernel might already have corrupted anything. At ring 3
+the kernel is intact by construction, so ending the guest is the honest
+response.
+
+**What this does not get you, said plainly.** There is no isolation from a
+*hostile* guest worth the name, and stage 0 said so: contained bugs, not
+malice. There is no scheduler that puts a guest on a second core. A guest that
+makes no syscalls receives no signals, because delivery happens on the way out
+of one -- a program spinning in a loop cannot be interrupted, which on Linux it
+could, and the run deadline is what ends a runaway instead.
 
 ---
 
@@ -376,11 +475,20 @@ GLADOS/STAGED.SIG     its detached GLADOSIG signature
 GLADOS/UPDATE.FLG     any contents; presence is the request
 ```
 
-**It is inert until a key is provisioned.** `UPDATE_KEY` is all zeroes, so
-verification answers `NoKey`, the decision refuses, and the flag is cleared.
-Run `tools/sign.py --keygen`, paste the public rows into `src/update.rs`, keep
-the private half off every machine that will ever apply an update, and rebuild.
-Adopting a signer is itself a kernel change, which is the point.
+**A key is provisioned and the updater is live.** This said `UPDATE_KEY` was
+all zeroes for a while after it stopped being true, and the cost was real: it
+sent a session looking for why the update channel could not publish, on the day
+it published. `UPDATE_KEY` in `src/update/mod.rs` holds a real P-256 point, the
+release workflow signs and uploads, and `update check`, `update fetch` and
+`update stage` are separate verbs because claiming a write range on the boot
+partition is the most dangerous thing this system does.
+
+To rotate: `tools/sign.py --keygen --out FILE`, paste the public rows into
+`src/update/mod.rs`, and rebuild -- adopting a signer is itself a kernel change,
+which is the point. **Use `--out`**, because without it the private half goes
+to stdout, which is exactly how the last one died. The first build carrying a
+new key cannot be delivered by this system, since no kernel in the field trusts
+it yet; that one ships as an ISO.
 
 The rollback copy is taken and read back before anything is overwritten, the
 health flag is cleared before the window rather than after, the written image
@@ -420,19 +528,36 @@ python tools/drive.py --iso glados.iso "ls /"
 **There is no `cargo test`.** This is a `no_std` UEFI binary with no host test
 runner, so verification is the boot selftests plus driving QEMU.
 
-At boot the system runs twenty-three selftest sections, printing `ok` or
-`FAIL` per line: heap, timer, clock, the namespace's Merkle addressing,
-fifteen sets of published cipher vectors, fault handling, running machine code
-from the heap, file type detection, the glyph table and the UTF-8 decoder,
-constrained decoding, the agent loop, the linear probe, the situation planner,
-the initiative policy, the self-modification gate, corpus bundles, QDoRA
-adapters, the backward kernels, and the trainer's arithmetic.
+At boot the system runs twenty-six selftest sections, printing `ok` or `FAIL`
+per line: heap, timer, clock, the namespace's Merkle addressing, fifteen sets
+of published cipher vectors, fault handling, running machine code from the
+heap, file type detection, the glyph table and the UTF-8 decoder, constrained
+decoding, the agent loop, the linear probe, the situation planner, the
+initiative policy, the self-modification gate, corpus bundles, QDoRA adapters,
+the backward kernels, and the trainer's arithmetic.
 
-Twenty-three suites can be re-run on demand with `diag all` or `diag <name>`:
-crypto, rng, json, aiksi, sysbox, smp, update, model, wgate, skill, desk,
-census, migrate, mt, power, fmt, differ, code, text, hid, acpi and battery. Registration is deliberately awkward: a suite
-added without a slot in the results table fails a compile-time assertion rather
-than silently never recording a verdict.
+**Forty-two** suites can be re-run on demand with `diag all` or `diag <name>`.
+Registration is deliberately awkward: `SLOTS` is one number, and a suite added
+without a slot in the results table fails a compile-time assertion rather than
+silently never recording a verdict. That guard has earned its place -- it once
+compared `SUITES.len()` against a *literal* while the array's length was a
+separate literal beside it, so the thirty-third suite passed the guard and then
+panicked at the store, which is precisely the failure the guard's own comment
+says it prevents.
+
+Both of those numbers were wrong here for several releases, and in different
+directions from the ones in the project's own notes. They are counted now
+rather than remembered:
+
+```bash
+python tools/drive.py "initiative off" "agent stop" "diag"   # then count
+grep -c 'const SLOTS' src/diag.rs                            # 42, asserted
+```
+
+**A bare `diag` is not a clean sweep.** It prints the table with `-` beside
+everything that has not run and a tally reading `0 passed, 0 failed, 42 not
+run`, which is easy to read as the opposite of what it is. `diag all` runs
+them.
 
 **That output is the test suite.** It is easy to scroll past and it does catch
 real bugs. An ECDSA break sat visible in `[selftest] crypto` for an entire
@@ -507,8 +632,15 @@ same angles; the model stayed fluent and attended by a scrambled notion of
 distance, which is indistinguishable from the outside from a small model being
 small.
 
-Negative results stay in the tree. Training the adapter head *hurts* at this
-data scale, and the Product-of-Experts council does not improve accuracy. A
+Negative results stay in the tree. Training the **SGD** head *hurts* at this
+data scale -- 30% held-out untrained, 10% after two epochs, 0% after eight,
+because forty examples across twenty-one classes leave gradient descent nothing
+to do but memorise. That is the head the ridge probe replaced, and it is **not**
+the QDoRA adapter; the two have nothing to do with each other. This sentence
+said "the adapter head" for a long time and it cost a session, which is the
+whole argument for naming the thing precisely in the summary and not only in
+the file it belongs to. The Product-of-Experts council does not improve
+accuracy either. A
 renderer survey ranked volatile framebuffer writes as the single largest
 constant-factor loss and the measurement disagreed; the real win was that blank
 console cells were being painted one pixel at a time under a background that
@@ -556,5 +688,10 @@ licence travels with it.
 ### Trademarks
 
 GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This
-is an independent, non-commercial homage and is not affiliated with, endorsed
-by, or connected to Valve in any way.
+project is independent and is not affiliated with, endorsed by, or connected to
+Valve in any way.
+
+That line used to say "an independent, non-commercial homage". The project has
+a token attached to it, which makes the non-commercial clause untrue, and a
+disclaimer carrying a false clause is worse than a shorter one. What was doing
+the work is the rest of the sentence.
