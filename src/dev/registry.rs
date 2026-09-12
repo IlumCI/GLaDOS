@@ -662,6 +662,34 @@ pub fn drivers_for(role: Role) -> Vec<&'static str> {
     out
 }
 
+/// Every present PCI device in the wireless role, as the seam spells them.
+///
+/// `crate::radio` cannot name `crate::dev`, so it cannot hold a `pci::Device`
+/// and cannot match on `Where`. This is the projection across that boundary,
+/// and it lives here rather than in `radio::bus` for the reason every `impl
+/// Nic` lives in `net::iface`: the dependency points one way, and the ported
+/// tree is the end it points away from.
+///
+/// USB wireless parts are deliberately absent from this answer rather than
+/// silently dropped -- they are not addressed by bus/device/function and a
+/// driver for one wants a different seam entirely.
+pub fn wireless_pci() -> Vec<crate::radio::bus::Pci> {
+    nodes()
+        .iter()
+        .filter(|n| n.entry.map(|e| e.role) == Some(Role::Wireless))
+        .filter_map(|n| match n.at {
+            Where::Pci(d) => Some(crate::radio::bus::Pci {
+                bus: d.bus,
+                dev: d.dev,
+                func: d.func,
+                vendor: d.vendor,
+                device: d.device,
+            }),
+            Where::Usb { .. } => None,
+        })
+        .collect()
+}
+
 /// Devices that are present, recognised, and unsupported.
 ///
 /// The report a person actually wants when something does not work. It is

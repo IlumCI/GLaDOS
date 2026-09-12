@@ -217,3 +217,17 @@ pub fn cfg_read32(ecam: u64, d: &Device, off: u64) -> u32 {
 pub fn cfg_write32(ecam: u64, d: &Device, off: u64, v: u32) {
     unsafe { write32(cfg_addr(ecam, d.bus, d.dev, d.func), off, v) }
 }
+
+/// The same, addressed by bus/device/function rather than by a `Device`.
+///
+/// `crate::radio` needs these: a ported driver tree may not name
+/// `crate::dev`, so it cannot hold a `Device` to pass in, and fabricating one
+/// from three numbers plus five fields nobody reads would be a worse lie than
+/// two more accessors.
+pub fn cfg_read32_at(ecam: u64, bus: u8, dev: u8, func: u8, off: u64) -> u32 {
+    unsafe { read32(cfg_addr(ecam, bus, dev, func), off) }
+}
+
+pub fn cfg_write32_at(ecam: u64, bus: u8, dev: u8, func: u8, off: u64, v: u32) {
+    unsafe { write32(cfg_addr(ecam, bus, dev, func), off, v) }
+}

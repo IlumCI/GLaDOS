@@ -1,16 +1,23 @@
-"""The seam, checked rather than intended.
+"""The seams, checked rather than intended.
 
-A ported program reaches this machine through `crate::port` and through
-nothing else. That is the whole value of doing the first port carefully: a
-port that reaches into `gfx`, `kbd`, `sysbox` and `time` wherever it happens
-to need them is not a port, it is a merge, and the second one starts from
-nothing.
+A ported tree reaches this machine through one named seam and through nothing
+else. That is the whole value of doing the first port carefully: a port that
+reaches into `gfx`, `kbd`, `sysbox` and `time` wherever it happens to need
+them is not a port, it is a merge, and the second one starts from nothing.
+
+There are two seams now, and the second is why `TREES` became a mapping.
+`src/doom` reaches `crate::port`, which is what a *program* asks of a machine.
+`src/wlan` reaches `crate::radio`, which is what an 802.11 stack asks of one --
+a different vocabulary with almost no overlap. Widening `crate::port` to cover
+both would have put a DMA allocator next to a keyboard scancode table and
+called it an interface.
 
 A rule with no check is a habit, and a habit does not survive a long debugging
 session at two in the morning. So this scans and fails.
 
     python tools/portcheck.py                 # every ported tree
     python tools/portcheck.py --tree src/doom
+    python tools/portcheck.py --tree src/wlan
 
 There is no `build.rs` in this repository and there cannot be one -- the
 machine has no host linker, which `Cargo.toml` records in detail -- so this
@@ -37,10 +44,19 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# The trees that are ported code. Adding one here is the whole of enrolling it.
-TREES = ["src/doom"]
-
-ALLOWED = {"port"}
+# The trees that are ported code, each with the seam it is allowed to name.
+# Adding one here is the whole of enrolling it.
+#
+# It is a mapping rather than a list because the second tree did not want the
+# first one's seam. `src/port` is what a *program* asks of this machine -- a
+# screen, held keys, a clock, the bytes of a file -- and a wireless stack wants
+# none of that and several things it does not have. One global `ALLOWED` would
+# have forced the two vocabularies into one module, which is the merge this
+# check exists to prevent, arriving through the check itself.
+TREES = {
+    "src/doom": {"port"},
+    "src/wlan": {"radio"},
+}
 
 # `crate::` followed by an identifier, and `super::super::` which is the way
 # out of a submodule without naming `crate`.
@@ -52,7 +68,7 @@ CLIMB = re.compile(r"\bsuper::super::")
 WAIVER = re.compile(r"#\s*portcheck:\s*ok")
 
 
-def scan(path: Path):
+def scan(path: Path, allowed):
     """Every violation in one file, as (line number, text, why)."""
     out = []
     try:
@@ -63,7 +79,7 @@ def scan(path: Path):
         if WAIVER.search(line):
             continue
         for m in CRATE.finditer(line):
-            if m.group(1) not in ALLOWED:
+            if m.group(1) not in allowed:
                 out.append((n, line.strip(), f"reaches crate::{m.group(1)}"))
         if CLIMB.search(line):
             out.append((n, line.strip(), "climbs out with super::super::"))
@@ -75,11 +91,20 @@ def main():
     ap.add_argument("--tree", action="append", help="override the tree list")
     args = ap.parse_args()
 
-    trees = args.tree or TREES
+    # An overridden tree that this file does not know about has no declared
+    # seam, so it is checked against the union of every seam there is. That is
+    # deliberately the lenient direction: `--tree` is a debugging aid, and a
+    # false failure there would teach somebody to stop running it.
+    if args.tree:
+        every = set().union(*TREES.values())
+        trees = {t: TREES.get(t, every) for t in args.tree}
+    else:
+        trees = TREES
+
     total = 0
     looked = 0
 
-    for t in trees:
+    for t, allowed in trees.items():
         d = ROOT / t
         if not d.is_dir():
             # Not an error. The tree is created by the port that needs it, and
@@ -89,7 +114,7 @@ def main():
         files = sorted(d.rglob("*.rs"))
         looked += len(files)
         for f in files:
-            bad = scan(f)
+            bad = scan(f, allowed)
             for n, line, why in bad:
                 rel = f.relative_to(ROOT).as_posix()
                 print(f"{rel}:{n}: {why}")
@@ -99,7 +124,9 @@ def main():
     if total:
         print()
         print(f"[portcheck] {total} violation(s) in {looked} file(s).")
-        print("[portcheck] A ported tree may name crate::port and nothing else.")
+        for t, allowed in trees.items():
+            seams = " or ".join(f"crate::{a}" for a in sorted(allowed))
+            print(f"[portcheck] {t} may name {seams} and nothing else.")
         print("[portcheck] If one is genuinely justified, append '# portcheck: ok'")
         print("[portcheck] to that line so the exception is in the diff.")
         return 1

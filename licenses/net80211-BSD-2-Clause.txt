@@ -1,0 +1,37 @@
+OpenBSD sys/net80211 -- BSD-2-Clause licence.
+
+This project transliterates part of OpenBSD's 802.11 stack into Rust
+under src/wlan/. The files below carry this licence. Each Rust file
+names its own upstream and copyright holders in its provenance block;
+tools/wlanprov.py checks that it does.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+1. Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
+IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
+INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
+NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+Copyright holders across these files:
+  Copyright (c) 2001 Atsushi Onoe
+  Copyright (c) 2002, 2003 Sam Leffler, Errno Consulting
+  Copyright (c) 2003, 2004 David Young.  All rights reserved.
+
+Files:
+  sys/net80211/ieee80211.h
+  sys/net80211/ieee80211_radiotap.h
+  sys/net80211/ieee80211_rssadapt.c
+  sys/net80211/ieee80211_rssadapt.h

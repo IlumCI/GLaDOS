@@ -37,6 +37,8 @@ mod net;
 mod pkg;
 /// What a program written somewhere else may ask of this machine.
 mod port;
+/// What an 802.11 stack written somewhere else may ask of this machine.
+mod radio;
 mod recovery;
 mod rng;
 mod serial;
