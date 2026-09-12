@@ -42,7 +42,7 @@ pub fn selftest() -> bool {
     console::set_color(YELLOW);
     kprintln!("\n[selftest] crypto:");
 
-    let checks: [(&str, fn() -> bool); 27] = [
+    let checks: [(&str, fn() -> bool); 28] = [
         ("sha-256   NIST vectors", crate::store::sha256::selftest),
         ("hmac/hkdf RFC 4231 and RFC 5869", hkdf::selftest),
         ("sha-384   FIPS 180-4", sha512::selftest),
@@ -56,6 +56,7 @@ pub fn selftest() -> bool {
         ("ccm/cmac  RFC 3610 and RFC 4493, tamper rejected", ccm::selftest),
         ("wpa2      IEEE 802.11i pmk and ptk", crate::net::wpa2::selftest),
         ("802.11    beacons parse, probe requests build", crate::net::ieee80211::selftest),
+        ("ccmp      802.11-2012 M.6.4, replay and tamper rejected", crate::wlan::ccmp::selftest),
         ("8188eu    tx/rx descriptor bit layout", crate::dev::rtl8188eu::desc::selftest),
         ("aiksi     functions, lists, scope, whole programs", crate::aiksi::selftest),
         ("engine    one holder, and a second task is refused", crate::ai::engine_selftest),

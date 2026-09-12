@@ -39,6 +39,8 @@ mod pkg;
 mod port;
 /// What an 802.11 stack written somewhere else may ask of this machine.
 mod radio;
+/// The 802.11 stack, transliterated from OpenBSD net80211.
+mod wlan;
 mod recovery;
 mod rng;
 mod serial;
