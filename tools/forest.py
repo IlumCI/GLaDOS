@@ -269,6 +269,28 @@ def gsm8k_node(row):
     }
 
 
+# --- which splits may become nodes -----------------------------------------
+#
+# **A forest built from a test split is an answer key, and this one was.**
+# The loop below walked `("dev", "validation", "test")`, so 1,353 MMLU *test*
+# questions went into the forest carrying their `answer` field. The plan for
+# retrieval says in as many words to measure `--task mmlu --forest`, and that
+# experiment would have reported a large improvement produced entirely by
+# handing the model the answer to the question it was being scored on.
+#
+# Nothing was wrong with the ingest when it was written: the forest was a
+# knowledge base and MMLU was not yet a rail it would be measured against. It
+# became wrong the moment both were true, which is the same shape as the test
+# set that *moved* when the routing corpus was appended to -- recorded in
+# `CLAUDE.md` as one of the three ways measurement was got wrong here before.
+#
+# So `test` is off by default and `--allow-test` is the deliberate exception,
+# for a forest that is never going to be retrieved into during an MMLU run.
+# `--report` prints the split composition of whatever was built, because the
+# number that matters is one nobody thought to look at.
+SPLITS = ("dev", "validation")
+
+
 def mmlu_node(row, subject, split):
     letters = "ABCD"
     ch = list(row["choices"])
@@ -466,7 +488,7 @@ def verify(outdir):
     print("  verified")
 
 
-def collect(limit):
+def collect(limit, splits=SPLITS):
     nodes, refused = [], {}
 
     def refuse(e):
@@ -485,7 +507,7 @@ def collect(limit):
     subs = sorted({p.parent.name for p in m.rglob("*.parquet")})
     want = ("math", "algebra", "logic", "statistic")
     for s in [x for x in subs if any(k in x for k in want)]:
-        for split in ("dev", "validation", "test"):
+        for split in splits:
             try:
                 f = find_file(m / s, split)
             except SystemExit:
@@ -578,6 +600,10 @@ def main():
                     help="rows per source, 0 for everything")
     ap.add_argument("--verify", action="store_true",
                     help="re-read an emitted tree instead of building one")
+    ap.add_argument("--allow-test", action="store_true", dest="allow_test",
+                    help="ingest MMLU's test split too. Refused by default: a "
+                         "node carries its answer, so a forest holding a test "
+                         "split is an answer key for that rail.")
     ap.add_argument("--selftest", action="store_true",
                     help="check the builder's own claims, with no data")
     args = ap.parse_args()
@@ -592,7 +618,18 @@ def main():
         verify(out)
         return
 
-    nodes, refused = collect(args.limit)
+    splits = SPLITS + ("test",) if args.allow_test else SPLITS
+    nodes, refused = collect(args.limit, splits)
+    # **The composition is printed, because it is the number nobody looked
+    # at.** A forest is a pile of nodes until you ask which split each came
+    # from, and the answer decided whether a planned experiment was valid.
+    from collections import Counter
+    comp = Counter(n["source"].rsplit("/", 1)[-1] if "/" in n["source"]
+                   else n["source"] for n in nodes)
+    print("  splits: " + ", ".join(f"{k} {v}" for k, v in sorted(comp.items())))
+    if "test" in comp:
+        print("  WARNING: this forest holds a test split and is an answer key "
+              "for that rail -- do not retrieve into it while scoring one")
     print(f"[forest] {len(nodes)} node(s) admitted")
     if refused:
         # Printed unprompted, the way `traces.py` reports what it could not
