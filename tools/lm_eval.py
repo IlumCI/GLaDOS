@@ -997,7 +997,8 @@ def main():
     elif args.task == "gsm8k":
         run_gsm8k(backend, hf, tok, 0 if args.all else args.limit,
                   args.max_new, args.show,
-                  args.shots if args.shots else 5)
+                  args.shots if args.shots else 5,
+                  batch=args.batch, seed=args.seed)
     elif args.task == "niah":
         run_niah(backend, hf, tok, args.contexts, args.limit)
     elif args.task == "route":

@@ -19,20 +19,35 @@ the obvious optimisation here is the one that bought least.
   noticing that the same arithmetic was being done 1,319 times.
 - **Questions against each other.** Decode is one token at a time whatever you
   do, so a lone sequence drags every weight past the processor for one row of
-  arithmetic. Measured on CPU: 8.8 tok/s at batch 1, 33.6 at 8, 40.2 at 16.
+  arithmetic. Raw decode throughput on CPU: 8.8 tok/s at batch 1, 33.6 at 8,
+  40.2 at 16 -- which is a throughput figure and **not** a wall-clock one; see
+  below for why the two came apart and what is still unmeasured.
 
-**What batching did not buy, and why the docstring used to claim it would.**
-This file first said cross-question batching "is the only thing that makes a
-full run affordable". Measured end to end it moved 13.5 s/question to 13.8 --
-*nothing* -- for two reasons neither of which is visible from the throughput
-figure. A 726-token prefill already saturates the processor, so a batch of 8
-prefills costs 8x one rather than sharing anything. And a batch runs until its
-**longest** answer finishes: answers average 107 tokens against a 256 budget,
-so eight questions all pay the slowest one's bill.
+**What the third one is worth is not yet known, and the last claim here about
+it was measured wrong.** This docstring said batching moved 13.5 s/question to
+13.8, "nothing", and drew a confident lesson from it. Both figures came from
+runs at **batch 1**: `lm_eval` built its argument list without passing `batch`
+through to `run_gsm8k`, so every `--batch 8` on the command line was a batch of
+one. The measurement compared a configuration against itself and the difference
+was host noise.
 
-The throughput number was real and the conclusion drawn from it was wrong,
-which is this project's recurring lesson wearing yet another costume. What
-actually moved the wall clock was the prefix.
+The tell was printed on every one of those runs and went unread --
+`1319 group(s) of one length` is only possible at batch 1.
+
+What is known after fixing it, on 24 questions: batch 1 and batch 8 give the
+same answers and the same wall clock, **because at that size exact-length
+grouping barely groups anything** -- 24 questions became 21 groups. A sample
+that small cannot measure batching at all. The benefit exists only where
+lengths collide, which at the full 1,319 is mean group 11.7.
+
+So the honest state is: correctness under batching is checked (below, and by
+identical answers across batch sizes), and the *speedup* is unmeasured. Do not
+quote one here until a full run has been done both ways.
+
+Two costs are real regardless and are worth knowing before expecting much. A
+726-token prefill already saturates the processor, so batched prefills share
+little. And a batch runs until its **longest** answer finishes: answers average
+107 tokens against a 256 budget, so a group pays its slowest member's bill.
 
 ### A second implementation is a liability unless it is checked
 
