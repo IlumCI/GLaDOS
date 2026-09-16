@@ -773,7 +773,7 @@ FILLER = [
 ]
 
 
-def run_niah(backend, hf, tok, contexts, limit):
+def run_niah(backend, hf, tok, contexts, limit, new_tok=24):
     """Needle at 25/50/75% depth; the model must recall a number it saw once.
     Filler is accumulated to a token budget, not a line count -- a line is
     roughly fourteen tokens, and conflating the two overshot every context
@@ -806,15 +806,29 @@ def run_niah(backend, hf, tok, contexts, limit):
                                          add_special_tokens=False).ids
             logits = backend.feed(prompt_ids)
             gen = []
-            for _ in range(8):
+            # **Budgeted in tokens, and the old budget was eight.** Qwen3's
+            # pre-tokenizer takes digits *one at a time*, so the seven-digit
+            # answer is seven tokens before any leading space or newline the
+            # model chooses to emit first. Eight left no room to be wrong in,
+            # and a truncated correct answer scores exactly like a wrong one.
+            for _ in range(new_tok):
                 nxt = int(np.argmax(logits))
+                if nxt == tok.eos:
+                    break
                 gen.append(nxt)
                 logits = backend.feed([nxt])
             text = detok(tok, gen)
             hit = magic in text
             results[(ctx, depth)] = hit
+            # **Printed, always.** This rail read 0/7 for SmolLM2 and 0/6 for
+            # Qwen3-0.6B and was quoted as a fact about the models, with
+            # nothing anywhere recording what they actually said -- which is
+            # precisely how GSM8K stayed at 0.0% for the life of the project.
+            # Six items, so there is no reason to ever not show them.
             print(f"  ctx {ctx:5d} depth {depth:4.0%} ({len(prompt_ids)} tok): "
                   f"{'ok  ' if hit else 'MISS'} (want {magic})")
+            print(f"        said ({len(gen)} tok): "
+                  + repr(text)[:160])
     hits = sum(results.values())
     print(f"  niah (greedy, {hits}/{len(results)} found)")
     return hits / len(results)
@@ -1000,7 +1014,7 @@ def main():
                   args.shots if args.shots else 5,
                   batch=args.batch, seed=args.seed)
     elif args.task == "niah":
-        run_niah(backend, hf, tok, args.contexts, args.limit)
+        run_niah(backend, hf, tok, args.contexts, args.limit, args.max_new)
     elif args.task == "route":
         run_route(backend, hf, tok, build_alphabet(tok), args.limit)
 

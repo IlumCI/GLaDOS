@@ -13,7 +13,7 @@ datasets.
 |---|---|---|---|---|
 | MMLU, 0-shot letter-logprob | 20.0% (n=50) | 30.0% (n=30) | **43.3%** (n=30) | 25% |
 | GSM8K, 5-shot greedy | ~~0.0%~~ *re-run owed* | ~~0.0%~~ *re-run owed* | ~~0.0%~~ *re-run owed* | ~0 |
-| NIAH, 512/1024 | 0/7 | 6/6 | **6/6** | -- |
+| NIAH, 512/1024 | ~~0/7~~ *suspect* | 6/6 | **6/6** | -- |
 | Route, constrained decode, 78 actions | 0.0% (n=50) | 33.3% (n=30) | **40.0%** (n=30) | ~1.3% |
 
 The 2B column is `insraq/Qwen3.5-2B-EmperoAI-Qwen3.8-Distill-Heretic-Abliterated`
@@ -141,12 +141,37 @@ its misses are near misses between related commands (`nvme`/`mem`,
 prompt engineering, and the three-core gate exists precisely to know which
 third.
 
-**NIAH is the linear-attention payoff, visible already at 1k.** The hybrid
-recalled the needle at every depth and both contexts; the dense 135M recalled
-nothing at any. This is one prompt each -- an existence proof, not a curve --
-but the direction is unambiguous, and the 8k-32k story that actually justifies
-the architecture is a GF63 measurement (host NumPy attention is quadratic;
-2k is where this rail honestly stops).
+**NIAH was read as the linear-attention payoff, and the zero half of it was a
+budget artifact.** The hybrids recalled the needle at every depth and both
+contexts; the dense 135M recalled nothing at any, and that contrast is what
+decided which checkpoint the retrieval work was developed against.
+
+**Qwen3-0.6B, dense, now reads 6/6 at 512 and 1024.** It reads 0/6 under the
+budget this rail shipped with, and the reason is printed the moment the rail
+prints anything:
+
+    said (24 tok): ' The special magic number for gravel-1537 is 4905091.'
+    said ( 8 tok): ' The special magic number for gra'
+
+Eleven tokens of preamble before the first digit, against a generation budget
+of **eight**. The model answered every one of them correctly and was cut off
+mid-word every time. Qwen3's pre-tokenizer also takes digits one at a time, so
+the answer alone is seven more.
+
+This is the GSM8K failure exactly, in a second rail: a budget shorter than the
+answer, no transcript kept, and the resulting zero written down as a fact about
+the model. `run_niah` prints what it was told on every item now, and the budget
+comes from `--max-new` rather than a literal.
+
+**So the SmolLM2 0/7 is struck as suspect rather than corrected.** It was
+produced by this same code with this same budget, and SmolLM2's answering style
+is not known to be terser than Qwen3's. It is not disproven -- that checkpoint
+is not in `out/` any more and it has not been re-run -- but it cannot be
+quoted, and **nothing should be concluded from it about small models and
+retrieval.**
+
+What the hybrids did is untouched: they were 6/6, and a budget that truncates
+cannot manufacture a hit.
 
 **MMLU sits near chance for both.** 0-shot letter-logprob is the cheap
 tracking trick, not the official harness; a 135M model below chance and an
