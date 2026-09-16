@@ -170,10 +170,23 @@ class Dense:
     """A dense checkpoint on whatever hardware is here, ready to be stepped."""
 
     def __init__(self, path, max_len, batch=1, device="auto", dtype="f32",
-                 vram=None, verbose=False):
+                 kv_dtype=None, vram=None, verbose=False):
         t0 = time.time()
         self.device = pick_device(device)
         self.dtype = DTYPES[dtype]
+        # **The cache is what scales with batch, and the weights are not.**
+        # Weights are a fixed 3.0 GB at f32 for this checkpoint; the cache is
+        # 264 MB per sequence at a 1152-token context, so batch 16 is 4.2 GB
+        # of cache against 3.0 of weights. Halving the cache therefore roughly
+        # doubles the batch that fits, where halving the weights buys one
+        # constant. Separate knob for that reason.
+        #
+        # The kernel holds its own KV cache int8 and `reference.py` models
+        # that with `q8_roundtrip`, so narrowing the cache is not a departure
+        # from what the real system does. It *is* a departure from the oracle
+        # whenever the checkpoint does not ask for it, which is why the check
+        # reports the disagreement instead of hiding it.
+        self.kv_dtype = DTYPES[kv_dtype] if kv_dtype else self.dtype
         # Norms, attention and the softmax accumulate in f32 whatever the
         # weights are. A softmax over a long context in fp16 is where a
         # plausible-looking model quietly stops being the model.
@@ -196,7 +209,8 @@ class Dense:
             per_layer = (cfg["q_dim"] * d + cfg["kv_dim"] * d * 2
                          + d * cfg["q_dim"] + h * d * 3) * width
             tail = vocab * d * width
-            cache = L * batch * max_len * cfg["kv_dim"] * 2 * width
+            kvw = torch.finfo(self.kv_dtype).bits // 8
+            cache = L * batch * max_len * cfg["kv_dim"] * 2 * kvw
             room = budget - tail - cache
             self.gpu_layers = max(0, min(L, room // per_layer)) if per_layer else L
             if verbose:
@@ -251,15 +265,23 @@ class Dense:
         self.kc, self.vc = [], []
         for i in range(L):
             self.kc.append(torch.zeros((batch, max_len, cfg["kv_dim"]),
-                                       dtype=self.dtype, device=dev_of(i)))
+                                       dtype=self.kv_dtype, device=dev_of(i)))
             self.vc.append(torch.zeros((batch, max_len, cfg["kv_dim"]),
-                                       dtype=self.dtype, device=dev_of(i)))
+                                       dtype=self.kv_dtype, device=dev_of(i)))
         self.pos = 0                                   # committed columns
         self.left = torch.zeros(batch, dtype=torch.long)   # pad width per row
         self.prefix = None                             # see `hold_prefix`
         if verbose:
+            kvw = torch.finfo(self.kv_dtype).bits // 8
+            wb = sum(t.numel() * t.element_size()
+                     for t in (self.wq + self.wk + self.wv + self.wo
+                               + self.w1 + self.w2 + self.w3)) + emb.numel() * emb.element_size()
+            cb = L * batch * max_len * cfg["kv_dim"] * 2 * kvw
             print(f"  loaded in {time.time() - t0:.1f}s on {self.device}/{dtype}, "
-                  f"batch {batch}, vocab {vocab}{', tied' if tied else ''}")
+                  f"kv {kv_dtype or dtype}, batch {batch}, vocab {vocab}"
+                  f"{', tied' if tied else ''}")
+            print(f"  resident: {wb/1e9:.2f} GB weights + {cb/1e9:.2f} GB cache "
+                  f"= {(wb + cb)/1e9:.2f} GB")
 
     # --- the pass ------------------------------------------------------
 
@@ -363,8 +385,8 @@ class Dense:
             k = self._rope(k, pos0, T)
 
             if commit:
-                self.kc[li][:B, self.pos:n] = k.reshape(B, T, -1)
-                self.vc[li][:B, self.pos:n] = v
+                self.kc[li][:B, self.pos:n] = k.reshape(B, T, -1).to(self.kv_dtype)
+                self.vc[li][:B, self.pos:n] = v.to(self.kv_dtype)
                 kc, vc = self.kc[li][:B, :n], self.vc[li][:B, :n]
             else:
                 # A latent pass reads the committed prefix and writes nothing.
@@ -469,7 +491,7 @@ class Dense:
 # --- the check, which is the only reason any of this may be used -----------
 
 
-def check(path, tokens, device, dtype, batch):
+def check(path, tokens, device, dtype, batch, kv_dtype=None):
     print(f"[fastdense] {Path(path).name}: {tokens} token(s), batch {batch}, "
           f"{device}/{dtype}")
     cfg, w = R.load(str(path))
@@ -487,7 +509,7 @@ def check(path, tokens, device, dtype, batch):
     del w
 
     d = Dense(path, max_len=tokens + 8, batch=batch, device=device,
-              dtype=dtype, verbose=True)
+              dtype=dtype, kv_dtype=kv_dtype, verbose=True)
     t0 = time.time()
     fast = list(d.prefill(seqs))
     t_fast = time.time() - t0
@@ -504,16 +526,17 @@ def check(path, tokens, device, dtype, batch):
         print(f"  row {i} len {lens[i]:4d}  max |dlogit| {diff.max():.3e}   "
               f"argmax {'same' if same else 'DIFFERENT'}   "
               f"top-5 {'held' if held else 'CHANGED'}")
-        ok &= same and held and diff.max() < TOL[dtype]
+        ok &= same and held and diff.max() < TOL[max(
+            (dtype, kv_dtype or dtype), key=lambda x: TOL[x])]
     print("  " + ("agrees with the oracle" if ok
                   else "DOES NOT AGREE -- do not use"))
     return 0 if ok else 1
 
 
-def bench(path, device, dtype, batch, prompt, steps):
+def bench(path, device, dtype, batch, prompt, steps, kv_dtype=None):
     """What a decode step costs, which is the number the batching is about."""
     d = Dense(path, max_len=prompt + steps + 8, batch=batch, device=device,
-              dtype=dtype, verbose=True)
+              dtype=dtype, kv_dtype=kv_dtype, verbose=True)
     rng = np.random.default_rng(7)
     seqs = [[int(v) for v in rng.integers(0, 30000, size=prompt)]
             for _ in range(batch)]
@@ -540,17 +563,22 @@ def main():
     ap.add_argument("--batch", type=int, default=1)
     ap.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
     ap.add_argument("--dtype", default="f32", choices=list(DTYPES))
+    ap.add_argument("--kv-dtype", default=None, choices=list(DTYPES),
+                    dest="kv_dtype",
+                    help="cache precision, separately from the weights. The "
+                         "cache is what grows with batch, so narrowing it is "
+                         "what buys a bigger one.")
     ap.add_argument("--prompt", type=int, default=726)
     ap.add_argument("--steps", type=int, default=32)
     args = ap.parse_args()
     if args.bench:
         bench(args.model, args.device, args.dtype, args.batch,
-              args.prompt, args.steps)
+              args.prompt, args.steps, args.kv_dtype)
         raise SystemExit(0)
     if not args.check:
         ap.error("--check or --bench; this module is imported to be used")
     raise SystemExit(check(args.model, args.tokens, args.device,
-                           args.dtype, args.batch))
+                           args.dtype, args.batch, args.kv_dtype))
 
 
 if __name__ == "__main__":

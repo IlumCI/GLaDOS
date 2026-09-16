@@ -379,18 +379,19 @@ class DenseRef:
         return logits
 
 
-def make_dense(path, max_len, oracle, batch=1, device="auto", dtype="f32"):
+def make_dense(path, max_len, oracle, batch=1, device="auto", dtype="f32",
+               kv_dtype=None):
     """The fast runner, or the oracle it was proven against."""
     if oracle:
         return DenseRef(str(path), max_len)
     import fastdense
 
-    return fastdense.Dense(str(path), max_len, batch=batch,
-                           device=device, dtype=dtype, verbose=True)
+    return fastdense.Dense(str(path), max_len, batch=batch, device=device,
+                           dtype=dtype, kv_dtype=kv_dtype, verbose=True)
 
 
 def make_backend(model_path, max_len, oracle=False, batch=1,
-                 device="auto", dtype="f32"):
+                 device="auto", dtype="f32", kv_dtype=None):
     """Returns (runner, note). runner.feed(tokens) -> logits of the last token.
 
     Dense and hybrid share the GLADOSM2 magic; the version field at offset 8
@@ -406,7 +407,8 @@ def make_backend(model_path, max_len, oracle=False, batch=1,
         tensors, cfg = v4.load(model_path)
         note = f"hybrid arch {cfg['arch']}, {len(cfg['layer_types'])} layers"
         return Hybrid35(tensors, cfg, max_len), note
-    return make_dense(model_path, max_len, oracle, batch, device, dtype)
+    return make_dense(model_path, max_len, oracle, batch, device, dtype,
+                      kv_dtype)
 
 
 class DenseRunner2(DenseRunner):
@@ -906,6 +908,12 @@ def main():
                     help="which sample --limit draws. Fixed, so two runs and "
                          "two checkpoints see the same questions.")
     ap.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
+    ap.add_argument("--kv-dtype", default=None, dest="kv_dtype",
+                    choices=["f32", "bf16", "fp16"],
+                    help="cache precision, separately from the weights. The "
+                         "cache is what grows with batch (264 MB per sequence "
+                         "here against 3.0 GB of weights), so this is the "
+                         "knob that decides how big a batch fits.")
     ap.add_argument("--dtype", default="f32", choices=["f32", "bf16", "fp16"],
                     help="weight precision. f32 is what the oracle check "
                          "passes at; the narrow ones hold the argmax and "
@@ -942,8 +950,9 @@ def main():
     # so 1152 has room and `need` below refuses loudly if it does not.
     if args.task == "gsm8k" and args.batch > 1:
         max_len = min(max_len, 1152)
-    made = make_backend(args.model, max_len, args.oracle,
-                        batch=args.batch, device=args.device, dtype=args.dtype)
+    made = make_backend(args.model, max_len, args.oracle, batch=args.batch,
+                        device=args.device, dtype=args.dtype,
+                        kv_dtype=args.kv_dtype)
     backend, note = made if isinstance(made, tuple) else (
         made,
         f"dense dim {made.cfg['dim']}, {made.cfg['layers']} layers"
