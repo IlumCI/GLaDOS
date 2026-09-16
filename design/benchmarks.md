@@ -66,13 +66,20 @@ right, and there is one now.
 
 ### The first GSM8K figure this project has that measures a model
 
-    Qwen3-0.6B, GSM8K 5-shot greedy, n=25, <= 256 new tokens
+    Qwen3-0.6B, GSM8K 5-shot greedy, <= 256 new tokens
+    n = 1319, the whole test set
 
-    28.0%
+    39.2%
 
 Dense, int8, its own tokenizer, through the fixed harness and
-`tools/fastdense.py`. Chance on this task is about zero, so 28% is the model
+`tools/fastdense.py`. Chance on this task is about zero, so 39.2% is the model
 doing the arithmetic rather than the harness finding a number somewhere.
+
+**The whole set, so there is no sampling question left.** Earlier partial runs
+of this same configuration read 28.0%, 36.0% and 37.5% at n around 25 -- which
+is the plus-or-minus-18-point interval behaving exactly as advertised, and a
+good argument against quoting any of them. This figure has no interval worth
+stating.
 
 The transcripts are the point and are printed by `--show`:
 
@@ -87,15 +94,25 @@ Well-formed reasoning, the `####` the format asks for, the stop cutting
 cleanly, and a budget the answer fits inside. Every one of those was broken
 before, and each on its own reads as a model that cannot do arithmetic.
 
-**n=25 is a small sample and the figure is quoted as one.** The 95% interval on
-25 items is roughly plus or minus 18 points, so this establishes that the task
-measures the model and does not establish where between 10% and 46% the model
-sits. What it also is not, is a number about the three checkpoints in the table
-above: Qwen3-0.6B is a fourth, and the dense runner that made it affordable
-does not run the hybrids.
+What it is **not** is a number about the three checkpoints in the table above:
+Qwen3-0.6B is a fourth, and the dense runner that made it affordable does not
+run the hybrids. Those three are still owed a re-run.
 
-Cost, since that is what was blocking: **26.1 s/question**, so a 25-question
-5-shot run is about eleven minutes where `reference.py` was about ninety.
+Cost, and the part of it that was predicted wrong:
+
+    reference.py, the oracle      ~180 s/question   (never run to completion)
+    fastdense, batch 1               11.5 s/question
+    fastdense, batch 8                8.7 s/question   <- the full run, 3.2 h
+
+Cross-question batching is worth about **25%** at full scale. Its raw decode
+throughput is 8.8 tok/s at batch 1 against 40.2 at batch 16, and reading that
+as a 4.6x is what this file warns about everywhere else. Two costs eat it: a
+726-token prefill already saturates the processor, so batched prefills share
+little, and a batch runs until its **longest** answer finishes, where answers
+average 107 tokens against a 256 budget.
+
+What actually made the run affordable was noticing that all 1,319 questions
+share the same 658-token five-shot prefix, and computing it once.
 
 ## What the numbers say
 

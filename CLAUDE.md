@@ -5468,24 +5468,40 @@ N` prints the raw completion and stays for that reason. A rail that reads zero
 is not a result until its output has been read; a score with no transcript
 behind it is an assertion.
 
-**And the number it was hiding: 28.0%.** Qwen3-0.6B, GSM8K 5-shot greedy,
-n=25, through the fixed harness. The row read 0.0% on every checkpoint this
-project has ever run and was quoted as evidence about small models and
-arithmetic; the model had been doing the arithmetic the whole time and nothing
-was reading the answer.
+**And the number it was hiding: 39.2%.** Qwen3-0.6B, GSM8K 5-shot greedy, on
+the **whole 1,319-question test set**, through the fixed harness. The row read
+0.0% on every checkpoint this project has ever run and was quoted as evidence
+about small models and arithmetic; the model had been doing the arithmetic the
+whole time and nothing was reading the answer.
 
 The last of the four defects needed a runner rather than a fix.
 `tools/fastdense.py` is `reference.py`'s arithmetic with the position loop
-turned into a matrix dimension -- 41x on the same logits, weights dequantised
-once instead of per call per layer per token, 26 s/question against about 180.
-It is allowed to exist only because `fastdense.py --check` runs it against the
-oracle on real ids and prints the largest disagreement; `lm_eval.py --oracle`
-takes the slow path, which is what a disagreement is diagnosed with. Two dense
-implementations do not stay agreeing unless something makes them.
+turned into a matrix dimension: prefill **92x**, weights dequantised once
+instead of per call per layer per token, and the same five-shot prefix computed
+once rather than 1,319 times. 8.7 s/question against about 180, so the whole
+set is 3.2 hours where the oracle could not finish it.
 
-`design/benchmarks.md` carries the figure, the transcript it came from, and the
-interval on n=25 -- roughly plus or minus 18 points, so what it establishes is
-that the task measures the model rather than where the model sits.
+It is allowed to exist only because `fastdense.py --check` runs it against the
+oracle on a deliberately **ragged** batch and prints the largest disagreement
+per row; `lm_eval.py --oracle` takes the slow path, which is what a
+disagreement is diagnosed with. Two dense implementations do not stay agreeing
+unless something makes them.
+
+**Three figures from partial runs are withdrawn and worth knowing about.**
+28.0%, 36.0% and 37.5% were all measured at n around 25 on this same
+configuration, and the spread is the plus-or-minus-18-point interval doing
+exactly what it says. None of them should have been quoted, and one of them
+was, here. The full set has no interval worth stating.
+
+And a fourth: cross-question batching was reported as buying nothing, from two
+runs that were **both batch 1** because `lm_eval` never passed `batch` through
+to the task. At full scale it is worth about 25%, which is far less than its
+throughput figure suggests and not nothing. The tell was printed every time --
+`1319 group(s) of one length` cannot happen at batch 8, and reads `222` once
+the flag arrives. Before comparing two configurations, print something that
+must differ between them.
+
+`design/benchmarks.md` carries the figure and the transcript it came from.
 
 There are **three** splits, and `vocab::splits()` is the single place anything
 asks for them. It returns the compiled `SEED_TRAIN` and `SEED_VAL_END` until a
