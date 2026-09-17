@@ -421,12 +421,26 @@ def parse(text):
 
 
 def emit(outdir, nodes, quiet=False):
-    """Write the tree. Ascending name order, capped fanout."""
+    """Write the tree. Ascending name order, capped fanout.
+
+    **A rebuild has to be able to make the tree smaller.** Names are ordinal
+    per directory -- `00000`, `00001` -- so a build admitting fewer nodes than
+    the last one writes over the low names and leaves the high ones exactly
+    where they were. Dropping MMLU's test split takes 1,353 nodes out of the
+    admitted set and would have left all 1,353 on disk: still readable, still
+    carrying their answers, under a tree that now reports itself clean. That
+    is the answer key this guard exists to remove, surviving its removal.
+
+    So the sweep below deletes node files this build did not write, and says
+    how many. It touches only files whose first word is `head`, because that
+    is the one thing every node has and a stranger's file does not. Anything
+    else under `outdir` is left alone and counted out loud.
+    """
     groups = {}
     for n in nodes:
         groups.setdefault(tuple(bucket(n)), []).append(n)
 
-    written, dirs = 0, 0
+    written, dirs, keep = 0, 0, set()
     for key in sorted(groups):
         items = groups[key]
         # Spill into numbered sub-buckets rather than widening a directory.
@@ -443,9 +457,34 @@ def emit(outdir, nodes, quiet=False):
                 name = str(i).zfill(NAME_WIDTH)
                 path = parts + [name]
                 (d / name).write_text(render(n, path), encoding="utf-8", newline="\n")
+                keep.add((d / name).resolve())
                 written += 1
+
+    stale, foreign = 0, 0
+    for p in outdir.rglob("*"):
+        if not p.is_file() or p.resolve() in keep:
+            continue
+        try:
+            with p.open("r", encoding="utf-8") as f:
+                first = f.readline()
+        except (OSError, UnicodeDecodeError):
+            first = ""
+        if first.startswith("head "):
+            p.unlink()
+            stale += 1
+        else:
+            foreign += 1
+    for d in sorted((p for p in outdir.rglob("*") if p.is_dir()),
+                    key=lambda p: -len(p.parts)):
+        if not any(d.iterdir()):
+            d.rmdir()
+
     if not quiet:
         print(f"  {written} node(s) in {dirs} director(ies), fanout <= {FANOUT}")
+        if stale:
+            print(f"  {stale} node(s) from an earlier build removed")
+        if foreign:
+            print(f"  {foreign} file(s) under {outdir} are not nodes, left alone")
     return written, dirs
 
 
