@@ -54,6 +54,30 @@ STOP = {
 WORD = re.compile(r"[a-zA-Z][a-zA-Z-]{2,}")
 ALNUM = re.compile(r"[^a-z0-9]+")
 
+# **The leak check counts numbers and the scorer does not, and the difference
+# is the whole of what separates a duplicate from a sibling.**
+#
+# MMLU is templated. Scoring 100 abstract-algebra questions with retrieval on,
+# twelve of them refused a node -- and every one of those nodes was a
+# *validation* question from the same template with different numbers in it:
+#
+#     test     Find the order of the factor group (Z_11 x Z_15)/(<1, 1>)
+#     refused  Find the order of the factor group (Z_4 x Z_12)/(<2> x <2>)
+#
+# Every content word is shared, so containment read 1.00 over a question whose
+# alphabetic vocabulary is four words long. That is not the question with its
+# answer attached; it is a worked example of the same kind, which is the single
+# most useful thing a forest can hand a model, and the guard was eating it.
+#
+# Numbers are what the template varies, so including them is exactly the
+# discrimination needed. The Natalia case still refuses -- 48, 24 and 72 are
+# shared as well as the words -- and the algebra sibling no longer does.
+#
+# It is deliberately *only* the leak check. `lex.rs` scores over BPE ids and
+# this scores over words, and widening the scorer's vocabulary here would move
+# it further from the kernel's rather than closer.
+LEAK_TERM = re.compile(r"[a-z]{3,}|\d+")
+
 # `src/ai/lex.rs`'s scorer, and matching it is the whole point.
 #
 # **The first version of this was BM25 with k1 = 1.2, which the kernel measured
@@ -83,6 +107,24 @@ LEN_B = 0.5
 # loud, where a node wrongly kept is an answer key and costs the whole run.
 LEAK = 0.8
 
+# **Below this many terms a question cannot be judged by overlap at all**, and
+# adding numbers to the comparison was not enough to fix that on its own.
+#
+#     Find the characteristic of the ring Z_3 x 3Z.        <- test
+#     Find the characteristic of the ring 2Z.              <- refused at 1.00
+#
+# Four terms, so one differing term is 0.75 and two is 0.5: there is no
+# threshold that separates a duplicate from a sibling at that length, because
+# at that length they are the same string with a symbol changed. MMLU is
+# templated and its abstract-algebra questions run to four or five content
+# terms, which is why this surfaced there and not on GSM8K.
+#
+# Short questions fall back to the substring test, which is exact. That is not
+# a hole: the containment rule exists to catch a *reworded* duplicate, and a
+# five-word question has nowhere to put a rewording. The Natalia case carries
+# twelve terms and is still refused.
+MIN_LEAK_TERMS = 8
+
 # What the retrieved block is introduced by. It is part of the budget, so it
 # has to be the same string when the block is counted and when it is rendered.
 LABEL = "Related worked examples"
@@ -90,6 +132,11 @@ LABEL = "Related worked examples"
 
 def words(text):
     return [w for w in WORD.findall(text.lower()) if w not in STOP]
+
+
+def leak_words(text):
+    """What the leak check compares: content words *and* numbers."""
+    return {w for w in LEAK_TERM.findall(text.lower()) if w not in STOP}
 
 
 def flatten(text):
@@ -115,7 +162,7 @@ class Node:
         # postings for the same reason.
         self.length = max(1, len(self.terms))
         self.flat = flatten(self.text)
-        self.body = set(words(self.text))
+        self.body = leak_words(self.text)
 
 
 def read_head_and_text(path):
@@ -227,7 +274,7 @@ class Forest:
         entry behind one large one and leaves the budget unspent.
         """
         flat_q = flatten(query)
-        qset = set(words(query))
+        qset = leak_words(query)
         out, refused = [], 0
         for _, i in self.score(query)[:pool]:
             n = self.nodes[i]
@@ -245,7 +292,8 @@ class Forest:
             if flat_q and (flat_q in n.flat or n.flat in flat_q):
                 refused += 1
                 continue
-            if len(qset) >= 4 and len(qset & n.body) / len(qset) >= LEAK:
+            if (len(qset) >= MIN_LEAK_TERMS
+                    and len(qset & n.body) / len(qset) >= LEAK):
                 refused += 1
                 continue
             if budget:
@@ -294,7 +342,8 @@ def selftest():
     (d / "sub" / "00001").write_text(
         "head sub | dividing pears | pears crates warehouse\n"
         "kind gsm8k\nsource gsm8k/train\nanswer 4\n"
-        "text Bob splits 12 pears into 3 crates.\nEach crate holds 4.\n",
+        "text Bob splits 12 pears into 3 crates for the Saturday market.\n"
+        "Each crate holds 4 pears.\n",
         encoding="utf-8")
     (d / "notes.txt").write_text("not a node\n", encoding="utf-8")
 
@@ -307,16 +356,32 @@ def selftest():
     claim("the apple question retrieves the apple node",
           len(got) == 1 and "apples" in got[0].text and ref == 0)
 
-    got, ref = f.retrieve("Bob splits 12 pears into 3 crates.", k=2)
+    got, ref = f.retrieve(
+        "Bob splits 12 pears into 3 crates for the Saturday market.", k=2)
     claim("a node holding the question verbatim is refused", ref >= 1)
     claim("and refusing it does not refuse the others",
           all("pears into 3 crates" not in n.text for n in got))
 
     # The case substring matching passed and should not have.
-    got, ref = f.retrieve("Bob splits 12 pears into 3 crates each", k=2)
+    got, ref = f.retrieve("For the Saturday market Bob splits his 12 pears "
+                          "into 3 crates", k=2)
     claim("a reworded question is refused too", ref >= 1)
     claim("and a question that merely shares a topic is not",
           f.retrieve("How do you divide fruit between containers?", k=2)[1] == 0)
+
+    # A template sibling is the most useful thing a forest can hand a model,
+    # and the guard ate twelve of them on MMLU before the floor existed.
+    (d / "sub" / "00002").write_text(
+        "head sub | ring characteristic | ring characteristic\n"
+        "kind mmlu\nsource mmlu/abstract_algebra/val\nanswer A\n"
+        "text Find the characteristic of the ring 2Z.\nA. 0 B. 3 C. 12 D. 30\n",
+        encoding="utf-8")
+    g = Forest.load(d)
+    claim("a short question does not refuse its template sibling",
+          g.retrieve("Find the characteristic of the ring Z_3 x 3Z.",
+                     k=2)[1] == 0)
+    claim("and an exact one is still refused, by the substring test",
+          g.retrieve("Find the characteristic of the ring 2Z.", k=2)[1] >= 1)
 
     # The budget is over the **rendered block**, label and separators
     # included, because that is what reaches the prompt. Summing the nodes
