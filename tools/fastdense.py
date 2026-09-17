@@ -185,7 +185,7 @@ class Dense:
     """A dense checkpoint on whatever hardware is here, ready to be stepped."""
 
     def __init__(self, path, max_len, batch=1, device="auto", dtype="f32",
-                 kv_dtype=None, vram=None, verbose=False):
+                 kv_dtype=None, kv8=None, vram=None, verbose=False):
         t0 = time.time()
         self.device = pick_device(device)
         self.dtype = DTYPES[dtype]
@@ -202,12 +202,25 @@ class Dense:
         # whenever the checkpoint does not ask for it, which is why the check
         # reports the disagreement instead of hiding it.
         self.kv_dtype = DTYPES[kv_dtype] if kv_dtype else self.dtype
+        # **Whether the eval runs the cache the kernel actually runs.**
+        # `KvLayer` in `src/ai/model.rs` is `Vec<i8>` plus per-block scales:
+        # the shipped system quantises its KV cache and keeps f32 only as an
+        # explicit opt-in for gradient checks. This checkpoint's header says
+        # `kv8: None`, so the oracle and this runner both keep f32 -- which
+        # makes every host figure a number about the *checkpoint* rather than
+        # about GLaDOS.
+        #
+        # Forcing it on measures what the kernel would score. It is off by
+        # default because the oracle does not do it either, and the two have
+        # to agree for `--check` to mean anything. Assigned after the load
+        # below, because it reads the header.
         # Norms, attention and the softmax accumulate in f32 whatever the
         # weights are. A softmax over a long context in fp16 is where a
         # plausible-looking model quietly stops being the model.
         self.acc = torch.float32
         cfg, w = R.load(str(path))
         self.cfg = cfg
+        self.kv8 = cfg.get("kv8") if kv8 is None else kv8
         self.max_len = max_len
         self.batch = batch
         self.latent_k = 0
@@ -283,6 +296,22 @@ class Dense:
                                        dtype=self.kv_dtype, device=dev_of(i)))
             self.vc.append(torch.zeros((batch, max_len, cfg["kv_dim"]),
                                        dtype=self.kv_dtype, device=dev_of(i)))
+        # **The latent feedback needs a scale, and without one it is an
+        # 898x overdrive.** A COCONUT pass puts the last hidden state where an
+        # input embedding goes, and on this checkpoint those are not remotely
+        # the same size: the embedding table has RMS 0.0278 and the final
+        # residual stream has RMS 24.99. Fed back raw, the model is handed a
+        # vector three orders of magnitude out of distribution, and it does
+        # what that deserves -- it starts an answer correctly and collapses
+        # into "1 the 1 the 1" inside a dozen tokens.
+        #
+        # Measured that way GSM8K went 38.0% to 2.0% at k=1, which reads as a
+        # fact about untrained latent reasoning and is really a fact about a
+        # missing normalisation. `latent_scale` rescales the fed-back state to
+        # the embedding table's own RMS, so the thing arriving at layer 0 is
+        # the size layer 0 was trained to receive.
+        self.embed_rms = float(self.embed.float().pow(2).mean().sqrt())
+        self.latent_scale = True
         self.pos = 0                                   # committed columns
         self.left = torch.zeros(batch, dtype=torch.long)   # pad width per row
         self.prefix = None                             # see `hold_prefix`
@@ -393,7 +422,7 @@ class Dense:
             if self.qk_norm:
                 q = self._rms(q, self.q_norm[li])
                 k = self._rms(k, self.k_norm[li])
-            if cfg.get("kv8"):
+            if self.kv8:
                 k, v = kv8_roundtrip(k), kv8_roundtrip(v)
 
             q = self._rope(q, pos0, T)
@@ -411,13 +440,35 @@ class Dense:
                 # assumption the mask rests on.
                 kc, vc = self.kc[li][:B, :self.pos], self.vc[li][:B, :self.pos]
 
-            att = F.scaled_dot_product_attention(
-                q.transpose(1, 2).to(self.acc),
-                kc.view(B, -1, kvh, hs).transpose(1, 2).to(self.acc),
-                vc.view(B, -1, kvh, hs).transpose(1, 2).to(self.acc),
-                attn_mask=mask[:, :, :, :kc.shape[1]],
-                enable_gqa=True,
-            ).transpose(1, 2).reshape(B, T, -1).to(x.dtype)
+            qh = q.transpose(1, 2).to(self.acc)
+            kh = kc.view(B, -1, kvh, hs).transpose(1, 2).to(self.acc)
+            vh = vc.view(B, -1, kvh, hs).transpose(1, 2).to(self.acc)
+            mh = mask[:, :, :, :kc.shape[1]]
+            if T == 1:
+                # **SDPA is 6.5x slower than this at decode shape, measured.**
+                # Flash and memory-efficient kernels are built for training,
+                # where the query axis is long; a decode step has T=1, one
+                # query row against the whole prefix, and torch picks a kernel
+                # that runs at 23 GB/s on a card that does 167. Written out as
+                # two batched matmuls it reaches 151 GB/s, which is ~90% of
+                # what the hardware gives on a plain copy.
+                #
+                #     f32   sdpa 2102 us   manual  322 us   6.5x
+                #     fp16  sdpa 2576 us   manual  195 us  13.2x
+                #
+                # over 28 layers that is 58.7 ms/step against 9.0. Prefill
+                # keeps SDPA, because a long query axis is exactly what those
+                # kernels are good at.
+                rp = heads // kvh
+                sc = torch.einsum("bkrh,bknh->bkrn",
+                                  qh.view(B, kvh, rp, hs), kh) * (hs ** -0.5)
+                sc = torch.softmax(sc + mh.view(B, 1, 1, -1), dim=-1)
+                att = torch.einsum("bkrn,bknh->bkrh", sc, vh)
+                att = att.reshape(B, heads, 1, hs)
+            else:
+                att = F.scaled_dot_product_attention(
+                    qh, kh, vh, attn_mask=mh, enable_gqa=True)
+            att = att.transpose(1, 2).reshape(B, T, -1).to(x.dtype)
 
             x = x + att @ self.wo[li].T
             xb = self._rms(x, self.rms_ffn[li])
@@ -425,7 +476,7 @@ class Dense:
             x = x + (gate * (xb @ self.w3[li].T)) @ self.w2[li].T
         return x
 
-    def _run(self, ids, left=None):
+    def _run(self, ids, left=None, latent=True):
         """Feed `(B, T)` ids and answer the last column's logits, `(B, vocab)`."""
         B, T = ids.shape
         if self.pos + T > self.max_len:
@@ -443,9 +494,23 @@ class Dense:
         # leaves no trace in the context. Whether an untrained backbone gains
         # anything from it is exactly what a measurement is for, which is why
         # this is a flag and not a default.
-        for _ in range(self.latent_k):
+        # **Once, after the prompt -- not on every decode step.** This loop
+        # used to run on every call, so each of 256 generated tokens paid k
+        # extra passes over the whole body. That is not COCONUT, which thinks
+        # in a contiguous latent block *between* the prompt and the answer and
+        # then generates normally; it is per-token refinement, and it compounds
+        # a perturbation 256 times instead of once.
+        #
+        # It was also most of the cost: k=4 paid five body passes per token, so
+        # a sweep over k=0,1,2,4 cost eleven runs' worth of decode rather than
+        # four. Fixing the shape makes every k about as cheap as k=0.
+        for _ in range(self.latent_k if latent else 0):
             d2 = self.kc[0].device
-            x = self._body(x[:, -1:, :].to(d2), self.pos - 1,
+            h = x[:, -1:, :].to(d2)
+            if self.latent_scale:
+                rms = h.float().pow(2).mean(-1, keepdim=True).sqrt().clamp_min(1e-6)
+                h = (h.float() / rms * self.embed_rms).to(h.dtype)
+            x = self._body(h, self.pos - 1,
                            self._mask(self.pos - 1, 1, self.pos, B, d2),
                            commit=False)
         return self._logits(x[:, -1, :])
@@ -460,7 +525,11 @@ class Dense:
     def feed(self, ids):
         """One sequence, the shape `lm_eval`'s single-question loop wants."""
         t = torch.as_tensor(list(ids), dtype=torch.long).view(1, -1)
-        return self._run(t).float().cpu().numpy()[0]
+        # A multi-token call is a prompt and gets the latent block; a
+        # single-token call is a decode step and does not. The compat path
+        # uses `feed` for both, so the length is the only thing that tells
+        # them apart here -- `prefill`/`step` say which they are explicitly.
+        return self._run(t, latent=len(ids) > 1).float().cpu().numpy()[0]
 
     @torch.inference_mode()
     def prefill(self, prompts, prefix=None):
@@ -498,9 +567,12 @@ class Dense:
 
     @torch.inference_mode()
     def step(self, tokens):
-        """One token for each row. Answers `(B, vocab)`."""
+        """One token for each row. Answers `(B, vocab)`.
+
+        No latent block: the thinking happened once, at `prefill`.
+        """
         t = torch.as_tensor(list(tokens), dtype=torch.long).view(-1, 1)
-        return self._run(t).float().cpu().numpy()
+        return self._run(t, latent=False).float().cpu().numpy()
 
 
 # --- the check, which is the only reason any of this may be used -----------
@@ -578,6 +650,11 @@ def main():
     ap.add_argument("--batch", type=int, default=1)
     ap.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
     ap.add_argument("--dtype", default="f32", choices=list(DTYPES))
+    ap.add_argument("--kv8", action="store_true",
+                    help="round-trip the cache through int8 the way the kernel "
+                         "does, whatever the header says. Off by default "
+                         "because the oracle does not, and --check compares "
+                         "against the oracle.")
     ap.add_argument("--kv-dtype", default=None, choices=list(DTYPES),
                     dest="kv_dtype",
                     help="cache precision, separately from the weights. The "

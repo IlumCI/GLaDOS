@@ -380,18 +380,19 @@ class DenseRef:
 
 
 def make_dense(path, max_len, oracle, batch=1, device="auto", dtype="f32",
-               kv_dtype=None):
+               kv_dtype=None, kv8=None):
     """The fast runner, or the oracle it was proven against."""
     if oracle:
         return DenseRef(str(path), max_len)
     import fastdense
 
     return fastdense.Dense(str(path), max_len, batch=batch, device=device,
-                           dtype=dtype, kv_dtype=kv_dtype, verbose=True)
+                           dtype=dtype, kv_dtype=kv_dtype, kv8=kv8,
+                           verbose=True)
 
 
 def make_backend(model_path, max_len, oracle=False, batch=1,
-                 device="auto", dtype="f32", kv_dtype=None):
+                 device="auto", dtype="f32", kv_dtype=None, kv8=None):
     """Returns (runner, note). runner.feed(tokens) -> logits of the last token.
 
     Dense and hybrid share the GLADOSM2 magic; the version field at offset 8
@@ -408,7 +409,7 @@ def make_backend(model_path, max_len, oracle=False, batch=1,
         note = f"hybrid arch {cfg['arch']}, {len(cfg['layer_types'])} layers"
         return Hybrid35(tensors, cfg, max_len), note
     return make_dense(model_path, max_len, oracle, batch, device, dtype,
-                      kv_dtype)
+                      kv_dtype, kv8)
 
 
 class DenseRunner2(DenseRunner):
@@ -922,6 +923,10 @@ def main():
                     help="which sample --limit draws. Fixed, so two runs and "
                          "two checkpoints see the same questions.")
     ap.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
+    ap.add_argument("--kv8", action="store_true",
+                    help="quantise the KV cache to int8 the way the kernel "
+                         "does. Without it a host figure is about the "
+                         "checkpoint; with it, about what GLaDOS would score.")
     ap.add_argument("--kv-dtype", default=None, dest="kv_dtype",
                     choices=["f32", "bf16", "fp16"],
                     help="cache precision, separately from the weights. The "
@@ -966,7 +971,8 @@ def main():
         max_len = min(max_len, 1152)
     made = make_backend(args.model, max_len, args.oracle, batch=args.batch,
                         device=args.device, dtype=args.dtype,
-                        kv_dtype=args.kv_dtype)
+                        kv_dtype=args.kv_dtype,
+                        kv8=True if args.kv8 else None)
     backend, note = made if isinstance(made, tuple) else (
         made,
         f"dense dim {made.cfg['dim']}, {made.cfg['layers']} layers"
