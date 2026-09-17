@@ -322,7 +322,8 @@ class Dense:
                                + self.w1 + self.w2 + self.w3)) + emb.numel() * emb.element_size()
             cb = L * batch * max_len * cfg["kv_dim"] * 2 * kvw
             print(f"  loaded in {time.time() - t0:.1f}s on {self.device}/{dtype}, "
-                  f"kv {kv_dtype or dtype}, batch {batch}, vocab {vocab}"
+                  f"kv {kv_dtype or dtype}{' int8' if self.kv8 else ''}, "
+                  f"batch {batch}, vocab {vocab}"
                   f"{', tied' if tied else ''}")
             print(f"  resident: {wb/1e9:.2f} GB weights + {cb/1e9:.2f} GB cache "
                   f"= {(wb + cb)/1e9:.2f} GB")

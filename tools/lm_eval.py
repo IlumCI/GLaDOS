@@ -37,6 +37,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
+import forest_retrieve as fr  # noqa: E402
 import ref35  # noqa: E402
 import v4  # noqa: E402
 from evaluate import Tok, Runner as DenseRunner, build_alphabet, constrained_pick  # noqa: E402
@@ -535,25 +536,50 @@ def letter_ids(hf, letters=(" A", " B", " C", " D")):
     return ids
 
 
-def run_mmlu(backend, hf, limit):
+# The block's preamble is part of the budget, so the string counted has to be
+# the string rendered. `forest_retrieve.LABEL` is the default and this task
+# wants its own, since what it retrieves is material rather than worked
+# examples -- so it is named once and passed to both.
+MMLU_LABEL = "Related material"
+
+
+def run_mmlu(backend, hf, limit, dump="", forest=None, fbudget=0, fk=4):
     d = snapshot_dir("datasets--cais--mmlu")
     rows = parquet_rows(find_file(d, "test"))[: limit or 100]
     lids = letter_ids(hf)
+    letters = "ABCD"
     right = 0
+    refused = 0
+    record = []
+    enc_len = lambda s: len(hf.encode(s, add_special_tokens=False).ids)
     t0 = time.time()
     for i, r in enumerate(rows):
         backend.reset()
+        block = ""
+        if forest is not None:
+            nodes, ref = forest.retrieve(r["question"], k=fk, budget=fbudget,
+                                         count=enc_len, label=MMLU_LABEL)
+            refused += ref
+            block = fr.render_block(nodes, MMLU_LABEL)
         prompt = (f"The following are multiple choice questions (with answers) "
-                  f"about {r['subject']}.\n\nQuestion: {r['question']}\n"
+                  f"about {r['subject']}.\n\n{block}Question: {r['question']}\n"
                   f"A. {r['choices'][0]}\nB. {r['choices'][1]}\n"
                   f"C. {r['choices'][2]}\nD. {r['choices'][3]}\nAnswer:")
         logits = backend.feed(hf.encode(prompt, add_special_tokens=False).ids)
         pick = int(np.argmax([logits[j] for j in lids]))
-        right += pick == r["answer"]
+        hit = pick == r["answer"]
+        right += hit
+        record.append((qid(r), letters[r["answer"]], letters[pick],
+                       int(bool(hit)), 1))
         if (i + 1) % 25 == 0 or i + 1 == len(rows):
             print(f"  [{i + 1}/{len(rows)}] acc {right / (i + 1):6.1%}  "
                   f"({(time.time() - t0) / (i + 1):.1f}s/q)")
+    if forest is not None:
+        print(f"  {refused} node(s) refused for carrying the question "
+              f"being scored")
     print(f"  mmlu (0-shot letter logprob, n={len(rows)}): {right / len(rows):6.1%}")
+    if dump:
+        write_dump(dump, "mmlu", record)
     return right / len(rows)
 
 
@@ -607,7 +633,35 @@ def pick(rows, limit, seed):
     return [rows[i] for i in idx], len(rows)
 
 
-def run_gsm8k(backend, hf, tok, limit, max_new, show=0, shots=5, batch=1, seed=0):
+# --- keeping the per-question record ---------------------------------------
+#
+# **A percentage is not enough to compare two configurations with.** Two runs
+# at 39.2% and 37.4% differ by 24 questions out of 1,319, and the interval on
+# each of those figures taken alone is wide enough to swallow the difference.
+# Taken as pairs it is not: the same question under both configurations either
+# agrees or it does not, and only the disagreements carry any information. That
+# is McNemar's test, it needs per-question outcomes, and this harness was
+# throwing them away the moment it printed an accuracy.
+#
+# So `--dump` writes one line per question, keyed by a hash of the question
+# text rather than by its position. Position moves when `--limit` or `--seed`
+# changes; the question does not, so two dumps taken at different samples still
+# pair on whatever they have in common.
+def qid(row):
+    import hashlib
+    return hashlib.sha1(row["question"].encode("utf-8")).hexdigest()[:10]
+
+
+def write_dump(path, task, rows):
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(f"# {task}\tqid\twant\tgot\thit\tntok\n")
+        for r in rows:
+            f.write("\t".join(str(x) for x in r) + "\n")
+    print(f"  per-question outcomes -> {path}")
+
+
+def run_gsm8k(backend, hf, tok, limit, max_new, show=0, shots=5, batch=1,
+              seed=0, dump="", forest=None, fbudget=0, fk=4):
     d = snapshot_dir("datasets--gsm8k")
     train = parquet_rows(find_file(d, "train"))
     rows = parquet_rows(find_file(d, "test"))
@@ -617,19 +671,46 @@ def run_gsm8k(backend, hf, tok, limit, max_new, show=0, shots=5, batch=1, seed=0
     prefix = "".join(
         f"Question: {s['question']}\nAnswer: {s['answer']}\n\n" for s in shots)
 
+    # --- retrieval, if there is a forest ------------------------------------
+    #
+    # The retrieved block sits between the five-shot prefix and the question,
+    # which keeps the prefix first and so keeps it shareable. It costs
+    # grouping: prompts were all one length and now differ by whatever was
+    # retrieved, so exact-length groups get smaller and the run gets slower.
+    # That is the price of the measurement and it is stated rather than hidden.
+    tails = [f"Question: {r['question']}\nAnswer:" for r in test]
+    if forest is not None:
+        enc_len = lambda s: len(hf.encode(s, add_special_tokens=False).ids)
+        refused = 0
+        got_n = 0
+        for i, r in enumerate(test):
+            nodes, ref = forest.retrieve(r["question"], k=fk,
+                                         budget=fbudget, count=enc_len)
+            refused += ref
+            got_n += len(nodes)
+            tails[i] = fr.render_block(nodes) + tails[i]
+        print(f"      forest: {len(forest.nodes)} node(s), "
+              f"{got_n / len(test):.1f} retrieved per question, "
+              f"budget {fbudget or 'none'} tok")
+        # Printed whatever it is, because zero is the only value that makes
+        # the rest of the run mean anything -- see `forest_retrieve`'s guard.
+        print(f"      {refused} node(s) refused for carrying the question "
+              f"being scored")
+
     # A prompt that does not fit is a prompt whose front falls off, and what
     # falls off first is the examples that make it few-shot. Said out loud
     # rather than scored: a silent 0% looks exactly like a model that cannot
     # do arithmetic.
     room = getattr(backend, "max_len", None)
     if room:
-        need = max(
-            len(hf.encode(prefix + f"Question: {r['question']}\nAnswer:",
-                          add_special_tokens=False).ids)
-            for r in test) + max_new
+        need = max(len(hf.encode(prefix + t, add_special_tokens=False).ids)
+                   for t in tails) + max_new
         if need > room:
             print(f"  the longest prompt plus {max_new} new is {need} tokens "
                   f"and the context is {room} -- raise --seq or lower --max-new")
+            if forest is not None:
+                print("  (a retrieved block is in that prompt; --forest-budget "
+                      "bounds it, and an unbounded one cannot be planned for)")
             return 0.0
 
     eos = tok.eos
@@ -637,6 +718,7 @@ def run_gsm8k(backend, hf, tok, limit, max_new, show=0, shots=5, batch=1, seed=0
     t0 = time.time()
     shown = 0
     done_n = 0
+    record = []
     # A backend that can hold several sequences at once decodes them together.
     # Decode is one token at a time whatever you do, so a lone sequence drags
     # every weight past the processor to compute one row; sixteen rows pay
@@ -648,8 +730,7 @@ def run_gsm8k(backend, hf, tok, limit, max_new, show=0, shots=5, batch=1, seed=0
     # Encoded once, up front, so the grouping below can see the lengths. It is
     # a tokenizer pass over 1,319 short strings and costs nothing next to one
     # forward pass.
-    enc = [hf.encode(prefix + f"Question: {r['question']}\nAnswer:",
-                     add_special_tokens=False).ids for r in test]
+    enc = [hf.encode(prefix + t, add_special_tokens=False).ids for t in tails]
 
     # --- the shared prefix, and the reason it needs checking ----------------
     #
@@ -749,6 +830,7 @@ def run_gsm8k(backend, hf, tok, limit, max_new, show=0, shots=5, batch=1, seed=0
                    and abs(float(got) - float(want)) < 1e-4)
             right += hit
             done_n += 1
+            record.append((qid(r), want, got, int(bool(hit)), len(gen[b])))
             if done_n <= 5:
                 print(f"      {'ok ' if hit else '-- '}got {got}  want {want}")
         print(f"  [{done_n}/{len(test)}] acc {right / done_n:6.1%}  "
@@ -757,6 +839,8 @@ def run_gsm8k(backend, hf, tok, limit, max_new, show=0, shots=5, batch=1, seed=0
     frac = f" ({len(test)}/{total} = {len(test)/total:.1%} of the set)"
     print(f"  gsm8k ({len(shots)}-shot greedy, n={len(test)}{frac}, "
           f"<= {max_new} new): {right / len(test):6.1%}")
+    if dump:
+        write_dump(dump, "gsm8k", record)
     return right / len(test)
 
 
@@ -942,6 +1026,20 @@ def main():
                          "correct, and about 40x slower. For diagnosing a "
                          "disagreement, not for producing a figure.")
     ap.add_argument("--hf-tokenizer", default="")
+    ap.add_argument("--dump", default="",
+                    help="write one line per question -- qid, gold, answer, "
+                         "hit -- so two runs can be compared as pairs rather "
+                         "than as two percentages that overlap.")
+    ap.add_argument("--forest", default="",
+                    help="retrieve from this forest before answering. The "
+                         "measurement is the delta against the same --seed "
+                         "without it, so run both.")
+    ap.add_argument("--forest-k", type=int, default=4, dest="forest_k",
+                    help="nodes per question, before the budget cuts it")
+    ap.add_argument("--forest-budget", type=int, default=0,
+                    dest="forest_budget",
+                    help="token ceiling on the retrieved block, measured by "
+                         "encoding it as the prompt will. 0 for no ceiling.")
     args = ap.parse_args()
 
     if args.check:
@@ -968,7 +1066,14 @@ def main():
     # is 4.2. The 5-shot prompt is 800 tokens at worst and the budget is 256,
     # so 1152 has room and `need` below refuses loudly if it does not.
     if args.task == "gsm8k" and args.batch > 1:
-        max_len = min(max_len, 1152)
+        # Plus whatever retrieval is allowed to add, because the cap and the
+        # retrieval budget are two halves of one number and leaving them apart
+        # means every --forest run refuses before it starts: the 8-question
+        # smoke read "the longest prompt plus 256 new is 1272 tokens and the
+        # context is 1152", which is the check working and the ceiling being
+        # wrong. A retrieved block is bounded by --forest-budget by
+        # construction, so the room it needs is known here rather than guessed.
+        max_len = min(max_len, 1152 + (args.forest_budget if args.forest else 0))
     made = make_backend(args.model, max_len, args.oracle, batch=args.batch,
                         device=args.device, dtype=args.dtype,
                         kv_dtype=args.kv_dtype,
@@ -1012,13 +1117,32 @@ def main():
 
     print(f"[lm_eval] {Path(args.model).name}: {note}, task {args.task}")
 
+    forest = None
+    if args.forest:
+        forest = fr.Forest.load(args.forest)
+        comp = {}
+        for n in forest.nodes:
+            s = n.source.rsplit("/", 1)[-1]
+            comp[s] = comp.get(s, 0) + 1
+        print("[lm_eval] forest splits: "
+              + ", ".join(f"{k} {v}" for k, v in sorted(comp.items())))
+        # The builder refuses `test` and this is a different program reading
+        # what the builder left behind, so it is checked again from here.
+        if "test" in comp:
+            print("[lm_eval] this forest holds a test split and is an answer "
+                  "key for that rail. Rebuild it without --allow-test.")
+            sys.exit(2)
+
     if args.task == "mmlu":
-        run_mmlu(backend, hf, args.limit)
+        run_mmlu(backend, hf, args.limit, dump=args.dump, forest=forest,
+                 fbudget=args.forest_budget, fk=args.forest_k)
     elif args.task == "gsm8k":
         run_gsm8k(backend, hf, tok, 0 if args.all else args.limit,
                   args.max_new, args.show,
                   args.shots if args.shots else 5,
-                  batch=args.batch, seed=args.seed)
+                  batch=args.batch, seed=args.seed, dump=args.dump,
+                  forest=forest, fbudget=args.forest_budget,
+                  fk=args.forest_k)
     elif args.task == "niah":
         run_niah(backend, hf, tok, args.contexts, args.limit, args.max_new)
     elif args.task == "route":
