@@ -312,6 +312,13 @@ class Dense:
         # the size layer 0 was trained to receive.
         self.embed_rms = float(self.embed.float().pow(2).mean().sqrt())
         self.latent_scale = True
+        # --- sparse decode, off unless a measurement turns it on -------
+        self.sparse = 0        # keys attended per head; 0 is every one
+        self.sparse_page = 0   # 0 ranks by the true score, the ceiling
+        self.sparse_sinks = 4  # always kept, as StreamingLLM has it
+        self.sparse_local = 64 # the most recent, always kept
+        self.sparse_seen = 0   # keys that existed, summed over steps
+        self.sparse_read = 0   # keys actually attended
         self.pos = 0                                   # committed columns
         self.left = torch.zeros(batch, dtype=torch.long)   # pad width per row
         self.prefix = None                             # see `hold_prefix`
@@ -463,7 +470,11 @@ class Dense:
                 rp = heads // kvh
                 sc = torch.einsum("bkrh,bknh->bkrn",
                                   qh.view(B, kvh, rp, hs), kh) * (hs ** -0.5)
-                sc = torch.softmax(sc + mh.view(B, 1, 1, -1), dim=-1)
+                sc = sc + mh.view(B, 1, 1, -1)
+                if self.sparse:
+                    sc = self._sparsify(
+                        sc, qh.view(B, kvh, rp, hs), kh)
+                sc = torch.softmax(sc, dim=-1)
                 att = torch.einsum("bkrn,bknh->bkrh", sc, vh)
                 att = att.reshape(B, heads, 1, hs)
             else:
@@ -519,6 +530,75 @@ class Dense:
     def _logits(self, x):
         x = x.to(self.wcls.device)
         return (self._rms(x, self.rms_final) @ self.wcls.T).to(self.acc)
+
+    def _sparsify(self, sc, qv, kh):
+        """Keep only `budget` keys per head at decode, and mask the rest.
+
+        **This is the question the paged cache rests on, asked before any of
+        it is built.** A cache that lives on disk can only be affordable if a
+        decode step reads a small part of it, so something has to decide which
+        part -- and if attending to a fraction of the keys destroys recall,
+        then no page layout, index or I/O rate rescues the design. So the
+        selection is measured here, on the host, in the runner that is already
+        proven against the oracle, with no kernel work and no NVMe.
+
+        Two modes, and the difference between them is the whole experiment.
+
+        `page == 0` ranks by the **true** score `q.k`, which no real
+        implementation can do -- knowing it means having already read every
+        key. It is the *ceiling*: the best any selection rule could achieve at
+        this budget. Measure it first, because if the ceiling is low nothing
+        below it matters.
+
+        `page > 0` ranks by Quest's bound. Keys are grouped into pages and a
+        page keeps only the per-channel min and max of its keys, so
+        `sum_i max(q_i.m_i, q_i.M_i)` is an upper bound on `q.k` for every `k`
+        in that page -- admissible, so a page whose bound is low cannot hold a
+        high-scoring key. That summary is what stays in RAM when the keys
+        themselves are on disk: two vectors per page against `page` of them.
+
+        Sinks and a local window are forced in regardless, which is what this
+        kernel already does and what every method in the literature keeps.
+        """
+        n = sc.shape[-1]
+        keep = self.sparse
+        if n <= keep:
+            return sc
+        if self.sparse_page:
+            p = self.sparse_page
+            B, kvh, rp, _ = sc.shape
+            # Pad the key axis up to a whole number of pages so the summary is
+            # a plain reshape. The padding is -inf in `sc` already where it is
+            # masked; here it is filled with values that cannot win.
+            pages = (n + p - 1) // p
+            pad = pages * p - n
+            k = kh
+            if pad:
+                k = torch.cat([kh, kh.new_zeros(B, kvh, pad, kh.shape[-1])], 2)
+            kp = k.view(B, kvh, pages, p, -1)
+            lo, hi = kp.amin(dim=3), kp.amax(dim=3)          # (B,kvh,pages,hs)
+            q = qv.unsqueeze(3)
+            bound = torch.maximum(q * lo.unsqueeze(2),
+                                  q * hi.unsqueeze(2)).sum(-1)  # (B,kvh,rp,pages)
+            rank = bound.repeat_interleave(p, dim=-1)[..., :n]
+            # A page that is entirely masked must never be chosen, whatever
+            # its bound says about keys that are not there.
+            rank = rank.masked_fill(sc == float("-inf"), float("-inf"))
+        else:
+            rank = sc
+
+        big = torch.finfo(rank.dtype).max
+        forced = torch.zeros(n, dtype=torch.bool, device=sc.device)
+        forced[: self.sparse_sinks] = True
+        if self.sparse_local:
+            forced[-self.sparse_local:] = True
+        rank = rank.masked_fill(forced.view(1, 1, 1, -1), big)
+        idx = rank.topk(keep, dim=-1).indices
+        out = torch.full_like(sc, float("-inf"))
+        out.scatter_(-1, idx, sc.gather(-1, idx))
+        self.sparse_seen += n
+        self.sparse_read += keep
+        return out
 
     @torch.inference_mode()
     def score(self, ids, block=64):

@@ -294,6 +294,63 @@ the wide rail adds the cost.
 roughly 55,000 retrievals, which is two datasets sharing a handful of
 questions and not a forest holding the split.
 
+### The paged cache, measured before it is built
+
+A KV cache on disk is affordable only if a decode step reads a small part of
+it, so something has to choose the part. **If attending to a fraction of the
+keys destroys recall then no page layout, index or I/O rate rescues the
+design**, and that question is numerical, answerable on the host, with no
+kernel work and no NVMe. `fastdense --sparse` asks it.
+
+Two rankings. `--sparse N` alone keeps the N keys with the **true** highest
+score, which no implementation can do -- knowing the score means having read
+the key -- so it is the *ceiling*. `--sparse-page P` keeps only a per-channel
+min and max per page of P keys and ranks by `sum_i max(q_i.m_i, q_i.M_i)`,
+Quest's bound, which is admissible: a page whose bound is low cannot hold a
+high-scoring key. That summary is what stays in RAM when the keys are on disk.
+Four sinks and a 64-key local window are forced in throughout.
+
+NIAH at 2,048 and 4,096, three depths each:
+
+    dense control                                        6/6
+    budget 256, true-score ceiling                       6/6
+    budget 256, page 16   (11.8 pages fetched)           6/6
+    budget 256, page 32   ( 5.9 pages fetched)           6/6
+    budget 256, page 64   ( 2.9 pages fetched)           4/6
+    budget 512, page 64   ( 6.9 pages fetched)           6/6
+
+**The controlling variable is pages fetched, not page size.** Four or more and
+recall is perfect; three or fewer and it degrades. 256 keys is 6.25% of the
+cache at 4,096 and the bound finds the needle every time.
+
+**And the control that fell out by accident is the one worth keeping.** With
+4 sinks and a 64-key window a budget of 64 has *no* slots left for anything
+chosen by score, so that row is exactly StreamingLLM -- and it read **0/7**,
+where 4 free slots read 7/7. Sinks plus a window generate fluently and recall
+nothing; four retrieved keys out of two thousand restore it completely. This
+tree's own ring buffer is the 0/7 row.
+
+Sized from that rule, at the trained 40,960 context, against 2,520 MiB to hold
+the cache outright:
+
+    page   pages   index MiB   fetch MiB/step   RAM saving
+      16    2560       144.4              5.9         17x
+      32    1280        72.2             11.8         35x
+      64     640        36.1             23.6         70x
+     128     320        18.0             47.2        140x
+
+Page 32 is the knee: 72 MiB resident and 12 MiB a step, inside one 320 MiB
+rung with room for the model. What decides whether it is fast enough is a
+number this kernel has never measured -- **NVMe read throughput** -- and 12
+MiB is 4 ms at 3 GB/s and 24 ms at 0.5. That measurement needs the GF63.
+
+Three things this does **not** establish, said plainly. NIAH is one fact per
+item and six items; a real corpus asks for several facts at once. The
+selection is measured at 4,096 where the design is for 40,960, and pages
+fetched may have to grow with context. And the summaries here are computed
+from a resident cache, where a real implementation writes one as a page is
+evicted -- the same arithmetic, but not the same code.
+
 ### A decomposition that worked, and what it proved
 
 `moral_scenarios` is 895 questions, 6.4% of MMLU, and it read 26.0% -- chance.

@@ -996,7 +996,15 @@ def run_niah(backend, hf, tok, contexts, limit, new_tok=24):
     rng = np.random.RandomState(7)
     results = {}
     for ctx in contexts:
-        depths = [0.25, 0.5, 0.75] if ctx <= 1024 else [0.5]
+        # **Every context gets every depth.** This read
+        # `[0.25, 0.5, 0.75] if ctx <= 1024 else [0.5]`, so the longest
+        # context -- the only one where long-range recall is actually under
+        # test -- contributed a single item, and a headline like "7/7" rested
+        # on one observation at 2048 with six easy ones padding it out. That
+        # was affordable caution when the runner was the NumPy oracle; on
+        # `fastdense` a 4k prefill is under a second, so the cap now only
+        # makes the evidence thinner than it looks.
+        depths = [0.25, 0.5, 0.75]
         for depth in depths:
             backend.reset()
             word = f"gravel-{rng.randint(1000, 9999)}"
@@ -1302,6 +1310,18 @@ def main():
                          "token indirection the standard protocol adds. Five "
                          "forward passes against one. The value picks which "
                          "variant the --dump records; all three print.")
+    ap.add_argument("--sparse", type=int, default=0,
+                    help="attend to only this many keys per head at decode. "
+                         "The question the paged cache rests on: a cache on "
+                         "disk is affordable only if a step reads a little of "
+                         "it. 0 attends to everything.")
+    ap.add_argument("--sparse-page", type=int, default=0, dest="sparse_page",
+                    help="rank keys by Quest's per-page min/max bound with "
+                         "pages this size, which is what a real index can do. "
+                         "0 ranks by the true score, which nothing can do and "
+                         "which is therefore the ceiling.")
+    ap.add_argument("--sparse-sinks", type=int, default=4, dest="sparse_sinks")
+    ap.add_argument("--sparse-local", type=int, default=64, dest="sparse_local")
     ap.add_argument("--window", type=int, default=1024,
                     help="tokens per scored window on the bpb rail")
     ap.add_argument("--hf-tokenizer", default="")
@@ -1364,6 +1384,15 @@ def main():
         + f", head_dim {made.cfg['head_dim']}"
         + (", oracle" if args.oracle else ", batched"),
     )
+    if args.sparse and hasattr(backend, "sparse"):
+        backend.sparse = args.sparse
+        backend.sparse_page = args.sparse_page
+        backend.sparse_sinks = args.sparse_sinks
+        backend.sparse_local = args.sparse_local
+        how = (f"pages of {args.sparse_page}" if args.sparse_page
+               else "the true score (a ceiling, not implementable)")
+        note += (f", sparse {args.sparse} keys/head by {how}"
+                 f", {args.sparse_sinks} sinks + {args.sparse_local} local")
     if hasattr(backend, "latent_k"):
         backend.latent_k = args.latent
         if args.latent:
