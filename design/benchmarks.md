@@ -263,6 +263,62 @@ checkpoint here predates that by more than a year, so it is held out by
 construction rather than by trust. It is pinned by content hash on every run,
 since a corpus that moves is the test set that moved.
 
+### Retrieval into the prompt, on the whole of MMLU
+
+`lm_eval --forest` retrieves from the forest before answering. Measured over
+all 57 subjects, paired question by question, 4 nodes under a 600-token
+budget, the resident 0.6B:
+
+    no forest     41.1%   (5,698 / 13,869)
+    with forest   39.6%   (5,497 / 13,869)
+    fixed 1,902   broke 2,103   agreed 9,864
+    mcnemar chi 9.99 against 3.84      worse, beyond the noise
+
+**And the split that was written down before the run rather than after.**
+The forest is 7,378 GSM8K word problems and 182 MMLU nodes under one
+`logic-and-maths` trunk, so if retrieval helped anywhere it had to be the
+maths and logic subjects, and it had to be a distraction everywhere else:
+
+    maths/logic, the forest's own subjects   n= 1,340   36.4% -> 36.5%   chi  0.00
+    everything else                          n=12,529   41.6% -> 40.0%   chi 11.27
+
+The second line is the distraction, as predicted. The first line is the
+finding: seven thousand worked arithmetic examples do **nothing** for
+`college_mathematics` or `abstract_algebra`. Word problems and undergraduate
+maths share a trunk name and no content. Retrieval is not refuted by this; a
+forest that holds the wrong thing is. The earlier figure on the narrow rail
+(28.0% to 29.0%, chi 0.00, 100 questions of `abstract_algebra`) survives, and
+the wide rail adds the cost.
+
+156 nodes were refused for carrying the question being scored, out of
+roughly 55,000 retrievals, which is two datasets sharing a handful of
+questions and not a forest holding the split.
+
+### A decomposition that worked, and what it proved
+
+`moral_scenarios` is 895 questions, 6.4% of MMLU, and it read 26.0% -- chance.
+Every one has the same stem and the same four choices, `Wrong, Wrong` through
+`Not wrong, Not wrong`, which is two independent binary judgments compressed
+into a 4-way letter. The obvious reading was that the model could judge a
+scenario and could not do the bookkeeping. So the bookkeeping was removed:
+each scenario asked on its own, the pair composed from the two answers, no
+gold consulted anywhere. On the first 200:
+
+    letter protocol            28.5%
+    decomposed into pairs      26.0%
+    scenario 1 alone           50.5%
+    scenario 2 alone           52.0%
+
+Binary accuracy 0.512, so independence predicts 26.3% for the pair and it
+read 26.0%. **The decomposition was exact and the hypothesis was wrong.** The
+model cannot say whether one scenario is wrong better than a coin flip. The
+four steps of indirection were never the cost; the judgment is. That is a
+capacity result, in the one place this file had argued the failure was
+structure.
+
+Kept here rather than as a tool, because the mechanism is a dozen lines and
+the result is the reason to have run it.
+
 **This paragraph is wrong and is kept for the record.** The 0.0 it reasons
 from was a harness fault -- see the withdrawal above -- so whatever is true
 about small models and arithmetic, none of it was established here. What

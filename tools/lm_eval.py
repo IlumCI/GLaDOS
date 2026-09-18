@@ -576,7 +576,21 @@ def mmlu_rows():
     return rows, len(files)
 
 
-def run_mmlu(backend, hf, limit, seed=0, dump="", forest=None, fbudget=0, fk=4):
+def backend_score(backend, hf, text):
+    """Summed NLL of `text` under the model, in nats. Fresh context each time.
+
+    A thin wrapper so the cloze protocol reads the same whichever backend is
+    underneath, and so `reset` can never be forgotten -- a stale KV prefix
+    would score the choice against the previous question and the number would
+    look entirely reasonable.
+    """
+    backend.reset()
+    ids = hf.encode(text, add_special_tokens=False).ids
+    return backend.score(ids)
+
+
+def run_mmlu(backend, hf, limit, seed=0, dump="", forest=None, fbudget=0,
+             fk=4, cloze=""):
     rows, nsub = mmlu_rows()
     total_all = len(rows)
     # Drawn rather than sliced, for the reason `pick` gives and for a sharper
@@ -591,6 +605,8 @@ def run_mmlu(backend, hf, limit, seed=0, dump="", forest=None, fbudget=0, fk=4):
     lids = letter_ids(hf)
     letters = "ABCD"
     right = 0
+    right_cloze = 0
+    right_norm = 0
     refused = 0
     record = []
     enc_len = lambda s: len(hf.encode(s, add_special_tokens=False).ids)
@@ -607,19 +623,68 @@ def run_mmlu(backend, hf, limit, seed=0, dump="", forest=None, fbudget=0, fk=4):
                   f"about {r['subject']}.\n\n{block}Question: {r['question']}\n"
                   f"A. {r['choices'][0]}\nB. {r['choices'][1]}\n"
                   f"C. {r['choices'][2]}\nD. {r['choices'][3]}\nAnswer:")
+        # --- the three protocols, on the same question ------------------
+        #
+        # **Letter-logprob asks the model to do the task and then two more
+        # things.** It has to know the answer, map it to a position in a list,
+        # and map that position to the token " A". The last two hops are
+        # indirection with nothing to do with the subject, and indirection is
+        # what a 0.6B is worst at -- so a model that knows perfectly well what
+        # the ribosome does can still pick the wrong letter. It is the
+        # standard protocol because it costs one prefill, which is a fact
+        # about harness budgets rather than about measurement.
+        #
+        # The cloze protocol deletes both hops: score each choice as a
+        # continuation of the question and take the likeliest. `acc_norm`
+        # divides by the choice's own length, because summed log-probability
+        # is monotonically punished by every extra token and the shortest
+        # option would otherwise win by default.
+        #
+        # Five forward passes against one. All three are computed on the same
+        # question so the comparison is paired rather than three runs.
         logits = backend.feed(hf.encode(prompt, add_special_tokens=False).ids)
         chose = int(np.argmax([logits[j] for j in lids]))
         hit = chose == r["answer"]
         right += hit
+
+        if cloze:
+            stem = (f"The following are multiple choice questions (with "
+                    f"answers) about {r['subject']}.\n\n{block}"
+                    f"Question: {r['question']}\nAnswer:")
+            base, _ = backend_score(backend, hf, stem)
+            nll, per = [], []
+            for c in list(r["choices"])[:4]:
+                tot, _ = backend_score(backend, hf, stem + " " + str(c))
+                # The stem's own cost is the same for all four, so it cancels
+                # in the ranking -- subtracted anyway because the normalised
+                # variant needs the continuation's cost on its own.
+                nll.append(tot - base)
+                per.append(max(1, len(str(c).encode("utf-8"))))
+            c_raw = int(np.argmin(nll))
+            c_norm = int(np.argmin([n / b for n, b in zip(nll, per)]))
+            right_cloze += c_raw == r["answer"]
+            right_norm += c_norm == r["answer"]
+            chose = c_norm if cloze == "norm" else chose
+
         record.append((qid(r), letters[r["answer"]], letters[chose],
                        int(bool(hit)), 1))
         if (i + 1) % 25 == 0 or i + 1 == len(rows):
-            print(f"  [{i + 1}/{len(rows)}] acc {right / (i + 1):6.1%}  "
+            extra = ""
+            if cloze:
+                extra = (f"  cloze {right_cloze / (i + 1):6.1%}  "
+                         f"norm {right_norm / (i + 1):6.1%}")
+            print(f"  [{i + 1}/{len(rows)}] acc {right / (i + 1):6.1%}{extra}  "
                   f"({(time.time() - t0) / (i + 1):.1f}s/q)")
     if forest is not None:
         print(f"  {refused} node(s) refused for carrying the question "
               f"being scored")
-    print(f"  mmlu (0-shot letter logprob, n={len(rows)}): {right / len(rows):6.1%}")
+    n = len(rows)
+    print(f"  mmlu (0-shot letter logprob, n={n}): {right / n:6.1%}")
+    if cloze:
+        print(f"  mmlu (0-shot cloze, likeliest choice text): "
+              f"{right_cloze / n:6.1%}")
+        print(f"  mmlu (0-shot cloze, length-normalised):     "
+              f"{right_norm / n:6.1%}")
     if dump:
         write_dump(dump, "mmlu", record)
     return right / len(rows)
@@ -690,8 +755,31 @@ def pick(rows, limit, seed):
 # changes; the question does not, so two dumps taken at different samples still
 # pair on whatever they have in common.
 def qid(row):
+    """A stable id for a question, keyed on what makes it distinct.
+
+    **A hash of the question text alone paired 14,042 MMLU questions as
+    13,869.** 173 stems repeat, and they repeat two ways: across subjects, and
+    within one subject with *different choices* -- "what is the source of the
+    material that causes meteor showers" appears twice in astronomy with two
+    different option lists, and those are two questions. So the subject and
+    the choices are in the key. The gold answer never is; an id that depends
+    on the answer is an id you cannot compute without it.
+
+    What still collapses is 27 rows that are byte-identical to another row in
+    every field, and that is right: two copies of one question are not two
+    independent observations, and pairing them as such would double-count.
+
+    GSM8K rows carry neither field, so their ids are unchanged and every
+    gsm8k dump written before this still pairs. An mmlu dump written before
+    it does not, which is the honest outcome, since those dumps were short.
+    """
     import hashlib
-    return hashlib.sha1(row["question"].encode("utf-8")).hexdigest()[:10]
+    key = row["question"]
+    if row.get("subject"):
+        key = row["subject"] + "\n" + key
+    if row.get("choices") is not None:
+        key += "\n" + "\n".join(str(c) for c in row["choices"])
+    return hashlib.sha1(key.encode("utf-8")).hexdigest()[:10]
 
 
 def write_dump(path, task, rows):
@@ -1208,6 +1296,12 @@ def main():
                          "because a corpus that moves is a test set that "
                          "moves. Default is the kernel's own source, which "
                          "postdates every checkpoint here by a year.")
+    ap.add_argument("--cloze", default="", choices=["", "raw", "norm"],
+                    help="also score mmlu by the likelihood of each choice's "
+                         "own text, which deletes the content-to-letter-to-"
+                         "token indirection the standard protocol adds. Five "
+                         "forward passes against one. The value picks which "
+                         "variant the --dump records; all three print.")
     ap.add_argument("--window", type=int, default=1024,
                     help="tokens per scored window on the bpb rail")
     ap.add_argument("--hf-tokenizer", default="")
@@ -1321,7 +1415,8 @@ def main():
     if args.task == "mmlu":
         run_mmlu(backend, hf, 0 if args.all else args.limit, args.seed,
                  dump=args.dump, forest=forest,
-                 fbudget=args.forest_budget, fk=args.forest_k)
+                 fbudget=args.forest_budget, fk=args.forest_k,
+                 cloze=args.cloze)
     elif args.task == "gsm8k":
         run_gsm8k(backend, hf, tok, 0 if args.all else args.limit,
                   args.max_new, args.show,
