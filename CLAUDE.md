@@ -2801,10 +2801,12 @@ GF63 for a correct reason.
 There is no `cargo test`. This is a `no_std` UEFI binary with no host test
 runner, so **verification is the boot selftests plus driving QEMU.**
 
-At boot the system runs **twenty-six selftest sections**, seven of which are
-now wrapped in `main::section` so an optional one that faults marks itself
-unavailable instead of taking the machine, and `diag` offers **fifty-eight
-named suites** on demand, most of them the same checks (the `aiksi` section covers the capability gate by name and never by
+At boot the system runs **twenty-seven selftest sections** -- count the
+`[selftest]` headings in a boot log, which is the only figure that cannot go
+stale -- **seventeen** of which are wrapped in `main::section` so one that
+breaks marks itself unavailable instead of taking the machine, and `diag`
+offers **fifty-nine named suites** on demand (`diag.rs`'s `SLOTS`, asserted
+against `SUITES.len()`), most of them the same checks (the `aiksi` section covers the capability gate by name and never by
 calling -- half that table pokes memory, drives I/O ports or paints over the
 screen, and a suite that called every row to prove it exists would be
 scribbling on the machine to do it), printing `ok` or `FAIL` per line: heap, timer, clock, the namespace's
@@ -3446,9 +3448,15 @@ Eleven cases, sixty-four rounds, including the three failure modes and a
 rather than left to be assumed: stored cores and seeded tools are compared
 too, but all three seeded tools have computing top levels, so the prepared
 route declines them and the stored half of the corpus contributed **nothing**
-on a fresh machine -- the line says `0 agreed, 3 declined`. And console
-output is not compared, the same blind spot `skill.rs` records for J3: a
-program of `println`s answers nil however it behaved.
+on a fresh machine -- the line says `0 agreed, 3 declined`.
+
+Console output **is** compared, and that sentence read "is not" here for a
+while after it stopped being true. It is the hole this harness documented
+against itself and then closed with `begin_capture`, which the console had had
+all along: a program of `println`s answers nil however it behaved, so two
+routes could disagree about everything a person would notice and agree on
+every field. `skill.rs`'s J3 had the identical hole and is closed the same
+way.
 
 Two honesty notes on those figures. `arm` and `call vote` are unchanged by
 this work and the movements in them are host noise. And `fields_of` adds up
@@ -3737,12 +3745,98 @@ asserts the defence rather than working around it.
 
 **Criticality is per subsystem.** `main::section(name, need, f)` wraps a boot
 check; `Need::Vital` halts with a reason, `Need::Optional` records the failure,
-prints one red line and carries on. Seven are wrapped today -- `sysbox`,
-`crypto` and `rng` vital, `power`, `fmt`, `usbhid` and `code` optional.
+prints one red line and carries on. **Seventeen are wrapped today**, where
+seven were: `sysbox`, `crypto` and `rng` vital, and `heap`, `version`, `timer`,
+`clock`, `json`, `websocket`, `html`, `css`, `power`, `fmt`, `usbhid`, `text`,
+`mining` and `code` optional.
 
-It takes `fn()` rather than `impl FnOnce()`, and that is the load-bearing
-detail: **a failure you cannot re-run is a failure you cannot repair**, and
-re-running the check is the only judge a repair has.
+`Optional` on all ten of the newly wrapped ones deliberately. What wrapping
+buys is that a failure is *recorded and named* rather than fatal or silent;
+escalating any of them to `Vital` is a separate decision wanting evidence from
+the GF63 about, for instance, how wide the timer's band really is on hardware,
+and a `Vital` false positive is an unbootable machine, which is exactly as bad
+as the miss it would be protecting against.
+
+**Two are still unwrapped and the reason is a type rather than an oversight.**
+`acpi::selftest` and `acpi::aml_selftest` both take `acpi_ref`, so a closure
+around either captures, and `section` wants a `fn` precisely because a check
+that cannot be re-run is a check no repair can be judged against. Making them
+re-runnable means giving `acpi` a handle that outlives that call.
+
+It takes `fn() -> bool` rather than `impl FnOnce()`, and both halves of that
+are load-bearing. The `fn` is because **a failure you cannot re-run is a
+failure you cannot repair**, and re-running the check is the only judge a
+repair has.
+
+**The `-> bool` is newer, and its absence was the largest hole in this
+machine's view of itself.** Every subsystem wrapped here answers a verdict --
+`sysbox::selftest`, `crypto::selftest`, `rng::selftest`, `fmt`, `usbhid` and
+`code` all return one -- and every call site discarded it; `|| {
+sysbox::selftest(); }` was literally what was written. So the boot and repair
+loop was a *liveness* oracle wearing a correctness one's name: a change that
+made ChaCha20 return the wrong bytes without faulting was not recorded in
+`boot_report`, not counted by `outstanding()`, never offered to `repair`, and
+did not stop the boot even when `Vital`.
+
+The two failures are recorded identically now and the report says which. A
+fault is a subsystem that is **gone**; a `false` is one that is **wrong**, and
+wrong is the more dangerous of the two everywhere a wrong answer still looks
+like an answer. `power` is the one section that answers `true` unconditionally,
+and that is honest rather than left over: what it can observe is whether
+reading the registers takes the machine down, which is the GF63's bug exactly,
+and every value claim `dev::power` can make without hardware is already `diag
+power`.
+
+Verified by injection, since nothing else settles it. With `crypto::selftest`
+returning `false` from an otherwise untouched run, all 26 of its own claims
+printed `ok` and then:
+
+    [selftest] crypto failed its own checks -- and this machine needs it
+    [boot] 1 subsystem(s) did not survive their own selftest, 1 still broken:
+      crypto         failed its own checks  (vital)
+    [boot] crypto is vital, so this machine will not continue.
+
+with no site line, since there is no faulting instruction to point at. Before
+the change the same boot reached the shell and answered `alive`.
+
+**`repair::judge` had the same shape and needed the same fix.** It asked
+`matches!(.., Caught::Ran)`, which is whether the check *finished*, so an
+action that left a subsystem alive and answering wrongly would have been
+adopted, marked as the repair that worked, and written to the boot volume for
+every boot after. It asks for both now, and `diag repair` carries the claim for
+the outcome that could not be expressed before: runs to the end, answers no.
+
+And `boot_report::record` takes the rip as an argument rather than reading
+`recover::site()` itself. `LAST_RIP` is a global that outlives the fault that
+set it, so a check answering `false` would otherwise be filed at whatever
+address broke last -- the "report names the wrong subsystem" failure the field
+exists to prevent, arriving from the other side. `recover::take_panic` zeroes
+it on the same argument.
+
+**And the wrapping found two bugs on its first run, which is the argument for
+doing it.**
+
+The heap check had been printing `after drop: 399104 B LEAKED` **in red on
+every boot** and nothing consumed the verdict. It compared the heap against
+*zero* after its own objects dropped, which is the same question only while
+nothing else in the kernel has ever allocated -- and the console's scrollback
+ring, among others, is long since resident by the time the selftests run. What
+it means is whether *this block's* allocations came back, so it is a delta
+against a baseline taken a line earlier. It reads `back to 399104 B` now.
+
+And `diag census` started failing, deterministically, on every boot, because
+ten functions were added to `main.rs`. Nothing about the allocator or the
+census changed. **Its 512 KiB test allocation was being deleted by the
+optimiser**: Rust marks the allocator functions so an alloc/dealloc pair with
+no observable effect can be removed outright, and the vector was filled once
+and dropped. The tell was which claims failed -- `taken`, `count` and `given`
+all stood still while `peak` passed on history alone, which is the signature of
+an allocation that never happened rather than one billed to the wrong row.
+`core::hint::black_box(v.as_mut_ptr())` makes the pointer escape so the
+allocation has to exist. Same defence `recover::guard_inner` needs against the
+optimiser deleting a landing pad, and worth stating as a rule: **a claim whose
+subject the compiler can prove is unnecessary is not a claim**, and it will
+pass until an unrelated edit somewhere else in the crate flips it.
 
 **The site is recorded, because recovering throws away the only evidence of
 where.** A caught fault is attributed to whatever scope was guarded, which
@@ -4998,13 +5092,24 @@ unadopted skill actually has (J2 -- a replay of an episode the *operator*
 drove often depends on a mutating applet a sandbox refuses), it repeats (J3),
 and it is cheap (J4).
 
-J3's blind spot is written down rather than discovered later: it compares the
-value the program answered, its step count and the objects it touched, and
-**not what it printed**. A replay is a sequence of `println(applet(...))`,
-which answers nil however the applets behaved. The selftest claim for J3 was
-itself wrong twice for related reasons -- first printing the clock instead of
-answering it, then answering a 100 Hz clock that does not move between two
-adjacent runs.
+**J3 compares what the candidate printed, and for a long time it could not.**
+It weighed the value the program answered, its step count and the objects it
+touched, and a replay is a sequence of `println(applet(...))` which answers
+nil however the applets behaved -- so the one judge that matters for the one
+shape `agent learn` actually produces agreed with itself by construction. The
+reason recorded for leaving it was that closing it needed a capturing console,
+"which does not exist". It did: `gfx::console::begin_capture` is a stack, it
+was already carrying `applet`, the agent's observations and `differ`'s own
+comparison, and the gap was a claim about the tree that had gone stale rather
+than a missing mechanism.
+
+The selftest claim for J3 was itself wrong twice for related reasons -- first
+printing the clock instead of answering it, then answering a 100 Hz clock that
+does not move between two adjacent runs. Both versions are claims now, and the
+first one is the interesting one: `println(tsc())` answers nil twice, spends
+the same steps twice and touches nothing twice, so removing the console
+comparison is the only thing in the suite that makes it fail. Checked by
+removing it.
 
 **`run`'s argument is decoded under a grammar.** The applet *name* always was,
 so an applet that does not exist is unreachable; its arguments were free text,

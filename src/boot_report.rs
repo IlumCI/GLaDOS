@@ -112,6 +112,22 @@ pub fn failures() -> impl Iterator<Item = Failure> {
     slots.iter().filter_map(|s| *s).collect::<alloc::vec::Vec<_>>().into_iter()
 }
 
+/// How many checks may be registered, which is **not** `SLOTS` and must not be.
+///
+/// `SLOTS` bounds the *report*, and sixteen is right there for the reason
+/// above: a boot with more than sixteen broken subsystems is a different fault
+/// upstream of all of them. This bounds the *roll*, which holds every check
+/// that ran and not only the ones that broke, so it has to be at least as
+/// large as the number of `section` calls in `main.rs` -- and that number went
+/// from seven to seventeen the day the unwrapped checks were wrapped, quietly
+/// pushing the last one off the end of a sixteen-entry array.
+///
+/// Thirty-two, with the overflow said out loud rather than counted, because
+/// what a dropped check costs is `recheck_persisted` silently skipping a
+/// subsystem: a repair for it would then live on the boot volume forever with
+/// nothing able to ask whether its bug had been fixed.
+const CHECK_SLOTS: usize = 32;
+
 /// Every check that ran, whether or not it passed.
 ///
 /// **Recorded because a repair has to be re-testable after it has worked.** A
@@ -119,7 +135,11 @@ pub fn failures() -> impl Iterator<Item = Failure> {
 /// is passing because somebody fixed the bug look identical from here, and the
 /// only way to tell them apart is to take the repair away and run the check
 /// again -- which needs the check, which only the failures were keeping.
-static CHECKS: Racy<[Option<(&'static str, fn() -> bool)>; SLOTS]> = Racy::new([None; SLOTS]);
+static CHECKS: Racy<[Option<(&'static str, fn() -> bool)>; CHECK_SLOTS]> =
+    Racy::new([None; CHECK_SLOTS]);
+
+static CHECKS_DROPPED: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 
 pub fn note_check(name: &'static str, f: fn() -> bool) {
     let slots = unsafe { CHECKS.get() };
@@ -129,6 +149,28 @@ pub fn note_check(name: &'static str, f: fn() -> bool) {
             return;
         }
     }
+    // Said at the moment it happens, at the one place that knows which name
+    // was lost. A count consulted later would be a number nobody reads, and
+    // the consequence is invisible from every other vantage point.
+    CHECKS_DROPPED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    crate::gfx::console::set_color(crate::gfx::console::LTRED);
+    crate::kprintln!(
+        "[boot] no room to record the '{}' check -- raise CHECK_SLOTS, or no repair \
+         for it can ever be re-judged",
+        name
+    );
+    crate::gfx::console::set_color(crate::gfx::console::LTGRAY);
+}
+
+/// How many checks did not fit. Zero is a claim in `diag repair`, because the
+/// failure it stands for is silent everywhere else.
+pub fn checks_dropped() -> usize {
+    CHECKS_DROPPED.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// How many checks were registered, which is how many `section` calls ran.
+pub fn checks_noted() -> usize {
+    unsafe { CHECKS.get() }.iter().filter(|s| s.is_some()).count()
 }
 
 /// The check a subsystem passed or failed, so it can be run a second time.

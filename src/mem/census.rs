@@ -162,7 +162,28 @@ pub fn selftest() -> bool {
     // Something big enough to be unmistakable against whatever else this task
     // is doing while the measurement runs.
     const BIG: usize = 512 * 1024;
-    let v: alloc::vec::Vec<u8> = alloc::vec![7u8; BIG];
+    let mut v: alloc::vec::Vec<u8> = alloc::vec![7u8; BIG];
+
+    // **`black_box`, because an allocation nothing observes is one the
+    // optimiser is entitled to delete, and it did.** Rust marks the allocator
+    // functions so that an alloc/dealloc pair with no observable effect can be
+    // removed outright; this vector is filled once and dropped, so whether the
+    // three claims below had a subject at all was a codegen decision.
+    //
+    // They passed for the life of this suite and then failed on every boot,
+    // deterministically, because ten functions were added to `main.rs`.
+    // Nothing about the allocator, the census or this file changed. The tell
+    // was which ones failed: `taken`, `count` and `given` all stood still
+    // while `peak` passed on history alone, which is the signature of an
+    // allocation that never happened rather than one billed to the wrong row.
+    //
+    // Passing the pointer through an opaque barrier makes it escape, so the
+    // allocation has to exist and the free has to follow it. Same defence
+    // `recover::guard_inner` needs against the optimiser deleting a landing
+    // pad, for the same reason: a test whose subject the compiler can prove is
+    // unnecessary is not a test.
+    core::hint::black_box(v.as_mut_ptr());
+
     let during = row(me);
     claim(
         &mut ok,

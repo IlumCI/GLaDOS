@@ -10,9 +10,17 @@
 //! This is the whole reason a repair is allowed to happen unattended. `godel`'s
 //! rule is that nothing is adopted without a judge, and for a repair there is
 //! an obvious one: apply it and **re-run the selftest that faulted**. Passing
-//! is the verdict. That is why `boot_report::Failure` carries a `fn()` rather
-//! than the machine merely remembering that something went wrong -- a failure
-//! you cannot re-run is a failure you cannot repair.
+//! is the verdict. That is why `boot_report::Failure` carries a `fn() -> bool`
+//! rather than the machine merely remembering that something went wrong -- a
+//! failure you cannot re-run is a failure you cannot repair.
+//!
+//! **And passing means running *and agreeing*.** `judge` asked only whether
+//! the check finished, for as long as `section` took a `fn()` and threw every
+//! subsystem's verdict away. An action that left a subsystem alive and
+//! answering wrongly would have been adopted, marked as the repair that
+//! worked, and written to the boot volume for every boot after -- the worst
+//! outcome this table can produce, because from every other vantage point it
+//! looks exactly like a fix.
 //!
 //! ### The table is an allowlist and starts small
 //!
@@ -720,6 +728,21 @@ pub fn selftest() -> bool {
         &mut ok,
         !judge(&synthetic(wrong)),
         "and one that runs to the end and answers no is not either",
+    );
+
+    // **A judge with nothing to judge is the quiet way this whole loop stops
+    // working.** `recheck_persisted` needs `check_for(name)`, and a check that
+    // did not fit the roll answers `None` -- so a repair for that subsystem
+    // lives on the boot volume forever with nothing able to ask whether its
+    // bug has since been fixed. Nothing else can see that, so it is a claim.
+    //
+    // `checks_noted() > 0` is the other half and is not decoration: on an
+    // empty roll nothing was dropped either, so the count alone is a claim
+    // that cannot fail.
+    claim(
+        &mut ok,
+        crate::boot_report::checks_dropped() == 0 && crate::boot_report::checks_noted() > 0,
+        "every boot check registered fits the roll, so every one can be re-judged",
     );
 
     // The window is the panic handler's gate, so a judge that left it open

@@ -1326,10 +1326,26 @@ fn section(name: &'static str, need: boot_report::Need, f: fn() -> bool) {
     }
 }
 
-fn selftest(acpi_ref: &Option<acpi::Acpi>) {
+/// Whether the allocator gives back exactly what it handed out.
+///
+/// **This was asking the wrong question and had been printing `LEAKED` in red
+/// on every boot for as long as anything else allocated before it.** It
+/// compared the heap against *zero* after its own objects dropped, which is
+/// the same question only while nothing else in the kernel has ever
+/// allocated -- and the console's scrollback ring, among others, is long since
+/// resident by the time the selftests run. A clean boot read `after drop:
+/// 399104 B LEAKED` and nothing consumed the verdict, so the line was
+/// computed, coloured red, printed, and never once acted on. It is the first
+/// thing `section` learning to read a verdict turned up, which is the whole
+/// argument for the change.
+///
+/// What it means is whether *this block's* allocations came back, so it is a
+/// delta against a baseline taken a line earlier.
+fn check_heap() -> bool {
     console::set_color(LTGREEN);
     kprintln!("\n[selftest] heap:");
     console::set_color(LTGRAY_IDX);
+    let (before, _) = mem::heap::HEAP.stats();
     {
         use alloc::format;
         use alloc::vec::Vec;
@@ -1346,22 +1362,33 @@ fn selftest(acpi_ref: &Option<acpi::Acpi>) {
         kprintln!("  in use {} B of {} B", used, total);
     }
     // Everything above is dropped. If alloc and dealloc round sizes the same
-    // way, this is exactly zero; any other number is a per-allocation leak.
-    let (used, _) = mem::heap::HEAP.stats();
-    if used == 0 {
-        console::set_color(LTGREEN);
-        kprintln!("  after drop: 0 B in use -- alloc/dealloc are exact inverses");
+    // way this is exactly the baseline; any other number is a per-allocation
+    // leak, and the sign says which way.
+    let (after, _) = mem::heap::HEAP.stats();
+    let ok = after == before;
+    console::set_color(if ok { LTGREEN } else { LTRED });
+    if ok {
+        kprintln!(
+            "  after drop: back to {} B -- alloc/dealloc are exact inverses",
+            before
+        );
     } else {
-        console::set_color(LTRED);
-        kprintln!("  after drop: {} B LEAKED", used);
+        kprintln!(
+            "  after drop: {} B against {} B before -- alloc and dealloc disagree",
+            after, before
+        );
     }
+    console::set_color(LTGRAY_IDX);
+    ok
+}
 
-    // Version ordering, because an updater will decide on it.
-    //
-    // The interesting case is 0.10.0 against 0.9.0: compared as strings "0.1"
-    // sorts before "0.9", so the naive implementation installs an older image
-    // and reports success. Checked here rather than reasoned about, since the
-    // failure is silent and the consequence is a downgrade nobody asked for.
+/// Version ordering, because an updater will decide on it.
+///
+/// The interesting case is 0.10.0 against 0.9.0: compared as strings "0.1"
+/// sorts before "0.9", so the naive implementation installs an older image and
+/// reports success. Checked here rather than reasoned about, since the failure
+/// is silent and the consequence is a downgrade nobody asked for.
+fn check_version() -> bool {
     console::set_color(LTGREEN);
     kprintln!("\n[selftest] version:");
     console::set_color(LTGRAY_IDX);
@@ -1379,10 +1406,13 @@ fn selftest(acpi_ref: &Option<acpi::Acpi>) {
         VERSION
     );
     console::set_color(LTGRAY_IDX);
+    vok
+}
 
-    // The timer is the first thing in this kernel that runs without being
-    // called. If ticks advance, the LAPIC, the IDT vector, the EOI path and
-    // the calibration are all correct at once.
+/// The timer is the first thing in this kernel that runs without being called.
+/// If ticks advance, the LAPIC, the IDT vector, the EOI path and the
+/// calibration are all correct at once.
+fn check_timer() -> bool {
     console::set_color(LTGREEN);
     kprintln!("\n[selftest] timer:");
     console::set_color(LTGRAY_IDX);
@@ -1410,11 +1440,17 @@ fn selftest(acpi_ref: &Option<acpi::Acpi>) {
     } else {
         0
     };
-    if elapsed < TIMER_HZ as u64 / 2 {
+    let verdict = if elapsed < TIMER_HZ as u64 / 2 {
         console::set_color(LTRED);
         kprintln!("  only {} ticks -- timer is not delivering", elapsed);
+        false
     } else if mhz == 0 {
         kprintln!("  {} ticks -- firing, but the TSC is uncalibrated", elapsed);
+        // Firing is the half this check exists for, and an uncalibrated TSC
+        // is a fact about the other clock. Refusing here would make a machine
+        // whose timer is fine unbootable for the sake of a comparison that
+        // could not be made.
+        true
     } else {
         // 500 ms expected. Allow a wide band: this is a spin loop on an
         // emulator and the point is to catch a rate wrong by a whole core
@@ -1432,12 +1468,23 @@ fn selftest(acpi_ref: &Option<acpi::Acpi>) {
                 "ticks() disagrees with the TSC; is every core incrementing it?"
             }
         );
-    }
+        ok
+    };
+    console::set_color(LTGRAY_IDX);
+    verdict
+}
 
+/// Calendar arithmetic, and what the machine thinks the date is.
+///
+/// The reading is printed and never judged: a machine with no usable RTC says
+/// so and carries on, because "snapshots will record no time" is a limitation
+/// and not a broken subsystem.
+fn check_clock() -> bool {
     console::set_color(LTGREEN);
     kprintln!("\n[selftest] clock:");
     console::set_color(LTGRAY_IDX);
-    if dev::rtc::selftest() {
+    let ok = dev::rtc::selftest();
+    if ok {
         console::set_color(LTGREEN);
         kprintln!("  ok   calendar round-trips, including leap years and 2000");
     } else {
@@ -1452,6 +1499,89 @@ fn selftest(acpi_ref: &Option<acpi::Acpi>) {
         ),
         None => kprintln!("  no usable RTC -- snapshots will record no time"),
     }
+    ok
+}
+
+/// One line per parser, and **a verdict where there used to be silence.**
+///
+/// These four were `if json::selftest() { print the ok line }`, so a parser
+/// that failed printed *nothing at all* -- the worst shape a check can take,
+/// because a missing line is what a check that never ran looks like too.
+fn check_parser(name: &'static str, what: &'static str, f: fn() -> bool) -> bool {
+    let ok = f();
+    console::set_color(if ok { LTGREEN } else { LTRED });
+    kprintln!("  {}     {:<9} {}", if ok { "ok" } else { "FAIL" }, name, what);
+    console::set_color(LTGRAY_IDX);
+    ok
+}
+
+fn check_json() -> bool {
+    check_parser("json", "parse, escapes, snowflakes, depth bound", json::selftest)
+}
+fn check_ws() -> bool {
+    check_parser("websocket", "RFC 6455 accept, masking, split frames", net::ws::selftest)
+}
+fn check_html() -> bool {
+    check_parser("html", "urls, entities, unclosed tags", net::html::selftest)
+}
+fn check_css() -> bool {
+    check_parser("css", "selectors, at-rules, inline display", net::css::selftest)
+}
+
+fn check_text() -> bool {
+    kprintln!("\n[selftest] text:");
+    let ok = gfx::text_selftest();
+    if !ok {
+        console::set_color(LTRED);
+        kprintln!("[selftest] the console cannot be trusted to draw what it was given");
+        console::set_color(LTGRAY_IDX);
+    }
+    ok
+}
+
+/// Cheap, pure, and no network: header assembly, the target arithmetic and the
+/// midstate. Every mistake available in that code is silent -- a header with
+/// two bytes swapped hashes at full speed and is rejected forever -- so it
+/// earns a place in the boot sequence rather than only in `diag`.
+fn check_mining() -> bool {
+    kprintln!("\n[selftest] mining:");
+    let mut bad = 0usize;
+    let mut n = 0usize;
+    for (what, good) in mine::checks() {
+        n += 1;
+        if !good {
+            bad += 1;
+            console::set_color(LTRED);
+            kprintln!("  FAIL {}", what);
+            console::set_color(LTGRAY_IDX);
+        }
+    }
+    if bad == 0 {
+        console::set_color(LTGREEN);
+        kprintln!("  ok   {} claim(s), block 125552 reassembles and hashes", n);
+        console::set_color(LTGRAY_IDX);
+    }
+    bad == 0
+}
+
+fn selftest(acpi_ref: &Option<acpi::Acpi>) {
+    // **Every check here is wrapped now, and thirteen of them were not.**
+    // An unwrapped check that faults takes the machine before the shell
+    // exists, which is the failure `boot_report` was built for and which
+    // seven of twenty checks were still exposed to; one that answers `false`
+    // was recorded nowhere at all. Both are `section`'s job.
+    //
+    // `Optional` on all of the newly wrapped ones, deliberately. What the
+    // wrapping buys is that a failure is *recorded and named* rather than
+    // fatal or silent; escalating any of these to `Vital` is a separate
+    // decision that wants evidence from the GF63 about, for instance, how
+    // wide the timer's band really is on hardware -- and a `Vital` false
+    // positive is an unbootable machine, which is exactly as bad as the miss
+    // it would be protecting against.
+    section("heap", boot_report::Need::Optional, check_heap);
+    section("version", boot_report::Need::Optional, check_version);
+    section("timer", boot_report::Need::Optional, check_timer);
+    section("clock", boot_report::Need::Optional, check_clock);
 
     console::set_color(LTGREEN);
     kprintln!("\n[selftest] sysbox namespace:");
@@ -1483,26 +1613,10 @@ fn selftest(acpi_ref: &Option<acpi::Acpi>) {
         ok
     });
 
-    if json::selftest() {
-        console::set_color(LTGREEN);
-        kprintln!("  ok     json      parse, escapes, snowflakes, depth bound");
-        console::set_color(LTGRAY_IDX);
-    }
-    if net::ws::selftest() {
-        console::set_color(LTGREEN);
-        kprintln!("  ok     websocket RFC 6455 accept, masking, split frames");
-        console::set_color(LTGRAY_IDX);
-    }
-    if net::html::selftest() {
-        console::set_color(LTGREEN);
-        kprintln!("  ok     html      urls, entities, unclosed tags");
-        console::set_color(LTGRAY_IDX);
-    }
-    if net::css::selftest() {
-        console::set_color(LTGREEN);
-        kprintln!("  ok     css       selectors, at-rules, inline display");
-        console::set_color(LTGRAY_IDX);
-    }
+    section("json", boot_report::Need::Optional, check_json);
+    section("websocket", boot_report::Need::Optional, check_ws);
+    section("html", boot_report::Need::Optional, check_html);
+    section("css", boot_report::Need::Optional, check_css);
 
     console::set_color(LTGREEN);
     kprintln!("\n[selftest] int3 should report and resume:");
@@ -1550,6 +1664,14 @@ fn selftest(acpi_ref: &Option<acpi::Acpi>) {
         ok
     });
 
+    // **The two that are not wrapped, and the reason is a type rather than an
+    // oversight.** Both take `acpi_ref`, so a closure around either captures,
+    // and `section` wants a `fn()` precisely because a check that cannot be
+    // re-run is a check no repair can be judged against. Making these
+    // re-runnable means giving `acpi` a handle that outlives this call, which
+    // is a change to how the tables are held and belongs in its own argument.
+    // Until then a fault in either is fatal, the way every check here used to
+    // be.
     kprintln!("
 [selftest] acpi tables:");
     if !acpi::selftest(acpi_ref) {
@@ -1578,38 +1700,8 @@ fn selftest(acpi_ref: &Option<acpi::Acpi>) {
         ok
     });
 
-    kprintln!("
-[selftest] text:");
-    if !gfx::text_selftest() {
-        console::set_color(LTRED);
-        kprintln!("[selftest] the console cannot be trusted to draw what it was given");
-        console::set_color(LTGRAY_IDX);
-    }
-
-    // Cheap, pure, and no network: header assembly, the target arithmetic and
-    // the midstate. Every mistake available in that code is silent -- a header
-    // with two bytes swapped hashes at full speed and is rejected forever --
-    // so it earns a place in the boot sequence rather than only in `diag`.
-    kprintln!("
-[selftest] mining:");
-    {
-        let mut bad = 0usize;
-        let mut n = 0usize;
-        for (what, good) in mine::checks() {
-            n += 1;
-            if !good {
-                bad += 1;
-                console::set_color(LTRED);
-                kprintln!("  FAIL {}", what);
-                console::set_color(LTGRAY_IDX);
-            }
-        }
-        if bad == 0 {
-            console::set_color(LTGREEN);
-            kprintln!("  ok   {} claim(s), block 125552 reassembles and hashes", n);
-            console::set_color(LTGRAY_IDX);
-        }
-    }
+    section("text", boot_report::Need::Optional, check_text);
+    section("mining", boot_report::Need::Optional, check_mining);
 
     kprintln!("
 [selftest] generated code:");
