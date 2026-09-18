@@ -36,8 +36,10 @@
 //! Comparing it is safe on every route rather than only on the interpreted
 //! ones: `jit`'s slice admits no calls at all, so a program the compiled route
 //! accepts cannot print by any path, and both sides are empty by construction.
-//! `skill.rs` writes down the same blind spot for its determinism judge, which
-//! is now closable the same way.
+//! `skill.rs` wrote down the same blind spot for its determinism judge and
+//! closes it the same way now -- its J3 compares what a candidate printed, so
+//! a replay of `println(applet(..))` no longer agrees with itself by answering
+//! nil twice.
 //!
 //! **The second route today is `prepare`/`adopt` against `run`.** That is a
 //! real pair, not a placeholder -- one registers a program's declarations by
@@ -72,8 +74,8 @@ const ROUNDS: usize = 64;
 /// `console` closed the one hole this harness documented against itself: a
 /// program whose whole purpose is `println` answers nil however it behaved, so
 /// two routes could disagree about everything a person would notice and agree
-/// on every field compared. `skill.rs` records the same blind spot for its
-/// determinism judge, and both are fixed by capturing here.
+/// on every field compared. `skill.rs`'s determinism judge had the same hole
+/// and is closed the same way, by the same stacking capture.
 #[derive(PartialEq, Eq, Clone)]
 pub struct Outcome {
     value: String,

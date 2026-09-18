@@ -112,6 +112,19 @@ fn jail(h: &[u8; 32]) -> String {
     p
 }
 
+/// Everything one run of a candidate is judged on.
+///
+/// A struct rather than a tuple because `said` is the fourth field and a
+/// four-tuple destructured at two call sites is where a judge starts
+/// comparing the wrong thing against the wrong thing.
+struct Run {
+    out: Result<String, String>,
+    steps: u64,
+    touched: usize,
+    /// What it printed. **The half J3 could not see.**
+    said: String,
+}
+
 /// Run a candidate once, under the restrictions it will really have, and
 /// report what it did.
 ///
@@ -119,22 +132,37 @@ fn jail(h: &[u8; 32]) -> String {
 /// namespace changed by having been *considered*. That is not politeness: the
 /// second run has to start from the same tree as the first or J3 measures the
 /// order of the runs rather than the program.
-fn once(h: &[u8; 32], src: &str) -> (Result<String, String>, u64, usize) {
-    let mut steps = 0u64;
-    let mut touched = 0usize;
-    let mut out = Err(String::from("no namespace"));
+fn once(h: &[u8; 32], src: &str) -> Run {
+    let mut r = Run {
+        out: Err(String::from("no namespace")),
+        steps: 0,
+        touched: 0,
+        said: String::new(),
+    };
     if let Some(sh) = sysbox::shadow(|| {
         let mut it = crate::aiksi::Interp::sandboxed(&jail(h)).with_step_budget(BUDGET);
-        out = match crate::aiksi::eval_line(&mut it, src) {
+        // The capture is a stack, so this nests inside a caller that is
+        // already capturing -- which it will be, since `skill judge` is
+        // reachable from an episode whose observation is a capture.
+        // `differ` closed the identical hole and leans on the same property.
+        //
+        // It spans the whole call rather than only the success path: a
+        // program that printed three lines and then failed printed three
+        // lines, and a judge that took the console only when the run
+        // succeeded would compare an empty string against an empty string
+        // for every candidate that errors.
+        crate::gfx::console::begin_capture();
+        r.out = match crate::aiksi::eval_line(&mut it, src) {
             Ok(v) => Ok(v.render()),
             Err(e) => Err(e),
         };
-        steps = it.steps();
+        r.said = crate::gfx::console::end_capture().unwrap_or_default();
+        r.steps = it.steps();
     }) {
-        touched = sh.changes as usize;
+        r.touched = sh.changes as usize;
         sh.discard();
     }
-    (out, steps, touched)
+    r
 }
 
 /// Judge a stored candidate.
@@ -169,10 +197,10 @@ pub fn bench(h: &[u8; 32]) -> Verdict {
     }
 
     // --- J2: does it run under the powers it will have? ------------------
-    let (first, steps, touched) = once(h, &src);
-    v.steps = steps;
-    v.touched = touched;
-    match &first {
+    let first = once(h, &src);
+    v.steps = first.steps;
+    v.touched = first.touched;
+    match &first.out {
         Err(_) => {
             // Deliberately not repeated as "the sandbox refused it". The
             // interpreter answers the same way for a program that reached for
@@ -190,18 +218,29 @@ pub fn bench(h: &[u8; 32]) -> Verdict {
 
     // --- J3: does it do the same thing twice? ---------------------------
     //
-    // **What this compares, and what it cannot see.** Two runs must agree on
-    // the value the program answered, the steps it took, and the objects it
-    // touched. It does not compare what the program *printed*, because the
-    // console is a scrolling side effect with nowhere to capture it from --
-    // and that is a real gap, not a quibble: a replay skill is a sequence of
-    // `println(applet(...))`, which answers nil however the applets behaved,
-    // so a replay whose output varies passes this judge. The claim in
-    // `selftest` was itself written wrongly for exactly that reason and
-    // passed until the program was changed to answer the clock rather than
-    // print it. Closing it needs a capturing console, which does not exist.
-    let (second, steps2, touched2) = once(h, &src);
-    v.j3 = first == second && steps == steps2 && touched == touched2;
+    // **What this compares.** Two runs must agree on the value the program
+    // answered, the steps it took, the objects it touched, and what it
+    // printed.
+    //
+    // The last of those was missing, and it was the one that mattered most
+    // here. This said "closing it needs a capturing console, which does not
+    // exist" -- and `gfx::console::begin_capture` had existed the whole time,
+    // used by `applet`, by the agent's observations and by `differ`, which
+    // closed the identical hole in its own comparison. The gap was not a
+    // missing mechanism, it was a claim about the tree that had gone stale.
+    //
+    // It is load-bearing rather than thorough: **a replay skill is a sequence
+    // of `println(applet(..))`, and `println` answers nil however the applets
+    // behaved**, so a replay whose output varies agreed on value, steps and
+    // touched objects and passed this judge. That is the shape of every skill
+    // `agent learn` writes. The claim in `selftest` was itself written wrongly
+    // for the same reason and passed until the program was changed to answer
+    // the clock rather than print it; both versions are claims now.
+    let second = once(h, &src);
+    v.j3 = first.out == second.out
+        && first.steps == second.steps
+        && first.touched == second.touched
+        && first.said == second.said;
     v.j3_why = if v.j3 {
         "the same twice"
     } else {
@@ -209,7 +248,7 @@ pub fn bench(h: &[u8; 32]) -> Verdict {
     };
 
     // --- J4: can it be afforded on a bad day? ---------------------------
-    v.j4 = steps <= STEP_CEILING;
+    v.j4 = first.steps <= STEP_CEILING;
 
     v
 }
@@ -282,6 +321,22 @@ pub fn selftest() -> bool {
     let v = bench(&restless);
     claim("one that will not repeat is refused by J3", v.j1 && v.j2 && !v.j3);
 
+    // **The first wrong version of that claim, kept as a claim.** This program
+    // answers nil twice, spends the same steps twice and touches nothing
+    // twice, so every field J3 compared before the console was among them is
+    // identical -- and it printed a different number each run. It passed.
+    //
+    // It is not a corner case: it is exactly the shape of a replay compiled
+    // from an episode, `println` around an applet call, which is what
+    // `agent learn` writes and what this whole judge exists to admit or
+    // refuse. Nothing else in the suite can fail if the capture is dropped.
+    let noisy = store("println(tsc())\n");
+    let v = bench(&noisy);
+    claim(
+        "and one whose only difference is what it printed is refused too",
+        v.j1 && v.j2 && !v.j3,
+    );
+
     // A judge that cannot veto is not a judge: prove J4 has a real ceiling by
     // spending past it *and finishing*.
     //
@@ -309,7 +364,7 @@ pub fn selftest() -> bool {
                 .all(|c| c.starts_with("/ai/tools/") && c.ends_with(".ai&xi")),
     );
 
-    for h in [good, broken, reaching, restless, greedy] {
+    for h in [good, broken, reaching, restless, noisy, greedy] {
         sysbox::detach(&path_of(&h));
     }
     ok
