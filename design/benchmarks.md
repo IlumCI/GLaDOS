@@ -9,12 +9,33 @@ datasets.
 
 ## Numbers
 
-| Rail | SmolLM2-135M (dense) | Qwen3.5-0.8B (hybrid) | **Qwen3.5-2B distill (hybrid)** | Chance |
-|---|---|---|---|---|
-| MMLU, 0-shot letter-logprob | 20.0% (n=50) | 30.0% (n=30) | **43.3%** (n=30) | 25% |
-| GSM8K, 5-shot greedy | ~~0.0%~~ *re-run owed* | ~~0.0%~~ *re-run owed* | ~~0.0%~~ *re-run owed* | ~0 |
-| NIAH, 512/1024 | ~~0/7~~ *suspect* | 6/6 | **6/6** | -- |
-| Route, constrained decode, 78 actions | 0.0% (n=50) | 33.3% (n=30) | **40.0%** (n=30) | ~1.3% |
+| Rail | SmolLM2-135M (dense) | Qwen3.5-0.8B (hybrid) | Qwen3.5-2B distill (hybrid) | **Qwen3-0.6B (dense, resident)** | Chance |
+|---|---|---|---|---|---|
+| bits per byte, `src/` | -- | -- | -- | **0.8643** (n=256 windows) | -- |
+| MMLU, 0-shot letter-logprob | ~~20.0%~~ † | ~~30.0%~~ † | ~~43.3%~~ † | **41.0%** (n=14,042, all 57) | 25% |
+| GSM8K, 5-shot greedy | ~~0.0%~~ *re-run owed* | ~~0.0%~~ *re-run owed* | ~~0.0%~~ *re-run owed* | **39.2%** (n=1,319, whole set) | ~0 |
+| NIAH, 512/1024/2048 | ~~0/7~~ *suspect* | 6/6 | 6/6 | **7/7** | -- |
+| Route, constrained decode, 78 actions | 0.0% (n=50) | 33.3% (n=30) | 40.0% (n=30) | 0.0% ‡ (n=200) | ~1.3% |
+
+† **Every MMLU figure in the first three columns is `abstract_algebra` and
+nothing else.** `find_file` answers `sorted(rglob("test*.parquet"))[0]`, the
+snapshot has one directory per subject with no combined config, and
+`abstract_algebra` sorts first -- so the rail read 100 questions of
+undergraduate group theory and labelled them MMLU, for its whole life. Struck
+rather than corrected: those three checkpoints have not been re-run, and the
+dense runner does not run the hybrids. The 0.6B column is the whole 14,042
+across all 57 subjects.
+
+‡ **The route figure is not a fact about the model and the rail needs work
+before it is quoted.** The 627-item test split holds **three** distinct
+actions -- `model`, `mem` and `snap` -- so always answering the majority class
+scores about 50% and the chance column's 1.3% describes a uniform guess over a
+grammar the corpus never exercises. Scoring *below* the majority baseline is
+the interesting part: all three gold answers are reachable in the grammar, and
+the decode answered `uptime` to most of them. That is the shape `repair.rs`
+records, where a constrained decode prefers a *name* that is one cheap common
+token over one that is several uncommon pieces. Unconfirmed here, and the next
+thing to measure on this rail.
 
 The 2B column is `insraq/Qwen3.5-2B-EmperoAI-Qwen3.8-Distill-Heretic-Abliterated`
 (Apache-2.0) -- a Qwen3.8-reasoning distill onto the Qwen3.5-2B hybrid body,
@@ -80,6 +101,42 @@ of this same configuration read 28.0%, 36.0% and 37.5% at n around 25 -- which
 is the plus-or-minus-18-point interval behaving exactly as advertised, and a
 good argument against quoting any of them. This figure has no interval worth
 stating.
+
+### And the first figure about GLaDOS rather than about the checkpoint
+
+39.2% is measured with an f32 KV cache. **The kernel's is `Vec<i8>`**, so
+every host number this project has ever quoted describes a machine nobody
+runs. `--kv8` round-trips the cache through int8 at the point `model::State`
+stores -- after QK-Norm and before RoPE for keys, raw for values -- and the
+same whole test set, paired:
+
+    fp16 cache   39.2%  (517/1319)      what the checkpoint scores
+    int8 cache   37.1%  (490/1319)      what GLaDOS scores
+
+    74 fixed, 101 broke, 1144 agreed
+    mcnemar chi 3.86 against a 3.84 bar
+
+**About two points, and it clears the bar by 0.02.** One question the other
+way puts it back inside the noise, so read it as probably real and not as
+settled. The churn is the part worth knowing: 175 of 1,319 answers moved for a
+net of 27, so int8 is not a small perturbation that occasionally matters. It
+is a large one that mostly cancels.
+
+The same change reads t = 6.61 on 256 windows of the compression rail, which
+is what that rail is for.
+
+**The int8 path is proven against the oracle, and was not when this figure was
+first taken.** `fastdense --check` had no `--kv8`, so the code producing 37.1%
+had never been compared to anything. It has two halves now, because the
+end-to-end comparison cannot be tight: quantisation is a step function, so the
+two runners' last-bit f32 differences land either side of a rounding boundary
+and one entry in a thousand moves a whole step. Per-logit disagreement runs to
+1.9e-01 where the same batch without `--kv8` reads 2e-05, with argmax and
+top-5 held on every row. So the arithmetic is checked where it can be checked
+exactly -- `kv8_roundtrip` against `reference.q8_roundtrip` on identical input
+at three magnitudes, on the all-zero block and on a value sitting on a
+rounding boundary, every entry equal -- and the end-to-end gate is argmax and
+top-5, which is what decides a score.
 
 The transcripts are the point and are printed by `--show`:
 
@@ -173,10 +230,38 @@ retrieval.**
 What the hybrids did is untouched: they were 6/6, and a budget that truncates
 cannot manufacture a hit.
 
-**MMLU sits near chance for both.** 0-shot letter-logprob is the cheap
-tracking trick, not the official harness; a 135M model below chance and an
-0.8B a little above it is the expected picture. This rail exists to catch
-regressions from quantisation or format changes, not to quote.
+**MMLU sat near chance for both, and the rail was scoring one subject.** The
+paragraph below is kept because the reasoning in it was reasonable and the
+premise was not: 0-shot letter-logprob is the cheap tracking trick rather than
+the official harness, and a 135M below chance with an 0.8B a little above it
+is the expected picture *for abstract algebra*, which is what was actually
+being measured. Over the whole 57 subjects the resident 0.6B reads **41.0%**
+against 25% chance, which is a different picture entirely.
+
+**The compression rail is the one to iterate against.** Held-out bits per byte
+over `src/` at 1024-token windows: one forward pass per window, no generation,
+every token an observation instead of one bit per question. Measured against
+the binary rails on a change both can see -- the kernel's int8 KV cache:
+
+    gsm8k  1319 questions   39.2% -> 37.1%   chi 3.86 vs 3.84   ~70 min/arm
+    bpb     256 windows    0.8643 -> 0.8658   t 6.61 vs 1.96    ~2 min/arm
+    bpb      24 windows    0.8800 -> 0.8826   t 3.58 vs 1.96     ~12 s/arm
+
+Same direction, and two dozen windows carry more evidence than the whole GSM8K
+test set for about 350x less time. The absolute difference is 0.0015 bits per
+byte, 0.17% relative, so the rail resolves a fifth of a percent where GSM8K
+needed every question it has for two points.
+
+The caveat that belongs beside it: Huang et al. (COLM 2024) put bits-per-char
+against twelve benchmarks over 31 base models at about -0.93, and **excluded
+the Qwen series from their maths fit as outliers**, inferring GSM8K exposure.
+Qwen3-0.6B is this column. So the published correlation is a reason to have
+the rail and not evidence about this checkpoint, and the agreement above is.
+
+`src/` is the corpus because its earliest commit is 2026-07-30 and every
+checkpoint here predates that by more than a year, so it is held out by
+construction rather than by trust. It is pinned by content hash on every run,
+since a corpus that moves is the test set that moved.
 
 **This paragraph is wrong and is kept for the record.** The 0.0 it reasons
 from was a harness fault -- see the withdrawal above -- so whatever is true

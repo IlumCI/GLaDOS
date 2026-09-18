@@ -5468,6 +5468,39 @@ N` prints the raw completion and stays for that reason. A rail that reads zero
 is not a result until its output has been read; a score with no transcript
 behind it is an assertion.
 
+**And a fifth, in the rail beside it, found while re-running what the first
+four owed.** `run_mmlu` did `parquet_rows(find_file(d, "test"))[:100]`, and
+`find_file` answers `sorted(rglob(...))[0]`. The MMLU snapshot has one
+directory per subject and no combined config, so that is 100 questions of
+`abstract_algebra` and nothing else -- **every MMLU figure this project has
+recorded, for the life of the rail**, including the 43.3% quoted in
+`design/benchmarks.md` as a number about the 2B. Not a wrong answer: a rail
+quietly answering a different question from the one its name claims, which is
+the same family as the other four and the fourth time it has been the
+*composition* of a set that nobody printed. It reads 14,042 over 57 subjects
+now, prints what it is scoring every run, and draws a seeded sample for
+`--limit` because the rows arrive grouped by subject. The resident 0.6B is
+**41.0%** over the whole thing against 25% chance.
+
+**The rail that stops this costing a week each time.** Every one of those five
+took thousands of items to surface because a binary rail throws away almost
+everything the model did. `--task bpb` scores held-out bits per byte over a
+corpus pinned by content hash, defaulting to this kernel's own source: one
+forward pass per window, no generation, every token an observation. Measured
+against GSM8K on a change both can see -- the kernel's int8 KV cache -- it
+reaches t = 6.61 on 256 windows where 1,319 GSM8K questions reach chi 3.86
+against a 3.84 bar, and two dozen windows in twelve seconds still carry more
+evidence than the full test set does in seventy minutes. Reach for it first;
+the binary rails are for the figure you quote, not the one you iterate on.
+
+**And the first figure about GLaDOS rather than about the checkpoint: 37.1%.**
+The kernel holds its KV cache `Vec<i8>` and every host number here was f32.
+`--kv8` round-trips it at the point `model::State` stores, and the same whole
+test set paired reads 39.2% against 37.1%, 74 fixed and 101 broke, chi 3.86.
+Two points, clearing the bar by 0.02, so probably real and not settled -- and
+175 of 1,319 answers moved for a net of 27, so int8 is a large perturbation
+that mostly cancels rather than a small one that rarely matters.
+
 **And the number it was hiding: 39.2%.** Qwen3-0.6B, GSM8K 5-shot greedy, on
 the **whole 1,319-question test set**, through the fixed harness. The row read
 0.0% on every checkpoint this project has ever run and was quoted as evidence
