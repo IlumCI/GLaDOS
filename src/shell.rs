@@ -2140,6 +2140,13 @@ fn store_cmd(rest: &str) {
             });
         }
 
+        "bench" => {
+            // Five repeats, best of, for the reason `video bench` and `core
+            // bench` both give: a single sample measures whatever else the
+            // machine was doing.
+            cas::read_bench(5);
+        }
+
         "init" => match store::init() {
             Ok((start, blocks)) => {
                 console::set_color(LTGREEN);

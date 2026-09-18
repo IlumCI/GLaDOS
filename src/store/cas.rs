@@ -28,6 +28,8 @@
 use super::block;
 use super::sha256;
 use crate::dev::nvme;
+use crate::gfx::console;
+use crate::kprintln;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -531,6 +533,167 @@ pub fn find_free_region(min_blocks: u64) -> Option<(u64, u64)> {
 /// read proves the thing streaming is built on: that the middle of a blob can
 /// be fetched without the blob being resident, and that it is byte-for-byte
 /// what the whole-blob read would have given.
+/// What `read_blocks` actually costs, which nothing here has ever measured.
+///
+/// **The paged KV cache turns on this number and on no other.** Holding the
+/// trained 40,960-token context outright is 2,520 MiB, which this machine does
+/// not have; keeping a per-page min/max index resident and fetching the few
+/// pages a query wants is 72 MiB at page 32, which it does. The host has
+/// already measured the half that can be measured there -- four or more pages
+/// fetched gives perfect recall at 6.25% of the cache -- and the half left is
+/// whether the disk can deliver 12 MiB inside a decode step.
+///
+/// So this reports two things that answer opposite questions, and reporting
+/// only the first is how a design like this gets built and then found to be
+/// slow. **Sequential** large reads give bandwidth, which is the number if
+/// pages are laid out so one read fetches many. **Scattered** small reads give
+/// per-read latency, which is the number if they are not -- and the naive
+/// layout needs 6 pages x 8 kv heads x 28 layers = 1,344 separate reads a
+/// step. Between those two the design is either free or impossible.
+///
+/// Nothing is written. It reads blocks the store has already committed, which
+/// are real data rather than a freshly written pattern, so no write gate is
+/// touched and the figure is not flattered by reading back what is still in a
+/// controller's write cache.
+pub fn read_bench(reps: usize) -> bool {
+    // The whole formatted region rather than just `alloc_next`. This times the
+    // disk and never looks at what the bytes mean, so an unallocated block is
+    // as good as a committed one -- and `alloc_next` after one empty snapshot
+    // is 142 blocks, which silently skipped every size above 32 KiB on the
+    // first run and printed a table that looked complete.
+    let Some((start, end)) = crate::store::with(|s| {
+        (s.sb.region_start, s.sb.region_start + s.sb.region_blocks)
+    }) else {
+        kprintln!("  no store mounted -- 'store init', then 'snap', then this");
+        return false;
+    };
+    let bsz = bs();
+    let span = end.saturating_sub(start);
+    if span < 64 {
+        kprintln!("  only {} block(s) committed -- 'snap' something first", span);
+        return false;
+    }
+
+    // One buffer, page-aligned, allocated once. `nvme::alloc_dma` never frees
+    // (`dev/nvme.rs:156`), so a bench that allocated per size would leak its
+    // way through the heap to make a point about the disk.
+    const BIG: usize = 2 * 1024 * 1024;
+    let Some(p) = nvme::alloc_dma(BIG) else {
+        kprintln!("  could not get a {} B DMA buffer", BIG);
+        return false;
+    };
+    let buf = unsafe { core::slice::from_raw_parts_mut(p, BIG) };
+
+    let mhz = crate::time::tsc_mhz().max(1);
+    if let Some(h) = crate::cpu::hypervisor() {
+        console::set_color(console::LTRED);
+        // The same caution `dev::power` states about its MSRs, and for the
+        // same reason: an emulator answers, and the answer is about the
+        // emulator rather than about the disk.
+        kprintln!(
+            "  a hypervisor is present ({}), so this measures the host's",
+            core::str::from_utf8(&h).unwrap_or("?")
+        );
+        kprintln!("  page cache and not this machine's NVMe. Run it on the GF63.");
+        console::set_color(console::WHITE);
+    }
+    kprintln!("  reading committed blocks {}..{}, nothing written", start, end);
+
+    let mut ok = true;
+    kprintln!("  sequential, best of {}:", reps);
+    for kib in [4u64, 32, 128, 512, 2048] {
+        let blocks = (kib * 1024 / bsz).max(1) as u32;
+        if blocks as u64 > span {
+            kprintln!("    {:>5} KiB   skipped, the region is only {} KiB",
+                      kib, span * bsz / 1024);
+            continue;
+        }
+        let mut best = u64::MAX;
+        for r in 0..reps {
+            // A different offset each repeat, so a controller that cached the
+            // last read cannot answer the next one from it.
+            let off = (r as u64 * blocks as u64) % (span - blocks as u64).max(1);
+            let cr = ChunkRef { hash: [0u8; 32], lba: start + off, len: span * bsz };
+            let t0 = crate::time::rdtsc();
+            let got = crate::store::with(|s| s.read_blocks(&cr, 0, blocks, buf));
+            let dt = crate::time::rdtsc() - t0;
+            if !matches!(got, Some(Ok(()))) {
+                ok = false;
+                break;
+            }
+            best = best.min(dt);
+        }
+        if best == u64::MAX {
+            continue;
+        }
+        let us = (best / mhz).max(1);
+        let mbs = (blocks as u64 * bsz) * 1_000_000 / us / (1024 * 1024);
+        kprintln!("    {:>5} KiB   {:>7} us   {:>5} MB/s", kib, us, mbs);
+    }
+
+    // --- which layout, which is what the first run turned this into ------
+    //
+    // A decode step at page 32 wants 6 pages per kv head per layer, and what
+    // that costs depends entirely on how a page sits on disk. The first run
+    // measured 261 us for a 9 KiB read against 112 us for a 32 KiB one:
+    // per-command overhead dominates and bandwidth is nearly irrelevant at
+    // these sizes, so the layout is what decides whether this is affordable.
+    // Three candidates, timed against each other rather than one assumed:
+    //
+    //   per head    P tokens, one head, one layer. 6*8*28 reads. Finest
+    //               selection, worst I/O.
+    //   per layer   P tokens, all 8 heads, one layer. 6*28 reads. The heads
+    //               in a layer must then agree on which pages they want.
+    //   whole       P tokens, every head and layer. 6 reads. One selection
+    //               for the entire model.
+    //
+    // The trade is real and is **not** resolved here: a coarser layout reads
+    // far less and chooses far worse, and how much worse is a host
+    // measurement nobody has taken. This says only what each one costs.
+    let page_tokens = 32u64;
+    let per_tok_head = 2 * (128 + (128 / 32) * 4);
+    let layouts: [(&str, u64, u64); 3] = [
+        ("per head ", 6 * 8 * 28, page_tokens * per_tok_head),
+        ("per layer", 6 * 28, page_tokens * per_tok_head * 8),
+        ("whole    ", 6, page_tokens * per_tok_head * 8 * 28),
+    ];
+    kprintln!("  what one decode step costs at page {}, by layout:", page_tokens);
+    for (name, reads, bytes) in layouts {
+        let rb = bytes.div_ceil(bsz) as u32;
+        if rb as u64 > span {
+            kprintln!("    {}  skipped, one read exceeds the region", name);
+            continue;
+        }
+        let mut best = u64::MAX;
+        for r in 0..reps {
+            let t0 = crate::time::rdtsc();
+            for i in 0..reads {
+                let off = (i * 2_654_435_761 + r as u64 * 7919)
+                    % (span - rb as u64).max(1);
+                let cr = ChunkRef { hash: [0u8; 32], lba: start + off, len: span * bsz };
+                if !matches!(
+                    crate::store::with(|s| s.read_blocks(&cr, 0, rb, buf)),
+                    Some(Ok(()))
+                ) {
+                    ok = false;
+                    break;
+                }
+            }
+            best = best.min(crate::time::rdtsc() - t0);
+        }
+        let us = (best / mhz).max(1);
+        let total = reads * rb as u64 * bsz;
+        console::set_color(if us < 20_000 { console::LTGREEN } else { console::YELLOW });
+        kprintln!(
+            "    {}  {:>4} reads x {:>4} KiB = {:>5} KiB   {:>7} us   {:>4} us/read",
+            name, reads, rb as u64 * bsz / 1024, total / 1024, us, us / reads
+        );
+        console::set_color(console::WHITE);
+    }
+    kprintln!("  against a decode step of roughly 200 ms on this checkpoint");
+    ok
+}
+
 pub fn stream_selftest() -> bool {
     use alloc::vec;
     use alloc::vec::Vec;

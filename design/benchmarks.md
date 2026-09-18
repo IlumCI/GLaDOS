@@ -351,6 +351,40 @@ fetched may have to grow with context. And the summaries here are computed
 from a resident cache, where a real implementation writes one as a page is
 evicted -- the same arithmetic, but not the same code.
 
+### And the disk half: `store bench`, which reframed the question
+
+The first run asked whether NVMe is fast enough and got an answer about
+something else. Per-command overhead dominates completely at these sizes:
+
+    sequential      4 KiB    167 us     23 MB/s
+                   32 KiB    112 us    279 MB/s
+                  128 KiB    178 us    702 MB/s
+                 2048 KiB   2288 us    874 MB/s
+
+So the design does not turn on bandwidth, it turns on **how a page is laid out
+on disk**, and the same 12 MiB costs eleven times more one way than another:
+
+    per head    1344 reads x    9 KiB   434 ms    a page is P tokens, one head, one layer
+    per layer    168 reads x   72 KiB    96 ms    all 8 heads of one layer
+    whole          6 reads x 2016 KiB    39 ms    every head and layer
+
+Against a decode step of roughly 200 ms: the finest layout is 217% and
+impossible, the middle is 48% and painful, the coarse one is 19% and
+affordable. With a whole-model page the read count is fixed at the number of
+pages fetched, so *smaller* pages are then strictly better -- page 16 is 1 MiB
+a page and 6 MiB a step, at a 144 MiB index.
+
+**The two halves do not meet yet, and that is the open question.** Recall was
+measured with selection *per head*; the disk says per-head selection is
+unaffordable and the layout must choose one set of pages for every head and
+layer at once. That is InfLLM's design rather than Quest's, and it is forced
+here by a fact about disks rather than chosen. Whether recall survives a
+shared selection is the next host measurement, and nothing above answers it.
+
+Measured under QEMU, so the bandwidth column is the host's page cache and not
+this disk. Per-command overhead is the one thing an emulator does not
+flatter, and it is the column the conclusion rests on.
+
 ### A decomposition that worked, and what it proved
 
 `moral_scenarios` is 895 questions, 6.4% of MMLU, and it read 26.0% -- chance.
