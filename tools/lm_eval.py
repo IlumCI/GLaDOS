@@ -550,9 +550,44 @@ def letter_ids(hf, letters=(" A", " B", " C", " D")):
 MMLU_LABEL = "Related material"
 
 
-def run_mmlu(backend, hf, limit, dump="", forest=None, fbudget=0, fk=4):
+def mmlu_rows():
+    """Every MMLU test question, all 57 subjects.
+
+    **This rail scored `abstract_algebra` and called it MMLU, for its whole
+    life.** `find_file` answers `sorted(rglob(...))[0]`, the snapshot has one
+    directory per subject and no combined config, and `abstract_algebra` sorts
+    first -- so `parquet_rows(find_file(d, "test"))` was 100 questions of
+    undergraduate group theory. Every MMLU figure this project has recorded,
+    including the 43.3% in `design/benchmarks.md`, is that.
+
+    It is the fifth defect of the shape the evaluation-discipline section
+    already lists four of: not a wrong answer, a rail quietly answering a
+    different question from the one its name claims. The tell was available
+    from the first run and nothing printed it, which is why the composition is
+    printed now.
+    """
     d = snapshot_dir("datasets--cais--mmlu")
-    rows = parquet_rows(find_file(d, "test"))[: limit or 100]
+    files = sorted(Path(d).rglob("test-*.parquet"))
+    if not files:
+        raise SystemExit(f"no MMLU test parquet under {d}")
+    rows = []
+    for f in files:
+        rows.extend(parquet_rows(f))
+    return rows, len(files)
+
+
+def run_mmlu(backend, hf, limit, seed=0, dump="", forest=None, fbudget=0, fk=4):
+    rows, nsub = mmlu_rows()
+    total_all = len(rows)
+    # Drawn rather than sliced, for the reason `pick` gives and for a sharper
+    # one here: the rows arrive grouped by subject, so a prefix is one subject
+    # and the next -- exactly the failure this function was built out of.
+    rows, _ = pick(rows, limit if limit is not None else 100, seed)
+    subj = {}
+    for r in rows:
+        subj[r["subject"]] = subj.get(r["subject"], 0) + 1
+    print(f"  {total_all} question(s) over {nsub} subject(s); "
+          f"scoring {len(rows)} over {len(subj)}")
     lids = letter_ids(hf)
     letters = "ABCD"
     right = 0
@@ -573,10 +608,10 @@ def run_mmlu(backend, hf, limit, dump="", forest=None, fbudget=0, fk=4):
                   f"A. {r['choices'][0]}\nB. {r['choices'][1]}\n"
                   f"C. {r['choices'][2]}\nD. {r['choices'][3]}\nAnswer:")
         logits = backend.feed(hf.encode(prompt, add_special_tokens=False).ids)
-        pick = int(np.argmax([logits[j] for j in lids]))
-        hit = pick == r["answer"]
+        chose = int(np.argmax([logits[j] for j in lids]))
+        hit = chose == r["answer"]
         right += hit
-        record.append((qid(r), letters[r["answer"]], letters[pick],
+        record.append((qid(r), letters[r["answer"]], letters[chose],
                        int(bool(hit)), 1))
         if (i + 1) % 25 == 0 or i + 1 == len(rows):
             print(f"  [{i + 1}/{len(rows)}] acc {right / (i + 1):6.1%}  "
@@ -1284,7 +1319,8 @@ def main():
             sys.exit(2)
 
     if args.task == "mmlu":
-        run_mmlu(backend, hf, args.limit, dump=args.dump, forest=forest,
+        run_mmlu(backend, hf, 0 if args.all else args.limit, args.seed,
+                 dump=args.dump, forest=forest,
                  fbudget=args.forest_budget, fk=args.forest_k)
     elif args.task == "gsm8k":
         run_gsm8k(backend, hf, tok, 0 if args.all else args.limit,
