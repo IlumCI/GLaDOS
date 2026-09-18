@@ -3444,6 +3444,47 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         None => kprintln!("  usage: godel judge <bar> [examples]"),
                     }
                 }
+                // `godel lib` -- judge the next queued library candidate.
+                //
+                // The operator path this axis never had, and the omission was
+                // not cosmetic: it was reachable only from the nightly
+                // rotation, which is four ranked axes away on most nights and
+                // needs the quiet window, so `trial_lib` had never been driven
+                // end to end by anybody. It was judging and then discarding
+                // its own verdict -- no node, no head, no ledger line -- and
+                // that survived precisely because nothing could run it and
+                // look. The same argument `godel judge` made for itself.
+                "lib" => {
+                    match godel::next_lib() {
+                        None => kprintln!(
+                            "  nothing queued that has not been judged -- 'redqueen' offers more"
+                        ),
+                        Some(p) => {
+                            // Through the dispatcher, so this leaves the same
+                            // marker the night loop reads and the night does
+                            // not re-judge what an operator has just judged.
+                            let b = p.budget(0, 0);
+                            match crate::ai::with_engine(|e| godel::run(e, &b, &p)) {
+                                None => kprintln!("  {}", crate::ai::engine_refusal()),
+                                Some(Err(why)) => kprintln!("  refused: {}", why.why()),
+                                Some(Ok(c)) => {
+                                    console::set_color(if c.adopted { LTGREEN } else { YELLOW });
+                                    kprintln!(
+                                        "  {} -- fixed {} broke {} chi {}",
+                                        if c.adopted { "adopted" } else { "rejected" },
+                                        c.fixed,
+                                        c.broke,
+                                        c.mcnemar
+                                    );
+                                    console::set_color(LTGRAY);
+                                    kprintln!(
+                                        "  'godel ledger' for the line, 'godel rollback' to undo"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
                 // `godel acquire` -- whether the ledger is long enough to fit
                 // an acquisition function, and whether the fitted one beats
                 // the heuristic it would replace.
@@ -3580,10 +3621,21 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                                     (e.score * 100.0) as u32
                                 );
                             }
+                            // **Said plainly, because this line claimed an
+                            // adoption that never happened.** It read "the
+                            // best was accepted" off a field `storm` computes
+                            // and acts on nowhere: there is no `set_head`, no
+                            // ledger line and no `TRIALS` increment in the
+                            // whole function. A storm fills the archive; a
+                            // trial is what takes something up.
                             kprintln!(
-                                "         tribunal: the best was {} -- {}",
-                                if r.adopted { "accepted" } else { "rejected" },
+                                "         tribunal: the best {} the bar -- {}",
+                                if r.cleared_bar { "would clear" } else { "does not clear" },
                                 r.verdict
+                            );
+                            kprintln!(
+                                "         nothing was adopted -- the archive is what a storm \
+                                 produces; `godel now` is what adopts"
                             );
                         }
                         Some(Err(why)) => kprintln!("  no storm: {}", why.why()),

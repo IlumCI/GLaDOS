@@ -818,6 +818,33 @@ pub struct Variant {
     /// makes `head` name something that no longer reproduces -- the change
     /// meant to extend re-derivability breaking it instead.
     pub lib: Option<[u8; 32]>,
+    /// The bar this variant was judged under, when the judge axis set one.
+    ///
+    /// **It used to ride in `rule`, and that corrupted the lineage it was
+    /// meant to record.** `trial_judge` packed it as hundredths --
+    /// `(bar * 100.0) as u8` -- over a `JUDGE_GRID` of
+    /// `[1.0, 2.0, 3.0, 5.0, 8.0, 12.0]`. Rust's `as` saturates, so 3.0, 5.0,
+    /// 8.0 and 12.0 all became **255**: four of six grid points collapsed onto
+    /// one number, and 100, 200 and 255 are none of them a `Rule`, which
+    /// `harness::Rule::from_u8` maps over `0..=3`. Every judge node therefore
+    /// named a routing rule this kernel does not have, and `rollback` onto one
+    /// fails with exactly that sentence.
+    ///
+    /// A field of its own, conditional in the rendering for the reason `core`,
+    /// `deep` and `lib` are: an unconditional line re-addresses every node
+    /// that already exists. `f32` and not a second packing, because a lossy
+    /// encoding is how this went wrong the first time.
+    ///
+    /// **Every axis records it, not only the judge axis**, because the claim
+    /// it exists to support -- that a lineage says which criterion each
+    /// variant was judged under -- is false if the next adapter trial drops
+    /// it. So it is `bar_in_force()` at the moment of the trial, which is a
+    /// fact about the judgement rather than something carried from a parent.
+    /// `None` survives in exactly two places and means "did not say" rather
+    /// than "had none": a node written before this field existed, and the
+    /// incumbent `ensure_head` records, which arrived from outside the loop
+    /// and was judged under nothing.
+    pub bar: Option<f32>,
     pub born: u32,
 }
 
@@ -1001,6 +1028,15 @@ impl Variant {
         if self.deep {
             s.push_str("deep 1\n");
         }
+        // Last, and conditional, so every node written before the judge axis
+        // had a field of its own renders byte for byte as it was stored.
+        // `push_f6` is what `BAR` itself is written with, so a bar read back
+        // and re-rendered is exact and the round trip holds.
+        if let Some(b) = self.bar {
+            s.push_str("bar ");
+            push_f6(&mut s, b);
+            s.push('\n');
+        }
         s
     }
 
@@ -1063,6 +1099,7 @@ impl Variant {
             core_seen: false,
             deep: false,
             lib: None,
+            bar: None,
             born: 0,
         };
         for line in text.lines() {
@@ -1093,6 +1130,7 @@ impl Variant {
                 }
                 "deep" => v.deep = val == "1",
                 "lib" => v.lib = from_hex32(val),
+                "bar" => v.bar = val.parse().ok(),
                 "rank" => v.rank = val.parse().unwrap_or(0),
                 "epochs" => v.epochs = val.parse().unwrap_or(0),
                 "rule" => v.rule = val.parse().unwrap_or(0),
@@ -1156,6 +1194,18 @@ pub struct Certificate {
     /// J1: paired repairs, breaks, and the McNemar statistic.
     pub fixed: usize,
     pub broke: usize,
+    /// How many validation decisions the *incumbent* gets wrong, which is the
+    /// ceiling on `fixed`. **The number that makes a veto legible.**
+    ///
+    /// `paired` has always computed it and thrown it away -- it is
+    /// `fixed + neither` -- and without it the ledger records that J1 wanted
+    /// six repairs and got two, with no way to tell a candidate that
+    /// underperformed from a budget on which six repairs did not exist. The
+    /// same thing `core_room` reports for a core, on the axis that needed it
+    /// more: at 24 nightly examples this measured **15 validation decisions**
+    /// and `clean_fixes_needed()` is **6**, so J1 was asking for a repair of
+    /// forty per cent of everything held out, with nothing broken.
+    pub wrong: Option<usize>,
     pub mcnemar: f32,
     pub j1: bool,
     /// Why J1 answered as it did. A veto on an empty validation slice is not
@@ -1405,6 +1455,15 @@ fn render_certificate(c: &Certificate, seq: u32, hour: u8) -> String {
     push_u32(&mut s, c.fixed as u32);
     s.push_str(" broke=");
     push_u32(&mut s, c.broke as u32);
+    // Written only when it is known, so an axis that cannot compute a ceiling
+    // says nothing rather than claiming zero -- which reads as "the incumbent
+    // was already perfect" and is the opposite of what it would mean. Every
+    // reader here keys on the field name, so adding one is safe; the shape
+    // `axis=` and `cell=` already established.
+    if let Some(w) = c.wrong {
+        s.push_str(" wrong=");
+        push_u32(&mut s, w as u32);
+    }
     s.push_str(" chi=");
     push_f2(&mut s, c.mcnemar);
     s.push(' ');
@@ -1523,6 +1582,7 @@ fn ensure_head(e: &mut super::Engine) -> Option<[u8; 32]> {
         corpus: sysbox::hash_of(super::vocab::CORPUS),
         deep,
         lib: None,
+        bar: None,
         // What is actually installed, recorded rather than assumed -- the same
         // discipline as `policy` and `corpus`. A variant trained while a
         // machine-written core was voting is not the same object as one
@@ -1562,11 +1622,23 @@ fn ensure_head(e: &mut super::Engine) -> Option<[u8; 32]> {
 /// Marking happens here for every kind, so a proposal that faults still counts
 /// as visited -- for a core that is what stops the machine judging the same
 /// program it wrote every night for the rest of its life.
+///
+/// **And `ensure_head` happens here, once, before any of them.** It used to be
+/// each axis's own business, and two of them could not do it: `trial_skill`
+/// and `trial_lib` take no engine, so both called `head()` directly and wrote
+/// a node whose parent named whatever the last trial had recorded. Run one
+/// after an out-of-band `adapter load` or `core install` -- both live operator
+/// verbs that touch neither the head nor the ledger -- and the lineage says a
+/// skill was adopted on top of a mind that was not running, which is the exact
+/// failure `ensure_head` exists to prevent. Idempotent, so the axes that
+/// already call it are unaffected; the answer is discarded here because each
+/// of them reads `head()` for itself and now gets a true one.
 pub fn run(
     e: &mut super::Engine,
     b: &Budget,
     p: &Proposal,
 ) -> Result<Certificate, Refused> {
+    let _ = ensure_head(e);
     match p.kind {
         ProposalKind::Adapter => trial(e, b, p).map_err(Refused::Train),
         ProposalKind::Core(h) => {
@@ -1644,15 +1716,41 @@ pub fn trial_lib(h: &[u8; 32]) -> Result<Certificate, &'static str> {
     let j3 = LibFn::parse(&f.src).as_ref() == Some(&f) && f.arity >= 1 && f.arity <= 2;
     let j4 = with.lib.preamble().len() <= LIB_MAX_BYTES;
 
-    let cert = Certificate {
+    // A library function does not change the mind, so the node names the same
+    // adapter and core the head already did. What it changes is what the
+    // solver can say, and `lib` is the field for it -- the same shape
+    // `trial_skill` uses for the toolkit.
+    let parent = head();
+    let carried = parent.and_then(|p| Variant::load(&p));
+    let variant = Variant {
+        parent,
+        adapter: carried.as_ref().and_then(|v| v.adapter),
+        policy: sysbox::read_blob("/ai/agent/policy").map(|p| sha256::hash(&p)),
+        skills: carried.as_ref().and_then(|v| v.skills),
+        corpus: sysbox::hash_of(super::vocab::CORPUS),
+        deep: carried.as_ref().map(|v| v.deep).unwrap_or(false),
+        lib: Some(*h),
+        core: super::voter::installed().map(|c| c.hash),
+        core_seen: true,
+        lambda: 0.0,
+        rank: 0,
+        epochs: 0,
+        rule: super::harness::rule_in_force() as u8,
+        bar: Some(bar_in_force()),
+        born: crate::dev::rtc::now().map(|d| crate::dev::rtc::unix_seconds(&d)).unwrap_or(0),
+    };
+    let vhash = variant.hash();
+
+    let mut cert = Certificate {
         axis: "lib",
-        parent: None,
-        variant: *h,
+        parent,
+        variant: vhash,
         decisions: n,
         validation: n,
         predicted: v.after < v.before,
         fixed: v.fixed,
         broke: v.broke,
+        wrong: None,
         mcnemar: mcnemar(v.broke, v.fixed),
         j1,
         j1_why,
@@ -1671,6 +1769,34 @@ pub fn trial_lib(h: &[u8; 32]) -> Result<Certificate, &'static str> {
         test_read: test_reads(),
         test_fresh: true,
     };
+
+    // **This judged and then did nothing at all, and the consequence chained
+    // all the way to a rotation that could not move.** The certificate was
+    // built with `adopted: false` hardcoded and immutable, with no `store`, no
+    // `set_head` and no ledger line -- so a library function could pass all
+    // four judges and be discarded, and nothing recorded that it had ever been
+    // tried. No ledger line means `axis_counts()[4]` stays `(0, 0)`, so
+    // `axis_uncertainty(0, 0)` is 1.0 forever, so `lib` sorts first in
+    // `surprise_order()` whenever it has work -- and `next_lib` did not
+    // consult `/ai/godel/tried` either, so it offered the same refused
+    // candidate every night, indefinitely, in front of every other axis.
+    cert.adopted = cert.unanimous();
+
+    if cert.adopted {
+        // Into `/ai/lib`, which is what `Lib::load` reads, so the solver
+        // actually gains the function. `store` answers whether it was new;
+        // false means the same declaration is already held, which is not a
+        // failure -- `next_candidate` skips a candidate whose name the library
+        // already has, so reaching here with one is a race rather than a bug.
+        f.store();
+        variant.store();
+        set_head(&vhash);
+        ADOPTIONS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    let hour = crate::dev::rtc::now().map(|d| d.hour).unwrap_or(0);
+    let seq = TRIALS.load(Ordering::Relaxed);
+    ledger_append(&render_certificate(&cert, seq, hour));
     Ok(cert)
 }
 
@@ -1745,7 +1871,23 @@ pub struct StormReport {
     pub lit: usize,
     pub best: f32,
     pub verdict: &'static str,
-    pub adopted: bool,
+    /// Whether the best of the generation would have cleared J1.
+    ///
+    /// **`adopted`, and it adopted nothing.** The shell printed "the best was
+    /// accepted" off this field while `storm` had no `set_head`, no ledger
+    /// line and no `TRIALS` increment anywhere in it -- so an operator was
+    /// told a variant had been taken up and the machine went on running the
+    /// one it had before, with nothing in the lineage either way.
+    ///
+    /// Renamed rather than made true, and the choice is an argument rather
+    /// than the smaller edit. A storm is an *explorer*: its product is the
+    /// archive, which it really does populate, and it weighs the whole
+    /// generation against J1 alone. The nightly loop adopts on four judges in
+    /// unanimity, and adopting here would put a weaker gate in front of the
+    /// head -- which is the failure this module's own history records as "an
+    /// axis in the rotation without a judge in front of it". `godel archive`
+    /// names the elites and `trial` is how one is taken up.
+    pub cleared_bar: bool,
 }
 
 /// One generation of the whole apparatus, on one `prepare`.
@@ -1831,6 +1973,7 @@ pub fn storm(e: &mut super::Engine, b: &Budget, points: usize) -> Result<StormRe
             corpus: sysbox::hash_of(super::vocab::CORPUS),
             deep: false,
             lib: None,
+            bar: Some(bar_in_force()),
             core: super::voter::installed().map(|c| c.hash),
             core_seen: true,
             lambda: b.lr,
@@ -1855,9 +1998,14 @@ pub fn storm(e: &mut super::Engine, b: &Budget, points: usize) -> Result<StormRe
         }
     }
 
-    // The best of the generation goes in front of the tribunal, which is the
-    // same J1 the nightly loop uses and not a softer one.
-    let (verdict, adopted) = match best {
+    // The best of the generation is measured against the tribunal, which is
+    // the same J1 the nightly loop uses and not a softer one.
+    //
+    // **Measured and not adopted**, and nothing below this line changes the
+    // head. What a storm produces is the archive -- `offer` and `v.store()`
+    // above, which are real and durable -- plus one number saying whether the
+    // generation reached the standing bar. See `cleared_bar`.
+    let (verdict, cleared_bar) = match best {
         Some((_, _, fixed, broke)) => {
             let (ok, why) = judge_one(n_val, fixed, broke);
             (why, ok)
@@ -1872,7 +2020,7 @@ pub fn storm(e: &mut super::Engine, b: &Budget, points: usize) -> Result<StormRe
         lit,
         best: archive_best,
         verdict,
-        adopted,
+        cleared_bar,
     })
 }
 
@@ -1931,7 +2079,7 @@ pub fn trial(
     let predicted = train_after > train_before;
 
     // --- J1: is it better, beyond noise? --------------------------------
-    let (broke, fixed, _, _) = t.paired(incumbent.as_ref(), Some(&fit.dora), Slice::Validation);
+    let (broke, fixed, _, neither) = t.paired(incumbent.as_ref(), Some(&fit.dora), Slice::Validation);
     let chi = mcnemar(broke, fixed);
     let n_val = t.slice_size(Slice::Validation);
     let (j1, j1_why) = judge_one(n_val, fixed, broke);
@@ -1969,6 +2117,7 @@ pub fn trial(
         // `scatter` builds a classifier-only adapter, always.
         deep: false,
         lib: None,
+        bar: Some(bar_in_force()),
         // What is actually installed, recorded rather than assumed -- the same
         // discipline as `policy` and `corpus`. A variant trained while a
         // machine-written core was voting is not the same object as one
@@ -2002,6 +2151,7 @@ pub fn trial(
         predicted,
         fixed,
         broke,
+        wrong: Some(fixed + neither),
         mcnemar: chi,
         j1,
         j1_why,
@@ -2181,6 +2331,7 @@ pub fn trial_core(e: &mut super::Engine, h: &[u8; 32]) -> Result<Certificate, &'
         // the parent was, this variant still is.
         deep: parent.and_then(|p| Variant::load(&p)).map(|v| v.deep).unwrap_or(false),
         lib: None,
+        bar: Some(bar_in_force()),
         born: crate::dev::rtc::now().map(|d| crate::dev::rtc::unix_seconds(&d)).unwrap_or(0),
     };
     let vhash = variant.hash();
@@ -2204,6 +2355,7 @@ pub fn trial_core(e: &mut super::Engine, h: &[u8; 32]) -> Result<Certificate, &'
         predicted: verdict.prize >= clean_fixes_needed(),
         fixed: verdict.fixed,
         broke: verdict.broke,
+        wrong: None,
         mcnemar: verdict.chi,
         j1: verdict.j1,
         j1_why: if verdict.j1 { "beyond the noise" } else { "inside the noise" },
@@ -2432,6 +2584,7 @@ pub fn trial_deep(
         // nothing that reads the lineage may confuse it with one that did not.
         deep: true,
         lib: None,
+        bar: Some(bar_in_force()),
         core: super::voter::installed().map(|c| c.hash),
         core_seen: true,
         lambda: b.lr,
@@ -2458,6 +2611,7 @@ pub fn trial_deep(
         predicted: report.last_loss < report.first_loss,
         fixed,
         broke,
+        wrong: None,
         mcnemar: chi,
         j1,
         j1_why,
@@ -2530,6 +2684,11 @@ pub fn trial_skill(h: &[u8; 32]) -> Result<Certificate, &'static str> {
     // adapter and core the head already did. What it changes is the toolkit,
     // and `skills` is the field for it -- hooked up at last, having been
     // hardcoded `None` since the struct was written.
+    //
+    // `head()` and not `ensure_head`, because this axis takes no engine and
+    // `ensure_head` needs the adapter bytes. `run` calls it once before
+    // dispatching for exactly that reason, so the head this reads already
+    // describes the mind that is running.
     let parent = head();
     let carried = parent.and_then(|p| Variant::load(&p));
     let variant = Variant {
@@ -2540,6 +2699,7 @@ pub fn trial_skill(h: &[u8; 32]) -> Result<Certificate, &'static str> {
         corpus: sysbox::hash_of(super::vocab::CORPUS),
         deep: carried.as_ref().map(|v| v.deep).unwrap_or(false),
         lib: None,
+        bar: Some(bar_in_force()),
         core: super::voter::installed().map(|c| c.hash),
         core_seen: true,
         lambda: 0.0,
@@ -2564,6 +2724,7 @@ pub fn trial_skill(h: &[u8; 32]) -> Result<Certificate, &'static str> {
         predicted: false,
         fixed: 0,
         broke: 0,
+        wrong: None,
         mcnemar: 0.0,
         j1: v.j1,
         j1_why: v.j1_why,
@@ -2691,6 +2852,7 @@ pub fn trial_config(e: &mut super::Engine, rule: u8) -> Result<Certificate, &'st
         corpus: sysbox::hash_of(super::vocab::CORPUS),
         deep: carried.as_ref().map(|x| x.deep).unwrap_or(false),
         lib: None,
+        bar: Some(bar_in_force()),
         core: super::voter::installed().map(|c| c.hash),
         core_seen: true,
         lambda: 0.0,
@@ -2711,6 +2873,7 @@ pub fn trial_config(e: &mut super::Engine, rule: u8) -> Result<Certificate, &'st
         predicted: v.gain() > 0.0,
         fixed: v.fixed,
         broke: v.broke,
+        wrong: None,
         mcnemar: v.chi,
         j1,
         j1_why,
@@ -2848,6 +3011,25 @@ pub fn rollback(e: &mut super::Engine) -> Result<Option<[u8; 32]>, &'static str>
         None
     };
 
+    // The bar, under exactly the same rule and for exactly the same reason.
+    //
+    // Undoing a judge trial without putting its criterion back leaves the
+    // machine on a bar the node it now points at was never judged under,
+    // which is the one thing this axis exists to make visible. Conditional
+    // because a node written before the field existed says nothing about a
+    // bar, and `None` is "did not say" rather than "had none" -- restoring
+    // from it would write a bar nobody chose. Checked before anything moves,
+    // like the rule and the core, so a refusal leaves the machine as it was.
+    let bar_back = match (v.bar, pv.bar) {
+        (a, Some(b)) if a != Some(b) => {
+            if !sane_bar(b) {
+                return Err("the parent names a bar outside the range this kernel accepts");
+            }
+            Some(b)
+        }
+        _ => None,
+    };
+
     // --- change things -------------------------------------------------
 
     // The adapter first: it is the half that can still fail on bytes we have
@@ -2865,6 +3047,14 @@ pub fn rollback(e: &mut super::Engine) -> Result<Option<[u8; 32]>, &'static str>
         let cfg = super::harness::Config { lambda: super::harness::default_lambda(), rule: r };
         if !super::harness::save_config(cfg) {
             return Err("the adapter was restored but the routing rule will not save");
+        }
+    }
+    if let Some(b) = bar_back {
+        let mut text = String::new();
+        push_f6(&mut text, b);
+        text.push('\n');
+        if !sysbox::write_text(BAR, &text) {
+            return Err("the adapter was restored but the bar will not save");
         }
     }
     match want {
@@ -3452,8 +3642,21 @@ fn next_deep() -> Option<Proposal> {
 /// itself is a certificate saying nothing changed, which is true and is not
 /// worth a night.
 /// The next library candidate worth judging, if the queue holds one.
-fn next_lib() -> Option<Proposal> {
-    super::redqueen::next_candidate().map(Proposal::lib)
+///
+/// **`tried()` is the whole of the fix and its absence was the whole of the
+/// bug.** This was the one `next_*` that did not consult `/ai/godel/tried`,
+/// while `run` has always written a marker for a `Lib` proposal. So a refused
+/// candidate stayed at the head of `/ai/libcand` and was offered again on
+/// every pass: `next_candidate` skips a candidate whose *name* the library
+/// already holds, which covers an adopted one and says nothing about a
+/// rejected one. Combined with `lib` sorting first on an empty record, an
+/// unattended machine spent every night re-judging one function it had already
+/// refused.
+pub fn next_lib() -> Option<Proposal> {
+    super::redqueen::unheld_candidates()
+        .into_iter()
+        .map(Proposal::lib)
+        .find(|p| !p.tried())
 }
 
 fn next_config() -> Option<Proposal> {
@@ -3752,7 +3955,7 @@ pub fn trial_judge(e: &mut super::Engine, b: &Budget, bar: f32) -> Result<Certif
     // question: whether the bars disagree about something already decided.
     let incumbent = e.model.adapters.as_ref().and_then(|a| t.gather(a));
     let fit = t.train(b);
-    let (broke, fixed, _, _) = t.paired(incumbent.as_ref(), Some(&fit.dora), Slice::Validation);
+    let (broke, fixed, _, neither) = t.paired(incumbent.as_ref(), Some(&fit.dora), Slice::Validation);
 
     let standing = bar_in_force();
 
@@ -3800,16 +4003,26 @@ pub fn trial_judge(e: &mut super::Engine, b: &Budget, bar: f32) -> Result<Certif
         corpus: sysbox::hash_of(super::vocab::CORPUS),
         deep: carried.as_ref().map(|x| x.deep).unwrap_or(false),
         lib: None,
+        bar: Some(bar),
         core: super::voter::installed().map(|c| c.hash),
         core_seen: true,
         lambda: 0.0,
         rank: 0,
         epochs: 0,
-        // The bar rides in the node's `rule` slot as a whole number of
-        // hundredths, so a lineage records which criterion each variant was
-        // judged under. Without it, "the loop improved for a month" and "the
-        // loop lowered its bar in week two" are the same chain of hashes.
-        rule: (bar * 100.0) as u8,
+        // The rule actually in force, as every other axis records it.
+        //
+        // **This was `(bar * 100.0) as u8`**, packing the criterion into the
+        // routing rule's slot so a lineage would record which bar each variant
+        // was judged under -- a good reason with a lossy encoding under it.
+        // Rust's `as` saturates, and `JUDGE_GRID` is
+        // `[1.0, 2.0, 3.0, 5.0, 8.0, 12.0]`, so four of the six became 255 and
+        // none of 100, 200 or 255 is a `Rule`. Every judge node named a
+        // routing rule this kernel does not have, which is what `rollback`
+        // refuses in so many words. The bar has a field of its own now, and
+        // the reason that field exists is still the one written here: without
+        // it, "the loop improved for a month" and "the loop lowered its bar in
+        // week two" are the same chain of hashes.
+        rule: super::harness::rule_in_force() as u8,
         born: crate::dev::rtc::now().map(|d| crate::dev::rtc::unix_seconds(&d)).unwrap_or(0),
     };
     let vhash = variant.hash();
@@ -3823,6 +4036,7 @@ pub fn trial_judge(e: &mut super::Engine, b: &Budget, bar: f32) -> Result<Certif
         predicted: cross.anchor_gain() > 0.0,
         fixed,
         broke,
+        wrong: Some(fixed + neither),
         mcnemar: cross.chi(),
         // J1 carries the verdict itself, because on this axis the verdict is
         // one sentence and the other judges are its preconditions.
@@ -3922,6 +4136,23 @@ pub fn report_trial(b: &Budget) {
         c.parent.map(|h| short_hex(&h)).unwrap_or(String::from("the frozen model"))
     );
     kprintln!("  {} decisions, {} in validation", c.decisions, c.validation);
+    // **The line that makes a J1 veto legible**, and the one this axis wanted
+    // for as long as `core_room` has had its equivalent. Without it "wanted
+    // six repairs, got two" cannot be told from "wanted six repairs on a
+    // budget where only three were available", and those are a candidate
+    // problem and a budget problem.
+    if let Some(w) = c.wrong {
+        let need = clean_fixes_needed();
+        console::set_color(if w >= need { LTGRAY } else { LTRED });
+        kprintln!(
+            "  the incumbent gets {} of those wrong, so at most {} can be repaired, and J1 needs {}{}",
+            w,
+            w,
+            need,
+            if w >= need { "" } else { " -- this budget cannot pass J1 at all" }
+        );
+        console::set_color(LTGRAY);
+    }
     kprintln!(
         "  predicted {} from training-set gain (nothing acts on this yet)",
         if c.predicted { "a win" } else { "a loss" }
@@ -4224,6 +4455,7 @@ pub fn selftest() -> bool {
         predicted: true,
         fixed: 12,
         broke: 1,
+        wrong: Some(20),
         mcnemar: mcnemar(1, 12),
         j1: true,
         j1_why: "beyond the noise",
@@ -4343,6 +4575,7 @@ pub fn selftest() -> bool {
         core_seen: false,
         deep: false,
         lib: None,
+        bar: None,
         parent: Some(h),
         adapter: Some(sha256::hash(b"adapter")),
         policy: None,
@@ -4401,6 +4634,35 @@ pub fn selftest() -> bool {
     claim(
         "a node naming a core round-trips through its own rendering",
         back.core == Some(h) && back.core_seen && back.hash() == with_core.hash(),
+    );
+
+    // The same three questions of the `bar` field, because it is the newest
+    // conditional one and it exists to undo a lossy encoding. Every point on
+    // `JUDGE_GRID` has to survive the round trip *distinctly* -- that is the
+    // whole of what went wrong when the bar rode in the `rule` byte as
+    // hundredths, where `as` saturated four of six onto 255.
+    claim(
+        "a node written before the bar field says nothing about one",
+        old.bar.is_none() && !old.render().contains("bar "),
+    );
+    let mut bars_distinct = true;
+    let mut bars_round_trip = true;
+    for (i, a) in JUDGE_GRID.iter().enumerate() {
+        let va = Variant { bar: Some(*a), ..old.clone() };
+        let back = Variant::from_text(&va.render());
+        if back.bar != Some(*a) || back.hash() != va.hash() || va.hash() == old.hash() {
+            bars_round_trip = false;
+        }
+        for b in JUDGE_GRID.iter().skip(i + 1) {
+            if va.hash() == (Variant { bar: Some(*b), ..old.clone() }).hash() {
+                bars_distinct = false;
+            }
+        }
+    }
+    claim("every bar on the grid round-trips through its own rendering", bars_round_trip);
+    claim(
+        "and no two of them are the same node, which the packed byte made four of six",
+        bars_distinct,
     );
 
     // The property the first two recorded trials violated. They trained the

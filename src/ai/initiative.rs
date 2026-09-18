@@ -130,11 +130,42 @@ const WORKS: &[(&str, &str)] = &[
     ("clockface", "the current time"),
     ("visits", "a count of how often it has been opened"),
 ];
-/// Corpus examples per nightly trial. Small, and it is the honest tradeoff:
-/// the judges get less evidence per trial in exchange for the machine staying
-/// responsive, and the ledger accumulates across nights rather than within
-/// one.
-const GODEL_EXAMPLES: usize = 24;
+/// Corpus examples per nightly trial.
+///
+/// **This was 24, and at 24 the nightly trial could not pass J1 at all.** The
+/// reasoning written here was that the judges get less evidence per trial in
+/// exchange for the machine staying responsive, and "the ledger accumulates
+/// across nights rather than within one" -- which is true of the ledger and is
+/// not true of J1, a paired test decided inside a single trial. So what
+/// accumulated across nights was rejections.
+///
+/// Measured under QEMU on the seeded 717-example corpus, both figures from the
+/// trial report's own lines:
+///
+///     examples   validation decisions   incumbent wrong   J1 needs
+///     24         15                     5                 6
+///     96         56                     26                6
+///
+/// `clean_fixes_needed()` is six, not `MIN_FIXED`, because Yates' correction
+/// subtracts one before squaring. At 24 examples the baseline gets **five**
+/// validation decisions wrong, so five is the ceiling on `fixed` and six is
+/// the floor on passing: the judge was asking for more repairs than there were
+/// wrong answers to repair. Not a hard trial, an arithmetically impossible
+/// one, every night, for as long as the axis has existed.
+///
+/// 96 rather than a rounder number because that is where it was measured; the
+/// headroom is 26 against a need of 6, which is about four times over. The
+/// price is the prepare half, which is a forward pass per example and is *not*
+/// what `GODEL_MS` bounds: 63 s at 24 and 321 s at 96 under WHPX with
+/// SmolLM2. That is up to five minutes of held engine on a night when nobody
+/// is there, which is what `godbits::felt()` is checked for, and it is the
+/// cost of the loop being able to say yes at all.
+///
+/// The trial report prints the ceiling beside the requirement now, so a budget
+/// that cannot pass says so in one line rather than looking like a run of bad
+/// candidates. **J2 still vetoes on the curiosity goals** on both budgets
+/// measured, so this makes an adoption reachable rather than likely.
+const GODEL_EXAMPLES: usize = 96;
 /// Wall-clock ceiling on the optimiser half of a nightly trial.
 const GODEL_MS: u64 = 20_000;
 

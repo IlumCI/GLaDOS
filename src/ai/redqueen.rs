@@ -1185,13 +1185,23 @@ pub fn report(rounds: usize, s: &Solver) {
     let _ = total;
 }
 
-/// The next queued library candidate the adopted library does not hold.
+/// Every queued library candidate the adopted library does not hold, in
+/// directory order.
 ///
 /// A directory scan in the shape `godel::next_skill` uses, and for the same
 /// reason: the queue is the work list, so what to try tonight is a function
 /// of what is on disk rather than of a counter somebody has to keep in step.
-pub fn next_candidate() -> Option<[u8; 32]> {
+///
+/// **The list rather than the first of it, because "already held" is not the
+/// only reason to skip one.** `godel::next_lib` has to filter these against
+/// `/ai/godel/tried` as every other axis does, and a function answering only
+/// the head of the queue cannot be filtered -- which is exactly how a refused
+/// candidate came to be re-offered on every pass forever. Holding the name is
+/// the one reason *this* module knows about; what has already been judged is
+/// the ledger's business and not this file's.
+pub fn unheld_candidates() -> Vec<[u8; 32]> {
     let held = Lib::load();
+    let mut out = Vec::new();
     for name in crate::sysbox::children(OFFERED) {
         if name.len() != 64 {
             continue;
@@ -1214,9 +1224,9 @@ pub fn next_candidate() -> Option<[u8; 32]> {
         if held.fns.iter().any(|g| g.name == f.name) {
             continue;
         }
-        return Some(h);
+        out.push(h);
     }
-    None
+    out
 }
 
 /// Boot self-test. No model, no corpus, no network, no store beyond the
