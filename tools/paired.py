@@ -67,7 +67,112 @@ def read(path):
     return task, rows
 
 
+def read_bpb(path):
+    """chunk -> (bytes, tokens, nats). A different shape, for a different test.
+
+    The chunk id is `<corpus digest>:<token offset>`, so two runs over
+    different corpora share no keys at all and the pairing reports zero
+    overlap rather than comparing unrelated text.
+    """
+    rows, task = {}, ""
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.rstrip("\n")
+            if not line:
+                continue
+            if line.startswith("#"):
+                task = line[1:].split("\t")[0].strip()
+                continue
+            p = line.split("\t")
+            if len(p) < 4:
+                continue
+            rows[p[0]] = (int(p[1]), int(p[2]), float(p[3]))
+    if not rows:
+        raise SystemExit(f"  {path} holds no rows")
+    return task, rows
+
+
+# The two-sided 95% bar on a standard normal. Named rather than inlined for
+# the reason `MCNEMAR_95` is: a threshold nobody can find is a threshold
+# nobody can argue with.
+Z95 = 1.96
+
+
+def report_bpb(a_path, b_path):
+    """A paired t-test over per-window bits per byte.
+
+    **The binary rails throw away almost everything the model did.** GSM8K
+    reduces a 107-token answer to one bit, so the int8 cache needed all 1,319
+    questions to reach chi 3.86 against a bar of 3.84. Here every window
+    carries a real-valued log-loss over about a thousand tokens, the two arms
+    see byte-identical windows, and the difference per window is the
+    observation. That is a far more powerful test of the same change, which
+    is the entire argument for this rail.
+
+    A t-test rather than McNemar because the observation is continuous. The
+    sign count is printed beside it because it assumes nothing about the
+    shape of the differences, and the two disagreeing would be worth knowing.
+    """
+    import math
+    ta, a = read_bpb(a_path)
+    tb, b = read_bpb(b_path)
+    if ta and tb and ta != tb:
+        raise SystemExit(f"  {ta} against {tb} -- different tasks do not pair")
+    both = sorted(set(a) & set(b))
+    if not both:
+        raise SystemExit("  the two runs share no windows -- different corpora?")
+
+    na = sum(a[c][2] for c in both)
+    nb = sum(b[c][2] for c in both)
+    nbytes = sum(a[c][0] for c in both)
+    # The bytes must agree window by window, or the two runs did not read the
+    # same text and no amount of arithmetic afterwards fixes it.
+    bad = [c for c in both if a[c][0] != b[c][0]]
+    if bad:
+        raise SystemExit(f"  {len(bad)} window(s) differ in byte count "
+                         f"-- these are not the same windows")
+
+    d = [(b[c][2] - a[c][2]) / a[c][0] / math.log(2.0) for c in both]
+    n = len(d)
+    mean = sum(d) / n
+    var = sum((x - mean) ** 2 for x in d) / (n - 1) if n > 1 else 0.0
+    se = math.sqrt(var / n) if var > 0 else 0.0
+    # **Zero variance is the strongest evidence there is, and the obvious
+    # guard turns it into the weakest.** `mean / se if se > 0 else 0.0` reads
+    # a difference that is identical in every single window as no difference
+    # at all -- which is exactly backwards, and is the one case a constant
+    # offset in the arithmetic would produce. The selftest shifts every
+    # window by one bit per byte and requires this to be certain.
+    if se > 0:
+        t = mean / se
+    elif mean == 0.0:
+        t = 0.0
+    else:
+        t = math.copysign(math.inf, mean)
+    up = sum(1 for x in d if x > 0)
+    down = sum(1 for x in d if x < 0)
+
+    print(f"[paired] {ta or 'bpb'}, {n} window(s) in common "
+          f"({len(a)} and {len(b)} in the two runs), {nbytes} byte(s)")
+    print(f"  A {a_path}   {na / nbytes / math.log(2.0):8.5f} bpb")
+    print(f"  B {b_path}   {nb / nbytes / math.log(2.0):8.5f} bpb")
+    print(f"  B - A per window: mean {mean:+.5f}  se {se:.5f}  t {t:+.2f} "
+          f"against {Z95} at 95%")
+    print(f"  B worse on {up} window(s), better on {down}")
+    if abs(t) < Z95:
+        print("  -> the difference is inside the noise")
+    else:
+        print(f"  -> B is {'worse' if mean > 0 else 'better'} than A "
+              f"beyond the noise")
+    return t
+
+
 def report(a_path, b_path, show=0):
+    # A continuous rail needs a continuous test; dispatching on the header
+    # means a caller never has to know which they have.
+    with open(a_path, encoding="utf-8") as f:
+        if f.readline().startswith("# bpb"):
+            return report_bpb(a_path, b_path)
     ta, a = read(a_path)
     tb, b = read(b_path)
     if ta and tb and ta != tb:
@@ -109,6 +214,26 @@ def report(a_path, b_path, show=0):
     return chi
 
 
+def not_paired(path):
+    """True when pairing `path` against a different corpus is refused.
+
+    The chunk id carries the corpus digest, so this is the guard that stops
+    a bpb figure being compared against one taken over text that has since
+    changed -- which is the "test set that moved" failure, arriving through
+    the comparison rather than through the rail.
+    """
+    import tempfile
+    from pathlib import Path
+    other = Path(tempfile.mkdtemp()) / "other.tsv"
+    body = open(path, encoding="utf-8").read().replace("d:", "other:")
+    other.write_text(body, encoding="utf-8")
+    try:
+        report_bpb(path, str(other))
+    except SystemExit:
+        return True
+    return False
+
+
 def selftest():
     ok = True
 
@@ -128,8 +253,32 @@ def selftest():
     claim("the statistic does not care which side won",
           mcnemar(3, 12) == mcnemar(12, 3))
 
+    # The continuous half. A constant shift of one bit per byte over 64
+    # windows has no variance at all, so it must read as certain; identical
+    # runs must read as nothing.
     import tempfile
     from pathlib import Path
+    dd = Path(tempfile.mkdtemp())
+    LN2 = 0.6931471805599453
+
+    def bpb_file(name, shift):
+        """64 windows of 1000 bytes, `shift` bits per byte apart."""
+        rows = ["# bpb\tchunk\tbytes\ttokens\tnats"]
+        for i in range(64):
+            nats = 500.0 + i + shift * 1000.0 * LN2
+            rows.append("d:%d\t1000\t300\t%.6f" % (i, nats))
+        (dd / name).write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+    bpb_file("x.tsv", 0.0)
+    bpb_file("y.tsv", 1.0)
+    bpb_file("z.tsv", 0.0)
+    claim("identical runs are inside the noise",
+          abs(report_bpb(str(dd / "x.tsv"), str(dd / "z.tsv"))) < Z95)
+    t = report_bpb(str(dd / "x.tsv"), str(dd / "y.tsv"))
+    claim("a constant one-bit-per-byte shift is not", abs(t) > Z95)
+    claim("and a run against a different corpus refuses to pair",
+          not_paired(str(dd / "x.tsv")))
+
     d = Path(tempfile.mkdtemp())
     (d / "a.tsv").write_text(
         "# gsm8k\tqid\twant\tgot\thit\tntok\n"

@@ -520,6 +520,55 @@ class Dense:
         x = x.to(self.wcls.device)
         return (self._rms(x, self.rms_final) @ self.wcls.T).to(self.acc)
 
+    @torch.inference_mode()
+    def score(self, ids, block=64):
+        """`-log p(ids[t] | ids[:t])` summed over `t = 1..T-1`, in nats.
+
+        Returns `(nats, predicted)`. The first token is not predicted by
+        anything, so it contributes nothing and is not counted; a caller
+        dividing by the wrong denominator is the easiest way to get a
+        bits-per-byte figure that is quietly 0.1% off.
+
+        **The whole point is that this generates nothing.** One forward pass
+        over a window answers every position in it, where a task like GSM8K
+        pays a forward pass per token produced. That is what makes a dense
+        rail cheap enough to iterate against.
+
+        **Logits are computed a block of positions at a time, because all of
+        them at once do not fit.** A 1024-token window against this
+        vocabulary is 1024 x 151,936 f32, which is 622 MB of logits on a card
+        holding 4 GB with 1.2 GB of weights already resident -- and the
+        gradient-free path still has to materialise it. Sixty-four rows is
+        39 MB. Only the target's log-probability is kept, so nothing else
+        survives the block.
+
+        No latent block here, deliberately. `latent_k` refines the *last*
+        hidden state before a token is generated, which has no meaning at a
+        position whose next token is already known and being scored.
+        """
+        t = torch.as_tensor(list(ids), dtype=torch.long).view(1, -1)
+        B, T = t.shape
+        if T < 2:
+            return 0.0, 0
+        if self.pos + T > self.max_len:
+            raise ValueError(f"{self.pos + T} tokens into a {self.max_len} context")
+        dev = self.kc[0].device
+        self.left[:B] = 0
+        x = self.embed[t.reshape(-1).to(self.embed.device)].view(B, T, -1).to(dev)
+        x = self._body(x, self.pos, self._mask(self.pos, T, self.pos + T, B, dev),
+                       commit=True)
+        self.pos += T
+
+        tgt = t[0, 1:].to(self.wcls.device)
+        total = 0.0
+        for i in range(0, T - 1, block):
+            j = min(i + block, T - 1)
+            lg = self._logits(x[0, i:j, :]).float()
+            total += float(torch.nn.functional.cross_entropy(
+                lg, tgt[i:j], reduction="sum"))
+            del lg
+        return total, T - 1
+
     # --- what callers use ---------------------------------------------
 
     @torch.inference_mode()

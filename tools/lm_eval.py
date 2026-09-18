@@ -1,7 +1,14 @@
 #!/usr/bin/env python3
 """Host-side measurement rails for the resident checkpoints.
 
-Four tasks, one tool, two backends:
+Five tasks, one tool, two backends:
+
+  bpb    held-out bits per byte over a corpus pinned by content hash, which
+         defaults to this kernel's own source. Dense: every token is an
+         observation rather than one bit per question, so it resolves a
+         change the binary rails need thousands of items to see. One forward
+         pass per window and no generation. Read the note above `corpus_blob`
+         before quoting one against a different checkpoint.
 
   mmlu   multiple choice, scored by comparing the logprob of the four letter
          continuations after "Answer:" -- one prefill per question, no
@@ -974,11 +981,147 @@ def run_route(backend, hf, tok, alphabet, limit, shots=0):
     return right / len(test)
 
 
+# --- the compression rail ---------------------------------------------------
+#
+# **Every rail here is coarse, and that is the thing that slows the work
+# down.** GSM8K needed all 1,319 questions to resolve the int8 cache at chi
+# 3.86 against a bar of 3.84. Retrieval on MMLU moved 39 of 100 answers and
+# netted one. The latent sweep read 34/38/32/42/34 at n=50, which is noise
+# against a standard error of 7. In each case the machine plainly did
+# something and the instrument could not say what.
+#
+# Held-out log-loss is the dense alternative: every token is an observation
+# rather than one bit per question, it needs one forward pass and no
+# generation, and it cannot leak an answer key because there is no answer.
+# Huang et al. (COLM 2024) measured bits-per-character against twelve
+# benchmarks over 31 base models and report about -0.93, and -0.92 against
+# GSM8K specifically.
+#
+# **The caveat that applies to this checkpoint in particular.** That paper
+# excluded the Qwen series from its maths fit as outliers, inferring GSM8K
+# and MATH training-data exposure. Qwen3-0.6B is what runs here. So the
+# published correlation is evidence that the rail is worth having and is not
+# evidence about how it behaves on a contaminated model, and the way to
+# settle that is to check whether this rail agrees with GSM8K on a change
+# both can see. `--kv8` is the first such change.
+#
+# **Bits per byte and never bits per token.** A token is a property of the
+# tokenizer, so a per-token figure cannot compare two checkpoints with
+# different vocabularies -- and comparing checkpoints is most of why a rail
+# exists. Bytes are a property of the text.
+
+# What a corpus directory is walked for.
+BPB_GLOB = "*.rs"
+
+
+def corpus_blob(path, pattern=BPB_GLOB):
+    """The exact bytes to be scored, and their content address.
+
+    **A rail whose corpus can move is the "test set that moved" failure in a
+    new costume**, which `CLAUDE.md` records as one of the three ways
+    measurement was got wrong here. `src/` is under active development, so
+    two runs a day apart would score different text and the difference would
+    be reported as a change in the model. The hash is printed on every run
+    and `paired.py` refuses to compare two runs that do not share it.
+
+    Files are joined in sorted order with a single newline and no path
+    headers. A header would be a thing the model can learn to predict cheaply
+    and would flatter the figure.
+    """
+    import hashlib
+    p = Path(path)
+    files = [p] if p.is_file() else sorted(p.rglob(pattern))
+    if not files:
+        raise SystemExit(f"  no {pattern} under {path}")
+    blob = b"\n".join(f.read_bytes() for f in files)
+    return blob, hashlib.sha256(blob).hexdigest()[:16], len(files)
+
+
+def byte_offsets(text):
+    """Character index to byte index, so predicted *bytes* can be exact.
+
+    The tokenizer answers character offsets and the rail is denominated in
+    bytes. Those agree on ASCII and this corpus is 244 lines short of being
+    ASCII, so the fast path is taken where it holds and the map is built
+    where it does not.
+    """
+    if text.isascii():
+        return None
+    out = np.empty(len(text) + 1, dtype=np.int64)
+    out[0] = 0
+    np.cumsum([len(c.encode("utf-8")) for c in text], out=out[1:])
+    return out
+
+
+def run_bpb(backend, hf, corpus, window=1024, limit=0, seed=0, dump=""):
+    blob, digest, nfiles = corpus_blob(corpus)
+    text = blob.decode("utf-8", "replace")
+    bmap = byte_offsets(text)
+    enc = hf.encode(text, add_special_tokens=False)
+    ids, offs = enc.ids, enc.offsets
+
+    room = getattr(backend, "max_len", None)
+    if room and window > room:
+        print(f"  a {window}-token window into a {room}-token context "
+              f"-- raise --seq or lower --window")
+        return 0.0
+
+    # Whole windows only. A ragged tail would be a shorter window with less
+    # context per token, which reads as the model doing worse at the end of
+    # the corpus.
+    starts = list(range(0, len(ids) - window + 1, window))
+    total_windows = len(starts)
+    if limit and limit < len(starts):
+        # Drawn rather than sliced, for the reason `pick` gives: a prefix of
+        # this corpus is `src/acpi/` and nothing else, so a prefix would
+        # measure how well the model does at AML interpreters.
+        starts = sorted(random.Random(seed).sample(starts, limit))
+
+    nats = 0.0
+    nbytes = 0
+    ntok = 0
+    record = []
+    t0 = time.time()
+    for n, s in enumerate(starts):
+        backend.reset()
+        chunk = ids[s:s + window]
+        got, pred = backend.score(chunk)
+        # Token `s` is context and is predicted by nothing, so the bytes it
+        # covers are not on the bill. Everything from the start of token
+        # `s+1` to the end of the last token is.
+        c0, c1 = offs[s + 1][0], offs[s + window - 1][1]
+        b = (int(bmap[c1] - bmap[c0]) if bmap is not None else c1 - c0)
+        nats += got
+        nbytes += b
+        ntok += pred
+        record.append((f"{digest}:{s}", b, pred, f"{got:.6f}"))
+        if (n + 1) % 50 == 0 or n + 1 == len(starts):
+            print(f"  [{n + 1}/{len(starts)}] bpb {nats / nbytes / LN2:6.4f}  "
+                  f"({(time.time() - t0) / (n + 1):.2f}s/window)")
+
+    bpb = nats / nbytes / LN2
+    print(f"  corpus {corpus} {digest}: {nfiles} file(s), {len(blob)} byte(s), "
+          f"{len(ids)} token(s), {len(ids) / len(blob):.3f} tok/byte")
+    print(f"  bpb ({window}-token windows, {len(starts)}/{total_windows} "
+          f"scored, {nbytes} byte(s) predicted): {bpb:6.4f}")
+    if dump:
+        with open(dump, "w", encoding="utf-8", newline="\n") as f:
+            f.write("# bpb\tchunk\tbytes\ttokens\tnats\n")
+            for r in record:
+                f.write("\t".join(str(x) for x in r) + "\n")
+        print(f"  per-window outcomes -> {dump}")
+    return bpb
+
+
+LN2 = float(np.log(2.0))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("model")
     ap.add_argument("tokenizer")
-    ap.add_argument("--task", default="", choices=["", "mmlu", "gsm8k", "niah", "route"])
+    ap.add_argument("--task", default="",
+                    choices=["", "mmlu", "gsm8k", "niah", "route", "bpb"])
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--shots", type=int, default=0,
                     help="few-shot examples; gsm8k used a hardcoded 5 and "
@@ -1025,6 +1168,13 @@ def main():
                     help="run the dense path through reference.py itself -- "
                          "correct, and about 40x slower. For diagnosing a "
                          "disagreement, not for producing a figure.")
+    ap.add_argument("--corpus", default="src",
+                    help="what the bpb rail scores. Pinned by content hash, "
+                         "because a corpus that moves is a test set that "
+                         "moves. Default is the kernel's own source, which "
+                         "postdates every checkpoint here by a year.")
+    ap.add_argument("--window", type=int, default=1024,
+                    help="tokens per scored window on the bpb rail")
     ap.add_argument("--hf-tokenizer", default="")
     ap.add_argument("--dump", default="",
                     help="write one line per question -- qid, gold, answer, "
@@ -1060,7 +1210,7 @@ def main():
     # it is large enough to hold an answer. The two numbers have to move
     # together, so they are worked out together.
     max_len = {"mmlu": 2048, "gsm8k": 2048, "niah": max(args.contexts) + 64,
-               "route": 2048}[args.task]
+               "route": 2048, "bpb": args.window + 8}[args.task]
     # The KV cache is `layers * batch * max_len * kv_dim * 2`, so a batch
     # multiplies it: 2048 at batch 16 is 7.5 GB on this checkpoint and 1152
     # is 4.2. The 5-shot prompt is 800 tokens at worst and the budget is 256,
@@ -1147,6 +1297,9 @@ def main():
         run_niah(backend, hf, tok, args.contexts, args.limit, args.max_new)
     elif args.task == "route":
         run_route(backend, hf, tok, build_alphabet(tok), args.limit)
+    elif args.task == "bpb":
+        run_bpb(backend, hf, args.corpus, args.window,
+                0 if args.all else (args.limit or 256), args.seed, args.dump)
 
 
 if __name__ == "__main__":
