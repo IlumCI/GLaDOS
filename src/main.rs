@@ -1249,45 +1249,80 @@ fn install_paging(boot: &BootInfo, frames: &mut mem::frame::EarlyFrames) {
 /// cannot happen here -- `percpu::arm` runs at `init_smp`, one step before the
 /// selftests -- and is matched explicitly so that if the boot order ever
 /// changes, this reads as the open question it is rather than as success.
-/// Note the  rather than a closure: a check has to be **re-runnable**,
-/// because re-running it is how a repair is judged. Every section here
-/// captures nothing, so this costs nothing and buys the whole repair loop.
-fn section(name: &'static str, need: boot_report::Need, f: fn()) {
+///
+/// Note the `fn() -> bool` rather than a closure: a check has to be
+/// **re-runnable**, because re-running it is how a repair is judged. Every
+/// section here captures nothing, so this costs nothing and buys the whole
+/// repair loop.
+///
+/// ### A fault is only half of failing
+///
+/// This took `fn()` for as long as it had existed, and every subsystem wrapped
+/// in it *answers a verdict*: `sysbox::selftest`, `crypto::selftest`,
+/// `rng::selftest`, `fmt`, `usbhid` and `code` all return `bool`, and every
+/// call site here discarded it -- `|| { sysbox::selftest(); }`, literally. So
+/// the boot and repair loop was a **liveness oracle wearing a correctness
+/// one's name**: a change that made ChaCha20 return the wrong bytes without
+/// faulting was not recorded in `boot_report`, not counted by `outstanding()`,
+/// never offered to `repair`, and did not stop the boot *even when `Vital`*.
+///
+/// The two failures are recorded identically from here on. They are not the
+/// same thing and the report says which: a fault is a subsystem that is
+/// **gone**, a `false` is one that is **wrong**, and wrong is the more
+/// dangerous of the two everywhere a wrong answer still looks like an answer.
+fn section(name: &'static str, need: boot_report::Need, f: fn() -> bool) {
     use cpu::recover::Caught;
     // Recorded whether it passes or not, because a repair already applied to
     // this subsystem has to be re-testable: passing with a repair holding it up
     // and passing because the bug was fixed look the same from anywhere else.
     boot_report::note_check(name, f);
-    match cpu::recover::guarded(f) {
-        Caught::Ran => {}
-        Caught::Unguarded(_) => {
-            console::set_color(LTRED);
-            kprintln!("[selftest] {} ran with no landing pad, so it proved nothing", name);
-            console::set_color(LTGRAY_IDX);
+
+    // The verdict comes back through a local because `guarded` takes a closure
+    // that answers nothing, and it has to stay that way -- on the path where
+    // the closure never finished there is no value for the longjmp to produce.
+    // So `false` is what a fault leaves behind, which is the right default and
+    // is never what gets reported: the fault arm names the fault instead.
+    let mut agreed = false;
+    let caught = cpu::recover::guarded(|| agreed = f());
+
+    if let Caught::Unguarded(_) = caught {
+        console::set_color(LTRED);
+        kprintln!("[selftest] {} ran with no landing pad, so a fault would have been fatal", name);
+        console::set_color(LTGRAY_IDX);
+    }
+
+    // `Unguarded` is not a pass and not a failure -- but the closure *ran*
+    // either way, so whatever verdict it reached still stands. What was not
+    // proven there is only that a fault would have been caught.
+    let broke = match caught {
+        Caught::Faulted(why) => Some((why, cpu::recover::site().unwrap_or(0))),
+        // No faulting instruction to point at, so no site. `recover::take_panic`
+        // zeroes `LAST_RIP` on the same argument.
+        _ if !agreed => Some(("failed its own checks", 0)),
+        _ => None,
+    };
+    let Some((why, rip)) = broke else { return };
+
+    boot_report::record(name, need, why, rip, f);
+    console::set_color(LTRED);
+    kprintln!(
+        "[selftest] {} {} -- {}",
+        name,
+        why,
+        match need {
+            boot_report::Need::Vital => "and this machine needs it",
+            boot_report::Need::Optional => "this subsystem is unavailable",
         }
-        Caught::Faulted(why) => {
-            boot_report::record(name, need, why, f);
-            console::set_color(LTRED);
-            kprintln!(
-                "[selftest] {} {} -- {}",
-                name,
-                why,
-                match need {
-                    boot_report::Need::Vital => "and this machine needs it",
-                    boot_report::Need::Optional => "this subsystem is unavailable",
-                }
-            );
-            console::set_color(LTGRAY_IDX);
-            if need == boot_report::Need::Vital {
-                // Nothing after this line can be trusted, so the honest thing
-                // is to stop here rather than to boot something that will fail
-                // somewhere less legible.
-                boot_report::report();
-                console::set_color(LTRED);
-                kprintln!("\n[boot] {} is vital, so this machine will not continue.", name);
-                halt();
-            }
-        }
+    );
+    console::set_color(LTGRAY_IDX);
+    if need == boot_report::Need::Vital {
+        // Nothing after this line can be trusted, so the honest thing is to
+        // stop here rather than to boot something that will fail somewhere
+        // less legible.
+        boot_report::report();
+        console::set_color(LTRED);
+        kprintln!("\n[boot] {} is vital, so this machine will not continue.", name);
+        halt();
     }
 }
 
@@ -1421,7 +1456,7 @@ fn selftest(acpi_ref: &Option<acpi::Acpi>) {
     console::set_color(LTGREEN);
     kprintln!("\n[selftest] sysbox namespace:");
     console::set_color(LTGRAY_IDX);
-    section("sysbox", boot_report::Need::Vital, || { sysbox::selftest(); });
+    section("sysbox", boot_report::Need::Vital, sysbox::selftest);
 
     // The RFC vectors, at every boot. 25 ms, and it is the only thing standing
     // between a broken field arithmetic and a TLS handshake that fails with
@@ -1430,7 +1465,7 @@ fn selftest(acpi_ref: &Option<acpi::Acpi>) {
     // Vital: a cipher that is quietly wrong produces output that works
     // perfectly and is not secure, which is the failure `crypto` opens by
     // warning about. Absent is safer than subtly broken.
-    section("crypto", boot_report::Need::Vital, || { crypto::selftest(); });
+    section("crypto", boot_report::Need::Vital, crypto::selftest);
 
     // Straight after the ciphers, and deliberately so: the generator is a
     // construction over the ChaCha20 checked one line above, so its claims
@@ -1438,10 +1473,14 @@ fn selftest(acpi_ref: &Option<acpi::Acpi>) {
     console::set_color(LTGREEN);
     kprintln!("\n[selftest] random:");
     console::set_color(LTGRAY_IDX);
-    section("rng", boot_report::Need::Vital, || if !rng::selftest() {
-        console::set_color(LTRED);
-        kprintln!("  FAIL -- key material would look fine and be predictable");
-        console::set_color(LTGRAY_IDX);
+    section("rng", boot_report::Need::Vital, || {
+        let ok = rng::selftest();
+        if !ok {
+            console::set_color(LTRED);
+            kprintln!("  FAIL -- key material would look fine and be predictable");
+            console::set_color(LTGRAY_IDX);
+        }
+        ok
     });
 
     if json::selftest() {
@@ -1484,19 +1523,31 @@ fn selftest(acpi_ref: &Option<acpi::Acpi>) {
     // **The one that has actually faulted on real hardware.** Optional by
     // any reading: nothing downstream needs a temperature, and the first
     // bare-metal boot lost the entire machine to it.
+    // **This one answers `true` unconditionally, and that is the honest
+    // verdict rather than a leftover.** What this section can observe is
+    // whether reading the registers takes the machine down -- which is exactly
+    // the GF63's bug and exactly what `Caught::Faulted` reports. Every claim
+    // `dev::power` can make about a *value* without hardware is already `diag
+    // power`, so a verdict here would be that suite run twice, printed into
+    // the boot log, and re-run on every repair judgement.
     section("power", boot_report::Need::Optional, || {
         dev::power::probe();
         kprintln!("
 [power]");
         dev::power::report();
+        true
     });
 
     kprintln!("
 [selftest] file formats:");
-    section("fmt", boot_report::Need::Optional, || if !fmt::selftest() {
-        console::set_color(LTRED);
-        kprintln!("[selftest] file type handling is unsound");
-        console::set_color(LTGRAY_IDX);
+    section("fmt", boot_report::Need::Optional, || {
+        let ok = fmt::selftest();
+        if !ok {
+            console::set_color(LTRED);
+            kprintln!("[selftest] file type handling is unsound");
+            console::set_color(LTGRAY_IDX);
+        }
+        ok
     });
 
     kprintln!("
@@ -1517,10 +1568,14 @@ fn selftest(acpi_ref: &Option<acpi::Acpi>) {
 
     kprintln!("
 [selftest] usb input:");
-    section("usbhid", boot_report::Need::Optional, || if !dev::usbhid::selftest() {
-        console::set_color(LTRED);
-        kprintln!("[selftest] a USB keyboard would type the wrong characters");
-        console::set_color(LTGRAY_IDX);
+    section("usbhid", boot_report::Need::Optional, || {
+        let ok = dev::usbhid::selftest();
+        if !ok {
+            console::set_color(LTRED);
+            kprintln!("[selftest] a USB keyboard would type the wrong characters");
+            console::set_color(LTGRAY_IDX);
+        }
+        ok
     });
 
     kprintln!("
@@ -1558,10 +1613,14 @@ fn selftest(acpi_ref: &Option<acpi::Acpi>) {
 
     kprintln!("
 [selftest] generated code:");
-    section("code", boot_report::Need::Optional, || if !cpu::code::selftest() {
-        console::set_color(LTRED);
-        kprintln!("[selftest] the code substrate is not sound -- do not generate any");
-        console::set_color(LTGRAY_IDX);
+    section("code", boot_report::Need::Optional, || {
+        let ok = cpu::code::selftest();
+        if !ok {
+            console::set_color(LTRED);
+            kprintln!("[selftest] the code substrate is not sound -- do not generate any");
+            console::set_color(LTGRAY_IDX);
+        }
+        ok
     });
 
     // The deliberate null dereference now lives behind the shell's `fault`

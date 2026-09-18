@@ -344,18 +344,27 @@ pub fn offered(subsystem: &str) -> impl Iterator<Item = &'static Action> + '_ {
 /// Guarded, because the whole reason it is here is that it faulted once. The
 /// panic window is opened for the same reason it is open during the boot
 /// selftests: an `assert!` is how most of these fail.
+///
+/// **It asks two things and used to ask one.** `matches!(.., Caught::Ran)`
+/// answers whether the check *finished*, which is the question a fault poses
+/// and not the question a repair does: an action that leaves a subsystem alive
+/// and answering wrongly would have been adopted, marked as the repair that
+/// worked, and written to the boot volume for every boot afterwards. So the
+/// check has to run **and** agree, and `false` without a fault is refused the
+/// same way a fault is.
 fn judge(f: &Failure) -> bool {
     // Saved and restored rather than closed, because this is callable from
     // inside a selftest -- and a judge that closed the window on its way out
     // would silently take panic recovery away from every check after it.
     let was = crate::cpu::recover::in_selftest();
     crate::cpu::recover::selftest_window(true);
-    let verdict = matches!(
-        crate::cpu::recover::guarded(f.retry),
+    let mut agreed = false;
+    let ran = matches!(
+        crate::cpu::recover::guarded(|| agreed = (f.retry)()),
         crate::cpu::recover::Caught::Ran
     );
     crate::cpu::recover::selftest_window(was);
-    verdict
+    ran && agreed
 }
 
 /// What happened to one subsystem.
@@ -592,7 +601,7 @@ pub fn attempt_all() {
 /// The name is deliberately not one in `ACTIONS`, so the only action offered
 /// for it is the universal one -- which is what makes the judge claims below
 /// about the judge rather than about `skip-hwp`.
-fn synthetic(retry: fn()) -> Failure {
+fn synthetic(retry: fn() -> bool) -> Failure {
     Failure {
         name: "nothing-by-this-name",
         need: crate::boot_report::Need::Optional,
@@ -603,10 +612,19 @@ fn synthetic(retry: fn()) -> Failure {
     }
 }
 
-fn faults() {
+fn faults() -> bool {
     unsafe { core::ptr::read_volatile(0x0 as *const u64) };
+    true
 }
-fn passes() {}
+fn passes() -> bool {
+    true
+}
+/// Runs to the end and answers no. The third outcome, and the one the judge
+/// could not see at all until `section` learned to carry a verdict: a
+/// subsystem that is alive and wrong rather than gone.
+fn wrong() -> bool {
+    false
+}
 
 /// An address inside a function whose symbol contains `part`, or 0.
 ///
@@ -692,6 +710,16 @@ pub fn selftest() -> bool {
         &mut ok,
         !judge(&synthetic(faults)),
         "and one that still faults is not",
+    );
+    // **The claim the rest of this loop was built without.** For as long as
+    // `judge` asked only `Caught::Ran`, a repair that left a subsystem alive
+    // and answering wrongly was adopted, recorded as the repair that worked,
+    // and persisted to the boot volume -- indistinguishable from one that
+    // fixed the bug. Running to the end is not the same as being right.
+    claim(
+        &mut ok,
+        !judge(&synthetic(wrong)),
+        "and one that runs to the end and answers no is not either",
     );
 
     // The window is the panic handler's gate, so a judge that left it open

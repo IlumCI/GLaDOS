@@ -60,12 +60,20 @@ pub struct Failure {
     /// thing that can say so, and it is resolved to a function name at print
     /// time rather than stored.
     pub rip: u64,
-    /// The check itself, so it can be run again.
+    /// The check itself, so it can be run again, and what it answered.
     ///
     /// **A failure you cannot re-run is a failure you cannot repair**, because
     /// re-running it is the only judge a repair has. This is why `section`
-    /// takes a `fn()` rather than a closure.
-    pub retry: fn(),
+    /// takes a `fn() -> bool` rather than a closure.
+    ///
+    /// It answers a `bool` because not surviving is only half of failing. Every
+    /// subsystem's selftest already computed a verdict and every call site
+    /// discarded it, so a check that returns `false` without faulting -- a
+    /// cipher answering the wrong bytes, a tokenizer off by one piece -- was
+    /// not recorded here, not counted by `outstanding()`, never offered to
+    /// `repair`, and did not stop the boot even when `Vital`. The loop was a
+    /// liveness oracle wearing a correctness one's name.
+    pub retry: fn() -> bool,
     /// Set once something fixed it. The subsystem stays listed, because "was
     /// broken and is now repaired" is a different fact from "never broke" and
     /// an operator is owed both.
@@ -77,8 +85,16 @@ const SLOTS: usize = 16;
 static FAILURES: Racy<[Option<Failure>; SLOTS]> = Racy::new([None; SLOTS]);
 static OVERFLOW: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
-pub fn record(name: &'static str, need: Need, why: &'static str, retry: fn()) {
-    let rip = crate::cpu::recover::site().unwrap_or(0);
+/// Record a broken subsystem. `rip` is where the fault was, or zero when there
+/// was no fault to point at.
+///
+/// **Taken as an argument rather than read from `recover::site()` here.**
+/// `LAST_RIP` is a global that outlives the fault that set it, so a check
+/// answering `false` without faulting would be filed at whatever address broke
+/// last -- the "report names the wrong subsystem" failure the `rip` field
+/// exists to prevent, arriving from the other side. `recover::take_panic`
+/// clears it for exactly the same reason.
+pub fn record(name: &'static str, need: Need, why: &'static str, rip: u64, retry: fn() -> bool) {
     let slots = unsafe { FAILURES.get() };
     for s in slots.iter_mut() {
         if s.is_none() {
@@ -103,9 +119,9 @@ pub fn failures() -> impl Iterator<Item = Failure> {
 /// is passing because somebody fixed the bug look identical from here, and the
 /// only way to tell them apart is to take the repair away and run the check
 /// again -- which needs the check, which only the failures were keeping.
-static CHECKS: Racy<[Option<(&'static str, fn())>; SLOTS]> = Racy::new([None; SLOTS]);
+static CHECKS: Racy<[Option<(&'static str, fn() -> bool)>; SLOTS]> = Racy::new([None; SLOTS]);
 
-pub fn note_check(name: &'static str, f: fn()) {
+pub fn note_check(name: &'static str, f: fn() -> bool) {
     let slots = unsafe { CHECKS.get() };
     for s in slots.iter_mut() {
         if s.is_none() {
@@ -116,7 +132,7 @@ pub fn note_check(name: &'static str, f: fn()) {
 }
 
 /// The check a subsystem passed or failed, so it can be run a second time.
-pub fn check_for(name: &str) -> Option<fn()> {
+pub fn check_for(name: &str) -> Option<fn() -> bool> {
     unsafe { CHECKS.get() }.iter().flatten().find(|(n, _)| *n == name).map(|(_, f)| *f)
 }
 
