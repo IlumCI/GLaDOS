@@ -59,6 +59,12 @@ jobs:
       - name: Build
         run: cargo build --release --locked
 
+      # **The gate.** Between the build and the signature, so a failure here
+      # means nothing is signed, nothing is published, and no machine in the
+      # field is told about this image. See .github/actions/verify-boot.
+      - name: Verify it boots and passes every suite
+        uses: ./.github/actions/verify-boot
+
       - name: The tag and Cargo.toml must agree
         if: startsWith(github.ref, 'refs/tags/')
         run: |

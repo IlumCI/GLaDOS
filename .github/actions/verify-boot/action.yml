@@ -1,0 +1,165 @@
+name: Verify the built image
+description: >
+  Boot the image this job just built under QEMU with KVM, run every diag suite,
+  and fail unless the machine came up clean and was still alive afterwards.
+
+# **Green used to mean `cargo build --release --locked` succeeded.** That was
+# the whole gate on an artifact this repository signs with a key every machine
+# in the field trusts. A kernel that compiles and then triple-faults on the
+# first page-table walk is green; so is one whose ChaCha20 returns the wrong
+# bytes.
+#
+# One composite action rather than a copy in each workflow, for the reason
+# `theme::chrome` is one formula: two definitions of "verified" would agree on
+# the day they were written and then drift, and the one that drifts is the one
+# nobody is reading.
+#
+# It runs between the build and the signature on purpose. A failure here means
+# no `sign` step runs, so nothing is signed, so nothing is published, so no
+# machine is told about it. That ordering is the gate.
+
+inputs:
+  timeout:
+    description: Seconds to wait for the whole run
+    required: false
+    default: "900"
+
+runs:
+  using: composite
+  steps:
+    # `ovmf` for the firmware and `qemu-system-x86` for the emulator.
+    # `--no-install-recommends` because the recommends pull in a desktop
+    # session's worth of packages for a job that never opens a window.
+    - name: QEMU and OVMF
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq --no-install-recommends qemu-system-x86 ovmf
+        qemu-system-x86_64 --version | head -1
+
+    # **Acceleration is not an optimisation here, it is whether this job
+    # exists.** Measured in this repository: a boot plus four cheap commands is
+    # over 24 minutes under TCG and 61 seconds under a hypervisor. A gate that
+    # costs half an hour a push is a gate somebody turns off.
+    #
+    # So a missing or unwritable /dev/kvm fails loudly rather than falling back
+    # to TCG and timing out twenty minutes later, which would read as the
+    # kernel hanging.
+    #
+    # **Whether a standard `ubuntu-latest` runner has it is not settled here.**
+    # GitHub's own announcement of hardware acceleration (23 February 2023) is
+    # explicitly about "larger" hosted runners, the Ubuntu image README does
+    # not list KVM at all, and the nested-virtualisation request is still an
+    # unanswered discussion. The udev rule below is verbatim from that
+    # announcement. This job answers the question on its first run rather than
+    # assuming it: if the device is absent, the fix is one word -- a larger
+    # runner label on the calling workflow, or a self-hosted runner on the
+    # GF63, which is also the only place `dev::power`, `smp bench` and the real
+    # `store bench` mean anything.
+    - name: KVM, or nothing
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ ! -e /dev/kvm ]; then
+          echo "::error::/dev/kvm is absent. This runner cannot accelerate, and"
+          echo "::error::under TCG this job costs 24+ minutes rather than one."
+          exit 1
+        fi
+        # The device exists and the runner user is usually not in its group.
+        # A udev rule rather than a chmod, because the node is recreated.
+        printf 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"\n' \
+          | sudo tee /etc/udev/rules.d/99-kvm-writable.rules >/dev/null
+        sudo udevadm control --reload-rules
+        sudo udevadm trigger --name-match=kvm
+        test -w /dev/kvm || { echo "::error::/dev/kvm is not writable"; exit 1; }
+        echo "kvm is available and writable"
+
+    # `--no-payload` and not a download. The weights are not in this repository
+    # and never will be, and they turn out not to be needed: measured, `diag
+    # all` is 59 of 59 with no checkpoint, no tokenizer and no root bundle
+    # staged, byte for byte the same verdicts and the same single skipped
+    # claim as a run with all three. Every suite tests machinery; none of them
+    # asks the model a question.
+    #
+    # `initiative off` then `agent stop` first, in that order, because the
+    # resident mind wakes about fifteen seconds in and holds the engine for a
+    # whole episode -- which presents as this job timing out with commands
+    # unsent. `echo ready` between them and `diag all` because at hypervisor
+    # speed the serial pacing races and two commands can arrive concatenated.
+    - name: Boot it and run every suite
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 tools/drive.py --no-payload \
+          --qemu-extra "-accel kvm -cpu host -smp 4" \
+          --timeout "${{ inputs.timeout }}" \
+          "initiative off" "agent stop" "echo ready" "diag all" "echo alive" \
+          2>&1 | tee verify.log
+
+    # **Five separate questions, because `diag all` answering cleanly is only
+    # one of them.** A boot that halted before the shell prints no tally at
+    # all, and a grep for FAIL finds nothing in a log that stops at the
+    # firmware banner -- silence passes a check written the obvious way.
+    - name: Read what it said
+      shell: bash
+      run: |
+        set -euo pipefail
+        fail=0
+
+        # 1. drive.py exits 1 on a timeout, and the pipe above would have
+        #    swallowed it without pipefail. Belt and braces: the line itself.
+        if grep -q '\[drive\] TIMEOUT' verify.log; then
+          echo "::error::the run timed out with commands unsent"
+          fail=1
+        fi
+
+        # 2. It reached a shell and was still answering after the suites. This
+        #    is the one that catches a halt, and it is why `echo alive` is the
+        #    last command rather than `diag all`.
+        if ! grep -q '^  alive' verify.log; then
+          echo "::error::the machine never answered after the suites"
+          fail=1
+        fi
+
+        # 3. The tally, which must exist and must read zero failures.
+        tally=$(grep -oE '[0-9]+ passed, [0-9]+ failed' verify.log | tail -1 || true)
+        if [ -z "$tally" ]; then
+          echo "::error::diag printed no tally at all, so nothing ran"
+          fail=1
+        elif ! echo "$tally" | grep -q ', 0 failed'; then
+          echo "::error::$tally"
+          fail=1
+        else
+          echo "$tally"
+        fi
+
+        # 4. Any FAIL line anywhere, including the boot selftests, which run
+        #    long before `diag` and are not in the tally.
+        if grep -nE '(^|[[:space:]])FAIL' verify.log; then
+          echo "::error::something printed FAIL"
+          fail=1
+        fi
+
+        # 5. The boot report, which is what `main::section` writes when a
+        #    subsystem faults or answers `false`. An Optional one does not halt
+        #    the boot, so without this a kernel that came up with a dead
+        #    subsystem would be signed and published.
+        if grep -q 'did not survive their own selftest' verify.log; then
+          echo "::error::a subsystem did not survive its own selftest"
+          grep -A 6 'did not survive their own selftest' verify.log
+          fail=1
+        fi
+
+        exit $fail
+
+    - name: Keep the transcript
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: verify-${{ github.run_id }}-${{ github.run_attempt }}
+        path: |
+          verify.log
+          .qemu/qemu-stderr.log
+        if-no-files-found: ignore
+        retention-days: 14

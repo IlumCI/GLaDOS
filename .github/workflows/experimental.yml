@@ -42,6 +42,12 @@ jobs:
       - name: Build
         run: cargo build --release --locked
 
+      # **The gate.** Between the build and the signature, so a failure here
+      # means nothing is signed, nothing is published, and no machine in the
+      # field is told about this image. See .github/actions/verify-boot.
+      - name: Verify it boots and passes every suite
+        uses: ./.github/actions/verify-boot
+
       # The version stays the plain crate version, and it must. `version_newer`
       # parses dotted numbers with `parse().unwrap_or(0)`, so "1.2.28-exp-a1b2"
       # reads its third field as 0 -- an experimental build would look OLDER

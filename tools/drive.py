@@ -13,6 +13,7 @@ Usage:
     drive.py [--timeout N] [--memory 2048M] [cmd ...]
     drive.py --stage-iso MODEL.BIN [--tokenizer TOK.BIN] [--memory 3072M] [cmd ...]
     drive.py --wad out/test.wad "wad"
+    drive.py --no-payload "diag all"      # no checkpoint, tokenizer or roots
 
 Each positional argument is one shell line. With none, it just captures the
 boot log and exits at the first prompt.
@@ -24,6 +25,7 @@ size cap; guest RAM still has to cover the weights, so raise --memory.
 """
 
 import codecs
+import shutil
 import socket
 import subprocess
 import sys
@@ -37,6 +39,15 @@ PROMPT = b"glados> "
 
 
 def find_qemu():
+    """The emulator, wherever this host keeps it.
+
+    PATH first, because that is where every packaged qemu is and this has to
+    run on a CI runner as well as on the development laptop -- the Windows
+    paths below were the whole of the search and a Linux host had no way in.
+    """
+    on_path = shutil.which("qemu-system-x86_64")
+    if on_path:
+        return on_path
     for c in [
         Path("C:/Program Files/qemu/qemu-system-x86_64.exe"),
         Path.home() / "scoop/apps/qemu/current/qemu-system-x86_64.exe",
@@ -44,7 +55,7 @@ def find_qemu():
     ]:
         if c.exists():
             return str(c)
-    raise SystemExit("qemu-system-x86_64 not found")
+    raise SystemExit("qemu-system-x86_64 not found on PATH or in the usual places")
 
 
 def find_firmware():
@@ -56,25 +67,41 @@ def find_firmware():
     booting rather than as leftover state. A scripted run wants the same
     starting conditions every time, so this copies a fresh one.
     """
-    share = Path(find_qemu()).parent / "share"
-    for name in ("edk2-x86_64-code.fd", "OVMF_CODE.fd"):
-        code = share / name
-        if not code.exists():
-            continue
-        for vname in ("edk2-i386-vars.fd", "OVMF_VARS.fd"):
-            pristine = share / vname
-            if pristine.exists():
-                scratch = ROOT / ".qemu/drive-vars.fd"
-                scratch.parent.mkdir(parents=True, exist_ok=True)
-                scratch.write_bytes(pristine.read_bytes())
-                return [
-                    "-drive", f"if=pflash,format=raw,unit=0,readonly=on,file={code}",
-                    "-drive", f"if=pflash,format=raw,unit=1,file={scratch}",
-                ]
-    combined = share / "OVMF.fd"
-    if combined.exists():
-        return ["-bios", str(combined)]
-    raise SystemExit(f"no UEFI firmware in {share}")
+    # Several directories, because a packaged qemu does not keep its firmware
+    # beside itself. A Windows build has `share/` next to the exe; Debian and
+    # Ubuntu put OVMF in its own directory under `/usr/share` and the split
+    # code/vars pair is the only form there. Searched in order and the first
+    # complete pair wins, so a host with both keeps whichever it had.
+    shares = [Path(find_qemu()).parent / "share"]
+    shares += [Path(p) for p in (
+        "/usr/share/OVMF",
+        "/usr/share/ovmf",
+        "/usr/share/qemu",
+        "/usr/share/edk2/ovmf",
+        "/usr/share/edk2-ovmf/x64",
+    )]
+    for share in shares:
+        for name in ("edk2-x86_64-code.fd", "OVMF_CODE.fd", "OVMF_CODE_4M.fd"):
+            code = share / name
+            if not code.exists():
+                continue
+            for vname in ("edk2-i386-vars.fd", "OVMF_VARS.fd", "OVMF_VARS_4M.fd"):
+                pristine = share / vname
+                if pristine.exists():
+                    scratch = ROOT / ".qemu/drive-vars.fd"
+                    scratch.parent.mkdir(parents=True, exist_ok=True)
+                    scratch.write_bytes(pristine.read_bytes())
+                    return [
+                        "-drive", f"if=pflash,format=raw,unit=0,readonly=on,file={code}",
+                        "-drive", f"if=pflash,format=raw,unit=1,file={scratch}",
+                    ]
+    for share in shares:
+        combined = share / "OVMF.fd"
+        if combined.exists():
+            return ["-bios", str(combined)]
+    raise SystemExit(
+        "no UEFI firmware found; looked in " + ", ".join(str(s) for s in shares)
+    )
 
 
 def monitor(lines):
@@ -479,6 +506,11 @@ def main():
     # is 723 MB against VVFAT's 516; `tools/hybtest.py` builds a small one
     # shaped to hit every path it does.
     model_src = ROOT / "out/smollm2-135m.bin"
+    # Boot with none of the ESP payload: no checkpoint, no tokenizer, no root
+    # bundle. See the refusal below for why the default is to insist.
+    no_payload = "--no-payload" in argv
+    if no_payload:
+        argv.remove("--no-payload")
     model_given = False
     if "--model" in argv:
         i = argv.index("--model")
@@ -558,8 +590,26 @@ def main():
             old_wad.unlink()
 
     for src, dst in staged:
-        if not src.exists():
-            raise SystemExit(f"missing {src}")
+        # **Refused rather than skipped, unless somebody said so.** A run that
+        # quietly booted without the checkpoint would look like a run where the
+        # model was loaded and answered badly, which is the "drive.py prefers
+        # the release artifact" failure by another route.
+        #
+        # `--no-payload` is the deliberate form, and it exists because a CI
+        # runner has none of this: the weights are not in this repository and
+        # never will be, so a gate that insisted on them could not run at all.
+        # It removes rather than merely skips, because `.qemu/esp` persists
+        # between runs and a stale copy is exactly what the flag is for
+        # avoiding. Measured: `diag all` is 59 of 59 either way, because every
+        # suite tests machinery and none of them asks the model a question.
+        if no_payload or not src.exists():
+            if not no_payload:
+                raise SystemExit(f"missing {src}")
+            stale = esp / "GLADOS" / dst
+            if stale.exists():
+                stale.unlink()
+            print(f"[drive] no {dst} (--no-payload)")
+            continue
         target = esp / "GLADOS" / dst
         # Content-compare rather than always copying: the copy is the slowest
         # thing in a run that is otherwise seconds.
