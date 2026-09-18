@@ -417,6 +417,84 @@ Still not done from that plan item: an authored application is left as a draft
 and never adopted, and `aixi`'s plan is still stringified to a report rather
 than gating how much the loop attempts.
 
+### Five defects in the loop itself, and four of them chained
+
+All five were found by reading and every one is now closed. Worth knowing
+before touching `godel.rs`, because each was invisible from every other
+vantage point.
+
+**`trial_lib` judged and adopted nothing.** It built a certificate with
+`adopted: false` hardcoded, with no `store`, no `set_head` and no ledger line,
+so a library function could pass all four judges and be discarded. The
+consequences chained: no ledger line means `axis_counts()[4]` stays `(0, 0)`,
+so `axis_uncertainty(0, 0)` is 1.0 forever, so `lib` sorts first in
+`surprise_order()` whenever it has work -- and `next_lib` was the one `next_*`
+that did not consult `/ai/godel/tried`, while `run` has always written a
+marker for a `Lib` proposal. So the loop re-offered one refused candidate
+every night, in front of every other axis, indefinitely.
+
+**The judge axis corrupted its own lineage.** `trial_judge` packed the bar
+into the node's `rule` byte as hundredths over a grid of
+`[1.0, 2.0, 3.0, 5.0, 8.0, 12.0]`. `as` saturates, so four of the six became
+255, and 100, 200 and 255 are none of them a `Rule`. Every judge node named a
+routing rule this kernel does not have and `rollback` onto one fails saying
+exactly that. `Variant.bar` is a conditional `Option<f32>` now -- the
+`core`/`deep`/`lib` pattern, so existing nodes still render to the bytes they
+were stored as -- and **every axis records `bar_in_force()`**, not only the
+judge axis, because a lineage that drops the criterion on the next adapter
+trial does not record it.
+
+**`storm` reported an adoption that never happened.** The shell printed "the
+best was accepted" off a field with no `set_head`, no ledger line and no
+`TRIALS` increment behind it. The words were fixed rather than the behaviour,
+and that is the argument: a storm is an *explorer*, its product is the archive
+it really does populate, and it weighs the generation against J1 alone.
+Adopting there would put a weaker gate than the nightly four-judge unanimity
+in front of the head. The field is `cleared_bar`.
+
+**`trial_skill` and `trial_lib` bypassed `ensure_head`.** Neither takes an
+engine, so both read `head()` directly and could write a node whose parent did
+not describe the running mind -- after an out-of-band `adapter load` or `core
+install`, both of which touch neither head nor ledger. `run` calls
+`ensure_head` once before dispatching now, which is where the rule belongs.
+
+**And the nightly trial could not pass J1 at all.** Not rarely: never. Not the
+`no validation decisions` veto either -- `Trial::prepare` already strides, so
+24 examples reach the held-out slice correctly. Measured, from the report's
+own lines:
+
+    examples   validation decisions   incumbent wrong   J1 needs
+    24         15                     5                 6
+    96         56                     26                6
+
+`clean_fixes_needed()` is **six** and not `MIN_FIXED`, because Yates'
+correction subtracts one before squaring. So at 24 examples the judge asked
+for six clean repairs where only five wrong answers existed. An
+arithmetically impossible trial, every night, for as long as the axis has
+existed; what accumulated across nights was rejections. `GODEL_EXAMPLES` is 96
+now, where the headroom is 26 against a need of 6, at a prepare cost of 321 s
+against 63 s under WHPX with SmolLM2 -- the half `GODEL_MS` does not bound.
+
+`Certificate.wrong` carries that ceiling and the report prints it beside the
+requirement, so a budget that cannot pass says so in one line rather than
+looking like a run of bad candidates. `Trial::paired` had always computed it
+and thrown it away. It is an `Option`: an axis with no paired test says
+nothing rather than claiming zero, which would read as "the incumbent was
+already perfect".
+
+**J2 still vetoes** on the curiosity goals at both budgets measured, so the
+budget fix makes a nightly adoption *reachable* rather than likely. The goals
+are four hardcoded `ls` commands.
+
+**`godel lib` is the operator path that axis never had**, and its absence is
+why `trial_lib` was never driven end to end: it was reachable only from a
+rotation four ranked axes away that needs the quiet window. The verification
+is three commands after `redqueen 3` offers candidates:
+
+    godel lib     rejected, and a ledger line: axis=lib cell=0 n=8 ... reject
+    godel next    lib surprise 66 -- it was 100, and 100 forever
+    godel lib     a different candidate: fixed 1 where the first had fixed 0
+
 That question -- is anybody here -- is `quiet_hours()`, and it is shared with
 the other unattended job. `initiative::tick`'s sleep branch also writes an
 application from `WORKS`, leaving a draft it never adopts. Each job owns its own
