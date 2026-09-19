@@ -291,6 +291,26 @@ def gsm8k_node(row):
 SPLITS = ("dev", "validation")
 
 
+def answer_key_nodes(nodes):
+    """Nodes that make this forest an answer key: a test-split node that
+    carries an answer.
+
+    **The check used to be `"test" in composition`, and that is the name
+    rather than the hazard.** What makes a forest an answer key is stated
+    two paragraphs up -- test questions went in *carrying their `answer`
+    field* -- so the predicate is the conjunction, and it has to be, now
+    that a source exists whose own splits are called `test` and
+    `validation` and which has no answers at all. wikitext partitions
+    Wikipedia articles; there is nothing in one to leak into an MMLU score.
+
+    This is strictly sharper and never weaker: every MMLU test node carries
+    an answer, so every one of them still trips it. `selftest` holds both
+    directions so a later loosening fails loudly rather than quietly.
+    """
+    return [n for n in nodes
+            if n["source"].rsplit("/", 1)[-1] == "test" and n["answer"].strip()]
+
+
 def mmlu_node(row, subject, split):
     letters = "ABCD"
     ch = list(row["choices"])
@@ -309,6 +329,132 @@ def mmlu_node(row, subject, split):
         "text": body,
         "terms": terms_of(q),
     }
+
+
+#: Where the wikitext parquet files live. Fetched rather than cached under
+#: ~/.cache, because this is the one source that is not a HuggingFace
+#: `datasets--*` snapshot and pretending it were would put a hand-made
+#: directory where `snapshot_dir` promises a real one.
+WIKI_DIR = Path(__file__).resolve().parent / "hf" / "wikitext"
+
+#: ` = Title = `, ` = = Section = = `, ` = = = Sub = = = `. The equals signs
+#: are SPACED in wikitext, so `=+` matches the first one and nothing else --
+#: which collapsed every article to a single node and read as a corpus of
+#: 122 very long documents rather than 1,063 sections.
+WIKI_HEAD = re.compile(r"^ (=(?: =)*) (.+?) \1 $")
+
+
+def detok(s):
+    """Wikitext back into prose.
+
+    **The corpus ships pre-tokenised and the index must not see that.**
+    wikitext writes `gunpowder @-@ propelled`, ` , ` and ` . `, which are
+    artefacts of how the set was built for language modelling. Indexed raw
+    they become terms no query ever spells: a retrieval corpus whose terms
+    are `@-@` is a corpus that scores its own preprocessing. The reverse is
+    lossy in the other direction too -- `@.@` really is a decimal point and
+    `@-@` really is a hyphen, so this restores rather than guesses.
+    """
+    s = s.replace(" @-@ ", "-").replace(" @,@ ", ",").replace(" @.@ ", ".")
+    s = re.sub(r" ([,.;:!?%)\]])", r"\1", s)
+    s = re.sub(r"([(\[]) ", r"\1", s)
+    s = re.sub(r" ' s\b", "'s", s)
+    s = re.sub(r"\s+", " ", s)
+    return s.strip()
+
+
+def slug(s, cap=48):
+    """A directory name from an article title.
+
+    `emit` uses what `bucket` returns as a path component verbatim, and an
+    encyclopedia title carries `(`, `)`, `:` and `/` -- none of which are
+    names this can write on Windows, and one of which would silently make a
+    deeper tree than the bucket declared.
+    """
+    s = re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")
+    return (s[:cap].rstrip("-") or "untitled")
+
+
+def wiki_sections(rows):
+    """(article, heading path, body) per leaf section.
+
+    Splits at every heading level rather than at articles, because an
+    article is thousands of words and a section is a few hundred -- and a
+    node is what retrieval returns into a context window with a budget.
+    """
+    art, path, buf = None, [], []
+    for r in rows:
+        line = r["text"].rstrip("\n")
+        m = WIKI_HEAD.match(line)
+        if m:
+            if buf and art:
+                yield art, " / ".join(path[1:]), " ".join(buf)
+            buf = []
+            lvl, title = m.group(1).count("="), detok(m.group(2))
+            if lvl == 1:
+                art, path = title, [title]
+            else:
+                path = (path[:lvl - 1] + [title]) if art else []
+        elif line.strip() and art:
+            buf.append(line.strip())
+    if buf and art:
+        yield art, " / ".join(path[1:]), " ".join(buf)
+
+
+def wiki_node(article, heading, raw, split):
+    """A section of a Wikipedia article as a node.
+
+    **It carries no `check` and that is the honest shape**, not an omission.
+    GSM8K admits a node by executing the arithmetic it states about itself;
+    there is nothing in an encyclopedia paragraph a builder can execute, and
+    inventing a check that always passes would be worse than having none --
+    it would make the refusal counters read as though prose had been
+    verified. What this source is admitted on is structure: long enough to
+    be a document, prose enough to have a sentence, and not mostly `<unk>`.
+    """
+    body = detok(raw)
+    if body.count("<unk>") > 2:
+        raise Refused("too many unknown-word markers to be prose")
+    if len(body.split()) < WIKI_MIN_WORDS:
+        raise Refused("too short to be a document")
+    if not re.search(r"[.?!]\s", body):
+        raise Refused("no sentence end, so no concept to index")
+    return {
+        "kind": "wiki",
+        "source": f"wikitext-103/{slug(article)}/{split}",
+        "concept": first_sentence(body),
+        "method": heading,
+        "checks": [],
+        "answer": "",
+        "text": body,
+        "terms": terms_of(body),
+    }
+
+
+#: What the CC BY-SA 3.0 / GFDL licence on the wikitext source obliges,
+#: written into the tree rather than only into a commit message, because
+#: the tree is what gets published.
+ATTRIBUTION = """\
+Bodies of nodes under encyclopedia/ are sections of Wikipedia articles,
+taken from the wikitext-103-raw-v1 dataset (Salesforce/wikitext on
+HuggingFace; Merity et al., "Pointer Sentinel Mixture Models", 2016).
+
+Wikipedia text is licensed CC BY-SA 3.0 and GFDL. Reuse of this tree
+carries those terms for those nodes, including attribution and
+share-alike. https://creativecommons.org/licenses/by-sa/3.0/
+
+Text has been detokenised (the dataset ships ` @-@ ` and spaced
+punctuation) and split at heading boundaries. No other change was made.
+Nodes of kind `mmlu` and `gsm8k` come from their own datasets and are not
+covered by this notice.
+"""
+
+
+#: A section under this many words is a stub, a disambiguation line or a
+#: table caption rather than a document. Declared because it is the one
+#: number that decides how much of the source survives, and the whole point
+#: of this source is document *length*.
+WIKI_MIN_WORDS = 60
 
 
 STOP = {
@@ -434,6 +580,20 @@ def bucket(node):
         # whichever one a substring rule happened to match.
         tree = MMLU_TREE_OF.get(subject, subject.replace("_", "-"))
         return [tree, subject.replace("_", "-")]
+    if node["kind"] == "wiki":
+        # **One declared tree, because this source carries no subject
+        # labels at all.** MMLU ships a subject per row and GSM8K's family
+        # is read off its own verified chain; an encyclopedia article says
+        # only what it is about, in prose. Classifying 122 articles into
+        # the eight MMLU disciplines would be exactly the substring guess
+        # `MMLU_TREES` exists to refuse, so the article itself is the
+        # second level -- derived from the data, and capping fanout for
+        # free the way a subject does. `<kind>/<subject>/<split>` is the
+        # layout the composition report reads its last component from, so
+        # the article goes in the MIDDLE: putting it last made that report
+        # list 122 article slugs where it means to list splits, which is
+        # the one number its own comment says nobody looked at.
+        return ["encyclopedia", node["source"].split("/")[1]]
     ops = node["ops"]
     if ops <= {"+", "-"}:
         family = "add-sub"
@@ -565,7 +725,22 @@ def emit(outdir, nodes, quiet=False):
 
 def verify(outdir):
     """Re-read every node with `parse` and check the invariants hold."""
-    files = sorted(p for p in outdir.rglob("*") if p.is_file())
+    # **A node is a file whose first word is `head`, which is the rule
+    # `emit`'s sweep already uses.** The two disagreed: emit left a foreign
+    # file alone and counted it out loud, while this read every file as a
+    # node and reported the difference as a corrupt one. Nothing exercised
+    # the gap until the tree had to carry its own CC BY-SA notice, and then
+    # a correct build failed its own verify. One rule, stated once.
+    every = sorted(p for p in outdir.rglob("*") if p.is_file())
+    files, foreign = [], 0
+    for p in every:
+        try:
+            with p.open("r", encoding="utf-8") as f:
+                head = f.readline()
+        except (OSError, UnicodeDecodeError):
+            head = ""
+        (files.append(p) if head.startswith("head ") else None)
+        foreign += 0 if head.startswith("head ") else 1
     if not files:
         raise SystemExit(f"  nothing under {outdir}")
 
@@ -596,6 +771,8 @@ def verify(outdir):
         widest = max(widest, sum(1 for _ in d.iterdir()))
 
     print(f"  {len(files)} node(s) read back, {checked} arithmetic step(s) re-checked")
+    if foreign:
+        print(f"  {foreign} file(s) are not nodes, left alone (emit says the same)")
     print(f"  widest directory {widest} entr(ies), cap {FANOUT}")
     if bad:
         raise SystemExit(f"  {bad} problem(s)")
@@ -633,6 +810,40 @@ def collect(limit, splits=SPLITS):
                     nodes.append(mmlu_node(row, s, split))
                 except Refused as e:
                     refuse(e)
+
+    # **The third source, and it is here to change the SHAPE of the corpus
+    # rather than to add to it.** MMLU and GSM8K are both exam items, so
+    # every constant `host.retrieval` judges was fitted to one register --
+    # question stems and their choice lists. Wikipedia sections are
+    # encyclopedic prose: different concept sentences, different queries,
+    # and 4,713 distinct terms the index had never seen (14,342 -> 19,055).
+    #
+    # **It does NOT give `LEN_B` longer documents, and the first version of
+    # this comment said it did.** That was reasoned from body length --
+    # wiki sections run 362 words against MMLU's 88 -- and the reasoning
+    # never reached the index. `forest_retrieve.Node` says so in as many
+    # words: the length charge is over the *indexed* document, which is the
+    # head line, and a head is `subject | concept | terms` by construction.
+    # Measured over both corpora: mean 20 terms, median 20, max 32. A
+    # source of 362-word bodies moved that distribution not at all.
+    #
+    # What it did move is the sweep. Across LEN_B 0.0 to 1.0 the rail spans
+    # 57.6-60.0% on the two-source forest and 41.6-46.8% on this one, so
+    # the constant's measurable effect roughly doubled -- from vocabulary
+    # and from 2,697 more nodes to be confused by, not from length.
+    for split in ("test", "validation"):
+        f = WIKI_DIR / f"{split}.parquet"
+        if not f.is_file():
+            continue
+        seen = 0
+        for article, heading, raw in wiki_sections(parquet_rows(str(f))):
+            if limit and seen >= limit:
+                break
+            seen += 1
+            try:
+                nodes.append(wiki_node(article, heading, raw, split))
+            except Refused as e:
+                refuse(e)
     return nodes, refused
 
 
@@ -704,6 +915,50 @@ def selftest():
     check("a body may contain newlines, brackets and equals with no escaping",
           "yy" in f2.get("text", "") and "(d)" in f2.get("text", ""))
 
+    # --- the third source ---------------------------------------------
+    raw = " Robert Boulter is an English film , television and theatre actor ."
+    check("wikitext detokenises back into prose",
+          detok(" a @-@ b , c . ") == "a-b, c." and
+          detok(raw).startswith("Robert Boulter is an English film,"))
+    check("a title becomes a directory name a filesystem will take",
+          slug("Kiss You ( One Direction song )") == "kiss-you-one-direction-song"
+          and "/" not in slug("New Jersey Route 29 / 50"))
+
+    lines = [{"text": " = A = "}, {"text": "one two three."},
+             {"text": " = = S = = "}, {"text": "four five six."},
+             {"text": " = = = T = = = "}, {"text": "seven eight nine."}]
+    secs = list(wiki_sections(lines))
+    # The regex that reads these counts SPACED equals. `=+` matches the
+    # first one only, which collapsed every article into a single node and
+    # read as a corpus of 122 very long documents -- plausible, and wrong.
+    check("every heading level splits, not only the article title",
+          [h for _a, h, _b in secs] == ["", "S", "S / T"])
+    check("and the article carries through each of them",
+          {a for a, _h, _b in secs} == {"A"})
+
+    long_enough = "The subject is a thing. " * 40
+    n = wiki_node("A Title", "S", long_enough, "test")
+    check("a wiki node carries no check, having nothing to execute",
+          n["checks"] == [] and n["answer"] == "")
+    for bad, why in ((" ".join(["<unk>"] * 5), "unknown-word"),
+                     ("too short", "short"),
+                     ("nosentenceendhere " * 40, "sentence")):
+        try:
+            wiki_node("T", "", bad, "test")
+            check(f"a {why} body is refused", False)
+        except Refused:
+            check(f"a {why} body is refused", True)
+
+    # **The answer-key guard, both directions.** Sharpening it from "is
+    # there a test split" to "is there a test-split node carrying an
+    # answer" is only safe if the first direction still fires, so the
+    # canary is an MMLU-shaped node and it must trip.
+    keyed = {"source": "mmlu/x/test", "answer": "B"}
+    check("a test-split node carrying an answer still makes an answer key",
+          len(answer_key_nodes([keyed])) == 1)
+    check("and one with nothing to leak does not",
+          answer_key_nodes([{"source": "wikitext-103/a/test", "answer": ""}]) == [])
+
     print("  " + ("all claims hold" if ok else "SOMETHING IS WRONG"))
     return 0 if ok else 1
 
@@ -742,8 +997,10 @@ def main():
     comp = Counter(n["source"].rsplit("/", 1)[-1] if "/" in n["source"]
                    else n["source"] for n in nodes)
     print("  splits: " + ", ".join(f"{k} {v}" for k, v in sorted(comp.items())))
-    if "test" in comp:
-        print("  WARNING: this forest holds a test split and is an answer key "
+    risky = answer_key_nodes(nodes)
+    if risky:
+        print(f"  WARNING: {len(risky)} test-split node(s) carry an answer, so "
+              "this forest is an answer key "
               "for that rail -- do not retrieve into it while scoring one")
     print(f"[forest] {len(nodes)} node(s) admitted")
     if refused:
@@ -757,7 +1014,28 @@ def main():
     if not nodes:
         raise SystemExit("  nothing to write")
     emit(out, nodes)
-    print(f"  now: python tools/mkpkg.py {out} out/forest.pkg --max-bytes 8388608")
+    if any(n["kind"] == "wiki" for n in nodes):
+        # **CC BY-SA is a licence with an obligation, and the obligation is
+        # attribution.** This tree gets published as a release asset, so the
+        # notice travels with the bytes rather than living in a commit
+        # message -- the same reason `rtl8188eu_tables.rs` says at the top
+        # what it came from. `emit` leaves it alone and counts it out loud,
+        # because its sweep only deletes files whose first word is `head`.
+        (out / "ATTRIBUTION").write_text(ATTRIBUTION, encoding="utf-8",
+                                         newline="\n")
+        print(f"  wrote {out / 'ATTRIBUTION'} -- CC BY-SA 3.0 travels with this tree")
+    # **The cap is computed from what was just written, not written down.**
+    # A hardcoded 8388608 was right for a 9,194-node forest and refuses an
+    # 10,257-node one, so the line this prints would have been a command
+    # that does not work -- the same drift as a figure in a doc going stale,
+    # arriving in the one place somebody copies and pastes.
+    size = sum(f.stat().st_size for f in out.rglob("*") if f.is_file())
+    cap = 1 << max(22, (size * 5 // 4 - 1).bit_length())
+    print(f"  {size} byte(s) on disk")
+    # `--name` is required and this line omitted it, so the command it
+    # printed has never once run as printed.
+    print(f"  now: python tools/mkpkg.py {out} out/forest.pkg"
+          f" --name forest --max-bytes {cap}")
 
 
 if __name__ == "__main__":
