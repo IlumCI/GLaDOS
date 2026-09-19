@@ -864,6 +864,43 @@ verifications consult different points.
 `sign.py` signs for either, decided entirely by which private half `--key-file`
 is given, so the two live in separate files and separate secrets.
 
+**And a secret nobody here can read is checked before it is used.** A signature
+made with the wrong private half is perfectly well formed: nothing in signing
+or publishing can tell, and the only thing that ever notices is the machine it
+eventually reaches, days later and three systems away, which answers "not a
+signature over this image by this key" and files nothing. A correct refusal,
+about a configuration mistake it has no way to name.
+
+So `sign.py --anchor SYMBOL --key-file F` derives the public point from a
+private half and compares it against what `src/update/mod.rs` pins, signing
+nothing -- its own mode rather than a flag, so a caller wanting the check
+cannot also produce a signature, and so CI can run it before the thing it
+guards. `--check FILE SIG --anchor SYMBOL` verifies the signature itself,
+which subsumes it: a key that matches says nothing about whether the signature
+over it is whole. Public halves are all either one renders. `propose.yml` runs
+the first before signing and the second after, and removes the key through a
+`trap` on every path out, the failing one included.
+
+`release.yml` and `experimental.yml` gained the same read-back for the image's
+**own** detached signature, which `manifest.py --verify` never covered -- it
+reads the manifest and checks the digest in it against the image, so a bad
+`.efi.sig` publishes and the refusal arrives at `update stage` on every
+machine in the field with nothing in the build to say why.
+
+`verify_sig` and `public_of` came down into `sign.py` with it, and the layering
+was backwards rather than merely duplicated: a manifest is a file format and
+that is the primitive underneath it, which is what a caller with no manifest
+needs. `manifest.py --selftest` still exercises every one, so the move is
+covered rather than asserted.
+
+**What it found on its first run is the argument for it.** The pinned
+`VERDICT_KEY` had been rotated in the working tree and not committed, so HEAD
+pinned a point whose private half exists nowhere -- `verdict.key` derived to
+the worktree's point and `update.key` to neither. A kernel built from HEAD
+would have refused every verdict anybody could sign, correctly, about a
+mismatch made three hours and one commit earlier. The check answers that in a
+second where reading the diff does not answer it at all.
+
 **Rails are what "better" refers to.** `bench report` emits one machine-readable
 block, `[rail] v1`, one rail per line as `name value unit want`. Thirteen of
 them: five graphics, four interpreter, `ai.matmul`, `ai.bpb`, and two memory
