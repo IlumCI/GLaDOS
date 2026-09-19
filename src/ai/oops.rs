@@ -51,7 +51,7 @@
 //! and reading it as the latter would raise every axis on the strength of the
 //! early history being silent.
 
-use alloc::string::String;
+use alloc::string::{String, ToString};
 
 /// The subsample a night starts from.
 ///
@@ -142,32 +142,94 @@ pub fn wrong_of(line: &str) -> Option<usize> {
     rest[..end].parse().ok()
 }
 
+/// The `ex=` field: the subsample the trial was *given*.
+pub fn ex_of(line: &str) -> Option<usize> {
+    let at = line.find(" ex=")? + 4;
+    let rest = &line[at..];
+    let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+
+/// The `corpus=` field, which says which body of evidence a line was paid for
+/// out of.
+pub fn corpus_of(line: &str) -> Option<&str> {
+    let at = line.find(" corpus=")? + 8;
+    let rest = &line[at..];
+    let end = rest.find(' ').unwrap_or(rest.len());
+    Some(&rest[..end])
+}
+
+/// Which level a budget is, as a count of doublings from the base.
+pub fn level_of(examples: usize) -> usize {
+    let mut level = 0usize;
+    let mut at = BASE_EXAMPLES;
+    while at < examples && level < MAX_LEVEL {
+        at *= 2;
+        level += 1;
+    }
+    level
+}
+
 /// How many doublings this axis's own record justifies.
 ///
-/// The **trailing run** of starved trials on this axis and nothing else. A
-/// verdict reached on sufficient evidence ends the run, so an axis drops back
-/// to the base the moment it can decide something -- which is what stops the
-/// level ratcheting up over a year and never coming down.
+/// **The largest budget at which it starved, and the smallest at which it
+/// decided.** If it has decided something at a budget above every starvation,
+/// use that: the search has found a level that works and there is nothing left
+/// to double for. Otherwise go one above the highest starvation, which is the
+/// doubling.
 ///
-/// Another axis's starvation is invisible here. They are different questions
-/// asked of different judges, and one being unanswerable at 24 examples says
-/// nothing about the next.
-pub fn level_for(lines: &[String], axis: usize, need: usize) -> usize {
-    let mut run = 0usize;
-    for line in lines.iter().rev() {
+/// The first version counted the *trailing run* of starved trials, which
+/// converges only by a coincidence: it works because the `Fresh` nights keep
+/// injecting starved lines at the base, and it would stop working the day they
+/// stopped failing. A schedule whose convergence depends on something
+/// continuing to go wrong is a schedule that fails silently, which is the
+/// class of defect this module was written to remove rather than to join.
+///
+/// Reading `ex=` is what makes the explicit rule possible, and that field had
+/// to be added: `n=` is validation decisions, derived from the budget and not
+/// invertibly, so a schedule that inferred the budget would be a second
+/// account of the record free to disagree with it.
+///
+/// **Scoped to one corpus.** Without that it is a ratchet -- an axis that
+/// starved at 192 once stays at 192 forever, even after the corpus grew enough
+/// that 24 would do. The ledger already records which body of evidence each
+/// line was paid for out of, for the family-wise budget's sake, and the same
+/// field answers this. A corpus this machine has no lines for starts at the
+/// base, which is the right place to start.
+///
+/// Another axis's record is invisible here. They are different questions asked
+/// of different judges, and one being unanswerable at 24 examples says nothing
+/// about the next.
+pub fn level_for(lines: &[String], axis: usize, need: usize, corpus: Option<&str>) -> usize {
+    let (mut starved_at, mut decided_at) = (0usize, None::<usize>);
+    for line in lines {
         if super::godel::axis_of(line) != Some(axis) {
             continue;
         }
-        if starved(wrong_of(line), need) {
-            run += 1;
-            if run >= MAX_LEVEL {
-                break;
+        if let Some(c) = corpus {
+            if corpus_of(line) != Some(c) {
+                continue;
             }
+        }
+        // A line with no `ex=` was written before the field existed and says
+        // nothing about what it was given. Skipped rather than assumed, the
+        // same way a line with no `wrong=` is not read as starved.
+        let Some(ex) = ex_of(line) else { continue };
+        if starved(wrong_of(line), need) {
+            starved_at = starved_at.max(ex);
         } else {
-            break;
+            decided_at = Some(decided_at.map_or(ex, |d| d.min(ex)));
         }
     }
-    run.min(MAX_LEVEL)
+    if let Some(d) = decided_at {
+        if d > starved_at {
+            return level_of(d);
+        }
+    }
+    if starved_at == 0 {
+        return 0;
+    }
+    (level_of(starved_at) + 1).min(MAX_LEVEL)
 }
 
 /// Which half tonight is, from the record rather than from a counter.
@@ -185,10 +247,10 @@ pub fn half_of(ledger_len: usize) -> Half {
 }
 
 /// The whole allocation for one night on one axis.
-pub fn plan(lines: &[String], axis: usize, need: usize) -> Plan {
+pub fn plan(lines: &[String], axis: usize, need: usize, corpus: Option<&str>) -> Plan {
     let half = half_of(lines.len());
     let level = match half {
-        Half::Extend => level_for(lines, axis, need),
+        Half::Extend => level_for(lines, axis, need, corpus),
         Half::Fresh => 0,
     };
     Plan { level, half, examples: examples(level), ms: ms(level) }
@@ -249,61 +311,109 @@ pub fn selftest() -> bool {
 
     // The level, from a record. `axis=adapter` is slot 0 and `axis=lib` is a
     // different axis, so one starving must not raise the other.
-    let starved_line = |axis: &str| {
+    let line = |axis: &str, ex: usize, wrong: usize, corpus: &str| {
         alloc::format!(
-            "1 h3 parent=root.... variant=000000aa axis={} cell=0 n=24 J1[fix=0 broke=0 wrong=5 chi=0.00 no] reject",
-            axis
+            "1 h3 parent=root.... variant=000000aa axis={} corpus={} cell=0 n=24              J1[fix=0 broke=0 wrong={} ex={} chi=0.00 no] reject",
+            axis, corpus, wrong, ex
         )
     };
-    let decided_line = |axis: &str| {
-        alloc::format!(
-            "2 h3 parent=root.... variant=000000bb axis={} cell=0 n=96 J1[fix=0 broke=0 wrong=26 chi=0.00 no] reject",
-            axis
-        )
-    };
-    let a0 = super::godel::axis_of(&starved_line("adapter"));
+    let starved_at = |ex: usize| line("adapter", ex, 5, "aaaa1111");
+    let decided_at = |ex: usize| line("adapter", ex, 26, "aaaa1111");
+
+    let a0 = super::godel::axis_of(&starved_at(24));
     claim(a0.is_some(), "the axis names in these fixtures are ones the ledger uses");
     let a0 = a0.unwrap_or(0);
+    claim(
+        ex_of(&starved_at(48)) == Some(48) && wrong_of(&starved_at(48)) == Some(5),
+        "a line gives up the budget it was given and the ceiling it reached",
+    );
+    claim(
+        corpus_of(&starved_at(24)) == Some("aaaa1111"),
+        "and which body of evidence it was paid for out of",
+    );
+    claim(
+        level_of(BASE_EXAMPLES) == 0 && level_of(BASE_EXAMPLES * 4) == 2,
+        "a budget maps back to the level that produced it",
+    );
+    claim(
+        level_of(BASE_EXAMPLES * 64) == MAX_LEVEL && level_of(1) == 0,
+        "and one off the end of the schedule clamps rather than looping",
+    );
 
     let none: [String; 0] = [];
-    claim(level_for(&none, a0, 6) == 0, "an empty ledger justifies no doubling");
+    claim(level_for(&none, a0, 6, None) == 0, "an empty ledger justifies no doubling");
 
-    let one = [starved_line("adapter")];
-    claim(level_for(&one, a0, 6) == 1, "one starved trial raises the level by one");
+    let one = [starved_at(24)];
+    claim(level_for(&one, a0, 6, None) == 1, "starving at the base raises the level by one");
 
-    let two = [starved_line("adapter"), starved_line("adapter")];
-    claim(level_for(&two, a0, 6) == 2, "and a run of them raises it once each");
-
-    let mixed = [starved_line("adapter"), decided_line("adapter")];
+    // **The case the first version got right only by luck.** It counted the
+    // trailing run, so a decided trial anywhere reset it -- and the schedule
+    // converged because the `Fresh` nights kept failing at the base. This asks
+    // the question directly: it starved at 24 and decided at 48, so 48 is what
+    // works and there is nothing left to double for.
+    let settled = [starved_at(24), decided_at(48)];
     claim(
-        level_for(&mixed, a0, 6) == 0,
-        "a trial that had the evidence drops the axis back to the base",
+        level_for(&settled, a0, 6, None) == 1,
+        "a level it decided at is kept, even with a starvation below it",
+    );
+    let settled_then_base = [starved_at(24), decided_at(48), starved_at(24)];
+    claim(
+        level_for(&settled_then_base, a0, 6, None) == 1,
+        "and a later failure at the base does not undo what the higher level proved",
+    );
+
+    let worse = [decided_at(24), starved_at(48)];
+    claim(
+        level_for(&worse, a0, 6, None) == 2,
+        "while a starvation above a lucky cheap verdict doubles past it",
+    );
+
+    let cheap = [decided_at(24)];
+    claim(
+        level_for(&cheap, a0, 6, None) == 0,
+        "an axis that decides at the base stays at the base",
     );
 
     // The one that keeps a cheap axis cheap. `lib` starving says nothing about
     // `adapter`, and a shared counter would have charged both.
-    let other = super::godel::axis_of(&starved_line("lib")).unwrap_or(a0 + 1);
-    let cross = [starved_line("lib"), starved_line("lib"), starved_line("lib")];
+    let other = super::godel::axis_of(&line("lib", 24, 5, "aaaa1111")).unwrap_or(a0 + 1);
+    let cross = [line("lib", 96, 5, "aaaa1111")];
     claim(
-        other != a0 && level_for(&cross, a0, 6) == 0 && level_for(&cross, other, 6) == MAX_LEVEL,
+        other != a0
+            && level_for(&cross, a0, 6, None) == 0
+            && level_for(&cross, other, 6, None) == MAX_LEVEL,
         "one axis starving does not raise another's budget",
     );
 
-    let many: alloc::vec::Vec<String> = (0..9).map(|_| starved_line("adapter")).collect();
-    claim(level_for(&many, a0, 6) == MAX_LEVEL, "and the run is capped however long it gets");
+    // **Scoped to one corpus, or it is a ratchet.** An axis that starved at
+    // 192 once would otherwise stay at 192 forever, including after the corpus
+    // grew enough that the base would do.
+    let older = [starved_at(96)];
+    claim(
+        level_for(&older, a0, 6, Some("aaaa1111")) == MAX_LEVEL
+            && level_for(&older, a0, 6, Some("bbbb2222")) == 0,
+        "a record paid for out of another corpus does not bind this one",
+    );
+
+    // A line written before `ex=` existed says nothing about what it was given.
+    let silent = ["1 h3 parent=root.... variant=000000aa axis=adapter cell=0 n=24 reject".to_string()];
+    claim(
+        level_for(&silent, a0, 6, None) == 0,
+        "and a line that never recorded its budget is skipped rather than assumed",
+    );
 
     // The halves, and that they are a function of the record.
     claim(
         half_of(0) == Half::Extend && half_of(1) == Half::Fresh && half_of(2) == Half::Extend,
         "the halves alternate with the ledger's length",
     );
-    let p = plan(&two, a0, 6);
+    let p = plan(&settled, a0, 6, None);
     claim(
-        p.half == Half::Extend && p.level == 2 && p.examples == 96,
+        p.half == Half::Extend && p.level == 1 && p.examples == 48,
         "an extending night spends what the axis's record justifies",
     );
-    let three = [starved_line("adapter"), starved_line("adapter"), starved_line("adapter")];
-    let p = plan(&three, a0, 6);
+    let three = [starved_at(24), starved_at(48), starved_at(96)];
+    let p = plan(&three, a0, 6, None);
     claim(
         p.half == Half::Fresh && p.level == 0 && p.examples == BASE_EXAMPLES,
         "and a fresh night spends the base however high the record has climbed",

@@ -1278,6 +1278,22 @@ pub struct Certificate {
     /// and `clean_fixes_needed()` is **6**, so J1 was asking for a repair of
     /// forty per cent of everything held out, with nothing broken.
     pub wrong: Option<usize>,
+    /// The corpus subsample this trial was *given*, which is not the same as
+    /// how many decisions came out of it.
+    ///
+    /// **Without it the schedule cannot read its own history.** `oops` decides
+    /// how much tonight may spend from what past nights spent and what they
+    /// got for it, and `n=` is validation decisions rather than the budget --
+    /// derived from it, and not invertibly. A schedule that inferred the
+    /// budget would be a second account of the record free to disagree with
+    /// it, which is the objection `axis_counts` makes about a counter in its
+    /// own file.
+    ///
+    /// `None` on the axes that take no subsample: a library function, a skill,
+    /// a core and a routing rule are judged against things that are not a
+    /// corpus slice, so there is no budget to record and saying zero would
+    /// read as one.
+    pub budget_n: Option<usize>,
     pub mcnemar: f32,
     pub j1: bool,
     /// Why J1 answered as it did. A veto on an empty validation slice is not
@@ -1549,6 +1565,10 @@ fn render_certificate(c: &Certificate, seq: u32, hour: u8) -> String {
     if let Some(w) = c.wrong {
         s.push_str(" wrong=");
         push_u32(&mut s, w as u32);
+    }
+    if let Some(n) = c.budget_n {
+        s.push_str(" ex=");
+        push_u32(&mut s, n as u32);
     }
     s.push_str(" chi=");
     push_f2(&mut s, c.mcnemar);
@@ -1838,6 +1858,7 @@ pub fn trial_lib(h: &[u8; 32]) -> Result<Certificate, &'static str> {
     let vhash = variant.hash();
 
     let mut cert = Certificate {
+        budget_n: None,
         axis: "lib",
         parent,
         variant: vhash,
@@ -2297,6 +2318,7 @@ pub fn trial(
     let vhash = variant.hash();
 
     let mut cert = Certificate {
+        budget_n: Some(b.examples),
         axis: "adapter",
         parent,
         variant: vhash,
@@ -2491,6 +2513,7 @@ pub fn trial_core(e: &mut super::Engine, h: &[u8; 32]) -> Result<Certificate, &'
     let vhash = variant.hash();
 
     let mut cert = Certificate {
+        budget_n: None,
         axis: "core",
         parent,
         variant: vhash,
@@ -2767,6 +2790,7 @@ pub fn trial_deep(
     let vhash = variant.hash();
 
     let mut cert = Certificate {
+        budget_n: Some(b.examples),
         axis: "deep",
         parent,
         variant: vhash,
@@ -2876,6 +2900,7 @@ pub fn trial_skill(h: &[u8; 32]) -> Result<Certificate, &'static str> {
     let vhash = variant.hash();
 
     let mut cert = Certificate {
+        budget_n: None,
         axis: "skill",
         parent,
         variant: vhash,
@@ -3029,6 +3054,7 @@ pub fn trial_config(e: &mut super::Engine, rule: u8) -> Result<Certificate, &'st
     let vhash = variant.hash();
 
     let mut cert = Certificate {
+        budget_n: None,
         axis: "rule",
         parent,
         variant: vhash,
@@ -4588,6 +4614,7 @@ pub fn trial_judge(e: &mut super::Engine, b: &Budget, bar: f32) -> Result<Certif
     let vhash = variant.hash();
 
     let mut cert = Certificate {
+        budget_n: Some(b.examples),
         axis: "judge",
         parent,
         variant: vhash,
@@ -5085,6 +5112,7 @@ pub fn selftest() -> bool {
     // the point. The counts are chosen so one line drifts and one does not
     // under each direction, and one is gated out by a failed non-bar judge.
     let mut base = Certificate {
+        budget_n: None,
         axis: "adapter",
         parent: None,
         variant: [0u8; 32],

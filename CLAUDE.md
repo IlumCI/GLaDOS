@@ -1043,10 +1043,31 @@ the base. And a line that says nothing about its ceiling is not starved: "did
 not say" is not "could not pass", and reading it as the latter would raise
 every axis on the strength of the early history being silent.
 
-The level is **per axis**, read off that axis's own trailing run, because one
-question being unanswerable at 24 examples says nothing about the next. The
-half is a function of the ledger's length, so a later reader can say which half
-any past night was on -- the objection `axis_counts` already makes about a
+The level is **the largest budget this axis starved at, and the smallest it
+decided at**: if it has decided something above every starvation, that is the
+level that works and there is nothing left to double for. It is per axis,
+because one question being unanswerable at 24 examples says nothing about the
+next, and a shared counter would charge `lib` for `adapter`'s problem.
+
+The first version counted the *trailing run* of starved trials, and it
+converged only by a coincidence: the `Fresh` nights kept injecting starvations
+at the base, and it would have stopped working the day they stopped failing. A
+schedule whose convergence depends on something continuing to go wrong is a
+schedule that fails silently.
+
+Reading it directly needed a field the ledger did not have. **`ex=` is the
+subsample a trial was given**, where `n=` is validation decisions -- derived
+from the budget and not invertibly -- so a schedule that inferred one would be
+a second account of the record free to disagree with it.
+
+It is **scoped to one corpus**, or it is a ratchet: an axis that starved at 192
+once would stay there forever, including after the corpus grew enough that the
+base would do. The ledger already records which body of evidence each line was
+paid for out of, for the family-wise budget's sake, and the same field answers
+this.
+
+The half is a function of the ledger's length, so a later reader can say which
+half any past night was on -- the objection `axis_counts` already makes about a
 counter in its own file.
 
 The journal line carries what the night was allowed to spend beside what it

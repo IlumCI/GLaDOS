@@ -638,13 +638,20 @@ fn tick_inner(forced: bool) {
                         Some(p) => {
                             let lines = super::godel::ledger_tail(usize::MAX);
                             let need = super::godel::clean_fixes_needed();
-                            let plan = match p.axis_slot() {
-                                Some(a) => super::oops::plan(&lines, a, need),
+                            // Scoped to the corpus in force, so a level
+                            // learned against a body of evidence that has
+                            // since been replaced does not bind this one.
+                            let corpus = crate::sysbox::hash_of(super::vocab::CORPUS)
+                                .map(|h| super::godel::short_hex(&h));
+                            let plan = super::oops::plan(
+                                &lines,
                                 // An axis the ranking does not choose among
-                                // spends the base, because there is no record
-                                // filed under it to read a level out of.
-                                None => super::oops::plan(&lines, usize::MAX, need),
-                            };
+                                // has no record filed under it to read a level
+                                // out of, so it spends the base.
+                                p.axis_slot().unwrap_or(usize::MAX),
+                                need,
+                                corpus.as_deref(),
+                            );
                             spent = Some(plan);
                             let b = p.budget(plan.examples, plan.ms);
                             super::with_engine(|e| super::godel::run(e, &b, &p))
