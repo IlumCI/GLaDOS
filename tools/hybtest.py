@@ -128,6 +128,54 @@ def build(dst, seed=7, schedule="LLLFLLLF", zero=False):
     return src
 
 
+def build_tokenizer(dst, vocab=256):
+    """A byte-level tokenizer whose vocabulary is exactly this model's.
+
+    **The fixture could not boot without one**, and the kernel was right to
+    refuse: it loads a checkpoint, loads a tokenizer, and stops with "tokenizer
+    produces ids up to 49152; this model's embedding has 256 rows" -- because a
+    tokenizer that can emit an id the embedding does not have is a model fed
+    rows of whatever lies past the end.
+
+    So the fixture carries its own. One token per byte, no merges, no
+    specials: not a good tokenizer and not meant to be. What it makes possible
+    is booting *`ai::init`*, which returns early with no checkpoint and takes
+    eleven boot selftest sections with it -- the godel machine, the QDoRA
+    adapters, the backward kernels, the trainer's arithmetic, constrained
+    decoding, the agent loop, the linear probe, the situation planner, the
+    initiative policy and the corpus bundles. On a CI runner, where the weights
+    are not in this repository and never will be, those eleven were silently
+    not running.
+
+    Scores are `-id` so the merge loop has a total order to work with, and the
+    byte table is the identity because every byte *is* a token. The format is
+    `tools/tokenizer.py`'s v2 and is written here rather than imported because
+    that module's job is converting a real Hugging Face tokenizer and this one
+    has no vocabulary to convert.
+    """
+    import struct
+
+    MAGIC = b"GLADOSTK"
+    VERSION = 2
+    raw = [bytes([i]) for i in range(vocab)]
+    out = bytearray()
+    out += MAGIC
+    # version, size, max_len, flags, bos, eos, unk. No flags: no dummy prefix,
+    # no digit splitting, the GPT-2 pre-tokenizer. bos and eos are 0 and 1,
+    # which are real single-byte tokens -- a fixture has nowhere else to put
+    # them and nothing here depends on what they spell.
+    out += struct.pack("<IIIIIII", VERSION, vocab, 1, 0, 0, 1, 2)
+    for b in range(256):
+        out += struct.pack("<I", b if b < vocab else 0)
+    out += struct.pack("<I", 0)
+    for i in range(vocab):
+        out += struct.pack("<fI", float(-i), len(raw[i]))
+        out += raw[i]
+    Path(dst).parent.mkdir(parents=True, exist_ok=True)
+    Path(dst).write_bytes(out)
+    print(f"  tokenizer: {vocab} byte tokens -> {dst}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("dst", nargs="?", default="out/hybtest.bin")
@@ -138,12 +186,25 @@ def main():
                     help="zero every projection back into the residual stream")
     ap.add_argument("--build", action="store_true",
                     help="regenerate the checkpoint before scoring it")
+    # The oracle is a forward pass through `ref35`, which is the expensive half
+    # and answers a question CI is not asking: a verify job wants a checkpoint
+    # the kernel will *boot*, so that `ai::init` runs and the eleven boot
+    # selftest sections behind it are not silently skipped. What the logits
+    # should be is a different check and belongs where somebody reads it.
+    ap.add_argument("--build-only", action="store_true",
+                    help="write the checkpoint and tokenizer, and score nothing")
     args = ap.parse_args()
 
     dst = Path(args.dst)
-    if args.build or not dst.exists():
+    if args.build or args.build_only or not dst.exists():
         build(dst, schedule=args.schedule, zero=args.zero)
+        # Beside the checkpoint and named for it, because the two only mean
+        # anything together: a tokenizer whose vocabulary is not this model's
+        # is exactly what the kernel refuses to boot.
+        build_tokenizer(dst.with_name(dst.stem + "-tokenizer.bin"))
 
+    if args.build_only:
+        return
     tensors, cfg = v4.load(dst)
     logits = ref35.forward(np.array(args.ids), tensors, cfg)[-1]
 

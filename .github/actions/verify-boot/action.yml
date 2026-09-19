@@ -75,23 +75,45 @@ runs:
         test -w /dev/kvm || { echo "::error::/dev/kvm is not writable"; exit 1; }
         echo "kvm is available and writable"
 
-    # `--no-payload` and not a download. The weights are not in this repository
-    # and never will be, and they turn out not to be needed: measured, `diag
-    # all` is 59 of 59 with no checkpoint, no tokenizer and no root bundle
-    # staged, byte for byte the same verdicts and the same single skipped
-    # claim as a run with all three. Every suite tests machinery; none of them
-    # asks the model a question.
+    # A **fixture checkpoint**, built here from nothing, rather than a download
+    # or nothing at all.
+    #
+    # `--no-payload` was the first answer and it was measured wrong. `diag all`
+    # really is 59 of 59 either way -- those suites test machinery and none of
+    # them asks the model a question -- but the gate also reads the *boot*
+    # selftests, and `ai::init` returns early with no checkpoint. Eleven
+    # sections were silently not running: the godel machine, QDoRA adapters,
+    # the backward kernels, the trainer's arithmetic, constrained decoding, the
+    # agent loop, the linear probe, the situation planner, the initiative
+    # policy and the corpus bundles. Which is to say: every claim about the
+    # self-modification loop, on a job whose whole purpose is to gate what that
+    # loop ships.
+    #
+    # `hybtest.py --build` writes a 353 KB hybrid shaped to hit every path the
+    # real one does, and a 256-token byte tokenizer to match -- the kernel
+    # refuses a tokenizer whose ids the embedding does not have, and is right
+    # to. Measured: 18 boot sections without it, 28 with, zero FAIL either way.
+    # No download, no 598 MB of weights that are not in this repository and
+    # never will be.
     #
     # `initiative off` then `agent stop` first, in that order, because the
     # resident mind wakes about fifteen seconds in and holds the engine for a
     # whole episode -- which presents as this job timing out with commands
     # unsent. `echo ready` between them and `diag all` because at hypervisor
     # speed the serial pacing races and two commands can arrive concatenated.
+    - name: Build the fixture checkpoint
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 -m pip install --quiet --disable-pip-version-check numpy
+        python3 tools/hybtest.py out/ci-fixture.bin --build-only
+
     - name: Boot it and run every suite
       shell: bash
       run: |
         set -euo pipefail
-        python3 tools/drive.py --no-payload \
+        python3 tools/drive.py \
+          --model out/ci-fixture.bin --tokenizer out/ci-fixture-tokenizer.bin \
           --qemu-extra "-accel kvm -cpu host -smp 4" \
           --timeout "${{ inputs.timeout }}" \
           "initiative off" "agent stop" "echo ready" "diag all" \
@@ -179,7 +201,28 @@ runs:
           fail=1
         fi
 
-        # 5. The boot report, which is what `main::section` writes when a
+        # 5. The sections that only run when a checkpoint loaded.
+        #
+        #    **This check exists because its absence hid eleven of them.** The
+        #    first version of this job staged no model, `ai::init` returned
+        #    early, and every selftest behind it -- the godel machine among
+        #    them -- silently did not run. Nothing printed FAIL, the tally read
+        #    59 of 59, and the gate was green. A count is the cheap half; the
+        #    named one is the half that says *which*, and it is the section
+        #    holding every claim about the loop this job exists to gate.
+        sections=$(grep -c '^\[selftest\]' verify.log || true)
+        if [ "${sections:-0}" -lt 25 ]; then
+          echo "::error::only $sections boot selftest sections ran; expected 25 or more"
+          fail=1
+        fi
+        for want in 'godel machine' 'qdora adapters' 'backward kernels' 'trainer arithmetic'; do
+          if ! grep -q "^\[selftest\] $want" verify.log; then
+            echo "::error::the '$want' section did not run -- did the checkpoint load?"
+            fail=1
+          fi
+        done
+
+        # 6. The boot report, which is what `main::section` writes when a
         #    subsystem faults or answers `false`. An Optional one does not halt
         #    the boot, so without this a kernel that came up with a dead
         #    subsystem would be signed and published.

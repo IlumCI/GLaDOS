@@ -3811,6 +3811,27 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         godel::ledger_len(),
                         if boundary { "open to question tonight" } else { "frozen for this epoch" }
                     );
+                    // What this body of evidence has left to spend, which is
+                    // the one thing that can refuse a trial before any judge
+                    // is asked.
+                    let spent = godel::tests_spent();
+                    match godel::effective_bar() {
+                        None => {
+                            console::set_color(LTRED);
+                            kprintln!(
+                                "  {} test(s) against this corpus, and its evidence is spent",
+                                spent
+                            );
+                            console::set_color(LTGRAY);
+                            kprintln!("  'teach' it something and the budget starts again");
+                        }
+                        Some(bar) => kprintln!(
+                            "  {} test(s) against this corpus; the bar it pays is {} and {} clean repairs",
+                            spent,
+                            (bar * 100.0) as u32 as f32 / 100.0,
+                            godel::clean_fixes_needed()
+                        ),
+                    }
                     for (i, (name, unc, has)) in slots.iter().enumerate() {
                         let mark = if i == 0 { "->" } else { "  " };
                         kprintln!(

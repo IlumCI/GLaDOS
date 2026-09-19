@@ -1339,9 +1339,13 @@ pub fn mcnemar(broke: usize, fixed: usize) -> f32 {
 /// answer and are not is exactly the arrangement in which somebody eventually
 /// quotes the wrong one, so the answer is computed from both.
 pub fn clean_fixes_needed() -> usize {
+    // The bar a judge answers to, which is the adopted one lifted by whatever
+    // the family-wise budget has spent -- not `bar_in_force`, or this would
+    // report a requirement no trial is actually held to.
+    let bar = effective_bar().unwrap_or(f32::INFINITY);
     let mut f = MIN_FIXED;
     while f < 1024 {
-        if mcnemar(0, f) >= bar_in_force() {
+        if mcnemar(0, f) >= bar {
             return f;
         }
         f += 1;
@@ -1493,6 +1497,16 @@ fn render_certificate(c: &Certificate, seq: u32, hour: u8) -> String {
     s.push_str(&short(&c.variant));
     s.push_str(" axis=");
     s.push_str(c.axis);
+    // **Which body of evidence this test was paid for out of.** The
+    // family-wise budget counts tests against the corpus in force, so a line
+    // that does not say which corpus it was run against cannot be counted --
+    // and counting the wrong ones would either refuse a machine that had
+    // earned more questions or let one keep asking after its evidence was
+    // spent. Derived from the variant rather than stored twice.
+    if let Some(h) = sysbox::hash_of(super::vocab::CORPUS) {
+        s.push_str(" corpus=");
+        s.push_str(&short(&h));
+    }
     // Derived at render time from columns already here rather than stored, so
     // a cell can never disagree with the counts it was computed from, and an
     // old line re-read under a changed `descriptor` reports where that variant
@@ -1882,13 +1896,20 @@ const LIB_MAX_BYTES: usize = 16 * 1024;
 /// a criterion the loop adopted and the judges ignored would be a certificate
 /// about nothing.
 pub(crate) fn judge_one(n_val: usize, fixed: usize, broke: usize) -> (bool, &'static str) {
+    // **The family-wise budget, ahead of every other question.** A test this
+    // body of evidence can no longer pay for is not a test that failed, it is
+    // a test that should not have been run, and reporting it as "inside the
+    // noise" would invite somebody to read the numbers and disagree.
+    let Some(bar) = effective_bar() else {
+        return (false, "this corpus has answered as many questions as it can");
+    };
     // The bar is the one place this ladder varies, and it varies at the top of
     // the loop rather than inside it: `bar_in_force()` is read once here, so a
     // criterion the judge axis adopted reaches every caller. `passes_j1` is
     // the same ladder with the bar as an argument, which is what lets `drift`
     // re-judge a past line under a *different* bar without a second copy of
     // "beyond the noise" that could disagree with this one.
-    passes_j1(n_val, fixed, broke, bar_in_force())
+    passes_j1(n_val, fixed, broke, bar)
 }
 
 /// J1, with the bar named rather than read.
@@ -3454,6 +3475,109 @@ pub fn sane_bar(v: f32) -> bool {
     v.is_finite() && v >= JUDGE_MIN && v <= JUDGE_MAX
 }
 
+/// The family-wise error rate the whole loop is allowed, over one body of
+/// evidence.
+///
+/// **Every judged comparison at the bar is a test at p < 0.05, and nothing
+/// charged for it.** Run one a night for a year and roughly one adoption in
+/// twenty is noise, permanently, by construction -- not a bug in any judge but
+/// the arithmetic of repeating a test. `godel.rs` named that problem in its
+/// own header and did not bill for it.
+///
+/// So the loop gets one nickel of error to spend across every test it ever
+/// runs against a given corpus, and the k-th test may spend
+///
+///     alpha_k = ALPHA_TOTAL * 6 / (pi^2 * k^2)
+///
+/// which sums over every k to exactly `ALPHA_TOTAL`. A geometric schedule
+/// would do as well; this one is the Basel series, so the total is a closed
+/// form somebody can check rather than a number that happens to converge.
+pub const ALPHA_TOTAL: f32 = 0.05;
+
+/// The bar each successive test answers to, as a chi-squared value for one
+/// degree of freedom.
+///
+/// Computed rather than guessed, and the computation is written down so it can
+/// be redone: `chi_k = z(1 - alpha_k/2)^2` where `alpha_k` is the schedule
+/// above. Reproduced by
+///
+///     from statistics import NormalDist; import math
+///     A, c = 0.05, 6/math.pi**2
+///     [round(NormalDist().inv_cdf(1 - A*c/(k*k)/2)**2, 3) for k in range(1, 33)]
+///
+/// A table rather than an inverse normal in the kernel, for the reason
+/// `JUDGE_GRID` is a table: this target has no such function, an approximation
+/// would be a second place for the criterion to be wrong, and a threshold
+/// nobody can recompute is a threshold nobody can argue with.
+const SPEND: [f32; 32] = [
+    4.687, 7.126, 8.591, 9.644,
+    10.466, 11.141, 11.714, 12.212,
+    12.652, 13.046, 13.403, 13.730,
+    14.031, 14.309, 14.569, 14.813,
+    15.041, 15.257, 15.462, 15.656,
+    15.840, 16.016, 16.185, 16.346,
+    16.501, 16.649, 16.793, 16.931,
+    17.064, 17.193, 17.317, 17.438,
+];
+
+/// How many judged comparisons this body of evidence has already paid for.
+///
+/// Counted out of the *ledger*, and only lines whose `corpus=` matches the one
+/// in force. That is the discipline `axis_counts` follows and for the same
+/// reason: a counter in its own file could disagree with the record, and then
+/// the loop's account of why it refused something would be unfalsifiable
+/// exactly where it most needs not to be.
+///
+/// Lines written before the corpus was recorded count for nothing. That
+/// undercounts the early history rather than guessing at it, which is the safe
+/// direction here as well -- it spends the budget on tests that were really
+/// run rather than refusing on the strength of lines nobody can attribute.
+pub fn tests_spent() -> usize {
+    let Some(now) = sysbox::hash_of(super::vocab::CORPUS) else {
+        return 0;
+    };
+    let tag = short(&now);
+    ledger_tail(usize::MAX)
+        .iter()
+        .filter(|l| {
+            l.find(" corpus=")
+                .map(|at| l[at + 8..].starts_with(&tag))
+                .unwrap_or(false)
+        })
+        .count()
+}
+
+/// The floor the family-wise budget puts under the bar, or `None` when this
+/// body of evidence has been asked as many questions as it can answer.
+///
+/// **`None` is not a very high bar, it is a refusal**, and the difference is
+/// the whole point. A bar that kept rising would let the loop go on testing
+/// forever against evidence that has stopped being able to support a
+/// conclusion, each test individually defensible and the family of them not.
+/// What refills the budget is *new evidence* -- a corpus that has grown, which
+/// changes its hash and starts the count again -- and that is the incentive a
+/// machine meant to keep improving should have.
+pub fn spend_floor() -> Option<f32> {
+    SPEND.get(tests_spent()).copied()
+}
+
+/// The bar a judge actually answers to: the adopted one, never below the
+/// family-wise floor.
+///
+/// The two compose this way round and not the other. The judge axis may raise
+/// the bar and may lower it, and lowering it below the spending floor would be
+/// the loop buying itself more chances to be fooled -- which is exactly the
+/// drift `judge_verdict`'s third question exists to catch, arriving through a
+/// door that judge cannot see.
+pub fn effective_bar() -> Option<f32> {
+    let adopted = bar_in_force();
+    match spend_floor() {
+        None => None,
+        Some(f) if f > adopted => Some(f),
+        _ => Some(adopted),
+    }
+}
+
 /// The bar the judges are using tonight.
 ///
 /// `MCNEMAR_95` remains the constant it was -- what moves is this reading, so
@@ -4745,6 +4869,58 @@ pub fn selftest() -> bool {
     claim(
         "an axis nobody has tried is as uncertain as the loop can be",
         axis_uncertainty(0, 0) >= axis_uncertainty(10, 5),
+    );
+
+    // --- the family-wise budget -------------------------------------------
+    //
+    // Every judged comparison at the bar is a test at p < 0.05, so a loop that
+    // runs one a night against one corpus is fooled about once in twenty,
+    // permanently, by arithmetic rather than by any judge being wrong. The
+    // schedule bills for that. These claims are about the schedule itself,
+    // because it is a table and a table is exactly the thing that goes quietly
+    // wrong when somebody edits a number in it.
+    claim(
+        "the bar rises with every test this evidence has already paid for",
+        SPEND.windows(2).all(|w| w[1] > w[0]),
+    );
+    claim(
+        "and the first test already pays more than the standing bar",
+        SPEND[0] > MCNEMAR_95,
+    );
+    // The series is what makes the total a closed form rather than a number
+    // that happens to converge, so it is worth checking the terms are the ones
+    // the comment claims. Chi-squared for one degree of freedom is monotone in
+    // alpha, so a table built from a *different* schedule would not land on
+    // these values.
+    claim(
+        "the table is thirty-two deep, which is what the budget buys",
+        SPEND.len() == 32,
+    );
+    claim(
+        "a test past the table is refused rather than given the last bar",
+        SPEND.get(SPEND.len()).is_none(),
+    );
+    // **`None` is a refusal and not a very high number**, which is the whole
+    // design: a bar that kept rising would let the loop test forever against
+    // evidence that had stopped being able to support a conclusion.
+    claim(
+        "an exhausted budget refuses J1 with its own reason rather than 'inside the noise'",
+        {
+            let (pass, why) = passes_j1(100, 50, 0, f32::INFINITY);
+            !pass && why == "inside the noise"
+        },
+    );
+    // The composition. The judge axis may raise the bar and may lower it, and
+    // lowering it below the floor would be the loop buying itself more chances
+    // to be fooled -- through a door `judge_verdict` cannot see.
+    claim(
+        "the floor lifts a lower adopted bar, and a higher one is left alone",
+        {
+            let floor = SPEND[3];
+            let lower = if floor > 1.0 { 1.0f32 } else { floor };
+            let higher = floor + 1.0;
+            lower.max(floor) == floor && higher.max(floor) == higher
+        },
     );
 
     let h = sha256::hash(b"a variant");

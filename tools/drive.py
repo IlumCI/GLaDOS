@@ -571,11 +571,18 @@ def main():
     # and boot exactly as before. `--wad` names one, otherwise whatever is in
     # `esp/GLADOS/` comes along -- which is what `deploy.ps1` does for the real
     # machine, where it copies the whole directory.
+    #
+    # The root bundle is optional in a *third* way. A missing checkpoint is
+    # silent and consequential -- `ai::init` returns early and takes eleven
+    # boot selftest sections with it -- so it is refused. A missing root bundle
+    # is neither: the kernel says so itself, at boot, and the state it leaves
+    # is a real one that `Identity::NoTrustStore` names. So it is skipped with
+    # a line rather than refused, which is what lets a CI runner boot at all.
     staged = [
         (model_src, "model.bin"),
         (tokenizer_src, "tokenizer.bin"),
-        (ROOT / "esp/GLADOS/roots.der", "roots.der"),
     ]
+    optional = [(ROOT / "esp/GLADOS/roots.der", "roots.der")]
     wad = wad_src if wad_src is not None else ROOT / "esp/GLADOS/DOOM.WAD"
     if wad.exists():
         staged.append((wad, "DOOM.WAD"))
@@ -588,6 +595,16 @@ def main():
         old_wad = esp / "GLADOS" / "DOOM.WAD"
         if old_wad.exists():
             old_wad.unlink()
+
+    for src, dst in optional:
+        target = esp / "GLADOS" / dst
+        if src.exists():
+            if not target.exists() or differs(src, target):
+                target.write_bytes(src.read_bytes())
+        else:
+            if target.exists():
+                target.unlink()
+            print(f"[drive] no {dst} -- TLS will encrypt and authenticate nothing")
 
     for src, dst in staged:
         # **Refused rather than skipped, unless somebody said so.** A run that

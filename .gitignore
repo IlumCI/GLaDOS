@@ -51,3 +51,4 @@ cuda/*.exe
 cuda/*.exp
 cuda/*.lib
 cuda/*.pdb
+out/ci-fixture*
