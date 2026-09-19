@@ -28,6 +28,12 @@ on:
         description: "propose and judge, but adopt writes nothing"
         type: boolean
         default: false
+      author_target:
+        description: >
+          A src/ or tools/ file for the rung-4 model author, tried only when
+          the grid is exhausted. Empty means rung 4 does not run -- an
+          unattended targeting policy is a design decision, not a default.
+        default: ""
   # schedule:
   #   - cron: "17 2 * * *"
 
@@ -121,6 +127,8 @@ jobs:
     needs: follow
     permissions:
       contents: write
+      # Rung 4a: inference with the workflow's own token, no new credential.
+      models: read
     outputs:
       point: ${{ steps.pick.outputs.point }}
       rail: ${{ steps.pick.outputs.rail }}
@@ -154,6 +162,8 @@ jobs:
 
       - name: Pick the next point, and mark it tried before anything runs
         id: pick
+        env:
+          AUTHOR_TARGET: ${{ inputs.author_target }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
@@ -163,10 +173,39 @@ jobs:
           code=$?
           set -e
           if [ "$code" != "0" ]; then
-            echo "have=no" >> "$GITHUB_OUTPUT"
-            echo "::notice::nothing to propose tonight:"
-            cat /tmp/account.txt || true
-            exit 0
+            if grep -q "every grid point is tried" /tmp/account.txt \
+               && [ -n "$AUTHOR_TARGET" ]; then
+              # The composed core's rule, ported: the model authors only
+              # when everything cheaper is out of moves. Its reply is held
+              # by the fence contract, admit(), and then the whole gate.
+              set +e
+              python3 tools/godel.py author --root . \
+                --kind cleanup --target "$AUTHOR_TARGET" \
+                --emit-env /tmp/env.txt > /tmp/account.txt
+              code=$?
+              set -e
+              if [ "$code" != "0" ]; then
+                echo "have=no" >> "$GITHUB_OUTPUT"
+                echo "::notice::the author refused or was refused:"
+                cat /tmp/account.txt || true
+                exit 0
+              fi
+              # The author emits point= only; the account is recomputed the
+              # way every account figure is.
+              {
+                python3 tools/godel.py alpha --root . \
+                  | sed -n 's/.*: \([0-9]*\) of 32.*/alpha_k=\1/p'
+                echo "chi_bar=-"
+                echo "rail=none"
+                python3 tools/godel.py oops --root . --axis model \
+                  | sed -E 's/.*(extend|fresh) at level ([0-9]+) -- ([0-9]+) minutes, ([0-9]+) boot.*/half=\1\nlevel=\2\nminutes=\3\nboots=\4/'
+              } >> /tmp/account.txt
+            else
+              echo "have=no" >> "$GITHUB_OUTPUT"
+              echo "::notice::nothing to propose tonight:"
+              cat /tmp/account.txt || true
+              exit 0
+            fi
           fi
           cat /tmp/account.txt
           # The account, as outputs (key=value already).

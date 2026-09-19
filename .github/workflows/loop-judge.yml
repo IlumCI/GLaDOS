@@ -271,6 +271,21 @@ jobs:
       - name: Judge it against what it claimed, at the bar in force
         run: |
           set -euo pipefail
+          # `rail none` claims nothing moved -- and adopting on "nothing
+          # broke" would be adopting what nothing measured. Until the cost
+          # rails exist (image bytes, warning count -- the cleanup kind's
+          # J1), a rail-none candidate is judged all the way through the
+          # gate and then REFUSED with the missing judge named, so the lane
+          # is drivable end to end without one unmeasured adoption. The
+          # kind table's own rule, applied to the loop's own gap.
+          if [ "$RAIL" = "none" ]; then
+            python3 tools/rails.py compare before.txt after.txt \
+              --again kernel-a2.txt kernel-b2.txt | tee judged.txt
+            echo "MOVED=-" >> "$GITHUB_ENV"
+            echo "VERDICT=refuse" >> "$GITHUB_ENV"
+            echo "WHY=rail none has no J1 yet; the cost rails are the missing judge" >> "$GITHUB_ENV"
+            exit 0
+          fi
           set +e
           python3 tools/rails.py judge before.txt after.txt \
             --again kernel-a2.txt kernel-b2.txt \

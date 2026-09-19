@@ -1,0 +1,218 @@
+name: boundary
+
+# The only lane that may change the evaluator -- rails.py's floors, the
+# judge workflows, godel.py itself -- and it ships LAST by operator
+# decision: the epoch gate below needs a ledger to count, and a gate with
+# no track record to gate against is a ceremony.
+#
+# Structure, in godel.rs's judge_verdict idiom:
+#   epoch  -- evaluator changes are questionable only at frozen-bar epoch
+#             boundaries (EPOCH_LEN entries), never mid-epoch, never at
+#             genesis. Off-boundary dispatches refuse with the distance.
+#   Sane   -- the patched evaluator's own selftests pass; a floors change
+#             sits inside [p95, 2*p95] of the newest measured spread.
+#   Moves  -- old and new judge configurations must disagree on at least
+#             one archived anchor pair, or the change is a certificate with
+#             no content.
+#   Honest -- loosening admitted only where newly-admitted pairs' ground
+#             truth was good; tightening only where newly-refused ones were
+#             not gains. Pairs without ground truth abstain.
+#
+# The write half runs under environment `evaluator`, whose required
+# reviewer means every run BLOCKS on a human before EVALUATOR_TOKEN exists
+# in it -- and the output is a PR to main, never a push, even to loop/main:
+# evaluator changes reach the machine only through main, which the machine
+# then follows.
+#
+# The machine may DRAFT proposals into loop/evidence/boundary/ through its
+# ordinary lane (they are data); only an operator dispatch judges one.
+#
+# CONSUMER: the operator, twice (environment approval, then the PR merge).
+# CANARY: the Sane drill (a floors change outside 2*p95 must refuse) and
+# the Moves gap -- with no anchors archived yet, Moves/Honest REFUSE with
+# the gap named rather than passing on nothing; absent is not ok.
+
+on:
+  workflow_dispatch:
+    inputs:
+      proposal:
+        description: "path under loop/evidence/boundary/ (a diff + declaration)"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: boundary
+  cancel-in-progress: false
+
+jobs:
+  judge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      PROPOSAL: ${{ inputs.proposal }}
+    outputs:
+      ok: ${{ steps.verdict.outputs.ok }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: loop/main
+          fetch-depth: 0
+
+      - name: The epoch gate
+        run: |
+          set -euo pipefail
+          python3 - <<'PYEOF'
+          import os, sys
+          sys.path.insert(0, "tools")
+          import godel
+          n = len(godel.load_entries("."))
+          if not godel.is_boundary(n):
+              to_go = godel.EPOCH_LEN - (n % godel.EPOCH_LEN) if n else godel.EPOCH_LEN
+              print(f"::error::the ledger holds {n} entr{'y' if n==1 else 'ies'}; "
+                    f"the criterion is questionable only at epoch boundaries, "
+                    f"{to_go} away")
+              sys.exit(1)
+          print(f"at an epoch boundary ({n} entries); the criterion may be questioned")
+          PYEOF
+
+      - name: The proposal itself
+        run: |
+          set -euo pipefail
+          case "$PROPOSAL" in
+            loop/evidence/boundary/*) ;;
+            *) echo "::error::proposals live under loop/evidence/boundary/"; exit 1;;
+          esac
+          test -f "$PROPOSAL" || { echo "::error::no such proposal"; exit 1; }
+          # Line 1: `declares <floors|judge-logic|workflow|gate-check>`.
+          # The rest: a unified diff touching EVALUATOR paths only.
+          decl=$(head -1 "$PROPOSAL")
+          case "$decl" in
+            "declares floors"|"declares judge-logic"|"declares workflow"|"declares gate-check") ;;
+            *) echo "::error::the proposal declares nothing this lane knows"; exit 1;;
+          esac
+          echo "DECL=${decl#declares }" >> "$GITHUB_ENV"
+          tail -n +2 "$PROPOSAL" > /tmp/boundary.diff
+          git apply --check --stat /tmp/boundary.diff
+
+      - name: Sane
+        run: |
+          set -euo pipefail
+          git apply /tmp/boundary.diff
+          python3 tools/rails.py --selftest
+          python3 tools/knob.py --selftest
+          python3 tools/godel.py --selftest
+          if [ "$DECL" = "floors" ]; then
+            newest=$(ls loop/evidence/floors/*.tsv 2>/dev/null | sort | tail -1 || true)
+            if [ -z "$newest" ]; then
+              echo "::error::a floors change with no measured spread to cite; run evidence-floors first"
+              exit 1
+            fi
+            python3 - "$newest" <<'PYEOF'
+          import io, sys
+          sys.path.insert(0, "tools")
+          import importlib, rails
+          importlib.reload(rails)          # the PATCHED table
+          rows = {r.split("\t")[0]: float(r.split("\t")[3])
+                  for r in io.open(sys.argv[1]) if not r.startswith("rail")}
+          bad = 0
+          for prefix, f in rails.NOISE.items():
+              p95s = [v for name, v in rows.items()
+                      if name == prefix or name.startswith(prefix)]
+              if not p95s:
+                  continue
+              p95 = max(p95s)
+              if p95 > 0 and not (p95 <= f <= 2 * p95):
+                  bad += 1
+                  print(f"::error::{prefix}: {f} is outside [{p95:.3f}, {2*p95:.3f}] "
+                        f"of the newest measured spread")
+          sys.exit(1 if bad else 0)
+          PYEOF
+          fi
+          if [ "$DECL" = "workflow" ]; then
+            curl -sSL https://github.com/rhysd/actionlint/releases/latest/download/actionlint_linux_amd64.tar.gz \
+              | tar xz actionlint
+            ./actionlint
+          fi
+          git apply -R /tmp/boundary.diff
+
+      # With no archived anchors these two REFUSE rather than pass, and say
+      # why: a Moves that cannot be asked is not a Moves that passed.
+      - name: Moves, then Honest
+        id: verdict
+        run: |
+          set -euo pipefail
+          pairs=$(ls loop/evidence/anchors/ 2>/dev/null | wc -l)
+          if [ "$pairs" = "0" ]; then
+            echo "::error::no anchor pairs are archived, so whether this change"
+            echo "::error::MOVES anything cannot be asked -- harvest anchors from"
+            echo "::error::evidence-boot first; absent is not ok"
+            exit 1
+          fi
+          # Each anchor pair: before.txt/after.txt + a ground line. Old and
+          # new rails.py must disagree somewhere (Moves), and every
+          # disagreement must side with the ground truth (Honest).
+          moves=0; dishonest=0
+          for d in loop/evidence/anchors/*/; do
+            old=$(python3 tools/rails.py judge "$d/before.txt" "$d/after.txt" \
+                    --claims "$(cat "$d/claims")" >/dev/null 2>&1; echo $?)
+            git apply /tmp/boundary.diff
+            new=$(python3 tools/rails.py judge "$d/before.txt" "$d/after.txt" \
+                    --claims "$(cat "$d/claims")" >/dev/null 2>&1; echo $?)
+            git apply -R /tmp/boundary.diff
+            if [ "$old" != "$new" ]; then
+              moves=$((moves + 1))
+              truth=$(cat "$d/ground" 2>/dev/null || echo "unknown")
+              want=$([ "$truth" = "real" ] && echo 0 || echo 1)
+              if [ "$truth" != "unknown" ] && [ "$new" != "$want" ]; then
+                dishonest=$((dishonest + 1))
+                echo "::error::$d: the new judge answers $new where ground truth says $truth"
+              fi
+            fi
+          done
+          if [ "$moves" = "0" ]; then
+            echo "::error::old and new judges agree on every anchor -- a change with no content"
+            exit 1
+          fi
+          if [ "$dishonest" != "0" ]; then
+            exit 1
+          fi
+          echo "moves on $moves pair(s), honestly"
+          echo "ok=yes" >> "$GITHUB_OUTPUT"
+
+  # The write half: blocked on a human by the environment, and its output
+  # is a PR, never a push.
+  open-pr:
+    needs: judge
+    if: needs.judge.outputs.ok == 'yes'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: evaluator
+    permissions:
+      contents: read
+    env:
+      PROPOSAL: ${{ inputs.proposal }}
+      EVALUATOR_TOKEN: ${{ secrets.EVALUATOR_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: loop/main
+          fetch-depth: 0
+          token: ${{ secrets.EVALUATOR_TOKEN }}
+      - name: A branch and a PR, for the second human decision
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          name=$(sha256sum "$PROPOSAL" | cut -c1-16)
+          git fetch origin main
+          git checkout -b "boundary/$name" origin/main
+          tail -n +2 "$PROPOSAL" | git apply
+          git add -A
+          git commit -m "boundary: $(head -1 "$PROPOSAL") ($name)"
+          git push origin "boundary/$name"
+          GH_TOKEN="$EVALUATOR_TOKEN" gh pr create \
+            --head "boundary/$name" --base main --label evaluator \
+            --title "boundary: $(head -1 "$PROPOSAL")" \
+            --body "An evaluator change, cross-judged at an epoch boundary. The run's log carries Sane/Moves/Honest; merging is the second human decision."
