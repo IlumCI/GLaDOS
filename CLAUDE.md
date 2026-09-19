@@ -1103,13 +1103,42 @@ before a boot is spent, `rails.py judge --bar` at the alpha floor in force).
 `rails.py --bar` raises the counted-rail threshold and can only ever raise
 it.
 
+**The rest of the suite, in one paragraph each.** Four evidence factories
+(`evidence-boot/floors/fuzz/sweep`) produce data and never verdicts -- the
+fuzz one is the differ idiom host-side, two independent readers over one
+stream of mangled envelopes, and every family carries a known-bad seed that
+must refuse. The verdict return leg exists at last (`migration 0005`,
+`functions/verdict`): ingest verifies the GLADOSIG against the pinned point
+in `_shared/verdict_key.js` BEFORE storing, ci.yml asserts that pin equals
+`mod.rs`'s via `sign.anchor` on every push, and the offline tests' two
+fixtures are the exact blobs a real boot filed and refused. Rung 2's
+`godel.py discover` lists 586 candidate constants and says the row-adding
+lane waits on the `eval` kind's enablement; rung 4a's `godel.py author`
+asks GitHub Models for one patch under a fence contract whose injection
+drill is a selftest claim (a diff aimed at `.github/` refuses by name).
+`rail none` judges to an explicit refusal naming its missing judge (the
+cost rails), so the model lane is drivable end to end without one
+unmeasured adoption. `boundary.yml` is the only evaluator lane: epoch gate,
+Sane/Moves/Honest over archived anchor pairs (refusing by name while none
+are archived), environment-gated token, output a PR to main and never a
+push. `.github/RULESETS.md` is the operator's half.
+
 **None of it has run on a runner** -- that requires the push -- and what
 could be driven locally was: every subcommand against the real tree, the
 candidate re-derivation producing `LEN_B = 0.25` in a tree the worktree
 never saw, fsck catching a certificate that lies about its candidate tree,
-the tried-walk moving to the next value, and the --bar floor turning a chi
-23 win into `same` at a bar of 30. The cron ships commented out; a schedule
-is the last thing a loop earns.
+the tried-walk moving to the next value, the --bar floor turning a chi
+23 win into `same` at a bar of 30, 500 envelope mangles with two readers
+agreeing and the fixpoint holding, and the verdict verifier agreeing with
+the kernel on all three of accept, wrong key and tamper. The crons ship
+commented out; a schedule is the last thing a loop earns.
+
+Still owed from the plan, named rather than implied: the kernel
+counterpart (`godel verdicts` + the fourth night block, polling before the
+trial so a filed verdict cannot move the epoch boundary mid-night), the
+cost rails that give `cleanup` its J1, the repair-persist boot-matrix leg,
+the anchor-pair harvest that arms Moves/Honest, and `godel.py --verify`'s
+kernel-rendered fixture session.
 
 Root certificate bundle, built from the host's store:
 
