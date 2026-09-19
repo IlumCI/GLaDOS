@@ -3074,7 +3074,35 @@ bare boot and 823 us after `diag all` had filled the console, which reads as a
 40% regression and is a full scrollback. Take the before and after with the
 identical command prefix, and read `full-screen rect` as the control -- nothing
 above the framebuffer can touch it, so what it moves by is the noise floor.
-Between boots on the development machine that is about 10%.
+
+**That figure said "about 10% between boots" and it is wrong by a factor of
+seven.** Three boots of one binary, `--no-payload`, `-smp 4`, the same command
+prefix, read through `bench report`:
+
+    rail               1 vs 2    1 vs 3    2 vs 3 (post-control)
+    video.rect         -69.4%    -62.0%    +24.4%     (the control itself)
+    video.*            ...       ...       -20 to -30%
+    core.new           -73.7%    -72.7%     +3.9%     (the control itself)
+    core.*             ...       ...       +0.2 to +1.5%
+    ai.matmul           +2.5%    -32.5%    -34.1%
+    smp.*              -50%      -61%      -21.7%, -5.1%
+
+Two things fall out and both are protocol rather than tuning.
+
+**Discard the first reading after a build.** Run 1 was two to three times
+slower than runs 2 and 3 on every timing rail, which is the host's page cache
+meeting a freshly written 5 MB image. Anything compared against it is
+measuring the build system. The CI verify job takes two readings and keeps the
+second for exactly this reason.
+
+**The control works, where there is a real one.** After dividing `core.new`
+out, the three interpreter rails agree to within **1.5%** across boots -- the
+design doing exactly what it is for. `video.rect` only half works: the
+graphics group still moves 20 to 30% once it is divided out, because
+`desk::draw` depends on what is on screen and a rectangle does not. And
+`ai.matmul` and `smp.*` have no control at all, so on a busier day they report
+a regression that is the day, with nothing to divide out and nothing to say
+so. `tools/rails.py` declares that hole rather than leaving it to be noticed.
 
 **Run `video bench` at `-smp 1`.** The extra cores cost the graphics path 30
 to 40% while doing nothing at all: `desk::draw + present` measures 1,541 us at

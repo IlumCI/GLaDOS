@@ -95,7 +95,7 @@ runs:
           --qemu-extra "-accel kvm -cpu host -smp 4" \
           --timeout "${{ inputs.timeout }}" \
           "initiative off" "agent stop" "echo ready" "diag all" \
-          "echo mid" "bench report" "echo alive" \
+          "echo mid" "bench report" "echo again" "bench report" "echo alive" \
           2>&1 | tee verify.log
 
     # Every rail this build can measure about itself, lifted out of the
@@ -105,14 +105,22 @@ runs:
     # Comparing two builds needs two reports and this job has one; what it can
     # do is make sure the number exists and is attached to the commit that
     # produced it, so the comparison is available to whatever asks later.
-    # Measured on the development machine, two consecutive single-core `smp`
-    # samples of identical code differed by 29%, so a future comparison wants a
-    # control and a threshold rather than a `!=`.
+    # **The second reading, not the first**, which is protocol rather than
+    # fussiness. Measured across three boots of one binary on the development
+    # machine: the first was two to three times slower than the next two on
+    # every timing rail, which is the host's page cache meeting a freshly
+    # written image. `tools/rails.py` refuses such a pair outright -- its
+    # controls moved 69% and 74% -- so a first reading is not merely noisy, it
+    # is a reading the comparison will decline to use.
+    #
+    # Two settled readings of one binary come back `same` on all twelve rails,
+    # which is what says the instrument works at all.
     - name: Keep the rail report
       shell: bash
       run: |
         set -euo pipefail
-        sed -n '/^\[rail\] v1/,/^\[rail\] end/p' verify.log > rails.txt
+        awk '/^\[rail\] v1/{n++} n==2' verify.log \
+          | sed -n '/^\[rail\] v1/,/^\[rail\] end/p' > rails.txt
         if ! grep -q '^\[rail\] end' rails.txt; then
           echo "::error::bench report did not finish"
           exit 1
