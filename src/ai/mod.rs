@@ -27,6 +27,7 @@ pub mod voter;
 pub mod harness;
 pub mod model;
 pub mod probe;
+pub mod progress;
 pub mod problem;
 pub mod lex;
 pub mod recall;

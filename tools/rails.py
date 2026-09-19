@@ -78,6 +78,21 @@ NOISE = {
     "core.": 0.16,
     "smp.": 0.29,
     "ai.matmul": 0.35,
+    # **Deterministic given the same text, and the text is the risk.**
+    # `ai.bpb` is a forward pass per token over a fixed window: the same model
+    # on the same bytes answers the same figure to the last millibit, so the
+    # instrument contributes no noise at all and a floor of zero would be
+    # defensible about the arithmetic.
+    #
+    # It is not defensible about the corpus. The window is the machine's *own*
+    # history -- the journal the night writes and the ledger the judges write
+    # -- so two arms booted separately read two different texts unless
+    # something hands them one. A comparison that got that wrong would move
+    # this rail for a reason that has nothing to do with the model, and
+    # nothing here can detect it. Two per cent is the bound on what a few
+    # lines of drift in a 2 KB window is worth; it is not a measurement, and
+    # it is written down as an assumption rather than left implicit.
+    "ai.bpb": 0.02,
 }
 
 # Which rail is the control for a group, for a comparison that wants to divide

@@ -354,6 +354,11 @@ pub const SUITES: &[Suite] = &[
         about: "which node to grow from, by what already grew from it",
         run: crate::ai::clade::selftest,
     },
+    Suite {
+        name: "progress",
+        about: "how well this machine predicts its own history, in bits",
+        run: crate::ai::progress::selftest,
+    },
 ];
 
 /// The ported picture decoder.
@@ -580,7 +585,7 @@ fn linux_selftest() -> bool {
 /// says it exists to prevent. A `static` cannot be read in a const context, so
 /// the array cannot be measured directly; naming its length is the next best
 /// thing and it is now the only place the number appears.
-const SLOTS: usize = 63;
+const SLOTS: usize = 64;
 
 /// One slot per suite. Indexed by position in `SUITES`, which is a constant,
 /// so the table cannot get out of step with the list.

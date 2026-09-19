@@ -5604,6 +5604,41 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
         // is every rail in one block a program reads. Same measurements
         // underneath, because two of them is how two answers to "did this
         // regress" come to disagree.
+        // The `ai.bpb` rail, taken on its own and broken into its parts.
+        //
+        // The rail reports one integer because a rail is a number two builds
+        // are compared on. A person wants to know what was read, how much of
+        // it, and whether the figure is a model that has learned something or
+        // a window so short it is measuring its own first line.
+        "bench" if rest.trim().starts_with("bpb") => {
+            use crate::ai::progress;
+            let arg = rest.trim()[3..].trim();
+            let want = arg.parse::<usize>().unwrap_or(progress::RAIL_BYTES);
+            console::set_color(YELLOW);
+            kprintln!("[bpb] how well this machine predicts its own history");
+            console::set_color(LTGRAY);
+            let text = progress::own_history(want);
+            kprintln!("  history    {} B of {}", text.len(), progress::SOURCES.join(", "));
+            match if text.len() < 64 {
+                Some(None)
+            } else {
+                crate::ai::with_engine(|e| progress::measure(e, &text, progress::RAIL_TOKENS))
+            } {
+                None => kprintln!("  no engine, or another task holds it"),
+                Some(None) if text.len() < 64 => {
+                    kprintln!("  too little history to read -- the journal fills as the mind runs")
+                }
+                Some(None) => kprintln!("  no checkpoint loaded, so there is nothing predicting"),
+                Some(Some(b)) => {
+                    kprintln!("  scored     {} token(s), {} byte(s)", b.tokens, b.bytes);
+                    kprintln!("  bits       {:.1}", b.bits);
+                    kprintln!("  per byte   {:.3}", b.per_byte());
+                    kprintln!("  per token  {:.3}", b.per_token());
+                    kprintln!("  lower is a better predictor. The 1991 signal is the *change*");
+                    kprintln!("  between two builds, which 'bench report' hands to rails.py");
+                }
+            }
+        }
         "bench" if rest.trim() == "report" => crate::bench::report(),
         "bench" => crate::ai::bench(),
         "model" => crate::ai::model_demo(),

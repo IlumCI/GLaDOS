@@ -91,6 +91,7 @@ pub const DECLARED: &[(&str, &str, Want)] = &[
     ("core.vote", "ns", Want::Lower),
     ("core.vote_walk", "ns", Want::Lower),
     ("ai.matmul", "gflops", Want::Higher),
+    ("ai.bpb", "mbits", Want::Lower),
     ("smp.one_core", "mbs", Want::Higher),
     ("smp.all_cores", "mbs", Want::Higher),
 ];
@@ -165,6 +166,35 @@ pub fn rails() -> Vec<Rail> {
     // exactly the machine CI has.
     let mm = crate::ai::measure();
     out.push(Rail::got("ai.matmul", "gflops", Want::Higher, mm.gflops as f64));
+
+    // --- how well the machine predicts its own history ---------------------
+    //
+    // **The only rail here that is about what the model knows**, and the
+    // reason to want one is that every other judge in this tree measures
+    // routing accuracy: a binary rail, one bit an item. Bits per byte is
+    // dense -- every token is an observation -- and the 1991 formulation of
+    // curiosity is exactly the *difference* in this number between two
+    // builds, which is what a rail comparison already computes.
+    //
+    // Absent rather than zero on a machine with no checkpoint or no history
+    // yet, which is most CI runners: a rail reading zero because nothing ran
+    // is the failure this file opens by naming, and a bits-per-byte of zero
+    // is a perfect predictor rather than a missing one.
+    match crate::ai::with_engine(crate::ai::progress::rail_millibits) {
+        Some(Some(mb)) => out.push(Rail::got("ai.bpb", "mbits", Want::Lower, mb as f64)),
+        Some(None) => out.push(Rail::absent(
+            "ai.bpb",
+            "mbits",
+            Want::Lower,
+            "no checkpoint, or too little history to read",
+        )),
+        None => out.push(Rail::absent(
+            "ai.bpb",
+            "mbits",
+            Want::Lower,
+            "another task holds the engine",
+        )),
+    }
 
     // --- memory bandwidth -------------------------------------------------
     //
