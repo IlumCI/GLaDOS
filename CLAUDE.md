@@ -1074,6 +1074,34 @@ The journal line carries what the night was allowed to spend beside what it
 got for it. A refusal at 24 and a refusal at 192 are different facts and
 looked identical.
 
+**Driven, which nothing about the nightly path had been.** With the clock wound
+to 03:00 and SmolLM2 loaded, forced ticks until one fell in the sleep branch:
+
+    [t35 +33s] godel: hour 3, extending at n=24,
+               variant ca6f18a4 rejected (fixed 2, broke 1, goals 1/3)
+
+    1 h3 parent=root.... variant=ca6f18a4 axis=adapter corpus=f330c22c
+      cell=4 n=15 pred=win J1[fix=2 broke=1 wrong=5 ex=24 chi=0.00
+      net repair below the floor no] J2[goals=1/3 no] J3[ok] ep=20
+      J4[r=8 kib=24 ok] reject
+
+Every piece is in those two lines. `extending at n=24` is the schedule taking
+its Extend half at the base, where the old constant would have spent 96.
+`ex=24` is the budget in the record. `wrong=5` against a requirement of seven
+clean repairs makes this a **starved** trial by definition, so the next
+extending night on this axis runs at 48 -- the doubling, demonstrated on a
+real verdict rather than on a fixture. No `grew from N back`, because with one
+node there is nothing to choose between and `reconsider` said so.
+
+Two things that cost a run each to find. The forced tick has to land in the
+*sleep* branch, and it only does so once an episode is in cooldown and the
+agent is genuinely idle, so `agent stop` needs a command after it before the
+next tick. And **the CI fixture is a hybrid**: `hybtest.py` builds one to
+exercise the Qwen3.5 path, the trainer refuses hybrids by design, so a nightly
+trial on a CI runner answers `refused: the model is a hybrid the trainer will
+not touch`. That is correct and is said in `verify-boot` now -- that job gates
+builds, and the loop runs where there is a dense checkpoint.
+
 ### Staged updates
 
 The boot image is replaced by the *next* boot, not the running one: the

@@ -96,6 +96,18 @@ runs:
     # No download, no 598 MB of weights that are not in this repository and
     # never will be.
     #
+    # **It is a hybrid, so the adapter axis cannot run on this runner**, and
+    # that is a fact worth stating rather than leaving somebody to infer from
+    # a journal nobody reads. `hybtest.py` exists to exercise the Qwen3.5
+    # path, the trainer refuses a hybrid by design -- their gated, partially
+    # rotated projections need a verified backward of their own -- so a
+    # nightly trial here answers `refused: the model is a hybrid the trainer
+    # will not touch`. Driven, at hour 3 with the clock wound forward. That is
+    # correct: this job gates *builds*, and the loop runs on a machine with a
+    # dense checkpoint. Anything that wanted CI to exercise the loop itself
+    # would need a small dense fixture as well, which is a second checkpoint
+    # to build and is not what this job is for.
+    #
     # `initiative off` then `agent stop` first, in that order, because the
     # resident mind wakes about fifteen seconds in and holds the engine for a
     # whole episode -- which presents as this job timing out with commands

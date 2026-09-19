@@ -3983,10 +3983,15 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     let (mv, arms) = godel::clade_now();
                     let lines = godel::ledger_tail(usize::MAX);
                     // A machine with no ledger has one arm, which is the root,
-                    // reading `0 of 0`. True, and it reads like a lineage that
-                    // exists and has done nothing -- so say which it is.
+                    // reading `0 of 0` with a draw beside it. Every word of
+                    // that is true and together they read as a lineage that
+                    // exists and has done nothing, with a decision made about
+                    // it. Say which it is and stop: a report that pads a "no"
+                    // with the shape of a "yes" is one somebody skims.
                     if crate::ai::clade::steps(&lines).is_empty() {
                         kprintln!("  no lineage yet -- nothing judged, so nothing to choose between");
+                        kprintln!("  the first adoption makes a node; the second makes a choice");
+                        return;
                     }
                     let here = arms.first().map(|a| a.node).unwrap_or(0);
                     let seed = crate::ai::clade::seed_of(lines.len(), here);
