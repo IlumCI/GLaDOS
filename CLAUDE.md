@@ -663,6 +663,25 @@ and an unbounded one would take the terminal away.
 Adoption is a pointer swap; the parent stays addressed and `godel rollback`
 costs a pointer write. `/ai/godel/ledger.txt` gets a line per trial either way.
 
+**And what a rollback decides is asserted now, because `clade::reconsider`
+calls it unattended.** Three decisions lived inside a hundred-and-fifty-line
+function needing an engine, a store and a real lineage to reach: which core to
+end on, whether to put a routing rule back, whether to restore a bar. Each has
+a recorded history of having been got wrong and each is wrong *silently*, and
+sixty-odd claims sat around that function without touching any of them.
+
+They are pure functions of two nodes now -- `core_move`, `rule_move`,
+`bar_move` -- in the shape `update::decide` has, and `rollback` calls them
+rather than carrying its own copy of the branches. Fourteen claims cover every
+state with no model and no disk. The one the shape exists for is the core: a
+parent that *said* it had none and a parent that said nothing at all are
+different facts, and `CoreMove::Leave` is the third outcome that keeps them
+apart.
+
+That hole could not be closed by driving. A real trial that gets rejected never
+moves the head, so there is no lineage to roll back along, and a synthetic head
+names nodes that are not stored -- which is exactly what `Rebased` reports.
+
 **The test slice carries a budget.** It is consulted only after a variant has
 already won on validation, never to decide whether it won, and the ledger
 counts the reads. Past three, a test figure is printed as stale and marked

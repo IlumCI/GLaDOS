@@ -3108,6 +3108,73 @@ pub fn trial_config(e: &mut super::Engine, rule: u8) -> Result<Certificate, &'st
     Ok(cert)
 }
 
+/// What a rollback should do about the adopted core.
+///
+/// Three outcomes, and the middle one is why this is a type: a parent that
+/// *said* it had no core and a parent that said nothing at all are different
+/// facts, and reading the second as the first pulled a core out of the
+/// decision path as a side effect of undoing an adapter.
+#[derive(PartialEq, Eq, Clone, Copy)]
+pub enum CoreMove {
+    /// The parent is silent and the node being left adopted nothing, so
+    /// whatever is installed was installed out of band and is not ours to
+    /// move.
+    Leave,
+    Drop,
+    Install([u8; 32]),
+}
+
+/// Which core a rollback should end on.
+///
+/// **Lifted out of `rollback` and asserted, because `clade::reconsider` calls
+/// that function unattended now.** Every one of these decisions was a branch
+/// inside a hundred-and-fifty-line function needing an engine, a store and a
+/// real lineage to reach, which is to say a branch nothing could check. They
+/// are pure functions of two nodes, in the shape `update::decide` is, and they
+/// earn the same treatment for the same reason: each has a recorded history of
+/// having been got wrong, and each is wrong *silently*.
+pub fn core_move(leaving: &Variant, parent: &Variant) -> CoreMove {
+    if parent.core_seen {
+        match parent.core {
+            None => CoreMove::Drop,
+            Some(c) => CoreMove::Install(c),
+        }
+    } else if leaving.core.is_some() {
+        CoreMove::Drop
+    } else {
+        CoreMove::Leave
+    }
+}
+
+/// The routing rule to put back, or none when the two nodes agree.
+///
+/// **Only on disagreement, and the guard is correctness rather than caution.**
+/// Every node renders a `rule` line, so unlike `core` there is no absent to
+/// detect -- but nodes written before that axis was searchable recorded 0,
+/// which is `ProbeOnly`, while the machine that wrote them ran the default
+/// `Majority`. Restoring unconditionally would switch a lineage full of those
+/// legacy zeroes to a rule none of them ever ran.
+pub fn rule_move(leaving: &Variant, parent: &Variant) -> Option<u8> {
+    if leaving.rule != parent.rule {
+        Some(parent.rule)
+    } else {
+        None
+    }
+}
+
+/// The bar to put back, or none.
+///
+/// A parent's `None` is "did not say" rather than "had none", so there is
+/// nothing to restore from: a node written before the field existed says
+/// nothing about a criterion, and writing one out of its silence would put the
+/// machine on a bar nobody chose.
+pub fn bar_move(leaving: &Variant, parent: &Variant) -> Option<f32> {
+    match (leaving.bar, parent.bar) {
+        (a, Some(b)) if a != Some(b) => Some(b),
+        _ => None,
+    }
+}
+
 /// Put back the adapters a trial was handed, whatever it did to them.
 fn restore(e: &mut super::Engine, saved: &Option<Vec<u8>>) {
     match saved {
@@ -3163,22 +3230,8 @@ pub fn rollback(e: &mut super::Engine) -> Result<Option<[u8; 32]>, &'static str>
     // side effect of undoing something else, and printed nowhere. When the
     // parent is silent the only core this rollback owns is the one the node
     // being left adopted; anything installed out of band is not ours to move.
-    enum Core {
-        Leave,
-        Drop,
-        Install([u8; 32]),
-    }
-    let want = if pv.core_seen {
-        match pv.core {
-            None => Core::Drop,
-            Some(c) => Core::Install(c),
-        }
-    } else if v.core.is_some() {
-        Core::Drop
-    } else {
-        Core::Leave
-    };
-    if let Core::Install(c) = want {
+    let want = core_move(&v, &pv);
+    if let CoreMove::Install(c) = want {
         if super::voter::load(&c).is_err() {
             return Err("the parent's core will not load");
         }
@@ -3193,13 +3246,12 @@ pub fn rollback(e: &mut super::Engine) -> Result<Option<[u8; 32]>, &'static str>
     // `Majority`. Restoring a parent's rule unconditionally would therefore
     // switch a lineage full of legacy nodes to a rule none of them ever ran.
     // If the two agree there is nothing to put back.
-    let rule_back = if v.rule != pv.rule {
-        match super::harness::Rule::from_u8(pv.rule) {
+    let rule_back = match rule_move(&v, &pv) {
+        None => None,
+        Some(byte) => match super::harness::Rule::from_u8(byte) {
             None => return Err("the parent names a routing rule this kernel does not have"),
             Some(r) => Some(r),
-        }
-    } else {
-        None
+        },
     };
 
     // The bar, under exactly the same rule and for exactly the same reason.
@@ -3211,14 +3263,11 @@ pub fn rollback(e: &mut super::Engine) -> Result<Option<[u8; 32]>, &'static str>
     // bar, and `None` is "did not say" rather than "had none" -- restoring
     // from it would write a bar nobody chose. Checked before anything moves,
     // like the rule and the core, so a refusal leaves the machine as it was.
-    let bar_back = match (v.bar, pv.bar) {
-        (a, Some(b)) if a != Some(b) => {
-            if !sane_bar(b) {
-                return Err("the parent names a bar outside the range this kernel accepts");
-            }
-            Some(b)
+    let bar_back = match bar_move(&v, &pv) {
+        Some(b) if !sane_bar(b) => {
+            return Err("the parent names a bar outside the range this kernel accepts")
         }
-        _ => None,
+        other => other,
     };
 
     // --- change things -------------------------------------------------
@@ -3249,13 +3298,13 @@ pub fn rollback(e: &mut super::Engine) -> Result<Option<[u8; 32]>, &'static str>
         }
     }
     match want {
-        Core::Leave => {}
-        Core::Drop => {
+        CoreMove::Leave => {}
+        CoreMove::Drop => {
             if !drop_core() {
                 return Err("the adapter was restored but the core will not detach");
             }
         }
-        Core::Install(c) => {
+        CoreMove::Install(c) => {
             if !super::voter::install(&c) {
                 return Err("the adapter was restored but the parent's core will not install");
             }
@@ -4973,6 +5022,95 @@ pub fn selftest() -> bool {
         }
         kprintln!("  {}  {}", if pass { "ok " } else { "FAIL" }, what);
     };
+
+    // --- what a rollback decides, before anything moves -----------------
+    //
+    // **`clade::reconsider` calls `rollback` unattended now**, and until this
+    // block nothing in the tree checked any of its decisions: they live inside
+    // a hundred-and-fifty-line function that needs an engine, a store and a
+    // real lineage to reach, so a boot could not get near them. They are pure
+    // functions of two nodes now, in the shape `update::decide` is, and every
+    // state is asserted here with no model and no disk.
+    {
+        let blank = Variant::from_text("");
+        let c1 = [1u8; 32];
+        let c2 = [2u8; 32];
+        let with_core = |h: Option<[u8; 32]>, seen: bool| {
+            let mut v = Variant::from_text("");
+            v.core = h;
+            v.core_seen = seen;
+            v
+        };
+
+        // **The regression this shape exists for.** A parent that says nothing
+        // about a core is not a parent that had none, and reading it as one
+        // pulled a core out of the decision path as a side effect of undoing
+        // an adapter, printed nowhere.
+        claim(
+            "a silent parent leaves a core nobody here adopted alone",
+            core_move(&blank, &blank) == CoreMove::Leave,
+        );
+        claim(
+            "and takes away the one the node being left adopted",
+            core_move(&with_core(Some(c1), true), &blank) == CoreMove::Drop,
+        );
+        claim(
+            "a parent that said it had none takes it away",
+            core_move(&with_core(Some(c1), true), &with_core(None, true)) == CoreMove::Drop,
+        );
+        claim(
+            "and one that names a core puts that core back",
+            core_move(&blank, &with_core(Some(c2), true)) == CoreMove::Install(c2),
+        );
+        claim(
+            "a silent parent never installs, whatever the node was carrying",
+            !matches!(core_move(&with_core(Some(c1), false), &blank), CoreMove::Install(_)),
+        );
+
+        // The routing rule. Every node renders one, so the guard is the
+        // *disagreement* rather than an absence: nodes written before the axis
+        // was searchable recorded 0 while the machine ran the default, and
+        // restoring unconditionally would switch a whole legacy lineage to a
+        // rule none of them ever ran.
+        let ruled = |r: u8| {
+            let mut v = Variant::from_text("");
+            v.rule = r;
+            v
+        };
+        claim("two nodes agreeing about the rule restore nothing", rule_move(&ruled(2), &ruled(2)) == None);
+        claim("and a lineage of legacy zeroes restores nothing", rule_move(&blank, &blank) == None);
+        claim(
+            "two that disagree put the parent's rule back",
+            rule_move(&ruled(2), &ruled(1)) == Some(1),
+        );
+
+        // The bar. A parent's `None` is "did not say" and not "had none".
+        let barred = |b: f32| {
+            let mut v = Variant::from_text("");
+            v.bar = Some(b);
+            v
+        };
+        claim("a silent parent restores no bar", bar_move(&barred(3.0), &blank) == None);
+        claim("and two silent nodes restore none either", bar_move(&blank, &blank) == None);
+        claim(
+            "a parent that named one puts it back on a node that named none",
+            bar_move(&blank, &barred(8.0)) == Some(8.0),
+        );
+        claim("two that agree restore nothing", bar_move(&barred(3.0), &barred(3.0)) == None);
+        claim(
+            "and two that disagree put the parent's back",
+            bar_move(&barred(3.0), &barred(12.0)) == Some(12.0),
+        );
+        // The pair `rollback` actually checks: what comes out of the decision,
+        // against the range this kernel accepts. A hand-edited node naming a
+        // bar outside it is refused rather than clamped, for the reason
+        // `bar_in_force` gives -- clamping lets an edited file slide the
+        // criterion to the nearest legal number and report nothing.
+        claim(
+            "a bar outside the range comes out of the decision and is refused by the guard",
+            bar_move(&blank, &barred(99.0)) == Some(99.0) && !sane_bar(99.0),
+        );
+    }
 
     // A window that does not wrap, and one that does. The wrapping case is
     // the whole reason this is a function: `from <= h < until` would permit
