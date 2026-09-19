@@ -746,14 +746,70 @@ fn update_cmd(rest: &str) {
                 return;
             }
 
+            // **Anti-rollback, on the path the machine itself takes.**
+            //
+            // `fetch` refuses an image that is not newer and `--force` is the
+            // operator's override, and for a long time that was the only check
+            // anywhere: `stage` took whatever was held, so `fetch --force`
+            // followed by `stage` installed an older signed image with nothing
+            // asking a second time. An old image is signed exactly as well as
+            // a new one and always will be, which is the whole reason this is
+            // a separate question from the signature.
+            //
+            // The version comes from what the channel last saw, because the
+            // manifest is not carried between the two commands. Absent means
+            // the blob arrived some way other than `fetch`, and that is
+            // refused rather than waved through -- an unknown provenance is
+            // the case this exists for.
+            //
+            // **Not in `update::decide`, and that is a judgement rather than
+            // an omission.** `decide` runs against files on the ESP, and
+            // anything that can write `STAGED.EFI` can write `BOOTX64.EFI`
+            // directly, where no signature is checked at all. A version test
+            // there would guard a door beside an open one. What it can guard
+            // is the path this machine walks by itself, which is this one.
+            // `--force` is a word of its own, not the whole argument. It
+            // overrides the *version* and never the digest: typing eight hex
+            // characters back is the `app trust` idiom and the one thing here
+            // that cannot be a reflex, so a forced stage still has to be
+            // confirmed as `update stage <hex> --force`.
+            let forced = arg.split_whitespace().any(|w| w == "--force");
+            let typed = arg.split_whitespace().find(|w| !w.starts_with("--")).unwrap_or("");
+
+            let older = match channel::seen() {
+                None => Some(String::from("nothing was fetched through this machine")),
+                Some(seen) => {
+                    let v = seen.split_whitespace().next().unwrap_or("");
+                    if crate::version_newer(v, crate::VERSION) {
+                        None
+                    } else {
+                        Some(alloc::format!("{} is not newer than {}", v, crate::VERSION))
+                    }
+                }
+            };
+            if let Some(why) = older {
+                if !forced {
+                    console::set_color(LTRED);
+                    kprintln!("  {}", why);
+                    console::set_color(LTGRAY);
+                    kprintln!("  'update stage <hex> --force' to take it anyway");
+                    return;
+                }
+                kprintln!("  forced: {}", why);
+            }
+
             let confirm = digest8(&image);
-            if arg != confirm {
+            if typed != confirm {
                 console::set_color(WHITE);
                 kprintln!("  about to stage {} B, sha256 {}..", image.len(), confirm);
                 console::set_color(LTGRAY);
                 kprintln!("  this replaces the boot image at the next boot, keeping the");
                 kprintln!("  current one as BOOTX64.OLD to fall back to.");
-                kprintln!("  'update stage {}' to confirm", confirm);
+                kprintln!(
+                    "  'update stage {}{}' to confirm",
+                    confirm,
+                    if forced { " --force" } else { "" }
+                );
                 return;
             }
 

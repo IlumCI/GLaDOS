@@ -53,6 +53,20 @@ pub enum Error {
     /// The server's `Sec-WebSocket-Accept` did not match. Either it is not a
     /// WebSocket endpoint or something is between us and it.
     BadAccept,
+    /// The handshake completed and the peer did not verify.
+    ///
+    /// **This connection had no such check for its whole life**, and it is the
+    /// only full-duplex TLS channel in the kernel: encrypted to whoever is in
+    /// the path, which is what TLS gives you when nobody looks at the
+    /// certificate. `update::fetch` refuses anything short of
+    /// `Identity::Verified` and says why; this trusted anything that could
+    /// complete a handshake, and a self-signed certificate completes one.
+    ///
+    /// The three cases are kept apart because they are different problems for
+    /// whoever reads the message: no roots loaded is a machine that was never
+    /// given any, and a failed chain is a machine that was given some and this
+    /// peer is not in them.
+    Identity(&'static str),
     Protocol,
     TooLarge,
     Closed,
@@ -61,6 +75,28 @@ pub enum Error {
 impl From<tls::Error> for Error {
     fn from(e: tls::Error) -> Self {
         Error::Tls(e)
+    }
+}
+
+/// Whether this peer may be talked to at all.
+///
+/// **A pure function, so all three of its states are asserted at boot with no
+/// network**, which is the discipline `update::decide` follows for the same
+/// reason: the branch that matters here is the one that almost never runs, and
+/// a check that has never been watched refusing is a check written in a
+/// comment.
+pub fn admit(identity: &tls::Identity) -> Result<(), Error> {
+    match identity {
+        tls::Identity::Verified { .. } => Ok(()),
+        // Kept apart because they are different problems for whoever reads the
+        // message: no roots is a machine that was never given any, a failed
+        // chain is a machine that was given some and this peer is not in them.
+        tls::Identity::NoTrustStore => {
+            Err(Error::Identity("no roots are loaded, so the server could be anyone"))
+        }
+        tls::Identity::Failed(_) => {
+            Err(Error::Identity("the server's certificate did not verify"))
+        }
     }
 }
 
@@ -114,6 +150,12 @@ impl Socket {
     /// Open a WebSocket to `host`, already resolved to `dst`.
     pub fn connect(dst: super::Ipv4, host: &str, port: u16, path: &str) -> Result<Socket, Error> {
         let mut s = tls::connect(dst, host, port)?;
+
+        // **Before a single byte of the upgrade goes out.** Checking after the
+        // handshake would mean the request line, the host and the key had
+        // already been sent to whoever answered, and the point of refusing is
+        // not to talk to them.
+        admit(&s.identity)?;
 
         let mut nonce = [0u8; 16];
         tsc_bytes(&mut nonce);
@@ -419,6 +461,42 @@ pub fn selftest() -> bool {
             ok = false;
         }
     };
+
+    // **Who may be talked to at all**, which for the whole life of this module
+    // was anybody who could complete a handshake -- and a self-signed
+    // certificate completes one. It is the only full-duplex TLS channel in the
+    // kernel, so "encrypted to whoever is in the path" was the property it
+    // had. Asserted here because `connect` needs a network and this decision
+    // does not, which is the same split `update::decide` makes.
+    check(
+        "an unverified peer is refused",
+        admit(&tls::Identity::Failed(crate::net::x509::Error::Malformed)).is_err(),
+    );
+    check(
+        "and so is one nothing could be checked against",
+        admit(&tls::Identity::NoTrustStore).is_err(),
+    );
+    check(
+        "a verified peer is admitted",
+        admit(&tls::Identity::Verified {
+            subject: String::from("example.invalid"),
+            roots: 1,
+        })
+        .is_ok(),
+    );
+    // The two refusals say different things, because "no roots on this
+    // machine" and "this peer is not in the roots this machine has" send
+    // whoever reads them to different places.
+    check(
+        "and the two refusals are distinguishable",
+        match (
+            admit(&tls::Identity::NoTrustStore),
+            admit(&tls::Identity::Failed(crate::net::x509::Error::Malformed)),
+        ) {
+            (Err(Error::Identity(a)), Err(Error::Identity(b))) => a != b,
+            _ => false,
+        },
+    );
 
     // RFC 4648 vectors.
     check("base64 empty", base64(b"") == "");

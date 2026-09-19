@@ -78,6 +78,10 @@ pub enum Error {
     NoKeyShare,
     BadFinished,
     WrongVersion,
+    /// The request could not be built. Today the only way in is a method that
+    /// is not upper-case letters, which is the outbound twin of the
+    /// response-splitting this module refuses on the way in.
+    BadRequest,
 }
 
 impl Error {
@@ -93,6 +97,7 @@ impl Error {
             Error::NoKeyShare => "the server offered no usable key share",
             Error::BadFinished => "the server's Finished did not verify",
             Error::WrongVersion => "the server does not speak TLS 1.3",
+            Error::BadRequest => "the request could not be built",
         }
     }
 }
@@ -972,22 +977,172 @@ pub fn https_fetch_with(
     timeout_ms: u64,
     extra: &[(&str, &str)],
 ) -> Result<Fetched, Error> {
-    let mut s = connect(dst, host, port)?;
+    https_send(dst, host, port, "GET", path, timeout_ms, extra, &[])
+}
 
+/// A length as decimal digits, without a formatter.
+///
+/// `format!` would do, and this is on the path that runs before the heap is
+/// certain -- `update::hook` learned that lesson at "memory allocation of 32
+/// bytes failed" three sections before the shell.
+fn decimal(mut n: usize) -> String {
+    let mut digits = [0u8; 20];
+    let mut i = digits.len();
+    loop {
+        i -= 1;
+        digits[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 || i == 0 {
+            break;
+        }
+    }
+    String::from(core::str::from_utf8(&digits[i..]).unwrap_or("0"))
+}
+
+/// The whole request head, or `None` for one that must not be sent.
+///
+/// **Separated from the socket so it can be checked without one**, which is
+/// the `update::decide` discipline: the branches that matter here are the
+/// refusals, and a refusal nobody has watched happen is a refusal written in
+/// a comment.
+pub fn request(
+    method: &str,
+    path: &str,
+    host: &str,
+    extra: &[(&str, &str)],
+    body_len: usize,
+) -> Option<String> {
+    if !method_ok(method) {
+        return None;
+    }
     let mut req = String::new();
-    req.push_str("GET ");
+    req.push_str(method);
+    req.push(' ');
     req.push_str(if path.is_empty() { "/" } else { path });
     req.push_str(" HTTP/1.1\r\nHost: ");
     req.push_str(host);
     req.push_str("\r\nUser-Agent: glados/0.1\r\nConnection: close\r\nAccept: */*\r\n");
     for (name, value) in extra {
+        // The one header this function owns. A caller that also supplied it
+        // would be describing a different body from the one being sent, and a
+        // length that disagrees with the body is request smuggling -- the
+        // outbound twin of the response-splitting refused on the way in.
+        if name.eq_ignore_ascii_case("content-length") {
+            continue;
+        }
         req.push_str(name);
         req.push_str(": ");
         req.push_str(value);
         req.push_str("\r\n");
     }
+    if body_len > 0 {
+        req.push_str("Content-Length: ");
+        req.push_str(&decimal(body_len));
+        req.push_str("\r\n");
+    }
     req.push_str("\r\n");
+    Some(req)
+}
+
+/// Claims about what this module will and will not put on the wire.
+///
+/// No socket, no server, no network. What is checkable here is the request,
+/// and the request is where a method built from a table rather than from a
+/// literal can go wrong.
+pub fn selftest() -> bool {
+    let mut ok = true;
+    let mut claim = |good: bool, what: &str| {
+        if !good {
+            ok = false;
+        }
+        kprintln!("  {}   {}", if good { "ok " } else { "FAIL" }, what);
+    };
+
+    // **The regression guard on the refactor.** `https_fetch_with` built this
+    // line inline as the literal `"GET "` for the whole life of the module,
+    // and pulling it out to make room for a method is exactly the kind of
+    // change that alters a byte nobody notices until a server rejects it.
+    let get = request("GET", "/a", "h", &[], 0).unwrap_or_default();
+    claim(
+        get == "GET /a HTTP/1.1\r\nHost: h\r\nUser-Agent: glados/0.1\r\n\
+                Connection: close\r\nAccept: */*\r\n\r\n",
+        "a GET is byte for byte what it was before there was a method",
+    );
+    claim(
+        request("GET", "", "h", &[], 0).unwrap_or_default().starts_with("GET / "),
+        "an empty path is a slash rather than nothing",
+    );
+
+    // A method with a space or a CR in it injects a whole request line.
+    claim(method_ok("POST") && method_ok("GET"), "an ordinary method is admitted");
+    claim(!method_ok(""), "an empty method is refused");
+    claim(!method_ok("GET /x HTTP/1.1\r\nHost: evil"), "and one carrying a request line is");
+    claim(!method_ok("get"), "and a lower-case one, because the set is declared rather than sniffed");
+    claim(request("BAD METHOD", "/", "h", &[], 0).is_none(), "so no request is built from one");
+
+    // The body and its length, which must agree.
+    let post = request("POST", "/x", "h", &[], 7).unwrap_or_default();
+    claim(post.contains("Content-Length: 7\r\n"), "a body's length is written from the body");
+    claim(
+        !get.contains("Content-Length"),
+        "and no length is written when there is no body",
+    );
+    let lying = request("POST", "/x", "h", &[("Content-Length", "999")], 7).unwrap_or_default();
+    claim(
+        lying.contains("Content-Length: 7\r\n") && !lying.contains("999"),
+        "a caller cannot make the declared length disagree with the body",
+    );
+    let hdr = request("POST", "/x", "h", &[("Authorization", "Bearer t")], 0).unwrap_or_default();
+    claim(hdr.contains("Authorization: Bearer t\r\n"), "and every other header is passed through");
+
+    claim(decimal(0) == "0" && decimal(7) == "7" && decimal(1234) == "1234",
+          "a length renders without a formatter, including zero");
+    ok
+}
+
+/// Whether a method may be put on a request line at all.
+///
+/// Upper-case letters and nothing else. A space or a CR in the method injects
+/// a whole request line, which is the outbound twin of the response-splitting
+/// this module already refuses on the way in -- and the one caller that will
+/// ever build a method from anything but a literal is a machine composing a
+/// request from a table.
+pub fn method_ok(m: &str) -> bool {
+    !m.is_empty() && m.len() <= 16 && m.bytes().all(|b| b.is_ascii_uppercase())
+}
+
+/// A request with a method and a body.
+///
+/// **The request line was the literal `"GET "` for the whole life of this
+/// module**, which is every byte this machine could send anywhere: it could
+/// ask and it could not tell. That is fine for an updater, which only ever
+/// fetches, and it is the wall the outward half of a self-improving loop runs
+/// into -- a machine that authors a change has to be able to *put* it
+/// somewhere.
+///
+/// `Content-Length` is written from the body and never taken from `extra`, so
+/// a caller cannot make the two disagree. A length that does not match the
+/// body is request smuggling, and it is the same family of mistake as the
+/// response-splitting refused on the way in.
+#[allow(clippy::too_many_arguments)]
+pub fn https_send(
+    dst: Ipv4,
+    host: &str,
+    port: u16,
+    method: &str,
+    path: &str,
+    timeout_ms: u64,
+    extra: &[(&str, &str)],
+    body: &[u8],
+) -> Result<Fetched, Error> {
+    let Some(req) = request(method, path, host, extra, body.len()) else {
+        return Err(Error::BadRequest);
+    };
+    let mut s = connect(dst, host, port)?;
     s.send(req.as_bytes())?;
+    if !body.is_empty() {
+        s.send(body)?;
+    }
 
     let mut raw: Vec<u8> = Vec::new();
     let mut head_end: Option<usize> = None;
