@@ -99,6 +99,7 @@ jobs:
                 --set "runner=${{ github.run_id }}/${{ github.run_attempt }}" \
                 > /tmp/superseded.cert
               name=$(sha256sum /tmp/superseded.cert | cut -c1-16)
+              mkdir -p loop/ledger/entries
               cp /tmp/superseded.cert "loop/ledger/entries/$name.cert"
               git add loop/ledger/entries
               git commit -m "loop: a superseded entry for what main overrode"
@@ -182,6 +183,7 @@ jobs:
           # Marker before trial: an interrupted night has still spent the
           # night -- godel.rs writes its marker at the same moment for the
           # same reason.
+          mkdir -p loop/ledger/tried
           cp /tmp/env.txt "loop/ledger/tried/${point:0:16}.env"
           git add loop/ledger/tried
           git commit -m "loop: tried ${point:0:16}"
