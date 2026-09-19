@@ -278,9 +278,9 @@ recipe is two commands, and it is the same bargain `crosscheck.mjs` makes for
 the signer:
 
 ```powershell
-.	oolsenv\Scripts\python.exe tools\drive.py --qemu-extra "-accel whpx -cpu max" `
+.\tools\venv\Scripts\python.exe tools\drive.py --qemu-extra "-accel whpx -cpu max" `
   "initiative off" "agent stop" "godel source" "godel push --dry" > out\push.log
-node supabaseunctions\_shared\envelope.check.mjs out\push.log
+node supabase\functions\_shared\envelope.check.mjs out\push.log
 ```
 
 Driven: the envelope the kernel rendered is 259 bytes over twelve lines, it
@@ -293,8 +293,7 @@ somebody actually has -- and stripping the shell's `  | ` prefix belongs in the
 checker rather than in the recipe, since a recipe with a `sed` in the middle is
 one somebody gets wrong once and then stops running.
 
-**That already earned itself.** A serial transcript carries `
-` -- the
+**That already earned itself.** A serial transcript carries `\r\r\n` -- the
 guest's line ending and the harness's -- so a strip that took exactly one
 carriage return left exactly one, and `parse` accepted it anyway because
 `trim()` eats a trailing CR. Nothing but comparing the rendered bytes noticed,
