@@ -936,6 +936,116 @@ pub fn train(epochs: usize, lr: f32) -> Option<TrainReport> {
 /// called training here and confusing them would make every number ambiguous:
 /// this one moves an adapter over the classifier, and `fit`/`train` move a
 /// closed-form router that never touches the checkpoint at all.
+/// Does the outcome reward change routing, paired, over one prepare?
+///
+/// **One `prepare`, several trains.** The expensive half is caching a hidden
+/// state per example; training against those cached features costs under a
+/// second. So comparing `lam` values by running `train adapter` once per value
+/// pays the expensive half every time and compares adapters fitted to
+/// *different* subsamples if anything about the corpus moved in between.
+///
+/// **And it is paired, which two accuracy figures cannot be.** `Trial::paired`
+/// is J1's own instrument: the same cached decisions answered by both
+/// adapters, so what comes back is `fixed` and `broke` rather than two
+/// percentages whose difference is one decision either way. That is the
+/// distinction `godel.rs` opens by making and the reason a rail reading
+/// `62.7%` both ways still had eight items move.
+pub fn mix_bench(e: &mut super::Engine, examples: usize, grid: &[f32]) {
+    use super::train::{Budget, Slice};
+
+    let mut b = Budget { examples, ..Budget::default() };
+    let mut trial = match super::train::prepare(e, &b) {
+        Ok(t) => t,
+        Err(_) => {
+            kprintln!("  could not prepare a trial");
+            return;
+        }
+    };
+    kprintln!(
+        "  {} example(s) -> {} decision(s), {} held out",
+        trial.examples,
+        trial.decisions(),
+        trial.held()
+    );
+
+    // The incumbent: the objective this trainer has always used. Everything
+    // below is compared against it and never against the base model, because
+    // the question is what the reward changes and not what training changes.
+    b.mix = 0.0;
+    let base = trial.train(&b);
+    let (bt, bh) = (
+        trial.score(Some(&base.dora), Slice::Train),
+        trial.score(Some(&base.dora), Slice::Held),
+    );
+    kprintln!(
+        "  lam 0.00   loss {:.3} -> {:.3}   seen {}%  held {}%",
+        base.first_loss,
+        base.last_loss,
+        (bt * 100.0) as u32,
+        (bh * 100.0) as u32
+    );
+
+    let aim = match super::outcome::probe() {
+        Some(m) => trial.aim(&m),
+        None => {
+            kprintln!("  no outcome matrix, so there is nothing to mix in");
+            return;
+        }
+    };
+    if aim.refused {
+        kprintln!("  the matrix does not describe this grammar -- refused");
+        return;
+    }
+    kprintln!(
+        "  reward     {} of {} step(s) aim off the label, {:.3} mean mass moved, {} rival vote(s)",
+        aim.moved,
+        aim.steps,
+        aim.off_target,
+        aim.voters
+    );
+    if aim.moved == 0 {
+        // Said before any verdict, for `answer.rs`'s reason: a comparison
+        // whose two arms are identical by construction reports "no effect"
+        // and means "no experiment".
+        kprintln!("  NOTHING IS BEING VARIED -- every target is still the label's own one-hot");
+        return;
+    }
+
+    for &lam in grid.iter() {
+        if lam <= 0.0 {
+            continue;
+        }
+        b.mix = lam;
+        let f = trial.train(&b);
+        let (broke, fixed, _, _) = trial.paired(Some(&base.dora), Some(&f.dora), Slice::Held);
+        let chi = super::godel::mcnemar(broke, fixed);
+        let held = trial.score(Some(&f.dora), Slice::Held);
+        kprintln!(
+            "  lam {:.2}   loss {:.3} -> {:.3}   held {}%   fixed {} broke {}  chi {:.2}{}",
+            lam,
+            f.first_loss,
+            f.last_loss,
+            (held * 100.0) as u32,
+            fixed,
+            broke,
+            chi,
+            if chi >= super::godel::MCNEMAR_95 {
+                if fixed > broke {
+                    "  <- better"
+                } else {
+                    "  <- WORSE"
+                }
+            } else {
+                ""
+            }
+        );
+    }
+    kprintln!(
+        "  paired against lam 0 on the held-out slice; {:.2} is the bar",
+        super::godel::MCNEMAR_95
+    );
+}
+
 pub fn adapter_train_report(b: &super::train::Budget) {
     use super::train::{RunError, RunReport};
 
@@ -987,6 +1097,37 @@ pub fn adapter_train_report(b: &super::train::Budget) {
         console::set_color(LTGRAY);
     }
     kprintln!("  loss      {:.3} -> {:.3}", r.first_loss, r.last_loss);
+    // Printed unconditionally, because the claim it exists for is that a run
+    // at lam = 0 matches a build from before the objective existed -- and a
+    // digest only printed when somebody passes a flag cannot make it.
+    kprintln!(
+        "  adapter   {:02x}{:02x}{:02x}{:02x}",
+        r.digest[0], r.digest[1], r.digest[2], r.digest[3]
+    );
+    if let Some(a) = &r.aim {
+        if a.refused {
+            kprintln!("  the outcome matrix does not describe this grammar -- nothing was aimed");
+        } else {
+            // `moved` is the degeneration canary. A reward that left every
+            // target distribution equal to the label's one-hot trains exactly
+            // what cross-entropy trains, and every figure below would look
+            // like a working experiment.
+            kprintln!(
+                "  reward    {} of {} step(s) aim off the label, {:.3} mean mass moved, {} rival vote(s)",
+                a.moved, a.steps, a.off_target, a.voters
+            );
+            if a.moved == 0 {
+                console::set_color(YELLOW);
+                kprintln!("  the reward changed no target at all, so this trained cross-entropy");
+                console::set_color(LTGRAY);
+            }
+            if a.empty > 0 {
+                console::set_color(LTRED);
+                kprintln!("  {} step(s) carried no mass -- votes and target disagree", a.empty);
+                console::set_color(LTGRAY);
+            }
+        }
+    }
     kprintln!(
         "  seen      {}% -> {}%",
         (r.before_train * 100.0) as u32,

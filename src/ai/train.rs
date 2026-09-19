@@ -1024,11 +1024,15 @@ pub struct Budget {
     pub lr: f32,
     pub rank: usize,
     pub alpha: f32,
+    /// How much of the objective the outcome reward carries. Zero takes
+    /// `restricted_ce_compact`'s own path, so a default `Budget` reproduces
+    /// every figure recorded before this field existed, bit for bit.
+    pub mix: f32,
 }
 
 impl Default for Budget {
     fn default() -> Self {
-        Self { epochs: 20, millis: 120_000, examples: 0, lr: 0.02, rank: 8, alpha: 16.0 }
+        Self { epochs: 20, millis: 120_000, examples: 0, lr: 0.02, rank: 8, alpha: 16.0, mix: 0.0 }
     }
 }
 
@@ -1063,6 +1067,16 @@ pub struct RunReport {
     pub train_ms: u64,
     /// Whether the wall-clock ceiling ended it rather than the epoch count.
     pub stopped: bool,
+    /// The trained adapter's content address, first eight hex digits.
+    ///
+    /// Printed so "lam = 0 reproduces today's numbers bit for bit" is a thing
+    /// somebody can check against a build from before the objective existed,
+    /// rather than a claim about one hand-built logit row. It is the same
+    /// digest `godel` puts in a `Variant`, over `scatter(..).to_blob()`, so
+    /// the two cannot drift.
+    pub digest: [u8; 32],
+    /// What the outcome reward changed, when one was supplied.
+    pub aim: Option<Aim>,
 }
 
 /// One step of one applet's spelling: the tokens the grammar admits here, and
@@ -1075,6 +1089,21 @@ pub(crate) struct Step {
     target: usize,
     /// The token to feed to keep the chain on the label's path.
     token: u32,
+    /// Which candidate each applet would take from this state, `-1` for one
+    /// this state can no longer reach. Grammar-only, so it is shared by every
+    /// example labelled with this applet.
+    votes: Vec<i16>,
+    /// The target distribution the mixed objective aims at, in candidate
+    /// order, or `None` while nothing has supplied an outcome matrix.
+    ///
+    /// **It lives here rather than on `Decision`, and that is a consequence of
+    /// the measurement in `outcome.rs` rather than a saving.** The reward is
+    /// task-independent -- the corpus carries no operands, so `r(example,
+    /// applet)` depends only on the example's label -- and a `Step` already
+    /// *is* per label and per position. Were the reward ever to become
+    /// per-example this has to move to `Decision`, at a cost of one `Vec<f32>`
+    /// per decision.
+    q: Option<Vec<f32>>,
 }
 
 /// One cached decision: the constant hidden state, and where to find the
@@ -1122,7 +1151,8 @@ fn chain_for(
     grammar: &Grammar,
     alphabet: &Alphabet,
     alt: usize,
-) -> Option<Vec<(Vec<u32>, usize, u32)>> {
+) -> Option<Vec<(Vec<u32>, usize, u32, Vec<i16>)>> {
+    let n_alts = grammar.alts();
     let mut cursor = Cursor::new(grammar);
     let mut steps = Vec::new();
     for _ in 0..step_bound(grammar) {
@@ -1130,23 +1160,79 @@ fn chain_for(
         if cands.is_empty() {
             return None;
         }
+        // Which candidate each alternative would take from *this* state, and
+        // -1 for one this state can no longer reach. The same "longest piece
+        // that advances" rule the label gets, applied to every applet, so the
+        // vote a rival casts is the one it would really cast rather than a
+        // prefix it merely shares.
+        //
+        // Grammar-only and therefore a property of the name: it goes in `Step`,
+        // which is built once per applet and shared by every example labelled
+        // with it, so a per-example reward costs no per-decision memory at all.
+        let mut votes = alloc::vec![-1i16; n_alts];
         let mut best: Option<(usize, u32, usize)> = None;
-        for (i, &id) in cands.iter().enumerate() {
-            if cursor.advances_toward(alphabet, id as usize, alt) {
+        for b in 0..n_alts {
+            let mut long: Option<(usize, usize)> = None;
+            for (i, &id) in cands.iter().enumerate() {
+                if !cursor.advances_toward(alphabet, id as usize, b) {
+                    continue;
+                }
                 let n = alphabet.piece(id as usize).len();
-                if best.map_or(true, |(_, _, bn)| n > bn) {
-                    best = Some((i, id, n));
+                if long.map_or(true, |(_, bn)| n > bn) {
+                    long = Some((i, n));
+                }
+            }
+            if let Some((i, n)) = long {
+                votes[b] = i as i16;
+                if b == alt && best.map_or(true, |(_, _, bn)| n > bn) {
+                    best = Some((i, cands[i], n));
                 }
             }
         }
         let (target, token, _) = best?;
-        steps.push((cands, target, token));
+        steps.push((cands, target, token, votes));
         cursor.push(alphabet, token as usize);
         if cursor.finished() == Some(alt) {
             return Some(steps);
         }
     }
     None
+}
+
+/// How many distinct first tokens spell `alt`, from the state the chain is in
+/// at `step`. One means the label has exactly one correct spelling here and
+/// cross-entropy is asking the right question; more means `chain_for` picked
+/// the longest and `Trial::correct` scores the others wrong.
+///
+/// Separate from `chain_for` because it counts what that function *discards*,
+/// and a caller wanting the number should not have to reconstruct the walk.
+fn spellings_at(grammar: &Grammar, alphabet: &Alphabet, alt: usize, upto: usize) -> Vec<usize> {
+    let mut cursor = Cursor::new(grammar);
+    let mut out = Vec::new();
+    for _ in 0..upto.min(step_bound(grammar)) {
+        let cands = cursor.candidates(alphabet);
+        if cands.is_empty() {
+            break;
+        }
+        let mut n = 0usize;
+        let mut best: Option<(u32, usize)> = None;
+        for &id in cands.iter() {
+            if cursor.advances_toward(alphabet, id as usize, alt) {
+                n += 1;
+                let len = alphabet.piece(id as usize).len();
+                if best.map_or(true, |(_, bl)| len > bl) {
+                    best = Some((id, len));
+                }
+            }
+        }
+        let Some((token, _)) = best else { break };
+        out.push(n);
+        cursor.push(alphabet, token as usize);
+        if cursor.finished() == Some(alt) {
+            break;
+        }
+    }
+    out
 }
 
 /// Train the loaded model's decision layer on the corpus in the namespace.
@@ -1186,6 +1272,31 @@ pub enum Slice {
     Held,
     Validation,
     Test,
+}
+
+/// What `Trial::aim` found when it pointed the objective at an outcome matrix.
+///
+/// Returned rather than discarded because a target distribution that came back
+/// equal to the label's one-hot would train exactly what training already
+/// trains, and the run would look like a working experiment. That is the
+/// degeneration `outcome.rs` names, and it is the same shape as the
+/// no-random-seed bug: every number in the ledger stays plausible.
+#[derive(Default)]
+pub struct Aim {
+    /// Steps that were given a target distribution.
+    pub steps: usize,
+    /// Steps where that distribution is not the label's own one-hot.
+    pub moved: usize,
+    /// Mean probability mass the reward puts anywhere but the target. Zero
+    /// means the mixture is cross-entropy however large `lam` is.
+    pub off_target: f32,
+    /// Rival applets that were reachable and able to vote, summed over steps.
+    pub voters: usize,
+    /// Steps whose candidates carried no mass at all, which cannot happen
+    /// unless `votes` and `target` disagree.
+    pub empty: usize,
+    /// The matrix did not describe this grammar, so nothing was aimed.
+    pub refused: bool,
 }
 
 impl Trial {
@@ -1240,6 +1351,95 @@ impl Trial {
     /// tokens the grammar admits? The same question the constrained decoder
     /// asks at temperature zero, which is the point -- a number measured any
     /// other way would not be the number the system's behaviour depends on.
+    /// Point every step's objective at an outcome-derived target distribution,
+    /// and report what that actually changed.
+    ///
+    /// For a step on `label`'s chain, each applet still reachable from here
+    /// votes for the candidate it would itself take, and its vote is worth
+    /// `1 - distance(label, applet)` -- so a rival whose output resembles the
+    /// label's moves probability toward its own spelling, and one that was
+    /// never run (because it mutates) moves none.
+    ///
+    /// **`APPLETS` order is the grammar's order and this depends on it.**
+    /// `prepare_on` builds `names` straight from `crate::sysbox::APPLETS`, so
+    /// alternative `b` and matrix row `b` are the same applet. That is an
+    /// invariant of two files agreeing, which is the pair this tree keeps
+    /// finding has stopped agreeing, so it is checked here rather than
+    /// assumed: a mismatched length refuses instead of aiming at a
+    /// permutation of the right answer.
+    ///
+    /// The report is the point of returning anything. A target distribution
+    /// that came back identical to the label's one-hot would train exactly
+    /// what training already trains, and the run would look like a working
+    /// experiment -- the degeneration `outcome.rs` names and the same shape
+    /// the no-random-seed bug had.
+    pub fn aim(&mut self, m: &super::outcome::Matrix) -> Aim {
+        let mut a = Aim::default();
+        if m.len() != self.chains.len() {
+            a.refused = true;
+            return a;
+        }
+        for (label, chain) in self.chains.iter_mut().enumerate() {
+            let Some(steps) = chain.as_mut() else { continue };
+            let row = m.reward_row(label);
+            for st in steps.iter_mut() {
+                let mut q = alloc::vec![0.0f32; st.local.len()];
+                let mut voters = 0usize;
+                for (b, &v) in st.votes.iter().enumerate() {
+                    if v < 0 {
+                        continue;
+                    }
+                    let i = v as usize;
+                    if i >= q.len() {
+                        continue;
+                    }
+                    // A rival that is reachable but worth nothing adds nothing,
+                    // and is still counted as having been asked -- "no applet
+                    // could vote here" and "every applet that could vote was
+                    // worth zero" are different facts about a step.
+                    if b != label {
+                        voters += 1;
+                    }
+                    q[i] += row[b];
+                }
+                let mass: f32 = q.iter().sum();
+                if !(mass > 0.0) {
+                    // The label always votes for its own target and its own
+                    // reward is 1, so this cannot happen -- unless `votes` and
+                    // `target` disagree, which is exactly the indexing bug
+                    // worth refusing rather than normalising away.
+                    a.empty += 1;
+                    continue;
+                }
+                let off = 1.0 - q[st.target] / mass;
+                a.off_target += off;
+                if off > 0.0 {
+                    a.moved += 1;
+                }
+                a.voters += voters;
+                a.steps += 1;
+                st.q = Some(q);
+            }
+        }
+        if a.steps > 0 {
+            a.off_target /= a.steps as f32;
+        }
+        a
+    }
+
+    /// How many first tokens spell each applet, and therefore how often
+    /// `chain_for`'s longest-piece rule throws a correct spelling away. See
+    /// `set_ce_compact`.
+    pub fn spellings(e: &mut super::Engine) -> Vec<(&'static str, Vec<usize>)> {
+        let names: Vec<&'static str> = crate::sysbox::APPLETS.iter().map(|a| a.name).collect();
+        let grammar = Grammar::new(names.iter().copied());
+        let alphabet = super::harness::alphabet_for(&e.tok);
+        names
+            .iter()
+            .enumerate()
+            .map(|(alt, n)| (*n, spellings_at(&grammar, alphabet, alt, 8)))
+            .collect()
+    }
     pub fn score(&self, dora: Option<&Dora>, s: Slice) -> f32 {
         let mut out = Vec::new();
         let mut ax = vec![0.0f32; dora.map(|d| d.r).unwrap_or(1)];
@@ -1378,14 +1578,14 @@ pub fn prepare_on(
     // Detached from the static rather than borrowed through a closure: the
     // guard decode below needs the alphabet and `&mut Engine` at once.
     let alphabet = super::harness::alphabet_for(&e.tok);
-    let raw: Vec<Option<Vec<(Vec<u32>, usize, u32)>>> =
+    let raw: Vec<Option<Vec<(Vec<u32>, usize, u32, Vec<i16>)>>> =
         (0..names.len()).map(|alt| chain_for(&grammar, alphabet, alt)).collect();
 
     // The live set: every row any chain can reach. Sorted and deduped so a
     // global token id maps to a local index by binary search.
     let mut live: Vec<u32> = Vec::new();
     for chain in raw.iter().flatten() {
-        for (cands, _, _) in chain {
+        for (cands, _, _, _) in chain {
             live.extend_from_slice(cands);
         }
     }
@@ -1401,7 +1601,7 @@ pub fn prepare_on(
             c.as_ref().map(|steps| {
                 steps
                     .iter()
-                    .map(|(cands, target, token)| Step {
+                    .map(|(cands, target, token, votes)| Step {
                         // `live` was built from exactly these candidate
                         // lists, so the search cannot miss. The fallback is
                         // unreachable rather than lenient.
@@ -1411,6 +1611,8 @@ pub fn prepare_on(
                             .collect(),
                         target: *target,
                         token: *token,
+                        votes: votes.clone(),
+                        q: None,
                     })
                     .collect()
             })
@@ -1574,7 +1776,13 @@ impl Trial {
                 out.clear();
                 out.extend_from_slice(&d.base);
                 dora.apply_rows(&mut out, &st.local, &d.x, &mut ax);
-                let (loss, gy) = restricted_ce_compact(&out, st.target);
+                // `st.q` is None until `aim` supplies one and `b.mix` is zero by
+                // default, so both arms of this take `restricted_ce_compact`'s
+                // own path. Changed in BOTH loops: the body is duplicated
+                // verbatim in `train` and `train_masked`, and editing one is a
+                // tree where `train adapter` and the curriculum optimise
+                // different objectives with nothing saying so.
+                let (loss, gy) = soft_ce_compact(&out, st.target, st.q.as_deref(), b.mix);
                 last_loss += loss;
                 dora.backward_rows(
                     &mat, &d.x, &ax, &d.base, &gy, &st.local, &mut ga, &mut gb, &mut dm,
@@ -1708,7 +1916,13 @@ impl Trial {
                 out.clear();
                 out.extend_from_slice(&d.base);
                 dora.apply_rows(&mut out, &st.local, &d.x, &mut ax);
-                let (loss, gy) = restricted_ce_compact(&out, st.target);
+                // `st.q` is None until `aim` supplies one and `b.mix` is zero by
+                // default, so both arms of this take `restricted_ce_compact`'s
+                // own path. Changed in BOTH loops: the body is duplicated
+                // verbatim in `train` and `train_masked`, and editing one is a
+                // tree where `train adapter` and the curriculum optimise
+                // different objectives with nothing saying so.
+                let (loss, gy) = soft_ce_compact(&out, st.target, st.q.as_deref(), b.mix);
                 last_loss += loss;
                 dora.backward_rows(
                     &mat, &d.x, &ax, &d.base, &gy, &st.local, &mut ga, &mut gb, &mut dm,
@@ -1810,7 +2024,12 @@ impl Trial {
 /// The whole of it now sits on `Trial`, which is what lets the Godel loop
 /// judge a variant without repeating any of the expensive half.
 pub fn run(e: &mut super::Engine, b: &Budget) -> Result<RunReport, RunError> {
-    let trial = prepare(e, b)?;
+    let mut trial = prepare(e, b)?;
+
+    // The matrix is taken only when the objective will use it. Probing costs
+    // fourteen dispatches, which is cheap and not free, and a run at `mix = 0`
+    // has to be indistinguishable from one taken before this existed.
+    let aim = if b.mix > 0.0 { super::outcome::probe().map(|m| trial.aim(&m)) } else { None };
 
     let before_train = trial.score(None, Slice::Train);
     let before_held = trial.score(None, Slice::Held);
@@ -1819,6 +2038,10 @@ pub fn run(e: &mut super::Engine, b: &Budget) -> Result<RunReport, RunError> {
     let after_held = trial.score(Some(&fit.dora), Slice::Held);
 
     let full = trial.scatter(&fit.dora, &e.model.cfg, b.alpha);
+    // Taken before the adapter is moved into the model, and through the same
+    // `to_blob` a `Variant` hashes, so the two accounts of one adapter cannot
+    // disagree.
+    let full_for_digest = full.to_blob();
     // Unseeded on purpose: every row outside the live set is already the
     // identity, and seeding all 151,936 would undo the reason this is
     // affordable at all.
@@ -1841,6 +2064,8 @@ pub fn run(e: &mut super::Engine, b: &Budget) -> Result<RunReport, RunError> {
         prep_ms: trial.features_ms,
         train_ms: fit.ms,
         stopped: fit.stopped,
+        digest: crate::store::sha256::hash(&full_for_digest),
+        aim,
     })
 }
 

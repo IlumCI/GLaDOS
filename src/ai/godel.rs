@@ -358,6 +358,9 @@ impl Proposal {
             lr: self.lr,
             rank: self.rank,
             alpha: self.alpha,
+            // A proposal names knobs and never an objective: the grid does not
+            // vary `mix`, so every point on it trains exactly as it did.
+            mix: 0.0,
         }
     }
 
@@ -2045,6 +2048,7 @@ pub fn storm(e: &mut super::Engine, b: &Budget, points: usize) -> Result<StormRe
             lr: p.lr,
             rank: p.rank,
             alpha: p.alpha,
+            mix: 0.0,
         };
         let fit = t.train(&bi);
         gen.push((fit.dora, p.rank));

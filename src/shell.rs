@@ -1549,7 +1549,7 @@ fn study_cmd(rest: &str) {
     if let Some(arg) = rest.strip_prefix("check") {
         let n = arg.trim().parse::<usize>().unwrap_or(40).max(8);
         let b = crate::ai::train::Budget {
-            epochs: 12, millis: 90_000, examples: n, lr: 0.02, rank: 8, alpha: 16.0,
+            epochs: 12, millis: 90_000, examples: n, lr: 0.02, rank: 8, alpha: 16.0, mix: 0.0,
         };
         if !crate::ai::train::hardware_ok() {
             console::set_color(LTRED);
@@ -1677,7 +1677,7 @@ fn study_seq_cmd(arg: &str) {
     }
 
     let examples = arg.parse::<usize>().unwrap_or(48).max(8);
-    let b = Budget { epochs: 12, millis: 90_000, examples, lr: 0.02, rank: 8, alpha: 16.0 };
+    let b = Budget { epochs: 12, millis: 90_000, examples, lr: 0.02, rank: 8, alpha: 16.0, mix: 0.0 };
 
     console::set_color(YELLOW);
     kprintln!("[study seq] {} domains, ~{} examples, {} epochs a stage",
@@ -2852,6 +2852,37 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     }
                 }
                 None => kprintln!("  no namespace, so there is nothing to run an applet against"),
+            }
+            // The other half of the same question, and the one `set_ce_compact`
+            // exists for: how often the label has more than one correct
+            // spelling, which `chain_for` discards by taking the longest and
+            // `Trial::correct` then scores as wrong. Printed beside the
+            // distances because both are facts about what a routing mistake
+            // costs, and neither had a number before.
+            match crate::ai::with_engine(crate::ai::train::Trial::spellings) {
+                Some(rows) => {
+                    let (mut multi, mut steps) = (0usize, 0usize);
+                    let mut worst = (0usize, "");
+                    for (n, counts) in rows.iter() {
+                        for c in counts.iter() {
+                            steps += 1;
+                            if *c > 1 {
+                                multi += 1;
+                            }
+                            if *c > worst.0 {
+                                worst = (*c, n);
+                            }
+                        }
+                    }
+                    kprintln!(
+                        "  {} of {} step(s) admit more than one correct spelling; worst is {} with {}",
+                        multi,
+                        steps,
+                        worst.1,
+                        worst.0
+                    );
+                }
+                None => kprintln!("  no engine, so spellings were not counted"),
             }
         }
         "answer" => {
@@ -4332,6 +4363,20 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 _ => kprintln!("  usage: adapter [status|save|load|off] [path]"),
             }
         }
+        // The paired comparison the mix axis would rest on, over one prepare.
+        "mixbench" => {
+            let n: usize = rest.split_whitespace().next().and_then(|w| w.parse().ok()).unwrap_or(96);
+            if !crate::ai::train::hardware_ok() {
+                kprintln!("  the trainer needs AVX2 and FMA; add -cpu max under QEMU");
+                return;
+            }
+            match crate::ai::with_engine(|e| {
+                crate::ai::harness::mix_bench(e, n, &[0.25, 0.5, 0.75, 1.0])
+            }) {
+                Some(()) => {}
+                None => kprintln!("  {}", crate::ai::engine_refusal()),
+            }
+        }
         "train" => {
             // Two trainers behind one verb, told apart by the first word.
             // `train [epochs]` is the linear probe's head, unchanged; `train
@@ -4355,13 +4400,20 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                                 Ok(v) => b.lr = v,
                                 Err(_) => bad = Some(value),
                             },
+                            // How much of the objective the outcome reward
+                            // carries. Zero is the default and takes the
+                            // objective this trainer has always used.
+                            ("-mix", _) => match value.parse::<f32>() {
+                                Ok(v) if (0.0..=1.0).contains(&v) => b.mix = v,
+                                _ => bad = Some(value),
+                            },
                             _ => bad = Some(flag),
                         }
                     }
                     match bad {
                         Some(w) => {
                             kprintln!("  unrecognised: {}", w);
-                            kprintln!("  usage: train adapter [-e epochs] [-n examples] [-ms budget] [-r rank] [-lr rate]");
+                            kprintln!("  usage: train adapter [-e epochs] [-n examples] [-ms budget] [-r rank] [-lr rate] [-mix lambda]");
                         }
                         None => crate::ai::harness::adapter_train_report(&b),
                     }
