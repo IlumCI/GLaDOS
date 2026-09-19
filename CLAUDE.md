@@ -1156,6 +1156,26 @@ gated on `spent` -- a fetch costs no decode.
 an empty mailbox, and it passes the identity gate first: "nothing for you"
 from an unverified server is still somebody in the path talking.
 
+**Driven, and it took four boots to see one line.** The block fires in the
+quiet window before the trial:
+
+    [t1 +13s] episode: "list the files in /ai" queued (read-only, 2 steps)
+    [t2 +46s] sleep: cooldown between self-set goals. ... op silent
+    [t3 +46s] verdicts: filed 0, skipped 0 (no device code -- ...)
+
+Three things cost a boot each, and all three are recipe rather than code.
+The forced tick has to land in the **sleep** branch, which the 240-second
+episode cooldown provides but only once the agent is genuinely idle -- and
+`agent stop` followed by instant `echo`s does not let an episode wind down,
+so the ticks bunched and every one reported "an episode is already
+running". Real elapsed time between them (two `bench report`s) fixed it.
+`quiet_hours` consumes the entropy-ring state, so the first quiet tick of a
+boot can refuse where the second passes. And `mind` printed eight lines,
+which is exactly enough to hide an hourly job in a fourteen-tick night: the
+poll had been running and scrolling away, so the block that worked looked
+like a block that did not. `mind [n]` is the fix and the reason is in its
+comment.
+
 **What the hardening pass changed.** The cost rails (`cost.image_bytes`,
 `cost.warnings`) give `cleanup` a J1, floored at **zero** because one
 locked toolchain over one tree is exact -- and that rail found a real bug
