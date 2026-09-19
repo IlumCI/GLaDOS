@@ -618,6 +618,25 @@ fn tick_inner(forced: bool) {
                     // number of verdicts already recorded, so which axis a
                     // given night takes is a function of the ledger and not of
                     // a coin.
+                    // **Where to grow from, before what to try.** Every
+                    // night before this one extended the head, which makes
+                    // the loop a hill climber that cannot go back: a lineage
+                    // that walked into a dead end spends every later night
+                    // proposing children of the dead end, and the only way
+                    // out was an operator typing `godel rollback`.
+                    //
+                    // `clade` draws from each ancestor's posterior over what
+                    // has already been adopted at or below it -- the
+                    // Huxley-Gödel Machine's finding that a node's own score
+                    // predicts its descendants' badly and its clade's record
+                    // predicts them well. It moves nothing until the head
+                    // has at least as much evidence as the prior, and it
+                    // cannot unwind more than `MAX_BACK` in one night.
+                    let moved = match super::with_engine(|e| super::godel::reconsider(e)) {
+                        Some(super::godel::Reconsidered::Went(n, _)) => Some(n),
+                        Some(super::godel::Reconsidered::Stuck(n, _)) if n > 0 => Some(n),
+                        _ => None,
+                    };
                     let picked = super::godel::next_proposal();
                     // Whether there was anything to run, remembered rather
                     // than re-derived afterwards.
@@ -672,11 +691,20 @@ fn tick_inner(forced: bool) {
                             c.goals_total
                         ),
                     };
+                    // The backtrack goes in the same line rather than its
+                    // own, because it is not an event of its own: it is where
+                    // the trial below it was taken from, and a reader asking
+                    // "why this variant" needs the two together.
+                    let where_from = match moved {
+                        None => String::new(),
+                        Some(n) => format!("grew from {} back, ", n),
+                    };
                     journal_push(format!(
-                        "[t{} +{}s] godel: hour {}, {}",
+                        "[t{} +{}s] godel: hour {}, {}{}",
                         TICKS.load(Ordering::Relaxed),
                         now_s,
                         hour,
+                        where_from,
                         line
                     ));
                 }

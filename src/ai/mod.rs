@@ -8,6 +8,7 @@ pub mod acquire;
 pub mod work;
 pub mod aixi;
 pub mod backward;
+pub mod clade;
 pub mod constrain;
 pub mod context;
 pub mod initiative;

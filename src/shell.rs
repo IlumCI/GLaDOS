@@ -3977,6 +3977,71 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         kprintln!("  {}", l);
                     }
                 }
+                // Where the loop would grow from tonight, and why. Read-only:
+                // `godel reconsider` is what acts on it.
+                "clade" => {
+                    let (mv, arms) = godel::clade_now();
+                    let lines = godel::ledger_tail(usize::MAX);
+                    // A machine with no ledger has one arm, which is the root,
+                    // reading `0 of 0`. True, and it reads like a lineage that
+                    // exists and has done nothing -- so say which it is.
+                    if crate::ai::clade::steps(&lines).is_empty() {
+                        kprintln!("  no lineage yet -- nothing judged, so nothing to choose between");
+                    }
+                    let here = arms.first().map(|a| a.node).unwrap_or(0);
+                    let seed = crate::ai::clade::seed_of(lines.len(), here);
+                    for a in arms.iter() {
+                        let d = (crate::ai::clade::draw_for(seed, a) * 1000.0) as u32;
+                        kprintln!(
+                            "  {}{:08x}  clade {} of {} adopted   draw 0.{:03}",
+                            if a.back == 0 { "head " } else { "back " },
+                            a.node,
+                            a.adoptions,
+                            a.trials,
+                            d
+                        );
+                    }
+                    match mv {
+                        crate::ai::clade::Move::Stay => {
+                            kprintln!("  the head won its own draw, so tonight grows from here")
+                        }
+                        crate::ai::clade::Move::Back(n) => kprintln!(
+                            "  an ancestor {} back won -- 'godel reconsider' goes there",
+                            n
+                        ),
+                    }
+                    kprintln!(
+                        "  the draw is seeded from the ledger's length and the head, so"
+                    );
+                    kprintln!("  a later reader with this ledger reaches the same node");
+                }
+                "reconsider" => match crate::ai::with_engine(|e| godel::reconsider(e)) {
+                    None => kprintln!("  no engine, or another task holds it"),
+                    Some(godel::Reconsidered::Stayed) => {
+                        kprintln!("  staying -- the head's own clade won the draw")
+                    }
+                    Some(godel::Reconsidered::Rebased(h)) => {
+                        kprintln!("  nothing was decided: the head did not describe the mind");
+                        match h {
+                            None => kprintln!("  that is running, so it now names the frozen model"),
+                            Some(h) => kprintln!(
+                                "  that is running, so it now names {}",
+                                godel::short_hex(&h)
+                            ),
+                        }
+                        kprintln!("  'godel clade' again to draw against what is actually here");
+                    }
+                    Some(godel::Reconsidered::Went(n, None)) => {
+                        kprintln!("  went back {} to the frozen model", n)
+                    }
+                    Some(godel::Reconsidered::Went(n, Some(h))) => {
+                        kprintln!("  went back {}, head is now {}", n, godel::short_hex(&h))
+                    }
+                    Some(godel::Reconsidered::Stuck(done, why)) => kprintln!(
+                        "  went back {} and then stopped: {}",
+                        done, why
+                    ),
+                },
                 "rollback" => match crate::ai::with_engine(|e| godel::rollback(e)) {
                     None => kprintln!("  no engine, or another task holds it"),
                     Some(Err(why)) => kprintln!("  cannot roll back: {}", why),
@@ -4001,7 +4066,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     godel::set_enabled(false);
                     kprintln!("  off -- nothing will change itself");
                 }
-                _ => kprintln!("  usage: godel [status|now [n]|ledger [n]|window <f> <u>|rollback|on|off]"),
+                _ => kprintln!("  usage: godel [status|now [n]|ledger [n]|clade|reconsider|window <f> <u>|rollback|on|off]"),
             }
         }
         "adapter" => {

@@ -4625,6 +4625,75 @@ pub fn short_hex(h: &[u8; 32]) -> String {
     short(h)
 }
 
+/// The head, in the four-byte name the ledger writes it under.
+pub fn name4(h: &[u8; 32]) -> super::clade::Name {
+    u32::from_be_bytes([h[0], h[1], h[2], h[3]])
+}
+
+/// Where the clade posterior says tonight should grow from, and the arms it
+/// drew to decide. Read-only: it moves nothing.
+pub fn clade_now() -> (super::clade::Move, Vec<super::clade::Arm>) {
+    let lines = ledger_tail(usize::MAX);
+    let here = head().map(|h| name4(&h)).unwrap_or(super::clade::ROOT);
+    super::clade::decide(&lines, here)
+}
+
+/// What `reconsider` did.
+pub enum Reconsidered {
+    /// The head won its own draw, which is what every night before this did
+    /// unconditionally.
+    Stayed,
+    /// **The head file did not describe the mind that was running**, so
+    /// `ensure_head` moved it before anything was decided, and whatever
+    /// `godel clade` said a moment ago was about a lineage this machine is not
+    /// on. Reported rather than folded into `Stayed`, because the two look
+    /// identical from outside and mean opposite things: one is a decision, the
+    /// other is the decision having been made about the wrong record.
+    ///
+    /// Found by driving it -- a report offering a backtrack, `reconsider`
+    /// answering "staying", and the head silently at the root afterwards.
+    Rebased(Option<[u8; 32]>),
+    /// Went back this many parents, landing here. `None` is the frozen model.
+    Went(usize, Option<[u8; 32]>),
+    /// A rollback refused partway. The machine is wherever it got to, which
+    /// is a real state and is reported rather than guessed at.
+    Stuck(usize, &'static str),
+}
+
+/// Choose where to grow from, and go there if it is not here.
+///
+/// **The one thing in this module that moves the machine without a verdict**,
+/// and it is worth saying why that is admissible. Every other change to the
+/// head is an adoption: judged, certified and written to the ledger. This is
+/// not a change to what the machine *is* so much as a change to where the
+/// search stands, and the mechanism is `rollback` -- which restores a node
+/// that was itself adopted under the four judges, validated before anything
+/// moves, and undone by the next adoption.
+///
+/// It writes no ledger line, and that is deliberate for the reason `OUTBOX`
+/// is not the ledger: every line there is a verdict, and "the search moved
+/// back two" is not one. Where the machine stands is the head file, which is
+/// the record of exactly this.
+pub fn reconsider(e: &mut super::Engine) -> Reconsidered {
+    // Before the draw, because a draw made against a head that is not the
+    // running mind is a draw about somebody else's lineage.
+    let before = head();
+    let _ = ensure_head(e);
+    if head() != before {
+        return Reconsidered::Rebased(head());
+    }
+    let (mv, _) = clade_now();
+    let super::clade::Move::Back(n) = mv else { return Reconsidered::Stayed };
+    let mut at = head();
+    for done in 0..n {
+        match rollback(e) {
+            Ok(h) => at = h,
+            Err(why) => return Reconsidered::Stuck(done, why),
+        }
+    }
+    Reconsidered::Went(n, at)
+}
+
 /// Run a trial and print the certificate.
 ///
 /// The whole certificate, including the judges that passed. A report that
