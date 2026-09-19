@@ -942,8 +942,69 @@ def next_point(root):
                           point=point_of(env), rail=row["rail"])
             budget.setdefault("queries", BASE_QUERIES)
             return (env, budget), None
-    return None, ("every grid point is tried from this tree; "
-                  "rungs 2-4 are what comes next (Phase 4)")
+
+    # Rung 3 only once the grid is exhausted, which is the composed-core
+    # rule ported: a template costs a `cargo check` to find out whether it
+    # has work at all, so it is reached for when everything cheaper is out
+    # of moves rather than because it looked promising.
+    got, why3 = next_template(root, entries, corpus, k, parent, tried_dir)
+    if got is not None:
+        return got, None
+    return None, (f"every grid point is tried from this tree; {why3}; "
+                  "rung 4 is what comes next")
+
+
+def next_template(root, entries, corpus, k, parent, tried_dir):
+    """The next untried template candidate, or a reason there is none.
+
+    **Every candidate is re-derived against the parent tree before it is
+    offered**, and that is not belt-and-braces. A template reads the
+    compiler's diagnostics about the WORKTREE, and the envelope claims a
+    line number in `parent-tree`; the two are the same tree most nights and
+    are not the same tree on the night somebody had an edit open. A line
+    diff that lands one line off does not fail, it deletes the wrong line --
+    the "stale span eats a line that means something else now" failure the
+    family already refuses one level down, arriving from the side where the
+    file on disk was right and the tree was not.
+    """
+    try:
+        import templates
+    except ImportError as e:            # pragma: no cover
+        return None, f"no templates package ({e})"
+    try:
+        cands = templates.emit_all(ROOT)
+    except Exception as e:              # a toolchain that will not run
+        # Named by TYPE, not only by message. A swallowed bug in a family
+        # and a toolchain that is not installed both end the night with no
+        # rung-3 candidate, and those are opposite facts -- "found nothing"
+        # is what this family already looked like for two runs while it was
+        # broken, and a reason a reader can act on is the difference.
+        return None, (f"templates could not enumerate "
+                      f"({type(e).__name__}: {e})")
+    if not cands:
+        return None, "no template family has a candidate against this tree"
+    for c in cands:
+        fields = {
+            "kind": c["kind"], "rung": 3, "axis": "template",
+            "parent-tree": parent, "corpus": corpus, "rail": c["rail"],
+        }
+        env = render_envelope(fields, patch=c["patch"])
+        marker = os.path.join(tried_dir, point_of(env)[:16] + ".env")
+        if os.path.exists(marker):
+            continue
+        if admit(env):
+            continue                    # a family whose output its kind refuses
+        try:
+            rederive(root, parent, c["patch"])
+        except RuntimeError:
+            continue                    # the tree moved under the diagnostic
+        p = plan(entries, "template", corpus)
+        budget = dict(p, alpha_k=k, chi_bar=chi_floor(k),
+                      point=point_of(env), rail=c["rail"])
+        budget.setdefault("queries", BASE_QUERIES)
+        return (env, budget), None
+    return None, (f"all {len(cands)} template candidate(s) are tried, "
+                  "refused by their kind, or do not apply to this tree")
 
 
 # ---------------------------------------------- rung 2: mechanical discovery
@@ -1510,7 +1571,11 @@ def selftest():
     claim("two fences are a refusal, not a choice", d is None and "2" in why)
     d, why = parse_completion("I refuse to answer in the requested format.")
     claim("no fence is a refusal, never a retry-with-more-context", d is None)
-    if os.path.isdir(os.path.join(ROOT, ".git")):
+    # `.git` is a DIRECTORY in a clone and a FILE in a worktree, and this
+    # asked isdir -- so the three author drills silently skipped and the
+    # suite FAILED, on a perfectly good checkout, in exactly the place the
+    # night job runs: `loop-night` stages its candidate in a worktree.
+    if os.path.exists(os.path.join(ROOT, ".git")):
         env2, why = author_finish(ROOT, "cleanup", "```diff\n" + good_diff + "```")
         claim("a clean cleanup completion becomes an admitted envelope",
               env2 is not None and why is None)
@@ -1526,6 +1591,13 @@ def selftest():
               env2 is None and "protected" in why)
     else:
         claim("author drills need the repo; run --selftest from a checkout", False)
+
+    # --- rung 3's families ------------------------------------------------
+    # Outside the drill's conditional deliberately: these need no git, and
+    # burying them in a branch that skips is how a suite reports green on
+    # claims it never ran.
+    import templates
+    templates.selftest(claim)
 
     print()
     print(f"  godel {'passed' if ok else 'FAILED'}")

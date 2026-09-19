@@ -1113,7 +1113,8 @@ in `_shared/verdict_key.js` BEFORE storing, ci.yml asserts that pin equals
 `mod.rs`'s via `sign.anchor` on every push, and the offline tests' two
 fixtures are the exact blobs a real boot filed and refused. Rung 2's
 `godel.py discover` lists 586 candidate constants and says the row-adding
-lane waits on the `eval` kind's enablement; rung 4a's `godel.py author`
+lane waits on the `eval` kind's enablement; rung 3 is `tools/templates/`
+(below); rung 4a's `godel.py author`
 asks GitHub Models for one patch under a fence contract whose injection
 drill is a selftest claim (a diff aimed at `.github/` refuses by name).
 `rail none` judges to an explicit refusal naming its missing judge (the
@@ -1122,6 +1123,103 @@ unmeasured adoption. `boundary.yml` is the only evaluator lane: epoch gate,
 Sane/Moves/Honest over archived anchor pairs (refusing by name while none
 are archived), environment-gated token, output a PR to main and never a
 push. `.github/RULESETS.md` is the operator's half.
+
+### Rung 3: a template authors, and the compiler enumerates the space
+
+`tools/templates/` is the rung between the declared grid and the model. A
+family exposes `emit(root) -> [Candidate]`, each carrying the kind it files
+under, a one-line reason and a unified diff, and the loop judges it through
+exactly the gate every other rung goes through. What a template buys is
+that the *space* is closed and mechanical, so a candidate is valid Rust by
+construction rather than by a model's good behaviour -- `constrain.rs`'s
+argument about applet names being unreachable rather than improbable,
+arriving on patches.
+
+**A family is admitted on being able to win**, and that rule removed the
+first family considered. `#[inline(never)]` would put inlined functions back
+in the symbol table, which `cpu::code::symbol` needs and which this file
+already records as a real gap -- and it costs image bytes, buys
+symbolication, and *symbolication has no rail*. Every output would have
+been a regression on the only rail that could score it. A template whose
+every candidate can only be refused is a template that spends runners, so
+it is not in the package and the reason is in its docstring.
+
+One family today. `unused_import` takes rustc's own `unused_imports`
+diagnostics, so the space is enumerated by the compiler rather than guessed
+at, and each candidate is the deletion of a line the compiler has already
+declared dead. It claims `cost.warnings`, which such a patch moves down by
+construction, and it is a pure deletion, which is what the `cleanup` kind
+asks for. `RAIL` and `KIND` are declared once and the package's selftest
+asks whether `rails.py` has a floor for the one and whether the kind table
+enables the other -- a family claiming a rail nobody reads would spend
+nights on a comparison that cannot come back better.
+
+**The span rustc emits is the import path, never the statement**, and
+assuming otherwise is the whole story of this family's first two runs. For
+`    use crate::kprintln;` rustc reports columns 9..24, which is
+`crate::kprintln` alone: no `use`, no semicolon, no indent. A check written
+against the line's own extent refused every candidate there was and looked
+exactly like a tree with no dead imports in it -- zero candidates on a tree
+carrying 251 warnings. The comparison is against the path the statement
+declares now, and the refusal it buys is load-bearing rather than
+theoretical: of ten spans on this tree, four are one name out of `pub use
+futures::{project, Projection, Branch, snapshot}` and one is `Fired` out of
+`use super::thing::{Fired, Objs};`. **Deleting that last line whole removes
+`Objs`, which is used.** The difference between a cleanup and a build
+failure is one column comparison.
+
+A guess was recorded as the reason before it was measured, and is worth
+keeping as the correction. The first version blamed a warm cargo cache --
+"cargo replays no diagnostics for a unit it did not rebuild" -- and that is
+simply false: 14 s cold, 0 s warm, five candidates both times. The private
+`target/lint` directory stays for the honest reason, which is that
+`cost.image_bytes` is read off a release build and a lint run sharing that
+target dir churns the fingerprints the judged build reads. A comment
+blaming the cache would have sent the next reader at the build system
+instead of at the bug.
+
+**Every candidate is re-derived against the parent tree before it is
+offered.** A template reads diagnostics about the *worktree* and the
+envelope claims a line number in `parent-tree`; those are the same tree most
+nights and are not on the night somebody had an edit open. A line diff that
+lands one line off does not fail, it deletes the wrong line. `emit` already
+refuses when the file on disk has moved under the diagnostic; `next_template`
+closes the other side by calling `rederive` and skipping anything that will
+not apply.
+
+Rung 3 is reached only once the grid is exhausted, which is the
+composed-core "always last" rule ported: finding out whether a template has
+work costs a `cargo check`, so it is reached for when everything cheaper is
+out of moves rather than because it looked promising.
+
+Driven end to end on a worktree of `loop/main`, which is where the night job
+runs:
+
+    next        kind cleanup / rung 3 / axis template / rail cost.warnings
+                a one-line deletion in src/ai/backward.rs
+    admit       admitted
+    derive      7163864c, and `git diff --stat` against the parent reads
+                1 file changed, 1 deletion(-)
+    tried-walk  five distinct points over five different files, then
+                "all 5 template candidate(s) are tried" and rung 4
+    build       251 warnings -> 246, exactly five, zero errors
+
+**And the package's own selftest caught the thing reading would not.** It
+asks whether the rail a family claims is one `rails.py` declares a floor
+for, and on `loop/main` the answer was no: that branch was cut before the
+cost rails existed, so the CI machine's own judge has `cleanup` enabled with
+a rail it cannot score. `noise_for` answers `None` rather than a default, so
+it is an honest absence and not a silent wrong floor -- and the fix is the
+`follow` job, which is the first thing `loop-night` does. Worth knowing
+before reading a green selftest on main as a statement about the loop
+branch.
+
+One unrelated defect fell out of driving it. `godel.py --selftest` gated its
+three author drills on `os.path.isdir(ROOT/".git")`, and **`.git` is a
+directory in a clone and a file in a worktree** -- so the drills silently
+skipped and the suite reported FAILED on a perfectly good checkout, in
+exactly the place the night job runs. 61 claims became 69: 8 template, and
+the 3 drills that had been unreachable there all along.
 
 **None of it has run on a runner** -- that requires the push -- and what
 could be driven locally was: every subcommand against the real tree, the
