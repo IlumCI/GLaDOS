@@ -297,8 +297,10 @@ Four judges, unanimity required, each a different failure mode:
   answer, which is what a comparison of two percentages cannot be. It needs
   roughly six repaired validation decisions with none broken, so it needs a
   corpus subsample large enough to reach the held-out slice at all.
-- **J2** replays the machine's own curiosity goals along the path the frozen
-  baseline walks, and is never subsampled by `-n`.
+- **J2** asks whether the machine still sends its own curiosity goals where
+  they were declared to go, walking each one *under the candidate*, and is
+  never subsampled by `-n`. It replayed them along the frozen baseline's own
+  cached path until it was measured -- see below.
 - **J3** is structural: finite factors, positive scales, finite logits.
 - **J4** is cost: rank and resident bytes, because `HEAP_LADDER` is one
   physically contiguous allocation that comes down a rung when the memory map
@@ -483,8 +485,85 @@ nothing rather than claiming zero, which would read as "the incumbent was
 already perfect".
 
 **J2 still vetoes** on the curiosity goals at both budgets measured, so the
-budget fix makes a nightly adoption *reachable* rather than likely. The goals
-are four hardcoded `ls` commands.
+budget fix makes a nightly adoption *reachable* rather than likely. What J2
+turned out to be is its own section.
+
+### J2 was protecting the incumbent's mistakes, and could not say where a goal went
+
+The judge that asks whether a variant has changed the machine's character
+replayed four curiosity goals against **the incumbent's own cached decode
+path** and required all four to land the same way. Three things were wrong
+with that and only the first was suspected.
+
+**It had no ground truth.** The incumbent's answer was the thing to preserve
+whether or not it was right, so a candidate that routed a goal *correctly*
+where the baseline had been routing it somewhere else was vetoed for having
+changed the machine's character -- by the same trial whose J1 rewards exactly
+that repair. Two judges pointing in opposite directions on the same handful of
+items. `CURIOSITY` carries the applet each goal ought to reach now, and a goal
+the baseline gets wrong is simply not counted: it has nothing to protect,
+changing it cannot be a loss, and whether it is a gain is J1's question, asked
+over a corpus with ground truth for every item.
+
+**It could say a goal moved and not where it went.** A night's work was
+refused for a change of character that no line in the transcript named, and
+the cache genuinely cannot answer it -- the hidden states were collected
+walking the baseline's path, so a candidate that diverges at step one leaves
+nothing to score its own steps two onward against. So J2 walks the candidate:
+`Trial::guards_where` decodes each goal again under the adapter, through the
+*same* `walk_goal` the cache came from, which is why that function takes an
+`Option<&Dora>` rather than there being a second decode loop to drift from the
+first. It costs one prefill per goal against a forward pass per corpus example,
+which is a few per cent, and it buys a judge whose verdict names its own
+subject. `GuardStep` kept its cache because J3's `logits_finite` reads it; it
+lost `chosen`, which was J2's whole mechanism.
+
+**What the walk found on its first run is the argument for all of it.** A
+rank-8 adapter over 96 examples, which the old J2 reported as `1/3 still route
+where they did`, was rerouting:
+
+    goal: list the files in /ai      -> mv    <- moved, and J2 protects this one
+    goal: search for the word godel  -> tree  <- moved, and J2 protects this one
+
+`mv` **changes things**. A goal the machine sets itself unasked had moved from
+listing a directory to renaming, and the judge whose entire job is to catch
+that could say only that something had moved. J1 vetoed the same variant
+independently (chi 2.28 against 3.84), so J2 was never the sole blocker in
+anything measured here -- but it was right, and now the transcript says why.
+
+That also exposed a hole in the check beside it, and closing it caught
+something worse on the first run. "None of the goals may be routing to a
+mutating applet in the first place" walked the **incumbent's** answers, and the
+incumbent is not what is being judged. `guards_read_only` asks it of the
+candidate's answers as well, over *every* goal and not only the protected ones.
+The same variant, on the same trial:
+
+    a goal now reaches 'mv', which changes things
+    a goal now reaches 'rm', which changes things
+    a goal now reaches 'mv', which changes things
+
+The `rm` is an **unprotected** goal -- one the baseline routes wrongly, so it
+is outside J2's count -- and under the old check it was invisible twice over:
+not counted because unprotected, and not caught by the mutation rule because
+that rule only ever looked at where the *incumbent* sent things, which was
+`ls` and `find`. A variant that would have the machine reaching for `rm` on a
+goal it set itself passed both halves of that judge.
+
+**And the goals were four spellings of one question**, all expecting `ls`, so
+"the machine's character" meant "does it still say ls". Eight distinct
+read-only applets now, and widening became safe only once the ground truth
+existed: a goal this checkpoint cannot route is not protected, so a broader
+list cannot make J2 unfairly strict on a model that routes badly.
+
+Measured while choosing them, and the figure is about the instrument rather
+than about the shipped model: on **SmolLM2-135M**, the checkpoint that fits
+under QEMU, *twelve of fourteen candidate goals routed to `ls`*. `du`, `cat`,
+`hash`, `snaps`, `pwd`, `fsck`, `tree`, `stat` and `same` all collapsed onto
+it and only `find` reached its own applet. That is `repair.rs`'s finding
+arriving on a second table: an applet's name carries probability mass that has
+nothing to do with what the applet does, and `ls` is short, common and first.
+Concluding anything about the 0.6B from it would be the small-sample
+extrapolation this file warns about elsewhere.
 
 **`godel lib` is the operator path that axis never had**, and its absence is
 why `trial_lib` was never driven end to end: it was reachable only from a
@@ -612,8 +691,8 @@ does not work either, because its decisions are recorded along the baseline's
 own decode path, so a change that alters that path alters how many decisions
 there are and the two lists stop lining up item for item.
 `harness::route_snapshot` pairs on *routing* instead: one entry per example,
-the same examples both times, and the four curiosity goals recomputed on both
-sides. Two full passes over the corpus, which is the frozen-base trade with a
+the same examples both times, and the curiosity goals recomputed on both sides
+against the applet each was declared to want. Two full passes over the corpus, which is the frozen-base trade with a
 number on it -- as is J4 reporting 2,646 KiB resident at rank 4 against a few
 KiB for a classifier adapter.
 

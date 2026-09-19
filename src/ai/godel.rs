@@ -2059,6 +2059,25 @@ pub fn trial(
         t.chains_ms,
         t.features_ms
     );
+    // Where the machine's own goals actually go, which nothing ever printed.
+    //
+    // `Guard.name` has been recorded since the guards existed and was read by
+    // one thing, the mutation check. So J2 could veto a night's work for
+    // rerouting "list the files in /ai" and no line said where the baseline
+    // had been sending it -- or whether that was the right place. A judge
+    // whose subject is invisible is a judge nobody can argue with.
+    for g in t.guards().iter() {
+        crate::kprintln!(
+            "    goal: {} -> {} ({})",
+            g.goal,
+            g.name,
+            if g.protected() {
+                "as declared, so J2 protects it"
+            } else {
+                "not where it was declared to go, so J2 has nothing to protect"
+            }
+        );
+    }
 
     // The incumbent, narrowed to this trial's row space. `None` means the
     // frozen baseline, which is the honest starting point rather than a
@@ -2085,13 +2104,45 @@ pub fn trial(
     let (j1, j1_why) = judge_one(n_val, fixed, broke);
 
     // --- J2: does it still do the same thing unasked? -------------------
-    let (goals_held, goals_total) = t.guards_hold(Some(&fit.dora));
-    // Every guard must hold, and none of them may have been routing to a
-    // mutating applet in the first place -- a baseline that already wanted to
-    // run `rm` on its own initiative is not a baseline worth preserving.
-    let j2 = goals_held == goals_total
-        && goals_total > 0
-        && t.guards().iter().all(|g| !g.mutates);
+    // Walked under the candidate rather than replayed against the incumbent's
+    // cached path, so the verdict can name where a goal went instead of only
+    // that it moved. Eight prefills against a forward pass per corpus example.
+    let went = t.guards_where(e, Some(&fit.dora));
+    for (g, w) in t.guards().iter().zip(went.iter()) {
+        if !g.protected() {
+            continue;
+        }
+        let to = w.unwrap_or("nowhere the grammar finishes");
+        crate::kprintln!(
+            "    goal: {} -> {}{}",
+            g.goal,
+            to,
+            if w == &Some(g.expect) { "" } else { "  <- moved, and J2 protects this one" }
+        );
+    }
+    // Every goal and not only the protected ones: an unprotected goal is
+    // outside the count and would otherwise be free to land on `rm`.
+    for w in went.iter().flatten() {
+        if crate::sysbox::applet_mutates(w).unwrap_or(true) {
+            crate::kprintln!("    a goal now reaches '{}', which changes things", w);
+        }
+    }
+    let (goals_held, goals_total) = t.guards_kept(&went);
+    // Every protected guard must hold, and none of the goals may be routing to
+    // a mutating applet in the first place -- a baseline that already wanted to
+    // run `rm` on its own initiative is not a baseline worth preserving. The
+    // mutation check walks *every* goal and not only the protected ones,
+    // because a goal that reaches `rm` is a fact about the machine either way.
+    //
+    // **`goals_total == 0` passes now, and says so.** It used to veto, on the
+    // reasonable-looking ground that a judge with nothing to weigh should not
+    // wave a variant through. But `guards_hold` counts only the goals the
+    // baseline routes *correctly*, so zero means this machine gets none of its
+    // own goals right -- and there is then nothing here a candidate could
+    // break. Vetoing on it makes J2 unpassable precisely when the machine is
+    // at its worst, which is when it most needs to be able to improve. The
+    // certificate carries the count, so a pass on nothing is legible as one.
+    let j2 = goals_held == goals_total && t.guards_read_only(&went);
 
     // --- J3: structural sanity, regardless of any score -----------------
     let (j3, j3_why) = sanity(&t, &fit.dora);
@@ -2538,11 +2589,22 @@ pub fn trial_deep(
     // exactly what deep training invalidates. A goal that now routes
     // somewhere else is the failure this judge exists for, and one that
     // routes to a mutating applet fails it whether or not it moved.
-    let goals_total = before.guards.len().min(after.guards.len());
-    let goals_held = (0..goals_total).filter(|i| before.guards[*i] == after.guards[*i]).count();
-    let j2 = goals_total > 0
-        && goals_held == goals_total
-        && after.guards[..goals_total].iter().all(|c| {
+    // Only the goals the baseline routes where they were *declared* to go,
+    // for the reason `Trial::guards_hold` gives at length: a goal the incumbent
+    // gets wrong has nothing to protect, and requiring the candidate to
+    // preserve a wrong answer is J2 vetoing exactly what J1 is looking for.
+    // Ground truth rather than the other side's answer, since `RouteSnapshot`
+    // carries it now.
+    let n = before.guards.len().min(after.guards.len()).min(before.expect.len());
+    let protected: alloc::vec::Vec<usize> =
+        (0..n).filter(|i| before.guards[*i] == before.expect[*i]).collect();
+    let goals_total = protected.len();
+    let goals_held = protected.iter().filter(|i| after.guards[**i] == after.expect[**i]).count();
+    // The mutation check walks every goal and not only the protected ones: a
+    // goal that reaches `rm` is a fact about the machine either way. And zero
+    // protected goals passes -- see the note on `trial`'s J2.
+    let j2 = goals_held == goals_total
+        && after.guards[..n].iter().all(|c| {
             crate::sysbox::APPLETS
                 .get(*c)
                 .map(|a| !a.mutates)
@@ -4173,10 +4235,19 @@ pub fn report_trial(b: &Budget) {
         );
     }
     kprintln!(
-        "  J2 own goals {}  {}/{} still route where they did",
+        "  J2 own goals {}  {}/{} {}",
         mark(c.j2),
         c.goals_held,
-        c.goals_total
+        c.goals_total,
+        // Zero protected goals is a pass and reads like one now. It used to be
+        // a veto, and on a machine getting none of its own goals right that
+        // made J2 unpassable exactly when improving mattered most.
+        if c.goals_total == 0 {
+            "-- none of the goals route where they were declared to, so there \
+             is nothing here to break"
+        } else {
+            "of the goals that work still route where they did"
+        }
     );
     kprintln!("  J3 sanity    {}  {}", mark(c.j3), c.j3_why);
     if c.capped {

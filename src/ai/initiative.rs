@@ -219,15 +219,44 @@ const MIND_DIR: &str = "/ai/mind";
 const JOURNAL_PATH: &str = "/ai/mind/journal.txt";
 const REPORT_PATH: &str = "/ai/mind/report.txt";
 
-/// Read-only goals the machine sets itself, rotated. Deliberately mundane:
-/// their value is not the answer but the exercise -- every successful
-/// transcript is material the router can be taught from, so curiosity here
-/// widens reflex coverage later.
-pub(crate) const CURIOSITY: [&str; 4] = [
-    "list the files in /sys",
-    "list the files in /tmp",
-    "list the files in /ai",
-    "list the files in /ai/tools",
+/// Read-only goals the machine sets itself, rotated, each with the applet it
+/// ought to reach. Deliberately mundane: their value is not the answer but the
+/// exercise -- every successful transcript is material the router can be
+/// taught from, so curiosity here widens reflex coverage later.
+///
+/// **The second column is new and it is what makes J2 a judge.** These are
+/// replayed as "the machine's own curiosity goals" by the judge that asks
+/// whether a variant has changed its character, and that judge compared the
+/// candidate against *the incumbent's own answer* -- so a variant that
+/// repaired a goal the baseline was routing wrongly was vetoed for it, by the
+/// same trial whose J1 rewards repairs. Two judges pointing in opposite
+/// directions on the same four items.
+///
+/// **They were four spellings of one question**, all expecting `ls`, so J2 was
+/// one check repeated four times and "the machine's character" meant "does it
+/// still say ls". Eight distinct read-only applets now, and widening became
+/// safe only once the second column existed: a goal this checkpoint cannot
+/// route is simply not protected, so a broader list cannot make J2 unfairly
+/// strict on a model that is bad at routing. It protects whatever the running
+/// machine actually gets right, which is the honest amount.
+///
+/// Measured while choosing them, on SmolLM2-135M under the constrained decoder
+/// -- **the checkpoint that fits under QEMU and not the one this machine
+/// runs**, so it is evidence about the instrument and not about the 0.6B. Of
+/// fourteen candidates, *twelve routed to `ls`*: `du`, `cat`, `hash`, `snaps`,
+/// `pwd`, `fsck`, `tree`, `stat` and `same` all collapsed onto it, and only
+/// `find` reached its own applet. That is `repair.rs`'s finding arriving on a
+/// second table -- an applet's name carries probability mass that has nothing
+/// to do with what the applet does, and `ls` is short, common and first.
+pub(crate) const CURIOSITY: [(&str, &str); 8] = [
+    ("list the files in /sys", "ls"),
+    ("list the files in /ai", "ls"),
+    ("how much space does /ai take up", "du"),
+    ("print the file /ai/about", "cat"),
+    ("list the snapshots", "snaps"),
+    ("print the working directory", "pwd"),
+    ("search for the word godel", "find"),
+    ("list /ai recursively", "tree"),
 ];
 
 /// What a tick decided, and the reason it can say out loud.
@@ -456,7 +485,7 @@ fn tick_inner(forced: bool) {
         let n = CURIOSITY.len();
         let i = (TICKS.load(Ordering::Relaxed) as usize) % n;
         if since_episode >= EPISODE_GAP_S {
-            Some(String::from(CURIOSITY[i]))
+            Some(String::from(CURIOSITY[i].0))
         } else {
             None
         }

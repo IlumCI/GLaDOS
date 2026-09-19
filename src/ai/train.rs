@@ -1069,9 +1069,9 @@ pub fn prepare_on(
     // `-n` trades corpus coverage for time; it must not trade away the check
     // that the machine still does the same thing when nobody asked.
     let mut guards: Vec<Guard> = Vec::new();
-    for goal in super::initiative::CURIOSITY.iter() {
+    for (goal, expect) in super::initiative::CURIOSITY.iter() {
         if let Some(g) =
-            cache_guard(e, &grammar, alphabet, &names, &live, &w_live, dim, goal)
+            walk_goal(e, &grammar, alphabet, &names, &live, &w_live, dim, goal, expect, None)
         {
             guards.push(g);
         }
@@ -1487,15 +1487,45 @@ pub fn run(e: &mut super::Engine, b: &Budget) -> Result<RunReport, RunError> {
 /// on the same applet. It is a sound check rather than a sampled one.
 pub struct Guard {
     pub goal: &'static str,
+    /// The applet the *baseline* walked to.
     pub name: &'static str,
+    /// The applet this goal is declared to want, from `CURIOSITY`.
+    pub expect: &'static str,
     pub mutates: bool,
     steps: Vec<GuardStep>,
 }
 
+impl Guard {
+    /// Whether the baseline routes this goal where it was supposed to go.
+    ///
+    /// **The distinction J2 did not have, and its absence made J2 the enemy of
+    /// J1.** A goal the baseline gets wrong has nothing worth preserving, so a
+    /// candidate that reroutes it is not breaking anything -- it may well be
+    /// repairing it, which is what J1 exists to reward. Judging it as
+    /// "changed its character" vetoed exactly the variants the other judge was
+    /// looking for.
+    /// Note `name` is the *frozen* model's answer and not the incumbent's:
+    /// `prepare` walks with no adapter, so on a machine that has already
+    /// adopted one, "the baseline gets this right" is being asked of something
+    /// slightly different from what is running. They agree on a fresh machine
+    /// and the old cached-path check had the same property, so this is
+    /// inherited rather than introduced -- but it is the reference a later
+    /// change should make the incumbent.
+    pub fn protected(&self) -> bool {
+        self.name == self.expect
+    }
+}
+
+/// One cached decision along a guard's walk, kept for J3 and nothing else.
+///
+/// It also carried `chosen`, the index the baseline put first, which was J2's
+/// whole mechanism: replay a candidate against these frozen logits and see
+/// whether its argmax still lands where the incumbent's did. J2 walks the
+/// candidate now, so that field is gone and this is only what
+/// `logits_finite` needs -- the check that a variant whose validation accuracy
+/// improved is not carrying a scale that overflows on the machine's own goals.
 struct GuardStep {
     local: Vec<u32>,
-    /// Index into `local` the baseline put first.
-    chosen: usize,
     x: Vec<f32>,
     base: Vec<f32>,
 }
@@ -1505,49 +1535,146 @@ impl Trial {
         &self.guards
     }
 
-    /// Does this variant still walk every guard goal down the same path?
+    /// How many of the goals worth protecting this variant still sends where
+    /// they were declared to go, given the answer `guards_where` walked.
     ///
-    /// Returns (held, total). A variant that reroutes one of the machine's
+    /// Returns (held, protected). A variant that reroutes one of the machine's
     /// own goals has changed its character rather than its accuracy, and
     /// aggregate corpus accuracy would never show it.
-    pub fn guards_hold(&self, dora: Option<&Dora>) -> (usize, usize) {
-        let mut ax = vec![0.0f32; dora.map(|d| d.r).unwrap_or(1)];
-        let mut out: Vec<f32> = Vec::new();
+    ///
+    /// ### Two things were wrong with the question this used to ask
+    ///
+    /// It compared the candidate against **the incumbent's own recorded
+    /// path**, which was the only thing the cache could answer soundly -- the
+    /// hidden states were collected walking that path, so once a candidate
+    /// diverges there is nothing cached to score the rest of its own path
+    /// against. Sound, and the wrong question twice over.
+    ///
+    /// The incumbent's answer was taken as the thing to preserve whether or
+    /// not it was *right*, so a candidate that routed a goal correctly where
+    /// the baseline had been routing it somewhere else was vetoed for having
+    /// changed the machine's character -- by the same trial whose J1 rewards
+    /// exactly that repair. Two judges pointing in opposite directions on the
+    /// same handful of items. A goal the baseline gets wrong is not counted
+    /// now: it has nothing to protect, changing it cannot be a loss, and
+    /// whether it is a gain is J1's question, asked over a corpus with ground
+    /// truth for every item rather than over a few hand-written rows.
+    ///
+    /// And it could say a goal *moved* without saying where it went, so a
+    /// night's work was refused for a change of character that no line named.
+    /// `guards_where` walks the candidate and answers that, which is what this
+    /// now folds.
+    pub fn guards_kept(&self, went: &[Option<&'static str>]) -> (usize, usize) {
         let mut held = 0usize;
-        for g in self.guards.iter() {
-            let mut same = true;
-            for st in g.steps.iter() {
-                out.clear();
-                out.extend_from_slice(&st.base);
-                if let Some(d) = dora {
-                    d.apply_rows(&mut out, &st.local, &st.x, &mut ax);
-                }
-                let mut best = 0usize;
-                for c in 1..out.len() {
-                    if out[c] > out[best] {
-                        best = c;
-                    }
-                }
-                if best != st.chosen {
-                    same = false;
-                    break;
-                }
+        let mut total = 0usize;
+        for (g, w) in self.guards.iter().zip(went.iter()) {
+            if !g.protected() {
+                continue;
             }
-            if same {
+            total += 1;
+            if *w == Some(g.expect) {
                 held += 1;
             }
         }
-        (held, self.guards.len())
+        (held, total)
+    }
+
+    /// Whether every goal still reaches something that changes nothing, under
+    /// this variant as well as under the baseline.
+    ///
+    /// **The baseline half was the whole check, and it watched the wrong
+    /// machine.** "None of the goals may be routing to a mutating applet in
+    /// the first place" is a fact about the incumbent, and the incumbent is
+    /// not what is being judged. Measured: a rank-8 adapter over 96 examples
+    /// rerouted "list the files in /ai" from `ls` to **`mv`** -- a goal the
+    /// machine sets itself unasked, moved from listing a directory to renaming
+    /// things -- and the old J2 could report only that it had moved.
+    ///
+    /// Every goal and not only the protected ones, because a goal the baseline
+    /// gets wrong is excluded from the count and would otherwise be free to
+    /// land on `rm`. A walk that did not finish reached no applet at all and is
+    /// not a mutation; it is J3's business that the decode ran out of steps.
+    pub fn guards_read_only(&self, went: &[Option<&'static str>]) -> bool {
+        self.guards.iter().all(|g| !g.mutates)
+            && went.iter().all(|w| match w {
+                None => true,
+                Some(n) => !crate::sysbox::applet_mutates(n).unwrap_or(true),
+            })
+    }
+
+    /// Where this variant actually sends each goal, walked under the variant.
+    ///
+    /// **`guards_hold` can say a goal moved and cannot say where it went**, so
+    /// a night's work was vetoed for "changing the machine's character" with
+    /// no line anywhere saying what the new character was. The cache cannot
+    /// answer it: the hidden states were collected along the baseline's path,
+    /// and a candidate that diverges at step one leaves nothing to score its
+    /// own steps two onward against.
+    ///
+    /// So this decodes again, under the adapter, through the same `walk_goal`
+    /// the cache came from -- the whole point of that function taking an
+    /// `Option<&Dora>` rather than there being a second loop to drift from
+    /// this one. It costs one prefill and a handful of forward passes per
+    /// goal, which against a trial's forward pass per corpus example is a few
+    /// per cent, and it buys a judge whose verdict names its own subject.
+    ///
+    /// `None` for a goal whose decode did not finish inside the grammar's step
+    /// bound, which is the same condition `prepare` drops a guard on.
+    pub fn guards_where(
+        &self,
+        e: &mut super::Engine,
+        dora: Option<&Dora>,
+    ) -> Vec<Option<&'static str>> {
+        let names: Vec<&'static str> = crate::sysbox::APPLETS.iter().map(|a| a.name).collect();
+        let grammar = Grammar::new(names.iter().copied());
+        // The cached alphabet, not a second one. `alphabet_for` builds it once
+        // per boot and the claim that training moves the decision the decoder
+        // makes holds only while both are reading the same vocabulary.
+        let alphabet = super::harness::alphabet_for(&e.tok);
+        let out: Vec<Option<&'static str>> = self
+            .guards
+            .iter()
+            .map(|g| {
+                walk_goal(
+                    e,
+                    &grammar,
+                    alphabet,
+                    &names,
+                    &self.live,
+                    &self.w_live,
+                    self.dim,
+                    g.goal,
+                    g.expect,
+                    dora,
+                )
+                .map(|w| w.name)
+            })
+            .collect();
+        // The cache now holds goal prompts nobody asked about, and `e.pos` is
+        // a promise it cannot keep. `prepare` says the same thing after its own
+        // walk; this runs *after* that, so without it a trial would leave the
+        // conversation resuming from "list the files in /sys".
+        super::harness::invalidate_conversation(e);
+        out
     }
 }
 
-/// Walk the frozen model down its own greedy path for one goal, caching each
-/// decision on the way.
+/// Walk the model down its greedy path for one goal, caching each decision on
+/// the way.
 ///
 /// This is `harness::choose` at temperature zero, reimplemented against an
 /// explicit `&mut Engine` because the borrow will not go through the public
-/// one -- and because the point here is the *cache*, not the answer.
-fn cache_guard(
+/// one -- and because the point here is usually the *cache*, not the answer.
+///
+/// **`dora` is what lets it answer both questions with one decode loop.**
+/// `None` walks the frozen model, which is what `prepare` caches. `Some`
+/// walks the *candidate*, which is the only way to find out where a goal the
+/// candidate rerouted actually went -- the cache cannot say, because its
+/// hidden states were collected along the baseline's path and a candidate that
+/// diverges at step one leaves nothing to score steps two onward against.
+/// Two decode loops would be two chances to drift, and the whole claim here is
+/// that the two walks differ only by the adapter.
+fn walk_goal(
     e: &mut super::Engine,
     grammar: &Grammar,
     alphabet: &Alphabet,
@@ -1556,6 +1683,8 @@ fn cache_guard(
     w_live: &[f32],
     dim: usize,
     goal: &'static str,
+    expect: &'static str,
+    dora: Option<&Dora>,
 ) -> Option<Guard> {
     let prompt = super::harness::prompt_for(goal, names);
     let tokens = e.tok.encode(&prompt, true, false);
@@ -1587,13 +1716,22 @@ fn cache_guard(
             let l = l as usize;
             base[c] = dot(&w_live[l * dim..(l + 1) * dim], &x);
         }
+        // The adapter goes on a copy. `base` is cached as the *frozen* logits
+        // because `logits_finite` applies a candidate's own adapter to them,
+        // and folding this walk's adapter in would make the cache describe one
+        // variant instead of the baseline.
+        let mut out = base.clone();
+        if let Some(d) = dora {
+            let mut ax = vec![0.0f32; d.r];
+            d.apply_rows(&mut out, &local, &x, &mut ax);
+        }
         let mut best = 0usize;
-        for c in 1..base.len() {
-            if base[c] > base[best] {
+        for c in 1..out.len() {
+            if out[c] > out[best] {
                 best = c;
             }
         }
-        steps.push(GuardStep { local, chosen: best, x, base });
+        steps.push(GuardStep { local, x, base });
 
         let next = cands[best] as usize;
         cursor.push(alphabet, next);
@@ -1604,7 +1742,7 @@ fn cache_guard(
                 .find(|a| a.name == name)
                 .map(|a| a.mutates)
                 .unwrap_or(true);
-            return Some(Guard { goal, name, mutates, steps });
+            return Some(Guard { goal, name, expect, mutates, steps });
         }
         e.model.forward(&mut e.state, next, pos);
         pos += 1;

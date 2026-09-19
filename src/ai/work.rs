@@ -1353,10 +1353,12 @@ pub fn train_role(role: &str, b: &super::train::Budget) -> Result<RoleFit, RoleE
         // adapter trained on a few dozen steps is exactly the object most
         // likely to route the machine's own unasked goals somewhere new, and
         // this is the same replay `godel` runs along the baseline's own path.
-        let (goals_held, goals_total) = t.guards_hold(Some(&fit.dora));
-        let j2 = goals_held == goals_total
-            && goals_total > 0
-            && t.guards().iter().all(|g| !g.mutates);
+        let went = t.guards_where(e, Some(&fit.dora));
+        let (goals_held, goals_total) = t.guards_kept(&went);
+        // Same rule as `godel::trial`'s J2, and it has to be the same: two
+        // definitions of "did it change its character" would drift, and the
+        // one that drifts is the one nobody reads. See the note there.
+        let j2 = goals_held == goals_total && t.guards_read_only(&went);
         let (j3, j3_why) = super::godel::sanity(&t, &fit.dora);
         let resident_kib = (fit.dora.resident_bytes() + t.live_rows() * 4) / 1024;
         let j4 = fit.dora.r <= b.rank && resident_kib <= super::godel::MAX_RESIDENT_KIB;

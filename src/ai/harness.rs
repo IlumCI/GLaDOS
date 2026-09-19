@@ -2519,6 +2519,15 @@ pub struct RouteSnapshot {
     pub correct: Vec<bool>,
     /// Where each of the machine's own goals goes, unprompted.
     pub guards: Vec<usize>,
+    /// Where each was *declared* to go, as a class index, from the second
+    /// column of `CURIOSITY`. `usize::MAX` for a name this head does not
+    /// classify, which is not a class and so matches nothing.
+    ///
+    /// **The ground truth J2 did not have.** Without it the only question
+    /// available is whether a goal moved, so a variant that repaired one the
+    /// baseline was routing wrongly was vetoed for changing the machine's
+    /// character -- by the same trial whose J1 rewards that repair.
+    pub expect: Vec<usize>,
     /// Whether every feature the probe was fitted on was finite. A trainer
     /// that diverges produces NaNs, and NaNs compare false against everything,
     /// so a diverged model would otherwise look like a model that simply
@@ -2588,7 +2597,9 @@ pub fn route_snapshot(e: &mut super::Engine, split_wanted: u8) -> Result<RouteSn
     // that fails on one side and not the other reads as moved, which is the
     // safe direction for a judge that is asking whether anything changed.
     let mut guards = Vec::new();
-    for goal in super::initiative::CURIOSITY.iter() {
+    let mut expect = Vec::new();
+    for (goal, want) in super::initiative::CURIOSITY.iter() {
+        expect.push(e.head.index_of(want).unwrap_or(usize::MAX));
         let Some(x) = feature(e, goal) else {
             guards.push(usize::MAX);
             continue;
@@ -2599,7 +2610,7 @@ pub fn route_snapshot(e: &mut super::Engine, split_wanted: u8) -> Result<RouteSn
         guards.push(decide_with(rule, p, pair, says));
     }
 
-    Ok(RouteSnapshot { correct, guards, finite })
+    Ok(RouteSnapshot { correct, guards, expect, finite })
 }
 
 /// What changing the routing rule does, to the answers and to the confidence.
