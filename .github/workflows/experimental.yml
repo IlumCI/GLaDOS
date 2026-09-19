@@ -32,6 +32,15 @@ jobs:
           rustup show active-toolchain || rustup toolchain install
           rustc --version --verbose
 
+      # **Nothing in the kernel can compare its own knob table against its own
+      # source**, so a row that has gone stale would produce a patch that
+      # applies to nothing: the marker written, the point never measured, and
+      # the loop spending nights on a constant somebody already moved. Cheap,
+      # pure Python, and it runs before the build because a stale row does not
+      # break one.
+      - name: The knob table must still describe the source
+        run: python3 tools/knob.py check
+
       - uses: actions/cache@v4
         with:
           path: |

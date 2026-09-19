@@ -18,6 +18,7 @@ pub mod forest;
 pub mod futures;
 pub mod glance;
 pub mod godel;
+pub mod knob;
 pub mod godbits;
 pub mod companion;
 pub mod council;

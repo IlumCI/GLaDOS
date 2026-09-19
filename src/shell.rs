@@ -3444,6 +3444,43 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         None => kprintln!("  usage: godel judge <bar> [examples]"),
                     }
                 }
+                // `godel source` -- the next constant worth proposing, and
+                // the patch it stands for.
+                //
+                // The one axis with no verdict on this side. The kernel cannot
+                // compile, so this writes the patch and marks the point; what
+                // says whether the change was any good is a rail comparison on
+                // a machine that built both, which is `tools/rails.py`.
+                "source" => match godel::next_source() {
+                    None => kprintln!(
+                        "  every declared constant has been proposed -- 'godel forget' walks them again"
+                    ),
+                    Some(p) => {
+                        let crate::ai::godel::ProposalKind::Source(ki, vi) = p.kind else {
+                            kprintln!("  not a source point");
+                            return;
+                        };
+                        match crate::ai::knob::at(ki as usize, vi as usize) {
+                            None => kprintln!("  this kernel does not have that knob"),
+                            Some((k, v)) => {
+                                console::set_color(YELLOW);
+                                kprintln!("[godel] source");
+                                console::set_color(LTGRAY);
+                                kprintln!("  {} {} = {} (was {})", k.file, k.symbol, v, k.now);
+                                kprintln!("  {}", k.about);
+                                kprintln!("  claims to move {}", k.rail);
+                                match godel::propose_source(&p) {
+                                    Err(why) => kprintln!("  refused: {}", why),
+                                    Ok(path) => {
+                                        kprintln!("  {}", path);
+                                        kprintln!("  nothing here can build it.");
+                                        kprintln!("  'knob.py apply' does, and 'rails.py judge' says whether it helped");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
                 // `godel lib` -- judge the next queued library candidate.
                 //
                 // The operator path this axis never had, and the omission was

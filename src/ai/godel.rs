@@ -179,6 +179,20 @@ pub enum ProposalKind {
     /// function lengthens every candidate list and one that buys nothing
     /// costs something.
     Lib([u8; 32]),
+    /// Change a declared constant in this kernel's own source.
+    ///
+    /// **The one kind that cannot be judged here, and that is the shape of the
+    /// machine rather than a gap in this axis.** The kernel has no copy of its
+    /// source and cannot compile, so nothing on this side can build the
+    /// variant or measure it. What a source proposal produces is a patch in
+    /// the outbox and a record that the point was reached; the verdict comes
+    /// back from whatever built it, against the rail the knob declares.
+    ///
+    /// `(row, value)` as indices into `knob::KNOBS`, because `Proposal` is
+    /// `Copy`. A marker written by a kernel with a wider table must resolve to
+    /// nothing here rather than to whatever row happens to sit at that index,
+    /// which is what `knob::at` refuses.
+    Source(u16, u16),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -301,6 +315,17 @@ impl Proposal {
         Proposal { lr: 0.0, rank: 0, alpha: 0.0, epochs: 0, rule: 0, kind: ProposalKind::Lib(h) }
     }
 
+    pub fn source(knob: usize, value: usize) -> Proposal {
+        Proposal {
+            lr: 0.0,
+            rank: 0,
+            alpha: 0.0,
+            epochs: 0,
+            rule: 0,
+            kind: ProposalKind::Source(knob as u16, value as u16),
+        }
+    }
+
     pub fn config(rule: u8) -> Proposal {
         Proposal { lr: 0.0, rank: 0, alpha: 0.0, epochs: 0, rule, kind: ProposalKind::Config(rule) }
     }
@@ -369,6 +394,33 @@ impl Proposal {
             ProposalKind::Lib(h) => {
                 s.push_str("lib ");
                 s.push_str(&hex32(&h));
+                s.push('\n');
+            }
+            // The *names*, not the indices. A marker has to survive a row
+            // being inserted above it in `KNOBS`, and an index does not: the
+            // table would shift and every marker would resolve to a different
+            // constant while still reading as tried. What the point is *about*
+            // is the file, the symbol and the value.
+            ProposalKind::Source(ki, vi) => {
+                s.push_str("source ");
+                match super::knob::at(ki as usize, vi as usize) {
+                    Some((k, v)) => {
+                        s.push_str(k.file);
+                        s.push(' ');
+                        s.push_str(k.symbol);
+                        s.push('=');
+                        s.push_str(v);
+                    }
+                    // A point this kernel cannot resolve still has to render
+                    // to something stable, or `tried()` would answer
+                    // differently on two calls. It renders to its indices and
+                    // is refused before it runs.
+                    None => {
+                        push_u32(&mut s, ki as u32);
+                        s.push(' ');
+                        push_u32(&mut s, vi as u32);
+                    }
+                }
                 s.push('\n');
             }
         }
@@ -1665,6 +1717,16 @@ pub fn run(
             // that would run on a machine with no checkpoint loaded.
             trial_lib(&h).map_err(Refused::Judge)
         }
+        // **Refused here, deliberately, and it is the only kind that is.**
+        // This dispatcher's contract is that it answers a certificate, and a
+        // certificate is a verdict. There is no verdict available for a source
+        // change on a machine that cannot compile, so the honest answer is
+        // that this is not a trial. `propose_source` is the path, it marks the
+        // point itself, and the patch waits in the outbox for something that
+        // can build it.
+        ProposalKind::Source(..) => Err(Refused::Judge(
+            "a source change cannot be judged here -- 'godel source' writes the patch",
+        )),
     }
 }
 
@@ -3703,6 +3765,62 @@ fn next_deep() -> Option<Proposal> {
 /// The rule already running is excluded rather than marked: judging it against
 /// itself is a certificate saying nothing changed, which is true and is not
 /// worth a night.
+/// Where a source patch waits for something that can build it.
+///
+/// **Not the ledger, and the distinction is what keeps the ledger meaning
+/// something.** Every line in `/ai/godel/ledger.txt` is a verdict: judged,
+/// adopted or refused, by judges that ran here. A source proposal has no
+/// verdict on this side at all -- the kernel cannot compile, so nothing here
+/// can say whether the change is good. Writing one as a ledger line would put
+/// an unjudged entry among judged ones, which is the "axis with no judge in
+/// front of it" failure this module opens by warning about.
+pub const OUTBOX: &str = "/ai/godel/outbox";
+
+/// The next constant worth proposing, if the declared space holds one.
+///
+/// Walks `KNOBS` in order and takes the first point with no marker, exactly as
+/// `frontier()` walks `GRID`. The search is therefore re-derivable from the
+/// markers rather than from a coin, which is the property the whole module
+/// rests on.
+pub fn next_source() -> Option<Proposal> {
+    let mut i = 0usize;
+    while i < super::knob::KNOBS.len() {
+        let mut j = 0usize;
+        while j < super::knob::KNOBS[i].values.len() {
+            let p = Proposal::source(i, j);
+            if !p.tried() {
+                return Some(p);
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Write the patch a source point stands for, and answer where it went.
+///
+/// Marked here, so a point that was proposed is not proposed again on the next
+/// pass. The marker means "this was reached", which is what every other axis's
+/// marker means; whether the change was any good is a separate record that
+/// arrives from outside.
+pub fn propose_source(p: &Proposal) -> Result<String, &'static str> {
+    let ProposalKind::Source(ki, vi) = p.kind else {
+        return Err("not a source proposal");
+    };
+    let Some(text) = super::knob::patch(ki as usize, vi as usize) else {
+        return Err("this kernel does not have that knob");
+    };
+    let mut path = String::from(OUTBOX);
+    path.push('/');
+    path.push_str(&hex32(&p.hash()));
+    if !sysbox::write_text(&path, &text) {
+        return Err("the outbox would not take it");
+    }
+    p.mark();
+    Ok(path)
+}
+
 /// The next library candidate worth judging, if the queue holds one.
 ///
 /// **`tried()` is the whole of the fix and its absence was the whole of the
