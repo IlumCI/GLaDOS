@@ -1,0 +1,250 @@
+name: evidence-boot
+
+# The boot matrix: CLAUDE.md's hand recipes as scheduled regressions. Each
+# leg is a named question about a rarely-driven path; none files anything,
+# because these are evidence factories -- a workflow that produced a verdict
+# here would be an axis with a judge nobody appointed.
+#
+# CONSUMER: the operator; Phase 5's anchor set (rail pairs are harvested
+# from these runs); the floors workflow's context. CANARY: repair-persist
+# kills a boot on purpose and requires the withdrawal to be observed, and
+# smp-4 fails outright if `diag migrate` cannot pass -- both are legs that
+# prove the matrix can go red.
+#
+# The cron stays commented until the first dispatch run is green.
+
+on:
+  workflow_dispatch:
+    inputs:
+      legs:
+        description: "comma list to run, or 'all'"
+        default: "all"
+  # schedule:
+  #   - cron: "43 3 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: evidence-boot
+  cancel-in-progress: false
+
+jobs:
+  # --- the core-count pair ---------------------------------------------------
+  smp:
+    if: contains(inputs.legs, 'all') || contains(inputs.legs, 'smp')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        smp: ["1", "4"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: uefi-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - run: cargo build --release --locked
+      # At one core, `diag mt` and `diag migrate` are false statements about
+      # the machine and verify-boot would fail on them -- which is exactly
+      # the point of the 4-core leg. The 1-core leg is where `video bench`
+      # is comparable, so its rails are the ones the graphics floors read.
+      - uses: ./.github/actions/verify-boot
+        if: matrix.smp == '4'
+        with:
+          arm: smp4
+          smp: "4"
+      - name: One core, driven directly (its own suite set)
+        if: matrix.smp == '1'
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends qemu-system-x86 ovmf
+          printf 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"\n' \
+            | sudo tee /etc/udev/rules.d/99-kvm-writable.rules >/dev/null
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+          python3 -m pip install --quiet --disable-pip-version-check numpy
+          python3 tools/hybtest.py out/ci-fixture.bin --build-only
+          python3 tools/drive.py \
+            --model out/ci-fixture.bin --tokenizer out/ci-fixture-tokenizer.bin \
+            --qemu-extra "-accel kvm -cpu host -smp 1" --timeout 900 \
+            "initiative off" "agent stop" "echo ready" \
+            "video bench" "echo mid" "bench report" "echo alive" \
+            2>&1 | tee smp1.log
+          grep -q '^  alive' smp1.log
+          ! grep -qE '(^|[[:space:]])FAIL' smp1.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-smp${{ matrix.smp }}-${{ github.run_id }}
+          path: |
+            smp1.log
+            verify.log
+            rails.txt
+            rails2.txt
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # --- the staged-update cycle ----------------------------------------------
+  # The three-boot transcript CLAUDE.md records: staged, on trial, settled.
+  # It needs a kernel that trusts a throwaway key, so the leg builds one --
+  # the pinned anchor is swapped in a scratch tree, which is exactly what
+  # the real rotation ritual does, performed here against a key that dies
+  # with the runner.
+  staged-update:
+    if: contains(inputs.legs, 'all') || contains(inputs.legs, 'staged')
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: uefi-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - name: QEMU, OVMF, KVM
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends qemu-system-x86 ovmf
+          printf 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"\n' \
+            | sudo tee /etc/udev/rules.d/99-kvm-writable.rules >/dev/null
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+          test -w /dev/kvm
+      - name: Two builds a version apart, trusting a throwaway key
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet --disable-pip-version-check numpy
+          umask 077
+          python3 tools/sign.py --keygen --out /tmp/throwaway.key > /tmp/keygen.txt
+          # The public rows, pasted the way the rotation ritual pastes them.
+          python3 - <<'PYEOF'
+          import re, subprocess, sys
+          rows = open('/tmp/keygen.txt').read()
+          pub = re.findall(r'0x[0-9a-f]{2}', rows)
+          assert len(pub) == 65, f"keygen printed {len(pub)} bytes"
+          src = open('src/update/mod.rs', encoding='utf-8').read()
+          pat = re.compile(r'(pub const UPDATE_KEY: \[u8; 65\] = \[)(.*?)(\];)', re.S)
+          src = pat.sub(lambda m: m.group(1) + ', '.join(pub) + ',' + m.group(3), src, count=1)
+          open('src/update/mod.rs', 'w', encoding='utf-8', newline='\n').write(src)
+          print('anchor swapped for the throwaway')
+          PYEOF
+          python3 tools/sign.py --anchor UPDATE_KEY --key-file /tmp/throwaway.key
+          cargo build --release --locked
+          cp target/x86_64-unknown-uefi/release/glados.efi /tmp/old.efi
+          sed -i 's/^version = "\([0-9]*\)\.\([0-9]*\)\.\([0-9]*\)"/version = "\1.\2.999"/' Cargo.toml
+          cargo build --release --locked
+          cp target/x86_64-unknown-uefi/release/glados.efi /tmp/new.efi
+          python3 tools/sign.py /tmp/new.efi /tmp/new.efi.sig --key-file /tmp/throwaway.key
+          git checkout -- Cargo.toml src/update/mod.rs
+      - name: Three boots on one persistent ESP image
+        run: |
+          set -euo pipefail
+          python3 tools/hybtest.py out/ci-fixture.bin --build-only
+          cp /tmp/old.efi target/x86_64-unknown-uefi/release/glados.efi
+          # Boot 1: stage the new image (the ESP image persists between runs).
+          python3 tools/mkfat.py .qemu/nvme.img /tmp/new.efi /tmp/new.efi.sig
+          python3 tools/drive.py --esp-image .qemu/esp-ev.img --esp-rebuild \
+            --model out/ci-fixture.bin --tokenizer out/ci-fixture-tokenizer.bin \
+            --qemu-extra "-accel kvm -cpu host -smp 4" --timeout 600 \
+            "initiative off" "agent stop" "echo ready" \
+            "fat get /NEW.EFI /tmp/n.efi" "echo ." "fat get /NEW.SIG /tmp/n.sig" \
+            "store unlock" "update stage-file /tmp/n.efi /tmp/n.sig" "echo alive" \
+            2>&1 | tee boot1.log || true
+          # The staging verb differs by tree; what this leg requires is the
+          # three-line transcript, and a missing verb is a red leg that says
+          # which recipe drifted -- that is the leg working, not failing.
+          python3 tools/drive.py --esp-image .qemu/esp-ev.img \
+            --model out/ci-fixture.bin --tokenizer out/ci-fixture-tokenizer.bin \
+            --qemu-extra "-accel kvm -cpu host -smp 4" --timeout 600 \
+            "echo boot2" "update" "echo alive" 2>&1 | tee boot2.log || true
+          python3 tools/drive.py --esp-image .qemu/esp-ev.img \
+            --model out/ci-fixture.bin --tokenizer out/ci-fixture-tokenizer.bin \
+            --qemu-extra "-accel kvm -cpu host -smp 4" --timeout 600 \
+            "echo boot3" "update" "echo alive" 2>&1 | tee boot3.log || true
+          grep -q 'alive' boot1.log && grep -q 'alive' boot2.log && grep -q 'alive' boot3.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-staged-${{ github.run_id }}
+          path: |
+            boot1.log
+            boot2.log
+            boot3.log
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # --- the dense fixture, when its payload exists -----------------------------
+  # The CI fixture is a hybrid and the trainer refuses hybrids by design, so
+  # the godel/adapter boot sections have never run on a runner. A dense
+  # checkpoint under a pinned release (`evidence-dense-v1`) closes that; its
+  # absence is a named notice, never a silent skip that reads as green.
+  dense:
+    if: contains(inputs.legs, 'all') || contains(inputs.legs, 'dense')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: The payload, if the operator has published it
+        id: payload
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release download evidence-dense-v1 --pattern 'model.bin' --dir out 2>/dev/null \
+             && gh release download evidence-dense-v1 --pattern 'tokenizer.bin' --dir out 2>/dev/null; then
+            echo "have=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "have=no" >> "$GITHUB_OUTPUT"
+            echo "::notice::no evidence-dense-v1 release, so the trainer and godel"
+            echo "::notice::sections still have never run on a runner -- a named gap,"
+            echo "::notice::not a green"
+          fi
+      - name: Install the pinned toolchain
+        if: steps.payload.outputs.have == 'yes'
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v4
+        if: steps.payload.outputs.have == 'yes'
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: uefi-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - if: steps.payload.outputs.have == 'yes'
+        run: cargo build --release --locked
+      - name: Boot the dense checkpoint; the trainer must not refuse it
+        if: steps.payload.outputs.have == 'yes'
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends qemu-system-x86 ovmf
+          printf 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"\n' \
+            | sudo tee /etc/udev/rules.d/99-kvm-writable.rules >/dev/null
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+          python3 tools/drive.py \
+            --model out/model.bin --tokenizer out/tokenizer.bin \
+            --qemu-extra "-accel kvm -cpu host -smp 4" --timeout 900 \
+            "initiative off" "agent stop" "echo ready" "diag godel" "echo alive" \
+            2>&1 | tee dense.log
+          grep -q '^  alive' dense.log
+          ! grep -qE '(^|[[:space:]])FAIL' dense.log
+          if grep -q 'the model is a hybrid the trainer will not touch' dense.log; then
+            echo "::error::the dense leg booted a hybrid -- the payload is wrong"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-dense-${{ github.run_id }}
+          path: dense.log
+          if-no-files-found: ignore
+          retention-days: 30

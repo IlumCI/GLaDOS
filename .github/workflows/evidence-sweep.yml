@@ -1,0 +1,117 @@
+name: evidence-sweep
+
+# A whole knob row measured, value by value, against one baseline -- and
+# filed NOWHERE. Evidence, not verdicts: no certificate, no tried marker,
+# no alpha spend, no bar. What it publishes is the table a rung-2 proposal
+# cites when a discovered interior optimum becomes a new row, and what the
+# kernel machine's operator reads before spending a night on a point.
+#
+# One runner, one baseline, every value against it -- the two-machines rule
+# from propose.yml. The baseline boots once; each value reuses its rails.
+#
+# CONSUMER: rung-2 table growth; the operator. CANARY: the LEN_B row's
+# shape is known (an interior optimum at 0.5, from lex.rs's own sweep
+# table), so the first run over that row must reproduce a shape or the
+# instrument is not measuring -- asserted as a notice with the numbers, not
+# silently.
+
+on:
+  workflow_dispatch:
+    inputs:
+      row:
+        description: "symbol to sweep (a knob.rs row)"
+        default: "LEN_B"
+  # schedule:
+  #   - cron: "11 5 * * 6"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: evidence-sweep
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 320
+    env:
+      ROW: ${{ inputs.row || 'LEN_B' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: uefi-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+
+      - name: The corpus (the sweep is host-rail only, so the forest is the instrument)
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet --disable-pip-version-check numpy
+          python3 tools/retrieval.py --fixture out/fixture --nodes 400 --limit 0 \
+            --dump /dev/null >/dev/null
+          echo "::notice::sweeping over the generated fixture, at roughly a quarter"
+          echo "::notice::of the real forest's sensitivity"
+
+      - name: Baseline
+        run: |
+          set -euo pipefail
+          python3 tools/retrieval.py out/fixture --dump /tmp/base.tsv | tee /tmp/base.log
+
+      - name: Every declared value of the row
+        run: |
+          set -euo pipefail
+          python3 - "$ROW" <<'PYEOF'
+          import subprocess, sys, io
+          sys.path.insert(0, "tools")
+          import knob
+          symbol = sys.argv[1]
+          rows = [r for r in knob.table_rows() if r["symbol"] == symbol]
+          if not rows:
+              raise SystemExit(f"::error::{symbol} is not a knob.rs row")
+          row = rows[0]
+          py = sys.executable
+          table = [("value", "r@1", "vs now")]
+          base = io.open("/tmp/base.log", encoding="utf-8").read()
+          import re
+          m = re.search(r"= ([0-9.]+)%", base)
+          now_pct = m.group(1) if m else "?"
+          table.append((row["now"] + " (now)", now_pct, "-"))
+          for v in row["values"]:
+              patch = "\n".join(["knob 1", f"file {row['file']}",
+                                 f"symbol {row['symbol']}", f"from {row['now']}",
+                                 f"to {v}", f"rail {row['rail']}"]) + "\n"
+              io.open("/tmp/p.knob", "w", newline="\n").write(patch)
+              subprocess.run([py, "tools/knob.py", "apply", "/tmp/p.knob"], check=True)
+              r = subprocess.run([py, "tools/retrieval.py", "out/fixture",
+                                  "--dump", f"/tmp/v{v}.tsv"],
+                                 capture_output=True, text=True, check=True)
+              subprocess.run([py, "tools/knob.py", "revert", "/tmp/p.knob"], check=True)
+              m = re.search(r"= ([0-9.]+)%", r.stdout)
+              pct = m.group(1) if m else "?"
+              p = subprocess.run([py, "tools/paired.py", "/tmp/base.tsv",
+                                  f"/tmp/v{v}.tsv"], capture_output=True, text=True)
+              tail = p.stdout.strip().split("\n")[-1] if p.stdout.strip() else "?"
+              table.append((v, pct, tail.strip()))
+          out = "\n".join("\t".join(str(c) for c in r) for r in table) + "\n"
+          io.open("/tmp/sweep.tsv", "w", newline="\n").write(out)
+          print(out)
+          PYEOF
+
+      # NOTE: this sweep is the retrieval rail only. A row claiming a kernel
+      # timing rail would need the build+boot pair per value, which is what
+      # loop-judge does one point at a time -- a sweep at that cost is a
+      # dispatch decision, not a schedule.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-sweep-${{ env.ROW }}-${{ github.run_id }}
+          path: |
+            /tmp/sweep.tsv
+            /tmp/base.log
+          if-no-files-found: ignore
+          retention-days: 90

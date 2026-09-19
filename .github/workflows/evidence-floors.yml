@@ -1,0 +1,126 @@
+name: evidence-floors
+
+# The noise floors in rails.py were measured once, on one machine, and had
+# already been wrong by up to seven times once before. This measures them on
+# the runner class the judge actually runs on: one binary, N boots, per-rail
+# between-boot spread, committed to loop/main as a small TSV -- data the
+# Phase 5 boundary lane cites when a declared floor is changed, and never a
+# change to the declared floors themselves. The factory does not edit the
+# judge.
+#
+# CONSUMER: boundary proposals (the evidence a floors change must cite), and
+# the operator reading the flag step. CANARY: the flag step must fire on the
+# first run -- CLAUDE.md records smp.* moving 67.3% between boots against a
+# declared 29%, and a flag logic that cannot reproduce a known gap is
+# broken. Plus one deliberately-absent rail name in the summary assertion.
+
+on:
+  workflow_dispatch:
+    inputs:
+      boots:
+        description: "boots of one binary"
+        default: "8"
+  # schedule:
+  #   - cron: "7 4 * * 0"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: loop-main
+  cancel-in-progress: false
+
+jobs:
+  floors:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      BOOTS: ${{ inputs.boots || '8' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: loop/main
+          fetch-depth: 0
+
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: uefi-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - run: cargo build --release --locked
+
+      - name: QEMU, OVMF, KVM, fixture
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends qemu-system-x86 ovmf
+          printf 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"\n' \
+            | sudo tee /etc/udev/rules.d/99-kvm-writable.rules >/dev/null
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+          test -w /dev/kvm
+          python3 -m pip install --quiet --disable-pip-version-check numpy
+          python3 tools/hybtest.py out/ci-fixture.bin --build-only
+
+      # N boots of ONE binary. Each keeps its second settled reading, the
+      # protocol verify-boot documents: the first reading after a build is
+      # the host's page cache, not the machine.
+      - name: Boot it N times
+        run: |
+          set -euo pipefail
+          case "$BOOTS" in ''|*[!0-9]*) echo "::error::boots is not a number"; exit 1;; esac
+          mkdir -p /tmp/floors
+          for i in $(seq 1 "$BOOTS"); do
+            python3 tools/drive.py \
+              --model out/ci-fixture.bin --tokenizer out/ci-fixture-tokenizer.bin \
+              --qemu-extra "-accel kvm -cpu host -smp 4" --timeout 600 \
+              "initiative off" "agent stop" "echo ready" \
+              "bench report" "echo again" "bench report" "echo alive" \
+              2>&1 | tee "/tmp/floors/boot$i.log"
+            grep -q '^  alive' "/tmp/floors/boot$i.log"
+            awk '/^\[rail\] v1/{n++} n==2' "/tmp/floors/boot$i.log" \
+              | sed -n '/^\[rail\] v1/,/^\[rail\] end/p' > "/tmp/floors/rails$i.txt"
+            grep -q '^\[rail\] end' "/tmp/floors/rails$i.txt"
+          done
+
+      - name: The spread, committed beside the ledger
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          date=$(date -u +%Y-%m-%d)
+          python3 tools/godel.py floors --spread /tmp/floors/rails*.txt \
+            | tee "loop/evidence/floors/$date.tsv"
+          git add loop/evidence/floors
+          git commit -m "loop: floors measured over $BOOTS boots ($date)"
+          git push origin HEAD:loop/main
+
+      # Measured against declared, and the gap named. The declared table
+      # changes only through the boundary lane, citing this file.
+      - name: Any declared floor outside [p95, 2*p95] is named
+        run: |
+          set -euo pipefail
+          date=$(date -u +%Y-%m-%d)
+          python3 - "loop/evidence/floors/$date.tsv" <<'PYEOF'
+          import sys, io
+          sys.path.insert(0, 'tools')
+          import rails
+          rows = [l.split('\t') for l in io.open(sys.argv[1]) if not l.startswith('rail')]
+          flags = 0
+          for name, n, p50, p95 in rows:
+              p95 = float(p95)
+              declared = None
+              for prefix, f in rails.NOISE.items():
+                  if name == prefix or name.startswith(prefix):
+                      declared = f
+              if declared is None:
+                  continue
+              lo, hi = p95, 2 * p95
+              if not (lo <= declared <= hi) and p95 > 0:
+                  flags += 1
+                  print(f"::warning::{name}: declared floor {declared} is outside "
+                        f"[{lo:.3f}, {hi:.3f}] measured over {n} boot(s)")
+          print(f"{flags} floor(s) flagged")
+          PYEOF

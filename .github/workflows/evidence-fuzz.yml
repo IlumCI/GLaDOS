@@ -1,0 +1,179 @@
+name: evidence-fuzz
+
+# Fuzzing for the parsers that gate signing jobs and the ledger. Every
+# family carries a known-bad seed that MUST be refused, because a fuzz run
+# that has never reported a refusal is indistinguishable from one comparing
+# nothing -- the differ's canary rule, applied to fuzzing itself.
+#
+# The envelope family is the differ idiom host-side: two independent readers
+# (envelope.js under node, knob.py under python) are fed identical bytes and
+# must agree on accept/reject; parse->render->parse must be a fixpoint.
+#
+# CONSUMER: confidence in the admission path (propose.yml holds a signing
+# key behind these parsers) and in godel.py's certificate grammar. CANARY:
+# the known-bad seeds, one per family, each asserted refused.
+
+on:
+  workflow_dispatch:
+    inputs:
+      rounds:
+        default: "500"
+  # schedule:
+  #   - cron: "29 4 * * 3"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: evidence-fuzz
+  cancel-in-progress: false
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ROUNDS: ${{ inputs.rounds || '500' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Two readers, one stream of mangled envelopes
+        run: |
+          set -euo pipefail
+          case "$ROUNDS" in ''|*[!0-9]*) echo "::error::rounds"; exit 1;; esac
+          node --input-type=module - "$ROUNDS" > /tmp/envelopes.jsonl <<'NODEEOF'
+          // Deterministic mangles of a valid envelope: every case is
+          // reproducible from its index, so a disagreement names its seed.
+          const { parse, render } = await import(
+            "./supabase/functions/_shared/envelope.js");
+          const rounds = parseInt(process.argv[2], 10);
+          const good = [
+            "proposal 1", "point " + "ab".repeat(32), "from 1.3.7",
+            "head none", "corpus " + "cd".repeat(32), "tests 0", "knob 1",
+            "file src/ai/lex.rs", "symbol LEN_B", "from 0.5", "to 0.25",
+            "rail host.retrieval",
+          ].join("\n") + "\n";
+          function mangle(i, text) {
+            const ops = [
+              t => t.replace("knob 1", "knob 2"),
+              t => t.replace("0.25", "1e5"),
+              t => t.replace("src/ai/lex.rs", "src/../../etc/passwd.rs"),
+              t => t.replace("LEN_B", "len_b"),
+              t => t + "x".repeat((i * 37) % 5000),
+              t => t.replace("to 0.25", "to " + "9".repeat(1 + (i % 14))),
+              t => t.slice(0, (i * 101) % t.length),
+              t => t.replace("\n", "\r\n"),
+              t => t.replace("rail host.retrieval", "rail HOST"),
+              t => t,                                    // the good case
+            ];
+            return ops[i % ops.length](text);
+          }
+          const out = [];
+          let refused = 0;
+          for (let i = 0; i < rounds; i++) {
+            const text = mangle(i, good);
+            const r = parse(text);
+            if (r.ok) {
+              // the fixpoint: what render writes, parse reads, identically
+              const again = parse(render(r.proposal));
+              if (!again.ok) {
+                console.error(`FIXPOINT BROKE at seed ${i}`);
+                process.exit(1);
+              }
+            } else {
+              refused++;
+            }
+            out.push(JSON.stringify({ i, ok: r.ok, text }));
+          }
+          if (refused === 0) {
+            console.error("a fuzz run that refused nothing checked nothing");
+            process.exit(1);
+          }
+          console.error(`node: ${rounds} cases, ${refused} refused, fixpoint held`);
+          console.log(out.join("\n"));
+          NODEEOF
+          python3 - /tmp/envelopes.jsonl <<'PYEOF'
+          # The second reader. knob.py accepts a superset (it ignores the
+          # provenance and validates five fields), so the cross-check is
+          # one-directional and exact where it must be: anything node
+          # ACCEPTED, python must accept too -- a validator stricter than
+          # the gate behind it is safe, the reverse is the hole.
+          import json, subprocess, sys, tempfile, os
+          accepted = refused_by_py = 0
+          for line in open(sys.argv[1], encoding="utf-8"):
+              row = json.loads(line)
+              if not row["ok"]:
+                  continue
+              accepted += 1
+              with tempfile.NamedTemporaryFile("w", suffix=".knob",
+                                               delete=False, newline="\n") as f:
+                  f.write(row["text"])
+                  path = f.name
+              r = subprocess.run([sys.executable, "tools/knob.py", "show", path],
+                                 capture_output=True, text=True)
+              os.unlink(path)
+              if r.returncode != 0:
+                  refused_by_py += 1
+                  print(f"DISAGREE at seed {row['i']}: node accepted, knob.py refused")
+                  print(r.stdout + r.stderr)
+          if refused_by_py:
+              sys.exit(1)
+          print(f"python agreed on all {accepted} accepted case(s)")
+          PYEOF
+
+      - name: Certificate mutations must all be refused
+        run: |
+          set -euo pipefail
+          python3 - "$ROUNDS" <<'PYEOF'
+          import sys
+          sys.path.insert(0, "tools")
+          import godel
+          base = dict(seq="1", utc="2026-01-01T00:00:00Z", point="0" * 64,
+                      kind="tune", rung="1", axis="grid",
+                      **{"parent-tree": "a" * 40, "candidate-tree": "b" * 40,
+                         "rail": "host.retrieval", "corpus": "deadbeef",
+                         "alpha-k": "0", "chi-bar": "4.69", "minutes": "40",
+                         "half": "extend", "level": "0", "boots": "1",
+                         "sections": "29/29", "suites": "65/65",
+                         "claims": "0/0", "witness": "-", "moved": "same",
+                         "why": "fuzz", "verdict": "refuse", "runner": "1/1"})
+          text = godel.render_cert(base)
+          rounds = int(sys.argv[1])
+          refused = 0
+          for i in range(rounds):
+              lines = text.split("\n")
+              j = i % (len(lines) - 2) + 1
+              k = i % 4
+              if k == 0:
+                  lines[j] = lines[j].upper()
+              elif k == 1:
+                  lines[j] = ""
+              elif k == 2:
+                  lines[j] = lines[j] + " trailing"
+              else:
+                  lines.insert(j, f"invented-{i} field")
+              try:
+                  godel.parse_cert("\n".join(lines))
+              except ValueError:
+                  refused += 1
+          # Some mutations are legal (an upper-cased WHY line is still a
+          # why), so the claim is a floor, plus the canary seed:
+          assert refused > rounds * 0.5, f"only {refused} of {rounds} refused"
+          try:
+              godel.parse_cert(text.replace("verdict refuse", "verdict yes"))
+              raise SystemExit("the canary seed was accepted")
+          except ValueError:
+              pass
+          print(f"{refused} of {rounds} mutations refused; the canary seed refused")
+          PYEOF
+
+      - name: The tokenizer round-trip, when the reference is present
+        run: |
+          set -euo pipefail
+          if [ -f tools/qwen3/tokenizer.json ]; then
+            python3 -m pip install --quiet --disable-pip-version-check tokenizers numpy
+            python3 tools/tokenizer.py tools/qwen3/tokenizer.json /tmp/tok.bin --verify
+          else
+            echo "::notice::tools/qwen3/tokenizer.json is not in the repo, so the"
+            echo "::notice::tokenizer family did not run -- a named gap, not a green"
+          fi
