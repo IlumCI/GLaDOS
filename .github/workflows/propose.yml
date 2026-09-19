@@ -233,8 +233,29 @@ jobs:
           fi
           umask 077
           printf '%s' "$VERDICT_KEY" > verdict.key
+          # On every path out of this step, the failing one below included. A
+          # private half left on a runner is a private half.
+          trap 'rm -f verdict.key' EXIT
+          # A signature made with the wrong secret is perfectly well formed, so
+          # the only thing that would notice is the machine it eventually
+          # reaches -- days later and three systems away, answering "not a
+          # signature over this image by this key" and filing nothing. A
+          # correct refusal, about a configuration mistake nobody could see
+          # from where it was made. So the key is proved against the point the
+          # kernel pins before anything is signed with it. Public halves only;
+          # the private one is never rendered and never reaches a log.
+          if ! python3 tools/sign.py --anchor VERDICT_KEY --key-file verdict.key; then
+            echo "::error::VERDICT_SIGNING_KEY is not the key VERDICT_KEY pins in src/update/mod.rs"
+            echo "::error::rotate one to match the other -- signing now produces a verdict"
+            echo "::error::every machine refuses, for a reason none of them can report back"
+            exit 1
+          fi
           python3 tools/sign.py verdict.txt verdict.sig --key-file verdict.key
-          rm -f verdict.key
+          # Then read it back with the verifier, against that same pinned
+          # point, which is the sentence `release.yml` already carries about a
+          # manifest. Strictly stronger than the check above: a key that
+          # matches says nothing about whether the signature over it is whole.
+          python3 tools/sign.py --check verdict.txt verdict.sig --anchor VERDICT_KEY
           # One object, text then exactly 80 bytes of GLADOSIG, which is what
           # `godel verdict` reads and the shape `manifest.py` already argues
           # for: two objects can be served out of step and produce a signature

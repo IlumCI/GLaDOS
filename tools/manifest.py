@@ -127,38 +127,11 @@ def split(blob):
     return blob[:-SIG_LEN], blob[-SIG_LEN:]
 
 
-def verify_sig(pub, data, blob):
-    """Check an 80-byte GLADOSIG against an uncompressed public key."""
-    if len(blob) != 80 or blob[:8] != b"GLADOSIG":
-        raise ValueError("not a GLADOSIG signature")
-    version = int.from_bytes(blob[8:12], "little")
-    curve = int.from_bytes(blob[12:16], "little")
-    if version != 1 or curve != 0:
-        raise ValueError("a signature format this does not implement")
-    r = int.from_bytes(blob[16:48], "big")
-    s = int.from_bytes(blob[48:80], "big")
-    if not (0 < r < sign.N and 0 < s < sign.N):
-        raise ValueError("r or s is out of range")
-
-    if len(pub) != 65 or pub[0] != 0x04:
-        raise ValueError("the public key is not uncompressed 0x04||X||Y")
-    q = (int.from_bytes(pub[1:33], "big"), int.from_bytes(pub[33:65], "big"))
-
-    z = int.from_bytes(hashlib.sha256(data).digest(), "big")
-    w = sign.inv(s, sign.N)
-    p = sign.add(
-        sign.mul(z * w % sign.N, (sign.GX, sign.GY)),
-        sign.mul(r * w % sign.N, q),
-    )
-    if p is None:
-        raise ValueError("not a signature over these bytes by this key")
-    if p[0] % sign.N != r:
-        raise ValueError("not a signature over these bytes by this key")
-
-
-def public_of(d):
-    q = sign.mul(d, (sign.GX, sign.GY))
-    return b"\x04" + q[0].to_bytes(32, "big") + q[1].to_bytes(32, "big")
+# `verify_sig` and `public_of` live in `sign.py` now. They were here because
+# this was the only reader; a verdict is the second, and two copies of an
+# ECDSA verification do not stay agreeing.
+verify_sig = sign.verify_sig
+public_of = sign.public_of
 
 
 def selftest():
@@ -256,30 +229,7 @@ def main():
                 # Read the pinned key out of the kernel so a manifest is
                 # checked against what will actually be running, not against
                 # whatever was pasted on the command line.
-                src = pathlib.Path(__file__).resolve().parent.parent / "src/update/mod.rs"
-                body = src.read_text(encoding="utf-8")
-                at = body.index("pub const UPDATE_KEY")
-                end = body.index("];", at)
-                # Every delimiter becomes whitespace, brackets included. A
-                # key pasted on one line reads as "[0x04" for its first
-                # element, which a scan for a "0x" prefix drops -- 64 bytes,
-                # a key that looks unprovisioned, and a release that fails
-                # its own verify step for a key that is perfectly good.
-                seg = body[at:end]
-                for ch in ",[];":
-                    seg = seg.replace(ch, " ")
-                nums = [int(t, 16) for t in seg.split() if t.startswith("0x")]
-                if len(nums) != 65 or nums[0] != 0x04:
-                    if not nums or all(n == 0 for n in nums):
-                        raise SystemExit(
-                            "  UPDATE_KEY is not provisioned in src/update/mod.rs -- "
-                            "pass --key <hex-public> to check against another"
-                        )
-                    raise SystemExit(
-                        f"  UPDATE_KEY parsed as {len(nums)} bytes starting "
-                        f"{nums[0]:#04x}; it must be 65 starting 0x04"
-                    )
-                pub = bytes(nums)
+                pub = sign.anchor("UPDATE_KEY")
             else:
                 pub = bytes.fromhex(key)
             verify_sig(pub, text, detached)

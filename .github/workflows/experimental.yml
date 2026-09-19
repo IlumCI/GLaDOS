@@ -106,7 +106,15 @@ jobs:
             --out out
 
       - name: Verify what we are about to publish
-        run: python3 tools/manifest.py --verify out/manifest --image "out/glados-$VERSION.efi"
+        run: |
+          python3 tools/manifest.py --verify out/manifest --image "out/glados-$VERSION.efi"
+          # And the image's own detached signature, which that does not cover:
+          # it reads the manifest and checks the digest in it against the
+          # image, so a bad .sig publishes and the refusal arrives on every
+          # machine in the field, at `update stage`, with nothing here to say
+          # why. Same pinned point the kernel will use.
+          python3 tools/sign.py --check "out/glados-$VERSION.efi" \
+            "out/glados-$VERSION.efi.sig" --anchor UPDATE_KEY
 
       - name: Publish to the experimental bucket
         env:

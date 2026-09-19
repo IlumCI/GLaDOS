@@ -40,6 +40,7 @@ shorter valid one.
 """
 import hashlib
 import os
+import re
 import struct
 import sys
 
@@ -88,6 +89,76 @@ def keygen():
     return d, q
 
 
+
+# --- does this private half match the point the kernel pins? --------------
+
+#: Where the anchors are declared. One file, and the check reads it rather than
+#: carrying a copy, for the reason `forest_retrieve.py` reads `lex.rs`: a second
+#: copy agrees on the day it is written and then drifts.
+ANCHORS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                       "src", "update", "mod.rs")
+
+
+def anchor(symbol, path=None):
+    """The 65-byte uncompressed point named `symbol`, out of the Rust.
+
+    The bytes are found by searching rather than by splitting on delimiters,
+    and that is the detail `manifest.py` paid for before this existed: one of
+    the two anchors is written on a single line, where its first element reads
+    `[0x04` -- which a scan for a `0x` *prefix* drops. 64 bytes, a key that
+    looks unprovisioned, and a release failing its own verify step over a key
+    that was perfectly good. A substring search sees both spellings alike.
+    """
+    src = open(path or ANCHORS, encoding="utf-8").read()
+    pat = r"pub const " + re.escape(symbol) + r"\s*:\s*\[u8;\s*65\]\s*=\s*\[(.*?)\];"
+    m = re.search(pat, src, re.S)
+    if not m:
+        raise SystemExit(f"  no `const {symbol}: [u8; 65]` in {path or ANCHORS}")
+    vals = [int(x, 16) for x in re.findall(r"0x([0-9a-fA-F]{1,2})", m.group(1))]
+    if len(vals) != 65 or vals[0] != 0x04:
+        if not vals or all(v == 0 for v in vals):
+            raise SystemExit(f"  {symbol} is not provisioned in {path or ANCHORS}")
+        raise SystemExit(
+            f"  {symbol} parsed as {len(vals)} bytes starting {vals[0]:#04x}; "
+            "it must be 65 starting 0x04"
+        )
+    return bytes(vals)
+
+
+def public_of(d):
+    """The uncompressed public point for a private scalar."""
+    x, y = mul(d, (GX, GY))
+    return b"\x04" + x.to_bytes(32, "big") + y.to_bytes(32, "big")
+
+
+def check_anchor(symbol, d, path=None):
+    """Answers 0 when this key is the one that symbol pins.
+
+    **The check that turns a wrong secret from a silent refusal into a loud
+    one.** A signature made with the wrong private half is perfectly well
+    formed; the only thing that notices is the machine it eventually reaches,
+    which answers "not a signature over this image by this key" and files
+    nothing. That is a correct refusal about a configuration mistake made days
+    earlier and three systems away.
+
+    Public points only ever leave this function, so a mismatch prints both and
+    says which is which. The private half is never rendered, never compared as
+    text, and never reaches a log.
+    """
+    want = anchor(symbol, path)
+    got = public_of(d)
+    if got == want:
+        print(f"  ok     this key is the one {symbol} pins")
+        print(f"         {got.hex()[:24]}...")
+        return 0
+    print(f"  FAIL   this key is not the one {symbol} pins")
+    print(f"         pinned  {want.hex()}")
+    print(f"         this is {got.hex()}")
+    print("         a signature from it is well formed and will be refused by")
+    print("         every machine, which is why this is checked here instead")
+    return 1
+
+
 def sign(d, digest):
     z = int.from_bytes(digest, "big")
     while True:
@@ -102,6 +173,42 @@ def sign(d, digest):
         if s == 0:
             continue
         return r, s
+
+
+
+SIG_LEN = 80
+
+
+def verify_sig(pub, data, blob):
+    """Check an 80-byte GLADOSIG against an uncompressed public key.
+
+    The other half of `sign`, and deliberately the *only* other half: a
+    caller that wants to know whether these bytes will be accepted asks the
+    arithmetic rather than re-deriving a key and comparing points, because
+    a matching key says nothing about whether the signature over it is whole.
+    """
+    if len(blob) != 80 or blob[:8] != b"GLADOSIG":
+        raise ValueError("not a GLADOSIG signature")
+    version = int.from_bytes(blob[8:12], "little")
+    curve = int.from_bytes(blob[12:16], "little")
+    if version != 1 or curve != 0:
+        raise ValueError("a signature format this does not implement")
+    r = int.from_bytes(blob[16:48], "big")
+    s = int.from_bytes(blob[48:80], "big")
+    if not (0 < r < N and 0 < s < N):
+        raise ValueError("r or s is out of range")
+
+    if len(pub) != 65 or pub[0] != 0x04:
+        raise ValueError("the public key is not uncompressed 0x04||X||Y")
+    q = (int.from_bytes(pub[1:33], "big"), int.from_bytes(pub[33:65], "big"))
+
+    z = int.from_bytes(hashlib.sha256(data).digest(), "big")
+    w = inv(s, N)
+    p = add(mul(z * w % N, (GX, GY)), mul(r * w % N, q))
+    if p is None:
+        raise ValueError("not a signature over these bytes by this key")
+    if p[0] % N != r:
+        raise ValueError("not a signature over these bytes by this key")
 
 
 def pack(r, s):
@@ -135,6 +242,44 @@ def main():
             print("    " + " ".join("0x%02x," % b for b in row))
         return
 
+    # `--check FILE SIG --anchor SYMBOL` reads back what was just produced,
+    # with the verifier, against the point the kernel pins. That is the
+    # sentence `release.yml` already carries about a manifest, and it is a
+    # strictly stronger question than `--anchor` alone: a key that matches
+    # says nothing about whether the signature over it is whole.
+    if "--check" in sys.argv:
+        at = sys.argv.index("--check")
+        if len(sys.argv) <= at + 2 or "--anchor" not in sys.argv:
+            raise SystemExit("  usage: sign.py --check FILE SIG --anchor SYMBOL")
+        data = open(sys.argv[at + 1], "rb").read()
+        blob = open(sys.argv[at + 2], "rb").read()
+        symbol = sys.argv[sys.argv.index("--anchor") + 1]
+        try:
+            verify_sig(anchor(symbol), data, blob)
+        except ValueError as e:
+            print(f"  FAIL   {e}")
+            print(f"         {symbol} would refuse this on every machine")
+            return 1
+        print(f"  ok     {len(data)} B verified against {symbol}")
+        return 0
+
+    # `--anchor SYMBOL` checks a key against a pinned point and signs nothing.
+    # Its own mode rather than a flag on signing, so a caller that wants the
+    # check cannot accidentally also produce a signature, and so it can run in
+    # CI before the thing it is guarding.
+    if "--anchor" in sys.argv:
+        at = sys.argv.index("--anchor")
+        if len(sys.argv) <= at + 1:
+            raise SystemExit("  usage: sign.py --anchor SYMBOL --key-file FILE")
+        symbol = sys.argv[at + 1]
+        if "--key-file" in sys.argv:
+            d = int(open(sys.argv[sys.argv.index("--key-file") + 1]).read().strip(), 16)
+        elif "--key" in sys.argv:
+            d = int(sys.argv[sys.argv.index("--key") + 1], 16)
+        else:
+            raise SystemExit("  --anchor needs --key-file FILE")
+        return check_anchor(symbol, d)
+
     if len(sys.argv) < 3 or not any(a in sys.argv for a in ("--key", "--key-file")):
         raise SystemExit(__doc__)
     image = sys.argv[1]
@@ -155,4 +300,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main() or 0)
