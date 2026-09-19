@@ -113,6 +113,21 @@ CONTROL = {
 }
 
 #: Groups with no control, named so a reader is not left to notice the absence.
+#
+# **And a second reading does not close that hole**, which a driven run
+# measured rather than argued. The second reading is taken in the *same boot*
+# as the first, so it captures within-boot noise and says nothing about
+# between-boot noise -- and the two arms of a comparison are different boots.
+# On that run `smp.all_cores` moved 1.7% and 12.2% within its own boots and
+# 67.3% between them, so the floor it measured about itself was 24% where the
+# honest one was over 67%.
+#
+# For a controlled group that gap is what the control is for. For these two it
+# is uncovered by both mechanisms, and the only thing that would cover it is a
+# second *boot* per arm -- which doubles what the gate costs and is a decision
+# rather than an omission. Compare these two only between runs on one machine
+# with the same `-smp` and the same command prefix, and read a verdict on them
+# as weaker than one on a controlled rail.
 UNCONTROLLED = ("ai.", "smp.")
 
 # The two-sided 95% bar on a standard normal, and the conventional chi-squared
@@ -248,7 +263,53 @@ def relative(before, after):
     return (after.value - before.value) / abs(before.value)
 
 
-def verdict(before, after, drift=None, floor=None):
+# How far apart two readings of *one* build may be and still be one build.
+#
+# A within-arm spread is the noise with the effect removed by construction: the
+# same binary, the same commands, one boot apart. A between-arm difference is
+# noise plus whatever the change did, and the difference of two independent
+# readings carries about twice the variance of one -- so a floor set at twice
+# the observed spread is the round, conservative multiple rather than a derived
+# constant, and it is written down as chosen.
+SPREAD_K = 2.0
+
+
+def observed_spread(first, second):
+    """How far one build's own two readings moved, as a fraction. `None` when
+    either side could not measure it."""
+    if first is None or second is None:
+        return None
+    if first.value is None or second.value is None or first.value == 0:
+        return None
+    return abs((second.value - first.value) / abs(first.value))
+
+
+def floor_for(name, spreads):
+    """The floor this rail is judged against, and where it came from.
+
+    **The declared floor or what the machine did today, whichever is larger.**
+    It can only ever widen, never narrow, and that asymmetry is the whole
+    safety argument: a day when the readings happened to agree cannot make the
+    judge stricter than the figure that was measured across three boots and
+    written down.
+
+    The floors in `NOISE` were taken on one machine, on one build, with
+    `--no-payload`, at one core count. They were already wrong by up to seven
+    times when they were inherited from within-boot figures, and there is no
+    reason to think one machine's spread is another's. A run that takes two
+    readings per arm knows better than the table does, about that run.
+    """
+    declared = noise_for(name)
+    usable = [s for s in spreads if s is not None]
+    if not usable:
+        return declared, "declared"
+    scaled = max(usable) * SPREAD_K
+    if declared is None or scaled > declared:
+        return scaled, "measured today"
+    return declared, "declared"
+
+
+def verdict(before, after, drift=None, floor=None, floor_src="declared"):
     """Did this rail move, and which way, given the two readings?
 
     Answers (verdict, why). Unpaired: the only evidence is two scalars, so the
@@ -275,10 +336,11 @@ def verdict(before, after, drift=None, floor=None):
         # Both as ratios of the baseline, so the control cancels.
         rel = (1.0 + rel) / (1.0 + drift) - 1.0
         said = f"{rel:+.1%} once the control's {drift:+.1%} is divided out"
+    src = "" if floor_src == "declared" else f" {floor_src}"
     if abs(rel) < floor:
-        return SAME, f"{said}, inside the {floor:.0%} floor"
+        return SAME, f"{said}, inside the {floor:.0%} floor{src}"
     improved = rel > 0 if after.want == "higher" else rel < 0
-    return (BETTER if improved else WORSE), f"{said}, against a {floor:.0%} floor"
+    return (BETTER if improved else WORSE), f"{said}, against a {floor:.0%} floor{src}"
 
 
 def paired_verdict(before, after):
@@ -345,7 +407,7 @@ def paired_verdict(before, after):
     return (BETTER if net > 0 else WORSE), f"fixed {fixed} broke {broke}, chi {chi:.2f}"
 
 
-def compare(before, after):
+def compare(before, after, before2=None, after2=None):
     """Every rail present on either side, paired by name.
 
     By name and not by position, and every rail on either side appears. A rail
@@ -361,14 +423,56 @@ def compare(before, after):
     """
     ba = {r.name: r for r in before}
     aa = {r.name: r for r in after}
+    b2 = {r.name: r for r in (before2 or [])}
+    a2 = {r.name: r for r in (after2 or [])}
+
+    # What each rail's own build did between two readings of itself, which is
+    # this run's noise with the effect removed by construction.
+    def floor_of(name):
+        return floor_for(
+            name,
+            [
+                observed_spread(ba.get(name), b2.get(name)),
+                observed_spread(aa.get(name), a2.get(name)),
+            ],
+        )
 
     # What each group's control did, and whether it did too much.
-    drift, refuse = {}, {}
+    #
+    # **The refusal keeps the DECLARED floor, and a driven run is why.** The
+    # measured floor widens what a rail may move and still be noise, which is
+    # right for a verdict and exactly backwards here: a run noisy enough to
+    # need a wide floor is a run that should be refused, and using the wide
+    # floor made the refusal *less* likely to fire. On the dry run that found
+    # this, the declared floors answered "not comparable" -- the correct
+    # answer -- and the measured ones turned the same readings into four
+    # regressions.
+    #
+    # The second reading earns its place here the other way round: a build
+    # whose *own* two readings moved the control past the limit does not agree
+    # with itself, and nothing can be compared with it. That is strictly more
+    # refusing than before, which is the safe direction for a check whose
+    # whole job is to say "take it again".
+    drift, refuse, refuse_why = {}, {}, {}
     for prefix, ctl in CONTROL.items():
         d = relative(ba.get(ctl), aa.get(ctl))
-        floor = noise_for(ctl) or 0.0
+        declared = noise_for(ctl) or 0.0
+        limit = declared * CONTROL_LIMIT
         drift[prefix] = d
-        refuse[prefix] = d is not None and floor > 0 and abs(d) > floor * CONTROL_LIMIT
+        why = None
+        if d is not None and declared > 0 and abs(d) > limit:
+            why = f"{ctl} moved {d:+.1%} between the two builds"
+        else:
+            for label, first, second in (("the baseline", ba, b2), ("the candidate", aa, a2)):
+                own = observed_spread(first.get(ctl), second.get(ctl))
+                if own is not None and declared > 0 and own > limit:
+                    why = (
+                        f"{label}'s own two readings moved {ctl} by {own:.1%}, "
+                        "so it does not agree with itself"
+                    )
+                    break
+        refuse[prefix] = why is not None
+        refuse_why[prefix] = why
 
     out = []
     for name in list(ba) + [n for n in aa if n not in ba]:
@@ -387,8 +491,7 @@ def compare(before, after):
             out.append((
                 name,
                 UNSTABLE,
-                f"{CONTROL[prefix]} moved {drift[prefix]:+.1%}, so these two "
-                f"readings do not compare",
+                f"{refuse_why[prefix]}, so these readings do not compare",
             ))
             continue
         # A control judged against itself is always 0% and always `same`, which
@@ -397,11 +500,12 @@ def compare(before, after):
         if prefix is not None and name == CONTROL[prefix]:
             out.append((name, SAME, f"the control; it moved {drift[prefix]:+.1%}"))
             continue
-        out.append((name, *verdict(b, a, drift.get(prefix))))
+        floor, src = floor_of(name)
+        out.append((name, *verdict(b, a, drift.get(prefix), floor, src)))
     return out
 
 
-def judge(before, after, claims):
+def judge(before, after, claims, before2=None, after2=None):
     """J1 and J2, generalised to rails.
 
     - **J1**: every rail the change *claims* to move got better.
@@ -416,7 +520,7 @@ def judge(before, after, claims):
     admitting it is how a search fills the ledger with changes that did
     nothing.
     """
-    rows = compare(before, after)
+    rows = compare(before, after, before2, after2)
     by = {n: (v, why) for n, v, why in rows}
     j1, j1_why = True, []
     for c in claims:
@@ -625,6 +729,87 @@ store.read absent us higher  -- no store mounted
             f" against {ctl}'s {floor:.0%} floor",
         )
 
+    # --- the floor this run measures about itself -------------------------
+    #
+    # **The declared floors were the instrument's weakest part and a dry run
+    # of the real workflow proved it.** Two boots of builds differing only in
+    # one retrieval constant reported `core.step`, `core.vote` and
+    # `core.vote_walk` all regressed, after the control's own 18.8% had been
+    # divided out -- a J2 veto, on a change that cannot touch the interpreter,
+    # from noise. A loop judged that way can never say yes, for reasons that
+    # are never about the proposal.
+    claim(observed_spread(None, None) is None, "a missing second reading gives no spread")
+    claim(
+        observed_spread(one("x", 100.0, "us", "lower"), one("x", 100.0, "us", "lower")) == 0.0,
+        "two identical readings of one build spread by nothing",
+    )
+    sp = observed_spread(one("x", 100.0, "us", "lower"), one("x", 130.0, "us", "lower"))
+    claim(abs(sp - 0.3) < 1e-9, "and two readings 30% apart spread by 30%")
+
+    f, src = floor_for("core.step", [None, None])
+    claim(
+        f == noise_for("core.step") and src == "declared",
+        "with no second reading the declared floor stands",
+    )
+    f, src = floor_for("core.step", [0.005, 0.01])
+    claim(
+        f == noise_for("core.step") and src == "declared",
+        "and a quiet day cannot make the judge stricter than the table",
+    )
+    f, src = floor_for("core.step", [0.30, 0.05])
+    claim(
+        abs(f - 0.60) < 1e-9 and src != "declared",
+        "while a build that disagreed with itself by 30% widens the floor to twice that",
+    )
+    f, _ = floor_for("core.step", [0.30, 0.45])
+    claim(abs(f - 0.90) < 1e-9, "and the noisier of the two arms is the one that counts")
+
+    # **The refusal must not be widened by the measured floor**, which is the
+    # defect the dry run found in the first version of it. A run noisy enough
+    # to need a wide floor is a run to refuse, and using the wide floor there
+    # made the refusal less likely: the declared floors answered "not
+    # comparable" on those readings and the measured ones turned them into
+    # four regressions.
+    ctl_b = [one("core.new", 100.0, "ns", "lower"), one("core.step", 100.0, "ps", "lower")]
+    ctl_b2 = [one("core.new", 100.0, "ns", "lower"), one("core.step", 100.0, "ps", "lower")]
+    # 40% between the arms, against core.new's 16% floor times the 1.5 limit.
+    ctl_a = [one("core.new", 140.0, "ns", "lower"), one("core.step", 100.0, "ps", "lower")]
+    ctl_a2 = [one("core.new", 140.0, "ns", "lower"), one("core.step", 100.0, "ps", "lower")]
+    rows = {n: (v, why) for n, v, why in compare(ctl_b, ctl_a, ctl_b2, ctl_a2)}
+    claim(
+        rows["core.step"][0] == UNSTABLE and "between the two builds" in rows["core.step"][1],
+        "a drifted control is still refused when a second reading is supplied",
+    )
+
+    # And the second reading earns its place here the other way round: a build
+    # that disagrees with *itself* about the control cannot be compared with
+    # anything, which nothing could say before.
+    shaky = [one("core.new", 160.0, "ns", "lower"), one("core.step", 100.0, "ps", "lower")]
+    rows = {n: (v, why) for n, v, why in compare(ctl_b, ctl_b, ctl_b2, shaky)}
+    claim(
+        rows["core.step"][0] == UNSTABLE and "does not agree with itself" in rows["core.step"][1],
+        "and a build whose own two readings move the control is refused too",
+    )
+    claim(
+        "candidate" in rows["core.step"][1],
+        "with the line saying which of the two builds it was",
+    )
+
+    # End to end: the shape the dry run hit. One build whose own two readings
+    # moved 20% must not have a 25% difference from the other build called a
+    # regression.
+    b1 = [one("core.new", 100.0, "ns", "lower"), one("core.step", 100.0, "ps", "lower")]
+    b2 = [one("core.new", 100.0, "ns", "lower"), one("core.step", 120.0, "ps", "lower")]
+    a1 = [one("core.new", 100.0, "ns", "lower"), one("core.step", 125.0, "ps", "lower")]
+    a2 = [one("core.new", 100.0, "ns", "lower"), one("core.step", 125.0, "ps", "lower")]
+    rows = {n: (v, why) for n, v, why in compare(b1, a1)}
+    claim(rows["core.step"][0] == WORSE, "a 25% move is a regression against the declared 16%")
+    rows = {n: (v, why) for n, v, why in compare(b1, a1, b2, a2)}
+    claim(
+        rows["core.step"][0] == SAME and "measured" in rows["core.step"][1],
+        "and is not, once the build has shown it disagrees with itself by 20%",
+    )
+
     return ok
 
 
@@ -662,16 +847,30 @@ def main():
 
     if cmd in ("compare", "judge"):
         if len(argv) < 3:
-            raise SystemExit(f"  usage: rails.py {cmd} BEFORE AFTER [--claims NAME ...]")
+            raise SystemExit(
+                f"  usage: rails.py {cmd} BEFORE AFTER [--again BEFORE2 AFTER2] "
+                "[--claims NAME ...]"
+            )
         before, after = read(argv[1]), read(argv[2])
+        # A **second reading of each build**, which is what lets this run
+        # measure its own noise instead of trusting a table taken on another
+        # machine on another day. Optional, because a run that has only one
+        # reading per arm is still a comparison -- just one judged against the
+        # declared floors, which is where this started.
+        before2 = after2 = None
+        if "--again" in argv:
+            at = argv.index("--again")
+            if len(argv) < at + 3:
+                raise SystemExit("  --again takes two files: the second reading of each arm")
+            before2, after2 = read(argv[at + 1]), read(argv[at + 2])
         claims = []
         if "--claims" in argv:
             claims = [a for a in argv[argv.index("--claims") + 1:] if not a.startswith("-")]
         if cmd == "compare":
-            for name, v, why in compare(before, after):
+            for name, v, why in compare(before, after, before2, after2):
                 print(f"  {name:<20} {v:<7} {why}")
             return 0
-        r = judge(before, after, claims)
+        r = judge(before, after, claims, before2, after2)
         for name, v, why in r["rows"]:
             print(f"  {name:<20} {v:<7} {why}")
         print()

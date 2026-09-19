@@ -64,6 +64,30 @@ pub struct Knob {
     pub about: &'static str,
 }
 
+/// Surfaces no mechanism here can judge, and which therefore may not be in the
+/// transformation space.
+///
+/// **Screenshots are captured and never compared.** There is no image diff
+/// anywhere in this tree, so a swapped red and blue channel, a window drawn
+/// off-screen or a font rendering hollow boxes are invisible to every judge,
+/// every rail and every suite -- and `CLAUDE.md` records a wrong claim made
+/// from a glance at a frame that reached a release note. A knob under one of
+/// these would produce a patch that CI builds, boots, measures as `same` on
+/// every rail it can read, and adopts, having checked nothing about the only
+/// thing it changed.
+///
+/// A prefix list rather than a per-row flag, because the question is about the
+/// *surface* and not about the constant: somebody adding a row for a new
+/// graphics knob would have to add the flag too, and the one they forget is
+/// the one that matters. The other half of the fix is a golden-frame diff,
+/// which does not exist; until it does, this is the gate.
+pub const UNJUDGEABLE: &[&str] = &["src/gfx/", "src/doom/", "src/port/"];
+
+/// Whether a file is on a surface nothing here can check.
+pub fn unjudgeable(file: &str) -> bool {
+    UNJUDGEABLE.iter().any(|p| file.starts_with(p))
+}
+
 pub const KNOBS: &[Knob] = &[
     Knob {
         file: "src/ai/lex.rs",
@@ -157,6 +181,20 @@ pub fn selftest() -> bool {
     };
 
     claim(!KNOBS.is_empty() && points() > 0, "there is a space to search at all");
+
+    // **Nothing visual may be in the space, because nothing here can judge
+    // it.** A knob under `src/gfx/` would produce a patch that builds, boots,
+    // reads `same` on every rail there is, and gets adopted having checked
+    // nothing about the only thing it changed.
+    claim(
+        KNOBS.iter().all(|k| !unjudgeable(k.file)),
+        "no declared knob touches a surface with no judge in front of it",
+    );
+    // And the gate has to be able to refuse, or it is a list nobody tested.
+    claim(
+        unjudgeable("src/gfx/theme.rs") && !unjudgeable("src/ai/lex.rs"),
+        "and the gate recognises such a surface rather than passing everything",
+    );
 
     // **The one that stops a proposal being a no-op.** A point whose value is
     // what the source already says is a patch that changes nothing, a build

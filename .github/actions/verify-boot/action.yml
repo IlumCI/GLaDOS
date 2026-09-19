@@ -117,7 +117,8 @@ runs:
           --qemu-extra "-accel kvm -cpu host -smp 4" \
           --timeout "${{ inputs.timeout }}" \
           "initiative off" "agent stop" "echo ready" "diag all" \
-          "echo mid" "bench report" "echo again" "bench report" "echo alive" \
+          "echo mid" "bench report" "echo again" "bench report" \
+          "echo once more" "bench report" "echo alive" \
           2>&1 | tee verify.log
 
     # Every rail this build can measure about itself, lifted out of the
@@ -143,8 +144,23 @@ runs:
         set -euo pipefail
         awk '/^\[rail\] v1/{n++} n==2' verify.log \
           | sed -n '/^\[rail\] v1/,/^\[rail\] end/p' > rails.txt
+        # **A second settled reading, which is what lets a comparison measure
+        # its own noise instead of trusting a table.** The floors in
+        # `tools/rails.py` were taken on one machine, on one build, at one core
+        # count, and had already been wrong by up to seven times once before. A
+        # dry run of `propose.yml` on two builds differing by one retrieval
+        # constant reported three interpreter rails regressed -- a J2 veto,
+        # from noise, on a change that cannot touch the interpreter. Two
+        # readings of one binary bound that directly: what a build does against
+        # itself is the noise with the effect removed by construction.
+        awk '/^\[rail\] v1/{n++} n==3' verify.log \
+          | sed -n '/^\[rail\] v1/,/^\[rail\] end/p' > rails2.txt
         if ! grep -q '^\[rail\] end' rails.txt; then
           echo "::error::bench report did not finish"
+          exit 1
+        fi
+        if ! grep -q '^\[rail\] end' rails2.txt; then
+          echo "::error::the third bench report did not finish"
           exit 1
         fi
         # An `absent` rail is a fact about the runner rather than a failure --
@@ -242,6 +258,7 @@ runs:
         path: |
           verify.log
           rails.txt
+          rails2.txt
           .qemu/qemu-stderr.log
         if-no-files-found: ignore
         retention-days: 14

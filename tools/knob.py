@@ -151,6 +151,22 @@ def table_rows():
     return out
 
 
+# Surfaces no mechanism in this repository can judge, and which therefore may
+# not be in the transformation space.
+#
+# **Screenshots are captured and never compared.** There is no image diff
+# anywhere in the tree, so a swapped red and blue channel, a window drawn
+# off-screen or a font rendering hollow boxes are invisible to every judge,
+# every rail and every suite. A knob under one of these would produce a patch
+# that CI builds, boots, measures as `same` on every rail it can read, and
+# adopts -- having checked nothing about the only thing it changed.
+#
+# The same list lives in `src/ai/knob.rs` as `UNJUDGEABLE`, and this checks the
+# rows it parses out of that file. Two copies of a *rule* rather than of a
+# table: this one is what CI runs, and a kernel claim cannot run in CI.
+UNJUDGEABLE = ("src/gfx/", "src/doom/", "src/port/")
+
+
 def check():
     """Every row against the file it names. This is what CI runs."""
     rows = table_rows()
@@ -180,6 +196,13 @@ def check():
             continue
         if r["now"] in r["values"]:
             print(f"  FAIL  {r['symbol']} offers the value it already has")
+            ok = False
+            continue
+        if any(r["file"].replace("\\", "/").startswith(p) for p in UNJUDGEABLE):
+            print(
+                f"  FAIL  {r['file']} is a surface nothing here can judge -- "
+                "a patch to it would be adopted on rails that cannot see it"
+            )
             ok = False
             continue
         print(f"  ok    {r['file']} {r['symbol']} = {current}  -> {', '.join(r['values'])}")

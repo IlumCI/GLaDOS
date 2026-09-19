@@ -115,6 +115,12 @@ jobs:
         run: |
           set -euo pipefail
           mv rails.txt kernel-a.txt
+          # The same build's *second* settled reading. It carries no host rail,
+          # deliberately: `retrieval.py` is deterministic over a fixed forest,
+          # so a second run of it would spread by exactly zero and say nothing
+          # about the day. What this pair is for is the kernel's timing rails,
+          # which is where the noise lives.
+          mv rails2.txt kernel-a2.txt
           python3 tools/retrieval.py "$FOREST" --dump retrieval-a.tsv | tee retrieval-a.log
           python3 tools/rails.py collect --rail retrieval=retrieval-a.tsv --out host-a.txt
           cat kernel-a.txt host-a.txt | grep -v '^\[rail\]' > body-a.txt
@@ -138,6 +144,7 @@ jobs:
         run: |
           set -euo pipefail
           mv rails.txt kernel-b.txt
+          mv rails2.txt kernel-b2.txt
           python3 tools/retrieval.py "$FOREST" --dump retrieval-b.tsv | tee retrieval-b.log
           python3 tools/rails.py collect --rail retrieval=retrieval-b.tsv --out host-b.txt
           cat kernel-b.txt host-b.txt | grep -v '^\[rail\]' > body-b.txt
@@ -151,7 +158,17 @@ jobs:
         run: |
           set -euo pipefail
           set +e
-          python3 tools/rails.py judge before.txt after.txt --claims "$RAIL" | tee judged.txt
+          # `--again` hands each arm its own second reading, so every floor is
+          # the larger of the declared one and twice what that build did
+          # against itself on this runner. It can only widen, never narrow, so
+          # a quiet day cannot make the judge stricter than the table.
+          #
+          # `code=$?` after a pipeline is the *pipeline's* status only because
+          # `pipefail` is still in force from the line above -- `set +e` turns
+          # off `errexit` and nothing else. Driven, rather than reasoned about:
+          # a dry run of this job answered 1 here and took the right branch.
+          python3 tools/rails.py judge before.txt after.txt \
+            --again kernel-a2.txt kernel-b2.txt --claims "$RAIL" | tee judged.txt
           code=$?
           set -e
           case "$code" in
@@ -193,6 +210,8 @@ jobs:
             proposal.knob
             before.txt
             after.txt
+            kernel-a2.txt
+            kernel-b2.txt
             judged.txt
             verdict.txt
             retrieval-a.log

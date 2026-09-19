@@ -825,6 +825,38 @@ wrong by up to 7x from within-boot figures in this file. `video.rect` and
 `core.new` are the controls; `ai.*` and `smp.*` have none, which is a hole and
 is named as one.
 
+**And the declared floors are a floor rather than the answer.** Each verify
+boot takes *three* rail readings and keeps the second and third, so a
+comparison can measure what a build does against itself and use the larger of
+that and the table: `--again` hands each arm its own second reading, and a
+floor can only ever widen. A quiet day cannot make the judge stricter than the
+figure that was measured across three boots and written down.
+
+**The refusal keeps the declared floor, and a driven run is why.** Widening a
+rail's floor is right for a verdict and exactly backwards for the
+not-comparable check: a run noisy enough to need a wide floor is a run to
+refuse, and the first version of this used the wide floor there and turned a
+correct "take it again" into four regressions. What the second reading buys
+*here* is the other direction -- a build whose own two readings move the
+control past the limit does not agree with itself, and nothing can be compared
+with it.
+
+**A within-boot spread is not a between-boot spread**, and the same run put a
+number on it: `smp.all_cores` moved 1.7% and 12.2% within its own boots and
+67.3% between them. For a controlled group the control covers that gap; for
+`ai.*` and `smp.*` nothing does, and the only thing that would is a second
+*boot* per arm, which doubles what the gate costs. Read a verdict on those two
+as weaker than one on a controlled rail.
+
+**Nothing visual is in the transformation space and it is now checked.**
+Screenshots are captured and never compared -- there is no image diff anywhere
+in this tree -- so a knob under `src/gfx/`, `src/doom/` or `src/port/` would
+produce a patch that builds, boots, reads `same` on every rail there is, and
+gets adopted having checked nothing about the only thing it changed.
+`knob::UNJUDGEABLE` and `knob.py`'s copy of the rule both refuse such a row,
+and two claims check that the gate can refuse rather than merely passing
+everything.
+
 **`.github/workflows/propose.yml` is the half that can compile.** Two builds
 on one runner from one checkout -- baseline as the tree stands, candidate with
 the patch applied -- two verify-boots, two rail collections, and
