@@ -863,8 +863,10 @@ debits alpha from a declared series -- `0.05 * 6/(pi^2 k^2)`, which sums to
 exactly 0.05 -- the bar rises as it depletes, past the table the loop refuses
 outright, and only a new corpus hash refills it.
 
-**`src/ai/clade.rs` chooses where to grow from.** See below; it is the first
-thing here that lets the loop go back.
+**`src/ai/clade.rs` chooses where to grow from** and **`src/ai/oops.rs`
+chooses how much to spend.** See below; the first is the thing that lets the
+loop go back, the second is the thing that lets it not know how big a question
+is.
 
 Root certificate bundle, built from the host's store:
 
@@ -973,6 +975,51 @@ at every one. So it costs what generation costs -- nightly, never interactive.
 whose 256-token byte vocabulary and random weights make it a good negative, it
 reads **11.5 bits per byte** -- worse than the 8 a uniform guess would spend.
 The plumbing works and the fixture knows nothing, which is what it should say.
+
+### How much a night may spend
+
+**A constant could not be right for two axes and the measurement says so.**
+`GODEL_EXAMPLES` was 24, where J1 was arithmetically impossible: five wrong
+validation decisions against a requirement of six clean repairs, so the judge
+was asking for more repairs than there were wrong answers to repair. Every
+night, for as long as the axis had existed. It became 96, which fixed that and
+charged every other axis four times over for a problem it does not have --
+`lib` judges a library function against a solver and pays 321 seconds of
+prepare to reach a verdict it could have reached at 24.
+
+The honest answer is not a better constant. It is to not know, and to search.
+
+Schmidhuber's Optimal Ordered Problem Solver (2004) is exactly this shape of
+question, and the arithmetic is the whole of it. Reaching level `L` by trying
+every level below it costs `base * (2^(L+1) - 1)`, which is under twice what an
+oracle that already knew `L` would have spent: **not knowing costs a factor of
+two, forever, whatever L turns out to be.** The other half is that the schedule
+never commits -- half the nights extend at the axis's level and half start at
+the base -- which bounds the average however high the level has climbed.
+Multiply the two and the whole scheme wastes at most four times an oracle's
+budget, which is the constant the module exists to be able to state. Both
+halves of that are asserted as arithmetic rather than cited.
+
+**What raises a level is only a trial the budget could not have decided.**
+`Certificate.wrong` is the ceiling on repairs available and
+`clean_fixes_needed()` is what the bar asks; a trial whose ceiling is below the
+requirement did not fail, it was never asked. A trial that had the evidence and
+was refused anyway is a *candidate* failure, and doubling for it would be the
+loop spending more and more on the same ground because it did not like the
+answer -- so any verdict reached on sufficient evidence drops that axis back to
+the base. And a line that says nothing about its ceiling is not starved: "did
+not say" is not "could not pass", and reading it as the latter would raise
+every axis on the strength of the early history being silent.
+
+The level is **per axis**, read off that axis's own trailing run, because one
+question being unanswerable at 24 examples says nothing about the next. The
+half is a function of the ledger's length, so a later reader can say which half
+any past night was on -- the objection `axis_counts` already makes about a
+counter in its own file.
+
+The journal line carries what the night was allowed to spend beside what it
+got for it. A refusal at 24 and a refusal at 192 are different facts and
+looked identical.
 
 ### Staged updates
 
@@ -3181,7 +3228,7 @@ At boot the system runs **twenty-nine selftest sections** -- count the
 `[selftest]` headings in a boot log, which is the only figure that cannot go
 stale -- **seventeen** of which are wrapped in `main::section` so one that
 breaks marks itself unavailable instead of taking the machine, and `diag`
-offers **sixty-four named suites** on demand (`diag.rs`'s `SLOTS`, asserted
+offers **sixty-five named suites** on demand (`diag.rs`'s `SLOTS`, asserted
 against `SUITES.len()`), most of them the same checks (the `aiksi` section covers the capability gate by name and never by
 calling -- half that table pokes memory, drives I/O ports or paints over the
 screen, and a suite that called every row to prove it exists would be

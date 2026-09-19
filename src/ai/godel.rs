@@ -330,6 +330,26 @@ impl Proposal {
         Proposal { lr: 0.0, rank: 0, alpha: 0.0, epochs: 0, rule, kind: ProposalKind::Config(rule) }
     }
 
+    /// Which of `AXIS_NAMES` this proposal will be filed under.
+    ///
+    /// The same mapping the certificates make, in one place, so a schedule
+    /// reading the ledger by axis and a trial writing it by axis cannot
+    /// disagree about which is which. `Source` has no slot: it is not one of
+    /// the axes the ranking chooses among, because the machine cannot run it.
+    pub fn axis_slot(&self) -> Option<usize> {
+        let name = match self.kind {
+            ProposalKind::Adapter => "adapter",
+            ProposalKind::Config(..) => "rule",
+            ProposalKind::Skill(..) => "skill",
+            ProposalKind::Deep => "deep",
+            ProposalKind::Lib(..) => "lib",
+            ProposalKind::Core(..) => "core",
+            ProposalKind::Judge(..) => "judge",
+            ProposalKind::Source(..) => return None,
+        };
+        AXIS_NAMES.iter().position(|n| *n == name)
+    }
+
     pub fn budget(&self, examples: usize, millis: u64) -> Budget {
         Budget {
             epochs: self.epochs,

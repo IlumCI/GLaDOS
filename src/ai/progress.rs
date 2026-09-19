@@ -44,7 +44,6 @@
 //! than discovered from a rail that drifted.
 
 use alloc::string::String;
-use alloc::vec::Vec;
 
 /// Bits and the bytes they were spent on.
 #[derive(Clone, Copy)]

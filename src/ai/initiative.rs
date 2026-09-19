@@ -130,44 +130,12 @@ const WORKS: &[(&str, &str)] = &[
     ("clockface", "the current time"),
     ("visits", "a count of how often it has been opened"),
 ];
-/// Corpus examples per nightly trial.
-///
-/// **This was 24, and at 24 the nightly trial could not pass J1 at all.** The
-/// reasoning written here was that the judges get less evidence per trial in
-/// exchange for the machine staying responsive, and "the ledger accumulates
-/// across nights rather than within one" -- which is true of the ledger and is
-/// not true of J1, a paired test decided inside a single trial. So what
-/// accumulated across nights was rejections.
-///
-/// Measured under QEMU on the seeded 717-example corpus, both figures from the
-/// trial report's own lines:
-///
-///     examples   validation decisions   incumbent wrong   J1 needs
-///     24         15                     5                 6
-///     96         56                     26                6
-///
-/// `clean_fixes_needed()` is six, not `MIN_FIXED`, because Yates' correction
-/// subtracts one before squaring. At 24 examples the baseline gets **five**
-/// validation decisions wrong, so five is the ceiling on `fixed` and six is
-/// the floor on passing: the judge was asking for more repairs than there were
-/// wrong answers to repair. Not a hard trial, an arithmetically impossible
-/// one, every night, for as long as the axis has existed.
-///
-/// 96 rather than a rounder number because that is where it was measured; the
-/// headroom is 26 against a need of 6, which is about four times over. The
-/// price is the prepare half, which is a forward pass per example and is *not*
-/// what `GODEL_MS` bounds: 63 s at 24 and 321 s at 96 under WHPX with
-/// SmolLM2. That is up to five minutes of held engine on a night when nobody
-/// is there, which is what `godbits::felt()` is checked for, and it is the
-/// cost of the loop being able to say yes at all.
-///
-/// The trial report prints the ceiling beside the requirement now, so a budget
-/// that cannot pass says so in one line rather than looking like a run of bad
-/// candidates. **J2 still vetoes on the curiosity goals** on both budgets
-/// measured, so this makes an adoption reachable rather than likely.
-const GODEL_EXAMPLES: usize = 96;
-/// Wall-clock ceiling on the optimiser half of a nightly trial.
-const GODEL_MS: u64 = 20_000;
+// **The nightly trial's budget lives in `super::oops` now**, and what used to
+// be here is the measurement that made a constant untenable. `GODEL_EXAMPLES`
+// was 24, where J1 was arithmetically impossible; it became 96, which fixed
+// the adapter axis and charged every other axis four times over for a problem
+// it does not have. The table and the reasoning moved with the schedule, to
+// the module that acts on them.
 
 /// Journal length cap. Old lines fall off the top; the namespace keeps the
 /// snapshots either way.
@@ -653,10 +621,32 @@ fn tick_inner(forced: bool) {
                     // engine was busy became unreachable in exactly the regime
                     // that introduced it.
                     let composed = picked.is_some();
+                    // **How much, decided per axis and per night rather than
+                    // by one constant.** `GODEL_EXAMPLES` was measured on the
+                    // adapter axis, where 24 made J1 arithmetically
+                    // impossible, and 96 then charged every other axis four
+                    // times over for a problem it does not have. `oops` reads
+                    // the axis's own trailing run of trials that the *budget*
+                    // could not have decided, doubles for each, and alternates
+                    // with the base so a raised level never becomes a
+                    // permanent commitment. Doubling costs under twice an
+                    // oracle's budget and the alternation under twice again,
+                    // which is the whole reason not knowing is acceptable.
+                    let mut spent = None;
                     let verdict = match picked {
                         None => None,
                         Some(p) => {
-                            let b = p.budget(GODEL_EXAMPLES, GODEL_MS);
+                            let lines = super::godel::ledger_tail(usize::MAX);
+                            let need = super::godel::clean_fixes_needed();
+                            let plan = match p.axis_slot() {
+                                Some(a) => super::oops::plan(&lines, a, need),
+                                // An axis the ranking does not choose among
+                                // spends the base, because there is no record
+                                // filed under it to read a level out of.
+                                None => super::oops::plan(&lines, usize::MAX, need),
+                            };
+                            spent = Some(plan);
+                            let b = p.budget(plan.examples, plan.ms);
                             super::with_engine(|e| super::godel::run(e, &b, &p))
                         }
                     };
@@ -699,12 +689,25 @@ fn tick_inner(forced: bool) {
                         None => String::new(),
                         Some(n) => format!("grew from {} back, ", n),
                     };
+                    // What the night was allowed to spend, in the same line as
+                    // what it got for it. A verdict without its budget beside
+                    // it cannot be read: a refusal at 24 examples and one at
+                    // 192 are different facts and looked identical.
+                    let how_much = match spent {
+                        None => String::new(),
+                        Some(p) => format!(
+                            "{} at n={}, ",
+                            if p.half == super::oops::Half::Fresh { "fresh" } else { "extending" },
+                            p.examples
+                        ),
+                    };
                     journal_push(format!(
-                        "[t{} +{}s] godel: hour {}, {}{}",
+                        "[t{} +{}s] godel: hour {}, {}{}{}",
                         TICKS.load(Ordering::Relaxed),
                         now_s,
                         hour,
                         where_from,
+                        how_much,
                         line
                     ));
                 }
