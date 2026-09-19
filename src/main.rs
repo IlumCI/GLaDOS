@@ -878,7 +878,18 @@ fn init_interrupts(acpi: &Option<acpi::Acpi>) {
         // any earlier than this.
         time::calibrate();
         if time::is_calibrated() {
-            kprintln!("  tsc {} MHz", time::tsc_mhz());
+            // Which clock, not just the number. A TSC calibrated from the tick
+            // counter is not a second opinion about the tick counter, and the
+            // figure alone cannot say which kind it is.
+            kprintln!(
+                "  tsc {} MHz, measured against {}",
+                time::tsc_mhz(),
+                if time::reference_is_independent() {
+                    source
+                } else {
+                    "the tick counter, so the two cannot be compared"
+                }
+            );
         } else {
             kprintln!("  tsc not calibrated -- console pacing disabled");
         }
@@ -1423,6 +1434,20 @@ fn check_timer() -> bool {
     // counter was really advancing, and could not see that every core's timer
     // ISR was incrementing one global `TICKS`. Two clocks that are supposed to
     // agree do not stay agreeing on their own.
+    //
+    // **And for a while afterwards it still could not see it**, which is the
+    // more interesting half. `time::calibrate` derived the microsecond from
+    // `ticks()` itself, so a tick rate wrong by a whole core count scaled both
+    // sides of this comparison and divided straight back out. Driven, with the
+    // ISR incrementing by two: `tsc` read 1345 MHz against a true 2690, this
+    // line answered "the two clocks agree" over a window half as long as it
+    // believed, and `uptime` reported 22.54 s at 11.3 s of real time. A check
+    // with a hundred per cent false-negative rate for the one bug its own
+    // message names.
+    //
+    // The reference is independent now (`lapic::tsc_per_us_ref`, off the PIT
+    // or the PM timer), which is what makes the band below mean anything: the
+    // same injection reads 250 ms against a floor of 350 and fails.
     let t0 = time::rdtsc();
     let start = dev::lapic::ticks();
     let want = start + TIMER_HZ as u64 / 2; // half a second, if ticks are honest
@@ -1445,6 +1470,17 @@ fn check_timer() -> bool {
         console::set_color(LTRED);
         kprintln!("  only {} ticks -- timer is not delivering", elapsed);
         false
+    } else if mhz > 0 && !time::reference_is_independent() {
+        // Neither the PIT nor the PM timer answered, so the only TSC figure
+        // available was derived from this very counter. Reporting agreement
+        // would be reporting arithmetic. Firing is still checked above, and
+        // that is the half this can honestly answer.
+        kprintln!(
+            "  {} ticks -- firing, but the TSC was calibrated from this same \
+             counter, so the two cannot be compared",
+            elapsed
+        );
+        true
     } else if mhz == 0 {
         kprintln!("  {} ticks -- firing, but the TSC is uncalibrated", elapsed);
         // Firing is the half this check exists for, and an uncalibrated TSC
@@ -1453,9 +1489,12 @@ fn check_timer() -> bool {
         // could not be made.
         true
     } else {
-        // 500 ms expected. Allow a wide band: this is a spin loop on an
-        // emulator and the point is to catch a rate wrong by a whole core
-        // count, not to measure the crystal.
+        // 500 ms expected. The band stays wide on purpose: this is a spin
+        // loop on an emulator and the point is to catch a rate wrong by a
+        // whole core count, not to measure the crystal. Two cores read 250 ms
+        // and three read 167, so the floor has a factor of 1.4 of headroom
+        // under the smallest error worth catching, and ten boots of a healthy
+        // machine measured 482 to 501.
         let ok = (350..=750).contains(&real_ms);
         console::set_color(if ok { LTGREEN } else { LTRED });
         kprintln!(

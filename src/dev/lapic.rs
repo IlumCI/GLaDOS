@@ -55,6 +55,22 @@ static BASE: Racy<u64> = Racy::new(0);
 static TIMER_HZ: Racy<u64> = Racy::new(0);
 static TICKS: AtomicU64 = AtomicU64::new(0);
 
+/// TSC cycles per microsecond, measured against the PIT or the PM timer.
+///
+/// **A second clock that owes nothing to `TICKS`, which is the entire point.**
+/// `time::calibrate` derives the microsecond *from* the tick counter, so a
+/// tick rate wrong by a whole core count cancels out of every comparison made
+/// against it -- `elapsed_us` and the TSC delta both scale, and the ratio
+/// comes out exactly right. Proven by injection rather than argued: with the
+/// ISR incrementing by two, `tsc` read 1345 MHz against a true 2690, the boot
+/// check answered "the two clocks agree" over a window half as long as it
+/// believed, and `uptime` reported 22.54 s at 11.3 s of real time.
+///
+/// Both calibrations below already bracket an exact 10 ms window on a
+/// reference this kernel did not have to trust, so this costs two `rdtsc`
+/// reads and no extra time at all.
+static TSC_REF: Racy<u64> = Racy::new(0);
+
 #[inline]
 fn base() -> u64 {
     unsafe { *BASE.get() }
@@ -120,6 +136,14 @@ pub fn ticks() -> u64 {
 
 pub fn timer_hz() -> u64 {
     unsafe { *TIMER_HZ.get() }
+}
+
+/// TSC cycles per microsecond against the calibration reference, or 0.
+///
+/// Zero means neither the PIT nor the PM timer answered, so there is no
+/// independent clock and a caller must say so rather than compare anyway.
+pub fn tsc_per_us_ref() -> u64 {
+    unsafe { *TSC_REF.get() }
 }
 
 extern "x86-interrupt" fn timer_isr(frame: idt::InterruptStackFrame) {
@@ -239,6 +263,7 @@ pub fn calibrate() -> u64 {
         outb(PIT_GATE, gate);
         write(REG_TIMER_INIT, u32::MAX);
         outb(PIT_GATE, gate | 1);
+        let t0 = crate::time::rdtsc();
 
         // Bit 5 of port 0x61 is channel 2's OUT line, high at terminal count.
         //
@@ -259,6 +284,7 @@ pub fn calibrate() -> u64 {
             core::hint::spin_loop();
         }
 
+        let t1 = crate::time::rdtsc();
         let remaining = read(REG_TIMER_CUR);
         write(REG_TIMER_INIT, 0); // stop
         outb(PIT_GATE, original);
@@ -266,6 +292,11 @@ pub fn calibrate() -> u64 {
         let elapsed = (u32::MAX - remaining) as u64;
         let hz = elapsed * SAMPLE_HZ;
         *TIMER_HZ.get() = hz;
+        // The same window read on the other clock. The one-shot ends at
+        // terminal count, so this is 10 ms by construction rather than by
+        // measurement, and the spin's last `inb` overshoots it by about a
+        // microsecond in ten thousand.
+        *TSC_REF.get() = t1.wrapping_sub(t0) / (1_000_000 / SAMPLE_HZ);
         hz
     }
 }
@@ -291,13 +322,18 @@ pub fn calibrate_pm(port: u16) -> u64 {
         write(REG_LVT_TIMER, LVT_MASKED);
 
         let start = inl(port) & MASK;
+        let t0 = crate::time::rdtsc();
         write(REG_TIMER_INIT, u32::MAX);
 
         let mut guard: u64 = 0;
-        loop {
+        // The loop yields how far the counter actually went, which is *at
+        // least* `want` and not exactly it. Re-reading the port afterwards
+        // would answer a slightly later question than the one the APIC count
+        // was taken over.
+        let elapsed_pm = loop {
             let elapsed = (inl(port).wrapping_sub(start)) & MASK;
             if elapsed >= want {
-                break;
+                break elapsed as u64;
             }
             guard += 1;
             if guard > 20_000_000 {
@@ -305,7 +341,8 @@ pub fn calibrate_pm(port: u16) -> u64 {
                 return 0; // The port is not a live counter.
             }
             core::hint::spin_loop();
-        }
+        };
+        let t1 = crate::time::rdtsc();
 
         let remaining = read(REG_TIMER_CUR);
         write(REG_TIMER_INIT, 0);
@@ -313,6 +350,12 @@ pub fn calibrate_pm(port: u16) -> u64 {
         let elapsed_apic = (u32::MAX - remaining) as u64;
         let hz = elapsed_apic * SAMPLE_HZ;
         *TIMER_HZ.get() = hz;
+        // See `TSC_REF`. The PM timer's rate is architecturally fixed, so this
+        // window is known exactly rather than assumed.
+        let us = elapsed_pm * 1_000_000 / PM_HZ;
+        if us > 0 {
+            *TSC_REF.get() = t1.wrapping_sub(t0) / us;
+        }
         hz
     }
 }

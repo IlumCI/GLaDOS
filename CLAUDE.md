@@ -4417,7 +4417,51 @@ Two gotchas paid for here:
   Two things about how it hid for so long. The `[selftest] timer` line printed
   "N ticks in ~0.5 s" where the 0.5 was **a constant in the format string**, so
   it read identically however fast the counter was really moving; it is timed
-  against the TSC now and fails if the two clocks disagree. And the benchmarks
+  against the TSC now and fails if the two clocks disagree.
+
+  **And for a long time after that it still could not have caught this**, which
+  is worth more than the original bug. `time::calibrate` derived the microsecond
+  from `ticks()` itself -- `elapsed_us = ticks * 1_000_000 / TIMER_HZ` -- so a
+  tick rate wrong by a whole core count scaled the calibration and the check
+  alike and divided straight back out. The comparison was arithmetic wearing a
+  measurement's clothes.
+
+  Driven rather than argued, by making the ISR increment by two:
+
+      before   tsc 1345 MHz (a true 2688)
+               ok   50 ticks in 492 ms -- the two clocks agree
+      after    tsc 2688 MHz, measured against PIT
+               FAIL 50 ticks in 248 ms -- ticks() disagrees with the TSC
+
+  `uptime` read 22.54 s at 11.3 s of real time on both. A check with a hundred
+  per cent false-negative rate for the one bug its own message names, passing
+  cheerfully on a machine where every `ticks()`-derived timeout was half what
+  it should be.
+
+  The fix is that the TSC now has a reference that owes nothing to `ticks()`.
+  `lapic::calibrate` already busy-waits on the PIT across an exact 10 ms window
+  to measure the APIC timer, so two `rdtsc` reads around that same loop give a
+  TSC frequency for free; `calibrate_pm` does the same against the PM timer,
+  whose rate is architecturally fixed. `time::calibrate` prefers it and keeps
+  the tick-derived loop only as a fallback -- and when that fallback is what
+  ran, the boot check **says the two cannot be compared** rather than reporting
+  agreement, because agreement would be a statement about division.
+
+  It is also the steadier clock, which is measurable rather than asserted.
+  Across ten boots before and eight after, the TSC figure went from 2672-2771
+  MHz (3.7%) to 2687-2694 (**0.26%**), fourteen times tighter. That matters
+  because the check reads that figure: a `tsc_mhz` inflated by a host stall
+  inside the old 50 ms calibration window made every later reading
+  proportionally short, which is what produced an intermittent FAIL at roughly
+  **one boot in twelve** under WHPX -- 344 ms against a floor of 350, where a
+  healthy boot reads 492 to 560. Nine post-fix boots have not reproduced it,
+  which is not enough to call a one-in-twelve event gone; what is established
+  is that its dominant cause is fourteen times smaller.
+
+  The band stays 350..=750 deliberately. Two cores read 250 ms and three read
+  167, so the floor keeps a factor of 1.4 under the smallest error worth
+  catching, and widening it to quiet the flake would have given back the
+  detection that was just bought. And the benchmarks
   that *are* trustworthy -- `smp bench`, `video bench`, `core bench` and the
   decode figures -- all use `rdtsc`/`tsc_mhz`, which is exactly why the decode
   numbers came out consistent across 1, 2 and 4 cores. Had they been

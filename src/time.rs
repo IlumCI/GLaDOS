@@ -18,9 +18,16 @@
 //! to notice and diagnose than silently waiting the wrong amount.
 
 use crate::dev::lapic;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 static TSC_PER_US: AtomicU64 = AtomicU64::new(0);
+
+/// Whether the figure above came from a clock other than `ticks()`.
+///
+/// False means the fallback below produced it, and a comparison of the TSC
+/// against the tick counter is then circular and cannot fail -- so a caller
+/// making one has to say so instead of reporting agreement.
+static INDEPENDENT: AtomicBool = AtomicBool::new(false);
 
 /// Read the timestamp counter.
 ///
@@ -59,6 +66,21 @@ pub fn calibrate() {
     if lapic::timer_hz() == 0 {
         return;
     }
+
+    // **Prefer the reference the APIC calibration already measured**, against
+    // the PIT or the PM timer. The fallback below is circular: it defines the
+    // microsecond as `TIMER_HZ` ticks, so if the tick rate is wrong the error
+    // divides out and every duration derived from the TSC is wrong by the same
+    // factor with nothing able to see it. Measured across ten boots, the
+    // reference is also the steadier of the two -- the PIT window put the APIC
+    // frequency inside 0.38% where this loop put the TSC inside 3.7%.
+    let reference = lapic::tsc_per_us_ref();
+    if reference > 0 {
+        TSC_PER_US.store(reference, Ordering::Relaxed);
+        INDEPENDENT.store(true, Ordering::Relaxed);
+        return;
+    }
+
     let hz = crate::TIMER_HZ as u64;
 
     // Start on a tick edge, otherwise the first tick is a partial interval and
@@ -110,6 +132,10 @@ pub fn is_calibrated() -> bool {
 }
 
 /// TSC frequency in MHz, or 0 if uncalibrated.
+pub fn reference_is_independent() -> bool {
+    INDEPENDENT.load(Ordering::Relaxed)
+}
+
 pub fn tsc_mhz() -> u64 {
     TSC_PER_US.load(Ordering::Relaxed)
 }
