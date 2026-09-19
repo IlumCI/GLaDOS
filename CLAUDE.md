@@ -4004,6 +4004,30 @@ routes could disagree about everything a person would notice and agree on
 every field. `skill.rs`'s J3 had the identical hole and is closed the same
 way.
 
+**And comparing it found a defect in the console rather than in either
+route.** `diag differ` failed on `a runaway, stopped by the budget at the same
+step` -- steps, value and error agreeing exactly at 100,001, and only the
+console differing, on a program that has no builtins and therefore cannot
+print. That shape is contamination and not divergence.
+
+`CAPTURE` was one stack for the whole machine, so a line printed by *any* task
+landed in whichever capture happened to be innermost. The runaway spends
+100,001 interpreter steps inside a capture, about twenty-eight timer ticks, and
+one boot in several had something land in that window. A capture carries the
+task that opened it now: `_print` writes to the innermost capture belonging to
+the *current* task and anything else falls through to the console, which is
+where it went before captures existed.
+
+`end_capture` pops this task's innermost rather than the stack's top, or two
+tasks capturing at once would hand one task's output to the other. And
+`serial::_print` suppresses the log only while *this* task is capturing, which
+is the same correction one layer down: the clock task's output was being
+dropped from the transcript whenever the shell happened to be capturing.
+
+`CLAUDE.md` had already recorded this class once -- `[mind t1] disabled`
+splitting `257` into `25` and `7` -- as an interleaving artefact rather than as
+a bug with a fix. It was both.
+
 Two honesty notes on those figures. `arm` and `call vote` are unchanged by
 this work and the movements in them are host noise. And `fields_of` adds up
 to eight string comparisons to every builtin call that misses, where the old

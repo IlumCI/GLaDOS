@@ -1090,20 +1090,70 @@ pub unsafe fn release_locks() {
     CONSOLES.force_unlock();
 }
 
-static CAPTURE: crate::sync::Spin<alloc::vec::Vec<alloc::string::String>> =
+/// Open captures, innermost last, each with the task that opened it.
+///
+/// **The task is not decoration and its absence was a real defect.** This is
+/// one stack for the whole machine, so before the pair was stored, a line
+/// printed by *any* task landed in whichever capture happened to be innermost.
+/// The clock task and the resident mind both print, and a capture is usually
+/// held around something slow -- so what a caller got back was its own output
+/// plus whatever else the machine said while it was waiting.
+///
+/// It surfaced in `diag differ`, which compares what two routes printed: a
+/// runaway case spends 100,001 interpreter steps inside a capture, about
+/// twenty-eight timer ticks, and one boot in several had something land in
+/// that window. Steps, value and error agreed exactly and only the console
+/// differed, which is the signature of contamination rather than divergence.
+/// `CLAUDE.md` already recorded the same class once, as `[mind t1] disabled`
+/// splitting a number in half.
+static CAPTURE: crate::sync::Spin<alloc::vec::Vec<(usize, alloc::string::String)>> =
     crate::sync::Spin::new(alloc::vec::Vec::new());
 
 pub fn begin_capture() {
-    CAPTURE.lock_irq().push(alloc::string::String::new());
+    // Asked before the lock is taken. `current()` reads the local controller's
+    // id register, which is a volatile load of a mapped page and takes no lock
+    // of its own -- so it cannot deadlock here -- but there is no reason to do
+    // it with interrupts off, and a habit of calling out from inside a spin is
+    // how the one that *can* deadlock eventually gets written.
+    let me = crate::task::current();
+    CAPTURE.lock_irq().push((me, alloc::string::String::new()));
 }
 
-/// Stop the innermost capture and return what it collected.
+/// Stop this task's innermost capture and return what it collected.
+///
+/// **This task's**, not the stack's. Two tasks capturing at once makes the
+/// stack interleave, and a plain `pop` would hand one task's output to the
+/// other and leave the first waiting on a capture that no longer exists.
 pub fn end_capture() -> Option<alloc::string::String> {
-    CAPTURE.lock_irq().pop()
+    let me = crate::task::current();
+    let mut stack = CAPTURE.lock_irq();
+    let at = stack.iter().rposition(|(t, _)| *t == me)?;
+    Some(stack.remove(at).1)
 }
 
+/// Is *this* task capturing?
+///
+/// This task's, because `serial::_print` suppresses the log while it is true,
+/// and the old global answer dropped the clock task's output from the
+/// transcript whenever the shell happened to be capturing.
+///
+/// Emptiness first, and that ordering is load-bearing rather than an
+/// optimisation. `serial_print!` runs before `console::init` and long before
+/// `lapic::init`, where `task::current()` reaches through a local controller
+/// base that is still zero. Nothing is capturing then, so the question is
+/// answered without asking.
 pub fn capturing() -> bool {
-    !CAPTURE.lock_irq().is_empty()
+    let stack = CAPTURE.lock_irq();
+    if stack.is_empty() {
+        return false;
+    }
+    // Inside the lock here, unlike its neighbours, and the ordering is the
+    // reason: emptiness has to be answered before the task is asked, or the
+    // early-boot guard above is not a guard. `current()` takes no lock, so
+    // this cannot deadlock -- it is a volatile read with interrupts off, on a
+    // path that only runs once something is genuinely capturing.
+    let me = crate::task::current();
+    stack.iter().any(|(t, _)| *t == me)
 }
 
 #[doc(hidden)]
@@ -1111,17 +1161,29 @@ pub fn _print(args: fmt::Arguments) {
     use fmt::Write;
     {
         let mut stack = CAPTURE.lock_irq();
-        if let Some(buf) = stack.last_mut() {
-            // Capped. A capture wraps arbitrary applet output, and an applet
-            // that prints forever -- a tool with a bad loop, a tree of a deep
-            // namespace -- would otherwise grow memory without bound while
-            // its caller is waiting on the capture to end. The cap is larger
-            // than any legitimate observation and smaller than a heap.
-            const CAPTURE_MAX: usize = 64 * 1024;
-            if buf.len() < CAPTURE_MAX {
-                let _ = buf.write_fmt(args);
+        // `current()` only when a capture is open, which by construction is
+        // long after boot. `console::init` runs twelve lines before
+        // `cpu::idt::init` and prints there, where a fault is a silent triple
+        // fault, so this path must not reach for per-core state until
+        // something has deliberately asked for a capture.
+        if !stack.is_empty() {
+            let me = crate::task::current();
+            if let Some((_, buf)) = stack.iter_mut().rev().find(|(t, _)| *t == me) {
+                // Capped. A capture wraps arbitrary applet output, and an
+                // applet that prints forever -- a tool with a bad loop, a tree
+                // of a deep namespace -- would otherwise grow memory without
+                // bound while its caller is waiting on the capture to end. The
+                // cap is larger than any legitimate observation and smaller
+                // than a heap.
+                const CAPTURE_MAX: usize = 64 * 1024;
+                if buf.len() < CAPTURE_MAX {
+                    let _ = buf.write_fmt(args);
+                }
+                return;
             }
-            return;
+            // A task printing while somebody *else* captures goes to the
+            // console, which is where it went before captures existed and is
+            // the only place it can honestly go.
         }
     }
     with(|c| {
@@ -1158,12 +1220,59 @@ macro_rules! kprintln {
 /// framebuffer, and what is being claimed here is arithmetic on bytes. The
 /// cases that earn their place are the malformed ones, because a decoder that
 /// only handles good input is a decoder nobody has tested.
+/// Open a capture attributed to somebody else, so a claim can check that a
+/// print does not fall into it.
+///
+/// Here rather than in `diag` because `CAPTURE` is private, and a claim rather
+/// than a second task because a spawned task that returns is never reclaimed
+/// -- `MAX_TASKS` is 24, and a suite that burned a slot per boot to check one
+/// property would be paying for the check forever. What is under test is the
+/// *matching*, and a fabricated task id tests exactly that.
+fn capture_as(task: usize) {
+    CAPTURE.lock_irq().push((task, alloc::string::String::new()));
+}
+
+fn drop_capture_of(task: usize) -> Option<alloc::string::String> {
+    let mut stack = CAPTURE.lock_irq();
+    let at = stack.iter().rposition(|(t, _)| *t == task)?;
+    Some(stack.remove(at).1)
+}
+
 pub fn selftest() -> bool {
     let mut ok = true;
     fn claim(ok: &mut bool, good: bool, what: &str) {
         crate::kprintln!("  {}   {}", if good { "ok " } else { "FAIL" }, what);
         *ok &= good;
     }
+
+    // **A capture belongs to the task that opened it**, and it did not until
+    // `diag differ` failed on a program that cannot print. One stack for the
+    // whole machine meant a line from the clock task or the resident mind
+    // landed in whichever capture happened to be innermost, so what a caller
+    // got back was its own output plus whatever else the machine said while it
+    // was waiting.
+    //
+    // A foreign id one above this task's, which no task can be running under
+    // while this one is: the property is the match, and a real second task
+    // would cost a slot out of 24 forever.
+    let me = crate::task::current();
+    let other = me.wrapping_add(1);
+    begin_capture();
+    capture_as(other);
+    crate::kprintln!("this line belongs to the capture below the foreign one");
+    let foreign = drop_capture_of(other).unwrap_or_default();
+    let mine = end_capture().unwrap_or_default();
+    claim(&mut ok, mine.contains("belongs to the capture"), "a capture collects what this task printed");
+    claim(
+        &mut ok,
+        foreign.is_empty(),
+        "and a capture another task opened does not take it, however nested",
+    );
+    claim(
+        &mut ok,
+        !capturing(),
+        "and both come off the stack, leaving this task not capturing",
+    );
 
     /// Feed a byte string and collect what came out, with '\u{FFFD}' standing
     /// for each replacement the console would have drawn.
