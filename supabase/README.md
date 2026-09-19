@@ -223,3 +223,107 @@ the wallet page displays the address the *wallet* reports beside the address
 the *server* recovered. MetaMask and Phantom are the independent
 implementations, and a wrong recovery shows up as two different addresses
 rather than as silence.
+
+## The proposal function
+
+The door a machine's own proposals come in through, and the one that spends
+somebody else's CI minutes.
+
+`godel source` picks a point out of the declared table of tunable constants and
+writes a patch; `godel push` sends it here as an *envelope* -- who is asking,
+from which lineage, against which corpus, how many tests that corpus has
+already paid for, and then the patch. The kernel cannot compile and cannot
+judge a source change, so this starts `propose.yml`: two builds on one runner,
+two boots, and the rail the proposal claimed.
+
+```
+supabase functions deploy proposal --no-verify-jwt
+```
+
+### The token is here and never there
+
+Dispatching a workflow needs a GitHub credential, and it lives in this
+function's environment. **The kernel never holds one**, which is the whole
+reason the outward path goes through a server rather than the machine talking
+to GitHub directly: a machine in the field carries a device code that can ask
+for a build to be judged, and nothing that can write to a repository.
+
+That is the same division `channel.rs` makes on the kernel side. What goes out
+is the machine's own text, over an authenticated connection to the origin it
+already talks to, and the origin decides what that means.
+
+### What arrives is not what is forwarded
+
+`_shared/envelope.js` reads the body into declared fields, checks every one
+against a shape, and **renders a fresh envelope from what it parsed**. The
+bytes handed to the workflow are bytes this side wrote.
+
+A validator that checked its input and then passed the original through would
+be one carriage return away from meaning something else, and the thing on the
+other end compiles code. The refusals are the point rather than the parse:
+
+```
+node supabase/functions/_shared/envelope.test.mjs
+```
+
+Forty-odd claims, and what earns their place is the list of things that must be
+refused -- a value that is a command, a value that is an expression, a path
+that climbs out of the tree, a symbol that is not a constant's name, a body
+carrying a control character. An Edge Function has no test runner of its own,
+which is why the validator is plain JS that `node` can drive, the same
+arrangement `gladosig.js` has with `crosscheck.mjs`.
+
+**And it has been checked against the kernel rather than against itself.** The
+recipe is two commands, and it is the same bargain `crosscheck.mjs` makes for
+the signer:
+
+```powershell
+.	oolsenv\Scripts\python.exe tools\drive.py --qemu-extra "-accel whpx -cpu max" `
+  "initiative off" "agent stop" "godel source" "godel push --dry" > out\push.log
+# strip the transcript's "  | " prefix, then:
+node -e "..."   # parse(raw).ok and render(parse(raw).proposal) === raw
+```
+
+Driven: the envelope the kernel rendered is 271 bytes over twelve lines, it
+parses, and `render` reproduces it **exactly**. Two implementations that are
+supposed to agree do not stay agreeing, and this is the pair where a single
+byte of disagreement is a proposal that silently means something else.
+
+It also refuses a patch under `src/gfx/`, `src/doom/` or `src/port/`, from the
+same list the kernel and `tools/knob.py` carry. Screenshots are captured and
+never compared, so such a patch would build, boot, read `same` on every rail
+there is, and be adopted having checked nothing about the only thing it
+changed. The kernel's copy stops the machine proposing one; this stops one
+arriving from anywhere else, which is what the auth check exists for.
+
+### The gate is the allowlist, not the balance
+
+`channel` opens on a token balance because what it hands out is a build, which
+is a product. This hands out CI minutes on somebody's behalf, and a balance is
+not a promise to behave -- so the allowlist only, plus a per-device daily
+count kept in `proposals` rather than inferred from GitHub. A run is two
+`cargo build --release` and two QEMU boots; an entitled device that could
+dispatch in a loop could spend an account's whole budget in an afternoon.
+
+### Secrets it needs
+
+| | |
+|---|---|
+| `GITHUB_DISPATCH_TOKEN` | fine-grained, `actions: write`, one repository, nothing else |
+| `GITHUB_REPO` | `owner/name`; defaults to this one |
+| `GITHUB_REF` | the branch to run on, default `main` |
+| `GITHUB_WORKFLOW` | default `propose.yml` |
+| `PROPOSAL_FOREST` | a path on the runner; blank means the workflow generates a fixture, **which it then refuses to adopt on** |
+| `PROPOSAL_PER_DAY` | runs one device may ask for, default 6 |
+
+With no token the door answers 503 and records the proposal as
+`unconfigured`, which is a configuration rather than an error and says so.
+
+### What it cannot do, said plainly
+
+It cannot cause an adoption. All it starts is a measurement; the verdict comes
+back **signed by the update key**, and `godel verdict` on the machine refuses
+an unsigned one -- a verdict is the only thing that writes a ledger line the
+machine did not derive itself, so an unsigned one is somebody else editing the
+lineage. Signing the verdict is the step `propose.yml` deliberately leaves out,
+and it is the one piece of this loop that is still not wired.
