@@ -2792,6 +2792,68 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
         // not a flag on `recall`, because it must be runnable while recall
         // is OFF -- the bench takes the block itself and would otherwise
         // read its own conclusion out of the switch it is judging.
+        // How far apart two applets are, by what they printed. Its own verb
+        // and not a column on `sysbox`, because taking the reading dispatches
+        // fourteen applets -- a list of names must not run anything.
+        //
+        // Nearest neighbours rather than the matrix: 23 by 23 is wider than a
+        // terminal, and the question an operator actually has is "what is a
+        // cheap confusion for this applet", which a row of distances answers
+        // only after somebody sorts it.
+        "outcome" => {
+            match crate::ai::outcome::probe() {
+                Some(m) => {
+                    kprintln!(
+                        "  {} of {} applet(s) ran -- the rest mutate and were never dispatched",
+                        m.ran,
+                        m.len()
+                    );
+                    let applets = crate::sysbox::APPLETS;
+                    for (a, ap) in applets.iter().enumerate() {
+                        if crate::sysbox::applet_mutates(ap.name) != Some(false) {
+                            continue;
+                        }
+                        let mut near: alloc::vec::Vec<(usize, f32)> = (0..m.len())
+                            .filter(|&b| b != a && m.get(a, b) < 1.0)
+                            .map(|b| (b, m.get(a, b)))
+                            .collect();
+                        near.sort_by(|x, y| {
+                            x.1.partial_cmp(&y.1).unwrap_or(core::cmp::Ordering::Equal)
+                        });
+                        near.truncate(3);
+                        if near.is_empty() {
+                            // Two different facts, and printing one message
+                            // for both would lose the more interesting one.
+                            // `hash` prints a line of hexadecimal and leaves
+                            // nothing a comparison can see; `same` prints
+                            // "identical" and simply shares that word with
+                            // nobody, which is a measurement rather than an
+                            // absence of one.
+                            kprintln!(
+                                "  {:8} {}",
+                                ap.name,
+                                if m.spoke(a) {
+                                    "printed nothing any other applet also says"
+                                } else {
+                                    "printed nothing a comparison can see"
+                                }
+                            );
+                            continue;
+                        }
+                        let mut line = alloc::string::String::new();
+                        for (b, d) in near.iter() {
+                            line.push_str(&alloc::format!(
+                                "{} {:.2}  ",
+                                applets[*b].name,
+                                d
+                            ));
+                        }
+                        kprintln!("  {:8} {}", ap.name, line);
+                    }
+                }
+                None => kprintln!("  no namespace, so there is nothing to run an applet against"),
+            }
+        }
         "answer" => {
             match crate::ai::with_engine(crate::ai::answer::bench) {
                 Some(Some(v)) => {
