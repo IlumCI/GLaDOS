@@ -5305,6 +5305,11 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             }
             console::set_color(WHITE);
         }
+        // `bench` alone is the matmul rail a person reads; `bench report`
+        // is every rail in one block a program reads. Same measurements
+        // underneath, because two of them is how two answers to "did this
+        // regress" come to disagree.
+        "bench" if rest.trim() == "report" => crate::bench::report(),
         "bench" => crate::ai::bench(),
         "model" => crate::ai::model_demo(),
         // The two pictures that come before a renderer: the WAD's own

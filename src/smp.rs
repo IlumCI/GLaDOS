@@ -816,7 +816,32 @@ pub fn selftest_mt() -> bool {
     ok
 }
 
-pub fn bench() {
+/// What a 16 MiB matvec costs on one core and on all of them.
+///
+/// `None` when the split answer differs from the whole one, which is an index
+/// bug and not a timing, and reporting a ratio for it would be reporting a
+/// speedup for skipped rows.
+pub struct Split {
+    pub cores: usize,
+    pub one_us: u64,
+    pub many_us: u64,
+    pub bytes: u64,
+}
+
+impl Split {
+    pub fn one_mbs(&self) -> u64 {
+        self.bytes / self.one_us.max(1)
+    }
+    pub fn many_mbs(&self) -> u64 {
+        self.bytes / self.many_us.max(1)
+    }
+}
+
+/// A struct rather than five printed lines, for the reason `gfx::measure`
+/// gives: `bench report` needs the numbers and a person needs the table, and
+/// two measurements of one thing is how two answers to "did this regress" come
+/// to disagree.
+pub fn measure() -> Option<Split> {
     use crate::ai::weights::Mat;
     use alloc::vec;
     use alloc::vec::Vec;
@@ -826,7 +851,6 @@ pub fn bench() {
     let (rows, cols) = (4096usize, 4096usize);
     let reps = 8;
 
-    crate::kprintln!("  building {} MiB...", rows * cols / (1024 * 1024));
     let data: Vec<i8> = (0..rows * cols)
         .map(|i| (i as u32).wrapping_mul(2654435761).to_le_bytes()[0] as i8)
         .collect();
@@ -872,21 +896,28 @@ pub fn bench() {
     let (many, sum_many) = run(&mut x2, &mut out);
 
     if sum_one != sum_many {
-        crate::kprintln!("  FAIL -- the split answer differs from the whole one");
-        return;
+        return None;
     }
 
-    let bytes = (rows * cols * reps) as u64;
-    crate::kprintln!("  1 core    {} us   {} MB/s", one, bytes / one.max(1));
-    crate::kprintln!(
-        "  {} cores   {} us   {} MB/s",
-        saved + 1,
-        many,
-        bytes / many.max(1)
-    );
-    if many > 0 {
+    Some(Split {
+        cores: saved as usize + 1,
+        one_us: one,
+        many_us: many,
+        bytes: (rows * cols * reps) as u64,
+    })
+}
+
+pub fn bench() {
+    crate::kprintln!("  building 16 MiB...");
+    let Some(m) = measure() else {
+        crate::kprintln!("  FAIL -- the split answer differs from the whole one");
+        return;
+    };
+    crate::kprintln!("  1 core    {} us   {} MB/s", m.one_us, m.one_mbs());
+    crate::kprintln!("  {} cores   {} us   {} MB/s", m.cores, m.many_us, m.many_mbs());
+    if m.many_us > 0 {
         // Tenths, without floating point in a diagnostic.
-        let x10 = one * 10 / many;
+        let x10 = m.one_us * 10 / m.many_us;
         crate::kprintln!("  {}.{}x", x10 / 10, x10 % 10);
     }
 }

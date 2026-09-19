@@ -559,7 +559,22 @@ pub fn model_demo() {
 }
 
 /// Measure sustained matmul throughput at a size typical of a small model.
-pub fn bench() {
+/// How fast this machine multiplies, which is what a forward pass is.
+///
+/// No model is loaded and none is needed: what it times is `tensor::matmul`
+/// itself, so it is a rail on a machine with no checkpoint on the disk.
+#[derive(Clone, Copy)]
+pub struct Matmul {
+    pub iters: u64,
+    pub ticks: u64,
+    pub gflops: f32,
+    pub avx: bool,
+    /// A value derived from the output, so the compiler cannot decide the
+    /// whole loop is dead.
+    pub checksum: i64,
+}
+
+pub fn measure() -> Matmul {
     let n = 512usize;
     let d = 512usize;
     let mut wv: Vec<f32> = Vec::with_capacity(n * d);
@@ -588,22 +603,29 @@ pub fn bench() {
     // Two flops per element: one multiply, one add.
     let flops = 2.0 * (n * d) as f32 * iters as f32;
     let seconds = elapsed as f32 / hz as f32;
-    let gflops = flops / seconds / 1.0e9;
+    Matmul {
+        iters,
+        ticks: elapsed,
+        gflops: flops / seconds / 1.0e9,
+        avx: crate::cpu::detected().avx_enabled,
+        checksum: (out[0] * 1000.0) as i64,
+    }
+}
 
+pub fn bench() {
+    let m = measure();
     console::set_color(YELLOW);
     kprintln!("[bench]");
     console::set_color(WHITE);
-    kprintln!("  {}x{} matmul, {} iterations in {} ticks", d, n, iters, elapsed);
-    let path = if crate::cpu::detected().avx_enabled { "avx2+fma" } else { "scalar" };
+    kprintln!("  512x512 matmul, {} iterations in {} ticks", m.iters, m.ticks);
     // Integer-formatted: printing floats needs a formatter we have not written.
     kprintln!(
         "  {}.{:02} GFLOP/s  ({})",
-        gflops as u64,
-        ((gflops * 100.0) as u64) % 100,
-        path
+        m.gflops as u64,
+        ((m.gflops * 100.0) as u64) % 100,
+        if m.avx { "avx2+fma" } else { "scalar" }
     );
-    // Guard against the compiler deciding the whole loop is dead.
-    kprintln!("  checksum {}", (out[0] * 1000.0) as i64);
+    kprintln!("  checksum {}", m.checksum);
 }
 
 // --- the engine ---------------------------------------------------------

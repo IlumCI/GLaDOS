@@ -108,8 +108,23 @@ pub fn eval_line(interp: &mut Interp, src: &str) -> Result<Value, String> {
 /// once more per loop iteration, and a second implementation of that rule in
 /// the benchmark would be a second thing to keep in step -- and would quietly
 /// mis-report the moment either drifted.
-pub fn bench() {
-    use crate::kprintln;
+/// What the tree-walking interpreter costs.
+///
+/// Picoseconds for a step, because a step is well under a nanosecond once the
+/// loop is divided out and integer nanoseconds would read as zero.
+#[derive(Clone, Copy)]
+pub struct Walk {
+    pub mhz: u64,
+    pub new_ns: (u64, u64),
+    pub loop_ns: (u64, u64),
+    pub steps: u64,
+    pub step_ps: u64,
+}
+
+/// A struct rather than printed lines, so `bench report` and a person read one
+/// measurement. `None` when the loop reported no steps, in which case nothing
+/// derived from it means anything.
+pub fn measure() -> Option<Walk> {
     let mhz = crate::time::tsc_mhz().max(1);
     const RUNS: usize = 9;
 
@@ -128,14 +143,11 @@ pub fn bench() {
     }
     let ns = |cycles: u64| -> u64 { cycles.saturating_mul(1000) / mhz };
 
-    kprintln!("  tsc {} MHz, best of {}", mhz, RUNS);
-
     // Construction alone. `Core::vote` pays this on every routing decision.
     let (c_lo, c_hi) = best(|| {
         let it = eval::Interp::new();
         core::hint::black_box(&it);
     });
-    kprintln!("  Interp::new()          {} ns  (max {})", ns(c_lo), ns(c_hi));
 
     // A tight loop, timed against the interpreter's own step count.
     let src = "i = 0 while (i < 20000) { i = i + 1 } i";
@@ -145,20 +157,33 @@ pub fn bench() {
         let _ = eval_line(&mut it, src);
         steps = it.steps();
     });
+    if steps == 0 {
+        return None;
+    }
+    Some(Walk {
+        mhz,
+        new_ns: (ns(c_lo), ns(c_hi)),
+        loop_ns: (ns(l_lo), ns(l_hi)),
+        steps,
+        step_ps: ns(l_lo).saturating_mul(1000) / steps,
+    })
+}
+
+pub fn bench() {
+    use crate::kprintln;
+    let Some(m) = measure() else {
+        kprintln!("  the loop reported no steps -- nothing here would mean anything");
+        return;
+    };
+    kprintln!("  tsc {} MHz, best of 9", m.mhz);
+    kprintln!("  Interp::new()          {} ns  (max {})", m.new_ns.0, m.new_ns.1);
     kprintln!(
         "  20k-iteration loop     {} us  (max {}), {} steps",
-        ns(l_lo) / 1000,
-        ns(l_hi) / 1000,
-        steps
+        m.loop_ns.0 / 1000,
+        m.loop_ns.1 / 1000,
+        m.steps
     );
-    if steps == 0 {
-        kprintln!("  the loop reported no steps -- nothing below this line means anything");
-        return;
-    }
-    // Picoseconds, because a step is well under a nanosecond of resolution
-    // once the loop is divided out and integer nanoseconds would read as 0.
-    let ps = ns(l_lo).saturating_mul(1000) / steps;
-    kprintln!("  one step               {} ps", ps);
+    kprintln!("  one step               {} ps", m.step_ps);
 
     // What every budget in the tree means in time, which is the number none of
     // them could be checked against before.
@@ -169,7 +194,7 @@ pub fn bench() {
         ("SKILL_BUDGET  5M", 5_000_000),
         ("STEP_BUDGET  20M", 20_000_000),
     ] {
-        let us = budget.saturating_mul(ps) / 1_000_000;
+        let us = budget.saturating_mul(m.step_ps) / 1_000_000;
         if us >= 1000 {
             kprintln!("    {}   {} ms", name, us / 1000);
         } else {

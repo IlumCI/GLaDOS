@@ -1147,16 +1147,43 @@ impl Framebuffer {
 /// the host. Noise only ever *adds* time, so the minimum over a handful of
 /// runs is the honest estimate of what the code costs; the maximum is printed
 /// beside it so the spread is visible rather than hidden.
-pub fn bench() {
-    use crate::kprintln;
-    let Some(fb) = primary() else {
-        kprintln!("  no framebuffer");
-        return;
-    };
+/// What one frame costs, in microseconds, best of nine.
+///
+/// A struct rather than five printed lines, because `bench report` needs the
+/// numbers and a person needs the table -- and two measurements of the same
+/// thing is how two answers to "did this regress" come to disagree. One
+/// `measure`, two consumers.
+#[derive(Clone, Copy)]
+pub struct Frame {
+    pub width: u32,
+    pub height: u32,
+    /// One span-filled rectangle over the whole target. The control: nothing
+    /// above the framebuffer can touch it, so what it moves by between two
+    /// builds is the noise floor.
+    pub rect_us: (u64, u64),
+    pub draw_us: (u64, u64),
+    /// A present with nothing changed, which is the diff alone and the floor
+    /// for any repaint that turns out to be a no-op.
+    pub present_us: (u64, u64),
+    /// ...and one where every row differs, which is the worst case.
+    pub fill_present_us: (u64, u64),
+    /// The terminal's own cost, which is most of what a full `draw` is.
+    pub console_us: (u64, u64),
+}
+
+/// Time the graphics path. `None` when there is no framebuffer to time.
+///
+/// **Only comparable against a run with the same text on screen**, because
+/// `console::redraw_all` skips blank cells and so scales with how much output
+/// is sitting in the terminal. The same build measured 497 us after a bare
+/// boot and 823 us after `diag all` had filled the console. Take the before
+/// and after with the identical command prefix, and read `rect_us` as the
+/// control.
+pub fn measure() -> Option<Frame> {
+    let fb = primary()?;
     let mhz = crate::time::tsc_mhz().max(1);
     const RUNS: usize = 9;
 
-    // Answers (min, max) in microseconds.
     let mut best_of = |f: &mut dyn FnMut()| -> (u64, u64) {
         let (mut lo, mut hi) = (u64::MAX, 0u64);
         for _ in 0..RUNS {
@@ -1171,32 +1198,43 @@ pub fn bench() {
 
     let target = compose::target().unwrap_or_else(|| fb.clone());
     let (w, h) = (target.width(), target.height());
-    kprintln!("  {}x{}  {} pixels, best of {}", w, h, w as u64 * h as u64, RUNS);
-
-    let (lo, hi) = best_of(&mut || target.rect(0, 0, w, h, theme::DESKTOP));
-    kprintln!("  full-screen rect      {:>7} us  (max {})", lo, hi);
-
-    let (lo, hi) = best_of(&mut || desk::draw());
-    kprintln!("  desk::draw + present  {:>7} us  (max {})", lo, hi);
-
-    // A present with nothing changed: the diff alone, which is the floor for
-    // any repaint that turns out to be a no-op.
-    let (lo, hi) = best_of(&mut || compose::present());
-    kprintln!("  present, no change    {:>7} us  (max {})", lo, hi);
-
-    // ...and one where every row differs, which is the worst case.
-    let (lo, hi) = best_of(&mut || {
-        target.rect(0, 0, w, h, theme::APERTURE);
-        compose::present();
-    });
-    kprintln!("  fill + present, all   {:>7} us  (max {})", lo, hi);
-
-    // The terminal's own cost, which is what a full `desk::draw` is mostly
-    // made of: every cell repainted through `put`.
-    let (lo, hi) = best_of(&mut || console::redraw());
-    kprintln!("  console redraw_all    {:>7} us  (max {})", lo, hi);
-
+    let out = Frame {
+        width: w,
+        height: h,
+        rect_us: best_of(&mut || target.rect(0, 0, w, h, theme::DESKTOP)),
+        draw_us: best_of(&mut || desk::draw()),
+        present_us: best_of(&mut || compose::present()),
+        fill_present_us: best_of(&mut || {
+            target.rect(0, 0, w, h, theme::APERTURE);
+            compose::present();
+        }),
+        console_us: best_of(&mut || console::redraw()),
+    };
     desk::draw();
+    Some(out)
+}
+
+pub fn bench() {
+    use crate::kprintln;
+    let Some(m) = measure() else {
+        kprintln!("  no framebuffer");
+        return;
+    };
+    kprintln!(
+        "  {}x{}  {} pixels, best of 9",
+        m.width,
+        m.height,
+        m.width as u64 * m.height as u64
+    );
+    for (what, (lo, hi)) in [
+        ("full-screen rect     ", m.rect_us),
+        ("desk::draw + present ", m.draw_us),
+        ("present, no change   ", m.present_us),
+        ("fill + present, all  ", m.fill_present_us),
+        ("console redraw_all   ", m.console_us),
+    ] {
+        kprintln!("  {} {:>7} us  (max {})", what, lo, hi);
+    }
 }
 
 

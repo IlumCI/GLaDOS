@@ -643,10 +643,40 @@ pub fn author(names: &[String], table: &[(String, usize, u32)]) -> Option<String
 /// phases are timed through the same `interp()` and `arm()` the real path
 /// uses, not through a copy of them, so the split cannot describe something
 /// other than what `vote` does.
-pub fn bench() {
-    use crate::kprintln;
+/// What one routing vote costs, decomposed.
+///
+/// `build` doubles as the control when two boots are compared: nothing that
+/// changes how a program is *stored or called* can touch `Interp::new`, so a
+/// difference in it between two builds is measurement error and nothing else.
+/// It read 16% across the pair that judged the `Rc` change, against a 25%
+/// effect, which is how the noise floor gets a number instead of an adjective.
+#[derive(Clone, Copy)]
+pub struct Vote {
+    pub build_ns: u64,
+    pub arm_ns: u64,
+    pub invoke_ns: u64,
+    pub total_ns: u64,
+    pub steps: u64,
+}
+
+/// One vote, best of nine samples of two hundred.
+///
+/// **One vote per timed sample could not resolve this**, and saying so is the
+/// whole reason the shape is what it is. A vote is a few microseconds; under
+/// the hypervisor accelerator the host's scheduler moves a best-of-nine
+/// minimum by 20% between boots, measured directly -- the 20k-step loop came
+/// out 25% faster on the boot where the vote came out 18% slower. A change
+/// worth roughly a tenth of a vote is invisible in that, so each sample runs
+/// `REPS` votes and the noise divides by `REPS`.
+///
+/// The three phases are measured as nested prefixes rather than separately,
+/// because arming needs a fresh interpreter and invoking needs an armed one:
+/// timing them apart would mean rebuilding between the stopwatch's start and
+/// stop, and charging that to whichever phase came second.
+pub fn measure() -> Option<Vote> {
     let mhz = crate::time::tsc_mhz().max(1);
     const RUNS: usize = 9;
+    const REPS: usize = 200;
 
     // A core of exactly the shape `compose` produces, since that is what the
     // machine writes and therefore what the cost question is about.
@@ -656,30 +686,13 @@ pub fn bench() {
         Clause { cue: String::from("back"), class: 20 },
     ]);
     let h = sha256::hash(src.as_bytes());
-    let Ok(core) = parse(&h, &src) else {
-        kprintln!("  the composed core would not parse");
-        return;
-    };
+    let core = parse(&h, &src).ok()?;
     let text = "put everything the way it was at checkpoint two";
     let all: Vec<usize> = (0..23).collect();
     let list = Value::List(all.iter().map(|i| Value::Int(*i as i64)).collect());
 
     let ns = |c: u64| -> u64 { c.saturating_mul(1000) / mhz };
 
-    // One vote per timed sample could not resolve this, and saying so is the
-    // whole reason the shape changed. A vote is a few microseconds; under
-    // WHPX the host's scheduler moves a best-of-nine minimum by 20% between
-    // boots, which was measured directly -- the 20k-step loop above came out
-    // 25% faster on the boot where the vote came out 18% slower. A change
-    // worth roughly a tenth of a vote is invisible in that. So each sample
-    // runs REPS votes and the noise divides by REPS.
-    //
-    // The three phases are measured as nested prefixes rather than
-    // separately, because arming needs a fresh interpreter and invoking needs
-    // an armed one: timing them apart would mean rebuilding between the
-    // stopwatch's start and stop, and charging that to whichever phase came
-    // second.
-    const REPS: usize = 200;
     let (mut b_lo, mut ba_lo, mut t_lo) = (u64::MAX, u64::MAX, u64::MAX);
     let mut used = 0u64;
     for _ in 0..RUNS {
@@ -712,34 +725,41 @@ pub fn bench() {
     let build = per(b_lo);
     let arm = per(ba_lo).saturating_sub(build);
     let total = per(t_lo);
-    let invoke = total.saturating_sub(build + arm);
+    Some(Vote {
+        build_ns: build,
+        arm_ns: arm,
+        invoke_ns: total.saturating_sub(build + arm),
+        total_ns: total,
+        steps: used,
+    })
+}
 
-    kprintln!("  one vote, best of {} x {}:", RUNS, REPS);
-    // `build` doubles as the control when two boots are compared. Nothing
-    // that changes how a program is *stored or called* can touch
-    // `Interp::new`, so a difference in this line between two builds is
-    // measurement error and nothing else -- which is how the noise floor
-    // gets a number instead of an adjective. It read 16% across the pair
-    // that judged the `Rc` change, against a 25% effect.
-    kprintln!("    build interpreter    {} ns", build);
-    kprintln!("    arm (run top level)  {} ns", arm);
-    kprintln!("    call vote            {} ns", invoke);
-    kprintln!("    total                {} ns", total);
-    let t = total.max(1);
+pub fn bench() {
+    use crate::kprintln;
+    let Some(m) = measure() else {
+        kprintln!("  the composed core would not parse");
+        return;
+    };
+    kprintln!("  one vote, best of 9 x 200:");
+    kprintln!("    build interpreter    {} ns", m.build_ns);
+    kprintln!("    arm (run top level)  {} ns", m.arm_ns);
+    kprintln!("    call vote            {} ns", m.invoke_ns);
+    kprintln!("    total                {} ns", m.total_ns);
+    let t = m.total_ns.max(1);
     kprintln!(
         "    the walk is {}% of it; {}% is setup paid per decision",
-        invoke * 100 / t,
-        (build + arm) * 100 / t
+        m.invoke_ns * 100 / t,
+        (m.build_ns + m.arm_ns) * 100 / t
     );
     // The part a code generator could actually remove.
     //
     // "The walk" above is everything `invoke` does, and most of that is not
     // walking: it is the string `lower` allocates, what `contains` scans, and
     // the arguments being cloned into the frame. Only the stepping itself --
-    // this many steps at the rate the section above just measured -- is
-    // dispatch overhead a compiler would take away. Printing the two side by
-    // side is the whole point of measuring before designing.
-    kprintln!("    {} steps taken by the vote", used);
+    // this many steps at the rate `aiksi::bench` measures -- is dispatch
+    // overhead a compiler would take away. Printing the two side by side is
+    // the whole point of measuring before designing.
+    kprintln!("    {} steps taken by the vote", m.steps);
 }
 
 pub fn selftest() -> bool {

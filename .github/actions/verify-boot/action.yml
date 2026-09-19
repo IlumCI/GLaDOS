@@ -94,8 +94,38 @@ runs:
         python3 tools/drive.py --no-payload \
           --qemu-extra "-accel kvm -cpu host -smp 4" \
           --timeout "${{ inputs.timeout }}" \
-          "initiative off" "agent stop" "echo ready" "diag all" "echo alive" \
+          "initiative off" "agent stop" "echo ready" "diag all" \
+          "echo mid" "bench report" "echo alive" \
           2>&1 | tee verify.log
+
+    # Every rail this build can measure about itself, lifted out of the
+    # transcript and kept as its own artifact.
+    #
+    # **Recorded rather than judged, and the distinction is the honest one.**
+    # Comparing two builds needs two reports and this job has one; what it can
+    # do is make sure the number exists and is attached to the commit that
+    # produced it, so the comparison is available to whatever asks later.
+    # Measured on the development machine, two consecutive single-core `smp`
+    # samples of identical code differed by 29%, so a future comparison wants a
+    # control and a threshold rather than a `!=`.
+    - name: Keep the rail report
+      shell: bash
+      run: |
+        set -euo pipefail
+        sed -n '/^\[rail\] v1/,/^\[rail\] end/p' verify.log > rails.txt
+        if ! grep -q '^\[rail\] end' rails.txt; then
+          echo "::error::bench report did not finish"
+          exit 1
+        fi
+        # An `absent` rail is a fact about the runner rather than a failure --
+        # CI has no NVMe store and may have no framebuffer. It is surfaced
+        # rather than ignored, because a rail quietly absent on every build is
+        # a rail nobody will notice was never measured.
+        if grep -q ' absent ' rails.txt; then
+          echo "::notice::rails this runner could not measure:"
+          grep ' absent ' rails.txt
+        fi
+        cat rails.txt
 
     # **Five separate questions, because `diag all` answering cleanly is only
     # one of them.** A boot that halted before the shell prints no tally at
@@ -160,6 +190,7 @@ runs:
         name: verify-${{ github.run_id }}-${{ github.run_attempt }}
         path: |
           verify.log
+          rails.txt
           .qemu/qemu-stderr.log
         if-no-files-found: ignore
         retention-days: 14
