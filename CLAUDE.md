@@ -888,6 +888,47 @@ it produced is the argument for paired testing arriving as a measurement:
 The aggregate was **identical both ways**, 62.7%, while eight items moved four
 each way. Two percentages would have called that nothing.
 
+**Driven again once every piece above existed**, both arms gated by `diag all`,
+three rail readings a boot, and the judge reading `--again`. It refused, and
+what refused it is the interesting part:
+
+    video.*         unstable  the candidate's own two readings moved
+                              video.rect by 69.2%, so it does not agree
+                              with itself
+    core.*          unstable  core.new moved -72.2% between the two builds
+    ai.bpb          same      +0.0%, inside the 2% floor
+    smp.all_cores   same      -54.9%, inside the 132% floor measured today
+    host.retrieval  same      fixed 1 broke 2 of 250, net under 4
+
+    J1 claimed  VETO        J2 the rest  pass
+    NOT COMPARABLE -- 9 rail(s) had a control that drifted
+
+Three of tonight's mechanisms are visible in that block and each did the job
+it was built for. The **self-disagreement** refusal fired on a build whose own
+two readings moved the graphics control by 69%, which nothing could say before.
+The **measured floor** called `smp.all_cores` at -54.9% noise where the
+declared 29% would have made it a regression, so **J2 passed** where it used to
+veto on the day rather than on the proposal. And `ai.bpb` moved by exactly
+nothing, which is what a deterministic rail on an unchanged model reading an
+unchanged history should say.
+
+Both arms passed `diag all` 65 of 65 before anything was judged, which is the
+gate working: a candidate that broke something never reaches the rails. The
+verdict was signed (267 B), carried in on the NVMe image, verified before it
+was parsed, and filed:
+
+    1 h7 parent=root.... variant=737f9c0a axis=source rail=host.retrieval
+      moved=unstable corpus=f330c22c
+      host.retrieval same fixed 1 broke 2 of 250, net under 4 reject
+
+**One thing that reads oddly and is worth a decision rather than a fix at the
+keyboard.** An unstable comparison is filed as `reject`, so a measurement that
+did not compare and a change that was judged and refused leave the same verb in
+the ledger. `moved=unstable` distinguishes them to a reader, and nothing
+automatic reads that field. The honest alternative is a fourth outcome that
+consumes no lineage and asks for the reading again, which is what the third
+verdict already means one level down.
+
 **The evidence budget is family-wise now.** Every judged comparison at
 `bar_in_force()` is a test at p < 0.05; run one nightly for a year and roughly
 one adoption in twenty is noise, permanently, by construction. So each trial
