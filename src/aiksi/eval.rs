@@ -804,7 +804,7 @@ pub struct Prepared {
 /// every frame is a fresh allocation and the kernel runs out of stack long
 /// before twenty million steps -- and running out of stack in ring 0 with no
 /// guard page is a triple fault, not an error message.
-const MAX_DEPTH: usize = 64;
+pub const MAX_DEPTH: usize = 64;
 
 /// What a program is allowed to reach.
 ///

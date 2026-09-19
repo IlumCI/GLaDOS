@@ -290,30 +290,31 @@ pub fn observe(src: &str, entry: Entry, route: Route) -> Option<Outcome> {
 /// zero" would be wrong in a way only this comparison catches.
 fn compiled(prog: &[super::parse::Stmt], entry: Entry) -> Option<Outcome> {
     use super::jit;
-    // `Call` is interpreted-only: the slice admits no calls, so there is
+    // `Call` is interpreted-only: its arguments are strings, and there is
     // nothing a compiled route could do with one.
     let Entry::Ints(want, args) = entry else { return None };
-    let (name, params, ret, body) = jit::only_fn(prog)?;
-    if name != want {
-        return None;
-    }
-    let p = jit::compile(params, ret, body)?;
-    // The budget the compiled code is given is short by the declaration's
-    // tick, for the same reason the count below is long by it.
-    let r = p.run(args, BUDGET - 1)?;
-    // The interpreter charged one tick for *executing the `fn` statement*
-    // that declared this function, before anything called it -- `observe`
-    // runs the top level and then invokes. Compiled code never ran a top
-    // level, so it owes exactly that one tick to be comparable, and `only_fn`
-    // guarantees the top level is exactly one statement so the number is one
-    // and not an estimate.
+    let fns = jit::only_fns(prog)?;
+    let at = fns.iter().position(|f| f.name == want)?;
+    let p = jit::compile(&fns, at)?;
+    // The interpreter charged one tick for *executing each `fn` statement*
+    // that declared a function, before anything called it -- `observe` runs
+    // the top level and then invokes. Compiled code never ran a top level, so
+    // it owes exactly those ticks to be comparable, and `only_fns` guarantees
+    // every top-level statement is a declaration so the number is the length
+    // of the program and not an estimate.
     //
     // This was the harness being wrong, not the compiler, and it was found by
     // the comparison failing on `fn f(): int { return 7 }` -- two ticks
     // against three. Worth recording because a harness that had been written
     // to agree would have hidden every later discrepancy behind the same
-    // fudge.
-    let steps = r.steps + 1;
+    // fudge. It was `+ 1` while the slice held one function; the day it held
+    // two, a constant would have been out by one with nothing saying which
+    // half was wrong.
+    let owed = fns.len() as u64;
+    let r = p.run(args, BUDGET - owed)?;
+    let steps = r.steps + owed;
+    let ret = fns[at].ret;
+    let name = fns[at].name;
     let out = match r.status {
         jit::ST_VALUE => Outcome {
             value: Value::Int(r.result).render(),
@@ -322,16 +323,14 @@ fn compiled(prog: &[super::parse::Stmt], entry: Entry) -> Option<Outcome> {
             console: String::new(),
         },
         jit::ST_NIL => {
-            // A function that falls off its end yields nothing, and
-            // `call_user` then checks that against the declared return type.
-            // Compiled code has to fail the same way, in the same words, or a
-            // function with a missing `return` would quietly answer nil here
-            // and an error there.
+            // Only an unannotated entry can reach this: a call to a function
+            // that is not `: int` is refused where the Nil would escape, so
+            // nothing below the top level can answer nothing.
             if matches!(ret, super::parse::Type::Int) {
                 Outcome::failed(alloc::format!("{} returns int, got nil", name), steps)
             } else {
-                // Compiled code cannot print -- the slice admits no calls --
-                // so an empty console here is a fact rather than a default.
+                // Compiled code cannot print -- the slice admits no builtins
+                // -- so an empty console here is a fact rather than a default.
                 Outcome {
                     value: Value::Nil.render(),
                     steps,
@@ -340,6 +339,19 @@ fn compiled(prog: &[super::parse::Stmt], entry: Entry) -> Option<Outcome> {
                 }
             }
         }
+        // A function declared `: int` that fell off its end or returned bare.
+        // `call_user` names it, so the blame index carries which one -- a
+        // message naming the entry when a callee three frames down was at
+        // fault would be exactly the "report names the wrong subsystem"
+        // failure `boot_report` carries a field to avoid.
+        jit::ST_RETNIL => {
+            let who = fns.get(r.blame as usize)?.name;
+            Outcome::failed(alloc::format!("{} returns int, got nil", who), steps)
+        }
+        jit::ST_DEPTH => Outcome::failed(
+            String::from("call nesting too deep (runaway recursion?)"),
+            steps,
+        ),
         jit::ST_BUDGET => Outcome::failed(
             String::from("execution budget exceeded (infinite loop?)"),
             steps,
@@ -607,6 +619,94 @@ const INTS: &[(&str, &str, &str, &[i64])] = &[
     // declared type and refuses. The compiled route has to refuse in the same
     // words.
     ("no return at all", "fn f(a: int): int { x = a }", "f", &[3]),
+
+    // --- calls, which is the rung this slice grew by -------------------
+    //
+    // Every one of these was outside it a commit ago, and the ordering is
+    // deliberate: the cheap ones first, then the two that a flat slot array
+    // answers confidently and wrongly, then the failures.
+    (
+        "a call, twice, each with a frame of its own",
+        "fn g(x: int): int { return x + x } fn f(a: int): int { return g(a) + g(a + 1) }",
+        "f",
+        &[5],
+    ),
+    (
+        "a call whose argument is a call",
+        "fn g(x: int): int { return x + 1 } fn f(a: int): int { return g(g(g(a))) }",
+        "f",
+        &[0],
+    ),
+    // Recursion is what a shared slot array gets wrong: the inner call writes
+    // its parameter over its caller's, so the unwinding half of the
+    // computation reads the deepest frame's values and the answer is merely
+    // plausible. Nothing about the step count would notice.
+    (
+        "recursion, where a shared frame would answer wrongly",
+        "fn fact(n: int): int { if (n < 2) { return 1 } return n * fact(n - 1) }",
+        "fact",
+        &[10],
+    ),
+    (
+        "recursion branching twice, so a live local must survive a call",
+        "fn fib(n: int): int { if (n < 2) { return n } return fib(n - 1) + fib(n - 2) }",
+        "fib",
+        &[10],
+    ),
+    (
+        "mutual recursion, which needs a call emitted before its target exists",
+        "fn even(n: int): int { if (n == 0) { return 1 } return odd(n - 1) }          fn odd(n: int): int { if (n == 0) { return 0 } return even(n - 1) }",
+        "even",
+        &[9],
+    ),
+    (
+        "a call inside a loop, so a frame is built and torn down repeatedly",
+        "fn sq(x: int): int { return x * x }          fn f(n: int): int { i = 0 s = 0 while (i < n) { s = s + sq(i) i = i + 1 } return s }",
+        "f",
+        &[12],
+    ),
+    (
+        "an unannotated entry that calls and then falls off its end",
+        "fn g(x: int): int { return x + 1 } fn f(a: int) { g(a) }",
+        "f",
+        &[4],
+    ),
+    // The depth cap, which is `eval::MAX_DEPTH` read rather than a number
+    // written down twice. Unbounded recursion is the one runaway the step
+    // budget does not stop in time: every frame is real stack, and running
+    // out of it in ring 0 with no guard page is a triple fault.
+    (
+        "runaway recursion, refused at the same depth and the same step",
+        "fn f(n: int): int { return f(n + 1) }",
+        "f",
+        &[0],
+    ),
+    // Blame. A callee that yields nothing is refused *by name*, and the name
+    // has to be the callee's rather than the entry's -- a message naming the
+    // wrong function is the failure `boot_report` carries a field to avoid,
+    // arriving one subsystem over.
+    (
+        "a callee with no return, named as the one at fault",
+        "fn g(x: int): int { y = x } fn f(a: int): int { return g(a) + 1 }",
+        "f",
+        &[3],
+    ),
+    (
+        "a callee returning bare, which is the same nil by another route",
+        "fn g(x: int): int { if (x) { return 1 } return } fn f(a: int): int { return g(a) }",
+        "f",
+        &[0],
+    ),
+    // Arguments are evaluated left to right and charged as they go, so a
+    // failure in the second has the first one's ticks already spent. A
+    // compiler that pushed right to left would answer identically here and
+    // cost differently, which is the whole reason cost is compared.
+    (
+        "a failure in the second argument, after the first was charged",
+        "fn g(x: int, y: int): int { return x } fn f(a: int): int { return g(a + a + a, a / 0) }",
+        "f",
+        &[2],
+    ),
 ];
 
 /// Two programs that answer the same thing and cost different amounts.
@@ -773,17 +873,51 @@ pub fn selftest() -> bool {
     // compiled something outside its slice would be answering a question it
     // was not asked, and the answer would be wrong in a way nothing here
     // would catch -- these programs have no integer-only meaning at all.
-    for outside in [
-        "fn f(a: int): str { return \"x\" }",
-        "fn f(a: int): int { return len(list(1)) }",
-        "rec P { x } fn f(a: int): int { return P(a).x }",
-        "fn g(): int { return 1 } fn f(a: int): int { return g() }",
-        "fn f(a: int): int { return a & 1 }",
+    //
+    // **Each one says which it is.** They were five claims in identical
+    // words, and when the slice grew calls one of them stopped holding and
+    // the transcript read four `ok` and one `FAIL` with nothing to tell them
+    // apart. A claim that cannot name its own subject is a claim somebody has
+    // to bisect, which is the same objection `boot_report` makes about a
+    // report that names the wrong subsystem.
+    for (why, outside) in [
+        ("a string return", "fn f(a: int): str { return \"x\" }"),
+        ("a builtin", "fn f(a: int): int { return len(list(1)) }"),
+        ("a record", "rec P { x } fn f(a: int): int { return P(a).x }"),
+        ("a bit operator", "fn f(a: int): int { return a & 1 }"),
+        // The boundary calls moved. A call is in the slice now; these four
+        // are the refusals that replaced the blanket one, and each is a place
+        // the compiled route could otherwise answer where the interpreter
+        // does not.
+        (
+            "a callee that can yield nil",
+            "fn g(x: int) { return } fn f(a: int): int { return g(a) }",
+        ),
+        (
+            "a callee this program does not define",
+            "fn f(a: int): int { return nowhere(a) }",
+        ),
+        (
+            "a call with the wrong number of arguments",
+            "fn g(x: int, y: int): int { return x } fn f(a: int): int { return g(a) }",
+        ),
+        (
+            "a top level that is not all declarations",
+            "n = 1 fn f(a: int): int { return a }",
+        ),
+        (
+            "a nested declaration, which the interpreter makes at the moment it runs",
+            "fn f(a: int): int { fn g(): int { return 1 } return a }",
+        ),
+        (
+            "two functions of one name, where the interpreter keeps the later",
+            "fn g(): int { return 1 } fn g(): int { return 2 } fn f(a: int): int { return g() }",
+        ),
     ] {
         claim(
             &mut ok,
             observe(outside, Entry::Ints("f", &[1]), Route::Compiled).is_none(),
-            "a function outside the slice is refused, not approximated",
+            &alloc::format!("outside the slice and refused: {}", why),
         );
     }
 

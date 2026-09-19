@@ -119,6 +119,32 @@ pub struct Walk {
     pub loop_ns: (u64, u64),
     pub steps: u64,
     pub step_ps: u64,
+    /// The compiled route against the interpreted one, on the same program.
+    /// `None` when the slice declined it, which is a fact worth printing
+    /// rather than a zero worth dividing by.
+    pub jit: Option<Jit>,
+}
+
+/// One program, run two ways, timed.
+///
+/// The ladder `jit.rs` climbs has to be paid for by something, and until now
+/// the only claim about it was that it *agrees* with the interpreter. Agreeing
+/// is the hard half and it is not the reason to have it.
+#[derive(Clone, Copy)]
+pub struct Jit {
+    /// Parse to armed machine code. Paid once and reported apart, because for
+    /// a program this small it is most of the total and folding it in would
+    /// answer a question nobody asked.
+    pub compile_ns: u64,
+    /// The tree-walk, best of nine.
+    pub walk_ns: u64,
+    /// The generated code, best of nine, same program and same argument.
+    pub code_ns: u64,
+    pub steps: u64,
+    pub value: i64,
+    /// Whether the two routes answered the same thing and charged the same
+    /// cost. A speedup between two routes that disagree is not a speedup.
+    pub agreed: bool,
 }
 
 /// A struct rather than printed lines, so `bench report` and a person read one
@@ -166,6 +192,81 @@ pub fn measure() -> Option<Walk> {
         loop_ns: (ns(l_lo), ns(l_hi)),
         steps,
         step_ps: ns(l_lo).saturating_mul(1000) / steps,
+        jit: measure_jit(mhz),
+    })
+}
+
+/// The two routes on one program, which for the first time is a program worth
+/// compiling: `fib` is recursive, so it exercises the frame, the call and the
+/// depth counter rather than a loop a single `Ctx` could have held.
+///
+/// The interpreted side is `Interp::invoke` rather than `eval_line`, so what
+/// is compared is the call and not the parse -- the compiled side was handed a
+/// parse too, and its cost is reported on its own line.
+fn measure_jit(mhz: u64) -> Option<Jit> {
+    const RUNS: usize = 9;
+    const N: i64 = 18;
+    let ns = |cycles: u64| -> u64 { cycles.saturating_mul(1000) / mhz };
+    fn best(mut f: impl FnMut()) -> u64 {
+        let mut lo = u64::MAX;
+        for _ in 0..RUNS {
+            let t = crate::time::rdtsc();
+            f();
+            lo = lo.min(crate::time::rdtsc().wrapping_sub(t));
+        }
+        lo
+    }
+
+    let src = "fn fib(n: int): int { if (n < 2) { return n } return fib(n - 1) + fib(n - 2) }";
+    let toks = lex::lex(src).ok()?;
+    let prog = parse::parse(toks).ok()?;
+
+    let compile_ns = ns(best(|| {
+        let f = jit::only_fns(&prog).and_then(|f| jit::compile(&f, 0));
+        core::hint::black_box(&f);
+    }));
+
+    let fns = jit::only_fns(&prog)?;
+    let p = jit::compile(&fns, 0)?;
+    // Generous, and the same both ways. The point of the number below is the
+    // ratio; a budget that stopped one route and not the other would make it
+    // a comparison of two different amounts of work.
+    const BUDGET: u64 = 50_000_000;
+    let mut code = jit::Run { status: jit::ST_NIL, result: 0, steps: 0, blame: 0 };
+    let code_ns = ns(best(|| {
+        if let Some(r) = p.run(&[N], BUDGET) {
+            code.status = r.status;
+            code.result = r.result;
+            code.steps = r.steps;
+        }
+    }));
+
+    let mut walked = (0i64, 0u64, false);
+    let walk_ns = ns(best(|| {
+        let mut it = eval::Interp::new().with_step_budget(BUDGET);
+        if it.run(&prog).is_err() {
+            return;
+        }
+        match it.invoke("fib", &[Value::Int(N)]) {
+            Ok(Value::Int(v)) => walked = (v, it.steps(), true),
+            _ => walked = (0, it.steps(), false),
+        }
+    }));
+
+    // The interpreter's count includes the `fn` declaration it executed at the
+    // top level; the compiled one never ran a top level, which is the same
+    // one-tick debt `differ` settles.
+    let agreed = walked.2
+        && code.status == jit::ST_VALUE
+        && code.result == walked.0
+        && code.steps + 1 == walked.1;
+    Some(Jit {
+        compile_ns,
+        walk_ns,
+        code_ns,
+        steps: code.steps,
+        value: code.result,
+        agreed,
     })
 }
 
@@ -184,6 +285,24 @@ pub fn bench() {
         m.steps
     );
     kprintln!("  one step               {} ps", m.step_ps);
+
+    match &m.jit {
+        None => kprintln!("  compiled               the slice declined it"),
+        Some(j) if !j.agreed => kprintln!(
+            "  compiled               the two routes disagreed -- no ratio is printed,              because a speedup between routes that answer differently is not one"
+        ),
+        Some(j) => {
+            kprintln!("  fib(18) = {}, {} steps, two ways:", j.value, j.steps);
+            kprintln!("    tree-walk            {} us", j.walk_ns / 1000);
+            kprintln!("    generated code       {} us", j.code_ns / 1000);
+            if j.code_ns > 0 {
+                kprintln!("    ratio                {}x", j.walk_ns / j.code_ns.max(1));
+            }
+            // Apart, and it is the figure that decides whether compiling is
+            // worth it at all: a program run once has to earn this back.
+            kprintln!("    parse and compile    {} us, paid once", j.compile_ns / 1000);
+        }
+    }
 
     // What every budget in the tree means in time, which is the number none of
     // them could be checked against before.
