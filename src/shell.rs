@@ -4952,7 +4952,14 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 tenths / 10,
                 tenths % 10
             );
-            let tail = crate::ai::initiative::journal_tail(8);
+            // `mind [n]` -- eight lines by default, because that is what fits
+            // beside the counters above without pushing them off a terminal.
+            // It is an argument because a night has several hourly jobs and
+            // the tail of eight can hide the one being looked for: the
+            // verdict poll fires once an hour, lands early in a long night,
+            // and was invisible here while every other branch was visible.
+            let want = rest.trim().parse::<usize>().unwrap_or(8).clamp(1, 48);
+            let tail = crate::ai::initiative::journal_tail(want);
             if tail.is_empty() {
                 kprintln!("  the journal is empty; 'initiative now' forces a tick");
             }
