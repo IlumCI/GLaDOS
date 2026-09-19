@@ -243,7 +243,39 @@ jobs:
           set -euo pipefail
           cp verify.log verify-a.log
           mv rails.txt kernel-a.txt
-          mv rails2.txt kernel-a2.txt
+          mv rails2.txt kernel-a2-within.txt
+
+      # **What a level above zero actually buys, and it is the hole
+      # `rails.py` names about itself.** The second reading kept above is
+      # taken in the SAME boot, so it measures within-boot noise -- and the
+      # two arms of a comparison are different boots. Driven once:
+      # `smp.all_cores` moved 1.7% and 12.2% within its own boots and 67.3%
+      # between them, so a floor measured from the within-boot pair was 24%
+      # where the honest one was over 67%. A second BOOT of the same binary
+      # is the only thing that closes that, and it costs a boot, which is
+      # exactly what an OOPS level is for.
+      #
+      # Static duplication rather than a loop, because a composite action
+      # cannot be called in a loop from YAML. One extra boot per arm at
+      # level 1 and above; levels 2 and 3 buy query count only, and the
+      # certificate records `boots` so the record says which it was.
+      - uses: ./.github/actions/verify-boot
+        if: fromJSON(env.LEVEL) >= 1
+        with:
+          arm: a2
+      - name: The baseline's between-boot partner
+        if: fromJSON(env.LEVEL) >= 1
+        run: |
+          set -euo pipefail
+          mv rails.txt kernel-a2.txt
+          rm -f rails2.txt
+          echo "BOOTS_SPENT=2" >> "$GITHUB_ENV"
+      - name: Or the within-boot one, at the base level
+        if: fromJSON(env.LEVEL) < 1
+        run: |
+          set -euo pipefail
+          cp kernel-a2-within.txt kernel-a2.txt
+          echo "BOOTS_SPENT=1" >> "$GITHUB_ENV"
           python3 tools/retrieval.py "$FOREST" --limit "$QUERIES" --dump retrieval-a.tsv | tee retrieval-a.log
           python3 tools/rails.py collect --rail retrieval=retrieval-a.tsv --out host-a.txt
           cat kernel-a.txt host-a.txt | grep -v '^\[rail\]' > body-a.txt
@@ -321,7 +353,21 @@ jobs:
           set -euo pipefail
           cp verify.log verify-b.log
           mv rails.txt kernel-b.txt
-          mv rails2.txt kernel-b2.txt
+          mv rails2.txt kernel-b2-within.txt
+
+      - uses: ./.github/actions/verify-boot
+        if: fromJSON(env.LEVEL) >= 1
+        with:
+          arm: b2
+      - name: The candidate's between-boot partner
+        if: fromJSON(env.LEVEL) >= 1
+        run: |
+          set -euo pipefail
+          mv rails.txt kernel-b2.txt
+          rm -f rails2.txt
+      - name: Or the within-boot one, at the base level
+        if: fromJSON(env.LEVEL) < 1
+        run: cp kernel-b2-within.txt kernel-b2.txt
           python3 tools/retrieval.py "$FOREST" --limit "$QUERIES" --dump retrieval-b.tsv | tee retrieval-b.log
           python3 tools/rails.py collect --rail retrieval=retrieval-b.tsv --out host-b.txt
           cat kernel-b.txt host-b.txt | grep -v '^\[rail\]' > body-b.txt
@@ -442,7 +488,7 @@ jobs:
             --set "rail=$RAIL" --set "corpus=$CORPUS" \
             --set "alpha-k=$ALPHA_K" --set "chi-bar=$CHI" \
             --set "minutes=$MINUTES" --set "half=$HALF" \
-            --set "level=$LEVEL" --set "boots=1" \
+            --set "level=$LEVEL" --set "boots=${BOOTS_SPENT:-1}" \
             --set "queries=$QUERIES" \
             --set "sections=$SECTIONS" --set "suites=$SUITES" \
             --set "claims=$CLAIMS" \
@@ -465,6 +511,8 @@ jobs:
             after.txt
             kernel-a2.txt
             kernel-b2.txt
+            kernel-a2-within.txt
+            kernel-b2-within.txt
             judged.txt
             verify-a.log
             verify-b.log

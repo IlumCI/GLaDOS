@@ -93,8 +93,18 @@ jobs:
           date=$(date -u +%Y-%m-%d)
           python3 tools/godel.py floors --spread /tmp/floors/rails*.txt \
             | tee "loop/evidence/floors/$date.tsv"
-          git add loop/evidence/floors
-          git commit -m "loop: floors measured over $BOOTS boots ($date)"
+          # **The same N readings are the boundary lane's anchor pairs**, and
+          # they are free here for the reason they are trustworthy: one
+          # build, so the honest verdict on any pair is that nothing moved,
+          # and a judge answering otherwise has a false positive. These are
+          # SETTLED readings (the second of each boot, per the protocol),
+          # which is what makes them comparable at all -- a cold first
+          # reading is dropped by the harvest rather than archived as
+          # evidence nothing can use.
+          python3 tools/godel.py anchors --from /tmp/floors/rails*.txt \
+            --out loop/evidence/anchors || true
+          git add loop/evidence/floors loop/evidence/anchors
+          git commit -m "loop: floors and anchors over $BOOTS boots ($date)"
           git push origin HEAD:loop/main
 
       # Measured against declared, and the gap named. The declared table

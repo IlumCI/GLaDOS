@@ -5549,6 +5549,56 @@ moved better
         .is_ok(),
     );
 
+    // --- the poll's skip, which reads text nothing has verified yet -------
+    //
+    // `peek_point` exists so `poll_verdicts` can skip a blob already in the
+    // inbox without filing it twice -- `file_verdict` appends a ledger line
+    // unconditionally and must, because the ledger is the record and not a
+    // cache. That makes this the one place in the module that looks at a
+    // verdict's text *before* the signature is checked, so what it may do is
+    // worth pinning: answer a point, or answer nothing. It may not throw,
+    // may not accept, and may not reach anything that decides.
+    //
+    // The safety argument is that a forged point can only cause a blob to be
+    // skipped -- and a blob whose point collides with one already filed
+    // would have had to survive `verify_verdict` to be filed in the first
+    // place. A novel point proceeds into exactly the same
+    // verify-before-parse gate as ever.
+    let signed = {
+        let mut v = good.as_bytes().to_vec();
+        // Eighty bytes of nothing, which is what an unsigned blob looks like
+        // to a reader that has not checked the signature -- the whole point.
+        v.extend_from_slice(&[0u8; 80]);
+        v
+    };
+    claim(
+        "the poll's peek reads a point out of a blob nobody has verified",
+        peek_point(&signed) == from_hex32(
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        ),
+    );
+    claim(
+        "and answers nothing for a blob too short to hold a signature",
+        peek_point(b"verdict 1
+").is_none(),
+    );
+    claim(
+        "and nothing for text the parser refuses, rather than a guess",
+        peek_point(&{
+            let mut v = good.replace("moved better", "moved excellent").into_bytes();
+            v.extend_from_slice(&[0u8; 80]);
+            v
+        })
+        .is_none(),
+    );
+    // One filing per line means one epoch step per line, so the burst has to
+    // be small enough that a night cannot move the frozen bar under its own
+    // trial. Asserted rather than left to a reader's arithmetic.
+    claim(
+        "a poll may not file a whole epoch's worth of verdicts in one tick",
+        VERDICT_BURST < EPOCH_LEN,
+    );
+
     let h = sha256::hash(b"a variant");
     claim(
         "a hash survives being written down and read back",

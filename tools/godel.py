@@ -1137,6 +1137,66 @@ def floors_spread(paths):
     return rows
 
 
+# ------------------------------------------------- anchors for the boundary
+
+
+def harvest_anchors(rails_files, out_dir, claims="video.draw"):
+    """Pairs of readings whose ground truth is known, out of one binary.
+
+    **The boundary lane needs pairs it can check a judge against, and the
+    only pairs whose answer is known for free are the ones where nothing
+    changed.** Two settled readings of a single build differ by noise and
+    by nothing else -- there is no effect in them to find -- so a judge that
+    calls such a pair `better` or `worse` has produced a false positive, and
+    `ground noise` says so. That is exactly the direction a loosened floor
+    fails in, which makes these the pairs that catch the change the
+    evaluator lane exists to be suspicious of.
+
+    The other ground truth (`real`) cannot be harvested this way and is not
+    faked here: it needs a change whose effect is established by something
+    outside this function, and a pair labelled `real` on a hunch would be a
+    judge being tuned against somebody's expectation. Until such pairs are
+    recorded by hand, `Honest` abstains on them -- which the workflow says
+    out loud rather than treating absence as agreement.
+
+    Answers the number of pairs written.
+    """
+    made, dropped = 0, 0
+    for i in range(len(rails_files) - 1):
+        a, b = rails_files[i], rails_files[i + 1]
+        # **A pair the judge cannot compare is not an anchor.** `rails.py
+        # judge` answers 2 when a control drifted, and a pair that answers 2
+        # under every judge configuration says nothing about a change to any
+        # of them -- it would sit in the set forever contributing no
+        # evidence while looking like evidence. The usual cause is a cold
+        # first reading, which is why the protocol keeps the second: this
+        # filter is what stops that protocol being optional here.
+        r = subprocess.run(
+            [sys.executable, os.path.join(ROOT, "tools", "rails.py"),
+             "judge", a, b, "--claims", claims],
+            capture_output=True, text=True)
+        if r.returncode == 2:
+            dropped += 1
+            continue
+        d = os.path.join(out_dir, f"noise-{i:02d}")
+        os.makedirs(d, exist_ok=True)
+        for src, name in ((a, "before.txt"), (b, "after.txt")):
+            io.open(os.path.join(d, name), "w", encoding="utf-8",
+                    newline="\n").write(io.open(src, encoding="utf-8").read())
+        io.open(os.path.join(d, "claims"), "w", encoding="utf-8",
+                newline="\n").write(claims + "\n")
+        io.open(os.path.join(d, "ground"), "w", encoding="utf-8",
+                newline="\n").write("noise\n")
+        io.open(os.path.join(d, "README"), "w", encoding="utf-8",
+                newline="\n").write(
+            "Two settled readings of ONE build, so the honest verdict is that\n"
+            "nothing moved. A judge answering otherwise on this pair has a\n"
+            "false positive, which is what `ground noise` lets the boundary\n"
+            "lane check. Harvested by `godel.py anchors`, never by hand.\n")
+        made += 1
+    return made, dropped
+
+
 # ---------------------------------------------------------------- selftest
 
 
@@ -1581,6 +1641,11 @@ def main():
     s.add_argument("--set", action="append", default=[])
     s = sub.add_parser("floors")
     s.add_argument("--spread", nargs="+")
+    s = sub.add_parser("anchors")
+    s.add_argument("--from", dest="rails", nargs="+", required=True,
+                   help="rails.txt files, all from ONE build")
+    s.add_argument("--out", default="loop/evidence/anchors")
+    s.add_argument("--claims", default="video.draw")
     s = sub.add_parser("discover")
     s = sub.add_parser("author")
     s.add_argument("--root", default=".")
@@ -1712,6 +1777,18 @@ def main():
         c = dict(kv.split("=", 1) for kv in a.set)
         sys.stdout.write(render_cert(c))
         return 0
+    if a.cmd == "anchors":
+        if len(a.rails) < 2:
+            print("  two readings of one build is the smallest pair",
+                  file=sys.stderr)
+            return 1
+        n, dropped = harvest_anchors(a.rails, a.out, a.claims)
+        print(f"  {n} noise pair(s) under {a.out}")
+        if dropped:
+            print(f"  {dropped} dropped as not comparable -- a pair no judge "
+                  "can answer is not evidence about any judge")
+        print("  ground truth: nothing moved, because nothing changed")
+        return 0 if n else 1
     if a.cmd == "discover":
         rows = discover()
         for rel, sym, val in rows:
