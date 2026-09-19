@@ -38,9 +38,15 @@ no figure from that run is about retrieval.
 
 import argparse
 import math
+import os
 import re
 import sys
 from pathlib import Path
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+ROOT = Path(HERE).parent
 
 # Mirrors `forest.STOP`. Duplicated rather than imported: this reader is meant
 # to be separable from the writer, which is the same bargain `forest.parse`
@@ -98,8 +104,31 @@ LEAK_TERM = re.compile(r"[a-z]{3,}|\d+")
 # One deviation, stated rather than hidden: the kernel indexes BPE token ids
 # and this indexes words, so `lex::prep`'s leading-space fix has no analogue
 # here and the two will not rank identically. The formula is what is shared.
-IDF_SQUARED = True
-LEN_B = 0.5
+#
+# **Read out of the Rust rather than copied beside it**, and that is not
+# tidiness. `src/ai/knob.rs` declares these as constants a machine may propose
+# changing, and `tools/knob.py apply` edits the Rust. A second copy here would
+# mean a proposal changed the kernel and not the measurement -- the rail would
+# report `same` for every knob in the table, forever, and the loop would learn
+# that none of its ideas matter.
+def _from_lex():
+    """(idf_squared, len_b, tf_k1), from `src/ai/lex.rs`."""
+    import knob
+
+    src = (ROOT / "src" / "ai" / "lex.rs").read_text(encoding="utf-8")
+
+    def one(sym, cast):
+        found = knob.find_const(src, sym)
+        if not found:
+            raise SystemExit(f"  no `const {sym}` in src/ai/lex.rs")
+        return cast(found[1])
+
+    return (one("IDF_SQUARED", lambda v: v == "true"),
+            one("LEN_B", float),
+            one("TF_K1", float))
+
+
+IDF_SQUARED, LEN_B, TF_K1 = _from_lex()
 
 # How much of a question's vocabulary a node may contain before the node is
 # treated as that question rather than as material for it. Deliberately
