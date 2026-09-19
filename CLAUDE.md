@@ -6613,11 +6613,51 @@ prints a line of hexadecimal and leaves nothing a comparison can see, while
 maximally far from everything and they mean different things, so
 `Matrix::spoke` keeps them apart.
 
-**None of it is wired.** `Matrix::reward_row` is the shape `soft_ce_compact`
-wants and nothing calls it, no `Decision` carries a target distribution, and
-there is no axis. What is established is that the signal exists, has variance,
-and is re-derivable -- and that the objective which would have consumed it is
-the one that does not work.
+**It is wired, and it measures nothing.** `mixbench` trains several `lam`
+values against one `prepare` and pairs each against `lam = 0` on the held-out
+slice, which is J1's own instrument. 103 examples, 222 decisions, 113 held out:
+
+    lam 0.00   loss 118.291   held 59%
+    lam 0.25   loss 121.655   held 61%   fixed 2 broke 0  chi 0.50
+    lam 0.50   loss 127.855   held 56%   fixed 3 broke 6  chi 0.44
+    lam 0.75   loss 133.673   held 60%   fixed 9 broke 8  chi 0.00
+    lam 1.00   loss 126.883   held 56%   fixed 4 broke 7  chi 0.36
+
+Not one clears 3.84, so **no axis is registered**: a grid whose every point the
+judge refuses is the "axis with no judge in front of it" failure inverted.
+
+**The unpaired figures mislead in both directions**, which is the argument for
+paired testing arriving a second time. `lam 0.75` reads 60% against 59% and
+looks neutral while *seventeen* decisions moved; `lam 0.25` reads 61% on two.
+And at 24 examples, unpaired, `lam 0.5` read 67% against 64% -- one decision --
+and was nearly written up as promising before the same configuration at 96
+examples read 56% against 59%.
+
+**`lam = 0` is bit-identical to a build that predates the objective**, checked
+rather than asserted: `73.961 -> 20.208`, 58 decisions, 140 rows, seen 53->80%,
+held 64->64% on both. `RunReport` carries the adapter's digest for it, the same
+one `godel` puts in a `Variant`.
+
+**The reward is not degenerate, which had to be established first.**
+`Trial::aim` reports `10 of 51 step(s) aim off the label, 0.039 mean mass moved,
+509 rival vote(s)`, and `mixbench` refuses to print a verdict when that reads
+zero -- a run where every target stayed the label's one-hot would report "no
+effect" for the wrong reason, the shape the no-random-seed bug had. That figure
+is identical at 24 examples and at 96, which is task-independence showing up as
+an observable: `q` is a function of the grammar and the matrix, so it lives on
+`Step` and costs no per-decision memory.
+
+The machinery stays for the reason the SGD head and the Product-of-Experts
+council stay: it is what lets somebody re-ask the question cheaply on a
+checkpoint or a corpus that is not this one.
+
+**And one alarm raised here was measured down.** `26 of 51 step(s) admit more
+than one correct spelling; worst is remember with 10` was reported as half the
+decision points being mis-scored. `Trial::lenient` counts both rules over the
+same logits and the answer is **one decision in 113**: the grammar admitting
+several spellings is not the same fact as the model picking a short one. The
+lenient figure is not a better accuracy either -- ` s` keeps `stat`, `same`,
+`snaps`, `snap` and `sysbox` alive, so a shorter piece commits to nothing.
 
 ### Does retrieval help? The rail that was missing
 
