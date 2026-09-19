@@ -78,6 +78,25 @@ NOISE = {
     "core.": 0.16,
     "smp.": 0.29,
     "ai.matmul": 0.35,
+    # **Zero, and the evidence for it is two readings rather than a proof.**
+    # `ai.bpb` reads the machine's own history, which differs between boots,
+    # and its 2% floor is an assumption about that text. `ai.answer` scores
+    # compiled-in questions against compiled-in answers with no forest and no
+    # history in the prefix, so there is nothing about the day in it.
+    #
+    # What is measured: two runs in one boot read 1616 millibits both times,
+    # with every printed figure identical. What is NOT established is bit
+    # identity -- the paired t of the same pair moved from -0.99 to -1.00
+    # between those runs, which is consistent with f32 rounding at a display
+    # boundary and is unexplained rather than understood. So this floor is
+    # justified at the rail's own resolution and not by a claim of exactness,
+    # and it is a candidate for `evidence-floors` to measure across boots the
+    # way every other rail's was.
+    #
+    # It matches the `ai.` prefix in UNCONTROLLED and therefore reports as
+    # uncontrolled, which is right for the wrong-sounding reason: there is no
+    # control because there is no day to divide out.
+    "ai.answer": 0.0,
     # **Deterministic given the same text, and the text is the risk.**
     # `ai.bpb` is a forward pass per token over a fixed window: the same model
     # on the same bytes answers the same figure to the last millibit, so the

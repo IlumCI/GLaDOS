@@ -917,9 +917,12 @@ mismatch made three hours and one commit earlier. The check answers that in a
 second where reading the diff does not answer it at all.
 
 **Rails are what "better" refers to.** `bench report` emits one machine-readable
-block, `[rail] v1`, one rail per line as `name value unit want`. Thirteen of
-them: five graphics, four interpreter, `ai.matmul`, `ai.bpb`, and two memory
-bandwidth. `tools/rails.py` compares two blocks with a declared noise floor per
+block, `[rail] v1`, one rail per line as `name value unit want`. Fourteen of
+them: five graphics, four interpreter, `ai.matmul`, `ai.bpb`, `ai.answer`, and
+two memory bandwidth. `bench::DECLARED` is the list and the report walks it, so
+that count is checkable rather than remembered -- which is the only reason this
+sentence can be trusted after the last three times a number in this file went
+stale. `tools/rails.py` compares two blocks with a declared noise floor per
 group, the group's **control divided out**, and a third verdict -- `UNSTABLE`,
 exit 2 -- for "a control drifted and these two readings do not compare". That
 is not a refusal: a "no" from an invalid measurement is as wrong as a yes.
@@ -6445,6 +6448,126 @@ since a new body of evidence is exactly what refills it. But the manifest
 has to name a release asset that exists, so the order is: publish
 `evidence-forest-v1`, then the corpus line, then the first trial against it.
 Writing the line first would give the loop an identity pointing at nothing.
+
+### Does retrieval help? The rail that was missing
+
+Every judge in this tree scores **routing**. J1 is McNemar over applet choices,
+J2 replays curiosity goals, `core_bench` and `rule_bench` score the same thing
+again -- and not one of them reads what `ask` replied. So `recall on` shipped
+with no instrument that could say whether it was an improvement, which is the
+"axis with no judge in front of it" failure `godel.rs` opens by warning about,
+arriving on a feature rather than on an axis.
+
+`src/ai/answer.rs` is that judge. **Bits the model spends on a written
+reference answer**, teacher-forced, with the retrieved block in front of the
+question and without it.
+
+Exact match was the obvious instrument and is wrong twice over: it needs
+questions whose answer is a short string, which is an exam and not a
+conversation, and it is binary, so it throws away almost everything the model
+did. `progress.rs` already has that measurement -- `t = 6.61` on 256 windows
+where GSM8K needed 1,319 questions to reach chi 3.86.
+
+**It catches the format failure a match rail would not.** A block that teaches
+the model to reply `D. None of the above` makes a prose reference *less*
+probable, so parroting shows up as more bits rather than as an answer that
+merely looked odd to whoever read it.
+
+**The oracle arm is the canary and it is the reason to believe the rest.** A
+rail that has never reported an improvement is indistinguishable from one that
+measures nothing -- `differ.rs` makes the argument and `smp.rs` paid for it --
+so a third arm shows the model a sentence that genuinely carries the fact, and
+it **must** beat the unaided arm. The verb prints that verdict *first*, and
+when it fails it says `THE INSTRUMENT IS NOT MEASURING` and refuses to print a
+conclusion about retrieval at all. The oracle is deliberately not the reference
+restated: a block holding the answer verbatim drives the bits to nothing and
+proves only that the model can copy, so a selftest claim refuses a source that
+contains its own answer.
+
+Measured, SmolLM2 under QEMU, 24 questions, the 469-node forest installed:
+
+    24 question(s) scored, 0 dropped for not fitting, 1 with nothing retrieved
+    bits per byte of the reference answer:
+      unaided    1.6162
+      retrieved  1.6298
+      oracle     1.4478
+    canary ok: the oracle arm is t=7.15 better than unaided
+    retrieval: helped 12 , hurt 11 , paired t=-1.00
+    retrieval changes nothing this can resolve
+
+**And that result corrects a claim made here from one observation.** An hour
+earlier, one question answered both ways read as a clear regression -- prose
+with recall off, `D. None of the above` with it on -- and was reported as one.
+Over 24 questions the effect is not resolvable: twelve helped, eleven hurt,
+t = -1.00. The anecdote was real and the conclusion drawn from it was the
+small-sample error this file spends pages warning about, committed by the
+person writing the warning. The rail is the better evidence and it says the
+average effect is nothing it can see.
+
+**The 0.168 bits per byte the oracle buys is the number that matters for a
+corpus decision.** It is what a context that genuinely contains the answer is
+worth on this checkpoint, at t = 7.15 -- so the mechanism works and the corpus
+is the missing piece. A source that could answer these questions has that much
+headroom to claim; one that cannot has none, and the rail will say so either
+way. That turns "should we add textbooks" from a matter of taste into a
+measurement somebody can take.
+
+**The questions are about this machine**, from its own documentation: what
+`store unlock` does, why there is no `cargo test`, what `Racy` is for. An
+operator asking this machine questions asks about its verbs and its own state,
+not about mitosis -- and the shipped corpus is MMLU, GSM8K and Wikipedia, which
+contains none of it. That makes the retrieved arm a **calibrated negative**
+today: retrieval *should* read as nothing, and a rail reporting that it helped
+would be evidence about the rail rather than about the corpus.
+
+Three details that are silent when wrong:
+
+- **An item is refused rather than truncated**, and dropped from every arm when
+  any arm cannot fit it. The retrieved block makes the prefix longer, so a
+  question can fit unaided and overflow with a block in front of it, and a pair
+  whose arms scored different numbers of the answer's tokens is two
+  measurements with one name.
+- **The first answer token is scored**, which `progress::measure` cannot do for
+  its own text -- there the first token is spelt by the prompt and nothing
+  predicted it. Here the prompt is the prefix, so every byte of the answer is
+  covered.
+- **The framing is `companion::turn`'s, minus the system turn.** That turn is
+  identical in both arms so it cannot move the paired difference, but it does
+  shift the absolute level, and `ai.answer` is therefore bits per byte in an
+  unprimed turn rather than in a conversation. Stated rather than left to be
+  discovered, because a rail on a different prompt shape measures a different
+  machine.
+
+`ai.answer` is the fourteenth rail: the **unaided** arm, millibits per byte,
+lower better. The unaided one deliberately, because a rail is a number two
+builds are compared on and retrieval is off by default, so the figure that
+describes the shipped machine is the one with no block. Its floor in
+`rails.py` is **zero**, for `cost.`'s reason rather than `ai.bpb`'s: `ai.bpb`
+reads the machine's own history, which differs between boots, while this scores
+compiled-in questions against compiled-in answers with no forest and no history
+in the prefix, so there is nothing about the day in it.
+
+**What repeatability was actually measured, since the floor rests on it.** Two
+runs in one boot read 1616 millibits both times and agreed on every printed
+figure -- the three means to four places, the canary t, and the helped/hurt
+split. The paired t moved from -0.99 to -1.00, which is what f32 rounding at a
+display boundary looks like and is unexplained rather than understood. So the
+per-item bits are **not** established as bit-identical, the floor is justified
+at the rail's own resolution, and it is a candidate for `evidence-floors` to
+measure across boots the way every other rail's was. A zero floor asserted from
+a proof this does not have would be the "arithmetic wearing a measurement's
+clothes" failure the timer check already records.
+
+One internal check falls out of the same run and is worth knowing: `helped` and
+`hurt` sum to 23 of 24, because the one question where `pick` returned nothing
+has the identical prompt in both arms and therefore identical bits. An item
+that retrieved nothing landing in `helped` or `hurt` would mean the two arms
+differ when they should not.
+
+It costs what generation costs, for `progress.rs`'s reason: a forward per token
+and no way around it, since a prefill materialises only the last position's
+logits. The rail arm alone is about 1,700 forwards. Nightly or per build, never
+interactive.
 
 ### Retrieval, and the measurement that condemned the first attempt
 

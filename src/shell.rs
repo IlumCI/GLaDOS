@@ -2788,6 +2788,67 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             opts.steps = 60;
             crate::ai::generate(rest, &opts);
         }
+        // The rail that says whether any of this helps. Its own verb and
+        // not a flag on `recall`, because it must be runnable while recall
+        // is OFF -- the bench takes the block itself and would otherwise
+        // read its own conclusion out of the switch it is judging.
+        "answer" => {
+            match crate::ai::with_engine(crate::ai::answer::bench) {
+                Some(Some(v)) => {
+                    kprintln!(
+                        "  {} question(s) scored, {} dropped for not fitting, \
+                         {} with nothing retrieved",
+                        v.n,
+                        v.dropped,
+                        v.empty
+                    );
+                    kprintln!("  bits per byte of the reference answer:");
+                    kprintln!("    unaided    {:.4}", v.off);
+                    kprintln!("    retrieved  {:.4}", v.on);
+                    kprintln!("    oracle     {:.4}", v.oracle);
+                    // **The canary first, because it decides whether the
+                    // line under it means anything.** A rail that has never
+                    // reported an improvement is indistinguishable from one
+                    // that compares nothing, so if showing the model a
+                    // sentence carrying the answer does not reduce the bits
+                    // spent on that answer, this instrument is broken and
+                    // says so rather than printing a verdict.
+                    if v.t_oracle <= 2.0 {
+                        kprintln!(
+                            "  THE INSTRUMENT IS NOT MEASURING: the oracle arm reads t={:.2}, \
+                             so a block containing the answer did not make the answer cheaper. \
+                             Nothing below this line is evidence.",
+                            v.t_oracle
+                        );
+                    } else {
+                        kprintln!(
+                            "  canary ok: the oracle arm is t={:.2} better than unaided",
+                            v.t_oracle
+                        );
+                    }
+                    kprintln!(
+                        "  retrieval: helped {} , hurt {} , paired t={:.2}",
+                        v.helped,
+                        v.hurt,
+                        v.t_on
+                    );
+                    kprintln!(
+                        "  {}",
+                        if v.t_oracle <= 2.0 {
+                            "no verdict -- fix the instrument first"
+                        } else if v.t_on > 2.0 {
+                            "retrieval helps on this corpus"
+                        } else if v.t_on < -2.0 {
+                            "retrieval HURTS on this corpus"
+                        } else {
+                            "retrieval changes nothing this can resolve"
+                        }
+                    );
+                }
+                Some(None) => kprintln!("  nothing scored -- no checkpoint, or no question fits"),
+                None => kprintln!("  {}", crate::ai::engine_refusal()),
+            }
+        }
         // Its own verb rather than a flag on `ask`, for the reason `fat
         // unlock` is separate: it changes every answer the machine gives
         // afterwards, and a thing that does that is a thing an operator

@@ -92,6 +92,7 @@ pub const DECLARED: &[(&str, &str, Want)] = &[
     ("core.vote_walk", "ns", Want::Lower),
     ("ai.matmul", "gflops", Want::Higher),
     ("ai.bpb", "mbits", Want::Lower),
+    ("ai.answer", "mbits", Want::Lower),
     ("smp.one_core", "mbs", Want::Higher),
     ("smp.all_cores", "mbs", Want::Higher),
 ];
@@ -190,6 +191,25 @@ pub fn rails() -> Vec<Rail> {
         )),
         None => out.push(Rail::absent(
             "ai.bpb",
+            "mbits",
+            Want::Lower,
+            "another task holds the engine",
+        )),
+    }
+
+    // The unaided arm, as a rail. `answer` is where the paired question is
+    // asked; this is the level, so a build that made the machine better at
+    // explaining itself moves it whether or not retrieval is on.
+    match crate::ai::with_engine(crate::ai::answer::rail_millibits) {
+        Some(Some(mb)) => out.push(Rail::got("ai.answer", "mbits", Want::Lower, mb as f64)),
+        Some(None) => out.push(Rail::absent(
+            "ai.answer",
+            "mbits",
+            Want::Lower,
+            "no checkpoint, or no question fits the window",
+        )),
+        None => out.push(Rail::absent(
+            "ai.answer",
             "mbits",
             Want::Lower,
             "another task holds the engine",
