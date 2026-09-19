@@ -1561,8 +1561,8 @@ pub fn recall_query(q: &str, budget: usize, subjects: usize) {
 
     let rc = bodies(&routed);
     let ac = bodies(&all);
-    let rf = crate::ai::recall::fill(&rc, budget, count);
-    let af = crate::ai::recall::fill(&ac, budget, count);
+    let rf = crate::ai::recall::fill(q, &rc, budget, count);
+    let af = crate::ai::recall::fill(q, &ac, budget, count);
 
     if subjects == 0 {
         kprintln!("  every subject, {} node(s) scored", total);

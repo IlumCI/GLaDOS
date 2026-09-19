@@ -278,6 +278,33 @@ pub fn turn(message: &str, opts: &super::GenOpts) -> usize {
         prompt.push_str("<|im_end|>\n");
     }
     prompt.push_str("<|im_start|>user\n");
+    // **In the user turn and never the system turn.** The system turn is
+    // *pinned*: `sink_count` sets those slots to ones that never recycle, so
+    // a block retrieved for one question would sit in front of every
+    // question after it and the machine would answer the second out of the
+    // first one's library. Here it scrolls with the turn that asked for it,
+    // which is what it is for.
+    //
+    // Before the message rather than after, because the model reads forward
+    // and material that arrives after the question is material the question
+    // was not asked with.
+    if crate::ai::recall::enabled() {
+        let seq = super::with_engine(|e| e.model.cfg.seq_len).unwrap_or(0);
+        let budget = crate::ai::recall::budget_for(seq);
+        if let Some(f) = crate::ai::recall::pick(message, budget, crate::ai::recall::ASK_K) {
+            // Said out loud on every turn it fires. A retrieved block changes
+            // the answer, and an answer whose inputs are invisible is one
+            // nobody can check against what the machine was actually given.
+            crate::kprintln!(
+                "  (recall: {} entr(y|ies), {} of {} token(s), {} refused as the question)",
+                f.taken.len(),
+                f.tokens,
+                budget,
+                f.leaked
+            );
+            prompt.push_str(&f.text);
+        }
+    }
     prompt.push_str(message);
     prompt.push_str("<|im_end|>\n<|im_start|>assistant\n");
 

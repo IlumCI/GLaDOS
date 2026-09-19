@@ -2788,6 +2788,47 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             opts.steps = 60;
             crate::ai::generate(rest, &opts);
         }
+        // Its own verb rather than a flag on `ask`, for the reason `fat
+        // unlock` is separate: it changes every answer the machine gives
+        // afterwards, and a thing that does that is a thing an operator
+        // turns on deliberately and can see the state of.
+        "recall" => {
+            let a = rest.trim();
+            match a {
+                "on" | "off" => {
+                    crate::ai::recall::set_enabled(a == "on");
+                    kprintln!("  ask consults the forest: {}", a);
+                    if a == "on" {
+                        // Said at the moment somebody turns it on, because
+                        // it is the number that decides whether they want
+                        // it: measured on the shipped corpus, the top node
+                        // is the wrong one more often than the right one.
+                        kprintln!(
+                            "  (r@1 is 44.4% on the corpus this ships against, so the                              first entry is wrong more often than right; the answer                              fields are redacted and the question itself is refused)"
+                        );
+                    }
+                }
+                "" => {
+                    let on = crate::ai::recall::enabled();
+                    kprintln!("  ask consults the forest: {}", if on { "on" } else { "off" });
+                    let seq = crate::ai::with_engine(|e| e.model.cfg.seq_len).unwrap_or(0);
+                    kprintln!(
+                        "  budget {} token(s) of a {}-token window, {} candidate(s) considered",
+                        crate::ai::recall::budget_for(seq),
+                        seq,
+                        crate::ai::recall::ASK_K
+                    );
+                    match crate::ai::recall::load_lex() {
+                        Some(_) => kprintln!("  postings at {}", crate::ai::recall::LEX),
+                        None => kprintln!(
+                            "  no postings at {} -- 'forest embed' writes them",
+                            crate::ai::recall::LEX
+                        ),
+                    }
+                }
+                _ => kprintln!("  usage: recall [on|off]"),
+            }
+        }
         "ask" => {
             let mut opts = crate::ai::GenOpts { steps: 64, temperature: 0.3, ..Default::default() };
             let mut q = rest;

@@ -212,6 +212,188 @@ pub struct Filled {
     /// Candidates that were skipped because they did not fit, but a later
     /// smaller one did.
     pub skipped: usize,
+    /// Candidates refused for being the question rather than material for
+    /// it. Counted separately from `skipped` because "three were the answer"
+    /// and "three did not fit" are different facts about a corpus, and only
+    /// one of them is a reason to distrust the block.
+    pub leaked: usize,
+}
+
+// ---------------------------------------------------------------- redaction
+
+/// Every key a node file may carry, for telling a node from plain text.
+const KEYS: [&str; 8] = [
+    "head", "kind", "source", "concept", "method", "check", "answer", "text",
+];
+
+/// What of a node may reach a context window: its `text` and nothing else.
+///
+/// **`answer` is the obvious field and it is not the dangerous one.** A
+/// `gsm8k` node's `method` and `check` lines are the worked arithmetic --
+/// `60+50 = 110` -- so a redaction that dropped only `answer` would hand
+/// over the sum and withhold the total. `head`, `kind`, `source` and
+/// `concept` go too, for a duller reason: they are index machinery and a
+/// restatement of the body's own first sentence, so they spend budget on
+/// nothing.
+///
+/// **Keep-one rather than drop-many, and that is a safety property.** The
+/// first version of this walked every line, flipped a flag on each key it
+/// recognised, and kept what followed `text`. Two things were wrong with
+/// it, and the second is the one that matters:
+///
+///   - A body line whose first word happened to be `answer` flipped the
+///     flag and silently truncated the node. `forest.py::parse` has the
+///     same ambiguity by design, but a redaction inheriting it fails in a
+///     direction a parser does not.
+///   - A node with no `text` field at all fell through to `return body`,
+///     which is the **unredacted** node. A safety function that fails open
+///     on malformed input is one that ships an answer key exactly when
+///     something else has already gone wrong.
+///
+/// `render` always emits `text` last, so everything after that line is the
+/// body. Finding it and keeping the remainder needs no state, cannot be
+/// confused by the body's own words, and has nothing to fail open into:
+/// no `text`, no answer, `None`.
+///
+/// It lives in `render_one` rather than at the call sites, which is the
+/// other half. A node is retrieved in three places today and the next
+/// caller is the one who forgets; a redaction somebody has to remember is a
+/// redaction that ships an answer key the first time somebody is in a
+/// hurry. One door.
+pub fn redact(body: &str) -> Option<String> {
+    // **"Not a node" and "a node missing its text" are different facts, and
+    // only one of them is dangerous.** A string with no field line anywhere
+    // carries no `answer` to strip, so passing it whole leaks nothing; one
+    // that carries `answer D` and no `text` is a malformed node, which is
+    // exactly what a redaction must not wave through. Asking only for
+    // `text` conflated the two and silently dropped every candidate not in
+    // node format -- five claims in this suite, and most of what a caller
+    // outside the forest can hand this.
+    let structured = body
+        .lines()
+        .any(|l| KEYS.contains(&l.split_whitespace().next().unwrap_or("")));
+    if !structured {
+        let t = body.trim();
+        return if t.is_empty() { None } else { Some(String::from(t)) };
+    }
+    let mut lines = body.lines();
+    let first = lines.find(|l| {
+        let mut w = l.split_whitespace();
+        w.next() == Some("text")
+    })?;
+    let mut out = String::from(first.strip_prefix("text").unwrap_or("").trim_start());
+    for l in lines {
+        out.push('\n');
+        out.push_str(l);
+    }
+    let out = String::from(out.trim());
+    if out.is_empty() {
+        return None;
+    }
+    Some(out)
+}
+
+// --------------------------------------------------------------- leak check
+
+/// Containment above which a candidate is the question rather than material
+/// for it. Mirrors `tools/forest_retrieve.py`, deliberately: a host
+/// retriever exists to predict what this kernel would retrieve, and two
+/// thresholds would make it predict a different machine.
+pub const LEAK: f32 = 0.8;
+
+/// Below this many terms a question cannot be judged by overlap at all.
+/// `forest_retrieve.py` carries the worked case -- four-term algebra stems
+/// where one differing term is 0.75 and two is 0.5, so no threshold
+/// separates a duplicate from a sibling. Short questions fall back to the
+/// substring test, which is exact.
+pub const MIN_LEAK_TERMS: usize = 8;
+
+/// Words too common to carry a question's identity. The host's list, to the
+/// word, for the reason `LEAK` is.
+const LEAK_STOP: [&str; 34] = [
+    "the", "a", "an", "of", "and", "or", "to", "in", "is", "are", "was", "were", "for", "on", "at",
+    "by", "with", "that", "this", "it", "as", "be", "from", "how", "what", "which", "if", "then",
+    "each", "many", "much", "does", "do", "not",
+];
+
+/// Lowercased, with everything that is not a letter or digit removed.
+fn flatten(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+/// Content words of three letters or more, and every run of digits.
+///
+/// **The numbers are the load-bearing half.** MMLU is templated, so a
+/// sibling question shares every content word and differs only in its
+/// figures: without digits, containment reads 1.00 over a stem four words
+/// long and the guard eats the single most useful thing a forest can hand a
+/// model, which is a worked example of the same kind.
+fn leak_terms(s: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut digits = false;
+    let push = |cur: &mut String, digits: bool, out: &mut Vec<String>| {
+        if cur.is_empty() {
+            return;
+        }
+        let keep = if digits { true } else { cur.len() >= 3 };
+        if keep && !LEAK_STOP.contains(&cur.as_str()) && !out.iter().any(|x| x == cur) {
+            out.push(cur.clone());
+        }
+        cur.clear();
+    };
+    for c in s.chars() {
+        let lc = c.to_ascii_lowercase();
+        if lc.is_ascii_digit() {
+            if !digits {
+                push(&mut cur, digits, &mut out);
+                digits = true;
+            }
+            cur.push(lc);
+        } else if lc.is_ascii_lowercase() {
+            if digits {
+                push(&mut cur, digits, &mut out);
+                digits = false;
+            }
+            cur.push(lc);
+        } else {
+            push(&mut cur, digits, &mut out);
+            digits = false;
+        }
+    }
+    push(&mut cur, digits, &mut out);
+    out
+}
+
+/// Is this candidate the question being asked rather than material for it?
+///
+/// Two tests, and the first is exact. A retrieved node whose body contains
+/// the question verbatim -- or is contained by it -- is the answer key
+/// however the overlap arithmetic reads. The second catches the reworded
+/// duplicate that substring matching cannot, and is skipped for questions
+/// too short to be judged by overlap.
+///
+/// **Deliberately generous.** A node wrongly dropped costs one retrieval and
+/// is counted out loud; a node wrongly kept is an answer key and costs the
+/// whole answer.
+pub fn leaks(query: &str, body: &str) -> bool {
+    let fq = flatten(query);
+    if !fq.is_empty() {
+        let fb = flatten(body);
+        if fb.contains(&fq) || fq.contains(&fb) {
+            return true;
+        }
+    }
+    let qt = leak_terms(query);
+    if qt.len() < MIN_LEAK_TERMS {
+        return false;
+    }
+    let bt = leak_terms(body);
+    let shared = qt.iter().filter(|t| bt.iter().any(|b| b == *t)).count();
+    shared as f32 / qt.len() as f32 >= LEAK
 }
 
 /// Render one node into the block.
@@ -222,7 +404,7 @@ fn render_one(n: usize, c: &Cand) -> String {
     // counts from zero.
     s.push_str(&alloc::format!("{}", n + 1));
     s.push('\n');
-    s.push_str(c.body.trim_end());
+    s.push_str(redact(&c.body).unwrap_or_default().trim_end());
     s.push_str("\n\n");
     s
 }
@@ -242,17 +424,38 @@ pub const PREAMBLE: &str = "Entries from the library that may bear on this:\n\n"
 /// The counter is a closure so the budget arithmetic can be checked with no
 /// model: a claim passes one that counts words and gets exact, predictable
 /// answers out of the same code the real path runs.
-pub fn fill<F: Fn(&str) -> usize>(cands: &[Cand], budget: usize, count: F) -> Filled {
+pub fn fill<F: Fn(&str) -> usize>(
+    query: &str,
+    cands: &[Cand],
+    budget: usize,
+    count: F,
+) -> Filled {
     let mut out = Filled {
         text: String::new(),
         taken: Vec::new(),
         tokens: 0,
         skipped: 0,
+        leaked: 0,
     };
     // An empty block is not the preamble on its own: a heading promising
     // entries with nothing under it is worse than nothing at all, so the
     // preamble is only paid for once something fits beneath it.
     for (i, c) in cands.iter().enumerate() {
+        // **Before the budget, not after.** A leaking candidate that did not
+        // fit would otherwise be counted as skipped, and the one number that
+        // says whether this block can be trusted would read clean.
+        if leaks(query, &c.body) {
+            out.leaked += 1;
+            continue;
+        }
+        // Nothing a model may see. A numbered entry with an empty body is
+        // the "heading promising entries with nothing under it" this
+        // function already refuses to produce, arriving from redaction
+        // rather than from an empty candidate list.
+        if redact(&c.body).is_none() {
+            out.skipped += 1;
+            continue;
+        }
         let mut next = if out.taken.is_empty() {
             String::from(PREAMBLE)
         } else {
@@ -270,6 +473,105 @@ pub fn fill<F: Fn(&str) -> usize>(cands: &[Cand], budget: usize, count: F) -> Fi
     }
     out
 }
+
+// ------------------------------------------------------- the automatic path
+
+/// Whether `ask` consults the forest at all.
+///
+/// **Off by default, and the reason is a number rather than caution.**
+/// `tools/retrieval.py` measures r@1 at 44.4% on the corpus this ships
+/// against: the top-ranked node is the wrong one more often than it is the
+/// right one. On by default would put a confidently-ranked wrong passage in
+/// front of the majority of answers, and there is no rail anywhere in this
+/// tree that would say so -- every judge here scores routing, and none of
+/// them reads what `ask` replied.
+///
+/// So this is a thing an operator turns on, having read that sentence.
+static ON: crate::sync::Racy<bool> = crate::sync::Racy::new(false);
+
+pub fn enabled() -> bool {
+    unsafe { *ON.get() }
+}
+
+pub fn set_enabled(v: bool) {
+    unsafe { *ON.get() = v };
+}
+
+/// How much of a turn retrieval may spend.
+///
+/// Clamped against the trained length for `sink_count`'s reason one level
+/// on: the system turn is pinned and the recent window is what is left, so
+/// a block large enough to fill it would evict the conversation to make
+/// room for a guess about it.
+pub const ASK_BUDGET: usize = 192;
+
+pub fn budget_for(seq_len: usize) -> usize {
+    ASK_BUDGET.min(seq_len / 8)
+}
+
+/// Top nodes for a question, redacted and leak-checked, or `None`.
+///
+/// **One engine behind the verb and the turn.** `forest recall` and `ask`
+/// must not grow two accounts of one retrieval: the verb is how an operator
+/// checks what the turn will do, and a verb that answered a different
+/// question would make that check worthless. The verb keeps its own
+/// reporting on top -- it measures the price of routing, which a turn does
+/// not care about -- but the selection, the redaction and the leak refusal
+/// are these lines for both.
+pub fn pick(q: &str, budget: usize, k: usize) -> Option<Filled> {
+    if budget == 0 {
+        return None;
+    }
+    let lex = load_lex()?;
+    let ids = crate::ai::with_engine(|e| crate::ai::lex::tokens(&e.tok, q))?;
+    if ids.is_empty() {
+        return None;
+    }
+    let mut ranked = with_nodes(|n| {
+        let mut sl = alloc::vec![0.0f32; n.len()];
+        lex.score(&ids, &mut sl);
+        let mut all: Vec<(usize, f32)> = (0..n.len()).map(|i| (i, sl[i])).collect();
+        // Descending by score, and by index where scores tie, so two runs
+        // over one corpus pick the same nodes -- the determinism every
+        // re-derivable verdict in this tree rests on.
+        all.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(core::cmp::Ordering::Equal)
+                .then(a.0.cmp(&b.0))
+        });
+        all.truncate(k);
+        all.iter()
+            .filter(|(_, s)| *s > 0.0)
+            .filter_map(|(i, s)| n.paths.get(*i).map(|p| (p.clone(), *s)))
+            .collect::<Vec<_>>()
+    })?;
+    ranked.retain(|(p, _)| !p.is_empty());
+    if ranked.is_empty() {
+        return None;
+    }
+    let cands: Vec<Cand> = ranked
+        .iter()
+        .filter_map(|(path, score)| {
+            let b = sysbox::read_blob(path)?;
+            Some(Cand {
+                path: path.clone(),
+                score: *score,
+                body: String::from_utf8_lossy(&b).into_owned(),
+            })
+        })
+        .collect();
+    let count = |t: &str| {
+        crate::ai::with_engine(|e| e.tok.encode(t, false, false).len()).unwrap_or(usize::MAX)
+    };
+    let f = fill(q, &cands, budget, count);
+    if f.taken.is_empty() {
+        return None;
+    }
+    Some(f)
+}
+
+/// How many candidates a turn considers before the budget decides.
+pub const ASK_K: usize = 8;
 
 /// What the reader and the budget arithmetic claim, with no model and no forest.
 pub fn selftest() -> bool {
@@ -294,7 +596,7 @@ pub fn selftest() -> bool {
     };
 
     let one = alloc::vec![cand("/a", 1.0, "alpha beta gamma")];
-    let f = fill(&one, 1000, words);
+    let f = fill("", &one, 1000, words);
     check(
         "a block that fits is rendered whole, and counted by the counter given",
         f.taken == alloc::vec![0] && f.tokens == words(&f.text) && f.text.contains("alpha"),
@@ -305,7 +607,7 @@ pub fn selftest() -> bool {
         f.tokens <= 1000 && f.tokens > 0,
     );
 
-    let f0 = fill(&one, 0, words);
+    let f0 = fill("", &one, 0, words);
     check(
         "a budget of zero renders nothing at all, not a bare heading",
         f0.text.is_empty() && f0.taken.is_empty() && f0.tokens == 0 && f0.skipped == 1,
@@ -313,7 +615,7 @@ pub fn selftest() -> bool {
     // A heading with nothing under it promises entries and delivers none,
     // which is worse than silence -- so the preamble is only paid for once
     // something fits beneath it.
-    let tight = fill(&one, words(PREAMBLE) + 1, words);
+    let tight = fill("", &one, words(PREAMBLE) + 1, words);
     check(
         "a budget that admits only the heading still renders nothing",
         tight.text.is_empty() && tight.taken.is_empty(),
@@ -327,7 +629,7 @@ pub fn selftest() -> bool {
     // Best-first, so the big one is offered first; the budget refuses it and
     // the two small ones behind it are still taken. Stopping at the first
     // miss would leave the budget unspent with nothing saying why.
-    let small = fill(&many, words(PREAMBLE) + 8, words);
+    let small = fill("", &many, words(PREAMBLE) + 8, words);
     check(
         "a candidate that does not fit is skipped, not an end to the fill",
         small.taken == alloc::vec![1, 2] && small.skipped == 1,
@@ -345,15 +647,95 @@ pub fn selftest() -> bool {
             && !small.text.contains("--- 3"),
     );
 
-    let all = fill(&many, 10_000, words);
+    let all = fill("", &many, 10_000, words);
     check(
         "a budget that admits everything takes everything, in score order",
         all.taken == alloc::vec![0, 1, 2] && all.skipped == 0,
     );
     check(
         "an empty candidate list is an empty block rather than a heading",
-        fill(&[], 10_000, words).text.is_empty(),
+        fill("", &[], 10_000, words).text.is_empty(),
     );
+
+    // --- what a model may be handed -----------------------------------
+    let mmlu = "head life-sciences/anatomy | What is the embryological origin of the hyoid bone? | x\nkind mmlu\nsource mmlu/anatomy/dev\nconcept What is the embryological origin of the hyoid bone?\nanswer D\ntext What is the embryological origin of the hyoid bone?\nA. The first pharyngeal arch\nB. The second and third pharyngeal arches\n";
+    let red = redact(mmlu).unwrap_or_default();
+    check(
+        "an mmlu node loses its answer letter",
+        !red.contains("answer D") && red.contains("embryological"),
+    );
+    check(
+        "and its index machinery, which is budget spent on nothing",
+        !red.contains("head ") && !red.contains("kind mmlu") && !red.contains("source mmlu"),
+    );
+    let gsm = "head x | y | z\nkind gsm8k\nsource gsm8k/train\nconcept Ralph practises tennis.\nmethod 60+50 = 110\ncheck 60+50 = 110\nanswer 110\ntext Ralph hits some balls. How many did he miss?\nHe missed 60+50 = 110 of them.\n";
+    let redg = redact(gsm).unwrap_or_default();
+    // The field that matters is not `answer`. `method` and `check` are the
+    // worked arithmetic, so dropping only `answer` hands over the sum and
+    // withholds the total.
+    check(
+        "a gsm8k node loses the worked arithmetic, not only the total",
+        !redg.contains("method") && !redg.contains("check 60") && !redg.contains("answer 110"),
+    );
+    check(
+        "and keeps the body, which is what it was retrieved for",
+        redg.contains("How many did he miss?"),
+    );
+    check(
+        "a body line beginning with a field name survives",
+        redact("text one\nanswer me this\ntwo")
+            .unwrap_or_default()
+            .contains("answer me this"),
+    );
+    // Fails closed. A node with no `text` is unrenderable, not unredacted:
+    // the first version returned the whole node here, answer included.
+    check(
+        "a node with no text field yields nothing rather than everything",
+        redact("head x\nkind mmlu\nanswer D").is_none(),
+    );
+    check(
+        "but a plain string with no fields at all passes through whole",
+        redact("just some prose").as_deref() == Some("just some prose"),
+    );
+
+    // --- the leak check -----------------------------------------------
+    let q = "What is the embryological origin of the hyoid bone?";
+    check(
+        "the question itself is refused, however it is dressed",
+        leaks(q, mmlu) && leaks(q, "TEXT:  what is the EMBRYOLOGICAL origin of the hyoid bone"),
+    );
+    check(
+        "an unrelated node is not",
+        !leaks(q, "text The Ise-class battleships were a pair of dreadnoughts."),
+    );
+    // The numbers are the load-bearing half: without them a templated
+    // sibling shares every content word and reads 1.00, and the guard eats
+    // the worked example that is the most useful thing a forest has.
+    let a = "Find the order of the factor group Z_11 x Z_15 modulo 1 1 and 4 more words";
+    let b = "text Find the order of the factor group Z_4 x Z_12 modulo 2 2 and 4 more words";
+    check(
+        "a templated sibling with different numbers is kept",
+        !leaks(a, b),
+    );
+    check(
+        "a question too short to judge by overlap falls back to substring",
+        !leaks("what is two", "text something entirely other")
+            && leaks("what is two", "text what is two"),
+    );
+    check(
+        "fill counts what it refused as the question, apart from what did not fit",
+        {
+            let c = Cand {
+                path: String::from("/p"),
+                score: 1.0,
+                body: String::from("text What is the embryological origin of the hyoid bone?"),
+            };
+            let f = fill(q, &[c], 10_000, words);
+            f.taken.is_empty() && f.leaked == 1 && f.skipped == 0
+        },
+    );
+
+
 
     // --- the table -------------------------------------------------------
     let n = Nodes {
