@@ -134,6 +134,7 @@ jobs:
                          "rail": "host.retrieval", "corpus": "deadbeef",
                          "alpha-k": "0", "chi-bar": "4.69", "minutes": "40",
                          "half": "extend", "level": "0", "boots": "1",
+                         "queries": "250",
                          "sections": "29/29", "suites": "65/65",
                          "claims": "0/0", "witness": "-", "moved": "same",
                          "why": "fuzz", "verdict": "refuse", "runner": "1/1"})

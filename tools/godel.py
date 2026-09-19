@@ -88,6 +88,10 @@ KERNEL_SPEND = [
 BASE_MINUTES = 40
 MAX_LEVEL = 3
 
+#: Retrieval queries at level 0, doubling with the level. The judge hands
+#: both arms the same figure, so the pair is always over one population.
+BASE_QUERIES = 250
+
 #: clade.rs:335,345,250.
 MIN_EVIDENCE = 6
 MAX_BACK = 4
@@ -380,7 +384,17 @@ def plan(entries, axis, corpus):
         "half": half,
         "level": level,
         "minutes": BASE_MINUTES << level,
-        "boots": 1 + level,
+        # **What a level buys, and what it does not.** The design says extra
+        # verify-boots per arm; a composite action cannot be called in a loop
+        # from YAML, so that costs static step duplication and is not built.
+        # What IS built is query count: `retrieval.py --limit` strides
+        # through the forest rather than taking a prefix, and `paired.py`
+        # pairs by node path, so a larger limit is strictly more evidence
+        # about the same population. Recorded as `queries` so the
+        # certificate says what was actually spent, and `boots` stays 1
+        # until the duplication is written.
+        "boots": 1,
+        "queries": BASE_QUERIES << level,
     }
 
 
@@ -501,7 +515,7 @@ def render_knob_block(row, value):
 CERT_KEYS = (
     "seq", "utc", "point", "kind", "rung", "axis", "parent-tree",
     "candidate-tree", "rail", "corpus", "alpha-k", "chi-bar", "minutes",
-    "half", "level", "boots", "sections", "suites", "claims", "witness",
+    "half", "level", "boots", "queries", "sections", "suites", "claims", "witness",
     "moved", "why", "verdict", "runner",
 )
 
@@ -738,9 +752,16 @@ def tree_exists(root, tree):
     return r.returncode == 0
 
 
-def rederive(root, parent_tree, patch):
-    """apply(parent, patch) as a tree, through plumbing, touching no
-    worktree. Returns the tree name, or raises."""
+def rederive(root, parent_tree, patch, witness=""):
+    """apply(parent [, witness], patch) as a tree, through plumbing,
+    touching no worktree. Returns the tree name, or raises.
+
+    **A witness kind's candidate carries the witness AND the fix**, in that
+    order: the tree the judge boots as "the candidate" must contain the new
+    claim passing, or "passes on the candidate" would be a statement about
+    a tree nobody built. The witness-only tree (for the fail-on-baseline
+    arm) is the same call with the witness as the patch.
+    """
     with tempfile.TemporaryDirectory() as td:
         idx = os.path.join(td, "index")
         env = dict(os.environ, GIT_INDEX_FILE=idx)
@@ -753,6 +774,10 @@ def rederive(root, parent_tree, patch):
             return r.stdout.strip()
 
         g("read-tree", parent_tree)
+        if witness:
+            wfile = os.path.join(td, "w.diff")
+            io.open(wfile, "w", encoding="utf-8", newline="\n").write(witness + "\n")
+            g("apply", "--cached", wfile)
         if patch.startswith("knob 1"):
             got = dict(l.partition(" ")[::2] for l in patch.split("\n") if l)
             path, symbol = got["file"], got["symbol"]
@@ -833,8 +858,8 @@ def fsck(root):
             problems.append(f"seq {c['seq']}: adopted a tree identical to its parent")
         if tree_exists(root, c["parent-tree"]):
             try:
-                _f, _w, patch = parse_envelope(env_text)
-                got = rederive(root, c["parent-tree"], patch)
+                _f, wit, patch = parse_envelope(env_text)
+                got = rederive(root, c["parent-tree"], patch, wit)
                 if got != c["candidate-tree"]:
                     problems.append(
                         f"seq {c['seq']}: candidate re-derives to {got[:12]}, "
@@ -915,6 +940,7 @@ def next_point(root):
             p = plan(entries, "grid", corpus)
             budget = dict(p, alpha_k=k, chi_bar=chi_floor(k),
                           point=point_of(env), rail=row["rail"])
+            budget.setdefault("queries", BASE_QUERIES)
             return (env, budget), None
     return None, ("every grid point is tried from this tree; "
                   "rungs 2-4 are what comes next (Phase 4)")
@@ -1056,10 +1082,15 @@ def author_finish(root, kind_name, reply):
     diff, why = parse_completion(reply)
     if diff is None:
         return None, why
+    # What each kind claims. cleanup's J1 is the cost rails ("less, for the
+    # same behaviour" needs a rail where less is measurable); the witness
+    # kinds' J1 is the witness itself, so they claim no rail; the rest have
+    # no author yet and claim none until their judge story is written.
+    claim = {"cleanup": "cost.image_bytes"}.get(kind_name, "none")
     fields = {
         "kind": kind_name, "rung": 4, "axis": "model",
         "parent-tree": head_tree(root), "corpus": corpus_hash(root) or "0" * 8,
-        "rail": "none",
+        "rail": claim,
     }
     env = render_envelope(fields, patch=diff)
     bad = admit(env)
@@ -1236,7 +1267,8 @@ def selftest():
         ("parent-tree", "a" * 40), ("candidate-tree", "b" * 40),
         ("rail", "host.retrieval"), ("corpus", "deadbeef"), ("alpha-k", "0"),
         ("chi-bar", "4.69"), ("minutes", "40"), ("half", "extend"),
-        ("level", "0"), ("boots", "1"), ("sections", "29/29"),
+        ("level", "0"), ("boots", "1"), ("queries", "250"),
+        ("sections", "29/29"),
         ("suites", "65/65"), ("claims", "0/0"), ("witness", "-"),
         ("moved", "same"), ("why", "fixed 1 broke 2 of 250, net under 4"),
         ("verdict", "refuse"), ("runner", "1/1"),
@@ -1450,14 +1482,63 @@ def verify():
         print("  is not ok.")
         return 2
     good = True
-    for name in sorted(os.listdir(d)):
-        if name.endswith(".txt"):
-            for line in io.open(os.path.join(d, name), encoding="utf-8"):
-                line = line.strip()
-                if line and ("parent=" in line):
-                    got = parse_kernel_line(line)
-                    print(f"  {'ok ' if got else 'FAIL'}  {name}: {line[:60]}...")
-                    good &= got is not None
+
+    def claim(what, ok):
+        nonlocal good
+        if not ok:
+            good = False
+        print(f"  {'ok ' if ok else 'FAIL'}  {what}")
+
+    # --- the ledger's judged lines, read field by field --------------------
+    #
+    # Asserting the VALUES, not merely that parsing returned something: a
+    # parser answering a well-formed wrong dict passes the weaker check,
+    # and the wrong dict is what a drift would produce.
+    path = os.path.join(d, "ledger.txt")
+    seen = 0
+    if os.path.isfile(path):
+        for line in io.open(path, encoding="utf-8"):
+            line = line.strip()
+            if not line or "parent=" not in line:
+                continue
+            seen += 1
+            got = parse_kernel_line(line)
+            if got is None:
+                claim(f"a kernel line this parser cannot read: {line[:50]}", False)
+                continue
+            # Re-derive each field from the text independently of the parser
+            # under test, so agreement means something.
+            want_parent = 0 if " parent=root" in line else \
+                int(line.split(" parent=")[1][:8], 16)
+            want_variant = int(line.split(" variant=")[1][:8], 16)
+            want_adopted = line.rstrip().endswith("ADOPT")
+            claim(f"parent reads {got['parent']:08x}", got["parent"] == want_parent)
+            claim(f"variant reads {got['variant']:08x}", got["variant"] == want_variant)
+            claim(f"adopted reads {got['adopted']}", got["adopted"] == want_adopted)
+    claim("the fixture set carries at least one kernel ledger line", seen > 0)
+
+    # --- the clade report, against this port's own arithmetic --------------
+    #
+    # The kernel prints `clade A of B adopted` for the head; the port
+    # computes the same pair from the same ledger. Two implementations of
+    # one rule, diffed on real output -- which is the only check that would
+    # catch the BFS-versus-suffix deviation the module header declares.
+    path = os.path.join(d, "clade.txt")
+    if os.path.isfile(path):
+        for line in io.open(path, encoding="utf-8"):
+            m = re.search(r"clade (\d+) of (\d+) adopted", line)
+            if not m:
+                continue
+            k_adopt, k_trials = int(m.group(1)), int(m.group(2))
+            lines = [l for l in io.open(os.path.join(d, "ledger.txt"),
+                                        encoding="utf-8")]
+            mine_trials = sum(1 for l in lines if parse_kernel_line(l))
+            mine_adopt = sum(1 for l in lines
+                             if (p := parse_kernel_line(l)) and p["adopted"])
+            claim(f"the head's clade: kernel {k_adopt}/{k_trials}, "
+                  f"this port {mine_adopt}/{mine_trials}",
+                  (k_adopt, k_trials) == (mine_adopt, mine_trials))
+            break
     return 0 if good else 1
 
 
@@ -1472,6 +1553,8 @@ def main():
     for name in ("next", "fsck", "alpha", "clade", "reconsider"):
         s = sub.add_parser(name)
         s.add_argument("--root", default=".")
+        if name == "reconsider":
+            s.add_argument("--emit", action="store_true")
         if name == "next":
             s.add_argument("--emit-env", default="",
                            help="write the envelope here; stdout then carries "
@@ -1487,6 +1570,8 @@ def main():
     s.add_argument("file")
     s.add_argument("--parent", required=True)
     s.add_argument("--root", default=".")
+    s.add_argument("--witness-only", action="store_true",
+                   help="the fail-on-baseline arm's tree: witness alone")
     s = sub.add_parser("ledger")
     s.add_argument("--root", default=".")
     s.add_argument("--tail", type=int, default=10)
@@ -1519,7 +1604,7 @@ def main():
             io.open(a.emit_env, "w", encoding="utf-8", newline="\n").write(env)
             # key=value, the shape a workflow forwards into GITHUB_OUTPUT.
             for k in ("point", "rail", "alpha_k", "chi_bar", "minutes",
-                      "half", "level", "boots"):
+                      "half", "level", "boots", "queries"):
                 print(f"{k}={budget[k]}")
         else:
             sys.stdout.write(env)
@@ -1537,9 +1622,15 @@ def main():
         return 0
     if a.cmd == "derive":
         text = io.open(a.file, encoding="utf-8").read()
-        _f, _w, patch = parse_envelope(text)
+        _f, wit, patch = parse_envelope(text)
         try:
-            print(rederive(a.root, a.parent, patch))
+            if a.witness_only:
+                if not wit:
+                    print("  the envelope has no witness section", file=sys.stderr)
+                    return 1
+                print(rederive(a.root, a.parent, wit))
+            else:
+                print(rederive(a.root, a.parent, patch, wit))
         except RuntimeError as e:
             print(f"  {e}", file=sys.stderr)
             return 1
@@ -1572,7 +1663,7 @@ def main():
         corpus = corpus_hash(a.root) or "--------"
         p = plan(entries, a.axis, corpus)
         print(f"  {a.axis}: {p['half']} at level {p['level']} -- "
-              f"{p['minutes']} minutes, {p['boots']} boot(s) per arm")
+              f"{p['minutes']} minutes, {p['queries']} queries per arm")
         return 0
     if a.cmd in ("clade", "reconsider"):
         entries = load_entries(a.root)
@@ -1586,6 +1677,13 @@ def main():
                   f"{arm['trials']} adopted")
         if a.cmd == "reconsider":
             d = decide(entries)
+            if a.emit:
+                # One line a workflow reads without guessing at prose.
+                if d is None:
+                    print("stay")
+                else:
+                    print(f"back={d[0]} target={d[1]}")
+                return 0
             if d is None:
                 print("  staying")
             else:
@@ -1597,8 +1695,10 @@ def main():
         for e in entries[-a.tail:]:
             print(f"  {e['seq']} {e['kind']}/{e['axis']} {e['point'][:8]} "
                   f"rail={e['rail']} moved={e['moved']} {e['verdict']}")
-        print(f"  {len(entries)} entr{'y' if len(entries) == 1 else 'ies'}, "
-              f"epoch boundary at {EPOCH_LEN - (len(entries) % EPOCH_LEN)} away")
+        n = len(entries)
+        at = "AT an epoch boundary" if is_boundary(n) else \
+            f"epoch boundary {EPOCH_LEN - (n % EPOCH_LEN)} away"
+        print(f"  {n} entr{'y' if n == 1 else 'ies'}, {at}")
         return 0
     if a.cmd == "cert":
         if a.check:

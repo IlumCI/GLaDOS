@@ -49,6 +49,9 @@ on:
       boots:
         type: string
         required: true
+      queries:
+        type: string
+        required: true
       kind:
         type: string
         required: true
@@ -93,6 +96,9 @@ on:
       boots:
         required: true
         default: "1"
+      queries:
+        required: true
+        default: "250"
       kind:
         required: true
         default: "tune"
@@ -123,6 +129,7 @@ jobs:
       HALF: ${{ inputs.half }}
       LEVEL: ${{ inputs.level }}
       BOOTS: ${{ inputs.boots }}
+      QUERIES: ${{ inputs.queries }}
       KIND: ${{ inputs.kind }}
       RUNG: ${{ inputs.rung }}
       AXIS: ${{ inputs.axis }}
@@ -200,6 +207,7 @@ jobs:
               python3 tools/retrieval.py --fixture out/fixture --nodes "$nodes" \
                 --limit 0 --dump /dev/null >/dev/null
               echo "FOREST=out/fixture" >> "$GITHUB_ENV"
+              echo "CORPUS_MODE=fixture" >> "$GITHUB_ENV"
               echo "::notice::the corpus is a generated fixture, at roughly a quarter"
               echo "::notice::of the real forest's sensitivity -- corpus.txt says so"
               ;;
@@ -212,6 +220,7 @@ jobs:
               test "$got" = "$want" || { echo "::error::corpus digest mismatch"; exit 1; }
               mkdir -p out/forest && tar -xzf "out/$asset" -C out/forest
               echo "FOREST=out/forest" >> "$GITHUB_ENV"
+              echo "CORPUS_MODE=release" >> "$GITHUB_ENV"
               ;;
             *) echo "::error::corpus.txt names a mode this job does not have: $mode"; exit 1;;
           esac
@@ -221,7 +230,9 @@ jobs:
       # --- the baseline arm ------------------------------------------------
 
       - name: Build the baseline
-        run: cargo build --release --locked
+        run: |
+          set -euo pipefail
+          cargo build --release --locked 2>&1 | tee build-a.log
 
       - uses: ./.github/actions/verify-boot
         with:
@@ -233,10 +244,58 @@ jobs:
           cp verify.log verify-a.log
           mv rails.txt kernel-a.txt
           mv rails2.txt kernel-a2.txt
-          python3 tools/retrieval.py "$FOREST" --dump retrieval-a.tsv | tee retrieval-a.log
+          python3 tools/retrieval.py "$FOREST" --limit "$QUERIES" --dump retrieval-a.tsv | tee retrieval-a.log
           python3 tools/rails.py collect --rail retrieval=retrieval-a.tsv --out host-a.txt
           cat kernel-a.txt host-a.txt | grep -v '^\[rail\]' > body-a.txt
+          # The cost rails: exact by construction (one locked toolchain, one
+          # tree), floored at zero in rails.py, and the cleanup kind's J1.
+          size=$(stat -c%s target/x86_64-unknown-uefi/release/glados.efi)
+          warns=$(grep -c '^warning' build-a.log || true)
+          { echo "cost.image_bytes $size B lower";
+            echo "cost.warnings $warns n lower"; } >> body-a.txt
           { echo '[rail] v1'; cat body-a.txt; echo '[rail] end'; } > before.txt
+
+      # --- the witness arm, for the kinds whose J1 it is --------------------
+      #
+      # The three-tree shape: the witness (the new claim) applied to the
+      # BASELINE must fail its boot -- genuinely, as a claim failure with the
+      # machine still answering, not as an infra death -- and the candidate
+      # (witness + fix) must then pass. A bugfix without this is a diff with
+      # a story; recording fail-then-pass is what makes it a certificate.
+
+      - name: The witness alone, on the baseline
+        if: env.KIND == 'bugfix' || env.KIND == 'test'
+        run: |
+          set -euo pipefail
+          wt=$(python3 tools/godel.py derive "$ENV_FILE" --parent "$PARENT_TREE" --witness-only)
+          wc_commit=$(git commit-tree "$wt" -p HEAD -m "witness arm (never pushed)")
+          git checkout -f --detach "$wc_commit"
+          cargo build --release --locked 2>&1 | tee build-w.log
+
+      - uses: ./.github/actions/verify-boot
+        if: env.KIND == 'bugfix' || env.KIND == 'test'
+        id: witness-boot
+        continue-on-error: true
+        with:
+          arm: w
+
+      - name: The witness must have FAILED, and failed the right way
+        if: env.KIND == 'bugfix' || env.KIND == 'test'
+        run: |
+          set -euo pipefail
+          cp verify.log verify-w.log || true
+          if [ "${{ steps.witness-boot.outcome }}" != "failure" ]; then
+            echo "WITNESS_RES=the witness passes on the baseline, so there is nothing to fix" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          # A claim failure reaches the shell and prints FAIL; an infra death
+          # does neither, and blaming the candidate for the runner would be
+          # the propose.yml two-machines error one level down.
+          if grep -q '^  alive' verify-w.log && grep -qE '(^|[[:space:]])FAIL' verify-w.log; then
+            echo "WITNESS_RES=fail-then-pass" >> "$GITHUB_ENV"
+          else
+            echo "WITNESS_RES=the witness arm died of infrastructure, not of the claim" >> "$GITHUB_ENV"
+          fi
 
       # --- the candidate arm -----------------------------------------------
 
@@ -249,7 +308,9 @@ jobs:
         run: git checkout -f --detach "$CAND_REF"
 
       - name: Build the candidate
-        run: cargo build --release --locked
+        run: |
+          set -euo pipefail
+          cargo build --release --locked 2>&1 | tee build-b.log
 
       - uses: ./.github/actions/verify-boot
         with:
@@ -261,9 +322,13 @@ jobs:
           cp verify.log verify-b.log
           mv rails.txt kernel-b.txt
           mv rails2.txt kernel-b2.txt
-          python3 tools/retrieval.py "$FOREST" --dump retrieval-b.tsv | tee retrieval-b.log
+          python3 tools/retrieval.py "$FOREST" --limit "$QUERIES" --dump retrieval-b.tsv | tee retrieval-b.log
           python3 tools/rails.py collect --rail retrieval=retrieval-b.tsv --out host-b.txt
           cat kernel-b.txt host-b.txt | grep -v '^\[rail\]' > body-b.txt
+          size=$(stat -c%s target/x86_64-unknown-uefi/release/glados.efi)
+          warns=$(grep -c '^warning' build-b.log || true)
+          { echo "cost.image_bytes $size B lower";
+            echo "cost.warnings $warns n lower"; } >> body-b.txt
           { echo '[rail] v1'; cat body-b.txt; echo '[rail] end'; } > after.txt
 
       # --- the verdict ------------------------------------------------------
@@ -271,19 +336,41 @@ jobs:
       - name: Judge it against what it claimed, at the bar in force
         run: |
           set -euo pipefail
-          # `rail none` claims nothing moved -- and adopting on "nothing
-          # broke" would be adopting what nothing measured. Until the cost
-          # rails exist (image bytes, warning count -- the cleanup kind's
-          # J1), a rail-none candidate is judged all the way through the
-          # gate and then REFUSED with the missing judge named, so the lane
-          # is drivable end to end without one unmeasured adoption. The
-          # kind table's own rule, applied to the loop's own gap.
+          # Three shapes of judgement, by what the kind's J1 is.
+          #
+          # Witness kinds: J1 is the witness (fail-then-pass, established
+          # above); the rails' job here is J2 -- nothing may read worse, and
+          # an unstable comparison refuses the night the way it refuses any.
+          if [ "$KIND" = "bugfix" ] || [ "$KIND" = "test" ]; then
+            python3 tools/rails.py compare before.txt after.txt \
+              --again kernel-a2.txt kernel-b2.txt | tee judged.txt
+            worse=$(grep -c ' worse ' judged.txt || true)
+            unstable=$(grep -c ' unstable ' judged.txt || true)
+            if [ "$WITNESS_RES" != "fail-then-pass" ]; then
+              echo "VERDICT=refuse" >> "$GITHUB_ENV"
+              echo "WHY=$WITNESS_RES" >> "$GITHUB_ENV"
+            elif [ "$unstable" != "0" ]; then
+              echo "VERDICT=refuse" >> "$GITHUB_ENV"
+              echo "WHY=witness held but $unstable rail(s) were not comparable" >> "$GITHUB_ENV"
+            elif [ "$worse" != "0" ]; then
+              echo "VERDICT=refuse" >> "$GITHUB_ENV"
+              echo "WHY=witness held but $worse rail(s) regressed" >> "$GITHUB_ENV"
+            else
+              echo "VERDICT=adopt" >> "$GITHUB_ENV"
+              echo "WHY=witness failed on the baseline and passes with the fix; no rail regressed" >> "$GITHUB_ENV"
+            fi
+            echo "MOVED=-" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          # `rail none` outside the witness kinds claims nothing moved --
+          # and adopting on "nothing broke" would be adopting what nothing
+          # measured. Refused with the missing judge named.
           if [ "$RAIL" = "none" ]; then
             python3 tools/rails.py compare before.txt after.txt \
               --again kernel-a2.txt kernel-b2.txt | tee judged.txt
             echo "MOVED=-" >> "$GITHUB_ENV"
             echo "VERDICT=refuse" >> "$GITHUB_ENV"
-            echo "WHY=rail none has no J1 yet; the cost rails are the missing judge" >> "$GITHUB_ENV"
+            echo "WHY=this kind claims no rail and carries no witness, so no J1 can say yes" >> "$GITHUB_ENV"
             exit 0
           fi
           set +e
@@ -303,6 +390,21 @@ jobs:
           echo "VERDICT=$verdict" >> "$GITHUB_ENV"
           why=$(grep -m1 "^  $RAIL " judged.txt | sed 's/^ *//;s/  */ /g' || true)
           [ -n "$why" ] || why="no line for the claimed rail"
+          # propose.yml's own rule, which the loop was quietly exempt from:
+          # a generated fixture is NOT evidence about a retrieval constant,
+          # so an adoption of a host.* claim on fixture evidence is
+          # downgraded to a refusal that says so. The grid stays
+          # refusal-only until the operator publishes the real forest --
+          # which is honest, not stuck.
+          if [ "$verdict" = "adopt" ] && [ "${CORPUS_MODE:-}" = "fixture" ]; then
+            case "$RAIL" in
+              host.*)
+                verdict=refuse
+                why="the fixture corpus is not evidence about $RAIL; a real forest is"
+                echo "VERDICT=refuse" >> "$GITHUB_ENV"
+                ;;
+            esac
+          fi
           echo "WHY=$why" >> "$GITHUB_ENV"
 
       # The monotonic invariants, counted from what both arms actually
@@ -340,9 +442,11 @@ jobs:
             --set "rail=$RAIL" --set "corpus=$CORPUS" \
             --set "alpha-k=$ALPHA_K" --set "chi-bar=$CHI" \
             --set "minutes=$MINUTES" --set "half=$HALF" \
-            --set "level=$LEVEL" --set "boots=$BOOTS" \
+            --set "level=$LEVEL" --set "boots=1" \
+            --set "queries=$QUERIES" \
             --set "sections=$SECTIONS" --set "suites=$SUITES" \
-            --set "claims=$CLAIMS" --set "witness=-" \
+            --set "claims=$CLAIMS" \
+            --set "witness=$([ "${WITNESS_RES:-}" = fail-then-pass ] && echo fail-then-pass || echo -)" \
             --set "moved=$MOVED" --set "why=$WHY" \
             --set "verdict=$VERDICT" \
             --set "runner=${{ github.run_id }}/${{ github.run_attempt }}" \
@@ -364,6 +468,10 @@ jobs:
             judged.txt
             verify-a.log
             verify-b.log
+            verify-w.log
+            build-a.log
+            build-b.log
+            build-w.log
             retrieval-a.tsv
             retrieval-b.tsv
             retrieval-a.log

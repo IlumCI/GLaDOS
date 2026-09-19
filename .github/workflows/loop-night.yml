@@ -44,9 +44,6 @@ concurrency:
   group: loop-main
   cancel-in-progress: false
 
-env:
-  LOOP_BRANCH: loop/main
-
 jobs:
   # --- follow: the machine follows main, never the reverse -----------------
   follow:
@@ -98,7 +95,7 @@ jobs:
                 --set "candidate-tree=$cand" --set "rail=none" \
                 --set "corpus=00000000" --set "alpha-k=0" --set "chi-bar=-" \
                 --set "minutes=0" --set "half=extend" --set "level=0" \
-                --set "boots=0" --set "sections=0/0" --set "suites=0/0" \
+                --set "boots=0" --set "queries=0" --set "sections=0/0" --set "suites=0/0" \
                 --set "claims=0/0" --set "witness=-" --set "moved=-" \
                 --set "why=main overrode: $conflicted" \
                 --set "verdict=superseded" \
@@ -138,6 +135,7 @@ jobs:
       half: ${{ steps.pick.outputs.half }}
       level: ${{ steps.pick.outputs.level }}
       boots: ${{ steps.pick.outputs.boots }}
+      queries: ${{ steps.pick.outputs.queries }}
       kind: ${{ steps.pick.outputs.kind }}
       rung: ${{ steps.pick.outputs.rung }}
       axis: ${{ steps.pick.outputs.axis }}
@@ -151,14 +149,42 @@ jobs:
           ref: ${{ needs.follow.outputs.tip }}
           fetch-depth: 0
 
-      # Clade before axis, as the kernel orders it. Until the head has
-      # MIN_EVIDENCE (6) trials below it this always answers "staying", so
-      # the report is the whole of it for the loop's first week; the commit
-      # that *applies* a backtrack lands before the cron does, with the
-      # first lineage long enough to move -- a stub that pretended to apply
-      # one tonight would be a lie with no drill able to catch it.
-      - name: Reconsider
-        run: python3 tools/godel.py reconsider --root .
+      # Clade before axis, as the kernel orders it. Under MIN_EVIDENCE (6)
+      # trials below the head this answers "stay" by construction, so early
+      # nights report and move on; when it answers Back, the backtrack is a
+      # real commit -- the target tree restored, the ledger carried forward
+      # whole, and a `rollback` event entry appended -- through the same
+      # index plumbing adopt uses, so the worktree never mediates.
+      - name: Reconsider, and go if the record says go
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          d=$(python3 tools/godel.py reconsider --root . --emit)
+          echo "clade says: $d"
+          case "$d" in back=*) ;; *) exit 0;; esac
+          back=${d#back=}; back=${back%% *}
+          target=${d##*target=}
+          parent=$(git rev-parse 'HEAD^{tree}')
+          seq=$(( $(ls loop/ledger/entries 2>/dev/null | wc -l) + 1 ))
+          point=$(printf 'rollback %s steps to %s from %s' "$back" "$target" "$parent"             | sha256sum | cut -d' ' -f1)
+          # The commit's tree: the target, with the CURRENT ledger overlaid
+          # (a rollback that rolled back its own record would be a lineage
+          # erasing the decision that moved it), plus the event entry.
+          python3 tools/godel.py cert --emit             --set "seq=$seq" --set "utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"             --set "point=$point" --set "kind=event" --set "rung=1"             --set "axis=grid" --set "parent-tree=$parent"             --set "candidate-tree=$target" --set "rail=none"             --set "corpus=00000000" --set "alpha-k=0" --set "chi-bar=-"             --set "minutes=0" --set "half=extend" --set "level=0"             --set "boots=0" --set "queries=0" --set "sections=0/0" --set "suites=0/0"             --set "claims=0/0" --set "witness=-" --set "moved=-"             --set "why=the clade chose an ancestor: back $back"             --set "verdict=rollback"             --set "runner=${{ github.run_id }}/${{ github.run_attempt }}"             > /tmp/rollback.cert
+          name=$(sha256sum /tmp/rollback.cert | cut -c1-16)
+          blob=$(git hash-object -w /tmp/rollback.cert)
+          export GIT_INDEX_FILE=/tmp/rb-index
+          git read-tree "$target"
+          git rm -r --cached loop/ledger --quiet 2>/dev/null || true
+          git read-tree --prefix=loop/ledger/ 'HEAD:loop/ledger'
+          git update-index --add --cacheinfo             "100644,$blob,loop/ledger/entries/$name.cert"
+          tree=$(git write-tree)
+          unset GIT_INDEX_FILE
+          new=$(git commit-tree "$tree" -p HEAD -m "loop: rollback $back to ${target:0:12} (seq $seq)")
+          git checkout -f --detach "$new"
+          python3 tools/godel.py fsck --root .
+          git push origin "$new:refs/heads/loop/main"
 
       - name: Pick the next point, and mark it tried before anything runs
         id: pick
@@ -254,10 +280,25 @@ jobs:
       half: ${{ needs.propose.outputs.half }}
       level: ${{ needs.propose.outputs.level }}
       boots: ${{ needs.propose.outputs.boots }}
+      queries: ${{ needs.propose.outputs.queries }}
       kind: ${{ needs.propose.outputs.kind }}
       rung: ${{ needs.propose.outputs.rung }}
       axis: ${{ needs.propose.outputs.axis }}
       corpus: ${{ needs.propose.outputs.corpus }}
+
+  # --- a dry run leaves no candidate ref behind -----------------------------
+  tidy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [propose, judge]
+    if: always() && needs.propose.outputs.have == 'yes' && inputs.dry_run
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          POINT: ${{ needs.propose.outputs.point }}
+        run: git push origin --delete "loop/cand/${POINT:0:16}" || true
 
   # --- adopt: the only writer of entries, serialized, staleness-checked ----
   adopt:

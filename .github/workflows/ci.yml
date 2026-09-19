@@ -71,6 +71,14 @@ jobs:
       - name: The loop ledger, if this ref carries one
         run: python3 tools/godel.py fsck --root .
 
+      # The port against the writer: fixtures rendered by the kernel itself,
+      # not by this parser. Exit 2 means the fixture set is absent, which is
+      # a named gap rather than a pass -- and a red X here, because a parser
+      # that has never been diffed against its writer is one this repository
+      # declines to trust.
+      - name: godel.py against the kernel's own rendering
+        run: python3 tools/godel.py --verify
+
       # The envelope validator is plain JavaScript precisely so node can
       # check it without Deno -- the README calls this the bargain. ~40
       # claims over parse/render, including every refusal.

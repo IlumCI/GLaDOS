@@ -93,6 +93,16 @@ NOISE = {
     # lines of drift in a 2 KB window is worth; it is not a measurement, and
     # it is written down as an assumption rather than left implicit.
     "ai.bpb": 0.02,
+    # **The cost rails are exact, and the floor says so.** `cost.image_bytes`
+    # is the byte length of the built artifact and `cost.warnings` is a count
+    # over one locked toolchain's output on one tree: the same tree answers
+    # the same numbers every time, so any movement at all belongs to the
+    # change. Zero, and meant. These exist to be the cleanup kind's J1 in the
+    # CI loop -- a kind whose whole claim is "less, for the same behaviour"
+    # needs a rail where less is measurable -- and a floor invented to be
+    # comfortable would let a cleanup claim an improvement the size of the
+    # invention.
+    "cost.": 0.0,
 }
 
 # Which rail is the control for a group, for a comparison that wants to divide
@@ -128,7 +138,17 @@ CONTROL = {
 # rather than an omission. Compare these two only between runs on one machine
 # with the same `-smp` and the same command prefix, and read a verdict on them
 # as weaker than one on a controlled rail.
-UNCONTROLLED = ("ai.", "smp.")
+#
+# **`cost.` is in this list for the opposite reason, and that is worth saying
+# rather than leaving a reader to assume the weak case.** A control divides
+# out the day; the cost rails have no day in them -- a byte count and a
+# warning count over one locked toolchain and one tree are exact, so there is
+# nothing for a control to remove, and their floor is zero because any
+# movement is the change. They are listed here because the selftest requires
+# every group to be one or the other, and "needs no control" and "has none"
+# reach that check identically. A verdict on these is the STRONGEST here, not
+# the weakest.
+UNCONTROLLED = ("ai.", "smp.", "cost.")
 
 # The two-sided 95% bar on a standard normal, and the conventional chi-squared
 # 95% line for one degree of freedom. Both named rather than inlined, and both
@@ -347,6 +367,14 @@ def verdict(before, after, drift=None, floor=None, floor_src="declared"):
         rel = (1.0 + rel) / (1.0 + drift) - 1.0
         said = f"{rel:+.1%} once the control's {drift:+.1%} is divided out"
     src = "" if floor_src == "declared" else f" {floor_src}"
+    # **No movement is no movement, whatever the floor.** `abs(rel) < floor`
+    # is false at zero when the floor is zero, so an exact rail reading
+    # identically on both arms fell through to the direction test and came
+    # back WORSE -- a regression of nothing. Harmless while every floor was
+    # positive, and found by the first zero-floor rail (`cost.*`) the moment
+    # one existed.
+    if rel == 0.0:
+        return SAME, f"{said}, unchanged"
     if abs(rel) < floor:
         return SAME, f"{said}, inside the {floor:.0%} floor{src}"
     improved = rel > 0 if after.want == "higher" else rel < 0
@@ -645,6 +673,22 @@ store.read absent us higher  -- no store mounted
     claim(v == SAME, "and 20% on the smp rail is inside its measured 29%")
     claim(noise_for("smp.all_cores") == 0.29 and noise_for("video.console") == 0.35,
           "the floor comes from the longest declared prefix")
+
+    # The cost rails, which are the CI loop's `cleanup` kind judge. Exact by
+    # construction -- one locked toolchain, one tree -- so the floor is zero
+    # and one byte is a verdict. A floor invented to feel comfortable here
+    # would let a cleanup claim an improvement the size of the invention.
+    claim(noise_for("cost.image_bytes") == 0.0,
+          "the cost rails are floored at zero, because they are exact")
+    v, _ = verdict(one("cost.image_bytes", 100.0, "B", "lower"),
+                   one("cost.image_bytes", 99.0, "B", "lower"))
+    claim(v == BETTER, "one byte smaller is better, with no floor to hide in")
+    v, _ = verdict(one("cost.image_bytes", 100.0, "B", "lower"),
+                   one("cost.image_bytes", 101.0, "B", "lower"))
+    claim(v == WORSE, "and one byte larger is worse")
+    v, _ = verdict(one("cost.warnings", 7.0, "n", "lower"),
+                   one("cost.warnings", 7.0, "n", "lower"))
+    claim(v == SAME, "an unchanged count is unchanged")
     # Named rather than left to be noticed. A group with no control is judged
     # on a fixed percentage alone, which is the weakest instrument here.
     claim(

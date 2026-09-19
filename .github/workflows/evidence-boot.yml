@@ -92,11 +92,13 @@ jobs:
           retention-days: 30
 
   # --- the staged-update cycle ----------------------------------------------
-  # The three-boot transcript CLAUDE.md records: staged, on trial, settled.
-  # It needs a kernel that trusts a throwaway key, so the leg builds one --
-  # the pinned anchor is swapped in a scratch tree, which is exactly what
-  # the real rotation ritual does, performed here against a key that dies
-  # with the runner.
+  # The three-boot transcript CLAUDE.md records, on one persistent ESP
+  # image: applied, on trial, settled. The kernel must trust the throwaway
+  # key that signs the staged image, so the leg performs the real rotation
+  # ritual against a key that dies with the runner; the staged files are
+  # injected into the built FAT image with mtools at the partition offset
+  # mkesp declares (LBA 2048), because the hook consumes them on the very
+  # next boot -- there is no "place them from inside" moment.
   staged-update:
     if: contains(inputs.legs, 'all') || contains(inputs.legs, 'staged')
     runs-on: ubuntu-latest
@@ -111,11 +113,11 @@ jobs:
             ~/.cargo/registry
             target
           key: uefi-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-      - name: QEMU, OVMF, KVM
+      - name: QEMU, OVMF, KVM, mtools
         run: |
           set -euo pipefail
           sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends qemu-system-x86 ovmf
+          sudo apt-get install -y -qq --no-install-recommends qemu-system-x86 ovmf mtools
           printf 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"\n' \
             | sudo tee /etc/udev/rules.d/99-kvm-writable.rules >/dev/null
           sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
@@ -126,9 +128,8 @@ jobs:
           python3 -m pip install --quiet --disable-pip-version-check numpy
           umask 077
           python3 tools/sign.py --keygen --out /tmp/throwaway.key > /tmp/keygen.txt
-          # The public rows, pasted the way the rotation ritual pastes them.
           python3 - <<'PYEOF'
-          import re, subprocess, sys
+          import re
           rows = open('/tmp/keygen.txt').read()
           pub = re.findall(r'0x[0-9a-f]{2}', rows)
           assert len(pub) == 65, f"keygen printed {len(pub)} bytes"
@@ -146,40 +147,125 @@ jobs:
           cp target/x86_64-unknown-uefi/release/glados.efi /tmp/new.efi
           python3 tools/sign.py /tmp/new.efi /tmp/new.efi.sig --key-file /tmp/throwaway.key
           git checkout -- Cargo.toml src/update/mod.rs
-      - name: Three boots on one persistent ESP image
+          # The OLD kernel is what boots; the NEW one is what gets staged.
+          cp /tmp/old.efi target/x86_64-unknown-uefi/release/glados.efi
+          python3 tools/hybtest.py out/ci-fixture.bin --build-only
+
+      - name: Prime the image, inject the staged files, boot three times
         run: |
           set -euo pipefail
-          python3 tools/hybtest.py out/ci-fixture.bin --build-only
-          cp /tmp/old.efi target/x86_64-unknown-uefi/release/glados.efi
-          # Boot 1: stage the new image (the ESP image persists between runs).
-          python3 tools/mkfat.py .qemu/nvme.img /tmp/new.efi /tmp/new.efi.sig
-          python3 tools/drive.py --esp-image .qemu/esp-ev.img --esp-rebuild \
+          # Boot 0 builds the persistent image around the old kernel.
+          python3 tools/drive.py --esp-image .qemu/esp-ev.img --esp-rebuild --esp-on-nvme \
             --model out/ci-fixture.bin --tokenizer out/ci-fixture-tokenizer.bin \
             --qemu-extra "-accel kvm -cpu host -smp 4" --timeout 600 \
-            "initiative off" "agent stop" "echo ready" \
-            "fat get /NEW.EFI /tmp/n.efi" "echo ." "fat get /NEW.SIG /tmp/n.sig" \
-            "store unlock" "update stage-file /tmp/n.efi /tmp/n.sig" "echo alive" \
-            2>&1 | tee boot1.log || true
-          # The staging verb differs by tree; what this leg requires is the
-          # three-line transcript, and a missing verb is a red leg that says
-          # which recipe drifted -- that is the leg working, not failing.
-          python3 tools/drive.py --esp-image .qemu/esp-ev.img \
-            --model out/ci-fixture.bin --tokenizer out/ci-fixture-tokenizer.bin \
-            --qemu-extra "-accel kvm -cpu host -smp 4" --timeout 600 \
-            "echo boot2" "update" "echo alive" 2>&1 | tee boot2.log || true
-          python3 tools/drive.py --esp-image .qemu/esp-ev.img \
-            --model out/ci-fixture.bin --tokenizer out/ci-fixture-tokenizer.bin \
-            --qemu-extra "-accel kvm -cpu host -smp 4" --timeout 600 \
-            "echo boot3" "update" "echo alive" 2>&1 | tee boot3.log || true
-          grep -q 'alive' boot1.log && grep -q 'alive' boot2.log && grep -q 'alive' boot3.log
+            "echo primed" 2>&1 | tee boot0.log
+          grep -q 'primed' boot0.log
+          # The staged triple, at mkesp's declared partition offset.
+          printf '1\n' > /tmp/flg
+          mcopy -o -i .qemu/esp-ev.img@@1048576 /tmp/new.efi ::/GLADOS/STAGED.EFI
+          mcopy -o -i .qemu/esp-ev.img@@1048576 /tmp/new.efi.sig ::/GLADOS/STAGED.SIG
+          mcopy -o -i .qemu/esp-ev.img@@1048576 /tmp/flg ::/GLADOS/UPDATE.FLG
+          boot() {
+            python3 tools/drive.py --esp-image .qemu/esp-ev.img --esp-on-nvme \
+              --model out/ci-fixture.bin --tokenizer out/ci-fixture-tokenizer.bin \
+              --qemu-extra "-accel kvm -cpu host -smp 4" --timeout 600 \
+              "echo alive" 2>&1 | tee "$1"
+            grep -q '^  alive' "$1"
+          }
+          boot boot1.log
+          grep -q 'update: applied -- reboot to run it' boot1.log
+          boot boot2.log
+          grep -q 'update: this image is on trial' boot2.log
+          boot boot3.log
+          # Settled: the third boot says nothing about updates at all.
+          ! grep -qE 'update: (applied|this image is on trial)' boot3.log
+          echo "applied, on trial, settled -- the CLAUDE.md transcript, reproduced"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: evidence-staged-${{ github.run_id }}
           path: |
+            boot0.log
             boot1.log
             boot2.log
             boot3.log
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # --- repair persistence: recorded, applied, killed, withdrawn, clean -------
+  # The six-boot sequence, without any fault injection: what this leg tests
+  # is the PERSISTENCE machinery -- the ESP file, the trial flag, the
+  # automatic withdrawal -- and none of that needs a broken subsystem, only
+  # a boot that dies before the shell clears the flag, which a short
+  # harness timeout provides.
+  repair-persist:
+    if: contains(inputs.legs, 'all') || contains(inputs.legs, 'repair')
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: uefi-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - run: cargo build --release --locked
+      - name: QEMU, OVMF, KVM
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends qemu-system-x86 ovmf
+          printf 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"\n' \
+            | sudo tee /etc/udev/rules.d/99-kvm-writable.rules >/dev/null
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+          python3 -m pip install --quiet --disable-pip-version-check numpy
+          python3 tools/hybtest.py out/ci-fixture.bin --build-only
+      - name: Six boots on one image
+        run: |
+          set -euo pipefail
+          boot() {  # $1 log, $2 timeout, then commands
+            log=$1; t=$2; shift 2
+            python3 tools/drive.py --esp-image .qemu/esp-rp.img --esp-on-nvme \
+              --model out/ci-fixture.bin --tokenizer out/ci-fixture-tokenizer.bin \
+              --qemu-extra "-accel kvm -cpu host -smp 4" --timeout "$t" \
+              "$@" 2>&1 | tee "$log" || true
+          }
+          # 1: record. Writing the boot volume goes over NVMe, which is why
+          #    the unlock is part of the recipe rather than a surprise.
+          python3 tools/drive.py --esp-image .qemu/esp-rp.img --esp-rebuild --esp-on-nvme \
+            --model out/ci-fixture.bin --tokenizer out/ci-fixture-tokenizer.bin \
+            --qemu-extra "-accel kvm -cpu host -smp 4" --timeout 600 \
+            "store unlock" "repair record power skip-hwp" "repair" "echo alive" \
+            2>&1 | tee boot1.log
+          grep -q '^  alive' boot1.log
+          grep -q 'skip-hwp' boot1.log
+          # 2: applied from the boot volume.
+          boot boot2.log 600 "echo alive"
+          grep -q '^  alive' boot2.log
+          grep -q 'repair(s) applied from the boot volume' boot2.log
+          # 3: applied again; the earlier trial cleared, so still one entry.
+          boot boot3.log 600 "echo alive"
+          grep -q 'repair(s) applied from the boot volume' boot3.log
+          # 4: the kill -- armed, then dead before the shell could clear it.
+          boot boot4.log 25 "echo alive"
+          ! grep -q '^  alive' boot4.log
+          # 5: the machine notices its own last boot and withdraws.
+          boot boot5.log 600 "echo alive"
+          grep -q '^  alive' boot5.log
+          grep -q "did not survive -- withdrawn, and it was the only one" boot5.log
+          # 6: clean; nothing applied, nothing said.
+          boot boot6.log 600 "echo alive"
+          grep -q '^  alive' boot6.log
+          ! grep -q 'applied from the boot volume' boot6.log
+          echo "recorded, applied, applied, killed, withdrawn, clean"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-repair-${{ github.run_id }}
+          path: boot*.log
           if-no-files-found: ignore
           retention-days: 30
 
