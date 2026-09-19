@@ -40,18 +40,26 @@ def read_patch(path):
     to check the source against, so a row that has drifted would be silently
     overwritten with a value chosen for a number that is no longer there.
     """
-    got = {}
+    got, inside = {}, False
     with open(path, encoding="utf-8") as f:
-        first = f.readline().strip()
-        if first != "knob 1":
-            raise SystemExit(f"  {path} is not a knob patch (first line {first!r})")
         for line in f:
             line = line.strip()
-            if not line:
+            # **The marker is found, not required to be first.** `godel push`
+            # sends an *envelope* -- who is asking, from which lineage, against
+            # which corpus -- with the patch inside it, and a reader that
+            # insisted on `knob 1` at line one would refuse the only thing that
+            # ever actually arrives. Fields before the marker are the
+            # envelope's and are not this file's business.
+            if line == "knob 1":
+                inside = True
+                continue
+            if not inside or not line:
                 continue
             k, _, v = line.partition(" ")
             if k in REQUIRED:
                 got[k] = v
+    if not inside:
+        raise SystemExit(f"  {path} carries no 'knob 1' patch")
     missing = [k for k in REQUIRED if k not in got]
     if missing:
         raise SystemExit(f"  {path} is missing {', '.join(missing)}")
@@ -227,6 +235,36 @@ def selftest():
 
         good, why = rewrite(p, "NOPE", "1", "2")
         claim(not good, "and a symbol that is not there is refused")
+
+        # The envelope `godel push` actually sends, with the patch inside it
+        # and four fields of provenance above. A reader that wanted `knob 1`
+        # on line one would refuse every real proposal.
+        env = os.path.join(d, "e.knob")
+        eol = chr(10)
+        with open(env, "w", encoding="utf-8", newline="") as f:
+            f.write(eol.join([
+                "proposal 1", "point abc", "from 1.3.7", "head none",
+                "corpus zz", "tests 0",
+                "knob 1", "file src/ai/lex.rs", "symbol LEN_B",
+                "from 0.5", "to 0.75", "rail host.retrieval", "",
+            ]))
+        got = read_patch(env)
+        claim(got["symbol"] == "LEN_B" and got["to"] == "0.75",
+              "an envelope carrying a patch is read, marker found rather than required first")
+        # `from` appears twice in that file -- once as the envelope's version
+        # and once as the patch's old value -- and only the one after the
+        # marker is the patch's.
+        claim(got["from"] == "0.5",
+              "and a field the envelope also uses is taken from inside the patch")
+
+        nothing = os.path.join(d, "n.knob")
+        with open(nothing, "w", encoding="utf-8", newline="") as f:
+            f.write(eol.join(["proposal 1", "point abc", ""]))
+        try:
+            read_patch(nothing)
+            claim(False, "an envelope with no patch in it is refused")
+        except SystemExit:
+            claim(True, "an envelope with no patch in it is refused")
 
     return ok
 

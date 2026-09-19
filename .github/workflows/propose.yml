@@ -1,0 +1,203 @@
+name: propose
+
+# What happens to a change the machine wrote.
+#
+# `godel source` picks a point from the declared space and writes a patch;
+# `godel push` sends it here. The kernel cannot compile and cannot judge a
+# source change, so this is the half that can: apply it, build it, boot it,
+# measure the rail it *claimed*, and answer.
+#
+# ### The shape is two builds and one comparison
+#
+# A rail figure on its own says nothing -- the noise floors in `tools/rails.py`
+# were measured at 16 to 35% across boots of one binary. So both arms are built
+# here, in one job, on one runner, from one checkout: the baseline as the tree
+# stands and the candidate with the patch applied. Anything else compares two
+# machines and calls the difference an effect.
+#
+# ### It answers three things, not two
+#
+# `rails.py judge` exits 0 for adopt, 1 for refuse and 2 for **not
+# comparable** -- a control drifted and these two readings do not compare.
+# That third one is not a refusal: a verdict of "no" from an invalid
+# measurement is as wrong as a yes, and the honest answer is take it again.
+#
+# ### What it does not do
+#
+# Sign or publish. That needs `UPDATE_SIGNING_KEY`, and a verdict is the only
+# thing that writes a ledger line the machine did not derive itself -- so the
+# signing step is deliberately the last one and deliberately separate, and this
+# workflow leaves the unsigned verdict as an artifact until somebody wires it
+# up. `godel verdict` on the machine refuses an unsigned one, which is the
+# correct behaviour and has been driven end to end.
+
+on:
+  workflow_dispatch:
+    inputs:
+      envelope:
+        description: "The envelope `godel push` sends: provenance, then the patch"
+        required: true
+      forest:
+        description: "Path to a forest for the retrieval rail (blank = fixture only)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  judge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version --verbose
+
+      - name: The knob table must still describe the source
+        run: python3 tools/knob.py check
+
+      # The envelope arrives as a workflow input, which is a string somebody
+      # or something typed. `knob.py` finds the `knob 1` marker inside it,
+      # reads five declared fields, ignores every other line, checks the file
+      # path is inside the repository, and refuses anything that is not "set
+      # this named const". Nothing in it is executed or used as a path.
+      #
+      # The provenance above the marker -- who asked, from which lineage,
+      # against which corpus, and how many tests that corpus has already paid
+      # for -- is what the verdict is filed against when it goes home.
+      - name: Read the patch
+        run: |
+          set -euo pipefail
+          printf '%s\n' "${{ inputs.envelope }}" > proposal.knob
+          cat proposal.knob
+          python3 tools/knob.py show proposal.knob
+          echo "RAIL=$(grep -m1 '^rail ' proposal.knob | cut -d' ' -f2-)" >> "$GITHUB_ENV"
+
+      - name: The tools must work before they are trusted to judge
+        run: |
+          set -euo pipefail
+          python3 tools/knob.py --selftest
+          python3 tools/rails.py --selftest
+          python3 tools/retrieval.py --selftest
+
+      # The corpus, if this runner has one. A generated fixture proves the
+      # rail tooling runs; it is **not** evidence about a retrieval constant,
+      # measured at roughly a quarter the sensitivity of the real forest. A
+      # runner with no corpus therefore produces `absent` for the claimed rail,
+      # and `rails.py judge` reads that as a veto -- which is the right answer
+      # rather than a gap to paper over.
+      - name: The corpus
+        run: |
+          set -euo pipefail
+          if [ -n "${{ inputs.forest }}" ] && [ -d "${{ inputs.forest }}" ]; then
+            echo "FOREST=${{ inputs.forest }}" >> "$GITHUB_ENV"
+            echo "using the forest at ${{ inputs.forest }}"
+          else
+            python3 tools/retrieval.py --fixture out/fixture --nodes 400 --limit 0 \
+              --dump /dev/null >/dev/null
+            echo "FOREST=out/fixture" >> "$GITHUB_ENV"
+            echo "::notice::no forest was given, so the retrieval rail is a fixture"
+            echo "::notice::and says only that the tooling runs, not that a constant helps"
+            echo "FIXTURE_ONLY=1" >> "$GITHUB_ENV"
+          fi
+
+      # --- the baseline arm ------------------------------------------------
+
+      - name: Build the tree as it stands
+        run: cargo build --release --locked
+
+      - uses: ./.github/actions/verify-boot
+
+      - name: Keep the baseline
+        run: |
+          set -euo pipefail
+          mv rails.txt kernel-a.txt
+          python3 tools/retrieval.py "$FOREST" --dump retrieval-a.tsv | tee retrieval-a.log
+          python3 tools/rails.py collect --rail retrieval=retrieval-a.tsv --out host-a.txt
+          cat kernel-a.txt host-a.txt | grep -v '^\[rail\]' > body-a.txt
+          { echo '[rail] v1'; cat body-a.txt; echo '[rail] end'; } > before.txt
+          cat before.txt
+
+      # --- the candidate arm -----------------------------------------------
+
+      - name: Apply what the machine proposed
+        run: |
+          set -euo pipefail
+          python3 tools/knob.py apply proposal.knob
+          git --no-pager diff --stat
+
+      - name: Build it
+        run: cargo build --release --locked
+
+      - uses: ./.github/actions/verify-boot
+
+      - name: Keep the candidate
+        run: |
+          set -euo pipefail
+          mv rails.txt kernel-b.txt
+          python3 tools/retrieval.py "$FOREST" --dump retrieval-b.tsv | tee retrieval-b.log
+          python3 tools/rails.py collect --rail retrieval=retrieval-b.tsv --out host-b.txt
+          cat kernel-b.txt host-b.txt | grep -v '^\[rail\]' > body-b.txt
+          { echo '[rail] v1'; cat body-b.txt; echo '[rail] end'; } > after.txt
+          cat after.txt
+
+      # --- the verdict ------------------------------------------------------
+
+      - name: Judge it against what it claimed
+        id: judge
+        run: |
+          set -euo pipefail
+          set +e
+          python3 tools/rails.py judge before.txt after.txt --claims "$RAIL" | tee judged.txt
+          code=$?
+          set -e
+          case "$code" in
+            0) moved=better; adopted=yes ;;
+            1) moved=$(grep -oE "^  $RAIL +[a-z]+" judged.txt | awk '{print $2}'); adopted=no ;;
+            2) moved=unstable; adopted=no ;;
+            *) echo "::error::rails.py answered $code"; exit 1 ;;
+          esac
+          # A fixture-only run cannot have measured the claimed rail as
+          # evidence, so it may not carry an adoption however the numbers came
+          # out. Said here rather than hoped for.
+          if [ "${FIXTURE_ONLY:-0}" = "1" ]; then
+            adopted=no
+          fi
+          point=$(grep -m1 '^point ' proposal.knob | cut -d' ' -f2 || true)
+          why=$(grep -m1 "^  $RAIL " judged.txt | sed 's/^ *//;s/  */ /g')
+          {
+            echo "verdict 1"
+            echo "point ${point:-0000000000000000000000000000000000000000000000000000000000000000}"
+            echo "rail $RAIL"
+            echo "moved ${moved:-same}"
+            echo "why ${why:-no line}"
+            echo "adopted $adopted"
+          } > verdict.txt
+          cat verdict.txt
+
+      # Unsigned, and it says so. `godel verdict` on the machine refuses a
+      # verdict that is not signed by the update key, which is the whole point:
+      # a verdict is the only thing that writes a ledger line the machine did
+      # not derive itself, so an unsigned one is somebody else editing the
+      # lineage. Appending 80 bytes of GLADOSIG here needs the signing key and
+      # is the one step left.
+      - name: Keep everything
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: proposal-${{ github.run_id }}
+          path: |
+            proposal.knob
+            before.txt
+            after.txt
+            judged.txt
+            verdict.txt
+            retrieval-a.log
+            retrieval-b.log
+            retrieval-a.tsv
+            retrieval-b.tsv
+          if-no-files-found: warn
+          retention-days: 30

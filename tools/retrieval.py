@@ -81,6 +81,91 @@ def split_head(node):
     return concept, tail
 
 
+# The word pool a fixture forest is built from.
+#
+# Ordinary English rather than nonsense, because the scorer weights by document
+# frequency and a pool of unique tokens would give every query exactly one
+# candidate: a benchmark that is 100% by construction and cannot move. These
+# repeat at very different rates, which is what makes `IDF_SQUARED` and `LEN_B`
+# have anything to bite on.
+_POOL = (
+    "ring field group set axiom proof lemma matrix vector basis kernel image "
+    "prime factor modulus residue graph edge vertex path cycle tree leaf root "
+    "apple basket crate lorry driver mile hour minute wage shift ticket fare "
+    "garden fence plank nail hammer paint litre metre gram flour sugar butter "
+    "pupil class marker sheet folder shelf window ledger column entry balance"
+).split()
+
+
+def build_fixture(dst, nodes=400, seed=7):
+    """A forest with no third-party data in it, for a runner that has none.
+
+    **It proves the pipeline runs. It is not evidence about a constant**, and
+    the difference is worth being exact about because the temptation is to
+    treat it as both. Measured against the real forest: `LEN_B` at 0.75 moves
+    thirteen items of six hundred there and one or two of three hundred here.
+    A fixture engineered until it *was* that sensitive would be a fixture whose
+    verdicts are about the fixture.
+
+    So a runner with no corpus gets a rail that says the tooling works, and
+    `rails.py` answering `absent` for the real one is the correct outcome
+    rather than a gap to paper over -- a proposal whose rail the judging
+    machine cannot measure must be refused, not adopted blind.
+
+    **The absolute number this produces means nothing and is not meant to.**
+    What a judge needs is two measurements of the same task under two builds,
+    and for that the corpus only has to be fixed, shaped like the real one, and
+    hard enough to have headroom. It is generated for the reason `mkwad.py`
+    generates its art and `hybtest.py` its weights: the real corpus is somebody
+    else's and is not in this repository.
+
+    Each node is a concept sentence plus a body that shares *some* of its
+    vocabulary and introduces more, which is the structure a GSM8K node has --
+    the rest of a word problem names the people its first sentence introduced.
+    Seeded, so two runs on two builds measure the same thing rather than two
+    samples of it.
+    """
+    import random
+
+    rng = random.Random(seed)
+    root = Path(dst)
+    for i in range(nodes):
+        # A long tail of shared words and a short head of rarer ones, so
+        # document frequency spans orders of magnitude the way it does in
+        # prose. Without that spread, weighting by rarity changes nothing and
+        # the knobs that exist to tune it cannot be measured at all.
+        shared = [_POOL[rng.randrange(0, 20)] for _ in range(4)]
+        rare = [_POOL[rng.randrange(20, len(_POOL))] for _ in range(3)]
+        concept = "The " + " ".join(shared[:2] + rare[:1]) + " problem here."
+
+        # **Lengths vary by an order of magnitude, and they have to.** The
+        # first fixture gave every node about the same number of terms, and
+        # `LEN_B` is a *length* discount: with nothing to discount between, a
+        # value of 0.75 against 0.5 moved three items in four hundred and the
+        # rail could not tell the knobs apart. A corpus with one length is a
+        # corpus that cannot measure the constant that exists to normalise
+        # length, which is the same shape as a benchmark with no headroom.
+        n_terms = 4 + int(rng.random() ** 2 * 56)
+        tail = " ".join(
+            [rng.choice(shared + rare) for _ in range(max(2, n_terms // 4))]
+            + [_POOL[rng.randrange(0, len(_POOL))] for _ in range(n_terms)]
+        )
+        d = root / f"part-{i // 100:02}"
+        d.mkdir(parents=True, exist_ok=True)
+        terms = " ".join(dict.fromkeys(shared + rare))
+        eol = chr(10)
+        body = eol.join([
+            f"head fixture/part-{i // 100:02} | {concept} | {terms}",
+            "kind fixture",
+            "source fixture",
+            f"concept {concept}",
+            f"text {concept} {tail}",
+            "",
+        ])
+        (d / f"{i:05}").write_text(body, encoding="utf-8", newline=eol)
+    print(f"  fixture: {nodes} node(s) -> {dst}")
+
+
 def qid(node):
     """A stable id for a query, keyed on the node it is asking for.
 
@@ -226,12 +311,18 @@ def main():
                     help="ask with the whole body tail rather than its first "
                          f"{SHORT_WORDS} words")
     ap.add_argument("--dump", default="")
+    ap.add_argument("--fixture", default="",
+                    help="write a generated forest here and measure that")
+    ap.add_argument("--nodes", type=int, default=400)
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
 
     if a.selftest:
         print("[retrieval] the rail, without a forest to point it at")
         return 0 if selftest() else 1
+    if a.fixture:
+        build_fixture(a.fixture, nodes=a.nodes)
+        a.forest = a.forest or a.fixture
     if not a.forest:
         raise SystemExit("  usage: retrieval.py <forest dir> [--limit N] [--dump FILE]")
 
