@@ -127,6 +127,199 @@ pub fn restricted_ce_compact(logits: &[f32], target: usize) -> (f32, Vec<f32>) {
     (loss, probs)
 }
 
+/// The policy gradient of `E_{a~pi}[r(a)]`, **kept because it does not work
+/// and the measurement is the reason the shipped objective has the shape it
+/// has.** Nothing on the training path calls this.
+///
+/// Maximising `J = sum_i pi_i r_i` at one decode step gives
+///
+/// ```text
+/// dJ/dz_k = sum_i r_i dpi_i/dz_k = pi_k (r_k - rbar),   rbar = sum_i pi_i r_i
+/// ```
+///
+/// and `gy` is descended, so the loss gradient is the negative of that.
+/// Correct, and useless here. With a binary reward -- one for the labelled
+/// token, zero elsewhere -- `rbar` is `pi_t` and **every component collapses
+/// to the cross-entropy gradient multiplied by `pi(target)`**, exactly, which
+/// `reward_is_ce_times_pi` asserts rather than assuming. The mechanism is one
+/// line: cross-entropy is `-log` of this same quantity, and the log is not
+/// decoration -- it is precisely the factor that cancels the softmax
+/// Jacobian's own `pi_t`.
+///
+/// **The framing that survives Adam is the one worth writing down.** "The
+/// gradient vanishes when the model is wrong" is the obvious objection and it
+/// is refutable: `Adam::step` divides `m_hat` by `sqrt(v_hat)`, so scaling a
+/// gradient by a constant leaves the step *exactly* unchanged and a uniform
+/// shrink would be absorbed. The real objection is that the factor is **not
+/// uniform**. `ga`, `gb` and `dm` accumulate across every training decision
+/// and Adam steps once per epoch on that sum, so a per-decision `pi_t` turns
+/// the batch gradient into a `pi_t`-weighted average of the per-decision
+/// cross-entropy gradients. Measured at the target logit:
+///
+/// ```text
+///                    pi_t = 1e-3      pi_t = 0.99     emphasis
+///   cross-entropy      0.999            0.010         100 : 1  toward hard
+///   this objective     0.000999         0.0099          1 : 10 toward easy
+/// ```
+///
+/// A thousandfold swing of relative emphasis, pointed at the examples the base
+/// model already answers correctly -- which are exactly the ones J1 cannot
+/// count as repairs. Adam normalises the sum and never the terms, so it cannot
+/// undo it. **A graded reward does not help**, because the `pi_k` prefactor
+/// comes from the softmax Jacobian and does not care what the rewards are.
+///
+/// `soft_ce_compact` ships instead, and it is the same idea with the reward
+/// entering as a *target distribution* rather than as a multiplier on
+/// probabilities, which is where the prefactor comes from.
+pub fn reward_grad(logits: &[f32], reward: &[f32]) -> Vec<f32> {
+    let probs = softmax(logits);
+    let mut rbar = 0.0f32;
+    for (i, &p) in probs.iter().enumerate() {
+        rbar += p * reward[i];
+    }
+    let mut gy = vec![0.0f32; logits.len()];
+    for (k, g) in gy.iter_mut().enumerate() {
+        *g = -probs[k] * (reward[k] - rbar);
+    }
+    gy
+}
+
+/// The shipped objective: cross-entropy against a **target distribution** the
+/// outcome decides, blended with the label's own one-hot.
+///
+/// ```text
+/// L   = -log pi_t                                   (reported, see below)
+/// gy  = (1 - lam) (pi - onehot(t))  +  lam (pi - q)
+/// ```
+///
+/// The deviation is `pi - q` with no `pi_k` in front of it, and that is the
+/// whole reason for this form rather than `reward_grad`'s: a reward expressed
+/// as *where the probability should be* differentiates without the softmax
+/// Jacobian eating the signal, and a reward expressed as *what each choice is
+/// worth* does not. It is bounded, it sums to zero, and at `q = onehot(t)` it
+/// is cross-entropy's own gradient exactly -- so the reward can only ever move
+/// the objective by disagreeing with the label, which is the point.
+///
+/// **The loss that comes back is the cross-entropy against the label**, not
+/// the mixture. `Fit::first_loss` and `last_loss` are raw sums quoted in the
+/// ledger and at `harness.rs:989`, so changing what they mean changes every
+/// recorded number, and a run stays legible against one quantity whatever
+/// `lam` was. What the reward moves is the direction, which is what it is for.
+///
+/// `lam = 0` takes `restricted_ce_compact`'s own path rather than a mixture
+/// that happens to weigh zero, so today's numbers are reproduced bit for bit
+/// by construction and not by the float arithmetic being kind.
+///
+/// `q` is normalised here rather than trusted. One that does not sum to one
+/// adds a uniform component to the logit row, which the softmax ignores and
+/// `backward_rows`'s magnitude route does **not** -- so a mis-scaled `q` would
+/// drift the row magnitudes with every accuracy figure unchanged.
+pub fn soft_ce_compact(
+    logits: &[f32],
+    target: usize,
+    q: Option<&[f32]>,
+    lam: f32,
+) -> (f32, Vec<f32>) {
+    let q = match q {
+        // A `q` the wrong length is a bug in whoever filled it, and blending
+        // it against the wrong candidates would train confidently on nothing.
+        Some(q) if lam != 0.0 && q.len() == logits.len() => q,
+        _ => return restricted_ce_compact(logits, target),
+    };
+    let mut mass = 0.0f32;
+    for &v in q {
+        mass += v;
+    }
+    if !(mass > 0.0) {
+        return restricted_ce_compact(logits, target);
+    }
+
+    let probs = softmax(logits);
+    let loss = -logf(probs[target]);
+    let mut gy = vec![0.0f32; logits.len()];
+    for (k, g) in gy.iter_mut().enumerate() {
+        let ce = probs[k] - if k == target { 1.0 } else { 0.0 };
+        let soft = probs[k] - q[k] / mass;
+        *g = (1.0 - lam) * ce + lam * soft;
+    }
+    (loss, gy)
+}
+
+/// Cross-entropy over a **set** of accepted tokens: `-log sum_{i in S} pi_i`.
+///
+/// ```text
+/// gy[j] = pi_j - pi_j 1{j in S} / p,      p = sum_{i in S} pi_i
+/// ```
+///
+/// Not wired to anything, and it is here because what it answers is a defect
+/// in the instrument rather than in the model. `chain_for` picks the
+/// **longest** piece advancing toward the label and calls that the target, so
+/// for a name with several tokenisations every other correct spelling is a
+/// candidate cross-entropy pushes *down* and `Trial::correct` scores as wrong.
+/// `constrain::costs` already counts them and its own doc says the number
+/// "mostly counts prefixes": `remember` has ten first tokens against `mv`'s
+/// three, both costing two tokens to spell.
+///
+/// So `Trial::score` is per-step teacher-forced agreement with one greedy
+/// segmentation, and its doc's claim to be "the same question the constrained
+/// decoder asks at temperature zero" is not quite true -- the decoder follows
+/// a shorter piece and carries on spelling. **It does not follow that the
+/// shorter piece is harmless**: `advances_toward` is asked about one
+/// alternative, and a prefix shared by several applets keeps all of them
+/// reachable, so accepting the set is an honest relaxation rather than a free
+/// correction.
+///
+/// **Deliberately not soft-target cross-entropy over `S`.** A uniform `q` on
+/// `S` would push the model to spread mass evenly across the spellings,
+/// fighting it for concentrating on one; this is indifferent between them and
+/// only asks that the sum be large. At `S = {t}` it is cross-entropy exactly,
+/// which `set_ce_is_ce_at_a_singleton` asserts.
+///
+/// Wiring it changes what `correct` accepts, and every `n=`, `fixed=`,
+/// `broke=` and `wrong=` already in the ledger was computed under the current
+/// definition. That is a corpus-hash-class decision and not a quiet edit, so
+/// it waits for one.
+pub fn set_ce_compact(logits: &[f32], in_set: &[bool]) -> (f32, Vec<f32>) {
+    let probs = softmax(logits);
+    let mut p = 0.0f32;
+    for (i, &m) in in_set.iter().enumerate() {
+        if m {
+            p += probs[i];
+        }
+    }
+    let loss = -logf(p);
+    let mut gy = vec![0.0f32; logits.len()];
+    for (k, g) in gy.iter_mut().enumerate() {
+        let keep = in_set.get(k).copied().unwrap_or(false);
+        *g = probs[k] - if keep { probs[k] / p } else { 0.0 };
+    }
+    (loss, gy)
+}
+
+/// Softmax with the maximum subtracted, shared by the three objectives above
+/// so they cannot disagree about a probability. `progress.rs` records what the
+/// naive form costs: `exp(300)` is infinity in f32, and `inf - inf` is NaN on
+/// exactly the confident predictions a working model makes.
+fn softmax(logits: &[f32]) -> Vec<f32> {
+    let mut max = f32::NEG_INFINITY;
+    for &v in logits {
+        if v > max {
+            max = v;
+        }
+    }
+    let mut probs = vec![0.0f32; logits.len()];
+    let mut sum = 0.0f32;
+    for (i, &v) in logits.iter().enumerate() {
+        let ex = expf(v - max);
+        probs[i] = ex;
+        sum += ex;
+    }
+    for p in probs.iter_mut() {
+        *p /= sum;
+    }
+    probs
+}
+
 /// Natural log without libm. Range-reduced: x = m . 2^e with m in
 /// [sqrt(1/2), sqrt(2)), then the atanh series on r=(m-1)/(m+1), whose
 /// argument stays within +-0.172 where four terms are past f32 precision.
@@ -331,9 +524,187 @@ pub fn selftest() -> bool {
         if ce_ok { "ok " } else { "FAIL" }
     );
 
+    // --- the objective, and the measurement that chose it ----------------
+    //
+    // Every claim here is engine-free arithmetic over a hand-built logit row,
+    // because the question they settle -- which objective is worth training
+    // with -- is a property of the gradient and not of any checkpoint.
+
+    // A row where the target holds exactly probability `p`, the rest sharing
+    // what is left. Built rather than sampled: the whole point is to stand at
+    // a decision the model gets badly wrong on purpose.
+    let row_at = |p: f32, n: usize, t: usize| -> Vec<f32> {
+        let mut z = vec![0.0f32; n];
+        z[t] = logf(p * (n - 1) as f32 / (1.0 - p));
+        z
+    };
+
+    const N: usize = 12;
+    const T: usize = 3;
+
+    // **The gradient floor, which is the claim the design rests on.** At a
+    // decision the model answers wrongly with confidence, cross-entropy pushes
+    // the target up with essentially all the force it has, and the
+    // reward-weighted policy gradient pushes it with `pi(target)` of that --
+    // a thousandth, at the probabilities `repair.rs`'s name-cost finding says
+    // a rare applet actually sits at. A later edit that "simplifies" the
+    // objective back to a reward weighting fails here first.
+    let zbad = row_at(1e-3, N, T);
+    let (_, g_ce_bad) = restricted_ce_compact(&zbad, T);
+    let mut onehot = vec![0.0f32; N];
+    onehot[T] = 1.0;
+    let g_rw_bad = reward_grad(&zbad, &onehot);
+    let floor_ok = g_ce_bad[T].abs() > 0.9 && g_rw_bad[T].abs() < 0.01;
+    kprintln!(
+        "  {}  at pi(target)=1e-3 cross-entropy pulls {:.3} where a reward weighting pulls {:.5}",
+        if floor_ok { "ok " } else { "FAIL" },
+        g_ce_bad[T].abs(),
+        g_rw_bad[T].abs()
+    );
+
+    // ...and *why* it is a thousandth: the reward gradient is the
+    // cross-entropy gradient times `pi(target)`, elementwise and exactly. This
+    // is the identity the doc comment on `reward_grad` argues from, asserted
+    // rather than trusted.
+    let mut orng = Rng(0x0B1E_C71F_0000_0003);
+    let z: Vec<f32> = (0..N).map(|_| orng.f32() * 4.0 - 2.0).collect();
+    let probs = softmax(&z);
+    let (_, g_ce) = restricted_ce_compact(&z, T);
+    let g_rw = reward_grad(&z, &onehot);
+    let factor_ok = (0..N).all(|k| (g_rw[k] - probs[T] * g_ce[k]).abs() < 1e-6);
+    kprintln!(
+        "  {}  a binary reward's gradient is the cross-entropy one times pi(target)={:.4}",
+        if factor_ok { "ok " } else { "FAIL" },
+        probs[T]
+    );
+
+    // **lam = 0 reproduces today's numbers bit for bit.** Not "within a
+    // tolerance": the mixture takes `restricted_ce_compact`'s own path, so
+    // every trial run before this existed is re-derivable, which is the claim
+    // every ledger line already written depends on.
+    let (l0, g0) = soft_ce_compact(&z, T, Some(&onehot), 0.0);
+    let (lr, gr) = restricted_ce_compact(&z, T);
+    let lam0_ok = l0 == lr && (0..N).all(|k| g0[k] == gr[k]);
+    kprintln!(
+        "  {}  the mixed objective at lam=0 is bit-identical to the one it replaces",
+        if lam0_ok { "ok " } else { "FAIL" }
+    );
+
+    // And at lam = 1 with the label's own one-hot as the target distribution
+    // it is cross-entropy *again* -- so the reward can only move the gradient
+    // by disagreeing with the label, never merely by being switched on.
+    let (_, g1) = soft_ce_compact(&z, T, Some(&onehot), 1.0);
+    let lam1_ok = (0..N).all(|k| (g1[k] - g_ce[k]).abs() < 1e-6);
+    kprintln!(
+        "  {}  at lam=1 a one-hot target distribution is cross-entropy, not a second objective",
+        if lam1_ok { "ok " } else { "FAIL" }
+    );
+
+    // A target distribution that disagrees genuinely moves it, or the two
+    // claims above would be satisfied by an objective that ignores `q`.
+    let mut qq = vec![0.0f32; N];
+    qq[T] = 0.5;
+    qq[(T + 5) % N] = 0.5;
+    let (_, gq) = soft_ce_compact(&z, T, Some(&qq), 1.0);
+    let moves_ok = (0..N).any(|k| (gq[k] - g_ce[k]).abs() > 0.1);
+    kprintln!(
+        "  {}  a target distribution that disagrees with the label changes the gradient",
+        if moves_ok { "ok " } else { "FAIL" }
+    );
+
+    // **Every objective here conserves zero.** A gradient that does not sum to
+    // zero adds a uniform component to the logit row, which the softmax
+    // ignores and `backward_rows`'s magnitude route does not -- so a reward
+    // built against the wrong step's candidates would drift the row
+    // magnitudes with every accuracy figure unchanged. Nothing else in this
+    // file would catch that.
+    let graded: Vec<f32> = (0..N).map(|k| 0.1 + 0.05 * (k % 4) as f32).collect();
+    let in_set: Vec<bool> = (0..N).map(|k| k == T || k == 1 || k == 7).collect();
+    let sums: [f32; 4] = [
+        g_ce.iter().sum(),
+        reward_grad(&z, &graded).iter().sum(),
+        gq.iter().sum(),
+        set_ce_compact(&z, &in_set).1.iter().sum(),
+    ];
+    let zero_ok = sums.iter().all(|s| s.abs() < 1e-5);
+    kprintln!(
+        "  {}  cross-entropy, reward, mixture and set forms all conserve zero",
+        if zero_ok { "ok " } else { "FAIL" }
+    );
+
+    // The degeneration canary. A reward with no variance across the candidate
+    // set has no advantage to express, so it trains *nothing* -- which the
+    // ledger cannot tell apart from a variant that trained and repaired
+    // nothing, the same pair the no-random-seed bug already cost this tree.
+    let flat = vec![0.4f32; N];
+    let g_flat = reward_grad(&z, &flat);
+    let flat_ok = g_flat.iter().all(|g| g.abs() < 1e-6);
+    kprintln!(
+        "  {}  a reward that is constant across the candidates moves nothing at all",
+        if flat_ok { "ok " } else { "FAIL" }
+    );
+
+    // The set form is cross-entropy at a singleton, which is what makes it a
+    // generalisation rather than a different objective wearing the name.
+    let single: Vec<bool> = (0..N).map(|k| k == T).collect();
+    let (ls, gs) = set_ce_compact(&z, &single);
+    let set_ok = (ls - lr).abs() < 1e-6 && (0..N).all(|k| (gs[k] - g_ce[k]).abs() < 1e-6);
+    // ...and accepting a set genuinely relaxes it: the target is pulled less
+    // hard because two other spellings now carry part of the answer.
+    let (_, gset) = set_ce_compact(&z, &in_set);
+    let relax_ok = gset[T].abs() < g_ce[T].abs();
+    kprintln!(
+        "  {}  set cross-entropy is cross-entropy at one token and relaxes at three",
+        if set_ok && relax_ok { "ok " } else { "FAIL" }
+    );
+
+    // A finite difference against the objective's own loss, which is the gate
+    // `restricted_ce_compact` has by equality with the full-width walk and
+    // these have nowhere else to get. `h` is a power of two so it is exact in
+    // f32; the tolerance is what h^2 truncation plus f32 rounding at this
+    // scale actually costs, rather than a number chosen to make it pass.
+    let h = 1.0f32 / 32.0;
+    let soft_loss = |zz: &[f32], q: &[f32]| -> f32 {
+        let p = softmax(zz);
+        let mut mass = 0.0f32;
+        for &v in q {
+            mass += v;
+        }
+        let mut l = 0.0f32;
+        for k in 0..zz.len() {
+            l -= (q[k] / mass) * logf(p[k]);
+        }
+        l
+    };
+    let mut fd_ok = true;
+    for j in 0..N {
+        let (mut zp, mut zm) = (z.clone(), z.clone());
+        zp[j] += h;
+        zm[j] -= h;
+        let num = (soft_loss(&zp, &qq) - soft_loss(&zm, &qq)) / (2.0 * h);
+        if (num - gq[j]).abs() > 2e-3 {
+            fd_ok = false;
+        }
+    }
+    kprintln!(
+        "  {}  the mixture's gradient survives a finite difference of its own loss",
+        if fd_ok { "ok " } else { "FAIL" }
+    );
+
+    let obj_ok = floor_ok
+        && factor_ok
+        && lam0_ok
+        && lam1_ok
+        && moves_ok
+        && zero_ok
+        && flat_ok
+        && set_ok
+        && relax_ok
+        && fd_ok;
+
     let collapsed = last_loss < first_loss * 0.05;
     let all_right = correct == EXAMPLES;
-    let ok = collapsed && all_right && ce_ok;
+    let ok = collapsed && all_right && ce_ok && obj_ok;
     kprintln!(
         "  {}  loss {:.3} -> {:.3}, {}/{} answered right through their candidate set",
         if ok { "ok " } else { "FAIL" },
