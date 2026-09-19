@@ -4190,6 +4190,64 @@ pub fn parse_verdict(text: &[u8]) -> Result<Verdict, String> {
     Ok(Verdict { point, rail, moved, why, adopted })
 }
 
+/// How many verdicts one poll may file. A mailbox drains across nights, not
+/// in one gulp: every filing appends a ledger line, and a burst that moved
+/// the epoch boundary four times in one tick would be four criterion windows
+/// nobody scheduled.
+pub const VERDICT_BURST: usize = 4;
+
+/// Empty the machine's mailbox: fetch, verify, file, repeat, bounded.
+///
+/// Answers `(filed, skipped, stopped_because)` -- reporting only, so the
+/// shell verb and the night branch print the same facts in their own
+/// registers rather than growing two accounts of one poll.
+pub fn poll_verdicts(again: bool) -> (usize, usize, Option<String>) {
+    let url = match crate::update::channel::verdict_endpoint(again) {
+        Ok(u) => u,
+        Err(e) => return (0, 0, Some(e)),
+    };
+    let Some(code) = crate::update::channel::code() else {
+        return (0, 0, Some(String::from("no device code -- 'update link <code>' first")));
+    };
+    let (mut filed, mut skipped) = (0usize, 0usize);
+    for _ in 0..VERDICT_BURST {
+        match crate::update::fetch::get_optional_with(&url, "a verdict", 20_000, &code) {
+            Err(e) => return (filed, skipped, Some(e)),
+            Ok(None) => return (filed, skipped, None),
+            Ok(Some(blob)) => {
+                // Idempotence lives HERE, in the caller, because
+                // `file_verdict` appends a ledger line unconditionally and
+                // must -- the ledger is the record. The peek reads a point
+                // out of not-yet-verified text, which is safe for exactly
+                // this use and no other: a forged point can only skip a blob
+                // that would not have verified anyway, and a novel one
+                // proceeds into the same verify-before-parse gate as ever.
+                if let Some(point) = peek_point(&blob) {
+                    let mut path = String::from(INBOX);
+                    path.push('/');
+                    path.push_str(&hex32(&point));
+                    if crate::sysbox::read_blob(&path).is_some() {
+                        skipped += 1;
+                        continue;
+                    }
+                }
+                match file_verdict(&blob) {
+                    Ok(_) => filed += 1,
+                    Err(e) => return (filed, skipped, Some(e)),
+                }
+            }
+        }
+    }
+    (filed, skipped, None)
+}
+
+/// The point out of a blob nothing has verified yet. See the caller for why
+/// that is allowed to exist at all.
+fn peek_point(blob: &[u8]) -> Option<[u8; 32]> {
+    let (text, _sig) = super::super::update::manifest::split(blob)?;
+    parse_verdict(text).ok().map(|v| v.point)
+}
+
 /// File a verdict: write it down, and put a line in the ledger.
 ///
 /// The ledger line is the point. Everything else this module records is a

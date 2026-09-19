@@ -1,0 +1,9 @@
+Rendered by the kernel itself, not by godel.py, and that is the whole point:
+`godel.py --verify` diffs its parser against the writer rather than against
+its own expectations. Captured from one driven QEMU session --
+
+  drive.py "godel verdict /tmp/vg" "godel ledger 3" "godel clade"
+
+-- after a real signed verdict was filed. Re-capture the same way when the
+kernel's rendering changes; a fixture set edited by hand is a fixture set
+that agrees with whoever edited it.

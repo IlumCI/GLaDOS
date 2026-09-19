@@ -131,6 +131,49 @@ pub fn get_with(url: &Url, what: &str, timeout_ms: u64, code: &str) -> Result<Ve
     inspect(f, what)
 }
 
+/// Exactly `get_with`, except an empty mailbox is an answer.
+///
+/// 204 -- and only 204 -- maps to `Ok(None)`, and it passes the identity
+/// gate first, because "nothing for you" claimed by an unverified server is
+/// still somebody in the path talking: the honest failure there is the TLS
+/// refusal, not a quiet skipped poll. Everything else goes through
+/// `inspect` unchanged, so the two fetchers cannot drift about what a body
+/// must be.
+pub fn get_optional_with(
+    url: &Url,
+    what: &str,
+    timeout_ms: u64,
+    code: &str,
+) -> Result<Option<Vec<u8>>, String> {
+    if code.is_empty() || code.chars().any(|c| c.is_control() || c == ':') {
+        return Err(String::from("that device code has characters a header cannot carry"));
+    }
+    let bearer = format!("Bearer {}", code);
+
+    let ip = dns::lookup(&url.host).map_err(|e| format!("{}: {} -- {}", what, url.host, e.name()))?;
+    let f = tls::https_fetch_with(
+        ip,
+        &url.host,
+        url.port,
+        &url.path,
+        timeout_ms,
+        &[("Authorization", bearer.as_str())],
+    )
+    .map_err(|e| format!("{}: {}", what, e.name()))?;
+    if f.status == 204 {
+        return match &f.identity {
+            tls::Identity::Verified { .. } => Ok(None),
+            tls::Identity::NoTrustStore => Err(String::from(
+                "no roots are loaded, so the server could be anyone. Put roots.der on the ESP and reboot",
+            )),
+            tls::Identity::Failed(e) => {
+                Err(format!("{}: the server did not verify -- {}", what, e.name()))
+            }
+        };
+    }
+    inspect(f, what).map(Some)
+}
+
 /// Send one object, carrying a device code, and answer what came back.
 ///
 /// **The first thing in this kernel that tells rather than asks.** Everything

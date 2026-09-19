@@ -161,6 +161,24 @@ pub fn outbox_endpoint() -> Result<Url, String> {
     Ok(u)
 }
 
+/// Where this machine's own verdicts wait -- the mailbox `godel verdicts`
+/// empties. Same origin as everything else and deliberately not separately
+/// configurable, for `outbox_endpoint`'s reason: everything served is
+/// signed against a compiled-in anchor, so a wrong host can strand answers
+/// and forge none.
+///
+/// `again` re-asks for what was already served once -- the recovery path
+/// for a verdict fetched into a boot that then died before filing it.
+pub fn verdict_endpoint(again: bool) -> Result<Url, String> {
+    let mut u = endpoint()?;
+    u.path = String::from(if again {
+        "/functions/v1/verdict?again=1"
+    } else {
+        "/functions/v1/verdict"
+    });
+    Ok(u)
+}
+
 /// What was last seen on the wire, so `update` with no arguments can answer
 /// without going out to the network.
 pub fn remember(version: &str, notes: &str) {

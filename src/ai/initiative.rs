@@ -155,6 +155,9 @@ static LAST_TICKED_SEC: AtomicU64 = AtomicU64::new(u64::MAX);
 static PREV_TICK_TOUCHED: Racy<bool> = Racy::new(false);
 static LAST_EPISODE_AT: Racy<u64> = Racy::new(0);
 static LAST_GODEL_AT: Racy<u64> = Racy::new(0);
+/// When the mailbox was last polled. Its own clock, like every other job in
+/// the quiet block, because one shared clock is how one job starves another.
+static LAST_VERDICTS_AT: Racy<u64> = Racy::new(0);
 static LAST_AUTHOR_AT: Racy<u64> = Racy::new(0);
 static LAST_WORK_AT: Racy<u64> = Racy::new(0);
 
@@ -308,6 +311,20 @@ fn next_work() -> Option<(&'static str, &'static str)> {
         return Some((name, goal));
     }
     None
+}
+
+/// Hourly, like the trial, and firing on the first quiet tick the way
+/// `since_godel` does: a machine that has been off for a week collects its
+/// mail before it does anything else.
+const VERDICTS_GAP_S: u64 = 3600;
+
+fn since_verdicts(now_s: u64) -> u64 {
+    let last = unsafe { *LAST_VERDICTS_AT.get() };
+    if last == 0 {
+        VERDICTS_GAP_S
+    } else {
+        now_s.saturating_sub(last)
+    }
 }
 
 fn since_godel(now_s: u64) -> u64 {
@@ -550,6 +567,32 @@ fn tick_inner(forced: bool) {
                     ));
                     return;
                 }
+                // **The mailbox first, before the trial, and the order is
+                // load-bearing.** `file_verdict` appends to the ledger that
+                // `is_boundary`, the OOPS half-parity and `tests_spent` are
+                // all derived from, so a verdict filed after tonight's trial
+                // had computed its epoch position would move the frozen-bar
+                // boundary mid-night. Polling first means the trial's
+                // arithmetic runs over a ledger that already holds everything
+                // the world had to say. Not gated on `spent`: a poll costs no
+                // decode and holds the engine for nothing, the same argument
+                // that exempts a pre-decided workflow step.
+                if since_verdicts(now_s) >= VERDICTS_GAP_S {
+                    unsafe { *LAST_VERDICTS_AT.get() = now_s };
+                    let (filed, skipped, stop) = super::godel::poll_verdicts(false);
+                    journal_push(format!(
+                        "[t{} +{}s] verdicts: filed {}, skipped {}{}",
+                        TICKS.load(Ordering::Relaxed),
+                        now_s,
+                        filed,
+                        skipped,
+                        match stop {
+                            Some(why) => format!(" ({})", why),
+                            None => String::new(),
+                        }
+                    ));
+                }
+
                 // One expensive job per quiet tick, and self-modification wins
                 // the tie.
                 //

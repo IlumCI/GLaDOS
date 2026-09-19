@@ -3619,6 +3619,30 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 // verdict signed with the update key, carried in by any of the
                 // ways bytes get in, and filed. The network form is the same
                 // call with a different source of the blob.
+                // The verb `godel push`'s own output has named since the
+                // day it shipped, existing at last. `--again` re-asks for
+                // verdicts already served once -- the recovery for a fetch
+                // that filed nothing because the boot died under it.
+                "verdicts" => {
+                    let again = words.clone().any(|w| w == "--again");
+                    console::set_color(YELLOW);
+                    kprintln!("[godel] verdicts{}", if again { " --again" } else { "" });
+                    console::set_color(LTGRAY);
+                    let (filed, skipped, stop) = godel::poll_verdicts(again);
+                    if filed == 0 && skipped == 0 && stop.is_none() {
+                        kprintln!("  the mailbox is empty");
+                    }
+                    if filed > 0 {
+                        kprintln!("  filed {}, each verified before it was parsed", filed);
+                    }
+                    if skipped > 0 {
+                        kprintln!("  skipped {} already in the inbox", skipped);
+                    }
+                    if let Some(why) = stop {
+                        kprintln!("  stopped: {}", why);
+                    }
+                }
+
                 "verdict" => {
                     // `words` is already past the sub-verb; `rest` is not.
                     let path = words.next().unwrap_or("").trim();
