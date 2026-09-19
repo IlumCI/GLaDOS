@@ -280,14 +280,25 @@ the signer:
 ```powershell
 .	oolsenv\Scripts\python.exe tools\drive.py --qemu-extra "-accel whpx -cpu max" `
   "initiative off" "agent stop" "godel source" "godel push --dry" > out\push.log
-# strip the transcript's "  | " prefix, then:
-node -e "..."   # parse(raw).ok and render(parse(raw).proposal) === raw
+node supabaseunctions\_shared\envelope.check.mjs out\push.log
 ```
 
-Driven: the envelope the kernel rendered is 271 bytes over twelve lines, it
+Driven: the envelope the kernel rendered is 259 bytes over twelve lines, it
 parses, and `render` reproduces it **exactly**. Two implementations that are
 supposed to agree do not stay agreeing, and this is the pair where a single
 byte of disagreement is a proposal that silently means something else.
+
+It reads the transcript rather than a bare file, because a transcript is what
+somebody actually has -- and stripping the shell's `  | ` prefix belongs in the
+checker rather than in the recipe, since a recipe with a `sed` in the middle is
+one somebody gets wrong once and then stops running.
+
+**That already earned itself.** A serial transcript carries `
+` -- the
+guest's line ending and the harness's -- so a strip that took exactly one
+carriage return left exactly one, and `parse` accepted it anyway because
+`trim()` eats a trailing CR. Nothing but comparing the rendered bytes noticed,
+which is the argument for doing that rather than asking whether it parsed.
 
 It also refuses a patch under `src/gfx/`, `src/doom/` or `src/port/`, from the
 same list the kernel and `tools/knob.py` carry. Screenshots are captured and
