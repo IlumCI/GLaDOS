@@ -291,6 +291,36 @@ jobs:
           cat verdict.txt verdict.sig > verdict.bin
           echo "signed verdict is $(wc -c < verdict.bin) B"
 
+      # The return leg. Degrades to artifact-only with a notice when the
+      # token is unset -- the unsigned-verdict idiom: an unconfigured repo
+      # is a configuration, not a failure.
+      - name: Send the verdict home
+        env:
+          VERDICT_INGEST_TOKEN: ${{ secrets.VERDICT_INGEST_TOKEN }}
+          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+        run: |
+          set -euo pipefail
+          if [ ! -f verdict.bin ]; then
+            echo "::notice::no signed verdict to send (unsigned runs stay artifacts)"
+            exit 0
+          fi
+          if [ -z "${VERDICT_INGEST_TOKEN:-}" ] || [ -z "${SUPABASE_URL:-}" ]; then
+            echo "::notice::no ingest token or URL, so the verdict travels as an artifact only"
+            exit 0
+          fi
+          code=$(curl -sS -o /tmp/ingest.txt -w '%{http_code}' \
+            -X POST "$SUPABASE_URL/functions/v1/verdict" \
+            -H "Authorization: Bearer $VERDICT_INGEST_TOKEN" \
+            -H "Content-Type: application/octet-stream" \
+            -H "x-run-id: ${{ github.run_id }}" \
+            -H "x-run-attempt: ${{ github.run_attempt }}" \
+            --data-binary @verdict.bin)
+          cat /tmp/ingest.txt
+          if [ "$code" != "202" ]; then
+            echo "::error::the verdict service answered $code"
+            exit 1
+          fi
+
       - name: Keep everything
         if: always()
         uses: actions/upload-artifact@v4

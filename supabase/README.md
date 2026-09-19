@@ -352,3 +352,35 @@ refused with `not a signature over this image by this key`, and
 signed with the verdict key are accepted and filed. `godel verdict` refuses an
 unsigned one either way, which is why a run with no secret configured is a
 configuration rather than a hole.
+
+## The verdict service (migration 0005, `functions/verdict`)
+
+The return leg the `proposal` function's own 202 has promised since it
+shipped. Deploy and configure:
+
+    supabase db push                       # runs 0005_verdicts.sql
+    supabase functions deploy verdict --no-verify-jwt
+
+    # a shared secret, generated once, set in BOTH places:
+    supabase secrets set VERDICT_INGEST_TOKEN=<random>
+    gh secret set VERDICT_INGEST_TOKEN     # the workflows post with it
+
+Ingest verifies the GLADOSIG against the pinned verdict point BEFORE
+storing (`_shared/verdict_key.js`; ci.yml asserts that pin equals
+`src/update/mod.rs`'s on every push), so a leaked ingest token can insert
+only verdicts the verdict key actually signed. A device fetches with its
+own code through the same allowlist gate `proposal` uses:
+
+    curl -X POST "$URL/functions/v1/verdict" \
+      -H "Authorization: Bearer $VERDICT_INGEST_TOKEN" \
+      --data-binary @verdict.bin            # 202, point echoed
+
+    curl -H "Authorization: Bearer <device code>" \
+      "$URL/functions/v1/verdict"           # oldest unclaimed bin, or 204
+    curl -H "Authorization: Bearer <device code>" \
+      "$URL/functions/v1/verdict?again=1"   # re-serve after a lost boot
+
+`node supabase/functions/_shared/verdict.test.mjs` is the offline check;
+its two fixtures are the exact blobs a real boot filed and refused. The
+kernel side (`godel verdicts`) re-verifies with the compiled-in anchor --
+this service is a mailbox, never an authority.

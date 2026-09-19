@@ -77,6 +77,30 @@ jobs:
       - name: The envelope validator, checked by node
         run: node supabase/functions/_shared/envelope.test.mjs
 
+      # Twelve claims, and the two fixtures are not synthetic: they are the
+      # exact blobs a real boot filed and refused.
+      - name: The verdict verifier, against what the kernel already decided
+        run: node supabase/functions/_shared/verdict.test.mjs
+
+      # The JS copy of the verdict anchor against the kernel's pinned point.
+      # A hand-copied pin drifts; this one decides which verdicts get
+      # stored, so drift is a red X with both points printed.
+      - name: The two copies of the verdict anchor agree
+        run: |
+          python3 - <<'PYEOF'
+          import re, sys
+          sys.path.insert(0, "tools")
+          import sign
+          js = open("supabase/functions/_shared/verdict_key.js", encoding="utf-8").read()
+          m = re.search(r'VERDICT_KEY_HEX =\s*((?:"[0-9a-f]+"\s*\+?\s*)+);', js)
+          got = "".join(re.findall(r'"([0-9a-f]+)"', m.group(1)))
+          want = sign.anchor("VERDICT_KEY").hex()
+          if got != want:
+              print(f"::error::verdict_key.js pins {got[:24]}..., mod.rs pins {want[:24]}...")
+              sys.exit(1)
+          print(f"  both pin {want[:24]}...")
+          PYEOF
+
   build-boot:
     runs-on: ubuntu-latest
     timeout-minutes: 45
