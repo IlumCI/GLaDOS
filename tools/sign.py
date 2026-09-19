@@ -6,7 +6,16 @@
 
 Prefer `--keygen --out FILE`. Without it the private half goes to stdout,
 and a private half that has been on a terminal is not a private half. That
-is how the last one died, and UPDATE_KEY has been zeroed ever since.
+is how one of them died, and the zeroing that followed is why this line used
+to end "and UPDATE_KEY has been zeroed ever since" -- true when written and
+long out of date, which is the same drift the key's own doc comment carried.
+
+**There are two anchors now and this signs for either.** `UPDATE_KEY` for a
+kernel image, `VERDICT_KEY` for a verdict coming home from `propose.yml`, and
+the point of the second is that the workflow any allowlisted device can start
+does not hold the first. Which key a signature answers to is decided entirely
+by which private half `--key-file` is given, so keep them in separate files
+and separate secrets.
 
 The kernel verifies with `crypto::p256::verify`, which the boot selftest
 already checks against published ECDSA vectors -- so a signature this produces

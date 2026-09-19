@@ -831,6 +831,39 @@ with no judge in front of it" failure the module opens by warning about.
 `godel verdict <path>` is the return leg: signature verified **before** the
 text is parsed, then a ledger line.
 
+**And that signature is checked against a second anchor, not the update key.**
+`src/update/mod.rs` pins `VERDICT_KEY` beside `UPDATE_KEY`, and
+`update::verify_verdict` is its own entry point rather than a flag on `verify`
+-- two questions that must never be answerable by one call with a different
+argument somebody could get wrong.
+
+The separation is about where the private halves are held. `release.yml` signs
+kernel images and is reached by pushing a tag, which needs write access to the
+repository. `propose.yml` signs verdicts and is reached by
+`workflow_dispatch` from the `proposal` function, which **any allowlisted
+device can call** -- that reachability is the entire point of the loop. One key
+for both would have put the key that ships a kernel to every machine in the
+field into a workflow a machine in the field can start. The verdict key's whole
+power is to tell one machine that a proposal it made was adopted or refused.
+
+Driven rather than asserted, on the same verdict bytes signed twice:
+
+    godel verdict /tmp/old   (the update key)
+      refused: not a signature over this image by this key
+    godel verdict /tmp/new   (the verdict key)
+      737f9c0a moved unstable on host.retrieval -- ...
+      not adopted, and the ledger says so
+
+Five claims in `diag update` cover what can be checked without a private half
+on the machine, which there is not and must not be: that a verdict key is
+pinned at all, that it is not the update key, that both anchors refuse a
+malformed signature and a future format identically -- which is what says they
+share one implementation rather than two that will drift -- and that the two
+verifications consult different points.
+
+`sign.py` signs for either, decided entirely by which private half `--key-file`
+is given, so the two live in separate files and separate secrets.
+
 **Rails are what "better" refers to.** `bench report` emits one machine-readable
 block, `[rail] v1`, one rail per line as `name value unit want`. Thirteen of
 them: five graphics, four interpreter, `ai.matmul`, `ai.bpb`, and two memory

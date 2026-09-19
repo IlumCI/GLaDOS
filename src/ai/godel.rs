@@ -4133,7 +4133,7 @@ pub fn read_verdict(blob: &[u8]) -> Result<Verdict, String> {
             blob.len()
         ));
     };
-    let v = crate::update::verify(text, sig);
+    let v = crate::update::verify_verdict(text, sig);
     if !v.ok() {
         return Err(String::from(v.why()));
     }

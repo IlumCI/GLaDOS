@@ -331,9 +331,24 @@ With no token the door answers 503 and records the proposal as
 
 ### What it cannot do, said plainly
 
-It cannot cause an adoption. All it starts is a measurement; the verdict comes
-back **signed by the update key**, and `godel verdict` on the machine refuses
-an unsigned one -- a verdict is the only thing that writes a ledger line the
-machine did not derive itself, so an unsigned one is somebody else editing the
-lineage. Signing the verdict is the step `propose.yml` deliberately leaves out,
-and it is the one piece of this loop that is still not wired.
+It cannot cause an adoption. All it starts is a measurement, and the verdict
+that comes back is signed by a key **held nowhere in this project**: it lives
+in the repository's `VERDICT_SIGNING_KEY` secret, is used by `propose.yml` and
+by nothing else, and this function never sees it. What this door can cause is a
+run; what that run can cause is a line in one machine's own lineage.
+
+**And that key is deliberately not the update key.** `release.yml` signs kernel
+images with `UPDATE_SIGNING_KEY` and is reached by pushing a tag, which needs
+write access to the repository. `propose.yml` is reached from *here*, by any
+allowlisted device, which is the entire point of the loop -- so signing
+verdicts with the update key would put the key that ships kernels to every
+machine in the field into a workflow a machine in the field can start. The
+kernel pins both points (`src/update/mod.rs`) and checks them through separate
+entry points, so a verdict signature is not an update signature however it is
+presented.
+
+Driven, on the machine: the same verdict bytes signed with the update key are
+refused with `not a signature over this image by this key`, and
+signed with the verdict key are accepted and filed. `godel verdict` refuses an
+unsigned one either way, which is why a run with no secret configured is a
+configuration rather than a hole.

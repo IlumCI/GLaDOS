@@ -22,14 +22,26 @@ name: propose
 # That third one is not a refusal: a verdict of "no" from an invalid
 # measurement is as wrong as a yes, and the honest answer is take it again.
 #
-# ### What it does not do
+# ### It signs the verdict, and with its own key
 #
-# Sign or publish. That needs `UPDATE_SIGNING_KEY`, and a verdict is the only
-# thing that writes a ledger line the machine did not derive itself -- so the
-# signing step is deliberately the last one and deliberately separate, and this
-# workflow leaves the unsigned verdict as an artifact until somebody wires it
-# up. `godel verdict` on the machine refuses an unsigned one, which is the
-# correct behaviour and has been driven end to end.
+# A verdict is the only thing that writes a ledger line the machine did not
+# derive itself, so `godel verdict` refuses an unsigned one. That made signing
+# the last step to wire, and it is wired now -- with `VERDICT_SIGNING_KEY` and
+# emphatically **not** with `UPDATE_SIGNING_KEY`.
+#
+# The separation is the reason this step can exist at all. This workflow is
+# reached by `workflow_dispatch` from the `proposal` function, which any
+# allowlisted device can call; `release.yml` is reached by pushing a tag, which
+# needs write access to the repository. Signing verdicts with the update key
+# would put the key that ships kernels to every machine in the field into a
+# workflow a machine in the field can start. The verdict key's whole power is
+# to tell one machine that a proposal it made was adopted or refused.
+#
+# `src/update/mod.rs` pins both points and `update::verify_verdict` checks the
+# second one, so a verdict signature is not an update signature however it is
+# presented. With no secret configured this step says so and the verdict goes
+# home unsigned, where the kernel refuses it -- which is the correct behaviour
+# and has been driven end to end.
 
 on:
   workflow_dispatch:
@@ -195,12 +207,41 @@ jobs:
           } > verdict.txt
           cat verdict.txt
 
-      # Unsigned, and it says so. `godel verdict` on the machine refuses a
-      # verdict that is not signed by the update key, which is the whole point:
-      # a verdict is the only thing that writes a ledger line the machine did
-      # not derive itself, so an unsigned one is somebody else editing the
-      # lineage. Appending 80 bytes of GLADOSIG here needs the signing key and
-      # is the one step left.
+      # **Signed with the verdict key, which is not the update key.** See the
+      # header for why; the short version is that this workflow is reachable by
+      # any allowlisted device and `release.yml` is not, so the two must not
+      # hold the same secret.
+      #
+      # The secret is written to a file because `sign.py` takes a path, it is
+      # removed before anything else runs, and it is not among the artifact
+      # paths below. `umask` first, so it is never briefly world-readable on a
+      # shared runner.
+      #
+      # With no secret set this says so and stops, leaving the unsigned verdict
+      # as the artifact. That is a configuration rather than a failure: the
+      # machine refuses an unsigned verdict, so nothing is written to a lineage
+      # on the strength of a run nobody could authenticate.
+      - name: Sign the verdict
+        env:
+          VERDICT_KEY: ${{ secrets.VERDICT_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${VERDICT_KEY:-}" ]; then
+            echo "::notice::no VERDICT_SIGNING_KEY is configured, so the verdict is unsigned"
+            echo "::notice::and 'godel verdict' will refuse it, which is the correct outcome"
+            exit 0
+          fi
+          umask 077
+          printf '%s' "$VERDICT_KEY" > verdict.key
+          python3 tools/sign.py verdict.txt verdict.sig --key-file verdict.key
+          rm -f verdict.key
+          # One object, text then exactly 80 bytes of GLADOSIG, which is what
+          # `godel verdict` reads and the shape `manifest.py` already argues
+          # for: two objects can be served out of step and produce a signature
+          # failure that is really a deployment race.
+          cat verdict.txt verdict.sig > verdict.bin
+          echo "signed verdict is $(wc -c < verdict.bin) B"
+
       - name: Keep everything
         if: always()
         uses: actions/upload-artifact@v4
@@ -214,6 +255,8 @@ jobs:
             kernel-b2.txt
             judged.txt
             verdict.txt
+            verdict.sig
+            verdict.bin
             retrieval-a.log
             retrieval-b.log
             retrieval-a.tsv
