@@ -1093,6 +1093,9 @@ pub(crate) struct Step {
     /// this state can no longer reach. Grammar-only, so it is shared by every
     /// example labelled with this applet.
     votes: Vec<i16>,
+    /// Which candidates keep the label reachable. `target` is the longest of
+    /// them; the rest are correct spellings `Trial::correct` scores as wrong.
+    reach: Vec<bool>,
     /// The target distribution the mixed objective aims at, in candidate
     /// order, or `None` while nothing has supplied an outcome matrix.
     ///
@@ -1151,7 +1154,7 @@ fn chain_for(
     grammar: &Grammar,
     alphabet: &Alphabet,
     alt: usize,
-) -> Option<Vec<(Vec<u32>, usize, u32, Vec<i16>)>> {
+) -> Option<Vec<(Vec<u32>, usize, u32, Vec<i16>, Vec<bool>)>> {
     let n_alts = grammar.alts();
     let mut cursor = Cursor::new(grammar);
     let mut steps = Vec::new();
@@ -1170,12 +1173,22 @@ fn chain_for(
         // which is built once per applet and shared by every example labelled
         // with it, so a per-example reward costs no per-decision memory at all.
         let mut votes = alloc::vec![-1i16; n_alts];
+        // And which candidates keep the *label* reachable at all, which is a
+        // different question from which one the label would take: `chain_for`
+        // picks the longest and `Trial::correct` demands exactly it, so every
+        // other member of this set is a correct spelling scored as wrong.
+        // Kept so the size of that can be measured on real logits rather than
+        // argued from `constrain::costs`.
+        let mut reach = alloc::vec![false; cands.len()];
         let mut best: Option<(usize, u32, usize)> = None;
         for b in 0..n_alts {
             let mut long: Option<(usize, usize)> = None;
             for (i, &id) in cands.iter().enumerate() {
                 if !cursor.advances_toward(alphabet, id as usize, b) {
                     continue;
+                }
+                if b == alt {
+                    reach[i] = true;
                 }
                 let n = alphabet.piece(id as usize).len();
                 if long.map_or(true, |(_, bn)| n > bn) {
@@ -1190,7 +1203,7 @@ fn chain_for(
             }
         }
         let (target, token, _) = best?;
-        steps.push((cands, target, token, votes));
+        steps.push((cands, target, token, votes, reach));
         cursor.push(alphabet, token as usize);
         if cursor.finished() == Some(alt) {
             return Some(steps);
@@ -1471,6 +1484,46 @@ impl Trial {
     ///
     /// Returns (broke, fixed, unchanged-correct, unchanged-wrong): `broke` is
     /// McNemar's b, `fixed` is c.
+    /// How much `Trial::correct` understates accuracy by demanding exactly the
+    /// longest spelling.
+    ///
+    /// Returns `(strict, lenient, total)`: how many decisions the argmax got
+    /// right under the rule this tree has always used, how many it got right
+    /// if *any* token keeping the label reachable counts, and how many there
+    /// were. The gap is the instrument's own false-negative rate, measured on
+    /// real logits rather than argued from `constrain::costs`.
+    ///
+    /// **The lenient figure is not a better accuracy and must not be read as
+    /// one.** A token that keeps the label reachable does not commit to it:
+    /// `advances_toward` is asked about one alternative, and ` s` keeps
+    /// `stat`, `same`, `snaps`, `snap` and `sysbox` all alive, so a decoder
+    /// that took it could still land anywhere. What the gap bounds is how many
+    /// decisions the strict rule *could* be wrong about -- an upper bound on
+    /// the defect, not a measurement of routing.
+    pub fn lenient(&self, dora: Option<&Dora>, s: Slice) -> (usize, usize, usize) {
+        let mut out = Vec::new();
+        let mut ax = vec![0.0f32; dora.map(|d| d.r).unwrap_or(1)];
+        let (mut strict, mut lenient, mut total) = (0usize, 0usize, 0usize);
+        for d in self.decisions.iter().filter(|d| self.in_slice(d, s)) {
+            let st = &self.chains[d.applet].as_ref().unwrap()[d.step];
+            self.logits(d, dora, &mut out, &mut ax);
+            let mut best = 0usize;
+            for c in 1..out.len() {
+                if out[c] > out[best] {
+                    best = c;
+                }
+            }
+            if best == st.target {
+                strict += 1;
+            }
+            if st.reach.get(best).copied().unwrap_or(false) {
+                lenient += 1;
+            }
+            total += 1;
+        }
+        (strict, lenient, total)
+    }
+
     pub fn paired(
         &self,
         old: Option<&Dora>,
@@ -1578,14 +1631,14 @@ pub fn prepare_on(
     // Detached from the static rather than borrowed through a closure: the
     // guard decode below needs the alphabet and `&mut Engine` at once.
     let alphabet = super::harness::alphabet_for(&e.tok);
-    let raw: Vec<Option<Vec<(Vec<u32>, usize, u32, Vec<i16>)>>> =
+    let raw: Vec<Option<Vec<(Vec<u32>, usize, u32, Vec<i16>, Vec<bool>)>>> =
         (0..names.len()).map(|alt| chain_for(&grammar, alphabet, alt)).collect();
 
     // The live set: every row any chain can reach. Sorted and deduped so a
     // global token id maps to a local index by binary search.
     let mut live: Vec<u32> = Vec::new();
     for chain in raw.iter().flatten() {
-        for (cands, _, _, _) in chain {
+        for (cands, _, _, _, _) in chain {
             live.extend_from_slice(cands);
         }
     }
@@ -1601,7 +1654,7 @@ pub fn prepare_on(
             c.as_ref().map(|steps| {
                 steps
                     .iter()
-                    .map(|(cands, target, token, votes)| Step {
+                    .map(|(cands, target, token, votes, reach)| Step {
                         // `live` was built from exactly these candidate
                         // lists, so the search cannot miss. The fallback is
                         // unreachable rather than lenient.
@@ -1612,6 +1665,7 @@ pub fn prepare_on(
                         target: *target,
                         token: *token,
                         votes: votes.clone(),
+                        reach: reach.clone(),
                         q: None,
                     })
                     .collect()

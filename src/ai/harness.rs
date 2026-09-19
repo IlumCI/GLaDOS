@@ -1044,6 +1044,22 @@ pub fn mix_bench(e: &mut super::Engine, examples: usize, grid: &[f32]) {
         "  paired against lam 0 on the held-out slice; {:.2} is the bar",
         super::godel::MCNEMAR_95
     );
+
+    // And what the judge itself is worth. `chain_for` takes the longest piece
+    // advancing toward the label and `correct` demands exactly it, so every
+    // other correct spelling reads as wrong. This is how many, on real logits.
+    let (st, le, tot) = trial.lenient(Some(&base.dora), Slice::Held);
+    kprintln!(
+        "  instrument: {} of {} held-out decision(s) strict, {} keep the label reachable",
+        st, tot, le
+    );
+    if le > st {
+        kprintln!(
+            "  so up to {} decision(s) are correct spellings scored as wrong -- an upper bound,",
+            le - st
+        );
+        kprintln!("  because a shorter piece keeps rival applets alive too and commits to nothing");
+    }
 }
 
 pub fn adapter_train_report(b: &super::train::Budget) {
