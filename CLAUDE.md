@@ -87,6 +87,25 @@ Use the project venv, since there is no Python on PATH:
 .\tools\venv\Scripts\python.exe tools\tokenizer.py tools\qwen3\tokenizer.json esp\GLADOS\tokenizer.bin --verify
 ```
 
+The self-improvement half, all four with a `--selftest` that needs no kernel:
+
+```powershell
+.\tools\venv\Scripts\python.exe tools\rails.py judge before.txt after.txt --claims host.retrieval
+.\tools\venv\Scripts\python.exe tools\knob.py check          # the table against the real source
+.\tools\venv\Scripts\python.exe tools\knob.py show|apply|revert PATCH
+.\tools\venv\Scripts\python.exe tools\retrieval.py out\forest --dump out\retrieval-a.tsv
+```
+
+A verdict travels as its text followed by exactly 80 bytes of `GLADOSIG`, the
+one object `manifest.py` already argues for: two objects can be served out of
+step and produce a signature failure that is really a deployment race. Sign it
+with `sign.py verdict.txt verdict.sig --key-file update.key` and concatenate.
+
+`knob.py check` is the one CI must run. Nothing in the kernel can compare its
+own table against the source, so a row that has gone stale produces a patch
+that applies to nothing -- the marker written, the point never measured, and
+the loop quietly spending nights on a constant that moved.
+
 `tools/qwen3/` and `tools/hf/` hold safetensors checkpoints. `convert.py <src>
 <dst> [--f32] [--seq N]` flattens one into the `GLADOSM3` layout
 `ai::model::offsets` indexes by arithmetic. `--seq` sets the context window and
@@ -289,6 +308,11 @@ content-addressed inputs, re-derivable bit for bit by any later run.
 
 ```
 godel [status|now [n]|ledger [n]|rollback|on|off]
+godel [next|space|forget|lib|rule <name>|window <from> <until>]
+godel [clade|reconsider]          where to grow from, and going there
+godel [source|push [--dry]|verdict <path>]   a change something else must build
+bench report                      every rail, one block, for tools/rails.py
+bench bpb [bytes]                 how well it predicts its own history
 ```
 
 Four judges, unanimity required, each a different failure mode:
@@ -749,11 +773,206 @@ routing decisions and the rule changes `Verdict::confident` -- how much the
 council will claim, not what it answers. Varying it without a judge that
 measures it would be search without selection.
 
+### The loop that ships: a change the machine wrote, built somewhere else
+
+**The kernel cannot compile and cannot sign, and neither is an omission.**
+`jit.rs` emits integer functions into a heap page and there is no PE32+ writer
+anywhere in the tree; `UPDATE_KEY` is a public point with no private half on
+the machine, which is the property that makes the updater worth having. So the
+loop is not "the machine rebuilds itself". It is:
+
+```
+   machine authors a source change  ->  an envelope in /ai/godel/outbox
+              |                                   |
+              |                          CI applies it, builds both arms,
+              |                          boots each, measures the rail it
+              |                          claimed, and answers
+              v                                   |
+      a signed verdict comes home  <--------------+
+```
+
+**`ProposalKind::Source` is the authoring half.** `src/ai/knob.rs` declares a
+closed table of tunable constants -- file, symbol, the value it has now, the
+values it may take, and **the rail each claims to move** -- so a proposal that
+claims nothing is refused before anything is built. Four rows today over
+`LEN_B`, `TF_K1`, `IDF_SQUARED` and `MIX`. The patch is generated
+mechanically, so it is valid Rust by construction, which is the same argument
+`constrain.rs` makes about applet names being unreachable rather than
+improbable.
+
+`godel source` picks the next untried point and writes an **envelope**: who is
+asking, from which lineage, against which corpus hash, how many tests that
+corpus has already paid for, and then the patch. `godel push [--dry]` sends
+it. Nothing in the kernel can build it and the shell says so in those words.
+
+**It is deliberately not a ledger line.** Every line in `ledger.txt` is a
+verdict by judges that ran here, and a source proposal has none on this side --
+writing one would put an unjudged entry among judged ones, which is the "axis
+with no judge in front of it" failure the module opens by warning about.
+`godel verdict <path>` is the return leg: signature verified **before** the
+text is parsed, then a ledger line.
+
+**Rails are what "better" refers to.** `bench report` emits one machine-readable
+block, `[rail] v1`, one rail per line as `name value unit want`. Thirteen of
+them: five graphics, four interpreter, `ai.matmul`, `ai.bpb`, and two memory
+bandwidth. `tools/rails.py` compares two blocks with a declared noise floor per
+group, the group's **control divided out**, and a third verdict -- `UNSTABLE`,
+exit 2 -- for "a control drifted and these two readings do not compare". That
+is not a refusal: a "no" from an invalid measurement is as wrong as a yes.
+
+The noise floors are measured across boots of one binary and were inherited
+wrong by up to 7x from within-boot figures in this file. `video.rect` and
+`core.new` are the controls; `ai.*` and `smp.*` have none, which is a hole and
+is named as one.
+
+**`.github/workflows/propose.yml` is the half that can compile.** Two builds
+on one runner from one checkout -- baseline as the tree stands, candidate with
+the patch applied -- two verify-boots, two rail collections, and
+`rails.py judge` against the rail the proposal claimed. Both arms in one job is
+not tidiness: two arms on two runners is a comparison of two machines with the
+difference called an effect.
+
+`.github/actions/verify-boot` is what made green mean something. It boots the
+built image under QEMU with KVM and reads **six** things, not one: no timeout,
+the machine still answering afterwards, a tally reading zero failures, no
+`FAIL` anywhere including the boot selftests, the boot report empty, and
+**the section count and four sections by name**. That last check exists because
+its absence hid eleven of them: the first version staged no model, `ai::init`
+returned early, and every selftest behind it -- the godel machine among them --
+silently did not run while the tally read 59 of 59 and the gate was green.
+`hybtest.py --build-only` writes a 353 KB fixture checkpoint so that cannot
+happen again.
+
+**The whole loop has been driven end to end on one machine**, and the verdict
+it produced is the argument for paired testing arriving as a measurement:
+
+    godel source        src/ai/lex.rs LEN_B = 0.25 (was 0.5)
+    godel push --dry    point 737f9c0a, corpus f330c22c, tests 0
+    knob.py apply       the constant, checked against what it said it was
+    retrieval.py        600 real queries, both arms, per item
+    rails.py judge      host.retrieval same: fixed 4 broke 4 of 600
+    godel verdict       signature verified, a ledger line, not adopted
+
+The aggregate was **identical both ways**, 62.7%, while eight items moved four
+each way. Two percentages would have called that nothing.
+
+**The evidence budget is family-wise now.** Every judged comparison at
+`bar_in_force()` is a test at p < 0.05; run one nightly for a year and roughly
+one adoption in twenty is noise, permanently, by construction. So each trial
+debits alpha from a declared series -- `0.05 * 6/(pi^2 k^2)`, which sums to
+exactly 0.05 -- the bar rises as it depletes, past the table the loop refuses
+outright, and only a new corpus hash refills it.
+
+**`src/ai/clade.rs` chooses where to grow from.** See below; it is the first
+thing here that lets the loop go back.
+
 Root certificate bundle, built from the host's store:
 
 ```powershell
 .\scripts\fetch-roots.ps1          # -List to see what would be exported
 ```
+
+### Which node to grow from, and how well the machine predicts its own life
+
+Two Phase 7 pieces, and they are the two the loop was missing: a way to choose
+where to search from, and something dense to want.
+
+**`clade.rs`: the loop had never made the first choice.** Every trial extended
+`head`, so the machine was a hill climber that could not go back -- a lineage
+that walked into a dead end spent every later night proposing children of the
+dead end, and the only way out was an operator typing `godel rollback`.
+
+The Huxley-Gödel Machine (arXiv 2510.21614) is about exactly that choice and
+its *finding* is the useful part: an agent's own score predicts its
+descendants' badly, and what predicts them is what its descendants already did.
+So the quantity to select on is the **clade** -- every trial at or below a
+node, and how many were adopted. `axis_uncertainty` was already a
+Laplace-smoothed Beta posterior pointed at axes; this points one at nodes.
+
+An ancestor's clade contains its child's, and that is the mechanism. The head
+starts cheap and confident, one trial and one adoption, and gets worse as
+refusals accumulate under it; an ancestor carries the same refusals *plus* the
+productive stretch before them. `godel clade` on a nine-line lineage:
+
+    head aaaa0002  clade 1 of 7 adopted   draw 0.031
+    back aaaa0001  clade 2 of 9 adopted   draw 0.277
+    back 00000000  clade 2 of 9 adopted   draw 0.159
+
+The last two have identical counts and different draws: independent samples
+from one posterior keyed by node, which is what makes it sampling rather than
+a ranking with extra arithmetic.
+
+**Thompson sampling is a coin and everything around it here is built on the
+opposite property**, so the draw is seeded from the record it is about -- the
+ledger's length and the head's own hash. A later reader with the same ledger
+draws the same numbers and reaches the same node. Exploration a reader can
+reconstruct, which is the bargain `frontier` makes by walking a declared grid.
+
+Beta is sampled exactly rather than approximated -- Gamma of integer shape as a
+sum of exponentials, and the ratio of two -- because the counts *are* integers
+and small, and an approximation tuned for large shapes is at its worst on the
+arm with one trial, which is the arm whose uncertainty is the point.
+
+Two declared floors. A head with fewer than six trials below it is left alone,
+because a Beta with a handful of observations is its own prior wearing a
+result's clothes. And one night may unwind at most four, because the decision
+is re-made tomorrow and a night that unwound twenty adoptions on one draw is a
+night nobody could review before it happened.
+
+`godel reconsider` acts on it and the nightly branch calls it before choosing
+an axis. It chooses among the head's **ancestors** and not the whole DAG,
+because the only mechanism for moving the machine is `rollback`, which walks
+one step to a parent; reaching a sibling means restoring an arbitrary node,
+which is `rollback` generalised rather than repeated.
+
+**Driving it found the thing reading it would not.** `godel clade` offered a
+backtrack, `godel reconsider` answered "staying", and the head was silently at
+the root afterwards -- because `reconsider` calls `ensure_head` and the head
+file did not describe the mind that was running. Those two outcomes look
+identical from outside and mean opposite things, so `Rebased` is its own answer
+now.
+
+**`progress.rs`: every judge in this tree measures routing accuracy.** J1 is
+McNemar over applet choices, J2 replays eight curiosity goals, `core_bench` and
+`rule_bench` score the same thing again. A binary rail at one bit an item needs
+a thousand items before a paired test sees anything, and the whole of what the
+loop can want is "pick a better applet more often".
+
+Bits per byte is the dense alternative and the figure is measured: `--task bpb`
+reaches t = 6.61 on 256 windows where GSM8K needed 1,319 questions to reach
+chi 3.86. Every token is an observation.
+
+Schmidhuber's 1991 signal is a **difference** -- `bits(history at t) - bits(the
+same history at t+1)` -- which is two builds, one corpus, one number each, and
+that is exactly what `rails.py` already does. So it ships as the rail `ai.bpb`
+and the subtraction is somebody else's job that is already done. A rail that
+computed its own progress would have to remember what it read last time, which
+is a second record free to disagree with the first.
+
+The history is the machine's **own**: the journal the night writes and the
+ledger the judges write. A variant that predicts its own life better has
+learned something about itself, which is the only reading of curiosity a kernel
+with one address space can honestly make. It is not held out and cannot be, so
+what keeps the comparison honest is that both arms are handed one text taken
+once -- and `rails.py` declares `ai.bpb`'s 2% floor as an assumption about
+*that*, since the instrument itself contributes no noise at all.
+
+Log-sum-exp with the maximum subtracted, and the claim that earns its place is
+the one the naive form fails: `exp(300)` is infinity in f32, so `inf - inf` is
+NaN on exactly the confident predictions a working model makes.
+
+It runs on a **scratch state sized to the window**, not the live one.
+`State::new` allocates by `live_cap`, so a full one for the 0.6B is 112 MiB of
+KV cache to score 256 positions; a config with `seq_len` cut to the window is
+the same state three orders of magnitude smaller. A prefill cannot do this and
+the reason is what makes prefill worth having: it is weight-stationary and
+materialises only the last position's logits, where this needs a distribution
+at every one. So it costs what generation costs -- nightly, never interactive.
+
+`bench bpb` takes the reading and breaks it into parts. On the CI fixture,
+whose 256-token byte vocabulary and random weights make it a good negative, it
+reads **11.5 bits per byte** -- worse than the 8 a uniform guess would spend.
+The plumbing works and the fixture knows nothing, which is what it should say.
 
 ### Staged updates
 
@@ -2958,11 +3177,11 @@ GF63 for a correct reason.
 There is no `cargo test`. This is a `no_std` UEFI binary with no host test
 runner, so **verification is the boot selftests plus driving QEMU.**
 
-At boot the system runs **twenty-seven selftest sections** -- count the
+At boot the system runs **twenty-nine selftest sections** -- count the
 `[selftest]` headings in a boot log, which is the only figure that cannot go
 stale -- **seventeen** of which are wrapped in `main::section` so one that
 breaks marks itself unavailable instead of taking the machine, and `diag`
-offers **fifty-nine named suites** on demand (`diag.rs`'s `SLOTS`, asserted
+offers **sixty-four named suites** on demand (`diag.rs`'s `SLOTS`, asserted
 against `SUITES.len()`), most of them the same checks (the `aiksi` section covers the capability gate by name and never by
 calling -- half that table pokes memory, drives I/O ports or paints over the
 screen, and a suite that called every row to prove it exists would be
@@ -3561,17 +3780,59 @@ as an unbroken column of `EXCEPTION 0x0d`. Pacing is also turned off, since
 It belongs to the console rather than to the reporter, it predates all of
 this, and it is now visible instead of silent.
 
-**And there is a code generator now.** `src/aiksi/jit.rs` compiles one
-function of integer arithmetic, `if`, `while` and `return` to x86-64, emits it
-into an `Exec`, and calls it through the `sysv64` pointer `cpu::code` pins.
-No builtins, no strings, no records, no `use`, no calls. Anything outside that
-slice is **refused** -- `compile` answers `None` and the interpreter remains
-the only thing that ran it -- and five claims check that refusing actually
-happens, because a generator that quietly compiled a string return would be
+**And there is a code generator now.** `src/aiksi/jit.rs` compiles a program
+of integer functions -- arithmetic, `if`, `while`, `return`, and **calls
+between them, recursion included** -- to x86-64, emits it into an `Exec`, and
+calls it through the `sysv64` pointer `cpu::code` pins. No builtins, no
+strings, no records, no `use`. Anything outside that slice is **refused** --
+`compile` answers `None` and the interpreter remains the only thing that ran
+it -- and ten claims check that refusing actually happens, each naming its own
+subject, because a generator that quietly compiled a string return would be
 answering a question nobody asked.
 
 It is reached only from `differ`, never from a live path. Nothing routes
 through it and `voter` does not know it exists.
+
+**Locals live on the machine stack and they had to move there.** They were a
+flat array inside the context structure, which is correct for exactly as long
+as one frame exists: a recursive call would have written its parameters over
+its caller's, and the tell would have been a `fib` that answers confidently and
+wrongly with every step count still matching. So a function gets a real frame
+-- `rbp`, locals under it, arguments pushed by the caller and copied in by the
+prologue -- and the depth cap is **read from `eval::MAX_DEPTH`** rather than
+copied, because two numbers that have to agree and are written down twice are
+two numbers that will not. No guard page here, so running off the stack is a
+triple fault rather than a message.
+
+**A call costs no tick of its own**, which is a fact about `call_user` rather
+than a convenience: it pushes a frame, checks the depth and runs the body, and
+ticks at none of them. Charging one per call is the obvious thing and is wrong
+by one per call, on a number the judges read.
+
+**Nil is a value the interpreter has and the compiler does not.** A function
+that falls off its end yields it, and inside an expression that means
+reproducing what the interpreter says about `nil + 1`. So a *called* function
+must declare `: int`, checked at the call site, which is exactly where the Nil
+could escape; an unannotated entry may still fall off, because nothing consumes
+what it answers. A callee that yields nothing is refused by the interpreter
+**by name**, so the blame index travels with the status -- a message naming the
+entry when a callee three frames down was at fault is the same failure
+`boot_report` carries a field to avoid.
+
+**And the first measurement of why any of this is worth doing.** `core bench`
+runs `fib(18)` both ways from one parse and prints the ratio only when the two
+routes agreed on the value *and* the step count:
+
+    fib(18) = 2584, 83606 steps, two ways:
+      tree-walk            5406 us
+      generated code       102 us
+      ratio                52x
+      parse and compile    16 us, paid once
+
+That does not contradict the finding above that the tree-walk is a twentieth
+of a vote. A vote is twenty steps of walk behind fixed setup; this is 83,606
+of it. The ratio is what says which kind of program a compiler is for, and the
+compile is repaid three hundred times over by a single run of one.
 
 **The step count is the hard part, not the arithmetic.** Twenty-one functions
 run three ways -- armed, prepared, compiled -- and all three must agree on the
