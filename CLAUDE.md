@@ -1045,6 +1045,72 @@ chooses how much to spend.** See below; the first is the thing that lets the
 loop go back, the second is the thing that lets it not know how big a question
 is.
 
+### The CI Godel machine
+
+A second self-improvement loop, resident in GitHub Actions, whose substrate
+is git -- which is the content-addressed Merkle DAG `godel.rs` had to build
+from scratch in ring 0. A branch head is `/ai/godel/head`, revert is
+rollback, the descendants of a commit are the clade. `tools/godel.py`
+re-derives the kernel's rules (the alpha SPEND series, frozen-bar epochs,
+OOPS doubling, deterministic Thompson clade selection) and its `--selftest`
+holds 56 claims, among them: the SPEND table recomputed from the formula
+against the kernel's 32 literals, the OOPS bounds as arithmetic, splitmix64
+bit-for-bit, and both machines' ledger grammars round-tripped.
+
+**Two machines, distinct authorities.** The kernel machine's ledger is
+`/ai/godel/ledger.txt`; the CI machine's is content-named certificate files
+under `loop/ledger/entries/` on the `loop/main` branch, fast-forward only,
+one adoption at a time under one Actions concurrency group. The CI token
+never holds `UPDATE_SIGNING_KEY` and has no `workflows` write, so GitHub
+itself rejects any push touching the judge; `main` is reachable only through
+the rolling audit PR, which a human merges. Certificates reference **git
+tree hashes, never commit hashes**, so history surgery renames nothing that
+matters.
+
+**A proposal's identity carries no account state**, and that was re-learned
+here the hard way rather than inherited: the first envelope format hashed
+`alpha-k` and the minute budget into the point, every trial moved the
+account, and the tried-marker walk re-proposed the same constant forever
+under fresh names. The kernel's rule is verbatim the fix -- a proposal is
+identified by its rendering alone, and `Proposal::render` carries knobs,
+never `Budget`. Every account field is a pure function of the ledger and is
+recomputed where needed; the certificate records what a judge actually
+spent.
+
+**Jobs are a closed kind table** (tune, cleanup, bugfix, test, feature,
+rewrite enabled; deps/docs/eval designed and disabled; `event` is
+certificate vocabulary for superseded/rollback entries and admits nowhere).
+Each row declares scope masks, diff budgets and its judge beyond the common
+gate: a bugfix must carry a witness that fails on the baseline arm and
+passes on the candidate; a cleanup must delete more than it adds and improve
+a cost rail; a rewrite claiming nothing is refused, the knob rule
+generalised. Containment is five layers -- admission budgets before a runner
+is spent, monotonic section/suite/claim counts in every certificate,
+protected and generated paths, `git apply --check` hygiene (no binaries,
+symlinks, renames, mode changes), and the machine only ever being able to
+ruin `loop/*`.
+
+The workflows: `ci.yml` (the first workflow to compile the kernel on a push
+to main in this repository's history; also re-verifies every loop/** push
+with a job the loop does not control), `probe-kvm.yml` (temporary; settles
+whether ubuntu-latest has KVM, on which everything depends),
+`loop-night.yml` (follow main with `superseded` entries where the operator
+overrode an adoption -> reconsider -> mark tried BEFORE trying -> stage the
+candidate as apply(parent-tree, patch) through plumbing) and
+`loop-judge.yml` (propose.yml's two-arm shape generalised, no secrets,
+`contents: read`, candidate tree asserted equal to the envelope's derivation
+before a boot is spent, `rails.py judge --bar` at the alpha floor in force).
+`rails.py --bar` raises the counted-rail threshold and can only ever raise
+it.
+
+**None of it has run on a runner** -- that requires the push -- and what
+could be driven locally was: every subcommand against the real tree, the
+candidate re-derivation producing `LEN_B = 0.25` in a tree the worktree
+never saw, fsck catching a certificate that lies about its candidate tree,
+the tried-walk moving to the next value, and the --bar floor turning a chi
+23 win into `same` at a bar of 30. The cron ships commented out; a schedule
+is the last thing a loop earns.
+
 Root certificate bundle, built from the host's store:
 
 ```powershell

@@ -1,0 +1,357 @@
+name: loop-judge
+
+# The generalized two-arm gate: propose.yml's shape, for candidates the CI
+# machine authors itself. One runner, one checkout, both arms -- anything
+# else compares two machines and calls the difference an effect.
+#
+# It holds NO secrets and asks for `contents: read`, deliberately: the judge
+# is the part of the loop most exposed to the candidate's own content (it
+# builds and boots it), so it is the part least entitled to authority. The
+# verdict becomes real only when loop-night's adopt job -- which never runs
+# candidate code -- commits the certificate.
+#
+# CONSUMER: loop-night.adopt (the certificate artifact), and anybody reading
+# a refused night. CANARY: the broken-candidate drill -- a candidate patched
+# to break a boot selftest must end `verdict refuse` with the boot failure
+# named in `why`; and verify-boot's own section-count canary rides along in
+# both arms.
+
+on:
+  workflow_call:
+    inputs:
+      point:
+        type: string
+        required: true
+      baseline_ref:
+        type: string
+        required: true
+      candidate_ref:
+        type: string
+        required: true
+      rail:
+        type: string
+        required: true
+      chi_bar:
+        type: string
+        required: true
+      alpha_k:
+        type: string
+        required: true
+      minutes:
+        type: string
+        required: true
+      half:
+        type: string
+        required: true
+      level:
+        type: string
+        required: true
+      boots:
+        type: string
+        required: true
+      kind:
+        type: string
+        required: true
+      rung:
+        type: string
+        required: true
+      axis:
+        type: string
+        required: true
+      corpus:
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      point:
+        description: "sha256 of the envelope (its tried marker must be on the ref)"
+        required: true
+      baseline_ref:
+        description: "the loop branch commit to judge from"
+        required: true
+      candidate_ref:
+        description: "the candidate ref or sha"
+        required: true
+      rail:
+        required: true
+        default: "host.retrieval"
+      chi_bar:
+        required: true
+        default: "4.687"
+      alpha_k:
+        required: true
+        default: "0"
+      minutes:
+        required: true
+        default: "60"
+      half:
+        required: true
+        default: "extend"
+      level:
+        required: true
+        default: "0"
+      boots:
+        required: true
+        default: "1"
+      kind:
+        required: true
+        default: "tune"
+      rung:
+        required: true
+        default: "1"
+      axis:
+        required: true
+        default: "grid"
+      corpus:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  judge:
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ fromJSON(inputs.minutes) }}
+    env:
+      POINT: ${{ inputs.point }}
+      BASE_REF: ${{ inputs.baseline_ref }}
+      CAND_REF: ${{ inputs.candidate_ref }}
+      RAIL: ${{ inputs.rail }}
+      CHI: ${{ inputs.chi_bar }}
+      ALPHA_K: ${{ inputs.alpha_k }}
+      MINUTES: ${{ inputs.minutes }}
+      HALF: ${{ inputs.half }}
+      LEVEL: ${{ inputs.level }}
+      BOOTS: ${{ inputs.boots }}
+      KIND: ${{ inputs.kind }}
+      RUNG: ${{ inputs.rung }}
+      AXIS: ${{ inputs.axis }}
+      CORPUS: ${{ inputs.corpus }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.baseline_ref }}
+          # Full history: the candidate ref must be fetchable and the parent
+          # tree must exist for the derive assertion below.
+          fetch-depth: 0
+
+      - name: Install the pinned toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version --verbose
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: uefi-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+
+      - name: The tools must work before they are trusted to judge
+        run: |
+          set -euo pipefail
+          python3 tools/knob.py --selftest
+          python3 tools/rails.py --selftest
+          python3 tools/retrieval.py --selftest
+          python3 tools/godel.py --selftest
+
+      # The envelope is already on the branch -- the marker was committed
+      # before the trial, by construction -- and it is re-admitted here even
+      # though propose admitted it, because this job is about to run what it
+      # describes and defense in depth is cheap.
+      - name: Read the envelope back off its marker, and re-admit it
+        run: |
+          set -euo pipefail
+          ENV_FILE="loop/ledger/tried/${POINT:0:16}.env"
+          test -f "$ENV_FILE" || { echo "::error::no tried marker for $POINT"; exit 1; }
+          test "$(python3 tools/godel.py point "$ENV_FILE")" = "$POINT" \
+            || { echo "::error::the marker is not the envelope the point names"; exit 1; }
+          python3 tools/godel.py admit "$ENV_FILE"
+          echo "ENV_FILE=$ENV_FILE" >> "$GITHUB_ENV"
+          echo "PARENT_TREE=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_ENV"
+
+      # **The candidate's tree must be exactly apply(parent, patch)** before
+      # a boot is spent on it. A candidate ref carrying anything else --
+      # however it got there -- is not the proposal the marker records.
+      - name: The candidate is what the envelope says, bit for bit
+        run: |
+          set -euo pipefail
+          want=$(python3 tools/godel.py derive "$ENV_FILE" --parent "$PARENT_TREE")
+          got=$(git rev-parse "$CAND_REF^{tree}")
+          if [ "$want" != "$got" ]; then
+            echo "::error::the candidate tree is $got, the envelope derives $want"
+            exit 1
+          fi
+          echo "CAND_TREE=$got" >> "$GITHUB_ENV"
+
+      # The evidence corpus, from the manifest in force. The manifest names a
+      # MODE and this job owns the command -- the REPAIRS.TXT rule: nothing a
+      # repo file says is executed, it only selects among things this file
+      # already does.
+      - name: The corpus
+        run: |
+          set -euo pipefail
+          test -f loop/evidence/corpus.txt || { echo "::error::no corpus manifest"; exit 1; }
+          mode=$(awk 'NR==2{print $1}' loop/evidence/corpus.txt)
+          case "$mode" in
+            fixture)
+              nodes=$(awk 'NR==2{print $2}' loop/evidence/corpus.txt | sed 's/nodes=//')
+              case "$nodes" in ''|*[!0-9]*) echo "::error::bad node count"; exit 1;; esac
+              python3 tools/retrieval.py --fixture out/fixture --nodes "$nodes" \
+                --limit 0 --dump /dev/null >/dev/null
+              echo "FOREST=out/fixture" >> "$GITHUB_ENV"
+              echo "::notice::the corpus is a generated fixture, at roughly a quarter"
+              echo "::notice::of the real forest's sensitivity -- corpus.txt says so"
+              ;;
+            release)
+              tag=$(awk 'NR==2{print $2}' loop/evidence/corpus.txt | sed 's/tag=//')
+              asset=$(awk 'NR==2{print $3}' loop/evidence/corpus.txt | sed 's/asset=//')
+              want=$(awk 'NR==2{print $4}' loop/evidence/corpus.txt | sed 's/sha256=//')
+              gh release download "$tag" --pattern "$asset" --dir out
+              got=$(sha256sum "out/$asset" | cut -d' ' -f1)
+              test "$got" = "$want" || { echo "::error::corpus digest mismatch"; exit 1; }
+              mkdir -p out/forest && tar -xzf "out/$asset" -C out/forest
+              echo "FOREST=out/forest" >> "$GITHUB_ENV"
+              ;;
+            *) echo "::error::corpus.txt names a mode this job does not have: $mode"; exit 1;;
+          esac
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      # --- the baseline arm ------------------------------------------------
+
+      - name: Build the baseline
+        run: cargo build --release --locked
+
+      - uses: ./.github/actions/verify-boot
+        with:
+          arm: a
+
+      - name: Keep the baseline
+        run: |
+          set -euo pipefail
+          cp verify.log verify-a.log
+          mv rails.txt kernel-a.txt
+          mv rails2.txt kernel-a2.txt
+          python3 tools/retrieval.py "$FOREST" --dump retrieval-a.tsv | tee retrieval-a.log
+          python3 tools/rails.py collect --rail retrieval=retrieval-a.tsv --out host-a.txt
+          cat kernel-a.txt host-a.txt | grep -v '^\[rail\]' > body-a.txt
+          { echo '[rail] v1'; cat body-a.txt; echo '[rail] end'; } > before.txt
+
+      # --- the candidate arm -----------------------------------------------
+
+      # A full checkout, not `checkout -- .`: a partial checkout leaves files
+      # the candidate deleted still in the worktree. Safe because admission
+      # refused any patch touching the evaluator, so the tools judging this
+      # tree are byte-identical to the baseline's -- and that was asserted,
+      # not assumed, by the derive check above.
+      - name: Become the candidate
+        run: git checkout -f --detach "$CAND_REF"
+
+      - name: Build the candidate
+        run: cargo build --release --locked
+
+      - uses: ./.github/actions/verify-boot
+        with:
+          arm: b
+
+      - name: Keep the candidate
+        run: |
+          set -euo pipefail
+          cp verify.log verify-b.log
+          mv rails.txt kernel-b.txt
+          mv rails2.txt kernel-b2.txt
+          python3 tools/retrieval.py "$FOREST" --dump retrieval-b.tsv | tee retrieval-b.log
+          python3 tools/rails.py collect --rail retrieval=retrieval-b.tsv --out host-b.txt
+          cat kernel-b.txt host-b.txt | grep -v '^\[rail\]' > body-b.txt
+          { echo '[rail] v1'; cat body-b.txt; echo '[rail] end'; } > after.txt
+
+      # --- the verdict ------------------------------------------------------
+
+      - name: Judge it against what it claimed, at the bar in force
+        run: |
+          set -euo pipefail
+          set +e
+          python3 tools/rails.py judge before.txt after.txt \
+            --again kernel-a2.txt kernel-b2.txt \
+            --claims "$RAIL" --bar "$CHI" | tee judged.txt
+          code=${PIPESTATUS[0]}
+          set -e
+          case "$code" in
+            0) moved=better; verdict=adopt ;;
+            1) moved=$(grep -oE "^  $RAIL +[a-z]+" judged.txt | awk '{print $2}' || true)
+               verdict=refuse ;;
+            2) moved=unstable; verdict=refuse ;;
+            *) echo "::error::rails.py answered $code"; exit 1 ;;
+          esac
+          echo "MOVED=${moved:-absent}" >> "$GITHUB_ENV"
+          echo "VERDICT=$verdict" >> "$GITHUB_ENV"
+          why=$(grep -m1 "^  $RAIL " judged.txt | sed 's/^ *//;s/  */ /g' || true)
+          [ -n "$why" ] || why="no line for the claimed rail"
+          echo "WHY=$why" >> "$GITHUB_ENV"
+
+      # The monotonic invariants, counted from what both arms actually
+      # printed. A decrease is a refusal for every kind whose row does not
+      # license removal -- today no enabled kind does.
+      - name: The counts that may not fall
+        run: |
+          set -euo pipefail
+          sa=$(grep -c '^\[selftest\]' verify-a.log || true)
+          sb=$(grep -c '^\[selftest\]' verify-b.log || true)
+          ta=$(grep -oE '[0-9]+ passed' verify-a.log | tail -1 | cut -d' ' -f1)
+          tb=$(grep -oE '[0-9]+ passed' verify-b.log | tail -1 | cut -d' ' -f1)
+          ca=$(grep -cE '^  ok ' verify-a.log || true)
+          cb=$(grep -cE '^  ok ' verify-b.log || true)
+          echo "SECTIONS=$sa/$sb" >> "$GITHUB_ENV"
+          echo "SUITES=$ta/$tb" >> "$GITHUB_ENV"
+          echo "CLAIMS=$ca/$cb" >> "$GITHUB_ENV"
+          if [ "$sb" -lt "$sa" ] || [ "$tb" -lt "$ta" ] || [ "$cb" -lt "$ca" ]; then
+            echo "::error::the candidate answers less than the baseline: sections $sa->$sb, suites $ta->$tb, claims $ca->$cb"
+            echo "VERDICT=refuse" >> "$GITHUB_ENV"
+            echo "WHY=the candidate answers less than the baseline (sections $sa->$sb suites $ta->$tb claims $ca->$cb)" >> "$GITHUB_ENV"
+          fi
+
+      - name: Render the certificate
+        run: |
+          set -euo pipefail
+          seq=$(( $(ls loop/ledger/entries 2>/dev/null | wc -l) + 1 ))
+          python3 tools/godel.py cert --emit \
+            --set "seq=$seq" \
+            --set "utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --set "point=$POINT" \
+            --set "kind=$KIND" --set "rung=$RUNG" --set "axis=$AXIS" \
+            --set "parent-tree=$PARENT_TREE" \
+            --set "candidate-tree=$CAND_TREE" \
+            --set "rail=$RAIL" --set "corpus=$CORPUS" \
+            --set "alpha-k=$ALPHA_K" --set "chi-bar=$CHI" \
+            --set "minutes=$MINUTES" --set "half=$HALF" \
+            --set "level=$LEVEL" --set "boots=$BOOTS" \
+            --set "sections=$SECTIONS" --set "suites=$SUITES" \
+            --set "claims=$CLAIMS" --set "witness=-" \
+            --set "moved=$MOVED" --set "why=$WHY" \
+            --set "verdict=$VERDICT" \
+            --set "runner=${{ github.run_id }}/${{ github.run_attempt }}" \
+            > certificate.cert
+          python3 tools/godel.py cert --check certificate.cert
+          cat certificate.cert
+
+      - name: Keep everything
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: loopjudge-${{ inputs.point }}
+          path: |
+            certificate.cert
+            before.txt
+            after.txt
+            kernel-a2.txt
+            kernel-b2.txt
+            judged.txt
+            verify-a.log
+            verify-b.log
+            retrieval-a.tsv
+            retrieval-b.tsv
+            retrieval-a.log
+            retrieval-b.log
+          if-no-files-found: ignore
+          retention-days: 90

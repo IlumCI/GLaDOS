@@ -1,0 +1,306 @@
+name: loop-night
+
+# The CI Godel machine's night: follow main, reconsider, propose, judge,
+# adopt. Four jobs under ONE concurrency group, which is what makes
+# fast-forward-only real -- there is never a second night interleaving with
+# this one, so adopt's fetch-then-commit is atomic in the only sense that
+# matters here.
+#
+# The machine's whole world is `loop/*`. Its token has `contents: write`
+# and no `workflows` write, so GitHub itself rejects any push touching
+# `.github/workflows/**`; the audit PR is how its work reaches a human, and
+# `main` is reachable only through that human.
+#
+# CONSUMER: loop/main's ledger (the next night reads it), the rolling audit
+# PR (the operator reads it), and ci.yml, which re-verifies every push to
+# loop/** with a job the loop does not control. CANARY: the three Phase 1
+# drills -- broken-candidate refused end to end, stale detected at adopt,
+# a hand-edited certificate refused by fsck -- plus fsck halting the whole
+# night on a corrupted ledger, proven in godel.py's own selftest.
+#
+# The cron stays commented until the Phase 1 exit proof is green, per the
+# plan: a schedule is the last thing a loop earns.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "propose and judge, but adopt writes nothing"
+        type: boolean
+        default: false
+  # schedule:
+  #   - cron: "17 2 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: loop-main
+  cancel-in-progress: false
+
+env:
+  LOOP_BRANCH: loop/main
+
+jobs:
+  # --- follow: the machine follows main, never the reverse -----------------
+  follow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      tip: ${{ steps.tip.outputs.tip }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: loop/main
+          fetch-depth: 0
+
+      - name: A corrupted ledger judges nothing
+        run: python3 tools/godel.py fsck --root .
+
+      - name: Follow main, and record what it overrode
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          if git merge-base --is-ancestor origin/main HEAD; then
+            echo "already carries main"
+          else
+            # First find out WHAT conflicts, then let main win. A conflict
+            # here is the operator having overridden an adoption, and the
+            # ledger records the override instead of pretending it did not
+            # happen -- main is the human authority.
+            set +e
+            git merge --no-commit --no-ff origin/main >/dev/null 2>&1
+            set -e
+            conflicted=$(git diff --name-only --diff-filter=U | tr '\n' ' ')
+            if [ -n "$conflicted" ]; then
+              git checkout --theirs -- .
+              git add -A
+              parent=$(git rev-parse 'HEAD^{tree}')
+              git commit -m "loop: follow main, which overrode: $conflicted"
+              cand=$(git rev-parse 'HEAD^{tree}')
+              seq=$(( $(ls loop/ledger/entries | wc -l) + 1 ))
+              point=$(printf 'superseded by main at %s over %s' \
+                "$(git rev-parse origin/main)" "$conflicted" | sha256sum | cut -d' ' -f1)
+              python3 tools/godel.py cert --emit \
+                --set "seq=$seq" --set "utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                --set "point=$point" --set "kind=event" --set "rung=1" \
+                --set "axis=grid" --set "parent-tree=$parent" \
+                --set "candidate-tree=$cand" --set "rail=none" \
+                --set "corpus=00000000" --set "alpha-k=0" --set "chi-bar=-" \
+                --set "minutes=0" --set "half=extend" --set "level=0" \
+                --set "boots=0" --set "sections=0/0" --set "suites=0/0" \
+                --set "claims=0/0" --set "witness=-" --set "moved=-" \
+                --set "why=main overrode: $conflicted" \
+                --set "verdict=superseded" \
+                --set "runner=${{ github.run_id }}/${{ github.run_attempt }}" \
+                > /tmp/superseded.cert
+              name=$(sha256sum /tmp/superseded.cert | cut -c1-16)
+              cp /tmp/superseded.cert "loop/ledger/entries/$name.cert"
+              git add loop/ledger/entries
+              git commit -m "loop: a superseded entry for what main overrode"
+            else
+              git commit -m "loop: follow main" || echo "nothing to merge"
+            fi
+            python3 tools/godel.py fsck --root .
+            git push origin HEAD:loop/main
+          fi
+
+      - name: Where the night grows from
+        id: tip
+        run: echo "tip=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  # --- propose: reconsider, pick, mark BEFORE trying, stage the candidate --
+  propose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: follow
+    permissions:
+      contents: write
+    outputs:
+      point: ${{ steps.pick.outputs.point }}
+      rail: ${{ steps.pick.outputs.rail }}
+      alpha_k: ${{ steps.pick.outputs.alpha_k }}
+      chi_bar: ${{ steps.pick.outputs.chi_bar }}
+      minutes: ${{ steps.pick.outputs.minutes }}
+      half: ${{ steps.pick.outputs.half }}
+      level: ${{ steps.pick.outputs.level }}
+      boots: ${{ steps.pick.outputs.boots }}
+      kind: ${{ steps.pick.outputs.kind }}
+      rung: ${{ steps.pick.outputs.rung }}
+      axis: ${{ steps.pick.outputs.axis }}
+      corpus: ${{ steps.pick.outputs.corpus }}
+      baseline: ${{ steps.pick.outputs.baseline }}
+      candidate: ${{ steps.pick.outputs.candidate }}
+      have: ${{ steps.pick.outputs.have }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.follow.outputs.tip }}
+          fetch-depth: 0
+
+      # Clade before axis, as the kernel orders it. Until the head has
+      # MIN_EVIDENCE (6) trials below it this always answers "staying", so
+      # the report is the whole of it for the loop's first week; the commit
+      # that *applies* a backtrack lands before the cron does, with the
+      # first lineage long enough to move -- a stub that pretended to apply
+      # one tonight would be a lie with no drill able to catch it.
+      - name: Reconsider
+        run: python3 tools/godel.py reconsider --root .
+
+      - name: Pick the next point, and mark it tried before anything runs
+        id: pick
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          set +e
+          python3 tools/godel.py next --root . --emit-env /tmp/env.txt > /tmp/account.txt
+          code=$?
+          set -e
+          if [ "$code" != "0" ]; then
+            echo "have=no" >> "$GITHUB_OUTPUT"
+            echo "::notice::nothing to propose tonight:"
+            cat /tmp/account.txt || true
+            exit 0
+          fi
+          cat /tmp/account.txt
+          # The account, as outputs (key=value already).
+          while IFS='=' read -r k v; do
+            echo "$k=$v" >> "$GITHUB_OUTPUT"
+          done < /tmp/account.txt
+          point=$(awk -F= '$1=="point"{print $2}' /tmp/account.txt)
+          echo "have=yes" >> "$GITHUB_OUTPUT"
+          echo "kind=$(awk '$1=="kind"{print $2}' /tmp/env.txt)" >> "$GITHUB_OUTPUT"
+          echo "rung=$(awk '$1=="rung"{print $2}' /tmp/env.txt)" >> "$GITHUB_OUTPUT"
+          echo "axis=$(awk '$1=="axis"{print $2}' /tmp/env.txt)" >> "$GITHUB_OUTPUT"
+          echo "corpus=$(awk '$1=="corpus"{print $2}' /tmp/env.txt)" >> "$GITHUB_OUTPUT"
+
+          # Marker before trial: an interrupted night has still spent the
+          # night -- godel.rs writes its marker at the same moment for the
+          # same reason.
+          cp /tmp/env.txt "loop/ledger/tried/${point:0:16}.env"
+          git add loop/ledger/tried
+          git commit -m "loop: tried ${point:0:16}"
+          git push origin HEAD:loop/main
+          echo "baseline=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+          # The candidate: parent tree + the patch, as a real commit on its
+          # own ref, derived through plumbing so the worktree stays the
+          # baseline's.
+          parent=$(git rev-parse 'HEAD^{tree}')
+          cand_tree=$(python3 tools/godel.py derive /tmp/env.txt --parent "$parent")
+          cand=$(git commit-tree "$cand_tree" -p HEAD -m "loop: candidate ${point:0:16}")
+          git push origin "$cand:refs/heads/loop/cand/${point:0:16}"
+          echo "candidate=$cand" >> "$GITHUB_OUTPUT"
+
+  # --- judge: the two-arm gate, in its own workflow ------------------------
+  judge:
+    needs: propose
+    if: needs.propose.outputs.have == 'yes'
+    uses: ./.github/workflows/loop-judge.yml
+    with:
+      point: ${{ needs.propose.outputs.point }}
+      baseline_ref: ${{ needs.propose.outputs.baseline }}
+      candidate_ref: ${{ needs.propose.outputs.candidate }}
+      rail: ${{ needs.propose.outputs.rail }}
+      chi_bar: ${{ needs.propose.outputs.chi_bar }}
+      alpha_k: ${{ needs.propose.outputs.alpha_k }}
+      minutes: ${{ needs.propose.outputs.minutes }}
+      half: ${{ needs.propose.outputs.half }}
+      level: ${{ needs.propose.outputs.level }}
+      boots: ${{ needs.propose.outputs.boots }}
+      kind: ${{ needs.propose.outputs.kind }}
+      rung: ${{ needs.propose.outputs.rung }}
+      axis: ${{ needs.propose.outputs.axis }}
+      corpus: ${{ needs.propose.outputs.corpus }}
+
+  # --- adopt: the only writer of entries, serialized, staleness-checked ----
+  adopt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [propose, judge]
+    if: needs.propose.outputs.have == 'yes' && !inputs.dry_run
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: loop/main
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: loopjudge-${{ needs.propose.outputs.point }}
+          path: /tmp/judge
+
+      - name: Adopt, refuse, or find the world moved
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          python3 tools/godel.py cert --check /tmp/judge/certificate.cert
+          cert=/tmp/judge/certificate.cert
+          parent=$(awk '$1=="parent-tree"{print $2}' "$cert")
+          cand=$(awk '$1=="candidate-tree"{print $2}' "$cert")
+          verdict=$(awk '$1=="verdict"{print $2}' "$cert")
+          point=$(awk '$1=="point"{print $2}' "$cert")
+          live=$(git rev-parse 'HEAD^{tree}')
+
+          # **The one honest edit a certificate ever receives, before it is
+          # frozen**: the judge answered about a parent that is no longer
+          # the tip, so its verdict cannot land -- whatever it was. The
+          # entry records `stale` and the point re-authors from the new tip
+          # under a new name, because parent-tree is inside the envelope
+          # hash.
+          if [ "$parent" != "$live" ]; then
+            sed -i "s/^verdict .*/verdict stale/" "$cert"
+            verdict=stale
+            echo "::notice::the tip moved mid-judge; filed as stale"
+          fi
+          # seq is re-derived under the lock, where it is authoritative.
+          seq=$(( $(ls loop/ledger/entries 2>/dev/null | wc -l) + 1 ))
+          sed -i "s/^seq .*/seq $seq/" "$cert"
+
+          # Pure plumbing from here: the commit's tree is built in an
+          # index, so the worktree is never mutated and there is no
+          # deleted-file / stale-file class of mistake to make. On an
+          # adoption the base is the candidate tree (which already carries
+          # tonight's marker -- it derives from the post-marker tip); on a
+          # refusal it is the live tree. Either way the one addition is the
+          # certificate, so code and record land in one commit and are
+          # inseparable in history.
+          name=$(sha256sum "$cert" | cut -c1-16)
+          blob=$(git hash-object -w "$cert")
+          base=$([ "$verdict" = "adopt" ] && echo "$cand" || echo "$live")
+          export GIT_INDEX_FILE=/tmp/adopt-index
+          git read-tree "$base"
+          git update-index --add --cacheinfo \
+            "100644,$blob,loop/ledger/entries/$name.cert"
+          tree=$(git write-tree)
+          unset GIT_INDEX_FILE
+          new=$(git commit-tree "$tree" -p HEAD -m "loop: $verdict ${point:0:16} (seq $seq)")
+          git checkout -f --detach "$new"
+          python3 tools/godel.py fsck --root .
+          git push origin "$new:refs/heads/loop/main"
+          git push origin --delete "loop/cand/${point:0:16}" || true
+
+      - name: The rolling audit PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tail=$(python3 tools/godel.py ledger --root . --tail 10)
+          body=$(printf 'The CI loop ledger, newest last:\n\n```\n%s\n```\n\nEvery entry is a content-named certificate under loop/ledger/entries, re-verified by ci.yml on every push to this branch. Merging is yours; the machine only ever writes here.' "$tail")
+          n=$(gh pr list --head loop/main --base main --state open --json number --jq length)
+          if [ "$n" = "0" ]; then
+            gh pr create --head loop/main --base main \
+              --title "The loop ledger" --body "$body"
+          else
+            num=$(gh pr list --head loop/main --base main --state open --json number --jq '.[0].number')
+            gh pr edit "$num" --body "$body"
+          fi

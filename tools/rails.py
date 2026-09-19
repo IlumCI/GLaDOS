@@ -136,6 +136,16 @@ UNCONTROLLED = ("ai.", "smp.")
 # the noise" free to drift is the thing `judge_one` exists to prevent.
 Z95 = 1.96
 MCNEMAR_95 = 3.84
+
+#: The bar actually in force for the counted (binary paired) rails. It is
+#: `MCNEMAR_95` unless `--bar` raises it, and it can only ever be raised:
+#: the flag exists for the loop's family-wise alpha series (`godel.py
+#: alpha`), whose floors start at 4.687 and climb, and a caller that could
+#: lower the bar through a flag would be the criterion drifting through the
+#: back door. Timing rails keep their noise floors either way -- the alpha
+#: series governs counted comparisons, which is what the kernel's budget
+#: governs too.
+BAR = MCNEMAR_95
 # A net repair under this is not a repair. `godel::MIN_FIXED`.
 MIN_FIXED = 4
 
@@ -402,8 +412,8 @@ def paired_verdict(before, after):
     net = fixed - broke
     if abs(net) < MIN_FIXED:
         return SAME, f"fixed {fixed} broke {broke} of {len(keys)}, net under {MIN_FIXED}"
-    if chi < MCNEMAR_95:
-        return SAME, f"fixed {fixed} broke {broke}, chi {chi:.2f} inside {MCNEMAR_95}"
+    if chi < BAR:
+        return SAME, f"fixed {fixed} broke {broke}, chi {chi:.2f} inside {BAR}"
     return (BETTER if net > 0 else WORSE), f"fixed {fixed} broke {broke}, chi {chi:.2f}"
 
 
@@ -866,6 +876,12 @@ def main():
         claims = []
         if "--claims" in argv:
             claims = [a for a in argv[argv.index("--claims") + 1:] if not a.startswith("-")]
+        if "--bar" in argv:
+            # Raised, never lowered -- see BAR's own comment. A caller
+            # passing something under the default gets the default, silently
+            # and correctly: the floor composes over the bar in force.
+            global BAR
+            BAR = max(MCNEMAR_95, float(argv[argv.index("--bar") + 1]))
         if cmd == "compare":
             for name, v, why in compare(before, after, before2, after2):
                 print(f"  {name:<20} {v:<7} {why}")

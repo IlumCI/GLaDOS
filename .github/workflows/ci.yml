@@ -63,6 +63,13 @@ jobs:
           python3 tools/paired.py --selftest
           python3 tools/manifest.py --selftest
           python3 tools/payload.py --selftest
+          python3 tools/godel.py --selftest
+
+      # On main this reads an empty ledger and answers clean, which is
+      # correct; on loop/** it is the invariant check the loop's own jobs
+      # cannot be trusted to be the only ones running.
+      - name: The loop ledger, if this ref carries one
+        run: python3 tools/godel.py fsck --root .
 
       # The envelope validator is plain JavaScript precisely so node can
       # check it without Deno -- the README calls this the bargain. ~40

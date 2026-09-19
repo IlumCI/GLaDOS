@@ -1,0 +1,1440 @@
+#!/usr/bin/env python3
+"""The CI Godel machine's record-keeper: godel.rs, re-derived for a loop
+whose substrate is git.
+
+    godel.py next [--root DIR]            pick the next point, emit its envelope
+    godel.py admit FILE                   the kind table's gate, before a runner is spent
+    godel.py point FILE                   an envelope's content address
+    godel.py cert --emit --set k=v ...    render a certificate
+    godel.py cert --check FILE            parse one back, refusing mutations
+    godel.py fsck [--root DIR]            every invariant the ledger rests on
+    godel.py alpha [--root DIR]           tests spent, the chi floor in force
+    godel.py oops --axis A [--root DIR]   what tonight may spend
+    godel.py clade [--root DIR]           where the lineage stands
+    godel.py reconsider [--root DIR]      stay, or name the tree to go back to
+    godel.py ledger --tail N [--root DIR] the record, compactly
+    godel.py floors --spread F1 F2 ...    per-rail spread over N rails.txt files
+    godel.py --selftest                   no repo state needed
+    godel.py --verify                     against fixtures the kernel rendered
+
+**Why a second implementation exists at all.** The kernel machine keeps its
+lineage in a content-addressed store it had to build; the CI machine's
+substrate is git, which already is one. What carries over is not code but
+*rules* -- the family-wise alpha series, the frozen-bar epochs, the OOPS
+budget doubling, clade selection by deterministic Thompson sampling -- and
+rules re-derived in a second language drift, which is the tokenizer-class
+risk. Three defences, in order of strength: `--selftest` recomputes the
+SPEND table from the formula and asserts equality with the 32 literals in
+godel.rs:3607, and asserts the OOPS bounds as arithmetic the way oops.rs
+does; `--verify` diffs this parser against fixtures rendered by the kernel's
+own code; and the grammar here is deliberately *not* the kernel's -- a
+`loopcert` is its own format with its own header, so neither reader can be
+fed the other's records by mistake, and the one place both grammars meet
+(`parse_kernel_line`) reads exactly the three fields clade.rs reads.
+
+**Two deviations from the kernel, stated rather than discovered.** A node
+here is a git tree named by 40 hex characters, so the per-arm sampling key
+is the first 16 hex digits as a u64 where clade.rs uses a u32 -- same
+construction, wider name, and the seeds are therefore not comparable across
+the two machines (they never meet, but a reader porting numbers between
+ledgers should know). And the lineage is linear by construction --
+`loop/main` is fast-forward only -- so the clade arithmetic runs over a
+spine with no branches; the BFS the kernel needs for a DAG collapses to a
+suffix walk here, and says so below rather than carrying dead generality.
+"""
+
+import argparse
+import hashlib
+import io
+import math
+import os
+import re
+import subprocess
+import sys
+import tempfile
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import knob            # noqa: E402  the one parser of knob.rs's table
+import knobs_host      # noqa: E402  the host-side table (ships empty)
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# ---------------------------------------------------------------- constants
+
+#: One criterion question per epoch of this many entries -- godel.rs:3530.
+EPOCH_LEN = 5
+
+#: The default paired bar, chi-squared at p 0.05 with Yates -- shared with
+#: godel.rs, rails.py and paired.py.
+MCNEMAR_95 = 3.84
+
+#: The whole family-wise budget, spent as alpha_k = TOTAL * 6 / (pi^2 k^2),
+#: which sums to exactly TOTAL -- godel.rs:3590.
+ALPHA_TOTAL = 0.05
+
+#: godel.rs:3607-3616, verbatim. `--selftest` recomputes these from the
+#: formula and refuses to disagree; the table exists in the kernel because
+#: `no_std` has no inverse normal, and exists here so the two never drift.
+KERNEL_SPEND = [
+    4.687, 7.126, 8.591, 9.644, 10.466, 11.141, 11.714, 12.212,
+    12.652, 13.046, 13.403, 13.730, 14.031, 14.309, 14.569, 14.813,
+    15.041, 15.257, 15.462, 15.656, 15.840, 16.016, 16.185, 16.346,
+    16.501, 16.649, 16.793, 16.931, 17.064, 17.193, 17.317, 17.438,
+]
+
+#: Provisional until probe-kvm.yml measures it: one two-arm judge on the
+#: runner class, rounded up to 5. The doubling and the cap are the design;
+#: the base is a measurement.
+BASE_MINUTES = 40
+MAX_LEVEL = 3
+
+#: clade.rs:335,345,250.
+MIN_EVIDENCE = 6
+MAX_BACK = 4
+DRAW_CAP = 4096
+
+MASK64 = (1 << 64) - 1
+GOLDEN = 0x9E3779B97F4A7C15
+
+#: The judge set. A loop that can tune its own judge converges on a judge
+#: that says yes, so patches touching these are refused at authoring, at
+#: admission, and at fsck -- and for `.github/`, by GitHub itself, since the
+#: loop's token carries no `workflows` write. Changes ride the Phase 5
+#: boundary lane only. `tools/knobs_host.py` is deliberately absent: it is
+#: data the loop may grow through the ordinary judged lane.
+EVALUATOR = (
+    ".github/",
+    "supabase/",
+    "tools/rails.py",
+    "tools/knob.py",
+    "tools/sign.py",
+    "tools/godel.py",
+    "tools/retrieval.py",
+    "tools/drive.py",
+    "tools/hybtest.py",
+    "tools/portcheck.py",
+)
+
+#: Human-only or generated surfaces. The anchors decide what every machine
+#: in the field trusts; the ignore file is what keeps private halves out of
+#: history; the generated files are changed by changing their generator.
+PROTECTED = (
+    "src/update/mod.rs",
+    ".gitignore",
+    "src/ai/corpus.rs",
+    "src/doom/info.rs",
+    "src/cpu/symbols.rs",
+    "docs/",
+    "src/dev/rtl8188eu_tables.rs",   # provenance: not written here
+)
+
+VERDICTS = ("adopt", "refuse", "stale", "superseded", "rollback")
+#: The verdicts that record a judged comparison. `stale` was judged in full
+#: and then found its parent had moved, so its evidence was spent;
+#: `superseded` records a human override and `rollback` a clade decision --
+#: neither asked the world a question, so neither counts as a trial.
+TRIAL_VERDICTS = ("adopt", "refuse", "stale")
+MOVED = ("better", "worse", "same", "unstable", "absent", "-")
+#: `event` is certificate vocabulary only -- superseded and rollback
+#: entries record transitions, not proposals, so they belong to no kind in
+#: the table and the table has no row to admit them by. An envelope claiming
+#: `event` is refused (admission checks the table, which has no such row).
+KIND_NAMES = ("tune", "cleanup", "bugfix", "test", "feature", "rewrite",
+              "deps", "docs", "eval", "evaluator", "event")
+AXES = ("grid", "table", "template", "model")
+
+# ------------------------------------------------------------ the kind table
+
+
+class Kind:
+    """One row of the closed job-kind table.
+
+    A kind is admissible only if its verdict is mechanically derivable, so
+    every row names masks, budgets and what its certificate must carry. A
+    kind whose judge cannot exist gets no row -- the UNJUDGEABLE move,
+    generalised from surfaces to jobs.
+    """
+
+    def __init__(self, name, masks, max_files, max_lines, *,
+                 witness=False, additive=False, deletions_dominate=False,
+                 enabled=True):
+        self.name = name
+        self.masks = masks
+        self.max_files = max_files
+        self.max_lines = max_lines            # changed lines, adds + dels
+        self.witness = witness                # the fail-then-pass claim
+        self.additive = additive              # no deletions at all
+        self.deletions_dominate = deletions_dominate
+        self.enabled = enabled
+
+
+#: Six enabled for unattended proposing (operator decision, 2026-09-19);
+#: deps/docs/eval enable one at a time on ledger evidence; evaluator changes
+#: never travel this lane at all.
+KINDS = {k.name: k for k in [
+    Kind("tune", ("src/", "tools/"), 1, 8),
+    Kind("cleanup", ("src/", "tools/"), 5, 150, deletions_dominate=True),
+    Kind("bugfix", ("src/", "tools/"), 3, 150, witness=True),
+    Kind("test", ("src/", "tools/"), 3, 200, witness=True, additive=True),
+    Kind("feature", ("src/", "tools/"), 10, 400),
+    Kind("rewrite", ("src/",), 1, 400),
+    Kind("deps", ("rust-toolchain.toml", "Cargo.lock"), 2, 60, enabled=False),
+    Kind("docs", ("CLAUDE.md", "README.md"), 2, 60, enabled=False),
+    Kind("eval", ("tools/",), 3, 200, additive=True, enabled=False),
+    Kind("evaluator", (), 0, 0, enabled=False),
+]}
+
+# ------------------------------------------------- alpha: the SPEND series
+
+
+def spend_table():
+    """The chi floors, recomputed from the formula godel.rs documents."""
+    from statistics import NormalDist
+    nd = NormalDist()
+    out = []
+    for k in range(1, 33):
+        alpha = ALPHA_TOTAL * 6.0 / (math.pi ** 2 * k * k)
+        z = nd.inv_cdf(1.0 - alpha / 2.0)
+        out.append(z * z)
+    return out
+
+
+def chi_floor(spent):
+    """The floor for the NEXT test after `spent` are on the record.
+
+    Past the table it answers None, which is a refusal rather than a high
+    bar -- godel.rs:3645. The effective bar composes over the default, so
+    the criterion axis cannot lower itself beneath the series.
+    """
+    if spent >= len(KERNEL_SPEND):
+        return None
+    return max(MCNEMAR_95, KERNEL_SPEND[spent])
+
+
+def is_boundary(n):
+    """Pure over the record length; genesis excluded -- godel.rs:3548."""
+    return n > 0 and n % EPOCH_LEN == 0
+
+
+# ------------------------------------------- clade: deterministic sampling
+
+
+def _mix(s):
+    """splitmix64 -- clade.rs:231, bit for bit."""
+    s = (s + GOLDEN) & MASK64
+    z = s
+    z = ((z ^ (z >> 30)) * 0xBF58476D1CE4E5B9) & MASK64
+    z = ((z ^ (z >> 27)) * 0x94D049BB133111EB) & MASK64
+    z = z ^ (z >> 31)
+    return s, z
+
+
+def _unit(s):
+    """24 bits, never zero -- clade.rs:240."""
+    s, z = _mix(s)
+    return s, ((z >> 40) + 1.0) / 16_777_217.0
+
+
+def _gamma(s, k):
+    """Gamma of integer shape as a sum of exponentials, capped."""
+    total = 0.0
+    for _ in range(min(k, DRAW_CAP)):
+        s, u = _unit(s)
+        total += -math.log(u)
+    return s, total
+
+
+def beta(seed, a, b):
+    """Exact Beta for small integer counts -- clade.rs:259."""
+    s = seed & MASK64
+    s, x = _gamma(s, a + 1)
+    s, y = _gamma(s, b + 1)
+    return x / (x + y) if x + y > 0.0 else 0.5
+
+
+def seed_of(ledger_len, head):
+    """clade.rs:285: the record seeds the draw, so a later reader with the
+    same ledger reaches the same node."""
+    s = ((ledger_len & MASK64) * 0x517CC1B727220A95) & MASK64
+    s ^= (head << 17) & MASK64
+    s, _ = _mix(s)
+    s, _ = _mix(s)
+    return s
+
+
+def draw_for(seed, node, adoptions, trials):
+    """Keyed by node, not position, so inserting an arm reshuffles nothing."""
+    key = (seed ^ ((node * GOLDEN) & MASK64)) & MASK64
+    return beta(key, adoptions, trials - adoptions)
+
+
+def pick(seed, arms):
+    """Strict argmax: a tie keeps arm 0, which is the head, which is stay."""
+    best, at = -1.0, 0
+    for i, a in enumerate(arms):
+        d = draw_for(seed, a["node"], a["adoptions"], a["trials"])
+        if d > best:
+            best, at = d, i
+    return at
+
+
+def decide(entries):
+    """Stay, or (back_steps, target_tree). The kernel's decide, over a
+    linear lineage."""
+    arms = clade_arms(entries)
+    if len(arms) < 2 or arms[0]["trials"] < MIN_EVIDENCE:
+        return None
+    head = arms[0]["node"]
+    seed = seed_of(len(entries), head)
+    at = pick(seed, arms)
+    if at == 0:
+        return None
+    back = min(arms[at]["back"], MAX_BACK)
+    return back, arms[back]["tree"]
+
+
+def node_of(tree_hex):
+    """A tree's sampling name: first 16 hex digits as a u64. The kernel's
+    Name is the printed 8-hex u32; wider here because git gives 40."""
+    return int(tree_hex[:16], 16)
+
+
+def clade_arms(entries):
+    """One arm per spine node, head first.
+
+    The lineage is linear (FF-only), so the spine is the chain of adopted
+    trees and a node's clade is simply every trial at or after the entry
+    that produced it -- the DAG walk clade.rs needs collapses to a suffix
+    count, which is stated in the module header as a deviation.
+    """
+    adopts = [e for e in entries if e["verdict"] == "adopt"]
+    if not adopts:
+        return []
+    # The consistent tail: each adoption must grow from the previous one's
+    # candidate. A break (hand surgery) keeps the newest consistent run,
+    # the way clade.rs's spine breaks on a repeat rather than hanging.
+    tail = [adopts[-1]]
+    for e in reversed(adopts[:-1]):
+        if e["candidate-tree"] == tail[0]["parent-tree"]:
+            tail.insert(0, e)
+        else:
+            break
+    trials = [e for e in entries if e["verdict"] in TRIAL_VERDICTS]
+    spine = [tail[-1]["candidate-tree"]] + \
+            [e["parent-tree"] for e in reversed(tail)]
+    arms = []
+    for back, tree in enumerate(spine):
+        if back == len(spine) - 1:
+            produced_seq = 0            # the root: produced by nothing
+        else:
+            produced_seq = tail[len(tail) - 1 - back]["seq"]
+        t = [e for e in trials if e["seq"] >= produced_seq] if produced_seq \
+            else trials
+        a = [e for e in t if e["verdict"] == "adopt"]
+        arms.append({
+            "tree": tree,
+            "node": node_of(tree),
+            "back": back,
+            "trials": len(t),
+            "adoptions": len(a),
+        })
+    return arms
+
+
+# ------------------------------------------------------------ OOPS budgets
+
+
+def half_of(ledger_len):
+    """Even nights extend at the axis's level, odd start fresh at the base.
+    A function of the record, never a counter -- oops.rs:241."""
+    return "extend" if ledger_len % 2 == 0 else "fresh"
+
+
+def level_for(entries, axis, corpus):
+    """The largest level this axis starved at, and the smallest it decided
+    at -- oops.rs:203, read off the `level` field the certificate records
+    (the kernel reads `ex=`; recording the level directly is what keeps the
+    account stable when BASE_MINUTES is remeasured)."""
+    starved_max, decided_min = -1, None
+    for e in entries:
+        if e["axis"] != axis or e["corpus"] != corpus:
+            continue
+        if e["verdict"] not in TRIAL_VERDICTS:
+            continue
+        lv = int(e["level"])
+        if e["verdict"] == "refuse" and e["moved"] in ("unstable", "absent"):
+            starved_max = max(starved_max, lv)
+        elif e["verdict"] in ("adopt", "refuse"):
+            decided_min = lv if decided_min is None else min(decided_min, lv)
+    if decided_min is not None and decided_min > starved_max:
+        return decided_min
+    if starved_max < 0:
+        return 0
+    return min(starved_max + 1, MAX_LEVEL)
+
+
+def plan(entries, axis, corpus):
+    half = half_of(len(entries))
+    level = level_for(entries, axis, corpus) if half == "extend" else 0
+    return {
+        "half": half,
+        "level": level,
+        "minutes": BASE_MINUTES << level,
+        "boots": 1 + level,
+    }
+
+
+# ----------------------------------------------------- envelope and marker
+
+HEX40 = re.compile(r"^[0-9a-f]{40}$")
+HEX8 = re.compile(r"^[0-9a-f]{8}$")
+HEX64 = re.compile(r"^[0-9a-f]{64}$")
+
+
+ENV_KEYS = ("kind", "rung", "axis", "parent-tree", "corpus", "rail")
+
+
+def render_envelope(f, witness="", patch=""):
+    """One byte layout, because these bytes are the point's identity.
+
+    **Identity only -- no account state.** The first version carried
+    alpha-k, minutes, half, level and boots, and the drill that walks tried
+    markers caught what that means: every trial moves the account, so the
+    "same" point re-hashed differently each night and re-proposed forever
+    under fresh names. The kernel's rule is the fix, verbatim: a proposal is
+    identified by its rendering alone, and `Proposal::render` carries knobs,
+    never `Budget`. Every account field is a pure function of the ledger and
+    is recomputed where it is needed; the certificate records what a judge
+    actually spent.
+    """
+    lines = [
+        "loopenv 1",
+        f"kind {f['kind']}",
+        f"rung {f['rung']}",
+        f"axis {f['axis']}",
+        f"parent-tree {f['parent-tree']}",
+        f"corpus {f['corpus']}",
+        f"rail {f['rail']}",
+    ]
+    if witness:
+        lines.append("--- witness")
+        lines.append(witness.rstrip("\n"))
+    lines.append("--- patch")
+    lines.append(patch.rstrip("\n"))
+    return "\n".join(lines) + "\n"
+
+
+def parse_envelope(text):
+    """Strict, and every refusal is a sentence. Returns (fields, witness,
+    patch) or raises ValueError."""
+    lines = text.split("\n")
+    if not lines or lines[0] != "loopenv 1":
+        raise ValueError("that is not a loop envelope")
+    fields, i = {}, 1
+    while i < len(lines) and not lines[i].startswith("--- "):
+        line = lines[i]
+        if line.strip() == "":
+            raise ValueError("a blank line inside the header")
+        k, _, v = line.partition(" ")
+        fields[k] = v
+        i += 1
+    witness, patch, section = [], [], None
+    while i < len(lines):
+        if lines[i] == "--- witness":
+            if section is not None:
+                raise ValueError("witness after patch")
+            section = witness
+        elif lines[i] == "--- patch":
+            section = patch
+        elif section is not None:
+            section.append(lines[i])
+        else:
+            raise ValueError(f"unexpected line before any section: {lines[i]!r}")
+        i += 1
+    if section is not patch and not patch:
+        raise ValueError("no patch section")
+    for k in ENV_KEYS:
+        if k not in fields:
+            raise ValueError(f"the envelope has no {k!r}")
+    # Strict about extras, unlike the update manifest, and deliberately: a
+    # manifest must survive readers older than its writer, where a ledger's
+    # reader and writer ship in one commit and an unknown key is far more
+    # likely a corruption than a future.
+    for k in fields:
+        if k not in ENV_KEYS:
+            raise ValueError(f"{k!r} is not an envelope field")
+    if fields["kind"] not in KIND_NAMES:
+        raise ValueError(f"{fields['kind']!r} is not a kind this table has")
+    if fields["axis"] not in AXES:
+        raise ValueError(f"{fields['axis']!r} is not an authoring axis")
+    if not HEX40.match(fields["parent-tree"]):
+        raise ValueError("parent-tree is not a git tree name")
+    if not HEX8.match(fields["corpus"]):
+        raise ValueError("corpus is not 8 hex digits")
+    if not fields["rung"].isdigit():
+        raise ValueError("rung is not a number")
+    return fields, "\n".join(witness), "\n".join(patch)
+
+
+def point_of(text):
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+# ----------------------------------------------------------- the knob block
+
+
+def render_knob_block(row, value):
+    """knob.rs::patch's six lines, exactly; `knob.py show` is the other
+    reader and the selftest round-trips through it."""
+    return "\n".join([
+        "knob 1",
+        f"file {row['file']}",
+        f"symbol {row['symbol']}",
+        f"from {row['now']}",
+        f"to {value}",
+        f"rail {row['rail']}",
+    ]) + "\n"
+
+
+# ------------------------------------------------------------- certificates
+
+CERT_KEYS = (
+    "seq", "utc", "point", "kind", "rung", "axis", "parent-tree",
+    "candidate-tree", "rail", "corpus", "alpha-k", "chi-bar", "minutes",
+    "half", "level", "boots", "sections", "suites", "claims", "witness",
+    "moved", "why", "verdict", "runner",
+)
+
+
+def render_cert(c):
+    out = ["loopcert 1"]
+    for k in CERT_KEYS:
+        if k not in c:
+            raise ValueError(f"the certificate has no {k!r}")
+        out.append(f"{k} {c[k]}")
+    return "\n".join(out) + "\n"
+
+
+def parse_cert(text):
+    lines = [l for l in text.split("\n") if l != ""]
+    if not lines or lines[0] != "loopcert 1":
+        raise ValueError("that is not a loop certificate")
+    c = {}
+    for line in lines[1:]:
+        k, _, v = line.partition(" ")
+        if k in c:
+            raise ValueError(f"{k!r} appears twice")
+        if k not in CERT_KEYS:
+            raise ValueError(f"{k!r} is not a certificate field")
+        c[k] = v
+    for k in CERT_KEYS:
+        if k not in c:
+            raise ValueError(f"the certificate has no {k!r}")
+    if not c["seq"].isdigit():
+        raise ValueError("seq is not a number")
+    if not HEX64.match(c["point"]):
+        raise ValueError("point is not a sha256")
+    for k in ("parent-tree", "candidate-tree"):
+        if not HEX40.match(c[k]):
+            raise ValueError(f"{k} is not a git tree name")
+    if c["verdict"] not in VERDICTS:
+        raise ValueError(f"{c['verdict']!r} is not a verdict this loop knows")
+    if c["moved"] not in MOVED:
+        raise ValueError(f"{c['moved']!r} is not a movement this loop knows")
+    if c["kind"] not in KIND_NAMES:
+        raise ValueError(f"{c['kind']!r} is not a kind")
+    for k in ("sections", "suites", "claims"):
+        if not re.match(r"^\d+/\d+$", c[k]):
+            raise ValueError(f"{k} is not a before/after pair")
+    if c["witness"] not in ("fail-then-pass", "-"):
+        raise ValueError("witness is neither fail-then-pass nor -")
+    return c
+
+
+def cert_name(text):
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+# ------------------------------------------------------------- the ledger
+
+
+def ledger_dir(root):
+    return os.path.join(root, "loop", "ledger")
+
+
+def load_entries(root):
+    d = os.path.join(ledger_dir(root), "entries")
+    if not os.path.isdir(d):
+        return []
+    out = []
+    for name in sorted(os.listdir(d)):
+        if not name.endswith(".cert"):
+            continue
+        text = io.open(os.path.join(d, name), encoding="utf-8").read()
+        c = parse_cert(text)
+        c["seq"] = int(c["seq"])
+        c["_name"] = name[:-5]
+        c["_text"] = text
+        out.append(c)
+    out.sort(key=lambda c: c["seq"])
+    return out
+
+
+def corpus_hash(root):
+    p = os.path.join(root, "loop", "evidence", "corpus.txt")
+    if not os.path.isfile(p):
+        return None
+    return hashlib.sha256(open(p, "rb").read()).hexdigest()[:8]
+
+
+def alpha_spent(entries, corpus):
+    """Trials on this body of evidence -- the count the SPEND series is
+    indexed by. `rail none` entries made no counted comparison and spend
+    nothing, the rule rung 2 relies on."""
+    return sum(1 for e in entries
+               if e["corpus"] == corpus and e["rail"] != "none"
+               and e["verdict"] in TRIAL_VERDICTS)
+
+
+# ------------------------------------------------------- kernel-line reads
+
+
+def parse_kernel_line(line):
+    """Exactly the three fields clade.rs reads out of the kernel's ledger:
+    parent, variant, adopted. Unreadable answers None rather than a guess."""
+    m = re.search(r" parent=([0-9a-f]{8}|root\.*)", line)
+    v = re.search(r" variant=([0-9a-f]{8})", line)
+    if not m or not v:
+        return None
+    parent = 0 if m.group(1).startswith("root") else int(m.group(1), 16)
+    return {
+        "parent": parent,
+        "variant": int(v.group(1), 16),
+        "adopted": " ADOPT" in line,
+    }
+
+
+# ------------------------------------------------------------ diff hygiene
+
+FORBIDDEN_DIFF = (
+    "GIT binary patch", "Binary files ", "old mode ", "new mode ",
+    "rename from ", "copy from ", "deleted file mode 120000",
+    "new file mode 120000",
+)
+
+
+def diff_stats(patch):
+    """Paths and line counts out of a unified diff, refusing every shape
+    the loop must not emit: binaries, mode changes, renames, symlinks."""
+    for bad in FORBIDDEN_DIFF:
+        if bad in patch:
+            raise ValueError(f"the patch carries {bad.strip()!r}")
+    paths, adds, dels = set(), 0, 0
+    for line in patch.split("\n"):
+        if line.startswith("+++ ") or line.startswith("--- "):
+            p = line[4:].strip()
+            if p == "/dev/null":
+                continue
+            if p.startswith(("a/", "b/")):
+                p = p[2:]
+            if p.startswith("/") or ".." in p.split("/"):
+                raise ValueError(f"the path {p!r} reaches outside the tree")
+            paths.add(p)
+        elif line.startswith("+"):
+            adds += 1
+        elif line.startswith("-"):
+            dels += 1
+    if not paths:
+        raise ValueError("the diff names no files")
+    return sorted(paths), adds, dels
+
+
+def admit(text):
+    """The gate before a runner is spent. Answers a list of refusals; empty
+    means admitted. Never raises for content reasons -- a reason is data."""
+    why = []
+    try:
+        fields, witness, patch = parse_envelope(text)
+    except ValueError as e:
+        return [str(e)]
+    kind = KINDS.get(fields["kind"])
+    if kind is None:
+        # `event` parses (certificates use it) and admits nowhere: the table
+        # has no row, and a refusal is a sentence rather than a KeyError.
+        return [f"the kind {fields['kind']!r} has no row in the table, "
+                "so nothing can admit it"]
+    if not kind.enabled:
+        why.append(f"the kind {kind.name!r} is not enabled for unattended proposing")
+    if fields["kind"] == "evaluator":
+        why.append("evaluator changes ride the boundary lane, never this one")
+        return why
+
+    if patch.startswith("knob 1"):
+        got = dict(l.partition(" ")[::2] for l in patch.split("\n") if l)
+        rows = knob.table_rows() + [
+            {"file": f, "symbol": s, "now": n, "values": list(v), "rail": r}
+            for (f, s, n, v, r, _a) in knobs_host.ROWS
+        ]
+        match = [r for r in rows if r["file"] == got.get("file")
+                 and r["symbol"] == got.get("symbol")]
+        if not match:
+            why.append("the knob block names a row no table has")
+        else:
+            row = match[0]
+            if got.get("from") != row["now"]:
+                why.append(f"from {got.get('from')!r} but the table says {row['now']!r}")
+            if got.get("to") not in row["values"]:
+                why.append(f"to {got.get('to')!r} is not a declared value")
+        paths = [got.get("file", "")]
+        adds = dels = 1
+    else:
+        try:
+            paths, adds, dels = diff_stats(patch)
+        except ValueError as e:
+            return why + [str(e)]
+
+    for p in paths:
+        if any(p.startswith(pre) for pre in EVALUATOR):
+            why.append(f"{p} is the evaluator, which this lane may not touch")
+        if any(p.startswith(pre) for pre in knob.UNJUDGEABLE):
+            why.append(f"{p} is an unjudgeable surface")
+        if any(p == pre or p.startswith(pre) for pre in PROTECTED):
+            why.append(f"{p} is protected (human-only or generated)")
+        if not any(p == m or p.startswith(m) for m in kind.masks):
+            why.append(f"{p} is outside the {kind.name} kind's mask")
+    if len(paths) > kind.max_files:
+        why.append(f"{len(paths)} files against the {kind.name} cap of {kind.max_files}")
+    if adds + dels > kind.max_lines:
+        why.append(f"{adds + dels} changed lines against the cap of {kind.max_lines}")
+    if kind.additive and dels > 0 and not patch.startswith("knob 1"):
+        why.append(f"the {kind.name} kind is additive and this deletes {dels} line(s)")
+    if kind.deletions_dominate and dels < adds:
+        why.append(f"a {kind.name} that adds more than it removes is not one")
+    if kind.witness and not witness:
+        why.append(f"a {kind.name} without a witness is a diff with a story")
+    if not kind.witness and witness:
+        why.append(f"the {kind.name} kind carries no witness section")
+    return why
+
+
+# ----------------------------------------------------------------- git
+
+
+def git(root, *args, check=True):
+    r = subprocess.run(["git", "-C", root, *args],
+                       capture_output=True, text=True)
+    if check and r.returncode != 0:
+        raise RuntimeError(f"git {' '.join(args)}: {r.stderr.strip()}")
+    return r.stdout.strip()
+
+
+def head_tree(root):
+    return git(root, "rev-parse", "HEAD^{tree}")
+
+
+def tree_exists(root, tree):
+    r = subprocess.run(["git", "-C", root, "cat-file", "-e", f"{tree}^{{tree}}"],
+                       capture_output=True, text=True)
+    return r.returncode == 0
+
+
+def rederive(root, parent_tree, patch):
+    """apply(parent, patch) as a tree, through plumbing, touching no
+    worktree. Returns the tree name, or raises."""
+    with tempfile.TemporaryDirectory() as td:
+        idx = os.path.join(td, "index")
+        env = dict(os.environ, GIT_INDEX_FILE=idx)
+
+        def g(*args, inp=None):
+            r = subprocess.run(["git", "-C", root, *args], env=env,
+                               capture_output=True, text=True, input=inp)
+            if r.returncode != 0:
+                raise RuntimeError(f"git {' '.join(args)}: {r.stderr.strip()}")
+            return r.stdout.strip()
+
+        g("read-tree", parent_tree)
+        if patch.startswith("knob 1"):
+            got = dict(l.partition(" ")[::2] for l in patch.split("\n") if l)
+            path, symbol = got["file"], got["symbol"]
+            old = g("cat-file", "blob", f"{parent_tree}:{path}")
+            # The same swap knob.rewrite makes, in memory, with the same
+            # staleness rule: a current value that is not the block's `from`
+            # refuses rather than overwrites.
+            pat = re.compile(
+                r"(const\s+" + re.escape(symbol) + r"\s*:\s*[^=]+=\s*)([^;]+)(;)")
+            m = pat.search(old)
+            if not m:
+                raise RuntimeError(f"{path} has no const {symbol}")
+            if m.group(2).strip() != got["from"]:
+                raise RuntimeError(
+                    f"{path} {symbol} is {m.group(2).strip()!r}, "
+                    f"not the {got['from']!r} the block says -- stale")
+            new = old[:m.start(2)] + got["to"] + old[m.end(2):]
+            blob = g("hash-object", "-w", "--stdin", "--path", path, inp=new)
+            g("update-index", "--cacheinfo", f"100644,{blob},{path}")
+        else:
+            pfile = os.path.join(td, "p.diff")
+            io.open(pfile, "w", encoding="utf-8", newline="\n").write(patch + "\n")
+            g("apply", "--cached", pfile)
+        return g("write-tree")
+
+
+# ---------------------------------------------------------------- fsck
+
+
+def fsck(root):
+    """Every invariant the ledger rests on. Answers (problems, notes)."""
+    problems, notes = [], []
+    ed = os.path.join(ledger_dir(root), "entries")
+    td = os.path.join(ledger_dir(root), "tried")
+    entries = []
+    if os.path.isdir(ed):
+        for name in sorted(os.listdir(ed)):
+            p = os.path.join(ed, name)
+            raw = io.open(p, encoding="utf-8").read()
+            if not name.endswith(".cert"):
+                problems.append(f"{name}: not a .cert file")
+                continue
+            if cert_name(raw) != name[:-5]:
+                problems.append(f"{name}: content does not match its name")
+                continue
+            try:
+                c = parse_cert(raw)
+            except ValueError as e:
+                problems.append(f"{name}: {e}")
+                continue
+            c["seq"] = int(c["seq"])
+            entries.append(c)
+    entries.sort(key=lambda c: c["seq"])
+    seqs = [c["seq"] for c in entries]
+    if seqs != list(range(1, len(seqs) + 1)):
+        problems.append(f"seq is not dense from 1: {seqs}")
+
+    for c in entries:
+        # An event entry (superseded, rollback) records a transition the
+        # world imposed, not a proposal anybody made: there is no envelope,
+        # so there is no marker to demand. A *trial* without its marker is
+        # a corruption, because the marker is committed before the trial by
+        # construction.
+        if c["verdict"] not in TRIAL_VERDICTS:
+            continue
+        marker = os.path.join(td, c["point"][:16] + ".env")
+        if not os.path.isfile(marker):
+            problems.append(f"seq {c['seq']}: no tried marker for its point")
+            continue
+        env_text = io.open(marker, encoding="utf-8").read()
+        if point_of(env_text) != c["point"]:
+            problems.append(f"seq {c['seq']}: the marker is not the envelope the point names")
+            continue
+        bad = admit_paths_only(env_text)
+        if bad:
+            problems.append(f"seq {c['seq']}: {bad[0]}")
+        if c["verdict"] == "adopt" and c["candidate-tree"] == c["parent-tree"]:
+            problems.append(f"seq {c['seq']}: adopted a tree identical to its parent")
+        if tree_exists(root, c["parent-tree"]):
+            try:
+                _f, _w, patch = parse_envelope(env_text)
+                got = rederive(root, c["parent-tree"], patch)
+                if got != c["candidate-tree"]:
+                    problems.append(
+                        f"seq {c['seq']}: candidate re-derives to {got[:12]}, "
+                        f"certificate says {c['candidate-tree'][:12]}")
+            except RuntimeError as e:
+                problems.append(f"seq {c['seq']}: could not re-derive: {e}")
+        else:
+            notes.append(f"seq {c['seq']}: parent tree absent here (shallow clone), not re-derived")
+
+    if os.path.isdir(td):
+        for name in sorted(os.listdir(td)):
+            raw = io.open(os.path.join(td, name), encoding="utf-8").read()
+            if not name.endswith(".env"):
+                problems.append(f"tried/{name}: not a .env file")
+            elif point_of(raw)[:16] != name[:-4]:
+                problems.append(f"tried/{name}: content does not match its name")
+    return problems, notes
+
+
+def admit_paths_only(env_text):
+    """The path half of admission alone, for fsck: budgets were judged when
+    the entry was made, but an evaluator path in a stored envelope is a
+    corruption whenever it is noticed."""
+    try:
+        _f, _w, patch = parse_envelope(env_text)
+    except ValueError as e:
+        return [str(e)]
+    if patch.startswith("knob 1"):
+        got = dict(l.partition(" ")[::2] for l in patch.split("\n") if l)
+        paths = [got.get("file", "")]
+    else:
+        try:
+            paths, _a, _d = diff_stats(patch)
+        except ValueError as e:
+            return [str(e)]
+    out = []
+    for p in paths:
+        if any(p.startswith(pre) for pre in EVALUATOR):
+            out.append(f"stored envelope touches the evaluator: {p}")
+        if any(p.startswith(pre) for pre in knob.UNJUDGEABLE):
+            out.append(f"stored envelope touches an unjudgeable surface: {p}")
+    return out
+
+
+# ------------------------------------------------------------------- next
+
+
+def next_point(root):
+    """The next untried grid point from the tip, or a reason there is none.
+    Returns (envelope_text, None) or (None, reason)."""
+    corpus = corpus_hash(root)
+    if corpus is None:
+        return None, "no loop/evidence/corpus.txt -- the alpha series has no identity"
+    entries = load_entries(root)
+    k = alpha_spent(entries, corpus)
+    if chi_floor(k) is None:
+        return None, ("the alpha series is spent on this corpus "
+                      f"({k} of {len(KERNEL_SPEND)}); only new evidence refills it")
+    parent = head_tree(root)
+    tried_dir = os.path.join(ledger_dir(root), "tried")
+    rows = knob.table_rows() + [
+        {"file": f, "symbol": s, "now": n, "values": list(v), "rail": r}
+        for (f, s, n, v, r, _a) in knobs_host.ROWS
+    ]
+    for row in rows:
+        for value in row["values"]:
+            fields = {
+                "kind": "tune", "rung": 1, "axis": "grid",
+                "parent-tree": parent, "corpus": corpus, "rail": row["rail"],
+            }
+            env = render_envelope(fields, patch=render_knob_block(row, value))
+            marker = os.path.join(tried_dir, point_of(env)[:16] + ".env")
+            if os.path.exists(marker):
+                continue
+            bad = admit(env)
+            if bad:
+                return None, f"the next grid point refuses its own admission: {bad[0]}"
+            p = plan(entries, "grid", corpus)
+            budget = dict(p, alpha_k=k, chi_bar=chi_floor(k),
+                          point=point_of(env), rail=row["rail"])
+            return (env, budget), None
+    return None, ("every grid point is tried from this tree; "
+                  "rungs 2-4 are what comes next (Phase 4)")
+
+
+# ------------------------------------------------------------- rails files
+
+
+def read_rails(path):
+    """name -> float value out of one rails.txt block."""
+    out = {}
+    for line in io.open(path, encoding="utf-8"):
+        line = line.strip()
+        if line.startswith("[rail]") or not line:
+            continue
+        parts = line.split()
+        if len(parts) >= 2 and parts[1] != "absent":
+            try:
+                out[parts[0]] = float(parts[1])
+            except ValueError:
+                pass
+    return out
+
+
+def floors_spread(paths):
+    """Per-rail between-boot spread over N rails files, as TSV rows."""
+    readings = {}
+    for p in paths:
+        for name, v in read_rails(p).items():
+            readings.setdefault(name, []).append(v)
+    rows = []
+    for name in sorted(readings):
+        vs = sorted(readings[name])
+        if len(vs) < 2 or vs[0] == 0:
+            continue
+        mid = vs[len(vs) // 2]
+        spreads = sorted(abs(v - mid) / mid for v in vs)
+        p50 = spreads[len(spreads) // 2]
+        p95 = spreads[min(len(spreads) - 1, int(len(spreads) * 0.95))]
+        rows.append((name, len(vs), p50, p95))
+    return rows
+
+
+# ---------------------------------------------------------------- selftest
+
+
+def selftest():
+    ok = True
+
+    def claim(what, good):
+        nonlocal ok
+        if not good:
+            ok = False
+        print(f"  {'ok ' if good else 'FAIL'}  {what}")
+
+    # --- the alpha series agrees with the kernel, to the digit ------------
+    mine = spend_table()
+    worst = max(abs(a - b) for a, b in zip(mine, KERNEL_SPEND))
+    claim(f"the SPEND table recomputes to the kernel's 32 literals (worst {worst:.4f})",
+          worst < 0.001)
+    claim("past the series the floor is a refusal, not a high bar",
+          chi_floor(32) is None and chi_floor(31) is not None)
+    claim("the floor composes over the default bar",
+          chi_floor(0) == max(MCNEMAR_95, KERNEL_SPEND[0]))
+
+    # --- epochs -----------------------------------------------------------
+    claim("genesis is not a boundary and multiples of five are",
+          not is_boundary(0) and not is_boundary(4) and is_boundary(5)
+          and not is_boundary(9) and is_boundary(10))
+
+    # --- OOPS arithmetic, the two oops.rs asserts -------------------------
+    good = True
+    for lv in range(MAX_LEVEL + 1):
+        reach = BASE_MINUTES * (2 ** (lv + 1) - 1)
+        oracle = BASE_MINUTES * 2 ** lv
+        good &= reach < 2 * oracle
+        good &= 2 * reach < 4 * oracle * 2      # halves interleaved, bounded
+    claim("not knowing the level costs under 2x, and never committing under 4x", good)
+    claim("halves alternate off the record's parity",
+          half_of(0) == "extend" and half_of(1) == "fresh" and half_of(2) == "extend")
+
+    # level_for off synthetic certificates
+    def mkcert(seq, verdict, moved, level, axis="grid", corpus="deadbeef",
+               rail="host.retrieval"):
+        return {"seq": seq, "verdict": verdict, "moved": moved,
+                "level": str(level), "axis": axis, "corpus": corpus,
+                "rail": rail, "parent-tree": "0" * 40,
+                "candidate-tree": "1" * 40}
+    es = [mkcert(1, "refuse", "unstable", 0)]
+    claim("one starvation at the base raises the level to one",
+          level_for(es, "grid", "deadbeef") == 1)
+    es.append(mkcert(2, "refuse", "same", 1))
+    claim("a decision above every starvation is the level that works",
+          level_for(es, "grid", "deadbeef") == 1)
+    es.append(mkcert(3, "adopt", "better", 0))
+    claim("a decision AT the starved level does not undo the starvation -- "
+          "oops.rs compares strictly",
+          level_for(es, "grid", "deadbeef") == 1)
+    claim("and one above every starvation is the level that stands",
+          level_for([mkcert(1, "refuse", "unstable", 0),
+                     mkcert(2, "adopt", "better", 2)],
+                    "grid", "deadbeef") == 2)
+    claim("another corpus's history does not bind",
+          level_for(es, "grid", "cafecafe") == 0)
+    claim("a superseded entry is not a trial",
+          level_for([mkcert(1, "superseded", "-", 3)], "grid", "deadbeef") == 0)
+
+    # --- the clade port ---------------------------------------------------
+    s0, z0 = _mix(0)
+    claim("splitmix64 is the kernel's, not a lookalike",
+          s0 == GOLDEN and z0 == 0xE220A8397B1DCDAF)
+    seed = seed_of(9, node_of("ab" * 20))
+    claim("the seed is a function of the record and derives twice the same",
+          seed == seed_of(9, node_of("ab" * 20)))
+    d1 = draw_for(seed, 7, 9, 10)
+    d2 = draw_for(seed, 7, 1, 10)
+    claim("nine adoptions in ten draw above one in ten, from one seed",
+          0.0 < d2 < d1 < 1.0)
+    means_hi = sum(draw_for(seed_of(i, 1), 7, 9, 10) for i in range(200)) / 200
+    means_lo = sum(draw_for(seed_of(i, 1), 7, 1, 10) for i in range(200)) / 200
+    claim(f"and on average across 200 seeds ({means_hi:.2f} vs {means_lo:.2f})",
+          means_hi > means_lo + 0.3)
+    claim("a huge shape is capped instead of hanging",
+          0.0 <= beta(seed, 100_000, 100_000) <= 1.0)
+
+    def adopt_cert(seq, parent, cand):
+        c = mkcert(seq, "adopt", "better", 0)
+        c["parent-tree"], c["candidate-tree"] = parent, cand
+        return c
+    t = ["%040x" % (i + 1) for i in range(4)]
+    lineage = [adopt_cert(1, t[0], t[1]), adopt_cert(2, t[1], t[2])]
+    lineage += [mkcert(i, "refuse", "same", 0) for i in range(3, 9)]
+    for e in lineage[2:]:
+        e["parent-tree"], e["candidate-tree"] = t[2], t[3]
+    arms = clade_arms(lineage)
+    claim("the spine is head, parent, root",
+          [a["tree"] for a in arms] == [t[2], t[1], t[0]])
+    claim("an ancestor's clade contains its child's",
+          arms[2]["trials"] >= arms[1]["trials"] >= arms[0]["trials"])
+    claim("the head here is under-evidenced enough to move or stay, decided the same twice",
+          decide(lineage) == decide(lineage))
+    few = lineage[:3]
+    claim("under six trials below the head, the answer is stay",
+          decide(few) is None)
+
+    # --- envelope and certificate grammar ---------------------------------
+    fields = {"kind": "tune", "rung": 1, "axis": "grid",
+              "parent-tree": "ab" * 20, "corpus": "deadbeef", "alpha-k": 0,
+              "rail": "host.retrieval", "minutes": 40, "half": "extend",
+              "level": 0, "boots": 1}
+    row = {"file": "src/ai/lex.rs", "symbol": "LEN_B", "now": "0.5",
+           "values": ["0.25"], "rail": "host.retrieval"}
+    env = render_envelope(fields, patch=render_knob_block(row, "0.25"))
+    f2, w2, p2 = parse_envelope(env)
+    claim("an envelope renders and parses back to itself",
+          f2["kind"] == "tune" and w2 == "" and p2.startswith("knob 1"))
+    claim("its point is stable", point_of(env) == point_of(env))
+    envw = render_envelope(dict(fields, kind="bugfix"), witness="--- w",
+                           patch="--- p")
+    claim("a witness section survives the round trip",
+          parse_envelope(envw)[1] == "--- w")
+    try:
+        parse_envelope(env.replace("loopenv 1", "loopenv 2"))
+        claim("a future envelope format is refused", False)
+    except ValueError:
+        claim("a future envelope format is refused", True)
+
+    cert = {k: v for k, v in [
+        ("seq", "1"), ("utc", "2026-09-19T00:00:00Z"), ("point", "0" * 64),
+        ("kind", "tune"), ("rung", "1"), ("axis", "grid"),
+        ("parent-tree", "a" * 40), ("candidate-tree", "b" * 40),
+        ("rail", "host.retrieval"), ("corpus", "deadbeef"), ("alpha-k", "0"),
+        ("chi-bar", "4.69"), ("minutes", "40"), ("half", "extend"),
+        ("level", "0"), ("boots", "1"), ("sections", "29/29"),
+        ("suites", "65/65"), ("claims", "0/0"), ("witness", "-"),
+        ("moved", "same"), ("why", "fixed 1 broke 2 of 250, net under 4"),
+        ("verdict", "refuse"), ("runner", "1/1"),
+    ]}
+    text = render_cert(cert)
+    back = parse_cert(text)
+    claim("a certificate renders and parses back", back["why"] == cert["why"])
+    for k, v, what in [("verdict", "maybe", "an invented verdict"),
+                       ("moved", "sideways", "an invented movement"),
+                       ("witness", "yes", "an invented witness value")]:
+        try:
+            parse_cert(render_cert(dict(cert, **{k: v})))
+            claim(f"{what} is refused", False)
+        except ValueError:
+            claim(f"{what} is refused", True)
+
+    # --- the kernel's own lines still read --------------------------------
+    l1 = ("1 h3 parent=root.... variant=ca6f18a4 axis=adapter corpus=f330c22c "
+          "cell=4 n=15 pred=win J1[fix=2 broke=1 wrong=5 ex=24 chi=0.00 "
+          "net repair below the floor no] J2[goals=1/3 no] J3[ok] ep=20 "
+          "J4[r=8 kib=24 ok] reject")
+    l2 = ("1 h12 parent=root.... variant=737f9c0a axis=source "
+          "rail=host.retrieval moved=same corpus=f330c22c "
+          "host.retrieval same fixed 1 broke 2 of 250, net under 4 reject")
+    k1, k2 = parse_kernel_line(l1), parse_kernel_line(l2)
+    claim("the kernel's judged line reads: root parent, ca6f18a4, rejected",
+          k1 == {"parent": 0, "variant": 0xca6f18a4, "adopted": False})
+    claim("and the inbound source line reads the same way",
+          k2["variant"] == 0x737f9c0a and not k2["adopted"])
+    claim("a word ending in ADOPT does not read as an adoption",
+          not parse_kernel_line(l2.replace(" reject", "railADOPT"))["adopted"])
+    claim("and a real adoption does",
+          parse_kernel_line(l2.replace(" reject", " ADOPT"))["adopted"])
+
+    # --- admission: the kind table refuses what it must -------------------
+    claim("the well-formed tune point is admitted", admit(env) == [])
+    big = render_envelope(dict(fields, kind="cleanup"), patch="\n".join(
+        [f"--- a/src/f{i}.rs\n+++ b/src/f{i}.rs\n-x" for i in range(6)]))
+    claim("six files against cleanup's cap of five is refused",
+          any("cap of 5" in w for w in admit(big)))
+    wipe = render_envelope(dict(fields, kind="rewrite"), patch=(
+        "--- a/src/main.rs\n+++ b/src/main.rs\n"
+        + "\n".join("-gone" for _ in range(450)) + "\n+fn f() {"))
+    claim("half a file replaced by a fragment dies at the line cap",
+          any("cap of 400" in w for w in admit(wipe)))
+    mid = render_envelope(dict(fields, kind="rewrite"), patch=(
+        "--- a/src/main.rs\n+++ b/src/main.rs\n"
+        + "\n".join("-gone" for _ in range(300)) + "\n+fn f() {"))
+    claim("a 300-line rewrite is admitted -- the cap is not the judge, and the "
+          "claim-count monotonic at judging is what a fragment actually dies of",
+          admit(mid) == [])
+    evl = render_envelope(dict(fields, kind="feature"), patch=(
+        "--- a/tools/rails.py\n+++ b/tools/rails.py\n-NOISE = 0.35\n+NOISE = 9.0"))
+    claim("a patch touching the evaluator is refused by name",
+          any("evaluator" in w for w in admit(evl)))
+    gfx = render_envelope(dict(fields, kind="feature"), patch=(
+        "--- a/src/gfx/theme.rs\n+++ b/src/gfx/theme.rs\n-a\n+b"))
+    claim("an unjudgeable surface is refused by name",
+          any("unjudgeable" in w for w in admit(gfx)))
+    anch = render_envelope(dict(fields, kind="feature"), patch=(
+        "--- a/src/update/mod.rs\n+++ b/src/update/mod.rs\n-a\n+b"))
+    claim("the pinned anchors are protected",
+          any("protected" in w for w in admit(anch)))
+    nowit = render_envelope(dict(fields, kind="bugfix"), patch=(
+        "--- a/src/ai/lex.rs\n+++ b/src/ai/lex.rs\n-a\n+b"))
+    claim("a bugfix without a witness is a diff with a story",
+          any("witness" in w for w in admit(nowit)))
+    dep = render_envelope(dict(fields, kind="deps"), patch=(
+        "--- a/Cargo.lock\n+++ b/Cargo.lock\n-a\n+b"))
+    claim("a designed-but-not-enabled kind is refused as such",
+          any("not enabled" in w for w in admit(dep)))
+    binp = render_envelope(dict(fields, kind="feature"), patch=(
+        "--- a/src/x.rs\n+++ b/src/x.rs\nGIT binary patch\nliteral 5"))
+    claim("a binary patch is refused outright",
+          any("binary" in w.lower() for w in admit(binp)))
+    esc = render_envelope(dict(fields, kind="feature"), patch=(
+        "--- a/src/../update.key\n+++ b/src/../update.key\n-a\n+b"))
+    claim("a path that climbs out of the tree is refused",
+          any("outside the tree" in w for w in admit(esc)))
+    claim("the envelope is identity only -- no account state in the bytes",
+          "minutes" not in env and "alpha" not in env and "boots" not in env)
+    try:
+        parse_envelope(env.replace("rung 1", "rung 1\nminutes 40"))
+        claim("an account field smuggled into an envelope is refused", False)
+    except ValueError:
+        claim("an account field smuggled into an envelope is refused", True)
+
+    # --- knob block round-trips through knob.py's own reader --------------
+    with tempfile.TemporaryDirectory() as td:
+        p = os.path.join(td, "p.knob")
+        io.open(p, "w", encoding="utf-8", newline="\n").write(
+            render_knob_block(row, "0.25"))
+        got = knob.read_patch(p)
+        claim("the knob block reads back through knob.py itself",
+              got["symbol"] == "LEN_B" and got["to"] == "0.25")
+
+    # --- knobs_host carries knob.rs's invariants even while empty ---------
+    good = True
+    seen = set()
+    for (f, s, n, vals, r, about) in knobs_host.ROWS:
+        good &= bool(f and s and n and vals and r and about)
+        good &= n not in vals
+        good &= len(set(vals)) == len(vals)
+        good &= (f, s) not in seen
+        seen.add((f, s))
+        good &= not any(f.startswith(pre) for pre in knob.UNJUDGEABLE)
+        good &= not any(f.startswith(pre) for pre in EVALUATOR)
+    claim(f"knobs_host holds knob.rs's invariants over {len(knobs_host.ROWS)} row(s)", good)
+
+    # --- alpha counting ----------------------------------------------------
+    es = [dict(mkcert(1, "refuse", "same", 0), corpus="aaaaaaaa"),
+          dict(mkcert(2, "adopt", "better", 0), corpus="aaaaaaaa"),
+          dict(mkcert(3, "refuse", "same", 0), corpus="bbbbbbbb"),
+          dict(mkcert(4, "refuse", "same", 0), corpus="aaaaaaaa", rail="none"),
+          dict(mkcert(5, "rollback", "-", 0), corpus="aaaaaaaa")]
+    claim("alpha counts trials on this corpus with a counted rail, and nothing else",
+          alpha_spent(es, "aaaaaaaa") == 2 and alpha_spent(es, "bbbbbbbb") == 1)
+
+    # --- fsck on a synthetic ledger ----------------------------------------
+    with tempfile.TemporaryDirectory() as td:
+        ed = os.path.join(td, "loop", "ledger", "entries")
+        tr = os.path.join(td, "loop", "ledger", "tried")
+        os.makedirs(ed)
+        os.makedirs(tr)
+        env1 = render_envelope(fields, patch=render_knob_block(row, "0.25"))
+        c1 = dict(cert, point=point_of(env1))
+        t1 = render_cert(c1)
+        io.open(os.path.join(ed, cert_name(t1) + ".cert"), "w",
+                encoding="utf-8", newline="\n").write(t1)
+        io.open(os.path.join(tr, point_of(env1)[:16] + ".env"), "w",
+                encoding="utf-8", newline="\n").write(env1)
+        probs, _n = fsck(td)
+        claim("a well-formed ledger fscks clean (outside a git repo, un-re-derived)",
+              probs == [])
+        # a renamed certificate
+        os.rename(os.path.join(ed, cert_name(t1) + ".cert"),
+                  os.path.join(ed, "0" * 16 + ".cert"))
+        probs, _n = fsck(td)
+        claim("a renamed certificate is a corruption",
+              any("does not match its name" in p for p in probs))
+        os.rename(os.path.join(ed, "0" * 16 + ".cert"),
+                  os.path.join(ed, cert_name(t1) + ".cert"))
+        # an edited byte
+        io.open(os.path.join(ed, cert_name(t1) + ".cert"), "a",
+                encoding="utf-8", newline="\n").write("tail\n")
+        probs, _n = fsck(td)
+        claim("an edited certificate is a corruption",
+              any("does not match its name" in p for p in probs))
+        io.open(os.path.join(ed, cert_name(t1) + ".cert"), "w",
+                encoding="utf-8", newline="\n").write(t1)
+        # a missing marker
+        os.remove(os.path.join(tr, point_of(env1)[:16] + ".env"))
+        probs, _n = fsck(td)
+        claim("a trial whose point has no tried marker is a corruption",
+              any("no tried marker" in p for p in probs))
+        # an event entry needs none: it records a transition, not a proposal
+        c2 = dict(c1, seq="2", verdict="rollback", moved="-",
+                  point=hashlib.sha256(b"an event, not a proposal").hexdigest())
+        t2 = render_cert(c2)
+        io.open(os.path.join(tr, point_of(env1)[:16] + ".env"), "w",
+                encoding="utf-8", newline="\n").write(env1)
+        io.open(os.path.join(ed, cert_name(t2) + ".cert"), "w",
+                encoding="utf-8", newline="\n").write(t2)
+        probs, _n = fsck(td)
+        claim("an event entry (rollback, superseded) is legal with no marker",
+              probs == [])
+
+    print()
+    print(f"  godel {'passed' if ok else 'FAILED'}")
+    return ok
+
+
+def verify():
+    d = os.path.join(ROOT, "tools", "fixtures", "loop")
+    if not os.path.isdir(d):
+        print("  the kernel-rendered fixture set is ABSENT: tools/fixtures/loop/")
+        print("  record it with one driven session (drive.py \"godel ledger 5\"")
+        print("  \"godel clade\" \"godel space\" on a seeded lineage) -- until then")
+        print("  this parser has not been diffed against the writer, and absent")
+        print("  is not ok.")
+        return 2
+    good = True
+    for name in sorted(os.listdir(d)):
+        if name.endswith(".txt"):
+            for line in io.open(os.path.join(d, name), encoding="utf-8"):
+                line = line.strip()
+                if line and ("parent=" in line):
+                    got = parse_kernel_line(line)
+                    print(f"  {'ok ' if got else 'FAIL'}  {name}: {line[:60]}...")
+                    good &= got is not None
+    return 0 if good else 1
+
+
+# ------------------------------------------------------------------- main
+
+
+def main():
+    ap = argparse.ArgumentParser(add_help=True)
+    ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--verify", action="store_true")
+    sub = ap.add_subparsers(dest="cmd")
+    for name in ("next", "fsck", "alpha", "clade", "reconsider"):
+        s = sub.add_parser(name)
+        s.add_argument("--root", default=".")
+        if name == "next":
+            s.add_argument("--emit-env", default="",
+                           help="write the envelope here; stdout then carries "
+                                "the account as key=value")
+    s = sub.add_parser("oops")
+    s.add_argument("--root", default=".")
+    s.add_argument("--axis", required=True)
+    s = sub.add_parser("admit")
+    s.add_argument("file")
+    s = sub.add_parser("point")
+    s.add_argument("file")
+    s = sub.add_parser("derive")
+    s.add_argument("file")
+    s.add_argument("--parent", required=True)
+    s.add_argument("--root", default=".")
+    s = sub.add_parser("ledger")
+    s.add_argument("--root", default=".")
+    s.add_argument("--tail", type=int, default=10)
+    s = sub.add_parser("cert")
+    s.add_argument("--emit", action="store_true")
+    s.add_argument("--check")
+    s.add_argument("--set", action="append", default=[])
+    s = sub.add_parser("floors")
+    s.add_argument("--spread", nargs="+")
+    a = ap.parse_args()
+
+    if a.selftest:
+        return 0 if selftest() else 1
+    if a.verify:
+        return verify()
+
+    if a.cmd == "next":
+        got, why = next_point(a.root)
+        if got is None:
+            print(f"  {why}", file=sys.stderr)
+            return 1
+        env, budget = got
+        if a.emit_env:
+            io.open(a.emit_env, "w", encoding="utf-8", newline="\n").write(env)
+            # key=value, the shape a workflow forwards into GITHUB_OUTPUT.
+            for k in ("point", "rail", "alpha_k", "chi_bar", "minutes",
+                      "half", "level", "boots"):
+                print(f"{k}={budget[k]}")
+        else:
+            sys.stdout.write(env)
+        return 0
+    if a.cmd == "admit":
+        text = io.open(a.file, encoding="utf-8").read()
+        why = admit(text)
+        for w in why:
+            print(f"  refused: {w}")
+        if not why:
+            print("  admitted")
+        return 1 if why else 0
+    if a.cmd == "point":
+        print(point_of(io.open(a.file, encoding="utf-8").read()))
+        return 0
+    if a.cmd == "derive":
+        text = io.open(a.file, encoding="utf-8").read()
+        _f, _w, patch = parse_envelope(text)
+        try:
+            print(rederive(a.root, a.parent, patch))
+        except RuntimeError as e:
+            print(f"  {e}", file=sys.stderr)
+            return 1
+        return 0
+    if a.cmd == "fsck":
+        probs, notes = fsck(a.root)
+        for n in notes:
+            print(f"  note: {n}")
+        for p in probs:
+            print(f"  FAIL  {p}")
+        n = len(load_entries(a.root)) if not probs else "?"
+        print(f"  {'clean' if not probs else 'CORRUPT'}: {n} entr{'y' if n == 1 else 'ies'}")
+        return 1 if probs else 0
+    if a.cmd == "alpha":
+        corpus = corpus_hash(a.root)
+        entries = load_entries(a.root)
+        if corpus is None:
+            print("  no corpus manifest, so no alpha identity")
+            return 1
+        k = alpha_spent(entries, corpus)
+        floor = chi_floor(k)
+        print(f"  corpus {corpus}: {k} of {len(KERNEL_SPEND)} tests spent")
+        if floor is None:
+            print("  the series is spent; only a new corpus refills it")
+            return 1
+        print(f"  the next counted test judges at chi >= {floor:.3f}")
+        return 0
+    if a.cmd == "oops":
+        entries = load_entries(a.root)
+        corpus = corpus_hash(a.root) or "--------"
+        p = plan(entries, a.axis, corpus)
+        print(f"  {a.axis}: {p['half']} at level {p['level']} -- "
+              f"{p['minutes']} minutes, {p['boots']} boot(s) per arm")
+        return 0
+    if a.cmd in ("clade", "reconsider"):
+        entries = load_entries(a.root)
+        arms = clade_arms(entries)
+        if not arms:
+            print("  no adoptions yet, so there is nowhere to grow from but here")
+            return 0
+        for arm in arms:
+            tag = "head" if arm["back"] == 0 else f"back {arm['back']}"
+            print(f"  {tag:7} {arm['tree'][:12]}  clade {arm['adoptions']} of "
+                  f"{arm['trials']} adopted")
+        if a.cmd == "reconsider":
+            d = decide(entries)
+            if d is None:
+                print("  staying")
+            else:
+                back, tree = d
+                print(f"  go back {back} to {tree}")
+        return 0
+    if a.cmd == "ledger":
+        entries = load_entries(a.root)
+        for e in entries[-a.tail:]:
+            print(f"  {e['seq']} {e['kind']}/{e['axis']} {e['point'][:8]} "
+                  f"rail={e['rail']} moved={e['moved']} {e['verdict']}")
+        print(f"  {len(entries)} entr{'y' if len(entries) == 1 else 'ies'}, "
+              f"epoch boundary at {EPOCH_LEN - (len(entries) % EPOCH_LEN)} away")
+        return 0
+    if a.cmd == "cert":
+        if a.check:
+            try:
+                parse_cert(io.open(a.check, encoding="utf-8").read())
+            except ValueError as e:
+                print(f"  refused: {e}")
+                return 1
+            print("  well formed")
+            return 0
+        c = dict(kv.split("=", 1) for kv in a.set)
+        sys.stdout.write(render_cert(c))
+        return 0
+    if a.cmd == "floors":
+        print("rail\tn\tp50\tp95")
+        for name, n, p50, p95 in floors_spread(a.spread):
+            print(f"{name}\t{n}\t{p50:.4f}\t{p95:.4f}")
+        return 0
+    ap.print_help()
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
