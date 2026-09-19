@@ -1133,12 +1133,50 @@ agreeing and the fixpoint holding, and the verdict verifier agreeing with
 the kernel on all three of accept, wrong key and tamper. The crons ship
 commented out; a schedule is the last thing a loop earns.
 
-Still owed from the plan, named rather than implied: the kernel
-counterpart (`godel verdicts` + the fourth night block, polling before the
-trial so a filed verdict cannot move the epoch boundary mid-night), the
-cost rails that give `cleanup` its J1, the repair-persist boot-matrix leg,
-the anchor-pair harvest that arms Moves/Honest, and `godel.py --verify`'s
-kernel-rendered fixture session.
+**The return leg reaches the machine.** `godel verdicts [--again]` is the
+verb `godel push`'s own output has named since the day it shipped, and
+`poll_verdicts` is one engine behind both it and the night, so the two
+cannot grow two accounts of one poll. Bounded at four per tick: every
+filing appends a ledger line, and a burst that moved the epoch boundary
+four times in one tick would be four criterion windows nobody scheduled.
+
+**Idempotence is the caller's, deliberately.** `file_verdict` appends
+unconditionally and must -- the ledger is the record, not a cache -- so the
+skip is a peek at `INBOX` before filing. That peek reads a point out of
+text nothing has verified yet, which is safe for exactly this use: a forged
+point can only skip a blob that would have failed verification anyway.
+
+**The night polls BEFORE its trial**, and the ordering is load-bearing:
+`file_verdict` appends to the ledger that `is_boundary`, the OOPS
+half-parity and `tests_spent` all derive from, so a verdict filed after the
+trial computed its epoch position would move the frozen bar mid-night. Not
+gated on `spent` -- a fetch costs no decode.
+
+`fetch::get_optional_with` is `get_with` with one difference, 204 meaning
+an empty mailbox, and it passes the identity gate first: "nothing for you"
+from an unverified server is still somebody in the path talking.
+
+**What the hardening pass changed.** The cost rails (`cost.image_bytes`,
+`cost.warnings`) give `cleanup` a J1, floored at **zero** because one
+locked toolchain over one tree is exact -- and that rail found a real bug
+on its first claim: at a zero floor an *unchanged* reading fell through to
+the direction test and came back WORSE, invisible until a zero-floor rail
+existed. The witness arm is built, so `bugfix` and `test` stopped being
+enabled kinds with no judge: witness-alone on the baseline must fail, and
+fail the right *way* (a claim failure reaches the shell and prints FAIL; an
+infra death does neither). The loop no longer adopts `host.*` claims on
+fixture evidence, which is the rule `propose.yml` already applied to
+itself. And an OOPS level buys query count rather than the extra boots a
+composite action cannot be looped to provide -- `--limit` strides and
+`paired.py` pairs by node path, so more queries is more evidence about one
+population; the certificate records `queries` and an honest `boots=1`.
+Rollback applies now instead of reporting, committing the target tree with
+the *current* ledger overlaid, because a rollback that rolled back its own
+record would erase the decision that moved it.
+
+Still owed, named rather than implied: the anchor-pair harvest that arms
+the boundary lane's Moves/Honest (it refuses by name until then), the extra
+boots per level, and a kernel-side claim over `peek_point`.
 
 Root certificate bundle, built from the host's store:
 
