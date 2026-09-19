@@ -65,12 +65,48 @@ pub struct Lex {
     pub tf: Vec<u8>,
 }
 
-/// Whether a term's weight is its IDF or its IDF squared.
+/// What power a term's rarity is raised to before it is counted.
 ///
 /// Set from the sweep in `forest bench`, and the reason it exists at all is in
 /// `Lex::weight`: five stopwords carried more of a query's linear IDF mass than
 /// the single rarest word in nine thousand nodes.
-pub const IDF_SQUARED: bool = true;
+///
+/// **A whole number, and that is a constraint rather than a simplification.**
+/// This was `IDF_SQUARED: bool`, which is this with two values; widening it to
+/// a `f32` exponent is the obvious generalisation and would put
+/// `expf(p * lnf(v))` on the shipped path. `tensor::powf` is a series, the
+/// host mirror in `tools/forest_retrieve.py` would use libm, and the two would
+/// then disagree about every weight -- which is the divergence that file was
+/// just corrected for. Repeated multiplication is exact on both sides, so the
+/// rung the loop may search is 1, 2, 3 and not a continuum.
+///
+/// Two is byte-identical to the `true` it replaced: 250 short queries on the
+/// 7,560-node forest, zero items moved, dumps the same file.
+///
+/// ### And the host rail does not re-confirm two, which is worth knowing
+/// before a verdict about this row is read
+///
+/// `forest bench` chose two in the kernel: 89.3% to 91.9% on long queries over
+/// its own 8,913-node forest, against a stopword *set* outweighing the one
+/// rare word that mattered. `tools/retrieval.py`, which is what judges a
+/// source proposal about this constant, swept the same three powers on the
+/// 7,560-node forest at 250 queries and answered:
+///
+///     short   pow 1  60.8%  fixed 5 broke 3      pow 3  59.6%  fixed 4 broke 5
+///     long    pow 1  96.4%  fixed 4 broke 0, chi 2.25   (shipped: 94.8%)
+///
+/// Every one of those is `same` under the paired test, so the loop would
+/// refuse all three and the shipped value stands. But the long-query row leans
+/// the *other way* from the kernel's own sweep, cleanly -- four repaired and
+/// nothing broken -- and falls short only on the bar.
+///
+/// They are different scorers: the kernel indexes BPE ids where this indexes
+/// words, on a different forest, with a different query set. So the honest
+/// reading is that two is **not re-confirmed by the host rail** rather than
+/// that it is wrong, and a verdict about this row carries that caveat in a way
+/// a verdict about `LEN_B` does not -- a length charge means the same thing
+/// under either tokenisation, and a rarity exponent does not.
+pub const IDF_POW: u32 = 2;
 
 /// How fast term frequency saturates. BM25's `k1`.
 ///
@@ -143,9 +179,9 @@ impl Lex {
     /// Query tokens are deduplicated first: a word said twice is not twice the
     /// evidence, and without this a repeated term quietly doubles its own
     /// weight against every other.
-    /// Whether rarity counts quadratically. Chosen by `forest bench`.
-    pub fn squared() -> bool {
-        IDF_SQUARED
+    /// What power rarity counts at. Chosen by `forest bench`.
+    pub fn idf_pow() -> u32 {
+        IDF_POW
     }
 
     /// What ships, with the constants `forest bench` chose.
@@ -157,7 +193,7 @@ impl Lex {
     /// term repetition, not about BM25, and the grid keeps both so the day the
     /// corpus changes the answer is one command away.
     pub fn score(&self, query: &[usize], out: &mut [f32]) {
-        let total = self.score_raw_p(query, out, IDF_SQUARED);
+        let total = self.score_raw_p(query, out, IDF_POW);
         self.finish(out, total, LEN_B);
     }
 
@@ -180,20 +216,29 @@ impl Lex {
     /// tf-idf cosine uses, where the query and the document are both IDF-scaled
     /// and the score is their inner product, and it says that rarity should
     /// count more than linearly. `forest bench` decides which.
-    pub fn weight(&self, t: usize, sq: bool) -> f32 {
+    pub fn weight(&self, t: usize, pow: u32) -> f32 {
         let v = self.idf(t);
-        if sq {
-            v * v
-        } else {
-            v
+        let mut out = 1.0f32;
+        // **Bounded, because this exponent is a thing a machine proposes.**
+        // `IDF_POW` is compiled in, so nothing on a running system can move
+        // it -- but `godel source` writes a patch, CI applies it and rebuilds,
+        // and the envelope reader admits any integer of up to twelve digits.
+        // A proposal of `to 999999999` would build, boot, and spend a billion
+        // multiplications per query term, which is a machine that has stopped
+        // answering rather than one that answers worse. Eight is far past
+        // anything the sweep has reason to try and is a loop that ends.
+        const MAX_POW: u32 = 8;
+        for _ in 0..pow.min(MAX_POW) {
+            out *= v;
         }
+        out
     }
 
     pub fn score_raw(&self, query: &[usize], out: &mut [f32]) -> f32 {
-        self.score_raw_p(query, out, false)
+        self.score_raw_p(query, out, 1)
     }
 
-    pub fn score_raw_p(&self, query: &[usize], out: &mut [f32], sq: bool) -> f32 {
+    pub fn score_raw_p(&self, query: &[usize], out: &mut [f32], pow: u32) -> f32 {
         for v in out.iter_mut() {
             *v = 0.0;
         }
@@ -204,7 +249,7 @@ impl Lex {
                 continue;
             }
             seen.push(*t);
-            let w = self.weight(*t, sq);
+            let w = self.weight(*t, pow);
             total += w;
             for n in self.posting(*t) {
                 if let Some(s) = out.get_mut(*n as usize) {

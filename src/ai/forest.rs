@@ -1194,8 +1194,12 @@ pub fn bench(sample: usize) {
             tally(1, &si);
             // The postings walk once, reused by every `Terms` row, so what
             // differs between them is the charge and nothing else.
-            let tot1 = lex.score_raw_p(&ids, &mut raw, false);
-            let tot2 = lex.score_raw_p(&ids, &mut raw2, true);
+            // The two powers the shipped grid sweeps. `IDF_POW` is a whole
+            // number now rather than a flag, so a wider sweep is a wider grid
+            // here; the knob table offers 1 and 3 to the loop, which judges
+            // them on the host rail where the corpus lives.
+            let tot1 = lex.score_raw_p(&ids, &mut raw, 1);
+            let tot2 = lex.score_raw_p(&ids, &mut raw2, 2);
             for (k, m) in grid.iter().enumerate() {
                 match m {
                     M::Terms(b, sq) => {
@@ -1203,7 +1207,7 @@ pub fn bench(sample: usize) {
                         sl.copy_from_slice(src);
                         lex.finish(&mut sl, tot, *b);
                         if (*b - crate::ai::lex::LEN_B).abs() < 1.0e-6
-                            && *sq == crate::ai::lex::IDF_SQUARED
+                            && (if *sq { 2 } else { 1 }) == crate::ai::lex::IDF_POW
                         {
                             best.copy_from_slice(&sl);
                         }
@@ -1276,7 +1280,8 @@ pub fn bench(sample: usize) {
     kprintln!(
         "  shipping terms b={:.2} idf{}; chance at r@1 is 1 in {}",
         crate::ai::lex::LEN_B,
-        if crate::ai::lex::IDF_SQUARED { "^2" } else { "" },
+        if crate::ai::lex::IDF_POW == 1 { alloc::string::String::new() }
+        else { alloc::format!("^{}", crate::ai::lex::IDF_POW) },
         n
     );
     kprintln!("  swept in {} ms", us / 1000);

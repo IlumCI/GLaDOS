@@ -86,7 +86,7 @@ def split_head(node):
 # Ordinary English rather than nonsense, because the scorer weights by document
 # frequency and a pool of unique tokens would give every query exactly one
 # candidate: a benchmark that is 100% by construction and cannot move. These
-# repeat at very different rates, which is what makes `IDF_SQUARED` and `LEN_B`
+# repeat at very different rates, which is what makes `IDF_POW` and `LEN_B`
 # have anything to bite on.
 _POOL = (
     "ring field group set axiom proof lemma matrix vector basis kernel image "
@@ -196,7 +196,7 @@ def run(forest_dir, limit=0, short=True, quiet=False):
     f = fr.Forest.load(forest_dir)
     if not quiet:
         print(f"[retrieval] {len(f.nodes)} node(s), {len(f.df)} distinct term(s)")
-        print(f"  LEN_B={fr.LEN_B} IDF_SQUARED={fr.IDF_SQUARED} TF_K1={fr.TF_K1}"
+        print(f"  LEN_B={fr.LEN_B} IDF_POW={fr.IDF_POW} TF_K1={fr.TF_K1}"
               "  (read from src/ai/lex.rs)")
         print(f"  {'short' if short else 'long'} queries"
               f"{f', first {SHORT_WORDS} words' if short else ', the whole tail'}")

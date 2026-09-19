@@ -795,7 +795,7 @@ loop is not "the machine rebuilds itself". It is:
 closed table of tunable constants -- file, symbol, the value it has now, the
 values it may take, and **the rail each claims to move** -- so a proposal that
 claims nothing is refused before anything is built. Four rows today over
-`LEN_B`, `TF_K1`, `IDF_SQUARED` and `MIX`. The patch is generated
+`LEN_B`, `TF_K1`, `IDF_POW` and `MIX`. The patch is generated
 mechanically, so it is valid Rust by construction, which is the same argument
 `constrain.rs` makes about applet names being unreachable rather than
 improbable.
@@ -6036,6 +6036,30 @@ tf-idf cosine uses, it says rarity counts more than linearly, and it moved
 
 The derivative entry now ranks **first**, paying the highest length charge in
 the list, and no stopword-only match survives in the top five.
+
+**That flag is a whole-number exponent now, `IDF_POW`, and the host rail does
+not re-confirm the two.** Widening it to an `f32` would put `expf(p * lnf(v))`
+on the shipped path where the host mirror uses libm, so the two would disagree
+about every weight -- the divergence `forest_retrieve.py` was just corrected
+for. Whole powers are exact on both sides, so the rung is 1, 2, 3.
+
+Two is byte-identical to the `true` it replaced, checked on 250 queries with
+the dumps compared as files. What is new is the sweep through the rail that
+actually judges a source proposal about this constant, on the 7,560-node
+forest at 250 queries:
+
+    short   pow 1  60.8%  fixed 5 broke 3     pow 3  59.6%  fixed 4 broke 5
+    long    pow 1  96.4%  fixed 4 broke 0, chi 2.25   (shipped 94.8%)
+
+All three are `same` under the paired test, so the loop refuses all three and
+the shipped value stands. But the long row leans the *other way* from the
+sweep above it, cleanly, and falls short only on the bar. They are different
+scorers -- BPE ids against words, a different forest, a different query set --
+so the honest reading is that two is **not re-confirmed by the host rail**
+rather than that it is wrong. A verdict about this row carries that caveat
+where one about `LEN_B` does not: a length charge means the same thing under
+either tokenisation and a rarity exponent does not, and `knob.rs` says so
+beside the row.
 
 ### Budgeted retrieval
 

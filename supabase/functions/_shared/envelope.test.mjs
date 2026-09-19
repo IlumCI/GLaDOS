@@ -10,7 +10,7 @@
 // things that must be *refused*, because this reader stands between a machine
 // on the internet and a workflow that compiles and runs code.
 
-import { MAX_BYTES, parse, render, UNJUDGEABLE } from "./envelope.js";
+import { MAX_BYTES, MAX_MAGNITUDE, parse, render, UNJUDGEABLE } from "./envelope.js";
 
 let ok = true;
 function claim(good, what) {
@@ -81,13 +81,24 @@ const refusals = [
   ["a point in upper case, which is not what the kernel renders", swap("point", POINT.toUpperCase())],
   ["a version that is not one", swap("from", "latest")],
   ["a test count that is not a count", swap("tests", "-1")],
-  ["a body carrying a control character", good.replace("LEN_B", "LENB")],
+  ["a body carrying a control character", good.replace("LEN_B", "LEN\u0007B")],
   ["a patch that changes nothing", swap("to", "0.5")],
+  // Well-formed and absurd. `IDF_POW` is a loop count in `Lex::weight`, so
+  // this is a valid number and an invalid proposal: it builds, boots, and
+  // spends a billion multiplications a term.
+  ["a value that is well-formed and absurd", swap("to", "999999999")],
+  ["and a large negative one", swap("to", "-999999999")],
 ];
 for (const [what, body] of refusals) {
   const v = parse(body);
   claim(!v.ok, `refused: ${what}`);
   if (!v.ok) claim(typeof v.why === "string" && v.why.length > 0, `  and says why: ${v.why}`);
+}
+
+// And the bound is a bound rather than a refusal of everything: the values the
+// table actually offers have to still get through.
+for (const ok_value of ["0.25", "3", "-1", String(MAX_MAGNITUDE)]) {
+  claim(parse(swap("to", ok_value)).ok, `admitted: a value of ${ok_value}`);
 }
 
 // Every unjudgeable surface, from the list rather than from three literals --

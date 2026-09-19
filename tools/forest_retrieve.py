@@ -96,8 +96,8 @@ LEAK_TERM = re.compile(r"[a-z]{3,}|\d+")
 #
 # A host retriever exists to predict what GLaDOS would retrieve. One scoring by
 # a different formula measures a different machine, so the constants below are
-# `lex.rs`'s and not a fresh choice: `IDF_SQUARED` because five stopwords
-# outweighed the only `derivative` in nine thousand nodes under linear idf, and
+# `lex.rs`'s and not a fresh choice: `IDF_POW` at two because five stopwords
+# outweighed the only `derivative` in nine thousand nodes at one, and
 # `LEN_B = 0.5` because the sweep has an interior optimum there rather than at
 # the textbook 0.75.
 #
@@ -119,7 +119,7 @@ LEAK_TERM = re.compile(r"[a-z]{3,}|\d+")
 # report `same` for every knob in the table, forever, and the loop would learn
 # that none of its ideas matter.
 def _from_lex():
-    """(idf_squared, len_b, tf_k1), from `src/ai/lex.rs`."""
+    """(idf_pow, len_b, tf_k1), from `src/ai/lex.rs`."""
     import knob
 
     src = (ROOT / "src" / "ai" / "lex.rs").read_text(encoding="utf-8")
@@ -130,12 +130,16 @@ def _from_lex():
             raise SystemExit(f"  no `const {sym}` in src/ai/lex.rs")
         return cast(found[1])
 
-    return (one("IDF_SQUARED", lambda v: v == "true"),
+    return (one("IDF_POW", int),
             one("LEN_B", float),
             one("TF_K1", float))
 
 
-IDF_SQUARED, LEN_B, TF_K1 = _from_lex()
+IDF_POW, LEN_B, TF_K1 = _from_lex()
+
+#: `Lex::weight`'s `MAX_POW`. The two have to be the same number or the two
+#: scorers disagree above it, with nothing saying so.
+MAX_IDF_POW = 8
 
 # How much of a question's vocabulary a node may contain before the node is
 # treated as that question rather than as material for it. Deliberately
@@ -304,9 +308,22 @@ class Forest:
         acc = {}
         total = 0.0
         for t in dict.fromkeys(words(query)):
-            w = self.idf(t)
-            if IDF_SQUARED:
-                w *= w
+            # Repeated multiplication rather than `w ** IDF_POW`, because the
+            # kernel has no libm and `tensor::powf` is a series. Whole powers
+            # are the one place the two can be exact together, which is why
+            # `IDF_POW` is a `u32` there and why this loop is a loop.
+            #
+            # **And capped at the same place `Lex::weight` caps**, which is
+            # not belt and braces. A cap on one side only is a divergence: at
+            # a power above the cap the kernel would stop multiplying and this
+            # would keep going, so the two would rank differently and the rail
+            # would be predicting a machine that does not exist. The number is
+            # here rather than read out of the Rust because it is a bound on
+            # this loop, not a constant the loop may propose changing.
+            v = self.idf(t)
+            w = 1.0
+            for _ in range(min(IDF_POW, MAX_IDF_POW)):
+                w *= v
             total += w
             for i in self.post.get(t, ()):
                 acc[i] = acc.get(i, 0.0) + w

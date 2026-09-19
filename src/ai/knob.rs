@@ -27,8 +27,8 @@
 //! Four rows, all from the retrieval scorer, and that is the honest size of
 //! the set of constants in this tree that are genuinely *tunable* rather than
 //! correctness parameters. `LEN_B` at 0.5 rather than the textbook 0.75 is a
-//! sweep with an interior optimum; `IDF_SQUARED` moved long-query recall from
-//! 89.3% to 91.9%; `TF_K1` is the saturation that measured *worse* and was
+//! sweep with an interior optimum; `IDF_POW` at two moved long-query recall
+//! from 89.3% to 91.9% over the one it had been; `TF_K1` is the saturation that measured *worse* and was
 //! kept so the day the corpus grows longer documents the answer is one command
 //! away; `MIX` is zero because every weight above zero measured worse on this
 //! checkpoint's embeddings and a different model may move it.
@@ -111,11 +111,17 @@ pub const KNOBS: &[Knob] = &[
     },
     Knob {
         file: "src/ai/lex.rs",
-        symbol: "IDF_SQUARED",
-        now: "true",
-        values: &["false"],
+        symbol: "IDF_POW",
+        now: "2",
+        values: &["1", "3"],
         rail: "host.retrieval",
-        about: "whether rarity counts more than linearly",
+        about: "what power a term's rarity is counted at",
+        // The one row whose rail is a weaker judge than the others', and it
+        // says so where somebody reading a verdict will look. `lex.rs` has
+        // the numbers: the kernel's own sweep chose two and the host mirror's
+        // long-query sweep leans the other way, cleanly, and falls short only
+        // on the bar. They index different things. A length charge means the
+        // same under either tokenisation; a rarity exponent does not.
     },
     Knob {
         file: "src/ai/recall.rs",
