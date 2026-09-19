@@ -146,6 +146,21 @@ pub fn endpoint() -> Result<Url, String> {
     Ok(u)
 }
 
+/// Where a proposal goes, on the same origin as the channel it updates from.
+///
+/// **A path beside the manifest's rather than a second configurable URL.** A
+/// machine that could be pointed at one host for what it installs and another
+/// for what it publishes would have two trust stories to keep straight, and
+/// the reason the source is safe to configure at all is that everything it
+/// serves is signed by the key compiled in here. What goes *out* is the
+/// machine's own text over an authenticated connection to the origin it
+/// already talks to, and nothing else needs saying about where.
+pub fn outbox_endpoint() -> Result<Url, String> {
+    let mut u = endpoint()?;
+    u.path = String::from("/functions/v1/proposal");
+    Ok(u)
+}
+
 /// What was last seen on the wire, so `update` with no arguments can answer
 /// without going out to the network.
 pub fn remember(version: &str, notes: &str) {

@@ -3537,6 +3537,122 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         }
                     }
                 },
+                // `godel push [--dry]` -- carry a proposal out of the machine.
+                //
+                // **The outward half, and the one place a credential is the
+                // only thing missing.** Everything before this point the
+                // machine can do alone: it picks a point, writes a patch,
+                // marks it. What it cannot do is reach anything that compiles.
+                //
+                // `--dry` prints exactly what would be sent and sends nothing,
+                // which is not a courtesy -- it is how the whole loop is
+                // testable on one machine with no account anywhere, and it is
+                // the difference between a transport that was built and one
+                // that was described. The body it prints is the body it would
+                // put on the wire, from the same function.
+                "push" => {
+                    let dry = words.clone().any(|w| w == "--dry");
+                    let Some(p) = godel::next_pushable() else {
+                        kprintln!("  the outbox is empty -- 'godel source' writes one");
+                        return;
+                    };
+                    let env = match godel::envelope(&p) {
+                        Err(why) => {
+                            kprintln!("  {}", why);
+                            return;
+                        }
+                        Ok(e) => e,
+                    };
+                    console::set_color(YELLOW);
+                    kprintln!("[godel] push{}", if dry { " --dry" } else { "" });
+                    console::set_color(LTGRAY);
+                    for line in env.lines() {
+                        kprintln!("  | {}", line);
+                    }
+                    if dry {
+                        kprintln!("  nothing was sent");
+                        return;
+                    }
+                    let url = match crate::update::channel::outbox_endpoint() {
+                        Err(e) => {
+                            kprintln!("  {}", e);
+                            kprintln!("  'godel push --dry' shows what would go, with no source set");
+                            return;
+                        }
+                        Ok(u) => u,
+                    };
+                    let Some(code) = crate::update::channel::code() else {
+                        kprintln!("  no device code -- 'update link <code>' first");
+                        kprintln!("  'godel push --dry' shows what would go, without one");
+                        return;
+                    };
+                    kprintln!("  telling {}{}", url.host, url.path);
+                    match crate::update::fetch::post_with(
+                        &url,
+                        "the proposal",
+                        30_000,
+                        &code,
+                        env.as_bytes(),
+                    ) {
+                        Err(e) => {
+                            console::set_color(LTRED);
+                            kprintln!("  {}", e);
+                            console::set_color(LTGRAY);
+                        }
+                        Ok(body) => {
+                            console::set_color(LTGREEN);
+                            kprintln!(
+                                "  accepted, {} B back: {}",
+                                body.len(),
+                                core::str::from_utf8(&body).unwrap_or("(not text)").trim()
+                            );
+                            console::set_color(LTGRAY);
+                            godel::mark_pushed(&p);
+                            kprintln!("  'godel verdicts' asks what came of it");
+                        }
+                    }
+                }
+                // `godel verdict <path>` -- file what came back.
+                //
+                // From the namespace rather than from the network, because
+                // that is the half that can be driven on one machine: a
+                // verdict signed with the update key, carried in by any of the
+                // ways bytes get in, and filed. The network form is the same
+                // call with a different source of the blob.
+                "verdict" => {
+                    // `words` is already past the sub-verb; `rest` is not.
+                    let path = words.next().unwrap_or("").trim();
+                    if path.is_empty() {
+                        kprintln!("  usage: godel verdict <path to a signed verdict>");
+                        return;
+                    }
+                    let Some(blob) = crate::sysbox::read_blob(path) else {
+                        kprintln!("  no such blob: {}", path);
+                        return;
+                    };
+                    match godel::file_verdict(&blob) {
+                        Err(why) => {
+                            console::set_color(LTRED);
+                            kprintln!("  refused: {}", why);
+                            console::set_color(LTGRAY);
+                        }
+                        Ok(v) => {
+                            console::set_color(if v.adopted { LTGREEN } else { YELLOW });
+                            kprintln!(
+                                "  {} moved {} on {} -- {}",
+                                godel::short_hex(&v.point),
+                                v.moved,
+                                v.rail,
+                                v.why
+                            );
+                            console::set_color(LTGRAY);
+                            kprintln!(
+                                "  {}, and the ledger says so",
+                                if v.adopted { "adopted upstream" } else { "not adopted" }
+                            );
+                        }
+                    }
+                }
                 // `godel lib` -- judge the next queued library candidate.
                 //
                 // The operator path this axis never had, and the omission was

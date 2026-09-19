@@ -3900,6 +3900,242 @@ fn next_deep() -> Option<Proposal> {
 /// front of it" failure this module opens by warning about.
 pub const OUTBOX: &str = "/ai/godel/outbox";
 
+/// Everything a proposal has to say to something that can build it.
+///
+/// **The patch plus who is asking and what they ran it on.** A patch alone is
+/// a change with no provenance: the receiving side cannot tell which machine
+/// wants it, which lineage it descends from, or which corpus the rail it
+/// claims will be measured against. All three are already addresses in this
+/// tree, so carrying them costs nothing and refusing to carry them would make
+/// the returning verdict impossible to file.
+pub fn envelope(p: &Proposal) -> Result<String, &'static str> {
+    let ProposalKind::Source(ki, vi) = p.kind else {
+        return Err("not a source proposal");
+    };
+    let Some(patch) = super::knob::patch(ki as usize, vi as usize) else {
+        return Err("this kernel does not have that knob");
+    };
+    let mut s = String::from("proposal 1\n");
+    s.push_str("point ");
+    s.push_str(&hex32(&p.hash()));
+    s.push_str("\nfrom ");
+    s.push_str(crate::VERSION);
+    s.push_str("\nhead ");
+    s.push_str(&head().map(|h| hex32(&h)).unwrap_or(String::from("none")));
+    s.push_str("\ncorpus ");
+    s.push_str(
+        &sysbox::hash_of(super::vocab::CORPUS)
+            .map(|h| hex32(&h))
+            .unwrap_or(String::from("none")),
+    );
+    s.push_str("\ntests ");
+    push_u32(&mut s, tests_spent() as u32);
+    s.push('\n');
+    s.push_str(&patch);
+    Ok(s)
+}
+
+/// Where a proposal that has left the machine is recorded, so it is not sent
+/// twice.
+///
+/// A separate marker from `/ai/godel/tried`, because they answer different
+/// questions and conflating them costs the loop a whole axis. `tried` means
+/// "this point has been reached"; if pushing also marked it, a push that
+/// failed on the network would read as a point already explored and the
+/// machine would never come back to it.
+pub const PUSHED: &str = "/ai/godel/pushed";
+
+/// The next thing in the outbox that has not been sent.
+///
+/// Rebuilt from the declared space rather than by listing the outbox, so what
+/// is offered is always a point this kernel can still resolve -- the same
+/// refusal `knob::at` makes, arriving one level up.
+pub fn next_pushable() -> Option<Proposal> {
+    let mut i = 0usize;
+    while i < super::knob::KNOBS.len() {
+        let mut j = 0usize;
+        while j < super::knob::KNOBS[i].values.len() {
+            let p = Proposal::source(i, j);
+            // Proposed but not yet sent. A point nobody has written a patch
+            // for has nothing to push.
+            if p.tried() && !pushed(&p) {
+                return Some(p);
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    None
+}
+
+fn pushed_path(p: &Proposal) -> String {
+    let mut path = String::from(PUSHED);
+    path.push('/');
+    path.push_str(&hex32(&p.hash()));
+    path
+}
+
+pub fn pushed(p: &Proposal) -> bool {
+    sysbox::read_blob(&pushed_path(p)).is_some()
+}
+
+/// Record that this proposal reached something that can build it.
+///
+/// **Written only on a `200`**, unlike `mark`, which is written before the
+/// work. The difference is what each one protects against: a trial that faults
+/// has still spent the night on that point, while a push that never arrived
+/// has spent nothing and the patch is still worth sending.
+pub fn mark_pushed(p: &Proposal) {
+    let hour = crate::dev::rtc::now().map(|d| d.hour).unwrap_or(0);
+    let mut s = String::from("h");
+    push_u32(&mut s, hour as u32);
+    s.push('\n');
+    sysbox::write_text(&pushed_path(p), &s);
+}
+
+/// Where a verdict about a proposal comes back to.
+///
+/// **Separate from the outbox, because they are different claims.** The outbox
+/// holds what this machine asked for; this holds what something that could
+/// build it answered. Merging them would make "proposed" and "judged" one
+/// state, and the whole reason a source proposal is not a trial is that those
+/// are two.
+pub const INBOX: &str = "/ai/godel/inbox";
+
+/// What came back about a proposal, once the signature said it could be read.
+pub struct Verdict {
+    /// The proposal this is about, by the hash the envelope carried.
+    pub point: [u8; 32],
+    /// The rail the knob claimed, echoed so a verdict about the wrong rail is
+    /// visible rather than silently filed against the right one.
+    pub rail: String,
+    /// `better`, `worse`, `same` or `unstable`, as `tools/rails.py` spells
+    /// them. A fifth word this kernel does not know is refused rather than
+    /// guessed at.
+    pub moved: String,
+    pub why: String,
+    pub adopted: bool,
+}
+
+/// Read a signed verdict, or say why it will not be believed.
+///
+/// **Signature first and parse second**, which is `manifest::verified`'s
+/// ordering and its reason: parsing attacker-chosen text is the larger of the
+/// two surfaces and there is no cause to enter it before knowing the bytes
+/// came from the signer.
+///
+/// And it *must* be signed, more than a manifest must. A manifest names an
+/// image whose own signature is checked again before anything installs, so an
+/// unsigned one costs a wasted download. A verdict changes this machine's
+/// account of what it has learned -- it is the only thing in this tree that
+/// writes a ledger line the machine did not derive itself -- so an unsigned
+/// one is somebody else editing the lineage. Same key as the images, because
+/// adopting a second signer is itself a kernel change and that is the point.
+pub fn read_verdict(blob: &[u8]) -> Result<Verdict, String> {
+    let Some((text, sig)) = super::super::update::manifest::split(blob) else {
+        return Err(alloc::format!(
+            "{} B is too short to be a signed verdict",
+            blob.len()
+        ));
+    };
+    let v = crate::update::verify(text, sig);
+    if !v.ok() {
+        return Err(String::from(v.why()));
+    }
+    parse_verdict(text)
+}
+
+/// The parse alone, for the claims.
+///
+/// Split from the signature check so every refusal below can be asserted at
+/// boot with no private key on the machine -- which there is not and must not
+/// be. The signature half is checked the other way, by feeding a real verdict
+/// with one word changed and watching it be refused.
+pub fn parse_verdict(text: &[u8]) -> Result<Verdict, String> {
+    let Ok(text) = core::str::from_utf8(text) else {
+        return Err(String::from("the verdict is not text"));
+    };
+    let mut lines = text.lines();
+    if lines.next().map(str::trim) != Some("verdict 1") {
+        return Err(String::from("that is not a verdict"));
+    }
+    let (mut point, mut rail, mut moved, mut why, mut adopted) =
+        (None, String::new(), String::new(), String::new(), false);
+    for line in lines {
+        let line = line.trim();
+        let (k, v) = line.split_once(' ').unwrap_or((line, ""));
+        match k {
+            "point" => point = from_hex32(v),
+            "rail" => rail = String::from(v),
+            "moved" => moved = String::from(v),
+            "why" => why = String::from(v),
+            "adopted" => adopted = v == "yes",
+            _ => {}
+        }
+    }
+    let Some(point) = point else {
+        return Err(String::from("the verdict names no proposal"));
+    };
+    // A word this kernel does not know is refused rather than filed. The four
+    // are `tools/rails.py`'s own, and a fifth would mean the two halves have
+    // parted -- which is exactly the drift that must not be resolved by
+    // guessing.
+    if !matches!(moved.as_str(), "better" | "worse" | "same" | "unstable") {
+        return Err(alloc::format!("'{}' is not a verdict this kernel knows", moved));
+    }
+    // **A verdict may not claim an adoption its own rail comparison refuses.**
+    // The machine that built it is trusted to measure; it is not trusted to
+    // conclude, because the conclusion is the one thing this side can check.
+    if adopted && moved != "better" {
+        return Err(alloc::format!(
+            "it says adopted and says the rail was '{}', which cannot both be true",
+            moved
+        ));
+    }
+    Ok(Verdict { point, rail, moved, why, adopted })
+}
+
+/// File a verdict: write it down, and put a line in the ledger.
+///
+/// The ledger line is the point. Everything else this module records is a
+/// verdict it reached itself; this is the one that arrives, and a lineage that
+/// could not say which of its entries came from outside would be a lineage
+/// nobody could audit.
+pub fn file_verdict(blob: &[u8]) -> Result<Verdict, String> {
+    let v = read_verdict(blob)?;
+    let mut path = String::from(INBOX);
+    path.push('/');
+    path.push_str(&hex32(&v.point));
+    sysbox::write_blob(&path, blob.to_vec());
+
+    let hour = crate::dev::rtc::now().map(|d| d.hour).unwrap_or(0);
+    let seq = ledger_len() as u32 + 1;
+    let mut line = String::new();
+    push_u32(&mut line, seq);
+    line.push_str(" h");
+    push_u32(&mut line, hour as u32);
+    line.push_str(" parent=");
+    line.push_str(&head().map(|h| short(&h)).unwrap_or(String::from("root....")));
+    line.push_str(" variant=");
+    line.push_str(&short(&v.point));
+    // Its own axis name. `axis_of` finds it by position in `AXIS_NAMES` and
+    // will answer `None`, which is correct: this is not one of the axes the
+    // surprise ranking chooses among, because the machine does not run it.
+    line.push_str(" axis=source rail=");
+    line.push_str(&v.rail);
+    line.push_str(" moved=");
+    line.push_str(&v.moved);
+    if let Some(h) = sysbox::hash_of(super::vocab::CORPUS) {
+        line.push_str(" corpus=");
+        line.push_str(&short(&h));
+    }
+    line.push(' ');
+    line.push_str(&v.why);
+    line.push_str(if v.adopted { " ADOPT" } else { " reject" });
+    ledger_append(&line);
+    Ok(v)
+}
+
 /// The next constant worth proposing, if the declared space holds one.
 ///
 /// Walks `KNOBS` in order and takes the first point with no marker, exactly as
@@ -4921,6 +5157,83 @@ pub fn selftest() -> bool {
             let higher = floor + 1.0;
             lower.max(floor) == floor && higher.max(floor) == higher
         },
+    );
+
+    // --- what comes back from outside -------------------------------------
+    //
+    // A verdict is the only thing in this tree that writes a ledger line the
+    // machine did not derive itself, so every way of refusing one is worth
+    // watching happen. The signature half is checked the other way -- by
+    // feeding a real signed verdict with one word changed -- because there is
+    // no private key on this machine and there must not be.
+    let good = concat!(
+        "verdict 1
+",
+        "point 0000000000000000000000000000000000000000000000000000000000000001
+",
+        "rail host.retrieval
+",
+        "moved better
+",
+        "why fixed 9 broke 1
+",
+        "adopted yes
+",
+    );
+    claim(
+        "a well-formed verdict parses, and carries what it said",
+        match parse_verdict(good.as_bytes()) {
+            Ok(v) => v.adopted && v.moved == "better" && v.rail == "host.retrieval",
+            Err(_) => false,
+        },
+    );
+    claim(
+        "anything that is not a verdict is refused before its fields are read",
+        parse_verdict(b"manifest 1
+version 9.9.9
+").is_err(),
+    );
+    claim(
+        "and one naming no proposal, since there would be nothing to file it against",
+        parse_verdict(b"verdict 1
+moved better
+").is_err(),
+    );
+    // A fifth word would mean the two halves of this loop have parted, and
+    // that is exactly the drift that must not be resolved by guessing.
+    claim(
+        "a verdict word this kernel does not know is refused rather than guessed at",
+        parse_verdict(good.replace("moved better", "moved excellent").as_bytes()).is_err(),
+    );
+    // **The one that makes the receiving side more than a parser.** The
+    // machine that built the change is trusted to measure and is not trusted
+    // to conclude, because the conclusion is the one thing this side can
+    // check against the numbers beside it.
+    claim(
+        "and one claiming an adoption its own rail comparison refuses",
+        parse_verdict(good.replace("moved better", "moved worse").as_bytes()).is_err(),
+    );
+    claim(
+        "while the same verdict without the claim is read",
+        parse_verdict(
+            good.replace("moved better", "moved worse")
+                .replace("adopted yes", "adopted no")
+                .as_bytes(),
+        )
+        .is_ok(),
+    );
+    // `unstable` is a verdict and not an error: `rails.py` answers it when a
+    // control drifted, which is neither evidence of a regression nor evidence
+    // against one, and a machine that could not record "we could not tell"
+    // would have to record something else.
+    claim(
+        "'we could not tell' is a verdict this kernel can file",
+        parse_verdict(
+            good.replace("moved better", "moved unstable")
+                .replace("adopted yes", "adopted no")
+                .as_bytes(),
+        )
+        .is_ok(),
     );
 
     let h = sha256::hash(b"a variant");

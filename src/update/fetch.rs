@@ -131,6 +131,53 @@ pub fn get_with(url: &Url, what: &str, timeout_ms: u64, code: &str) -> Result<Ve
     inspect(f, what)
 }
 
+/// Send one object, carrying a device code, and answer what came back.
+///
+/// **The first thing in this kernel that tells rather than asks.** Everything
+/// outward-facing here has been a `GET` -- the request line was the literal
+/// `"GET "` until `tls::https_send` existed -- which is the whole surface a
+/// machine that only installs updates needs, and the wall the outward half of
+/// a self-improving loop runs into. A machine that authors a change has to be
+/// able to put it somewhere.
+///
+/// Every refusal `get_with` makes applies unchanged and for the same reasons:
+/// the code is checked for control characters before it goes near a header,
+/// because a value containing a carriage return is not a code but a second
+/// header somebody else wrote; and `inspect` refuses anything short of
+/// `Identity::Verified`, so a body is never sent to a peer that did not check
+/// out. That last one is the half that matters more here than anywhere else
+/// in this module -- a `GET` to the wrong server reveals what was asked for,
+/// and a `POST` to the wrong server *hands it the thing*.
+pub fn post_with(
+    url: &Url,
+    what: &str,
+    timeout_ms: u64,
+    code: &str,
+    body: &[u8],
+) -> Result<Vec<u8>, String> {
+    if code.is_empty() || code.chars().any(|c| c.is_control() || c == ':') {
+        return Err(String::from("that device code has characters a header cannot carry"));
+    }
+    let bearer = format!("Bearer {}", code);
+
+    let ip = dns::lookup(&url.host).map_err(|e| format!("{}: {} -- {}", what, url.host, e.name()))?;
+    let f = tls::https_send(
+        ip,
+        &url.host,
+        url.port,
+        "POST",
+        &url.path,
+        timeout_ms,
+        &[
+            ("Authorization", bearer.as_str()),
+            ("Content-Type", "text/plain; charset=utf-8"),
+        ],
+        body,
+    )
+    .map_err(|e| format!("{}: {}", what, e.name()))?;
+    inspect(f, what)
+}
+
 /// Fetch and verify the signed manifest for a channel.
 ///
 /// One object, one round trip. The gated channel needs the device code on the
