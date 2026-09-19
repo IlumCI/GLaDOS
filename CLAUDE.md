@@ -3729,7 +3729,7 @@ At boot the system runs **twenty-nine selftest sections** -- count the
 `[selftest]` headings in a boot log, which is the only figure that cannot go
 stale -- **seventeen** of which are wrapped in `main::section` so one that
 breaks marks itself unavailable instead of taking the machine, and `diag`
-offers **sixty-five named suites** on demand (`diag.rs`'s `SLOTS`, asserted
+offers **sixty-seven named suites** on demand (`diag.rs`'s `SLOTS`, asserted
 against `SUITES.len()`), most of them the same checks (the `aiksi` section covers the capability gate by name and never by
 calling -- half that table pokes memory, drives I/O ports or paints over the
 screen, and a suite that called every row to prove it exists would be
@@ -6448,6 +6448,176 @@ since a new body of evidence is exactly what refills it. But the manifest
 has to name a release asset that exists, so the order is: publish
 `evidence-forest-v1`, then the corpus line, then the first trial against it.
 Writing the line first would give the loop an identity pointing at nothing.
+
+### Learning from what an action did, and the objective that turned out not to work
+
+Every judge in this tree scores routing as a **bool**. `Trial::score` is
+`right / total`, `Trial::paired` is a 2x2 contingency, J1 is McNemar over
+discordant pairs, J2 is `(held, total)` plus one bool. There is no cost matrix
+and no applet-to-applet distance anywhere, so a variant that reroutes "list the
+files in /ai" from `ls` to `tree` and one that reroutes it to `rm` produce
+**arithmetically identical** failures. `godel.rs` prints "a goal now reaches
+'rm', which changes things" and nothing consumes that string.
+
+Underneath, `Trial::train` optimises restricted cross-entropy against a label,
+and the label is the only thing the trainer can want. That is why role adapters
+failed and this file says so: a harvested label is the base model's own argmax.
+
+The intended fix was a mixed objective, cross-entropy blended with the policy
+gradient of `E_{a~pi}[r(a)]` for an outcome-derived reward. **The algebra was
+right and the conclusion drawn from it was wrong**, so the refutation ships
+beside the replacement, in `train::reward_grad`, called by nothing.
+
+    dJ/dz_k = sum_i r_i dpi_i/dz_k = pi_k (r_k - rbar),   rbar = sum_i pi_i r_i
+
+With a binary reward this is **exactly** the cross-entropy gradient times
+`pi(target)` -- elementwise, asserted, not approximated -- because cross-entropy
+is `-log` of the same quantity and the log is precisely what cancels the softmax
+Jacobian's `pi_t`.
+
+**The obvious framing of that is refutable and would have been refuted.**
+"The gradient vanishes when the model is wrong" is wrong about Adam:
+`Adam::step` divides `m_hat` by `sqrt(v_hat)`, so a constant scale on a
+gradient leaves the step *exactly* unchanged. What survives is that the factor
+is not constant. `ga`, `gb` and `dm` accumulate across every training decision
+and Adam steps once per epoch on that sum, so a per-decision `pi_t` makes the
+batch gradient a `pi_t`-weighted average of the per-decision cross-entropy
+gradients. At the target logit:
+
+                         pi_t = 1e-3     pi_t = 0.99     emphasis
+    cross-entropy          0.999           0.010         100 : 1  toward hard
+    reward weighting       0.000999        0.0099          1 : 10 toward easy
+
+A thousandfold swing of relative emphasis, aimed at the examples the base model
+already answers correctly -- which are exactly the ones J1 cannot count as
+repairs. Adam normalises the sum and never the terms. A graded reward does not
+help, because the `pi_k` prefactor is the softmax Jacobian's and does not care
+what the rewards are.
+
+**`soft_ce_compact` ships instead**, and it is the same idea with the reward
+entering as a *target distribution* rather than as a multiplier on
+probabilities:
+
+    gy = (1 - lam) (pi - onehot(t))  +  lam (pi - q)
+
+The deviation is `pi - q` with nothing in front of it. Bounded, sums to zero,
+and at `q = onehot(target)` it is cross-entropy's own gradient -- so a reward
+can only move the objective by **disagreeing with the label**, never by being
+switched on. The loss it reports is still cross-entropy against the label,
+deliberately: `first_loss` and `last_loss` are raw sums quoted in the ledger
+and at `harness.rs:989`, and a run has to stay legible against one quantity
+whatever `lam` was. `lam = 0` takes `restricted_ce_compact`'s own path rather
+than a mixture weighing zero, so every verdict already in the ledger is
+re-derivable by construction and not by the float arithmetic being kind.
+
+**`set_ce_compact` is a third form, wired to nothing, and what it answers is a
+defect in the instrument rather than in the model.** `chain_for` takes the
+*longest* piece advancing toward the label as the target, so for a name with
+several tokenisations every other correct spelling is a candidate cross-entropy
+pushes down and `Trial::correct` scores as wrong. `constrain::costs` already
+counts them and its own doc says the number "mostly counts prefixes" --
+`remember` has ten first tokens against `mv`'s three, both costing two tokens
+to spell. So `Trial::score` is per-step agreement with one greedy segmentation,
+and its doc's claim to ask "the same question the constrained decoder asks at
+temperature zero" is not quite true. It does **not** follow that the shorter
+piece is harmless: `advances_toward` is asked about one alternative, and a
+prefix shared by several applets keeps all of them reachable, so accepting the
+set is an honest relaxation and not a free correction. Wiring it changes what
+`correct` accepts, and every `n=`, `fixed=`, `broke=` and `wrong=` in the
+ledger was computed under the current definition -- a corpus-hash-class
+decision, so it waits for one.
+
+Ten claims, engine-free, in `[selftest] trainer arithmetic`. The one that
+decides the design is first:
+
+    ok  at pi(target)=1e-3 cross-entropy pulls 0.999 where a reward weighting pulls 0.00100
+    ok  a binary reward's gradient is the cross-entropy one times pi(target)=0.0006
+    ok  the mixed objective at lam=0 is bit-identical to the one it replaces
+    ok  at lam=1 a one-hot target distribution is cross-entropy, not a second objective
+    ok  cross-entropy, reward, mixture and set forms all conserve zero
+    ok  a reward that is constant across the candidates moves nothing at all
+
+The zero-sum claim earns its place least obviously: a gradient that does not
+sum to zero adds a uniform component to the logit row, which the softmax
+ignores and `backward_rows`'s magnitude route does **not** -- so a reward built
+against the wrong step's candidates would drift the row magnitudes with every
+accuracy figure unchanged, and nothing else in that file would catch it.
+
+### The outcome signal, and the corpus that cannot carry the one that was planned
+
+`src/ai/outcome.rs` is the missing distance, and **the per-example form is not
+computable here, which is a measurement rather than a judgement.** Of the 717
+examples in `corpus.rs`, seven contain a path and none contains a filename: the
+tasks are paraphrases of intent -- "compare the versions", "describe that
+directory to me" -- not commands, so there is no object for a candidate applet
+to act on. `harness::decode_args` would be inventing operands and the
+comparison would be between two identical "no such path" errors on 710 rows.
+The cost was never the obstacle; the corpus was.
+
+So the reward is **task-independent**: `r(example, applet)` depends on the
+example's label and not on its text. That is a real loss against what was
+planned and it is stated in the module rather than left to be discovered from a
+reward with no variance. What it keeps is the half that was actually missing,
+and it costs fourteen dispatches and no model call at all, against the 2,208
+decodes the per-example form would have needed.
+
+Each read-only applet is dispatched once against a declared probe, its output
+captured through `console::begin_capture`, and the distance is Jaccard over the
+vocabulary. `outcome` is the operator verb:
+
+    14 of 23 applet(s) ran -- the rest mutate and were never dispatched
+    ls       tree 0.75  find 0.89
+    tree     ls 0.75
+    stat     du 0.75  sysbox 0.94  fsck 0.94
+    du       stat 0.75  sysbox 0.94  find 0.95
+    hash     printed nothing a comparison can see
+    same     printed nothing any other applet also says
+
+**`ls` and `tree` are each other's nearest neighbour at 0.75**, which is the
+pair this section opens with -- and they are probed on *different* paths, so
+the overlap is the vocabulary of listing a directory rather than an artefact of
+being handed the same argument. `stat` and `du` pair off the same way on the
+vocabulary of counting bytes.
+
+Nearest neighbours rather than the matrix, because 23 by 23 is wider than a
+terminal and the question somebody actually has is "what is a cheap confusion
+for this applet". Its own verb and not a column on `sysbox`, because taking the
+reading dispatches fourteen applets and a list of names must not run anything.
+
+Three things that are silent when wrong:
+
+- **A mutating applet is never dispatched.** The gate is
+  `sysbox::applet_mutates`, which answers `Option`, so an unknown name is
+  refused rather than defaulting to read-only; it takes the floor distance
+  without being run, which is both the safety property and the severity signal.
+  The drill is a claim over every row of `PROBE`, and it is checked for vacuity
+  too, since a table of names nobody knows would satisfy it.
+- **`cd` is `mutates: false` and still has to be put back.** The applet table's
+  own doc says the division is by effect and not by danger: `cd` changes no
+  persistent content and does move the session cursor, so probing it would
+  change what every applet after it prints. The probe reads the working
+  directory through `pwd`'s own capture and restores it last. The determinism
+  claim is what catches a failure here -- a second probe with the cursor left
+  elsewhere runs `ls` and `tree` somewhere else and reports different words.
+- **A token containing a digit is dropped whole rather than stripped.** Half of
+  what these applets print is byte counts, object counts, addresses and
+  timestamps, all of which differ between boots, so comparing raw text would
+  make the matrix a property of the day. Stripping instead of dropping would
+  turn the address `16253559e3c2` into the words `e` and `c`, and
+  `fbc432c6e790290e` into `fbc` -- addresses arriving in the vocabulary as
+  short words, which is what dropping them was for.
+
+And two facts that came out as one message until the verb was driven: `hash`
+prints a line of hexadecimal and leaves nothing a comparison can see, while
+`same` prints "identical" and simply shares that word with nobody. Both read as
+maximally far from everything and they mean different things, so
+`Matrix::spoke` keeps them apart.
+
+**None of it is wired.** `Matrix::reward_row` is the shape `soft_ce_compact`
+wants and nothing calls it, no `Decision` carries a target distribution, and
+there is no axis. What is established is that the signal exists, has variance,
+and is re-derivable -- and that the objective which would have consumed it is
+the one that does not work.
 
 ### Does retrieval help? The rail that was missing
 
