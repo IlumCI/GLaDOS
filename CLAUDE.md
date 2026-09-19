@@ -846,13 +846,28 @@ for both would have put the key that ships a kernel to every machine in the
 field into a workflow a machine in the field can start. The verdict key's whole
 power is to tell one machine that a proposal it made was adopted or refused.
 
-Driven rather than asserted, on the same verdict bytes signed twice:
+Driven rather than asserted, on the same verdict bytes signed twice, and
+re-driven after the key was rotated because the first transcript was about a
+point the tree no longer pins. The proposal came out of the machine itself --
+`godel source` picked `LEN_B = 0.25`, `godel push --dry` printed the envelope,
+and the point in the verdict is the one it named:
 
-    godel verdict /tmp/old   (the update key)
+    godel verdict /tmp/vbad    (signed by the update key)
       refused: not a signature over this image by this key
-    godel verdict /tmp/new   (the verdict key)
-      737f9c0a moved unstable on host.retrieval -- ...
+    godel verdict /tmp/vgood   (signed by the verdict key)
+      737f9c0a moved same on host.retrieval -- ... net under 4
       not adopted, and the ledger says so
+
+    godel ledger 3
+      1 h12 parent=root.... variant=737f9c0a axis=source rail=host.retrieval
+        moved=same corpus=f330c22c ... reject
+
+**The two blobs are byte-identical except for their 80-byte tails**, which is
+what makes this a test of the anchor rather than of the parser: same text, same
+digest, same everything the kernel reads before it reaches the signature. Only
+which private half signed it differs, and that decides whether a line is
+written. 29 boot sections, `diag all` 65 of 65, no boot report, alive
+afterwards.
 
 Five claims in `diag update` cover what can be checked without a private half
 on the machine, which there is not and must not be: that a verdict key is
