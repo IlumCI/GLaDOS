@@ -1,0 +1,130 @@
+name: probe-kvm
+
+# **Temporary, and the plan says so: this workflow answers one question and
+# is then deleted**, its answer recorded into verify-boot's own comment where
+# the question is currently marked "not settled here".
+#
+# The question (K1): does a standard `ubuntu-latest` runner have /dev/kvm?
+# Every kernel workflow in this repository -- release, experimental, propose,
+# ci, and the whole loop being built on them -- runs verify-boot, and
+# verify-boot fails hard without KVM because a TCG boot was measured at 24+
+# minutes against ~61 seconds accelerated. GitHub's 2023 announcement of
+# hardware acceleration named "larger" runners; the Ubuntu image README does
+# not list KVM; nothing in this repository has ever actually run on a hosted
+# runner. So the first workflow to run is the one that asks.
+#
+# It also measures: the wall time of one build plus one verify-boot becomes
+# BASE_MINUTES for the loop's OOPS budget (tools/godel.py), replacing the
+# provisional 40.
+#
+# CONSUMER: the operator, verify-boot's comment, and godel.py's BASE_MINUTES.
+# CANARY: the verify-boot leg is the canary -- it hard-fails on missing KVM
+# and on any boot defect, so a green run is a measured yes, and a red run's
+# log says which half failed. The report step asserts nothing on purpose.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      # Report first, assert nothing: the point is the answer, not a verdict.
+      - name: Is /dev/kvm there at all
+        run: |
+          set -euo pipefail
+          {
+            echo "## KVM probe on $(uname -r), image ${ImageOS:-unknown} ${ImageVersion:-}"
+            if [ -e /dev/kvm ]; then
+              echo "- /dev/kvm: **present**"
+              ls -la /dev/kvm | sed 's/^/- /'
+            else
+              echo "- /dev/kvm: **absent** -- verify-boot below will fail, which is the answer"
+            fi
+            grep -m1 -oE 'vmx|svm' /proc/cpuinfo >/dev/null \
+              && echo "- cpu virtualization flags: present" \
+              || echo "- cpu virtualization flags: ABSENT (no nested virt on this host)"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Install the pinned toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version --verbose
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: uefi-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+
+      - name: Build, timed
+        run: |
+          set -euo pipefail
+          t0=$(date +%s)
+          cargo build --release --locked
+          t1=$(date +%s)
+          echo "BUILD_S=$((t1 - t0))" >> "$GITHUB_ENV"
+          echo "- build: $((t1 - t0)) s" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Mark the boot start
+        run: echo "BOOT_T0=$(date +%s)" >> "$GITHUB_ENV"
+
+      # The composite is the canary: missing KVM or a broken boot both fail
+      # here, loudly, with the reason in the log.
+      - uses: ./.github/actions/verify-boot
+        with:
+          arm: probe
+
+      # Only reached when something above failed. If that something was KVM,
+      # measure what the fallback would actually cost, bounded, so the
+      # 24-minute figure is confirmed or refuted on this runner class rather
+      # than carried from the development machine.
+      - name: The TCG figure, if KVM was the failure
+        if: failure()
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          if [ -e /dev/kvm ]; then
+            echo "- /dev/kvm exists, so the failure above is a boot defect, not K1" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          python3 -m pip install --quiet --disable-pip-version-check numpy
+          python3 tools/hybtest.py out/ci-fixture.bin --build-only
+          t0=$(date +%s)
+          python3 tools/drive.py \
+            --model out/ci-fixture.bin --tokenizer out/ci-fixture-tokenizer.bin \
+            --qemu-extra "-accel tcg -smp 4" --timeout 1500 "echo alive" || true
+          t1=$(date +%s)
+          echo "- TCG boot to one echo: $((t1 - t0)) s, KVM absent (the K1 answer is no)" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: The figure BASE_MINUTES comes from
+        run: |
+          set -euo pipefail
+          t1=$(date +%s)
+          boot=$((t1 - BOOT_T0))
+          total=$((BUILD_S + boot))
+          {
+            echo "- verify-boot: ${boot} s"
+            echo "- build + verify-boot: ${total} s"
+            # The loop's judge pays this twice (two arms), plus retrieval and
+            # the judge itself. Round up to the next 5 minutes.
+            two=$(( (BUILD_S + 2 * boot) / 60 + 6 ))
+            echo "- suggested BASE_MINUTES (one two-arm judge, rounded up): $(( two / 5 * 5 + 5 ))"
+            echo ""
+            echo "Record this in .github/actions/verify-boot/action.yml's KVM"
+            echo "comment and in tools/godel.py BASE_MINUTES, then delete this"
+            echo "workflow -- that is the whole of its job."
+          } | tee -a "$GITHUB_STEP_SUMMARY"

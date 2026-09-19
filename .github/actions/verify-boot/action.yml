@@ -23,6 +23,23 @@ inputs:
     description: Seconds to wait for the whole run
     required: false
     default: "900"
+  arm:
+    description: >
+      A discriminator for the artifact name, for callers that run this action
+      more than once in one job. Without it the second upload collides with
+      the first -- upload-artifact@v4 refuses a duplicate name -- and the job
+      fails at its very last step, after both builds and both boots were
+      already paid for. propose.yml passes "a" and "b".
+    required: false
+    default: ""
+  smp:
+    description: >
+      Guest core count. Four by default, because `diag mt` and `diag migrate`
+      are false statements about a machine with one core. One is a legitimate
+      ask -- `video bench` is only comparable at -smp 1 -- so the matrix jobs
+      pass it rather than fork the action.
+    required: false
+    default: "4"
 
 runs:
   using: composite
@@ -122,12 +139,18 @@ runs:
 
     - name: Boot it and run every suite
       shell: bash
+      # Inputs through env rather than interpolated into the script -- the
+      # rule propose.yml's envelope taught, applied as a convention even where
+      # the caller is a workflow rather than a person.
+      env:
+        TIMEOUT: ${{ inputs.timeout }}
+        SMP: ${{ inputs.smp }}
       run: |
         set -euo pipefail
         python3 tools/drive.py \
           --model out/ci-fixture.bin --tokenizer out/ci-fixture-tokenizer.bin \
-          --qemu-extra "-accel kvm -cpu host -smp 4" \
-          --timeout "${{ inputs.timeout }}" \
+          --qemu-extra "-accel kvm -cpu host -smp $SMP" \
+          --timeout "$TIMEOUT" \
           "initiative off" "agent stop" "echo ready" "diag all" \
           "echo mid" "bench report" "echo again" "bench report" \
           "echo once more" "bench report" "echo alive" \
@@ -148,8 +171,12 @@ runs:
     # controls moved 69% and 74% -- so a first reading is not merely noisy, it
     # is a reading the comparison will decline to use.
     #
-    # Two settled readings of one binary come back `same` on all twelve rails,
-    # which is what says the instrument works at all.
+    # Two settled readings of one binary come back `same` on all thirteen
+    # rails -- five graphics, four interpreter, ai.matmul, ai.bpb and two
+    # memory-bandwidth, counted from `RAILS` in src/bench.rs rather than
+    # remembered (this line said twelve for a while, against CLAUDE.md's
+    # thirteen, and the table settled it) -- which is what says the
+    # instrument works at all.
     - name: Keep the rail report
       shell: bash
       run: |
@@ -185,7 +212,7 @@ runs:
         fi
         cat rails.txt
 
-    # **Five separate questions, because `diag all` answering cleanly is only
+    # **Six separate questions, because `diag all` answering cleanly is only
     # one of them.** A boot that halted before the shell prints no tally at
     # all, and a grep for FAIL finds nothing in a log that stops at the
     # firmware banner -- silence passes a check written the obvious way.
@@ -266,7 +293,7 @@ runs:
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: verify-${{ github.run_id }}-${{ github.run_attempt }}
+        name: verify-${{ github.run_id }}-${{ github.run_attempt }}${{ inputs.arm && format('-{0}', inputs.arm) || '' }}
         path: |
           verify.log
           rails.txt

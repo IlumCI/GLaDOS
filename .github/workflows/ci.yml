@@ -1,0 +1,97 @@
+name: ci
+
+# **The kernel has never been compiled by a push to main.** Until this file,
+# the only main-push workflow was rust-clippy.yml under
+# `continue-on-error: true` -- a gate that cannot fail, which is the exact
+# enemy verify-boot's own history names: green that checks nothing.
+# `knob.py check` ran only on tags, exp pushes and dispatches, so a stale
+# knob row landing on main was not caught until the next release; and
+# `tools/portcheck.py` -- whose rule CLAUDE.md calls "checked rather than
+# intended" -- ran nowhere in CI at all.
+#
+# Two jobs rather than one, so the cheap truths do not wait on QEMU:
+# `check` answers in about a minute, `build-boot` is the real gate.
+#
+# It also runs on `loop/**`, deliberately: every adoption the CI Godel
+# machine commits to loop/main gets re-verified by a job the loop does not
+# control, so a bad adopt turns the branch red even if the loop's own judge
+# was somehow wrong. That independence is the point of having both.
+#
+# CONSUMER: humans merging to main (branch protection requires both jobs);
+# the loop's audit trail on loop/**; the rolling audit PR's checks.
+# CANARY: verify-boot's section-count check is built in (its absence once
+# hid eleven silently-skipped boot sections); `check` is proven able to
+# fail by the Phase 0 drill (a deliberately desynced knob row must turn it
+# red).
+
+on:
+  push:
+    branches: ["main", "loop/**"]
+  pull_request:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+# A superseded push is not a paid-for question: cancel it.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      # The table against the real source, first, because everything the
+      # loop judges flows through it and a stale row is a night spent on a
+      # constant that moved.
+      - name: The knob table must still describe the source
+        run: python3 tools/knob.py check
+
+      - name: Nothing under a ported tree reaches past the seam
+        run: python3 tools/portcheck.py
+
+      - name: Every judging tool proves itself before anything trusts it
+        run: |
+          set -euo pipefail
+          python3 tools/knob.py --selftest
+          python3 tools/rails.py --selftest
+          python3 tools/retrieval.py --selftest
+          python3 tools/paired.py --selftest
+          python3 tools/manifest.py --selftest
+          python3 tools/payload.py --selftest
+
+      # The envelope validator is plain JavaScript precisely so node can
+      # check it without Deno -- the README calls this the bargain. ~40
+      # claims over parse/render, including every refusal.
+      - name: The envelope validator, checked by node
+        run: node supabase/functions/_shared/envelope.test.mjs
+
+  build-boot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      # Not actions-rs: `rustup override set` outranks rust-toolchain.toml,
+      # which release.yml records as "the bug in rust-clippy.yml".
+      - name: Install the pinned toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version --verbose
+          rustc --print target-list | grep -qx x86_64-unknown-uefi
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: uefi-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - uses: ./.github/actions/verify-boot

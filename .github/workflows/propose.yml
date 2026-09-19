@@ -57,9 +57,26 @@ on:
 permissions:
   contents: read
 
+# One judge at a time, queued rather than cancelled: a queued device proposal
+# is a paid-for question, where a superseded push is not. And a ceiling on the
+# whole job, because two release builds plus two 900-second boot budgets can
+# legitimately take an hour and anything past ninety minutes is a hang.
+concurrency:
+  group: propose
+  cancel-in-progress: false
+
 jobs:
   judge:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
+    # The inputs reach every script through env, never by interpolation. An
+    # `${{ inputs.x }}` inside `run:` is pasted into the shell before bash
+    # ever runs, so a crafted envelope would execute in a job that holds
+    # VERDICT_SIGNING_KEY. The Supabase validator makes the machine path
+    # safe; this makes the human path match it.
+    env:
+      ENVELOPE: ${{ inputs.envelope }}
+      FOREST_IN: ${{ inputs.forest }}
     steps:
       - uses: actions/checkout@v4
 
@@ -83,7 +100,7 @@ jobs:
       - name: Read the patch
         run: |
           set -euo pipefail
-          printf '%s\n' "${{ inputs.envelope }}" > proposal.knob
+          printf '%s\n' "$ENVELOPE" > proposal.knob
           cat proposal.knob
           python3 tools/knob.py show proposal.knob
           echo "RAIL=$(grep -m1 '^rail ' proposal.knob | cut -d' ' -f2-)" >> "$GITHUB_ENV"
@@ -104,9 +121,16 @@ jobs:
       - name: The corpus
         run: |
           set -euo pipefail
-          if [ -n "${{ inputs.forest }}" ] && [ -d "${{ inputs.forest }}" ]; then
-            echo "FOREST=${{ inputs.forest }}" >> "$GITHUB_ENV"
-            echo "using the forest at ${{ inputs.forest }}"
+          # A path, so it is held to path characters before it may reach
+          # GITHUB_ENV -- a newline in an input is how a second variable gets
+          # smuggled into every later step.
+          if printf '%s' "$FOREST_IN" | LC_ALL=C grep -q '[^A-Za-z0-9_./-]'; then
+            echo "::error::the forest input is not a plain path"
+            exit 1
+          fi
+          if [ -n "$FOREST_IN" ] && [ -d "$FOREST_IN" ]; then
+            echo "FOREST=$FOREST_IN" >> "$GITHUB_ENV"
+            echo "using the forest at $FOREST_IN"
           else
             python3 tools/retrieval.py --fixture out/fixture --nodes 400 --limit 0 \
               --dump /dev/null >/dev/null
@@ -122,6 +146,8 @@ jobs:
         run: cargo build --release --locked
 
       - uses: ./.github/actions/verify-boot
+        with:
+          arm: a
 
       - name: Keep the baseline
         run: |
@@ -151,6 +177,8 @@ jobs:
         run: cargo build --release --locked
 
       - uses: ./.github/actions/verify-boot
+        with:
+          arm: b
 
       - name: Keep the candidate
         run: |

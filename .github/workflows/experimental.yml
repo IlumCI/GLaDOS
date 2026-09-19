@@ -89,9 +89,11 @@ jobs:
         env:
           KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
           ORIGIN: ${{ vars.SUPABASE_URL }}
+        env:
+          NOTES: ${{ inputs.notes }}
         run: |
           test -n "$ORIGIN" || { echo "the SUPABASE_URL variable is not set"; exit 1; }
-          notes="${{ inputs.notes }}"
+          notes="$NOTES"
           [ -n "$notes" ] || notes="branch $GITHUB_REF_NAME"
           notes="$SLUG -- $notes"
           # The base is the private bucket's path. The URLs in this manifest
