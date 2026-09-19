@@ -6290,6 +6290,64 @@ top-1 won, and **that choice is budget-dependent**: a retrieval loading three
 subjects would prefer the other one. Both figures print every run so it can be
 revisited with evidence.
 
+### The forest stopped being one subject
+
+`tools/forest.py` built `out/forest` from MMLU behind the filter
+`want = ("math", "algebra", "logic", "statistic")`, and every surviving
+subject was hardcoded into one tree. So `host.retrieval` -- the rail that
+judges every source proposal about `LEN_B`, `IDF_POW`, `TF_K1` and `MIX` --
+measured **retrieval within mathematics**, and any constant tuned against it
+was tuned on one discipline.
+
+That is `run_mmlu`'s failure arriving a second time on a second rail, and
+this file already records the first: 100 questions of `abstract_algebra`
+reported as MMLU, for the life of the rail. The shape is the same both
+times, which is why it is worth naming rather than only fixing -- *nobody
+printed the composition of the set*. A rail answers a narrower question than
+its name claims and reads perfectly well while doing it.
+
+`MMLU_TREES` files all 57 subjects into eight declared trees, and it is a
+closed table in the `KNOBS` and `repair::ACTIONS` idiom rather than a rule.
+Every other bucket in that file is read off the node -- GSM8K branches by
+the operators its verified chain actually uses -- and that rule cannot be
+kept for a discipline: nothing in the string `professional_medicine` says
+life sciences, and a substring rule would file `machine_learning` under
+psychology on the strength of "learning". **A subject the table does not
+name becomes its own tree** rather than being filed somewhere plausible,
+because the subject router pools a tree's nodes into one vector, so a wrong
+home is a wrong vector for every node that lands in it. A thin tree is
+visible; a misfiled one is not.
+
+    before   7,560 nodes, 1 tree
+    after    9,194 nodes, 8 trees, 119 directories, 8.25 MB
+             95 refused, every one of them "no arithmetic to check"
+             57 of 57 subjects mapped, none in two trees
+
+**Widening relaxes no admission rule**, which is the thing to check before
+believing the node count. `mmlu_node` carries `"checks": []` -- the
+`<<expr=value>>` arithmetic discipline is GSM8K's and is untouched -- so a
+wider MMLU cannot let through anything a narrower one was catching. The 95
+refusals are the same refusal the old forest made.
+
+Retrieval measures **56.4% r@1 over 250 queries** against 60.0% on the old
+single-subject forest. That is a harder corpus and not a regression: nine
+thousand nodes spanning eight disciplines have more near-neighbours than
+seven thousand inside one. The figure to compare a future constant against
+is 56.4%, and comparing one against the other would be the small-sample
+extrapolation this file warns about wearing a different costume.
+
+At 8,253,921 bytes it fits `mkpkg.py --max-bytes 8388608` with about 134 KB
+of headroom, which is tight enough to be worth knowing before another
+subject is added.
+
+**Publishing it is an operator step and is deliberately not done here.**
+`loop/evidence/corpus.txt`'s sha256 *is* the corpus identity the alpha
+series is indexed by, so replacing the forest refills alpha -- correctly,
+since a new body of evidence is exactly what refills it. But the manifest
+has to name a release asset that exists, so the order is: publish
+`evidence-forest-v1`, then the corpus line, then the first trial against it.
+Writing the line first would give the loop an identity pointing at nothing.
+
 ### Retrieval, and the measurement that condemned the first attempt
 
 `src/ai/lex.rs`. **Mean-pooled embeddings scored 0.5% on real retrieval**, and

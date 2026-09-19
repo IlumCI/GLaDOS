@@ -349,6 +349,76 @@ def first_sentence(text, cap=120):
     return (cut or s[:cap]).strip()
 
 
+
+# Which tree an MMLU subject belongs to.
+#
+# **A declared table, because there is nothing to derive it from.** Every
+# other bucket in this file is read off the node -- GSM8K branches by the
+# operators its verified chain actually uses -- and that is the rule here
+# too wherever it can be kept. It cannot be kept for a discipline: nothing
+# in the string "professional_medicine" says life sciences, and a rule that
+# guessed from substrings would put `machine_learning` under psychology on
+# the strength of "learning". So it is a closed table in the `KNOBS` and
+# `repair::ACTIONS` idiom -- one place to read, one place to be wrong in --
+# and a subject absent from it becomes its OWN tree rather than being filed
+# somewhere plausible. Misfiling is worse than a thin tree: the subject
+# router pools a tree's nodes into one vector, so a wrong home is a wrong
+# vector for every node that lands in it.
+#
+# **Why the forest stopped being one subject.** The filter here was
+# `("math", "algebra", "logic", "statistic")` and every surviving subject
+# was hardcoded to the `logic-and-maths` tree, so `host.retrieval` measured
+# retrieval *within mathematics* and any constant tuned against it was
+# tuned on one discipline -- the `run_mmlu` failure this project already
+# recorded once, where 100 questions of abstract_algebra were reported as
+# MMLU. Widening relaxes no admission rule, because `mmlu_node` never had
+# the arithmetic check in the first place: that discipline is GSM8K's, and
+# it is untouched.
+MMLU_TREES = {
+    "logic-and-maths": (
+        "abstract_algebra", "college_mathematics", "elementary_mathematics",
+        "formal_logic", "high_school_mathematics", "high_school_statistics",
+        "logical_fallacies", "econometrics",
+    ),
+    "physical-sciences": (
+        "astronomy", "college_chemistry", "college_physics",
+        "conceptual_physics", "high_school_chemistry", "high_school_physics",
+    ),
+    "life-sciences": (
+        "anatomy", "clinical_knowledge", "college_biology", "college_medicine",
+        "high_school_biology", "human_aging", "medical_genetics", "nutrition",
+        "professional_medicine", "virology", "human_sexuality",
+    ),
+    "computing": (
+        "college_computer_science", "computer_security", "electrical_engineering",
+        "high_school_computer_science", "machine_learning",
+    ),
+    "law-and-politics": (
+        "international_law", "jurisprudence", "professional_law",
+        "high_school_government_and_politics", "us_foreign_policy",
+        "security_studies",
+    ),
+    "economics-and-business": (
+        "business_ethics", "high_school_macroeconomics",
+        "high_school_microeconomics", "management", "marketing",
+        "professional_accounting", "public_relations",
+    ),
+    "history-and-geography": (
+        "high_school_european_history", "high_school_geography",
+        "high_school_us_history", "high_school_world_history", "prehistory",
+        "global_facts",
+    ),
+    "mind-and-society": (
+        "high_school_psychology", "professional_psychology", "sociology",
+        "moral_disputes", "moral_scenarios", "philosophy", "world_religions",
+        "miscellaneous",
+    ),
+}
+
+#: subject -> tree, inverted once so `bucket` is a lookup rather than a scan.
+MMLU_TREE_OF = {s: t for t, subs in MMLU_TREES.items() for s in subs}
+
+
 def bucket(node):
     """Where a node lives. Derived from the data, never hand-assigned.
 
@@ -358,7 +428,12 @@ def bucket(node):
     difficulty axis, the same shape `redqueen`'s archive bands use.
     """
     if node["kind"] == "mmlu":
-        return ["logic-and-maths", node["source"].split("/")[1].replace("_", "-")]
+        subject = node["source"].split("/")[1]
+        # Its own tree when the table does not name it, so a new MMLU
+        # subject is visible as a thin tree rather than silently swelling
+        # whichever one a substring rule happened to match.
+        tree = MMLU_TREE_OF.get(subject, subject.replace("_", "-"))
+        return [tree, subject.replace("_", "-")]
     ops = node["ops"]
     if ops <= {"+", "-"}:
         family = "add-sub"
@@ -544,8 +619,9 @@ def collect(limit, splits=SPLITS):
 
     m = snapshot_dir("datasets--cais--mmlu")
     subs = sorted({p.parent.name for p in m.rglob("*.parquet")})
-    want = ("math", "algebra", "logic", "statistic")
-    for s in [x for x in subs if any(k in x for k in want)]:
+    # Every subject the snapshot carries. See `MMLU_TREES` for why the
+    # maths-only filter that used to live here was a measurement problem.
+    for s in subs:
         for split in splits:
             try:
                 f = find_file(m / s, split)
