@@ -1194,9 +1194,30 @@ Rollback applies now instead of reporting, committing the target tree with
 the *current* ledger overlaid, because a rollback that rolled back its own
 record would erase the decision that moved it.
 
-Still owed, named rather than implied: the anchor-pair harvest that arms
-the boundary lane's Moves/Honest (it refuses by name until then), the extra
-boots per level, and a kernel-side claim over `peek_point`.
+**All three of those are closed.** `peek_point` carries four claims -- it
+is the one place in the module that reads a verdict's text before the
+signature is checked, so what it may do is pinned: answer a point, or
+answer nothing -- plus a fifth asserting `VERDICT_BURST < EPOCH_LEN`, so
+one tick cannot file a whole epoch's worth of lines and move the frozen bar
+under its own trial.
+
+The **anchor harvest** takes the pairs whose ground truth is free: two
+settled readings of one build differ by noise and nothing else, so a judge
+calling such a pair `better` is a false positive -- the direction a
+loosened floor fails in. `evidence-floors` commits them beside its spread.
+The harvest refuses a pair the judge cannot compare, which earned itself at
+once: fed a boot's 1st and 2nd readings it dropped the pair, because the
+first after a build is the host's page cache. `real` pairs are still not
+harvested and not faked -- they need an effect established elsewhere, and
+one labelled `real` on a hunch is a judge tuned to somebody's expectation.
+
+And a **level above zero buys a second boot per arm**, which closes the
+hole `rails.py` names about itself: the within-boot second reading measures
+within-boot noise, and the two arms of a comparison are different boots
+(`smp.all_cores` moved 12.2% within its own boots and 67.3% between them).
+At level 0 the `--again` partner is the within-boot reading as before; at
+level 1 and above it is a real second boot, and the certificate's `boots`
+says which.
 
 Root certificate bundle, built from the host's store:
 
