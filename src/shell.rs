@@ -2933,8 +2933,19 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 "  the compositor has turned {} time(s), last {} ms ago, {}",
                 h.beats, h.quiet_ms, h.phase.name()
             );
-            if let Some(st) = render::comp_state() {
-                kprintln!("    the scheduler has its task as '{}'", st);
+            if let (Some(st), Some(sw)) = (render::comp_state(), render::comp_switches()) {
+                kprintln!(
+                    "    the scheduler has its task as '{}', resumed {} time(s)",
+                    st, sw
+                );
+                // Who holds the screen, when anybody does. A compositor that
+                // is resumed and never turns is blocked, and `Claim::wait` is
+                // the only loop here that can do that -- so the holder is the
+                // answer, and it is reentrant for itself, which is why the
+                // task that leaks it never notices.
+                if let Some(h) = crate::gfx::desk::claim_holder() {
+                    kprintln!("    the paint claim is held by task {}", h);
+                }
             }
             // **The worst quiet prints whether or not it crossed the bar.**
             //

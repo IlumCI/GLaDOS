@@ -1755,6 +1755,59 @@ impl Claim {
     }
 }
 
+/// Who holds the paint claim, if anybody.
+///
+/// Exposed so a stuck compositor can name what is stopping it. `Claim` is
+/// reentrant for its own holder, so a leaked claim is invisible from the task
+/// that leaked it and fatal to every other one -- which is the shape that made
+/// this take four runs to find.
+pub fn claim_holder() -> Option<usize> {
+    match PAINTER.load(core::sync::atomic::Ordering::Relaxed) {
+        NOBODY => None,
+        h => Some(h),
+    }
+}
+
+/// Open the paint claim this task was holding. **Recovery path only.**
+///
+/// **A caught fault leaves the claim held, and nothing was putting it back.**
+/// `recover::land` restores a stack pointer and jumps, so no destructor runs
+/// and `Claim::drop` never happens -- exactly the reason stated one screen up
+/// for why the compositor's frame is not wrapped in a guard. It is also true
+/// of every *other* guarded scope that touches the desktop, and `diag all`
+/// runs several that fault on purpose.
+///
+/// What it looks like is the interesting part, because it does not look like a
+/// lock. The claim is reentrant for its holder, so the task that leaked it
+/// goes on working perfectly -- `take_as(me)` matches and hands back a
+/// non-owning claim forever. Every *other* task blocks in `Claim::wait`, which
+/// is a `yield_now` loop, so it is scheduled constantly and progresses never.
+/// Measured: the compositor resumed 2,194 times across one `diag all` and
+/// completed essentially zero turns of its loop, while the shell that had
+/// leaked the claim finished all sixty-eight suites without noticing.
+///
+/// Only this task's, by compare-exchange. A blanket store would open a claim
+/// another task is legitimately holding, and two painters in one back buffer
+/// is the thing the claim exists to prevent -- a recovery that caused it would
+/// be worse than the leak.
+///
+/// **It assumes no `guard` is nested inside a held claim**, and that is true of
+/// all twenty guarded scopes today: they are boot sections, diag suites, the
+/// JIT, the paging check, hostile parsing and repair, and not one of them runs
+/// underneath a `with`. A future one that did would have its outer claim
+/// opened underneath it by a fault in its inner scope, which is the two-painter
+/// race rather than a leak. The honest fix then is to snapshot the holder at
+/// `guard` entry and restore it, not to widen this.
+///
+/// # Safety
+/// Only after a `recover::guard` has caught a fault, when the code that held
+/// this cannot resume.
+pub unsafe fn release_claim() {
+    use core::sync::atomic::Ordering::{AcqRel, Acquire};
+    let me = crate::task::current();
+    let _ = PAINTER.compare_exchange(me, NOBODY, AcqRel, Acquire);
+}
+
 impl Drop for Claim {
     fn drop(&mut self) {
         if self.took {

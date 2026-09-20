@@ -951,8 +951,18 @@ fn clock_task() {
                             // turning" has three causes it tells apart and
                             // nothing else does: starved, claimed by a core
                             // that is not running it, or stranded mid-switch.
-                            if let Some(st) = gfx::render::comp_state() {
-                                kprintln!("       the scheduler has its task as '{}'", st);
+                            if let (Some(st), Some(sw)) =
+                                (gfx::render::comp_state(), gfx::render::comp_switches())
+                            {
+                                // The resume count beside the state, because
+                                // `ready` covers two opposite bugs: a task the
+                                // scheduler never picks, and one it picks
+                                // constantly that never reaches the top of its
+                                // own loop.
+                                kprintln!(
+                                    "       the scheduler has its task as '{}', resumed {} time(s)",
+                                    st, sw
+                                );
                             }
                         });
                     }

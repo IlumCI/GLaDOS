@@ -18,18 +18,20 @@
 //! `present` keeps the largest span between two consecutive calls, and a
 //! freeze is that number rather than an adjective.
 //!
-//! ### The contrast is the diagnosis
+//! ### It stopped being counters only, and the watchdog is why
 //!
-//! Three painters are counted separately on purpose, because the symptom is
-//! that they disagree. `paint_clock` and the cursor run on the clock task,
-//! which wakes on its own quantum; `draw` and `present` run wherever somebody
-//! remembered to call them, which is sixteen scattered sites and the shell's
-//! idle loop. If a run comes back with thousands of clock paints and a present
-//! gap of twenty seconds, the freeze is not a rendering bug at all -- it is
-//! that nothing owns the frame.
+//! This opened as counters and nothing else, so that a measurement taken with
+//! it could not be an artefact of it. That held while there were several
+//! painters and the diagnosis was that they disagreed. There is one painter
+//! now, and a count that stops rising cannot say whether the task died, is
+//! starved, or is blocked -- so the file also carries a heartbeat, the phase
+//! the compositor was in, and what the scheduler makes of its task.
 //!
-//! Counters only, and deliberately nothing else: this file changes no
-//! behaviour, so a measurement taken with it cannot be an artefact of it.
+//! It earned that immediately. Two readings across one `diag all` had the
+//! compositor resumed 2,194 times and its loop turning once, which is a task
+//! being scheduled constantly and blocking inside a single iteration -- a
+//! different bug from the starvation the counts alone had suggested, and one
+//! no rate could have named.
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -52,13 +54,10 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 /// the shell calls it after every command. The two things that measure
 /// `composers` open no windows, which is why it read 1 for so long.
 ///
-/// So: marking is free and idempotent and the compositor decides when, but a
-/// caller that marks is not yet the only kind of caller there is.
-///
-/// Marking is free and idempotent; the compositor decides when. A caller that
-/// marks twice costs one frame, and a caller that forgets is the bug this is
-/// meant to end -- so `invalidate` is cheap enough that the honest default is
-/// to call it whenever anything might have moved.
+/// Marking is free and idempotent and the compositor decides when. A caller
+/// that marks twice costs one frame, and a caller that forgets is the bug this
+/// is meant to end -- so `invalidate` is cheap enough that the honest default
+/// is to call it whenever anything might have moved.
 static DIRTY: AtomicBool = AtomicBool::new(true);
 
 /// Whether the compositor task paints at all.
@@ -498,6 +497,26 @@ pub fn comp_state() -> Option<&'static str> {
     crate::task::snapshot(i as usize).map(|t| t.state.name())
 }
 
+/// How many times the scheduler has resumed the compositor.
+///
+/// **This is the discriminator the state alone could not give.** A task the
+/// scheduler never picks and a task it picks constantly that never reaches the
+/// top of its own loop both read as `ready` from outside, and they are
+/// completely different bugs -- starvation against something inside the loop
+/// swallowing every turn. The counts say which: beats frozen with resumes
+/// climbing is the second, both frozen is the first.
+///
+/// Worth having as its own number rather than read off `tasks`, because that
+/// verb takes a snapshot and the question is about a *rate*. Two readings of a
+/// counter answer it; one reading of a table does not.
+pub fn comp_switches() -> Option<u64> {
+    let i = COMP_TASK.load(Ordering::Acquire);
+    if i == u64::MAX {
+        return None;
+    }
+    crate::task::snapshot(i as usize).map(|t| t.switches)
+}
+
 /// A deliberate stall, so the watchdog can be watched firing.
 ///
 /// **An alarm nobody has seen go off is an alarm written in a comment.** Every
@@ -571,13 +590,32 @@ pub fn selftest() -> bool {
     // current quiet. That relationship is what the `MAX_GAP` bug broke.
     claim("worst quiet is never less than current quiet", h.worst_ms >= h.quiet_ms);
 
-    // A beat this instant must move the counter and be read back as the phase
-    // it announced.
+    // **A beat this instant must move the counter -- and must be put back.**
+    //
+    // This ran on the shell task during `diag all` and wrote the live
+    // counters, which made the instrument lie about the very thing it is for:
+    // `beat` stamps `BEAT_AT`, so a suite calling it reset the compositor's
+    // quiet timer and the watchdog reported the screen recovering when what
+    // had moved was the selftest. It also cost a real investigation, because
+    // the compositor's beat count rose by exactly one across an eighty-eight
+    // second window and the one was this.
+    //
+    // So the three statics are saved and restored around the check. The claim
+    // is worth keeping -- it is the only thing that asserts `beat` and
+    // `health` agree -- and a test that perturbs its subject is not.
+    let (keep_beats, keep_at, keep_phase) = (
+        BEATS.load(Ordering::Relaxed),
+        BEAT_AT.load(Ordering::Relaxed),
+        PHASE.load(Ordering::Relaxed),
+    );
     let before = h.beats;
     beat(Phase::Turn);
     let after = health();
     claim("a beat advances the count", after.beats > before);
     claim("and the phase it announced is what is read back", after.phase == Phase::Turn);
+    BEATS.store(keep_beats, Ordering::Relaxed);
+    BEAT_AT.store(keep_at, Ordering::Relaxed);
+    PHASE.store(keep_phase, Ordering::Relaxed);
 
     // A boot where `watching` was never called leaves the alarm able to say
     // the compositor stopped and unable to say what became of it, which is

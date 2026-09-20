@@ -528,6 +528,15 @@ fn guard_inner<F: FnOnce()>(f: F) -> Result<bool, &'static str> {
         // reporting this very fault -- would spin to `PATIENCE` and panic.
         // A recovered fault must not become a fatal one on the way out.
         unsafe { crate::gfx::console::release_locks() };
+        // And the paint claim, for the same reason one line up. A guarded
+        // scope that faulted inside `desk::with` never ran `Claim::drop`, and
+        // the claim is reentrant for its holder -- so the task that leaked it
+        // carries on working while every other task blocks forever in
+        // `Claim::wait`. The compositor is the one that matters: it is the
+        // only painter left, so a leak here is a screen that stops with the
+        // machine still running, which is the exact failure this tree has been
+        // chasing. Releases only this task's.
+        unsafe { crate::gfx::desk::release_claim() };
         Err(describe())
     } else {
         Ok(true)
