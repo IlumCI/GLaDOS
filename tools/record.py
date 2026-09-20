@@ -70,6 +70,17 @@ import threading
 import time
 from pathlib import Path
 
+# **Both ends of the pipe, not just the one that bit first.** Decoding the
+# guest was fixed with `encoding="utf-8"` on the Popen; echoing it then failed
+# the same way in the other direction, because this process's own stdout is
+# cp1252 and the guest prints a Greek alphabet in its glyph sheet. One codec
+# per direction, and a stray byte stops being able to take a capture down.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 ROOT = Path(__file__).resolve().parent.parent
 PY = ROOT / "tools/venv/Scripts/python.exe"
 
