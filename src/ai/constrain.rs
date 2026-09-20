@@ -79,13 +79,6 @@ pub const TERMINATOR: u8 = b'\n';
 
 impl Grammar {
     /// Each entry gains a trailing terminator.
-    /// How many alternatives this grammar admits. Exposed rather than making
-    /// the field public, because `chain_for` needs to ask every applet where
-    /// it would go from a state and the field itself is nobody else's business.
-    pub fn alts(&self) -> usize {
-        self.alternatives.len()
-    }
-
     /// Each entry gains a trailing terminator.
     pub fn new<'a>(words: impl Iterator<Item = &'a str>) -> Self {
         let mut alternatives = Vec::new();

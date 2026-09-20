@@ -1155,7 +1155,7 @@ fn chain_for(
     alphabet: &Alphabet,
     alt: usize,
 ) -> Option<Vec<(Vec<u32>, usize, u32, Vec<i16>, Vec<bool>)>> {
-    let n_alts = grammar.alts();
+    let n_alts = super::constrain::alternatives(grammar).len();
     let mut cursor = Cursor::new(grammar);
     let mut steps = Vec::new();
     for _ in 0..step_bound(grammar) {
