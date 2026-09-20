@@ -590,32 +590,27 @@ pub fn selftest() -> bool {
     // current quiet. That relationship is what the `MAX_GAP` bug broke.
     claim("worst quiet is never less than current quiet", h.worst_ms >= h.quiet_ms);
 
-    // **A beat this instant must move the counter -- and must be put back.**
+    // **This suite does not call `beat`, and the attempt to was a bug.**
     //
-    // This ran on the shell task during `diag all` and wrote the live
-    // counters, which made the instrument lie about the very thing it is for:
-    // `beat` stamps `BEAT_AT`, so a suite calling it reset the compositor's
-    // quiet timer and the watchdog reported the screen recovering when what
-    // had moved was the selftest. It also cost a real investigation, because
-    // the compositor's beat count rose by exactly one across an eighty-eight
-    // second window and the one was this.
+    // `beat` stamps `BEAT_AT`, which is the watchdog's whole measurement, and
+    // this runs on the shell task inside `diag all` while the compositor is
+    // beating on its own. Calling it once reset the compositor's quiet timer,
+    // so the watchdog reported the screen recovering when what had moved was
+    // the suite.
     //
-    // So the three statics are saved and restored around the check. The claim
-    // is worth keeping -- it is the only thing that asserts `beat` and
-    // `health` agree -- and a test that perturbs its subject is not.
-    let (keep_beats, keep_at, keep_phase) = (
-        BEATS.load(Ordering::Relaxed),
-        BEAT_AT.load(Ordering::Relaxed),
-        PHASE.load(Ordering::Relaxed),
-    );
-    let before = h.beats;
-    beat(Phase::Turn);
-    let after = health();
-    claim("a beat advances the count", after.beats > before);
-    claim("and the phase it announced is what is read back", after.phase == Phase::Turn);
-    BEATS.store(keep_beats, Ordering::Relaxed);
-    BEAT_AT.store(keep_at, Ordering::Relaxed);
-    PHASE.store(keep_phase, Ordering::Relaxed);
+    // Saving the three statics and putting them back afterwards looked like
+    // the fix and is worse: the load and the store are a read-modify-write
+    // across tasks, the shell is preempted in the middle of it, and every beat
+    // the compositor makes inside that window is *discarded* -- `BEAT_AT` goes
+    // back to a timestamp from before the suite ran. That reproduces a frozen
+    // compositor exactly, out of an instrument measuring a healthy one, and it
+    // cost a run to tell the artefact from the fault it was imitating.
+    //
+    // So the beat claims are gone rather than guarded. What they asserted was
+    // that a `fetch_add` adds and an atomic reads back what was stored, which
+    // is worth close to nothing against an instrument that lies about the one
+    // number it exists to report. Everything above is a pure function of
+    // values this suite owns.
 
     // A boot where `watching` was never called leaves the alarm able to say
     // the compositor stopped and unable to say what became of it, which is
