@@ -45,7 +45,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-const TABS: [&str; 4] = ["Route", "Council", "Ledger", "Outcome"];
+const TABS: [&str; 5] = ["Route", "Net", "Council", "Ledger", "Outcome"];
 
 /// The probe, the lexical core, the character core. One colour each, used for
 /// the vote markers and the agreement bars alike so the two panels read as one
@@ -182,6 +182,137 @@ impl Oracle {
         } else {
             format!("{} -- the probe alone, no cores asked", d.winner_name())
         }
+    }
+
+
+    // --- Net -------------------------------------------------------------
+
+    /// The probe as the network it is, carrying the decision it really made.
+    ///
+    /// **Every edge here is a term of the sum that produced the answer.**
+    /// `Probe::scores` is `sum_i w[c][i] * (x[i] - mean[i])`; `contributions`
+    /// groups those terms into slices of the hidden state and the totals come
+    /// back equal to the scores, which `diag probe` asserts. So a thick warm
+    /// edge is a slice of the state genuinely pushing that applet up, and a
+    /// cool one is genuinely pushing it down. Nothing here is drawn because it
+    /// looks like a neural network.
+    ///
+    /// The animation is a wavefront sweeping left to right, and it is honest
+    /// about direction only: signal really does go from the hidden state to
+    /// the scores, once, with no recurrence. It carries no other meaning and
+    /// is not pretending to show time.
+    fn draw_net(&self, fb: &Framebuffer, r: Rect) -> String {
+        let lh = theme::text_h();
+        let all = trace::recent();
+        let Some(d) = all.last().filter(|d| !d.act.is_empty() && !d.cand.is_empty()) else {
+            theme::text_over(fb, r.x + 8, r.y + 8,
+                &clip("no decision to draw -- 'fit' then 'route <task>'",
+                      fits(r.w.saturating_sub(16))),
+                theme::SCREEN_TEXT);
+            return String::from("the probe has not scored anything this boot");
+        };
+
+        let bins = d.act.len();
+        let outs = d.cand.len();
+        if bins == 0 || outs == 0 || d.edge.len() < outs * bins {
+            return String::from("the record is incomplete");
+        }
+
+        // Phase from the clock, not from stored state: `draw_in` takes `&self`
+        // and the frame is composed by the compositor, so an animation that
+        // needed to mutate would need a cell and a writer. Time is already
+        // shared and already moves.
+        let ms = crate::dev::lapic::ticks() as u64 * 1000 / crate::TIMER_HZ as u64;
+        let phase = (ms % 1400) as f32 / 1400.0;
+
+        let top = r.y + 6 + lh;
+        let bot = r.y + r.h.saturating_sub(6);
+        let col_l = r.x + 26;
+        let col_r = r.x + r.w.saturating_sub(theme::text_w(9) + 16);
+        let span = (bot.saturating_sub(top)).max(1);
+
+        theme::text_over(fb, r.x + 8, r.y + 2,
+            &clip(&format!("{} slices of hidden state -> {} applets", bins, outs),
+                  fits(r.w.saturating_sub(16))),
+            theme::SHADOW);
+
+        let y_in = |b: usize| top + (b as u32 * span) / bins.max(1) as u32;
+        let y_out = |c: usize| top + (c as u32 * span) / outs.max(1) as u32 + span / (outs as u32 * 2).max(1);
+
+        // Scale edges against the strongest, so the picture is readable on a
+        // checkpoint whose weights are any size.
+        let mut peak = 1e-6f32;
+        for v in &d.edge {
+            if v.abs() > peak {
+                peak = v.abs();
+            }
+        }
+
+        // **The strongest few per output, not everything above a threshold.**
+        //
+        // A global cut still passed about a hundred of the hundred and
+        // forty-four and drew a hairball -- which is exactly what a decorative
+        // network picture looks like, and the thing this panel exists not to
+        // be. Per output, the slices that actually carry the decision are a
+        // handful; showing those makes it legible that different applets are
+        // driven by different parts of the state.
+        const PER_OUT: usize = 7;
+        for c in 0..outs {
+            let mut rank: Vec<(usize, f32)> =
+                (0..bins).map(|b| (b, d.edge[c * bins + b].abs())).collect();
+            rank.sort_by(|x, y| y.1.partial_cmp(&x.1).unwrap_or(core::cmp::Ordering::Equal));
+            rank.truncate(PER_OUT);
+            for (b, _) in rank {
+                let w = d.edge[c * bins + b];
+                let mag = (w.abs() / peak).clamp(0.0, 1.0);
+                if mag < 0.05 {
+                    continue;
+                }
+                let (y0, y1) = (y_in(b), y_out(c));
+                // The wavefront: an edge brightens as the pulse crosses it.
+                let mid = 0.5f32;
+                let d0 = ((phase - mid).abs() * 2.0).clamp(0.0, 1.0);
+                let lit = 1.0 - d0 * 0.75;
+                let k = (mag * lit * 255.0) as u8;
+                let col = if w >= 0.0 {
+                    Color::new(k, (k as u16 * 150 / 255) as u8, (k as u16 * 40 / 255) as u8)
+                } else {
+                    Color::new((k as u16 * 50 / 255) as u8, (k as u16 * 110 / 255) as u8, k)
+                };
+                fb.line(col_l as i32 + 6, y0 as i32, col_r as i32 - 6, y1 as i32, col);
+            }
+        }
+
+        // The input slices. Height is the centred activation summed over the
+        // slice, so a tall node is a part of the state that is far from the
+        // average sentence.
+        let mut apeak = 1e-6f32;
+        for v in &d.act {
+            if v.abs() > apeak {
+                apeak = v.abs();
+            }
+        }
+        for b in 0..bins {
+            let a = (d.act[b].abs() / apeak).clamp(0.0, 1.0);
+            let y = y_in(b);
+            let s = 3 + (a * 5.0) as u32;
+            let k = (60.0 + a * 195.0) as u8;
+            fb.rect(col_l.saturating_sub(s / 2), y.saturating_sub(s / 2), s, s,
+                    Color::new(k / 2, k, k));
+        }
+
+        // The outputs, in the order the probe ranked them.
+        for (c, cand) in d.cand.iter().enumerate() {
+            let y = y_out(c);
+            let won = cand.class == d.winner;
+            let s = if won { 11 } else { 7 };
+            fb.rect(col_r.saturating_sub(s / 2), y.saturating_sub(s / 2), s, s,
+                    if won { theme::APERTURE } else { Color::new(0x6C, 0x8A, 0x9A) });
+            theme::text_over(fb, col_r + 10, y.saturating_sub(lh / 2), &clip(&cand.name, 8),
+                             if won { theme::APERTURE } else { theme::SCREEN_TEXT });
+        }
+
+        String::from("warm pushes up, cool pushes down")
     }
 
     // --- Council ---------------------------------------------------------
@@ -348,18 +479,32 @@ impl DeskApp for Oracle {
     fn draw_in(&self, fb: &Framebuffer, client: Rect, focused: bool) {
         theme::panel(fb, client);
         let (tabs, body, foot) = Self::layout(client);
-        let _ = focused;
 
         for (i, rect) in Self::tab_rects(tabs).iter().enumerate() {
             theme::button(fb, *rect, TABS[i], i == self.tab, i == self.tab);
+        }
+
+        // **The animation asks for the next frame, and that is a real cost.**
+        //
+        // The compositor composes only when something says the screen is out
+        // of date, which is what keeps an idle desktop free. A moving picture
+        // has to keep saying so, and a frame is 2,143 us measured -- about 7%
+        // of a core at sixty a second. So it is asked for only while this
+        // window has focus and the panel that moves is the one on screen:
+        // a background window animating something nobody is looking at would
+        // be the desktop paying for a decoration, which is the failure this
+        // whole window was rebuilt to stop committing.
+        if focused && self.tab == 1 {
+            super::render::invalidate();
         }
 
         theme::well(fb, body, theme::SCREEN);
         let inner = body.shrink(4);
         let note = match self.tab {
             0 => self.draw_route(fb, inner),
-            1 => self.draw_council(fb, inner),
-            2 => self.draw_ledger(fb, inner),
+            1 => self.draw_net(fb, inner),
+            2 => self.draw_council(fb, inner),
+            3 => self.draw_ledger(fb, inner),
             _ => self.draw_outcome(fb, inner),
         };
         let line = if self.status.is_empty() { note } else { self.status.clone() };
@@ -373,7 +518,7 @@ impl DeskApp for Oracle {
                 self.status.clear();
                 true
             }
-            b'1'..=b'4' => {
+            b'1'..=b'5' => {
                 self.tab = (k - b'1') as usize;
                 self.status.clear();
                 true
@@ -388,7 +533,7 @@ impl DeskApp for Oracle {
                     Some(_) => String::new(),
                     None => String::from("the applet table would not answer"),
                 };
-                self.tab = 3;
+                self.tab = 4;
                 true
             }
             _ => false,

@@ -271,6 +271,44 @@ impl Probe {
         out
     }
 
+    /// The same scoring, decomposed into what each slice of the input
+    /// contributed to each class.
+    ///
+    /// **It is the scoring, not a summary of it.** `scores` is
+    /// `sum_i w[c][i] * (x[i] - mean[i])`, so each term of that sum is a real
+    /// number with a sign, and grouping the terms into `bins` and adding them
+    /// up leaves the totals *exactly* equal to `scores` -- which is what makes
+    /// this drawable as a network rather than as an illustration of one. A
+    /// picture whose edges did not sum to the answer would be decoration, and
+    /// this window has already carried one of those.
+    ///
+    /// Binned because the input is 576 wide on the small checkpoint and no
+    /// screen shows 576 nodes; the bins are contiguous slices, so a bin is a
+    /// span of the hidden state rather than a cluster somebody chose.
+    ///
+    /// Answers `(input, edges)` where `input[b]` is the centred activation
+    /// summed over bin `b`, and `edges[c * bins + b]` is what bin `b` gave
+    /// class `c`.
+    pub fn contributions(&self, x: &[f32], bins: usize) -> (Vec<f32>, Vec<f32>) {
+        let bins = bins.max(1).min(self.dim.max(1));
+        let mut input = vec![0.0f32; bins];
+        let mut edges = vec![0.0f32; self.classes * bins];
+        if x.len() != self.dim {
+            return (input, edges);
+        }
+        for i in 0..self.dim {
+            // Integer arithmetic, so the last bin gets the remainder rather
+            // than a rounding rule dropping the tail of the hidden state.
+            let b = (i * bins) / self.dim;
+            let v = x[i] - self.mean[i];
+            input[b] += v;
+            for c in 0..self.classes {
+                edges[c * bins + b] += self.w[c * self.dim + i] * v;
+            }
+        }
+        (input, edges)
+    }
+
     pub fn predict(&self, x: &[f32]) -> usize {
         let s = self.scores(x);
         let mut best = 0usize;
@@ -376,6 +414,45 @@ pub fn selftest() -> bool {
         return false;
     }
     if Probe::fit(&features, &[classes + 5; 48], classes, 1.0).is_some() {
+        return false;
+    }
+
+    // **The decomposition has to be the scoring, or the picture drawn from it
+    // is an illustration rather than a reading.** `contributions` groups the
+    // terms of the same sum `scores` computes, so binning them and adding them
+    // back must land on `scores` to within float association -- if it does
+    // not, the network the Oracle draws has edges that do not carry the signal
+    // they are drawn as carrying.
+    if let Some(p) = Probe::fit(&features, &labels, classes, 1.0) {
+        let x = &features[3];
+        let want = p.scores(x);
+        for bins in [1usize, 5, 24, 64] {
+            let (input, edges) = p.contributions(x, bins);
+            let b = bins.min(dim);
+            // Every dimension lands in exactly one bin, so the binned input
+            // sums to the centred input whatever the bin count.
+            let mut tot = 0.0f32;
+            for v in &input {
+                tot += *v;
+            }
+            let mut direct = 0.0f32;
+            for i in 0..dim {
+                direct += x[i] - p.mean[i];
+            }
+            if (tot - direct).abs() > 1e-2 {
+                return false;
+            }
+            for c in 0..classes {
+                let mut acc = 0.0f32;
+                for k in 0..b {
+                    acc += edges[c * b + k];
+                }
+                if (acc - want[c]).abs() > 1e-2 {
+                    return false;
+                }
+            }
+        }
+    } else {
         return false;
     }
 

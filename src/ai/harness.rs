@@ -1554,7 +1554,20 @@ pub fn route(task: &str, trust: Trust) -> Option<Choice> {
         }
         cand.sort_by(|x, y| y.score.partial_cmp(&x.score).unwrap_or(core::cmp::Ordering::Equal));
         cand.truncate(super::trace::TOPN);
-        super::trace::begin(task, cand, allowed, scores.len());
+
+        // The same sum `scores` just computed, grouped so a window can draw
+        // it. `contributions` is the scoring decomposed rather than summarised
+        // -- the edges add back to the scores exactly -- so the network panel
+        // shows the arithmetic that made this decision and not a picture of a
+        // network in general.
+        let bins = super::trace::BINS;
+        let (act, all_edges) = p.contributions(&x, bins);
+        let mut edge = Vec::with_capacity(cand.len() * bins);
+        for c in &cand {
+            let base = c.class * bins;
+            edge.extend_from_slice(&all_edges[base..base + bins]);
+        }
+        super::trace::begin(task, cand, allowed, scores.len(), act, edge);
 
         Some(Choice { applet: name, mutates, steps: 1 })
     })?

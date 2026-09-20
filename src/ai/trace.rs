@@ -41,6 +41,15 @@ pub const KEEP: usize = 10;
 /// rather than carried around to be discarded at draw time.
 pub const TOPN: usize = 6;
 
+/// How many slices of the hidden state the network panel draws.
+///
+/// The state is 576 wide on the small checkpoint and 1024 on the 0.6B, and no
+/// screen shows that many nodes. Twenty-four is what fits down the left of the
+/// window at a legible size. The slices are contiguous, so a node is a span of
+/// the hidden state rather than a grouping somebody chose to make the picture
+/// tidy.
+pub const BINS: usize = 24;
+
 /// One routing decision, whole.
 #[derive(Clone)]
 pub struct Decision {
@@ -69,6 +78,14 @@ pub struct Decision {
     pub settled: bool,
     /// Uptime when it happened.
     pub at_s: f32,
+    /// The hidden state, in `BINS` contiguous slices, centred the way the
+    /// probe centres it.
+    pub act: Vec<f32>,
+    /// What each slice gave each kept candidate: `edge[c * BINS + b]`, in the
+    /// order of `cand`. These sum to the candidate's score exactly, which is
+    /// the property that makes the network drawable as the scoring rather than
+    /// as a picture of it.
+    pub edge: Vec<f32>,
 }
 
 #[derive(Clone)]
@@ -95,7 +112,14 @@ static RING: crate::sync::Spin<Vec<Decision>> = crate::sync::Spin::new(Vec::new(
 ///
 /// `cand` arrives already filtered to what the trust gate admits and already
 /// sorted, because the caller is the only place that knows both.
-pub fn begin(task: &str, cand: Vec<Cand>, allowed: usize, total: usize) {
+pub fn begin(
+    task: &str,
+    cand: Vec<Cand>,
+    allowed: usize,
+    total: usize,
+    act: Vec<f32>,
+    edge: Vec<f32>,
+) {
     let probe = cand.first().map(|c| c.class).unwrap_or(0);
     let d = Decision {
         task: task.to_string(),
@@ -110,6 +134,8 @@ pub fn begin(task: &str, cand: Vec<Cand>, allowed: usize, total: usize) {
         rule: "probe only",
         settled: false,
         at_s: crate::dev::lapic::ticks() as f32 / crate::TIMER_HZ as f32,
+        act,
+        edge,
     };
     let mut r = RING.lock_irq();
     r.push(d);
@@ -187,7 +213,7 @@ pub fn selftest() -> bool {
         Cand { class: 3, name: "ls".to_string(), score: 2.0 },
         Cand { class: 7, name: "tree".to_string(), score: 1.0 },
     ];
-    begin("list the files", cand, 14, 23);
+    begin("list the files", cand, 14, 23, Vec::new(), Vec::new());
     let d = recent();
     let last = d.last().expect("just pushed");
     claim("a decision is recorded with its task", last.task == "list the files");
@@ -210,7 +236,7 @@ pub fn selftest() -> bool {
 
     // The ring is what bounds the memory, so it is worth one claim.
     for _ in 0..KEEP + 4 {
-        begin("filler", Vec::new(), 1, 1);
+        begin("filler", Vec::new(), 1, 1, Vec::new(), Vec::new());
     }
     claim("the ring never grows past its cap", recent().len() == KEEP);
     let _ = before;
