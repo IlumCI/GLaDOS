@@ -853,6 +853,9 @@ def main():
     sent_all = not queue
     idle_prompts = 0
     pending = None
+    # Set by a beat and cleared by the send it causes, so a pause does not
+    # depend on a prompt coming back afterwards. See the beat below.
+    force_send = False
 
     try:
         while time.time() < deadline:
@@ -956,7 +959,8 @@ def main():
                         pending = None
 
             # The shell echoes a prompt when it is ready for the next line.
-            if buf.endswith(PROMPT) or (not chunk and buf.rstrip().endswith(PROMPT.strip())):
+            if (force_send or buf.endswith(PROMPT)
+                    or (not chunk and buf.rstrip().endswith(PROMPT.strip()))):
                 if queue:
                     line = queue.pop(0)
                     # `@wait N` is a beat rather than a command: it is handled
@@ -978,13 +982,32 @@ def main():
                             continue
                         print(f"[drive] beat: {secs}s")
                         time.sleep(secs)
-                        # `buf` is deliberately **not** cleared. The guest is
-                        # idle and will print nothing further, so clearing the
-                        # prompt that is already in there would leave nothing
-                        # to match against and the next command would never be
-                        # sent. Leaving it means the next pass round the loop
-                        # matches immediately, which is exactly the intent.
+                        # **The next line is sent because the beat is over,
+                        # not because a prompt came back.**
+                        #
+                        # This used to leave `buf` alone, on the reasoning that
+                        # the guest is idle during a beat and will print
+                        # nothing further, so the prompt already sitting in
+                        # there would match on the next pass. That was true of
+                        # every guest this harness had driven and stopped being
+                        # true the moment a background task learned to report
+                        # something: the compositor watchdog prints from the
+                        # clock task during exactly the pause a beat creates,
+                        # those bytes land behind the prompt, and the match
+                        # below can never fire again. Every remaining command
+                        # then goes unsent, which reads as a guest that hung
+                        # rather than as a harness that stopped asking.
+                        #
+                        # Standing a fresh prompt in `buf` does not fix it
+                        # either, for the same reason one pass later -- the
+                        # alarm is still in the socket and arrives on top of
+                        # it. So the beat stops consulting the buffer at all.
+                        # It already knows what a prompt would have told it:
+                        # the guest was at one when the wait began, and the
+                        # wait is what the pause was for.
+                        force_send = True
                         continue
+                    force_send = False
                     print(f"[drive] sent: {line}")
                     sock.sendall(line.encode() + b"\r")
                     buf.clear()
