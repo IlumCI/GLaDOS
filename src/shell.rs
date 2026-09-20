@@ -2827,6 +2827,16 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 kprintln!("  counting from here");
                 return;
             }
+            // Stop the compositor on purpose, so the alarm can be watched
+            // going off. Shell-only and absent from `sysbox::APPLETS`, so no
+            // grammar can spell it.
+            if let Some(n) = rest.trim().strip_prefix("stall") {
+                let ms: u64 = n.trim().parse().unwrap_or(3000);
+                render::stall_for(ms);
+                kprintln!("  the compositor will stop turning for {} ms", ms);
+                kprintln!("  the clock task should report it about a second in");
+                return;
+            }
             // Reproduce the shape that froze, so the fix has something to be
             // measured against.
             //
@@ -2907,12 +2917,51 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             console::set_color(if st.max_gap_ms > 1000 { LTRED } else { WHITE });
             kprintln!("    worst gap    {:>6} ms   the longest the screen stood still", st.max_gap_ms);
             console::set_color(LTGRAY);
-            if st.max_gap_ms > 1000 && st.clocks > 0 {
+            // The compositor's own pulse, which is a different question from
+            // whether frames landed. An idle desktop composes nothing and is
+            // perfectly healthy; a compositor that stopped turning is the
+            // machine having lost its only painter, and the two used to look
+            // identical from here.
+            let h = render::health();
+            console::set_color(if h.stalled { LTRED } else { LTGRAY });
+            kprintln!(
+                "  the compositor has turned {} time(s), last {} ms ago, {}",
+                h.beats, h.quiet_ms, h.phase.name()
+            );
+            if let Some(st) = render::comp_state() {
+                kprintln!("    the scheduler has its task as '{}'", st);
+            }
+            if h.stalls > 0 {
                 kprintln!(
-                    "  the clock painted {} time(s) inside that gap, so the machine was",
-                    st.clocks
+                    "    it has gone quiet {} time(s); the longest was {} ms",
+                    h.stalls, h.worst_ms
                 );
-                kprintln!("  running and nothing owned the frame");
+            }
+            console::set_color(LTGRAY);
+            // **A long gap is two completely different facts and this line
+            // used to report only the worse one.**
+            //
+            // It read "the machine was running and nothing owned the frame",
+            // which was the correct diagnosis in the days when nothing did.
+            // Something owns it now, so the same gap is usually the opposite:
+            // a desktop nobody changed composes no frames, which is the
+            // compositor being right rather than absent. Measured -- `diag
+            // all` reports an 84-second gap while the loop turns sixteen
+            // thousand times, because `diag` touches no window.
+            //
+            // The watchdog is what tells them apart, so it is asked rather
+            // than guessed at from the clock's paint count.
+            if st.max_gap_ms > 1000 {
+                if h.stalls > 0 || h.stalled {
+                    console::set_color(LTRED);
+                    kprintln!("  the compositor stopped turning inside that gap -- a real freeze");
+                } else {
+                    kprintln!(
+                        "  the compositor kept turning throughout, so the screen was idle"
+                    );
+                    kprintln!("  rather than stuck -- nothing asked for a frame");
+                }
+                console::set_color(LTGRAY);
             }
         }
         "outcome" => {
@@ -4895,11 +4944,23 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             for i in 0..crate::task::count() {
                 if let Some(t) = crate::task::snapshot(i) {
                     let marker = if i == crate::task::current() { '*' } else { ' ' };
+                    // **The state, because a task that stopped running looks
+                    // exactly like one that is merely quiet without it.**
+                    //
+                    // `resumed` says how often it has been picked and nothing
+                    // about whether it still can be: a task stranded in
+                    // `handoff` is unclaimable forever and reads here as a
+                    // count that has stopped moving, which is also what an
+                    // idle task reads as. `task::dump` has printed this since
+                    // it was written and has never had a caller, so the one
+                    // verb an operator actually types could not answer the
+                    // question the field exists for.
                     kprintln!(
-                        "  {}{} {:<8} rsp {:#018x}  resumed {}",
+                        "  {}{} {:<8} {:<7} rsp {:#018x}  resumed {}",
                         marker,
                         i,
                         t.name,
+                        t.state.name(),
                         t.rsp,
                         t.switches
                     );

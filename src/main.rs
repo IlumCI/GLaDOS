@@ -516,7 +516,13 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     // beside it. That contrast is the whole diagnosis -- the machine was
     // running, and nobody was responsible for the picture.
     match task::spawn("comp", comp_task) {
-        Some(i) => kprintln!("  spawned '{}' as task {}", "comp", i),
+        Some(i) => {
+            // Told, not guessed. The watchdog reports what the scheduler makes
+            // of this task when it stops beating, and `task::current()` cannot
+            // answer who it is: 0 means both task 0 and an idle core.
+            gfx::render::watching(i);
+            kprintln!("  spawned '{}' as task {}", "comp", i);
+        }
         None => kprintln!("  could not spawn the compositor task"),
     }
     task::enable();
@@ -750,6 +756,15 @@ fn comp_task() {
     // Anything measuring an interval uses the TSC.
     let mut next = time::rdtsc();
     loop {
+        // **The heartbeat, at the top and unconditionally.**
+        //
+        // Every path below this line either yields or composes, so a beat here
+        // means one full turn of the loop happened whatever branch it took --
+        // including `render off` and a full-screen program owning the screen,
+        // neither of which is a fault and neither of which should raise an
+        // alarm. The clock task reads it; see `render::watch`.
+        gfx::render::beat(gfx::render::Phase::Turn);
+
         // Standing it down is what the machine did before this task existed,
         // which is how the before-number is taken without a second build.
         if !gfx::render::enabled() {
@@ -765,6 +780,9 @@ fn comp_task() {
         // asked for during the last frame appears in this one rather than the
         // next.
         if !gfx::exclusive() {
+            // The phase before each call that leaves this file, so a stall
+            // names the thing it is stuck inside rather than the loop.
+            gfx::render::beat(gfx::render::Phase::Ops);
             gfx::desk::drain_ops();
             // **The pointer, every loop rather than every frame.**
             //
@@ -784,8 +802,20 @@ fn comp_task() {
             // window, start an app, or run an Aiksi program under DRAW_BUDGET.
             // That work is allowed to overrun and make the next frame late; it
             // is not allowed to happen underneath one.
+            gfx::render::beat(gfx::render::Phase::Pointer);
             gfx::desk::poll_mouse();
         }
+
+        // **Back to `Turn` before the wait, or the resting state lies.**
+        //
+        // Most turns of this loop end at the deadline check below, and with no
+        // beat here the last phase announced was whatever ran before it -- so
+        // a perfectly healthy idle compositor reported "reading the pointer",
+        // and so did one genuinely stuck inside `poll_mouse`. Those are a
+        // non-event and a hung input path, and the whole value of recording a
+        // phase is telling them apart. Measured: a healthy loop reported
+        // `Pointer` 13 ms ago, and a 43-second stall reported `Pointer` too.
+        gfx::render::beat(gfx::render::Phase::Turn);
 
         let now = time::rdtsc();
         if now < next {
@@ -811,6 +841,9 @@ fn comp_task() {
         let mhz = time::tsc_mhz().max(1) as u64;
         next = now + (mhz * 1_000_000) / FRAME_HZ;
 
+        // `render stall` lands here, and nowhere in a shipped path.
+        gfx::render::stall_hook();
+
         // A full-screen program owns the screen outright -- DOOM, the editor,
         // a guest holding /dev/fb0 -- so the desktop stands down rather than
         // contending. The repaint is owed for when it gives the screen back,
@@ -828,6 +861,7 @@ fn comp_task() {
             // the same desktop. What must not happen is losing the request, so
             // it goes back if the frame did not land.
             let before = gfx::render::stats().draws;
+            gfx::render::beat(gfx::render::Phase::Frame);
             gfx::desk::draw();
             if gfx::render::stats().draws == before {
                 gfx::render::restore_dirty();
@@ -866,6 +900,49 @@ fn clock_task() {
             // future is only projectable from a history, and the history has
             // to have been accruing before anyone asks.
             if crossed_second {
+                // **Somebody has to notice the screen's owner is gone, and it
+                // cannot be the owner.**
+                //
+                // Every painter but this one now goes through the compositor,
+                // so if that task stops the machine keeps running and shows
+                // nothing -- with no line in the log, because the thing that
+                // would have written one is what stopped. This task is the
+                // right watcher: it is independent of the desktop, it never
+                // blocks, and it is already awake once a second.
+                //
+                // `kprintln!` and not `serial_println!`, because it reaches
+                // all three sinks. The console paints through
+                // `compose::flush_rect` and takes no desktop claim, so it is
+                // the one painter that still works while the compositor holds
+                // the claim and is stuck inside a frame.
+                match gfx::render::watch() {
+                    Some(gfx::render::Verdict::Stalled(h)) => {
+                        console::on_channel(console::EXEC, || {
+                            kprintln!(
+                                "[gfx] the compositor has been quiet for {} ms while {} -- the screen is stopped",
+                                h.quiet_ms,
+                                h.phase.name()
+                            );
+                            // The scheduler's own word for it, because "not
+                            // turning" has three causes it tells apart and
+                            // nothing else does: starved, claimed by a core
+                            // that is not running it, or stranded mid-switch.
+                            if let Some(st) = gfx::render::comp_state() {
+                                kprintln!("       the scheduler has its task as '{}'", st);
+                            }
+                        });
+                    }
+                    Some(gfx::render::Verdict::Recovered(h)) => {
+                        console::on_channel(console::EXEC, || {
+                            kprintln!(
+                                "[gfx] the compositor is painting again after {} ms",
+                                h.worst_ms
+                            );
+                        });
+                    }
+                    None => {}
+                }
+
                 ai::futures::sample();
                 // The thermal policy and the power-source policy, both of
                 // which were written and neither of which had a caller. A
