@@ -21,8 +21,14 @@ at all.
 A guest larger than the host screen has its window clipped, and the part hanging
 off the edge records as **black** -- which reads as a kernel that painted
 nothing rather than as a window that did not fit. This host is 1536x864, so the
-guest runs at 1280x720: it fits at 1:1 with room for the title bar, so every
-guest pixel is one video pixel, and it is already a standard video mode.
+guest runs at 1280x800: it fits at 1:1 with room for the title bar, so every
+guest pixel is one video pixel.
+
+**1280x800 and not 1280x720**, which was tried first and silently produced a
+640x480 capture. 720 is not a mode this VGA device offers, so the guest fell
+back to the smallest one it had -- and the recording looked like a working
+demo of a tiny screen rather than a misconfiguration. `client_crop` asserts the
+client area equals the mode that was asked for, which is what caught it.
 
 Text is what this machine mostly draws, and resampled text is the difference
 between a demo somebody watches and one they scroll past.
@@ -52,7 +58,7 @@ PY = ROOT / "tools/venv/Scripts/python.exe"
 # interface between two files and is checked rather than assumed.
 WINDOW = "QEMU (GLaDOS-0)"
 
-RES = "1280x720"
+RES = "1280x800"
 
 
 def ffmpeg():

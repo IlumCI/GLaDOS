@@ -267,11 +267,14 @@ pub fn run(boot: &BootInfo, acpi: &Option<Acpi>) -> ! {
             // rather than in the timer tick for the same reason the pointer
             // is: a keystroke can raise a window.
             crate::dev::usbhid::poll();
-            // The pointer is read from the idle loop rather than acted on in
-            // the interrupt: a click raises a window and repaints, and doing
+            // The pointer is **not** read here any more. It was, and that is
+            // precisely why it froze: a click is only noticed while the shell
+            // is idle, so any command that took a second took the pointer with
+            // it. The compositor owns it now and runs whatever the shell is
+            // doing. What stays true is the original reason it is not done in
+            // the interrupt -- a click raises a window and repaints, and doing
             // that from an ISR would redraw the screen underneath whatever was
             // drawing when the mouse moved.
-            crate::gfx::desk::poll_mouse();
             unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };
             continue;
         };

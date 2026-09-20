@@ -1577,11 +1577,12 @@ pub fn generate(prompt: &str, opts: &GenOpts) {
                 // That is the "windows freeze but the uptime moves" report,
                 // and it was never a slow renderer.
                 //
-                // Motion only; `pump_cursor` deliberately dispatches no
-                // clicks, so a press that lands mid-answer stays latched for
-                // `poll_mouse` rather than re-entering the desktop from
-                // inside a generation.
-                crate::gfx::desk::pump_cursor();
+                // Nothing to pump. The compositor task reads the pointer on
+                // its own schedule, so a generation no longer has to carry the
+                // desktop on its back -- which also removes the thing this
+                // comment used to have to promise, that a press landing
+                // mid-answer could not re-enter the desktop from inside a
+                // generation. It cannot, because this no longer touches it.
             }
         }
 

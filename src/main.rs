@@ -766,6 +766,25 @@ fn comp_task() {
         // next.
         if !gfx::exclusive() {
             gfx::desk::drain_ops();
+            // **The pointer, every loop rather than every frame.**
+            //
+            // This used to run from the shell's idle loop, so it stopped the
+            // moment the shell entered a command -- which is why `pump_cursor`
+            // existed at all: a motion-only stand-in bolted onto the clock task
+            // so the arrow would keep moving while the real handler was
+            // unreachable. The compositor runs whatever the shell is doing, so
+            // the stand-in is not needed and is gone.
+            //
+            // Before the deadline check on purpose. Composing is rate-limited
+            // because a frame is expensive; reading the mouse is not, and
+            // capping it at 60 Hz would add up to sixteen milliseconds of lag
+            // to every click for no saving.
+            //
+            // Outside the frame's borrow, also on purpose: a press can open a
+            // window, start an app, or run an Aiksi program under DRAW_BUDGET.
+            // That work is allowed to overrun and make the next frame late; it
+            // is not allowed to happen underneath one.
+            gfx::desk::poll_mouse();
         }
 
         let now = time::rdtsc();
@@ -863,27 +882,12 @@ fn clock_task() {
             // counter in the corner of a splash is the tell that something is
             // drawing behind the curtain.
             if let (Some(fb), false) = (gfx::primary(), gfx::splash::active()) {
-                // **The pointer is pumped from here, not only from a
-                // generation.** `pump_cursor` had exactly one caller, inside
-                // `generate`, so it answered the freeze during `ask` and no
-                // other. Every long foreground command has the same shape --
-                // `mine sweep` waits whole seconds per point on the shell task,
-                // and the shell's idle loop is the only thing that reads the
-                // mouse -- so on the GF63 a sweep froze the pointer for half an
-                // hour with the uptime still counting beside it. That is the
-                // same symptom `pump_cursor` documents, arriving by a command
-                // nobody had added a call to.
-                //
-                // Here rather than in the sweep, because a list of long
-                // commands that remember to pump is the stale-call-site failure
-                // `with_engine` records: correct the day it is written and
-                // wrong the next time somebody adds a command. This task wakes
-                // on its own quantum whatever the shell is doing, which is
-                // precisely what the moving clock proved.
-                //
-                // Still motion only -- `pump_cursor` dispatches no presses, so
-                // nothing here can re-enter the desktop or the engine.
-                gfx::desk::pump_cursor();
+                // The pointer used to be pumped from here, because the
+                // shell's idle loop was the only thing that read it and a long
+                // command took it away. The compositor reads it now, on its own
+                // task, whatever the shell is doing -- so this stand-in and the
+                // motion-only compromise it forced are both gone. The clock
+                // task paints the clock and nothing else.
                 // Short, because the taskbar reserves a fixed well for it and
                 // every character of that well is a character the task buttons
                 // do not get. The switch counter moved to `tasks`, which is
