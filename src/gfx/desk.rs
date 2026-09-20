@@ -1034,7 +1034,7 @@ pub fn init() {
             super::console::with_ch(ch, |c| c.retarget(back.clone(), true));
         }
     }
-    draw();
+    super::render::invalidate();
 }
 
 fn item(label: &str, cmd: &str) -> MenuItem {
@@ -1089,7 +1089,7 @@ pub fn refresh_routed() {
         });
     }
     if any {
-        draw();
+        super::render::invalidate();
     }
 }
 
@@ -1433,7 +1433,7 @@ pub fn minimise_others() {
             }
         }
     });
-    draw();
+    super::render::invalidate();
 }
 
 /// Put the focused window away.
@@ -1445,7 +1445,7 @@ pub fn minimise_focused() -> bool {
     })
     .unwrap_or(false);
     if ok {
-        draw();
+        super::render::invalidate();
     }
     ok
 }
@@ -2212,7 +2212,7 @@ pub fn poll_mouse() {
             crate::serial_println!("[desk] drag end {}x{}+{}+{}", r.w, r.h, r.x, r.y);
         }
         trace("drag end");
-        draw();
+        super::render::invalidate();
     }
     if released_left && in_app {
         unsafe { *APP_PRESS.get() = false };
@@ -2325,7 +2325,7 @@ pub fn show_executive() {
     })
     .unwrap_or(false);
     if ok {
-        draw();
+        super::render::invalidate();
     }
 }
 
@@ -2338,7 +2338,7 @@ pub fn set_round(r: u32) -> bool {
     })
     .unwrap_or(false);
     if ok {
-        draw();
+        super::render::invalidate();
     }
     ok
 }
@@ -2509,13 +2509,13 @@ fn press_at(x: i32, y: i32) {
     // closes. Both must come before window routing or the press falls through
     // the menu onto whatever is behind it.
     if menu_press(&fb, x, y, screen) {
-        draw();
+        super::render::invalidate();
         return;
     }
 
     if contains(taskbar_rect(&fb), x, y) {
         task_press(&fb, x, y);
-        draw();
+        super::render::invalidate();
         return;
     }
 
@@ -2529,7 +2529,7 @@ fn press_at(x: i32, y: i32) {
                 launch(ICONS[k].1);
             }
         }
-        draw();
+        super::render::invalidate();
         return;
     };
 
@@ -2555,7 +2555,7 @@ fn press_at(x: i32, y: i32) {
             .position(|b| contains(*b, x, y));
         if let Some(which) = hit {
             caption_action(f, which);
-            draw();
+            super::render::invalidate();
             return;
         }
         if double {
@@ -2576,7 +2576,7 @@ fn press_at(x: i32, y: i32) {
                 }
             });
         }
-        draw();
+        super::render::invalidate();
         return;
     }
 
@@ -2584,7 +2584,7 @@ fn press_at(x: i32, y: i32) {
         let e = edges_at(frame, x, y);
         if e != edge::NONE {
             with(|d| d.mode = Mode::DragSize { from: frame, edges: e });
-            draw();
+            super::render::invalidate();
             return;
         }
     }
@@ -2593,7 +2593,7 @@ fn press_at(x: i32, y: i32) {
         let hit = with(|d| menu_label_at(&d.windows[f].menus, bar, x, y)).flatten();
         if let Some(mi) = hit {
             with(|d| d.mode = Mode::Menu { menu: mi, item: 0 });
-            draw();
+            super::render::invalidate();
             return;
         }
     }
@@ -2623,7 +2623,7 @@ fn press_at(x: i32, y: i32) {
     })
     .unwrap_or(ui::Step::Idle);
     act_on(step);
-    draw();
+    super::render::invalidate();
 }
 
 /// Whether the held left button is a gesture inside an app's client area,
@@ -2646,7 +2646,7 @@ fn app_drag_to(x: i32, y: i32) {
     })
     .unwrap_or(false);
     if changed {
-        draw();
+        super::render::invalidate();
     }
 }
 
@@ -2660,7 +2660,7 @@ fn app_release() {
     })
     .unwrap_or(false);
     if changed {
-        draw();
+        super::render::invalidate();
     }
 }
 
@@ -2739,7 +2739,7 @@ pub fn close_focused() {
             }
         }
     });
-    draw();
+    super::render::invalidate();
 }
 
 /// A press on the taskbar: the Start button, an app, or a window button.
@@ -2938,7 +2938,7 @@ pub fn tile_focused(t: Tile) -> bool {
     })
     .unwrap_or(false);
     if ok {
-        draw();
+        super::render::invalidate();
     }
     ok
 }
@@ -2970,7 +2970,7 @@ pub fn tile_all() -> usize {
     })
     .unwrap_or(0);
     if n > 0 {
-        draw();
+        super::render::invalidate();
     }
     n
 }
@@ -3019,7 +3019,7 @@ pub fn tile_workspace(rail_l: &str, main: &str, foot: &str, rail_r: &str) -> usi
     })
     .unwrap_or(0);
     if n > 0 {
-        draw();
+        super::render::invalidate();
     }
     n
 }
@@ -3423,7 +3423,7 @@ fn snap_release(x: i32, y: i32) {
     })
     .unwrap_or(false);
     if changed {
-        draw();
+        super::render::invalidate();
     }
 }
 
@@ -3490,7 +3490,7 @@ fn drag_to(x: i32, y: i32) {
     })
     .unwrap_or(false);
     if changed {
-        draw();
+        super::render::invalidate();
     }
 }
 
@@ -3584,7 +3584,7 @@ fn update_hover(x: i32, y: i32) {
     .flatten();
     if let Some(moved) = tracked {
         if moved {
-            draw();
+            super::render::invalidate();
         }
         return;
     }
@@ -3600,7 +3600,7 @@ fn update_hover(x: i32, y: i32) {
     })
     .unwrap_or(false);
     if changed {
-        draw();
+        super::render::invalidate();
     }
 }
 
@@ -3641,7 +3641,7 @@ fn right_click_at(x: i32, y: i32) {
             with(|d| d.mode = Mode::Taskbar { item: 0 });
         }
     };
-    draw();
+    super::render::invalidate();
 }
 
 fn wheel_at(x: i32, y: i32, notches: i32) {
@@ -3662,7 +3662,7 @@ fn wheel_at(x: i32, y: i32, notches: i32) {
     })
     .unwrap_or(false);
     if hit {
-        draw();
+        super::render::invalidate();
     }
 }
 
@@ -4081,6 +4081,27 @@ pub fn clock_rect(fb: &Framebuffer) -> Rect {
     )
 }
 
+/// Compose a whole frame. **The compositor calls this. Nothing else should.**
+///
+/// It had fifty direct callers inside this file until they were converted, and
+/// the flag beside it was written up as having replaced them when it had only
+/// been added alongside. So every event handler here composed a frame on
+/// whichever task had reached it -- the shell for a keystroke, the compositor
+/// for a click -- and the property the whole design rests on held only on the
+/// paths nobody had looked at. Measured before the conversion: `composers`
+/// read 1 after a `render probe` and 3 after opening one window, because
+/// `focus_terminal` ends in a repaint and the shell calls it after every
+/// command.
+///
+/// Anything here that changes the screen calls `render::invalidate` instead,
+/// which is free, idempotent, and safe from any task. The cost of being wrong
+/// about it is one frame of staleness rather than two writers in one back
+/// buffer.
+///
+/// **The one named exception is `video bench`**, which times this directly and
+/// has to: a measurement of what a frame costs cannot be taken by asking for
+/// one and waiting to see when it lands. It moves `composers`, and a reading
+/// taken after one is expected to say so.
 pub fn draw() {
     let Some(real) = super::primary() else {
         return;
@@ -4489,7 +4510,7 @@ pub fn cycle(back: bool) {
         d.raise(pick);
     });
     trace(if back { "alt-tab back" } else { "alt-tab" });
-    draw();
+    super::render::invalidate();
 }
 
 pub fn trace(event: &str) {
@@ -4571,7 +4592,7 @@ pub fn dismiss_menus() {
     })
     .unwrap_or(false);
     if changed {
-        draw();
+        super::render::invalidate();
     }
 }
 
@@ -4601,7 +4622,7 @@ pub fn key(k: u8) -> Route {
             };
             d.query.clear();
         });
-        draw();
+        super::render::invalidate();
         return Route::Handled;
     }
     if k == kbd::KEY_TASKBAR {
@@ -4613,7 +4634,7 @@ pub fn key(k: u8) -> Route {
                 _ => Mode::Taskbar { item: 0 },
             }
         });
-        draw();
+        super::render::invalidate();
         return Route::Handled;
     }
 
@@ -4623,7 +4644,7 @@ pub fn key(k: u8) -> Route {
         Mode::Normal => {
             if k == kbd::KEY_SYSMENU {
                 with(|d| d.mode = Mode::Sys { item: 0 });
-                draw();
+                super::render::invalidate();
                 return Route::Handled;
             }
             if k == kbd::KEY_MENU {
@@ -4636,7 +4657,7 @@ pub fn key(k: u8) -> Route {
                 })
                 .unwrap_or(false);
                 if opened {
-                    draw();
+                    super::render::invalidate();
                     return Route::Handled;
                 }
                 return Route::Handled;
@@ -4685,7 +4706,7 @@ pub fn key(k: u8) -> Route {
                                 d.windows[f].content = Content::Panel(panel);
                             }
                         });
-                        draw();
+                        super::render::invalidate();
                     }
                 }
                 _ => {}
@@ -4713,7 +4734,7 @@ pub fn key(k: u8) -> Route {
                     _ => {}
                 }
             });
-            draw();
+            super::render::invalidate();
             Route::Handled
         }
 
@@ -4748,7 +4769,7 @@ pub fn key(k: u8) -> Route {
                     _ => {}
                 }
             });
-            draw();
+            super::render::invalidate();
             Route::Handled
         }
 
@@ -4760,11 +4781,11 @@ pub fn key(k: u8) -> Route {
             match k {
                 kbd::KEY_RIGHT => {
                     with(|d| d.mode = Mode::Taskbar { item: (item + 1) % n });
-                    draw();
+                    super::render::invalidate();
                 }
                 kbd::KEY_LEFT => {
                     with(|d| d.mode = Mode::Taskbar { item: (item + n - 1) % n });
-                    draw();
+                    super::render::invalidate();
                 }
                 b'\n' | b'\r' => {
                     with(|d| d.mode = Mode::Normal);
@@ -4778,11 +4799,11 @@ pub fn key(k: u8) -> Route {
                             d.raise(item);
                         }
                     });
-                    draw();
+                    super::render::invalidate();
                 }
                 27 => {
                     with(|d| d.mode = Mode::Normal);
-                    draw();
+                    super::render::invalidate();
                 }
                 _ => {}
             }
@@ -4794,11 +4815,11 @@ pub fn key(k: u8) -> Route {
             match k {
                 kbd::KEY_DOWN => {
                     with(|d| d.mode = Mode::Start { item: (item + 1) % n });
-                    draw();
+                    super::render::invalidate();
                 }
                 kbd::KEY_UP => {
                     with(|d| d.mode = Mode::Start { item: (item + n - 1) % n });
-                    draw();
+                    super::render::invalidate();
                 }
                 b'\n' | b'\r' => {
                     // The query row runs what was typed; every other row runs
@@ -4820,14 +4841,14 @@ pub fn key(k: u8) -> Route {
                     } else {
                         launch(START_ITEMS[item].1);
                     }
-                    draw();
+                    super::render::invalidate();
                 }
                 27 => {
                     with(|d| {
                         d.mode = Mode::Normal;
                         d.query.clear();
                     });
-                    draw();
+                    super::render::invalidate();
                 }
                 8 => {
                     // Backspace edits the query wherever the selection is, and
@@ -4841,7 +4862,7 @@ pub fn key(k: u8) -> Route {
                     })
                     .unwrap_or(false);
                     let _ = moved;
-                    draw();
+                    super::render::invalidate();
                 }
                 // Printable ASCII. Typing anywhere in the menu goes to the
                 // query and selects it, which is what Windows has done since
@@ -4854,7 +4875,7 @@ pub fn key(k: u8) -> Route {
                         }
                         d.mode = Mode::Start { item: START_ITEMS.len() };
                     });
-                    draw();
+                    super::render::invalidate();
                 }
                 _ => {}
             }
@@ -4873,7 +4894,7 @@ pub fn key(k: u8) -> Route {
                     }
                     d.mode = Mode::Normal;
                 });
-                draw();
+                super::render::invalidate();
             }
             Route::Handled
         }
@@ -4916,7 +4937,7 @@ pub fn key(k: u8) -> Route {
                     _ => {}
                 }
             });
-            draw();
+            super::render::invalidate();
             Route::Handled
         }
     }
@@ -4940,7 +4961,7 @@ pub fn focus_terminal() {
             }
         }
     });
-    draw();
+    super::render::invalidate();
 }
 
 /// Repaint if any window overlaps the terminal.
@@ -4976,7 +4997,7 @@ pub fn redraw_over_terminal() {
     })
     .unwrap_or(false);
     if overlapped {
-        draw();
+        super::render::invalidate();
     }
 }
 
