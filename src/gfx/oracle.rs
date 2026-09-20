@@ -45,7 +45,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-const TABS: [&str; 5] = ["Route", "Net", "Council", "Ledger", "Outcome"];
+const TABS: [&str; 5] = ["Learn", "Route", "Council", "Ledger", "Outcome"];
 
 /// The probe, the lexical core, the character core. One colour each, used for
 /// the vote markers and the agreement bars alike so the two panels read as one
@@ -58,6 +58,10 @@ const VOTER_COLORS: [Color; 3] = [
 
 pub struct Oracle {
     tab: usize,
+    /// When the current tab was raised, in milliseconds of uptime. The reveal
+    /// runs from here rather than from the fit, because the fit happens at
+    /// boot and would always be over by the time anybody opened the window.
+    shown_ms: u64,
     /// The applet distance matrix, once somebody has asked for it. Never
     /// computed during a frame: `outcome::probe` dispatches fourteen applets
     /// and captures their output, which is a long way past what a paint may do.
@@ -71,7 +75,7 @@ impl Oracle {
             .iter()
             .position(|t| t.eq_ignore_ascii_case(arg.trim()))
             .unwrap_or(0);
-        Self { tab, matrix: None, status: String::new() }
+        Self { tab, shown_ms: now_ms(), matrix: None, status: String::new() }
     }
 
     pub fn preferred() -> (u32, u32) {
@@ -185,134 +189,96 @@ impl Oracle {
     }
 
 
-    // --- Net -------------------------------------------------------------
+    // --- Learn -----------------------------------------------------------
 
-    /// The probe as the network it is, carrying the decision it really made.
+    /// What one cold fit bought, which is the one number here that plainly
+    /// goes up.
     ///
-    /// **Every edge here is a term of the sum that produced the answer.**
-    /// `Probe::scores` is `sum_i w[c][i] * (x[i] - mean[i])`; `contributions`
-    /// groups those terms into slices of the hidden state and the totals come
-    /// back equal to the scores, which `diag probe` asserts. So a thick warm
-    /// edge is a slice of the state genuinely pushing that applet up, and a
-    /// cool one is genuinely pushing it down. Nothing here is drawn because it
-    /// looks like a neural network.
+    /// **Nothing in this panel is a proxy for progress.** The probe starts
+    /// with no weights at all and 23 classes, so a guess is right 4% of the
+    /// time; a closed-form ridge solve over the corpus takes it to the high
+    /// nineties on what it saw and the mid seventies on what it did not, in
+    /// 1,115 ms measured. Held out is the bar that matters and it is drawn
+    /// tallest for that reason -- seen is drawn beside it because the gap
+    /// between the two is the only honest way to show there is nothing being
+    /// hidden by memorisation.
     ///
-    /// The animation is a wavefront sweeping left to right, and it is honest
-    /// about direction only: signal really does go from the hidden state to
-    /// the scores, once, with no recurrence. It carries no other meaning and
-    /// is not pretending to show time.
-    fn draw_net(&self, fb: &Framebuffer, r: Rect) -> String {
+    /// The per-class strip underneath is the shape the average conceals. Some
+    /// applets are learned outright and some are never learned at all, and
+    /// `repair.rs` records why from the other side: a name carries probability
+    /// mass that has nothing to do with what the applet does.
+    fn draw_learn(&self, fb: &Framebuffer, r: Rect) -> String {
         let lh = theme::text_h();
-        let all = trace::recent();
-        let Some(d) = all.last().filter(|d| !d.act.is_empty() && !d.cand.is_empty()) else {
+        let Some(f) = trace::last_fit() else {
             theme::text_over(fb, r.x + 8, r.y + 8,
-                &clip("no decision to draw -- 'fit' then 'route <task>'",
+                &clip("no fit recorded -- the router fits itself at boot",
                       fits(r.w.saturating_sub(16))),
                 theme::SCREEN_TEXT);
-            return String::from("the probe has not scored anything this boot");
+            return String::from("nothing fitted this boot");
         };
 
-        let bins = d.act.len();
-        let outs = d.cand.len();
-        if bins == 0 || outs == 0 || d.edge.len() < outs * bins {
-            return String::from("the record is incomplete");
+        // The reveal runs from when this panel was last brought up, so the
+        // numbers arrive rather than being there already. It is presentation
+        // and nothing else: what it uncovers was measured once, at boot, and
+        // does not change while it is being drawn.
+        let now = crate::dev::lapic::ticks() as u64 * 1000 / crate::TIMER_HZ as u64;
+        let since = now.saturating_sub(self.shown_ms);
+        let grow = (since as f32 / 900.0).clamp(0.0, 1.0);
+
+        let chance = 100 / f.classes.max(1);
+        let held = if f.held_n > 0 { f.held_ok * 100 / f.held_n } else { 0 };
+        let seen = if f.seen_n > 0 { f.seen_ok * 100 / f.seen_n } else { 0 };
+
+        let bars: [(&str, usize, Color); 3] = [
+            ("chance", chance, Color::new(0x4A, 0x5A, 0x66)),
+            ("held out", held, theme::APERTURE),
+            ("seen", seen, Color::new(0x6C, 0xC2, 0x8A)),
+        ];
+        let bh = (lh + 10).min(30);
+        let label_w = theme::text_w(9);
+        let bw = r.w.saturating_sub(label_w + 70);
+        for (i, (name, v, col)) in bars.iter().enumerate() {
+            let y = r.y + 8 + i as u32 * (bh + 8);
+            theme::text_over(fb, r.x + 6, y + 3, name,
+                             if i == 1 { theme::APERTURE } else { theme::SCREEN_TEXT });
+            fb.rect(r.x + 6 + label_w, y, bw, bh, theme::SCREEN);
+            let w = ((*v as f32 / 100.0) * bw as f32 * grow) as u32;
+            fb.rect(r.x + 6 + label_w, y, w.max(1), bh, *col);
+            theme::text_over(fb, r.x + 6 + label_w + bw + 8, y + 3,
+                             &format!("{}%", (*v as f32 * grow) as usize),
+                             theme::SCREEN_TEXT);
         }
 
-        // Phase from the clock, not from stored state: `draw_in` takes `&self`
-        // and the frame is composed by the compositor, so an animation that
-        // needed to mutate would need a cell and a writer. Time is already
-        // shared and already moves.
-        let ms = crate::dev::lapic::ticks() as u64 * 1000 / crate::TIMER_HZ as u64;
-        let phase = (ms % 1400) as f32 / 1400.0;
-
-        let top = r.y + 6 + lh;
-        let bot = r.y + r.h.saturating_sub(6);
-        let col_l = r.x + 26;
-        let col_r = r.x + r.w.saturating_sub(theme::text_w(9) + 16);
-        let span = (bot.saturating_sub(top)).max(1);
-
-        theme::text_over(fb, r.x + 8, r.y + 2,
-            &clip(&format!("{} slices of hidden state -> {} applets", bins, outs),
-                  fits(r.w.saturating_sub(16))),
+        // Per class, over the held-out tail only. A cell that never lights is
+        // an applet the router did not learn, which is worth seeing.
+        let top = r.y + 14 + 3 * (bh + 8);
+        theme::text_over(fb, r.x + 6, top,
+            &clip("per applet, held out only", fits(r.w.saturating_sub(12))),
             theme::SHADOW);
-
-        let y_in = |b: usize| top + (b as u32 * span) / bins.max(1) as u32;
-        let y_out = |c: usize| top + (c as u32 * span) / outs.max(1) as u32 + span / (outs as u32 * 2).max(1);
-
-        // Scale edges against the strongest, so the picture is readable on a
-        // checkpoint whose weights are any size.
-        let mut peak = 1e-6f32;
-        for v in &d.edge {
-            if v.abs() > peak {
-                peak = v.abs();
-            }
-        }
-
-        // **The strongest few per output, not everything above a threshold.**
-        //
-        // A global cut still passed about a hundred of the hundred and
-        // forty-four and drew a hairball -- which is exactly what a decorative
-        // network picture looks like, and the thing this panel exists not to
-        // be. Per output, the slices that actually carry the decision are a
-        // handful; showing those makes it legible that different applets are
-        // driven by different parts of the state.
-        const PER_OUT: usize = 7;
-        for c in 0..outs {
-            let mut rank: Vec<(usize, f32)> =
-                (0..bins).map(|b| (b, d.edge[c * bins + b].abs())).collect();
-            rank.sort_by(|x, y| y.1.partial_cmp(&x.1).unwrap_or(core::cmp::Ordering::Equal));
-            rank.truncate(PER_OUT);
-            for (b, _) in rank {
-                let w = d.edge[c * bins + b];
-                let mag = (w.abs() / peak).clamp(0.0, 1.0);
-                if mag < 0.05 {
-                    continue;
-                }
-                let (y0, y1) = (y_in(b), y_out(c));
-                // The wavefront: an edge brightens as the pulse crosses it.
-                let mid = 0.5f32;
-                let d0 = ((phase - mid).abs() * 2.0).clamp(0.0, 1.0);
-                let lit = 1.0 - d0 * 0.75;
-                let k = (mag * lit * 255.0) as u8;
-                let col = if w >= 0.0 {
-                    Color::new(k, (k as u16 * 150 / 255) as u8, (k as u16 * 40 / 255) as u8)
+        let n = f.per_class.len().min(24);
+        if n > 0 && top + lh + 26 < r.y + r.h {
+            let cols = 12u32;
+            let cw = (r.w.saturating_sub(12)) / cols;
+            let chh = ((r.y + r.h).saturating_sub(top + lh + 6) / 2).min(26).max(8);
+            for (i, (_name, ok, tot)) in f.per_class.iter().take(n).enumerate() {
+                let cx = r.x + 6 + (i as u32 % cols) * cw;
+                let cy = top + lh + 4 + (i as u32 / cols) * (chh + 4);
+                let lit = if *tot > 0 { *ok as f32 / *tot as f32 } else { 0.0 };
+                // Reveal left to right, so the strip fills rather than
+                // appearing.
+                let vis = ((i as f32 / n as f32) < grow) as u32 as f32;
+                let k = (40.0 + lit * 200.0 * vis) as u8;
+                let col = if *tot == 0 {
+                    Color::new(0x1A, 0x20, 0x26)
                 } else {
-                    Color::new((k as u16 * 50 / 255) as u8, (k as u16 * 110 / 255) as u8, k)
+                    Color::new((k as u16 * 60 / 255) as u8, k, (k as u16 * 90 / 255) as u8)
                 };
-                fb.line(col_l as i32 + 6, y0 as i32, col_r as i32 - 6, y1 as i32, col);
+                fb.rect(cx, cy, cw.saturating_sub(3), chh, col);
             }
         }
 
-        // The input slices. Height is the centred activation summed over the
-        // slice, so a tall node is a part of the state that is far from the
-        // average sentence.
-        let mut apeak = 1e-6f32;
-        for v in &d.act {
-            if v.abs() > apeak {
-                apeak = v.abs();
-            }
-        }
-        for b in 0..bins {
-            let a = (d.act[b].abs() / apeak).clamp(0.0, 1.0);
-            let y = y_in(b);
-            let s = 3 + (a * 5.0) as u32;
-            let k = (60.0 + a * 195.0) as u8;
-            fb.rect(col_l.saturating_sub(s / 2), y.saturating_sub(s / 2), s, s,
-                    Color::new(k / 2, k, k));
-        }
-
-        // The outputs, in the order the probe ranked them.
-        for (c, cand) in d.cand.iter().enumerate() {
-            let y = y_out(c);
-            let won = cand.class == d.winner;
-            let s = if won { 11 } else { 7 };
-            fb.rect(col_r.saturating_sub(s / 2), y.saturating_sub(s / 2), s, s,
-                    if won { theme::APERTURE } else { Color::new(0x6C, 0x8A, 0x9A) });
-            theme::text_over(fb, col_r + 10, y.saturating_sub(lh / 2), &clip(&cand.name, 8),
-                             if won { theme::APERTURE } else { theme::SCREEN_TEXT });
-        }
-
-        String::from("warm pushes up, cool pushes down")
+        format!("{} parameters, closed form, {} ms -- chance is {}%",
+                f.params, f.ms, chance)
     }
 
     // --- Council ---------------------------------------------------------
@@ -456,6 +422,10 @@ impl Oracle {
     }
 }
 
+fn now_ms() -> u64 {
+    crate::dev::lapic::ticks() as u64 * 1000 / crate::TIMER_HZ as u64
+}
+
 fn clip(s: &str, n: usize) -> String {
     if s.chars().count() <= n {
         return String::from(s);
@@ -494,15 +464,15 @@ impl DeskApp for Oracle {
         // a background window animating something nobody is looking at would
         // be the desktop paying for a decoration, which is the failure this
         // whole window was rebuilt to stop committing.
-        if focused && self.tab == 1 {
+        if focused && self.tab == 0 {
             super::render::invalidate();
         }
 
         theme::well(fb, body, theme::SCREEN);
         let inner = body.shrink(4);
         let note = match self.tab {
-            0 => self.draw_route(fb, inner),
-            1 => self.draw_net(fb, inner),
+            0 => self.draw_learn(fb, inner),
+            1 => self.draw_route(fb, inner),
             2 => self.draw_council(fb, inner),
             3 => self.draw_ledger(fb, inner),
             _ => self.draw_outcome(fb, inner),
@@ -515,11 +485,13 @@ impl DeskApp for Oracle {
         match k {
             b'\t' => {
                 self.tab = (self.tab + 1) % TABS.len();
+                self.shown_ms = now_ms();
                 self.status.clear();
                 true
             }
             b'1'..=b'5' => {
                 self.tab = (k - b'1') as usize;
+                self.shown_ms = now_ms();
                 self.status.clear();
                 true
             }
@@ -534,6 +506,7 @@ impl DeskApp for Oracle {
                     None => String::from("the applet table would not answer"),
                 };
                 self.tab = 4;
+                self.shown_ms = now_ms();
                 true
             }
             _ => false,
@@ -549,6 +522,7 @@ impl DeskApp for Oracle {
                 && y < (r.y + r.h) as i32
             {
                 self.tab = i;
+                self.shown_ms = now_ms();
                 self.status.clear();
                 return true;
             }
@@ -562,6 +536,7 @@ impl DeskApp for Oracle {
         }
         let n = TABS.len() as i32;
         self.tab = (((self.tab as i32 + notches.signum()) % n + n) % n) as usize;
+        self.shown_ms = now_ms();
         true
     }
 }

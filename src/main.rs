@@ -566,6 +566,25 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     gfx::splash::stage("loading the model");
     ai::init(boot.model, boot.tokenizer);
 
+    // **The router fits itself, because waiting to be asked is not a feature.**
+    //
+    // `fit` was a shell verb and nothing else called it, so a fresh machine
+    // had no router at all until somebody typed a word -- and the agent loop
+    // correctly refused to act without one, which made a machine that could
+    // route perfectly well behave as though it could not. `ensure_router`
+    // loads a cached one where a store exists and fits a new one where none
+    // does, which is 1,115 ms measured: pooled features, no forward pass,
+    // 13,824 parameters in closed form.
+    //
+    // Before the resident tasks, so the first thing the mind or the agent asks
+    // for is already there rather than being fitted underneath them.
+    if ai::engine_ready() {
+        gfx::splash::stage("fitting the router");
+        if ai::harness::ensure_router() {
+            kprintln!("  router fitted -- 'fit' reprints the numbers");
+        }
+    }
+
     // The model becomes a resident task rather than a blocking command. This
     // has to come after ai::init: the task starts running as soon as it is
     // spawned, and it expects an engine to exist.

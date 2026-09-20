@@ -106,6 +106,46 @@ impl Decision {
     }
 }
 
+/// What one cold fit of the router achieved.
+///
+/// **The one number in this machine that unambiguously goes up.** The probe
+/// starts with nothing: 23 classes, so chance is 4%, and a closed-form ridge
+/// solve over the corpus takes it to the high nineties on what it saw and the
+/// mid seventies on what it did not, in about a second and with no epochs to
+/// overfit. `fit_report` printed those figures and kept none of them.
+///
+/// Per class as well as in total, because the average hides the shape: some
+/// applets are learned outright and some are never learned at all, and which
+/// is which is the interesting half. `repair.rs` records the same finding from
+/// the other side -- an applet's *name* carries probability mass that has
+/// nothing to do with what it does.
+#[derive(Clone)]
+pub struct Fit {
+    pub seen_ok: usize,
+    pub seen_n: usize,
+    pub held_ok: usize,
+    pub held_n: usize,
+    pub classes: usize,
+    pub params: usize,
+    pub council_params: usize,
+    pub ms: u64,
+    /// Name, right, total -- over the held-out tail only.
+    pub per_class: Vec<(String, usize, usize)>,
+    /// `rdtsc` when it landed, so a panel can reveal it rather than have it
+    /// appear between one frame and the next.
+    pub at: u64,
+}
+
+static FIT: crate::sync::Spin<Option<Fit>> = crate::sync::Spin::new(None);
+
+pub fn record_fit(f: Fit) {
+    *FIT.lock_irq() = Some(f);
+}
+
+pub fn last_fit() -> Option<Fit> {
+    FIT.lock_irq().clone()
+}
+
 static RING: crate::sync::Spin<Vec<Decision>> = crate::sync::Spin::new(Vec::new());
 
 /// Record what the probe saw. Called from `route`, where the scores exist.
@@ -239,6 +279,18 @@ pub fn selftest() -> bool {
         begin("filler", Vec::new(), 1, 1, Vec::new(), Vec::new());
     }
     claim("the ring never grows past its cap", recent().len() == KEEP);
+
+    // A fit with nothing held out must not divide by zero, and must not read
+    // as a perfect one. This is the shape a tiny corpus produces.
+    record_fit(Fit {
+        seen_ok: 9, seen_n: 10, held_ok: 0, held_n: 0,
+        classes: 23, params: 13824, council_params: 0, ms: 1,
+        per_class: Vec::new(), at: 0,
+    });
+    let f = last_fit().expect("just recorded");
+    claim("a fit is remembered whole", f.classes == 23 && f.params == 13824);
+    claim("and an empty held-out set stays empty rather than reading 100%",
+          f.held_n == 0);
     let _ = before;
     ok
 }

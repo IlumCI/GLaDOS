@@ -1361,15 +1361,22 @@ pub fn probe_features() {
 /// equivalent knob to get wrong here: the solution is closed form, so the only
 /// choice is the regularisation, and the measured curve across two orders of
 /// magnitude of it is 51%, 55%, 49%.
-pub fn fit_probe(lambda: f32) {
-    console::set_color(YELLOW);
-    kprintln!("[probe]");
-    console::set_color(LTGRAY);
-
+/// Fit the router and record what it achieved. Prints nothing.
+///
+/// **Split out because this should not need a human to type it.** It was only
+/// reachable through the `fit` verb, so a fresh machine had no router at all
+/// until somebody asked for one -- and `ensure_router`, whose whole name is
+/// the promise that there is one, only ever *loaded* a cached router and gave
+/// up when there was none. The agent loop then refused to act, correctly, on a
+/// machine that was one second of arithmetic away from being able to.
+///
+/// One second is the measured figure: 717 examples, pooled features so no
+/// forward pass, 13,824 parameters solved in closed form, 1,115 ms under WHPX.
+/// That is cheap enough to simply do at boot rather than offer as a command.
+pub fn fit_router(lambda: f32) -> bool {
     let examples = vocab::examples();
     if examples.is_empty() {
-        kprintln!("  no corpus at {}", vocab::CORPUS);
-        return;
+        return false;
     }
 
     let t0 = crate::time::rdtsc();
@@ -1408,6 +1415,25 @@ pub fn fit_probe(lambda: f32) {
             train_x.iter().cloned().zip(train_y.iter().copied()).collect();
         let (tr_ok, tr_n) = hit(&seen);
         let (te_ok, te_n) = hit(&test);
+
+        // The same pass, kept per class. The average says the router works;
+        // the shape says which applets it actually learned, and those are
+        // different facts -- some classes come out at nothing and the mean
+        // hides them.
+        let mut per_class: Vec<(usize, usize)> = alloc::vec![(0, 0); classes];
+        for (x, y) in &test {
+            if *y < classes {
+                per_class[*y].1 += 1;
+                if p.predict(x) == *y {
+                    per_class[*y].0 += 1;
+                }
+            }
+        }
+        let named: Vec<(alloc::string::String, usize, usize)> = (0..classes)
+            .map(|c| {
+                (alloc::string::String::from(e.head.name(c)), per_class[c].0, per_class[c].1)
+            })
+            .collect();
 
         let params = p.params();
         e.probe = Some(p);
@@ -1458,36 +1484,63 @@ pub fn fit_probe(lambda: f32) {
             }
         }
 
-        Some((tr_ok, tr_n, te_ok, te_n, params, classes, council_params))
+        Some((tr_ok, tr_n, te_ok, te_n, params, classes, council_params, named))
     })
     .flatten();
 
-    let Some((tr_ok, tr_n, te_ok, te_n, params, classes, council_params)) = built else {
+    let Some((tr_ok, tr_n, te_ok, te_n, params, classes, council_params, per_class)) = built
+    else {
+        return false;
+    };
+    let elapsed = crate::time::rdtsc() - t0;
+    let mhz0 = crate::time::tsc_mhz().max(1) as u64;
+    super::trace::record_fit(super::trace::Fit {
+        seen_ok: tr_ok,
+        seen_n: tr_n,
+        held_ok: te_ok,
+        held_n: te_n,
+        classes,
+        params,
+        council_params,
+        ms: elapsed / mhz0 / 1000,
+        per_class,
+        at: crate::time::rdtsc(),
+    });
+    true
+}
+
+/// The `fit` verb: do it, then say what happened.
+pub fn fit_probe(lambda: f32) {
+    console::set_color(YELLOW);
+    kprintln!("[probe]");
+    console::set_color(LTGRAY);
+    if vocab::examples().is_empty() {
+        kprintln!("  no corpus at {}", vocab::CORPUS);
+        return;
+    }
+    if !fit_router(lambda) {
         console::set_color(LTRED);
         kprintln!("  could not fit (no model, or the features are degenerate)");
         console::set_color(LTGRAY);
         return;
-    };
-    let elapsed = crate::time::rdtsc() - t0;
+    }
+    let Some(f) = super::trace::last_fit() else { return };
 
-    kprintln!("  {} train, {} held out, {} classes", tr_n, te_n, classes);
-    kprintln!("  seen      {}%", pct(tr_ok, tr_n));
-    let te = pct(te_ok, te_n);
-    console::set_color(if te * classes as u32 > 200 { LTGREEN } else { YELLOW });
+    kprintln!("  {} train, {} held out, {} classes", f.seen_n, f.held_n, f.classes);
+    kprintln!("  seen      {}%", pct(f.seen_ok, f.seen_n));
+    let te = pct(f.held_ok, f.held_n);
+    console::set_color(if te * f.classes as u32 > 200 { LTGREEN } else { YELLOW });
     kprintln!("  held out  {}%   <- the one that counts", te);
     console::set_color(LTGRAY);
-    kprintln!("  chance is {}%", 100 / classes.max(1));
-    kprintln!("  {} parameters, closed form -- no epochs, nothing to overfit", params);
-    if council_params > 0 {
+    kprintln!("  chance is {}%", 100 / f.classes.max(1));
+    kprintln!("  {} parameters, closed form -- no epochs, nothing to overfit", f.params);
+    if f.council_params > 0 {
         kprintln!(
             "  council {} more, counted not solved -- they judge confidence, not the answer",
-            council_params
+            f.council_params
         );
     }
-    let mhz = crate::time::tsc_mhz();
-    if mhz > 0 {
-        kprintln!("  fitted in {} ms", elapsed / mhz / 1000);
-    }
+    kprintln!("  fitted in {} ms", f.ms);
 }
 
 fn pct(a: usize, b: usize) -> u32 {
@@ -1596,7 +1649,13 @@ pub fn ensure_router() -> bool {
         return true;
     }
     let Some(blob) = crate::sysbox::read_blob(ROUTER_PATH) else {
-        return false;
+        // **Nothing cached, so fit one.** This function is named for a promise
+        // it did not keep: it loaded a router or gave up, and giving up meant
+        // the agent loop refused to act on a machine that was one second of
+        // arithmetic away from being able to. Fitting costs 1,115 ms measured,
+        // with pooled features and no forward pass, which is not a price worth
+        // making a person ask for.
+        return fit_router(default_lambda());
     };
     if blob.len() < 8 + 64 || &blob[0..8] != b"GLADOSRT" {
         return false;
