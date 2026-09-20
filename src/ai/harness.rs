@@ -1525,6 +1525,37 @@ pub fn route(task: &str, trust: Trust) -> Option<Choice> {
             .find(|a| a.name == name)
             .map(|a| a.mutates)
             .unwrap_or(false);
+
+        // **Record what was just computed, before it goes on the floor.**
+        //
+        // The loop above visits every class and keeps one argmax; the scores
+        // it walked past are the router's whole reasoning and nothing has ever
+        // been able to see them. Built here rather than recomputed anywhere
+        // else because `feature` is a prefill -- asking again would double the
+        // cost of every routing decision to draw a window.
+        //
+        // Names are copied in because the reader is the compositor, and a
+        // class index would make it call `with_engine`, which refuses while
+        // another task holds the model.
+        let mut cand: Vec<super::trace::Cand> = Vec::new();
+        let mut allowed = 0usize;
+        for (k, sc) in scores.iter().enumerate() {
+            let n = e.head.name(k);
+            let Some(a) = sysbox::APPLETS.iter().find(|a| a.name == n) else { continue };
+            if !trust.admits(a) {
+                continue;
+            }
+            allowed += 1;
+            cand.push(super::trace::Cand {
+                class: k,
+                name: alloc::string::String::from(n),
+                score: *sc,
+            });
+        }
+        cand.sort_by(|x, y| y.score.partial_cmp(&x.score).unwrap_or(core::cmp::Ordering::Equal));
+        cand.truncate(super::trace::TOPN);
+        super::trace::begin(task, cand, allowed, scores.len());
+
         Some(Choice { applet: name, mutates, steps: 1 })
     })?
 }
@@ -1647,6 +1678,9 @@ pub fn route_verdict(task: &str, trust: Trust) -> Option<(Choice, super::council
             .find(|a| a.name == name)
             .map(|a| a.mutates)
             .unwrap_or(false);
+
+        // The other half of the record `route` opened a moment ago.
+        super::trace::settle(probe_idx, lexical, character, winner, agreement, rule.name());
 
         Some((
             Choice { applet: name, mutates, steps: 1 },

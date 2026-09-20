@@ -4437,7 +4437,7 @@ pub(crate) fn axis_of(line: &str) -> Option<usize> {
 /// invisible reads as untried, an untried axis is maximally uncertain, so it
 /// gets reached for and measured. The loop recovers by looking rather than by
 /// assuming.
-fn axis_counts() -> [(u32, u32); AXIS_NAMES.len()] {
+pub fn axis_counts() -> [(u32, u32); AXIS_NAMES.len()] {
     let mut out = [(0u32, 0u32); AXIS_NAMES.len()];
     for line in ledger_tail(usize::MAX) {
         if let Some(i) = axis_of(&line) {

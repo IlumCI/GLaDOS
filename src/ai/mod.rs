@@ -29,6 +29,7 @@ pub mod harness;
 pub mod model;
 pub mod oops;
 pub mod outcome;
+pub mod trace;
 pub mod probe;
 pub mod progress;
 pub mod problem;

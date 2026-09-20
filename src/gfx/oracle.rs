@@ -1,287 +1,422 @@
-//! Oracle. God Says, made to tell the one future that is knowable.
+//! What the machine was thinking, drawn from what it already computed.
 //!
-//! TempleOS drew uniform words and let the operator hear prophecy; the
-//! randomness was the timing of the operator's hands. This keeps that entropy
-//! (every key and mouse move since boot feeds it, [`crate::ai::godbits`]) and
-//! changes the subject from hallucinated words to the machine's measured
-//! state. It samples uptime, heap, task switching and the operator's own
-//! touch rate once a second, fits a linear dynamical model from that history
-//! with the router's Cholesky solver, and rolls the state forward under three
-//! interventions -- left alone, carried on, put under load. The window draws
-//! the result as forked timelines: solid history up to now, three diverging
-//! projections after.
+//! **This window used to plot three futures and they were the same line three
+//! times.** `futures::project` fits `v' = a + b*v + c*u` per variable and rolls
+//! it forward under three forced values of `u`, the operator's touch rate --
+//! and `godbits::FELT`, which is that rate, is incremented from the i8042 and
+//! PS/2 interrupt handlers and nowhere else. `win keys` bypasses both and so
+//! does serial, so on every machine this has ever been driven on the control
+//! was **zero in every sample**. A coefficient fitted against a treatment that
+//! never varies is not small, it is unidentifiable; the "left alone" and
+//! "carried on" branches were literally the same intervention; and the third
+//! multiplied a zero. Measured, twice in one boot: heap rising 16192 -> 24408
+//! KiB while all three futures predicted it falling, and "put under load"
+//! predicting the *least* heap of the three.
 //!
-//! Honest where the word-prophecy version was not. A branch is the
-//! counterfactual `do(activity := level)` on a controlled linear system fitted
-//! from how the machine has actually behaved. It predicts the machine, from
-//! the machine. The noise on each step is the God-bits fold, so the reading
-//! still depends on every touch the machine has felt -- the operator still
-//! plays the instrument, now over real state.
+//! The telemetry itself is fine and still feeds `aixi` and `context`. What was
+//! wrong was showing it here as though it meant something.
+//!
+//! So the window shows reasoning the machine really does. Every panel below is
+//! a quantity that was already being computed and then discarded:
+//!
+//! - **Route**: one hidden state, a ridge score for every applet the trust
+//!   gate admits, three independent cores voting, and the rule that resolved
+//!   them. All of it fell on the floor at the end of `route_verdict`.
+//! - **Council**: how often those three agree. Unanimity was measured at 90.3%
+//!   correct against 50% when split, which is the one number here that should
+//!   change what somebody does.
+//! - **Ledger**: the self-improvement machine's search state -- which cells of
+//!   the MAP-Elites archive are lit, and how uncertain each axis is.
+//! - **Outcome**: how far apart two applets are, measured by what they print.
+//!
+//! ### Nothing here may block the compositor
+//!
+//! `draw_in` runs on the task that owns the screen, and after the single-writer
+//! work that is the *only* painter -- so a panel that waited on the model would
+//! stop the whole display, not just itself. `trace` copies applet names in at
+//! record time so this never calls `with_engine`, the ledger reads are small
+//! namespace lookups, and the outcome matrix dispatches fourteen applets and is
+//! therefore behind a keypress rather than computed on a frame.
 
 use super::theme::{self, Rect};
 use super::{Color, DeskApp, Framebuffer};
-use crate::ai::futures::{self, NVARS, VAR_NAMES};
+use crate::ai::trace;
 use alloc::format;
 use alloc::string::String;
+use alloc::vec::Vec;
 
-/// One colour per branch: left alone, carried on, under load.
-const BRANCH_COLORS: [Color; 3] = [
-    Color::new(0x5A, 0x9B, 0xD5), // cool blue -- the machine at rest
-    theme::APERTURE,              // amber -- the present carried forward
-    Color::new(0xD5, 0x5A, 0x3A), // hot red -- pushed hard
+const TABS: [&str; 4] = ["Route", "Council", "Ledger", "Outcome"];
+
+/// The probe, the lexical core, the character core. One colour each, used for
+/// the vote markers and the agreement bars alike so the two panels read as one
+/// idea.
+const VOTER_COLORS: [Color; 3] = [
+    theme::APERTURE,               // the probe -- the machine's own voice
+    Color::new(0x5A, 0x9B, 0xD5),  // lexical
+    Color::new(0x6C, 0xC2, 0x8A),  // character
 ];
 
 pub struct Oracle {
-    proj: Option<futures::Projection>,
-    /// Which state variable the big graph shows.
-    var: usize,
+    tab: usize,
+    /// The applet distance matrix, once somebody has asked for it. Never
+    /// computed during a frame: `outcome::probe` dispatches fourteen applets
+    /// and captures their output, which is a long way past what a paint may do.
+    matrix: Option<crate::ai::outcome::Matrix>,
     status: String,
 }
 
 impl Oracle {
-    pub fn new(_arg: &str) -> Self {
-        let mut o = Self { proj: None, var: 0, status: String::new() };
-        o.consult();
-        o
+    pub fn new(arg: &str) -> Self {
+        let tab = TABS
+            .iter()
+            .position(|t| t.eq_ignore_ascii_case(arg.trim()))
+            .unwrap_or(0);
+        Self { tab, matrix: None, status: String::new() }
     }
 
     pub fn preferred() -> (u32, u32) {
-        (640, 460)
-    }
-
-    fn consult(&mut self) {
-        // Fast: a 3x3 fit per variable and a rollout, no model forward passes.
-        // The window stays responsive, unlike anything that runs the network.
-        let pr = futures::project(24);
-        self.status = if pr.fitted {
-            format!(
-                "3 futures fitted from {} samples, fed by {} touches",
-                pr.hist.len(),
-                pr.felt
-            )
-        } else {
-            format!(
-                "warming up: {} of 4 samples. leave it running a few seconds",
-                pr.hist.len()
-            )
-        };
-        self.proj = Some(pr);
+        (700, 480)
     }
 
     fn layout(client: Rect) -> (Rect, Rect, Rect) {
         let lh = theme::text_h();
-        let tabs = Rect::new(client.x + 8, client.y + 6, client.w.saturating_sub(16), lh + 8);
-        let graph = Rect::new(
-            client.x + 8,
+        let tabs = Rect::new(client.x + 6, client.y + 6, client.w.saturating_sub(12), lh + 10);
+        let foot = Rect::new(
+            client.x + 6,
+            client.y + client.h.saturating_sub(lh + 8),
+            client.w.saturating_sub(12),
+            lh + 2,
+        );
+        let body = Rect::new(
+            client.x + 6,
             tabs.y + tabs.h + 6,
-            client.w.saturating_sub(16),
-            client.h.saturating_sub(tabs.h + lh * 3 + 34),
+            client.w.saturating_sub(12),
+            client
+                .h
+                .saturating_sub(tabs.h + lh + 28),
         );
-        let legend = Rect::new(
-            client.x + 8,
-            graph.y + graph.h + 4,
-            client.w.saturating_sub(16),
-            lh * 2 + 6,
-        );
-        (tabs, graph, legend)
+        (tabs, body, foot)
     }
 
-    fn var_tabs(tabs: Rect) -> [Rect; NVARS] {
-        let w = tabs.w / NVARS as u32;
-        core::array::from_fn(|i| Rect::new(tabs.x + i as u32 * w, tabs.y, w - 2, tabs.h))
+    fn tab_rects(tabs: Rect) -> Vec<Rect> {
+        let w = tabs.w / TABS.len() as u32;
+        (0..TABS.len())
+            .map(|i| Rect::new(tabs.x + i as u32 * w, tabs.y, w.saturating_sub(4), tabs.h))
+            .collect()
     }
 
-    /// Value range of the selected variable across history and every branch,
-    /// so all timelines share one honest scale.
-    fn range(&self, var: usize) -> (f32, f32) {
-        let Some(pr) = &self.proj else { return (0.0, 1.0) };
-        let mut lo = f32::INFINITY;
-        let mut hi = f32::NEG_INFINITY;
-        for s in &pr.hist {
-            lo = lo.min(s.vars[var]);
-            hi = hi.max(s.vars[var]);
+    // --- Route -----------------------------------------------------------
+
+    fn draw_route(&self, fb: &Framebuffer, r: Rect) -> String {
+        let lh = theme::text_h();
+        let all = trace::recent();
+        let Some(d) = all.last() else {
+            theme::text_over(fb, r.x + 8, r.y + 8,
+                "no routing decision yet -- ask it something, or run 'teach'",
+                theme::SCREEN_TEXT);
+            return String::from("the router has not been asked anything this boot");
+        };
+
+        // What was asked, and what the grammar left of the table.
+        let ask = clip(&d.task, fits(r.w.saturating_sub(20)));
+        theme::text_over(fb, r.x + 8, r.y + 6, &format!("\"{}\"", ask), theme::FACE);
+        theme::text_over(
+            fb,
+            r.x + 8,
+            r.y + 8 + lh,
+            &clip(&format!("{} of {} applets reachable", d.allowed, d.total),
+                  fits(r.w.saturating_sub(16))),
+            theme::SHADOW,
+        );
+
+        // The candidates, as bars. Scores are ridge outputs and can be
+        // negative, so the bar is drawn against the span of what is shown
+        // rather than against zero -- a bar chart with no zero on it is
+        // honest here and would not be if these were counts.
+        let top = r.y + 12 + lh * 2;
+        let rows = d.cand.len().min(trace::TOPN) as u32;
+        if rows == 0 {
+            return String::from("nothing was reachable at this trust level");
         }
-        for b in &pr.branches {
-            for v in &b.traj {
-                lo = lo.min(v[var]);
-                hi = hi.max(v[var]);
+        let row_h = ((r.y + r.h).saturating_sub(top) / rows.max(1)).min(lh + 12);
+        let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+        for c in &d.cand {
+            lo = lo.min(c.score);
+            hi = hi.max(c.score);
+        }
+        let span = (hi - lo).max(1e-3);
+        let label_w = theme::text_w(10);
+        let bar_x = r.x + 10 + label_w;
+        let bar_w = r.w.saturating_sub(label_w + 30);
+
+        for (i, c) in d.cand.iter().take(rows as usize).enumerate() {
+            let y = top + i as u32 * row_h;
+            let won = c.class == d.winner;
+            theme::text_over(fb, r.x + 8, y + 2, &clip(&c.name, 10),
+                             if won { theme::APERTURE } else { theme::SCREEN_TEXT });
+            let f = ((c.score - lo) / span).clamp(0.02, 1.0);
+            let w = (f * bar_w as f32) as u32;
+            fb.rect(bar_x, y + 3, bar_w, row_h.saturating_sub(8), theme::SCREEN);
+            fb.rect(bar_x, y + 3, w.max(2), row_h.saturating_sub(8),
+                    if won { theme::APERTURE_DEEP } else { Color::new(0x2A, 0x3A, 0x46) });
+
+            // Who voted for this one. Three small marks rather than a legend,
+            // so a split decision is visible at a glance as marks that do not
+            // line up.
+            let mut mx = bar_x + bar_w + 4;
+            for (vi, v) in [d.probe, d.lexical, d.character].iter().enumerate() {
+                if *v == c.class && d.settled {
+                    fb.rect(mx, y + 5, 5, row_h.saturating_sub(12), VOTER_COLORS[vi]);
+                }
+                mx += 7;
             }
         }
-        if !lo.is_finite() || !hi.is_finite() {
-            return (0.0, 1.0);
+
+        if d.settled {
+            format!(
+                "{} -- {} of 3 agreed ({})",
+                d.winner_name(),
+                d.agreement,
+                if d.agreement == 3 { "90% right" } else { "a split is 50%" }
+            )
+        } else {
+            format!("{} -- the probe alone, no cores asked", d.winner_name())
         }
-        // A flat line should sit mid-graph, not have its own noise magnified.
-        if (hi - lo).abs() < 1e-3 {
-            return (lo - 1.0, hi + 1.0);
+    }
+
+    // --- Council ---------------------------------------------------------
+
+    fn draw_council(&self, fb: &Framebuffer, r: Rect) -> String {
+        let lh = theme::text_h();
+        let census = trace::agreement_census();
+        let total: usize = census.iter().sum();
+        theme::text_over(fb, r.x + 8, r.y + 6,
+            &clip("three cores vote on every decision", fits(r.w.saturating_sub(16))),
+            theme::SHADOW);
+
+        let top = r.y + 10 + lh;
+        let bar_h = lh + 8;
+        let label_w = theme::text_w(12);
+        for (i, n) in census.iter().enumerate().rev() {
+            let k = 2 - i; // draw 3-of-3 first
+            let y = top + k as u32 * (bar_h + 6);
+            let agree = i + 1;
+            theme::text_over(fb, r.x + 8, y + 2,
+                &format!("{} of 3", agree),
+                if agree == 3 { theme::APERTURE } else { theme::SCREEN_TEXT });
+            let bw = r.w.saturating_sub(label_w + 40);
+            fb.rect(r.x + 8 + label_w, y, bw, bar_h, theme::SCREEN);
+            if total > 0 {
+                let f = *n as f32 / total as f32;
+                fb.rect(r.x + 8 + label_w, y, ((f * bw as f32) as u32).max(1), bar_h,
+                        VOTER_COLORS[2 - k as usize]);
+            }
+            theme::text_over(fb, r.x + 8 + label_w + bw + 6, y + 2,
+                             &format!("{}", n), theme::SCREEN_TEXT);
         }
-        let pad = (hi - lo) * 0.1;
-        (lo - pad, hi + pad)
+
+        if total == 0 {
+            return String::from("no settled decisions yet");
+        }
+        format!("{} decision(s) -- unanimity is the signal", total)
+    }
+
+    // --- Ledger ----------------------------------------------------------
+
+    fn draw_ledger(&self, fb: &Framebuffer, r: Rect) -> String {
+        use crate::ai::godel;
+        let lh = theme::text_h();
+        theme::text_over(fb, r.x + 8, r.y + 6,
+            &clip("archive: rank across, repair down",
+                  fits(r.w.saturating_sub(16))),
+            theme::SHADOW);
+
+        // The MAP-Elites archive as the grid it actually is. A variant earns a
+        // cell by beating whatever is in that cell, not by beating the
+        // champion, so a lit cell is a niche somebody survived in.
+        let cols = 4u32;
+        let rows = (godel::CELLS as u32 / cols).max(1);
+        let gw = (r.w.saturating_sub(16)).min(320);
+        let cw = gw / cols;
+        let ch = (lh + 14).min(34);
+        let top = r.y + 10 + lh;
+        let mut lit = 0;
+        for i in 0..godel::CELLS {
+            let cx = r.x + 8 + (i as u32 % cols) * cw;
+            let cy = top + (i as u32 / cols) * (ch + 4);
+            let e = godel::cell(i);
+            // An empty cell has to be visible as an empty cell. The first
+            // version filled it with `SCREEN`, which is the well it sits in,
+            // so a fresh machine showed no grid at all -- and "nothing has
+            // been tried yet" and "this panel is broken" looked identical.
+            let w = cw.saturating_sub(4);
+            match &e {
+                Some(_) => {
+                    lit += 1;
+                    fb.rect(cx, cy, w, ch, theme::APERTURE_DEEP);
+                }
+                None => {
+                    fb.rect(cx, cy, w, ch, Color::new(0x14, 0x1B, 0x22));
+                    fb.rect(cx, cy, w, 1, Color::new(0x2C, 0x3A, 0x45));
+                    fb.rect(cx, cy + ch - 1, w, 1, Color::new(0x2C, 0x3A, 0x45));
+                    fb.rect(cx, cy, 1, ch, Color::new(0x2C, 0x3A, 0x45));
+                    fb.rect(cx + w - 1, cy, 1, ch, Color::new(0x2C, 0x3A, 0x45));
+                }
+            }
+            if let Some(el) = e {
+                theme::text_over(fb, cx + 4, cy + 3,
+                                 &format!("{}", (el.score * 100.0) as i64),
+                                 theme::TITLE_TEXT);
+            }
+        }
+
+        // Which axis the loop reaches for next is decided by which one it can
+        // least predict, so the counts are the search's own state.
+        let ax_x = r.x + 16 + gw;
+        let counts = godel::axis_counts();
+        for (i, (yes, no)) in counts.iter().enumerate() {
+            let y = top + i as u32 * (lh + 3);
+            if y + lh > r.y + r.h {
+                break;
+            }
+            let n = yes + no;
+            theme::text_over(fb, ax_x, y,
+                &format!("{:<8}{}/{}", godel::AXIS_NAMES[i], yes, n),
+                if n == 0 { theme::SHADOW } else { theme::SCREEN_TEXT });
+        }
+
+        format!("{} of {} cells lit, {} trials on the ledger",
+                lit, godel::CELLS, godel::ledger_len())
+    }
+
+    // --- Outcome ---------------------------------------------------------
+
+    fn draw_outcome(&self, fb: &Framebuffer, r: Rect) -> String {
+        let lh = theme::text_h();
+        let Some(m) = &self.matrix else {
+            theme::text_over(fb, r.x + 8, r.y + 6,
+                "how far apart two applets are, by what they printed",
+                theme::SHADOW);
+            theme::text_over(fb, r.x + 8, r.y + 10 + lh,
+                "press M to measure -- it runs fourteen applets,",
+                theme::SCREEN_TEXT);
+            theme::text_over(fb, r.x + 8, r.y + 12 + lh * 2,
+                "which is why it is not done on a frame",
+                theme::SCREEN_TEXT);
+            return String::from("not measured this boot");
+        };
+
+        let n = m.len().min(16) as u32;
+        let cell = ((r.w.saturating_sub(16)).min(r.h.saturating_sub(lh + 16)) / n.max(1)).max(4);
+        let top = r.y + 8 + lh;
+        theme::text_over(fb, r.x + 8, r.y + 4,
+            &clip("dark is near, light is far", fits(r.w.saturating_sub(16))),
+            theme::SHADOW);
+        for a in 0..n {
+            for b in 0..n {
+                let d = m.get(a as usize, b as usize).clamp(0.0, 1.0);
+                let v = (d * 220.0) as u8;
+                fb.rect(r.x + 8 + b * cell, top + a * cell,
+                        cell.saturating_sub(1), cell.saturating_sub(1),
+                        Color::new(v / 3, v / 2, v));
+            }
+        }
+        format!("{} of {} ran; the rest mutate", m.ran, m.len())
     }
 }
 
-impl DeskApp for Oracle {
-    /// The plot needs a history axis worth reading; below this the forked
-    /// projections overlap into a single line.
-    fn min_size(&self) -> (u32, u32) {
-        (420, 300)
+fn clip(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        return String::from(s);
     }
+    s.chars().take(n.saturating_sub(1)).collect::<String>() + "."
+}
 
+/// How many characters fit across `w` pixels.
+///
+/// **Measured rather than guessed, because a guess clipped every line.** The
+/// first version passed literal counts -- 78 for the footer -- which is a
+/// character count standing in for a width, and this tree has paid for that
+/// confusion in three other places. A glyph is eight pixels doubled by
+/// `CHROME_SCALE`, so the answer is forty across this window and not seventy
+/// eight, and the sentences lost their ends.
+fn fits(w: u32) -> usize {
+    (w / theme::text_w(1).max(1)) as usize
+}
+
+impl DeskApp for Oracle {
     fn draw_in(&self, fb: &Framebuffer, client: Rect, focused: bool) {
         theme::panel(fb, client);
-        let (tabs, graph, legend) = Self::layout(client);
-        let lh = theme::text_h();
+        let (tabs, body, foot) = Self::layout(client);
         let _ = focused;
 
-        for (i, r) in Self::var_tabs(tabs).iter().enumerate() {
-            theme::button(fb, *r, VAR_NAMES[i], i == self.var, i == self.var);
+        for (i, rect) in Self::tab_rects(tabs).iter().enumerate() {
+            theme::button(fb, *rect, TABS[i], i == self.tab, i == self.tab);
         }
 
-        theme::well(fb, graph, theme::SCREEN);
-        let g = graph.shrink(6);
-
-        let Some(pr) = &self.proj else { return };
-        let (lo, hi) = self.range(self.var);
-        let span = (hi - lo).max(1e-3);
-
-        let hist_span = pr.hist.len().max(1) as f32;
-        let total_t = hist_span + pr.steps as f32;
-        let x_of = |t: f32| g.x + (t / total_t * g.w as f32) as u32;
-        let y_of = |v: f32| {
-            let f = ((v - lo) / span).clamp(0.0, 1.0);
-            g.y + g.h - (f * g.h as f32) as u32
+        theme::well(fb, body, theme::SCREEN);
+        let inner = body.shrink(4);
+        let note = match self.tab {
+            0 => self.draw_route(fb, inner),
+            1 => self.draw_council(fb, inner),
+            2 => self.draw_ledger(fb, inner),
+            _ => self.draw_outcome(fb, inner),
         };
-
-        // Guide lines and value labels at hi, mid, lo.
-        for (frac, v) in [(0.0f32, hi), (0.5, (lo + hi) / 2.0), (1.0, lo)] {
-            let y = g.y + (frac * g.h as f32) as u32;
-            let mut x = g.x;
-            while x < g.x + g.w {
-                fb.rect(x, y, 2, 1, theme::SHADOW);
-                x += 6;
-            }
-            let mut s = String::new();
-            push_num(&mut s, v as i64);
-            theme::text_over(fb, g.x + 2, y.saturating_sub(lh + 1).max(g.y), &s, theme::SHADOW);
-        }
-
-        // The fork: where history ends and the futures begin.
-        let fork_x = x_of(hist_span);
-        let mut fy = g.y;
-        while fy < g.y + g.h {
-            fb.rect(fork_x, fy, 1, 2, theme::SCREEN_TEXT);
-            fy += 4;
-        }
-        theme::text_over(fb, fork_x + 3, g.y + 1, "now", theme::SCREEN_TEXT);
-
-        // History, solid white -- the shared past.
-        for i in 1..pr.hist.len() {
-            let (a, b) = (pr.hist[i - 1].vars[self.var], pr.hist[i].vars[self.var]);
-            fb.line(
-                x_of(i as f32 - 1.0) as i32,
-                y_of(a) as i32,
-                x_of(i as f32) as i32,
-                y_of(b) as i32,
-                theme::HILIGHT,
-            );
-        }
-
-        // The three futures, each its colour, from the fork point.
-        let start = pr.hist.last().map(|s| s.vars[self.var]).unwrap_or(0.0);
-        for (bi, b) in pr.branches.iter().enumerate() {
-            let col = BRANCH_COLORS[bi.min(2)];
-            let mut prev = (hist_span, start);
-            for (k, v) in b.traj.iter().enumerate() {
-                let cur = (hist_span + k as f32 + 1.0, v[self.var]);
-                fb.line(
-                    x_of(prev.0) as i32,
-                    y_of(prev.1) as i32,
-                    x_of(cur.0) as i32,
-                    y_of(cur.1) as i32,
-                    col,
-                );
-                prev = cur;
-            }
-        }
-
-        // Legend: current state, and each intervention's end-state for this var.
-        let now = futures::snapshot_now();
-        let head = format!(
-            "now: heap {} KiB  {}/s switch  {}/s touch  {} tasks",
-            now.vars[0] as u64, now.vars[1] as u64, now.vars[2] as u64, now.vars[3] as u64
-        );
-        theme::text(fb, legend.x, legend.y, &head, theme::TEXT, theme::FACE);
-        let mut lx = legend.x;
-        for (bi, b) in pr.branches.iter().enumerate() {
-            let col = BRANCH_COLORS[bi.min(2)];
-            let ly = legend.y + lh + 4;
-            fb.rect(lx, ly + 2, 10, 8, col);
-            let end = b.traj.last().map(|v| v[self.var]).unwrap_or(0.0);
-            let mut label = format!("{} to ", b.name);
-            push_num(&mut label, end as i64);
-            theme::text(fb, lx + 14, ly, &label, theme::TEXT, theme::FACE);
-            lx += theme::text_w(label.len() + 3) + 16;
-        }
-
-        let sy = legend.y + legend.h + 2;
-        if sy + lh < client.y + client.h {
-            theme::text(fb, client.x + 8, sy, &self.status, theme::TEXT, theme::FACE);
-        }
+        let line = if self.status.is_empty() { note } else { self.status.clone() };
+        theme::text_over(fb, foot.x + 2, foot.y, &clip(&line, fits(foot.w)), theme::SHADOW);
     }
 
     fn key(&mut self, k: u8) -> bool {
-        use crate::dev::kbd;
         match k {
-            b'\n' | b'\r' => self.consult(),
-            kbd::KEY_LEFT | kbd::KEY_UP => self.var = (self.var + NVARS - 1) % NVARS,
-            kbd::KEY_RIGHT | kbd::KEY_DOWN | b'\t' => self.var = (self.var + 1) % NVARS,
-            _ => return false,
+            b'\t' => {
+                self.tab = (self.tab + 1) % TABS.len();
+                self.status.clear();
+                true
+            }
+            b'1'..=b'4' => {
+                self.tab = (k - b'1') as usize;
+                self.status.clear();
+                true
+            }
+            // **Measuring is a key and never a frame.** `outcome::probe`
+            // dispatches fourteen applets and captures what each one prints.
+            // On the compositor that is a stalled screen, and the watchdog
+            // would correctly report the display as stopped.
+            b'm' | b'M' => {
+                self.matrix = crate::ai::outcome::probe();
+                self.status = match &self.matrix {
+                    Some(_) => String::new(),
+                    None => String::from("the applet table would not answer"),
+                };
+                self.tab = 3;
+                true
+            }
+            _ => false,
         }
-        true
     }
 
     fn press(&mut self, client: Rect, x: i32, y: i32) -> bool {
         let (tabs, _, _) = Self::layout(client);
-        for (i, r) in Self::var_tabs(tabs).iter().enumerate() {
-            if x >= r.x as i32 && y >= r.y as i32 && x < (r.x + r.w) as i32 && y < (r.y + r.h) as i32 {
-                self.var = i;
+        for (i, r) in Self::tab_rects(tabs).iter().enumerate() {
+            if x >= r.x as i32
+                && y >= r.y as i32
+                && x < (r.x + r.w) as i32
+                && y < (r.y + r.h) as i32
+            {
+                self.tab = i;
+                self.status.clear();
                 return true;
             }
         }
-        // A press in the graph re-consults, the ritual gesture.
-        self.consult();
-        true
+        false
     }
 
     fn wheel(&mut self, notches: i32) -> bool {
-        let was = self.var;
-        self.var = if notches > 0 {
-            (self.var + 1) % NVARS
-        } else {
-            (self.var + NVARS - 1) % NVARS
-        };
-        self.var != was
-    }
-}
-
-/// Integer to string; the kernel console has no float formatting.
-fn push_num(s: &mut String, mut n: i64) {
-    if n < 0 {
-        s.push('-');
-        n = -n;
-    }
-    if n == 0 {
-        s.push('0');
-        return;
-    }
-    let mut digits = [0u8; 20];
-    let mut i = 0;
-    while n > 0 {
-        digits[i] = b'0' + (n % 10) as u8;
-        n /= 10;
-        i += 1;
-    }
-    while i > 0 {
-        i -= 1;
-        s.push(digits[i] as char);
+        if notches == 0 {
+            return false;
+        }
+        let n = TABS.len() as i32;
+        self.tab = (((self.tab as i32 + notches.signum()) % n + n) % n) as usize;
+        true
     }
 }
