@@ -264,6 +264,88 @@ pub fn queue_command(cmd: &str) {
     q.push(String::from(cmd));
 }
 
+/// Desktop changes asked for by a task that does not own the desktop.
+///
+/// **One writer, and it is the compositor.** `Desktop` lives behind a `Racy`,
+/// which is single-core interior mutability and not a lock, so two tasks
+/// holding `&mut Desktop` is undefined behaviour rather than a race. That was
+/// safe by accident while the shell both changed the windows and drew them. It
+/// stopped being safe when the compositor task started reading the window list
+/// for the two milliseconds a frame takes: `open_authoring` runs on the *agent*
+/// task and calls `open_app`, which is a `Vec::push` that can reallocate
+/// `windows` out from under a walk.
+///
+/// So a task that is not the compositor posts an operation and the compositor
+/// applies it between frames, where nothing else is looking at the desktop.
+/// Same discipline as `autosnap_tick`/`autosnap_poll`, and the same reason:
+/// the timer flags and the owner acts.
+///
+/// **A `Vec` and not the ring in `linux/input.rs`.** That ring is lock-free and
+/// better in every way except the one that matters here -- its `const fn new`
+/// needs `T: Copy`, and `Op::OpenAuthoring` carries a `Box<dyn DeskApp>`.
+/// Forcing one mechanism would mean boxing every keystroke to serve the rare
+/// case. Input gets the ring; owned payloads get this.
+pub enum Op {
+    /// Open the authoring window, if it is not already open.
+    ///
+    /// The `Box` is built by the poster rather than in here, because
+    /// `AuthorWin::new` is the agent's business and this queue's job is to
+    /// carry it, not to know about it.
+    OpenApp { title: &'static str, icon: usize, app: alloc::boxed::Box<dyn super::DeskApp>, w: u32, h: u32 },
+}
+
+static OPS: Racy<Vec<Op>> = Racy::new(Vec::new());
+
+/// Small for the same reason `PENDING_CAP` is: this covers a burst, not a
+/// backlog. Nothing posts more than one of these per episode.
+const OPS_CAP: usize = 8;
+
+/// Ask the compositor to change the desktop.
+///
+/// Safe from any task. Full drops the newest and says so, exactly as
+/// `queue_command` does -- pushing the oldest out is the bug that replaces.
+pub fn post(op: Op) {
+    let q = unsafe { &mut *OPS.get() };
+    if q.len() >= OPS_CAP {
+        crate::kprintln!("  (desktop queue full -- an op was dropped)");
+        return;
+    }
+    q.push(op);
+    super::render::invalidate();
+}
+
+/// Apply everything posted. The compositor calls this, and nothing else may.
+///
+/// Drains to empty rather than one per frame: an op is cheap, and a window
+/// that opened two frames after it was asked for would read as the lag this
+/// whole change exists to remove.
+pub fn drain_ops() {
+    loop {
+        let op = {
+            let q = unsafe { &mut *OPS.get() };
+            if q.is_empty() {
+                return;
+            }
+            q.remove(0)
+        };
+        match op {
+            Op::OpenApp { title, icon, app, w, h } => {
+                if has_window(title) {
+                    continue;
+                }
+                open_app(title, icon, app, w, h);
+                clear_of_terminal();
+                focus_terminal();
+            }
+        }
+    }
+}
+
+/// How many ops are waiting. For the selftest.
+pub fn ops_len() -> usize {
+    unsafe { (*OPS.get()).len() }
+}
+
 const MARGIN: u32 = 8;
 const NUDGE: u32 = 16;
 /// A menu bar's height, which is the theme's and no longer the caption's.
@@ -1271,15 +1353,31 @@ fn clear_of_terminal() {
 /// reason and flagged a cell on the `f`.
 ///
 /// Idempotent. A second run must not stack a second window on the first.
+/// Ask for the authoring window.
+///
+/// **Posts rather than opens, because its caller is the agent task.**
+/// `ai/author.rs` runs on the resident agent task, and this used to reach
+/// straight into the window list from there: `open_app` is a `Vec::push` that
+/// can reallocate `windows` while the compositor task is walking them, which is
+/// two `&mut Desktop` and undefined behaviour rather than a race. It was the
+/// only genuine cross-task writer in the tree.
+///
+/// It also called `draw()` on the early-out, painting a frame from the agent
+/// task. That is `invalidate()` now -- asking the owner to paint rather than
+/// painting on its behalf.
 pub fn open_authoring() {
     if has_window("Writing") {
-        draw();
+        super::render::invalidate();
         return;
     }
     let (w, h) = super::agentwin::AuthorWin::preferred();
-    open_app("Writing", ICO_ORACLE, Box::new(super::agentwin::AuthorWin::new()), w, h);
-    clear_of_terminal();
-    focus_terminal();
+    post(Op::OpenApp {
+        title: "Writing",
+        icon: ICO_ORACLE,
+        app: Box::new(super::agentwin::AuthorWin::new()),
+        w,
+        h,
+    });
 }
 
 /// Is a window with this title already open?

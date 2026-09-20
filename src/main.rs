@@ -732,7 +732,23 @@ pub fn clock_iterations() -> u64 {
 /// would clear a request that came in halfway through and leave the screen one
 /// update behind, which is the shape of bug that is invisible until somebody
 /// moves a window during a long paint.
+/// How often a frame may be composed, at most.
+///
+/// Sixty, because a pointer drag and a window move are what a person actually
+/// watches and thirty reads as stepping on those. The frame is 2,143 us
+/// measured (`video bench`, one core), so this is about 13% of a core while
+/// something is continuously changing and **nothing at all when it is not** --
+/// a clean frame composes no pixels, so the cost is the deadline check.
+const FRAME_HZ: u64 = 60;
+
 fn comp_task() {
+    // `rdtsc` and not `lapic::ticks()`. That counter is incremented by the
+    // bootstrap processor's timer and is right for wall-clock-ish elapsed
+    // time, but this tree has already paid once for deriving a *duration* from
+    // it -- every network timeout was short by the core count and the check
+    // that should have caught it divided the error straight back out.
+    // Anything measuring an interval uses the TSC.
+    let mut next = time::rdtsc();
     loop {
         // Standing it down is what the machine did before this task existed,
         // which is how the before-number is taken without a second build.
@@ -740,6 +756,42 @@ fn comp_task() {
             task::yield_now();
             continue;
         }
+
+        // Ops first, and before the deadline check.
+        //
+        // These come from tasks that do not own the desktop, and applying them
+        // here is the whole point: this is the one moment nothing else is
+        // looking at the window list. Draining before composing means a window
+        // asked for during the last frame appears in this one rather than the
+        // next.
+        if !gfx::exclusive() {
+            gfx::desk::drain_ops();
+        }
+
+        let now = time::rdtsc();
+        if now < next {
+            // **`yield_now` and deliberately not `hlt`.**
+            //
+            // `hlt` is the obvious way to wait for a deadline and it is wrong
+            // here, because this scheduler has no blocked state: `State` is
+            // `Unused`, `Ready` and `Running`, and a task cannot stop being
+            // runnable. So `hlt` halts *the core*, not this task -- and the
+            // next thing to run does not run until an interrupt arrives, which
+            // at 100 Hz is up to ten milliseconds. That is ten milliseconds
+            // taken from the shell, once per round trip, during exactly the
+            // long foreground commands this whole change exists to fix.
+            //
+            // Yielding costs a `rdtsc` and a compare per visit and hands the
+            // core to whoever is actually ready. Real sleeping needs a blocked
+            // state and a wake from `render::invalidate`, which is surgery on
+            // the most delicate loop in the tree and buys nothing while there
+            // is always a shell wanting the core.
+            task::yield_now();
+            continue;
+        }
+        let mhz = time::tsc_mhz().max(1) as u64;
+        next = now + (mhz * 1_000_000) / FRAME_HZ;
+
         // A full-screen program owns the screen outright -- DOOM, the editor,
         // a guest holding /dev/fb0 -- so the desktop stands down rather than
         // contending. The repaint is owed for when it gives the screen back,
@@ -762,7 +814,6 @@ fn comp_task() {
                 gfx::render::restore_dirty();
             }
         }
-        task::yield_now();
     }
 }
 

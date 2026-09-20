@@ -2885,6 +2885,14 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             );
             // The contrast is the diagnosis: these two run on the clock task,
             // which wakes on its own quantum whatever the shell is doing.
+            // The number the whole single-writer design rests on. One means
+            // exactly one task has ever composed a frame this boot.
+            kprintln!(
+                "    composers       {:>6}   task(s) have ever composed a frame",
+                crate::gfx::render::composer_changes()
+            );
+            kprintln!("    desktop ops     {:>6}   posted and not yet applied",
+                crate::gfx::desk::ops_len());
             kprintln!("    clock paints    {:>6}   (clock task)", st.clocks);
             kprintln!("    cursor paints   {:>6}   (clock task)", st.cursors);
             if st.refused > 0 {

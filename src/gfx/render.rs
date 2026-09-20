@@ -113,8 +113,33 @@ static MAX_GAP: AtomicU64 = AtomicU64::new(0);
 /// When the window under measurement opened, so a rate can be computed.
 static SINCE: AtomicU64 = AtomicU64::new(0);
 
+/// Which task composed a frame, and whether more than one ever has.
+///
+/// **Single-writer has to be a printed number, not a belief.** Every stage
+/// after this one rests on "nothing else paints", and the only honest way to
+/// hold that is to record who did. `sync::audit` cannot answer it: `Racy::get`
+/// is `#[track_caller]` and every desktop mutation goes through `desk::with`,
+/// so all of them collapse to one line and the report says "shared" without
+/// saying by whom.
+static COMPOSER: AtomicU64 = AtomicU64::new(u64::MAX);
+static COMPOSERS: AtomicU64 = AtomicU64::new(0);
+
 pub fn drew() {
     DRAWS.fetch_add(1, Ordering::Relaxed);
+    let me = crate::task::current() as u64;
+    // A different composer than last time is what is being counted, not the
+    // identity itself -- `task::current()` answers 0 for both task 0 and an
+    // idle core, so the id alone is not trustworthy. A *change* in it is.
+    let prev = COMPOSER.swap(me, Ordering::Relaxed);
+    if prev != me {
+        COMPOSERS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// How many times the composing task changed. One means one task has ever
+/// composed a frame, which is the property the whole design rests on.
+pub fn composer_changes() -> u64 {
+    COMPOSERS.load(Ordering::Relaxed)
 }
 
 pub fn clock_painted() {
@@ -152,9 +177,13 @@ pub fn presented(rows: u64) {
 
 /// Start a fresh window. Everything below is measured from here.
 pub fn reset() {
-    for c in [&DRAWS, &PRESENTS, &WROTE, &ROWS, &CLOCKS, &CURSORS, &REFUSED, &MAX_GAP] {
+    for c in [&DRAWS, &PRESENTS, &WROTE, &ROWS, &CLOCKS, &CURSORS, &REFUSED, &MAX_GAP,
+              &COMPOSERS] {
         c.store(0, Ordering::Relaxed);
     }
+    // Not the identity -- resetting that would count the next frame as a new
+    // composer and report two where there is one.
+    COMPOSER.store(u64::MAX, Ordering::Relaxed);
     LAST.store(0, Ordering::Relaxed);
     SINCE.store(crate::time::rdtsc(), Ordering::Relaxed);
 }
