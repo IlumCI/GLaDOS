@@ -2906,8 +2906,13 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             );
             kprintln!("    desktop ops     {:>6}   posted and not yet applied",
                 crate::gfx::desk::ops_len());
-            kprintln!("    clock paints    {:>6}   (clock task)", st.clocks);
-            kprintln!("    cursor paints   {:>6}   (clock task)", st.cursors);
+            // Both say "compositor" now. They were the clock task's, and a
+            // rising count beside a frozen frame was the diagnosis; there is
+            // no second painter left to contrast against, so what they report
+            // is small direct writes the compositor made instead of composing
+            // a whole frame for a few thousand pixels.
+            kprintln!("    tray paints     {:>6}   (compositor, ~10 Hz)", st.clocks);
+            kprintln!("    cursor paints   {:>6}   (compositor)", st.cursors);
             if st.refused > 0 {
                 kprintln!(
                     "    refused         {:>6}   a full-screen program owned the screen",
@@ -2931,11 +2936,23 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             if let Some(st) = render::comp_state() {
                 kprintln!("    the scheduler has its task as '{}'", st);
             }
+            // **The worst quiet prints whether or not it crossed the bar.**
+            //
+            // It was inside the stall count, so a run with no alarm said
+            // nothing at all about how close it came -- and the interesting
+            // case turned out to be exactly that. `diag all` painted the tray
+            // 543 times in 87.8 s where a clean 10 Hz is about 878, so the
+            // compositor lost some thirty seconds in gaps each too short to
+            // trip a two-second threshold. A count of zero stalls is true and
+            // reads as nothing wrong; the worst gap is the number that says
+            // otherwise, which is the argument `presented` already makes one
+            // screen up about rates against intervals.
+            kprintln!(
+                "    worst quiet  {:>6} ms   the longest it has gone without a turn",
+                h.worst_ms
+            );
             if h.stalls > 0 {
-                kprintln!(
-                    "    it has gone quiet {} time(s); the longest was {} ms",
-                    h.stalls, h.worst_ms
-                );
+                kprintln!("    and it crossed the alarm threshold {} time(s)", h.stalls);
             }
             console::set_color(LTGRAY);
             // **A long gap is two completely different facts and this line

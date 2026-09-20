@@ -99,8 +99,20 @@ static WROTE: AtomicU64 = AtomicU64::new(0);
 /// Rows written, summed. A present that wrote one row and one that wrote a
 /// thousand are the same event and very different amounts of screen.
 static ROWS: AtomicU64 = AtomicU64::new(0);
-/// The clock task's two small paints, which are what keep moving while
-/// everything else is stopped.
+/// The taskbar's two readouts, and the pointer.
+///
+/// **These counted a different thing until the readouts moved.** They were
+/// the clock task's paints, and the whole point of counting them separately
+/// was that they kept moving while everything else was stopped -- a machine
+/// running with nobody responsible for the picture. Both painters are the
+/// compositor's now, so the contrast they existed to show is gone, and what
+/// they measure instead is how much of the screen a frame did not have to
+/// touch: a tenth of a second of uptime is a few thousand pixels where a
+/// composed frame is 2,143 us.
+///
+/// The question they used to answer is the watchdog's now, and it answers it
+/// better -- a beat that has stopped names the phase it stopped in, where a
+/// count that kept rising only ever said somebody was still painting.
 static CLOCKS: AtomicU64 = AtomicU64::new(0);
 static CURSORS: AtomicU64 = AtomicU64::new(0);
 /// Paints refused because a full-screen program owns the screen. Counted so a
@@ -142,7 +154,7 @@ pub fn composer_changes() -> u64 {
     COMPOSERS.load(Ordering::Relaxed)
 }
 
-pub fn clock_painted() {
+pub fn tray_painted() {
     CLOCKS.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -177,15 +189,18 @@ pub fn presented(rows: u64) {
 
 /// Start a fresh window. Everything below is measured from here.
 ///
-/// **The watchdog's counters are deliberately not among them.** These are a
-/// measurement window and `Health` is the compositor's life since boot, which
-/// are two different questions: "how did the screen do during that command"
-/// against "has this machine's only painter ever stopped". Zeroing a record of
-/// a stall because somebody opened a fresh window would throw away evidence of
-/// a defect to take a reading, and `render reset` is typed casually.
+/// **A measurement follows the window; a record of a defect does not.** Those
+/// are two different questions -- "how did the screen do during that command"
+/// against "has this machine's only painter ever stopped" -- and the watchdog
+/// holds one of each. `WORST_BEAT` is an interval, exactly like `MAX_GAP`
+/// beside it, so a gap from boot would otherwise sit in every later reading
+/// and hide a smaller one during the thing actually being measured. `BEATS`
+/// and `STALLS` stay: throwing away evidence that the compositor once stopped
+/// because somebody opened a fresh window would lose the most important thing
+/// this file knows, and `render reset` is typed casually.
 pub fn reset() {
     for c in [&DRAWS, &PRESENTS, &WROTE, &ROWS, &CLOCKS, &CURSORS, &REFUSED, &MAX_GAP,
-              &COMPOSERS] {
+              &COMPOSERS, &WORST_BEAT] {
         c.store(0, Ordering::Relaxed);
     }
     // Not the identity -- resetting that would count the next frame as a new
@@ -268,6 +283,8 @@ pub enum Phase {
     Pointer,
     /// Inside `desk::draw`, composing.
     Frame,
+    /// Painting the taskbar's uptime and charge.
+    Tray,
 }
 
 impl Phase {
@@ -278,6 +295,7 @@ impl Phase {
             Phase::Ops => 2,
             Phase::Pointer => 3,
             Phase::Frame => 4,
+            Phase::Tray => 5,
         }
     }
 
@@ -287,6 +305,7 @@ impl Phase {
             2 => Phase::Ops,
             3 => Phase::Pointer,
             4 => Phase::Frame,
+            5 => Phase::Tray,
             _ => Phase::Cold,
         }
     }
@@ -298,6 +317,7 @@ impl Phase {
             Phase::Ops => "applying posted ops",
             Phase::Pointer => "reading the pointer",
             Phase::Frame => "composing a frame",
+            Phase::Tray => "painting the taskbar readouts",
         }
     }
 }
@@ -522,7 +542,7 @@ pub fn selftest() -> bool {
         kprintln!("  {}  {}", if good { "ok " } else { "FAIL" }, what);
     };
 
-    claim("every phase code round-trips", (0..5).all(|c| Phase::of(c).code() == c));
+    claim("every phase code round-trips", (0..6).all(|c| Phase::of(c).code() == c));
     // Out of range must land on `Cold` rather than on a neighbouring phase: a
     // stray read reporting "composing a frame" would send somebody into the
     // window manager after a compositor that was never spawned.

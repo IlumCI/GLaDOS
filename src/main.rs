@@ -855,6 +855,7 @@ fn comp_task() {
             task::yield_now();
             continue;
         }
+        let mut composed = false;
         if gfx::render::take_dirty() {
             // `draw` takes the painter's claim itself and refuses if another
             // task holds it, which is the right answer: that task is painting
@@ -865,8 +866,20 @@ fn comp_task() {
             gfx::desk::draw();
             if gfx::render::stats().draws == before {
                 gfx::render::restore_dirty();
+            } else {
+                composed = true;
             }
         }
+
+        // The taskbar's two readouts, after the frame rather than before it.
+        //
+        // `draw` paints the *well* they sit in and not the text inside it, so
+        // a composed frame erases them and they have to go back on top. Doing
+        // it in the other order leaves the tray blank until the next tenth of
+        // a second ticks, which is the flicker that had no name while the
+        // clock task owned this and could only repaint on its own schedule.
+        gfx::render::beat(gfx::render::Phase::Tray);
+        gfx::desk::paint_tray(composed);
     }
 }
 
@@ -955,55 +968,21 @@ fn clock_task() {
                     }
                 }
             }
-            // The boot screen owns the framebuffer while it is up; an uptime
-            // counter in the corner of a splash is the tell that something is
-            // drawing behind the curtain.
-            if let (Some(fb), false) = (gfx::primary(), gfx::splash::active()) {
-                // The pointer used to be pumped from here, because the
-                // shell's idle loop was the only thing that read it and a long
-                // command took it away. The compositor reads it now, on its own
-                // task, whatever the shell is doing -- so this stand-in and the
-                // motion-only compromise it forced are both gone. The clock
-                // task paints the clock and nothing else.
-                // Short, because the taskbar reserves a fixed well for it and
-                // every character of that well is a character the task buttons
-                // do not get. The switch counter moved to `tasks`, which is
-                // where someone actually reads it.
-                let text = alloc::format!(" up {}.{}s ", tenths / 10, tenths % 10);
-                // The taskbar's clock well. It used to draw at a fixed
-                // screen corner, then on the terminal's title bar; the bar is
-                // where it belongs, and it is the one region no window can
-                // cover.
-                let c = gfx::desk::clock_rect(&fb);
-                let cs = gfx::theme::CHROME_SCALE;
-                let width = text.len() as u32 * gfx::font::GLYPH_W * cs;
-                if c.w > width {
-                    let x = c.x + (c.w - width) / 2;
-                    let y = c.y + (c.h.saturating_sub(gfx::font::GLYPH_H * cs)) / 2;
-                    // Through the compositor, and under the desktop's paint
-                    // claim. Writing the aperture directly left the shadow
-                    // describing pixels that were no longer there, so the
-                    // compositor could never repaint over the clock.
-                    gfx::desk::paint_clock(&fb, x, y, &text, cs);
-                }
-                // The charge, in its own well beside the clock. Painted from
-                // here for the same reason the clock is: this is the task that
-                // wakes on a schedule, and the reading behind it is cached, so
-                // asking ten times a second costs a comparison rather than a
-                // run of the firmware's bytecode.
-                if crossed_second {
-                    if let (Some(b), Some(t)) =
-                        (gfx::desk::battery_rect(&fb), gfx::desk::battery_text())
-                    {
-                        let bw = t.chars().count() as u32 * gfx::font::GLYPH_W * cs;
-                        if b.w > bw {
-                            let x = b.x + (b.w - bw) / 2;
-                            let y = b.y + (b.h.saturating_sub(gfx::font::GLYPH_H * cs)) / 2;
-                            gfx::desk::paint_clock(&fb, x, y, &t, cs);
-                        }
-                    }
-                }
-            }
+            // **The clock task no longer touches the framebuffer at all.**
+            //
+            // It painted the uptime and the charge straight into the taskbar
+            // from here, on its own quantum, while `draw` ran on another task
+            // -- two writers on one back buffer, which is exactly what the
+            // paint claim existed to referee. The compositor owns both
+            // readouts now (`desk::paint_tray`), so there is nobody to
+            // referee.
+            //
+            // That also ends the symptom this whole rearrangement started
+            // from: a desktop frozen solid with the uptime still ticking in
+            // the corner of it. The readouts stop when the compositor stops,
+            // so a stopped screen looks stopped, and what reports liveness
+            // instead is the watchdog above -- in words, on a channel the
+            // screen cannot take away.
         }
         core::hint::spin_loop();
     }

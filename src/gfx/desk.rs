@@ -2024,55 +2024,108 @@ pub fn cursor_show(fb: &Framebuffer, x: u32, y: u32) {
     unsafe { *SHOWN.get() = Some((x, y)) };
 }
 
-/// Paint the uptime into the taskbar's clock well, through the compositor.
+/// When the tray readouts were last painted, in tenths of a second.
 ///
-/// **The last thing in the system that drew straight to the aperture.** It
-/// wrote the digits over the firmware's memory while the compositor's shadow
-/// went on describing whatever had been there before, so the compositor could
-/// not erase the clock: a later `present` comparing `back` against `shadow`
-/// found them equal over that rectangle and wrote nothing, leaving digits on
-/// screen that the desktop had already decided to paint over. The clock kept
-/// moving above frozen windows for a different reason -- that was scheduling,
-/// and `pump_cursor` answered it -- but this is why the two never agreed about
-/// what was on the taskbar.
+/// `Racy` and not an atomic because it is touched by one task -- which is the
+/// whole point of this section and is now true by construction rather than by
+/// a claim. It was two tasks until the readouts moved here.
+static TRAY_AT: Racy<Option<u64>> = Racy::new(None);
+
+/// The taskbar's uptime and charge, painted straight rather than composed.
 ///
-/// Under the same claim the cursor takes, and for the same reason: this runs
-/// on the clock task and `draw` runs on the shell's, and they would otherwise
-/// both be writing the back buffer through a `&mut` neither knows the other
-/// holds. Interrupts off around the paint so the claim cannot be held across a
-/// task switch -- a few thousand pixels once a tenth of a second.
+/// **This is the last painter that was not the compositor, and moving it is
+/// what retires the paint claim's reason for existing.** It ran on the clock
+/// task, which wakes on its own quantum whatever the shell is doing, so it and
+/// `draw` were two tasks writing one back buffer through a `&mut` neither knew
+/// the other held. The claim is what stood between them. On this task there is
+/// nobody to exclude.
 ///
-/// Losing the claim costs one tick of clock. The shell is mid-frame and about
-/// to paint the taskbar itself.
-pub fn paint_clock(real: &Framebuffer, x: u32, y: u32, text: &str, scale: u32) {
-    // Somebody owns the screen. The clock is the one painter with no event
-    // behind it -- it fires on a schedule whether or not the desktop is what
-    // is being looked at -- so it is the one that has to ask.
+/// It also ends the symptom the whole rearrangement started from: a frozen
+/// desktop with an uptime still ticking in the corner of it. The readouts are
+/// the compositor's now, so a compositor that stops takes them with it, and a
+/// stopped screen looks stopped. What still reports liveness is the watchdog,
+/// which says so in words on a channel the screen cannot take away.
+///
+/// **Straight to the aperture and deliberately not folded into the frame.**
+/// Composing them would mean a whole frame every tenth of a second -- 2,143 us
+/// measured, so about 2% of a core with nothing happening at all -- to move
+/// four digits. The objection that made the old version wrong was never that
+/// it wrote a small rectangle; it was that a second *task* did. Writing
+/// through `compose::target` keeps the shadow honest, which is the half that
+/// actually mattered.
+///
+/// `after_frame` forces a repaint because `draw` paints the well these sit in
+/// and not the text inside it, so a composed frame erases them. They were
+/// blank for up to a tenth of a second after every frame before this, which is
+/// the flicker nobody had a name for.
+pub fn paint_tray(after_frame: bool) {
+    // The boot screen owns the framebuffer while it is up, and an uptime in
+    // the corner of a splash is the tell that something is drawing behind the
+    // curtain.
+    if super::splash::active() {
+        return;
+    }
+    let Some(fb) = super::primary() else { return };
+
+    // The rate check comes before the exclusive check on purpose. This is
+    // called every frame and the tray changes ten times a second, so counting
+    // a refusal per *call* would report a few thousand of them for a minute of
+    // DOOM and swamp the counter that exists to say a full-screen program was
+    // running. One per tenth is the same fact at the tray's own rate.
+    let tenths = crate::dev::lapic::ticks() * 10 / crate::TIMER_HZ as u64;
+    if !after_frame && unsafe { *TRAY_AT.get() } == Some(tenths) {
+        return;
+    }
+    // A full-screen program owns the screen outright, and the tray is not on
+    // it. `TRAY_AT` is deliberately left alone here: recording this tenth
+    // would make the tray believe it was up to date, and it would stay blank
+    // when the program gave the screen back until the clock happened to tick.
     if super::exclusive() {
         super::render::refused();
         return;
     }
-    super::render::clock_painted();
-    crate::cpu::without_interrupts(|| {
-        let Some(_claim) = Claim::take() else { return };
-        let target = super::compose::target().unwrap_or(*real);
-        // Light ink on the tray's own ground, not dark ink on `FACE`. The
-        // recess is a dark colour now, and `draw_text` fills the cell behind
-        // every glyph -- so the old pair stamped a cream block into the middle
-        // of it, which reads as a label stuck on the bar rather than as a
-        // readout set into it. The background has to stay opaque here: it is
-        // what erases the digit that was there a tenth of a second ago, and
-        // nothing else presents this rectangle on the clock's behalf.
-        target.draw_text(x, y, text, theme::TITLE_TEXT, theme::TRAY, scale);
-        // Straight through, because the clock is not on anybody's draw path:
-        // nothing else is going to present this rectangle on its behalf.
-        super::compose::flush_rect(
-            x,
-            y,
-            text.len() as u32 * super::font::GLYPH_W * scale,
-            super::font::GLYPH_H * scale,
-        );
-    });
+    unsafe { *TRAY_AT.get() = Some(tenths) };
+    super::render::tray_painted();
+
+    let cs = theme::CHROME_SCALE;
+    // Short, because the taskbar reserves a fixed well for it and every
+    // character of that well is a character the task buttons do not get.
+    let text = alloc::format!(" up {}.{}s ", tenths / 10, tenths % 10);
+    let c = clock_rect(&fb);
+    tray_text(&fb, c, &text, cs);
+
+    // The charge, in its own well beside the clock. The reading behind it is
+    // cached, so asking ten times a second costs a comparison rather than a
+    // run of the firmware's bytecode.
+    if let (Some(b), Some(t)) = (battery_rect(&fb), battery_text()) {
+        tray_text(&fb, b, &t, cs);
+    }
+}
+
+/// One readout, centred in its well.
+///
+/// Characters and not bytes for the width. Both wells hold ASCII today and
+/// `text.len()` was what the clock used, but a byte count is not a column
+/// count -- this tree has paid for that distinction in three separate places,
+/// and the charge string is the one here most likely to grow a symbol.
+fn tray_text(fb: &Framebuffer, well: Rect, text: &str, scale: u32) {
+    let width = text.chars().count() as u32 * super::font::GLYPH_W * scale;
+    if well.w <= width {
+        return;
+    }
+    let x = well.x + (well.w - width) / 2;
+    let y = well.y + (well.h.saturating_sub(super::font::GLYPH_H * scale)) / 2;
+    // Through the compositor's back buffer, so the shadow agrees with the
+    // screen. Writing the aperture directly left the shadow describing pixels
+    // that were no longer there, and a later `present` comparing the two found
+    // them equal and wrote nothing -- so the compositor could never erase the
+    // clock, and digits stayed on screen the desktop had decided to cover.
+    let target = super::compose::target().unwrap_or(*fb);
+    // Light ink on the tray's own ground, and the background stays opaque: it
+    // is what erases the digit that was there a tenth of a second ago, and
+    // nothing else presents this rectangle on the tray's behalf.
+    target.draw_text(x, y, text, theme::TITLE_TEXT, theme::TRAY, scale);
+    super::compose::flush_rect(x, y, width, super::font::GLYPH_H * scale);
 }
 
 /// Put the arrow somewhere, without letting anything else paint while it does.
