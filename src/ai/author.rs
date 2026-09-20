@@ -572,7 +572,7 @@ pub fn commission(name: &str, goal: &str, budget: usize) -> (Work, Report) {
     // what somebody who walked away came back for, and a window that vanishes
     // when the work finishes is a window that only ever shows the boring part.
     publish(&w, budget, false);
-    crate::gfx::desk::draw();
+    crate::gfx::render::invalidate();
     crate::app::draft::set_panel(name, &panel_of(&w));
     crate::app::draft::set_code(name, &w.code);
     let mut plan = String::new();
@@ -1102,7 +1102,7 @@ fn compose(w: &Work, p: &str) -> Option<String> {
 /// Run the loop with the model deciding, releasing the engine each step.
 pub fn generate(w: &mut Work, budget: usize) -> Report {
     publish(w, budget, true);
-    crate::gfx::desk::draw();
+    crate::gfx::render::invalidate();
     while w.steps < budget {
         // The same flag the episode loop checks, cleared by the agent task
         // when the job ends.
@@ -1121,7 +1121,7 @@ pub fn generate(w: &mut Work, budget: usize) -> Report {
         // step costs only what actually changed -- the same bargain the
         // episode transcript makes.
         publish(w, budget, true);
-        crate::gfx::desk::draw();
+        crate::gfx::render::invalidate();
         crate::task::yield_now();
         if stop || done(w).is_some() {
             break;

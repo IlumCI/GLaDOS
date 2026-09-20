@@ -93,7 +93,7 @@ pub fn with_screen<R>(f: impl FnOnce() -> R) -> R {
     // the terminal drawn over the top of it. Found by looking at a
     // screenshot taken after the picture was supposed to be gone.
     crate::gfx::compose::invalidate();
-    crate::gfx::desk::draw();
+    crate::gfx::render::invalidate();
     out
 }
 

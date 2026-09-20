@@ -311,7 +311,7 @@ pub fn wifi_service() {
     let last = unsafe { &mut *WIFI_SEEN.get() };
     if *last != now_key {
         *last = now_key;
-        crate::gfx::desk::draw();
+        crate::gfx::render::invalidate();
     }
 }
 

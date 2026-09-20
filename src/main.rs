@@ -506,6 +506,19 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
         Some(i) => kprintln!("  spawned '{}' as task {}", "clock", i),
         None => kprintln!("  could not spawn the clock task"),
     }
+    // The thing that owns the frame.
+    //
+    // Painting used to be push-model with no owner: sixteen scattered
+    // `desk::draw()` calls, plus the shell's idle loop, so a task inside a long
+    // command painted nothing and the screen stopped. Measured, `diag all`:
+    // one frame in seventy-three seconds and the screen still for fifty-nine
+    // of them, while the clock task painted a hundred and eighty-seven times
+    // beside it. That contrast is the whole diagnosis -- the machine was
+    // running, and nobody was responsible for the picture.
+    match task::spawn("comp", comp_task) {
+        Some(i) => kprintln!("  spawned '{}' as task {}", "comp", i),
+        None => kprintln!("  could not spawn the compositor task"),
+    }
     task::enable();
     kprintln!("  preemption enabled at {} Hz", TIMER_HZ);
 
@@ -707,6 +720,52 @@ pub fn clock_iterations() -> u64 {
 /// responsive while this runs, that is preemption doing it and nothing else.
 /// The iteration counter is the headless proof: it can only advance while this
 /// task holds the CPU.
+/// Compose a frame when one is owed, and never mind who asked.
+///
+/// The loop is deliberately dull. It does not know what changed, only that
+/// something did, and `desk::draw` repaints everything anyway -- total repaint
+/// is what makes the window manager obviously correct, and `compose::present`
+/// is what makes it cheap, writing only the rows that actually differ.
+///
+/// **The flag is taken before the frame, not after.** A change arriving while
+/// a frame is being composed has to survive that frame: taking it afterwards
+/// would clear a request that came in halfway through and leave the screen one
+/// update behind, which is the shape of bug that is invisible until somebody
+/// moves a window during a long paint.
+fn comp_task() {
+    loop {
+        // Standing it down is what the machine did before this task existed,
+        // which is how the before-number is taken without a second build.
+        if !gfx::render::enabled() {
+            task::yield_now();
+            continue;
+        }
+        // A full-screen program owns the screen outright -- DOOM, the editor,
+        // a guest holding /dev/fb0 -- so the desktop stands down rather than
+        // contending. The repaint is owed for when it gives the screen back,
+        // so the flag goes back too.
+        if gfx::exclusive() {
+            if gfx::render::take_dirty() {
+                gfx::render::restore_dirty();
+            }
+            task::yield_now();
+            continue;
+        }
+        if gfx::render::take_dirty() {
+            // `draw` takes the painter's claim itself and refuses if another
+            // task holds it, which is the right answer: that task is painting
+            // the same desktop. What must not happen is losing the request, so
+            // it goes back if the frame did not land.
+            let before = gfx::render::stats().draws;
+            gfx::desk::draw();
+            if gfx::render::stats().draws == before {
+                gfx::render::restore_dirty();
+            }
+        }
+        task::yield_now();
+    }
+}
+
 fn clock_task() {
     let mut last = u64::MAX;
     loop {

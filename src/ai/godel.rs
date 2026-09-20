@@ -1522,7 +1522,7 @@ fn ledger_append(line: &str) {
     // unrelated window operation repainted the desktop, so a trial could run,
     // be judged and be refused with the pane in front of the operator still
     // reading `0 of 0 trials`.
-    crate::gfx::desk::draw();
+    crate::gfx::render::invalidate();
 }
 
 fn render_certificate(c: &Certificate, seq: u32, hour: u8) -> String {

@@ -31,7 +31,62 @@
 //! Counters only, and deliberately nothing else: this file changes no
 //! behaviour, so a measurement taken with it cannot be an artefact of it.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+/// Something changed and the screen does not know yet.
+///
+/// **This replaces sixteen scattered `desk::draw()` calls**, which is what the
+/// freeze actually was: painting was push-model with no owner, so every
+/// feature that changed the screen had to remember to repaint, and a task
+/// inside a long command remembered nothing. Measured before this existed --
+/// one frame composed in seventy-three seconds, the screen still for
+/// fifty-nine of them, while the clock task painted a hundred and eighty-seven
+/// times.
+///
+/// Marking is free and idempotent; the compositor decides when. A caller that
+/// marks twice costs one frame, and a caller that forgets is the bug this is
+/// meant to end -- so `invalidate` is cheap enough that the honest default is
+/// to call it whenever anything might have moved.
+static DIRTY: AtomicBool = AtomicBool::new(true);
+
+/// Whether the compositor task paints at all.
+///
+/// Off is what the machine did before it existed, so the two can be compared
+/// in one binary rather than across two builds -- which is the difference
+/// between a paired measurement and two numbers from different machines, the
+/// distinction `rails.py` exists to make.
+static ENABLED: AtomicBool = AtomicBool::new(true);
+
+pub fn set_enabled(on: bool) {
+    ENABLED.store(on, Ordering::Release);
+    if on {
+        invalidate();
+    }
+}
+
+pub fn enabled() -> bool {
+    ENABLED.load(Ordering::Acquire)
+}
+
+/// Say the screen is out of date. Cheap, and safe from anywhere.
+pub fn invalidate() {
+    DIRTY.store(true, Ordering::Release);
+}
+
+/// Claim the pending repaint, if there is one.
+pub fn take_dirty() -> bool {
+    DIRTY.swap(false, Ordering::AcqRel)
+}
+
+/// Put it back, for a frame that could not be painted after all.
+///
+/// The compositor takes the flag *before* it tries, so a change arriving
+/// during a frame is not swallowed by that frame -- but a frame refused
+/// because a full-screen program owns the screen never happened, and dropping
+/// the flag there would leave the desktop stale until something else moved.
+pub fn restore_dirty() {
+    DIRTY.store(true, Ordering::Release);
+}
 
 /// Calls to `desk::draw`, which composes a whole frame into the back buffer.
 static DRAWS: AtomicU64 = AtomicU64::new(0);

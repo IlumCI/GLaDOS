@@ -378,7 +378,7 @@ pub fn hold_screen(on: bool) {
         }
     } else {
         crate::gfx::compose::invalidate();
-        crate::gfx::desk::draw();
+        crate::gfx::render::invalidate();
     }
 }
 

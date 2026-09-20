@@ -2430,7 +2430,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
         // The whole screen, not just the character grid. `redraw` alone would
         // restore the text and leave whatever scribbled on the frame around it
         // still there -- which is exactly the state `refresh` exists to fix.
-        "refresh" => crate::gfx::desk::draw(),
+        "refresh" => crate::gfx::render::invalidate(),
         "fat" => fat_cmd(rest),
         // `if` and `net` are the same command. `if` because that is what it
         // operates on; `net` because that is what it used to be called and
@@ -2809,9 +2809,68 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
         // twenty, and what a person experiences is the worst interval.
         "render" => {
             use crate::gfx::render;
+            if rest.trim() == "off" || rest.trim() == "on" {
+                let on = rest.trim() == "on";
+                render::set_enabled(on);
+                kprintln!(
+                    "  the compositor is {} -- {}",
+                    if on { "on" } else { "off" },
+                    if on { "frames land on their own" } else { "back to what froze" }
+                );
+                return;
+            }
             if rest.trim() == "reset" {
                 render::reset();
                 kprintln!("  counting from here");
+                return;
+            }
+            // Reproduce the shape that froze, so the fix has something to be
+            // measured against.
+            //
+            // `diag all` turned out to be the wrong probe: it changes nothing
+            // about the desktop, so a compositor that painted no frames during
+            // it was *correct*, and the sixty-second gap it reported was an
+            // idle screen rather than a stuck one. What the complaint is
+            // actually about is a long foreground command that keeps changing
+            // the screen while never returning to the idle loop -- an agent
+            // episode, a mining sweep, an authoring run. This is that shape and
+            // nothing else: touch the desktop, spin, repeat, never yield.
+            if let Some(n) = rest.trim().strip_prefix("probe") {
+                let secs: u64 = n.trim().parse().unwrap_or(5);
+                let mhz = crate::time::tsc_mhz().max(1) as u64;
+                let end = crate::time::rdtsc() + secs * mhz * 1_000_000;
+                render::reset();
+                let mut touched = 0u64;
+                while crate::time::rdtsc() < end {
+                    // A top-level claim, so this marks the screen dirty the
+                    // same way a real change would.
+                    crate::gfx::desk::with(|_| {});
+                    touched += 1;
+                    // Busy, not idle: the point is that this task does not give
+                    // the shell's idle loop a chance to paint on its behalf.
+                    for _ in 0..20_000 {
+                        core::hint::spin_loop();
+                    }
+                }
+                let st = render::stats();
+                kprintln!(
+                    "  {}s of a busy foreground command, {} desktop touch(es)",
+                    secs, touched
+                );
+                kprintln!(
+                    "    frames composed {:>5}   presents {:>5}   worst gap {} ms",
+                    st.draws, st.presents, st.max_gap_ms
+                );
+                if st.draws == 0 {
+                    console::set_color(LTRED);
+                    kprintln!("    nothing painted -- the screen was frozen for the whole of it");
+                } else {
+                    kprintln!(
+                        "    about {} frame(s) a second reached the screen",
+                        st.draws / secs.max(1)
+                    );
+                }
+                console::set_color(LTGRAY);
                 return;
             }
             let st = render::stats();
@@ -5409,7 +5468,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     let now = crate::gfx::console::view_of(crate::gfx::console::USER);
                     let kept = crate::gfx::console::history_of(crate::gfx::console::USER);
                     if moved {
-                        desk::draw();
+                        crate::gfx::render::invalidate();
                     }
                     kprintln!("  {} row(s) back of {} kept", now, kept);
                 }
@@ -5436,7 +5495,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 }
                 "clear" | "none" => {
                     desk::minimise_all();
-                    desk::draw();
+                    crate::gfx::render::invalidate();
                 }
                 // `win round [n]` -- the focused window's corner radius, 0 for
                 // a plain rectangle. Exposed on the shell rather than settled

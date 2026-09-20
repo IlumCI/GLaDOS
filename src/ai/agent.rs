@@ -701,7 +701,7 @@ pub fn run(goal: &str, trust: Trust, max_steps: usize) {
         kprintln!("  transcript at {}", path);
         elog(format!("transcript at {}", path));
     }
-    crate::gfx::desk::draw();
+    crate::gfx::render::invalidate();
 }
 
 
@@ -1047,7 +1047,7 @@ fn episode(
             }
             // The window repaints through the diffed present, so refreshing
             // per step costs only what actually changed.
-            crate::gfx::desk::draw();
+            crate::gfx::render::invalidate();
         }
 
         steps.push(Step {

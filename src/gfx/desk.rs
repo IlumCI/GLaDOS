@@ -357,7 +357,40 @@ pub fn ready() -> bool {
     unsafe { (*DESK.get()).is_some() }
 }
 
+/// Reach the desktop, under the painter's claim.
+///
+/// **This hands out `&mut Desktop` and used to do it with no exclusion at
+/// all.** That was safe by accident for as long as one task both changed the
+/// windows and drew them: the shell opened a window and the shell painted it,
+/// and a preemption between the two could not produce a reader. A compositor
+/// task ends that -- it reads this state for the two milliseconds a frame
+/// takes, and a shell preempted halfway through moving a window leaves exactly
+/// the half-written `Vec` the reader would walk.
+///
+/// So the claim covers the window list as well as the screen, and `with`
+/// waits for it rather than refusing: a caller here is usually *changing*
+/// something, and a window that declines to open because a frame was in
+/// flight is a worse failure than the one being prevented.
+///
+/// `draw` holds the claim across its whole frame and calls this ninety-one
+/// times underneath, which is why the claim is reentrant per task.
 pub fn with<R>(f: impl FnOnce(&mut Desktop) -> R) -> Option<R> {
+    let claim = Claim::wait();
+    // **Reaching the desktop from outside a frame marks the screen dirty**,
+    // and that is what stops this becoming the treadmill it replaced. The old
+    // arrangement asked every caller to remember a repaint, sixteen of them
+    // did, and a task inside a long command remembered nothing -- so the rule
+    // is now structural: if somebody took `&mut Desktop`, assume they changed
+    // it, because the cost of being wrong is one frame and the cost of
+    // forgetting is a frozen screen.
+    //
+    // Only a *top-level* claim, or `draw`'s own ninety-one nested calls would
+    // re-dirty the flag from inside the frame that is servicing it and the
+    // compositor would repaint forever at full tilt. `took` is exactly that
+    // distinction: true for a fresh claim, false for a re-entry.
+    if claim.took {
+        super::render::invalidate();
+    }
     unsafe { (*DESK.get()).as_mut().map(f) }
 }
 
@@ -1539,24 +1572,77 @@ static POS: Racy<Option<(u32, u32)>> = Racy::new(None);
 /// the new background -- so the damage is copied forward every frame, and in
 /// the worst ordering what gets saved is the arrow itself, leaving one
 /// permanent ghost per occurrence.
-static CUR_BUSY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// Who holds it, rather than merely that somebody does.
+///
+/// It was an `AtomicBool`, which is the right shape while the only holders are
+/// two small paints that can shrug and try again. It stopped being the right
+/// shape once a compositor task began holding it for a whole frame and the
+/// window state started needing the same protection: `draw` takes the claim at
+/// the top and then calls `with` ninety-one times underneath, so a claim that
+/// could not recognise its own holder would refuse itself instantly.
+///
+/// The owner is a task id, and re-entry from the same task is free -- which is
+/// exactly the bargain `ai::with_engine` already makes, for the same reason
+/// and with the same hazard: nesting stays forbidden between *tasks* and
+/// costless within one.
+const NOBODY: usize = usize::MAX;
+static PAINTER: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(NOBODY);
 
-/// Releases the claim however the holder leaves.
-struct Claim;
+/// Releases the claim however the holder leaves, and only if it took it.
+struct Claim {
+    /// False for a re-entry: the outer claim owns the release, and storing
+    /// `NOBODY` here would free the screen in the middle of somebody's frame.
+    took: bool,
+}
 
 impl Claim {
-    /// `None` when somebody else holds it. Never waits: every caller here has
-    /// something sensible to do with a refusal, and a spin would be spinning
-    /// against a task that only runs when this one yields.
+    /// `None` when **another task** holds it. Never waits.
+    ///
+    /// This is what the clock task and the cursor use, and they must never
+    /// block: they run on a schedule with no event behind them, and a painter
+    /// that waited would be waiting on the task it preempted.
     fn take() -> Option<Claim> {
-        use core::sync::atomic::Ordering::{Acquire, Relaxed};
-        CUR_BUSY.compare_exchange(false, true, Acquire, Relaxed).ok().map(|_| Claim)
+        Self::take_as(crate::task::current())
+    }
+
+    /// Split out so the exclusion can be asked about a task that is not this
+    /// one. A second `take()` from the same task is now *supposed* to succeed,
+    /// so it can no longer answer "is a second holder refused" -- see
+    /// `selftest`.
+    fn take_as(me: usize) -> Option<Claim> {
+        use core::sync::atomic::Ordering::{AcqRel, Acquire};
+        match PAINTER.compare_exchange(NOBODY, me, AcqRel, Acquire) {
+            Ok(_) => Some(Claim { took: true }),
+            // Ours already: a frame in progress, or a nested `with`.
+            Err(h) if h == me => Some(Claim { took: false }),
+            Err(_) => None,
+        }
+    }
+
+    /// Wait for it, yielding.
+    ///
+    /// For changing the desktop, which cannot sensibly refuse: a window that
+    /// declined to open because a frame happened to be in flight would be a
+    /// worse bug than the race this prevents. Yielding rather than spinning,
+    /// because the holder only runs when this task gives the core up -- a spin
+    /// here is a hang, which is the objection the non-blocking version was
+    /// written around.
+    fn wait() -> Claim {
+        loop {
+            if let Some(c) = Self::take() {
+                return c;
+            }
+            crate::task::yield_now();
+        }
     }
 }
 
 impl Drop for Claim {
     fn drop(&mut self) {
-        CUR_BUSY.store(false, core::sync::atomic::Ordering::Release);
+        if self.took {
+            PAINTER.store(NOBODY, core::sync::atomic::Ordering::Release);
+        }
     }
 }
 
@@ -1579,16 +1665,33 @@ pub fn selftest() -> bool {
         kprintln!("  {}  {}", if good { "ok " } else { "FAIL" }, what);
     };
 
+    // **A second take from this task is now supposed to succeed**, so the old
+    // form of this check -- take twice, expect a refusal -- stopped asking
+    // about exclusion the day the claim became reentrant, and would have gone
+    // on passing for the wrong reason. The property that matters was always
+    // "another *task* is refused", which a same-task call cannot answer.
+    // `take_as` exists so it can be asked without arranging a second task.
+    let me = crate::task::current();
+    let other = me.wrapping_add(1);
     let first = Claim::take();
     claim("a free claim can be taken", first.is_some());
-    claim("and a second holder is refused", Claim::take().is_none());
+    claim("and another task is refused", Claim::take_as(other).is_none());
+    // Reentrancy, asserted rather than assumed: `draw` holds this across a
+    // whole frame and calls `with` ninety-one times underneath, so a claim
+    // that refused its own holder would deadlock the compositor on its first
+    // frame.
+    claim("while this task may re-enter", Claim::take().is_some());
     drop(first);
     let again = Claim::take();
     claim("dropping it lets the next one in", again.is_some());
     drop(again);
     // Leaving it held would deadlock every later repaint, so the release path
-    // is worth one more claim of its own.
-    claim("and it is free afterwards", !CUR_BUSY.load(core::sync::atomic::Ordering::Relaxed));
+    // is worth one more claim of its own -- and a re-entry must *not* release
+    // it, which is what `Claim::took` is for.
+    claim(
+        "and it is free afterwards",
+        PAINTER.load(core::sync::atomic::Ordering::Relaxed) == NOBODY,
+    );
 
     // --- tiling -----------------------------------------------------------
     //
