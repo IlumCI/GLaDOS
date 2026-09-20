@@ -35,13 +35,25 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// Something changed and the screen does not know yet.
 ///
-/// **This replaces sixteen scattered `desk::draw()` calls**, which is what the
-/// freeze actually was: painting was push-model with no owner, so every
-/// feature that changed the screen had to remember to repaint, and a task
-/// inside a long command remembered nothing. Measured before this existed --
-/// one frame composed in seventy-three seconds, the screen still for
-/// fifty-nine of them, while the clock task painted a hundred and eighty-seven
-/// times.
+/// **This was written up as replacing the scattered `desk::draw()` calls and
+/// it replaced none of them.** It says so here because the claim was load
+/// bearing: painting was push-model with no owner, every feature that changed
+/// the screen had to remember to repaint, and a task inside a long command
+/// remembered nothing -- one frame composed in seventy-three seconds, the
+/// screen still for fifty-nine of them, while the clock task painted a hundred
+/// and eighty-seven times. The compositor fixes *that*, because it repaints on
+/// its own account whether or not anybody asked.
+///
+/// What it did not do is remove the other writers. `desk.rs` still calls
+/// `draw()` directly in **fifty** places, so the push model is intact
+/// alongside the pull one and any task that runs one of those sites composes a
+/// frame. Measured: `composers` reads 1 after a `render probe` and 3 after
+/// opening a single window, because `focus_terminal` ends with a `draw()` and
+/// the shell calls it after every command. The two things that measure
+/// `composers` open no windows, which is why it read 1 for so long.
+///
+/// So: marking is free and idempotent and the compositor decides when, but a
+/// caller that marks is not yet the only kind of caller there is.
 ///
 /// Marking is free and idempotent; the compositor decides when. A caller that
 /// marks twice costs one frame, and a caller that forgets is the bug this is

@@ -871,6 +871,17 @@ fn comp_task() {
             }
         }
 
+        // A window arriving, one frame at a time.
+        //
+        // After the frame, because each step paints chrome on top of a freshly
+        // composed desktop and the composed desktop is what erases the step
+        // before it. This ran as a blocking loop on whichever task opened the
+        // window, calling `draw` itself six times -- so every task that opened
+        // a window was a compositor for a tenth of a second.
+        if gfx::desk::flourish_step() {
+            composed = true;
+        }
+
         // The taskbar's two readouts, after the frame rather than before it.
         //
         // `draw` paints the *well* they sit in and not the text inside it, so

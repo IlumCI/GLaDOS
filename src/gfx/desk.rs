@@ -3178,23 +3178,36 @@ fn terminal_status(fb: &super::Framebuffer, r: Rect) {
     });
 }
 
-/// Which window is still on its way, if any.
+/// A window on its way in, and how far along it is.
 ///
-/// A static rather than a field on `Window`, because it is true of the desktop
-/// for a tenth of a second and not a property of a window -- and a field would
-/// have to be spelled out at four `Window` literals to say "no" four times.
-static ARRIVING: crate::sync::Racy<Option<usize>> = crate::sync::Racy::new(None);
+/// **One static and not two.** This was an `ARRIVING` index beside a blocking
+/// animation loop, and the index was a flag somebody had to remember to clear
+/// -- its own comment said so: "a missed flourish is a window that appears
+/// instantly; a leaked flag is a window that never appears at all". There are
+/// three exits from that loop and each had to put it back. Holding the whole
+/// flight instead makes `arriving()` *derived*: there is no window arriving
+/// when there is no flight, which is the same bargain `draw` makes about
+/// console visibility one screen down.
+struct Flight {
+    win: usize,
+    to: Rect,
+    title: alloc::string::String,
+    step: u32,
+}
 
+static FLIGHT: crate::sync::Racy<Option<Flight>> = crate::sync::Racy::new(None);
+
+/// Which window is still on its way, if any.
 fn arriving() -> Option<usize> {
-    unsafe { *ARRIVING.get() }
+    unsafe { (*FLIGHT.get()).as_ref().map(|f| f.win) }
 }
 
 /// How many frames a window takes to arrive.
 ///
-/// Six, which at the delay below is about a tenth of a second -- long enough
-/// to be seen and short enough that it is never something to wait through. It
-/// is bounded and one-shot rather than a running cost: six frames at ~2.2 ms
-/// is ~13 ms of painting for the whole gesture.
+/// Six, which at one frame each is about a tenth of a second -- long enough to
+/// be seen and short enough that it is never something to wait through. It is
+/// bounded and one-shot rather than a running cost: six frames at ~2.2 ms is
+/// ~13 ms of painting for the whole gesture.
 const OPEN_STEPS: u32 = 6;
 
 /// Where a window sits partway through arriving.
@@ -3226,20 +3239,28 @@ fn open_rect(to: Rect, step: u32, steps: u32) -> Rect {
     Rect::new(cx.saturating_sub(w / 2), cy.saturating_sub(h / 2), w, h)
 }
 
-/// Play a window arriving, then leave the desktop as it was.
+/// Start a window's arrival. Records it; the compositor flies it.
 ///
-/// Chrome only, and that is a constraint rather than a shortcut. There is no
-/// way to blend a window against a backdrop the back-to-front repaint has
-/// already overwritten, so a fade is not available; and `Console::reflow`
-/// **discards rows when it shrinks**, so animating a terminal's real geometry
-/// would destroy its scrollback to decorate its opening. So the frames paint a
-/// frame and a caption at a rectangle nothing owns, and the window itself
-/// appears whole on the frame after.
+/// **It used to run the animation here, and that made every task that opens a
+/// window a compositor.** The loop called `draw` six times on whichever task
+/// had asked -- the shell, the agent, `drain_ops` -- with a `delay_us(16_000)`
+/// between them, so opening a window both composed frames off the compositor
+/// and blocked its caller for a tenth of a second. Measured: `composers` went
+/// 1 -> 5 for one `paint` and 5 -> 9 for one `mines`, four handovers of the
+/// frame per window, on a machine whose whole design rests on there being one
+/// writer. Nothing caught it for a while because the two things that measure
+/// `composers` -- `render probe` and `diag all` -- open no windows.
 ///
-/// Called before the window exists, so `draw` needs to know nothing about any
-/// of this: each step repaints the desktop as it stands and puts the chrome on
-/// top of it, and the flush is over that rectangle alone.
+/// The delay goes with it. A frame per compositor turn is ~16 ms at 60 Hz by
+/// construction, which is what the sleep was approximating.
 pub fn open_flourish() {
+    // With the compositor stood down there is nobody to fly it, and a flight
+    // nothing advances is a window that never appears. Arriving instantly is
+    // the right answer, and it is what `render off` means: back to what the
+    // machine did before any of this.
+    if !super::render::enabled() {
+        return;
+    }
     let Some(fb) = super::primary() else { return };
     let screen = screen_rect(&fb);
     let mut what = None;
@@ -3256,37 +3277,55 @@ pub fn open_flourish() {
     if to.w < 64 || to.h < 48 {
         return;
     }
-    unsafe { *ARRIVING.get() = Some(i) };
-    for step in 0..OPEN_STEPS.saturating_sub(1) {
-        let r = open_rect(to, step, OPEN_STEPS);
-        draw();
-        let Some(claimed) = Claim::take() else {
-            // The clock task has the painter. Give up on the animation rather
-            // than waiting for it -- but clear the flag first: leaving it set
-            // would make `draw` skip that window for the rest of the session,
-            // and the index would later name a different window entirely. A
-            // missed flourish is a window that appears instantly; a leaked
-            // flag is a window that never appears at all.
-            unsafe { *ARRIVING.get() = None };
-            draw();
-            return;
-        };
-        let back = super::compose::target().unwrap_or(fb);
-        theme::window(&back, r, &title, true, false, false, None);
-        super::compose::flush_rect(
-            r.x.saturating_sub(theme::SHADOW_W),
-            r.y.saturating_sub(theme::SHADOW_W),
-            r.w + theme::SHADOW_W * 2,
-            r.h + theme::SHADOW_W * 2,
-        );
-        drop(claimed);
-        crate::time::delay_us(16_000);
+    // A second window opened while the first is still arriving replaces it
+    // rather than queueing. The one it replaces appears instantly, which is
+    // the same outcome the old loop gave by blocking its caller until it had
+    // finished -- and it cannot strand an index, because the index and the
+    // flight are one object now.
+    unsafe { *FLIGHT.get() = Some(Flight { win: i, to, title, step: 0 }) };
+    super::render::invalidate();
+}
+
+/// Fly a window in by one frame. The compositor's, and nobody else's.
+///
+/// Answers whether one is still in flight, which the caller uses for nothing
+/// but a count -- the repaint is asked for here, because the desktop under the
+/// next rectangle has to be composed again or the previous step's chrome stays
+/// on the screen under it.
+pub fn flourish_step() -> bool {
+    let done = {
+        let held = unsafe { &mut *FLIGHT.get() };
+        let Some(f) = held.as_mut() else { return false };
+        match super::primary() {
+            // A full-screen program owns the screen, so the arrival is not on
+            // it. Abandoned rather than paused: it is a tenth of a second of
+            // decoration, and holding a flight across a DOOM session would
+            // keep its window out of every frame until the program exited.
+            _ if super::exclusive() => true,
+            None => true,
+            Some(_) if f.step >= OPEN_STEPS.saturating_sub(1) => true,
+            Some(fb) => {
+                let r = open_rect(f.to, f.step, OPEN_STEPS);
+                f.step += 1;
+                let back = super::compose::target().unwrap_or(fb);
+                theme::window(&back, r, &f.title, true, false, false, None);
+                super::compose::flush_rect(
+                    r.x.saturating_sub(theme::SHADOW_W),
+                    r.y.saturating_sub(theme::SHADOW_W),
+                    r.w + theme::SHADOW_W * 2,
+                    r.h + theme::SHADOW_W * 2,
+                );
+                false
+            }
+        }
+    };
+    // Dropped before the write, because `arriving()` reads this and the frame
+    // asked for below is the one that has to see the window arrive.
+    if done {
+        unsafe { *FLIGHT.get() = None };
     }
-    // Cleared before the last draw, not after it, so the window's own first
-    // frame is the one that lands. Clearing afterwards would leave the last
-    // animation frame on screen until something else repainted.
-    unsafe { *ARRIVING.get() = None };
-    draw();
+    super::render::invalidate();
+    !done
 }
 
 /// How close to a screen edge a move has to end to count as a snap.
