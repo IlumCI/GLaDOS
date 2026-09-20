@@ -82,6 +82,23 @@ pub enum State {
     Handoff(u8),
 }
 
+impl State {
+    /// One word for it, shared with `dump` and the `tasks` verb.
+    ///
+    /// One table rather than two, because the whole use of this word is to
+    /// tell a task that is never picked from one that is picked and yields
+    /// immediately, and two spellings of that answer that could drift is the
+    /// bet `idt.rs` already lost over the stub stride.
+    pub fn name(self) -> &'static str {
+        match self {
+            State::Unused => "unused",
+            State::Ready => "ready",
+            State::Running(_) => "running",
+            State::Handoff(_) => "handoff",
+        }
+    }
+}
+
 /// The ring-3 entry state a task carries across a switch.
 ///
 /// Four words the syscall stub reaches through fixed globals. With one guest
@@ -661,12 +678,7 @@ pub fn dump() {
     let t = TASKS.lock_irq();
     let n = COUNT.load(Ordering::Acquire);
     for (i, x) in t.iter().enumerate().take(n) {
-        let st = match x.state {
-            State::Unused => "unused",
-            State::Ready => "ready",
-            State::Running(_) => "running",
-            State::Handoff(_) => "handoff",
-        };
+        let st = x.state.name();
         crate::kprintln!(
             "  task {} {:<14} {:<8} pin {} idle {} root {:#x} switches {}",
             i, x.name, st, x.pin, x.idle, x.root, x.switches
