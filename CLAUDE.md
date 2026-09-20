@@ -4495,9 +4495,19 @@ between two builds is measurement error and nothing else. Across the pair
 that judged the `Rc` change it read **16%** -- which is what "within noise"
 is allowed to mean here, and it is a number instead of an adjective.
 
-There is one TCP connection. `tcp` holds a single TCB and `connect` aborts
-whatever was open before it; the builtins expose that rather than handing back
-a descriptor that corresponds to nothing.
+There is one TCP connection **at the Aiksi builtins**, and that is now a fact
+about the builtins rather than about the stack. `TCBS` is a `Vec<Option<Tcb>>`
+and `tcp::open` answers a `Handle`, so several connections are live at once --
+the mining client holds one while `fetch` holds another. `tcp::connect` is the
+one-at-a-time wrapper that still calls `abort()` first, and the builtins expose
+*that* rather than handing back a descriptor that corresponds to nothing.
+
+**What the stack cannot do is accept one.** `State` is `Closed`, `SynSent`,
+`Established` and the five closing states: there is no `Listen` and no
+`SynRecv`, so nothing in this kernel can be connected *to*. That is not a
+limitation of the miner, which dials out to a pool; it is the whole of what
+stands between this tree and being a pool, since a pool is a server and the
+server half of the state machine has never been written.
 
 `app::migrate_extension` carries programs written before the rename across by
 moving the bytes under the new name. Identity is the hash of the file contents,
