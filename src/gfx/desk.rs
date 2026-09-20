@@ -456,6 +456,25 @@ pub fn ready() -> bool {
 ///
 /// `draw` holds the claim across its whole frame and calls this ninety-one
 /// times underneath, which is why the claim is reentrant per task.
+/// Read the desktop without being able to change it.
+///
+/// **`draw` is a reader and this is what makes that a fact rather than a
+/// comment.** It composes a whole frame -- wallpaper, taskbar, every window,
+/// popups -- and writes nothing to the model; `taskbar`, `draw_icons` and the
+/// rest already take `&Desktop`. Until now it said so in prose while holding a
+/// `&mut`, so nothing stopped a later edit from quietly mutating inside the
+/// frame, which is the one place a mutation is hardest to reason about.
+///
+/// It still takes the claim, because a reader and a writer must not interleave
+/// -- a frame walking `windows` while somebody pushes to it is the hazard, and
+/// which side holds the `&mut` does not change that. What it does not do is
+/// mark the screen dirty: reading changed nothing, and a reader that invited a
+/// repaint would have the compositor composing forever off its own frames.
+pub fn with_ref<R>(f: impl FnOnce(&Desktop) -> R) -> Option<R> {
+    let _claim = Claim::wait();
+    unsafe { (*DESK.get()).as_ref().map(f) }
+}
+
 pub fn with<R>(f: impl FnOnce(&mut Desktop) -> R) -> Option<R> {
     let claim = Claim::wait();
     // **Reaching the desktop from outside a frame marks the screen dirty**,
@@ -4034,7 +4053,7 @@ pub fn draw() {
     // only the rows that changed. Without one (no heap yet, or its
     // allocation failed) this is the direct draw it always was.
     let fb = super::compose::target().unwrap_or(real);
-    with(|d| {
+    with_ref(|d| {
         // The terminal is an application, not the screen itself. While its
         // window is minimised the shell keeps running -- it still reads serial,
         // still answers, and its output still lands in the console's shadow
