@@ -97,6 +97,9 @@ pub fn present() {
     let Some(fb) = super::primary() else { return };
     let Some(c) = (unsafe { (*COMP.get()).as_mut() }) else { return };
     let w = c.w as usize;
+    // Counted so a freeze is a number. See `gfx::render`: what matters is not
+    // how often this runs but the longest anybody waited for it.
+    let mut wrote = 0u64;
     for y in 0..c.h as usize {
         let row = &c.back[y * w..(y + 1) * w];
         let seen = &mut c.shadow[y * w..(y + 1) * w];
@@ -116,7 +119,9 @@ pub fn present() {
             .unwrap_or(0);
         fb.blit_span(a as u32, y as u32, &row[a..b]);
         seen[a..b].copy_from_slice(&row[a..b]);
+        wrote += 1;
     }
+    super::render::presented(wrote);
 }
 
 /// Whether there is a back buffer at all.

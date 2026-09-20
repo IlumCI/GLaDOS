@@ -450,6 +450,36 @@ def main():
     hd = "--hd" in argv
     if hd:
         argv.remove("--hd")
+    # An explicit mode, because a window larger than the screen is not a window.
+    #
+    # `--hd` asks for 1920x1080 and that is right for a headless screenshot,
+    # where nothing has to fit anywhere. A *recording* is captured off the host
+    # desktop, so a guest bigger than the host screen has its window clipped and
+    # the part hanging off the edge records as black -- which looks exactly like
+    # a kernel that painted nothing. This host is 1536x864, so the recorder asks
+    # for 1280x720: it fits at 1:1 with room for the title bar, which means the
+    # capture is pixel-perfect rather than resampled, and it is already a
+    # standard video mode on the way out.
+    res = None
+    if "--res" in argv:
+        i = argv.index("--res")
+        res = argv[i + 1].lower().split("x")
+        del argv[i:i + 2]
+
+    # A real window, for a camera to point at.
+    #
+    # `screendump` is the only capture this harness had, and it is a monitor
+    # round-trip that writes a 3 MB PPM with a two-second settle in front of it
+    # and a one-and-a-half-second wait behind: about 0.28 frames a second. That
+    # is right for *a* screenshot and hopeless for video, and no amount of
+    # tuning fixes it, because the cost is the round trip rather than the
+    # encoding. So recording does not go through QEMU at all -- the guest gets
+    # an ordinary SDL window and something else films it.
+    #
+    # `-name` is what titles that window, which is how `gdigrab` finds it.
+    window = "--window" in argv
+    if window:
+        argv.remove("--window")
     # A WAD to stage, overriding whatever is in `esp/GLADOS/`. The override
     # exists for the malformed ones: a parser whose error paths have never run
     # is a parser with no error paths, and in a kernel with no unwinder those
@@ -784,8 +814,9 @@ def main():
         # screen is legible, and a GUI that has never been looked at is a GUI
         # nobody has tested.
         "-monitor", f"tcp:127.0.0.1:{MONITOR_PORT},server=on,wait=off",
-        "-display", "none",
-        *(["-vga", "none", "-device", "VGA,xres=1920,yres=1080"] if hd else []),
+        *(["-display", "sdl", "-name", "GLaDOS"] if window else ["-display", "none"]),
+        *(["-vga", "none", "-device", f"VGA,xres={res[0]},yres={res[1]}"] if res else
+          ["-vga", "none", "-device", "VGA,xres=1920,yres=1080"] if hd else []),
         "-no-reboot",
     ]
 
@@ -928,6 +959,32 @@ def main():
             if buf.endswith(PROMPT) or (not chunk and buf.rstrip().endswith(PROMPT.strip())):
                 if queue:
                     line = queue.pop(0)
+                    # `@wait N` is a beat rather than a command: it is handled
+                    # here and never reaches the guest.
+                    #
+                    # This loop sends the next line the moment a prompt comes
+                    # back, which is right for a test and wrong for a demo --
+                    # a window that opens and is replaced a fifth of a second
+                    # later is not something anybody can watch. The guest has
+                    # no `sleep` verb to abuse for this, and adding one would
+                    # put a do-nothing applet in the grammar the model decodes
+                    # against, which is a real cost for a presentational
+                    # problem. So the pause lives in the harness.
+                    if line.startswith("@wait "):
+                        try:
+                            secs = float(line.split(None, 1)[1])
+                        except (IndexError, ValueError):
+                            print(f"[drive] bad beat: {line}", file=sys.stderr)
+                            continue
+                        print(f"[drive] beat: {secs}s")
+                        time.sleep(secs)
+                        # `buf` is deliberately **not** cleared. The guest is
+                        # idle and will print nothing further, so clearing the
+                        # prompt that is already in there would leave nothing
+                        # to match against and the next command would never be
+                        # sent. Leaving it means the next pass round the loop
+                        # matches immediately, which is exactly the intent.
+                        continue
                     print(f"[drive] sent: {line}")
                     sock.sendall(line.encode() + b"\r")
                     buf.clear()

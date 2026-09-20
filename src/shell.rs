@@ -2800,6 +2800,51 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
         // terminal, and the question an operator actually has is "what is a
         // cheap confusion for this applet", which a row of distances answers
         // only after somebody sorts it.
+        // What reached the screen, and the longest anybody waited for it.
+        //
+        // The freeze during a long command has been fixed three times and is
+        // still happening, so this measures it before anything is rearranged.
+        // The headline is `worst gap`: an average frame rate over a session
+        // that stopped for twenty seconds and ran for forty reads as a healthy
+        // twenty, and what a person experiences is the worst interval.
+        "render" => {
+            use crate::gfx::render;
+            if rest.trim() == "reset" {
+                render::reset();
+                kprintln!("  counting from here");
+                return;
+            }
+            let st = render::stats();
+            kprintln!("  over the last {} ms:", st.window_ms);
+            kprintln!(
+                "    desk::draw      {:>6}   compose a whole frame",
+                st.draws
+            );
+            kprintln!(
+                "    present         {:>6}   of which {} wrote anything, {} row(s)",
+                st.presents, st.wrote, st.rows
+            );
+            // The contrast is the diagnosis: these two run on the clock task,
+            // which wakes on its own quantum whatever the shell is doing.
+            kprintln!("    clock paints    {:>6}   (clock task)", st.clocks);
+            kprintln!("    cursor paints   {:>6}   (clock task)", st.cursors);
+            if st.refused > 0 {
+                kprintln!(
+                    "    refused         {:>6}   a full-screen program owned the screen",
+                    st.refused
+                );
+            }
+            console::set_color(if st.max_gap_ms > 1000 { LTRED } else { WHITE });
+            kprintln!("    worst gap    {:>6} ms   the longest the screen stood still", st.max_gap_ms);
+            console::set_color(LTGRAY);
+            if st.max_gap_ms > 1000 && st.clocks > 0 {
+                kprintln!(
+                    "  the clock painted {} time(s) inside that gap, so the machine was",
+                    st.clocks
+                );
+                kprintln!("  running and nothing owned the frame");
+            }
+        }
         "outcome" => {
             match crate::ai::outcome::probe() {
                 Some(m) => {

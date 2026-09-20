@@ -1864,8 +1864,10 @@ pub fn paint_clock(real: &Framebuffer, x: u32, y: u32, text: &str, scale: u32) {
     // behind it -- it fires on a schedule whether or not the desktop is what
     // is being looked at -- so it is the one that has to ask.
     if super::exclusive() {
+        super::render::refused();
         return;
     }
+    super::render::clock_painted();
     crate::cpu::without_interrupts(|| {
         let Some(_claim) = Claim::take() else { return };
         let target = super::compose::target().unwrap_or(*real);
@@ -1910,6 +1912,7 @@ fn move_cursor(x: u32, y: u32) -> bool {
         let Some(_claim) = Claim::take() else { return false };
         let Some(fb) = super::primary() else { return false };
         cursor_show(&fb, x, y);
+        super::render::cursor_painted();
         true
     })
 }
@@ -4118,6 +4121,7 @@ pub fn draw() {
             }
         }
     });
+    super::render::drew();
     super::compose::present();
     // Put the pointer back where it was. Without this every keystroke that
     // repaints would blink the arrow out until the mouse next moved.

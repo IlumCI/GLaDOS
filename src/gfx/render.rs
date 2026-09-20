@@ -1,0 +1,153 @@
+//! What actually reached the screen, and when it stopped.
+//!
+//! The desktop freezes during long foreground commands. That has been fixed
+//! three times -- `pump_cursor` was added for `ask`, then called from the clock
+//! task as well once `mine sweep` turned out to have the same shape, and
+//! `paint_clock` was moved through the compositor -- and it is still happening,
+//! which is the tell that the fixes were addressing call sites rather than a
+//! cause.
+//!
+//! So before any of it is rearranged: an instrument. This counts what each
+//! painter did and, more usefully, **the longest anybody went without one**.
+//!
+//! ### The gap is the measurement, not the rate
+//!
+//! A frames-per-second average over a session that froze for twenty seconds
+//! and ran smoothly for forty reads as a perfectly healthy twenty. What a
+//! person experiences is the *worst* interval, so that is what is recorded:
+//! `present` keeps the largest span between two consecutive calls, and a
+//! freeze is that number rather than an adjective.
+//!
+//! ### The contrast is the diagnosis
+//!
+//! Three painters are counted separately on purpose, because the symptom is
+//! that they disagree. `paint_clock` and the cursor run on the clock task,
+//! which wakes on its own quantum; `draw` and `present` run wherever somebody
+//! remembered to call them, which is sixteen scattered sites and the shell's
+//! idle loop. If a run comes back with thousands of clock paints and a present
+//! gap of twenty seconds, the freeze is not a rendering bug at all -- it is
+//! that nothing owns the frame.
+//!
+//! Counters only, and deliberately nothing else: this file changes no
+//! behaviour, so a measurement taken with it cannot be an artefact of it.
+
+use core::sync::atomic::{AtomicU64, Ordering};
+
+/// Calls to `desk::draw`, which composes a whole frame into the back buffer.
+static DRAWS: AtomicU64 = AtomicU64::new(0);
+/// Calls to `compose::present`, which copies changed spans to the aperture.
+static PRESENTS: AtomicU64 = AtomicU64::new(0);
+/// Presents that actually wrote a span. A present over an unchanged frame is
+/// a 4 MB compare and no pixels, so the two counts differing is how much of
+/// the work was a no-op.
+static WROTE: AtomicU64 = AtomicU64::new(0);
+/// Rows written, summed. A present that wrote one row and one that wrote a
+/// thousand are the same event and very different amounts of screen.
+static ROWS: AtomicU64 = AtomicU64::new(0);
+/// The clock task's two small paints, which are what keep moving while
+/// everything else is stopped.
+static CLOCKS: AtomicU64 = AtomicU64::new(0);
+static CURSORS: AtomicU64 = AtomicU64::new(0);
+/// Paints refused because a full-screen program owns the screen. Counted so a
+/// quiet run under `doom` is not mistaken for a freeze.
+static REFUSED: AtomicU64 = AtomicU64::new(0);
+
+/// `rdtsc` at the last present, and the largest gap between two of them.
+static LAST: AtomicU64 = AtomicU64::new(0);
+static MAX_GAP: AtomicU64 = AtomicU64::new(0);
+/// When the window under measurement opened, so a rate can be computed.
+static SINCE: AtomicU64 = AtomicU64::new(0);
+
+pub fn drew() {
+    DRAWS.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn clock_painted() {
+    CLOCKS.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn cursor_painted() {
+    CURSORS.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn refused() {
+    REFUSED.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Called by `present`, with how many rows it wrote.
+///
+/// The gap is measured here rather than at `draw` because `present` is what
+/// the screen sees. A frame composed into the back buffer and never presented
+/// changed nothing a person could look at.
+pub fn presented(rows: u64) {
+    let now = crate::time::rdtsc();
+    PRESENTS.fetch_add(1, Ordering::Relaxed);
+    if rows > 0 {
+        WROTE.fetch_add(1, Ordering::Relaxed);
+        ROWS.fetch_add(rows, Ordering::Relaxed);
+    }
+    let prev = LAST.swap(now, Ordering::Relaxed);
+    // Zero means this is the first present since a reset, and the interval
+    // before it is not a gap anybody experienced.
+    if prev != 0 && now > prev {
+        let gap = now - prev;
+        MAX_GAP.fetch_max(gap, Ordering::Relaxed);
+    }
+}
+
+/// Start a fresh window. Everything below is measured from here.
+pub fn reset() {
+    for c in [&DRAWS, &PRESENTS, &WROTE, &ROWS, &CLOCKS, &CURSORS, &REFUSED, &MAX_GAP] {
+        c.store(0, Ordering::Relaxed);
+    }
+    LAST.store(0, Ordering::Relaxed);
+    SINCE.store(crate::time::rdtsc(), Ordering::Relaxed);
+}
+
+pub struct Stats {
+    pub draws: u64,
+    pub presents: u64,
+    pub wrote: u64,
+    pub rows: u64,
+    pub clocks: u64,
+    pub cursors: u64,
+    pub refused: u64,
+    /// Milliseconds, the longest anybody waited between two presents.
+    pub max_gap_ms: u64,
+    /// Milliseconds the window has been open.
+    pub window_ms: u64,
+}
+
+pub fn stats() -> Stats {
+    let mhz = crate::time::tsc_mhz().max(1) as u64;
+    let since = SINCE.load(Ordering::Relaxed);
+    let now = crate::time::rdtsc();
+    // **The gap that is still open counts, and leaving it out read as zero.**
+    //
+    // `MAX_GAP` only ever sees the interval *between two* presents, so a
+    // window containing one present contains no interval and the worst gap
+    // came back as `0 ms` -- from a run where the screen was composed once in
+    // sixty-eight seconds, which is the most frozen a screen can be. An
+    // instrument answering zero for the total freeze is the failure this
+    // whole file exists to avoid, arriving inside it.
+    //
+    // So the span from the last present to *now* is a gap too, and so is the
+    // span from the reset to the first one when none has happened yet.
+    let open = now.saturating_sub(if LAST.load(Ordering::Relaxed) != 0 {
+        LAST.load(Ordering::Relaxed)
+    } else {
+        since
+    });
+    let worst = MAX_GAP.load(Ordering::Relaxed).max(open);
+    Stats {
+        draws: DRAWS.load(Ordering::Relaxed),
+        presents: PRESENTS.load(Ordering::Relaxed),
+        wrote: WROTE.load(Ordering::Relaxed),
+        rows: ROWS.load(Ordering::Relaxed),
+        clocks: CLOCKS.load(Ordering::Relaxed),
+        cursors: CURSORS.load(Ordering::Relaxed),
+        refused: REFUSED.load(Ordering::Relaxed),
+        max_gap_ms: worst / mhz / 1000,
+        window_ms: if since != 0 && now > since { (now - since) / mhz / 1000 } else { 0 },
+    }
+}
