@@ -3413,7 +3413,7 @@ At boot the system runs **twenty-nine selftest sections** -- count the
 `[selftest]` headings in a boot log, which is the only figure that cannot go
 stale -- **seventeen** of which are wrapped in `main::section` so one that
 breaks marks itself unavailable instead of taking the machine, and `diag`
-offers **sixty-seven named suites** on demand (`diag.rs`'s `SLOTS`, asserted
+offers **sixty-eight named suites** on demand (`diag.rs`'s `SLOTS`, asserted
 against `SUITES.len()`), most of them the same checks (the `aiksi` section covers the capability gate by name and never by
 calling -- half that table pokes memory, drives I/O ports or paints over the
 screen, and a suite that called every row to prove it exists would be
@@ -3495,7 +3495,7 @@ attention path is wired correctly writes real sentences.
 
 **`diag` on its own lists the suites; `diag all` runs them.** A bare `diag`
 prints a table with `-` beside everything that has not run this boot and a
-tally reading `0 passed, 0 failed, 48 not run`, which is easy to read as a
+tally reading `0 passed, 0 failed, 68 not run`, which is easy to read as a
 clean sweep. It is the opposite of one.
 
 **The list and its verdict table are one number now, and were not.** `RESULTS`
