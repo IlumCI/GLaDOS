@@ -81,7 +81,7 @@ pub struct Knob {
 /// graphics knob would have to add the flag too, and the one they forget is
 /// the one that matters. The other half of the fix is a golden-frame diff,
 /// which does not exist; until it does, this is the gate.
-pub const UNJUDGEABLE: &[&str] = &["src/gfx/", "src/doom/", "src/port/"];
+pub const UNJUDGEABLE: &[&str] = &["src/gfx/", "src/port/"];
 
 /// Whether a file is on a surface nothing here can check.
 pub fn unjudgeable(file: &str) -> bool {

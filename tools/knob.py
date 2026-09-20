@@ -164,7 +164,7 @@ def table_rows():
 # The same list lives in `src/ai/knob.rs` as `UNJUDGEABLE`, and this checks the
 # rows it parses out of that file. Two copies of a *rule* rather than of a
 # table: this one is what CI runs, and a kernel claim cannot run in CI.
-UNJUDGEABLE = ("src/gfx/", "src/doom/", "src/port/")
+UNJUDGEABLE = ("src/gfx/", "src/port/")
 
 
 def check():

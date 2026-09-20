@@ -245,11 +245,6 @@ pub const SUITES: &[Suite] = &[
         run: crate::dev::kbd::selftest,
     },
     Suite {
-        name: "doom",
-        about: "the picture decoder, the level indexes, and the line opening",
-        run: doom_selftest,
-    },
-    Suite {
         name: "linux",
         about: "the ELF reader, the syscall surface, and the POSIX view of the namespace",
         run: linux_selftest,
@@ -381,32 +376,6 @@ pub const SUITES: &[Suite] = &[
     },
 ];
 
-/// The ported picture decoder.
-///
-/// The body is here rather than beside its subject because **nothing under
-/// `src/doom/` may name the printing macro** -- that is the seam rule the port
-/// exists to establish, and `tools/portcheck.py` enforces it. So the checks
-/// answer names and verdicts (`doom::pic::checks`) and the talking happens on
-/// this side of the line, which is the same bargain the WAD reader's `Error`
-/// type makes.
-fn doom_selftest() -> bool {
-    use crate::kprintln;
-    let mut ok = true;
-    let mut n = 0usize;
-    for (what, good) in crate::doom::checks() {
-        n += 1;
-        if !good {
-            kprintln!("    FAIL: {}", what);
-            ok = false;
-        }
-    }
-    // The count, because only failures print. A `checks()` that returned early
-    // -- an aggregator missing a module, a list built behind a condition that
-    // stopped holding -- passes in exactly the same silence as one that
-    // checked everything, and this suite aggregates five modules now.
-    kprintln!("    {} claim(s)", n);
-    ok
-}
 
 /// The descriptor table, checked as bit fields rather than by loading it.
 ///
@@ -575,7 +544,7 @@ fn paging_selftest() -> bool {
 
 /// The reader for binaries this kernel did not compile.
 ///
-/// Same bargain as `doom_selftest`: the claims answer names and verdicts and
+/// The claims answer names and verdicts and
 /// the talking happens here. A foreign-binary parser is the one place in this
 /// tree where every negative matters more than the positive, so the count is
 /// printed for the reason it is printed there -- a list that returned early
@@ -605,7 +574,7 @@ fn linux_selftest() -> bool {
 /// says it exists to prevent. A `static` cannot be read in a const context, so
 /// the array cannot be measured directly; naming its length is the next best
 /// thing and it is now the only place the number appears.
-const SLOTS: usize = 68;
+const SLOTS: usize = 67;
 
 /// One slot per suite. Indexed by position in `SUITES`, which is a constant,
 /// so the table cannot get out of step with the list.

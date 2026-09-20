@@ -12,7 +12,6 @@ between "the selftests probably pass" and knowing.
 Usage:
     drive.py [--timeout N] [--memory 2048M] [cmd ...]
     drive.py --stage-iso MODEL.BIN [--tokenizer TOK.BIN] [--memory 3072M] [cmd ...]
-    drive.py --wad out/test.wad "wad"
     drive.py --no-payload "diag all"      # no checkpoint, tokenizer or roots
 
 Each positional argument is one shell line. With none, it just captures the
@@ -480,16 +479,6 @@ def main():
     window = "--window" in argv
     if window:
         argv.remove("--window")
-    # A WAD to stage, overriding whatever is in `esp/GLADOS/`. The override
-    # exists for the malformed ones: a parser whose error paths have never run
-    # is a parser with no error paths, and in a kernel with no unwinder those
-    # are the difference between "that file is truncated" and a halt.
-    wad_src = None
-    if "--wad" in argv:
-        i = argv.index("--wad")
-        wad_src = Path(argv[i + 1])
-        del argv[i:i + 2]
-
     rec_dir, rec_frames, rec_gap = None, 120, 4.0
     # When to start, measured from the moment the last command was *sent*.
     #
@@ -497,10 +486,10 @@ def main():
     # right for a command that returns immediately and leaves the machine
     # working -- `initiative now`, `author` -- and useless for one that holds
     # the screen until it is finished, because by then the thing worth
-    # filming is over. `doom play` is the second kind, and so is `edit`.
+    # filming is over. `edit` is the second kind, and so is `port bars`.
     #
     # Measured from the send and not from the first frame, so it has to cover
-    # whatever the command spends before it draws: loading a WAD's textures
+    # whatever the command spends before it draws: loading an app's own art
     # and sprites takes a couple of seconds on its own.
     rec_after = 0.0
     if "--record" in argv:
@@ -597,12 +586,8 @@ def main():
 
     esp = ROOT / ".qemu/esp"
     (esp / "GLADOS").mkdir(parents=True, exist_ok=True)
-    # A WAD is optional in a way the other three are not: most runs have none
-    # and boot exactly as before. `--wad` names one, otherwise whatever is in
-    # `esp/GLADOS/` comes along -- which is what `deploy.ps1` does for the real
-    # machine, where it copies the whole directory.
-    #
-    # The root bundle is optional in a *third* way. A missing checkpoint is
+    # The root bundle is optional in a way the other two are not. A missing
+    # checkpoint is
     # silent and consequential -- `ai::init` returns early and takes eleven
     # boot selftest sections with it -- so it is refused. A missing root bundle
     # is neither: the kernel says so itself, at boot, and the state it leaves
@@ -613,18 +598,11 @@ def main():
         (tokenizer_src, "tokenizer.bin"),
     ]
     optional = [(ROOT / "esp/GLADOS/roots.der", "roots.der")]
-    wad = wad_src if wad_src is not None else ROOT / "esp/GLADOS/DOOM.WAD"
-    if wad.exists():
-        staged.append((wad, "DOOM.WAD"))
-    elif wad_src is not None:
-        raise SystemExit(f"missing {wad_src}")
-    else:
-        # Stale copies are worse than none: a run with --wad pointing at a
-        # broken file, followed by one without, would otherwise still be
-        # testing the broken file.
-        old_wad = esp / "GLADOS" / "DOOM.WAD"
-        if old_wad.exists():
-            old_wad.unlink()
+    # The WAD staging went with `src/doom/`. A stale copy on the ESP would be
+    # a file nothing reads, so it is cleared rather than left.
+    old_wad = esp / "GLADOS" / "DOOM.WAD"
+    if old_wad.exists():
+        old_wad.unlink()
 
     for src, dst in optional:
         target = esp / "GLADOS" / dst

@@ -184,10 +184,7 @@ SCENES = {
         # `SUITES.len()` at compile time. It said 67 here for a while after a
         # suite was added, which is the ordinary way a number in a caption goes
         # stale -- there is nothing to check a string in a demo script.
-        ("diag all", 25.0, "68 suites, 0 failed"),
-    ],
-    "doom": [
-        ("doom view 0 60000", 20.0, "DOOM, ported not emulated"),
+        ("diag all", 25.0, "67 suites, 0 failed"),
     ],
 }
 
@@ -240,8 +237,13 @@ def build(out, scene_names, dry):
         *cmds,
     ]
     print("[record] " + " ".join(shlex.quote(x) for x in drive))
+    # **`encoding` and `errors` are load-bearing, not tidiness.** `text=True`
+    # alone decodes with the locale codec, cp1252 here, and this guest prints
+    # bytes it has no mapping for -- `font` draws a 325-glyph coverage sheet of
+    # box drawing and accents, which is exactly where the first capture died.
     guest = subprocess.Popen(drive, cwd=ROOT, stdout=subprocess.PIPE,
-                             stderr=subprocess.STDOUT, text=True, bufsize=1)
+                             stderr=subprocess.STDOUT, text=True, bufsize=1,
+                             encoding="utf-8", errors="replace")
 
     # Drained from the moment it starts. See the module docstring: nothing read
     # this until the process exited, and boot writes far more than the pipe
@@ -250,25 +252,34 @@ def build(out, scene_names, dry):
     lock = threading.Lock()
 
     def pump(stream):
-        for line in stream:
-            with lock:
-                log.append((time.time(), line.rstrip("\n")))
-            sys.stdout.write(line)
-            sys.stdout.flush()
+        # **Nothing this thread hits may stop it draining.** A decoder that
+        # raised took a whole capture down: the pump died, the pipe filled, the
+        # guest blocked, and the window closed under the camera thirteen
+        # minutes in. The encoding is fixed below, but a bare drain behind it
+        # is cheap against eleven minutes of guest time.
+        try:
+            for line in stream:
+                with lock:
+                    log.append((time.time(), line.rstrip("\n")))
+                sys.stdout.write(line)
+                sys.stdout.flush()
+        except Exception as e:
+            print(f"[record] the log pump stopped: {e!r}", file=sys.stderr)
+            try:
+                for _ in stream:
+                    pass
+            except Exception:
+                pass
 
     threading.Thread(target=pump, args=(guest.stdout,), daemon=True).start()
 
     # Wait for the window rather than sleeping a guessed amount. Boot under
     # WHPX is around 370 s with a real checkpoint and much less with the small
     # one, and a fixed sleep is wrong in both directions.
-    if not wait_for_window():
-        guest.kill()
-        raise SystemExit("record.py: the guest never opened a window")
-
-    box = client_crop()
+    box = wait_for_mode()
     if box is None:
         guest.kill()
-        raise SystemExit("record.py: the window vanished before filming started")
+        raise SystemExit("record.py: the guest never opened a window")
     w, h, dx, dy = box
     print(f"[record] window is up; filming its client area {w}x{h} at +{dx}+{dy}")
     cap = subprocess.Popen(
@@ -451,23 +462,46 @@ def _text(font, textfile, a, b):
     )
 
 
-def wait_for_window(limit=900.0):
-    """Block until QEMU's window exists, or give up."""
-    import ctypes
-    user32 = ctypes.windll.user32
+def wait_for_mode(limit=900.0):
+    """Block until the guest is at the mode it was given, not merely on screen.
+
+    **Waiting for the window was the bug, and the assertion below caught it and
+    was ignored.** QEMU opens its window at the firmware's default 640x480 and
+    the guest switches to 1280x800 a little later, so filming from the moment
+    the window existed locked `gdigrab`'s crop at 640x480 -- and what came out
+    was the **top-left quarter** of the desktop at 1:1, with the taskbar, the
+    tray and half of every window simply absent. Thirteen minutes of it, and
+    the warning had printed on line one.
+
+    So the crop is not taken until the client area *is* the mode. What that
+    costs is the firmware splash, which is a progress bar on a blank screen;
+    what it buys is every pixel of the part anybody wants to see.
+
+    Answers the crop box, or `None` if the mode never arrived.
+    """
+    want_w, want_h = (int(v) for v in RES.split("x"))
     t0 = time.time()
+    seen = None
     while time.time() - t0 < limit:
-        if user32.FindWindowW(None, WINDOW):
-            # A window exists before it has painted anything. One second is
-            # enough for the firmware's first frame, and filming a moment of
-            # black is better than missing the splash.
-            time.sleep(1.0)
-            return True
-        time.sleep(1.0)
-    return False
+        box = client_crop(quiet=True)
+        if box is not None:
+            seen = box
+            if (box[0], box[1]) == (want_w, want_h):
+                # A mode is set a moment before anything is drawn in it.
+                time.sleep(0.6)
+                return client_crop()
+        time.sleep(0.5)
+    if seen is not None:
+        print(
+            f"[record] the guest never reached {want_w}x{want_h}; it is at "
+            f"{seen[0]}x{seen[1]}. Filming anyway, and the capture is not "
+            f"pixel-perfect.",
+            file=sys.stderr,
+        )
+    return seen
 
 
-def client_crop():
+def client_crop(quiet=False):
     """Where the guest's pixels are inside QEMU's window.
 
     `gdigrab title=` captures the whole **window**, which is the guest plus a
@@ -497,7 +531,7 @@ def client_crop():
     w, h = cli.right - cli.left, cli.bottom - cli.top
     dx, dy = org.x - win.left, org.y - win.top
     want_w, want_h = (int(v) for v in RES.split("x"))
-    if (w, h) != (want_w, want_h):
+    if (w, h) != (want_w, want_h) and not quiet:
         print(
             f"[record] WARNING: client area is {w}x{h} where the guest was "
             f"given {want_w}x{want_h}.\n"

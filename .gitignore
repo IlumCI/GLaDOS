@@ -52,3 +52,11 @@ cuda/*.exp
 cuda/*.lib
 cuda/*.pdb
 out/ci-fixture*
+
+# DOOM: the port was an experiment in whether software written elsewhere
+# survives being brought over. It answered that, it was never finished, and
+# it is not part of this system. The tree stays on disk for anyone who wants
+# to read it; nothing builds it and nothing tracks it.
+src/doom/
+tools/doominfo.py
+tools/mkwad.py
