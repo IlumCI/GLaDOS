@@ -95,9 +95,14 @@ Does not work yet:
   audit. Preemption on one core means two tasks never execute at the same
   instant; on two cores they genuinely overlap, so every `Racy` reachable from
   two different tasks becomes a live race, the namespace tree among them. So
-  every task this kernel spawns is pinned to core 0 on purpose, `unpin` exists,
-  and nothing calls it. Unpinning before the audit buys a kernel that passes
-  every test and corrupts something later.
+  every task this kernel spawns *but the mining slices* is pinned to core 0 on
+  purpose. Unpinning before the audit buys a kernel that passes every test and
+  corrupts something later, so the opt-in **is** the audit: `mine::client` is
+  the one caller of `unpin`, and earning it meant reducing that miner's shared
+  surface to a single object and converting its journal from a `Racy` to a
+  `Spin`. The evidence is arithmetic rather than a passing test, since four
+  slices summed to 256% of one slice's hash rate and tasks sharing a core sum
+  to 100% however many there are. The other 91 `Racy`s are untouched.
 - **A hardware entropy source.** The generator is a fast-key-erasure ChaCha20
   DRBG fed by keyboard and mouse interrupt timing and by NVMe completion
   latency, and it refuses to answer for key material until it has seen enough

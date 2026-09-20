@@ -5526,14 +5526,15 @@ generation counter with MONITOR/MWAIT, run a range of a matrix, and go back to
 sleep, with every decision and every byte of kernel state still on the
 bootstrap processor.
 
-**A caution for whoever reads this next.** The README's status table says
-"per-core GDT/TSS/APIC ... tasks that migrate" while its limitations list says
-every task is pinned to core 0. Those looked like a contradiction and were not:
-the mechanism worked and was deliberately unused. The limitations line is now
-genuinely stale rather than deliberately conservative -- the mining slices
-migrate -- and the honest edit is "every task but the mining slices", not
-deleting the line. Do not resolve it the other way by unpinning something else
-to make the README true; the pinning is the audit.
+**The README said every task was pinned to core 0, and that is fixed rather
+than still owed.** Its status table said "per-core GDT/TSS/APIC ... tasks that
+migrate" while its limitations list said nothing migrates. Those looked like a
+contradiction and were not: the mechanism worked and was deliberately unused,
+so the line was conservative rather than wrong. It went genuinely stale the day
+the mining slices started migrating, and the honest edit was "every task but
+the mining slices" plus what earning that cost -- not deleting the line, and
+emphatically not unpinning something else to make the README true. The pinning
+is the audit.
 
 `smp::parallel_split(ctx, func, count, width)` is the whole interface. It
 answers false -- meaning "do it yourself" -- if there are no helpers, if
