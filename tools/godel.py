@@ -1306,6 +1306,15 @@ def ask_model(system, card, meta, token, agent="glados-loop", grammar=None):
         "model": meta.get("model", "openai/gpt-4o-mini"),
         "temperature": float(meta.get("temperature", "0")),
         "max_tokens": int(meta.get("max_tokens", "1400")),
+        # **The repetition penalty is the fix for the thing the fence
+        # contract cannot see.** A stuck decode produces a perfectly well
+        # formed fence full of one sentence, and the first real `create`
+        # run did exactly that: 71 lines, 17 distinct, no code. Declared in
+        # the prompt's front matter so a prompt that wants a different
+        # value says so, and defaulted here because every prompt in this
+        # tree wants a file rather than a chant.
+        "repeat_penalty": float(meta.get("repeat_penalty", "1.15")),
+        "repeat_last_n": int(meta.get("repeat_last_n", "256")),
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": card},
@@ -1384,6 +1393,49 @@ def new_file_diff(path, contents):
     return "\n".join(out) + "\n"
 
 
+#: Rust items. A created file with none of these declares nothing, whatever
+#: else is in it.
+ITEM = re.compile(r"^\s*(pub\s+)?(unsafe\s+)?(async\s+)?"
+                  r"(fn|struct|enum|impl|trait|mod|const|static|type|use)\b",
+                  re.M)
+
+#: Below this fraction of distinct lines a reply is a stuck decode rather
+#: than a short file. Measured: the first real `create` run came back 71
+#: lines with 17 distinct, all of them doc comments and no code at all --
+#: the 4B had entered a repetition loop and the fence contract cannot see
+#: that, because the fence was perfectly well formed.
+MIN_DISTINCT = 0.6
+
+
+COMMENTS = "\n".join(["/// a comment"] * 12)
+STUCK = "\n".join(["pub fn f() {}"] + ["    let x = 1;"] * 20)
+SHORT = "\n".join(["pub fn zigzag(i: usize) -> usize {", "    i", "}"])
+
+
+def degenerate(body):
+    """Why this reply is not a file, or None.
+
+    **Both checks are about a runner rather than about taste.** A judge
+    that ran this would build it, boot it twice, read the rails, and refuse
+    it for adding no claim -- correct, and a whole night to say what two
+    string operations say here. The `feature` J1 still stands behind them;
+    this is the cheap half of the same question asked before anything is
+    spent.
+    """
+    lines = [l for l in body.split("\n") if l.strip()]
+    if not lines:
+        return "the fence holds no lines"
+    if not ITEM.search(body):
+        return ("the file declares no Rust item -- %d line(s) of comment "
+                "and whitespace is not a file" % len(lines))
+    distinct = len(set(l.strip() for l in lines))
+    if len(lines) >= 8 and distinct < MIN_DISTINCT * len(lines):
+        return ("the decode repeated itself: %d distinct line(s) of %d, "
+                "under the %.0f%% floor" % (distinct, len(lines),
+                                            MIN_DISTINCT * 100))
+    return None
+
+
 def create_finish(root, kind_name, target, reply):
     """The offline half of `create`: fence, build, admit."""
     fences = FENCE_SRC.findall(reply)
@@ -1394,6 +1446,9 @@ def create_finish(root, kind_name, target, reply):
     body = fences[0]
     if not body.strip():
         return None, "the fence is empty"
+    bad = degenerate(body)
+    if bad:
+        return None, bad
     fields = {
         "kind": kind_name, "rung": 4, "axis": "model",
         "parent-tree": head_tree(root), "corpus": corpus_hash(root) or "0" * 8,
@@ -1838,6 +1893,16 @@ def selftest():
               all('"$KIND" = "%s"' % n in jtext
                   for n, k in KINDS.items()
                   if k.enabled and k.j1 in ("witness", "claims")))
+    # The two gates that stand in front of a runner, against the reply
+    # that bought them: the first real `create` run, 70 lines of doc
+    # comment and no code, which the fence contract cannot see because
+    # the fence was perfectly well formed.
+    claim("a created file with no Rust item is refused",
+          "declares no Rust item" in (degenerate(COMMENTS) or ""))
+    claim("a stuck decode is refused by its own repetition",
+          "repeated itself" in (degenerate(STUCK) or ""))
+    claim("and an ordinary short file is not refused",
+          degenerate(SHORT) is None)
     claim("the envelope is identity only -- no account state in the bytes",
           "minutes" not in env and "alpha" not in env and "boots" not in env)
     try:

@@ -109,6 +109,44 @@ def judgeable_kinds():
         if k.enabled and k.j1 in ("witness", "claims")))
 
 
+def godel_kind(name):
+    sys.path.insert(0, os.path.join(ROOT, "tools"))
+    import godel
+    return godel.KINDS[name]
+
+
+def nothing_built(rungs):
+    """True while no rung has been met.
+
+    **The first rung toward a north star cannot be witnessed, and that is
+    arithmetic rather than taste.** A witness must fail against the tree as
+    it stands *because of the goal*; with nothing of the goal built, every
+    file that exists belongs to something else, so the only witnessed rung
+    available is one aimed at a file the goal has never touched. Such a rung
+    is admissible, spends a runner, and is refused -- three times, before it
+    retires, and then the next one is drawn from the same distribution.
+
+    Measured rather than assumed: the 4B chose `test` against
+    `src/fmt/outline.rs` five times out of five, deterministically, with a
+    witness whose own text says "the struct does not exist". It is not
+    confused. It is being offered a choice that cannot be right yet.
+
+    So while nothing is built only the creating kind is offered, and the
+    restriction lifts the moment one rung is met -- from then on there is
+    something of the goal's to be wrong about, which is exactly when a
+    witness starts being able to fail for the right reason.
+    """
+    return not any(r.get("met") for r in rungs)
+
+
+def kinds_open(rungs):
+    """The kinds a rung may name, given what the ladder has already met."""
+    ks = judgeable_kinds()
+    if rungs is not None and nothing_built(rungs):
+        return tuple(k for k in ks if not godel_kind(k).witness)
+    return ks
+
+
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 SLUG = re.compile(r"^[0-9]{4}-[a-z0-9-]+\.rung$")
 
@@ -184,13 +222,19 @@ def parse_rung(text):
     return r
 
 
-def admit(r, root):
-    """Everything that must hold before a rung is worth a night."""
-    kinds = judgeable_kinds()
+def admit(r, root, rungs=None):
+    """Everything that must hold before a rung is worth a night.
+
+    `rungs` is what the ladder has met so far, and it narrows the kinds --
+    see `nothing_built`. It is optional because `load` re-admits rungs
+    written under earlier rules, and a rung already on the ladder must not
+    become stale for a restriction that did not exist when it was written.
+    """
+    kinds = kinds_open(rungs)
     if r["kind"] not in kinds:
         raise Bad(
-            "kind %r has no J1 that could say yes, so this milestone would "
-            "have no judge; the kinds you may name are %s" % (r["kind"], ", ".join(kinds)))
+            "kind %r cannot be judged here yet; the kinds you may name are "
+            "%s" % (r["kind"], ", ".join(kinds)))
     g = goal_hash(root)
     if g is None:
         raise Bad("there is no north star, so this rung is aimed at nothing")
@@ -556,7 +600,7 @@ def rung_card(root, rungs):
     """Structured data only. The tree's shape is a listing, never a slice of
     source, because a milestone is chosen from what exists rather than
     written against what one file happens to say."""
-    kinds = judgeable_kinds()
+    kinds = kinds_open(rungs)
     sys.path.insert(0, os.path.join(ROOT, "tools"))
     import godel
     import knob
@@ -647,7 +691,7 @@ def grammar_for(root, rungs):
     # grammar is a second lock rather than a replacement for the first.
     existing = existing_targets(root)
     arms = []
-    for k in judgeable_kinds():
+    for k in kinds_open(rungs):
         sys.path.insert(0, os.path.join(ROOT, "tools"))
         import godel
         rhs = "oldpath" if godel.KINDS[k].witness else "newpath"
@@ -721,13 +765,15 @@ def propose_finish(root, reply, rungs=None):
     _, _, after = rest.partition("```")
     if before.strip() or after.strip():
         return None, "content outside the fence"
-    try:
-        r = parse_rung(fences[0])
-        admit(r, root)
-    except Bad as e:
-        return None, str(e)
+    # The ladder is read BEFORE admission, because what has been met is
+    # what decides which kinds are open -- see `nothing_built`.
     if rungs is None:
         rungs = state(root)
+    try:
+        r = parse_rung(fences[0])
+        admit(r, root, rungs)
+    except Bad as e:
+        return None, str(e)
     want = len(rungs) + 1
     if int(r["seq"]) != want:
         return None, ("the rung claims seq %s where the ladder's next is %d"
@@ -825,7 +871,7 @@ def selftest():
         # lie, and a checker that has never refused anything is one that reads
         # nothing.
         refuses(lambda: admit(parse_rung(_rung(g, kind="cleanup")), tmp),
-                "no J1 that could say yes",
+                "cannot be judged here yet",
                 "a kind with no reachable J1 is refused, so no milestone "
                 "lacks a judge")
         refuses(lambda: admit(parse_rung(_rung("0" * 64)), tmp),
@@ -967,7 +1013,7 @@ def selftest():
         # stays refused is a kind whose J1 needs a rail that already reads
         # something, since a rung creates what nothing was measuring.
         r, why = propose_finish(tmp, fenced(_rung(g, 2, kind="cleanup")))
-        claim(r is None and "no J1 that could say yes" in (why or ""),
+        claim(r is None and "cannot be judged here yet" in (why or ""),
               "a milestone under a kind with no reachable J1 is refused by name")
 
         r, why = propose_finish(tmp, fenced(_rung(g, 2, kind="feature")))
@@ -983,15 +1029,25 @@ def selftest():
         # The rule whose absence cost three nights: a witnessed kind aimed
         # at a file that is not there yet is stuck, not slow -- it refuses
         # locally, files no certificate, and so never retires.
-        r, why = propose_finish(tmp, fenced(_rung(g, 2, kind="test")))
+        # **A ladder with something met**, because the first-rung rule closes
+        # the witnessed kinds until one is, and these two claims are about
+        # the target check sitting behind it.
+        built = [dict(parse_rung(_rung(g, 1)), met=True, retired=False,
+                      stale="", point="x" * 64)]
+        r, why = propose_finish(tmp, fenced(_rung(g, 2, kind="test")), built)
         claim(r is None and "does not exist yet" in (why or ""),
               "a witnessed kind aimed at a file that is not there is refused")
         os.makedirs(os.path.join(tmp, "src", "ai"), exist_ok=True)
         open(os.path.join(tmp, "src", "ai", "there.rs"), "w").write("// x")
         r, why = propose_finish(tmp, fenced(
-            _rung(g, 2, kind="test", target="src/ai/there.rs")))
+            _rung(g, 2, kind="test", target="src/ai/there.rs")), built)
         claim(r is not None,
               "and the same kind aimed at a file that IS there is admitted")
+        claim('"kind test' not in grammar_for(tmp, [])
+              and '"kind feature' in grammar_for(tmp, []),
+              "with nothing met, the grammar offers only the creating kind")
+        claim('"kind test' in grammar_for(tmp, [dict(met=True)]),
+              "and a witnessed kind opens as soon as one rung is met")
 
         # **A rung that stops admitting must not take the ladder down.**
         # `load` raised, so one rung written before a rule tightened made
