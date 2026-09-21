@@ -1261,6 +1261,101 @@ def ask_model(system, card, meta, token, agent="glados-loop", grammar=None):
         raise NoInference(f"{url} could not be asked: {e}")
 
 
+FENCE_SRC = re.compile(r"```(?:rust)?\n(.*?)```", re.S)
+
+
+def new_file_diff(path, contents):
+    """A unified diff that creates `path`, built here rather than asked for.
+
+    **A small model should not be asked for a diff at all.** The hunk header
+    `@@ -a,b +c,d @@` has to describe the body exactly -- this file's own
+    selftest claims "a deletion diff's hunk header agrees with the body it
+    describes" -- and a 4B asked for one is failing at arithmetic rather than
+    at engineering. The first local run of the author returned *zero* fences,
+    which is the same format failure the decomposer had.
+
+    A *new* file needs no arithmetic: the header is `@@ -0,0 +1,N @@` where N
+    is the line count, and every body line is an addition. So the model is
+    asked for the file and the diff is constructed, which is `constrain.rs`'s
+    move again -- the invalid form is unreachable because nobody is asked to
+    produce it. It is also the rule rungs 1 and 3 already follow: a knob patch
+    is "generated mechanically, so it is valid Rust by construction", and a
+    template candidate is valid "rather than by a model's good behaviour".
+
+    This covers creation only. Editing an existing file still wants a real
+    diff, and rung 3's template families are the mechanical answer there.
+    """
+    if not contents.endswith("\n"):
+        contents += "\n"
+    lines = contents.split("\n")[:-1]
+    out = [f"--- /dev/null", f"+++ b/{path}", f"@@ -0,0 +1,{len(lines)} @@"]
+    out += ["+" + l for l in lines]
+    return "\n".join(out) + "\n"
+
+
+def create_finish(root, kind_name, target, reply):
+    """The offline half of `create`: fence, build, admit."""
+    fences = FENCE_SRC.findall(reply)
+    if len(fences) != 1:
+        preview = " ".join(reply.split())[:240]
+        return None, ("%d source fence(s) where the contract says exactly one"
+                      " -- it said: %s" % (len(fences), preview or "(nothing)"))
+    body = fences[0]
+    if not body.strip():
+        return None, "the fence is empty"
+    fields = {
+        "kind": kind_name, "rung": 4, "axis": "model",
+        "parent-tree": head_tree(root), "corpus": corpus_hash(root) or "0" * 8,
+        "rail": "none",
+    }
+    env = render_envelope(fields, patch=new_file_diff(target, body))
+    bad = admit(env)
+    if bad:
+        return None, bad[0]
+    return env, None
+
+
+def create(root, kind_name, target, token, rung=None):
+    """Ask for a new file's contents and build the creating diff."""
+    meta, system = read_prompt("create.md")
+    card = "\n".join([
+        f"file to create: {target}",
+        f"kind: {kind_name}",
+        f"budget: at most {KINDS[kind_name].max_lines} lines",
+        f"what must become true: {(rung or {}).get('title', '(unstated)')}",
+        f"the check that will say whether it did: {(rung or {}).get('witness', '(unstated)')}",
+    ])
+    # The fence is guaranteed rather than requested; what is inside it is not,
+    # and `admit` plus the build plus the witness are what judge that.
+    #
+    # **No line inside the body may begin with a backtick**, which is what
+    # makes the closing fence unambiguous. The first attempt used
+    # `body ::= [^\x00]*`, and a body that can contain ``` leaves the parser
+    # two live readings of one closing fence -- so the model wrote past it and
+    # opened a second. Backticks mid-line stay legal, because doc comments in
+    # this tree are full of them.
+    # **And the body is bounded, because `line*` never has to end.** With an
+    # unbounded repeat the model may always continue, so nothing pressures it
+    # to close the fence: the first attempt ran to the token cap still
+    # writing, and the second ran to the request timeout. The size guidance in
+    # the prompt is advice a 4B can decline. A `{1,70}` repeat is not.
+    #
+    # Seventy lines sits above the thirty-to-sixty the prompt asks for and far
+    # under the kind's own budget, so the grammar bounds the *shape* and
+    # `admit` still owns the real limit.
+    grammar = (
+        'root ::= "```rust\\n" body "```"\n'
+        'body ::= line{1,70}\n'
+        'line ::= ([^`\\n] [^\\n]*)? "\\n"\n'
+    )
+    try:
+        reply = ask_model(system, card, meta, token, "glados-loop-create",
+                          grammar=grammar)
+    except NoInference as e:
+        return None, str(e)
+    return create_finish(root, kind_name, target, reply)
+
+
 def author_finish(root, kind_name, reply):
     """The offline half, split out so the drills need no network."""
     diff, why = parse_completion(reply)

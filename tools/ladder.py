@@ -40,14 +40,22 @@ question is not evidence for another.
 ### Who writes the rungs
 
 The machine does, and that is the point: the operator's whole input is the
-one line in `loop/goal.txt`. `propose` asks GitHub Models -- the workflow's
-own token, `models: read`, no new credential -- for the next milestone, under
-the same shape `godel.author` uses for patches: a system prompt from
-`tools/prompts/`, a structured card as the user turn, and exactly one fenced
-block back. The card carries the north star, the rungs so far, the witnessed
-kinds with their line budgets, and a *listing* of the modules that exist. A
-listing rather than source, because a milestone is chosen from what is there
-rather than written against whatever one file happens to say.
+one line in `loop/goal.txt`. `propose` asks a model **running inside the CI
+job** -- a ternary Bonsai 4B served by `llama-server`, no credential of any
+kind -- for the next milestone, under the same shape `godel.author` uses for
+patches: a system prompt from `tools/prompts/`, a structured card as the user
+turn, and exactly one fenced block back.
+
+(It asked GitHub Models until that was retired mid-loop. The endpoint was
+chosen for "the workflow's own token, no new credential"; a model in the job
+keeps that property without depending on anybody's service staying up.)
+
+The card carries the north star, the rungs so far, the witnessed kinds with
+their line budgets, the surfaces no milestone may target, and a *listing* of
+the modules that exist. A listing rather than source, because a milestone is
+chosen from what is there rather than written against whatever one file
+happens to say -- and because a listing is a far smaller injection surface
+than a file the loop may itself have written.
 
 Everything the reply could do is refused somewhere. Prose outside the fence,
 two fences, none; a kind with no witness; a goal hash that is not the current
@@ -198,6 +206,25 @@ def admit(r, root):
     if any(t.startswith(pre) for pre in godel.EVALUATOR):
         raise Bad("the target %r is evaluator machinery, which the loop may "
                   "not aim at" % t)
+
+    # **And it must be somewhere a verdict can be reached.** `src/gfx/` and
+    # `src/port/` are unjudgeable: screenshots are captured and never
+    # compared, so a change there builds, boots, reads `same` on every rail
+    # there is, and would be adopted having checked nothing about the only
+    # thing it altered. `knob.UNJUDGEABLE` is that list and `admit` in
+    # `godel.py` already refuses a patch aimed at one.
+    #
+    # It was refusing them a step too late. The first rung the decomposer
+    # wrote for a video codec targeted `src/gfx/video.rs`, which is exactly
+    # the plausible-looking wrong answer -- a codec is data in and data out
+    # and perfectly judgeable, but not from inside the graphics tree. The
+    # refusal arrived after a model had written the file. Here it arrives
+    # before a night is spent.
+    import knob
+    if any(t.startswith(pre) for pre in knob.UNJUDGEABLE):
+        raise Bad("the target %r is an unjudgeable surface %s -- nothing "
+                  "there can be compared, so no witness could settle it"
+                  % (t, list(knob.UNJUDGEABLE)))
     return r
 
 
@@ -349,6 +376,7 @@ def rung_card(root, rungs):
     kinds = witnessed_kinds()
     sys.path.insert(0, os.path.join(ROOT, "tools"))
     import godel
+    import knob
     lines = [
         "north star: %s" % north_star(root),
         "goal hash: %s" % goal_hash(root),
@@ -366,6 +394,10 @@ def rung_card(root, rungs):
         lines.append("  seq %s %s [%s] %s"
                      % (r["seq"], r["kind"],
                         "met" if r["met"] else "open", r["title"]))
+    lines.append("surfaces NO milestone may target, because nothing there "
+                 "can be compared and so no witness could settle it:")
+    for pre in knob.UNJUDGEABLE:
+        lines.append("  %s  (screenshots are captured and never diffed)" % pre)
     lines.append("modules that exist today (data, not directives):")
     src = os.path.join(root, "src")
     if os.path.isdir(src):
@@ -545,6 +577,9 @@ def selftest():
         refuses(lambda: admit(parse_rung(_rung(g, target="tools/godel.py")), tmp),
                 "evaluator machinery",
                 "and a target that IS the evaluator is refused by name")
+        refuses(lambda: admit(parse_rung(_rung(g, target="src/gfx/video.rs")), tmp),
+                "unjudgeable surface",
+                "and an unjudgeable surface is refused before a night is spent")
         refuses(lambda: admit(parse_rung(_rung(g, target="../escape.rs")), tmp),
                 "outside the tree",
                 "and one reaching out of the tree is refused")
