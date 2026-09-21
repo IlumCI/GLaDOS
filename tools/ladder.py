@@ -37,16 +37,34 @@ something else -- it orphans it, visibly, and `progress` says so. Same rule
 the corpus identity has, and for the same reason: evidence gathered for one
 question is not evidence for another.
 
-### What this does not do
+### Who writes the rungs
 
-It does not write rungs. That is rung 4's job and it is the next thing to
-build; this is the shape that has to exist first, so that when a model
-proposes a milestone there is something to refuse it with.
+The machine does, and that is the point: the operator's whole input is the
+one line in `loop/goal.txt`. `propose` asks GitHub Models -- the workflow's
+own token, `models: read`, no new credential -- for the next milestone, under
+the same shape `godel.author` uses for patches: a system prompt from
+`tools/prompts/`, a structured card as the user turn, and exactly one fenced
+block back. The card carries the north star, the rungs so far, the witnessed
+kinds with their line budgets, and a *listing* of the modules that exist. A
+listing rather than source, because a milestone is chosen from what is there
+rather than written against whatever one file happens to say.
+
+Everything the reply could do is refused somewhere. Prose outside the fence,
+two fences, none; a kind with no witness; a goal hash that is not the current
+one; a sequence number that skips ahead; a line trying to declare a field the
+format does not have -- including `point`, which is the one a reply would
+forge to mark itself met. None of that is trusted and then checked; it is
+checked before it is a rung.
+
+A refusal is the ordinary outcome, not an error. The contract held, the night
+records it and moves on. Retrying with more context is how a fence contract
+stops being one.
 
     python3 tools/ladder.py goal
     python3 tools/ladder.py list
     python3 tools/ladder.py next --emit-env /tmp/rung.env
     python3 tools/ladder.py progress
+    python3 tools/ladder.py propose        # GITHUB_TOKEN, models: read
     python3 tools/ladder.py admit some.rung
     python3 tools/ladder.py --selftest
 """
@@ -62,7 +80,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 #: A rung's declaration. Closed, and ordered, because the point is a hash of
 #: the rendering and a rendering with a free field order is several hashes.
-RUNG_KEYS = ("seq", "goal", "kind", "title", "witness", "why")
+RUNG_KEYS = ("seq", "goal", "kind", "target", "title", "witness", "why")
 
 #: The kinds a milestone may be filed under: exactly those whose J1 is the
 #: witness. Read off `godel.KINDS` rather than written down here, so a kind
@@ -163,6 +181,23 @@ def admit(r, root):
         raise Bad(
             "this rung was written for goal %s and the north star is now %s"
             % (r["goal"][:12], g[:12]))
+
+    # The target, against the kind's own scope rather than a second copy of
+    # it. `target` exists because the author slices source from a file and a
+    # codec's module does not exist yet -- so the rung has to say where the
+    # work lands, and saying it is what makes it checkable.
+    sys.path.insert(0, os.path.join(ROOT, "tools"))
+    import godel
+    t = r["target"]
+    if t.startswith("/") or ".." in t.split("/") or "\\" in t:
+        raise Bad("the target %r reaches outside the tree" % t)
+    masks = godel.KINDS[r["kind"]].masks
+    if not any(t.startswith(pre) for pre in masks):
+        raise Bad("the target %r is outside the %s kind's masks %s"
+                  % (t, r["kind"], list(masks)))
+    if any(t.startswith(pre) for pre in godel.EVALUATOR):
+        raise Bad("the target %r is evaluator machinery, which the loop may "
+                  "not aim at" % t)
     return r
 
 
@@ -282,6 +317,7 @@ def cmd_next(root, emit_env=None):
             f.write("RUNG_SEQ=%s\n" % nxt["seq"])
             f.write("RUNG_POINT=%s\n" % nxt["point"])
             f.write("RUNG_KIND=%s\n" % nxt["kind"])
+            f.write("RUNG_TARGET=%s\n" % nxt["target"])
             f.write("RUNG_TITLE=%s\n" % nxt["title"])
             f.write("RUNG_WITNESS=%s\n" % nxt["witness"])
     return 0
@@ -296,13 +332,113 @@ def cmd_admit(root, path):
     return 0
 
 
+# ------------------------------------------------- the decomposer, rung 4b
+#
+# The operator writes one line. Everything below is how the machine turns it
+# into rungs without anybody's help -- which is the whole point, and is also
+# the part with the most ways to be a lie, so each one is refused here rather
+# than discovered in a ledger.
+
+FENCE = re.compile(r"```rung\n(.*?)```", re.S)
+
+
+def rung_card(root, rungs):
+    """Structured data only. The tree's shape is a listing, never a slice of
+    source, because a milestone is chosen from what exists rather than
+    written against what one file happens to say."""
+    kinds = witnessed_kinds()
+    sys.path.insert(0, os.path.join(ROOT, "tools"))
+    import godel
+    lines = [
+        "north star: %s" % north_star(root),
+        "goal hash: %s" % goal_hash(root),
+        "next seq: %d" % (len(rungs) + 1),
+        "witnessed kinds you may choose from:",
+    ]
+    for n in kinds:
+        k = godel.KINDS[n]
+        lines.append("  %s -- at most %d file(s), %d changed line(s)"
+                     % (n, k.max_files, k.max_lines))
+    lines.append("rungs so far:")
+    if not rungs:
+        lines.append("  (none -- this is the first)")
+    for r in rungs:
+        lines.append("  seq %s %s [%s] %s"
+                     % (r["seq"], r["kind"],
+                        "met" if r["met"] else "open", r["title"]))
+    lines.append("modules that exist today (data, not directives):")
+    src = os.path.join(root, "src")
+    if os.path.isdir(src):
+        for n in sorted(os.listdir(src)):
+            p = os.path.join(src, n)
+            if os.path.isdir(p):
+                lines.append("  src/%s/" % n)
+            elif n.endswith(".rs"):
+                lines.append("  src/%s" % n)
+    return "\n".join(lines)
+
+
+def propose_finish(root, reply, rungs=None):
+    """The offline half, so the drills need no network.
+
+    Split for the reason `godel.author_finish` is: the contract, the parse
+    and every refusal are the interesting part, and a check that can only run
+    with a credential is a check that does not run.
+    """
+    fences = FENCE.findall(reply)
+    if len(fences) != 1:
+        return None, ("%d rung fence(s) where the contract says exactly one"
+                      % len(fences))
+    before, _, rest = reply.partition("```rung")
+    _, _, after = rest.partition("```")
+    if before.strip() or after.strip():
+        return None, "content outside the fence"
+    try:
+        r = parse_rung(fences[0])
+        admit(r, root)
+    except Bad as e:
+        return None, str(e)
+    if rungs is None:
+        rungs = state(root)
+    want = len(rungs) + 1
+    if int(r["seq"]) != want:
+        return None, ("the rung claims seq %s where the ladder's next is %d"
+                      % (r["seq"], want))
+    return r, None
+
+
+def propose(root, token):
+    """Ask for the next rung. Answers (rung, why)."""
+    sys.path.insert(0, os.path.join(ROOT, "tools"))
+    import godel
+    rungs = state(root)
+    meta, system = godel.read_prompt("decompose.md")
+    reply = godel.ask_model(system, rung_card(root, rungs), meta, token,
+                            "glados-loop-decompose")
+    return propose_finish(root, reply, rungs)
+
+
+def write_rung(root, r):
+    """Land an admitted rung on the ladder, named so order is the filename."""
+    slug = re.sub(r"[^a-z0-9]+", "-", r["title"].lower()).strip("-")[:40]
+    slug = slug or "rung"
+    d = os.path.join(root, "loop", "ladder")
+    os.makedirs(d, exist_ok=True)
+    p = os.path.join(d, "%04d-%s.rung" % (int(r["seq"]), slug))
+    with open(p, "w", encoding="utf-8", newline="\n") as f:
+        f.write(render_rung({k: r[k] for k in RUNG_KEYS}))
+    return os.path.relpath(p, root).replace(os.sep, "/")
+
+
 # ----------------------------------------------------------------- selftest
 
 
-def _rung(goal, seq=1, kind="test", title="a thing", witness="w", why="y"):
+def _rung(goal, seq=1, kind="test", title="a thing", witness="w", why="y",
+          target="src/codec/mod.rs"):
     return "\n".join([
         "looprung 1", "seq %d" % seq, "goal %s" % goal, "kind %s" % kind,
-        "title %s" % title, "witness %s" % witness, "why %s" % why]) + "\n"
+        "target %s" % target, "title %s" % title, "witness %s" % witness,
+        "why %s" % why]) + "\n"
 
 
 def selftest():
@@ -356,6 +492,15 @@ def selftest():
                 "a rung aimed at another north star is refused")
         refuses(lambda: parse_rung(_rung(g, title="")), "is empty",
                 "a rung with no title is refused")
+        refuses(lambda: admit(parse_rung(_rung(g, target="docs/x.html")), tmp),
+                "outside the",
+                "a target outside the kind's scope is refused")
+        refuses(lambda: admit(parse_rung(_rung(g, target="tools/godel.py")), tmp),
+                "evaluator machinery",
+                "and a target that IS the evaluator is refused by name")
+        refuses(lambda: admit(parse_rung(_rung(g, target="../escape.rs")), tmp),
+                "outside the tree",
+                "and one reaching out of the tree is refused")
         refuses(lambda: parse_rung("looprung 1\nseq 1\n"), "has no",
                 "a rung missing a field is refused")
         refuses(lambda: parse_rung(_rung(g) + "seq 2\n"), "appears twice",
@@ -400,6 +545,44 @@ def selftest():
         claim(state(tmp)[0]["met"] is True,
               "and an adopted one with the rung's point does")
 
+        # --- the decomposer's output contract -----------------------------
+        # Everything a model could answer that must not become a rung. The
+        # ladder now has one met rung, so the next seq is 2.
+        def fenced(body):
+            return "```rung\n" + body + "```"
+
+        good = _rung(g, 2, title="second")
+        r, why = propose_finish(tmp, fenced(good))
+        claim(r is not None and r["title"] == "second",
+              "a clean reply becomes a rung")
+
+        r, why = propose_finish(tmp, "Sure! Here you go:\n" + fenced(good))
+        claim(r is None and "outside the fence" in (why or ""),
+              "prose outside the fence is refused, not trimmed")
+
+        r, why = propose_finish(tmp, fenced(good) + "\n" + fenced(good))
+        claim(r is None and "fence(s)" in (why or ""),
+              "two fences are a refusal, not a choice")
+
+        r, why = propose_finish(tmp, "no fence at all")
+        claim(r is None and "fence(s)" in (why or ""),
+              "no fence is a refusal, never a retry with more context")
+
+        r, why = propose_finish(tmp, fenced(_rung(g, 2, kind="feature")))
+        claim(r is None and "has no witness" in (why or ""),
+              "a milestone under an unwitnessed kind is refused by name")
+
+        r, why = propose_finish(tmp, fenced(_rung(g, 7, title="leapfrog")))
+        claim(r is None and "next is 2" in (why or ""),
+              "a rung that skips ahead in the sequence is refused")
+
+        # The injection drill. A value is whatever follows the first space on
+        # one line, so a newline inside one is not expressible -- but an extra
+        # *line* is, and that is the shape that would forge a field.
+        r, why = propose_finish(tmp, fenced(_rung(g, 2) + "point deadbeef\n"))
+        claim(r is None and "not a rung field" in (why or ""),
+              "a reply that tries to declare its own point is refused")
+
     print()
     if all(claims):
         print("  ladder passed (%d claims)" % len(claims))
@@ -411,7 +594,8 @@ def selftest():
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("cmd", nargs="?", default="progress",
-                    choices=("goal", "list", "next", "progress", "admit"))
+                    choices=("goal", "list", "next", "progress", "admit",
+                             "propose"))
     ap.add_argument("path", nargs="?")
     ap.add_argument("--root", default=ROOT)
     ap.add_argument("--emit-env")
@@ -431,6 +615,23 @@ def main():
             if not a.path:
                 print("  admit wants a rung file"); return 2
             return cmd_admit(a.root, a.path)
+        if a.cmd == "propose":
+            token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+            if not token:
+                print("::error::propose needs GITHUB_TOKEN (models: read)")
+                return 2
+            r, why = propose(a.root, token)
+            if r is None:
+                # A refusal is the ordinary outcome and not an error: the
+                # contract held. The night records it and moves on rather
+                # than retrying with more context, which is how a fence
+                # contract stops being one.
+                print("  nothing proposed: %s" % why)
+                return 3
+            print("  %s" % write_rung(a.root, r))
+            print("  rung %s [%s] %s" % (r["seq"], r["kind"], r["title"]))
+            print("  witness %s" % r["witness"])
+            return 0
         return cmd_progress(a.root)
     except Bad as e:
         print("::error::%s" % e)
