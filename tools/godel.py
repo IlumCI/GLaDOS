@@ -1231,8 +1231,14 @@ def ask_model(system, card, meta, token, agent="glados-loop"):
             "Content-Type": "application/json",
             "User-Agent": agent,
         })
+    # **Six hundred seconds, not a hundred and twenty.** The old value was
+    # chosen for a hosted endpoint that answered in seconds; a 4B model on
+    # four vCPU prefills a card and generates a few hundred tokens, and the
+    # first run on a runner timed out at 120 having started the server
+    # successfully four seconds in. The night has fifteen minutes and spends
+    # them on nothing else.
     try:
-        with urllib.request.urlopen(req, timeout=120) as r:
+        with urllib.request.urlopen(req, timeout=int(meta.get("timeout", "600"))) as r:
             return _json.loads(r.read())["choices"][0]["message"]["content"]
     except urllib.error.HTTPError as e:
         # Read the body: the useful half of a refusal is in it, and the 410
