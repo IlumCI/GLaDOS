@@ -12,6 +12,13 @@
 #
 #     cargo build --release --target x86_64-unknown-linux-gnu
 #
+# **This is a Windows target, so every other host must pass `--target`.**
+# Cargo cannot unset an inherited key, so escaping the kernel's UEFI target
+# means naming one, and the one named is the development machine's. That makes
+# the crate unbuildable anywhere else without an explicit `--target`, which is
+# exactly what happened: `pool.yml` built with one and tested without, so the
+# tests looked for a Windows std on a Linux runner and this job failed every
+# release it ever ran on.
 [build]
 target = "x86_64-pc-windows-msvc"
 

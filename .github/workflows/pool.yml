@@ -61,7 +61,13 @@ jobs:
       # be the least visible anywhere else.
       - name: Test
         working-directory: pool
-        run: cargo test --locked
+        # `--target`, because `pool/.cargo/config.toml` names a *Windows*
+        # target to escape the kernel's UEFI one, and cargo cannot unset an
+        # inherited key -- so the closest config wins and a bare `cargo test`
+        # on a Linux runner looks for a Windows std that is not installed.
+        # The build below already passed `--target`; the tests never did, which
+        # is why this job has failed every release it has run on.
+        run: cargo test --locked --target x86_64-unknown-linux-musl
 
       # musl, so the artefact is statically linked: no glibc version to match
       # against whatever a host runs, no shared objects, one file. `--target` is
