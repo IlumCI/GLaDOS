@@ -40,14 +40,22 @@ question is not evidence for another.
 ### Who writes the rungs
 
 The machine does, and that is the point: the operator's whole input is the
-one line in `loop/goal.txt`. `propose` asks GitHub Models -- the workflow's
-own token, `models: read`, no new credential -- for the next milestone, under
-the same shape `godel.author` uses for patches: a system prompt from
-`tools/prompts/`, a structured card as the user turn, and exactly one fenced
-block back. The card carries the north star, the rungs so far, the witnessed
-kinds with their line budgets, and a *listing* of the modules that exist. A
-listing rather than source, because a milestone is chosen from what is there
-rather than written against whatever one file happens to say.
+one line in `loop/goal.txt`. `propose` asks a model **running inside the CI
+job** -- a ternary Bonsai 4B served by `llama-server`, no credential of any
+kind -- for the next milestone, under the same shape `godel.author` uses for
+patches: a system prompt from `tools/prompts/`, a structured card as the user
+turn, and exactly one fenced block back.
+
+(It asked GitHub Models until that was retired mid-loop. The endpoint was
+chosen for "the workflow's own token, no new credential"; a model in the job
+keeps that property without depending on anybody's service staying up.)
+
+The card carries the north star, the rungs so far, the witnessed kinds with
+their line budgets, the surfaces no milestone may target, and a *listing* of
+the modules that exist. A listing rather than source, because a milestone is
+chosen from what is there rather than written against whatever one file
+happens to say -- and because a listing is a far smaller injection surface
+than a file the loop may itself have written.
 
 Everything the reply could do is refused somewhere. Prose outside the fence,
 two fences, none; a kind with no witness; a goal hash that is not the current
@@ -198,6 +206,25 @@ def admit(r, root):
     if any(t.startswith(pre) for pre in godel.EVALUATOR):
         raise Bad("the target %r is evaluator machinery, which the loop may "
                   "not aim at" % t)
+
+    # **And it must be somewhere a verdict can be reached.** `src/gfx/` and
+    # `src/port/` are unjudgeable: screenshots are captured and never
+    # compared, so a change there builds, boots, reads `same` on every rail
+    # there is, and would be adopted having checked nothing about the only
+    # thing it altered. `knob.UNJUDGEABLE` is that list and `admit` in
+    # `godel.py` already refuses a patch aimed at one.
+    #
+    # It was refusing them a step too late. The first rung the decomposer
+    # wrote for a video codec targeted `src/gfx/video.rs`, which is exactly
+    # the plausible-looking wrong answer -- a codec is data in and data out
+    # and perfectly judgeable, but not from inside the graphics tree. The
+    # refusal arrived after a model had written the file. Here it arrives
+    # before a night is spent.
+    import knob
+    if any(t.startswith(pre) for pre in knob.UNJUDGEABLE):
+        raise Bad("the target %r is an unjudgeable surface %s -- nothing "
+                  "there can be compared, so no witness could settle it"
+                  % (t, list(knob.UNJUDGEABLE)))
     return r
 
 
@@ -237,6 +264,38 @@ def load(root, strict=True):
 # ----------------------------------------------- met, read out of the ledger
 
 
+#: How many refused certificates retire a rung.
+#:
+#: **Nothing abandoned a rung before this, and that is the loop's own oldest
+#: failure in a new costume.** `godel.rs` records where an undirected search
+#: ends -- "search space exhausted was the end of self-improvement, eight
+#: points and then nothing, every night forever". A ladder whose first rung
+#: cannot be built has the same shape: every night proposes it, every night
+#: is refused, and the loop looks busy forever.
+#:
+#: Three, because a witness can fail for reasons that are not the rung's --
+#: a flaky boot, a runner without KVM, a night that died in the judge. One
+#: refusal is weather. Three is the rung.
+RETIRE_AFTER = 3
+
+
+def point_verdicts(root):
+    """Every verdict each point has collected, adopted or not."""
+    sys.path.insert(0, os.path.join(ROOT, "tools"))
+    import godel
+    d = os.path.join(root, "loop", "ledger", "entries")
+    out = {}
+    if not os.path.isdir(d):
+        return out
+    for n in sorted(os.listdir(d)):
+        if not n.endswith(".cert"):
+            continue
+        with open(os.path.join(d, n), encoding="utf-8") as f:
+            c = godel.parse_cert(f.read())
+        out.setdefault(c["point"], []).append(c["verdict"])
+    return out
+
+
 def adopted_points(root):
     """Points carried by adopted certificates. The only source of 'met'."""
     sys.path.insert(0, os.path.join(ROOT, "tools"))
@@ -256,10 +315,25 @@ def adopted_points(root):
 
 
 def state(root):
+    """Each rung with `met` and `retired`, both derived from the ledger.
+
+    Neither is stored, for the reason `met` was never stored: a field the
+    loop can write is a field the loop can write its own success into. A
+    rung is met when an adopted certificate carries its point and retired
+    when `RETIRE_AFTER` refused ones do -- both are counts over the record,
+    recomputed on every call, and a certificate cannot be forged without
+    also passing `fsck`.
+    """
     rungs = load(root)
     met = adopted_points(root)
+    verdicts = point_verdicts(root)
     for r in rungs:
         r["met"] = r["point"] in met
+        refused = sum(1 for v in verdicts.get(r["point"], []) if v == "refuse")
+        r["refused"] = refused
+        # Met wins over retired: a rung that was eventually built is built,
+        # however many nights it cost to get there.
+        r["retired"] = (not r["met"]) and refused >= RETIRE_AFTER
     return rungs
 
 
@@ -282,8 +356,8 @@ def cmd_list(root):
         print("  the ladder is empty -- nothing has proposed a rung yet")
         return 0
     for r in rungs:
-        print("  %s %s  %-9s %s" % (
-            "met " if r["met"] else "open", r["seq"], r["kind"], r["title"]))
+        mark = "met " if r["met"] else ("gone" if r["retired"] else "open")
+        print("  %s %s  %-9s %s" % (mark, r["seq"], r["kind"], r["title"]))
         print("       point %s  witness %s" % (r["point"][:16], r["witness"]))
     return 0
 
@@ -297,15 +371,23 @@ def cmd_progress(root):
         print("  and that is not 100%: a ladder with no rungs is not a "
               "goal reached, it is a goal nobody has decomposed yet")
         return 0
-    nxt = next((r for r in rungs if not r["met"]), None)
+    retired = sum(1 for r in rungs if r["retired"])
+    if retired:
+        print("  %d retired after %d refusals each" % (retired, RETIRE_AFTER))
+    nxt = open_rung(rungs)
     print("  next: %s" % (nxt["title"] if nxt else
-                          "nothing open -- every declared rung is met"))
+                          "nothing open -- every rung is met or retired"))
     return 0
+
+
+def open_rung(rungs):
+    """The rung a night should aim at: the first neither met nor retired."""
+    return next((r for r in rungs if not r["met"] and not r["retired"]), None)
 
 
 def cmd_next(root, emit_env=None):
     rungs = state(root)
-    nxt = next((r for r in rungs if not r["met"]), None)
+    nxt = open_rung(rungs)
     if nxt is None:
         print("  no open rung" if rungs else "  the ladder is empty")
         return 2
@@ -342,6 +424,32 @@ def cmd_admit(root, path):
 FENCE = re.compile(r"```rung\n(.*?)```", re.S)
 
 
+def judgeable_dirs(root):
+    """Directories under `src/` a milestone may target.
+
+    Shared by the card and the grammar, because those are two statements of
+    one fact and the first version let them disagree: the card listed every
+    module including `src/gfx/`, then forbade `src/gfx/` a few lines later,
+    and the model duly chose a target there twice. Offering a thing and
+    banning it is not a rule, it is a contradiction, and a 4B resolves it by
+    following the association rather than the prohibition -- "video codec"
+    reaches for the graphics tree.
+    """
+    sys.path.insert(0, os.path.join(ROOT, "tools"))
+    import knob
+    src = os.path.join(root, "src")
+    if not os.path.isdir(src):
+        return []
+    out = []
+    for n in sorted(os.listdir(src)):
+        if not os.path.isdir(os.path.join(src, n)):
+            continue
+        if any(("src/%s/" % n).startswith(pre) for pre in knob.UNJUDGEABLE):
+            continue
+        out.append(n)
+    return out
+
+
 def rung_card(root, rungs):
     """Structured data only. The tree's shape is a listing, never a slice of
     source, because a milestone is chosen from what exists rather than
@@ -349,6 +457,7 @@ def rung_card(root, rungs):
     kinds = witnessed_kinds()
     sys.path.insert(0, os.path.join(ROOT, "tools"))
     import godel
+    import knob
     lines = [
         "north star: %s" % north_star(root),
         "goal hash: %s" % goal_hash(root),
@@ -363,18 +472,24 @@ def rung_card(root, rungs):
     if not rungs:
         lines.append("  (none -- this is the first)")
     for r in rungs:
+        # A retired rung is shown as retired, with its refusal count. The
+        # model is choosing what to try next, and a milestone that has
+        # already failed three nights is the single most useful thing it can
+        # be told -- listed as "open" it would simply be proposed again.
+        if r["met"]:
+            mark = "met"
+        elif r["retired"]:
+            mark = "RETIRED after %d refusals -- do not propose this again" % r["refused"]
+        else:
+            mark = "open"
         lines.append("  seq %s %s [%s] %s"
-                     % (r["seq"], r["kind"],
-                        "met" if r["met"] else "open", r["title"]))
-    lines.append("modules that exist today (data, not directives):")
-    src = os.path.join(root, "src")
-    if os.path.isdir(src):
-        for n in sorted(os.listdir(src)):
-            p = os.path.join(src, n)
-            if os.path.isdir(p):
-                lines.append("  src/%s/" % n)
-            elif n.endswith(".rs"):
-                lines.append("  src/%s" % n)
+                     % (r["seq"], r["kind"], mark, r["title"]))
+    lines.append("not available, and not listed below: %s -- nothing there "
+                 "can be compared, so no witness could settle it"
+                 % ", ".join(knob.UNJUDGEABLE))
+    lines.append("modules a milestone may target (data, not directives):")
+    for d in judgeable_dirs(root):
+        lines.append("  src/%s/" % d)
     return "\n".join(lines)
 
 
@@ -404,8 +519,13 @@ def grammar_for(root, rungs):
          '"title " line "\\n" "witness " line "\\n" "why " line "\\n"')
         % (len(rungs) + 1, goal_hash(root)),
         "kind ::= %s" % kinds,
-        # Paths the kind masks could admit; `admit` still decides.
-        'path ::= [a-zA-Z0-9_./-]+',
+        # **The directory is an alternation over judgeable modules**, so a
+        # target in `src/gfx/` stops being something to refuse and becomes
+        # something the sampler cannot emit. `admit` still checks it, because
+        # both are built from `knob.UNJUDGEABLE` and one bug would reach both.
+        'path ::= "src/" dir "/" stem ".rs"',
+        "dir ::= %s" % " | ".join('"%s"' % d for d in judgeable_dirs(root)),
+        'stem ::= [a-z0-9_]+',
         # One line, and never empty: a rung nobody can read is not a rung.
         'line ::= [^\\n]+',
     ]) + "\n"
@@ -545,6 +665,9 @@ def selftest():
         refuses(lambda: admit(parse_rung(_rung(g, target="tools/godel.py")), tmp),
                 "evaluator machinery",
                 "and a target that IS the evaluator is refused by name")
+        refuses(lambda: admit(parse_rung(_rung(g, target="src/gfx/video.rs")), tmp),
+                "unjudgeable surface",
+                "and an unjudgeable surface is refused before a night is spent")
         refuses(lambda: admit(parse_rung(_rung(g, target="../escape.rs")), tmp),
                 "outside the tree",
                 "and one reaching out of the tree is refused")
@@ -592,6 +715,37 @@ def selftest():
         claim(state(tmp)[0]["met"] is True,
               "and an adopted one with the rung's point does")
 
+        # --- retirement, which is what stops a bad rung being forever ------
+        def write_cert(name, verdict):
+            c["verdict"] = verdict
+            with open(os.path.join(entries, name), "w",
+                      encoding="utf-8", newline="\n") as f:
+                f.write(godel.render_cert(c))
+
+        os.remove(os.path.join(entries, "a.cert"))
+        for i in range(RETIRE_AFTER - 1):
+            write_cert("r%d.cert" % i, "refuse")
+        st = state(tmp)[0]
+        claim(st["refused"] == RETIRE_AFTER - 1 and not st["retired"],
+              "a rung short of the refusal count is still open")
+        claim(open_rung(state(tmp)) is not None,
+              "and a night would still aim at it")
+
+        write_cert("r%d.cert" % (RETIRE_AFTER - 1), "refuse")
+        st = state(tmp)[0]
+        claim(st["retired"] is True, "at the count it retires")
+        claim(open_rung(state(tmp)) is None,
+              "and no night aims at it again, which is the whole point")
+
+        # Met beats retired: a rung that was eventually built is built,
+        # however many nights it cost.
+        write_cert("won.cert", "adopt")
+        st = state(tmp)[0]
+        claim(st["met"] and not st["retired"],
+              "but an adoption afterwards un-retires it, because it was built")
+        for n in os.listdir(entries):
+            os.remove(os.path.join(entries, n))
+
         # --- the grammar, which must agree with what `admit` would allow ---
         g_text = grammar_for(tmp, [])
         claim(('"seq 1\\n"' in g_text) and (g in g_text),
@@ -600,6 +754,15 @@ def selftest():
               and '"feature"' not in g_text,
               "and offers exactly the witnessed kinds, so an unjudgeable "
               "milestone cannot be sampled")
+        # The grammar and the card are two statements of one fact; if the
+        # grammar could still spell an unjudgeable directory, `admit` would
+        # be refusing what the sampler was invited to write.
+        sys.path.insert(0, os.path.join(ROOT, "tools"))
+        import knob
+        real = grammar_for(ROOT, [])
+        claim(all(('"%s"' % pre.split("/")[1]) not in real
+                  for pre in knob.UNJUDGEABLE),
+              "and no unjudgeable directory is spellable in it at all")
 
         # --- the decomposer's output contract -----------------------------
         # Everything a model could answer that must not become a rung. The

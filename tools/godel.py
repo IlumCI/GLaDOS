@@ -223,6 +223,60 @@ def spend_table():
     return out
 
 
+#: The lanes a night can spend itself on, cheapest first.
+#:
+#: `grid` walks the declared knob table, `template` enumerates candidates from
+#: rustc's own diagnostics, `model` asks the author. The order here is the
+#: tie-break, not the policy -- see `lane_order`.
+LANES = ("grid", "template", "model")
+
+
+def axis_uncertainty(att, adopt):
+    """`godel.rs:3974`, ported to the machine that did not have it.
+
+    A Laplace-smoothed Beta posterior mean folded to a distance from the
+    coin-flip: an axis that has said yes to everything and one that has said
+    no to everything are equally predictable and equally uninformative, and
+    the one near 50% is where the information is. The `+1` over `+2` is what
+    stops that becoming starvation -- a saturated axis stays strictly above
+    zero and comes up once the others are out of moves.
+    """
+    rate = (adopt + 1.0) / (att + 2.0)
+    return 1.0 - abs(rate - 0.5) * 2.0
+
+
+def lane_counts(root):
+    """(attempts, adoptions) per lane, read out of the ledger."""
+    counts = {n: [0, 0] for n in LANES}
+    for e in load_entries(root):
+        if e["axis"] in counts:
+            counts[e["axis"]][0] += 1
+            if e["verdict"] == "adopt":
+                counts[e["axis"]][1] += 1
+    return {n: tuple(v) for n, v in counts.items()}
+
+
+def lane_order(root):
+    """Which lane a night should try first.
+
+    **The kernel machine has ranked its axes by information since
+    `godel.rs:4458`; this one never has.** It walks grid, then templates, then
+    the author, in a fixed order -- so the lane that pursues the operator's
+    declared north star is reached only when everything else is out of moves,
+    which for a goal-directed loop is backwards. A ladder rung waits behind
+    eleven knob points it has nothing to do with.
+
+    Same arithmetic as the kernel's, and the same trade stated there:
+    fairness for information. Ties break by `LANES` order, which is cheapest
+    first, so an untried lane does not get to be expensive *and* preferred on
+    a coin-flip -- and, as there, the order stays a pure function of the
+    record, so a later reader reconstructs it rather than guessing.
+    """
+    counts = lane_counts(root)
+    return sorted(LANES,
+                  key=lambda n: (-axis_uncertainty(*counts[n]), LANES.index(n)))
+
+
 def chi_floor(spent):
     """The floor for the NEXT test after `spent` are on the record.
 
@@ -1261,6 +1315,101 @@ def ask_model(system, card, meta, token, agent="glados-loop", grammar=None):
         raise NoInference(f"{url} could not be asked: {e}")
 
 
+FENCE_SRC = re.compile(r"```(?:rust)?\n(.*?)```", re.S)
+
+
+def new_file_diff(path, contents):
+    """A unified diff that creates `path`, built here rather than asked for.
+
+    **A small model should not be asked for a diff at all.** The hunk header
+    `@@ -a,b +c,d @@` has to describe the body exactly -- this file's own
+    selftest claims "a deletion diff's hunk header agrees with the body it
+    describes" -- and a 4B asked for one is failing at arithmetic rather than
+    at engineering. The first local run of the author returned *zero* fences,
+    which is the same format failure the decomposer had.
+
+    A *new* file needs no arithmetic: the header is `@@ -0,0 +1,N @@` where N
+    is the line count, and every body line is an addition. So the model is
+    asked for the file and the diff is constructed, which is `constrain.rs`'s
+    move again -- the invalid form is unreachable because nobody is asked to
+    produce it. It is also the rule rungs 1 and 3 already follow: a knob patch
+    is "generated mechanically, so it is valid Rust by construction", and a
+    template candidate is valid "rather than by a model's good behaviour".
+
+    This covers creation only. Editing an existing file still wants a real
+    diff, and rung 3's template families are the mechanical answer there.
+    """
+    if not contents.endswith("\n"):
+        contents += "\n"
+    lines = contents.split("\n")[:-1]
+    out = [f"--- /dev/null", f"+++ b/{path}", f"@@ -0,0 +1,{len(lines)} @@"]
+    out += ["+" + l for l in lines]
+    return "\n".join(out) + "\n"
+
+
+def create_finish(root, kind_name, target, reply):
+    """The offline half of `create`: fence, build, admit."""
+    fences = FENCE_SRC.findall(reply)
+    if len(fences) != 1:
+        preview = " ".join(reply.split())[:240]
+        return None, ("%d source fence(s) where the contract says exactly one"
+                      " -- it said: %s" % (len(fences), preview or "(nothing)"))
+    body = fences[0]
+    if not body.strip():
+        return None, "the fence is empty"
+    fields = {
+        "kind": kind_name, "rung": 4, "axis": "model",
+        "parent-tree": head_tree(root), "corpus": corpus_hash(root) or "0" * 8,
+        "rail": "none",
+    }
+    env = render_envelope(fields, patch=new_file_diff(target, body))
+    bad = admit(env)
+    if bad:
+        return None, bad[0]
+    return env, None
+
+
+def create(root, kind_name, target, token, rung=None):
+    """Ask for a new file's contents and build the creating diff."""
+    meta, system = read_prompt("create.md")
+    card = "\n".join([
+        f"file to create: {target}",
+        f"kind: {kind_name}",
+        f"budget: at most {KINDS[kind_name].max_lines} lines",
+        f"what must become true: {(rung or {}).get('title', '(unstated)')}",
+        f"the check that will say whether it did: {(rung or {}).get('witness', '(unstated)')}",
+    ])
+    # The fence is guaranteed rather than requested; what is inside it is not,
+    # and `admit` plus the build plus the witness are what judge that.
+    #
+    # **No line inside the body may begin with a backtick**, which is what
+    # makes the closing fence unambiguous. The first attempt used
+    # `body ::= [^\x00]*`, and a body that can contain ``` leaves the parser
+    # two live readings of one closing fence -- so the model wrote past it and
+    # opened a second. Backticks mid-line stay legal, because doc comments in
+    # this tree are full of them.
+    # **And the body is bounded, because `line*` never has to end.** With an
+    # unbounded repeat the model may always continue, so nothing pressures it
+    # to close the fence: the first attempt ran to the token cap still
+    # writing, and the second ran to the request timeout. The size guidance in
+    # the prompt is advice a 4B can decline. A `{1,70}` repeat is not.
+    #
+    # Seventy lines sits above the thirty-to-sixty the prompt asks for and far
+    # under the kind's own budget, so the grammar bounds the *shape* and
+    # `admit` still owns the real limit.
+    grammar = (
+        'root ::= "```rust\\n" body "```"\n'
+        'body ::= line{1,70}\n'
+        'line ::= ([^`\\n] [^\\n]*)? "\\n"\n'
+    )
+    try:
+        reply = ask_model(system, card, meta, token, "glados-loop-create",
+                          grammar=grammar)
+    except NoInference as e:
+        return None, str(e)
+    return create_finish(root, kind_name, target, reply)
+
+
 def author_finish(root, kind_name, reply):
     """The offline half, split out so the drills need no network."""
     diff, why = parse_completion(reply)
@@ -1447,6 +1596,23 @@ def selftest():
                 "level": str(level), "axis": axis, "corpus": corpus,
                 "rail": rail, "parent-tree": "0" * 40,
                 "candidate-tree": "1" * 40}
+    # --- the lane bandit, ported from godel.rs:3974 -----------------------
+    #
+    # The kernel machine has ranked its axes by information since it had
+    # axes; this one walked a fixed order, which put the operator's north
+    # star behind eleven knob points it has nothing to do with.
+    claim("a lane that adopts everything and one that refuses everything "
+          "are equally uninformative",
+          abs(axis_uncertainty(20, 20) - axis_uncertainty(20, 0)) < 1e-6)
+    claim("and a lane near the coin-flip outranks both",
+          axis_uncertainty(20, 10) > axis_uncertainty(20, 20))
+    claim("an untried lane is maximally uncertain, so a fresh machine "
+          "breaks ties by cost and behaves exactly as it did",
+          axis_uncertainty(0, 0) == 1.0)
+    # The smoothing is what stops information-seeking becoming starvation.
+    claim("a saturated lane stays strictly above zero and comes back",
+          axis_uncertainty(200, 0) > 0.0)
+
     es = [mkcert(1, "refuse", "unstable", 0)]
     claim("one starvation at the base raises the level to one",
           level_for(es, "grid", "deadbeef") == 1)
@@ -1851,6 +2017,8 @@ def main():
     s = sub.add_parser("ledger")
     s.add_argument("--root", default=".")
     s.add_argument("--tail", type=int, default=10)
+    s = sub.add_parser("lanes")
+    s.add_argument("--root", default=ROOT)
     s = sub.add_parser("cert")
     s.add_argument("--emit", action="store_true")
     s.add_argument("--check")
@@ -1980,6 +2148,14 @@ def main():
         at = "AT an epoch boundary" if is_boundary(n) else \
             f"epoch boundary {EPOCH_LEN - (n % EPOCH_LEN)} away"
         print(f"  {n} entr{'y' if n == 1 else 'ies'}, {at}")
+        return 0
+    if a.cmd == "lanes":
+        counts = lane_counts(a.root)
+        for n in lane_order(a.root):
+            att, ad = counts[n]
+            print("  %-9s %d tried, %d adopted, surprise %.3f"
+                  % (n, att, ad, axis_uncertainty(att, ad)))
+        print("first %s" % lane_order(a.root)[0])
         return 0
     if a.cmd == "cert":
         if a.check:

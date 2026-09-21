@@ -327,23 +327,52 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          set +e
-          python3 tools/godel.py next --root . --emit-env /tmp/env.txt > /tmp/account.txt
-          code=$?
-          set -e
+          # **The target comes from the ladder, not from a dispatch input.**
+          # It was `inputs.author_target`, under a comment saying an
+          # unattended targeting policy is a design decision rather than a
+          # default -- which was right when there was no goal. There is one
+          # now, so the open rung names the file and the kind, and the
+          # operator is out of the nightly path entirely.
+          rung_target=""
+          rung_kind="cleanup"
+          if python3 tools/ladder.py next --root . --emit-env /tmp/rung.env >/dev/null 2>&1; then
+            rung_target=$(awk -F= '$1=="RUNG_TARGET"{print $2}' /tmp/rung.env)
+            rung_kind=$(awk -F= '$1=="RUNG_KIND"{print $2}' /tmp/rung.env)
+          fi
+
+          # **Which lane goes first is the ledger's answer, not this file's.**
+          # `godel.py lanes` ranks grid, template and model by how little the
+          # record can predict their next verdict -- `godel.rs:4458`'s rule,
+          # which the kernel machine has had since it had axes and this one
+          # did not. The order here was fixed: grid, then templates, then the
+          # author, so a rung toward the operator's north star waited behind
+          # eleven knob points it has nothing to do with.
+          #
+          # The composed core's "always last" rule is what that fixed order
+          # came from, and it was right when a model call cost a dozen decodes
+          # on the one engine in the building. The author runs in this job for
+          # about two minutes now, so the rule it was protecting no longer
+          # bites, and the cost survives as the tie-break instead: on a fresh
+          # ledger every lane reads 1.000 and grid still goes first.
+          python3 tools/godel.py lanes --root .
+          first=$(python3 tools/godel.py lanes --root . | sed -n 's/^first //p')
+          code=1
+          if [ "$first" = "model" ] && [ -n "$rung_target" ]; then
+            echo "  the ledger can least predict the model lane, and a rung is open"
+            set +e
+            python3 tools/godel.py author --root . \
+              --kind "$rung_kind" --target "$rung_target" \
+              --emit-env /tmp/env.txt > /tmp/account.txt
+            code=$?
+            set -e
+          fi
           if [ "$code" != "0" ]; then
-            # **The target comes from the ladder, not from a dispatch input.**
-            # It was `inputs.author_target`, under a comment saying an
-            # unattended targeting policy is a design decision rather than a
-            # default -- which was right when there was no goal. There is one
-            # now, so the open rung names the file and the kind, and the
-            # operator is out of the nightly path entirely.
-            rung_target=""
-            rung_kind="cleanup"
-            if python3 tools/ladder.py next --root . --emit-env /tmp/rung.env >/dev/null 2>&1; then
-              rung_target=$(awk -F= '$1=="RUNG_TARGET"{print $2}' /tmp/rung.env)
-              rung_kind=$(awk -F= '$1=="RUNG_KIND"{print $2}' /tmp/rung.env)
-            fi
+            set +e
+            python3 tools/godel.py next --root . --emit-env /tmp/env.txt > /tmp/account.txt
+            code=$?
+            set -e
+          fi
+          if [ "$code" != "0" ]; then
             if grep -q "every grid point is tried" /tmp/account.txt \
                && [ -n "$rung_target" ]; then
               # The composed core's rule, ported: the model authors only
