@@ -33,6 +33,31 @@ Belt to the braces: the loop's `GITHUB_TOKEN` already has no `workflows`
 write, so GitHub rejects such pushes at the token layer; this covers every
 other non-admin credential too.
 
+## Actions may open a pull request
+
+Settings -> Actions -> General -> **Allow GitHub Actions to create and
+approve pull requests**.
+
+Off by default, and the adopt job's last step fails on it with
+
+    GraphQL: GitHub Actions is not permitted to create or approve pull
+    requests (createPullRequest)
+
+after everything else in the night has already succeeded -- the certificate
+filed, `loop/main` pushed, the candidate ref tidied. So the symptom is a red
+square on a night that worked, which is the shape that gets ignored.
+
+**It does not widen what the loop may do**, which is why it is safe to grant.
+The rolling audit PR is the machine's *only* path to `main`, and a PR is a
+request: the token still has no `workflows` write, `main` is still protected,
+and merging is still a human decision. Withholding this does not contain the
+loop, it silences it -- the work keeps happening on `loop/main` and stops
+being offered to anybody.
+
+The "approve" half of the setting's name is GitHub's, not a grant to this
+loop: nothing here approves anything, and `boundary.yml`'s write job still
+sits behind the `evaluator` environment and a required reviewer.
+
 ## Environment `evaluator`
 
 - Required reviewer: the operator.
