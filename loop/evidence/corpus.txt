@@ -1,0 +1,8 @@
+evidence 1
+fixture nodes=400
+# The alpha series is keyed to this file: its sha256 IS the corpus
+# identity, so replacing the fixture with the real forest (a `release`
+# line naming a pinned asset) is what refills the budget. The fixture
+# reads at roughly a quarter of the real forest sensitivity, which is
+# why a fixture-judged adoption of a retrieval constant should be read
+# as weaker than its certificate chi suggests.

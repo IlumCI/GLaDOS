@@ -1,0 +1,4 @@
+Certificates live in entries/, one content-named file per judged event;
+tried markers in tried/ are the envelopes, committed before their trials.
+Append-only, enforced by godel.py fsck in ci.yml, by the adopt job, and by
+the rulesets. See CLAUDE.md, "The CI Godel machine".
