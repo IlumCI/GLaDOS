@@ -44,6 +44,7 @@ suffix walk here, and says so below rather than carrying dead generality.
 """
 
 import argparse
+import difflib
 import hashlib
 import io
 import math
@@ -181,7 +182,7 @@ class Kind:
 
     def __init__(self, name, masks, max_files, max_lines, *,
                  witness=False, additive=False, deletions_dominate=False,
-                 enabled=True):
+                 j1="rail", enabled=True):
         self.name = name
         self.masks = masks
         self.max_files = max_files
@@ -189,6 +190,13 @@ class Kind:
         self.witness = witness                # the fail-then-pass claim
         self.additive = additive              # no deletions at all
         self.deletions_dominate = deletions_dominate
+        #: **What this kind's J1 reads**, which decides what may propose it.
+        #: `witness` is fail-then-pass; `rail` is a paired rail comparison;
+        #: `claims` is the boot's own claim count going up while none is
+        #: lost. A kind is declared here rather than inferred, and
+        #: `loop-judge.yml` branches on the same three -- two copies that
+        #: must agree, which `--selftest` asserts rather than trusts.
+        self.j1 = "witness" if witness else j1
         self.enabled = enabled
 
 
@@ -200,7 +208,20 @@ KINDS = {k.name: k for k in [
     Kind("cleanup", ("src/", "tools/"), 5, 150, deletions_dominate=True),
     Kind("bugfix", ("src/", "tools/"), 3, 150, witness=True),
     Kind("test", ("src/", "tools/"), 3, 200, witness=True, additive=True),
-    Kind("feature", ("src/", "tools/"), 10, 400),
+    #: **`feature` reads the claim count, and why is arithmetic rather than
+    #: taste.** A witness must build and run against the PARENT tree, and a
+    #: module being created is by construction absent from it -- so a
+    #: greenfield rung filed as `bugfix` or `test` dies of infrastructure on
+    #: the witness arm, every time, before a runner is spent. `rail: none`
+    #: then refuses it for claiming nothing. Both refusals are correct and
+    #: between them they made the north star unreachable.
+    #:
+    #: What is left that is still mechanical: it builds, it boots, it loses
+    #: no claim and it adds one. Weaker than fail-then-pass and said so --
+    #: it does not show the feature is right. It shows the code is exercised
+    #: and nothing regressed, which is the honest bar for creating a thing,
+    #: and it is what lets the witnessed rungs after it exist at all.
+    Kind("feature", ("src/", "tools/"), 10, 400, j1="claims"),
     Kind("rewrite", ("src/",), 1, 400),
     Kind("deps", ("rust-toolchain.toml", "Cargo.lock"), 2, 60, enabled=False),
     Kind("docs", ("CLAUDE.md", "README.md"), 2, 60, enabled=False),
@@ -981,9 +1002,20 @@ def admit_paths_only(env_text):
 # ------------------------------------------------------------------- next
 
 
-def next_point(root):
+def next_point(root, lane=None):
     """The next untried grid point from the tip, or a reason there is none.
-    Returns (envelope_text, None) or (None, reason)."""
+    Returns (envelope_text, None) or (None, reason).
+
+    **`lane` is what makes the ranking mean anything.** Without it this walks
+    grid and then templates internally, in that fixed order, so a caller told
+    by `lane_order` to try templates first had no way to say so -- it called
+    this, got a knob point, and the ranking it had just computed decided
+    nothing. That is the same "an axis with no way to be reached is an axis
+    that is never tried" failure `trial_lib` recorded one machine down.
+
+    None keeps the old behaviour, which is what a caller with no opinion
+    wants and what every drill written before the flag existed asks for.
+    """
     corpus = corpus_hash(root)
     if corpus is None:
         return None, "no loop/evidence/corpus.txt -- the alpha series has no identity"
@@ -994,7 +1026,7 @@ def next_point(root):
                       f"({k} of {len(KERNEL_SPEND)}); only new evidence refills it")
     parent = head_tree(root)
     tried_dir = os.path.join(ledger_dir(root), "tried")
-    rows = knob.table_rows() + [
+    rows = [] if lane == "template" else knob.table_rows() + [
         {"file": f, "symbol": s, "now": n, "values": list(v), "rail": r}
         for (f, s, n, v, r, _a) in knobs_host.ROWS
     ]
@@ -1021,9 +1053,13 @@ def next_point(root):
     # rule ported: a template costs a `cargo check` to find out whether it
     # has work at all, so it is reached for when everything cheaper is out
     # of moves rather than because it looked promising.
+    if lane == "grid":
+        return None, "every grid point is tried from this tree"
     got, why3 = next_template(root, entries, corpus, k, parent, tried_dir)
     if got is not None:
         return got, None
+    if lane == "template":
+        return None, why3
     return None, (f"every grid point is tried from this tree; {why3}; "
                   "rung 4 is what comes next")
 
@@ -1271,6 +1307,15 @@ def ask_model(system, card, meta, token, agent="glados-loop", grammar=None):
         "model": meta.get("model", "openai/gpt-4o-mini"),
         "temperature": float(meta.get("temperature", "0")),
         "max_tokens": int(meta.get("max_tokens", "1400")),
+        # **The repetition penalty is the fix for the thing the fence
+        # contract cannot see.** A stuck decode produces a perfectly well
+        # formed fence full of one sentence, and the first real `create`
+        # run did exactly that: 71 lines, 17 distinct, no code. Declared in
+        # the prompt's front matter so a prompt that wants a different
+        # value says so, and defaulted here because every prompt in this
+        # tree wants a file rather than a chant.
+        "repeat_penalty": float(meta.get("repeat_penalty", "1.15")),
+        "repeat_last_n": int(meta.get("repeat_last_n", "256")),
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": card},
@@ -1284,14 +1329,16 @@ def ask_model(system, card, meta, token, agent="glados-loop", grammar=None):
         payload["grammar"] = grammar
     body = _json.dumps(payload).encode("utf-8")
     url = inference_url(meta)
-    req = urllib.request.Request(
-        url,
-        data=body,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "User-Agent": agent,
-        })
+    # **The Authorization header is sent only when there is something to
+    # put in it.** It was unconditional, from when the endpoint was GitHub
+    # Models and a token was the whole of the access story. The author runs
+    # in the job now and `llama-server` authenticates nobody, so a header
+    # holding `Bearer ` was being sent to something that ignores it while a
+    # gate upstream refused to start without a credential nothing reads.
+    headers = {"Content-Type": "application/json", "User-Agent": agent}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(url, data=body, headers=headers)
     # **Six hundred seconds, not a hundred and twenty.** The old value was
     # chosen for a hosted endpoint that answered in seconds; a 4B model on
     # four vCPU prefills a card and generates a few hundred tokens, and the
@@ -1347,6 +1394,285 @@ def new_file_diff(path, contents):
     return "\n".join(out) + "\n"
 
 
+#: Rust items. A created file with none of these declares nothing, whatever
+#: else is in it.
+ITEM = re.compile(r"^\s*(pub\s+)?(unsafe\s+)?(async\s+)?"
+                  r"(fn|struct|enum|impl|trait|mod|const|static|type|use)\b",
+                  re.M)
+
+#: Below this fraction of distinct lines a reply is a stuck decode rather
+#: than a short file. Measured: the first real `create` run came back 71
+#: lines with 17 distinct, all of them doc comments and no code at all --
+#: the 4B had entered a repetition loop and the fence contract cannot see
+#: that, because the fence was perfectly well formed.
+MIN_DISTINCT = 0.6
+
+
+COMMENTS = "\n".join(["/// a comment"] * 12)
+STUCK = "\n".join(["pub fn f() {}"] + ["    let x = 1;"] * 20)
+SHORT = "\n".join(["pub fn zigzag(i: usize) -> usize {", "    i", "}"])
+
+
+def degenerate(body):
+    """Why this reply is not a file, or None.
+
+    **Both checks are about a runner rather than about taste.** A judge
+    that ran this would build it, boot it twice, read the rails, and refuse
+    it for adding no claim -- correct, and a whole night to say what two
+    string operations say here. The `feature` J1 still stands behind them;
+    this is the cheap half of the same question asked before anything is
+    spent.
+    """
+    lines = [l for l in body.split("\n") if l.strip()]
+    if not lines:
+        return "the fence holds no lines"
+    if not ITEM.search(body):
+        return ("the file declares no Rust item -- %d line(s) of comment "
+                "and whitespace is not a file" % len(lines))
+    distinct = len(set(l.strip() for l in lines))
+    if len(lines) >= 8 and distinct < MIN_DISTINCT * len(lines):
+        return ("the decode repeated itself: %d distinct line(s) of %d, "
+                "under the %.0f%% floor" % (distinct, len(lines),
+                                            MIN_DISTINCT * 100))
+    return None
+
+
+def parent_module(target):
+    """(path of the module that must declare it, the name it declares).
+
+    `src/fmt/codec.rs` is declared by `src/fmt/mod.rs` as `codec`; a file
+    directly under `src/` is declared by `src/main.rs`. Answers None where
+    the target is not a Rust module this rule covers.
+    """
+    if not target.startswith("src/") or not target.endswith(".rs"):
+        return None
+    rest = target[len("src/"):]
+    name = rest.rsplit("/", 1)[-1][:-len(".rs")]
+    if name in ("mod", "main", "lib"):
+        return None
+    if "/" in rest:
+        return ("src/" + rest.rsplit("/", 1)[0] + "/mod.rs", name)
+    return ("src/main.rs", name)
+
+
+def wire_module(root, target):
+    """A diff that declares `target` and calls its selftest, or (None, why).
+
+    **Two edits to one file, because a greenfield rung needs both and
+    neither can be asked for.** A created file nothing declares is never
+    compiled -- the candidate builds, boots and reads identically to the
+    baseline because cargo never saw it, and `feature`'s J1 then refuses it
+    for adding no claim, correctly, having measured a tree that does not
+    contain it. And a module that compiles but is never *exercised* adds no
+    claim either, so the same J1 refuses it for the same reason one step
+    later. Driven: the first file that compiled did exactly that.
+
+    Both lines are generated rather than requested, which is `knob.rs`'s
+    argument. The target path determines the parent module and the name, and
+    the parent's `selftest` has one shape across this tree -- `let mut ok`,
+    claims, `ok` -- so the call site is the line before that final `ok`.
+    Asking a 4B for a second fenced diff against a file it has not been
+    shown would be asking it to invent line numbers.
+
+    A parent with no `selftest` is refused rather than half-wired: the
+    module would compile, add nothing, and be refused by a runner instead
+    of here.
+    """
+    got = parent_module(target)
+    if got is None:
+        return None, "%r is not a module a parent could declare" % target
+    mod_path, name = got
+    disk = os.path.join(root, mod_path)
+    if not os.path.exists(disk):
+        return None, "%s does not exist, so nothing can declare %r" % (
+            mod_path, name)
+    old = io.open(disk, encoding="utf-8", newline="").read().split("\n")
+    # **The line ending is the file's, not this host's.** `git apply` matches
+    # the worktree byte for byte, and this repository checks out CRLF on
+    # Windows and LF on the runner -- so a patch built with one and applied
+    # to the other fails to apply at all, which reads as a model that wrote
+    # a bad diff. Read with `newline=""`, so each line keeps its own ending,
+    # and give the inserted lines the same one.
+    # **The split leaves a phantom line and difflib emits it as
+    # context.** A file ending in a newline splits to [..., "}", ""],
+    # and that final empty string is not a line -- it is what follows
+    # the last newline. Diffed as though it were, the hunk claims one
+    # more line than the file has and `git apply` refuses the whole
+    # patch. Driven: the wiring hunk was rejected six times running
+    # with "patch does not apply", and the offending context line was
+    # a single space.
+    if old and old[-1] == "":
+        old = old[:-1]
+    eol = "\r" if old and old[0].endswith("\r") else ""
+
+    def bare(l):
+        return l[:-1] if l.endswith("\r") else l
+
+    decl = "pub mod %s;" % name
+    if any(bare(l).strip() in (decl, "mod %s;" % name) for l in old):
+        return None, "%s already declares %r" % (mod_path, name)
+    idx = [i for i, l in enumerate(old)
+           if bare(l).startswith("pub mod ") or bare(l).startswith("mod ")]
+    if not idx:
+        return None, ("%s declares no modules, so there is no block to join"
+                      % mod_path)
+    at = next((i for i in idx if bare(old[i]) > decl), idx[-1] + 1)
+    new = old[:at] + [decl + eol] + old[at:]
+
+    # The claim. `selftest` returns `ok` on its own line as the last thing
+    # it does, everywhere in this tree, so that line is the insertion
+    # point -- searched from the function's own start rather than globally,
+    # because a file may hold more than one such shape.
+    try:
+        fn = next(i for i, l in enumerate(new)
+                  if bare(l).startswith("pub fn selftest() -> bool {"))
+    except StopIteration:
+        return None, ("%s has no `pub fn selftest() -> bool`, so a claim "
+                      "has nowhere to be added and the module would be "
+                      "adopted having been exercised by nothing" % mod_path)
+    try:
+        ret = next(i for i in range(fn, len(new) - 1)
+                   if bare(new[i]) == "    ok"
+                   and bare(new[i + 1]).startswith("}"))
+    except (StopIteration, IndexError):
+        return None, ("%s's selftest does not end in the shape this rule "
+                      "reads (`    ok` then `}`)" % mod_path)
+    new = (new[:ret] + ["    ok &= %s::selftest();" % name + eol, eol]
+           + new[ret:])
+
+    diff = difflib.unified_diff(old, new,
+                                fromfile="a/" + mod_path,
+                                tofile="b/" + mod_path,
+                                lineterm="", n=3)
+    return "\n".join(diff) + "\n", None
+
+
+#: How many times the author may be asked before the night gives up.
+#:
+#: Three was the first value and the errors were plainly converging under
+#: it -- four errors, then two, then one, and the last was the grammar
+#: truncating the file rather than the model being wrong. Each attempt is a
+#: decode plus a `cargo check`, measured at roughly 30 s and 12 s on this
+#: tree, so six is about four minutes against a night.
+CREATE_TRIES = 6
+
+
+class NoCargo(Exception):
+    """There is no cargo here at all, which is not a broken candidate."""
+
+
+def _cargo_check(root):
+    """(returncode, stderr) of a release check in its own target dir.
+
+    A host with no cargo raises rather than answering, because a missing
+    toolchain and a candidate that does not compile are different facts and
+    the caller has a third answer for the first. The night job had no
+    toolchain at all when this was written, so without the distinction the
+    author would have died on `FileNotFoundError` every night.
+    """
+    try:
+        return subprocess.run(
+            ["cargo", "check", "--release", "--message-format=short",
+             "--target-dir", "target/authorcheck"],
+            cwd=root, capture_output=True, text=True)
+    except (FileNotFoundError, OSError) as e:
+        raise NoCargo(str(e))
+
+
+_BASELINE = {}
+
+
+def baseline_compiles(root):
+    """(ok, why not) for the tree before anything is applied. Cached.
+
+    The reason is carried because the two ways to fail are different facts
+    an operator acts on differently: a host with no toolchain wants one
+    installed, and a tree that will not build wants looking at. Reporting
+    both as "does not compile" sent this session at the wrong one once
+    already.
+
+    **The canary, and it caught this check on its first run.** A `cargo`
+    that cannot build the tree at all -- a missing target, an unavailable
+    toolchain, a machine with no linker -- reports every candidate as
+    broken, which is indistinguishable from a model that never writes
+    working code and is exactly the shape `differ.rs` refuses to ship a
+    harness in. Measured: the first drive reported three attempts failing
+    on `can't find crate for core`, of which the compiler was right about
+    none; the baseline was failing the same way and nothing had asked it.
+    """
+    key = os.path.abspath(root)
+    if key not in _BASELINE:
+        try:
+            ok = _cargo_check(root).returncode == 0
+            _BASELINE[key] = (ok, "" if ok else
+                              "the tree does not compile before the patch")
+        except NoCargo as e:
+            _BASELINE[key] = (False, "there is no cargo here (%s)" % e)
+    return _BASELINE[key]
+
+
+def compile_errors(stderr):
+    """The error lines out of a check's stderr, or the tail if there are
+    none to find. Warnings are not a reason to ask again and the whole log
+    does not fit in a card."""
+    lines = [l.rstrip() for l in stderr.split("\n")
+             if l.startswith("error") or ": error" in l]
+    return "\n".join(lines[:12]) or stderr.strip()[-800:]
+
+
+def compiles(root, env):
+    """`ok`, `bad` or `cannot`, with the errors when it is `bad`.
+
+    **The cheapest judge there is, and it was not being asked.** The first
+    file the author wrote called `len(input)` where Rust wants
+    `input.len()` -- a candidate that spends a whole runner to report a
+    typo. `cargo check` answers that in seconds, and answering it here is
+    what lets the author be asked again rather than the night being spent.
+
+    `cannot` is a real third answer rather than a failure, for the reason
+    `rails.py` has UNSTABLE: a check that did not run is not a candidate
+    that is broken, and reporting one as the other is how a gate becomes a
+    machine for refusing everything. The caller proceeds without it and the
+    runner decides, which is where the authority was in the first place --
+    this only ever saves a night, it never grants one.
+
+    Its own target directory, for `templates/__init__.py`'s reason: a check
+    sharing the judged build's target dir churns the fingerprints that
+    build reads, and `cost.image_bytes` is read off it.
+
+    The patch is applied and reverted through `git apply`, so a failure
+    anywhere leaves the tree exactly as it was.
+    """
+    base_ok, why = baseline_compiles(root)
+    if not base_ok:
+        return "cannot", why
+    _, _, patch = parse_envelope(env)
+    tmp = os.path.join(root, ".authorcheck.patch")
+    io.open(tmp, "w", encoding="utf-8", newline="\n").write(patch + "\n")
+    applied = False
+    try:
+        r = subprocess.run(["git", "apply", tmp], cwd=root,
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            return "bad", "the patch does not apply: " + r.stderr.strip()
+        applied = True
+        try:
+            r = _cargo_check(root)
+        except NoCargo as e:
+            return "cannot", "there is no cargo here (%s)" % e
+        if r.returncode == 0:
+            return "ok", ""
+        return "bad", compile_errors(r.stderr)
+    finally:
+        if applied:
+            subprocess.run(["git", "apply", "-R", tmp], cwd=root,
+                           capture_output=True, text=True)
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+
 def create_finish(root, kind_name, target, reply):
     """The offline half of `create`: fence, build, admit."""
     fences = FENCE_SRC.findall(reply)
@@ -1357,12 +1683,19 @@ def create_finish(root, kind_name, target, reply):
     body = fences[0]
     if not body.strip():
         return None, "the fence is empty"
+    bad = degenerate(body)
+    if bad:
+        return None, bad
     fields = {
         "kind": kind_name, "rung": 4, "axis": "model",
         "parent-tree": head_tree(root), "corpus": corpus_hash(root) or "0" * 8,
         "rail": "none",
     }
-    env = render_envelope(fields, patch=new_file_diff(target, body))
+    wire, why = wire_module(root, target)
+    if wire is None:
+        return None, "the file could not be wired in: %s" % why
+    env = render_envelope(
+        fields, patch=new_file_diff(target, body) + wire)
     bad = admit(env)
     if bad:
         return None, bad[0]
@@ -1394,20 +1727,63 @@ def create(root, kind_name, target, token, rung=None):
     # writing, and the second ran to the request timeout. The size guidance in
     # the prompt is advice a 4B can decline. A `{1,70}` repeat is not.
     #
-    # Seventy lines sits above the thirty-to-sixty the prompt asks for and far
+    # A hundred and forty sits well above the thirty-to-sixty the prompt asks
+    # for and far
     # under the kind's own budget, so the grammar bounds the *shape* and
     # `admit` still owns the real limit.
     grammar = (
         'root ::= "```rust\\n" body "```"\n'
-        'body ::= line{1,70}\n'
+        'body ::= line{1,140}\n'
         'line ::= ([^`\\n] [^\\n]*)? "\\n"\n'
     )
-    try:
-        reply = ask_model(system, card, meta, token, "glados-loop-create",
-                          grammar=grammar)
-    except NoInference as e:
-        return None, str(e)
-    return create_finish(root, kind_name, target, reply)
+    # **Asked again on a compile error, with the error in the card.** One
+    # decode and one `cargo check` is seconds; a runner is a night. The
+    # first file the author wrote failed on `len(input)` for `input.len()`,
+    # which is exactly the class a compiler names precisely and a model
+    # fixes on being told -- and which, unasked, costs a build, two boots
+    # and a rail collection to report.
+    #
+    # The card grows rather than the conversation: `ask_model` is one
+    # request with no history, so a retry that did not carry the error
+    # forward would be the same request drawing from the same
+    # distribution, which is what the five-for-five rung measurement shows
+    # this model does.
+    tried = []
+    for attempt in range(CREATE_TRIES):
+        this = card if not tried else card + "\n" + "\n".join([
+            "",
+            "your last attempt did not compile. the errors were:",
+            tried[-1],
+            "",
+            "write the whole file again, fixed. it is Rust, not Python:",
+            "a length is `x.len()`, and there is no `len(x)`.",
+        ])
+        try:
+            reply = ask_model(system, this, meta, token,
+                              "glados-loop-create", grammar=grammar)
+        except NoInference as e:
+            return None, str(e)
+        env, why = create_finish(root, kind_name, target, reply)
+        if env is None:
+            # A refusal by the fence contract or by `degenerate` is not a
+            # compile error and carries nothing to feed back, so it ends
+            # the attempt rather than spending the next one blind.
+            return None, why
+        verdict, errs = compiles(root, env)
+        if verdict == "cannot":
+            print("  not compile-checked here (%s), so the runner decides"
+                  % errs, file=sys.stderr)
+            return env, None
+        if verdict == "ok":
+            if tried:
+                print("  it compiled on attempt %d" % (attempt + 1),
+                      file=sys.stderr)
+            return env, None
+        print("  attempt %d did not compile:\n%s"
+              % (attempt + 1, errs), file=sys.stderr)
+        tried.append(errs)
+    return None, ("%d attempt(s) and none compiled; the last errors were:\n%s"
+                  % (CREATE_TRIES, tried[-1]))
 
 
 def author_finish(root, kind_name, reply):
@@ -1779,6 +2155,38 @@ def selftest():
         "--- a/src/../update.key\n+++ b/src/../update.key\n-a\n+b"))
     claim("a path that climbs out of the tree is refused",
           any("outside the tree" in w for w in admit(esc)))
+    # **`Kind.j1` and loop-judge.yml are two copies and must agree.** The
+    # table says what a kind's J1 reads; the workflow branches on the same
+    # three. A kind whose row said `claims` while the judge had no branch
+    # for it would be admitted here, built, booted, and then refused by the
+    # `rail none` arm -- a whole runner spent on a disagreement between two
+    # files. Skipped rather than failed where the file is absent, since this
+    # suite runs in worktrees and from the loop branch.
+    jpath = os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), ".github", "workflows", "loop-judge.yml")
+    if os.path.exists(jpath):
+        jtext = io.open(jpath, encoding="utf-8").read()
+        for n, k in KINDS.items():
+            if not k.enabled:
+                continue
+            branch = '"$KIND" = "%s"' % n
+            want = k.j1 in ("witness", "claims")
+            claim("the judge branches on %s exactly as its row's j1=%s says"
+                  % (n, k.j1), (branch in jtext) == want)
+        claim("and every kind the ladder may name has a branch there",
+              all('"$KIND" = "%s"' % n in jtext
+                  for n, k in KINDS.items()
+                  if k.enabled and k.j1 in ("witness", "claims")))
+    # The two gates that stand in front of a runner, against the reply
+    # that bought them: the first real `create` run, 70 lines of doc
+    # comment and no code, which the fence contract cannot see because
+    # the fence was perfectly well formed.
+    claim("a created file with no Rust item is refused",
+          "declares no Rust item" in (degenerate(COMMENTS) or ""))
+    claim("a stuck decode is refused by its own repetition",
+          "repeated itself" in (degenerate(STUCK) or ""))
+    claim("and an ordinary short file is not refused",
+          degenerate(SHORT) is None)
     claim("the envelope is identity only -- no account state in the bytes",
           "minutes" not in env and "alpha" not in env and "boots" not in env)
     try:
@@ -2001,6 +2409,11 @@ def main():
             s.add_argument("--emit-env", default="",
                            help="write the envelope here; stdout then carries "
                                 "the account as key=value")
+            s.add_argument("--lane", default="", choices=["", "grid",
+                                                          "template"],
+                           help="walk only this lane; the default walks grid "
+                                "then templates, which is what a caller with "
+                                "no ranking to honour wants")
     s = sub.add_parser("oops")
     s.add_argument("--root", default=".")
     s.add_argument("--axis", required=True)
@@ -2036,6 +2449,21 @@ def main():
     s.add_argument("--kind", default="cleanup")
     s.add_argument("--target", required=True)
     s.add_argument("--emit-env", default="")
+    # **`create` had no CLI entry, so nothing could reach it.** It and
+    # `create_finish` were written, selftested, and unreachable: the night
+    # calls `author`, which asks the model to hand-write a unified diff --
+    # hunk headers, line counts and all -- where `create` asks for the
+    # file's contents and builds the diff mechanically. For a rung that
+    # creates a file the second is the only sane one, and it is the same
+    # argument `knob.rs` makes about its own patches being valid Rust by
+    # construction rather than by a model's good behaviour.
+    s = sub.add_parser("create")
+    s.add_argument("--root", default=".")
+    s.add_argument("--kind", default="feature")
+    s.add_argument("--target", required=True)
+    s.add_argument("--title", default="")
+    s.add_argument("--witness", default="")
+    s.add_argument("--emit-env", default="")
     a = ap.parse_args()
 
     if a.selftest:
@@ -2044,7 +2472,7 @@ def main():
         return verify()
 
     if a.cmd == "next":
-        got, why = next_point(a.root)
+        got, why = next_point(a.root, a.lane or None)
         if got is None:
             print(f"  {why}", file=sys.stderr)
             return 1
@@ -2155,6 +2583,11 @@ def main():
             att, ad = counts[n]
             print("  %-9s %d tried, %d adopted, surprise %.3f"
                   % (n, att, ad, axis_uncertainty(att, ad)))
+        # `first` alone was all a caller could act on, and a caller that
+        # acted on it for one value and fell through for the other two is a
+        # ranking that decides nothing. The whole order is printed so a
+        # workflow can walk it.
+        print("order %s" % " ".join(lane_order(a.root)))
         print("first %s" % lane_order(a.root)[0])
         return 0
     if a.cmd == "cert":
@@ -2188,12 +2621,24 @@ def main():
         print(f"  {len(rows)} candidate(s); a row-adding envelope rides the "
               "'eval' kind, which is designed and not yet enabled")
         return 0
-    if a.cmd == "author":
+    if a.cmd == "create":
         token = os.environ.get("GITHUB_TOKEN", "")
-        if not token:
-            print("  no GITHUB_TOKEN, and the author is a workflow citizen only",
-                  file=sys.stderr)
+        rung = {"title": a.title, "witness": a.witness}
+        env, why = create(a.root, a.kind, a.target, token, rung)
+        if env is None:
+            print(f"  refused: {why}", file=sys.stderr)
             return 1
+        if a.emit_env:
+            io.open(a.emit_env, "w", encoding="utf-8", newline="\n").write(env)
+            print(f"point={point_of(env)}")
+        else:
+            sys.stdout.write(env)
+        return 0
+    if a.cmd == "author":
+        # The token is optional now and was a hard refusal: `ask_model` puts
+        # it in an `Authorization` header that `llama-server` ignores, so
+        # this gate was demanding a credential nothing downstream reads.
+        token = os.environ.get("GITHUB_TOKEN", "")
         env, why = author(a.root, a.kind, a.target, token)
         if env is None:
             print(f"  refused: {why}", file=sys.stderr)
