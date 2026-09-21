@@ -120,6 +120,122 @@ def local_uses(doc):
     return found
 
 
+def on_block(doc):
+    """A workflow's `on:`, which YAML 1.1 resolves to the boolean `True`.
+
+    Worth a function rather than a comment: `doc.get("on")` answers `None` on
+    every workflow in this tree and looks like a workflow with no triggers.
+    """
+    if not isinstance(doc, dict):
+        return {}
+    got = doc.get("on")
+    if got is None:
+        got = doc.get(True)
+    return got if isinstance(got, dict) else {}
+
+
+def call_contract(root, doc):
+    """Reusable-workflow calls against what the callee declares.
+
+    `loop-night` calls `loop-judge` with **fifteen** inputs. An input the
+    callee does not declare fails the run outright; a *required* one the
+    caller omits does the same. Neither is a thing anybody notices while
+    editing one of the two files, and the loop's whole night is that one call.
+    """
+    bad = []
+    for name, job in (doc.get("jobs") or {}).items():
+        if not isinstance(job, dict):
+            continue
+        u = job.get("uses")
+        if not (isinstance(u, str) and u.startswith("./") and u.endswith((".yml", ".yaml"))):
+            continue
+        callee_path = os.path.join(root, u[2:])
+        if not os.path.isfile(callee_path):
+            continue  # already reported by the `uses:` check
+        try:
+            callee = load_strict(callee_path)
+        except (Duplicate, yaml.YAMLError):
+            continue  # already reported against that file
+        declared = (on_block(callee).get("workflow_call") or {}).get("inputs") or {}
+        supplied = job.get("with") or {}
+        for k in supplied:
+            if k not in declared:
+                bad.append("job %s passes `%s` to %s, which does not declare it"
+                           % (name, k, u))
+        for k, spec in declared.items():
+            if isinstance(spec, dict) and spec.get("required") and k not in supplied:
+                bad.append("job %s omits `%s`, which %s requires" % (name, k, u))
+    return bad
+
+
+def declared_outputs(root, job):
+    """What a job actually publishes.
+
+    A normal job declares `outputs:`. **A job that is a reusable-workflow call
+    declares none of its own** -- its outputs are the callee's
+    `workflow_call.outputs`, so reading `outputs:` off the caller would report
+    every one of them as undeclared. `loop-night.judge` is exactly that shape,
+    which is the false positive this exists to avoid.
+    """
+    if not isinstance(job, dict):
+        return {}
+    u = job.get("uses")
+    if isinstance(u, str) and u.startswith("./"):
+        p = os.path.join(root, u[2:])
+        if os.path.isfile(p):
+            try:
+                return (on_block(load_strict(p)).get("workflow_call") or {}).get(
+                    "outputs"
+                ) or {}
+            except (Duplicate, yaml.YAMLError):
+                return {}
+        return {}
+    if isinstance(u, str):
+        return None  # a remote reusable workflow: not knowable from here
+    return job.get("outputs") or {}
+
+
+def output_refs(root, doc):
+    """`needs.<job>.outputs.<name>` that the named job never declares.
+
+    **This one fails quietly, which is why it is here.** An undeclared output
+    resolves to the empty string with no error at all, so the judge is handed
+    an empty `rail` or an empty `chi_bar` and goes on to measure something
+    against nothing. A run that fails is cheaper than a verdict that is wrong.
+    """
+    import re
+
+    jobs = doc.get("jobs") or {}
+    found = set()
+
+    def walk(node):
+        if isinstance(node, dict):
+            for v in node.values():
+                walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+        elif isinstance(node, str):
+            for m in re.finditer(
+                r"needs\.([A-Za-z0-9_-]+)\.outputs\.([A-Za-z0-9_-]+)", node
+            ):
+                found.add(m.groups())
+
+    walk(jobs)
+    bad = []
+    for job, out in sorted(found):
+        if job not in jobs:
+            bad.append("`needs.%s.outputs.%s` names no such job" % (job, out))
+            continue
+        declared = declared_outputs(root, jobs[job])
+        if declared is None:
+            continue  # a remote reusable workflow; nothing here can say
+        if out not in declared:
+            bad.append("`needs.%s.outputs.%s` is never declared, so it is empty"
+                       % (job, out))
+    return bad
+
+
 def resolves(root, ref):
     """Whether a local `uses:` names something that is there.
 
@@ -167,10 +283,12 @@ def check(root, quiet=False):
         except yaml.YAMLError as e:
             bad.append("%s: will not parse: %s" % (rel, str(e).replace("\n", " ")))
             continue
-        missing = [u for u in local_uses(doc) if not resolves(root, u)]
-        for u in missing:
-            bad.append("%s: `uses: %s` names nothing in the tree" % (rel, u))
-        if not quiet and not missing:
+        here = ["`uses: %s` names nothing in the tree" % u
+                for u in local_uses(doc) if not resolves(root, u)]
+        here += call_contract(root, doc)
+        here += output_refs(root, doc)
+        bad += ["%s: %s" % (rel, h) for h in here]
+        if not quiet and not here:
             print("  ok   %s" % rel)
     return bad
 
@@ -199,6 +317,54 @@ jobs:
 """
 
 DUPED = CLEAN.replace('          A: "1"\n', '          A: "1"\n        env:\n')
+
+CALLEE = """
+name: callee
+on:
+  workflow_call:
+    inputs:
+      point:
+        required: true
+        type: string
+      rail:
+        required: false
+        type: string
+    outputs:
+      verdict:
+        value: "x"
+jobs:
+  only:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+"""
+
+# The shape `loop-night` has: a job that computes, a job that calls the judge
+# with what it computed, and a job that reads the judge's answer.
+CALLER = """
+name: caller
+on:
+  push:
+    branches: ["main"]
+jobs:
+  propose:
+    runs-on: ubuntu-latest
+    outputs:
+      point: ${{ steps.s.outputs.point }}
+    steps:
+      - id: s
+        run: echo hi
+  judge:
+    needs: propose
+    uses: ./.github/workflows/callee.yml
+    with:
+      point: ${{ needs.propose.outputs.point }}
+  after:
+    needs: judge
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ${{ needs.judge.outputs.verdict }}
+"""
 
 
 def selftest():
@@ -250,6 +416,45 @@ def selftest():
         with open(good, "w", encoding="utf-8") as f:
             f.write("name: x\non: push\njobs: [\n")
         claim(len(check(tmp, quiet=True)) == 1, "a file that will not parse is refused")
+        os.remove(good)
+
+        # --- the reusable-workflow contract, which is loop-night's whole night
+        callee = os.path.join(wf, "callee.yml")
+        caller = os.path.join(wf, "caller.yml")
+        with open(callee, "w", encoding="utf-8") as f:
+            f.write(CALLEE)
+
+        def write_caller(text):
+            with open(caller, "w", encoding="utf-8") as f:
+                f.write(text)
+
+        write_caller(CALLER)
+        # This also pins the false positive worth having: `after` reads
+        # `needs.judge.outputs.verdict`, and `judge` is a `uses:` job that
+        # declares no outputs of its own -- they belong to the callee. A check
+        # reading `outputs:` off the caller would refuse every one of them.
+        claim(not check(tmp, quiet=True),
+              "a correct call is accepted, callee-owned outputs included")
+
+        write_caller(CALLER.replace(
+            "      point: ${{ needs.propose.outputs.point }}\n",
+            "      point: ${{ needs.propose.outputs.point }}\n      bogus: 1\n"))
+        bad = check(tmp, quiet=True)
+        claim(len(bad) == 1 and "does not declare it" in bad[0],
+              "an input the callee never declared is refused")
+
+        write_caller(CALLER.replace(
+            "      point: ${{ needs.propose.outputs.point }}\n", ""))
+        bad = check(tmp, quiet=True)
+        claim(any("requires" in b for b in bad),
+              "a required input the caller omits is refused")
+
+        # The quiet one. An undeclared output is not an error on the runner --
+        # it resolves to "" and the judge measures against nothing.
+        write_caller(CALLER.replace("outputs.point }}", "outputs.nope }}"))
+        bad = check(tmp, quiet=True)
+        claim(any("is never declared, so it is empty" in b for b in bad),
+              "an output nobody declared is refused rather than passed empty")
 
     print()
     if all(claims):
