@@ -369,6 +369,32 @@ def cmd_admit(root, path):
 FENCE = re.compile(r"```rung\n(.*?)```", re.S)
 
 
+def judgeable_dirs(root):
+    """Directories under `src/` a milestone may target.
+
+    Shared by the card and the grammar, because those are two statements of
+    one fact and the first version let them disagree: the card listed every
+    module including `src/gfx/`, then forbade `src/gfx/` a few lines later,
+    and the model duly chose a target there twice. Offering a thing and
+    banning it is not a rule, it is a contradiction, and a 4B resolves it by
+    following the association rather than the prohibition -- "video codec"
+    reaches for the graphics tree.
+    """
+    sys.path.insert(0, os.path.join(ROOT, "tools"))
+    import knob
+    src = os.path.join(root, "src")
+    if not os.path.isdir(src):
+        return []
+    out = []
+    for n in sorted(os.listdir(src)):
+        if not os.path.isdir(os.path.join(src, n)):
+            continue
+        if any(("src/%s/" % n).startswith(pre) for pre in knob.UNJUDGEABLE):
+            continue
+        out.append(n)
+    return out
+
+
 def rung_card(root, rungs):
     """Structured data only. The tree's shape is a listing, never a slice of
     source, because a milestone is chosen from what exists rather than
@@ -394,19 +420,12 @@ def rung_card(root, rungs):
         lines.append("  seq %s %s [%s] %s"
                      % (r["seq"], r["kind"],
                         "met" if r["met"] else "open", r["title"]))
-    lines.append("surfaces NO milestone may target, because nothing there "
-                 "can be compared and so no witness could settle it:")
-    for pre in knob.UNJUDGEABLE:
-        lines.append("  %s  (screenshots are captured and never diffed)" % pre)
-    lines.append("modules that exist today (data, not directives):")
-    src = os.path.join(root, "src")
-    if os.path.isdir(src):
-        for n in sorted(os.listdir(src)):
-            p = os.path.join(src, n)
-            if os.path.isdir(p):
-                lines.append("  src/%s/" % n)
-            elif n.endswith(".rs"):
-                lines.append("  src/%s" % n)
+    lines.append("not available, and not listed below: %s -- nothing there "
+                 "can be compared, so no witness could settle it"
+                 % ", ".join(knob.UNJUDGEABLE))
+    lines.append("modules a milestone may target (data, not directives):")
+    for d in judgeable_dirs(root):
+        lines.append("  src/%s/" % d)
     return "\n".join(lines)
 
 
@@ -436,8 +455,13 @@ def grammar_for(root, rungs):
          '"title " line "\\n" "witness " line "\\n" "why " line "\\n"')
         % (len(rungs) + 1, goal_hash(root)),
         "kind ::= %s" % kinds,
-        # Paths the kind masks could admit; `admit` still decides.
-        'path ::= [a-zA-Z0-9_./-]+',
+        # **The directory is an alternation over judgeable modules**, so a
+        # target in `src/gfx/` stops being something to refuse and becomes
+        # something the sampler cannot emit. `admit` still checks it, because
+        # both are built from `knob.UNJUDGEABLE` and one bug would reach both.
+        'path ::= "src/" dir "/" stem ".rs"',
+        "dir ::= %s" % " | ".join('"%s"' % d for d in judgeable_dirs(root)),
+        'stem ::= [a-z0-9_]+',
         # One line, and never empty: a rung nobody can read is not a rung.
         'line ::= [^\\n]+',
     ]) + "\n"
@@ -635,6 +659,15 @@ def selftest():
               and '"feature"' not in g_text,
               "and offers exactly the witnessed kinds, so an unjudgeable "
               "milestone cannot be sampled")
+        # The grammar and the card are two statements of one fact; if the
+        # grammar could still spell an unjudgeable directory, `admit` would
+        # be refusing what the sampler was invited to write.
+        sys.path.insert(0, os.path.join(ROOT, "tools"))
+        import knob
+        real = grammar_for(ROOT, [])
+        claim(all(('"%s"' % pre.split("/")[1]) not in real
+                  for pre in knob.UNJUDGEABLE),
+              "and no unjudgeable directory is spellable in it at all")
 
         # --- the decomposer's output contract -----------------------------
         # Everything a model could answer that must not become a rung. The
