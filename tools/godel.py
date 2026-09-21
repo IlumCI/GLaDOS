@@ -1319,14 +1319,16 @@ def ask_model(system, card, meta, token, agent="glados-loop", grammar=None):
         payload["grammar"] = grammar
     body = _json.dumps(payload).encode("utf-8")
     url = inference_url(meta)
-    req = urllib.request.Request(
-        url,
-        data=body,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "User-Agent": agent,
-        })
+    # **The Authorization header is sent only when there is something to
+    # put in it.** It was unconditional, from when the endpoint was GitHub
+    # Models and a token was the whole of the access story. The author runs
+    # in the job now and `llama-server` authenticates nobody, so a header
+    # holding `Bearer ` was being sent to something that ignores it while a
+    # gate upstream refused to start without a credential nothing reads.
+    headers = {"Content-Type": "application/json", "User-Agent": agent}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(url, data=body, headers=headers)
     # **Six hundred seconds, not a hundred and twenty.** The old value was
     # chosen for a hosted endpoint that answered in seconds; a 4B model on
     # four vCPU prefills a card and generates a few hundred tokens, and the
@@ -2098,6 +2100,21 @@ def main():
     s.add_argument("--kind", default="cleanup")
     s.add_argument("--target", required=True)
     s.add_argument("--emit-env", default="")
+    # **`create` had no CLI entry, so nothing could reach it.** It and
+    # `create_finish` were written, selftested, and unreachable: the night
+    # calls `author`, which asks the model to hand-write a unified diff --
+    # hunk headers, line counts and all -- where `create` asks for the
+    # file's contents and builds the diff mechanically. For a rung that
+    # creates a file the second is the only sane one, and it is the same
+    # argument `knob.rs` makes about its own patches being valid Rust by
+    # construction rather than by a model's good behaviour.
+    s = sub.add_parser("create")
+    s.add_argument("--root", default=".")
+    s.add_argument("--kind", default="feature")
+    s.add_argument("--target", required=True)
+    s.add_argument("--title", default="")
+    s.add_argument("--witness", default="")
+    s.add_argument("--emit-env", default="")
     a = ap.parse_args()
 
     if a.selftest:
@@ -2255,12 +2272,24 @@ def main():
         print(f"  {len(rows)} candidate(s); a row-adding envelope rides the "
               "'eval' kind, which is designed and not yet enabled")
         return 0
-    if a.cmd == "author":
+    if a.cmd == "create":
         token = os.environ.get("GITHUB_TOKEN", "")
-        if not token:
-            print("  no GITHUB_TOKEN, and the author is a workflow citizen only",
-                  file=sys.stderr)
+        rung = {"title": a.title, "witness": a.witness}
+        env, why = create(a.root, a.kind, a.target, token, rung)
+        if env is None:
+            print(f"  refused: {why}", file=sys.stderr)
             return 1
+        if a.emit_env:
+            io.open(a.emit_env, "w", encoding="utf-8", newline="\n").write(env)
+            print(f"point={point_of(env)}")
+        else:
+            sys.stdout.write(env)
+        return 0
+    if a.cmd == "author":
+        # The token is optional now and was a hard refusal: `ask_model` puts
+        # it in an `Authorization` header that `llama-server` ignores, so
+        # this gate was demanding a credential nothing downstream reads.
+        token = os.environ.get("GITHUB_TOKEN", "")
         env, why = author(a.root, a.kind, a.target, token)
         if env is None:
             print(f"  refused: {why}", file=sys.stderr)

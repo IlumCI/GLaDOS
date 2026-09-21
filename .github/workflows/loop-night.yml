@@ -335,9 +335,15 @@ jobs:
           # operator is out of the nightly path entirely.
           rung_target=""
           rung_kind="cleanup"
-          if python3 tools/ladder.py next --root . --emit-env /tmp/rung.env >/dev/null 2>&1; then
+          rung_title=""
+          rung_witness=""
+          verb="author"
+          if python3 tools/ladder.py next --root . --emit-env /tmp/rung.env; then
             rung_target=$(awk -F= '$1=="RUNG_TARGET"{print $2}' /tmp/rung.env)
             rung_kind=$(awk -F= '$1=="RUNG_KIND"{print $2}' /tmp/rung.env)
+            rung_title=$(sed -n 's/^RUNG_TITLE=//p' /tmp/rung.env)
+            rung_witness=$(sed -n 's/^RUNG_WITNESS=//p' /tmp/rung.env)
+            verb=$(awk -F= '$1=="RUNG_VERB"{print $2}' /tmp/rung.env)
           fi
 
           # **Which lane goes first is the ledger's answer, not this file's.**
@@ -374,13 +380,29 @@ jobs:
                   echo "  model: no rung is open" > /tmp/account.txt
                   continue
                 fi
-                echo "  lane $lane: a rung is open, asking the author"
-                # The author's reply is held by the fence contract, then by
-                # admit(), then by the whole gate.
+                # **Which entry point is a property of the kind.** It was
+                # `author` for every rung, and `author` asks the model to
+                # hand-write a unified diff: hunk headers, line counts, the
+                # lot. That is the right shape for changing a file that
+                # exists and the wrong one for making a file that does not,
+                # where `create` asks for contents and builds the diff
+                # mechanically -- `knob.rs`'s "valid by construction rather
+                # than by a model's good behaviour", one lane over. It had
+                # no CLI entry at all until now, so nothing could reach it.
+                echo "  lane $lane: a rung is open, asking the $verb"
+                # The reply is held by the fence contract, then by admit(),
+                # then by the whole gate.
                 set +e
-                python3 tools/godel.py author --root . \
-                  --kind "$rung_kind" --target "$rung_target" \
-                  --emit-env /tmp/env.txt > /tmp/account.txt
+                if [ "$verb" = "create" ]; then
+                  python3 tools/godel.py create --root . \
+                    --kind "$rung_kind" --target "$rung_target" \
+                    --title "$rung_title" --witness "$rung_witness" \
+                    --emit-env /tmp/env.txt > /tmp/account.txt
+                else
+                  python3 tools/godel.py author --root . \
+                    --kind "$rung_kind" --target "$rung_target" \
+                    --emit-env /tmp/env.txt > /tmp/account.txt
+                fi
                 code=$?
                 set -e
                 if [ "$code" = "0" ]; then authored=yes; fi

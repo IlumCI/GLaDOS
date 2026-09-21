@@ -248,6 +248,17 @@ def admit(r, root):
     # Greenfield work is what `feature` is for. Naming it here is what
     # keeps a milestone that creates something from being filed under a
     # judge that cannot reach it.
+    # The other half of the same rule. A rung drives `godel.create`, which
+    # builds a `--- /dev/null` diff, so a `feature` naming a file that is
+    # already there produces a patch `git apply` refuses -- locally, with no
+    # certificate filed and therefore nothing that would ever retire it.
+    # Same stuck shape as the witnessed case, arriving from the other side.
+    if not godel.KINDS[r["kind"]].witness and os.path.exists(
+            os.path.join(root, t)):
+        raise Bad(
+            "%r creates a file and %r already exists -- to change what is "
+            "there, name a witnessed kind whose check fails on it today"
+            % (r["kind"], t))
     if godel.KINDS[r["kind"]].witness and not os.path.exists(
             os.path.join(root, t)):
         raise Bad(
@@ -481,6 +492,18 @@ def cmd_next(root, emit_env=None):
             f.write("RUNG_TARGET=%s\n" % nxt["target"])
             f.write("RUNG_TITLE=%s\n" % nxt["title"])
             f.write("RUNG_WITNESS=%s\n" % nxt["witness"])
+            # **Which author entry point this rung wants.** A witnessed kind
+            # changes a file that exists, which is a patch, so `author`; an
+            # unwitnessed one makes a file that does not, so `create`, which
+            # asks for contents and builds the diff itself. Decided here
+            # rather than in the workflow because the rule is one line of
+            # Python about the kind table and several of shell about a
+            # string.
+            sys.path.insert(0, os.path.join(ROOT, "tools"))
+            import godel
+            f.write("RUNG_VERB=%s\n"
+                    % ("author" if godel.KINDS[nxt["kind"]].witness
+                       else "create"))
     return 0
 
 
@@ -545,8 +568,22 @@ def rung_card(root, rungs):
     ]
     for n in kinds:
         k = godel.KINDS[n]
-        lines.append("  %s -- at most %d file(s), %d changed line(s)"
-                     % (n, k.max_files, k.max_lines))
+        # **The card says what each kind is FOR**, not only what it costs.
+        # A budget alone left the model picking `test` for a file that does
+        # not exist yet, every time -- a refusal `admit` makes correctly and
+        # a rung nobody could have written correctly from what they were
+        # told. The rule is one sentence and it belongs where the choice is
+        # made rather than only where it is refused.
+        what = {
+            "feature": "use this to CREATE a file that does not exist yet",
+            "bugfix": "only for a file that already exists: its check must "
+                      "fail on the tree as it stands today",
+            "test": "only for a file that already exists: its check must "
+                    "fail on the tree as it stands today",
+        }.get(n, "")
+        lines.append("  %s -- at most %d file(s), %d changed line(s)%s"
+                     % (n, k.max_files, k.max_lines,
+                        ("; " + what) if what else ""))
     lines.append("rungs so far:")
     if not rungs:
         lines.append("  (none -- this is the first)")
@@ -590,24 +627,77 @@ def grammar_for(root, rungs):
     first -- it is generated from the same values, so a bug that got one wrong
     would get both wrong.
     """
-    kinds = " | ".join('"%s"' % k for k in judgeable_kinds())
-    return "\n".join([
+    # **Kind and target are emitted together, because the rule that binds
+    # them is a rule about the pair.** A witnessed kind needs a file that
+    # already exists and `feature` needs one that does not, and `admit`
+    # refused the wrong pairing correctly -- three times out of three, on
+    # three different filenames, every one of them `test` against a file
+    # that was not there.
+    #
+    # Saying so in the card moved nothing, which is this tree's own finding
+    # arriving a third time: `repair.rs` measured a model preferring the
+    # name `retry` five times in six wherever it sat, and `work.rs` records
+    # a rule in prose being ignored by both checkpoints until an example
+    # demonstrated it. A kind's name carries probability mass that has
+    # nothing to do with what the kind does.
+    #
+    # So the pairing stops being improbable and becomes unreachable, which
+    # is `constrain.rs`'s whole argument. `admit` still checks it: the two
+    # are built from the same predicate, so a bug would reach both, and a
+    # grammar is a second lock rather than a replacement for the first.
+    existing = existing_targets(root)
+    arms = []
+    for k in judgeable_kinds():
+        sys.path.insert(0, os.path.join(ROOT, "tools"))
+        import godel
+        rhs = "oldpath" if godel.KINDS[k].witness else "newpath"
+        if rhs == "oldpath" and not existing:
+            # Nothing to be wrong about yet, so no witnessed arm at all.
+            continue
+        arms.append('"kind %s\\n" "target " %s "\\n"' % (k, rhs))
+    lines = [
         'root ::= "```rung\\n" body "```"',
-        ('body ::= "looprung 1\\n" "seq %d\\n" "goal %s\\n" '
-         '"kind " kind "\\n" "target " path "\\n" '
+        ('body ::= "looprung 1\\n" "seq %d\\n" "goal %s\\n" spec '
          '"title " line "\\n" "witness " line "\\n" "why " line "\\n"')
         % (len(rungs) + 1, goal_hash(root)),
-        "kind ::= %s" % kinds,
+        "spec ::= %s" % " | ".join(arms),
         # **The directory is an alternation over judgeable modules**, so a
         # target in `src/gfx/` stops being something to refuse and becomes
         # something the sampler cannot emit. `admit` still checks it, because
         # both are built from `knob.UNJUDGEABLE` and one bug would reach both.
-        'path ::= "src/" dir "/" stem ".rs"',
+        'newpath ::= "src/" dir "/" stem ".rs"',
         "dir ::= %s" % " | ".join('"%s"' % d for d in judgeable_dirs(root)),
         'stem ::= [a-z0-9_]+',
         # One line, and never empty: a rung nobody can read is not a rung.
         'line ::= [^\\n]+',
-    ]) + "\n"
+    ]
+    if existing:
+        lines.insert(4, "oldpath ::= %s"
+                     % " | ".join('"%s"' % t for t in existing))
+    return "\n".join(lines) + "\n"
+
+
+def existing_targets(root):
+    """Every judgeable source file that is there to be wrong about.
+
+    Enumerated rather than patterned, for `grammar_for`'s reason: a witness
+    must fail against the tree as it stands, so the set of files it can name
+    is exactly the set that exists. Bounded by the same masks and the same
+    unjudgeable list the rest of admission uses.
+    """
+    sys.path.insert(0, os.path.join(ROOT, "tools"))
+    import knob
+    out = []
+    for d in judgeable_dirs(root):
+        base = os.path.join(root, "src", d)
+        for n in sorted(os.listdir(base)) if os.path.isdir(base) else []:
+            if not n.endswith(".rs"):
+                continue
+            t = "src/%s/%s" % (d, n)
+            if any(t.startswith(pre) for pre in knob.UNJUDGEABLE):
+                continue
+            out.append(t)
+    return tuple(out)
 
 
 def propose_finish(root, reply, rungs=None):
@@ -834,8 +924,9 @@ def selftest():
         g_text = grammar_for(tmp, [])
         claim(('"seq 1\\n"' in g_text) and (g in g_text),
               "the grammar pins the goal hash and the next seq as literals")
-        claim(all(('"%s"' % k) in g_text for k in judgeable_kinds())
-              and '"cleanup"' not in g_text and '"tune"' not in g_text,
+        claim(all(('"kind %s' % k) in g_text for k in judgeable_kinds()
+                  if k == "feature" or existing_targets(tmp))
+              and '"kind cleanup' not in g_text and '"kind tune' not in g_text,
               "and offers exactly the judgeable kinds, so an unjudgeable "
               "milestone cannot be sampled")
         # The grammar and the card are two statements of one fact; if the
@@ -882,6 +973,12 @@ def selftest():
         r, why = propose_finish(tmp, fenced(_rung(g, 2, kind="feature")))
         claim(r is not None,
               "a feature rung is admitted, so greenfield work has a lane")
+        os.makedirs(os.path.join(tmp, "src", "ai"), exist_ok=True)
+        open(os.path.join(tmp, "src", "ai", "here.rs"), "w").write("// x")
+        r2, why2 = propose_finish(tmp, fenced(
+            _rung(g, 2, kind="feature", target="src/ai/here.rs")))
+        claim(r2 is None and "already exists" in (why2 or ""),
+              "and a feature naming a file that is already there is refused")
 
         # The rule whose absence cost three nights: a witnessed kind aimed
         # at a file that is not there yet is stuck, not slow -- it refuses
@@ -960,9 +1057,23 @@ def main():
                 print("  admit wants a rung file"); return 2
             return cmd_admit(a.root, a.path)
         if a.cmd == "propose":
-            token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
-            if not token:
-                print("::error::propose needs GITHUB_TOKEN (models: read)")
+            # **What `propose` needs is an endpoint, and it was demanding a
+            # credential.** The gate predates the author moving into the job:
+            # `ask_model` puts the token in an `Authorization` header that
+            # `llama-server` ignores, so in CI this passed because a token
+            # happened to be in the environment and was then read by nobody.
+            # A machine with the model and no GitHub token could not stock
+            # its own ladder, which is the opposite of what this file claims
+            # about needing no credential of any kind.
+            token = (os.environ.get("GITHUB_TOKEN")
+                     or os.environ.get("GH_TOKEN") or "")
+            sys.path.insert(0, os.path.join(ROOT, "tools"))
+            import godel
+            if not token and not os.environ.get("GLADOS_INFERENCE_URL") \
+                    and godel.INFERENCE_URL.startswith("https://"):
+                print("::error::propose needs somewhere to ask: set "
+                      "GLADOS_INFERENCE_URL, or GITHUB_TOKEN for the "
+                      "hosted default")
                 return 2
             r, why = propose(a.root, token)
             if r is None:
