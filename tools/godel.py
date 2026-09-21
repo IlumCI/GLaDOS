@@ -223,6 +223,60 @@ def spend_table():
     return out
 
 
+#: The lanes a night can spend itself on, cheapest first.
+#:
+#: `grid` walks the declared knob table, `template` enumerates candidates from
+#: rustc's own diagnostics, `model` asks the author. The order here is the
+#: tie-break, not the policy -- see `lane_order`.
+LANES = ("grid", "template", "model")
+
+
+def axis_uncertainty(att, adopt):
+    """`godel.rs:3974`, ported to the machine that did not have it.
+
+    A Laplace-smoothed Beta posterior mean folded to a distance from the
+    coin-flip: an axis that has said yes to everything and one that has said
+    no to everything are equally predictable and equally uninformative, and
+    the one near 50% is where the information is. The `+1` over `+2` is what
+    stops that becoming starvation -- a saturated axis stays strictly above
+    zero and comes up once the others are out of moves.
+    """
+    rate = (adopt + 1.0) / (att + 2.0)
+    return 1.0 - abs(rate - 0.5) * 2.0
+
+
+def lane_counts(root):
+    """(attempts, adoptions) per lane, read out of the ledger."""
+    counts = {n: [0, 0] for n in LANES}
+    for e in load_entries(root):
+        if e["axis"] in counts:
+            counts[e["axis"]][0] += 1
+            if e["verdict"] == "adopt":
+                counts[e["axis"]][1] += 1
+    return {n: tuple(v) for n, v in counts.items()}
+
+
+def lane_order(root):
+    """Which lane a night should try first.
+
+    **The kernel machine has ranked its axes by information since
+    `godel.rs:4458`; this one never has.** It walks grid, then templates, then
+    the author, in a fixed order -- so the lane that pursues the operator's
+    declared north star is reached only when everything else is out of moves,
+    which for a goal-directed loop is backwards. A ladder rung waits behind
+    eleven knob points it has nothing to do with.
+
+    Same arithmetic as the kernel's, and the same trade stated there:
+    fairness for information. Ties break by `LANES` order, which is cheapest
+    first, so an untried lane does not get to be expensive *and* preferred on
+    a coin-flip -- and, as there, the order stays a pure function of the
+    record, so a later reader reconstructs it rather than guessing.
+    """
+    counts = lane_counts(root)
+    return sorted(LANES,
+                  key=lambda n: (-axis_uncertainty(*counts[n]), LANES.index(n)))
+
+
 def chi_floor(spent):
     """The floor for the NEXT test after `spent` are on the record.
 
@@ -1542,6 +1596,23 @@ def selftest():
                 "level": str(level), "axis": axis, "corpus": corpus,
                 "rail": rail, "parent-tree": "0" * 40,
                 "candidate-tree": "1" * 40}
+    # --- the lane bandit, ported from godel.rs:3974 -----------------------
+    #
+    # The kernel machine has ranked its axes by information since it had
+    # axes; this one walked a fixed order, which put the operator's north
+    # star behind eleven knob points it has nothing to do with.
+    claim("a lane that adopts everything and one that refuses everything "
+          "are equally uninformative",
+          abs(axis_uncertainty(20, 20) - axis_uncertainty(20, 0)) < 1e-6)
+    claim("and a lane near the coin-flip outranks both",
+          axis_uncertainty(20, 10) > axis_uncertainty(20, 20))
+    claim("an untried lane is maximally uncertain, so a fresh machine "
+          "breaks ties by cost and behaves exactly as it did",
+          axis_uncertainty(0, 0) == 1.0)
+    # The smoothing is what stops information-seeking becoming starvation.
+    claim("a saturated lane stays strictly above zero and comes back",
+          axis_uncertainty(200, 0) > 0.0)
+
     es = [mkcert(1, "refuse", "unstable", 0)]
     claim("one starvation at the base raises the level to one",
           level_for(es, "grid", "deadbeef") == 1)
@@ -1946,6 +2017,8 @@ def main():
     s = sub.add_parser("ledger")
     s.add_argument("--root", default=".")
     s.add_argument("--tail", type=int, default=10)
+    s = sub.add_parser("lanes")
+    s.add_argument("--root", default=ROOT)
     s = sub.add_parser("cert")
     s.add_argument("--emit", action="store_true")
     s.add_argument("--check")
@@ -2075,6 +2148,14 @@ def main():
         at = "AT an epoch boundary" if is_boundary(n) else \
             f"epoch boundary {EPOCH_LEN - (n % EPOCH_LEN)} away"
         print(f"  {n} entr{'y' if n == 1 else 'ies'}, {at}")
+        return 0
+    if a.cmd == "lanes":
+        counts = lane_counts(a.root)
+        for n in lane_order(a.root):
+            att, ad = counts[n]
+            print("  %-9s %d tried, %d adopted, surprise %.3f"
+                  % (n, att, ad, axis_uncertainty(att, ad)))
+        print("first %s" % lane_order(a.root)[0])
         return 0
     if a.cmd == "cert":
         if a.check:
