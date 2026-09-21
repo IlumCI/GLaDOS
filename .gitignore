@@ -20,7 +20,25 @@ tools/gh/
 __pycache__/
 *.pyc
 
-out/
+out/*
+
+# **Except the release notes, and the reason is the `cuda/` one above: a file
+# the release depends on cannot be a file the tree ignores.** `release.yml`
+# creates the GitHub release and had nothing to put in it, so it hardcoded
+# "Notes written by hand" -- and `tools/site.py` builds the front page's news
+# column from the release *body*, so the placeholder reached the site as well.
+# The notes were always written. They were written *here*, inside an ignored
+# directory, so CI could not read the one file it needed and every release
+# waited on somebody remembering to paste them in. 1.3.8 shipped with the
+# placeholder for exactly that reason.
+#
+# Only the prose is re-included; the ISOs, the .efi and everything else beside
+# it stay ignored, which is what `out/` is for. Git cannot re-include a file
+# under an excluded *directory*, hence the four lines rather than one negation.
+!out/release/
+out/release/*
+!out/release/NOTES-*.md
+!out/release/CHANGELOG-*.md
 
 # Built images. Large, reproducible from the repo plus a model, and
 # distributed through Releases rather than through git.
