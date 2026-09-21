@@ -28,12 +28,15 @@ on:
         description: "propose and judge, but adopt writes nothing"
         type: boolean
         default: false
-      author_target:
-        description: >
-          A src/ or tools/ file for the rung-4 model author, tried only when
-          the grid is exhausted. Empty means rung 4 does not run -- an
-          unattended targeting policy is a design decision, not a default.
-        default: ""
+      # `author_target` was here, and it is gone on purpose. It carried the
+      # note that an unattended targeting policy is a design decision rather
+      # than a default, which was correct while the loop had no goal: without
+      # one, nothing but a human could say which file the model should touch.
+      #
+      # `loop/goal.txt` is that policy now. The open rung names its own target
+      # and its own kind, so the night needs no input at all -- which is the
+      # whole requirement: the operator writes one line, and the rest is the
+      # system. An input left here would be a hand on the wheel every night.
   # schedule:
   #   - cron: "17 2 * * *"
 
@@ -85,7 +88,13 @@ jobs:
               parent=$(git rev-parse 'HEAD^{tree}')
               git commit -m "loop: follow main, which overrode: $conflicted"
               cand=$(git rev-parse 'HEAD^{tree}')
-              seq=$(( $(ls loop/ledger/entries | wc -l) + 1 ))
+              # Counted the safe way; see the long note in loop-judge.yml. `ls` on an
+              # absent directory exits 2 and `pipefail` makes that the shell's last word.
+              n=0
+              if [ -d loop/ledger/entries ]; then
+                n=$(ls -1 loop/ledger/entries | wc -l)
+              fi
+              seq=$(( n + 1 ))
               point=$(printf 'superseded by main at %s over %s' \
                 "$(git rev-parse origin/main)" "$conflicted" | sha256sum | cut -d' ' -f1)
               python3 tools/godel.py cert --emit \
@@ -166,7 +175,13 @@ jobs:
           back=${d#back=}; back=${back%% *}
           target=${d##*target=}
           parent=$(git rev-parse 'HEAD^{tree}')
-          seq=$(( $(ls loop/ledger/entries 2>/dev/null | wc -l) + 1 ))
+          # Counted the safe way; see the long note in loop-judge.yml. `ls` on an
+          # absent directory exits 2 and `pipefail` makes that the shell's last word.
+          n=0
+          if [ -d loop/ledger/entries ]; then
+            n=$(ls -1 loop/ledger/entries | wc -l)
+          fi
+          seq=$(( n + 1 ))
           point=$(printf 'rollback %s steps to %s from %s' "$back" "$target" "$parent"             | sha256sum | cut -d' ' -f1)
           # The commit's tree: the target, with the CURRENT ledger overlaid
           # (a rollback that rolled back its own record would be a lineage
@@ -186,10 +201,50 @@ jobs:
           python3 tools/godel.py fsck --root .
           git push origin "$new:refs/heads/loop/main"
 
+      # **The operator writes one line and the machine writes the rest.**
+      # `loop/goal.txt` is the north star; this keeps the ladder under it
+      # stocked. A rung is a milestone with a witness, so a night always has
+      # something to aim at that is not "walk the grid again" -- which is
+      # where the kernel-side machine stopped, eight points and then nothing.
+      #
+      # It asks GitHub Models with this workflow's own token and no new
+      # credential, and everything the reply could do is refused by
+      # `ladder.py` before it is a rung: prose outside the fence, two fences,
+      # a kind with no witness, a stale goal hash, a sequence that skips, a
+      # target outside the kind's masks or inside the evaluator, or a line
+      # trying to declare the `point` that would mark it met.
+      #
+      # A refusal is the ordinary outcome and not a failure. The night goes on
+      # to the grid; retrying with more context is how a fence contract stops
+      # being one.
+      - name: Keep the ladder stocked
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if python3 tools/ladder.py next --root . >/dev/null 2>&1; then
+            echo "  a rung is already open:"
+            python3 tools/ladder.py next --root .
+            exit 0
+          fi
+          set +e
+          out=$(python3 tools/ladder.py propose --root . 2>&1); code=$?
+          set -e
+          echo "$out"
+          if [ "$code" != "0" ]; then
+            echo "::notice::no new rung tonight; the grid still has work"
+            exit 0
+          fi
+          git add loop/ladder
+          git commit -m "loop: a rung toward the north star"
+          git push origin HEAD:loop/main
+
       - name: Pick the next point, and mark it tried before anything runs
         id: pick
         env:
-          AUTHOR_TARGET: ${{ inputs.author_target }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
@@ -199,14 +254,26 @@ jobs:
           code=$?
           set -e
           if [ "$code" != "0" ]; then
+            # **The target comes from the ladder, not from a dispatch input.**
+            # It was `inputs.author_target`, under a comment saying an
+            # unattended targeting policy is a design decision rather than a
+            # default -- which was right when there was no goal. There is one
+            # now, so the open rung names the file and the kind, and the
+            # operator is out of the nightly path entirely.
+            rung_target=""
+            rung_kind="cleanup"
+            if python3 tools/ladder.py next --root . --emit-env /tmp/rung.env >/dev/null 2>&1; then
+              rung_target=$(awk -F= '$1=="RUNG_TARGET"{print $2}' /tmp/rung.env)
+              rung_kind=$(awk -F= '$1=="RUNG_KIND"{print $2}' /tmp/rung.env)
+            fi
             if grep -q "every grid point is tried" /tmp/account.txt \
-               && [ -n "$AUTHOR_TARGET" ]; then
+               && [ -n "$rung_target" ]; then
               # The composed core's rule, ported: the model authors only
               # when everything cheaper is out of moves. Its reply is held
               # by the fence contract, admit(), and then the whole gate.
               set +e
               python3 tools/godel.py author --root . \
-                --kind cleanup --target "$AUTHOR_TARGET" \
+                --kind "$rung_kind" --target "$rung_target" \
                 --emit-env /tmp/env.txt > /tmp/account.txt
               code=$?
               set -e
@@ -345,7 +412,13 @@ jobs:
             echo "::notice::the tip moved mid-judge; filed as stale"
           fi
           # seq is re-derived under the lock, where it is authoritative.
-          seq=$(( $(ls loop/ledger/entries 2>/dev/null | wc -l) + 1 ))
+          # Counted the safe way; see the long note in loop-judge.yml. `ls` on an
+          # absent directory exits 2 and `pipefail` makes that the shell's last word.
+          n=0
+          if [ -d loop/ledger/entries ]; then
+            n=$(ls -1 loop/ledger/entries | wc -l)
+          fi
+          seq=$(( n + 1 ))
           sed -i "s/^seq .*/seq $seq/" "$cert"
 
           # Pure plumbing from here: the commit's tree is built in an

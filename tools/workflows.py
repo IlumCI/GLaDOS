@@ -170,6 +170,55 @@ def folded_runs(path):
     return bad
 
 
+def silenced_in_pipeline(path):
+    """A command whose failure is hidden *and* fatal at the same time.
+
+    `set -o pipefail` makes a pipeline take the first failure it contains, so
+
+        seq=$(( $(ls loop/ledger/entries 2>/dev/null | wc -l) + 1 ))
+
+    ends the shell under `set -e` when that directory does not exist -- and
+    ends it **in silence**, because the only message went to /dev/null. Exit
+    2, no output, no clue.
+
+    That is the bug that stopped the CI Godel machine filing its first
+    certificate. Both arms built, both booted, the rail was judged and refused
+    correctly, and then the ledger had no `entries/` yet because nothing had
+    ever landed in it. The night before had died forty minutes earlier for an
+    unrelated reason, so this was the *second* silent failure in the same
+    step, and neither left anything to read.
+
+    The shape is narrow and worth refusing on sight: stderr discarded on the
+    left of a pipe, with no `||` to catch the status. Either the failure
+    matters -- and then it must not be silenced -- or it does not, and then it
+    needs `|| true` saying so.
+    """
+    with open(path, encoding="utf-8") as f:
+        root = yaml.compose(f, yaml.SafeLoader)
+    bad = []
+
+    def walk(n):
+        if isinstance(n, yaml.MappingNode):
+            for k, v in n.value:
+                if (isinstance(k, yaml.ScalarNode) and k.value == "run"
+                        and isinstance(v, yaml.ScalarNode)
+                        and "pipefail" in v.value):
+                    for i, line in enumerate(v.value.split("\n")):
+                        if "2>/dev/null |" in line and "||" not in line:
+                            bad.append(
+                                "a pipeline hides a failure it will still die "
+                                "of, near line %d of the `run:` at line %d: %s"
+                                % (i + 1, k.start_mark.line + 1, line.strip()))
+                walk(v)
+        elif isinstance(n, yaml.SequenceNode):
+            for v in n.value:
+                walk(v)
+
+    if root is not None:
+        walk(root)
+    return bad
+
+
 def on_block(doc):
     """A workflow's `on:`, which YAML 1.1 resolves to the boolean `True`.
 
@@ -336,6 +385,7 @@ def check(root, quiet=False):
         here = ["`uses: %s` names nothing in the tree" % u
                 for u in local_uses(doc) if not resolves(root, u)]
         here += folded_runs(path)
+        here += silenced_in_pipeline(path)
         here += call_contract(root, doc)
         here += output_refs(root, doc)
         bad += ["%s: %s" % (rel, h) for h in here]
@@ -476,6 +526,23 @@ def selftest():
         bad = check(tmp, quiet=True)
         claim(any("folds into one command" in b for b in bad),
               "a `run:` that lost its `|` is refused")
+
+        # And the pipeline that hides a failure it still dies of.
+        pipefail_step = (
+            "        run: |\n"
+            "          set -euo pipefail\n"
+            "          n=$(ls maybe 2>/dev/null | wc -l)\n")
+        with open(good, "w", encoding="utf-8") as f:
+            f.write(CLEAN.replace("        run: echo hi\n", pipefail_step))
+        bad = check(tmp, quiet=True)
+        claim(any("hides a failure it will still die of" in b for b in bad),
+              "stderr discarded on the left of a pipe under pipefail is refused")
+        with open(good, "w", encoding="utf-8") as f:
+            f.write(CLEAN.replace("        run: echo hi\n",
+                                  pipefail_step.replace("wc -l)\n",
+                                                        "wc -l) || true\n")))
+        claim(not check(tmp, quiet=True),
+              "and the same line with `|| true` saying so is accepted")
         with open(good, "w", encoding="utf-8") as f:
             f.write(CLEAN)
         claim(not check(tmp, quiet=True),

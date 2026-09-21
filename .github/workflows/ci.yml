@@ -70,11 +70,22 @@ jobs:
       - name: Every workflow file is one GitHub can actually load
         run: python3 tools/workflows.py
 
+      # The other inherited-and-unclearable key. `pool/` and `miner/` each
+      # carried `rustflags = []` under a comment saying "cleared, not
+      # inherited"; cargo *joins* arrays, so the kernel's `/MAP:` reached both
+      # and the pool could not link for musl. The escape they make for
+      # `build.target` is real -- strings are overridden by the closest config
+      # -- which is what made the wrong belief about arrays plausible.
+      - name: No crate inherits linker flags it cannot escape
+        run: python3 tools/cargocheck.py
+
       - name: Every judging tool proves itself before anything trusts it
         run: |
           set -euo pipefail
           python3 tools/knob.py --selftest
           python3 tools/workflows.py --selftest
+          python3 tools/cargocheck.py --selftest
+          python3 tools/ladder.py --selftest
           python3 tools/rails.py --selftest
           python3 tools/retrieval.py --selftest
           python3 tools/paired.py --selftest

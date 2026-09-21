@@ -123,6 +123,13 @@ EVALUATOR = (
     # by one level of indirection. A loop able to relax its own workflow
     # checker can then propose a workflow the checker no longer refuses.
     "tools/workflows.py",
+    # Decides what a rung is and when one is met. A loop able to edit
+    # this can redefine its own success, which is the whole point of
+    # the ladder being read out of the ledger rather than declared.
+    "tools/ladder.py",
+    "tools/cargocheck.py",
+    # The operator writes the north star and nothing else writes it.
+    "loop/goal.txt",
 )
 
 #: Human-only or generated surfaces. The anchors decide what every machine
@@ -1106,21 +1113,54 @@ def author(root, kind_name, target, token):
     admit(), the evaluator by the token's own permissions, and the rest by
     the gate.
     """
-    import json as _json
-    import urllib.request
-
-    prompt_path = os.path.join(ROOT, "tools", "prompts", "author.md")
-    prompt = io.open(prompt_path, encoding="utf-8").read()
-    parts = prompt.split("---\n", 2)
-    if len(parts) != 3:
-        raise RuntimeError("author.md has no front matter")
-    meta_text, system = parts[1], parts[2]
-    meta = dict(l.split(": ", 1) for l in meta_text.strip().split("\n") if ": " in l)
-
-    src = io.open(os.path.join(root, target), encoding="utf-8").read()
-    slice_text = "\n".join(src.split("\n")[:200])
+    meta, system = read_prompt("author.md")
+    p = os.path.join(root, target)
+    if os.path.isfile(p):
+        slice_text = "\n".join(
+            io.open(p, encoding="utf-8").read().split("\n")[:200])
+    else:
+        # A ladder rung may name a module that does not exist yet, and
+        # starting one is an ordinary first step. Refusing to author against
+        # an absent file would mean every ladder had to begin with a file
+        # somebody created by hand -- which is the operator back in the loop,
+        # for no reason. The card says the file is absent rather than passing
+        # an empty slice that reads like an empty file.
+        slice_text = "(this file does not exist yet -- the patch creates it)"
     entries = load_entries(root)
     card = task_card(kind_name, target, slice_text, entries)
+    reply = ask_model(system, card, meta, token, "glados-loop-author")
+    return author_finish(root, kind_name, reply)
+
+
+def read_prompt(name):
+    """A prompt file's front matter and its system text.
+
+    Shared, because there is now more than one thing that asks a model
+    something and two copies of "where does the model name come from" is two
+    answers waiting to disagree.
+    """
+    p = os.path.join(ROOT, "tools", "prompts", name)
+    text = io.open(p, encoding="utf-8").read()
+    parts = text.split("---\n", 2)
+    if len(parts) != 3:
+        raise RuntimeError(f"{name} has no front matter")
+    meta = dict(l.split(": ", 1) for l in parts[1].strip().split("\n") if ": " in l)
+    return meta, parts[2]
+
+
+def ask_model(system, card, meta, token, agent="glados-loop"):
+    """The one transport, so there is one place a model is asked anything.
+
+    `ladder.propose` asks for a milestone and `author` asks for a patch, and
+    both go through here -- which matters less for the HTTP than for the
+    shape: system prompt from a file under `tools/prompts/`, user turn a
+    structured card, temperature from front matter and zero by default. A
+    second copy of this would be a second set of decode settings nobody
+    compares, which is how `voter` and `author` ended up with two notions of
+    what a prompt looks like.
+    """
+    import json as _json
+    import urllib.request
 
     body = _json.dumps({
         "model": meta.get("model", "openai/gpt-4o-mini"),
@@ -1137,11 +1177,10 @@ def author(root, kind_name, target, token):
         headers={
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
-            "User-Agent": "glados-loop-author",
+            "User-Agent": agent,
         })
     with urllib.request.urlopen(req, timeout=120) as r:
-        reply = _json.loads(r.read())["choices"][0]["message"]["content"]
-    return author_finish(root, kind_name, reply)
+        return _json.loads(r.read())["choices"][0]["message"]["content"]
 
 
 def author_finish(root, kind_name, reply):

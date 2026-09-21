@@ -491,7 +491,23 @@ jobs:
       - name: Render the certificate
         run: |
           set -euo pipefail
-          seq=$(( $(ls loop/ledger/entries 2>/dev/null | wc -l) + 1 ))
+          # **`ls` on a directory that does not exist exits 2**, `pipefail` hands that
+          # status to the assignment, and `set -e` then ends the shell -- in silence,
+          # because the only message went to /dev/null. That is exactly what happened
+          # to the first night that ever reached a verdict: both arms built, both
+          # booted, the rail was judged `same` and refused correctly, and the
+          # certificate could not be rendered because the ledger had no `entries/`
+          # yet. `3dab0fb` removed the `.keep` placeholders for good reasons -- fsck
+          # was right to refuse them -- and left the loop unable to count to one.
+          #
+          # `if` rather than `[ -d x ] && n=...`, which `pool.yml` already records the
+          # trap for: whether a false AND-OR list is fatal under `set -e` differs
+          # between shells, and here the false case is the ordinary one.
+          n=0
+          if [ -d loop/ledger/entries ]; then
+            n=$(ls -1 loop/ledger/entries | wc -l)
+          fi
+          seq=$(( n + 1 ))
           python3 tools/godel.py cert --emit \
             --set "seq=$seq" \
             --set "utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
