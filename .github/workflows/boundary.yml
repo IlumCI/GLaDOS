@@ -143,7 +143,11 @@ jobs:
         id: verdict
         run: |
           set -euo pipefail
-          pairs=$(ls loop/evidence/anchors/ 2>/dev/null | wc -l)
+          # Same trap as the ledger count; see loop-judge.yml.
+          pairs=0
+          if [ -d loop/evidence/anchors ]; then
+            pairs=$(ls -1 loop/evidence/anchors | wc -l)
+          fi
           if [ "$pairs" = "0" ]; then
             echo "::error::no anchor pairs are archived, so whether this change"
             echo "::error::MOVES anything cannot be asked -- harvest anchors from"

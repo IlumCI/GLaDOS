@@ -88,7 +88,13 @@ jobs:
               parent=$(git rev-parse 'HEAD^{tree}')
               git commit -m "loop: follow main, which overrode: $conflicted"
               cand=$(git rev-parse 'HEAD^{tree}')
-              seq=$(( $(ls loop/ledger/entries | wc -l) + 1 ))
+              # Counted the safe way; see the long note in loop-judge.yml. `ls` on an
+              # absent directory exits 2 and `pipefail` makes that the shell's last word.
+              n=0
+              if [ -d loop/ledger/entries ]; then
+                n=$(ls -1 loop/ledger/entries | wc -l)
+              fi
+              seq=$(( n + 1 ))
               point=$(printf 'superseded by main at %s over %s' \
                 "$(git rev-parse origin/main)" "$conflicted" | sha256sum | cut -d' ' -f1)
               python3 tools/godel.py cert --emit \
@@ -169,7 +175,13 @@ jobs:
           back=${d#back=}; back=${back%% *}
           target=${d##*target=}
           parent=$(git rev-parse 'HEAD^{tree}')
-          seq=$(( $(ls loop/ledger/entries 2>/dev/null | wc -l) + 1 ))
+          # Counted the safe way; see the long note in loop-judge.yml. `ls` on an
+          # absent directory exits 2 and `pipefail` makes that the shell's last word.
+          n=0
+          if [ -d loop/ledger/entries ]; then
+            n=$(ls -1 loop/ledger/entries | wc -l)
+          fi
+          seq=$(( n + 1 ))
           point=$(printf 'rollback %s steps to %s from %s' "$back" "$target" "$parent"             | sha256sum | cut -d' ' -f1)
           # The commit's tree: the target, with the CURRENT ledger overlaid
           # (a rollback that rolled back its own record would be a lineage
@@ -400,7 +412,13 @@ jobs:
             echo "::notice::the tip moved mid-judge; filed as stale"
           fi
           # seq is re-derived under the lock, where it is authoritative.
-          seq=$(( $(ls loop/ledger/entries 2>/dev/null | wc -l) + 1 ))
+          # Counted the safe way; see the long note in loop-judge.yml. `ls` on an
+          # absent directory exits 2 and `pipefail` makes that the shell's last word.
+          n=0
+          if [ -d loop/ledger/entries ]; then
+            n=$(ls -1 loop/ledger/entries | wc -l)
+          fi
+          seq=$(( n + 1 ))
           sed -i "s/^seq .*/seq $seq/" "$cert"
 
           # Pure plumbing from here: the commit's tree is built in an
