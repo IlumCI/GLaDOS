@@ -9,10 +9,10 @@
 #
 # What this is, and why this one:
 #
-#   prism-ml/Ternary-Bonsai-4B-gguf, the Q2_0 file
+#   prism-ml/Ternary-Bonsai-4B-gguf, the Q2_0 **g64** file
 #   a ternary distill of Qwen3-4B -- every weight in {-1, 0, +1} with one
-#   FP16 scale per group of 128, which is 2.125 bits/weight
-#   Apache-2.0, 32,768 context, 36 layers, GQA 32q/8kv
+#   FP16 scale per group, Apache-2.0, 32,768 context, qwen3 architecture,
+#   398 tensors of which 253 are Q2_0 and 145 stay F32
 #
 #   HumanEval+ 78.7, against the 8.04 GB Qwen3-4B it was distilled from at
 #   74.4 -- it out-codes its own parent at an eighth the size. It also
@@ -24,15 +24,30 @@
 #   paying 2x size and 2x time for instruction-following we intend to enforce
 #   anyway would be buying something twice.
 #
+# **g64 and not g128, and the two files do not announce the difference.**
+# The repository ships both. Both declare `GGML_TYPE_Q2_0`, id 42, with
+# identical tensor counts -- the type does not encode the block size. What
+# differs is bytes per weight:
+#
+#   mainline  #define QK2_0 64   ->  2 + 16 = 18 bytes / 64  = 0.281250 B/w
+#   g128                         ->      34 bytes / 128      = 0.265625 B/w
+#
+# and the file sizes agree to four figures: 1137806656 / 1074969344 = 1.0585
+# against 2.25/2.125 = 1.0588. So llama.cpp derives a different expected size
+# for every tensor in the g128 file and refuses it at load. Loudly, which is
+# the good failure -- but it never runs, and the name gives no warning.
+#
+# The model card says Q2_0 needs PrismML-Eng's llama.cpp fork. **That is
+# stale.** It is upstream now: `GGML_TYPE_Q2_0 = 42` in ggml.h, `block_q2_0`
+# with real CPU kernels in ggml-quants.c and arch-fallback.h, and `Q2_0`
+# listed by the quantize tool as "2.25 bpw quantization (group 64)". So no
+# fork is built, and the requantise-to-Q4 alternative is not needed either --
+# which is just as well, since a ternary model stored at Q4 is 2.2 GB for
+# exactly the quality it has at 1.14, and the size was the reason to pick it.
+#
 # Fetched from:
-#   https://huggingface.co/prism-ml/Ternary-Bonsai-4B-gguf/resolve/main/Ternary-Bonsai-4B-Q2_0.gguf
+#   https://huggingface.co/prism-ml/Ternary-Bonsai-4B-gguf/resolve/main/Ternary-Bonsai-4B-Q2_0_g64.gguf
 #
-# **Q2_0 is not in mainline llama.cpp.** It needs PrismML-Eng/llama.cpp on
-# the `prism` branch (upstream PR pending), which CI builds once and caches
-# on a key the way the judge already caches cargo's registry and `target`.
-# Their fork ships `llama-server`, so the endpoint stays OpenAI-shaped and
-# `GLADOS_INFERENCE_URL` needs no code change to point at it.
-#
-# Verified rather than copied: downloaded whole and hashed, and the digest
-# below is what came back, not what the API said it would be.
-4e0bf8b737b0431552f8c2c97695ab7c0cb214c94bcdeb4f5f267e67ddf28b8b  1074969344  Ternary-Bonsai-4B-Q2_0.gguf
+# Verified rather than copied: downloaded whole, hashed, and the GGUF header
+# read back for its tensor types. The digest below is what came back.
+9d968b04a3c9a794897bcc744c8072fb6a061c0e42efd03c989401ddf8baef0c  1137806656  Ternary-Bonsai-4B-Q2_0_g64.gguf
