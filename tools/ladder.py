@@ -24,9 +24,12 @@ point. Since a witnessed kind's J1 is the witness itself, "met" means a check
 genuinely failed before the patch and passed after it. There is no field
 anywhere the loop can write its own success into.
 
-**A rung must name a witnessed kind.** `bugfix` and `test` carry
-`witness=True`, so their J1 is fail-then-pass. `feature` does not: it claims
-`rail: none`, and `rail none` refuses. A milestone filed under an unwitnessed
+**A rung must name a kind whose J1 can say yes without a prior reading.**
+`bugfix` and `test` carry `witness=True`, so their J1 is fail-then-pass;
+`feature`'s is the boot's own claim count. `tune`, `cleanup` and `rewrite`
+are excluded not for lacking a judge but for needing a rail that already
+reads something, and a rung creates what nothing was measuring. A milestone
+filed under a kind with no reachable J1
 kind is a milestone with no judge, which is the arrangement `godel.rs` opens
 by warning about, so it is refused at admission rather than discovered at
 three in the morning.
@@ -91,13 +94,14 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RUNG_KEYS = ("seq", "goal", "kind", "target", "title", "witness", "why")
 
 #: The kinds a milestone may be filed under: exactly those whose J1 is the
-#: witness. Read off `godel.KINDS` rather than written down here, so a kind
-#: that stops being witnessed cannot leave a stale copy behind.
-def witnessed_kinds():
+#: J1. Read off `godel.KINDS` rather than written down here, so a kind
+#: whose J1 changes cannot leave a stale copy behind.
+def judgeable_kinds():
     sys.path.insert(0, os.path.join(ROOT, "tools"))
     import godel
     return tuple(sorted(
-        n for n, k in godel.KINDS.items() if k.enabled and k.witness))
+        n for n, k in godel.KINDS.items()
+        if k.enabled and k.j1 in ("witness", "claims")))
 
 
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
@@ -177,11 +181,11 @@ def parse_rung(text):
 
 def admit(r, root):
     """Everything that must hold before a rung is worth a night."""
-    kinds = witnessed_kinds()
+    kinds = judgeable_kinds()
     if r["kind"] not in kinds:
         raise Bad(
-            "kind %r has no witness, so this milestone would have no judge; "
-            "the witnessed kinds are %s" % (r["kind"], ", ".join(kinds)))
+            "kind %r has no J1 that could say yes, so this milestone would "
+            "have no judge; the kinds you may name are %s" % (r["kind"], ", ".join(kinds)))
     g = goal_hash(root)
     if g is None:
         raise Bad("there is no north star, so this rung is aimed at nothing")
@@ -454,7 +458,7 @@ def rung_card(root, rungs):
     """Structured data only. The tree's shape is a listing, never a slice of
     source, because a milestone is chosen from what exists rather than
     written against what one file happens to say."""
-    kinds = witnessed_kinds()
+    kinds = judgeable_kinds()
     sys.path.insert(0, os.path.join(ROOT, "tools"))
     import godel
     import knob
@@ -462,7 +466,7 @@ def rung_card(root, rungs):
         "north star: %s" % north_star(root),
         "goal hash: %s" % goal_hash(root),
         "next seq: %d" % (len(rungs) + 1),
-        "witnessed kinds you may choose from:",
+        "kinds you may choose from:",
     ]
     for n in kinds:
         k = godel.KINDS[n]
@@ -511,7 +515,7 @@ def grammar_for(root, rungs):
     first -- it is generated from the same values, so a bug that got one wrong
     would get both wrong.
     """
-    kinds = " | ".join('"%s"' % k for k in witnessed_kinds())
+    kinds = " | ".join('"%s"' % k for k in judgeable_kinds())
     return "\n".join([
         'root ::= "```rung\\n" body "```"',
         ('body ::= "looprung 1\\n" "seq %d\\n" "goal %s\\n" '
@@ -651,9 +655,10 @@ def selftest():
         # **The canary.** Every refusal below is a way this could have been a
         # lie, and a checker that has never refused anything is one that reads
         # nothing.
-        refuses(lambda: admit(parse_rung(_rung(g, kind="feature")), tmp),
-                "has no witness",
-                "an unwitnessed kind is refused, so no milestone lacks a judge")
+        refuses(lambda: admit(parse_rung(_rung(g, kind="cleanup")), tmp),
+                "no J1 that could say yes",
+                "a kind with no reachable J1 is refused, so no milestone "
+                "lacks a judge")
         refuses(lambda: admit(parse_rung(_rung("0" * 64)), tmp),
                 "was written for goal",
                 "a rung aimed at another north star is refused")
@@ -750,9 +755,9 @@ def selftest():
         g_text = grammar_for(tmp, [])
         claim(('"seq 1\\n"' in g_text) and (g in g_text),
               "the grammar pins the goal hash and the next seq as literals")
-        claim(all(('"%s"' % k) in g_text for k in witnessed_kinds())
-              and '"feature"' not in g_text,
-              "and offers exactly the witnessed kinds, so an unjudgeable "
+        claim(all(('"%s"' % k) in g_text for k in judgeable_kinds())
+              and '"cleanup"' not in g_text and '"tune"' not in g_text,
+              "and offers exactly the judgeable kinds, so an unjudgeable "
               "milestone cannot be sampled")
         # The grammar and the card are two statements of one fact; if the
         # grammar could still spell an unjudgeable directory, `admit` would
@@ -787,9 +792,17 @@ def selftest():
         claim(r is None and "fence(s)" in (why or ""),
               "no fence is a refusal, never a retry with more context")
 
+        # `cleanup` and not `feature`: feature's J1 is the claim count and
+        # it is admissible now, which is the whole point of the row. What
+        # stays refused is a kind whose J1 needs a rail that already reads
+        # something, since a rung creates what nothing was measuring.
+        r, why = propose_finish(tmp, fenced(_rung(g, 2, kind="cleanup")))
+        claim(r is None and "no J1 that could say yes" in (why or ""),
+              "a milestone under a kind with no reachable J1 is refused by name")
+
         r, why = propose_finish(tmp, fenced(_rung(g, 2, kind="feature")))
-        claim(r is None and "has no witness" in (why or ""),
-              "a milestone under an unwitnessed kind is refused by name")
+        claim(r is not None,
+              "a feature rung is admitted, so greenfield work has a lane")
 
         r, why = propose_finish(tmp, fenced(_rung(g, 7, title="leapfrog")))
         claim(r is None and "next is 2" in (why or ""),

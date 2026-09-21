@@ -181,7 +181,7 @@ class Kind:
 
     def __init__(self, name, masks, max_files, max_lines, *,
                  witness=False, additive=False, deletions_dominate=False,
-                 enabled=True):
+                 j1="rail", enabled=True):
         self.name = name
         self.masks = masks
         self.max_files = max_files
@@ -189,6 +189,13 @@ class Kind:
         self.witness = witness                # the fail-then-pass claim
         self.additive = additive              # no deletions at all
         self.deletions_dominate = deletions_dominate
+        #: **What this kind's J1 reads**, which decides what may propose it.
+        #: `witness` is fail-then-pass; `rail` is a paired rail comparison;
+        #: `claims` is the boot's own claim count going up while none is
+        #: lost. A kind is declared here rather than inferred, and
+        #: `loop-judge.yml` branches on the same three -- two copies that
+        #: must agree, which `--selftest` asserts rather than trusts.
+        self.j1 = "witness" if witness else j1
         self.enabled = enabled
 
 
@@ -200,7 +207,20 @@ KINDS = {k.name: k for k in [
     Kind("cleanup", ("src/", "tools/"), 5, 150, deletions_dominate=True),
     Kind("bugfix", ("src/", "tools/"), 3, 150, witness=True),
     Kind("test", ("src/", "tools/"), 3, 200, witness=True, additive=True),
-    Kind("feature", ("src/", "tools/"), 10, 400),
+    #: **`feature` reads the claim count, and why is arithmetic rather than
+    #: taste.** A witness must build and run against the PARENT tree, and a
+    #: module being created is by construction absent from it -- so a
+    #: greenfield rung filed as `bugfix` or `test` dies of infrastructure on
+    #: the witness arm, every time, before a runner is spent. `rail: none`
+    #: then refuses it for claiming nothing. Both refusals are correct and
+    #: between them they made the north star unreachable.
+    #:
+    #: What is left that is still mechanical: it builds, it boots, it loses
+    #: no claim and it adds one. Weaker than fail-then-pass and said so --
+    #: it does not show the feature is right. It shows the code is exercised
+    #: and nothing regressed, which is the honest bar for creating a thing,
+    #: and it is what lets the witnessed rungs after it exist at all.
+    Kind("feature", ("src/", "tools/"), 10, 400, j1="claims"),
     Kind("rewrite", ("src/",), 1, 400),
     Kind("deps", ("rust-toolchain.toml", "Cargo.lock"), 2, 60, enabled=False),
     Kind("docs", ("CLAUDE.md", "README.md"), 2, 60, enabled=False),
@@ -981,9 +1001,20 @@ def admit_paths_only(env_text):
 # ------------------------------------------------------------------- next
 
 
-def next_point(root):
+def next_point(root, lane=None):
     """The next untried grid point from the tip, or a reason there is none.
-    Returns (envelope_text, None) or (None, reason)."""
+    Returns (envelope_text, None) or (None, reason).
+
+    **`lane` is what makes the ranking mean anything.** Without it this walks
+    grid and then templates internally, in that fixed order, so a caller told
+    by `lane_order` to try templates first had no way to say so -- it called
+    this, got a knob point, and the ranking it had just computed decided
+    nothing. That is the same "an axis with no way to be reached is an axis
+    that is never tried" failure `trial_lib` recorded one machine down.
+
+    None keeps the old behaviour, which is what a caller with no opinion
+    wants and what every drill written before the flag existed asks for.
+    """
     corpus = corpus_hash(root)
     if corpus is None:
         return None, "no loop/evidence/corpus.txt -- the alpha series has no identity"
@@ -994,7 +1025,7 @@ def next_point(root):
                       f"({k} of {len(KERNEL_SPEND)}); only new evidence refills it")
     parent = head_tree(root)
     tried_dir = os.path.join(ledger_dir(root), "tried")
-    rows = knob.table_rows() + [
+    rows = [] if lane == "template" else knob.table_rows() + [
         {"file": f, "symbol": s, "now": n, "values": list(v), "rail": r}
         for (f, s, n, v, r, _a) in knobs_host.ROWS
     ]
@@ -1021,9 +1052,13 @@ def next_point(root):
     # rule ported: a template costs a `cargo check` to find out whether it
     # has work at all, so it is reached for when everything cheaper is out
     # of moves rather than because it looked promising.
+    if lane == "grid":
+        return None, "every grid point is tried from this tree"
     got, why3 = next_template(root, entries, corpus, k, parent, tried_dir)
     if got is not None:
         return got, None
+    if lane == "template":
+        return None, why3
     return None, (f"every grid point is tried from this tree; {why3}; "
                   "rung 4 is what comes next")
 
@@ -1779,6 +1814,28 @@ def selftest():
         "--- a/src/../update.key\n+++ b/src/../update.key\n-a\n+b"))
     claim("a path that climbs out of the tree is refused",
           any("outside the tree" in w for w in admit(esc)))
+    # **`Kind.j1` and loop-judge.yml are two copies and must agree.** The
+    # table says what a kind's J1 reads; the workflow branches on the same
+    # three. A kind whose row said `claims` while the judge had no branch
+    # for it would be admitted here, built, booted, and then refused by the
+    # `rail none` arm -- a whole runner spent on a disagreement between two
+    # files. Skipped rather than failed where the file is absent, since this
+    # suite runs in worktrees and from the loop branch.
+    jpath = os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), ".github", "workflows", "loop-judge.yml")
+    if os.path.exists(jpath):
+        jtext = io.open(jpath, encoding="utf-8").read()
+        for n, k in KINDS.items():
+            if not k.enabled:
+                continue
+            branch = '"$KIND" = "%s"' % n
+            want = k.j1 in ("witness", "claims")
+            claim("the judge branches on %s exactly as its row's j1=%s says"
+                  % (n, k.j1), (branch in jtext) == want)
+        claim("and every kind the ladder may name has a branch there",
+              all('"$KIND" = "%s"' % n in jtext
+                  for n, k in KINDS.items()
+                  if k.enabled and k.j1 in ("witness", "claims")))
     claim("the envelope is identity only -- no account state in the bytes",
           "minutes" not in env and "alpha" not in env and "boots" not in env)
     try:
@@ -2001,6 +2058,11 @@ def main():
             s.add_argument("--emit-env", default="",
                            help="write the envelope here; stdout then carries "
                                 "the account as key=value")
+            s.add_argument("--lane", default="", choices=["", "grid",
+                                                          "template"],
+                           help="walk only this lane; the default walks grid "
+                                "then templates, which is what a caller with "
+                                "no ranking to honour wants")
     s = sub.add_parser("oops")
     s.add_argument("--root", default=".")
     s.add_argument("--axis", required=True)
@@ -2044,7 +2106,7 @@ def main():
         return verify()
 
     if a.cmd == "next":
-        got, why = next_point(a.root)
+        got, why = next_point(a.root, a.lane or None)
         if got is None:
             print(f"  {why}", file=sys.stderr)
             return 1
@@ -2155,6 +2217,11 @@ def main():
             att, ad = counts[n]
             print("  %-9s %d tried, %d adopted, surprise %.3f"
                   % (n, att, ad, axis_uncertainty(att, ad)))
+        # `first` alone was all a caller could act on, and a caller that
+        # acted on it for one value and fell through for the other two is a
+        # ranking that decides nothing. The whole order is printed so a
+        # workflow can walk it.
+        print("order %s" % " ".join(lane_order(a.root)))
         print("first %s" % lane_order(a.root)[0])
         return 0
     if a.cmd == "cert":

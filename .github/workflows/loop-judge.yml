@@ -393,6 +393,24 @@ jobs:
 
       # --- the verdict ------------------------------------------------------
 
+      - name: Count what both arms answered
+        run: |
+          set -euo pipefail
+          sa=$(grep -c '^\[selftest\]' verify-a.log || true)
+          sb=$(grep -c '^\[selftest\]' verify-b.log || true)
+          ta=$(grep -oE '[0-9]+ passed' verify-a.log | tail -1 | cut -d' ' -f1)
+          tb=$(grep -oE '[0-9]+ passed' verify-b.log | tail -1 | cut -d' ' -f1)
+          ca=$(grep -cE '^  ok ' verify-a.log || true)
+          cb=$(grep -cE '^  ok ' verify-b.log || true)
+          echo "SECTIONS=$sa/$sb" >> "$GITHUB_ENV"
+          echo "SUITES=$ta/$tb" >> "$GITHUB_ENV"
+          echo "CLAIMS=$ca/$cb" >> "$GITHUB_ENV"
+          {
+            echo "CLAIMS_SA=$sa"; echo "CLAIMS_SB=$sb"
+            echo "CLAIMS_TA=$ta"; echo "CLAIMS_TB=$tb"
+            echo "CLAIMS_CA=$ca"; echo "CLAIMS_CB=$cb"
+          } >> "$GITHUB_ENV"
+
       - name: Judge it against what it claimed, at the bar in force
         run: |
           set -euo pipefail
@@ -420,6 +438,54 @@ jobs:
               echo "WHY=witness failed on the baseline and passes with the fix; no rail regressed" >> "$GITHUB_ENV"
             fi
             echo "MOVED=-" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          # **`feature` is greenfield, and fail-then-pass cannot express it.**
+          # Not a gap in the model's behaviour -- arithmetic about which
+          # trees exist. A witness must build and run against the PARENT
+          # tree, and a module being created is by construction absent from
+          # it, so the witness arm dies of infrastructure rather than of its
+          # claim and the judge above correctly refuses. Every rung the
+          # ladder could emit was therefore refused before a runner was
+          # spent, which is why three nights of this loop produced
+          # certificates and no `src/` line.
+          #
+          # What IS mechanically derivable here is weaker, and is stated
+          # rather than dressed up: the candidate compiles, boots, loses no
+          # claim, and ADDS one -- so the new code is exercised by something
+          # that printed `ok`, not merely compiled. It does not say the
+          # feature is correct.
+          #
+          # That is the honest bar for creating a thing, and it is the
+          # ordering the witnessed kinds need: after this adoption the
+          # module exists, so the rungs that follow CAN fail against it, and
+          # those are the ones that say it is right. A loop that could never
+          # take this step could never take theirs either.
+          #
+          # It is not gameable in the direction that matters. A claim is a
+          # line the boot printed `ok` for, so buying one costs running one;
+          # the monotonic veto below catches anything traded away for it;
+          # and the diff budget (400 lines, 10 files) and the path masks are
+          # unchanged.
+          if [ "$KIND" = "feature" ]; then
+            python3 tools/rails.py compare before.txt after.txt \
+              --again kernel-a2.txt kernel-b2.txt | tee judged.txt
+            worse=$(grep -c ' worse ' judged.txt || true)
+            unstable=$(grep -c ' unstable ' judged.txt || true)
+            echo "MOVED=-" >> "$GITHUB_ENV"
+            if [ "$CLAIMS_CB" -le "$CLAIMS_CA" ]; then
+              echo "VERDICT=refuse" >> "$GITHUB_ENV"
+              echo "WHY=a feature that adds no claim is code nothing exercises (claims $CLAIMS_CA->$CLAIMS_CB)" >> "$GITHUB_ENV"
+            elif [ "$unstable" != "0" ]; then
+              echo "VERDICT=refuse" >> "$GITHUB_ENV"
+              echo "WHY=$unstable rail(s) were not comparable" >> "$GITHUB_ENV"
+            elif [ "$worse" != "0" ]; then
+              echo "VERDICT=refuse" >> "$GITHUB_ENV"
+              echo "WHY=$worse rail(s) regressed" >> "$GITHUB_ENV"
+            else
+              echo "VERDICT=adopt" >> "$GITHUB_ENV"
+              echo "WHY=it builds, it boots, it added $(( CLAIMS_CB - CLAIMS_CA )) claim(s) and lost none; no rail regressed" >> "$GITHUB_ENV"
+            fi
             exit 0
           fi
           # `rail none` outside the witness kinds claims nothing moved --
@@ -470,18 +536,18 @@ jobs:
       # The monotonic invariants, counted from what both arms actually
       # printed. A decrease is a refusal for every kind whose row does not
       # license removal -- today no enabled kind does.
+      #
+      # **Counted before the judge, vetoed after it.** `feature`'s J1 reads
+      # the claim count, so the counting had to move ahead of the judgement;
+      # keeping the veto here is what makes it a veto rather than one more
+      # branch a kind could forget. Two steps, one set of greps -- a second
+      # copy of them is two numbers that have to agree and will not.
       - name: The counts that may not fall
         run: |
           set -euo pipefail
-          sa=$(grep -c '^\[selftest\]' verify-a.log || true)
-          sb=$(grep -c '^\[selftest\]' verify-b.log || true)
-          ta=$(grep -oE '[0-9]+ passed' verify-a.log | tail -1 | cut -d' ' -f1)
-          tb=$(grep -oE '[0-9]+ passed' verify-b.log | tail -1 | cut -d' ' -f1)
-          ca=$(grep -cE '^  ok ' verify-a.log || true)
-          cb=$(grep -cE '^  ok ' verify-b.log || true)
-          echo "SECTIONS=$sa/$sb" >> "$GITHUB_ENV"
-          echo "SUITES=$ta/$tb" >> "$GITHUB_ENV"
-          echo "CLAIMS=$ca/$cb" >> "$GITHUB_ENV"
+          sa=$CLAIMS_SA; sb=$CLAIMS_SB
+          ta=$CLAIMS_TA; tb=$CLAIMS_TB
+          ca=$CLAIMS_CA; cb=$CLAIMS_CB
           if [ "$sb" -lt "$sa" ] || [ "$tb" -lt "$ta" ] || [ "$cb" -lt "$ca" ]; then
             echo "::error::the candidate answers less than the baseline: sections $sa->$sb, suites $ta->$tb, claims $ca->$cb"
             echo "VERDICT=refuse" >> "$GITHUB_ENV"

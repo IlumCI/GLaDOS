@@ -354,58 +354,68 @@ jobs:
           # about two minutes now, so the rule it was protecting no longer
           # bites, and the cost survives as the tie-break instead: on a fresh
           # ledger every lane reads 1.000 and grid still goes first.
+          #
+          # **The ranking is walked, not peeked at.** The first version read
+          # `first` and short-circuited on the single value `model`, so a
+          # ranking that said `template` fell straight through to `godel.py
+          # next`, which walks the grid internally before templates -- the
+          # answer computed, printed, and then ignored for two of its three
+          # values. `--lane` is what lets a lane be asked on its own, and the
+          # whole order is walked so every rank means what it says.
           python3 tools/godel.py lanes --root .
-          first=$(python3 tools/godel.py lanes --root . | sed -n 's/^first //p')
+          order=$(python3 tools/godel.py lanes --root . | sed -n 's/^order //p')
           code=1
-          if [ "$first" = "model" ] && [ -n "$rung_target" ]; then
-            echo "  the ledger can least predict the model lane, and a rung is open"
-            set +e
-            python3 tools/godel.py author --root . \
-              --kind "$rung_kind" --target "$rung_target" \
-              --emit-env /tmp/env.txt > /tmp/account.txt
-            code=$?
-            set -e
-          fi
-          if [ "$code" != "0" ]; then
-            set +e
-            python3 tools/godel.py next --root . --emit-env /tmp/env.txt > /tmp/account.txt
-            code=$?
-            set -e
-          fi
-          if [ "$code" != "0" ]; then
-            if grep -q "every grid point is tried" /tmp/account.txt \
-               && [ -n "$rung_target" ]; then
-              # The composed core's rule, ported: the model authors only
-              # when everything cheaper is out of moves. Its reply is held
-              # by the fence contract, admit(), and then the whole gate.
-              set +e
-              python3 tools/godel.py author --root . \
-                --kind "$rung_kind" --target "$rung_target" \
-                --emit-env /tmp/env.txt > /tmp/account.txt
-              code=$?
-              set -e
-              if [ "$code" != "0" ]; then
-                echo "have=no" >> "$GITHUB_OUTPUT"
-                echo "::notice::the author refused or was refused:"
-                cat /tmp/account.txt || true
-                exit 0
-              fi
-              # The author emits point= only; the account is recomputed the
-              # way every account figure is.
-              {
-                python3 tools/godel.py alpha --root . \
-                  | sed -n 's/.*: \([0-9]*\) of 32.*/alpha_k=\1/p'
-                echo "chi_bar=-"
-                echo "rail=none"
-                python3 tools/godel.py oops --root . --axis model \
-                  | sed -E 's/.*(extend|fresh) at level ([0-9]+) -- ([0-9]+) minutes, ([0-9]+) boot.*/half=\1\nlevel=\2\nminutes=\3\nboots=\4/'
-              } >> /tmp/account.txt
-            else
-              echo "have=no" >> "$GITHUB_OUTPUT"
-              echo "::notice::nothing to propose tonight:"
-              cat /tmp/account.txt || true
-              exit 0
+          authored=no
+          for lane in $order; do
+            if [ "$code" = "0" ]; then break; fi
+            case "$lane" in
+              model)
+                if [ -z "$rung_target" ]; then
+                  echo "  model: no rung is open" > /tmp/account.txt
+                  continue
+                fi
+                echo "  lane $lane: a rung is open, asking the author"
+                # The author's reply is held by the fence contract, then by
+                # admit(), then by the whole gate.
+                set +e
+                python3 tools/godel.py author --root . \
+                  --kind "$rung_kind" --target "$rung_target" \
+                  --emit-env /tmp/env.txt > /tmp/account.txt
+                code=$?
+                set -e
+                if [ "$code" = "0" ]; then authored=yes; fi
+                ;;
+              *)
+                echo "  lane $lane"
+                set +e
+                python3 tools/godel.py next --root . --lane "$lane" \
+                  --emit-env /tmp/env.txt > /tmp/account.txt
+                code=$?
+                set -e
+                ;;
+            esac
+            if [ "$code" != "0" ]; then
+              echo "    nothing there:"
+              sed 's/^/    /' /tmp/account.txt || true
             fi
+          done
+          if [ "$code" != "0" ]; then
+            echo "have=no" >> "$GITHUB_OUTPUT"
+            echo "::notice::every lane is out of moves tonight:"
+            cat /tmp/account.txt || true
+            exit 0
+          fi
+          if [ "$authored" = "yes" ]; then
+            # The author emits point= only; the account is recomputed the
+            # way every account figure is.
+            {
+              python3 tools/godel.py alpha --root . \
+                | sed -n 's/.*: \([0-9]*\) of 32.*/alpha_k=\1/p'
+              echo "chi_bar=-"
+              echo "rail=none"
+              python3 tools/godel.py oops --root . --axis model \
+                | sed -E 's/.*(extend|fresh) at level ([0-9]+) -- ([0-9]+) minutes, ([0-9]+) boot.*/half=\1\nlevel=\2\nminutes=\3\nboots=\4/'
+            } >> /tmp/account.txt
           fi
           cat /tmp/account.txt
           # The account, as outputs (key=value already).
