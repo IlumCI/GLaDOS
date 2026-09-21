@@ -54,10 +54,27 @@ jobs:
       - name: Nothing under a ported tree reaches past the seam
         run: python3 tools/portcheck.py
 
+      # **First among the file checks in spirit, because a workflow GitHub
+      # cannot load is a gate that is not running at all.** `experimental.yml`
+      # carried two `env:` keys on one step from `1f1744f` onward: GitHub
+      # refused the file, so every push to any branch produced a zero-job run
+      # named after the path, the `exp/**` filter never applied because the
+      # filter was inside the file that would not load, and nothing published
+      # from that channel for the whole stretch. The only symptom was a fast
+      # red X on unrelated branches, which reads as noise.
+      #
+      # It survived a YAML sweep that printed `ok`, because `yaml.safe_load`
+      # keeps the last of a duplicate pair -- agreeing with a file the real
+      # parser rejects, and keeping the wrong half of it. This reads them the
+      # way the runner does.
+      - name: Every workflow file is one GitHub can actually load
+        run: python3 tools/workflows.py
+
       - name: Every judging tool proves itself before anything trusts it
         run: |
           set -euo pipefail
           python3 tools/knob.py --selftest
+          python3 tools/workflows.py --selftest
           python3 tools/rails.py --selftest
           python3 tools/retrieval.py --selftest
           python3 tools/paired.py --selftest

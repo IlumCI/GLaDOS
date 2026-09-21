@@ -117,6 +117,12 @@ EVALUATOR = (
     "tools/drive.py",
     "tools/hybtest.py",
     "tools/portcheck.py",
+    # The strict reader for `.github/**`. `.github/` is already here, so a
+    # patch editing a workflow is refused -- and a patch editing the thing
+    # that decides whether a workflow is *loadable* would route around that
+    # by one level of indirection. A loop able to relax its own workflow
+    # checker can then propose a workflow the checker no longer refuses.
+    "tools/workflows.py",
 )
 
 #: Human-only or generated surfaces. The anchors decide what every machine
