@@ -381,11 +381,39 @@ def verdict(before, after, drift=None, floor=None, floor_src="declared"):
     if floor is None:
         return SAME, "no noise floor is declared for this rail"
     said = f"{rel:+.1%}"
+    raw = rel
     if drift is not None and drift != 0:
         # Both as ratios of the baseline, so the control cancels.
         rel = (1.0 + rel) / (1.0 + drift) - 1.0
         said = f"{rel:+.1%} once the control's {drift:+.1%} is divided out"
     src = "" if floor_src == "declared" else f" {floor_src}"
+
+    # **Normalising may quieten a verdict and must never manufacture one.**
+    # Dividing the control out exists to remove an effect the whole group
+    # shared, so it is allowed to turn a move into no move. The other
+    # direction means the group did not share it: the rail sat still and the
+    # control walked off, and what comes out is a verdict about the control
+    # wearing the rail's name.
+    #
+    # Measured, on run 35668028694. Three interpreter rails read `worse` at
+    # about +30% each, from a raw move of **-0.03%** against a control that
+    # had moved -23.1% on its own. Deleting one dead `use` had regressed
+    # nothing; the arithmetic invented all of it, and vetoed an adoption
+    # with it.
+    #
+    # `unstable` and not `same`, because "these two readings do not compare"
+    # is a different fact from "this rail did not move", and the honest
+    # answer to a control that drifted is to take the reading again. The
+    # module already argues the asymmetry: a refusal says take it again, an
+    # admission produces a verdict, so this leans toward refusing.
+    if drift is not None and drift != 0 and floor is not None:
+        quiet_raw = raw == 0.0 or abs(raw) < floor
+        loud_now = rel != 0.0 and abs(rel) >= floor
+        if quiet_raw and loud_now:
+            return UNSTABLE, (
+                f"{raw:+.1%} raw, inside the {floor:.0%} floor{src}, and only "
+                f"the control's {drift:+.1%} puts it outside -- the rail held "
+                "still and the control moved, so these do not compare")
     # **No movement is no movement, whatever the floor.** `abs(rel) < floor`
     # is false at zero when the floor is zero, so an exact rail reading
     # identically on both arms fell through to the direction test and came
@@ -889,6 +917,24 @@ store.read absent us higher  -- no store mounted
     # rail -- absent from both reports, so J1 vetoed. Invisible until a
     # candidate improved the rail it claimed, because until then the
     # refusal was correct for a different reason.
+    # **Normalising may quieten a verdict and must never manufacture one.**
+    # Measured on run 35668028694: three interpreter rails read `worse` at
+    # about +30% from a raw move of -0.03%, because the control alone had
+    # moved -23.1%. The candidate had deleted one dead `use`.
+    held = Rail("core.step", 1000.0, "ns", "lower")
+    still = Rail("core.step", 1000.0, "ns", "lower")
+    v, why = verdict(held, still, drift=-0.231, floor=0.16)
+    claim(v == UNSTABLE and "held still" in why,
+          "a rail that did not move is not made worse by a control that did")
+    v, why = verdict(held, Rail("core.step", 1400.0, "ns", "lower"),
+                         drift=-0.231, floor=0.16)
+    claim(v == WORSE,
+          "and a rail that really did move is still judged on the merits")
+    v, why = verdict(held, Rail("core.step", 1300.0, "ns", "lower"),
+                         drift=0.30, floor=0.16)
+    claim(v == SAME,
+          "while the control may still quieten a move the whole group shared")
+
     line = ["judge", "a", "b", "--again", "x", "y",
             "--claims", "cost.warnings", "--bar", "9.644"]
     claim(claims_of(line) == ["cost.warnings"],
