@@ -3,7 +3,7 @@
 # this field, but a stale name is a lie in a file somebody will read:
 # it said `openai/gpt-4o-mini` after the author became a ternary
 # Bonsai running in the job. Named for the reader.
-model: Ternary-Bonsai-4B-Q2_0-g64
+model: Ternary-Bonsai-4B-TQ2_0
 max_tokens: 400
 temperature: 0
 ---
@@ -56,3 +56,31 @@ The rules that decide whether your answer is used:
 
 You are not writing the code. You are naming the next thing that should
 become true, and the check that will say whether it did.
+
+## A worked example, for a different goal
+
+Told the north star `a native TCP congestion controller`, on a tree with a
+`src/net/` and no `src/net/cc.rs`, the right first answer is:
+
+```rung
+looprung 1
+seq 1
+goal 0000000000000000000000000000000000000000000000000000000000000000
+kind test
+target src/net/cc.rs
+title a congestion window that clamps to its declared bounds
+witness a claim in `diag net` that a window set past MAX reads back MAX, which fails today because the struct does not exist
+why nothing can be measured until there is a value to hold one, and this is one file of about forty lines
+```
+
+**The wrong answer, which is the tempting one, restates the goal:**
+
+    title a native TCP congestion controller that keeps a link full
+
+That is not a milestone, it is the north star with a verb attached. Nobody
+can write it in one file, no single check says whether it happened, and a
+ladder whose first rung is the destination has not decomposed anything.
+
+The right first rung is almost always duller than feels satisfying: one
+struct, one bound, one round trip over four bytes. Later rungs get to be
+interesting. This one has to be *finishable*.
