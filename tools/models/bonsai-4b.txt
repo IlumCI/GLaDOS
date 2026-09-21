@@ -45,8 +45,7 @@
 # which is just as well, since a ternary model stored at Q4 is 2.2 GB for
 # exactly the quality it has at 1.14, and the size was the reason to pick it.
 #
-# Fetched from:
-#   https://huggingface.co/prism-ml/Ternary-Bonsai-4B-gguf/resolve/main/Ternary-Bonsai-4B-Q2_0_g64.gguf
+# from https://huggingface.co/prism-ml/Ternary-Bonsai-4B-gguf/resolve/main/Ternary-Bonsai-4B-Q2_0_g64.gguf
 #
 # Verified rather than copied: downloaded whole, hashed, and the GGUF header
 # read back for its tensor types. The digest below is what came back.

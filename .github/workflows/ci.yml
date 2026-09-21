@@ -85,6 +85,7 @@ jobs:
           python3 tools/knob.py --selftest
           python3 tools/workflows.py --selftest
           python3 tools/cargocheck.py --selftest
+          python3 tools/fetchmodel.py --selftest
           python3 tools/ladder.py --selftest
           python3 tools/rails.py --selftest
           python3 tools/retrieval.py --selftest

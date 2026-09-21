@@ -134,6 +134,9 @@ EVALUATOR = (
     # one that says yes -- the same objection the criterion axis exists to
     # answer, arriving on the weights instead of on the bar.
     "tools/models/",
+    # And what fetches them. A loop able to edit the verifier could
+    # accept weights that are not the ones pinned.
+    "tools/fetchmodel.py",
 )
 
 #: Human-only or generated surfaces. The anchors decide what every machine

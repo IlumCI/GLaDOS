@@ -133,8 +133,9 @@ jobs:
     needs: follow
     permissions:
       contents: write
-      # Rung 4a: inference with the workflow's own token, no new credential.
-      models: read
+      # `models: read` was here for GitHub Models, which has been retired.
+      # The author runs inside the job now and asks nothing of any token, so
+      # the permission is removed rather than left as a dead grant.
     outputs:
       point: ${{ steps.pick.outputs.point }}
       rail: ${{ steps.pick.outputs.rail }}
@@ -200,6 +201,63 @@ jobs:
           git checkout -f --detach "$new"
           python3 tools/godel.py fsck --root .
           git push origin "$new:refs/heads/loop/main"
+
+      # **The author runs here, in the job, and needs no credential.**
+      #
+      # GitHub Models retired mid-loop -- `HTTP 410
+      # github_models_retirement_brownout` -- and the property it was chosen
+      # for was "the workflow's own token, no new credential". A model in the
+      # job restores that better than the hosted endpoint ever had it: there
+      # is no token at all, and a pinned tarball plus a pinned GGUF are two
+      # files with digests, which do not get retired.
+      #
+      # It also makes the author **re-derivable**, which a hosted endpoint
+      # could never be: fixed weights, fixed build number, temperature zero.
+      # A certificate naming a rung-4 proposal now names something a later
+      # run can reproduce, which is the rule `frontier()` already states --
+      # the next point is a function of the markers, not a coin.
+      - uses: actions/cache@v4
+        with:
+          path: out/models
+          # Keyed on the manifests, so repinning either the runtime or the
+          # weights misses the cache by construction. `fetchmodel.py` checks
+          # the digest again on a hit regardless: a restored cache is a
+          # transfer too, and this tree does not trust transfers.
+          key: author-${{ hashFiles('tools/models/*.txt') }}
+
+      - name: The author it will ask
+        id: author
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          python3 tools/fetchmodel.py tools/models/llama-cpp.txt --out out/models
+          python3 tools/fetchmodel.py tools/models/bonsai-4b.txt --out out/models
+          tar -xzf out/models/llama-b11071-bin-ubuntu-x64.tar.gz -C out/models
+          bin=out/models/llama-b11071
+          chmod +x "$bin"/llama-server
+          # The shared objects sit beside the binary in the tarball, and
+          # nothing guarantees an RPATH survives extraction.
+          LD_LIBRARY_PATH="$PWD/$bin" "$bin"/llama-server \
+            -m out/models/Ternary-Bonsai-4B-Q2_0_g64.gguf \
+            --host 127.0.0.1 --port 8080 -c 8192 -t 4 --no-warmup \
+            > out/models/server.log 2>&1 &
+          for i in $(seq 1 120); do
+            if curl -sf http://127.0.0.1:8080/health >/dev/null 2>&1; then
+              echo "  the server answered after ${i}s"
+              echo "GLADOS_INFERENCE_URL=http://127.0.0.1:8080/v1/chat/completions" \
+                >> "$GITHUB_ENV"
+              exit 0
+            fi
+            sleep 1
+          done
+          # `continue-on-error`, deliberately. A night with no inference is a
+          # night that authored nothing, which is an ordinary outcome: the
+          # grid, `discover` and the template families need no model and are
+          # most of what the loop can do. The step goes red so somebody sees
+          # it; the night carries on.
+          echo "::error::llama-server never answered on 127.0.0.1:8080"
+          tail -40 out/models/server.log || true
+          exit 1
 
       # **The operator writes one line and the machine writes the rest.**
       # `loop/goal.txt` is the north star; this keeps the ladder under it
