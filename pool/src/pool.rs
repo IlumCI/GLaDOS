@@ -1526,16 +1526,18 @@ mod tests {
         assert!(p.make_job(0, 8).unwrap().proof.is_none());
     }
 
-    /// Equal effort must earn equal credit, whatever difficulty it was at.
-    ///
-    /// This is the property that pays people fairly, and it is exactly what
     /// The window is meaningless until it can be said in blocks, and against a
-    /// real chain the deployed number turns out to be far too small.
+    /// real chain the number a `u64` can hold turns out to be far too small.
+    ///
+    /// (The first three lines of this comment used to be the tail of another
+    /// test's prose, ending mid-sentence at "exactly what". An edit ate the
+    /// middle and nothing reads a doc comment, so it sat there.)
     ///
     /// Two claims in one because the second only has weight beside the first.
     /// A synthetic target with a known exponent checks the arithmetic; then
-    /// Bitcoin's own `nbits` from a real `mining.notify` checks what it says
-    /// about the configuration actually shipped in `run-pool.sh`.
+    /// Bitcoin's own `nbits` from a real `mining.notify` checks the ceiling
+    /// `window_work` argues for, and what the shipped configuration is worth
+    /// underneath it.
     #[test]
     fn the_window_can_be_said_in_blocks_and_the_deployed_one_is_a_rounding_error() {
         let mut p = a_pool();
@@ -1559,13 +1561,32 @@ mod tests {
         assert!((h - 0.5).abs() < 0.01, "half the window is half a block, got {h}");
 
         // Now the real one. `0x17030ecd` is Bitcoin's `nbits` as carried by a
-        // live `mining.notify` this pool took from solo.ckpool.org, and
-        // 268435456 is what `run-pool.sh` passes as `--window`.
+        // live `mining.notify` this pool took from solo.ckpool.org.
         p.coins[0].network_target = U256::from_nbits(0x1703_0ecd);
-        p.set_window(268_435_456);
+
+        // **The ceiling first**, because it is the claim `window_work` makes
+        // and the only one here that does not move when a deploy script does:
+        // a `u64` cannot express one Bitcoin block at all, so this is a limit
+        // of the type rather than a setting somebody got wrong. Pinning the
+        // largest expressible window is what says "no value would have been
+        // right" -- an assertion about one deployed number cannot say that,
+        // and the previous version of this test tried to.
+        p.set_window(u64::MAX);
+        let most = p.window_in_blocks(&p.coins[0].label.clone()).unwrap();
+        assert!(
+            most < 1e-4,
+            "even the largest u64 window is a rounding error against Bitcoin, got {most}"
+        );
+
+        // And what `run-pool.wg.sh` actually passes, so the two stay in step.
+        // It is sized for Feathercoin -- the coin on that listener whose blocks
+        // a `u64` can hold -- and against Bitcoin it is nine orders of
+        // magnitude short for the reason above rather than for want of a
+        // larger number.
+        p.set_window(1u64 << 50);
         let real = p.window_in_blocks(&p.coins[0].label.clone()).unwrap();
         assert!(
-            real < 1e-12,
+            real < 1e-8,
             "the deployed window against Bitcoin is a rounding error, got {real}"
         );
 
