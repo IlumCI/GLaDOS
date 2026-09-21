@@ -1,8 +1,0 @@
-looprung 1
-seq 1
-goal ce93af35a0b0364e0b918caaa96c0e6e685347d9b390091d2a3bd5430253be4f
-kind test
-target src/gfx/video.rs
-title "A native video codec is implemented and can decode a simple frame"
-witness "The video module contains a functional decode function that processes a 16-bit YUV frame and returns a valid pixel buffer without crashing or asserting errors"
-why "This is the next thing because it enables the kernel to handle video data directly, which is required before any video-related functionality can be tested in the UEFI environment"
