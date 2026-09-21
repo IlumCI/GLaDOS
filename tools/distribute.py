@@ -38,7 +38,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from selectors import keccak256  # noqa: E402  the local one, checked against a vector
+from evmselect import keccak256  # noqa: E402  the local one, checked against a vector
 
 
 # --------------------------------------------------------------- the tree

@@ -57,13 +57,27 @@ macro_rules! kprintln {
 #[path = "../../src/json.rs"]
 pub mod json;
 
+// **`#[path]` goes on the group, not on each module inside it.**
+//
+// These were `pub mod store { #[path = "../../../src/store/sha256.rs"] ... }`,
+// which resolves against the *implied* directory of the inline module --
+// `pool/src/store/` -- a directory that does not exist. Windows collapses the
+// `..` lexically before it reaches the filesystem and opens the file; Linux
+// resolves each component and needs every one of them to be real, so it
+// answers ENOENT. This crate therefore built on the development machine and
+// had never once compiled on a runner, which is why `pool.yml` has failed
+// every release it has ever run on.
+//
+// Pointing `#[path]` at the group names a directory that exists, and the
+// modules inside resolve within it with no phantom traversal at all. It is
+// also one line per group rather than one per module.
+#[path = "../../src/store"]
 pub mod store {
-    #[path = "../../../src/store/sha256.rs"]
     pub mod sha256;
 }
 
+#[path = "../../src/crypto"]
 pub mod crypto {
-    #[path = "../../../src/crypto/hkdf.rs"]
     pub mod hkdf;
 }
 
@@ -74,26 +88,17 @@ pub mod crypto {
 /// into `sync`. Naming the eight that travel is a list somebody has to keep
 /// current, and that is the right cost: a new module here is a deliberate act,
 /// where inheriting one would be silent.
+#[path = "../../src/mine"]
 pub mod mine {
-    #[path = "../../../src/mine/u256.rs"]
     pub mod u256;
-    #[path = "../../../src/mine/hash.rs"]
     pub mod hash;
-    #[path = "../../../src/mine/header.rs"]
     pub mod header;
-    #[path = "../../../src/mine/blake2s.rs"]
     pub mod blake2s;
-    #[path = "../../../src/mine/neoscrypt.rs"]
     pub mod neoscrypt;
-    #[path = "../../../src/mine/yespower.rs"]
     pub mod yespower;
-    #[path = "../../../src/mine/algo.rs"]
     pub mod algo;
-    #[path = "../../../src/mine/stratum.rs"]
     pub mod stratum;
-    #[path = "../../../src/mine/proto.rs"]
     pub mod proto;
-    #[path = "../../../src/mine/ev.rs"]
     pub mod ev;
 }
 

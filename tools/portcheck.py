@@ -10,7 +10,7 @@ A rule with no check is a habit, and a habit does not survive a long debugging
 session at two in the morning. So this scans and fails.
 
     python tools/portcheck.py                 # every ported tree
-    python tools/portcheck.py --tree src/doom
+    python tools/portcheck.py --tree src/someport
 
 There is no `build.rs` in this repository and there cannot be one -- the
 machine has no host linker, which `Cargo.toml` records in detail -- so this
@@ -38,7 +38,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 # The trees that are ported code. Adding one here is the whole of enrolling it.
-TREES = ["src/doom"]
+# **Empty, and honestly so.** `src/doom` was the only ported tree and it left
+# with 1.3.8. The seam it forced into existence, `src/port`, stays for the next
+# one, and this list is where that one gets added. Meanwhile the stdlib shadow
+# check below is what earns this script its slot in CI.
+TREES = []
 
 ALLOWED = {"port"}
 
@@ -105,7 +109,41 @@ def main():
         return 1
 
     print(f"[portcheck] {looked} file(s) clean.")
-    return 0
+    return shadow_check()
+
+
+def shadow_check():
+    """Refuse a file in `tools/` that shadows a standard library module.
+
+    **This cost a release.** `python3 tools/drive.py` puts `tools/` at the head
+    of `sys.path`, so `tools/selectors.py` was imported in place of the real
+    `selectors` -- and `subprocess` imports `selectors` **only on POSIX**,
+    taking a `_mswindows` branch that never touches it otherwise. So every
+    tools script worked on the development machine and every one of them died
+    on the first Linux runner, with an `AttributeError` inside `import
+    subprocess` that names neither the file nor the shadowing.
+
+    Checked here because `portcheck.py` already runs in CI and already exists
+    to enforce a rule nothing else can see. `sys.stdlib_module_names` is the
+    real list rather than one somebody maintains.
+    """
+    std = getattr(sys, "stdlib_module_names", set())
+    # `site` is imported during interpreter startup, before `sys.path[0]` is
+    # set to the script's directory, so it cannot be shadowed the same way.
+    allowed = {"site"}
+    bad = sorted(
+        p.name
+        for p in (ROOT / "tools").glob("*.py")
+        if p.stem in std and p.stem not in allowed
+    )
+    if not bad:
+        return 0
+    print()
+    for n in bad:
+        print(f"tools/{n}: shadows the standard library module '{n[:-3]}'")
+    print("[portcheck] A script run from tools/ imports these instead of the")
+    print("[portcheck] real ones. Rename it; the import site has to change too.")
+    return 1
 
 
 if __name__ == "__main__":
