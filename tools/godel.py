@@ -44,6 +44,7 @@ suffix walk here, and says so below rather than carrying dead generality.
 """
 
 import argparse
+import difflib
 import hashlib
 import io
 import math
@@ -1436,6 +1437,213 @@ def degenerate(body):
     return None
 
 
+def parent_module(target):
+    """(path of the module that must declare it, the name it declares).
+
+    `src/fmt/codec.rs` is declared by `src/fmt/mod.rs` as `codec`; a file
+    directly under `src/` is declared by `src/main.rs`. Answers None where
+    the target is not a Rust module this rule covers.
+    """
+    if not target.startswith("src/") or not target.endswith(".rs"):
+        return None
+    rest = target[len("src/"):]
+    name = rest.rsplit("/", 1)[-1][:-len(".rs")]
+    if name in ("mod", "main", "lib"):
+        return None
+    if "/" in rest:
+        return ("src/" + rest.rsplit("/", 1)[0] + "/mod.rs", name)
+    return ("src/main.rs", name)
+
+
+def wire_module(root, target):
+    """A diff that declares `target` and calls its selftest, or (None, why).
+
+    **Two edits to one file, because a greenfield rung needs both and
+    neither can be asked for.** A created file nothing declares is never
+    compiled -- the candidate builds, boots and reads identically to the
+    baseline because cargo never saw it, and `feature`'s J1 then refuses it
+    for adding no claim, correctly, having measured a tree that does not
+    contain it. And a module that compiles but is never *exercised* adds no
+    claim either, so the same J1 refuses it for the same reason one step
+    later. Driven: the first file that compiled did exactly that.
+
+    Both lines are generated rather than requested, which is `knob.rs`'s
+    argument. The target path determines the parent module and the name, and
+    the parent's `selftest` has one shape across this tree -- `let mut ok`,
+    claims, `ok` -- so the call site is the line before that final `ok`.
+    Asking a 4B for a second fenced diff against a file it has not been
+    shown would be asking it to invent line numbers.
+
+    A parent with no `selftest` is refused rather than half-wired: the
+    module would compile, add nothing, and be refused by a runner instead
+    of here.
+    """
+    got = parent_module(target)
+    if got is None:
+        return None, "%r is not a module a parent could declare" % target
+    mod_path, name = got
+    disk = os.path.join(root, mod_path)
+    if not os.path.exists(disk):
+        return None, "%s does not exist, so nothing can declare %r" % (
+            mod_path, name)
+    old = io.open(disk, encoding="utf-8", newline="").read().split("\n")
+    # **The line ending is the file's, not this host's.** `git apply` matches
+    # the worktree byte for byte, and this repository checks out CRLF on
+    # Windows and LF on the runner -- so a patch built with one and applied
+    # to the other fails to apply at all, which reads as a model that wrote
+    # a bad diff. Read with `newline=""`, so each line keeps its own ending,
+    # and give the inserted lines the same one.
+    # **The split leaves a phantom line and difflib emits it as
+    # context.** A file ending in a newline splits to [..., "}", ""],
+    # and that final empty string is not a line -- it is what follows
+    # the last newline. Diffed as though it were, the hunk claims one
+    # more line than the file has and `git apply` refuses the whole
+    # patch. Driven: the wiring hunk was rejected six times running
+    # with "patch does not apply", and the offending context line was
+    # a single space.
+    if old and old[-1] == "":
+        old = old[:-1]
+    eol = "\r" if old and old[0].endswith("\r") else ""
+
+    def bare(l):
+        return l[:-1] if l.endswith("\r") else l
+
+    decl = "pub mod %s;" % name
+    if any(bare(l).strip() in (decl, "mod %s;" % name) for l in old):
+        return None, "%s already declares %r" % (mod_path, name)
+    idx = [i for i, l in enumerate(old)
+           if bare(l).startswith("pub mod ") or bare(l).startswith("mod ")]
+    if not idx:
+        return None, ("%s declares no modules, so there is no block to join"
+                      % mod_path)
+    at = next((i for i in idx if bare(old[i]) > decl), idx[-1] + 1)
+    new = old[:at] + [decl + eol] + old[at:]
+
+    # The claim. `selftest` returns `ok` on its own line as the last thing
+    # it does, everywhere in this tree, so that line is the insertion
+    # point -- searched from the function's own start rather than globally,
+    # because a file may hold more than one such shape.
+    try:
+        fn = next(i for i, l in enumerate(new)
+                  if bare(l).startswith("pub fn selftest() -> bool {"))
+    except StopIteration:
+        return None, ("%s has no `pub fn selftest() -> bool`, so a claim "
+                      "has nowhere to be added and the module would be "
+                      "adopted having been exercised by nothing" % mod_path)
+    try:
+        ret = next(i for i in range(fn, len(new) - 1)
+                   if bare(new[i]) == "    ok"
+                   and bare(new[i + 1]).startswith("}"))
+    except (StopIteration, IndexError):
+        return None, ("%s's selftest does not end in the shape this rule "
+                      "reads (`    ok` then `}`)" % mod_path)
+    new = (new[:ret] + ["    ok &= %s::selftest();" % name + eol, eol]
+           + new[ret:])
+
+    diff = difflib.unified_diff(old, new,
+                                fromfile="a/" + mod_path,
+                                tofile="b/" + mod_path,
+                                lineterm="", n=3)
+    return "\n".join(diff) + "\n", None
+
+
+#: How many times the author may be asked before the night gives up.
+#:
+#: Three was the first value and the errors were plainly converging under
+#: it -- four errors, then two, then one, and the last was the grammar
+#: truncating the file rather than the model being wrong. Each attempt is a
+#: decode plus a `cargo check`, measured at roughly 30 s and 12 s on this
+#: tree, so six is about four minutes against a night.
+CREATE_TRIES = 6
+
+
+def _cargo_check(root):
+    """(returncode, stderr) of a release check in its own target dir."""
+    return subprocess.run(
+        ["cargo", "check", "--release", "--message-format=short",
+         "--target-dir", "target/authorcheck"],
+        cwd=root, capture_output=True, text=True)
+
+
+_BASELINE = {}
+
+
+def baseline_compiles(root):
+    """Whether the tree compiles before anything is applied. Cached.
+
+    **The canary, and it caught this check on its first run.** A `cargo`
+    that cannot build the tree at all -- a missing target, an unavailable
+    toolchain, a machine with no linker -- reports every candidate as
+    broken, which is indistinguishable from a model that never writes
+    working code and is exactly the shape `differ.rs` refuses to ship a
+    harness in. Measured: the first drive reported three attempts failing
+    on `can't find crate for core`, of which the compiler was right about
+    none; the baseline was failing the same way and nothing had asked it.
+    """
+    key = os.path.abspath(root)
+    if key not in _BASELINE:
+        _BASELINE[key] = _cargo_check(root).returncode == 0
+    return _BASELINE[key]
+
+
+def compile_errors(stderr):
+    """The error lines out of a check's stderr, or the tail if there are
+    none to find. Warnings are not a reason to ask again and the whole log
+    does not fit in a card."""
+    lines = [l.rstrip() for l in stderr.split("\n")
+             if l.startswith("error") or ": error" in l]
+    return "\n".join(lines[:12]) or stderr.strip()[-800:]
+
+
+def compiles(root, env):
+    """`ok`, `bad` or `cannot`, with the errors when it is `bad`.
+
+    **The cheapest judge there is, and it was not being asked.** The first
+    file the author wrote called `len(input)` where Rust wants
+    `input.len()` -- a candidate that spends a whole runner to report a
+    typo. `cargo check` answers that in seconds, and answering it here is
+    what lets the author be asked again rather than the night being spent.
+
+    `cannot` is a real third answer rather than a failure, for the reason
+    `rails.py` has UNSTABLE: a check that did not run is not a candidate
+    that is broken, and reporting one as the other is how a gate becomes a
+    machine for refusing everything. The caller proceeds without it and the
+    runner decides, which is where the authority was in the first place --
+    this only ever saves a night, it never grants one.
+
+    Its own target directory, for `templates/__init__.py`'s reason: a check
+    sharing the judged build's target dir churns the fingerprints that
+    build reads, and `cost.image_bytes` is read off it.
+
+    The patch is applied and reverted through `git apply`, so a failure
+    anywhere leaves the tree exactly as it was.
+    """
+    if not baseline_compiles(root):
+        return "cannot", "the tree does not compile before the patch"
+    _, _, patch = parse_envelope(env)
+    tmp = os.path.join(root, ".authorcheck.patch")
+    io.open(tmp, "w", encoding="utf-8", newline="\n").write(patch + "\n")
+    applied = False
+    try:
+        r = subprocess.run(["git", "apply", tmp], cwd=root,
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            return "bad", "the patch does not apply: " + r.stderr.strip()
+        applied = True
+        r = _cargo_check(root)
+        if r.returncode == 0:
+            return "ok", ""
+        return "bad", compile_errors(r.stderr)
+    finally:
+        if applied:
+            subprocess.run(["git", "apply", "-R", tmp], cwd=root,
+                           capture_output=True, text=True)
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+
 def create_finish(root, kind_name, target, reply):
     """The offline half of `create`: fence, build, admit."""
     fences = FENCE_SRC.findall(reply)
@@ -1454,7 +1662,11 @@ def create_finish(root, kind_name, target, reply):
         "parent-tree": head_tree(root), "corpus": corpus_hash(root) or "0" * 8,
         "rail": "none",
     }
-    env = render_envelope(fields, patch=new_file_diff(target, body))
+    wire, why = wire_module(root, target)
+    if wire is None:
+        return None, "the file could not be wired in: %s" % why
+    env = render_envelope(
+        fields, patch=new_file_diff(target, body) + wire)
     bad = admit(env)
     if bad:
         return None, bad[0]
@@ -1486,20 +1698,63 @@ def create(root, kind_name, target, token, rung=None):
     # writing, and the second ran to the request timeout. The size guidance in
     # the prompt is advice a 4B can decline. A `{1,70}` repeat is not.
     #
-    # Seventy lines sits above the thirty-to-sixty the prompt asks for and far
+    # A hundred and forty sits well above the thirty-to-sixty the prompt asks
+    # for and far
     # under the kind's own budget, so the grammar bounds the *shape* and
     # `admit` still owns the real limit.
     grammar = (
         'root ::= "```rust\\n" body "```"\n'
-        'body ::= line{1,70}\n'
+        'body ::= line{1,140}\n'
         'line ::= ([^`\\n] [^\\n]*)? "\\n"\n'
     )
-    try:
-        reply = ask_model(system, card, meta, token, "glados-loop-create",
-                          grammar=grammar)
-    except NoInference as e:
-        return None, str(e)
-    return create_finish(root, kind_name, target, reply)
+    # **Asked again on a compile error, with the error in the card.** One
+    # decode and one `cargo check` is seconds; a runner is a night. The
+    # first file the author wrote failed on `len(input)` for `input.len()`,
+    # which is exactly the class a compiler names precisely and a model
+    # fixes on being told -- and which, unasked, costs a build, two boots
+    # and a rail collection to report.
+    #
+    # The card grows rather than the conversation: `ask_model` is one
+    # request with no history, so a retry that did not carry the error
+    # forward would be the same request drawing from the same
+    # distribution, which is what the five-for-five rung measurement shows
+    # this model does.
+    tried = []
+    for attempt in range(CREATE_TRIES):
+        this = card if not tried else card + "\n" + "\n".join([
+            "",
+            "your last attempt did not compile. the errors were:",
+            tried[-1],
+            "",
+            "write the whole file again, fixed. it is Rust, not Python:",
+            "a length is `x.len()`, and there is no `len(x)`.",
+        ])
+        try:
+            reply = ask_model(system, this, meta, token,
+                              "glados-loop-create", grammar=grammar)
+        except NoInference as e:
+            return None, str(e)
+        env, why = create_finish(root, kind_name, target, reply)
+        if env is None:
+            # A refusal by the fence contract or by `degenerate` is not a
+            # compile error and carries nothing to feed back, so it ends
+            # the attempt rather than spending the next one blind.
+            return None, why
+        verdict, errs = compiles(root, env)
+        if verdict == "cannot":
+            print("  not compile-checked here (%s), so the runner decides"
+                  % errs, file=sys.stderr)
+            return env, None
+        if verdict == "ok":
+            if tried:
+                print("  it compiled on attempt %d" % (attempt + 1),
+                      file=sys.stderr)
+            return env, None
+        print("  attempt %d did not compile:\n%s"
+              % (attempt + 1, errs), file=sys.stderr)
+        tried.append(errs)
+    return None, ("%d attempt(s) and none compiled; the last errors were:\n%s"
+                  % (CREATE_TRIES, tried[-1]))
 
 
 def author_finish(root, kind_name, reply):
