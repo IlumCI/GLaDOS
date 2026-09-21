@@ -3474,3 +3474,75 @@ pub fn search_report() {
 }
 
 
+
+/// Run one real forward pass and keep what the stack was carrying at each
+/// depth, binned for drawing.
+///
+/// **A taped pass, so the numbers are the model's own.** `Tape` keeps the
+/// residual stream entering every layer, which is the only place a depthwise
+/// picture of this network can honestly come from. Thirty layers on SmolLM2,
+/// twenty-eight on the 0.6B.
+///
+/// Normalised per layer rather than globally. A residual stream grows as it
+/// goes up, so a global scale draws the last few layers bright and the first
+/// twenty black, which says more about layer norms than about the prompt.
+///
+/// On request only. This allocates a tape and runs the whole stack, which is
+/// not something a paint may do on the task that owns the screen.
+pub fn capture_stack(prompt: &str) -> bool {
+    const BINS: usize = 14;
+    with_engine(|e| {
+        if e.model.cfg.hybrid() {
+            return false;
+        }
+        let ids = e.tok.encode(prompt, true, false);
+        if ids.is_empty() {
+            return false;
+        }
+        // The last few tokens are enough: what is wanted is the state the
+        // stack reached, and a long prompt costs a tape entry per position.
+        let take = ids.len().min(8);
+        let ids = &ids[ids.len() - take..];
+
+        let cfg = e.model.cfg.clone();
+        let mut tape = super::model::Tape::new(&cfg, take);
+        let mut st = super::model::State::new(&cfg);
+        for (t, id) in ids.iter().enumerate() {
+            if !e.model.forward_taped(&mut st, *id, t, &mut tape) {
+                return false;
+            }
+        }
+
+        let last = take - 1;
+        let layers = cfg.n_layers + 1;
+        let mut act = alloc::vec![0.0f32; layers * BINS];
+        for l in 0..layers {
+            let Some(x) = tape.entering(l, last) else { continue };
+            let mut peak = 1e-6f32;
+            for i in 0..cfg.dim {
+                let b = (i * BINS) / cfg.dim;
+                act[l * BINS + b] += x[i].abs();
+            }
+            for b in 0..BINS {
+                if act[l * BINS + b] > peak {
+                    peak = act[l * BINS + b];
+                }
+            }
+            for b in 0..BINS {
+                act[l * BINS + b] /= peak;
+            }
+        }
+
+        super::trace::record_stack(super::trace::Stack {
+            layers,
+            dim: cfg.dim,
+            heads: cfg.n_heads,
+            bins: BINS,
+            act,
+            prompt: alloc::string::String::from(prompt),
+            at: crate::time::rdtsc(),
+        });
+        true
+    })
+    .unwrap_or(false)
+}

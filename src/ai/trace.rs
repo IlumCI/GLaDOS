@@ -294,3 +294,38 @@ pub fn selftest() -> bool {
     let _ = before;
     ok
 }
+
+/// A real forward pass through the stack, binned so it can be drawn.
+///
+/// **This is the network, not a picture of one.** `Tape` keeps the residual
+/// stream entering every layer, so a row here is what the model was actually
+/// carrying at that depth: thirty layers on SmolLM2, twenty-eight on the 0.6B,
+/// five hundred and seventy-six values wide, summed into bins because no
+/// screen shows five hundred nodes.
+///
+/// Taken on request and never on a frame. A taped forward pass allocates a
+/// tape and runs the whole stack, which is a long way past what a paint may
+/// do on the task that owns the screen.
+#[derive(Clone)]
+pub struct Stack {
+    pub layers: usize,
+    pub dim: usize,
+    pub heads: usize,
+    pub bins: usize,
+    /// `act[l * bins + b]`, the magnitude of bin `b` entering layer `l`,
+    /// normalised per layer so a deep layer with a large residual does not
+    /// wash the early ones out.
+    pub act: Vec<f32>,
+    pub prompt: String,
+    pub at: u64,
+}
+
+static STACK: crate::sync::Spin<Option<Stack>> = crate::sync::Spin::new(None);
+
+pub fn record_stack(s: Stack) {
+    *STACK.lock_irq() = Some(s);
+}
+
+pub fn last_stack() -> Option<Stack> {
+    STACK.lock_irq().clone()
+}

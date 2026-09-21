@@ -45,7 +45,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-const TABS: [&str; 5] = ["Learn", "Route", "Council", "Ledger", "Outcome"];
+const TABS: [&str; 6] = ["Learn", "Net", "Route", "Council", "Ledger", "Outcome"];
 
 /// The probe, the lexical core, the character core. One colour each, used for
 /// the vote markers and the agreement bars alike so the two panels read as one
@@ -75,11 +75,37 @@ impl Oracle {
             .iter()
             .position(|t| t.eq_ignore_ascii_case(arg.trim()))
             .unwrap_or(0);
-        Self { tab, shown_ms: now_ms(), matrix: None, status: String::new() }
+        let mut o = Self { tab, shown_ms: now_ms(), matrix: None, status: String::new() };
+        // **Opening the panel takes the reading.** It was behind the N key, on
+        // the reasoning that a forward pass is too expensive for a frame --
+        // which is true, and has nothing to do with opening a window. Asking
+        // somebody to press a key before the panel shows anything is a worse
+        // version of the thing this whole window was rebuilt to stop doing,
+        // and driving that key turned out to be impossible anyway: the shell
+        // re-focuses the terminal after every command, so an injected key
+        // never reaches the app that was just raised.
+        if o.tab == 1 {
+            o.capture();
+        }
+        o
     }
 
     pub fn preferred() -> (u32, u32) {
-        (700, 480)
+        (760, 520)
+    }
+
+    /// One taped forward pass, kept for the network panel.
+    ///
+    /// Never from `draw_in`. This allocates a tape and runs the whole stack,
+    /// which is not something a paint may do on the task that owns the screen.
+    fn capture(&mut self) {
+        self.status = if crate::ai::harness::capture_stack(
+            "list the files in /ai and tell me what changed",
+        ) {
+            String::new()
+        } else {
+            String::from("no model, or it is a hybrid the tape cannot follow")
+        };
     }
 
     fn layout(client: Rect) -> (Rect, Rect, Rect) {
@@ -281,6 +307,107 @@ impl Oracle {
                 f.params, f.ms, chance)
     }
 
+    // --- Net -------------------------------------------------------------
+
+    /// The transformer stack, at the depth it really has.
+    ///
+    /// **Every node is a real activation.** `Tape` keeps the residual stream
+    /// entering each layer of a taped forward pass, so a column here is what
+    /// the model was carrying at that depth and a node is a contiguous slice
+    /// of it. Thirty layers on SmolLM2, twenty-eight on the 0.6B, five hundred
+    /// and seventy-six values wide, summed into fourteen bins because no
+    /// screen shows five hundred nodes.
+    ///
+    /// Normalised per layer, on purpose. A residual stream grows as it climbs,
+    /// so one global scale draws the top bright and the first twenty black,
+    /// which is a picture of layer norms rather than of the prompt.
+    ///
+    /// The edges are co-activation: bright where both ends are carrying, dim
+    /// where either is quiet. A transformer layer is fully connected through
+    /// its matrices so every one of them exists, and thinning to the strongest
+    /// few per node is what stops it being a grey rectangle.
+    fn draw_net(&self, fb: &Framebuffer, r: Rect) -> String {
+        let lh = theme::text_h();
+        let Some(st) = trace::last_stack() else {
+            theme::text_over(fb, r.x + 8, r.y + 8,
+                &clip("press N to run a forward pass and capture the stack",
+                      fits(r.w.saturating_sub(16))),
+                theme::SCREEN_TEXT);
+            return String::from("nothing captured yet");
+        };
+        if st.layers == 0 || st.bins == 0 {
+            return String::from("the capture is empty");
+        }
+
+        let ms = now_ms();
+        // One pulse travelling up through the depth, on a loop.
+        let phase = (ms % 2600) as f32 / 2600.0;
+
+        let top = r.y + 4 + lh;
+        let bot = r.y + r.h.saturating_sub(4);
+        let h = bot.saturating_sub(top).max(1);
+        let lw = (r.w.saturating_sub(16)) as f32 / (st.layers as f32 - 1.0).max(1.0);
+        let x_of = |l: usize| r.x + 8 + (l as f32 * lw) as u32;
+        let y_of = |b: usize| top + (b as u32 * h) / st.bins.max(1) as u32 + h / (st.bins as u32 * 2).max(1);
+
+        theme::text_over(fb, r.x + 8, r.y + 1,
+            &clip(&format!("{} layers x {} wide, {} heads", st.layers - 1, st.dim, st.heads),
+                  fits(r.w.saturating_sub(16))),
+            theme::SHADOW);
+
+        // Edges first, so nodes sit on top of them.
+        const PER_NODE: usize = 5;
+        for l in 0..st.layers.saturating_sub(1) {
+            let d = (l as f32 / (st.layers - 1) as f32 - phase).abs();
+            let lit = (1.0 - d * 2.2).clamp(0.42, 1.0) + (1.0 - d * 6.0).max(0.0) * 0.8;
+            for b in 0..st.bins {
+                let a0 = st.act[l * st.bins + b];
+                if a0 < 0.08 {
+                    continue;
+                }
+                let mut rank: Vec<(usize, f32)> = (0..st.bins)
+                    .map(|c| (c, a0 * st.act[(l + 1) * st.bins + c]))
+                    .collect();
+                rank.sort_by(|x, y| y.1.partial_cmp(&x.1).unwrap_or(core::cmp::Ordering::Equal));
+                rank.truncate(PER_NODE);
+                for (c, w) in rank {
+                    let k = (w.clamp(0.0, 1.0) * lit * 235.0).min(255.0) as u8;
+                    if k < 10 {
+                        continue;
+                    }
+                    fb.line(
+                        x_of(l) as i32, y_of(b) as i32,
+                        x_of(l + 1) as i32, y_of(c) as i32,
+                        Color::new(k / 5, (k as u16 * 3 / 5) as u8, k),
+                    );
+                }
+            }
+        }
+
+        for l in 0..st.layers {
+            let d = (l as f32 / (st.layers - 1).max(1) as f32 - phase).abs();
+            let lit = (1.0 - d * 2.2).clamp(0.6, 1.0) + (1.0 - d * 6.0).max(0.0) * 0.9;
+            for b in 0..st.bins {
+                let a = st.act[l * st.bins + b].clamp(0.0, 1.0);
+                let sz = 3 + (a * 5.0) as u32;
+                let k = (70.0 + a * 185.0 * lit).min(255.0) as u8;
+                // Cyan through to white as a slice carries more, so the
+                // strongest parts of the stream read as hot rather than as
+                // merely bigger.
+                let col = if a > 0.66 {
+                    let w = ((a - 0.66) / 0.34 * 255.0).min(255.0) as u8;
+                    Color::new(w.max((k as u16 * 70 / 255) as u8), k, 255)
+                } else {
+                    Color::new((k as u16 * 45 / 255) as u8, (k as u16 * 190 / 255) as u8, k)
+                };
+                let (x, y) = (x_of(l), y_of(b));
+                fb.rect(x.saturating_sub(sz / 2), y.saturating_sub(sz / 2), sz, sz, col);
+            }
+        }
+
+        format!("residual stream, binned {} ways, normalised per layer", st.bins)
+    }
+
     // --- Council ---------------------------------------------------------
 
     fn draw_council(&self, fb: &Framebuffer, r: Rect) -> String {
@@ -458,13 +585,17 @@ impl DeskApp for Oracle {
         //
         // The compositor composes only when something says the screen is out
         // of date, which is what keeps an idle desktop free. A moving picture
-        // has to keep saying so, and a frame is 2,143 us measured -- about 7%
-        // of a core at sixty a second. So it is asked for only while this
-        // window has focus and the panel that moves is the one on screen:
-        // a background window animating something nobody is looking at would
-        // be the desktop paying for a decoration, which is the failure this
-        // whole window was rebuilt to stop committing.
-        if focused && self.tab == 0 {
+        // has to keep saying so, and a frame is 2,143 us measured, about 7% of
+        // a core at sixty a second.
+        //
+        // Gated on the tab rather than on focus, and that is a correction. The
+        // shell calls `focus_terminal` after *every* command, so a window
+        // raised by `win keys alttab` loses focus again before the next line
+        // is read -- which made the panel freeze the moment anything was typed,
+        // including the command that was meant to be driving it. The tab is
+        // the real opt-in: nothing draws this unless somebody chose it, and a
+        // minimised window is never drawn at all.
+        if self.tab <= 1 {
             super::render::invalidate();
         }
 
@@ -472,9 +603,10 @@ impl DeskApp for Oracle {
         let inner = body.shrink(4);
         let note = match self.tab {
             0 => self.draw_learn(fb, inner),
-            1 => self.draw_route(fb, inner),
-            2 => self.draw_council(fb, inner),
-            3 => self.draw_ledger(fb, inner),
+            1 => self.draw_net(fb, inner),
+            2 => self.draw_route(fb, inner),
+            3 => self.draw_council(fb, inner),
+            4 => self.draw_ledger(fb, inner),
             _ => self.draw_outcome(fb, inner),
         };
         let line = if self.status.is_empty() { note } else { self.status.clone() };
@@ -489,7 +621,7 @@ impl DeskApp for Oracle {
                 self.status.clear();
                 true
             }
-            b'1'..=b'5' => {
+            b'1'..=b'6' => {
                 self.tab = (k - b'1') as usize;
                 self.shown_ms = now_ms();
                 self.status.clear();
@@ -499,13 +631,20 @@ impl DeskApp for Oracle {
             // dispatches fourteen applets and captures what each one prints.
             // On the compositor that is a stalled screen, and the watchdog
             // would correctly report the display as stopped.
+            // A forward pass on the shell's task, never on a frame.
+            b'n' | b'N' => {
+                self.capture();
+                self.tab = 1;
+                self.shown_ms = now_ms();
+                true
+            }
             b'm' | b'M' => {
                 self.matrix = crate::ai::outcome::probe();
                 self.status = match &self.matrix {
                     Some(_) => String::new(),
                     None => String::from("the applet table would not answer"),
                 };
-                self.tab = 4;
+                self.tab = 5;
                 self.shown_ms = now_ms();
                 true
             }

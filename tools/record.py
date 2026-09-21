@@ -199,6 +199,18 @@ SCENES = {
     ],
 }
 
+SCENES["net"] = [
+    # Raw footage of the network panel animating. No captions: this is cut into
+    # a gif rather than watched, and the panel only animates while its window
+    # has focus, which is what the alt-tab is for -- `open_app` hands focus back
+    # to the terminal on purpose.
+    # `oracle net` captures on open, so nothing has to be typed at the window.
+    # Driving a key into it is not possible anyway: the shell re-focuses the
+    # terminal after every command, so an injected key never reaches the app
+    # that was just raised.
+    ("oracle net", 15.0, None),
+]
+
 ORDER = ["settle", "desktop", "screen", "mind"]
 
 
