@@ -264,6 +264,38 @@ def load(root, strict=True):
 # ----------------------------------------------- met, read out of the ledger
 
 
+#: How many refused certificates retire a rung.
+#:
+#: **Nothing abandoned a rung before this, and that is the loop's own oldest
+#: failure in a new costume.** `godel.rs` records where an undirected search
+#: ends -- "search space exhausted was the end of self-improvement, eight
+#: points and then nothing, every night forever". A ladder whose first rung
+#: cannot be built has the same shape: every night proposes it, every night
+#: is refused, and the loop looks busy forever.
+#:
+#: Three, because a witness can fail for reasons that are not the rung's --
+#: a flaky boot, a runner without KVM, a night that died in the judge. One
+#: refusal is weather. Three is the rung.
+RETIRE_AFTER = 3
+
+
+def point_verdicts(root):
+    """Every verdict each point has collected, adopted or not."""
+    sys.path.insert(0, os.path.join(ROOT, "tools"))
+    import godel
+    d = os.path.join(root, "loop", "ledger", "entries")
+    out = {}
+    if not os.path.isdir(d):
+        return out
+    for n in sorted(os.listdir(d)):
+        if not n.endswith(".cert"):
+            continue
+        with open(os.path.join(d, n), encoding="utf-8") as f:
+            c = godel.parse_cert(f.read())
+        out.setdefault(c["point"], []).append(c["verdict"])
+    return out
+
+
 def adopted_points(root):
     """Points carried by adopted certificates. The only source of 'met'."""
     sys.path.insert(0, os.path.join(ROOT, "tools"))
@@ -283,10 +315,25 @@ def adopted_points(root):
 
 
 def state(root):
+    """Each rung with `met` and `retired`, both derived from the ledger.
+
+    Neither is stored, for the reason `met` was never stored: a field the
+    loop can write is a field the loop can write its own success into. A
+    rung is met when an adopted certificate carries its point and retired
+    when `RETIRE_AFTER` refused ones do -- both are counts over the record,
+    recomputed on every call, and a certificate cannot be forged without
+    also passing `fsck`.
+    """
     rungs = load(root)
     met = adopted_points(root)
+    verdicts = point_verdicts(root)
     for r in rungs:
         r["met"] = r["point"] in met
+        refused = sum(1 for v in verdicts.get(r["point"], []) if v == "refuse")
+        r["refused"] = refused
+        # Met wins over retired: a rung that was eventually built is built,
+        # however many nights it cost to get there.
+        r["retired"] = (not r["met"]) and refused >= RETIRE_AFTER
     return rungs
 
 
@@ -309,8 +356,8 @@ def cmd_list(root):
         print("  the ladder is empty -- nothing has proposed a rung yet")
         return 0
     for r in rungs:
-        print("  %s %s  %-9s %s" % (
-            "met " if r["met"] else "open", r["seq"], r["kind"], r["title"]))
+        mark = "met " if r["met"] else ("gone" if r["retired"] else "open")
+        print("  %s %s  %-9s %s" % (mark, r["seq"], r["kind"], r["title"]))
         print("       point %s  witness %s" % (r["point"][:16], r["witness"]))
     return 0
 
@@ -324,15 +371,23 @@ def cmd_progress(root):
         print("  and that is not 100%: a ladder with no rungs is not a "
               "goal reached, it is a goal nobody has decomposed yet")
         return 0
-    nxt = next((r for r in rungs if not r["met"]), None)
+    retired = sum(1 for r in rungs if r["retired"])
+    if retired:
+        print("  %d retired after %d refusals each" % (retired, RETIRE_AFTER))
+    nxt = open_rung(rungs)
     print("  next: %s" % (nxt["title"] if nxt else
-                          "nothing open -- every declared rung is met"))
+                          "nothing open -- every rung is met or retired"))
     return 0
+
+
+def open_rung(rungs):
+    """The rung a night should aim at: the first neither met nor retired."""
+    return next((r for r in rungs if not r["met"] and not r["retired"]), None)
 
 
 def cmd_next(root, emit_env=None):
     rungs = state(root)
-    nxt = next((r for r in rungs if not r["met"]), None)
+    nxt = open_rung(rungs)
     if nxt is None:
         print("  no open rung" if rungs else "  the ladder is empty")
         return 2
@@ -417,9 +472,18 @@ def rung_card(root, rungs):
     if not rungs:
         lines.append("  (none -- this is the first)")
     for r in rungs:
+        # A retired rung is shown as retired, with its refusal count. The
+        # model is choosing what to try next, and a milestone that has
+        # already failed three nights is the single most useful thing it can
+        # be told -- listed as "open" it would simply be proposed again.
+        if r["met"]:
+            mark = "met"
+        elif r["retired"]:
+            mark = "RETIRED after %d refusals -- do not propose this again" % r["refused"]
+        else:
+            mark = "open"
         lines.append("  seq %s %s [%s] %s"
-                     % (r["seq"], r["kind"],
-                        "met" if r["met"] else "open", r["title"]))
+                     % (r["seq"], r["kind"], mark, r["title"]))
     lines.append("not available, and not listed below: %s -- nothing there "
                  "can be compared, so no witness could settle it"
                  % ", ".join(knob.UNJUDGEABLE))
@@ -650,6 +714,37 @@ def selftest():
             f.write(godel.render_cert(c))
         claim(state(tmp)[0]["met"] is True,
               "and an adopted one with the rung's point does")
+
+        # --- retirement, which is what stops a bad rung being forever ------
+        def write_cert(name, verdict):
+            c["verdict"] = verdict
+            with open(os.path.join(entries, name), "w",
+                      encoding="utf-8", newline="\n") as f:
+                f.write(godel.render_cert(c))
+
+        os.remove(os.path.join(entries, "a.cert"))
+        for i in range(RETIRE_AFTER - 1):
+            write_cert("r%d.cert" % i, "refuse")
+        st = state(tmp)[0]
+        claim(st["refused"] == RETIRE_AFTER - 1 and not st["retired"],
+              "a rung short of the refusal count is still open")
+        claim(open_rung(state(tmp)) is not None,
+              "and a night would still aim at it")
+
+        write_cert("r%d.cert" % (RETIRE_AFTER - 1), "refuse")
+        st = state(tmp)[0]
+        claim(st["retired"] is True, "at the count it retires")
+        claim(open_rung(state(tmp)) is None,
+              "and no night aims at it again, which is the whole point")
+
+        # Met beats retired: a rung that was eventually built is built,
+        # however many nights it cost.
+        write_cert("won.cert", "adopt")
+        st = state(tmp)[0]
+        claim(st["met"] and not st["retired"],
+              "but an adoption afterwards un-retires it, because it was built")
+        for n in os.listdir(entries):
+            os.remove(os.path.join(entries, n))
 
         # --- the grammar, which must agree with what `admit` would allow ---
         g_text = grammar_for(tmp, [])
