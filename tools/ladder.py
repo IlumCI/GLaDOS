@@ -29,10 +29,15 @@ anywhere the loop can write its own success into.
 `feature`'s is the boot's own claim count. `tune`, `cleanup` and `rewrite`
 are excluded not for lacking a judge but for needing a rail that already
 reads something, and a rung creates what nothing was measuring. A milestone
-filed under a kind with no reachable J1
-kind is a milestone with no judge, which is the arrangement `godel.rs` opens
-by warning about, so it is refused at admission rather than discovered at
-three in the morning.
+filed under a kind whose J1 cannot reach it is a milestone with no judge,
+which is the arrangement `godel.rs` opens by warning about, so it is refused
+at admission rather than discovered at three in the morning.
+
+A witnessed kind also needs a target that already exists, and that rule cost
+three nights to learn: the witness arm builds against the PARENT tree, so a
+file being created is absent from it and the arm dies of infrastructure.
+Creating a thing is `feature`; the witnessed rungs come after it, once there
+is something to be wrong about.
 
 **A rung names the goal it was written for.** The goal's sha256 travels in
 every rung. Rewriting the north star does not re-aim a ladder built for
@@ -53,15 +58,15 @@ turn, and exactly one fenced block back.
 chosen for "the workflow's own token, no new credential"; a model in the job
 keeps that property without depending on anybody's service staying up.)
 
-The card carries the north star, the rungs so far, the witnessed kinds with
-their line budgets, the surfaces no milestone may target, and a *listing* of
+The card carries the north star, the rungs so far, the kinds it may name
+with their line budgets, the surfaces no milestone may target, and a *listing* of
 the modules that exist. A listing rather than source, because a milestone is
 chosen from what is there rather than written against whatever one file
 happens to say -- and because a listing is a far smaller injection surface
 than a file the loop may itself have written.
 
 Everything the reply could do is refused somewhere. Prose outside the fence,
-two fences, none; a kind with no witness; a goal hash that is not the current
+two fences, none; a kind with no reachable J1; a goal hash that is not the
 one; a sequence number that skips ahead; a line trying to declare a field the
 format does not have -- including `point`, which is the one a reply would
 forge to mark itself met. None of that is trusted and then checked; it is
@@ -93,8 +98,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 #: the rendering and a rendering with a free field order is several hashes.
 RUNG_KEYS = ("seq", "goal", "kind", "target", "title", "witness", "why")
 
-#: The kinds a milestone may be filed under: exactly those whose J1 is the
-#: J1. Read off `godel.KINDS` rather than written down here, so a kind
+#: The kinds a milestone may be filed under: exactly those whose J1 needs
+#: no prior rail reading. Read off `godel.KINDS` rather than written down here, so a kind
 #: whose J1 changes cannot leave a stale copy behind.
 def judgeable_kinds():
     sys.path.insert(0, os.path.join(ROOT, "tools"))
@@ -229,6 +234,27 @@ def admit(r, root):
         raise Bad("the target %r is an unjudgeable surface %s -- nothing "
                   "there can be compared, so no witness could settle it"
                   % (t, list(knob.UNJUDGEABLE)))
+
+    # **A witnessed kind needs a target that already exists**, and this is
+    # the rule whose absence cost three nights. The witness arm builds the
+    # witness against the PARENT tree; a file being created is absent from
+    # it, so the arm dies of infrastructure and `loop-judge.yml` refuses by
+    # name. Worse, the refusal never arrives: `create_finish` carries no
+    # witness, so `godel.admit` refuses locally, no certificate is filed,
+    # and `retired` -- which counts refused certificates -- never moves. A
+    # rung like that is not slow, it is stuck, and it blocks every rung
+    # behind it for good.
+    #
+    # Greenfield work is what `feature` is for. Naming it here is what
+    # keeps a milestone that creates something from being filed under a
+    # judge that cannot reach it.
+    if godel.KINDS[r["kind"]].witness and not os.path.exists(
+            os.path.join(root, t)):
+        raise Bad(
+            "%r is a witnessed kind and %r does not exist yet -- a witness "
+            "runs against the parent tree, so nothing there could fail. "
+            "Creating a file is 'feature'; witnessed kinds come after it"
+            % (r["kind"], t))
     return r
 
 
@@ -251,8 +277,19 @@ def load(root, strict=True):
     for p in rung_files(root):
         with open(p, encoding="utf-8") as f:
             r = parse_rung(f.read())
+        r["stale"] = ""
         if strict:
-            admit(r, root)
+            # **A rung `admit` would no longer take is stale, not fatal.**
+            # It was a raise, which killed the whole read -- so one rung
+            # written before a rule tightened took the ladder down with it,
+            # and `next` exited 1 where the night needed it to say "nothing
+            # open" and go stock another. `propose` still calls `admit`
+            # directly and still raises, which is where a refusal belongs:
+            # before a rung is written, never after.
+            try:
+                admit(r, root)
+            except Bad as why:
+                r["stale"] = str(why)
         r["point"] = rung_point({k: r[k] for k in RUNG_KEYS})
         r["file"] = os.path.relpath(p, root).replace(os.sep, "/")
         rungs.append(r)
@@ -337,7 +374,13 @@ def state(root):
         r["refused"] = refused
         # Met wins over retired: a rung that was eventually built is built,
         # however many nights it cost to get there.
-        r["retired"] = (not r["met"]) and refused >= RETIRE_AFTER
+        # Stale retires too, and it has to: `refused` counts *certificates*,
+        # so it only moves for a rung that reached a runner. A rung refused
+        # earlier than that -- by `godel.admit`, before an envelope exists --
+        # files nothing, never retires, and blocks every rung behind it for
+        # good. Exactly one was in that state.
+        r["retired"] = (not r["met"]) and (
+            refused >= RETIRE_AFTER or bool(r["stale"]))
     return rungs
 
 
@@ -375,23 +418,55 @@ def cmd_progress(root):
         print("  and that is not 100%: a ladder with no rungs is not a "
               "goal reached, it is a goal nobody has decomposed yet")
         return 0
-    retired = sum(1 for r in rungs if r["retired"])
-    if retired:
-        print("  %d retired after %d refusals each" % (retired, RETIRE_AFTER))
-    nxt = open_rung(rungs)
+    # Two ways to retire and they are different facts: a rung the judges
+    # refused three times was tried and lost, a stale one was never tried at
+    # all. One line for both would read as evidence that does not exist.
+    spent = sum(1 for r in rungs if r["retired"] and not r["stale"])
+    stale = sum(1 for r in rungs if r["retired"] and r["stale"])
+    if spent:
+        print("  %d retired after %d refusals each" % (spent, RETIRE_AFTER))
+    if stale:
+        print("  %d retired without being tried, the rules having tightened"
+              % stale)
+    nxt = open_rung(rungs, root)
+    for r in rungs:
+        if r.get("stale"):
+            print("  rung %s retired: %s" % (r["seq"], r["stale"]))
     print("  next: %s" % (nxt["title"] if nxt else
                           "nothing open -- every rung is met or retired"))
     return 0
 
 
-def open_rung(rungs):
-    """The rung a night should aim at: the first neither met nor retired."""
+def open_rung(rungs, root=None):
+    """The rung a night should aim at: the first neither met nor retired.
+
+    `root` is accepted and unused: `load` is what decides staleness now, so
+    every caller of `state` already has it folded in. Kept so the callers
+    that pass it keep reading as the question they are asking.
+
+    **A rung `admit` would no longer take is retired too, and that is not
+    tidiness.** `retired` counts refused *certificates*, so it only ever
+    moves for a rung that reached a runner. A rung refused earlier than that
+    -- by `godel.admit`, before an envelope is built -- files nothing, never
+    retires, and blocks every rung behind it for good. Exactly one is in the
+    ledger: a `test` rung aimed at a file that does not exist, written
+    before the rule that now refuses it.
+
+    So a rule tightened after a rung was written retires that rung instead
+    of deadlocking on it, and the reason is printed rather than inferred
+    from a ladder that silently stopped moving. `root` is optional because
+    `state` is read in places with no tree to check against; passing it is
+    what turns the check on.
+    """
     return next((r for r in rungs if not r["met"] and not r["retired"]), None)
 
 
 def cmd_next(root, emit_env=None):
     rungs = state(root)
-    nxt = open_rung(rungs)
+    nxt = open_rung(rungs, root)
+    for r in rungs:
+        if r.get("stale"):
+            print("  rung %s retired: %s" % (r["seq"], r["stale"]))
     if nxt is None:
         print("  no open rung" if rungs else "  the ladder is empty")
         return 2
@@ -604,7 +679,11 @@ def write_rung(root, r):
 # ----------------------------------------------------------------- selftest
 
 
-def _rung(goal, seq=1, kind="test", title="a thing", witness="w", why="y",
+#: `feature` and a file that does not exist, because that is the shape of
+#: the first rung toward any north star -- and a witnessed kind aimed at the
+#: same target is now a refusal, which is a claim below rather than a
+#: fixture that quietly stopped being admissible.
+def _rung(goal, seq=1, kind="feature", title="a thing", witness="w", why="y",
           target="src/codec/mod.rs"):
     return "\n".join([
         "looprung 1", "seq %d" % seq, "goal %s" % goal, "kind %s" % kind,
@@ -803,6 +882,39 @@ def selftest():
         r, why = propose_finish(tmp, fenced(_rung(g, 2, kind="feature")))
         claim(r is not None,
               "a feature rung is admitted, so greenfield work has a lane")
+
+        # The rule whose absence cost three nights: a witnessed kind aimed
+        # at a file that is not there yet is stuck, not slow -- it refuses
+        # locally, files no certificate, and so never retires.
+        r, why = propose_finish(tmp, fenced(_rung(g, 2, kind="test")))
+        claim(r is None and "does not exist yet" in (why or ""),
+              "a witnessed kind aimed at a file that is not there is refused")
+        os.makedirs(os.path.join(tmp, "src", "ai"), exist_ok=True)
+        open(os.path.join(tmp, "src", "ai", "there.rs"), "w").write("// x")
+        r, why = propose_finish(tmp, fenced(
+            _rung(g, 2, kind="test", target="src/ai/there.rs")))
+        claim(r is not None,
+              "and the same kind aimed at a file that IS there is admitted")
+
+        # **A rung that stops admitting must not take the ladder down.**
+        # `load` raised, so one rung written before a rule tightened made
+        # `next` exit 1 where the night needed "nothing open" to go stock
+        # another -- and `retired` counts certificates, which a rung refused
+        # before an envelope exists never earns. It blocks for good.
+        # Written to disk, because `propose_finish` deliberately does not
+        # persist -- the staleness is a property of the ladder as it is read
+        # back, which is where the raise was.
+        with open(os.path.join(tmp, "loop", "ladder", "0002-there.rung"),
+                  "w", encoding="utf-8", newline="\n") as f:
+            f.write(render_rung({k: r[k] for k in RUNG_KEYS}))
+        os.remove(os.path.join(tmp, "src", "ai", "there.rs"))
+        rs = state(tmp)
+        claim(len(rs) == 2 and rs[-1]["stale"] and rs[-1]["retired"],
+              "a rung the rules no longer admit retires instead of raising")
+        nxt = open_rung(rs)
+        claim(nxt is not None and nxt["seq"] == rs[0]["seq"],
+              "so the read survives it and the stale rung is never offered")
+        os.remove(os.path.join(tmp, "loop", "ladder", "0002-there.rung"))
 
         r, why = propose_finish(tmp, fenced(_rung(g, 7, title="leapfrog")))
         claim(r is None and "next is 2" in (why or ""),
