@@ -1,6 +1,10 @@
 ---
-model: openai/gpt-4o-mini
-max_tokens: 900
+# `llama-server` serves whatever GGUF it was started with and ignores
+# this field, but a stale name is a lie in a file somebody will read:
+# it said `openai/gpt-4o-mini` after the author became a ternary
+# Bonsai running in the job. Named for the reader.
+model: Ternary-Bonsai-4B-Q2_0-g64
+max_tokens: 400
 temperature: 0
 ---
 You propose ONE next milestone toward a long-running engineering goal, for a

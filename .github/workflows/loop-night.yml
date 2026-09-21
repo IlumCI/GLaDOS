@@ -239,10 +239,15 @@ jobs:
           # nothing guarantees an RPATH survives extraction.
           LD_LIBRARY_PATH="$PWD/$bin" "$bin"/llama-server \
             -m out/models/Ternary-Bonsai-4B-Q2_0_g64.gguf \
-            --host 127.0.0.1 --port 8080 -c 8192 -t 4 --no-warmup \
+            --host 127.0.0.1 --port 8080 -c 8192 -t 4 --threads-batch 4 \
             > out/models/server.log 2>&1 &
           for i in $(seq 1 120); do
             if curl -sf http://127.0.0.1:8080/health >/dev/null 2>&1; then
+              # `--no-warmup` was here and is deliberately gone. It defers
+              # the weight load to the first request, so `/health` answered
+              # in **4 seconds** and the completion then timed out -- a
+              # server that is up by every check available and cannot answer
+              # anything yet. The cost moves into this wait, where it shows.
               echo "  the server answered after ${i}s"
               echo "GLADOS_INFERENCE_URL=http://127.0.0.1:8080/v1/chat/completions" \
                 >> "$GITHUB_ENV"
