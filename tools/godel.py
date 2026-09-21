@@ -1128,7 +1128,13 @@ def author(root, kind_name, target, token):
         slice_text = "(this file does not exist yet -- the patch creates it)"
     entries = load_entries(root)
     card = task_card(kind_name, target, slice_text, entries)
-    reply = ask_model(system, card, meta, token, "glados-loop-author")
+    try:
+        reply = ask_model(system, card, meta, token, "glados-loop-author")
+    except NoInference as e:
+        # A night with no inference is a night that authored nothing, which
+        # is an ordinary outcome and not a failure of the proposal. Reported
+        # as a refusal so the night goes on to what it can do without a model.
+        return None, str(e)
     return author_finish(root, kind_name, reply)
 
 
@@ -1148,6 +1154,43 @@ def read_prompt(name):
     return meta, parts[2]
 
 
+#: Where inference is asked for, and the reason this is a setting.
+#:
+#: **GitHub Models is being retired.** The first night that ever reached this
+#: code got `HTTP 410 github_models_retirement_brownout`, and it had been
+#: invisible until then because nothing had ever exercised the lane -- rung 4
+#: is reached only when the grid is out of moves, which had not happened.
+#:
+#: The endpoint was chosen for a property that was real and is now gone: the
+#: workflow's own token, `models: read`, no new credential. Anything that
+#: replaces it is a decision about credentials, so it is the operator's and
+#: not taken here. What IS taken here is that it must be a decision they can
+#: make without editing code: an OpenAI-shaped `/chat/completions` is what
+#: every local server speaks, so pointing this at one is a variable.
+INFERENCE_URL = "https://models.github.ai/inference/chat/completions"
+
+
+def inference_url(meta):
+    """Env first, then the prompt's front matter, then the default.
+
+    Env first because the endpoint is deployment, not authorship: the same
+    prompt file should work against a hosted service and against something
+    listening on localhost, and which one is running is a property of the
+    machine rather than of the prompt.
+    """
+    return (os.environ.get("GLADOS_INFERENCE_URL")
+            or meta.get("endpoint")
+            or INFERENCE_URL)
+
+
+class NoInference(Exception):
+    """The transport failed. Held apart from a model that answered badly,
+    because those are different facts and only one of them is about the
+    proposal: a refused completion is evidence, an unreachable endpoint is
+    not, and filing the second as the first would put a verdict in the ledger
+    about a night that never asked anything."""
+
+
 def ask_model(system, card, meta, token, agent="glados-loop"):
     """The one transport, so there is one place a model is asked anything.
 
@@ -1160,6 +1203,7 @@ def ask_model(system, card, meta, token, agent="glados-loop"):
     what a prompt looks like.
     """
     import json as _json
+    import urllib.error
     import urllib.request
 
     body = _json.dumps({
@@ -1171,16 +1215,30 @@ def ask_model(system, card, meta, token, agent="glados-loop"):
             {"role": "user", "content": card},
         ],
     }).encode("utf-8")
+    url = inference_url(meta)
     req = urllib.request.Request(
-        "https://models.github.ai/inference/chat/completions",
+        url,
         data=body,
         headers={
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
             "User-Agent": agent,
         })
-    with urllib.request.urlopen(req, timeout=120) as r:
-        return _json.loads(r.read())["choices"][0]["message"]["content"]
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:
+            return _json.loads(r.read())["choices"][0]["message"]["content"]
+    except urllib.error.HTTPError as e:
+        # Read the body: the useful half of a refusal is in it, and the 410
+        # that retired this lane said `github_models_retirement_brownout`
+        # where the status alone says only "gone".
+        detail = ""
+        try:
+            detail = e.read().decode("utf-8", "replace")[:300]
+        except Exception:
+            pass
+        raise NoInference(f"{url} answered HTTP {e.code} {detail}".strip())
+    except (urllib.error.URLError, OSError, ValueError, KeyError) as e:
+        raise NoInference(f"{url} could not be asked: {e}")
 
 
 def author_finish(root, kind_name, reply):
@@ -1314,6 +1372,27 @@ def selftest():
         if not good:
             ok = False
         print(f"  {'ok ' if good else 'FAIL'}  {what}")
+
+    # --- where inference is asked for, since that moved once already -----
+    #
+    # GitHub Models retired under this loop, so the endpoint is a setting and
+    # the precedence is the part somebody will depend on: env beats the
+    # prompt file, because which server is listening is a property of the
+    # machine rather than of the prompt. Getting this backwards would make an
+    # operator's `GLADOS_INFERENCE_URL` silently do nothing.
+    _saved = os.environ.pop("GLADOS_INFERENCE_URL", None)
+    try:
+        claim("with nothing set, inference goes to the declared default",
+              inference_url({}) == INFERENCE_URL)
+        claim("a prompt's front matter overrides the default",
+              inference_url({"endpoint": "http://x/v1"}) == "http://x/v1")
+        os.environ["GLADOS_INFERENCE_URL"] = "http://env/v1"
+        claim("and the environment overrides the prompt, not the other way",
+              inference_url({"endpoint": "http://x/v1"}) == "http://env/v1")
+    finally:
+        os.environ.pop("GLADOS_INFERENCE_URL", None)
+        if _saved is not None:
+            os.environ["GLADOS_INFERENCE_URL"] = _saved
 
     # --- the alpha series agrees with the kernel, to the digit ------------
     mine = spend_table()

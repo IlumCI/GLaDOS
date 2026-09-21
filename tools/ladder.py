@@ -413,8 +413,15 @@ def propose(root, token):
     import godel
     rungs = state(root)
     meta, system = godel.read_prompt("decompose.md")
-    reply = godel.ask_model(system, rung_card(root, rungs), meta, token,
-                            "glados-loop-decompose")
+    try:
+        reply = godel.ask_model(system, rung_card(root, rungs), meta, token,
+                                "glados-loop-decompose")
+    except godel.NoInference as e:
+        # Not a traceback, and not a verdict either. The ladder simply does
+        # not grow tonight, and the reason is one line rather than a stack --
+        # the first night to reach this printed twenty lines of urllib and
+        # buried `410 github_models_retirement_brownout` in the middle.
+        return None, str(e)
     return propose_finish(root, reply, rungs)
 
 
