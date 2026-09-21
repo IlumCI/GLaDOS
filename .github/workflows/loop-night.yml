@@ -234,11 +234,26 @@ jobs:
           python3 tools/fetchmodel.py tools/models/bonsai-4b.txt --out out/models
           tar -xzf out/models/llama-b11071-bin-ubuntu-x64.tar.gz -C out/models
           bin=out/models/llama-b11071
-          chmod +x "$bin"/llama-server
+          chmod +x "$bin"/llama-server "$bin"/llama-quantize
+
+          # **Q2_0 has no x86 kernel**, so it runs scalar: 2.18 t/s prefill
+          # against TQ2_0's 17.33 at four threads, measured. That is the
+          # difference between a rung in two minutes and a request that times
+          # out at ten, which is how this was found. `llama-quantize` is in
+          # the tarball already, the conversion takes about a minute, and it
+          # is byte-reproducible -- so the derived file is pinned like any
+          # other rather than hosted somewhere by somebody.
+          tq=out/models/Ternary-Bonsai-4B-TQ2_0.gguf
+          if [ ! -f "$tq" ]; then
+            "$bin"/llama-quantize --allow-requantize \
+              out/models/Ternary-Bonsai-4B-Q2_0_g64.gguf "$tq" TQ2_0
+          fi
+          python3 tools/fetchmodel.py tools/models/bonsai-4b.txt \
+            --out out/models --check-derived
           # The shared objects sit beside the binary in the tarball, and
           # nothing guarantees an RPATH survives extraction.
           LD_LIBRARY_PATH="$PWD/$bin" "$bin"/llama-server \
-            -m out/models/Ternary-Bonsai-4B-Q2_0_g64.gguf \
+            -m "$tq" \
             --host 127.0.0.1 --port 8080 -c 8192 -t 4 --threads-batch 4 \
             > out/models/server.log 2>&1 &
           for i in $(seq 1 120); do
