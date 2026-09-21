@@ -1,0 +1,8 @@
+looprung 1
+seq 2
+goal ce93af35a0b0364e0b918caaa96c0e6e685347d9b390091d2a3bd5430253be4f
+kind feature
+target src/fmt/video.rs
+title a native video codec that encodes a 4x4 pixel buffer to a 4x4 pixel buffer
+witness a claim in `diag gfx` that a frame of 4x4 pixels is encoded and decoded correctly without hardware dependency, which fails today because the struct does not exist
+why this is the next thing and not a later one: it must be first to create the actual encoding logic, which cannot be checked until the module exists and has the required type; no earlier step can verify the presence or correctness of the structure
