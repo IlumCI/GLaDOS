@@ -63,12 +63,27 @@ PIDFILE="${STATE}/run-pool.pid"
 # is also serving media; raise it on a machine with headroom, or 0 for no cap.
 #
 # `--window` is the PPLNS payout window in work; a share credits 2^bits, so the
-# default 2^32 is one difficulty-1 share's worth. Left default here.
+# default 2^32 is one difficulty-1 share's worth, which is a starting point and
+# not a setting. The comment above this line said "left default here" while the
+# line below passed 268435456, and both halves were wrong: the value is not the
+# default, and as a bare integer it looked perfectly large while being **2e-7 of
+# one Feathercoin block**. That is not a window that pays smoothly or a window
+# that pays soon; it pays the last few shares and nothing else, which is the
+# failure a number with no unit produces. 2^50 is about 0.85 of a Feathercoin
+# block, taking one block as the dial's midpoint -- Rosenfeld gives reward
+# variance as pB^2/N and mean time to payment as pN/2, so their product is fixed
+# and there is no optimum, only an end to pick.
+#
+# **Against Bitcoin no value would have been right.** `pool.rs` records it at
+# `window_work`: a `u64` reaches one block only while difficulty is under
+# 4.295e9, and Bitcoin misses that by 21,432x, so btc's PPLNS degenerates to
+# paying the most recent shares whatever is passed here. Sized for the coin the
+# dial can actually serve, and the payout line says what it is worth on each.
 set -- \
     --listen 10.66.66.1:3334 \
     --ledger "${STATE}/ledger.json" \
     --cpu-percent 25 \
-    --window 268435456 \
+    --window 1125899906842624 \
     btc:sha256d:24:bitcoin \
     ftc:neoscrypt:20:feathercoin
 

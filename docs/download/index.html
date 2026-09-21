@@ -48,9 +48,9 @@
 <div id="body">
 <!--sidebar-->
 <div id="sidebar">
-<div class="box"><div class="t">Latest release</div><div class="bd"><table class="facts"><tr><td>Version</td><td>1.3.7</td></tr><tr><td>Released</td><td>2026-09-16</td></tr><tr><td>Images</td><td>3</td></tr></table><ul><li><a href="../download/">Download</a></li><li><a href="https://github.com/IlumCI/GLaDOS/releases/tag/v1.3.7">Release notes</a></li></ul></div></div>
+<div class="box"><div class="t">Latest release</div><div class="bd"><table class="facts"><tr><td>Version</td><td>1.3.8</td></tr><tr><td>Released</td><td>2026-09-21</td></tr><tr><td>Images</td><td>3</td></tr></table><ul><li><a href="../download/">Download</a></li><li><a href="https://github.com/IlumCI/GLaDOS/releases/tag/v1.3.8">Release notes</a></li></ul></div></div>
 <div class="box"><div class="t">Project information</div><div class="bd"><table class="facts"><tr><td>Development status</td><td>3 - Alpha</td></tr><tr><td>Environment</td><td>Console, framebuffer</td></tr><tr><td>Intended audience</td><td>Developers, science/research</td></tr><tr><td>Licence</td><td>Other/proprietary, all rights reserved</td></tr><tr><td>Natural language</td><td>English</td></tr><tr><td>Operating system</td><td>x86-64 UEFI, bare metal</td></tr><tr><td>Programming language</td><td>Rust, Python</td></tr><tr><td>Topic</td><td>Operating systems, kernels, artificial intelligence</td></tr></table></div></div>
-<div class="box"><div class="t">Statistics</div><div class="bd"><table class="facts"><tr><td>Registered</td><td>2026-08-14</td></tr><tr><td>Releases</td><td>17</td></tr><tr><td>Downloads</td><td>802</td></tr><tr><td>Source</td><td>198 files, ~132,000 lines</td></tr></table></div></div>
+<div class="box"><div class="t">Statistics</div><div class="bd"><table class="facts"><tr><td>Registered</td><td>2026-08-14</td></tr><tr><td>Releases</td><td>18</td></tr><tr><td>Downloads</td><td>819</td></tr><tr><td>Source</td><td>198 files, ~132,000 lines</td></tr></table></div></div>
 <div class="box"><div class="t">Developers</div><div class="bd"><table class="facts"><tr><td>IlumCI</td><td>project admin, developer</td></tr></table></div></div>
 <div class="box"><div class="t">Documentation</div><div class="bd"><ul><li><a href="../wiki/glados-os.html">GLaDOS OS</a></li><li><a href="../wiki/kernel.html">The kernel</a></li><li><a href="../wiki/model.html">The model</a></li><li><a href="../wiki/agent.html">The agent</a></li><li><a href="../wiki/rsi.html">Self-improvement</a></li><li><a href="../wiki/aiksi.html">Aiksi, the language</a></li><li><a href="../wiki/">All 18 articles</a></li></ul></div></div>
 </div>
@@ -93,7 +93,7 @@
 
 <div class="scroll">
 <!--download-table-->
-<table class="dl"><thead><tr><th>File</th><th>Model</th><th>Context</th><th>Size</th><th>Notes</th></tr></thead><tbody><tr><td><a href="https://github.com/IlumCI/GLaDOS/releases/download/v1.3.7/glados-1.3.7-qwen3-0.6b.iso">glados-1.3.7-qwen3-0.6b.iso</a></td><td>Qwen3-0.6B</td><td>512</td><td class="size">579 MB</td><td>The middle size.</td></tr><tr><td><a href="https://github.com/IlumCI/GLaDOS/releases/download/v1.3.7/glados-1.3.7-qwen35-2b-8k.iso">glados-1.3.7-qwen35-2b-8k.iso</a></td><td>Qwen3.5-2B hybrid</td><td>8192</td><td class="size">1.8 GB</td><td>The same weights with room for a long conversation before the cache becomes a ring.</td></tr><tr><td><a href="https://github.com/IlumCI/GLaDOS/releases/download/v1.3.7/glados-1.3.7-qwen35-2b-32k.iso">glados-1.3.7-qwen35-2b-32k.iso</a></td><td>Qwen3.5-2B hybrid</td><td>32768</td><td class="size">1.8 GB</td><td>The longest context shipped. Three layers in four are linear, so the cache grows far more slowly with context than a dense model&#x27;s.</td></tr></tbody></table>
+<table class="dl"><thead><tr><th>File</th><th>Model</th><th>Context</th><th>Size</th><th>Notes</th></tr></thead><tbody><tr><td><a href="https://github.com/IlumCI/GLaDOS/releases/download/v1.3.8/glados-1.3.8-qwen3-0.6b.iso">glados-1.3.8-qwen3-0.6b.iso</a></td><td>Qwen3-0.6B</td><td>512</td><td class="size">579 MB</td><td>The middle size.</td></tr><tr><td><a href="https://github.com/IlumCI/GLaDOS/releases/download/v1.3.8/glados-1.3.8-qwen35-2b-8k.iso">glados-1.3.8-qwen35-2b-8k.iso</a></td><td>Qwen3.5-2B hybrid</td><td>8192</td><td class="size">1.8 GB</td><td>The same weights with room for a long conversation before the cache becomes a ring.</td></tr><tr><td><a href="https://github.com/IlumCI/GLaDOS/releases/download/v1.3.8/glados-1.3.8-qwen35-2b-32k.iso">glados-1.3.8-qwen35-2b-32k.iso</a></td><td>Qwen3.5-2B hybrid</td><td>32768</td><td class="size">1.8 GB</td><td>The longest context shipped. Three layers in four are linear, so the cache grows far more slowly with context than a dense model&#x27;s.</td></tr></tbody></table>
 <!--/download-table-->
 </div>
 
@@ -284,7 +284,7 @@ cp /usr/share/OVMF/OVMF_VARS.fd ./vars.fd</code></pre>
 </ul>
 <!--flash-example-->
 <pre><code># Linux / macOS. Check the device name first, this overwrites it
-sudo dd if=glados-1.3.7.iso of=/dev/sdX bs=4M status=progress oflag=sync</code></pre>
+sudo dd if=glados-1.3.8.iso of=/dev/sdX bs=4M status=progress oflag=sync</code></pre>
 <!--/flash-example-->
 <p class="small">On macOS the device is <code>/dev/rdiskN</code> and you will need to <code>diskutil unmountDisk</code> it first.</p>
 </div>
@@ -379,7 +379,7 @@ sudo dd if=glados-1.3.7.iso of=/dev/sdX bs=4M status=progress oflag=sync</code><
 <div id="footer">
   <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This project is independent and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
   <p>Copyright 2026. All rights reserved. The source is published so it can be read; redistribution and derivatives need asking. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are other people's and are listed on <a href="../credits.html">the credits page</a>.</p>
-  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-09-16.</p>
+  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-09-21.</p>
 </div>
 <!--/footer-->
 

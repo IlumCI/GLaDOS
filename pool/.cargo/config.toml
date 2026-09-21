@@ -22,13 +22,22 @@
 [build]
 target = "x86_64-pc-windows-msvc"
 
-# Cleared, not inherited. The parent sets `+sse,+sse2,-soft-float` for the UEFI
-# target; on a hard-float host the first two are baseline and the third is a
-# switch with nothing to disable, so rustc warns on every single build that
-# `soft-float` cannot be disabled this way. The flags change no code generated
-# here and the warning is about a target this crate does not use, so the honest
-# thing is to stop asking for them rather than to read past it.
-rustflags = []
+# **This said "cleared, not inherited" and held `rustflags = []`, and it was
+# wrong.** Cargo merges config files by *joining* arrays, so an empty list
+# contributes nothing and the parent's flags arrive whole. Checked with
+# `cargo config get build.rustflags` in this directory, which answered the
+# kernel's list verbatim.
+#
+# It cost the pool's CI. `/MAP:target/glados.map` is an MSVC flag that
+# `link.exe` accepts, so on the development machine's Windows target the build
+# worked and wrote a stray map file; under musl, `rust-lld -flavor gnu` reads
+# it as a filename and cannot link. `pool.yml` therefore failed on the step
+# after `--target` was added to it, for a second and unrelated reason.
+#
+# Nothing replaces it here, because the parent scopes those flags to
+# `[target.x86_64-unknown-uefi]` now and they never reach this crate at all --
+# which is the fix, since the only way to not inherit a cargo array is for the
+# parent not to declare it where it applies.
 
 # Cross-compiling to Linux from this Windows machine, which is how the daemon
 # is actually built: there is no `cc` here, and cargo's default linker for a

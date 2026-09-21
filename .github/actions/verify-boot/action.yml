@@ -89,6 +89,28 @@ runs:
           | sudo tee /etc/udev/rules.d/99-kvm-writable.rules >/dev/null
         sudo udevadm control --reload-rules
         sudo udevadm trigger --name-match=kvm
+
+        # **`udevadm trigger` queues the event and returns**, so without this
+        # the test below races udev and loses often enough to matter. Measured
+        # rather than suspected: two runs of one commit two minutes apart on
+        # the same image (ubuntu-24.04, release 20260907.300) went one each
+        # way, and the loser reported `/dev/kvm is not writable` after a step
+        # lasting **52 ms** -- which is the three sudo calls above and no time
+        # at all for udev to have applied the rule.
+        #
+        # That matters more than one red X. This action is the gate on eleven
+        # call sites, `ci` among them, so an intermittent here is an
+        # intermittent on every workflow the CI Godel machine depends on, and
+        # a loop whose judge fails at random cannot tell a bad candidate from
+        # a bad day.
+        sudo udevadm settle --timeout=10 || true
+
+        # And a direct chmod as the belt to that brace. The rule is what
+        # survives the node being recreated, which is why it stays; this is
+        # what makes *this* job deterministic rather than lucky. Guarded, so
+        # it runs only when the rule did not take.
+        test -w /dev/kvm || sudo chmod 666 /dev/kvm || true
+
         test -w /dev/kvm || { echo "::error::/dev/kvm is not writable"; exit 1; }
         echo "kvm is available and writable"
 

@@ -43,11 +43,23 @@ PIDFILE="${STATE}/run-pool.pid"
 # is also serving media; raise it on a machine with headroom, or 0 for no cap.
 #
 # `--window` is the PPLNS payout window in work; a share credits 2^bits, so the
-# default 2^32 is one difficulty-1 share's worth. Left default here.
+# default 2^32 is one difficulty-1 share's worth -- a starting point, and the
+# reason `DEFAULT_WINDOW_WORK` says so. Leaving it default here was the same
+# rounding error `run-pool.wg.sh` shipped explicitly: against Bitzeny it is
+# 5e-5 of one block, so the window paid the last few shares and nothing else.
+# 2^46 is about 0.80 of a Bitzeny block. See the longer note in the WireGuard
+# script for why one block is the dial's midpoint and why there is no optimum.
+#
+# Bitcoin testnet is the other coin on this listener, and its difficulty swings
+# by orders of magnitude under the 20-minute minimum-difficulty rule, so one
+# window cannot be a considered choice for both. It is chosen for bitzeny, the
+# coin this pool is actually pointed at, and the payout line prints what it is
+# worth on each.
 set -- \
     --listen 0.0.0.0:3334 \
     --ledger "${STATE}/ledger.json" \
     --cpu-percent 25 \
+    --window 70368744177664 \
     bitzeny:yespower-10-2048-8:12 \
     testnet:sha256d:24
 

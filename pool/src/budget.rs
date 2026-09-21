@@ -115,12 +115,38 @@ impl Budget {
     /// that answered by validating nothing would look broken instead of
     /// unlimited.
     pub fn new(percent: f64) -> Budget {
+        Budget::new_at(percent, Instant::now())
+    }
+
+    /// The same, against a supplied instant.
+    ///
+    /// `refill_at` and `admit_at` take one already, and say why: so a claim can
+    /// drive the budget rather than sleep. **The constructor was the one place
+    /// left reaching for the clock itself**, and that turned a claim which
+    /// looks like pure arithmetic into one that measures how long the lines
+    /// above it took to run.
+    ///
+    /// `cost_and_not_count_is_what_is_bounded` is where it surfaced. It takes
+    /// `t0`, builds one budget, spends **416,666** admissions out of it, and
+    /// only then builds the second -- by which point `Instant::now()` is a
+    /// dozen milliseconds past `t0`, so `refill_at(at(t0, 1000))` credited less
+    /// than the second it asked for and the budget admitted 51 yespower shares
+    /// where the bench says 52. Arithmetic wearing a measurement's clothes,
+    /// which is the shape `time::calibrate` records in the kernel: the check
+    /// and the thing it checks were reading the same drifting clock.
+    ///
+    /// It fails by build profile and by machine speed rather than by anything
+    /// about budgets, which is why it went unnoticed for as long as the pool's
+    /// tests could not run at all -- `pool/.cargo/config.toml` names a Windows
+    /// target, so a bare `cargo test` on a Linux runner looked for a std that
+    /// was not there and never reached this.
+    pub fn new_at(percent: f64, now: Instant) -> Budget {
         let percent = if percent.is_finite() && percent > 0.0 { percent } else { 0.0 };
         Budget {
             tokens: 0.0,
             rate_us_per_s: percent * US_PER_PERCENT,
             burst: percent * US_PER_PERCENT * BURST_SECONDS,
-            last: Instant::now(),
+            last: now,
             cost: Vec::new(),
             admitted: 0,
             denied: 0,
@@ -253,7 +279,11 @@ mod tests {
     fn cost_and_not_count_is_what_is_bounded() {
         let t0 = Instant::now();
         // 100% of one core: 1,000,000 us of validation per second.
-        let mut b = Budget::new(100.0);
+        //
+        // `new_at` and not `new`: both budgets have to measure from the same
+        // `t0` the refills are expressed against, or the second one is
+        // credited only for the time left after the first one's loop.
+        let mut b = Budget::new_at(100.0, t0);
         b.record("sha256d", 2.4);
         b.record("yespower", 19_000.0);
         b.refill_at(at(t0, 1000));
@@ -265,7 +295,7 @@ mod tests {
                 break;
             }
         }
-        let mut b2 = Budget::new(100.0);
+        let mut b2 = Budget::new_at(100.0, t0);
         b2.record("yespower", 19_000.0);
         b2.refill_at(at(t0, 1000));
         let mut dear = 0;
@@ -294,7 +324,7 @@ mod tests {
     #[test]
     fn an_idle_pool_does_not_hoard_budget() {
         let t0 = Instant::now();
-        let mut b = Budget::new(100.0);
+        let mut b = Budget::new_at(100.0, t0);
         b.record("yespower", 19_000.0);
         // An hour of quiet.
         b.refill_at(at(t0, 3_600_000));
@@ -314,7 +344,7 @@ mod tests {
     #[test]
     fn an_unmeasured_algorithm_is_admitted_once_and_then_priced() {
         let t0 = Instant::now();
-        let mut b = Budget::new(1.0);
+        let mut b = Budget::new_at(1.0, t0);
         assert!(b.admit_at("mystery", t0), "the first is free, or it is never measured");
         b.record("mystery", 500_000.0);
         // 1% of a core is 10,000 us/s, burst 20,000 -- a 500 ms validation

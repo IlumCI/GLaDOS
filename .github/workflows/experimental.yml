@@ -85,11 +85,23 @@ jobs:
           cp target/x86_64-unknown-uefi/release/glados.efi "out/glados-$VERSION.efi"
           python3 tools/sign.py "out/glados-$VERSION.efi" "out/glados-$VERSION.efi.sig" --key "$KEY"
 
+      # One `env`, and the reason is worth the line. This step carried two of
+      # them for as long as `1f1744f` has existed, which GitHub rejects
+      # outright: the run it produced was named after the *file path* rather
+      # than `experimental`, held zero jobs, and failed in under a second on
+      # every push to any branch -- including branches `on.push.branches`
+      # excludes, because the filter lives in the file that would not load.
+      #
+      # So this workflow has published nothing since that commit, and the
+      # 0-second red X on unrelated pushes was the only symptom. A permissive
+      # YAML reader takes the *last* duplicate, so the sweep that checked these
+      # files reported `experimental.yml ok` while silently dropping `KEY` and
+      # `ORIGIN` -- the instrument agreeing with a file the real parser
+      # refuses. `tools/workflows.py` is the strict reader that now runs in ci.
       - name: Build the signed manifest
         env:
           KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
           ORIGIN: ${{ vars.SUPABASE_URL }}
-        env:
           NOTES: ${{ inputs.notes }}
         run: |
           test -n "$ORIGIN" || { echo "the SUPABASE_URL variable is not set"; exit 1; }
