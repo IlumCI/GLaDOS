@@ -1,0 +1,25 @@
+# The runtime that serves the author: sha256, size, name.
+#
+# `ggml-org/llama.cpp` release **b11071**, the CPU-only Ubuntu x64 tarball.
+# 16.9 MB, so `propose` fetches a runtime rather than building one. Building
+# it takes three to six minutes of the fifteen that job has, every time
+# the cache turns over, to produce something upstream already published.
+#
+# Pinned to a build number and not to `latest`, and that matters twice here.
+# llama.cpp tags a release per commit, so `latest` moves several times a day
+# -- it was b11063 through b11071 on the two days this was written -- and a
+# runtime that changes under the loop would make a certificate name a night
+# nobody can reproduce. The whole ledger rests on re-derivability; an
+# unpinned interpreter is the one input that would quietly break it.
+#
+# It also answers the retirement that put us here. GitHub Models went away
+# mid-loop because it was somebody else's service; a pinned tarball and a
+# pinned GGUF are two files with digests, and they do not get retired.
+#
+# Verified rather than copied: downloaded, hashed, and the archive listed.
+# It carries `llama-b11071/llama-server`, which is the OpenAI-shaped endpoint
+# `godel.ask_model` already speaks to -- so pointing `GLADOS_INFERENCE_URL`
+# at `127.0.0.1` needs no code change at all.
+#
+# from https://github.com/ggml-org/llama.cpp/releases/download/b11071/llama-b11071-bin-ubuntu-x64.tar.gz
+035c130b6f2cb4fb213c85e5d4e8f56baab37685e9898d27f2ce69213c6de1a4  16880986  llama-b11071-bin-ubuntu-x64.tar.gz

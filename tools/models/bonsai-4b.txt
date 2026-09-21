@@ -1,0 +1,52 @@
+# The loop's author: sha256, size, name -- payload.py's three columns.
+#
+# **Deliberately not under `payload/`.** `mkiso.py` reads the union of
+# `payload/*.txt` as an *allowlist* of what may be placed on install media,
+# so a manifest there would make a gigabyte of CI machinery eligible for an
+# ISO that is already 1.90 GB against GitHub's 2 GB per-asset limit. Same
+# format, different directory, because the format is about verification and
+# the directory is about permission.
+#
+# What this is, and why this one:
+#
+#   prism-ml/Ternary-Bonsai-4B-gguf, the Q2_0 **g64** file
+#   a ternary distill of Qwen3-4B -- every weight in {-1, 0, +1} with one
+#   FP16 scale per group, Apache-2.0, 32,768 context, qwen3 architecture,
+#   398 tensors of which 253 are Q2_0 and 145 stay F32
+#
+#   HumanEval+ 78.7, against the 8.04 GB Qwen3-4B it was distilled from at
+#   74.4 -- it out-codes its own parent at an eighth the size. It also
+#   out-codes the 8B Bonsai (77.4), which is why the larger one is not here:
+#   the 8B's wins are IFEval (81.8 vs 72.1) and BFCL (73.9 vs 67.8), and
+#   those are exactly what a GBNF grammar makes structural rather than
+#   probabilistic. `constrain.rs` already argues this on the kernel's own
+#   routing -- invalid output unreachable rather than merely improbable -- so
+#   paying 2x size and 2x time for instruction-following we intend to enforce
+#   anyway would be buying something twice.
+#
+# **g64 and not g128, and the two files do not announce the difference.**
+# The repository ships both. Both declare `GGML_TYPE_Q2_0`, id 42, with
+# identical tensor counts -- the type does not encode the block size. What
+# differs is bytes per weight:
+#
+#   mainline  #define QK2_0 64   ->  2 + 16 = 18 bytes / 64  = 0.281250 B/w
+#   g128                         ->      34 bytes / 128      = 0.265625 B/w
+#
+# and the file sizes agree to four figures: 1137806656 / 1074969344 = 1.0585
+# against 2.25/2.125 = 1.0588. So llama.cpp derives a different expected size
+# for every tensor in the g128 file and refuses it at load. Loudly, which is
+# the good failure -- but it never runs, and the name gives no warning.
+#
+# The model card says Q2_0 needs PrismML-Eng's llama.cpp fork. **That is
+# stale.** It is upstream now: `GGML_TYPE_Q2_0 = 42` in ggml.h, `block_q2_0`
+# with real CPU kernels in ggml-quants.c and arch-fallback.h, and `Q2_0`
+# listed by the quantize tool as "2.25 bpw quantization (group 64)". So no
+# fork is built, and the requantise-to-Q4 alternative is not needed either --
+# which is just as well, since a ternary model stored at Q4 is 2.2 GB for
+# exactly the quality it has at 1.14, and the size was the reason to pick it.
+#
+# from https://huggingface.co/prism-ml/Ternary-Bonsai-4B-gguf/resolve/main/Ternary-Bonsai-4B-Q2_0_g64.gguf
+#
+# Verified rather than copied: downloaded whole, hashed, and the GGUF header
+# read back for its tensor types. The digest below is what came back.
+9d968b04a3c9a794897bcc744c8072fb6a061c0e42efd03c989401ddf8baef0c  1137806656  Ternary-Bonsai-4B-Q2_0_g64.gguf
