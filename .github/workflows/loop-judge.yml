@@ -365,9 +365,23 @@ jobs:
           set -euo pipefail
           mv rails.txt kernel-b2.txt
           rm -f rails2.txt
+      # `run: |`, and the missing bar is what stopped this loop ever reaching a
+      # verdict. Without it the block is a *plain* YAML scalar, which folds
+      # every line into one with spaces between them -- so the runner was
+      # handed `cp kernel-b2-within.txt kernel-b2.txt python3 tools/...` as a
+      # single command and died on `syntax error near unexpected token '}'`,
+      # the `{ ... }` group having lost the newline that separated it.
+      #
+      # It bit at `LEVEL < 1`, which is the *base* level and the default, so
+      # the first night that ever ran hit it: both arms built, both booted,
+      # both kept their rails, and the candidate's second reading could not be
+      # taken. Its baseline twin thirty lines up has the bar and passed, which
+      # is what made the failure look like something about the candidate.
       - name: Or the within-boot one, at the base level
         if: fromJSON(env.LEVEL) < 1
-        run: cp kernel-b2-within.txt kernel-b2.txt
+        run: |
+          set -euo pipefail
+          cp kernel-b2-within.txt kernel-b2.txt
           python3 tools/retrieval.py "$FOREST" --limit "$QUERIES" --dump retrieval-b.tsv | tee retrieval-b.log
           python3 tools/rails.py collect --rail retrieval=retrieval-b.tsv --out host-b.txt
           cat kernel-b.txt host-b.txt | grep -v '^\[rail\]' > body-b.txt
