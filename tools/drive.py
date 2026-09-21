@@ -35,6 +35,7 @@ ROOT = Path(__file__).resolve().parent.parent
 PORT = 45454
 MONITOR_PORT = 45455
 PROMPT = b"glados> "
+NVME_IMAGE_BYTES = 192 * 1024 * 1024
 
 
 def find_qemu():
@@ -676,6 +677,35 @@ def main():
         else:
             fat, tot = mkesp.build(esp, esp_image)
             print(f"[drive] built {esp_image} ({tot / 1024 / 1024:.0f} MB, writable)")
+
+    # The NVMe scratch disk, which nothing had ever created.
+    #
+    # `-drive file=.qemu/nvme.img` is passed unconditionally below, `/.qemu` is
+    # gitignored, and `mkfat.py` only ever *writes* that path when somebody
+    # runs it by hand. So the file existed on the development machine because
+    # it had been made there once, months ago, and existed nowhere else --
+    # every fresh checkout got `Could not open ... nvme.img` out of QEMU before
+    # the guest drew a single line. That is a checkout-shaped failure and it
+    # went unnoticed for exactly as long as nothing ran on a fresh checkout.
+    #
+    # Only when it is absent, for the reason the ESP image above gives: this is
+    # where `mkfat.py` stages corpus bundles, ACPI tables and ELF fixtures, so
+    # rebuilding between boots would delete the thing the next command reads.
+    #
+    # Sparse and blank, which is the honest empty state rather than a
+    # simulation of a populated one. `cas::find_free_region` needs the disk to
+    # be larger than 3 MiB and reserves the last MiB for a GPT backup header
+    # it will not find; 192 MiB is what the development machine has, so a CI
+    # boot and a local one look at the same topology instead of two.
+    if not esp_on_nvme:
+        nvme = ROOT / ".qemu/nvme.img"
+        if not nvme.exists():
+            nvme.parent.mkdir(parents=True, exist_ok=True)
+            with open(nvme, "wb") as f:
+                f.truncate(NVME_IMAGE_BYTES)
+            print(f"[drive] blank {nvme} "
+                  f"({NVME_IMAGE_BYTES / 1024 / 1024:.0f} MB, no store on it) "
+                  f"-- mkfat.py puts fixtures here")
 
     if stage_iso:
         import mkiso
