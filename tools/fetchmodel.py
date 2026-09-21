@@ -102,7 +102,7 @@ def check(path, size, want):
     return d
 
 
-def fetch(manifest, out_dir, force=False):
+def fetch(manifest, out_dir, force=False, backoff=1.0):
     url, rows = parse(io.open(manifest, encoding="utf-8").read())
     name, size, want = rows[0]
     os.makedirs(out_dir, exist_ok=True)
@@ -118,16 +118,48 @@ def fetch(manifest, out_dir, force=False):
         except Refused as e:
             print(f"  refetching: {e}")
 
+    import time
+    import urllib.error
     import urllib.request
+
     print(f"  fetching {name} ({size / 1e6:.1f} MB)")
     req = urllib.request.Request(url, headers={"User-Agent": "glados-loop"})
     tmp = dest + ".part"
-    with urllib.request.urlopen(req, timeout=600) as r, open(tmp, "wb") as f:
-        while True:
-            block = r.read(1 << 20)
-            if not block:
-                break
-            f.write(block)
+
+    # **Retried, because the first real run died of a 504.** A release CDN
+    # timing out is not a fact about the pin and not a reason to spend the
+    # night without an author; it is weather. Only transient shapes are
+    # retried -- a 404 is a wrong URL and a 403 is a wrong credential, and
+    # asking those again four times is four times the same answer.
+    #
+    # And the failure is a Refused rather than a traceback, for the reason
+    # `ask_model` learned one file over: twenty lines of urllib with the
+    # useful half in the middle is not a message anybody reads.
+    last = None
+    for attempt in range(4):
+        if attempt:
+            wait = (2 ** attempt) * backoff
+            print(f"  retrying in {wait:g}s after {last}")
+            # `backoff` exists so the selftest can exercise the retry
+            # path without spending fourteen seconds asleep on every push.
+            if wait:
+                time.sleep(wait)
+        try:
+            with urllib.request.urlopen(req, timeout=600) as r, open(tmp, "wb") as f:
+                while True:
+                    block = r.read(1 << 20)
+                    if not block:
+                        break
+                    f.write(block)
+            break
+        except urllib.error.HTTPError as e:
+            last = f"HTTP {e.code}"
+            if e.code not in (408, 429, 500, 502, 503, 504):
+                raise Refused(f"{url} answered {last}")
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            last = str(e)
+    else:
+        raise Refused(f"{url} could not be fetched after 4 tries: {last}")
     # Verified before it takes the real name, so a failed fetch never leaves
     # something behind that the next run mistakes for a cache hit.
     check(tmp, size, want)
@@ -205,6 +237,18 @@ def selftest():
         # fetch must not be mistaken for the real thing next time.
         claim(not os.path.exists(os.path.join(tmp, "thing.bin.part")),
               "a verified fetch leaves no .part behind")
+
+        # A transport that will not answer is a refusal with a reason, not a
+        # stack. The first run on a runner died of a 504 and printed twenty
+        # lines of urllib; `file://` to nowhere exercises the same path with
+        # no network at all.
+        gone = os.path.join(tmp, "gone.txt")
+        with open(gone, "w", encoding="utf-8", newline="\n") as f:
+            f.write("# from file:///no/such/file/anywhere\n"
+                    "%s  %d  thing.bin\n" % (d, len(body)))
+        refuses(lambda: fetch(gone, os.path.join(tmp, "dest"), backoff=0),
+                "could not be fetched after 4 tries",
+                "an unreachable source is refused by name, not by traceback")
 
     print()
     if all(claims):
