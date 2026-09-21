@@ -130,6 +130,10 @@ EVALUATOR = (
     "tools/cargocheck.py",
     # The operator writes the north star and nothing else writes it.
     "loop/goal.txt",
+    # Which model authors. A loop able to repin its own author could choose
+    # one that says yes -- the same objection the criterion axis exists to
+    # answer, arriving on the weights instead of on the bar.
+    "tools/models/",
 )
 
 #: Human-only or generated surfaces. The anchors decide what every machine
