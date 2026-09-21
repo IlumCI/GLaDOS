@@ -410,6 +410,44 @@ def adopted_points(root):
     return out
 
 
+def balked_dir(root):
+    return os.path.join(root, "loop", "ladder", "balked")
+
+
+def balked(root, point):
+    """How many nights the author could not write this rung at all.
+
+    **The third way a rung gets stuck, and it is the same shape as the
+    other two.** `create` decodes at temperature 0, so its first attempt
+    against an unchanged card is identical every night; if all its
+    attempts fail the night files no certificate, `refused` never moves,
+    and the rung blocks every rung behind it for good. The other two were
+    a raise that killed the read, and a refusal earlier than the
+    certificate; this one is a refusal earlier than the runner.
+
+    Counted in files rather than derived, unlike `met` and `refused`, and
+    the difference is honest: those are properties of the ledger, which
+    the loop cannot forge, while this records something that happened here
+    and nowhere else. It can only ever retire a rung and never mark one
+    met, so the property that matters -- that nothing the loop writes can
+    declare its own success -- is untouched.
+    """
+    d = os.path.join(balked_dir(root), point[:16])
+    if not os.path.isdir(d):
+        return 0
+    return len([n for n in os.listdir(d) if not n.startswith(".")])
+
+
+def note_balk(root, point, why):
+    """Record that the author could not write this rung tonight."""
+    d = os.path.join(balked_dir(root), point[:16])
+    os.makedirs(d, exist_ok=True)
+    n = "%04d.txt" % (balked(root, point) + 1)
+    with open(os.path.join(d, n), "w", encoding="utf-8", newline="\n") as f:
+        f.write(why.rstrip("\n") + "\n")
+    return os.path.relpath(os.path.join(d, n), root).replace(os.sep, "/")
+
+
 def state(root):
     """Each rung with `met` and `retired`, both derived from the ledger.
 
@@ -434,8 +472,10 @@ def state(root):
         # earlier than that -- by `godel.admit`, before an envelope exists --
         # files nothing, never retires, and blocks every rung behind it for
         # good. Exactly one was in that state.
+        r["balked"] = balked(root, r["point"])
         r["retired"] = (not r["met"]) and (
-            refused >= RETIRE_AFTER or bool(r["stale"]))
+            refused >= RETIRE_AFTER or bool(r["stale"])
+            or r["balked"] >= RETIRE_AFTER)
     return rungs
 
 
@@ -476,13 +516,19 @@ def cmd_progress(root):
     # Two ways to retire and they are different facts: a rung the judges
     # refused three times was tried and lost, a stale one was never tried at
     # all. One line for both would read as evidence that does not exist.
-    spent = sum(1 for r in rungs if r["retired"] and not r["stale"])
+    spent = sum(1 for r in rungs if r["retired"] and not r["stale"]
+                and r.get("balked", 0) < RETIRE_AFTER)
     stale = sum(1 for r in rungs if r["retired"] and r["stale"])
     if spent:
         print("  %d retired after %d refusals each" % (spent, RETIRE_AFTER))
     if stale:
         print("  %d retired without being tried, the rules having tightened"
               % stale)
+    balk = sum(1 for r in rungs
+               if r["retired"] and r.get("balked", 0) >= RETIRE_AFTER)
+    if balk:
+        print("  %d retired because the author could not write them, %d "
+              "night(s) each" % (balk, RETIRE_AFTER))
     nxt = open_rung(rungs, root)
     for r in rungs:
         if r.get("stale"):
@@ -1067,6 +1113,19 @@ def selftest():
         nxt = open_rung(rs)
         claim(nxt is not None and nxt["seq"] == rs[0]["seq"],
               "so the read survives it and the stale rung is never offered")
+
+        # **The third stuck shape.** `create` is temperature 0, so a rung
+        # it cannot write is a rung it cannot write every night, and a
+        # local refusal files no certificate for `refused` to count.
+        first = state(tmp)[0]
+        claim(balked(tmp, first["point"]) == 0,
+              "a rung starts with no balks against it")
+        for _ in range(RETIRE_AFTER):
+            note_balk(tmp, first["point"], "the author came back with nothing")
+        claim(balked(tmp, first["point"]) == RETIRE_AFTER,
+              "and each night the author balks is recorded")
+        claim(state(tmp)[0]["retired"],
+              "so a rung nobody can write retires instead of blocking")
         os.remove(os.path.join(tmp, "loop", "ladder", "0002-there.rung"))
 
         r, why = propose_finish(tmp, fenced(_rung(g, 7, title="leapfrog")))
@@ -1092,7 +1151,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("cmd", nargs="?", default="progress",
                     choices=("goal", "list", "next", "progress", "admit",
-                             "propose"))
+                             "propose", "balk"))
     ap.add_argument("path", nargs="?")
     ap.add_argument("--root", default=ROOT)
     ap.add_argument("--emit-env")
@@ -1112,6 +1171,19 @@ def main():
             if not a.path:
                 print("  admit wants a rung file"); return 2
             return cmd_admit(a.root, a.path)
+        if a.cmd == "balk":
+            # The night calls this when the author came back with nothing,
+            # so a rung nobody can write retires instead of blocking.
+            rungs = state(a.root)
+            nxt = open_rung(rungs)
+            if nxt is None:
+                print("  no open rung to record a balk against")
+                return 2
+            at = note_balk(a.root, nxt["point"], a.path or "(unstated)")
+            n = balked(a.root, nxt["point"])
+            print("  rung %s balked %d time(s) of %d: %s"
+                  % (nxt["seq"], n, RETIRE_AFTER, at))
+            return 0
         if a.cmd == "propose":
             # **What `propose` needs is an endpoint, and it was demanding a
             # credential.** The gate predates the author moving into the job:

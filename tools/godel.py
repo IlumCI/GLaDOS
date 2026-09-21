@@ -1557,19 +1557,39 @@ def wire_module(root, target):
 CREATE_TRIES = 6
 
 
+class NoCargo(Exception):
+    """There is no cargo here at all, which is not a broken candidate."""
+
+
 def _cargo_check(root):
-    """(returncode, stderr) of a release check in its own target dir."""
-    return subprocess.run(
-        ["cargo", "check", "--release", "--message-format=short",
-         "--target-dir", "target/authorcheck"],
-        cwd=root, capture_output=True, text=True)
+    """(returncode, stderr) of a release check in its own target dir.
+
+    A host with no cargo raises rather than answering, because a missing
+    toolchain and a candidate that does not compile are different facts and
+    the caller has a third answer for the first. The night job had no
+    toolchain at all when this was written, so without the distinction the
+    author would have died on `FileNotFoundError` every night.
+    """
+    try:
+        return subprocess.run(
+            ["cargo", "check", "--release", "--message-format=short",
+             "--target-dir", "target/authorcheck"],
+            cwd=root, capture_output=True, text=True)
+    except (FileNotFoundError, OSError) as e:
+        raise NoCargo(str(e))
 
 
 _BASELINE = {}
 
 
 def baseline_compiles(root):
-    """Whether the tree compiles before anything is applied. Cached.
+    """(ok, why not) for the tree before anything is applied. Cached.
+
+    The reason is carried because the two ways to fail are different facts
+    an operator acts on differently: a host with no toolchain wants one
+    installed, and a tree that will not build wants looking at. Reporting
+    both as "does not compile" sent this session at the wrong one once
+    already.
 
     **The canary, and it caught this check on its first run.** A `cargo`
     that cannot build the tree at all -- a missing target, an unavailable
@@ -1582,7 +1602,12 @@ def baseline_compiles(root):
     """
     key = os.path.abspath(root)
     if key not in _BASELINE:
-        _BASELINE[key] = _cargo_check(root).returncode == 0
+        try:
+            ok = _cargo_check(root).returncode == 0
+            _BASELINE[key] = (ok, "" if ok else
+                              "the tree does not compile before the patch")
+        except NoCargo as e:
+            _BASELINE[key] = (False, "there is no cargo here (%s)" % e)
     return _BASELINE[key]
 
 
@@ -1618,8 +1643,9 @@ def compiles(root, env):
     The patch is applied and reverted through `git apply`, so a failure
     anywhere leaves the tree exactly as it was.
     """
-    if not baseline_compiles(root):
-        return "cannot", "the tree does not compile before the patch"
+    base_ok, why = baseline_compiles(root)
+    if not base_ok:
+        return "cannot", why
     _, _, patch = parse_envelope(env)
     tmp = os.path.join(root, ".authorcheck.patch")
     io.open(tmp, "w", encoding="utf-8", newline="\n").write(patch + "\n")
@@ -1630,7 +1656,10 @@ def compiles(root, env):
         if r.returncode != 0:
             return "bad", "the patch does not apply: " + r.stderr.strip()
         applied = True
-        r = _cargo_check(root)
+        try:
+            r = _cargo_check(root)
+        except NoCargo as e:
+            return "cannot", "there is no cargo here (%s)" % e
         if r.returncode == 0:
             return "ok", ""
         return "bad", compile_errors(r.stderr)
