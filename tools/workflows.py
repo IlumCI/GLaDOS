@@ -120,6 +120,56 @@ def local_uses(doc):
     return found
 
 
+def folded_runs(path):
+    """`run:` blocks that lost their `|` and therefore fold into one line.
+
+    **This is what stopped the CI Godel machine reaching its first verdict.**
+    `loop-judge.yml` had
+
+        run: cp kernel-b2-within.txt kernel-b2.txt
+          python3 tools/retrieval.py ...
+
+    with no block scalar, so YAML folds the lines together with spaces and the
+    runner is handed one command. It died on `syntax error near unexpected
+    token '}'`, the `{ ... }` group having lost the newline before it. Its
+    baseline twin thirty lines up was written `run: |` and passed, which made
+    the failure read as something about the candidate arm.
+
+    Nothing in the parsed document can show this -- both spellings produce a
+    string -- so the *node* is inspected instead: a `run:` scalar spanning
+    more than one source line must be literal. A folded or quoted one is a
+    shell script with its newlines removed, which is never what anybody meant.
+    """
+    with open(path, encoding="utf-8") as f:
+        root = yaml.compose(f, yaml.SafeLoader)
+    bad = []
+
+    def walk(n):
+        if isinstance(n, yaml.MappingNode):
+            for k, v in n.value:
+                if (
+                    isinstance(k, yaml.ScalarNode)
+                    and k.value == "run"
+                    and isinstance(v, yaml.ScalarNode)
+                    and v.style != "|"
+                    and v.start_mark.line != v.end_mark.line
+                ):
+                    bad.append(
+                        "`run:` at line %d spans %d lines without `|`, so it "
+                        "folds into one command"
+                        % (k.start_mark.line + 1,
+                           v.end_mark.line - v.start_mark.line + 1)
+                    )
+                walk(v)
+        elif isinstance(n, yaml.SequenceNode):
+            for v in n.value:
+                walk(v)
+
+    if root is not None:
+        walk(root)
+    return bad
+
+
 def on_block(doc):
     """A workflow's `on:`, which YAML 1.1 resolves to the boolean `True`.
 
@@ -285,6 +335,7 @@ def check(root, quiet=False):
             continue
         here = ["`uses: %s` names nothing in the tree" % u
                 for u in local_uses(doc) if not resolves(root, u)]
+        here += folded_runs(path)
         here += call_contract(root, doc)
         here += output_refs(root, doc)
         bad += ["%s: %s" % (rel, h) for h in here]
@@ -412,6 +463,23 @@ def selftest():
         bad = check(tmp, quiet=True)
         claim(len(bad) == 1 and "names nothing" in bad[0],
               "a local `uses:` pointing at nothing is refused")
+
+        # The `run:` that folds. Written as the real one was, with the second
+        # line indented under a plain scalar rather than under a `|`.
+        with open(good, "w", encoding="utf-8") as f:
+            f.write(CLEAN.replace(
+                "      - name: a step\n"
+                "        env:\n          A: \"1\"\n          B: \"2\"\n"
+                "        run: echo hi\n",
+                "      - name: a step\n"
+                "        run: echo one\n          echo two\n"))
+        bad = check(tmp, quiet=True)
+        claim(any("folds into one command" in b for b in bad),
+              "a `run:` that lost its `|` is refused")
+        with open(good, "w", encoding="utf-8") as f:
+            f.write(CLEAN)
+        claim(not check(tmp, quiet=True),
+              "and a one-line `run:` is not mistaken for one")
 
         with open(good, "w", encoding="utf-8") as f:
             f.write("name: x\non: push\njobs: [\n")

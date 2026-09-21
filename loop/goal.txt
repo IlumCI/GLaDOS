@@ -1,0 +1,26 @@
+goal 1
+north-star create a native video codec
+# The operator writes this file and nothing else. Its sha256 is the goal
+# identity, the way `evidence/corpus.txt`'s is the corpus identity, and every
+# rung on the ladder names the goal it was written against -- so changing this
+# line does not quietly re-aim a ladder built for something else. It orphans
+# it, visibly, and the next night starts a new one.
+#
+# **Native means designed here rather than decoded from somebody else's
+# specification.** That is the choice that makes this judgeable at all. A
+# conformance target ("decode this H.264 clip") can only be checked against
+# reference vectors, and the machine has no way to want one figure more than
+# another. A codec of its own has two numbers it can push:
+#
+#     ratio      compressed bytes over raw bytes, at a fidelity floor
+#     decode     microseconds per frame
+#
+# Both are rails. Fidelity is the floor rather than the objective, because a
+# codec that improves its ratio by throwing away the picture is the Goodhart
+# failure this whole apparatus exists to refuse: the witness asserts PSNR
+# above a threshold and the rails then compete on ratio and time underneath it.
+#
+# What this does NOT authorise is the machine deciding it has arrived. A rung
+# counts as met when an adopted certificate carries its point -- which means a
+# witness that failed on the baseline arm and passed on the candidate. There is
+# no field anywhere in which the loop can write down that it is finished.
