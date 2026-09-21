@@ -47,6 +47,37 @@
 #
 # from https://huggingface.co/prism-ml/Ternary-Bonsai-4B-gguf/resolve/main/Ternary-Bonsai-4B-Q2_0_g64.gguf
 #
+# **And it is converted to TQ2_0 before it is served, because Q2_0 has no
+# x86 kernel.** `x86/quants.c` implements `ggml_vec_dot_q4_0_q8_0` and
+# `ggml_vec_dot_tq2_0_q8_K` and does not implement `ggml_vec_dot_q2_0_q8_0`;
+# `arch-fallback.h` maps that name to the generic path, which is scalar. The
+# model card's 56 tok/s is Apple NEON, and the card says the kernels are
+# "CPU (NEON/generic)" -- generic being exactly what a runner gets.
+#
+# Measured here at four threads, which is the runner's width:
+#
+#     Q2_0  g64     pp256  2.18 t/s     tg64  1.70 t/s
+#     TQ2_0        pp256 17.33 t/s     tg64  7.76 t/s      7.9x / 4.6x
+#
+# Those numbers reconstruct the failure that found this: a ~900-token card at
+# 2.18 t/s is 413 s of prefill plus ~235 s of generation, about 648 s, against
+# a 600 s timeout -- which is the nine-and-a-half-minute run that timed out.
+# At TQ2_0 the same work is roughly two minutes.
+#
+# The conversion is done in the job by `llama-quantize --allow-requantize`,
+# which is already in the tarball above, so nothing has to host a second
+# gigabyte. It takes about a minute and it is **byte-reproducible**: two runs
+# over the same input produced the same sha256, checked rather than assumed.
+# That is what makes it allowed at all -- an author that changed under the
+# loop would make every rung-4 certificate name a night nobody can reproduce.
+#
+# TQ2_0 is 2.06 bpw against Q2_0's 2.25, so every quantised block shrinks --
+# and the file grows, because llama.cpp refuses to ternarise the 389M-
+# parameter token embedding and promotes it to Q6_K. That is the tool being
+# right: a ternarised embedding table is a destroyed one. 252 tensors TQ2_0,
+# 145 F32, one Q6_K, and all three have x86 kernels.
+#
 # Verified rather than copied: downloaded whole, hashed, and the GGUF header
 # read back for its tensor types. The digest below is what came back.
+# derives e8e7ba16a58bd34390eaa904bfa528517e44110711e492d939d34eccb909f4f8  1261954048  Ternary-Bonsai-4B-TQ2_0.gguf
 9d968b04a3c9a794897bcc744c8072fb6a061c0e42efd03c989401ddf8baef0c  1137806656  Ternary-Bonsai-4B-Q2_0_g64.gguf

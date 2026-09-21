@@ -44,10 +44,33 @@ class Refused(Exception):
 
 def parse(text):
     """(url, [(name, size, sha256)]) out of a manifest."""
+    url, rows, _ = parse_all(text)
+    return url, rows
+
+
+def parse_all(text):
+    """As `parse`, plus the `# derives` rows.
+
+    **A derived file is pinned too, and it can be.** The author is served as
+    TQ2_0, which `llama-quantize` makes from the fetched Q2_0 in about a
+    minute -- so CI converts rather than fetching a second gigabyte from
+    somewhere somebody has to host. That is only allowed because the
+    conversion is byte-reproducible: two runs over the same input produced
+    the same sha256, checked rather than assumed. An author that changed
+    under the loop would make every rung-4 certificate name a night nobody
+    can reproduce, which is the property the pinned build number exists for.
+    """
     url = None
     rows = []
+    derived = []
     for line in text.split("\n"):
         s = line.strip()
+        if s.startswith("# derives "):
+            parts = s[len("# derives "):].split()
+            if len(parts) != 3:
+                raise Refused(f"not a derives row: {s!r}")
+            derived.append((parts[2], int(parts[1]), parts[0]))
+            continue
         if s.startswith("# from "):
             candidate = s[len("# from "):].strip()
             # **A directive must name a URL, or it is prose.** This file's own
@@ -78,7 +101,7 @@ def parse(text):
         raise Refused("the manifest has no `# from <url>` line")
     if len(rows) != 1:
         raise Refused(f"expected exactly one file, found {len(rows)}")
-    return url, rows
+    return url, rows, derived
 
 
 def digest_of(path):
@@ -246,6 +269,22 @@ def selftest():
         with open(gone, "w", encoding="utf-8", newline="\n") as f:
             f.write("# from file:///no/such/file/anywhere\n"
                     "%s  %d  thing.bin\n" % (d, len(body)))
+        dman = man + "# derives %s  %d  thing.bin\n" % (d, len(body))
+        _, _, der = parse_all(dman)
+        claim(der == [("thing.bin", len(body), d)],
+              "a `# derives` row parses beside the fetched one")
+        dp = os.path.join(tmp, "d.txt")
+        with open(dp, "w", encoding="utf-8", newline="\n") as f:
+            f.write(dman)
+        claim(check_derived(dp, tmp) == 1,
+              "and a derived file that matches verifies")
+        with open(os.path.join(tmp, "thing.bin"), "ab") as f:
+            f.write(b"!")
+        refuses(lambda: check_derived(dp, tmp), "short transfer",
+                "a derived file that does not match is refused")
+        with open(os.path.join(tmp, "thing.bin"), "wb") as f:
+            f.write(body)
+
         refuses(lambda: fetch(gone, os.path.join(tmp, "dest"), backoff=0),
                 "could not be fetched after 4 tries",
                 "an unreachable source is refused by name, not by traceback")
@@ -258,11 +297,24 @@ def selftest():
     return 1
 
 
+def check_derived(manifest, out_dir):
+    """Verify every `# derives` row against what is on disk."""
+    _, _, derived = parse_all(io.open(manifest, encoding="utf-8").read())
+    if not derived:
+        raise Refused("the manifest derives nothing")
+    for name, size, want in derived:
+        check(os.path.join(out_dir, name), size, want)
+        print(f"  {name} verifies")
+    return len(derived)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("manifest", nargs="?")
     ap.add_argument("--out", default="out/models")
     ap.add_argument("--force", action="store_true")
+    ap.add_argument("--check-derived", action="store_true",
+                    help="verify the `# derives` rows against --out")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
     if a.selftest:
@@ -271,6 +323,9 @@ def main():
         print("  which manifest?", file=sys.stderr)
         return 2
     try:
+        if a.check_derived:
+            check_derived(a.manifest, a.out)
+            return 0
         print(fetch(a.manifest, a.out, a.force))
     except Refused as e:
         print(f"::error::{e}")
