@@ -15,13 +15,18 @@
 [build]
 target = "x86_64-pc-windows-msvc"
 
-# Cleared, not inherited. The parent sets `+sse,+sse2,-soft-float` for the UEFI
-# target; on a hard-float host the first two are baseline and the third is a
-# switch with nothing to disable, so rustc warns on every single build that
-# `soft-float` cannot be disabled this way. The flags change no code generated
-# here and the warning is about a target this crate does not use, so the honest
-# thing is to stop asking for them rather than to read past it.
-rustflags = []
+# **This said "cleared, not inherited" and it was wrong**, the same way the
+# pool's copy of it was: cargo merges config files by *joining* arrays, so an
+# empty list takes nothing away and the parent's flags arrived whole --
+# `/MAP:target/glados.map` among them, which is an MSVC flag `link.exe`
+# accepts and `rust-lld -flavor gnu` reads as a filename. The pool found that
+# by failing to link for musl; this crate has never been built for a
+# non-Windows target, so here it was only ever latent.
+#
+# Nothing replaces it, because the parent scopes those flags to
+# `[target.x86_64-unknown-uefi]` now and they do not reach this crate at all.
+# The escape above for `build.target` is still real and still necessary: that
+# key is a string, and for strings the closest config does win.
 
 # Cross-compiling to Linux from this Windows machine, which is how the daemon
 # is actually built: there is no `cc` here, and cargo's default linker for a

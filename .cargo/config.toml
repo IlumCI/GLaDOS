@@ -45,10 +45,37 @@
 [build]
 target = "x86_64-unknown-uefi"
 
-# AVX is deliberately absent. Enabling it globally would let the compiler emit
-# AVX anywhere, including early boot before CR4.OSXSAVE and XCR0 are set, where
-# every such instruction raises #UD. AVX is opted into per function with
-# #[target_feature], guarded by runtime detection.
+# **Under `[target.x86_64-unknown-uefi]` and not `[build]`, because these flags
+# are about this target and cargo has no way to take them back.**
+#
+# They sat under `[build]` and therefore reached every crate in the tree that
+# cargo walked up to this file from -- `pool/` and `miner/` both. Each of those
+# carries `rustflags = []` under a comment saying "cleared, not inherited", and
+# that is simply not how cargo merges config: **arrays are joined**, so an
+# empty list contributes nothing and the parent's flags survive intact. Proved
+# rather than reasoned about, with `cargo config get build.rustflags` run
+# inside `pool/`:
+#
+#     build.rustflags = ["-C", "target-feature=+sse,+sse2,-soft-float",
+#                        "-C", "link-arg=/MAP:target/glados.map"]
+#
+# `/MAP:` is an MSVC linker flag, which is right for `lld-link` on the UEFI
+# target and is a *filename* to `rust-lld -flavor gnu`. So the pool built
+# perfectly on this Windows machine, where `link.exe` accepts it and quietly
+# writes a map file, and could not link at all for musl:
+#
+#     rust-lld: error: cannot open /MAP:target/glados.map: No such file
+#
+# That is why `pool.yml` still failed after `3fe55bd` gave its tests
+# `--target`: the target was never the only thing leaking down. The escape
+# each sub-crate makes for `build.target` is real and necessary; the one it
+# thought it was making for `rustflags` never worked.
+#
+# AVX is deliberately absent from the list. Enabling it globally would let the
+# compiler emit AVX anywhere, including early boot before CR4.OSXSAVE and XCR0
+# are set, where every such instruction raises #UD. AVX is opted into per
+# function with #[target_feature], guarded by runtime detection.
+[target.x86_64-unknown-uefi]
 rustflags = [
     "-C", "target-feature=+sse,+sse2,-soft-float",
     "-C", "link-arg=/MAP:target/glados.map",
