@@ -1,8 +1,0 @@
-looprung 1
-seq 1
-goal ce93af35a0b0364e0b918caaa96c0e6e685347d9b390091d2a3bd5430253be4f
-kind test
-target src/gfx/video.rs
-title a native video codec that encodes a 4:4:4 RGB frame to a 4:4:4 RGB frame
-witness a claim in `diag gfx` that a frame of 4x4x4 pixels reads back a frame of 4x4x4 pixels, which fails today because the struct does not exist
-why nothing can be measured until there is a value to hold one, and this is one file of about forty lines
