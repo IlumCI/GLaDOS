@@ -883,7 +883,53 @@ store.read absent us higher  -- no store mounted
         "and is not, once the build has shown it disagrees with itself by 20%",
     )
 
+    # **The flag that vetoed every adoption the loop could reach.** The
+    # loop's own command line is `--claims RAIL --bar N`, and reading
+    # every non-flag token after `--claims` made `N` a second claimed
+    # rail -- absent from both reports, so J1 vetoed. Invisible until a
+    # candidate improved the rail it claimed, because until then the
+    # refusal was correct for a different reason.
+    line = ["judge", "a", "b", "--again", "x", "y",
+            "--claims", "cost.warnings", "--bar", "9.644"]
+    claim(claims_of(line) == ["cost.warnings"],
+          "a flag after --claims ends the list rather than being skipped over")
+    claim(claims_of(["judge", "a", "b", "--claims", "one", "two"])
+          == ["one", "two"],
+          "and several rails may still be claimed")
+    claim(claims_of(["judge", "a", "b"]) == [],
+          "claiming nothing is not claiming a rail called nothing")
+
     return ok
+
+
+def claims_of(argv):
+    """The rails a candidate claims, out of `--claims NAME ...`.
+
+    **Stops at the next flag; it does not filter flags out and carry on.**
+    The first version read every remaining token that did not start with
+    `-`, so `--claims cost.warnings --bar 9.644` dropped `--bar` and then
+    swallowed `9.644` as a second claimed rail. J1 requires every claimed
+    rail to improve and no report has a rail called `9.644`, so it read
+    `absent` and vetoed.
+
+    That is a veto on every rail-judged candidate the loop can produce, and
+    it stayed invisible for exactly as long as no candidate ever improved
+    the rail it claimed -- a refusal for `net under 4` and a refusal for
+    this leave the same word in the ledger. The first night a template
+    cleared its floor is the night it showed:
+
+        J1 claimed  VETO
+          cost.warnings: better (-0.4%, against a 0% floor)
+          9.644: absent (no such rail in either report)
+    """
+    if "--claims" not in argv:
+        return []
+    out = []
+    for a in argv[argv.index("--claims") + 1:]:
+        if a.startswith("-"):
+            break
+        out.append(a)
+    return out
 
 
 def main():
@@ -936,9 +982,7 @@ def main():
             if len(argv) < at + 3:
                 raise SystemExit("  --again takes two files: the second reading of each arm")
             before2, after2 = read(argv[at + 1]), read(argv[at + 2])
-        claims = []
-        if "--claims" in argv:
-            claims = [a for a in argv[argv.index("--claims") + 1:] if not a.startswith("-")]
+        claims = claims_of(argv)
         if "--bar" in argv:
             # Raised, never lowered -- see BAR's own comment. A caller
             # passing something under the default gets the default, silently
