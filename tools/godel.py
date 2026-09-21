@@ -1198,7 +1198,7 @@ class NoInference(Exception):
     about a night that never asked anything."""
 
 
-def ask_model(system, card, meta, token, agent="glados-loop"):
+def ask_model(system, card, meta, token, agent="glados-loop", grammar=None):
     """The one transport, so there is one place a model is asked anything.
 
     `ladder.propose` asks for a milestone and `author` asks for a patch, and
@@ -1213,7 +1213,7 @@ def ask_model(system, card, meta, token, agent="glados-loop"):
     import urllib.error
     import urllib.request
 
-    body = _json.dumps({
+    payload = {
         "model": meta.get("model", "openai/gpt-4o-mini"),
         "temperature": float(meta.get("temperature", "0")),
         "max_tokens": int(meta.get("max_tokens", "1400")),
@@ -1221,7 +1221,14 @@ def ask_model(system, card, meta, token, agent="glados-loop"):
             {"role": "system", "content": system},
             {"role": "user", "content": card},
         ],
-    }).encode("utf-8")
+    }
+    # `llama-server` takes a GBNF here and constrains sampling to it, which is
+    # the difference between a format the model is asked for and one it cannot
+    # avoid. A hosted endpoint ignores the field, so passing it is safe
+    # wherever this points -- it either binds or it is surplus.
+    if grammar:
+        payload["grammar"] = grammar
+    body = _json.dumps(payload).encode("utf-8")
     url = inference_url(meta)
     req = urllib.request.Request(
         url,

@@ -378,6 +378,39 @@ def rung_card(root, rungs):
     return "\n".join(lines)
 
 
+def grammar_for(root, rungs):
+    """A GBNF that makes a malformed rung unreachable rather than improbable.
+
+    **This is `constrain.rs`'s argument, one system over.** The kernel builds
+    its decoding grammar from the live applet table so an applet that does not
+    exist cannot be sampled at all; a check made after the fact leaves the bad
+    answer reachable. The first time this loop asked a 4B model for a rung it
+    got back **zero fences**, which the contract refused correctly and which no
+    amount of prose in the prompt was going to fix.
+
+    Two fields are *known at request time*, so they are literals here rather
+    than patterns: the goal hash and the sequence number. A rung aimed at the
+    wrong north star or skipping ahead in the ladder stops being something to
+    refuse and becomes something the sampler cannot emit. `admit` still checks
+    both, because a grammar is a second lock and not a replacement for the
+    first -- it is generated from the same values, so a bug that got one wrong
+    would get both wrong.
+    """
+    kinds = " | ".join('"%s"' % k for k in witnessed_kinds())
+    return "\n".join([
+        'root ::= "```rung\\n" body "```"',
+        ('body ::= "looprung 1\\n" "seq %d\\n" "goal %s\\n" '
+         '"kind " kind "\\n" "target " path "\\n" '
+         '"title " line "\\n" "witness " line "\\n" "why " line "\\n"')
+        % (len(rungs) + 1, goal_hash(root)),
+        "kind ::= %s" % kinds,
+        # Paths the kind masks could admit; `admit` still decides.
+        'path ::= [a-zA-Z0-9_./-]+',
+        # One line, and never empty: a rung nobody can read is not a rung.
+        'line ::= [^\\n]+',
+    ]) + "\n"
+
+
 def propose_finish(root, reply, rungs=None):
     """The offline half, so the drills need no network.
 
@@ -387,8 +420,14 @@ def propose_finish(root, reply, rungs=None):
     """
     fences = FENCE.findall(reply)
     if len(fences) != 1:
+        # **The reply travels with the refusal.** The first real run answered
+        # "0 rung fence(s)" and that named the rule broken without showing
+        # what was written instead, which is the difference between a refusal
+        # somebody can act on and one they can only count. Bounded, because a
+        # model with no grammar can run on for a while.
+        preview = " ".join(reply.split())[:240]
         return None, ("%d rung fence(s) where the contract says exactly one"
-                      % len(fences))
+                      " -- it said: %s" % (len(fences), preview or "(nothing)"))
     before, _, rest = reply.partition("```rung")
     _, _, after = rest.partition("```")
     if before.strip() or after.strip():
@@ -415,7 +454,8 @@ def propose(root, token):
     meta, system = godel.read_prompt("decompose.md")
     try:
         reply = godel.ask_model(system, rung_card(root, rungs), meta, token,
-                                "glados-loop-decompose")
+                                "glados-loop-decompose",
+                                grammar=grammar_for(root, rungs))
     except godel.NoInference as e:
         # Not a traceback, and not a verdict either. The ladder simply does
         # not grow tonight, and the reason is one line rather than a stack --
@@ -551,6 +591,15 @@ def selftest():
             f.write(godel.render_cert(c))
         claim(state(tmp)[0]["met"] is True,
               "and an adopted one with the rung's point does")
+
+        # --- the grammar, which must agree with what `admit` would allow ---
+        g_text = grammar_for(tmp, [])
+        claim(('"seq 1\\n"' in g_text) and (g in g_text),
+              "the grammar pins the goal hash and the next seq as literals")
+        claim(all(('"%s"' % k) in g_text for k in witnessed_kinds())
+              and '"feature"' not in g_text,
+              "and offers exactly the witnessed kinds, so an unjudgeable "
+              "milestone cannot be sampled")
 
         # --- the decomposer's output contract -----------------------------
         # Everything a model could answer that must not become a rung. The
