@@ -400,6 +400,28 @@ jobs:
                   echo "  model: no rung is open" > /tmp/account.txt
                   continue
                 fi
+                # **No author is not a balk.** The author step is
+                # `continue-on-error`, so a night where llama-server never
+                # answered carries on -- and the model lane would then get
+                # a connection refused, come back empty, and that would be
+                # recorded as the author having balked at this rung. Three
+                # of those retire it. So an afternoon of failed downloads
+                # or a runner with no disk would retire every rung on the
+                # ladder in a week, and the ledger would say the author
+                # could not write them.
+                #
+                # A balk is a fact about the RUNG: it was asked for and the
+                # author came back with nothing. There being no author to
+                # ask is a fact about the night, and it belongs to nobody.
+                # Same distinction the witness arm draws between a claim
+                # failure and an infra death, and the one the candidate
+                # build draws between itself and the baseline's.
+                if [ "${{ steps.author.outcome }}" = "failure" ]; then
+                  echo "  model: no author answered tonight, so this rung" \
+                       "was never asked" > /tmp/account.txt
+                  echo "::notice::the model lane stood down: no inference server"
+                  continue
+                fi
                 # **Which entry point is a property of the kind.** It was
                 # `author` for every rung, and `author` asks the model to
                 # hand-write a unified diff: hunk headers, line counts, the
@@ -574,12 +596,25 @@ jobs:
       axis: ${{ needs.propose.outputs.axis }}
       corpus: ${{ needs.propose.outputs.corpus }}
 
-  # --- a dry run leaves no candidate ref behind -----------------------------
+  # --- no night leaves a candidate ref behind -------------------------------
+  #
+  # **It was `inputs.dry_run` alone, and that leaked a branch per bad
+  # night.** `adopt` deletes the ref on its way out, but it only runs when
+  # `judge` succeeded -- so every night the judge failed, was skipped or was
+  # cancelled left `loop/cand/<point>` on the remote forever. Two were
+  # already stranded when this was noticed, from the two nights the judge
+  # could not start. Nightly, over a year, that is a refs list nobody can
+  # read and a clone that carries every candidate the loop ever refused.
+  #
+  # Keyed on `adopt` rather than on `judge`, because adopt is the thing that
+  # does the deleting: any outcome of it other than success means the branch
+  # is still there, and that is one condition covering the dry run, the
+  # failed judge, the skipped judge and an adopt that fell over itself.
   tidy:
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    needs: [propose, judge]
-    if: always() && needs.propose.outputs.have == 'yes' && inputs.dry_run
+    needs: [propose, judge, adopt]
+    if: always() && needs.propose.outputs.have == 'yes' && needs.adopt.result != 'success'
     permissions:
       contents: write
     steps:
