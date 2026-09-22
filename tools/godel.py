@@ -653,8 +653,20 @@ def parse_cert(text):
     if c["kind"] not in KIND_NAMES:
         raise ValueError(f"{c['kind']!r} is not a kind")
     for k in ("sections", "suites", "claims"):
+        # **`-` means nobody counted, and that is a fact a certificate has
+        # to be able to state.** A candidate that will not build never
+        # boots, so there is no second number -- and a candidate that will
+        # not build is a refusal the ledger must record, or the rung that
+        # produced it is offered again every night forever. Rendering `0/0`
+        # instead would read as a boot that answered nothing, which is a
+        # different fact and one a later reader cannot tell from this one.
+        # `chi-bar`, `witness` and `moved` all already spell absence this
+        # way.
+        if c[k] == "-":
+            continue
         if not re.match(r"^\d+/\d+$", c[k]):
-            raise ValueError(f"{k} is not a before/after pair")
+            raise ValueError(f"{k} is not a before/after pair, nor - for "
+                             "nobody counted")
     if c["witness"] not in ("fail-then-pass", "-"):
         raise ValueError("witness is neither fail-then-pass nor -")
     return c
@@ -1417,7 +1429,57 @@ SHORT = "\n".join(["pub fn zigzag(i: usize) -> usize {", "    i", "}"])
 #: What a claim looks like at boot. `verify-boot` counts lines matching
 #: `^  ok ` and `feature`'s J1 reads that count, so a file whose selftest
 #: prints nothing adds no claim however well it compiles.
+#: Text that is the card's example and never a description. A claim
+#: carrying one of these was copied rather than written, and it reads
+#: identically to a real claim everywhere except to a person.
+PLACEHOLDERS = ("what this checks", "what it checks", "what the check does")
+
+#: An angle-bracket slot the card offered and the reply did not fill. The
+#: card has to show the shape somehow, and every way of showing it is a
+#: string the model may copy -- so the one it is shown is made obviously a
+#: slot, and a slot that survives into the file is refused by its brackets
+#: rather than by a list of phrases somebody has to keep up to date.
+SLOT = re.compile(r'"[^"]*<[^">]+>[^"]*"')
+
 CLAIM_SHAPE = ("kprintln!", '"ok "', '"FAIL"')
+
+
+#: What `adopt` does with a judged certificate, as a pure function.
+#:
+#: **The staleness check was four lines of shell in a job that runs once a
+#: night, and it is the whole of the loop's concurrency safety.** If the tip
+#: moved while the judge was building and booting, the verdict is about a
+#: parent that is no longer there and must not land, whatever it said -- the
+#: entry is filed `stale` and the point re-authors from the new tip under a
+#: new name, because `parent-tree` is inside the envelope hash.
+#:
+#: It was one of the three Phase 1 drills, and the drill would have been a
+#: night with a race arranged inside it: expensive, slow, and passing or
+#: failing for reasons a reader could not separate from the night's own.
+#: `update::decide` is the shape this tree already uses for exactly this
+#: problem -- a decision with a handful of states, extracted so all of them
+#: are asserted with nothing staged. So the drill becomes arithmetic that
+#: runs on every selftest rather than a runner spent once.
+#:
+#: Three states and no more. A verdict about the live tree stands; a verdict
+#: about anything else is stale; and what the commit is built on top of
+#: follows from the verdict rather than from a second decision that could
+#: disagree with the first.
+def adopt_decide(parent, live, verdict, candidate):
+    """`(verdict, base)` for a certificate judged against `parent`.
+
+    `base` is the tree the adoption commit is built from: the candidate on
+    an adoption, the live tree on anything else. That pairing is the rule
+    -- a refusal that built on the candidate tree would land the code it
+    just refused, which is the one mistake here that writes itself into
+    history and is invisible in the ledger, since the certificate would say
+    `refuse` beside a tree that carries the change.
+    """
+    if parent != live:
+        return "stale", live
+    if verdict == "adopt":
+        return "adopt", candidate
+    return verdict, live
 
 
 def prints_a_claim(body):
@@ -1436,11 +1498,28 @@ def prints_a_claim(body):
     spend a runner on a file that cannot possibly pass it.
     """
     missing = [w for w in CLAIM_SHAPE if w not in body]
-    if not missing:
-        return None
-    return ("the selftest prints no claim, so the boot's count cannot rise "
-            "and J1 has nothing to read -- it is missing %s"
-            % ", ".join(missing))
+    if missing:
+        return ("the selftest prints no claim, so the boot's count cannot "
+                "rise and J1 has nothing to read -- it is missing %s"
+                % ", ".join(missing))
+    # **The card's own placeholder is refused, or the card teaches it.**
+    # The retry card showed the claim shape with `what it checks` where the
+    # description belongs, and the first file ever to compile copied that
+    # string verbatim -- so the boot would have printed `ok    what it
+    # checks`, J1 would have counted it, and it would have been adopted.
+    # A claim whose text describes nothing is a claim nobody can read back
+    # against the thing it claims, and every later candidate would have
+    # said the same words. Cheaper to make the placeholder unreachable than
+    # to hope the card is read as a shape rather than as a line to copy --
+    # `constrain.rs`'s argument, on a string.
+    said = [w for w in PLACEHOLDERS if w in body]
+    if SLOT.search(body):
+        said.append("an unfilled <...> slot")
+    if said:
+        return ("the claim's text is the card's own placeholder (%s) rather "
+                "than a description of what is checked -- say what the check "
+                "establishes, in your own words" % ", ".join(said))
+    return None
 
 
 def degenerate(body):
@@ -1800,7 +1879,7 @@ def create(root, kind_name, target, token, rung=None):
                 "```",
                 "",
                 "inside `selftest`, for each thing it checks, add exactly:",
-                '    crate::kprintln!("  {}   what this checks",',
+                '    crate::kprintln!("  {}   <say what this check establishes>",',
                 '                     if good { "ok " } else { "FAIL" });',
                 "",
                 "keep every other line exactly as it is.",
@@ -1821,11 +1900,20 @@ def create(root, kind_name, target, token, rung=None):
             "  `kprintln!` takes one argument per `{}` and no more. six",
             "  attempts in a row died on `argument never used`, which is",
             "  what a third argument to a two-placeholder format is.",
+            "  do NOT wrap an assigned value in parentheses. write",
+            "  `let good = a == 1 && b == 2;` and never",
+            "  `let good = (a == 1 && b == 2);` -- the parentheses are a",
+            "  warning, a warning is a cost rail, and a feature that raises",
+            "  a cost rail is refused. this is what refused the last one.",
             "  every function you call must be one you defined in this",
             "  file, or `core::`. nothing else is in scope.",
-            "  the selftest MUST print each claim with",
-            '  `crate::kprintln!("  {}   what it checks", if good { "ok " }',
-            '  else { "FAIL" });` -- a selftest that prints nothing adds no',
+            '  the selftest MUST print one line per thing it checks:',
+            '    crate::kprintln!("  {}   <what this establishes>",',
+            '                     if good { "ok " } else { "FAIL" });',
+            '  and the part in angle brackets is a SLOT: replace it with',
+            '  a sentence about what that check establishes. a claim that',
+            '  still carries the brackets, or the words "what it checks",',
+            '  is refused. a selftest that prints nothing adds no',
             "  claim and is refused whatever it returns.",
             ])
         try:
@@ -2193,6 +2281,27 @@ def selftest():
         except ValueError:
             claim(f"{what} is refused", True)
 
+    # **A candidate that will not build still has to be filed.** It was
+    # fatal to the judge job, so adopt was skipped and nothing was written
+    # -- no certificate, no ledger line, and `refused` never moving on the
+    # rung that produced it, which under a schedule is the same broken file
+    # authored every night forever. The refusal is a verdict now, and it
+    # needs a certificate that can say nobody counted: there is no second
+    # boot to count, and `0/0` would read as a boot that answered nothing.
+    dead = dict(cert, sections="-", suites="-", claims="-",
+                verdict="refuse", moved="-", witness="-",
+                why="the candidate did not build: error[E0425]")
+    claim("a certificate may say nobody counted, for a candidate that died",
+          parse_cert(render_cert(dead))["claims"] == "-")
+    for bad, what in [("12/", "a half-written pair"),
+                      ("many/more", "a count that is not a number"),
+                      ("--", "a dash that is not the dash")]:
+        try:
+            parse_cert(render_cert(dict(dead, claims=bad)))
+            claim(f"{what} is still refused", False)
+        except ValueError:
+            claim(f"{what} is still refused", True)
+
     # --- the kernel's own lines still read --------------------------------
     l1 = ("1 h3 parent=root.... variant=ca6f18a4 axis=adapter corpus=f330c22c "
           "cell=4 n=15 pred=win J1[fix=2 broke=1 wrong=5 ex=24 chi=0.00 "
@@ -2320,6 +2429,45 @@ def selftest():
           "prints no claim" in (prints_a_claim(SHORT) or ""))
     claim("and one that prints the shape is not",
           prints_a_claim(CLAIMING) is None)
+    # **The card's own example is refused, and the file that forced this
+    # is the fixture.** `src/fmt/pixel_format.rs` on
+    # loop/cand/3650dd1c79e9363b is the first thing the model lane ever
+    # got past the compiler, and its claim read `ok    what it checks` --
+    # the retry card's placeholder, copied. It would have built, booted,
+    # counted and adopted, and every candidate after it would have said
+    # the same four words. The card shows the shape with an angle-bracket
+    # slot now, and both the slot and the old phrasing are refused here,
+    # which is the only reason showing a shape at all is safe.
+    copied = CLAIMING.replace('   x"', '   what it checks"')
+    # **Every state of what `adopt` does, with nothing staged.** This was
+    # one of the three Phase 1 drills and it was going to be a night with a
+    # race arranged inside it. It is five claims instead, and the two that
+    # earn their place are the pairing ones: a refusal must build on the
+    # LIVE tree, because a refusal built on the candidate tree lands the
+    # code it just refused -- and the certificate would read `refuse` beside
+    # a tree that carries the change, which is a lie nothing in the ledger
+    # could catch.
+    claim("a verdict about the live tree stands",
+          adopt_decide("A", "A", "adopt", "C") == ("adopt", "C"))
+    claim("and an adoption builds on the candidate tree",
+          adopt_decide("A", "A", "adopt", "C")[1] == "C")
+    claim("a refusal builds on the live tree, never the candidate's",
+          adopt_decide("A", "A", "refuse", "C") == ("refuse", "A"))
+    claim("a tip that moved mid-judge is stale whatever the verdict said",
+          adopt_decide("A", "B", "adopt", "C")[0] == "stale"
+          and adopt_decide("A", "B", "refuse", "C")[0] == "stale")
+    claim("and a stale entry lands on the live tree, so it changes no code",
+          adopt_decide("A", "B", "adopt", "C")[1] == "B")
+    claim("a verdict the table does not know is carried, not guessed at",
+          adopt_decide("A", "A", "superseded", "C") == ("superseded", "A"))
+    claim("a claim carrying the card's placeholder is refused",
+          "placeholder" in (prints_a_claim(copied) or ""))
+    slotted = CLAIMING.replace('   x"', '   <what this establishes>"')
+    claim("and so is one that still carries the slot's brackets",
+          "slot" in (prints_a_claim(slotted) or ""))
+    claim("while a description that merely mentions checking is fine",
+          prints_a_claim(CLAIMING.replace(
+              '   x"', '   encoding checks every byte of the block"')) is None)
     claim("the envelope is identity only -- no account state in the bytes",
           "minutes" not in env and "alpha" not in env and "boots" not in env)
     try:
@@ -2554,6 +2702,10 @@ def main():
                    help="the plan as key=value, which is what a caller "
                         "putting it in a job output wants; the prose "
                         "form is for a person")
+    s = sub.add_parser("adopt-decide")
+    s.add_argument("--cert", required=True)
+    s.add_argument("--live", required=True,
+                   help="the tree loop/main points at right now")
     s = sub.add_parser("admit")
     s.add_argument("file")
     s = sub.add_parser("point")
@@ -2671,6 +2823,19 @@ def main():
             print("  the series is spent; only a new corpus refills it")
             return 1
         print(f"  the next counted test judges at chi >= {floor:.3f}")
+        return 0
+    if a.cmd == "adopt-decide":
+        text = io.open(a.cert, encoding="utf-8").read()
+        f = {}
+        for line in text.splitlines():
+            parts = line.split(None, 1)
+            if len(parts) == 2:
+                f.setdefault(parts[0], parts[1].strip())
+        verdict, base = adopt_decide(f.get("parent-tree", ""), a.live,
+                                     f.get("verdict", ""),
+                                     f.get("candidate-tree", ""))
+        print("verdict=%s" % verdict)
+        print("base=%s" % base)
         return 0
     if a.cmd == "oops":
         entries = load_entries(a.root)

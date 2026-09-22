@@ -356,16 +356,49 @@ jobs:
       - name: Become the candidate
         run: git checkout -f --detach "$CAND_REF"
 
+      # **A candidate that will not build is a REFUSAL, not a red run.**
+      # It was fatal, so the judge job went red, `adopt` was skipped for
+      # needing it, and nothing was filed -- no certificate, no ledger line,
+      # and `refused` never moved on the rung that produced it. Under a
+      # schedule that is a silent stall: the same rung is offered again
+      # every night, the author writes the same broken file at temperature
+      # zero, and the loop spends a runner a night forever with a human
+      # needed to notice. The balk mechanism exists to stop exactly that one
+      # stage earlier, and this is the same hole one stage later.
+      #
+      # The baseline's build stays fatal, deliberately. A baseline that will
+      # not build is the runner or the branch being wrong, not the
+      # candidate, and blaming a candidate for infrastructure is the
+      # two-machines error propose.yml already records.
       - name: Build the candidate
+        id: cand-build
+        continue-on-error: true
         run: |
           set -euo pipefail
           cargo build --release --locked 2>&1 | tee build-b.log
 
+      - name: A candidate that did not build is refused here
+        if: steps.cand-build.outcome == 'failure'
+        run: |
+          set -euo pipefail
+          errs=$(grep -E '^error' build-b.log | head -c 400 | tr '\n' ' ' || true)
+          echo "CAND_DEAD=the candidate did not build: ${errs:-no error line}" >> "$GITHUB_ENV"
+
       - uses: ./.github/actions/verify-boot
+        id: cand-boot
+        if: env.CAND_DEAD == ''
+        continue-on-error: true
         with:
           arm: b
 
+      - name: A candidate that did not boot is refused too
+        if: env.CAND_DEAD == '' && steps.cand-boot.outcome == 'failure'
+        run: |
+          set -euo pipefail
+          echo "CAND_DEAD=the candidate built and did not survive its boot" >> "$GITHUB_ENV"
+
       - name: Keep the candidate
+        if: env.CAND_DEAD == ''
         run: |
           set -euo pipefail
           cp verify.log verify-b.log
@@ -373,11 +406,11 @@ jobs:
           mv rails2.txt kernel-b2-within.txt
 
       - uses: ./.github/actions/verify-boot
-        if: fromJSON(env.LEVEL) >= 1
+        if: env.CAND_DEAD == '' && fromJSON(env.LEVEL) >= 1
         with:
           arm: b2
       - name: The candidate's between-boot partner
-        if: fromJSON(env.LEVEL) >= 1
+        if: env.CAND_DEAD == '' && fromJSON(env.LEVEL) >= 1
         run: |
           set -euo pipefail
           mv rails.txt kernel-b2.txt
@@ -395,13 +428,18 @@ jobs:
       # taken. Its baseline twin thirty lines up has the bar and passed, which
       # is what made the failure look like something about the candidate.
       - name: Or the within-boot one, at the base level
-        if: fromJSON(env.LEVEL) < 1
+        if: env.CAND_DEAD == '' && fromJSON(env.LEVEL) < 1
         run: |
           set -euo pipefail
           cp kernel-b2-within.txt kernel-b2.txt
 
-      # Unconditional, for the reason its baseline twin is -- see there.
+      # Unconditional but for a dead candidate, for the reason its
+      # baseline twin is -- see there. **Both arms build to the same path**,
+      # so running this after a failed candidate build would `stat` the
+      # BASELINE's binary and report every cost rail as `same`: a candidate
+      # that does not compile, judged as having changed nothing.
       - name: The candidate's rail block
+        if: env.CAND_DEAD == ''
         run: |
           set -euo pipefail
           python3 tools/retrieval.py "$FOREST" --limit "$QUERIES" --dump retrieval-b.tsv | tee retrieval-b.log
@@ -416,6 +454,7 @@ jobs:
       # --- the verdict ------------------------------------------------------
 
       - name: Count what both arms answered
+        if: env.CAND_DEAD == ''
         run: |
           set -euo pipefail
           sa=$(grep -c '^\[selftest\]' verify-a.log || true)
@@ -436,6 +475,24 @@ jobs:
       - name: Judge it against what it claimed, at the bar in force
         run: |
           set -euo pipefail
+          # A candidate that never built or never booted is refused before
+          # any rail is consulted, because there are no readings to consult
+          # -- and the certificate says which of the two it was, so the
+          # ledger records a refusal with a reason rather than a red run
+          # with none.
+          if [ -n "${CAND_DEAD:-}" ]; then
+            echo "MOVED=-" >> "$GITHUB_ENV"
+            echo "VERDICT=refuse" >> "$GITHUB_ENV"
+            echo "WHY=$CAND_DEAD" >> "$GITHUB_ENV"
+            # `-` and not `0`. Nothing counted these, and a zero reads as a
+            # boot that answered nothing, which is a different fact from a
+            # boot that never happened.
+            echo "SECTIONS=-" >> "$GITHUB_ENV"
+            echo "SUITES=-" >> "$GITHUB_ENV"
+            echo "CLAIMS=-" >> "$GITHUB_ENV"
+            : > judged.txt
+            exit 0
+          fi
           # Three shapes of judgement, by what the kind's J1 is.
           #
           # Witness kinds: J1 is the witness (fail-then-pass, established
@@ -585,6 +642,7 @@ jobs:
       # branch a kind could forget. Two steps, one set of greps -- a second
       # copy of them is two numbers that have to agree and will not.
       - name: The counts that may not fall
+        if: env.CAND_DEAD == ''
         run: |
           set -euo pipefail
           sa=$CLAIMS_SA; sb=$CLAIMS_SB

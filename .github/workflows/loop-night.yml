@@ -400,6 +400,28 @@ jobs:
                   echo "  model: no rung is open" > /tmp/account.txt
                   continue
                 fi
+                # **No author is not a balk.** The author step is
+                # `continue-on-error`, so a night where llama-server never
+                # answered carries on -- and the model lane would then get
+                # a connection refused, come back empty, and that would be
+                # recorded as the author having balked at this rung. Three
+                # of those retire it. So an afternoon of failed downloads
+                # or a runner with no disk would retire every rung on the
+                # ladder in a week, and the ledger would say the author
+                # could not write them.
+                #
+                # A balk is a fact about the RUNG: it was asked for and the
+                # author came back with nothing. There being no author to
+                # ask is a fact about the night, and it belongs to nobody.
+                # Same distinction the witness arm draws between a claim
+                # failure and an infra death, and the one the candidate
+                # build draws between itself and the baseline's.
+                if [ "${{ steps.author.outcome }}" = "failure" ]; then
+                  echo "  model: no author answered tonight, so this rung" \
+                       "was never asked" > /tmp/account.txt
+                  echo "::notice::the model lane stood down: no inference server"
+                  continue
+                fi
                 # **Which entry point is a property of the kind.** It was
                 # `author` for every rung, and `author` asks the model to
                 # hand-write a unified diff: hunk headers, line counts, the
@@ -574,12 +596,25 @@ jobs:
       axis: ${{ needs.propose.outputs.axis }}
       corpus: ${{ needs.propose.outputs.corpus }}
 
-  # --- a dry run leaves no candidate ref behind -----------------------------
+  # --- no night leaves a candidate ref behind -------------------------------
+  #
+  # **It was `inputs.dry_run` alone, and that leaked a branch per bad
+  # night.** `adopt` deletes the ref on its way out, but it only runs when
+  # `judge` succeeded -- so every night the judge failed, was skipped or was
+  # cancelled left `loop/cand/<point>` on the remote forever. Two were
+  # already stranded when this was noticed, from the two nights the judge
+  # could not start. Nightly, over a year, that is a refs list nobody can
+  # read and a clone that carries every candidate the loop ever refused.
+  #
+  # Keyed on `adopt` rather than on `judge`, because adopt is the thing that
+  # does the deleting: any outcome of it other than success means the branch
+  # is still there, and that is one condition covering the dry run, the
+  # failed judge, the skipped judge and an adopt that fell over itself.
   tidy:
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    needs: [propose, judge]
-    if: always() && needs.propose.outputs.have == 'yes' && inputs.dry_run
+    needs: [propose, judge, adopt]
+    if: always() && needs.propose.outputs.have == 'yes' && needs.adopt.result != 'success'
     permissions:
       contents: write
     steps:
@@ -616,7 +651,6 @@ jobs:
           python3 tools/godel.py cert --check /tmp/judge/certificate.cert
           cert=/tmp/judge/certificate.cert
           parent=$(awk '$1=="parent-tree"{print $2}' "$cert")
-          cand=$(awk '$1=="candidate-tree"{print $2}' "$cert")
           verdict=$(awk '$1=="verdict"{print $2}' "$cert")
           point=$(awk '$1=="point"{print $2}' "$cert")
           live=$(git rev-parse 'HEAD^{tree}')
@@ -627,9 +661,21 @@ jobs:
           # entry records `stale` and the point re-authors from the new tip
           # under a new name, because parent-tree is inside the envelope
           # hash.
-          if [ "$parent" != "$live" ]; then
+          #
+          # **The decision is `godel.py adopt-decide` and not four lines of
+          # shell here.** It was four lines of shell, in a job that runs
+          # once a night, and it is the whole of this loop's concurrency
+          # safety -- so proving it meant a night with a race arranged
+          # inside it, which is the Phase 1 drill that was never written.
+          # As a pure function all of its states are asserted on every
+          # selftest with nothing staged, which is what `update::decide`
+          # does for the updater and for the same reason. `base` comes back
+          # from the same call, so the tree a commit is built on cannot
+          # disagree with the verdict written beside it.
+          eval "$(python3 tools/godel.py adopt-decide --cert "$cert" \
+                    --live "$live")"
+          if [ "$verdict" = "stale" ]; then
             sed -i "s/^verdict .*/verdict stale/" "$cert"
-            verdict=stale
             echo "::notice::the tip moved mid-judge; filed as stale"
           fi
           # seq is re-derived under the lock, where it is authoritative.
@@ -652,7 +698,8 @@ jobs:
           # inseparable in history.
           name=$(sha256sum "$cert" | cut -c1-16)
           blob=$(git hash-object -w "$cert")
-          base=$([ "$verdict" = "adopt" ] && echo "$cand" || echo "$live")
+          # `base` came from adopt-decide above, beside the verdict it
+          # must agree with.
           export GIT_INDEX_FILE=/tmp/adopt-index
           git read-tree "$base"
           git update-index --add --cacheinfo \
