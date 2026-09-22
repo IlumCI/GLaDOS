@@ -413,18 +413,32 @@ jobs:
                 # The reply is held by the fence contract, then by admit(),
                 # then by the whole gate.
                 set +e
+                # **stderr into its own file, and back into the log.**
+                # `create` reports every attempt and its final refusal
+                # on stderr, and `account.txt` is stdout, so the balk
+                # reason read off it was the empty string -- which is
+                # what reached argparse as `unrecognized arguments: `
+                # with nothing after the colon, three nights running.
+                # Folding stderr into account.txt instead would lose
+                # the per-attempt lines from the runner log, and those
+                # are the only thing that said the six attempts were
+                # failing on identical errors.
+                : > /tmp/why.txt
                 if [ "$verb" = "create" ]; then
                   python3 tools/godel.py create --root . \
                     --kind "$rung_kind" --target "$rung_target" \
                     --title "$rung_title" --witness "$rung_witness" \
-                    --emit-env /tmp/env.txt > /tmp/account.txt
+                    --emit-env /tmp/env.txt \
+                    > /tmp/account.txt 2> /tmp/why.txt
                 else
                   python3 tools/godel.py author --root . \
                     --kind "$rung_kind" --target "$rung_target" \
-                    --emit-env /tmp/env.txt > /tmp/account.txt
+                    --emit-env /tmp/env.txt \
+                    > /tmp/account.txt 2> /tmp/why.txt
                 fi
                 code=$?
                 set -e
+                cat /tmp/why.txt >&2
                 if [ "$code" = "0" ]; then
                   authored=yes
                 else
@@ -438,13 +452,16 @@ jobs:
                   # asked for identically tomorrow, forever. `create` is
                   # temperature 0; that is the whole trap.
                   balked=yes
-                  # **Its own file.** `/tmp/account.txt` is written by every
-                  # lane the walk tries after this one, so reading it later
-                  # gives the template's `point=... rail=...` account rather
-                  # than why the author came back empty -- which is exactly
-                  # what reached `ladder.py balk` as six unrecognised
-                  # arguments.
-                  head -c 300 /tmp/account.txt | tr '\n' ' ' > /tmp/balk.txt
+                  # **Its own file.** `/tmp/why.txt` is written by this
+                  # lane alone, where `account.txt` is rewritten by
+                  # every lane the walk tries after this one -- so
+                  # reading that one later gives the template's
+                  # `point=... rail=...` account rather than why the
+                  # author came back empty.
+                  # The tail rather than the head: the refusal is the
+                  # last thing written, and the attempts ahead of it
+                  # are the same two compile errors six times over.
+                  tail -c 300 /tmp/why.txt | tr '\n' ' ' > /tmp/balk.txt
                 fi
                 ;;
               *)
@@ -462,8 +479,11 @@ jobs:
             fi
           done
           if [ "$balked" = "yes" ]; then
-            reason=$(cat /tmp/balk.txt 2>/dev/null || echo "the author came back with nothing")
-            python3 tools/ladder.py balk --root . "$reason" || true
+            reason=$(cat /tmp/balk.txt 2>/dev/null || true)
+            [ -n "$reason" ] || reason="the author came back with nothing"
+            # `--why=` and not `--why `, because a reason that happens to
+            # start with a dash is a flag to argparse in the spaced form.
+            python3 tools/ladder.py balk --root . --why="$reason" || true
             if [ -n "$(git status --porcelain loop/ladder)" ]; then
               git add loop/ladder
               git commit -q -m "loop: the author balked at this rung"
