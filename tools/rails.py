@@ -18,7 +18,7 @@ file is what either one asks.
 
 Usage:
     rails.py collect --kernel LOG [--rail NAME=DUMP ...] --out rails.txt
-    rails.py compare BEFORE AFTER
+    rails.py compare BEFORE AFTER [--allow NAME ...]
     rails.py judge BEFORE AFTER --claims NAME
     rails.py --selftest
 
@@ -277,6 +277,29 @@ BETTER, WORSE, SAME, ABSENT = "better", "worse", "same", "absent"
 #: ...or the two readings are not comparable at all, which is neither.
 UNSTABLE = "unstable"
 
+#: A rail that read worse and whose kind is allowed to pay for it.
+#:
+#: **A feature always grows the image, so charging it for that is
+#: charging it for existing.** `cost.image_bytes` is floored at zero
+#: and one byte larger is asserted to be `worse`, which is exactly
+#: right for a `cleanup` -- the kind whose J1 IS that rail. For a
+#: `feature` the same rail is J2, "nothing may read worse", and a new
+#: module cannot satisfy it: the bytes are the point. Measured rather
+#: than reasoned about -- two blocks differing by one byte of
+#: `cost.image_bytes` read `worse +1.0%, against a 0% floor`, and the
+#: judge's feature branch refuses on any `worse` at all. So the only
+#: kind that writes new code could never adopt, on any candidate,
+#: however good. That is the `#[inline(never)]` family this tree
+#: already declined -- every output a regression on the only rail that
+#: could score it -- arriving as a kind rather than as a template.
+#:
+#: It is a separate word and not a suppression. The movement is still
+#: measured, still printed and still in `judged.txt`, so the
+#: certificate records what the feature cost; what changes is that the
+#: number stops being a veto. What bounds the growth instead is the
+#: kind's own diff budget, which is 400 lines over 10 files.
+PRICED = "priced"
+
 # How far a control may move before dividing it out stops being defensible, as
 # a multiple of its own floor.
 #
@@ -492,7 +515,7 @@ def paired_verdict(before, after):
     return (BETTER if net > 0 else WORSE), f"fixed {fixed} broke {broke}, chi {chi:.2f}"
 
 
-def compare(before, after, before2=None, after2=None):
+def compare(before, after, before2=None, after2=None, allow=()):
     """Every rail present on either side, paired by name.
 
     By name and not by position, and every rail on either side appears. A rail
@@ -587,6 +610,20 @@ def compare(before, after, before2=None, after2=None):
             continue
         floor, src = floor_of(name)
         out.append((name, *verdict(b, a, drift.get(prefix), floor, src)))
+
+    # **Only `worse` is downgraded, and only for a named rail.** An
+    # allowed rail that got BETTER still reads better, because allowing a
+    # kind to pay a price is not the same as declining to notice it did
+    # not; and an allowed rail that is UNSTABLE stays unstable, because a
+    # measurement that did not compare has said nothing about a price. So
+    # the list can only ever move one verdict to one other, which is what
+    # keeps `--allow` from becoming a way to make a rail stop counting.
+    if allow:
+        out = [
+            (n, PRICED, why + ", and this kind is allowed to pay it")
+            if n in allow and v == WORSE else (n, v, why)
+            for n, v, why in out
+        ]
     return out
 
 
@@ -736,6 +773,32 @@ store.read absent us higher  -- no store mounted
     v, _ = verdict(one("cost.warnings", 7.0, "n", "lower"),
                    one("cost.warnings", 7.0, "n", "lower"))
     claim(v == SAME, "an unchanged count is unchanged")
+
+    # **A kind may be allowed to pay a rail, and only in one direction.**
+    # A `feature` adds a module, a module is bytes, and `cost.image_bytes`
+    # is floored at zero -- so the judge's `worse != 0` refused every
+    # feature there could ever be. `--allow` names that rail and nothing
+    # else, and the three claims here are the three ways it must not
+    # become a way of switching a rail off.
+    grew_b = [one("cost.image_bytes", 100.0, "B", "lower")]
+    grew_a = [one("cost.image_bytes", 101.0, "B", "lower")]
+    rows = {n: v for n, v, _ in compare(grew_b, grew_a)}
+    claim(rows["cost.image_bytes"] == WORSE,
+          "a feature's image growth is worse when nothing allows it")
+    rows = {n: (v, w) for n, v, w in
+            compare(grew_b, grew_a, allow=["cost.image_bytes"])}
+    claim(rows["cost.image_bytes"][0] == PRICED,
+          "and priced rather than worse when the kind may pay for it")
+    claim("+1.0%" in rows["cost.image_bytes"][1],
+          "with the movement still printed, so the certificate records it")
+    rows = {n: v for n, v, _ in
+            compare(grew_a, grew_b, allow=["cost.image_bytes"])}
+    claim(rows["cost.image_bytes"] == BETTER,
+          "an allowed rail that improved still reads better")
+    rows = {n: v for n, v, _ in
+            compare(grew_b, grew_a, allow=["cost.warnings"])}
+    claim(rows["cost.image_bytes"] == WORSE,
+          "and allowing one rail does not quieten another")
     # Named rather than left to be noticed. A group with no control is judged
     # on a fixed percentage alone, which is the weakest instrument here.
     claim(
@@ -891,6 +954,15 @@ store.read absent us higher  -- no store mounted
         rows["core.step"][0] == UNSTABLE and "does not agree with itself" in rows["core.step"][1],
         "and a build whose own two readings move the control is refused too",
     )
+    # **`--allow` may not buy its way past an invalid measurement.** A
+    # comparison that did not compare has said nothing about a price, so
+    # allowing the rail must leave it unstable rather than priced -- which
+    # is the difference between a kind paying a cost somebody measured and
+    # a kind paying one nobody did.
+    allowed = {n: v for n, v, _ in
+               compare(ctl_b, ctl_b, ctl_b2, shaky, allow=["core.step"])}
+    claim(allowed["core.step"] == UNSTABLE,
+          "and allowing a rail does not make an unstable reading payable")
     claim(
         "candidate" in rows["core.step"][1],
         "with the line saying which of the two builds it was",
@@ -948,6 +1020,28 @@ store.read absent us higher  -- no store mounted
     return ok
 
 
+def list_flag(argv, flag):
+    """The names after `flag`, stopping at the next flag.
+
+    Shared by `--claims` and `--allow` deliberately: they are the same shape,
+    and the bug recorded below is one either of them could have had. One
+    implementation to get right rather than two to keep agreeing.
+    """
+    if flag not in argv:
+        return []
+    out = []
+    for a in argv[argv.index(flag) + 1:]:
+        if a.startswith("-"):
+            break
+        out.append(a)
+    return out
+
+
+def allow_of(argv):
+    """The rails this kind may pay for, out of `--allow NAME ...`."""
+    return list_flag(argv, "--allow")
+
+
 def claims_of(argv):
     """The rails a candidate claims, out of `--claims NAME ...`.
 
@@ -968,14 +1062,7 @@ def claims_of(argv):
           cost.warnings: better (-0.4%, against a 0% floor)
           9.644: absent (no such rail in either report)
     """
-    if "--claims" not in argv:
-        return []
-    out = []
-    for a in argv[argv.index("--claims") + 1:]:
-        if a.startswith("-"):
-            break
-        out.append(a)
-    return out
+    return list_flag(argv, "--claims")
 
 
 def main():
@@ -1036,7 +1123,8 @@ def main():
             global BAR
             BAR = max(MCNEMAR_95, float(argv[argv.index("--bar") + 1]))
         if cmd == "compare":
-            for name, v, why in compare(before, after, before2, after2):
+            for name, v, why in compare(before, after, before2, after2,
+                                        allow_of(sys.argv)):
                 print(f"  {name:<20} {v:<7} {why}")
             return 0
         r = judge(before, after, claims, before2, after2)

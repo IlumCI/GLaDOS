@@ -2278,6 +2278,30 @@ def selftest():
               all('"$KIND" = "%s"' % n in jtext
                   for n, k in KINDS.items()
                   if k.enabled and k.j1 in ("witness", "claims")))
+        # **A required input nobody emits stops the judge from starting,
+        # and nothing anywhere says why.** The model lane re-derived the
+        # OOPS plan with a regular expression over `oops`'s prose; the
+        # prose changed from `N boot(s)` to `N queries per arm` when a
+        # level started buying queries, the sed matched nothing, and five
+        # `required: true` inputs went out empty. GitHub then refused to
+        # start the reusable workflow -- so the run failed with no judge
+        # in the job list, no annotation on any job, and a candidate that
+        # had compiled sitting on its branch unjudged. A failure with no
+        # log line is the worst shape available here, so the agreement is
+        # a claim rather than a thing to notice.
+        want = set()
+        body = jtext.split("jobs:", 1)[0]
+        for line in body.splitlines():
+            t = line.strip()
+            if t.endswith(":") and not t.startswith("#"):
+                last = t[:-1]
+            elif t == "required: true":
+                want.add(last)
+        claim("the judge asks for at least the five plan keys",
+              want >= {"half", "level", "minutes", "boots", "queries"})
+        emitted = set(plan([], "model", "-" * 8))
+        claim("and `oops --emit` answers every one of them",
+              emitted >= {"half", "level", "minutes", "boots", "queries"})
     # The two gates that stand in front of a runner, against the reply
     # that bought them: the first real `create` run, 70 lines of doc
     # comment and no code, which the fence contract cannot see because
@@ -2526,6 +2550,10 @@ def main():
     s = sub.add_parser("oops")
     s.add_argument("--root", default=".")
     s.add_argument("--axis", required=True)
+    s.add_argument("--emit", action="store_true",
+                   help="the plan as key=value, which is what a caller "
+                        "putting it in a job output wants; the prose "
+                        "form is for a person")
     s = sub.add_parser("admit")
     s.add_argument("file")
     s = sub.add_parser("point")
@@ -2648,6 +2676,26 @@ def main():
         entries = load_entries(a.root)
         corpus = corpus_hash(a.root) or "--------"
         p = plan(entries, a.axis, corpus)
+        if a.emit:
+            # **The prose was being read back with a regular expression,
+            # and it went stale the day the prose did.** An OOPS level
+            # buys query count rather than the extra boots a composite
+            # action cannot be looped to provide, so this line stopped
+            # saying `N boot(s)` and started saying `N queries per arm`
+            # -- and the model lane's sed, which matched on the word
+            # `boot`, silently matched nothing. `half`, `level`,
+            # `minutes`, `boots` and `queries` are all `required: true`
+            # inputs of loop-judge.yml, so five empty strings meant the
+            # judge job would not start at all: the run failed with no
+            # judge in the job list and nothing annotated, on a night
+            # whose candidate had compiled.
+            #
+            # Every other lane gets these from `next --emit-env`. This
+            # is the same numbers out of the same `plan`, so there is
+            # one producer rather than two free to disagree.
+            for k in ("half", "level", "minutes", "boots", "queries"):
+                print(f"{k}={p[k]}")
+            return 0
         print(f"  {a.axis}: {p['half']} at level {p['level']} -- "
               f"{p['minutes']} minutes, {p['queries']} queries per arm")
         return 0
