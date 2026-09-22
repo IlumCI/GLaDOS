@@ -1288,6 +1288,32 @@ and still in the certificate, and the diff budget bounds the growth.
 first real feature candidate -- refused for `unnecessary parentheses around
 assigned value`.
 
+**And the floors measure a different thing from what the judge needs.**
+`evidence-floors` boots ONE binary eight times and reports the spread: on a
+CI runner `ai.matmul` reads a p95 of **4.2%** and `smp.one_core` **1.2%**,
+against declared floors of 35% and 29%. The judge compares TWO binaries,
+and adding a module relocates every function after it -- which on a tight
+arithmetic loop is an alignment and instruction-cache effect nobody here
+has measured.
+
+A controlled group does not care: the control sits in the same binary and
+moves with it, so layout divides out along with the day. `ai.` and `smp.`
+have no control, so a movement there is the change's logic or its relayout
+and there is no instrument in this tree that can say which. Measured on the
+loop's own candidates -- a 26-line function copying sixteen bytes read
+`ai.matmul -40.5%` and `smp.one_core -30.5%`, and an earlier one read
+`smp.one_core +69.7%`. None of those can be the logic, and against a 4.2%
+and 1.2% boot-to-boot p95 none of them is the day either.
+
+`rails.py compare --adrift` reports such a rail rather than vetoing on it,
+for the `feature` kind only, and refuses to do so for a controlled group or
+a `cost.` rail -- this is about the absence of an instrument, not about
+wanting a different answer. **The hole stays named: nothing measures a
+build-to-build spread.** Closing it means booting N trivially different
+binaries -- an unused function added, as a feature candidate does -- and
+reading the spread of that, which is a run somebody has to decide to spend.
+Until then, read a verdict on `ai.*` and `smp.*` as saying nothing.
+
 The cron is 02:17 daily. It still cannot reach `main`: the token has no
 `workflows` write, the machine's world is `loop/*`, and the rolling audit
 PR is the only route to the operator's tree.

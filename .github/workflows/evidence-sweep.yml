@@ -21,8 +21,9 @@ on:
       row:
         description: "symbol to sweep (a knob.rs row)"
         default: "LEN_B"
-  # schedule:
-  #   - cron: "11 5 * * 6"
+  # Green on its first run, 35747668406.
+  schedule:
+    - cron: "11 5 * * 6"
 
 permissions:
   contents: read

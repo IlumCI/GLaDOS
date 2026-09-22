@@ -18,8 +18,10 @@ on:
     inputs:
       rounds:
         default: "500"
-  # schedule:
-  #   - cron: "29 4 * * 3"
+  # Green on its first run, 35747660044. Host-side only, so it needs no
+  # accelerator and no boot.
+  schedule:
+    - cron: "29 4 * * 3"
 
 permissions:
   contents: read
