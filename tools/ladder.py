@@ -115,6 +115,48 @@ def godel_kind(name):
     return godel.KINDS[name]
 
 
+def goal_phrase(root):
+    """The north star with its leading verb stripped, lowercased.
+
+    `create a native video codec` names a thing to build; the thing is
+    `a native video codec`. That noun phrase is what a rung must not simply
+    repeat, so it is what `restates_the_goal` looks for.
+    """
+    star = (north_star(root) or "").strip().lower()
+    for verb in ("create ", "build ", "write ", "make ", "implement ",
+                 "add ", "design "):
+        if star.startswith(verb):
+            return star[len(verb):].strip()
+    return star
+
+
+def restates_the_goal(title, root):
+    """True when a rung's title is the north star wearing a longer coat.
+
+    **Measured, and it is the whole reason the ladder was not decomposing.**
+    Every rung the 4B wrote for `create a native video codec` was titled
+    `a native video codec that encodes a 4x4 pixel buffer to a 4x4 pixel
+    buffer` -- the goal restated with a size bolted on, twice, under two
+    different kinds and two different targets. The prompt already said "it
+    must be small" and "split it and propose the first half", in prose,
+    which this tree has now measured three separate models ignoring.
+
+    So it is a refusal rather than advice: a title carrying the goal's own
+    noun phrase is not a part of the goal, it is the goal. What a part
+    looks like is a zigzag order, a quantisation table, a bit writer -- none
+    of which contain the phrase, and all of which are one file of work.
+
+    Deliberately a containment test and not an overlap fraction. A
+    fraction needs a threshold nobody can defend, and the failure being
+    caught is exact: the phrase appears whole.
+    """
+    phrase = goal_phrase(root)
+    if not phrase:
+        return False
+    flat = " ".join(title.lower().split())
+    return phrase in flat
+
+
 def nothing_built(rungs):
     """True while no rung has been met.
 
@@ -297,6 +339,11 @@ def admit(r, root, rungs=None):
     # already there produces a patch `git apply` refuses -- locally, with no
     # certificate filed and therefore nothing that would ever retire it.
     # Same stuck shape as the witnessed case, arriving from the other side.
+    if restates_the_goal(r["title"], root):
+        raise Bad(
+            "the title repeats the north star (%r) rather than naming one "
+            "part of it -- a rung is a component, and the ladder is how the "
+            "parts add up" % goal_phrase(root))
     if not godel.KINDS[r["kind"]].witness and os.path.exists(
             os.path.join(root, t)):
         raise Bad(
@@ -827,23 +874,58 @@ def propose_finish(root, reply, rungs=None):
     return r, None
 
 
+#: How many times the decomposer may be asked before the night gives up.
+#:
+#: **A refusal it can act on deserves another turn.** The contract, the
+#: goal hash and the sequence number are all things a reply gets wrong in
+#: ways the refusal names exactly, and this model has been measured
+#: producing the same first answer every time against an unchanged card --
+#: so one attempt is one sample from one distribution, and the card growing
+#: is the only thing that moves it. Same shape `godel.create` uses, and the
+#: same reason: three attempts of a 400-token decode is under a minute
+#: against a night.
+PROPOSE_TRIES = 3
+
+
 def propose(root, token):
     """Ask for the next rung. Answers (rung, why)."""
     sys.path.insert(0, os.path.join(ROOT, "tools"))
     import godel
     rungs = state(root)
     meta, system = godel.read_prompt("decompose.md")
-    try:
-        reply = godel.ask_model(system, rung_card(root, rungs), meta, token,
-                                "glados-loop-decompose",
-                                grammar=grammar_for(root, rungs))
-    except godel.NoInference as e:
-        # Not a traceback, and not a verdict either. The ladder simply does
-        # not grow tonight, and the reason is one line rather than a stack --
-        # the first night to reach this printed twenty lines of urllib and
-        # buried `410 github_models_retirement_brownout` in the middle.
-        return None, str(e)
-    return propose_finish(root, reply, rungs)
+    card = rung_card(root, rungs)
+    grammar = grammar_for(root, rungs)
+    why = "no attempt was made"
+    for attempt in range(PROPOSE_TRIES):
+        this = card if attempt == 0 else card + "\n" + "\n".join([
+            "",
+            "your last answer was refused:",
+            "  " + why,
+            "",
+            "write the rung again, fixed. name one PART of the north star,",
+            "never the north star itself.",
+        ])
+        try:
+            reply = godel.ask_model(system, this, meta, token,
+                                    "glados-loop-decompose", grammar=grammar)
+        except godel.NoInference as e:
+            # Not a traceback, and not a verdict either. The ladder simply
+            # does not grow tonight, and the reason is one line rather than
+            # a stack -- the first night to reach this printed twenty lines
+            # of urllib and buried `410 github_models_retirement_brownout`
+            # in the middle. A transport failure ends the attempts: asking
+            # again cannot fix a server that is not there.
+            return None, str(e)
+        r, why = propose_finish(root, reply, rungs)
+        if r is not None:
+            if attempt:
+                print("  admitted on attempt %d" % (attempt + 1),
+                      file=sys.stderr)
+            return r, None
+        print("  attempt %d refused: %s" % (attempt + 1, why),
+              file=sys.stderr)
+    return None, "%d attempt(s) and none admitted; the last was: %s" % (
+        PROPOSE_TRIES, why)
 
 
 def write_rung(root, r):
@@ -1071,6 +1153,22 @@ def selftest():
             _rung(g, 2, kind="feature", target="src/ai/here.rs")))
         claim(r2 is None and "already exists" in (why2 or ""),
               "and a feature naming a file that is already there is refused")
+
+        # **A rung must name a part, not the whole thing.** Every rung the
+        # 4B wrote for `create a native video codec` was titled `a native
+        # video codec that encodes a 4x4 pixel buffer...` -- the goal with a
+        # size bolted on, twice, under two kinds and two targets. The prompt
+        # said "split it" in prose and named that exact wrong answer as a
+        # counter-example, and it was produced anyway.
+        r3, why3 = propose_finish(tmp, fenced(_rung(
+            g, 2, kind="feature",
+            title="a test star that encodes a 4x4 block")))
+        claim(r3 is None and "repeats the north star" in (why3 or ""),
+              "a title that restates the north star is refused by name")
+        r4, why4 = propose_finish(tmp, fenced(_rung(
+            g, 2, kind="feature", title="a zigzag scan order over a block")))
+        claim(r4 is not None,
+              "and a title naming one part of it is admitted")
 
         # The rule whose absence cost three nights: a witnessed kind aimed
         # at a file that is not there yet is stuck, not slow -- it refuses
