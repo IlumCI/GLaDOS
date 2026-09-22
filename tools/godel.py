@@ -1958,6 +1958,18 @@ def create_finish(root, kind_name, target, reply, rung=None):
     if bad:
         return None, True, bad
     body = assemble((rung or {}).get("title", ""), items, check, notes)
+    # **The canary, where the assembled body is in hand.** It sat at the
+    # call site reading `body_of(reply)` -- the fence, which is the items,
+    # which by design carry no claim -- so it fired on every reply and
+    # refused the lane in the name of a bug that was its own. It can only
+    # fail if `assemble` stops writing the shape J1 counts, which is this
+    # file's fault and never the model's, and it says so.
+    if KINDS[kind_name].j1 == "claims":
+        bad = prints_a_claim(body)
+        if bad:
+            return None, False, (
+                "the assembled file prints no claim, which is a bug in "
+                "`assemble` and not in the reply: %s" % bad)
     fields = {
         "kind": kind_name, "rung": 4, "axis": "model",
         "parent-tree": head_tree(root), "corpus": corpus_hash(root) or "0" * 8,
@@ -2140,13 +2152,6 @@ def create(root, kind_name, target, token, rung=None):
                   % (attempt + 1, errs), file=sys.stderr)
             tried.append(errs)
             continue
-
-        if KINDS[kind_name].j1 == "claims":
-            bad = prints_a_claim(body_of(reply))
-            if bad:
-                return None, ("the assembled file prints no claim, which is "
-                              "a bug in `assemble` and not in the reply: %s"
-                              % bad)
 
         if tried:
             print("  it compiled on attempt %d" % (attempt + 1),
@@ -2658,6 +2663,17 @@ def selftest():
           and "the check reads back" in notes[0])
     claim("while the items themselves are untouched",
           "pub fn encode" in kept and "why encode is shaped this way" in kept)
+    # The canary fired on every reply once, because it read the FENCE --
+    # which by design carries no claim -- instead of the assembled file. A
+    # good reply must be admitted, and that is the claim that would have
+    # caught it.
+    claim("a reply carrying only items and a check is admitted",
+          create_finish(".", "feature", "src/fmt/px.rs",
+                        "```rust\n"
+                        "pub fn e(b: &[u8; 16]) -> [u8; 16] { *b }\n"
+                        "```\n"
+                        "check: e(&[7u8; 16])[0] == 7\n",
+                        {"title": "a pixel format"})[0] is not None)
     claim("a fence with no such tail is left exactly as it was",
           split_items("pub fn f() -> bool { true }")[0]
           == "pub fn f() -> bool { true }")
