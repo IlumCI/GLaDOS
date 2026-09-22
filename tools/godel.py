@@ -1847,7 +1847,35 @@ CHECK_LINE = re.compile(r"^check:[ \t]*(.+?)[ \t]*$", re.M)
 RESERVED = ("fn selftest", "fn claim")
 
 
-def assemble(title, items, check):
+def split_items(items):
+    """`(items, notes)` -- the fence, minus what belongs at the check.
+
+    **The model writes the `check:` line inside the fence as well as after
+    it, with its doc comments above it**, and both were going into the file
+    as Rust. `check: encode(..)[0] == 7` is not an item, and a `///` above
+    it documents nothing, so the fence ended in two hard parse errors. That
+    is every error the first six-attempt night produced: `expected
+    identifier, found !`, `unknown start of token: BACKSLASH`, `this file
+    contains an unclosed delimiter`.
+
+    Nothing is thrown away. The duplicate line is dropped because there is
+    already one after the fence and it is authoritative; the doc comments
+    above it are *about the check*, so they travel to where the check lands
+    and become ordinary comments there. Repairing a known-bad shape rather
+    than refusing it, for the reason `assemble` exists at all: the model is
+    reliably wrong about the boilerplate and reliably right about the work.
+    """
+    lines = items.rstrip("\n").split("\n")
+    while lines and (lines[-1].strip().startswith("check:")
+                     or not lines[-1].strip()):
+        lines.pop()
+    notes = []
+    while lines and lines[-1].lstrip().startswith("///"):
+        notes.insert(0, "    // " + lines.pop().lstrip()[3:].strip())
+    return "\n".join(lines), notes
+
+
+def assemble(title, items, check, notes=()):
     """A whole source file from the items, the check, and the rung's title.
 
     **Everything a model got wrong six nights running is written here.**
@@ -1876,6 +1904,7 @@ def assemble(title, items, check):
         "",
         "pub fn selftest() -> bool {",
         "    let mut ok = true;",
+    ] + list(notes) + [
         "    let good = %s;" % check.rstrip().rstrip(";"),
         '    crate::kprintln!("  {}   %s",' % flat[:70],
         '                     if good { "ok " } else { "FAIL" });',
@@ -1924,10 +1953,11 @@ def create_finish(root, kind_name, target, reply, rung=None):
         return None, True, (
             "the fence defines %s, which this file writes itself -- write "
             "only the items your check needs" % ", ".join(said))
+    items, notes = split_items(items)
     bad = degenerate(items)
     if bad:
         return None, True, bad
-    body = assemble((rung or {}).get("title", ""), items, check)
+    body = assemble((rung or {}).get("title", ""), items, check, notes)
     fields = {
         "kind": kind_name, "rung": 4, "axis": "model",
         "parent-tree": head_tree(root), "corpus": corpus_hash(root) or "0" * 8,
@@ -2606,6 +2636,36 @@ def selftest():
              "    o\n}")
     built = assemble("a pixel format that reads back what was written",
                      ITEMS, "encode(&[7u8; 16])[0] == 7")
+    # **The model writes the check inside the fence as well as after it**,
+    # with its doc comments above it, and both went into the file as Rust.
+    # `check: ..` is not an item and a `///` above it documents nothing, so
+    # the fence ended in two hard parse errors -- which is every error the
+    # first six-attempt night on this contract produced. Measured against
+    # the live model, not imagined: it does this every time.
+    FENCED = ("/// why encode is shaped this way\n"
+              "pub fn encode(b: &[u8; 16]) -> [u8; 16] { *b }\n"
+              "\n"
+              "/// the check reads back what was written\n"
+              "/// and this line documents it too\n"
+              "check: encode(&[7u8; 16])[0] == 7\n")
+    kept, notes = split_items(FENCED)
+    claim("the check duplicated inside the fence is dropped from the items",
+          "check:" not in kept)
+    claim("and the doc comments above it do not stay to document nothing",
+          "the check reads back" not in kept)
+    claim("they travel to the check, as comments that compile",
+          len(notes) == 2 and all(n.lstrip().startswith("//") for n in notes)
+          and "the check reads back" in notes[0])
+    claim("while the items themselves are untouched",
+          "pub fn encode" in kept and "why encode is shaped this way" in kept)
+    claim("a fence with no such tail is left exactly as it was",
+          split_items("pub fn f() -> bool { true }")[0]
+          == "pub fn f() -> bool { true }")
+    built_notes = assemble("t", kept, "encode(&[7u8; 16])[0] == 7", notes)
+    claim("and the notes land above the check in the assembled file",
+          built_notes.index("the check reads back")
+          < built_notes.index("let good ="))
+
     claim("the assembled file calls the macro by its crate path",
           "crate::kprintln!" in built)
     claim("and declares the accumulator the claim folds into",
