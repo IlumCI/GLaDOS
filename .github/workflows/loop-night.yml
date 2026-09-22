@@ -462,8 +462,11 @@ jobs:
             fi
           done
           if [ "$balked" = "yes" ]; then
-            reason=$(cat /tmp/balk.txt 2>/dev/null || echo "the author came back with nothing")
-            python3 tools/ladder.py balk --root . "$reason" || true
+            reason=$(cat /tmp/balk.txt 2>/dev/null || true)
+            [ -n "$reason" ] || reason="the author came back with nothing"
+            # `--why=` and not `--why `, because a reason that happens to
+            # start with a dash is a flag to argparse in the spaced form.
+            python3 tools/ladder.py balk --root . --why="$reason" || true
             if [ -n "$(git status --porcelain loop/ladder)" ]; then
               git add loop/ladder
               git commit -q -m "loop: the author balked at this rung"

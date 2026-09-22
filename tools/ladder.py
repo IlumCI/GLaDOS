@@ -1251,6 +1251,10 @@ def main():
                     choices=("goal", "list", "next", "progress", "admit",
                              "propose", "balk"))
     ap.add_argument("path", nargs="?")
+    ap.add_argument("--why", default="",
+                    help="why the author balked; an option and never a "
+                         "positional, because a reason with spaces in it "
+                         "has twice reached argparse as several arguments")
     ap.add_argument("--root", default=ROOT)
     ap.add_argument("--emit-env")
     ap.add_argument("--selftest", action="store_true")
@@ -1277,7 +1281,8 @@ def main():
             if nxt is None:
                 print("  no open rung to record a balk against")
                 return 2
-            at = note_balk(a.root, nxt["point"], a.path or "(unstated)")
+            at = note_balk(a.root, nxt["point"],
+                           a.why or a.path or "(unstated)")
             n = balked(a.root, nxt["point"])
             print("  rung %s balked %d time(s) of %d: %s"
                   % (nxt["seq"], n, RETIRE_AFTER, at))

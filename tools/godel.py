@@ -1843,34 +1843,44 @@ def create(root, kind_name, target, token, rung=None):
         # shipped spent its whole model lane on one reply: `refused: the
         # selftest prints no claim`, no attempt 2, straight to the template
         # lane. Six attempts that never happened.
-        if KINDS[kind_name].j1 == "claims":
-            bad = prints_a_claim(body_of(reply))
-            if bad:
-                print("  attempt %d has no claim to count:\n  %s"
-                      % (attempt + 1, bad), file=sys.stderr)
-                # **The code was fine; only the printing was missing.** The
-                # card carries the last failure and nothing else, so an
-                # attempt told "no claim" rewrote the whole file and lost
-                # the part that had compiled -- measured as compile, compile,
-                # no-claim, no-claim, compile, compile across six tries.
-                # Hand back what it wrote and ask for the smaller change.
-                tried.append(bad)
-                kept = body_of(reply)
-                continue
+        # **Compiled first, then asked for the claim.** The other order
+        # was the bug: a reply with no claim was never compile-checked, yet
+        # `kept` was set from it -- so the next card opened with "this is
+        # your last attempt. it COMPILES" about code that had never been
+        # built. The model added the claim to a broken file and every
+        # attempt after inherited it. Measured on run 35734721114: attempt 1
+        # no claim, then five attempts failing on the same two errors, byte
+        # for byte, because the base never changed.
         verdict, errs = compiles(root, env)
         if verdict == "cannot":
             print("  not compile-checked here (%s), so the runner decides"
                   % errs, file=sys.stderr)
             return env, None
-        if verdict == "ok":
-            if tried:
-                print("  it compiled on attempt %d" % (attempt + 1),
-                      file=sys.stderr)
-            return env, None
-        print("  attempt %d did not compile:\n%s"
-              % (attempt + 1, errs), file=sys.stderr)
-        tried.append(errs)
-    return None, ("%d attempt(s) and none compiled; the last errors were:\n%s"
+        if verdict == "bad":
+            print("  attempt %d did not compile:\n%s"
+                  % (attempt + 1, errs), file=sys.stderr)
+            tried.append(errs)
+            # It did not build, so there is nothing worth keeping and the
+            # next card must not claim there is.
+            kept = ""
+            continue
+
+        # It compiles. The only thing that can still be missing is the
+        # claim, and that is a three-line addition to a file that works.
+        if KINDS[kind_name].j1 == "claims":
+            bad = prints_a_claim(body_of(reply))
+            if bad:
+                print("  attempt %d compiles but has no claim to count"
+                      % (attempt + 1), file=sys.stderr)
+                tried.append(bad)
+                kept = body_of(reply)
+                continue
+
+        if tried:
+            print("  it compiled on attempt %d" % (attempt + 1),
+                  file=sys.stderr)
+        return env, None
+    return None, ("%d attempt(s) and none were usable; the last was:\n%s"
                   % (CREATE_TRIES, tried[-1]))
 
 
