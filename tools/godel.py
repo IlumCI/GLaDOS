@@ -1821,19 +1821,80 @@ def body_of(reply):
     return fences[0] if len(fences) == 1 else ""
 
 
-def create_finish(root, kind_name, target, reply):
+#: The one line a reply may carry outside its fence.
+CHECK_LINE = re.compile(r"^check:[ \t]*(.+?)[ \t]*$", re.M)
+
+#: An item the assembled file writes itself. A reply defining one of these
+#: is refused rather than merged around: two `selftest`s in one module do
+#: not compile, and a reply that writes its own would be writing exactly
+#: the boilerplate this assembly exists to take off it.
+RESERVED = ("fn selftest", "fn claim")
+
+
+def assemble(title, items, check):
+    """A whole source file from the items, the check, and the rung's title.
+
+    **Everything a model got wrong six nights running is written here.**
+    The `crate::` on the macro, the `ok` accumulator, the claim's exact
+    `if good { "ok " } else { "FAIL" }` shape, its text, and the absence of
+    parentheses around an assigned value -- each was a real refusal, and
+    each is now a property of this function rather than a hope about a
+    reply. `wire_module` makes the same trade one file over and for the
+    same reason.
+
+    The claim's text is the rung's own title, so it describes this file by
+    construction and cannot be a placeholder somebody has to refuse later.
+    """
+    # Kept to one line: `kprintln!` takes a format string, and a title with
+    # a newline in it would end the macro call rather than the comment.
+    flat = " ".join((title or "what this file establishes").split())
+    return "\n".join([
+        "//! %s" % flat[:100],
+        "//!",
+        "//! The items below were written by the loop's author against the",
+        "//! rung of that name. `selftest` is assembled rather than written:",
+        "//! its claim is what J1 counts, and a claim a model spells itself",
+        "//! is a claim that can be spelt wrong.",
+        "",
+        items.rstrip("\n"),
+        "",
+        "pub fn selftest() -> bool {",
+        "    let mut ok = true;",
+        "    let good = %s;" % check.rstrip().rstrip(";"),
+        '    crate::kprintln!("  {}   %s",' % flat[:70],
+        '                     if good { "ok " } else { "FAIL" });',
+        "    ok &= good;",
+        "    ok",
+        "}",
+        "",
+    ])
+
+
+def create_finish(root, kind_name, target, reply, rung=None):
     """The offline half of `create`: fence, build, admit."""
     fences = FENCE_SRC.findall(reply)
     if len(fences) != 1:
         preview = " ".join(reply.split())[:240]
         return None, ("%d source fence(s) where the contract says exactly one"
                       " -- it said: %s" % (len(fences), preview or "(nothing)"))
-    body = fences[0]
-    if not body.strip():
+    items = fences[0]
+    if not items.strip():
         return None, "the fence is empty"
-    bad = degenerate(body)
+    m = CHECK_LINE.search(reply[reply.rindex("```") + 3:])
+    if not m:
+        return None, ("no `check:` line after the fence -- the contract is "
+                      "the items in the fence and one boolean expression "
+                      "after it")
+    check = m.group(1)
+    said = [r for r in RESERVED if r in items]
+    if said:
+        return None, ("the fence defines %s, which this file writes itself -- "
+                      "write only the items your check needs"
+                      % ", ".join(said))
+    bad = degenerate(items)
     if bad:
         return None, bad
+    body = assemble((rung or {}).get("title", ""), items, check)
     fields = {
         "kind": kind_name, "rung": 4, "axis": "model",
         "parent-tree": head_tree(root), "corpus": corpus_hash(root) or "0" * 8,
@@ -1901,10 +1962,39 @@ def create(root, kind_name, target, token, rung=None):
     # for and far
     # under the kind's own budget, so the grammar bounds the *shape* and
     # `admit` still owns the real limit.
+    # **The model writes the items and one expression; the loop writes the
+    # rest of the file.** It used to be asked for the whole thing, and six
+    # nights of evidence say what that costs. On the last of them all six
+    # attempts failed to compile on two errors, and neither was about the
+    # codec:
+    #
+    #     5x  cannot find macro `kprintln` in this scope   (dropped `crate::`)
+    #     3x  cannot find value `ok` in this scope         (never declared it)
+    #
+    # Earlier nights added `argument never used` (a third argument to a
+    # two-placeholder format), `unnecessary parentheses around assigned
+    # value` (a warning, so a cost rail, so a refusal), and a claim printed
+    # without the `if good { "ok " } else { "FAIL" }` shape J1 counts. The
+    # `encode` body compiled on four separate nights. Every one of those
+    # failures is in boilerplate this file already knows how to write.
+    #
+    # So it is generated. The macro path, the `ok` accumulator, the claim's
+    # text and its exact shape are all assembled by `create_finish`, which
+    # makes each of those errors unreachable rather than merely discouraged
+    # -- `constrain.rs`'s argument about applet names, `knob.rs`'s about
+    # patches being valid by construction, and `wire_module`'s about
+    # generating a diff instead of asking for one, arriving on the one path
+    # that still asked for everything and hoped.
+    #
+    # What is left for the model is the part only it can do: the items the
+    # rung needs, and one boolean expression over them. Those still have to
+    # compile, and the retry loop feeds the compiler's own words back for
+    # exactly that.
     grammar = (
-        'root ::= "```rust\\n" body "```"\n'
-        'body ::= line{1,140}\n'
+        'root ::= "```rust\\n" body "```\\n" "check: " expr "\\n"\n'
+        'body ::= line{1,120}\n'
         'line ::= ([^`\\n] [^\\n]*)? "\\n"\n'
+        'expr ::= [^\\n]+\n'
     )
     # **Asked again on a compile error, with the error in the card.** One
     # decode and one `cargo check` is seconds; a runner is a night. The
@@ -1919,66 +2009,36 @@ def create(root, kind_name, target, token, rung=None):
     # distribution, which is what the five-for-five rung measurement shows
     # this model does.
     tried = []
-    kept = ""
     for attempt in range(CREATE_TRIES):
-        if kept:
-            # A file that compiled and printed nothing needs three lines
-            # added, not a rewrite. Asking for the rewrite is what lost it.
-            this = card + "\n" + "\n".join([
-                "",
-                "this is your last attempt. it COMPILES. do not change any",
-                "line of it except to add the missing claim printing:",
-                "",
-                "```rust",
-                kept.rstrip("\n"),
-                "```",
-                "",
-                "it was refused because:",
-                "  " + (tried[-1] if tried else "no claim was printed"),
-                "",
-                "inside `selftest`, for each thing it checks, add exactly:",
-                '    crate::kprintln!("  {}   %s",' % claim_text,
-                '                     if good { "ok " } else { "FAIL" });',
-                "",
-                "keep every other line exactly as it is.",
-            ])
-        else:
-            this = card if not tried else card + "\n" + "\n".join([
+        # **One card, because there is one failure left.** There used to be
+        # two: a compile error, and a reply that compiled and printed no
+        # claim. The second cannot happen now -- the claim is assembled, not
+        # asked for -- and with it goes the `kept` machinery that handed the
+        # last body back and asked for three lines to be added to it.
+        this = card if not tried else card + "\n" + "\n".join([
             "",
-            "your last attempt did not compile. the errors were:",
+            "your last answer did not compile. the errors were:",
             tried[-1],
             "",
-            "write the whole file again, fixed.",
+            "answer again, fixed: the fence, then the `check:` line.",
             "",
             "the mistakes these attempts keep making:",
             "  `&[u8; 16]` is the whole array; `&x[0]` is one byte.",
             "  an array and a byte are never equal: compare `x[0] == 7`,",
             "  never `x == 7`.",
             "  a length is `x.len()`, and there is no `len(x)`.",
-            "  `kprintln!` takes one argument per `{}` and no more. six",
-            "  attempts in a row died on `argument never used`, which is",
-            "  what a third argument to a two-placeholder format is.",
-            "  do NOT wrap an assigned value in parentheses. write",
-            "  `let good = a == 1 && b == 2;` and never",
-            "  `let good = (a == 1 && b == 2);` -- the parentheses are a",
-            "  warning, a warning is a cost rail, and a feature that raises",
-            "  a cost rail is refused. this is what refused the last one.",
             "  every function you call must be one you defined in this",
-            "  file, or `core::`. nothing else is in scope.",
-            '  the selftest MUST print one line per thing it checks:',
-            '    crate::kprintln!("  {}   %s",' % claim_text,
-            '                     if good { "ok " } else { "FAIL" });',
-            '  the text after the braces describes what that check',
-            '  establishes. use the line above, or your own sentence about',
-            '  this file. a selftest that prints nothing adds no claim and',
-            "  is refused whatever it returns.",
-            ])
+            "  fence, or `core::`. nothing else is in scope.",
+            "  do NOT write `selftest`. it is written for you, around what",
+            "  you answer. the fence holds items; the `check:` line holds",
+            "  one boolean expression over them.",
+        ])
         try:
             reply = ask_model(system, this, meta, token,
                               "glados-loop-create", grammar=grammar)
         except NoInference as e:
             return None, str(e)
-        env, why = create_finish(root, kind_name, target, reply)
+        env, why = create_finish(root, kind_name, target, reply, rung)
         if env is None:
             # A refusal by the fence contract or by `degenerate` is not a
             # compile error and carries nothing to feed back, so it ends
@@ -1987,18 +2047,18 @@ def create(root, kind_name, target, token, rung=None):
 
         # **A missing claim is something the model can fix on being told**,
         # so it belongs with the compile errors and not with the refusals
-        # above. It was refusing outright, and the first night after that
-        # shipped spent its whole model lane on one reply: `refused: the
-        # selftest prints no claim`, no attempt 2, straight to the template
-        # lane. Six attempts that never happened.
-        # **Compiled first, then asked for the claim.** The other order
-        # was the bug: a reply with no claim was never compile-checked, yet
-        # `kept` was set from it -- so the next card opened with "this is
-        # your last attempt. it COMPILES" about code that had never been
-        # built. The model added the claim to a broken file and every
-        # attempt after inherited it. Measured on run 35734721114: attempt 1
-        # no claim, then five attempts failing on the same two errors, byte
-        # for byte, because the base never changed.
+        # **The claim is assembled, so only the compiler can refuse now.**
+        # This used to be two checks in a delicate order -- compile, then
+        # ask whether the reply printed a claim -- and the order was itself
+        # a bug once: a reply with no claim was never compile-checked and
+        # still became the base the next card was built on, so five
+        # attempts inherited one broken file. That whole branch is gone,
+        # because a reply no longer writes the claim.
+        #
+        # `prints_a_claim` still runs, on the ASSEMBLED file, and it is a
+        # canary rather than a gate: it can only fail if `assemble` stopped
+        # writing the shape, which is this file's own bug and not the
+        # model's. It says so in those words if it ever fires.
         verdict, errs = compiles(root, env)
         if verdict == "cannot":
             print("  not compile-checked here (%s), so the runner decides"
@@ -2008,21 +2068,14 @@ def create(root, kind_name, target, token, rung=None):
             print("  attempt %d did not compile:\n%s"
                   % (attempt + 1, errs), file=sys.stderr)
             tried.append(errs)
-            # It did not build, so there is nothing worth keeping and the
-            # next card must not claim there is.
-            kept = ""
             continue
 
-        # It compiles. The only thing that can still be missing is the
-        # claim, and that is a three-line addition to a file that works.
         if KINDS[kind_name].j1 == "claims":
             bad = prints_a_claim(body_of(reply))
             if bad:
-                print("  attempt %d compiles but has no claim to count"
-                      % (attempt + 1), file=sys.stderr)
-                tried.append(bad)
-                kept = body_of(reply)
-                continue
+                return None, ("the assembled file prints no claim, which is "
+                              "a bug in `assemble` and not in the reply: %s"
+                              % bad)
 
         if tried:
             print("  it compiled on attempt %d" % (attempt + 1),
@@ -2482,6 +2535,50 @@ def selftest():
     # refuses it after a build and two boots. Driven: the first file the
     # author got past the compiler set `ok = false` on a mismatch and
     # printed not one line.
+    # **What `assemble` writes, and why each line is a claim.** Every one
+    # of these was a real refusal on a real night, from a model asked to
+    # write the whole file. They are properties of this function now, so
+    # the suite is what notices if the assembly stops writing one.
+    ITEMS = ("pub fn encode(b: &[u8; 16]) -> [u8; 16] {\n"
+             "    let mut o = [0u8; 16];\n"
+             "    let mut i = 0;\n"
+             "    while i < 16 { o[i] = b[i]; i += 1; }\n"
+             "    o\n}")
+    built = assemble("a pixel format that reads back what was written",
+                     ITEMS, "encode(&[7u8; 16])[0] == 7")
+    claim("the assembled file calls the macro by its crate path",
+          "crate::kprintln!" in built)
+    claim("and declares the accumulator the claim folds into",
+          "let mut ok = true;" in built)
+    claim("and the claim it writes is one J1 can count",
+          prints_a_claim(built) is None)
+    claim("the claim's text is the rung's title, so it describes this file",
+          "a pixel format that reads back what was written" in built)
+    claim("the check lands where a bool goes, with exactly one semicolon",
+          "let good = encode(&[7u8; 16])[0] == 7;" in built)
+    claim("a check written with its own semicolon does not get two",
+          "let good = 1 == 1;" in assemble("t", ITEMS, "1 == 1;"))
+    # A title is interpolated into a doc comment AND a format string, so a
+    # newline in it would end the comment and then end the macro call.
+    spanning = assemble("one\ntwo", ITEMS, "true").split("\n")
+    claim("a title spanning lines is flattened before it reaches either",
+          spanning[0] == "//! one two"
+          and sum(1 for l in spanning if "one two" in l) == 2)
+    claim("and an absent title still yields a describable claim",
+          prints_a_claim(assemble("", ITEMS, "true")) is None)
+
+    # The two shapes of reply the contract refuses, as opposed to the
+    # compiler refusing them later for a runner's money.
+    def finish(reply):
+        return create_finish(".", "feature", "src/fmt/nope.rs", reply,
+                             {"title": "t"})[1] or ""
+    claim("a reply that writes its own selftest is refused by name",
+          "which this file writes itself"
+          in finish("```rust\npub fn selftest() -> bool { true }\n```\n"
+                    "check: true\n"))
+    claim("and one with no check line is refused for that",
+          "no `check:` line" in finish("```rust\n%s\n```\n" % ITEMS))
+
     claim("a selftest that prints no claim is refused before a runner",
           "prints no claim" in (prints_a_claim(SHORT) or ""))
     claim("and one that prints the shape is not",

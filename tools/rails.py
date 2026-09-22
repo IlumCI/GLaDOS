@@ -169,6 +169,30 @@ CONTROL = {
 # the weakest.
 UNCONTROLLED = ("ai.", "smp.", "cost.")
 
+# **Do not tighten these floors from what `evidence-floors` reports, and the
+# reason is the one thing this file did not previously say about controls.**
+#
+# That workflow boots ONE binary eight times and reports a p95. Two
+# independent runs agree closely -- `ai.matmul` 4.2% then 3.1%,
+# `smp.one_core` 1.2% then 1.3%, `video.draw` 3.1% then 3.0% -- so the day,
+# on a CI runner, is small. It flags ten of the declared floors as too wide
+# on that basis, and acting on the flag would be a mistake.
+#
+# A control removes what the whole machine shares: a busy host, a colder
+# cache, a different core count. It does **not** remove layout. Adding a
+# module relocates every function after it, and that is per function: the
+# control is a different function from the rail, so a control can sit still
+# while the rail it is dividing into moves for no reason but its new
+# address. Measured: a 26-line file that copies sixteen bytes moved
+# `ai.matmul` by -40.5%, which is thirteen times the boot-to-boot p95 above.
+#
+# So the declared floors are not a boot-to-boot noise figure and must not be
+# set from one. They are wide because they are absorbing a build-to-build
+# variance nobody has measured, and until somebody boots N trivially
+# different binaries and reads that spread, wide is the honest direction to
+# be wrong in. `evidence-floors`'s flag answers a question this table is not
+# asking.
+
 # The two-sided 95% bar on a standard normal, and the conventional chi-squared
 # 95% line for one degree of freedom. Both named rather than inlined, and both
 # the same numbers `godel` and `paired.py` use -- two definitions of "beyond
