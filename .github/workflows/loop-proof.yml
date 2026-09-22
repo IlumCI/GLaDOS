@@ -113,6 +113,27 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           run=${{ github.run_id }}
 
+          # **The judge runs the tools from the BASELINE checkout, not from
+          # the ref this workflow was dispatched on.** That is right -- a
+          # candidate is judged by the machinery its own parent carries --
+          # and it means a proof staged off loop/main tests whatever
+          # loop/main last merged, which is only current just after a
+          # night's `follow` job has run.
+          #
+          # The first run of this proof failed exactly there, and the
+          # failure was worth having: the judge got all the way to a
+          # correct `refuse` certificate and then `cert --check` refused
+          # its own output, because loop/main's godel.py predated the
+          # `sections -` widening that certificate needs. A green run would
+          # have depended on having dispatched after a night rather than
+          # before one.
+          #
+          # So the proof does what `follow` does, onto its own ref. main
+          # wins, as it does there: the operator's tree is the authority.
+          git fetch origin main
+          git merge -X theirs --no-edit origin/main \
+            -m "proof: follow main, so the judge runs current tools"
+
           # The patch comes out of `git diff` rather than being written by
           # hand, so its headers and counts are right by construction --
           # the same argument `wire_module` makes about generating a diff

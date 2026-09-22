@@ -146,6 +146,7 @@ jobs:
       level: ${{ steps.pick.outputs.level }}
       boots: ${{ steps.pick.outputs.boots }}
       queries: ${{ steps.pick.outputs.queries }}
+      ladder: ${{ steps.pick.outputs.ladder }}
       kind: ${{ steps.pick.outputs.kind }}
       rung: ${{ steps.pick.outputs.rung }}
       axis: ${{ steps.pick.outputs.axis }}
@@ -356,8 +357,18 @@ jobs:
           rung_kind="cleanup"
           rung_title=""
           rung_witness=""
+          rung_point=""
           verb="author"
           if python3 tools/ladder.py next --root . --emit-env /tmp/rung.env; then
+            # **The rung's point, carried all the way to the certificate.**
+            # It was emitted here and read by nobody, so `ladder.py` counted
+            # `met` and `refused` against a point no certificate ever
+            # carried -- the envelope's point identifies the patch and
+            # differs every night. Both counters read zero forever, so a
+            # rung could be neither completed nor retired, and the loop
+            # would have rebuilt the same file every night with the ladder
+            # never leaving its first rung.
+            rung_point=$(awk -F= '$1=="RUNG_POINT"{print $2}' /tmp/rung.env)
             rung_target=$(awk -F= '$1=="RUNG_TARGET"{print $2}' /tmp/rung.env)
             rung_kind=$(awk -F= '$1=="RUNG_KIND"{print $2}' /tmp/rung.env)
             rung_title=$(sed -n 's/^RUNG_TITLE=//p' /tmp/rung.env)
@@ -392,6 +403,7 @@ jobs:
           code=1
           authored=no
           balked=no
+          ladder_point=""
           for lane in $order; do
             if [ "$code" = "0" ]; then break; fi
             case "$lane" in
@@ -463,6 +475,7 @@ jobs:
                 cat /tmp/why.txt >&2
                 if [ "$code" = "0" ]; then
                   authored=yes
+                  ladder_point="$rung_point"
                 else
                   # **Recorded here and not at the end of the walk.** A
                   # balk is a fact about the rung: the author was asked for
@@ -550,6 +563,10 @@ jobs:
           done < /tmp/account.txt
           point=$(awk -F= '$1=="point"{print $2}' /tmp/account.txt)
           echo "have=yes" >> "$GITHUB_OUTPUT"
+          # Empty unless the model lane worked the rung. A template or grid
+          # night is not the ladder's work, and a certificate of theirs
+          # claiming the rung would retire it for something it never tried.
+          echo "ladder=${ladder_point:-}" >> "$GITHUB_OUTPUT"
           echo "kind=$(awk '$1=="kind"{print $2}' /tmp/env.txt)" >> "$GITHUB_OUTPUT"
           echo "rung=$(awk '$1=="rung"{print $2}' /tmp/env.txt)" >> "$GITHUB_OUTPUT"
           echo "axis=$(awk '$1=="axis"{print $2}' /tmp/env.txt)" >> "$GITHUB_OUTPUT"
@@ -595,6 +612,7 @@ jobs:
       rung: ${{ needs.propose.outputs.rung }}
       axis: ${{ needs.propose.outputs.axis }}
       corpus: ${{ needs.propose.outputs.corpus }}
+      ladder: ${{ needs.propose.outputs.ladder }}
 
   # --- no night leaves a candidate ref behind -------------------------------
   #
