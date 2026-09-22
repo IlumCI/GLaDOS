@@ -66,7 +66,7 @@ Told the north star `a native TCP congestion controller`, on a tree with a
 looprung 1
 seq 1
 goal 0000000000000000000000000000000000000000000000000000000000000000
-kind test
+kind feature
 target src/net/cc.rs
 title a congestion window that clamps to its declared bounds
 witness a claim in `diag net` that a window set past MAX reads back MAX, which fails today because the struct does not exist
@@ -84,3 +84,10 @@ ladder whose first rung is the destination has not decomposed anything.
 The right first rung is almost always duller than feels satisfying: one
 struct, one bound, one round trip over four bytes. Later rungs get to be
 interesting. This one has to be *finishable*.
+
+**A title carrying the north star's own words is refused before it is a
+rung.** For `create a native video codec` the phrase `a native video codec`
+may not appear in your title at all -- not with a size bolted on, not with a
+clause after it. Name the part: `a zigzag scan order over a 4x4 block`, `a
+bit writer that packs values into a byte stream`, `the quantisation table
+for a 4x4 block`. Each of those is one file, one check, and one night.

@@ -270,12 +270,29 @@ jobs:
           mv rails.txt kernel-a2.txt
           rm -f rails2.txt
           echo "BOOTS_SPENT=2" >> "$GITHUB_ENV"
+      # **Which second reading to use is the only thing LEVEL decides.**
+      # Assembling the rail block is common to both, and it lived inside the
+      # `< 1` branch -- so the first night the OOPS schedule ever raised a
+      # level took the `>= 1` branch, never wrote `before.txt`, and the judge
+      # died on `FileNotFoundError: before.txt` with an empty `judged.txt`.
+      # The certificate read `moved absent / no line for the claimed rail`,
+      # which describes a rail that was never measured and reads exactly like
+      # a candidate that did something wrong.
+      #
+      # It could not fire until a level rose, and levels rise only on a
+      # starved trial, so it sat behind eight nights at the base level. Its
+      # twin one branch down had the same shape and the same cost: `run: |`
+      # missing a bar, which bit at the base level instead.
       - name: Or the within-boot one, at the base level
         if: fromJSON(env.LEVEL) < 1
         run: |
           set -euo pipefail
           cp kernel-a2-within.txt kernel-a2.txt
           echo "BOOTS_SPENT=1" >> "$GITHUB_ENV"
+
+      - name: The baseline's rail block
+        run: |
+          set -euo pipefail
           python3 tools/retrieval.py "$FOREST" --limit "$QUERIES" --dump retrieval-a.tsv | tee retrieval-a.log
           python3 tools/rails.py collect --rail retrieval=retrieval-a.tsv --out host-a.txt
           cat kernel-a.txt host-a.txt | grep -v '^\[rail\]' > body-a.txt
@@ -382,6 +399,11 @@ jobs:
         run: |
           set -euo pipefail
           cp kernel-b2-within.txt kernel-b2.txt
+
+      # Unconditional, for the reason its baseline twin is -- see there.
+      - name: The candidate's rail block
+        run: |
+          set -euo pipefail
           python3 tools/retrieval.py "$FOREST" --limit "$QUERIES" --dump retrieval-b.tsv | tee retrieval-b.log
           python3 tools/rails.py collect --rail retrieval=retrieval-b.tsv --out host-b.txt
           cat kernel-b.txt host-b.txt | grep -v '^\[rail\]' > body-b.txt
