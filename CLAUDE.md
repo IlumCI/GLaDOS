@@ -1305,6 +1305,17 @@ loop's own candidates -- a 26-line function copying sixteen bytes read
 `smp.one_core +69.7%`. None of those can be the logic, and against a 4.2%
 and 1.2% boot-to-boot p95 none of them is the day either.
 
+**A control removes the day and not the layout**, which is the part that
+was never written down. A control absorbs what the whole machine shares --
+a busy host, a colder cache, a different core count -- and relocation is per
+function: the control is a *different* function from the rail, so it can sit
+still while the rail it divides into moves for no reason but its new
+address. That is why the declared floors must not be tightened to the
+boot-to-boot p95 `evidence-floors` reports, even though it flags ten of them
+as too wide. They are wide because they absorb a build-to-build variance
+nobody has measured, and until somebody measures it, wide is the honest
+direction to be wrong in.
+
 `rails.py compare --adrift` reports such a rail rather than vetoing on it,
 for the `feature` kind only, and refuses to do so for a controlled group or
 a `cost.` rail -- this is about the absence of an instrument, not about
