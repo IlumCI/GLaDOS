@@ -18,8 +18,10 @@ name: loop-night
 # a hand-edited certificate refused by fsck -- plus fsck halting the whole
 # night on a corrupted ledger, proven in godel.py's own selftest.
 #
-# The cron stays commented until the Phase 1 exit proof is green, per the
-# plan: a schedule is the last thing a loop earns.
+# The cron is live. It was commented until the Phase 1 exit proof was
+# green, per the plan -- a schedule is the last thing a loop earns -- and
+# `loop-proof.yml` is that proof. See the note on the schedule below for
+# what else had to stop being true first.
 
 on:
   workflow_dispatch:
@@ -37,8 +39,37 @@ on:
       # and its own kind, so the night needs no input at all -- which is the
       # whole requirement: the operator writes one line, and the rest is the
       # system. An input left here would be a hand on the wheel every night.
-  # schedule:
-  #   - cron: "17 2 * * *"
+  # **The schedule, earned.** This read "the cron stays commented until
+  # the Phase 1 exit proof is green, per the plan: a schedule is the last
+  # thing a loop earns" for as long as the file has existed, and the proof
+  # was never written -- a gate on a thing that did not exist can only stay
+  # shut. `loop-proof.yml` is that proof and run 35748769962 is it green:
+  # the three decisions as claims, and a broken candidate refused end to
+  # end with a certificate `cert --check` accepts and `adopt-decide` lands
+  # on the live tree.
+  #
+  # What makes an unattended night safe is not the proof alone. Four things
+  # had to stop being true first, and each was a way the loop stalls with
+  # nobody watching:
+  #
+  #   a candidate that would not build took the judge down, so nothing was
+  #   filed and `refused` never moved on the rung that produced it
+  #
+  #   a night with no inference server recorded a balk against the rung,
+  #   so an afternoon of failed downloads would have retired the ladder
+  #
+  #   every failed night leaked its candidate branch, because `tidy` was
+  #   keyed on `dry_run` and `adopt` only runs after a green judge
+  #
+  #   and a rung could be neither met nor retired, because the certificate
+  #   carried the envelope's point and `ladder.py` counts on the rung's --
+  #   so the loop would have rebuilt one file every night for good
+  #
+  # It still cannot reach `main`. The token has no `workflows` write, the
+  # machine's whole world is `loop/*`, and the rolling audit PR is the only
+  # route to the operator's tree -- which a human merges.
+  schedule:
+    - cron: "17 2 * * *"
 
 permissions:
   contents: read
@@ -736,7 +767,15 @@ jobs:
         run: |
           set -euo pipefail
           tail=$(python3 tools/godel.py ledger --root . --tail 10)
-          body=$(printf 'The CI loop ledger, newest last:\n\n```\n%s\n```\n\nEvery entry is a content-named certificate under loop/ledger/entries, re-verified by ci.yml on every push to this branch. Merging is yours; the machine only ever writes here.' "$tail")
+          # **The ladder, above the ledger.** The ledger says what was
+          # judged; it does not say whether the loop is getting anywhere.
+          # An operator checking in once a week wants the second question
+          # answered first, and it is the one the north star was written to
+          # ask -- so `progress` goes at the top, where a stalled ladder is
+          # visible without reading fourteen certificates.
+          star=$(python3 tools/ladder.py goal --root . 2>/dev/null | head -2 || true)
+          rungs=$(python3 tools/ladder.py progress --root . 2>/dev/null || true)
+          body=$(printf 'Where the loop is going:\n\n```\n%s\n\n%s\n```\n\nAnd what it has judged, newest last:\n\n```\n%s\n```\n\nEvery entry is a content-named certificate under loop/ledger/entries, re-verified by ci.yml on every push to this branch. Merging is yours; the machine only ever writes here.' "$star" "$rungs" "$tail")
           n=$(gh pr list --head loop/main --base main --state open --json number --jq length)
           if [ "$n" = "0" ]; then
             gh pr create --head loop/main --base main \

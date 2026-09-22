@@ -1860,6 +1860,28 @@ def create(root, kind_name, target, token, rung=None):
         f"what must become true: {(rung or {}).get('title', '(unstated)')}",
         f"the check that will say whether it did: {(rung or {}).get('witness', '(unstated)')}",
     ])
+    # **What the card shows in the description slot is the rung's own
+    # title**, and never a placeholder. The first version showed
+    # `what this checks`, the model copied it verbatim into the first file
+    # it ever got past the compiler, and `ok    what it checks` would have
+    # been counted and adopted -- a claim describing nothing, and every
+    # candidate after it saying the same four words.
+    #
+    # The second version showed `<say what this check establishes>` and
+    # refused anything still carrying the brackets. That was worse: the
+    # model copied the slot too, so a file that compiled was refused five
+    # times in a row for the thing the card had just shown it. A contract
+    # that shows an example and then punishes the example is not a
+    # contract.
+    #
+    # The title is the honest third option. It is a real sentence about
+    # this specific file, written by the decomposer for exactly this rung,
+    # so a model that copies it verbatim has written a true claim rather
+    # than a placeholder -- which is `wire_module`'s argument again: make
+    # the good outcome the one that falls out of copying.
+    claim_text = (rung or {}).get("title") or "what this file establishes"
+    claim_text = " ".join(claim_text.split())[:70]
+
     # The fence is guaranteed rather than requested; what is inside it is not,
     # and `admit` plus the build plus the witness are what judge that.
     #
@@ -1911,8 +1933,11 @@ def create(root, kind_name, target, token, rung=None):
                 kept.rstrip("\n"),
                 "```",
                 "",
+                "it was refused because:",
+                "  " + (tried[-1] if tried else "no claim was printed"),
+                "",
                 "inside `selftest`, for each thing it checks, add exactly:",
-                '    crate::kprintln!("  {}   <say what this check establishes>",',
+                '    crate::kprintln!("  {}   %s",' % claim_text,
                 '                     if good { "ok " } else { "FAIL" });',
                 "",
                 "keep every other line exactly as it is.",
@@ -1941,13 +1966,12 @@ def create(root, kind_name, target, token, rung=None):
             "  every function you call must be one you defined in this",
             "  file, or `core::`. nothing else is in scope.",
             '  the selftest MUST print one line per thing it checks:',
-            '    crate::kprintln!("  {}   <what this establishes>",',
+            '    crate::kprintln!("  {}   %s",' % claim_text,
             '                     if good { "ok " } else { "FAIL" });',
-            '  and the part in angle brackets is a SLOT: replace it with',
-            '  a sentence about what that check establishes. a claim that',
-            '  still carries the brackets, or the words "what it checks",',
-            '  is refused. a selftest that prints nothing adds no',
-            "  claim and is refused whatever it returns.",
+            '  the text after the braces describes what that check',
+            '  establishes. use the line above, or your own sentence about',
+            '  this file. a selftest that prints nothing adds no claim and',
+            "  is refused whatever it returns.",
             ])
         try:
             reply = ask_model(system, this, meta, token,
