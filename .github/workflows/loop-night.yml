@@ -391,6 +391,7 @@ jobs:
           order=$(python3 tools/godel.py lanes --root . | sed -n 's/^order //p')
           code=1
           authored=no
+          balked=no
           for lane in $order; do
             if [ "$code" = "0" ]; then break; fi
             case "$lane" in
@@ -424,7 +425,20 @@ jobs:
                 fi
                 code=$?
                 set -e
-                if [ "$code" = "0" ]; then authored=yes; fi
+                if [ "$code" = "0" ]; then
+                  authored=yes
+                else
+                  # **Recorded here and not at the end of the walk.** A
+                  # balk is a fact about the rung: the author was asked for
+                  # it and came back with nothing. Whether some later lane
+                  # then found a knob to turn says nothing about that, and
+                  # the first version only recorded it when the whole night
+                  # came back empty -- so a night where the author balked
+                  # and a template succeeded left the rung untouched, to be
+                  # asked for identically tomorrow, forever. `create` is
+                  # temperature 0; that is the whole trap.
+                  balked=yes
+                fi
                 ;;
               *)
                 echo "  lane $lane"
@@ -440,6 +454,15 @@ jobs:
               sed 's/^/    /' /tmp/account.txt || true
             fi
           done
+          if [ "$balked" = "yes" ]; then
+            python3 tools/ladder.py balk --root . \
+              "$(head -c 300 /tmp/account.txt | tr '\n' ' ')" || true
+            if [ -n "$(git status --porcelain loop/ladder)" ]; then
+              git add loop/ladder
+              git commit -q -m "loop: the author balked at this rung"
+              git push origin HEAD:loop/main
+            fi
+          fi
           if [ "$code" != "0" ]; then
             # **A rung the author cannot write must retire, or it blocks.**
             # `create` decodes at temperature 0, so its first attempt
@@ -448,16 +471,6 @@ jobs:
             # nothing behind it is ever reached. Recorded only when the
             # model lane was the one that came back empty, since a grid
             # lane running out of points says nothing about the rung.
-            if [ "$verb" = "create" ] && [ -n "$rung_target" ]; then
-              python3 tools/ladder.py balk --root . \
-                "$(head -c 300 /tmp/account.txt | tr '\n' ' ')" || true
-              if ! git diff --quiet --cached -- loop/ladder \
-                 || [ -n "$(git status --porcelain loop/ladder)" ]; then
-                git add loop/ladder
-                git commit -q -m "loop: the author balked at this rung"
-                git push origin HEAD:loop/main
-              fi
-            fi
             echo "have=no" >> "$GITHUB_OUTPUT"
             echo "::notice::every lane is out of moves tonight:"
             cat /tmp/account.txt || true

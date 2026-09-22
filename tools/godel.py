@@ -1410,7 +1410,37 @@ MIN_DISTINCT = 0.6
 
 COMMENTS = "\n".join(["/// a comment"] * 12)
 STUCK = "\n".join(["pub fn f() {}"] + ["    let x = 1;"] * 20)
+CLAIMING = ('crate::kprintln!("  {}   x", if g { "ok " } else { "FAIL" });')
 SHORT = "\n".join(["pub fn zigzag(i: usize) -> usize {", "    i", "}"])
+
+
+#: What a claim looks like at boot. `verify-boot` counts lines matching
+#: `^  ok ` and `feature`'s J1 reads that count, so a file whose selftest
+#: prints nothing adds no claim however well it compiles.
+CLAIM_SHAPE = ("kprintln!", '"ok "', '"FAIL"')
+
+
+def prints_a_claim(body):
+    """Why this file's selftest would add no claim, or None.
+
+    **A `feature` that adds no claim is refused by J1, after a build and
+    two boots.** Driven: the first file the author got past the compiler
+    had a perfectly good `selftest` that set `ok = false` on a mismatch and
+    printed nothing at all, so the boot's claim count would not have moved
+    and the night would have been spent to say so.
+
+    Checked on the text rather than by running it, which is what makes it
+    cheap -- and it can only ever be approximate in the permissive
+    direction: a file that prints the shape might still print it in a
+    branch nothing reaches. J1 remains the judge. This only declines to
+    spend a runner on a file that cannot possibly pass it.
+    """
+    missing = [w for w in CLAIM_SHAPE if w not in body]
+    if not missing:
+        return None
+    return ("the selftest prints no claim, so the boot's count cannot rise "
+            "and J1 has nothing to read -- it is missing %s"
+            % ", ".join(missing))
 
 
 def degenerate(body):
@@ -1686,6 +1716,10 @@ def create_finish(root, kind_name, target, reply):
     bad = degenerate(body)
     if bad:
         return None, bad
+    if KINDS[kind_name].j1 == "claims":
+        bad = prints_a_claim(body)
+        if bad:
+            return None, bad
     fields = {
         "kind": kind_name, "rung": 4, "axis": "model",
         "parent-tree": head_tree(root), "corpus": corpus_hash(root) or "0" * 8,
@@ -1755,8 +1789,19 @@ def create(root, kind_name, target, token, rung=None):
             "your last attempt did not compile. the errors were:",
             tried[-1],
             "",
-            "write the whole file again, fixed. it is Rust, not Python:",
-            "a length is `x.len()`, and there is no `len(x)`.",
+            "write the whole file again, fixed.",
+            "",
+            "the mistakes these attempts keep making:",
+            "  `&[u8; 16]` is the whole array; `&x[0]` is one byte.",
+            "  an array and a byte are never equal: compare `x[0] == 7`,",
+            "  never `x == 7`.",
+            "  a length is `x.len()`, and there is no `len(x)`.",
+            "  every function you call must be one you defined in this",
+            "  file, or `core::`. nothing else is in scope.",
+            "  the selftest MUST print each claim with",
+            '  `crate::kprintln!("  {}   what it checks", if good { "ok " }',
+            '  else { "FAIL" });` -- a selftest that prints nothing adds no',
+            "  claim and is refused whatever it returns.",
         ])
         try:
             reply = ask_model(system, this, meta, token,
@@ -2187,6 +2232,14 @@ def selftest():
           "repeated itself" in (degenerate(STUCK) or ""))
     claim("and an ordinary short file is not refused",
           degenerate(SHORT) is None)
+    # **A file that compiles and prints nothing adds no claim**, and J1
+    # refuses it after a build and two boots. Driven: the first file the
+    # author got past the compiler set `ok = false` on a mismatch and
+    # printed not one line.
+    claim("a selftest that prints no claim is refused before a runner",
+          "prints no claim" in (prints_a_claim(SHORT) or ""))
+    claim("and one that prints the shape is not",
+          prints_a_claim(CLAIMING) is None)
     claim("the envelope is identity only -- no account state in the bytes",
           "minutes" not in env and "alpha" not in env and "boots" not in env)
     try:
