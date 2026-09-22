@@ -1703,6 +1703,12 @@ def compiles(root, env):
             pass
 
 
+def body_of(reply):
+    """The one fenced body, or "" when the contract was not held."""
+    fences = FENCE_SRC.findall(reply)
+    return fences[0] if len(fences) == 1 else ""
+
+
 def create_finish(root, kind_name, target, reply):
     """The offline half of `create`: fence, build, admit."""
     fences = FENCE_SRC.findall(reply)
@@ -1716,10 +1722,6 @@ def create_finish(root, kind_name, target, reply):
     bad = degenerate(body)
     if bad:
         return None, bad
-    if KINDS[kind_name].j1 == "claims":
-        bad = prints_a_claim(body)
-        if bad:
-            return None, bad
     fields = {
         "kind": kind_name, "rung": 4, "axis": "model",
         "parent-tree": head_tree(root), "corpus": corpus_hash(root) or "0" * 8,
@@ -1783,8 +1785,28 @@ def create(root, kind_name, target, token, rung=None):
     # distribution, which is what the five-for-five rung measurement shows
     # this model does.
     tried = []
+    kept = ""
     for attempt in range(CREATE_TRIES):
-        this = card if not tried else card + "\n" + "\n".join([
+        if kept:
+            # A file that compiled and printed nothing needs three lines
+            # added, not a rewrite. Asking for the rewrite is what lost it.
+            this = card + "\n" + "\n".join([
+                "",
+                "this is your last attempt. it COMPILES. do not change any",
+                "line of it except to add the missing claim printing:",
+                "",
+                "```rust",
+                kept.rstrip("\n"),
+                "```",
+                "",
+                "inside `selftest`, for each thing it checks, add exactly:",
+                '    crate::kprintln!("  {}   what this checks",',
+                '                     if good { "ok " } else { "FAIL" });',
+                "",
+                "keep every other line exactly as it is.",
+            ])
+        else:
+            this = card if not tried else card + "\n" + "\n".join([
             "",
             "your last attempt did not compile. the errors were:",
             tried[-1],
@@ -1802,7 +1824,7 @@ def create(root, kind_name, target, token, rung=None):
             '  `crate::kprintln!("  {}   what it checks", if good { "ok " }',
             '  else { "FAIL" });` -- a selftest that prints nothing adds no',
             "  claim and is refused whatever it returns.",
-        ])
+            ])
         try:
             reply = ask_model(system, this, meta, token,
                               "glados-loop-create", grammar=grammar)
@@ -1814,6 +1836,27 @@ def create(root, kind_name, target, token, rung=None):
             # compile error and carries nothing to feed back, so it ends
             # the attempt rather than spending the next one blind.
             return None, why
+
+        # **A missing claim is something the model can fix on being told**,
+        # so it belongs with the compile errors and not with the refusals
+        # above. It was refusing outright, and the first night after that
+        # shipped spent its whole model lane on one reply: `refused: the
+        # selftest prints no claim`, no attempt 2, straight to the template
+        # lane. Six attempts that never happened.
+        if KINDS[kind_name].j1 == "claims":
+            bad = prints_a_claim(body_of(reply))
+            if bad:
+                print("  attempt %d has no claim to count:\n  %s"
+                      % (attempt + 1, bad), file=sys.stderr)
+                # **The code was fine; only the printing was missing.** The
+                # card carries the last failure and nothing else, so an
+                # attempt told "no claim" rewrote the whole file and lost
+                # the part that had compiled -- measured as compile, compile,
+                # no-claim, no-claim, compile, compile across six tries.
+                # Hand back what it wrote and ask for the smaller change.
+                tried.append(bad)
+                kept = body_of(reply)
+                continue
         verdict, errs = compiles(root, env)
         if verdict == "cannot":
             print("  not compile-checked here (%s), so the runner decides"

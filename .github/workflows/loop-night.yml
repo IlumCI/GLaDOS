@@ -438,6 +438,13 @@ jobs:
                   # asked for identically tomorrow, forever. `create` is
                   # temperature 0; that is the whole trap.
                   balked=yes
+                  # **Its own file.** `/tmp/account.txt` is written by every
+                  # lane the walk tries after this one, so reading it later
+                  # gives the template's `point=... rail=...` account rather
+                  # than why the author came back empty -- which is exactly
+                  # what reached `ladder.py balk` as six unrecognised
+                  # arguments.
+                  head -c 300 /tmp/account.txt | tr '\n' ' ' > /tmp/balk.txt
                 fi
                 ;;
               *)
@@ -455,8 +462,8 @@ jobs:
             fi
           done
           if [ "$balked" = "yes" ]; then
-            python3 tools/ladder.py balk --root . \
-              "$(head -c 300 /tmp/account.txt | tr '\n' ' ')" || true
+            reason=$(cat /tmp/balk.txt 2>/dev/null || echo "the author came back with nothing")
+            python3 tools/ladder.py balk --root . "$reason" || true
             if [ -n "$(git status --porcelain loop/ladder)" ]; then
               git add loop/ladder
               git commit -q -m "loop: the author balked at this rung"
