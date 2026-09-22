@@ -1,0 +1,270 @@
+name: loop-proof
+
+# The Phase 1 exit proof. `loop-night.yml` has carried the line "the cron
+# stays commented until the Phase 1 exit proof is green" since the day it
+# was written, and the proof itself was never written -- so the schedule
+# was gated on a thing that did not exist, which is a gate that can only
+# ever stay shut.
+#
+# Four drills were named: a broken candidate refused end to end, stale
+# detected at adopt, a hand-edited certificate refused by fsck, and fsck
+# halting the whole night on a corrupted ledger. Three of them turned out
+# to be decisions rather than journeys, and decisions belong in a selftest
+# where they are checked on every run rather than in a drill somebody
+# spends a runner on once:
+#
+#   hand-edited certificate    `godel.py --selftest`, cert round-trip
+#   corrupted ledger halts     `godel.py --selftest`, fsck claims
+#   stale detected at adopt    `godel.py --selftest`, `adopt_decide`
+#
+# The fourth is genuinely a journey. "Refused end to end" is a claim about
+# the judge building a real tree, failing, and filing a certificate that
+# `adopt` will accept -- four moving parts, none of which a pure function
+# can stand in for. So that one is a runner, here, and it is the only one.
+#
+# **It was not runnable at all until a broken candidate stopped being
+# fatal.** A candidate that would not build killed the judge job, so the
+# drill's expected outcome was a red run, which is indistinguishable from
+# the drill itself being broken. That is fixed in loop-judge.yml and this
+# workflow is what checks the fix.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: loop-proof
+  cancel-in-progress: false
+
+jobs:
+  # --- the three that need no runner ---------------------------------------
+  decided:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: The decisions, all of them, with nothing staged
+        run: |
+          set -euo pipefail
+          python3 tools/godel.py --selftest
+          python3 tools/ladder.py --selftest
+          python3 tools/rails.py --selftest
+
+      # Named individually rather than trusted to the suite's exit code, so
+      # a claim that is deleted or renamed fails this job instead of quietly
+      # reducing what the proof covers.
+      - name: And the three drills are among them, by name
+        run: |
+          set -euo pipefail
+          out=$(python3 tools/godel.py --selftest)
+          for want in \
+            "an invented verdict is refused" \
+            "a tip that moved mid-judge is stale whatever the verdict said" \
+            "a refusal builds on the live tree, never the candidate's" \
+            "a certificate may say nobody counted, for a candidate that died"
+          do
+            if ! printf '%s\n' "$out" | grep -qF "$want"; then
+              echo "::error::the proof names a claim that is not in the suite: $want"
+              exit 1
+            fi
+            echo "  covered: $want"
+          done
+
+  # --- the one that is a journey -------------------------------------------
+  stage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: decided
+    permissions:
+      contents: write
+    outputs:
+      point: ${{ steps.make.outputs.point }}
+      baseline: ${{ steps.make.outputs.baseline }}
+      candidate: ${{ steps.make.outputs.candidate }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: loop/main
+          fetch-depth: 0
+
+      # **Through the real machinery, or it proves nothing.** The judge
+      # asserts the candidate tree is exactly `apply(parent, patch)` for
+      # the patch in the envelope the point names, so a hand-pushed branch
+      # dies at that assertion -- before the build, which is the thing
+      # under test. So the drill builds an envelope, marks it tried, and
+      # derives the candidate the way `propose` does, step for step.
+      #
+      # Onto proof-only refs and never onto loop/main. The night marks
+      # tried on loop/main because a night that was interrupted has still
+      # spent the night; a drill has not spent anything the ledger should
+      # carry, and a marker for a point no rung ever asked for would be a
+      # line a later reader cannot account for.
+      - name: A candidate that cannot possibly build
+        id: make
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          run=${{ github.run_id }}
+
+          # The patch comes out of `git diff` rather than being written by
+          # hand, so its headers and counts are right by construction --
+          # the same argument `wire_module` makes about generating a diff
+          # instead of asking for one.
+          #
+          # Deliberately not a subtle break: the drill is about what the
+          # loop DOES with a candidate that will not compile, so the break
+          # is one nobody can argue about and one that cannot accidentally
+          # become valid Rust.
+          printf '%s\n' 'this line is not rust and is not meant to be' \
+            >> src/fmt/mod.rs
+          git diff > /tmp/patch
+          git checkout -- src/fmt/mod.rs
+          test -s /tmp/patch
+
+          {
+            echo "loopenv 1"
+            echo "kind feature"
+            echo "rung 1"
+            echo "axis model"
+            echo "parent-tree $(git rev-parse 'HEAD^{tree}')"
+            # The hash the tools compute, and not the manifest's first
+            # word -- which is the literal `evidence`, and which `admit`
+            # accepts without a murmur because a corpus name is not a
+            # thing it checks.
+            echo "corpus $(python3 tools/godel.py alpha --root . \
+              | sed -n 's/.*corpus \([0-9a-f]*\):.*/\1/p')"
+            echo "rail none"
+            echo "--- patch"
+            cat /tmp/patch
+          } > /tmp/proof.env
+          python3 tools/godel.py admit /tmp/proof.env
+          point=$(python3 tools/godel.py point /tmp/proof.env)
+
+          # Marked tried, exactly as propose does -- the judge refuses a
+          # point with no marker, and rightly.
+          mkdir -p loop/ledger/tried
+          cp /tmp/proof.env "loop/ledger/tried/${point:0:16}.env"
+          git add loop/ledger/tried
+          git commit -q -m "proof: tried ${point:0:16} (never on loop/main)"
+          git push -f origin "HEAD:refs/heads/loop/proof-base-$run"
+          base=$(git rev-parse HEAD)
+
+          parent=$(git rev-parse 'HEAD^{tree}')
+          cand_tree=$(python3 tools/godel.py derive /tmp/proof.env --parent "$parent")
+          cand=$(git commit-tree "$cand_tree" -p HEAD \
+            -m "proof: a candidate that cannot build")
+          git push -f origin "$cand:refs/heads/loop/cand/proof-$run"
+          {
+            echo "point=$point"
+            echo "baseline=$base"
+            echo "candidate=$cand"
+          } >> "$GITHUB_OUTPUT"
+
+  judge:
+    needs: stage
+    uses: ./.github/workflows/loop-judge.yml
+    with:
+      point: ${{ needs.stage.outputs.point }}
+      baseline_ref: ${{ needs.stage.outputs.baseline }}
+      candidate_ref: ${{ needs.stage.outputs.candidate }}
+      rail: none
+      chi_bar: "-"
+      alpha_k: "0"
+      minutes: "40"
+      half: fresh
+      level: "0"
+      boots: "1"
+      queries: "250"
+      kind: feature
+      rung: "1"
+      axis: model
+      corpus: "00000000"
+
+  verdict:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [stage, judge]
+    if: always()
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        id: art
+        with:
+          name: loopjudge-${{ needs.stage.outputs.point }}
+          path: /tmp/judge
+
+      - name: The candidate must have been refused, and filed
+        run: |
+          set -euo pipefail
+          # **A red judge job is a FAILED drill, not a passed one.** That is
+          # the whole point: before this was fixed, a broken candidate took
+          # the job down, and "the run went red" was indistinguishable from
+          # the loop being broken. The drill passes only on a certificate.
+          if [ "${{ needs.judge.result }}" != "success" ]; then
+            echo "::error::the judge did not finish -- a broken candidate must"
+            echo "::error::produce a verdict, not take the job down"
+            exit 1
+          fi
+          cert=/tmp/judge/certificate.cert
+          if [ ! -f "$cert" ]; then
+            echo "::error::no certificate; a refusal nobody filed is a refusal"
+            echo "::error::nobody can read, and the rung it came from never retires"
+            exit 1
+          fi
+          echo "--- the certificate ---"
+          cat "$cert"
+          echo "-----------------------"
+
+          # It must be well formed, or `adopt` could not have filed it --
+          # which is the stall this drill exists to rule out.
+          python3 tools/godel.py cert --check "$cert"
+
+          v=$(awk '$1=="verdict"{print $2}' "$cert")
+          [ "$v" = "refuse" ] || { echo "::error::verdict is $v, not refuse"; exit 1; }
+          why=$(sed -n 's/^why //p' "$cert")
+          case "$why" in
+            *"did not build"*) : ;;
+            *) echo "::error::refused for '$why', which does not name the build"
+               exit 1 ;;
+          esac
+
+          # And `adopt` must land it on the live tree rather than on the
+          # candidate's, or the refusal would commit the code it refused.
+          parent=$(awk '$1=="parent-tree"{print $2}' "$cert")
+          eval "$(python3 tools/godel.py adopt-decide --cert "$cert" --live "$parent")"
+          [ "$verdict" = "refuse" ] || { echo "::error::adopt would say $verdict"; exit 1; }
+          [ "$base" = "$parent" ] || { echo "::error::adopt would build on $base"; exit 1; }
+
+          echo "  the broken candidate was refused, filed, and lands no code"
+
+      - name: Take the proof branches back down
+        if: always()
+        run: |
+          run=${{ github.run_id }}
+          git push origin --delete "loop/cand/proof-$run" || true
+          git push origin --delete "loop/proof-base-$run" || true
+
+      - name: What this proves, and what it does not
+        run: |
+          echo "  Phase 1 exit proof: green"
+          echo "    a hand-edited certificate is refused      (selftest)"
+          echo "    a corrupted ledger halts the night        (selftest)"
+          echo "    a tip that moved mid-judge files stale    (selftest)"
+          echo "    a broken candidate is refused end to end  (this run)"
+          echo
+          echo "  It does NOT prove a good candidate is adopted; that is the"
+          echo "  loop's ordinary night and the ledger is the record of it."
