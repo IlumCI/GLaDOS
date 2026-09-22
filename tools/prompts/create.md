@@ -42,17 +42,38 @@ The rules that decide whether your file is used:
    Testing here is a claim printed at boot, in exactly this shape:
 
    ```rust
+   /// A 4x4 block is sixteen bytes, so the size is known and no allocator
+   /// is involved. Taking a reference to the whole array rather than a
+   /// slice is what lets the length be a fact instead of a check.
+   pub fn encode(block: &[u8; 16]) -> [u8; 16] {
+       let mut out = [0u8; 16];
+       let mut i = 0;
+       while i < 16 {
+           out[i] = block[i];
+           i += 1;
+       }
+       out
+   }
+
    pub fn selftest() -> bool {
        let mut ok = true;
 
-       let good = encode(&[0u8; 16])[0] == 0;
-       crate::kprintln!("  {}   an empty block encodes to zero",
+       let flat = [7u8; 16];
+       let back = encode(&flat);
+       let good = back[0] == 7 && back[15] == 7;
+       crate::kprintln!("  {}   a flat block survives encoding",
                         if good { "ok " } else { "FAIL" });
        ok &= good;
 
        ok
    }
    ```
+
+   **Every type in that example is load-bearing.** `&[u8; 16]` is a
+   reference to the whole array; `&block[0]` is a reference to one byte and
+   is not the same thing. `back` is an array, `back[0]` is a byte, and only
+   the second may be compared with `7`. Attempts are failing on exactly
+   this: `expected &[u8], found &u8`, and `can't compare [u8; 16] with u8`.
 
    Copy that shape exactly, one group of three lines per claim. Do not
    write a helper function for it: a nested `fn` cannot see `ok`, and one
