@@ -1,0 +1,27 @@
+loopcert 1
+seq 21
+utc 2026-09-22T17:26:22Z
+point feedfbf3c67a5fb49eefd0b2e5f6f86f2c968abed5b95dc9e2329748c3548081
+kind feature
+rung 4
+axis model
+parent-tree dbb97f878da5fc51dcb2bfa36f81a7f0883ddc1d
+candidate-tree fa1cb6040fc186318a28a520b82079192bc09e39
+rail none
+corpus ae595a23
+alpha-k 18
+chi-bar -
+minutes 40
+half extend
+level 0
+boots 1
+queries 250
+sections 29/29
+suites 68/68
+claims 1219/1221
+witness -
+moved -
+why it builds, it boots, it added 2 claim(s) and lost none; no rail regressed
+verdict adopt
+runner 35759506432/1
+ladder 9d90d8c4ce3badf3ddbd0293bc90066ae862a6ac8b6905db70efd9e872e9a1d4
