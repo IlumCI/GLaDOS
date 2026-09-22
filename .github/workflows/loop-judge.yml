@@ -490,8 +490,28 @@ jobs:
           # and the diff budget (400 lines, 10 files) and the path masks are
           # unchanged.
           if [ "$KIND" = "feature" ]; then
+            # **A feature is allowed to pay for its own bytes.**
+            # `cost.image_bytes` is floored at zero and one byte larger
+            # is `worse` by an asserted claim -- which is exactly right
+            # for `cleanup`, the kind whose J1 IS that rail. Here the
+            # same rail is J2, "nothing may read worse", and a new
+            # module cannot satisfy it: the bytes are the point. So the
+            # one kind that writes new code refused every candidate it
+            # could ever have, and would have gone on doing so however
+            # good they got. `--allow` prices the rail instead of
+            # vetoing on it: the movement is still measured, still
+            # printed and still in `judged.txt`, so the certificate
+            # records what the feature cost. What bounds the growth is
+            # this kind's diff budget, 400 lines over 10 files.
+            #
+            # `cost.warnings` is deliberately NOT allowed. A feature
+            # that adds warnings has added code nothing exercises,
+            # which is the thing this branch already refuses one line
+            # down -- and its J1 is that the boot count rose, so the
+            # selftest does run what it added.
             python3 tools/rails.py compare before.txt after.txt \
-              --again kernel-a2.txt kernel-b2.txt | tee judged.txt
+              --again kernel-a2.txt kernel-b2.txt \
+              --allow cost.image_bytes | tee judged.txt
             worse=$(grep -c ' worse ' judged.txt || true)
             unstable=$(grep -c ' unstable ' judged.txt || true)
             echo "MOVED=-" >> "$GITHUB_ENV"

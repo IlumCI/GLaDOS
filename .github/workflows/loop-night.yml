@@ -511,8 +511,14 @@ jobs:
                 | sed -n 's/.*: \([0-9]*\) of 32.*/alpha_k=\1/p'
               echo "chi_bar=-"
               echo "rail=none"
-              python3 tools/godel.py oops --root . --axis model \
-                | sed -E 's/.*(extend|fresh) at level ([0-9]+) -- ([0-9]+) minutes, ([0-9]+) boot.*/half=\1\nlevel=\2\nminutes=\3\nboots=\4/'
+              # `--emit` and not a regular expression over the prose.
+              # The prose stopped saying `N boot(s)` when a level
+              # started buying queries instead of boots, so the sed
+              # matched nothing and `half`, `level`, `minutes`,
+              # `boots` and `queries` all went out empty -- five
+              # `required: true` inputs of the judge, which then
+              # would not start. See the note in godel.py.
+              python3 tools/godel.py oops --root . --axis model --emit
             } >> /tmp/account.txt
           fi
           cat /tmp/account.txt
