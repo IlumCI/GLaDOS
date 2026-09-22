@@ -423,7 +423,25 @@ RETIRE_AFTER = 3
 
 
 def point_verdicts(root):
-    """Every verdict each point has collected, adopted or not."""
+    """Every verdict each RUNG has collected, adopted or not.
+
+    **Keyed on the certificate's `ladder` field and never on its `point`.**
+    A certificate's point identifies the envelope -- the patch -- and the
+    patch is different every night by construction, so keying on it meant
+    every rung's verdict list was empty, forever. `met` could not become
+    true and `refused` could not reach `RETIRE_AFTER`, so a rung could
+    neither be completed nor retired: the loop would have built the rung's
+    file, adopted it, and been asked for the same file again the next
+    night, and every night after, with the ladder never leaving its first
+    rung. Two nights of work on rung 3 produced two certificates and zero
+    entries here.
+
+    Certificates written before the field exists carry no `ladder` and are
+    skipped rather than guessed at. That undercounts the early history,
+    which is the same bargain `axis_counts` makes about certificates
+    written before `axis=` existed, and for the same reason: a rung whose
+    record is invisible reads as untried, which is the safe direction.
+    """
     sys.path.insert(0, os.path.join(ROOT, "tools"))
     import godel
     d = os.path.join(root, "loop", "ledger", "entries")
@@ -435,12 +453,16 @@ def point_verdicts(root):
             continue
         with open(os.path.join(d, n), encoding="utf-8") as f:
             c = godel.parse_cert(f.read())
-        out.setdefault(c["point"], []).append(c["verdict"])
+        if c.get("ladder"):
+            out.setdefault(c["ladder"], []).append(c["verdict"])
     return out
 
 
 def adopted_points(root):
-    """Points carried by adopted certificates. The only source of 'met'."""
+    """Rungs carried by adopted certificates. The only source of 'met'.
+
+    `ladder` and not `point`, for the reason point_verdicts gives.
+    """
     sys.path.insert(0, os.path.join(ROOT, "tools"))
     import godel
     d = os.path.join(root, "loop", "ledger", "entries")
@@ -452,8 +474,8 @@ def adopted_points(root):
             continue
         with open(os.path.join(d, n), encoding="utf-8") as f:
             c = godel.parse_cert(f.read())
-        if c["verdict"] == "adopt":
-            out.add(c["point"])
+        if c["verdict"] == "adopt" and c.get("ladder"):
+            out.add(c["ladder"])
     return out
 
 
@@ -1041,7 +1063,12 @@ def selftest():
         r = state(tmp)[0]
         c = {k: "-" for k in godel.CERT_KEYS}
         c.update({
-            "seq": "1", "utc": "2026-01-01T00:00:00Z", "point": r["point"],
+            # `point` is the envelope's and `ladder` is the rung's, and
+            # they are different by construction -- which is the bug these
+            # claims now pin. A night's point changes with the patch; the
+            # rung's does not.
+            "seq": "1", "utc": "2026-01-01T00:00:00Z",
+            "point": "e" * 64, "ladder": r["point"],
             "kind": "test", "rung": "4", "axis": "model",
             "parent-tree": "0" * 40, "candidate-tree": "1" * 40,
             "rail": "none", "corpus": "00000000", "alpha-k": "0",
@@ -1056,6 +1083,26 @@ def selftest():
             f.write(godel.render_cert(c))
         claim(state(tmp)[0]["met"] is False,
               "a REFUSED certificate does not meet a rung")
+        # **The envelope's point is not the rung's, and counting the wrong
+        # one is a ladder that can never advance.** A certificate carrying
+        # the rung's hash as its own `point` and no `ladder` field -- which
+        # is every certificate written before that field existed -- must
+        # move neither counter. This is the claim that would have caught
+        # the stall: two nights of real work on rung 3 produced two
+        # certificates, and both were invisible to `met` and to `refused`,
+        # so the rung could be neither completed nor retired and would
+        # have been offered again every night for good.
+        lone = dict(c)
+        lone.pop("ladder", None)
+        lone["point"] = r["point"]
+        lone["verdict"] = "adopt"
+        with open(os.path.join(entries, "lone.cert"), "w",
+                  encoding="utf-8", newline="\n") as f:
+            f.write(godel.render_cert(lone))
+        claim(state(tmp)[0]["met"] is False,
+              "a certificate carrying the rung's hash as its OWN point "
+              "meets nothing -- those are different objects")
+        os.remove(os.path.join(entries, "lone.cert"))
         c["verdict"] = "adopt"
         with open(os.path.join(entries, "a.cert"), "w",
                   encoding="utf-8", newline="\n") as f:

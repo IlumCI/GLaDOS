@@ -615,12 +615,39 @@ CERT_KEYS = (
 )
 
 
+#: Fields a certificate may carry and need not. Rendered only when
+#: present, for the reason `Variant`'s two new fields are: a certificate is
+#: named by the sha256 of its own rendering, so a field that rendered
+#: unconditionally would re-address every certificate already in the
+#: ledger -- `fsck` re-derives those names, so the next night would halt on
+#: a ledger it had just invalidated.
+#:
+#: **`ladder` is the rung a night was working on, and its absence was a
+#: stall nobody could see.** `ladder.py` counts a rung met when an adopted
+#: certificate carries its point, and retired when three refused ones do.
+#: The certificate carried the ENVELOPE's point, which identifies the
+#: patch and is different every night by construction -- so both counters
+#: read zero forever. A rung could not be completed and could not be
+#: retired: the loop would have written `src/fmt/pixel_format.rs`, had it
+#: adopted, and been asked for it again the next night, and every night
+#: after, with the ladder never advancing past its first rung. Measured on
+#: loop/main: two nights of work on rung 3, two certificates, and zero
+#: carrying the point that would have counted.
+CERT_OPTIONAL = ("ladder",)
+
+
 def render_cert(c):
     out = ["loopcert 1"]
     for k in CERT_KEYS:
         if k not in c:
             raise ValueError(f"the certificate has no {k!r}")
         out.append(f"{k} {c[k]}")
+    # After the required ones and only when carried, so a certificate
+    # written before this field existed renders to the same bytes it was
+    # named by.
+    for k in CERT_OPTIONAL:
+        if c.get(k):
+            out.append(f"{k} {c[k]}")
     return "\n".join(out) + "\n"
 
 
@@ -633,7 +660,7 @@ def parse_cert(text):
         k, _, v = line.partition(" ")
         if k in c:
             raise ValueError(f"{k!r} appears twice")
-        if k not in CERT_KEYS:
+        if k not in CERT_KEYS and k not in CERT_OPTIONAL:
             raise ValueError(f"{k!r} is not a certificate field")
         c[k] = v
     for k in CERT_KEYS:
@@ -669,6 +696,12 @@ def parse_cert(text):
                              "nobody counted")
     if c["witness"] not in ("fail-then-pass", "-"):
         raise ValueError("witness is neither fail-then-pass nor -")
+    # Present or absent, and a sha256 when present. A malformed one is
+    # refused rather than ignored: a rung point that does not match any
+    # rung is a counter that silently never moves, which is the failure
+    # this field exists to close.
+    if "ladder" in c and not HEX64.match(c["ladder"]):
+        raise ValueError("ladder is not a rung point")
     return c
 
 

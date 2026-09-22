@@ -64,6 +64,19 @@ on:
       corpus:
         type: string
         required: true
+      # **The ladder rung this night was working on, and empty when it was
+      # not.** `ladder.py` counts a rung met by an adopted certificate
+      # carrying its point and retired by three refused ones; the
+      # certificate carried the ENVELOPE's point, which identifies the
+      # patch and differs every night, so both counters read zero for good
+      # and a rung could be neither completed nor retired. Not `required`,
+      # because a template or grid night is not the ladder's work and a
+      # certificate of theirs claiming the rung would retire it for
+      # something it never tried.
+      ladder:
+        type: string
+        required: false
+        default: ""
   workflow_dispatch:
     inputs:
       point:
@@ -134,6 +147,7 @@ jobs:
       RUNG: ${{ inputs.rung }}
       AXIS: ${{ inputs.axis }}
       CORPUS: ${{ inputs.corpus }}
+      LADDER: ${{ inputs.ladder }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -690,6 +704,7 @@ jobs:
             --set "claims=$CLAIMS" \
             --set "witness=$([ "${WITNESS_RES:-}" = fail-then-pass ] && echo fail-then-pass || echo -)" \
             --set "moved=$MOVED" --set "why=$WHY" \
+            ${LADDER:+--set "ladder=$LADDER"} \
             --set "verdict=$VERDICT" \
             --set "runner=${{ github.run_id }}/${{ github.run_attempt }}" \
             > certificate.cert
