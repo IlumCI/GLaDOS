@@ -20,8 +20,11 @@ on:
       boots:
         description: "boots of one binary"
         default: "8"
-  # schedule:
-  #   - cron: "7 4 * * 0"
+  # Green on run 35735886443. It is the one factory that pushes, and it is
+  # already in the `loop-main` concurrency group, so it serialises against
+  # the night rather than racing it.
+  schedule:
+    - cron: "7 4 * * 0"
 
 permissions:
   contents: write

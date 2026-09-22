@@ -19,8 +19,13 @@ on:
       legs:
         description: "comma list to run, or 'all'"
         default: "all"
-  # schedule:
-  #   - cron: "43 3 * * *"
+  # Every job green on run 35749880638, which was also the first time this
+  # workflow had ever run. It found three bugs doing it: the KVM setup it
+  # carried four copies of, `--locked` refusing the version bump the
+  # staged-update drill exists to make, and boot 4 timed against a guess
+  # about how long a boot takes.
+  schedule:
+    - cron: "43 3 * * *"
 
 permissions:
   contents: read
