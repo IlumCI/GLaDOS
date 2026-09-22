@@ -780,9 +780,25 @@ FORBIDDEN_DIFF = (
 def diff_stats(patch):
     """Paths and line counts out of a unified diff, refusing every shape
     the loop must not emit: binaries, mode changes, renames, symlinks."""
-    for bad in FORBIDDEN_DIFF:
-        if bad in patch:
-            raise ValueError(f"the patch carries {bad.strip()!r}")
+    # **At the start of a line, because that is where a git header lives.**
+    # It was a substring search over the whole patch, content included --
+    # and every content line in a unified diff carries a `+`, `-` or space
+    # in column 0, so a header can only ever appear without one. The
+    # difference is not academic: a candidate whose doc comment said
+    # `copy from the source buffer` was refused for carrying `copy from`,
+    # which reads in the log exactly like the loop catching a rename it was
+    # right to catch. A check that refuses the right thing for the wrong
+    # reason is the shape this tree keeps paying for.
+    #
+    # It also loses nothing. The `author` path lets a model write the diff
+    # itself, which is the only place a header could be smuggled, and a
+    # smuggled header has to be at column 0 to be read as one -- so this
+    # catches exactly the case that was worth catching and stops flagging
+    # the case that never was.
+    for line in patch.split("\n"):
+        for bad in FORBIDDEN_DIFF:
+            if line.startswith(bad):
+                raise ValueError(f"the patch carries {bad.strip()!r}")
     paths, adds, dels = set(), 0, 0
     for line in patch.split("\n"):
         if line.startswith("+++ ") or line.startswith("--- "):
@@ -1871,29 +1887,46 @@ def assemble(title, items, check):
 
 
 def create_finish(root, kind_name, target, reply, rung=None):
-    """The offline half of `create`: fence, build, admit."""
+    """`(env, why, mine)` -- the offline half of `create`.
+
+    `mine` is whether the REPLY is what was wrong, and it decides whether
+    the night asks again. Every refusal here but one is something a model
+    can act on being told: a second fence, an empty one, a missing
+    `check:` line, a fence that writes the `selftest` this file assembles,
+    a body that declares no Rust item. Those used to end the lane on the
+    first one, under a comment saying a contract refusal "carries nothing
+    to feed back" -- which was true when the contract was "write the whole
+    file" and is not true now that it names a specific line.
+
+    It cost a night to find out. A candidate whose doc comment read
+    `copy from the source buffer` was refused for carrying `copy from`,
+    the lane ended on attempt 2 of six, and the log read like the loop
+    catching a rename. The substring bug is fixed; ending the lane on a
+    fixable refusal would have wasted the other four attempts anyway.
+    """
     fences = FENCE_SRC.findall(reply)
     if len(fences) != 1:
         preview = " ".join(reply.split())[:240]
-        return None, ("%d source fence(s) where the contract says exactly one"
-                      " -- it said: %s" % (len(fences), preview or "(nothing)"))
+        return None, True, (
+            "%d source fence(s) where the contract says exactly one"
+            " -- it said: %s" % (len(fences), preview or "(nothing)"))
     items = fences[0]
     if not items.strip():
-        return None, "the fence is empty"
+        return None, True, "the fence is empty"
     m = CHECK_LINE.search(reply[reply.rindex("```") + 3:])
     if not m:
-        return None, ("no `check:` line after the fence -- the contract is "
-                      "the items in the fence and one boolean expression "
-                      "after it")
+        return None, True, (
+            "no `check:` line after the fence -- the contract is the items "
+            "in the fence and one boolean expression after it")
     check = m.group(1)
     said = [r for r in RESERVED if r in items]
     if said:
-        return None, ("the fence defines %s, which this file writes itself -- "
-                      "write only the items your check needs"
-                      % ", ".join(said))
+        return None, True, (
+            "the fence defines %s, which this file writes itself -- write "
+            "only the items your check needs" % ", ".join(said))
     bad = degenerate(items)
     if bad:
-        return None, bad
+        return None, True, bad
     body = assemble((rung or {}).get("title", ""), items, check)
     fields = {
         "kind": kind_name, "rung": 4, "axis": "model",
@@ -1902,14 +1935,15 @@ def create_finish(root, kind_name, target, reply, rung=None):
     }
     wire, why = wire_module(root, target)
     if wire is None:
-        return None, "the file could not be wired in: %s" % why
+        # The one refusal that is not about the reply. Asking again cannot
+        # fix a parent module that will not take a declaration.
+        return None, False, "the file could not be wired in: %s" % why
     env = render_envelope(
         fields, patch=new_file_diff(target, body) + wire)
     bad = admit(env)
     if bad:
-        return None, bad[0]
-    return env, None
-
+        return None, True, bad[0]
+    return env, True, None
 
 def create(root, kind_name, target, token, rung=None):
     """Ask for a new file's contents and build the creating diff."""
@@ -2017,7 +2051,7 @@ def create(root, kind_name, target, token, rung=None):
         # last body back and asked for three lines to be added to it.
         this = card if not tried else card + "\n" + "\n".join([
             "",
-            "your last answer did not compile. the errors were:",
+            "your last answer was refused. the reason was:",
             tried[-1],
             "",
             "answer again, fixed: the fence, then the `check:` line.",
@@ -2038,12 +2072,19 @@ def create(root, kind_name, target, token, rung=None):
                               "glados-loop-create", grammar=grammar)
         except NoInference as e:
             return None, str(e)
-        env, why = create_finish(root, kind_name, target, reply, rung)
-        if env is None:
-            # A refusal by the fence contract or by `degenerate` is not a
-            # compile error and carries nothing to feed back, so it ends
-            # the attempt rather than spending the next one blind.
+        env, mine, why = create_finish(root, kind_name, target, reply, rung)
+        if env is None and not mine:
+            # Not the reply's fault, so asking again cannot help.
             return None, why
+        if env is None:
+            # It is the reply's fault and the refusal names the line. Feed
+            # it back, the way a compile error is fed back -- this used to
+            # end the lane on the first one, which threw away four attempts
+            # over a doc comment that happened to say "copy from".
+            print("  attempt %d was refused: %s" % (attempt + 1, why),
+                  file=sys.stderr)
+            tried.append(why)
+            continue
 
         # **A missing claim is something the model can fix on being told**,
         # so it belongs with the compile errors and not with the refusals
@@ -2525,6 +2566,25 @@ def selftest():
     # that bought them: the first real `create` run, 70 lines of doc
     # comment and no code, which the fence contract cannot see because
     # the fence was perfectly well formed.
+    # **A header is a header only at column 0.** The substring form refused
+    # a candidate whose doc comment mentioned copying, and the log read
+    # like the loop catching a rename.
+    smuggled = ("--- a/x\n+++ b/x\n@@ -1 +1 @@\n"
+                "rename from y\n-a\n+b\n")
+    try:
+        diff_stats(smuggled)
+        claim("a real rename header is still refused", False)
+    except ValueError as e:
+        claim("a real rename header is still refused", "rename from" in str(e))
+    innocent = ("--- a/x\n+++ b/x\n@@ -1 +1 @@\n"
+                "-a\n+/// copy from the source buffer, because the decoder\n")
+    try:
+        diff_stats(innocent)
+        claim("but a comment that merely says 'copy from' is not", True)
+    except ValueError as e:
+        claim("but a comment that merely says 'copy from' is not: %s" % e,
+              False)
+
     claim("a created file with no Rust item is refused",
           "declares no Rust item" in (degenerate(COMMENTS) or ""))
     claim("a stuck decode is refused by its own repetition",
@@ -2571,13 +2631,33 @@ def selftest():
     # compiler refusing them later for a runner's money.
     def finish(reply):
         return create_finish(".", "feature", "src/fmt/nope.rs", reply,
-                             {"title": "t"})[1] or ""
+                             {"title": "t"})[2] or ""
     claim("a reply that writes its own selftest is refused by name",
           "which this file writes itself"
           in finish("```rust\npub fn selftest() -> bool { true }\n```\n"
                     "check: true\n"))
     claim("and one with no check line is refused for that",
           "no `check:` line" in finish("```rust\n%s\n```\n" % ITEMS))
+
+    # **Which refusals end the lane, and which are asked again.** Every
+    # refusal about the reply names a line the model can change, so it is
+    # fed back the way a compile error is; only a wiring failure, which is
+    # about the tree rather than the reply, ends the attempts. That
+    # distinction is the third value `create_finish` answers, and it cost a
+    # night: a doc comment reading `copy from the source buffer` was
+    # refused as a rename header and the lane stopped on attempt 2 of six.
+    def mine(reply):
+        return create_finish(".", "feature", "src/fmt/nope.rs", reply,
+                             {"title": "t"})[1]
+    claim("a refusal about the reply is one the night asks again about",
+          mine("```rust\npub fn selftest() -> bool { true }\n```\ncheck: 1\n")
+          is True)
+    claim("and so is a reply that answered with no fence at all",
+          mine("I cannot do that.") is True)
+    claim("but a file that cannot be wired in ends the attempts",
+          create_finish(".", "feature", "src/nowhere/at/all.rs",
+                        "```rust\n%s\n```\ncheck: true\n" % ITEMS,
+                        {"title": "t"})[1] is False)
 
     claim("a selftest that prints no claim is refused before a runner",
           "prints no claim" in (prints_a_claim(SHORT) or ""))
