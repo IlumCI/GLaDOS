@@ -580,9 +580,32 @@ jobs:
             # which is the thing this branch already refuses one line
             # down -- and its J1 is that the boot count rose, so the
             # selftest does run what it added.
+            # **And the uncontrolled timing rails cannot be attributed.**
+            # Every floor rails.py declares is a boot-to-boot spread of ONE
+            # binary -- `evidence-floors` boots a fixed build eight times --
+            # and this job compares TWO. Adding a module relocates every
+            # function after it, which on a tight arithmetic loop is an
+            # alignment and instruction-cache effect nobody here has
+            # measured. `ai.` and `smp.` have no control to divide that out,
+            # so a movement there is the change's logic or its layout and
+            # there is no instrument in this repository that can say which.
+            #
+            # Measured on this loop's own candidates: a 26-line function
+            # that copies sixteen bytes read `ai.matmul -40.5%` and
+            # `smp.one_core -30.5%`, and an earlier one read `smp.one_core
+            # +69.7%`. Against a measured boot-to-boot p95 of 4.2% and 1.2%
+            # respectively -- so these are not the day either. They are the
+            # binary being a different binary.
+            #
+            # Reported, not vetoed on. The controlled groups still refuse --
+            # graphics, the interpreter -- and so do `host.retrieval` and
+            # `cost.warnings`, which is what caught the first real feature
+            # candidate. The gap this names is closed by measuring a
+            # build-to-build spread, which nothing here does yet.
             python3 tools/rails.py compare before.txt after.txt \
               --again kernel-a2.txt kernel-b2.txt \
-              --allow cost.image_bytes | tee judged.txt
+              --allow cost.image_bytes \
+              --adrift ai.matmul smp.one_core smp.all_cores | tee judged.txt
             worse=$(grep -c ' worse ' judged.txt || true)
             unstable=$(grep -c ' unstable ' judged.txt || true)
             echo "MOVED=-" >> "$GITHUB_ENV"

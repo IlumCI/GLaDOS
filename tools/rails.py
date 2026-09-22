@@ -18,7 +18,7 @@ file is what either one asks.
 
 Usage:
     rails.py collect --kernel LOG [--rail NAME=DUMP ...] --out rails.txt
-    rails.py compare BEFORE AFTER [--allow NAME ...]
+    rails.py compare BEFORE AFTER [--allow NAME ...] [--adrift NAME ...]
     rails.py judge BEFORE AFTER --claims NAME
     rails.py --selftest
 
@@ -300,6 +300,36 @@ UNSTABLE = "unstable"
 #: kind's own diff budget, which is 400 lines over 10 files.
 PRICED = "priced"
 
+#: A rail that moved and whose movement nothing here can attribute.
+#:
+#: **Every floor in this file is measured boot-to-boot on ONE binary, and
+#: the judge compares TWO.** `evidence-floors` boots a fixed build N times
+#: and reports the spread: on a CI runner, `ai.matmul` p95 is 4.2% and
+#: `smp.one_core` 1.2%, against declared floors of 35% and 29%. Those
+#: numbers describe the day. They say nothing about what changes when the
+#: binary itself changes -- and adding a module relocates every function
+#: after it, which on a tight arithmetic loop is an alignment and
+#: instruction-cache effect with no upper bound anybody here has measured.
+#:
+#: A controlled group does not care: the control is in the same binary and
+#: moves with it, so layout divides out along with the day. `ai.` and
+#: `smp.` have no control -- `ai.matmul` *is* the arithmetic and `smp`'s
+#: subject is the cores themselves -- so for those two groups a movement
+#: between two builds is the change's logic, or its layout, and there is no
+#: instrument here that can say which.
+#:
+#: Measured on the loop's own candidates: a 26-line function that copies
+#: sixteen bytes read `ai.matmul -40.5%` and `smp.one_core -30.5%`, and an
+#: earlier one read `smp.one_core +69.7%`. Neither can be the logic.
+#:
+#: So a caller may declare those rails unattributable for a kind, and the
+#: movement is reported rather than vetoed on. `cost.` is never eligible
+#: and neither is a controlled group: this is about the absence of an
+#: instrument, not about wanting a different answer. The gap it names is
+#: real and is closed by measuring a build-to-build spread, which nothing
+#: in this tree does yet.
+UNATTRIBUTED = "adrift"
+
 # How far a control may move before dividing it out stops being defensible, as
 # a multiple of its own floor.
 #
@@ -515,7 +545,7 @@ def paired_verdict(before, after):
     return (BETTER if net > 0 else WORSE), f"fixed {fixed} broke {broke}, chi {chi:.2f}"
 
 
-def compare(before, after, before2=None, after2=None, allow=()):
+def compare(before, after, before2=None, after2=None, allow=(), adrift=()):
     """Every rail present on either side, paired by name.
 
     By name and not by position, and every rail on either side appears. A rail
@@ -622,6 +652,21 @@ def compare(before, after, before2=None, after2=None, allow=()):
         out = [
             (n, PRICED, why + ", and this kind is allowed to pay it")
             if n in allow and v == WORSE else (n, v, why)
+            for n, v, why in out
+        ]
+    # Same one-way rule, and the same reason: a rail that got BETTER still
+    # reads better, and one that is UNSTABLE stays unstable. A group with a
+    # control is never eligible, because there the control already removes
+    # what this would excuse -- so `adrift` cannot be used to quieten a rail
+    # that something here could have judged.
+    if adrift:
+        ok = [n for n in adrift
+              if not any(n.startswith(k) for k in CONTROL)
+              and not n.startswith("cost.")]
+        out = [
+            (n, UNATTRIBUTED,
+             why + ", and no control here can tell that from the relayout")
+            if n in ok and v == WORSE else (n, v, why)
             for n, v, why in out
         ]
     return out
@@ -799,6 +844,37 @@ store.read absent us higher  -- no store mounted
             compare(grew_b, grew_a, allow=["cost.warnings"])}
     claim(rows["cost.image_bytes"] == WORSE,
           "and allowing one rail does not quieten another")
+
+    # **A rail nothing here can attribute.** Every floor in this file is a
+    # boot-to-boot spread of ONE binary and the judge compares TWO, so a
+    # movement on an uncontrolled timing rail is the change's logic or its
+    # relayout and there is no instrument here that can say which. The
+    # eligibility rule is the whole safety of it: a controlled group is
+    # never eligible, because there the control already removes what this
+    # would excuse, and `cost.` never is, because it has no day in it.
+    fast = [one("ai.matmul", 10.0, "gflops", "higher"),
+            one("video.draw", 100.0, "us", "lower"),
+            one("video.rect", 50.0, "us", "lower"),
+            one("cost.image_bytes", 100.0, "B", "lower")]
+    slow = [one("ai.matmul", 6.0, "gflops", "higher"),
+            one("video.draw", 200.0, "us", "lower"),
+            one("video.rect", 50.0, "us", "lower"),
+            one("cost.image_bytes", 101.0, "B", "lower")]
+    asked = ["ai.matmul", "video.draw", "cost.image_bytes"]
+    rows = {n: v for n, v, _ in compare(fast, slow)}
+    claim(rows["ai.matmul"] == WORSE,
+          "an uncontrolled timing rail is worse when nothing says otherwise")
+    rows = {n: v for n, v, _ in compare(fast, slow, adrift=asked)}
+    claim(rows["ai.matmul"] == UNATTRIBUTED,
+          "and adrift once the kind declares it unattributable")
+    claim(rows["video.draw"] == WORSE,
+          "a CONTROLLED rail is never adrift, however it is asked for -- "
+          "its control already removes what that would excuse")
+    claim(rows["cost.image_bytes"] == WORSE,
+          "and neither is a cost rail, which has no day in it to blame")
+    rows = {n: v for n, v, _ in compare(slow, fast, adrift=asked)}
+    claim(rows["ai.matmul"] == BETTER,
+          "an adrift-declared rail that improved still reads better")
     # Named rather than left to be noticed. A group with no control is judged
     # on a fixed percentage alone, which is the weakest instrument here.
     claim(
@@ -1042,6 +1118,11 @@ def allow_of(argv):
     return list_flag(argv, "--allow")
 
 
+def adrift_of(argv):
+    """The rails nothing here can attribute, out of `--adrift NAME ...`."""
+    return list_flag(argv, "--adrift")
+
+
 def claims_of(argv):
     """The rails a candidate claims, out of `--claims NAME ...`.
 
@@ -1124,7 +1205,8 @@ def main():
             BAR = max(MCNEMAR_95, float(argv[argv.index("--bar") + 1]))
         if cmd == "compare":
             for name, v, why in compare(before, after, before2, after2,
-                                        allow_of(sys.argv)):
+                                        allow_of(sys.argv),
+                                        adrift_of(sys.argv)):
                 print(f"  {name:<20} {v:<7} {why}")
             return 0
         r = judge(before, after, claims, before2, after2)
