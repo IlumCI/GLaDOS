@@ -1253,8 +1253,9 @@ def main():
     ap.add_argument("path", nargs="?")
     ap.add_argument("--why", default="",
                     help="why the author balked; an option and never a "
-                         "positional, because a reason with spaces in it "
-                         "has twice reached argparse as several arguments")
+                         "positional, because three nights running the "
+                         "reason reached argparse as unrecognised arguments "
+                         "and each diagnosis of why was wrong")
     ap.add_argument("--root", default=ROOT)
     ap.add_argument("--emit-env")
     ap.add_argument("--selftest", action="store_true")
