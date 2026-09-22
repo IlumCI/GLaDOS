@@ -1216,15 +1216,81 @@ skipped and the suite reported FAILED on a perfectly good checkout, in
 exactly the place the night job runs. 61 claims became 69: 8 template, and
 the 3 drills that had been unreachable there all along.
 
-**None of it has run on a runner** -- that requires the push -- and what
-could be driven locally was: every subcommand against the real tree, the
+**It runs on runners nightly now, and the paragraph below is the state it
+was written in.** Kept because the local drives it lists are still the only
+evidence for the pieces no runner exercises. What has changed: the loop has
+completed nights end to end, the ledger carries adoptions and refusals from
+both the template and model lanes, and the cron is live at 02:17 -- see
+"The night, unattended" below. What could be driven locally was: every subcommand against the real tree, the
 candidate re-derivation producing `LEN_B = 0.25` in a tree the worktree
 never saw, fsck catching a certificate that lies about its candidate tree,
 the tried-walk moving to the next value, the --bar floor turning a chi
 23 win into `same` at a bar of 30, 500 envelope mangles with two readers
 agreeing and the fixpoint holding, and the verdict verifier agreeing with
-the kernel on all three of accept, wrong key and tamper. The crons ship
-commented out; a schedule is the last thing a loop earns.
+the kernel on all three of accept, wrong key and tamper.
+
+### The night, unattended
+
+A schedule is the last thing a loop earns, and `loop-night.yml` gated its
+cron on a "Phase 1 exit proof" that was named in a comment and never
+written -- a gate on a thing that does not exist can only stay shut.
+
+`loop-proof.yml` is that proof. Three of the four drills it was meant to
+cover turned out to be **decisions rather than journeys**, and a decision
+belongs in a selftest where it runs every time rather than in a drill
+somebody spends a runner on once: a hand-edited certificate, a corrupted
+ledger, and a tip that moved mid-judge are claims in `godel.py` now, the
+last of them `adopt_decide`, which was four lines of shell in a job that
+runs once a night and is the whole of this loop's concurrency safety. The
+fourth is genuinely a journey -- a broken candidate refused end to end --
+and it is the only thing the proof spends a runner on.
+
+**Four things had to stop being true before an unattended night was safe**,
+and each was a way the loop stalls silently:
+
+- **A candidate that would not build took the judge down.** `adopt` needs
+  `judge`, so nothing was filed: no certificate, no ledger line, and
+  `refused` never moving on the rung that produced it. At temperature zero
+  the author writes the same broken file every night. It is a `refuse`
+  certificate now, with the compiler's own words as the `why`. That
+  exposed a second bug behind it: both arms build to the same path, so the
+  rail block after a failed candidate build would have `stat`ed the
+  *baseline's* binary and read every cost rail as `same`.
+- **A night with no inference server recorded a balk against the rung.**
+  Three balks retire a rung, so an afternoon of failed downloads would have
+  retired the whole ladder while the ledger said the author could not write
+  it. A balk is a fact about the rung; there being no author to ask is a
+  fact about the night.
+- **Every failed night leaked its candidate branch**, because `tidy` was
+  keyed on `dry_run` while `adopt` only runs after a green judge.
+- **A rung could be neither met nor retired.** `ladder.py` counts a rung met
+  when an adopted certificate carries its point and retired when three
+  refused ones do -- and the certificate carried the *envelope's* point,
+  which identifies the patch and differs every night by construction. Both
+  counters read zero forever. Even a perfect adopted module would have left
+  the rung open, so the loop would have rebuilt one file every night with
+  the ladder never leaving its first rung. The rung's point travels as an
+  optional `ladder` field now, optional in both directions because a
+  certificate is named by the sha256 of its own rendering and an
+  unconditional field would re-address every entry already filed -- which
+  `fsck` re-derives, so the next night would halt on a ledger it had just
+  invalidated.
+
+**And the feature kind could never have adopted.** `cost.image_bytes` is
+floored at zero and one byte larger is `worse` by an asserted claim, which
+is right for `cleanup` -- the kind whose J1 *is* that rail. For `feature`
+the same rail is J2, "nothing may read worse", and a new module cannot
+satisfy it: the bytes are the point. So the one kind that writes new code
+refused every candidate it could ever have. `rails.py compare --allow`
+prices such a rail instead of vetoing on it; the movement is still measured
+and still in the certificate, and the diff budget bounds the growth.
+`cost.warnings` is deliberately not allowed, and it earned that on the
+first real feature candidate -- refused for `unnecessary parentheses around
+assigned value`.
+
+The cron is 02:17 daily. It still cannot reach `main`: the token has no
+`workflows` write, the machine's world is `loop/*`, and the rolling audit
+PR is the only route to the operator's tree.
 
 **The return leg reaches the machine.** `godel verdicts [--again]` is the
 verb `godel push`'s own output has named since the day it shipped, and

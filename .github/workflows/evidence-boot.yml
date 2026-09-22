@@ -147,10 +147,17 @@ jobs:
           cargo build --release --locked
           cp target/x86_64-unknown-uefi/release/glados.efi /tmp/old.efi
           sed -i 's/^version = "\([0-9]*\)\.\([0-9]*\)\.\([0-9]*\)"/version = "\1.\2.999"/' Cargo.toml
-          cargo build --release --locked
+          # **`--offline` and not `--locked` for the bumped arm.** The
+          # lock file records this package's own version, so changing it
+          # in Cargo.toml is exactly the update `--locked` exists to
+          # refuse: `cannot update the lock file because --locked was
+          # passed`, which is what this job died of on its first ever
+          # run. `--offline` keeps the property that actually matters,
+          # which is that no dependency is resolved from the network.
+          cargo build --release --offline
           cp target/x86_64-unknown-uefi/release/glados.efi /tmp/new.efi
           python3 tools/sign.py /tmp/new.efi /tmp/new.efi.sig --key-file /tmp/throwaway.key
-          git checkout -- Cargo.toml src/update/mod.rs
+          git checkout -- Cargo.toml Cargo.lock src/update/mod.rs
           # The OLD kernel is what boots; the NEW one is what gets staged.
           cp /tmp/old.efi target/x86_64-unknown-uefi/release/glados.efi
           python3 tools/hybtest.py out/ci-fixture.bin --build-only
@@ -249,16 +256,38 @@ jobs:
             2>&1 | tee boot1.log
           grep -q '^  alive' boot1.log
           grep -q 'skip-hwp' boot1.log
-          # 2: applied from the boot volume.
+          # 2: applied from the boot volume. Timed, because boot 4 needs a
+          # deadline derived from how long this machine actually takes
+          # rather than from a number somebody guessed.
+          t0=$(date +%s)
           boot boot2.log 600 "echo alive"
+          full=$(( $(date +%s) - t0 ))
+          echo "  a full boot here takes ${full}s"
           grep -q '^  alive' boot2.log
           grep -q 'repair(s) applied from the boot volume' boot2.log
           # 3: applied again; the earlier trial cleared, so still one entry.
           boot boot3.log 600 "echo alive"
           grep -q 'repair(s) applied from the boot volume' boot3.log
           # 4: the kill -- armed, then dead before the shell could clear it.
-          boot boot4.log 25 "echo alive"
-          ! grep -q '^  alive' boot4.log
+          # **A boot killed before it reaches the shell**, which is what
+          # leaves the health flag unset and makes boot 5 withdraw. The
+          # deadline was a flat 25s and that is a guess about how long a
+          # boot takes: under KVM on this runner it takes less, so the
+          # machine reached the shell, printed `alive`, cleared the flag,
+          # and the drill failed on its own timing rather than on anything
+          # it was testing. Half of the boot just measured is inside the
+          # window by construction, with a floor so a pathologically quick
+          # boot still gets a chance to start.
+          early=$(( full / 2 ))
+          [ "$early" -ge 5 ] || early=5
+          echo "  killing boot 4 at ${early}s, against a ${full}s boot"
+          boot boot4.log "$early" "echo alive"
+          if grep -q '^  alive' boot4.log; then
+            echo "::error::boot 4 reached the shell in ${early}s, so it cleared"
+            echo "::error::the health flag and there is nothing for boot 5 to"
+            echo "::error::withdraw. This is the drill mistiming itself."
+            exit 1
+          fi
           # 5: the machine notices its own last boot and withdraws.
           boot boot5.log 600 "echo alive"
           grep -q '^  alive' boot5.log
