@@ -60,15 +60,20 @@ jobs:
         with:
           arm: smp4
           smp: "4"
-      - name: One core, driven directly (its own suite set)
+      - name: QEMU and OVMF, for the one-core run
         if: matrix.smp == '1'
         run: |
           set -euo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends qemu-system-x86 ovmf
-          printf 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"\n' \
-            | sudo tee /etc/udev/rules.d/99-kvm-writable.rules >/dev/null
-          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+
+      - uses: ./.github/actions/kvm
+        if: matrix.smp == '1'
+
+      - name: One core, driven directly (its own suite set)
+        if: matrix.smp == '1'
+        run: |
+          set -euo pipefail
           python3 -m pip install --quiet --disable-pip-version-check numpy
           python3 tools/hybtest.py out/ci-fixture.bin --build-only
           python3 tools/drive.py \
@@ -113,15 +118,14 @@ jobs:
             ~/.cargo/registry
             target
           key: uefi-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-      - name: QEMU, OVMF, KVM, mtools
+      - name: QEMU, OVMF and mtools
         run: |
           set -euo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends qemu-system-x86 ovmf mtools
-          printf 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"\n' \
-            | sudo tee /etc/udev/rules.d/99-kvm-writable.rules >/dev/null
-          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
-          test -w /dev/kvm
+
+      - uses: ./.github/actions/kvm
+
       - name: Two builds a version apart, trusting a throwaway key
         run: |
           set -euo pipefail
@@ -213,14 +217,17 @@ jobs:
             target
           key: uefi-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
       - run: cargo build --release --locked
-      - name: QEMU, OVMF, KVM
+      - name: QEMU and OVMF
         run: |
           set -euo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends qemu-system-x86 ovmf
-          printf 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"\n' \
-            | sudo tee /etc/udev/rules.d/99-kvm-writable.rules >/dev/null
-          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+
+      - uses: ./.github/actions/kvm
+
+      - name: The fixture checkpoint
+        run: |
+          set -euo pipefail
           python3 -m pip install --quiet --disable-pip-version-check numpy
           python3 tools/hybtest.py out/ci-fixture.bin --build-only
       - name: Six boots on one image
@@ -307,15 +314,20 @@ jobs:
           key: uefi-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
       - if: steps.payload.outputs.have == 'yes'
         run: cargo build --release --locked
-      - name: Boot the dense checkpoint; the trainer must not refuse it
+      - name: QEMU and OVMF, for the dense boot
         if: steps.payload.outputs.have == 'yes'
         run: |
           set -euo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends qemu-system-x86 ovmf
-          printf 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"\n' \
-            | sudo tee /etc/udev/rules.d/99-kvm-writable.rules >/dev/null
-          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+
+      - uses: ./.github/actions/kvm
+        if: steps.payload.outputs.have == 'yes'
+
+      - name: Boot the dense checkpoint; the trainer must not refuse it
+        if: steps.payload.outputs.have == 'yes'
+        run: |
+          set -euo pipefail
           python3 tools/drive.py \
             --model out/model.bin --tokenizer out/tokenizer.bin \
             --qemu-extra "-accel kvm -cpu host -smp 4" --timeout 900 \
