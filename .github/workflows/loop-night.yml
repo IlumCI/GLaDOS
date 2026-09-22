@@ -767,7 +767,15 @@ jobs:
         run: |
           set -euo pipefail
           tail=$(python3 tools/godel.py ledger --root . --tail 10)
-          body=$(printf 'The CI loop ledger, newest last:\n\n```\n%s\n```\n\nEvery entry is a content-named certificate under loop/ledger/entries, re-verified by ci.yml on every push to this branch. Merging is yours; the machine only ever writes here.' "$tail")
+          # **The ladder, above the ledger.** The ledger says what was
+          # judged; it does not say whether the loop is getting anywhere.
+          # An operator checking in once a week wants the second question
+          # answered first, and it is the one the north star was written to
+          # ask -- so `progress` goes at the top, where a stalled ladder is
+          # visible without reading fourteen certificates.
+          star=$(python3 tools/ladder.py goal --root . 2>/dev/null | head -2 || true)
+          rungs=$(python3 tools/ladder.py progress --root . 2>/dev/null || true)
+          body=$(printf 'Where the loop is going:\n\n```\n%s\n\n%s\n```\n\nAnd what it has judged, newest last:\n\n```\n%s\n```\n\nEvery entry is a content-named certificate under loop/ledger/entries, re-verified by ci.yml on every push to this branch. Merging is yours; the machine only ever writes here.' "$star" "$rungs" "$tail")
           n=$(gh pr list --head loop/main --base main --state open --json number --jq length)
           if [ "$n" = "0" ]; then
             gh pr create --head loop/main --base main \
