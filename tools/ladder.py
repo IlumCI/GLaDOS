@@ -189,6 +189,30 @@ def kinds_open(rungs):
     return ks
 
 
+#: Whether the author can write a witnessed rung, which edits a file.
+#:
+#: **Judgeable is not the same as writable, and the ladder only knew the
+#: first.** A witnessed kind is `godel.author`'s: one request for a unified
+#: diff, hunk arithmetic and all, with no compile feedback and no second
+#: attempt. `create` got the assembled contract, the compiler in the loop
+#: and six tries, and it is the only path that has ever written a file the
+#: judge adopted. So a witnessed rung is admissible, would be judged
+#: correctly, and would balk three nights running before it retired --
+#: three nights of a runner spent on a rung nobody could have written.
+#:
+#: This narrows what the decomposer is OFFERED and nothing else. `admit`
+#: still takes a witnessed rung written by hand, `kinds_open` still says
+#: what a judge can settle, and the day `author` edits the way `create`
+#: writes, this flips and the ladder can go back into files it built.
+EDITS_AUTHORABLE = False
+
+
+def kinds_offered(rungs):
+    """The kinds the decomposer is shown and its grammar can emit."""
+    return tuple(k for k in kinds_open(rungs)
+                 if EDITS_AUTHORABLE or not godel_kind(k).witness)
+
+
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 SLUG = re.compile(r"^[0-9]{4}-[a-z0-9-]+\.rung$")
 
@@ -344,6 +368,22 @@ def admit(r, root, rungs=None):
             "the title repeats the north star (%r) rather than naming one "
             "part of it -- a rung is a component, and the ladder is how the "
             "parts add up" % goal_phrase(root))
+    # **A title the ladder already has is the same rung twice.** Rung 4 was
+    # rung 3's title and rung 3's target under a new witness sentence, so it
+    # admitted, and the day rung 3 was met its twin became a `feature` for a
+    # file that now existed -- stale, retired, and the decomposer asked for
+    # a fresh rung wrote the same one a third time. Only for a proposal:
+    # `load` re-admits the ladder with `rungs` unset, and a rung already
+    # written must not go stale for matching itself.
+    if rungs is not None:
+        flat = " ".join(r["title"].lower().split())
+        for old in rungs:
+            if " ".join(old.get("title", "").lower().split()) == flat:
+                raise Bad(
+                    "rung %s already has this title (%s) -- a rung is the "
+                    "NEXT part, so name one this ladder does not have yet"
+                    % (old.get("seq"), "met" if old.get("met")
+                       else "retired" if old.get("retired") else "open"))
     if not godel.KINDS[r["kind"]].witness and os.path.exists(
             os.path.join(root, t)):
         raise Bad(
@@ -600,7 +640,7 @@ def cmd_progress(root):
               "night(s) each" % (balk, RETIRE_AFTER))
     nxt = open_rung(rungs, root)
     for r in rungs:
-        if r.get("stale"):
+        if r.get("stale") and not r["met"]:
             print("  rung %s retired: %s" % (r["seq"], r["stale"]))
     print("  next: %s" % (nxt["title"] if nxt else
                           "nothing open -- every rung is met or retired"))
@@ -635,7 +675,11 @@ def cmd_next(root, emit_env=None):
     rungs = state(root)
     nxt = open_rung(rungs, root)
     for r in rungs:
-        if r.get("stale"):
+        # A met rung whose file now exists no longer admits as a `feature`,
+        # and that is what being met looks like, not a retirement. The
+        # morning this printed "rung 3 retired" about the one rung the
+        # ladder had ever finished, it read as the opposite of the truth.
+        if r.get("stale") and not r["met"]:
             print("  rung %s retired: %s" % (r["seq"], r["stale"]))
     if nxt is None:
         print("  no open rung" if rungs else "  the ladder is empty")
@@ -715,7 +759,7 @@ def rung_card(root, rungs):
     """Structured data only. The tree's shape is a listing, never a slice of
     source, because a milestone is chosen from what exists rather than
     written against what one file happens to say."""
-    kinds = kinds_open(rungs)
+    kinds = kinds_offered(rungs)
     sys.path.insert(0, os.path.join(ROOT, "tools"))
     import godel
     import knob
@@ -751,10 +795,20 @@ def rung_card(root, rungs):
         # model is choosing what to try next, and a milestone that has
         # already failed three nights is the single most useful thing it can
         # be told -- listed as "open" it would simply be proposed again.
+        # A met rung names the file it built, because that file now exists
+        # and a `feature` cannot create it twice. And a retired one says
+        # WHY: "after 0 refusals" is what a stale rung used to read as,
+        # which told the model nothing about what not to do again.
         if r["met"]:
-            mark = "met"
+            mark = "met, built %s" % r["target"]
         elif r["retired"]:
-            mark = "RETIRED after %d refusals -- do not propose this again" % r["refused"]
+            if r.get("stale"):
+                why = "no longer admissible"
+            elif r.get("balked", 0) >= RETIRE_AFTER:
+                why = "the author could not write it"
+            else:
+                why = "refused %d times" % r["refused"]
+            mark = "RETIRED, %s -- do not propose this again" % why
         else:
             mark = "open"
         lines.append("  seq %s %s [%s] %s"
@@ -806,7 +860,7 @@ def grammar_for(root, rungs):
     # grammar is a second lock rather than a replacement for the first.
     existing = existing_targets(root)
     arms = []
-    for k in kinds_open(rungs):
+    for k in kinds_offered(rungs):
         sys.path.insert(0, os.path.join(ROOT, "tools"))
         import godel
         rhs = "oldpath" if godel.KINDS[k].witness else "newpath"
@@ -824,16 +878,128 @@ def grammar_for(root, rungs):
         # target in `src/gfx/` stops being something to refuse and becomes
         # something the sampler cannot emit. `admit` still checks it, because
         # both are built from `knob.UNJUDGEABLE` and one bug would reach both.
-        'newpath ::= "src/" dir "/" stem ".rs"',
-        "dir ::= %s" % " | ".join('"%s"' % d for d in judgeable_dirs(root)),
-        'stem ::= [a-z0-9_]+',
+        #
+        # **And a new path is one the tree does not hold.** `feature`
+        # creates a file, so naming one that exists is refused by `admit`
+        # -- and was, three attempts out of three on the night the ladder
+        # stalled, all `src/fmt/pixel_format.rs`, the file the rung before
+        # had built. Refusing it and asking again drew the same path again.
+        # So each directory's stems are every name except the ones already
+        # there, which a grammar can say exactly: see `fresh_stem`.
+        "newpath ::= %s" % " | ".join(
+            '"src/%s/" nd-%d' % (d, i)
+            for i, d in enumerate(judgeable_dirs(root))),
         # One line, and never empty: a rung nobody can read is not a rung.
         'line ::= [^\\n]+',
     ]
-    if existing:
+    for i, d in enumerate(judgeable_dirs(root)):
+        taken = [t[len("src/%s/" % d):-3] for t in existing
+                 if t.startswith("src/%s/" % d)]
+        lines += render_stem(fresh_stem(taken), "nd-%d" % i, ".rs")
+    # Only when an arm names it: with no witnessed kind offered, a rule of
+    # every file in the tree is two hundred alternatives nothing can reach.
+    if existing and any("oldpath" in a for a in arms):
         lines.insert(4, "oldpath ::= %s"
                      % " | ".join('"%s"' % t for t in existing))
     return "\n".join(lines) + "\n"
+
+
+#: What a new file's stem may be spelt with.
+STEM_CHARS = "0123456789_abcdefghijklmnopqrstuvwxyz"
+
+
+def fresh_stem(taken):
+    """Every stem over `STEM_CHARS` except the ones in `taken`, as a trie.
+
+    **A grammar cannot say "not these", so this says everything else.**
+    GBNF has no negation, but the complement of a finite set of words is a
+    finite automaton: walk the trie of the taken names, and at every node
+    the next character either continues a taken name (stay in the trie),
+    or leaves all of them (anything may follow), and the stem may end here
+    unless what has been spelt so far is itself taken.
+
+    Answers `{node: [arm]}` with node 0 the root and an arm one of
+    `("end",)`, `("char", c, node)` or `("free", chars)`. A structure
+    rather than grammar text, so `stem_accepts` can walk the very thing
+    `render_stem` writes out and a selftest can ask it questions.
+    """
+    taken = sorted({t for t in taken if t})
+    ids = {"": 0}
+    nodes = {}
+    todo = [""]
+    while todo:
+        pre = todo.pop(0)
+        arms = []
+        if pre and pre not in taken:
+            arms.append(("end",))
+        nxt = sorted({t[len(pre)] for t in taken
+                      if t.startswith(pre) and len(t) > len(pre)})
+        for c in nxt:
+            if pre + c not in ids:
+                ids[pre + c] = len(ids)
+                todo.append(pre + c)
+            arms.append(("char", c, ids[pre + c]))
+        rest = "".join(c for c in STEM_CHARS if c not in nxt)
+        if rest:
+            arms.append(("free", rest))
+        nodes[ids[pre]] = arms
+    return nodes
+
+
+def stem_accepts(nodes, stem):
+    """Whether the automaton `fresh_stem` built admits `stem`."""
+    at = 0
+    for i, c in enumerate(stem):
+        step = None
+        for arm in nodes[at]:
+            if arm[0] == "char" and arm[1] == c:
+                step = arm[2]
+            elif arm[0] == "free" and c in arm[1]:
+                return all(x in STEM_CHARS for x in stem[i + 1:])
+        if step is None:
+            return False
+        at = step
+    return ("end",) in nodes[at]
+
+
+def render_stem(nodes, name, suffix):
+    """GBNF for `fresh_stem`'s automaton, each node a rule named `name-N`.
+
+    **The suffix is written into every arm that ends**, rather than there
+    being an empty alternative for "stop here". An empty literal is the one
+    construct in this grammar whose meaning to llama.cpp's parser nobody
+    here has checked, and not needing it costs nothing.
+
+    Rule names are letters, digits and dashes and never underscores,
+    because those are the only characters the parser takes in a name.
+    """
+    def cls(chars):
+        # By code point, because that is what a range in a class means:
+        # `9-a` would admit every punctuation mark between the two.
+        runs = []
+        for c in sorted(set(chars), key=ord):
+            if runs and ord(c) == ord(runs[-1][-1]) + 1:
+                runs[-1].append(c)
+            else:
+                runs.append([c])
+        return "[" + "".join(
+            r[0] if len(r) == 1 else r[0] + r[-1] if len(r) == 2
+            else r[0] + "-" + r[-1] for r in runs) + "]"
+
+    lines = []
+    for n in sorted(nodes):
+        alts = []
+        for arm in nodes[n]:
+            if arm[0] == "end":
+                alts.append('"%s"' % suffix)
+            elif arm[0] == "char":
+                alts.append('"%s" %s-%d' % (arm[1], name, arm[2]))
+            else:
+                alts.append('%s %s-free' % (cls(arm[1]), name))
+        lines.append("%s%s ::= %s" % (name, "" if n == 0 else "-%d" % n,
+                                      " | ".join(alts)))
+    lines.append('%s-free ::= [0-9_a-z]* "%s"' % (name, suffix))
+    return lines
 
 
 def existing_targets(root):
@@ -927,9 +1093,15 @@ def propose(root, token):
             "write the rung again, fixed. name one PART of the north star,",
             "never the north star itself.",
         ])
+        # **A retry draws, where the first ask decodes greedily.** Measured:
+        # three refusals, three identical proposals, because the card grew
+        # by one sentence and a temperature-0 decode anchored on the same
+        # path every time. The first ask is still the greedy one, so a night
+        # whose first answer would have been admitted is unchanged.
         try:
             reply = godel.ask_model(system, this, meta, token,
-                                    "glados-loop-decompose", grammar=grammar)
+                                    "glados-loop-decompose", grammar=grammar,
+                                    seed=None if attempt == 0 else attempt)
         except godel.NoInference as e:
             # Not a traceback, and not a verdict either. The ladder simply
             # does not grow tonight, and the reason is one line rather than
@@ -1225,20 +1397,84 @@ def selftest():
         # the target check sitting behind it.
         built = [dict(parse_rung(_rung(g, 1)), met=True, retired=False,
                       stale="", point="x" * 64)]
-        r, why = propose_finish(tmp, fenced(_rung(g, 2, kind="test")), built)
+        # Titled, because `built` already holds the default one and a title
+        # the ladder has is refused before the target is looked at.
+        r, why = propose_finish(tmp, fenced(
+            _rung(g, 2, kind="test", title="a witnessed part")), built)
         claim(r is None and "does not exist yet" in (why or ""),
               "a witnessed kind aimed at a file that is not there is refused")
         os.makedirs(os.path.join(tmp, "src", "ai"), exist_ok=True)
         open(os.path.join(tmp, "src", "ai", "there.rs"), "w").write("// x")
         r, why = propose_finish(tmp, fenced(
-            _rung(g, 2, kind="test", target="src/ai/there.rs")), built)
+            _rung(g, 2, kind="test", title="a witnessed part",
+                  target="src/ai/there.rs")), built)
         claim(r is not None,
               "and the same kind aimed at a file that IS there is admitted")
         claim('"kind test' not in grammar_for(tmp, [])
               and '"kind feature' in grammar_for(tmp, []),
               "with nothing met, the grammar offers only the creating kind")
-        claim('"kind test' in grammar_for(tmp, [dict(met=True)]),
-              "and a witnessed kind opens as soon as one rung is met")
+        claim(("kind test" in grammar_for(tmp, [dict(met=True)]))
+              == EDITS_AUTHORABLE,
+              "and a witnessed kind is offered once a rung is met only if "
+              "the author can edit a file -- judgeable is not writable")
+        claim("test" in kinds_open([dict(met=True)]),
+              "while admission still takes one, so a hand-written witnessed "
+              "rung is judged as before")
+
+        # **The path a feature may name is one the tree does not hold.**
+        # Walked on the automaton the grammar is rendered from.
+        nodes = fresh_stem(["pixel_format", "mod", "table"])
+        claim(not any(stem_accepts(nodes, t)
+                      for t in ("pixel_format", "mod", "table")),
+              "a stem the directory already holds cannot be sampled")
+        claim(all(stem_accepts(nodes, t)
+                  for t in ("pixel", "pixel_formats", "zigzag", "mo",
+                            "modx", "tables", "t", "quant_table")),
+              "while its prefixes, its extensions and every other name can")
+        claim(not stem_accepts(nodes, "") and not stem_accepts(nodes, "a-b"),
+              "and an empty stem or a character outside the set cannot")
+        # **A grammar llama.cpp cannot parse is a night with no rung**, and
+        # the only report is an HTTP 400 in a log. So the two mistakes this
+        # generator could make are checked here: a rule name with a
+        # character the parser does not take (it reads letters, digits and
+        # dashes, and an underscore ends the name), and a reference to a
+        # rule nobody defined.
+        gram = grammar_for(tmp, [dict(met=True)])
+        names, refs, ranges = set(), set(), []
+        for row in gram.strip().split("\n"):
+            name, _, rhs = row.partition(" ::= ")
+            names.add(name)
+            rhs = re.sub(r'"(?:[^"\\]|\\.)*"', " ", rhs)
+            ranges += re.findall(r"\[((?:[^\]\\]|\\.)*)\]", rhs)
+            rhs = re.sub(r"\[(?:[^\]\\]|\\.)*\]", " ", rhs)
+            rhs = re.sub(r"\{[0-9,]*\}", " ", rhs)
+            refs |= set(re.findall(r"[^\s|()*+?]+", rhs))
+        claim(all(re.match(r"^[a-zA-Z0-9-]+$", n) for n in names),
+              "every rule name is one llama.cpp's grammar parser accepts")
+        claim(refs <= names,
+              "and every rule the grammar refers to is defined (%d rules)"
+              % len(names))
+        # A range in a character class is by code point, so `9-a` would
+        # admit every punctuation mark between them. The stems' classes are
+        # built from `STEM_CHARS` and must stay inside it.
+        spans = [c for r in ranges if not r.startswith("^")
+                 for c in re.findall(r"(.)-(.)", r)]
+        claim(all(a in STEM_CHARS and b in STEM_CHARS
+                  and all(chr(x) in STEM_CHARS
+                          for x in range(ord(a), ord(b) + 1))
+                  for a, b in spans),
+              "and every range in a stem's class spans only stem characters")
+
+        # **One title per ladder.** Rung 4 was rung 3 again.
+        ladder_now = [dict(parse_rung(_rung(g, 1, title="a zigzag order")),
+                           met=True, retired=False, stale="",
+                           point="y" * 64)]
+        r5, why5 = propose_finish(tmp, fenced(_rung(
+            g, 2, kind="feature", title="A Zigzag  order",
+            target="src/ai/zig.rs")), ladder_now)
+        claim(r5 is None and "already has this title" in (why5 or ""),
+              "a title the ladder already has is refused, whatever its case "
+              "and spacing")
 
         # **A rung that stops admitting must not take the ladder down.**
         # `load` raised, so one rung written before a rule tightened made

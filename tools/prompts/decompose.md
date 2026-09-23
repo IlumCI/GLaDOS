@@ -3,7 +3,7 @@
 # this field, but a stale name is a lie in a file somebody will read:
 # it said `openai/gpt-4o-mini` after the author became a ternary
 # Bonsai running in the job. Named for the reader.
-model: Ternary-Bonsai-4B-TQ2_0
+model: Qwen3.8-4B-Q4_K_M
 max_tokens: 400
 temperature: 0
 ---

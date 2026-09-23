@@ -1262,8 +1262,13 @@ def task_card(kind_name, target, slice_text, entries):
     return "\n".join(lines)
 
 
-def author(root, kind_name, target, token):
-    """Ask GitHub Models for one candidate patch; answer (envelope, why).
+def author(root, kind_name, target, token, seed=None):
+    """Ask the model for one candidate patch; answer (envelope, why).
+
+    `seed` is `create`'s: a shard of the fan-out draws with its own, and
+    omitting it is the greedy path. A transport failure raises
+    `NoInference` rather than coming back as a refusal, for the reason
+    `NO_ANSWER` gives.
 
     Reached only when the cheaper rungs are out of moves -- the composed
     core's "always last" rule, ported. Everything the reply could do is
@@ -1286,13 +1291,8 @@ def author(root, kind_name, target, token):
         slice_text = "(this file does not exist yet -- the patch creates it)"
     entries = load_entries(root)
     card = task_card(kind_name, target, slice_text, entries)
-    try:
-        reply = ask_model(system, card, meta, token, "glados-loop-author")
-    except NoInference as e:
-        # A night with no inference is a night that authored nothing, which
-        # is an ordinary outcome and not a failure of the proposal. Reported
-        # as a refusal so the night goes on to what it can do without a model.
-        return None, str(e)
+    reply = ask_model(system, card, meta, token, "glados-loop-author",
+                      seed=seed)
     return author_finish(root, kind_name, reply)
 
 
@@ -1341,6 +1341,18 @@ def inference_url(meta):
             or INFERENCE_URL)
 
 
+#: What `create` and `author` exit with when nothing answered.
+#:
+#: **Three, so that "no answer" is not "a bad answer".** Both used to catch
+#: `NoInference` and return a refusal, so the shard exited 1 either way and
+#: `propose` counted it as a draw. That is the balk the no-server guard was
+#: written to stop, arriving by a second road: a server that came up and
+#: then timed out on every request, or answered only in its think block,
+#: would have been filed against the rung, and three such nights retire it.
+#: The workflow writes its `drew` marker for 0 and 1 and never for this.
+NO_ANSWER = 3
+
+
 class NoInference(Exception):
     """The transport failed. Held apart from a model that answered badly,
     because those are different facts and only one of them is about the
@@ -1349,7 +1361,8 @@ class NoInference(Exception):
     about a night that never asked anything."""
 
 
-def ask_model(system, card, meta, token, agent="glados-loop", grammar=None):
+def ask_model(system, card, meta, token, agent="glados-loop",
+              grammar=None, seed=None):
     """The one transport, so there is one place a model is asked anything.
 
     `ladder.propose` asks for a milestone and `author` asks for a patch, and
@@ -1366,7 +1379,13 @@ def ask_model(system, card, meta, token, agent="glados-loop", grammar=None):
 
     payload = {
         "model": meta.get("model", "openai/gpt-4o-mini"),
-        "temperature": float(meta.get("temperature", "0")),
+        # Zero unless a seed was named. A seed with temperature 0 is the
+        # same answer every time, which is the shape this exists to escape;
+        # `seed_temperature` is the front matter's say in what a seeded draw
+        # costs, and it defaults low enough that the draws stay close to the
+        # greedy path rather than wandering.
+        "temperature": float(meta.get("temperature", "0")) if seed is None
+        else float(meta.get("seed_temperature", "0.5")),
         "max_tokens": int(meta.get("max_tokens", "1400")),
         # **The repetition penalty is the fix for the thing the fence
         # contract cannot see.** A stuck decode produces a perfectly well
@@ -1376,6 +1395,24 @@ def ask_model(system, card, meta, token, agent="glados-loop", grammar=None):
         # value says so, and defaulted here because every prompt in this
         # tree wants a file rather than a chant.
         "repeat_penalty": float(meta.get("repeat_penalty", "1.15")),
+        # **A declared seed, so there can be more than one sample.**
+        # Temperature 0 draws exactly one answer from one distribution,
+        # measured here as five identical first answers to five identical
+        # cards, and a shard with a seed is a second, third and fourth
+        # answer to the same card.
+        #
+        # **What it does NOT buy is a replay, and this said it did.** It
+        # claimed the envelope records the seed, and the envelope records
+        # no such thing. Nor could the seed alone reproduce a draw: a
+        # sampler is only as repeatable as the logits under it, and those
+        # move with prompt caching, slot count and which CPU kernel the
+        # runner picked at start-up (llama.cpp #7052, #29295). None of that
+        # costs the loop anything, because re-derivability was never a
+        # property of the *draw*. It is a property of the verdict, and the
+        # verdict is about the patch, which the envelope carries whole and
+        # the tried marker keeps forever. The seed is provenance: which
+        # shard's answer this was.
+        "seed": -1 if seed is None else int(seed),
         "repeat_last_n": int(meta.get("repeat_last_n", "256")),
         "messages": [
             {"role": "system", "content": system},
@@ -1388,6 +1425,30 @@ def ask_model(system, card, meta, token, agent="glados-loop", grammar=None):
     # wherever this points -- it either binds or it is surplus.
     if grammar:
         payload["grammar"] = grammar
+    # **Thinking off, and asked for here as well as at the server.** The
+    # author descends from a thinking model and opens every answer with a
+    # `<think>` block by default -- measured locally, where a 40-token
+    # budget came back with `content` empty because every token had gone
+    # to reasoning.
+    #
+    # And the grammar does not save it, which is the part that was assumed.
+    # llama.cpp enforces a raw `grammar` from the first generated token, but
+    # with thinking on the chat template has already written `<think>` into
+    # the prompt, so the first generated token is *inside* the think block:
+    # the fence is sampled there, nothing in the grammar ever emits
+    # `</think>`, and the whole file is filed under `reasoning_content`. A
+    # reply that is perfectly shaped and arrives in the wrong field.
+    #
+    # `loop-night.yml` starts the server with `--reasoning off`, which makes
+    # the template close an empty think block itself. These two are the same
+    # switch arriving by a second road, so a server started without the flag
+    # -- a new workflow, a local run, an operator's own box -- still gets a
+    # model that answers. `enable_thinking` must be a JSON boolean: b11071
+    # refuses the string "false". A prompt that genuinely wants reasoning
+    # says `thinking: on` in its front matter.
+    if meta.get("thinking", "off") == "off":
+        payload["reasoning_effort"] = "none"
+        payload["chat_template_kwargs"] = {"enable_thinking": False}
     body = _json.dumps(payload).encode("utf-8")
     url = inference_url(meta)
     # **The Authorization header is sent only when there is something to
@@ -1408,7 +1469,21 @@ def ask_model(system, card, meta, token, agent="glados-loop", grammar=None):
     # them on nothing else.
     try:
         with urllib.request.urlopen(req, timeout=int(meta.get("timeout", "600"))) as r:
-            return _json.loads(r.read())["choices"][0]["message"]["content"]
+            msg = _json.loads(r.read())["choices"][0]["message"]
+        # **An answer given only inside the think block is not an answer**,
+        # and it is not the rung's fault either. It means the switch above
+        # did not reach the template, which is a fact about how the server
+        # was started. Read as an empty reply it would be refused for having
+        # no fence, fed back, refused again, and filed as a balk: three
+        # nights of that retire a rung the model was never allowed to see.
+        content = msg.get("content") or ""
+        thought = msg.get("reasoning_content") or ""
+        if not content.strip() and thought.strip():
+            raise NoInference(
+                "the model answered only inside its think block (%d chars of "
+                "reasoning, no content), so thinking was not switched off -- "
+                "start the server with `--reasoning off`" % len(thought))
+        return content
     except urllib.error.HTTPError as e:
         # Read the body: the useful half of a refusal is in it, and the 410
         # that retired this lane said `github_models_retirement_brownout`
@@ -1788,28 +1863,38 @@ def new_file_warnings(stderr, target):
     produced -- it built, it booted, it added two claims, and it lost on a
     pair of brackets.
 
-    The docstring above this one used to say warnings are not a reason to
-    ask again, which was true when nothing judged them and stopped being
-    true when something did.
+    **Written against real output, after the first version was not.** The
+    check runs `--message-format=short`, which prints a warning as
+    `path:line:col: warning: text` on one line with no `-->` under it. The
+    first version of this looked only for the `-->` form, its claims passed
+    because their fixture was written in that same form by the same hand,
+    and on every real night it would have found nothing -- a self-consistent
+    test proving a function against its author's belief rather than against
+    rustc. The fixture below is captured output, and it carries both path
+    separators because the host is Windows and the runner is not.
 
     **Only this file's, which is the whole difficulty.** The tree carries
-    over two hundred and fifty warnings of its own, so a count is useless;
-    what matters is the ones rustc points at the new path. rustc prints the
-    location on the `-->` line under each warning, so a warning is this
-    file's when the next location line names it.
+    over two hundred and fifty warnings of its own, so a count is useless.
     """
-    out, lines = [], stderr.split("\n")
-    for i, line in enumerate(lines):
-        if not line.startswith("warning:"):
+    want = target.replace("\\", "/")
+    out, lines = [], stderr.replace("\r", "").split("\n")
+    for i, raw in enumerate(lines):
+        line = raw.replace("\\", "/")
+        # The short form: `path:line:col: warning: text`.
+        if line.startswith(want + ":") and ": warning:" in line:
+            out.append(line.strip())
             continue
-        for nxt in lines[i + 1:i + 4]:
-            if "-->" not in nxt:
-                continue
-            if target in nxt.replace("\\", "/"):
-                out.append("%s  (%s)" % (line.rstrip(), nxt.split("-->")[1].strip()))
-            break
+        # The long form, for a caller that did not ask for short: the
+        # location is on the `-->` line under the warning.
+        if line.startswith("warning:"):
+            for nxt in lines[i + 1:i + 4]:
+                nxt = nxt.replace("\\", "/")
+                if "-->" in nxt:
+                    if want in nxt:
+                        out.append("%s  (%s)" % (line.strip(),
+                                                 nxt.split("-->")[1].strip()))
+                    break
     return out[:8]
-
 
 def compiles(root, env, target=None):
     """`ok`, `bad` or `cannot`, with the errors when it is `bad`.
@@ -1914,6 +1999,107 @@ def split_items(items):
     return "\n".join(lines), notes
 
 
+def created_body(env, target):
+    """The contents of the file an envelope's patch creates, or ""."""
+    try:
+        _, _, patch = parse_envelope(env)
+    except ValueError:
+        return ""
+    lines = patch.split("\n")
+    try:
+        at = lines.index("+++ b/%s" % target)
+    except ValueError:
+        return ""
+    m = re.match(r"@@ -0,0 \+1,(\d+) @@", lines[at + 1] if at + 1 < len(lines) else "")
+    if not m:
+        return ""
+    return "\n".join(l[1:] for l in lines[at + 2:at + 2 + int(m.group(1))])
+
+
+def numbered(body, cap=160):
+    """What the model wrote in an assembled file, under the file's own
+    line numbers, with the line its check became marked.
+
+    **The retry card carried the compiler's errors and not the code they
+    were about**, so every attempt started again from nothing: measured on
+    the first full rehearsal of this author, attempt 1 failed on three
+    errors in one `const` and attempt 2 wrote a different file that failed
+    on ten. `src/fmt/x.rs:29:45` is an instruction only to somebody who can
+    see line 29. The header and the assembled `selftest` are left out,
+    because a model shown the selftest writes one, and that is refused.
+    """
+    lines = body.split("\n")
+    try:
+        end = lines.index("pub fn selftest() -> bool {")
+    except ValueError:
+        end = len(lines)
+    start = 0
+    while start < end and (lines[start].startswith("//!")
+                           or not lines[start].strip()):
+        start += 1
+    out = ["%4d | %s" % (i + 1, lines[i]) for i in range(start, end)]
+    out = out[:cap]
+    for i in range(end, len(lines)):
+        if lines[i].lstrip().startswith("let good"):
+            out.append("%4d | %s    <- your check line" % (i + 1, lines[i]))
+    return "\n".join(out)
+
+
+def claim_of(body):
+    """The claim `assemble` wrote, from its macro call to the file's end.
+
+    Narrower than the `selftest` it sits in, because the check sits there
+    too and the check is the model's: `s == "<b>"` is a fine check and the
+    canary's slot pattern would read it as a placeholder.
+    """
+    at = body.rfind("crate::kprintln!(")
+    return body[at:] if at >= 0 else body
+
+
+def example_of(system):
+    """`(signatures, check)` of the worked example in a create prompt.
+
+    Read out of the prompt rather than written down twice, so the example
+    can change without this going quietly stale.
+    """
+    m = re.search(r"```rust\n(.*?)```\ncheck:[ \t]*([^\n]+)", system, re.S)
+    if not m:
+        return (), ""
+    sigs = tuple(" ".join(l.split()) for l in m.group(1).split("\n")
+                 if re.match(r"\s*(pub\s+)?fn\s", l))
+    return sigs, " ".join(m.group(2).split())
+
+
+def copies_the_example(items, check, system=None):
+    """Why this reply is the prompt's worked example, or None.
+
+    **The only file this loop has ever adopted from the model is the
+    prompt's example.** Rung 4, `a pixel format that represents a 4x4 block
+    of pixels as a 4x4 block of bytes`, was met by `encode(block: &[u8;
+    16]) -> [u8; 16]` copying sixteen bytes to sixteen bytes, checked by
+    `encode(&[7u8; 16])[0] == 7` -- the example and its check, verbatim.
+    It compiled, it booted, the claim printed `ok` with the rung's title
+    beside it, and J1 counts claims, so it was adopted. The example had
+    been written about 4x4 blocks because the first rung was a codec, which
+    made copying it look exactly like an answer.
+
+    The example is about checksums now, and copying it is refused and fed
+    back, because nothing downstream can tell a copied example from the
+    work: the claim's text is the title whatever the code does.
+    """
+    if system is None:
+        system = read_prompt("create.md")[1]
+    sigs, ex_check = example_of(system)
+    flat = [" ".join(l.split()) for l in items.split("\n")]
+    same = [sg for sg in sigs if sg in flat]
+    if same or (ex_check and " ".join(check.split()) == ex_check):
+        return ("that is the prompt's worked example, copied (%s) -- it is "
+                "there to show the shape. Write the items THIS milestone "
+                "needs, and a check about them"
+                % (same[0] if same else "its check"))
+    return None
+
+
 def assemble(title, items, check, notes=()):
     """A whole source file from the items, the check, and the rung's title.
 
@@ -1931,6 +2117,17 @@ def assemble(title, items, check, notes=()):
     # Kept to one line: `kprintln!` takes a format string, and a title with
     # a newline in it would end the macro call rather than the comment.
     flat = " ".join((title or "what this file establishes").split())
+    # **And made safe to put inside that format string**, which it was not.
+    # The title is the decomposer's free text, and its grammar allows any
+    # character but a newline, so a rung called `a "raw" block` would end
+    # the string literal early and `a {header} table` would be read as a
+    # format argument. Either one is a compile error in a line the model
+    # never wrote and cannot fix, fed back to it six times. Cut at a word,
+    # so a long title reads as shortened rather than as a sentence that
+    # stops in the middle of one.
+    said = flat if len(flat) <= 90 else flat[:90].rsplit(" ", 1)[0] + " ..."
+    said = (said.replace("\\", "\\\\").replace('"', '\\"')
+            .replace("{", "{{").replace("}", "}}"))
     return "\n".join([
         "//! %s" % flat[:100],
         "//!",
@@ -1944,8 +2141,18 @@ def assemble(title, items, check, notes=()):
         "pub fn selftest() -> bool {",
         "    let mut ok = true;",
     ] + list(notes) + [
-        "    let good = %s;" % check.rstrip().rstrip(";"),
-        '    crate::kprintln!("  {}   %s",' % flat[:70],
+        # **In a block, so a check that names things first still
+        # compiles.** It was `let good = <check>;`, which takes an
+        # expression and nothing else, and the model's most natural way to
+        # write a check is to bind the thing it checks before comparing it:
+        # `let px = PixelFormat::new(4, 4); px.width == 4`. That was a hard
+        # `expected expression, found let statement` -- the greedy shard's
+        # whole answer on the first rehearsal of this author. In a block it
+        # is ordinary Rust, and the `: bool` makes a check that is not one
+        # say so in the compiler's words rather than in a type mismatch
+        # three lines further down.
+        "    let good: bool = { %s };" % check.rstrip().rstrip(";"),
+        '    crate::kprintln!("  {}   %s",' % said,
         '                     if good { "ok " } else { "FAIL" });',
         "    ok &= good;",
         "    ok",
@@ -1996,6 +2203,9 @@ def create_finish(root, kind_name, target, reply, rung=None):
     bad = degenerate(items)
     if bad:
         return None, True, bad
+    bad = copies_the_example(items, check)
+    if bad:
+        return None, True, bad
     body = assemble((rung or {}).get("title", ""), items, check, notes)
     # **The canary, where the assembled body is in hand.** It sat at the
     # call site reading `body_of(reply)` -- the fence, which is the items,
@@ -2004,7 +2214,16 @@ def create_finish(root, kind_name, target, reply, rung=None):
     # fail if `assemble` stops writing the shape J1 counts, which is this
     # file's fault and never the model's, and it says so.
     if KINDS[kind_name].j1 == "claims":
-        bad = prints_a_claim(body)
+        # **The assembled part only.** It read the whole file, the model's
+        # items included, and the slot pattern is a quote, an angle bracket
+        # and another quote -- which is also what two string literals with
+        # a generic between them look like. So an item as ordinary as
+        # `let s = "a"; let v: Option<u8> = None; let t = "b";` read as an
+        # unfilled slot, and because the canary answers "not the reply's
+        # fault", it ended the shard's attempts outright. Measured on the
+        # first rehearsal of this author: one of four shards, gone on its
+        # first answer, for a bug that was this file's.
+        bad = prints_a_claim(claim_of(body))
         if bad:
             return None, False, (
                 "the assembled file prints no claim, which is a bug in "
@@ -2026,8 +2245,30 @@ def create_finish(root, kind_name, target, reply, rung=None):
         return None, True, bad[0]
     return env, True, None
 
-def create(root, kind_name, target, token, rung=None):
-    """Ask for a new file's contents and build the creating diff."""
+def create(root, kind_name, target, token, rung=None, seed=None,
+           tries=None):
+    """Ask for a new file's contents and build the creating diff.
+
+    `seed` and `tries` are what let this be one shard of a fan-out. A
+    shard draws with its own declared seed and spends `tries` attempts on
+    the feedback loop; several shards run at once on several runners and
+    the lowest-numbered one that produced something usable wins.
+
+    **Both halves earn their place and they are not the same half.** The
+    feedback loop fixes what the compiler can name -- four distinct error
+    sets converging on the fifth attempt, measured. The seeds fix what it
+    cannot: a card that draws the same wrong answer every time, which is
+    also measured, five for five. Serially you can have one or the other
+    within a night's budget; across runners you can have both, and the
+    wall clock is one shard rather than the sum.
+    """
+    # **Zero is not a small budget, it is no draw.** `tries or CREATE_TRIES`
+    # read a zero as "use the default", so `--tries 0` quietly spent six
+    # attempts; and a negative count ran the loop not at all and then
+    # indexed an empty list for the reason it gave up.
+    n = CREATE_TRIES if tries is None else tries
+    if n < 1:
+        raise ValueError(f"tries must be at least one, not {tries}")
     meta, system = read_prompt("create.md")
     card = "\n".join([
         f"file to create: {target}",
@@ -2124,7 +2365,8 @@ def create(root, kind_name, target, token, rung=None):
     # distribution, which is what the five-for-five rung measurement shows
     # this model does.
     tried = []
-    for attempt in range(CREATE_TRIES):
+    shown = ""
+    for attempt in range(n):
         # **One card, because there is one failure left.** There used to be
         # two: a compile error, and a reply that compiled and printed no
         # claim. The second cannot happen now -- the claim is assembled, not
@@ -2132,27 +2374,40 @@ def create(root, kind_name, target, token, rung=None):
         # last body back and asked for three lines to be added to it.
         this = card if not tried else card + "\n" + "\n".join([
             "",
-            "your last answer was refused. the reason was:",
+        ] + ([
+            "your last answer became this file. the numbers are the file's",
+            "own lines, which is what the compiler counts:",
+            "",
+            shown,
+            "",
+        ] if shown else []) + [
+            "it was refused. the reason was:",
             tried[-1],
             "",
-            "answer again, fixed: the fence, then the `check:` line.",
+            "fix exactly that, keep what was right, and answer again: the",
+            "fence, then the `check:` line.",
             "",
             "the mistakes these attempts keep making:",
             "  `&[u8; 16]` is the whole array; `&x[0]` is one byte.",
             "  an array and a byte are never equal: compare `x[0] == 7`,",
             "  never `x == 7`.",
             "  a length is `x.len()`, and there is no `len(x)`.",
+            "  an index is a `usize`: `x[i as usize]` when `i` is a `u8`.",
+            "  `Vec` and `vec!` are not in scope. a fixed-size array",
+            "  `[u8; 16]` needs no import and no allocator.",
+            "  a `const` cannot read a function's arguments or `self`: use",
+            "  `let`, or a literal.",
             "  every function you call must be one you defined in this",
             "  fence, or `core::`. nothing else is in scope.",
             "  do NOT write `selftest`. it is written for you, around what",
             "  you answer. the fence holds items; the `check:` line holds",
             "  one boolean expression over them.",
         ])
-        try:
-            reply = ask_model(system, this, meta, token,
-                              "glados-loop-create", grammar=grammar)
-        except NoInference as e:
-            return None, str(e)
+        # A transport failure propagates. It is not a refusal of anything
+        # the model wrote, and `NO_ANSWER` is how the shard says so.
+        reply = ask_model(system, this, meta, token,
+                          "glados-loop-create", grammar=grammar,
+                          seed=seed)
         env, mine, why = create_finish(root, kind_name, target, reply, rung)
         if env is None and not mine:
             # Not the reply's fault, so asking again cannot help.
@@ -2165,6 +2420,7 @@ def create(root, kind_name, target, token, rung=None):
             print("  attempt %d was refused: %s" % (attempt + 1, why),
                   file=sys.stderr)
             tried.append(why)
+            shown = ""
             continue
 
         # **A missing claim is something the model can fix on being told**,
@@ -2189,7 +2445,13 @@ def create(root, kind_name, target, token, rung=None):
         if verdict == "bad":
             print("  attempt %d did not compile:\n%s"
                   % (attempt + 1, errs), file=sys.stderr)
-            tried.append(errs)
+            # The crate-wide summary counts the tree's own warnings, and
+            # "37 warnings emitted" under a new file reads as thirty-seven
+            # things to fix in it.
+            tried.append("\n".join(
+                l for l in errs.split("\n")
+                if not l.startswith("error: could not compile")))
+            shown = numbered(created_body(env, target))
             continue
 
         if tried:
@@ -2197,7 +2459,7 @@ def create(root, kind_name, target, token, rung=None):
                   file=sys.stderr)
         return env, None
     return None, ("%d attempt(s) and none were usable; the last was:\n%s"
-                  % (CREATE_TRIES, tried[-1]))
+                  % (n, tried[-1]))
 
 
 def author_finish(root, kind_name, reply):
@@ -2352,6 +2614,82 @@ def selftest():
         os.environ.pop("GLADOS_INFERENCE_URL", None)
         if _saved is not None:
             os.environ["GLADOS_INFERENCE_URL"] = _saved
+
+    # --- what a request asks for, read off the wire ------------------------
+    #
+    # A fake transport, so these need no server: it keeps the body it was
+    # handed and answers whatever message the claim chose.
+    import json as _json
+    import urllib.request as _ur
+
+    class _Reply:
+        def __init__(self, message):
+            self.data = _json.dumps(
+                {"choices": [{"message": message}]}).encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return self.data
+
+    _sent = []
+    _real_urlopen = _ur.urlopen
+
+    def _fake(message):
+        def urlopen(req, timeout=None):
+            _sent.append(_json.loads(req.data))
+            return _Reply(message)
+        return urlopen
+
+    try:
+        _ur.urlopen = _fake({"content": "```rust\nfn f() {}\n```\n"})
+        got = ask_model("s", "c", {}, "")
+        greedy = _sent[-1]
+        ask_model("s", "c", {"thinking": "on"}, "")
+        wants = _sent[-1]
+        ask_model("s", "c", {}, "", seed=2)
+        seeded = _sent[-1]
+        claim("a request switches thinking off unless its prompt asks for it",
+              greedy.get("reasoning_effort") == "none"
+              and greedy.get("chat_template_kwargs")
+              == {"enable_thinking": False})
+        claim("and enable_thinking goes as a JSON boolean, which b11071 "
+              "requires, never the string 'false'",
+              greedy["chat_template_kwargs"]["enable_thinking"] is False)
+        claim("a prompt that says `thinking: on` is sent neither switch",
+              "reasoning_effort" not in wants
+              and "chat_template_kwargs" not in wants)
+        claim("the greedy path decodes cold and a seeded shard decodes warm",
+              greedy["temperature"] == 0.0 and greedy["seed"] == -1
+              and seeded["temperature"] > 0 and seeded["seed"] == 2)
+        claim("an ordinary answer comes back as its content",
+              got.startswith("```rust"))
+        _ur.urlopen = _fake({"content": "",
+                             "reasoning_content": "```rust\nfn f() {}\n"})
+        try:
+            ask_model("s", "c", {}, "")
+            thought_raised = False
+        except NoInference as e:
+            thought_raised = "think block" in str(e)
+        claim("an answer given only inside the think block is no answer, "
+              "and says so -- never an empty reply to be refused and balked",
+              thought_raised)
+    finally:
+        _ur.urlopen = _real_urlopen
+
+    try:
+        create(ROOT, "feature", "src/fmt/none.rs", "", tries=0)
+        zero_refused = False
+    except ValueError:
+        zero_refused = True
+    claim("`--tries 0` is refused rather than read as the default six",
+          zero_refused)
+    claim("no answer exits with its own code, apart from a refusal",
+          NO_ANSWER not in (0, 1))
 
     # --- the alpha series agrees with the kernel, to the digit ------------
     mine = spend_table()
@@ -2713,16 +3051,29 @@ def selftest():
     # feature candidate this loop produced. The tree carries 250-odd
     # warnings of its own, so only the ones rustc points at the new path
     # may count, and that is what these claims are about.
-    WARNED = "warning: unused import: `crate::kprintln`\n --> src/ai/backward.rs:3:5\n  |\nwarning: unnecessary parentheses around assigned value\n  --> src/fmt/pixel_format.rs:20:16\n   |\nwarning: unused variable: `i`\n  --> src/gfx/desk.rs:99:9"
-    mine_w = new_file_warnings(WARNED, "src/fmt/pixel_format.rs")
-    claim("a warning in the created file is found",
-          len(mine_w) == 1 and "unnecessary parentheses" in mine_w[0])
+    WARNED = "src\\fmt\\warnprobe.rs:1:30: warning: unnecessary parentheses around assigned value\nsrc\\fmt\\warnprobe.rs:1:8: warning: function `f` is never used\nsrc/ai/backward.rs:3:5: warning: unused import: `crate::kprintln`\nsrc/gfx/desk.rs:99:9: warning: unused variable: `i`"
+    # Captured from `cargo check --release --message-format=short` on this
+    # tree, Windows separators and all -- the flags `_cargo_check` passes.
+    mine_w = new_file_warnings(WARNED, "src/fmt/warnprobe.rs")
+    claim("a warning in the created file is found in the short format",
+          len(mine_w) == 2 and "unnecessary parentheses" in mine_w[0])
     claim("and it carries the line, so the card can point at it",
-          "20:16" in mine_w[0])
+          ":1:30:" in mine_w[0])
+    claim("whichever way the host writes its path separator",
+          new_file_warnings(WARNED.replace(chr(92), "/"),
+                            "src/fmt/warnprobe.rs") == mine_w)
+    claim("and the long format still reads, for a caller that asks for it",
+          len(new_file_warnings(
+              "warning: unused\n  --> src/fmt/warnprobe.rs:4:1\n",
+              "src/fmt/warnprobe.rs")) == 1)
     claim("while the tree's own warnings are not the candidate's fault",
           new_file_warnings(WARNED, "src/fmt/nothing_here.rs") == [])
     claim("and a clean check warns about nothing",
-          new_file_warnings("", "src/fmt/pixel_format.rs") == [])
+          new_file_warnings("", "src/fmt/warnprobe.rs") == [])
+
+    def finish(reply):
+        return create_finish(".", "feature", "src/fmt/nope.rs", reply,
+                             {"title": "t"})[2] or ""
 
     claim("a reply carrying only items and a check is admitted",
           create_finish(".", "feature", "src/fmt/px.rs",
@@ -2731,13 +3082,33 @@ def selftest():
                         "```\n"
                         "check: e(&[7u8; 16])[0] == 7\n",
                         {"title": "a pixel format"})[0] is not None)
+    made = create_finish(".", "feature", "src/fmt/px.rs",
+                         "```rust\n"
+                         "pub fn e(b: &[u8; 16]) -> [u8; 16] { *b }\n"
+                         "```\n"
+                         "check: e(&[7u8; 16])[0] == 7\n",
+                         {"title": "a pixel format"})[0]
+    body_made = created_body(made or "", "src/fmt/px.rs")
+    listing = numbered(body_made)
+    at_line = body_made.split("\n").index(
+        "pub fn e(b: &[u8; 16]) -> [u8; 16] { *b }") + 1
+    claim("the file an envelope creates reads back out of its patch",
+          body_made.startswith("//! a pixel format")
+          and "pub fn selftest() -> bool {" in body_made)
+    claim("and a retry shows the model its code under the file's own line "
+          "numbers, the ones the compiler's errors name",
+          "%4d | pub fn e(" % at_line in listing
+          and "<- your check line" in listing)
+    claim("while the header and the assembled selftest stay out of it",
+          "//!" not in listing and "fn selftest" not in listing
+          and "kprintln" not in listing)
     claim("a fence with no such tail is left exactly as it was",
           split_items("pub fn f() -> bool { true }")[0]
           == "pub fn f() -> bool { true }")
     built_notes = assemble("t", kept, "encode(&[7u8; 16])[0] == 7", notes)
     claim("and the notes land above the check in the assembled file",
           built_notes.index("the check reads back")
-          < built_notes.index("let good ="))
+          < built_notes.index("let good"))
 
     claim("the assembled file calls the macro by its crate path",
           "crate::kprintln!" in built)
@@ -2747,10 +3118,49 @@ def selftest():
           prints_a_claim(built) is None)
     claim("the claim's text is the rung's title, so it describes this file",
           "a pixel format that reads back what was written" in built)
-    claim("the check lands where a bool goes, with exactly one semicolon",
-          "let good = encode(&[7u8; 16])[0] == 7;" in built)
+    claim("the check lands in a bool-typed block, with one semicolon",
+          "let good: bool = { encode(&[7u8; 16])[0] == 7 };" in built)
     claim("a check written with its own semicolon does not get two",
-          "let good = 1 == 1;" in assemble("t", ITEMS, "1 == 1;"))
+          "let good: bool = { 1 == 1 };" in assemble("t", ITEMS, "1 == 1;"))
+    claim("and a check that names things first is ordinary Rust in it",
+          "let good: bool = { let x = [7u8; 16]; encode(&x)[0] == 7 };"
+          in assemble("t", ITEMS, "let x = [7u8; 16]; encode(&x)[0] == 7"))
+    quoted = assemble('a "raw" {header} table', ITEMS, "true")
+    claim("a title with quotes and braces cannot break the claim's literal",
+          'a \\"raw\\" {{header}} table",' in quoted
+          and prints_a_claim(claim_of(quoted)) is None)
+    long_title = ("a quantisation table that maps each of the sixty four "
+                  "coefficients of a block to its step size and back")
+    cut = [l for l in assemble(long_title, ITEMS, "true").split("\n")
+           if "kprintln" in l][0]
+    claim("a long title is cut at a word, and says it was cut",
+          cut.endswith(' ...",') and "to its step ..." in cut
+          and "step size" not in cut)
+    # The canary fired on the model's own items once. Two string literals
+    # with a generic between them read as an unfilled `<...>` slot, and
+    # because the canary answers "not the reply's fault" it ended a shard.
+    GENERIC = ('pub fn pick(a: bool) -> &\'static str {\n'
+               '    let s = "one"; let v: Option<u8> = None;'
+               ' let t = "two";\n'
+               '    if a && v.is_none() { s } else { t }\n}')
+    around = assemble("a picker", GENERIC, 'pick(true) == "one"')
+    claim("the canary reads only what assemble wrote, never the items",
+          prints_a_claim(claim_of(around)) is None
+          and prints_a_claim(around) is not None)
+    # The one adoption the model lane has had was the prompt's example.
+    ex_sigs, ex_check = example_of(read_prompt("create.md")[1])
+    claim("the prompt's example is found in the prompt, signature and check",
+          len(ex_sigs) == 1 and "fn checksum" in ex_sigs[0]
+          and ex_check.startswith("checksum("))
+    claim("a reply that copies it is refused and fed back",
+          "worked example" in (finish(
+              "```rust\n%s {\n    0\n}\n```\ncheck: 1 == 1\n"
+              % ex_sigs[0].rstrip(" {")) or "")
+          and "worked example" in (finish(
+              "```rust\n%s\n```\ncheck: %s\n" % (ITEMS, ex_check)) or ""))
+    claim("while one that merely uses the same types is not",
+          copies_the_example("pub fn sum16(b: &[u8; 16]) -> u8 { b[0] }",
+                             "sum16(&[1u8; 16]) == 1") is None)
     # A title is interpolated into a doc comment AND a format string, so a
     # newline in it would end the comment and then end the macro call.
     spanning = assemble("one\ntwo", ITEMS, "true").split("\n")
@@ -2761,10 +3171,8 @@ def selftest():
           prints_a_claim(assemble("", ITEMS, "true")) is None)
 
     # The two shapes of reply the contract refuses, as opposed to the
-    # compiler refusing them later for a runner's money.
-    def finish(reply):
-        return create_finish(".", "feature", "src/fmt/nope.rs", reply,
-                             {"title": "t"})[2] or ""
+    # compiler refusing them later for a runner's money. (`finish` is
+    # defined further up, where the example claims first need it.)
     claim("a reply that writes its own selftest is refused by name",
           "which this file writes itself"
           in finish("```rust\npub fn selftest() -> bool { true }\n```\n"
@@ -3105,6 +3513,8 @@ def main():
     s.add_argument("--kind", default="cleanup")
     s.add_argument("--target", required=True)
     s.add_argument("--emit-env", default="")
+    s.add_argument("--seed", type=int, default=None,
+                   help="a declared draw, as for `create`")
     # **`create` had no CLI entry, so nothing could reach it.** It and
     # `create_finish` were written, selftested, and unreachable: the night
     # calls `author`, which asks the model to hand-write a unified diff --
@@ -3120,6 +3530,11 @@ def main():
     s.add_argument("--title", default="")
     s.add_argument("--witness", default="")
     s.add_argument("--emit-env", default="")
+    s.add_argument("--seed", type=int, default=None,
+                   help="a declared draw, for one shard of a fan-out; "
+                        "omitted means the greedy path at temperature 0")
+    s.add_argument("--tries", type=int, default=None,
+                   help="attempts this shard spends on the feedback loop")
     a = ap.parse_args()
 
     if a.selftest:
@@ -3313,7 +3728,12 @@ def main():
     if a.cmd == "create":
         token = os.environ.get("GITHUB_TOKEN", "")
         rung = {"title": a.title, "witness": a.witness}
-        env, why = create(a.root, a.kind, a.target, token, rung)
+        try:
+            env, why = create(a.root, a.kind, a.target, token, rung,
+                              seed=a.seed, tries=a.tries)
+        except NoInference as e:
+            print(f"  no answer: {e}", file=sys.stderr)
+            return NO_ANSWER
         if env is None:
             print(f"  refused: {why}", file=sys.stderr)
             return 1
@@ -3328,7 +3748,11 @@ def main():
         # it in an `Authorization` header that `llama-server` ignores, so
         # this gate was demanding a credential nothing downstream reads.
         token = os.environ.get("GITHUB_TOKEN", "")
-        env, why = author(a.root, a.kind, a.target, token)
+        try:
+            env, why = author(a.root, a.kind, a.target, token, seed=a.seed)
+        except NoInference as e:
+            print(f"  no answer: {e}", file=sys.stderr)
+            return NO_ANSWER
         if env is None:
             print(f"  refused: {why}", file=sys.stderr)
             return 1
