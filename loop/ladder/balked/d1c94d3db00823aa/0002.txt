@@ -1,0 +1,1 @@
+efuses a feature for: src/fmt/yuv.rs:39:1: warning: type `Pixel` is more private than the item `pack`: function `pack` is reachable at visibility `pub(crate)` src/fmt/yuv.rs:48:1: warning: type `Pixel` is more private than the item `unpack`: function `unpack` is reachable at visibility `pub(crate)` 
