@@ -1787,15 +1787,24 @@ def wire_module(root, target):
 #: truncating the file rather than the model being wrong. Each attempt is a
 #: decode plus a `cargo check`, measured at roughly 30 s and 12 s on this
 #: tree, so six is about four minutes against a night.
-CREATE_TRIES = 6
+#: Eight, from six: every attempt now carries a fresh draw and the compiler's
+#: own rendering of what went wrong, so a later attempt is worth more than
+#: it was when the sixth was usually the first one again. At two and a half
+#: minutes an attempt on a runner, eight fits the author job's seventy-five
+#: with the fetch and the toolchain beside it.
+CREATE_TRIES = 8
 
 
 class NoCargo(Exception):
     """There is no cargo here at all, which is not a broken candidate."""
 
 
-def _cargo_check(root):
+def _cargo_check(root, human=False):
     """(returncode, stderr) of a release check in its own target dir.
+
+    Short format by default, because the warning check reads one line per
+    diagnostic. `human` is rustc's own rendering, asked for only after a
+    check has already failed -- see `rendered_errors`.
 
     A host with no cargo raises rather than answering, because a missing
     toolchain and a candidate that does not compile are different facts and
@@ -1805,7 +1814,8 @@ def _cargo_check(root):
     """
     try:
         return subprocess.run(
-            ["cargo", "check", "--release", "--message-format=short",
+            ["cargo", "check", "--release",
+             "--message-format=%s" % ("human" if human else "short"),
              "--target-dir", "target/authorcheck"],
             cwd=root, capture_output=True, text=True)
     except (FileNotFoundError, OSError) as e:
@@ -1850,6 +1860,87 @@ def compile_errors(stderr):
     lines = [l.rstrip() for l in stderr.split("\n")
              if l.startswith("error") or ": error" in l]
     return "\n".join(lines[:12]) or stderr.strip()[-800:]
+
+
+def rendered_errors(stderr, target, blocks=4, per=18, lines=70):
+    """rustc's own rendering of the errors in `target`, or "".
+
+    **The short format names an error; the human one teaches it.** The
+    first full rehearsal of this author failed on `attempt to use a
+    non-constant value in a constant: help: try using Self` -- an array
+    whose length was a variable -- and the greedy shard, shown that line and
+    its own code, wrote the same code back. The human rendering puts the
+    offending line under the message with a caret at the variable, which is
+    the difference between a code and an explanation for a model that does
+    not know the code.
+
+    **Parsed against captured output, and the capture is what corrected
+    it.** A diagnostic begins at a column-0 `error` or `warning`, and
+    column 0 is not otherwise a boundary: rustc writes the source lines
+    (`6 |`), its `help:` and `note:` sub-diagnostics and its suggested
+    edits (`5 +`) there too. Warnings about the tree's other files sit
+    between the errors, so only blocks whose first `-->` names `target` are
+    kept. Bounded, because it lands in a card with a 2,600-token answer
+    behind it, and one `E0277` renders twenty lines of the standard library.
+    """
+    want = target.replace("\\", "/")
+    rows = stderr.replace("\r", "").split("\n")
+    found, block = [], None
+    for row in rows:
+        if row and not row[0].isspace():
+            if row.startswith("error") or row.startswith("warning"):
+                if block:
+                    found.append(block)
+                block = [row.rstrip()]
+                continue
+            if row.startswith("For more information") or \
+                    row.startswith("Some errors have"):
+                if block:
+                    found.append(block)
+                block = None
+                continue
+        if block is not None:
+            block.append(row.rstrip())
+    if block:
+        found.append(block)
+    keep = []
+    for b in found:
+        if not b[0].startswith("error") or b[0].startswith("error: could not"):
+            continue
+        where = [r for r in b if "-->" in r]
+        if not where or want not in where[0].replace("\\", "/"):
+            continue
+        b = _own_spans(b, want)
+        while b and not b[-1].strip():
+            b.pop()
+        keep.append("\n".join(b[:per]))
+    text = "\n\n".join(keep[:blocks])
+    return "\n".join(text.split("\n")[:lines])
+
+
+def _own_spans(block, want):
+    """A diagnostic without the spans it quotes from other files.
+
+    rustc explains `E0277` by quoting the standard library -- twenty lines
+    of `impl SliceIndex` from a toolchain's source tree, under a `-->` or a
+    `:::` that names it. That is true and no use to a model that has to
+    change one index in its own file, and it pushed the model's own lines
+    out of the bound. A span naming another file is dropped up to the next
+    `help:`, `note:` or `= ` line, which is where rustc starts saying
+    something about this one again.
+    """
+    out, foreign = [], False
+    for r in block:
+        if "-->" in r or ":::" in r:
+            foreign = want not in r.replace("\\", "/")
+            if foreign:
+                continue
+        elif foreign and (r.startswith("help") or r.startswith("note")
+                          or r.lstrip().startswith("= ")):
+            foreign = False
+        if not foreign:
+            out.append(r)
+    return out
 
 
 def new_file_warnings(stderr, target):
@@ -1944,7 +2035,18 @@ def compiles(root, env, target=None):
                     "`cost.warnings`, which the judge refuses a feature for:"
                     "\n" + "\n".join(warned))
             return "ok", ""
-        return "bad", compile_errors(r.stderr)
+        # Asked again in rustc's own words, with the patch still applied.
+        # A second check costs one rustc on a crate that just failed, which
+        # is seconds against a decode of minutes, and it is only paid on
+        # the path where the model is about to be asked again anyway.
+        told = ""
+        if target:
+            try:
+                told = rendered_errors(_cargo_check(root, human=True).stderr,
+                                       target)
+            except NoCargo:
+                pass
+        return "bad", told or compile_errors(r.stderr)
     finally:
         if applied:
             subprocess.run(["git", "apply", "-R", tmp], cwd=root,
@@ -1969,6 +2071,99 @@ CHECK_LINE = re.compile(r"^check:[ \t]*(.+?)[ \t]*$", re.M)
 #: not compile, and a reply that writes its own would be writing exactly
 #: the boilerplate this assembly exists to take off it.
 RESERVED = ("fn selftest", "fn claim")
+
+
+def _code_only(line):
+    """A line with its string and char literals and its `//` tail removed."""
+    line = re.sub(r'b?"(?:[^"\\]|\\.)*"', '""', line)
+    line = re.sub(r"b?'(?:\\.|[^\\'])'", "' '", line)
+    at = line.find("//")
+    return line if at < 0 else line[:at]
+
+
+#: A plain English sentence on a line of its own: capitalised words, ending in
+#: a full stop, with nothing in it that Rust would read as punctuation.
+PROSE = re.compile(r"^\s*[A-Z][A-Za-z0-9 ,'()-]*[a-z)]\.\s*$")
+
+
+def quiet_prose(items):
+    """The fence, with every line of English in it made a comment.
+
+    **A 4B writes its explanation between the items, and some of it outside
+    a comment.** Measured on the first night of the Qwen3.8 author, over
+    five shards and thirty attempts: 27 `unknown start of token: `` `, six
+    arrows and dashes, and five `prefix won is unknown` -- which is
+    `won't`, read by Rust 2021 as a literal with a prefix. Every one is a
+    line of prose, and the compiler's answer to it is noise about a
+    sentence rather than anything about the code.
+
+    None of those can be Rust. A backtick is not a token of the language, a
+    symbol like `->` spelt as one character is not one either, and a letter,
+    an apostrophe and a letter is a reserved prefix -- so outside a string,
+    a char literal or a comment, each is a line that cannot compile however
+    it is read, and making it a comment cannot break code that worked.
+    Lines inside a block comment are left alone, and so is everything a
+    comment or a literal holds.
+    """
+    import unicodedata
+    out, in_block = [], False
+    for line in items.split("\n"):
+        if in_block:
+            out.append(line)
+            if "*/" in line:
+                in_block = False
+            continue
+        code = _code_only(line)
+        if "/*" in code and "*/" not in code[code.find("/*"):]:
+            in_block = True
+            out.append(line)
+            continue
+        loud = ("`" in code
+                or any(ord(c) > 127 and unicodedata.category(c)[0] in "PS"
+                       for c in code)
+                or re.search(r"[A-Za-z]'[a-z]", code)
+                or (PROSE.match(code) and len(code.split()) >= 4
+                    and not re.search(r"[;{}=:<>\[\]]", code)))
+        if loud and code.strip():
+            indent = line[:len(line) - len(line.lstrip())]
+            out.append(indent + "// " + line.strip())
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+
+#: What `alloc` has that `core` does not, and the line that brings each in --
+#: the tree's own idiom, one `use` per name, with `extern crate alloc` in
+#: `main.rs` and nowhere else.
+ALLOC_USES = (
+    (r"(?<!::)\bVec\b", r"\bVec\b", "use alloc::vec::Vec;"),
+    (r"(?<!::)\bvec!", r"alloc::vec\s*(;|::\{[^}]*\bself\b)", "use alloc::vec;"),
+    (r"(?<!::)\bString\b", r"\bString\b", "use alloc::string::String;"),
+    (r"\.to_string\(\)", r"\bToString\b", "use alloc::string::ToString;"),
+    (r"(?<!::)\bformat!", r"alloc::format\b", "use alloc::format;"),
+    (r"(?<!::)\bBox\b", r"\bBox\b", "use alloc::boxed::Box;"),
+)
+
+
+def alloc_uses(items, check):
+    """The `use` lines the items and check need from `alloc` and lack.
+
+    **Twelve errors on every greedy attempt of the first Qwen3.8 night were
+    one missing line.** `Vec`, `vec!` and `format!` are not in a `no_std`
+    prelude, the model reaches for them anyway, and the prompt's advice was
+    `extern crate alloc;` -- which is not this tree's idiom and which the
+    model then forgot. So the lines are written for it, exactly when the
+    code names the thing and the items do not already bring it in: only
+    `use` lines are consulted for that, and only code, never comments or
+    strings, for whether the name is used, because an import nothing uses
+    is a warning and a warning is a refusal.
+    """
+    code = "\n".join(_code_only(l) for l in (items + "\n" + check).split("\n")
+                     if not l.lstrip().startswith("use "))
+    uses = "\n".join(l for l in items.split("\n")
+                     if l.lstrip().startswith("use ") and "alloc" in l)
+    return [line for used, have, line in ALLOC_USES
+            if re.search(used, code) and not re.search(have, uses)]
 
 
 def split_items(items):
@@ -2200,12 +2395,16 @@ def create_finish(root, kind_name, target, reply, rung=None):
             "the fence defines %s, which this file writes itself -- write "
             "only the items your check needs" % ", ".join(said))
     items, notes = split_items(items)
+    items = quiet_prose(items)
     bad = degenerate(items)
     if bad:
         return None, True, bad
     bad = copies_the_example(items, check)
     if bad:
         return None, True, bad
+    uses = alloc_uses(items, check)
+    if uses:
+        items = "\n".join(uses) + "\n\n" + items
     body = assemble((rung or {}).get("title", ""), items, check, notes)
     # **The canary, where the assembled body is in hand.** It sat at the
     # call site reading `body_of(reply)` -- the fence, which is the items,
@@ -2244,6 +2443,26 @@ def create_finish(root, kind_name, target, reply, rung=None):
     if bad:
         return None, True, bad[0]
     return env, True, None
+
+def draw_seed(seed, attempt, echoed):
+    """The seed one attempt draws with, or None for the greedy decode.
+
+    **An unchanged card is an unchanged answer.** Temperature 0 is a
+    function of the card, so once the card stops changing the attempts stop
+    being attempts: measured on the rehearsal of this author, the greedy
+    shard got past one error, then wrote the same file on attempts four,
+    five and six, the last two from byte-identical cards. A fixed seed has
+    the same trap one temperature up -- same card, same seed, same draw.
+
+    So a seeded shard takes a fresh seed on every attempt, and the greedy
+    shard stays greedy until it repeats itself and then draws warm for the
+    rest of its budget. Both are still written down, `shard * 1000 +
+    attempt`, which keeps the draw's provenance a number a reader can name.
+    """
+    if seed is None and not echoed:
+        return None
+    return (seed or 0) * 1000 + attempt
+
 
 def create(root, kind_name, target, token, rung=None, seed=None,
            tries=None):
@@ -2366,6 +2585,8 @@ def create(root, kind_name, target, token, rung=None, seed=None,
     # this model does.
     tried = []
     shown = ""
+    last_fed = None
+    echoed = False
     for attempt in range(n):
         # **One card, because there is one failure left.** There used to be
         # two: a compile error, and a reply that compiled and printed no
@@ -2395,8 +2616,18 @@ def create(root, kind_name, target, token, rung=None, seed=None,
             "  an index is a `usize`: `x[i as usize]` when `i` is a `u8`.",
             "  `Vec` and `vec!` are not in scope. a fixed-size array",
             "  `[u8; 16]` needs no import and no allocator.",
+            "  there is no `u4` or `u2`: the integers are `u8 u16 u32 u64",
+            "  usize` and their `i` twins.",
+            "  `x as u8 << 4` reads `<<` as the start of a type: write",
+            "  `(x as u8) << 4`.",
+            "  every line in the fence is Rust. an explanation is a `//`",
+            "  comment; a line of plain English does not compile.",
             "  a `const` cannot read a function's arguments or `self`: use",
             "  `let`, or a literal.",
+            "  an array's length is a constant: `[u8; 16]`, never `[u8; n]`",
+            "  with `n` a variable -- and making `n` a `const` does not help",
+            "  when it is computed from `self`. size the array by the",
+            "  largest case, or take the size as a const generic.",
             "  every function you call must be one you defined in this",
             "  fence, or `core::`. nothing else is in scope.",
             "  do NOT write `selftest`. it is written for you, around what",
@@ -2407,7 +2638,7 @@ def create(root, kind_name, target, token, rung=None, seed=None,
         # the model wrote, and `NO_ANSWER` is how the shard says so.
         reply = ask_model(system, this, meta, token,
                           "glados-loop-create", grammar=grammar,
-                          seed=seed)
+                          seed=draw_seed(seed, attempt, echoed))
         env, mine, why = create_finish(root, kind_name, target, reply, rung)
         if env is None and not mine:
             # Not the reply's fault, so asking again cannot help.
@@ -2421,6 +2652,8 @@ def create(root, kind_name, target, token, rung=None, seed=None,
                   file=sys.stderr)
             tried.append(why)
             shown = ""
+            echoed = echoed or why == last_fed
+            last_fed = why
             continue
 
         # **A missing claim is something the model can fix on being told**,
@@ -2448,9 +2681,22 @@ def create(root, kind_name, target, token, rung=None, seed=None,
             # The crate-wide summary counts the tree's own warnings, and
             # "37 warnings emitted" under a new file reads as thirty-seven
             # things to fix in it.
-            tried.append("\n".join(
-                l for l in errs.split("\n")
-                if not l.startswith("error: could not compile")))
+            fed = "\n".join(l for l in errs.split("\n")
+                            if not l.startswith("error: could not compile"))
+            # **The same error twice is said to be the same.** Shown its
+            # own code, the greedy shard answered with that code again and
+            # failed on three identical errors -- temperature 0 reading
+            # "keep what was right" as "keep all of it". Naming the repeat
+            # is the one thing the second card can say that the first did
+            # not.
+            said = fed
+            if fed == last_fed:
+                said = ("this is the SAME error your last answer had, so what "
+                        "you changed did not touch it -- write that part a "
+                        "different way:\n" + fed)
+                echoed = True
+            last_fed = fed
+            tried.append(said)
             shown = numbered(created_body(env, target))
             continue
 
@@ -3055,6 +3301,90 @@ def selftest():
     # Captured from `cargo check --release --message-format=short` on this
     # tree, Windows separators and all -- the flags `_cargo_check` passes.
     mine_w = new_file_warnings(WARNED, "src/fmt/warnprobe.rs")
+    # Captured from `cargo check --release --message-format=human` on this
+    # tree, verbatim: two errors in a probe file with one of the tree's own
+    # warnings between them, as rustc interleaves them.
+    HUMAN = r"""error[E0435]: attempt to use a non-constant value in a constant
+ --> src\fmt\probe.rs:6:26
+  |
+6 |         let data = [0u8; n];
+  |                          ^ non-constant value
+  |
+help: consider using `const` instead of `let`
+  |
+5 -         let n = self.w * self.h;
+5 +         const n: /* Type */ = self.w * self.h;
+  |
+
+warning: unused import: `crate::kprintln`
+   --> src\ai\backward.rs:355:9
+    |
+355 |     use crate::kprintln;
+    |         ^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+error[E0425]: cannot find function `total` in this scope
+  --> src\fmt\probe.rs:19:86
+   |
+19 |     let good: bool = { let p = Px { w: 4, h: 4 }; p.buf()[0] == 0 && pick(1) == 2 && total(3) };
+   |                                                                                      ^^^^^ not found in this scope
+
+For more information about an error, try `rustc --explain E0277`.
+error: could not compile `glados` (bin "glados") due to 3 previous errors; 37 warnings emitted"""
+    told = rendered_errors(HUMAN, "src/fmt/probe.rs")
+    claim("rustc's rendering of the new file's errors is kept, code line and "
+          "caret and all",
+          "error[E0435]" in told and "6 |" in told and "^ non-constant" in told
+          and "error[E0425]" in told)
+    claim("including the help rustc writes at column 0, which is not a "
+          "boundary between diagnostics",
+          "help: consider using `const`" in told
+          and told.index("help: consider") < told.index("error[E0425]"))
+    claim("while the tree's own warning between them is not the model's to fix",
+          "backward.rs" not in told and "warning" not in told)
+    claim("and the crate-wide trailer stays out of it",
+          "could not compile" not in told and "For more information" not in told)
+    claim("a file with no errors of its own renders to nothing, so the short "
+          "lines are what the card falls back to",
+          rendered_errors(HUMAN, "src/fmt/elsewhere.rs") == "")
+    # Captured the same way, with the host's home directory shortened: one
+    # index by a `u8`, which rustc explains by quoting the standard library.
+    E0277 = r"""error[E0277]: the type `[u8]` cannot be indexed by `u8`
+   --> src\fmt\probe.rs:15:7
+    |
+ 15 |     v[i]
+    |       ^ slice indices are of type `usize` or ranges of `usize`
+    |
+    = help: the trait `SliceIndex<[u8]>` is not implemented for `u8`
+help: `usize` implements trait `SliceIndex<T>`
+   --> C:\Users\dev\scoop\persist\rustup-msvc\.rustup\toolchains\nightly-2026-07-30-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library/core/src/bstr/traits.rs:197:1
+    |
+197 | unsafe impl SliceIndex<ByteStr> for usize {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `SliceIndex<ByteStr>`
+    |
+   ::: C:\Users\dev\scoop\persist\rustup-msvc\.rustup\toolchains\nightly-2026-07-30-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library/core/src/slice/index.rs:179:1
+    |
+179 | const unsafe impl<T> SliceIndex<[T]> for usize {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `SliceIndex<[T]>`
+    = note: required for `[u8]` to implement `core::ops::Index<u8>`
+    = note: 1 redundant requirement hidden
+    = note: required for `[u8; 3]` to implement `core::ops::Index<u8>`"""
+    own = rendered_errors(E0277, "src/fmt/probe.rs")
+    claim("an error's own line and caret survive, and rustc's help beside them",
+          "15 |     v[i]" in own and "slice indices are of type `usize`" in own
+          and "= help: the trait `SliceIndex<[u8]>`" in own)
+    claim("while the spans it quotes from the standard library do not",
+          "rustlib" not in own and "SliceIndex<ByteStr> for usize" not in own
+          and "= note: required for `[u8]`" in own)
+    claim("the greedy shard decodes greedily until it repeats itself",
+          draw_seed(None, 0, False) is None and draw_seed(None, 4, False) is None)
+    claim("and then draws warm, under a seed a reader can name",
+          draw_seed(None, 4, True) == 4)
+    claim("a seeded shard takes a fresh seed every attempt, so an unchanged "
+          "card is not an unchanged draw",
+          draw_seed(2, 0, False) == 2000 and draw_seed(2, 1, False) == 2001
+          and draw_seed(3, 1, False) != draw_seed(2, 1, False))
     claim("a warning in the created file is found in the short format",
           len(mine_w) == 2 and "unnecessary parentheses" in mine_w[0])
     claim("and it carries the line, so the card can point at it",
@@ -3102,6 +3432,43 @@ def selftest():
     claim("while the header and the assembled selftest stay out of it",
           "//!" not in listing and "fn selftest" not in listing
           and "kprintln" not in listing)
+    # **Prose in the fence becomes a comment, and nothing else does.**
+    PROSE_IN = "\n".join([
+        "/// Doc with a `tick` stays.",
+        "pub fn f() -> u8 {",
+        "    let s = \"a `tick` in a string\";",
+        "    let c = b'a';",
+        "    let r: &'static str = s;",
+        "    This won't overflow because the sum wraps.",
+        "    The `y` channel comes first.",
+        "    y → u → v",
+        "    /* a block with `ticks`",
+        "       still in it */",
+        "    c",
+        "}",
+        "Returns the luma of one pixel in a block.",
+    ])
+    quiet = quiet_prose(PROSE_IN).split("\n")
+    claim("a line of English in the fence becomes a comment",
+          quiet[5].strip().startswith("// This won't")
+          and quiet[6].strip().startswith("// The `y`")
+          and quiet[7].strip().startswith("// y")
+          and quiet[12].startswith("// Returns the luma"))
+    claim("while strings, byte literals, lifetimes, doc and block comments "
+          "are left exactly as they were",
+          quiet[:5] == PROSE_IN.split("\n")[:5]
+          and quiet[8:12] == PROSE_IN.split("\n")[8:12])
+    claim("the alloc names the code uses are brought in, the tree's way",
+          alloc_uses("pub fn f() -> Vec<u8> { vec![0; 4] }", "true")
+          == ["use alloc::vec::Vec;", "use alloc::vec;"])
+    claim("and nothing the items already import, only mention in a comment, "
+          "or spell out in full",
+          alloc_uses("use alloc::vec::Vec;\npub fn f() -> Vec<u8> {"
+                     " alloc::vec![0] }\n// a String here", "true") == [])
+    claim("a check that formats is covered too, since it lives in the same "
+          "module",
+          alloc_uses("pub fn f() -> u8 { 1 }", 'format!("{}", f()).len() == 1')
+          == ["use alloc::format;"])
     claim("a fence with no such tail is left exactly as it was",
           split_items("pub fn f() -> bool { true }")[0]
           == "pub fn f() -> bool { true }")

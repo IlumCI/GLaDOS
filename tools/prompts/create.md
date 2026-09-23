@@ -51,15 +51,23 @@ The rules that decide whether your answer is used:
 
 1. **It must compile as `no_std`.** No `std::`, no `println!`. `core::` is
    available. There is no prelude beyond `core`'s, so `Vec`, `String`,
-   `Box` and `vec!` are **not in scope** until you import them:
+   `Box`, `vec!` and `format!` are **not in scope** until a `use` brings
+   them in. You may write those lines yourself, one per name, the way the
+   rest of this tree does; any your code needs and you leave out are added
+   for you:
 
    ```rust
-   extern crate alloc;
    use alloc::vec::Vec;
+   use alloc::vec;
    ```
 
    Prefer a fixed-size array to a `Vec` where the size is known. A 4x4
    buffer is `[u8; 16]`, which needs no import and no allocator.
+
+   An array's length is fixed when the code is compiled. `[u8; 16]` is
+   fine, and so is a const generic, `struct Block<const N: usize>`; a
+   length that comes from a field or an argument, `[u8; self.width]` or
+   `[u8; n]`, does not compile.
 
    It is Rust, not Python. A length is `x.len()`; there is no `len(x)`.
    Indexing a slice is `s[i]`; there is no `s.at(i)`.
