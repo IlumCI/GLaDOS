@@ -1787,7 +1787,12 @@ def wire_module(root, target):
 #: truncating the file rather than the model being wrong. Each attempt is a
 #: decode plus a `cargo check`, measured at roughly 30 s and 12 s on this
 #: tree, so six is about four minutes against a night.
-CREATE_TRIES = 6
+#: Eight, from six: every attempt now carries a fresh draw and the compiler's
+#: own rendering of what went wrong, so a later attempt is worth more than
+#: it was when the sixth was usually the first one again. At two and a half
+#: minutes an attempt on a runner, eight fits the author job's seventy-five
+#: with the fetch and the toolchain beside it.
+CREATE_TRIES = 8
 
 
 class NoCargo(Exception):
@@ -2068,6 +2073,99 @@ CHECK_LINE = re.compile(r"^check:[ \t]*(.+?)[ \t]*$", re.M)
 RESERVED = ("fn selftest", "fn claim")
 
 
+def _code_only(line):
+    """A line with its string and char literals and its `//` tail removed."""
+    line = re.sub(r'b?"(?:[^"\\]|\\.)*"', '""', line)
+    line = re.sub(r"b?'(?:\\.|[^\\'])'", "' '", line)
+    at = line.find("//")
+    return line if at < 0 else line[:at]
+
+
+#: A plain English sentence on a line of its own: capitalised words, ending in
+#: a full stop, with nothing in it that Rust would read as punctuation.
+PROSE = re.compile(r"^\s*[A-Z][A-Za-z0-9 ,'()-]*[a-z)]\.\s*$")
+
+
+def quiet_prose(items):
+    """The fence, with every line of English in it made a comment.
+
+    **A 4B writes its explanation between the items, and some of it outside
+    a comment.** Measured on the first night of the Qwen3.8 author, over
+    five shards and thirty attempts: 27 `unknown start of token: `` `, six
+    arrows and dashes, and five `prefix won is unknown` -- which is
+    `won't`, read by Rust 2021 as a literal with a prefix. Every one is a
+    line of prose, and the compiler's answer to it is noise about a
+    sentence rather than anything about the code.
+
+    None of those can be Rust. A backtick is not a token of the language, a
+    symbol like `->` spelt as one character is not one either, and a letter,
+    an apostrophe and a letter is a reserved prefix -- so outside a string,
+    a char literal or a comment, each is a line that cannot compile however
+    it is read, and making it a comment cannot break code that worked.
+    Lines inside a block comment are left alone, and so is everything a
+    comment or a literal holds.
+    """
+    import unicodedata
+    out, in_block = [], False
+    for line in items.split("\n"):
+        if in_block:
+            out.append(line)
+            if "*/" in line:
+                in_block = False
+            continue
+        code = _code_only(line)
+        if "/*" in code and "*/" not in code[code.find("/*"):]:
+            in_block = True
+            out.append(line)
+            continue
+        loud = ("`" in code
+                or any(ord(c) > 127 and unicodedata.category(c)[0] in "PS"
+                       for c in code)
+                or re.search(r"[A-Za-z]'[a-z]", code)
+                or (PROSE.match(code) and len(code.split()) >= 4
+                    and not re.search(r"[;{}=:<>\[\]]", code)))
+        if loud and code.strip():
+            indent = line[:len(line) - len(line.lstrip())]
+            out.append(indent + "// " + line.strip())
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+
+#: What `alloc` has that `core` does not, and the line that brings each in --
+#: the tree's own idiom, one `use` per name, with `extern crate alloc` in
+#: `main.rs` and nowhere else.
+ALLOC_USES = (
+    (r"(?<!::)\bVec\b", r"\bVec\b", "use alloc::vec::Vec;"),
+    (r"(?<!::)\bvec!", r"alloc::vec\s*(;|::\{[^}]*\bself\b)", "use alloc::vec;"),
+    (r"(?<!::)\bString\b", r"\bString\b", "use alloc::string::String;"),
+    (r"\.to_string\(\)", r"\bToString\b", "use alloc::string::ToString;"),
+    (r"(?<!::)\bformat!", r"alloc::format\b", "use alloc::format;"),
+    (r"(?<!::)\bBox\b", r"\bBox\b", "use alloc::boxed::Box;"),
+)
+
+
+def alloc_uses(items, check):
+    """The `use` lines the items and check need from `alloc` and lack.
+
+    **Twelve errors on every greedy attempt of the first Qwen3.8 night were
+    one missing line.** `Vec`, `vec!` and `format!` are not in a `no_std`
+    prelude, the model reaches for them anyway, and the prompt's advice was
+    `extern crate alloc;` -- which is not this tree's idiom and which the
+    model then forgot. So the lines are written for it, exactly when the
+    code names the thing and the items do not already bring it in: only
+    `use` lines are consulted for that, and only code, never comments or
+    strings, for whether the name is used, because an import nothing uses
+    is a warning and a warning is a refusal.
+    """
+    code = "\n".join(_code_only(l) for l in (items + "\n" + check).split("\n")
+                     if not l.lstrip().startswith("use "))
+    uses = "\n".join(l for l in items.split("\n")
+                     if l.lstrip().startswith("use ") and "alloc" in l)
+    return [line for used, have, line in ALLOC_USES
+            if re.search(used, code) and not re.search(have, uses)]
+
+
 def split_items(items):
     """`(items, notes)` -- the fence, minus what belongs at the check.
 
@@ -2297,12 +2395,16 @@ def create_finish(root, kind_name, target, reply, rung=None):
             "the fence defines %s, which this file writes itself -- write "
             "only the items your check needs" % ", ".join(said))
     items, notes = split_items(items)
+    items = quiet_prose(items)
     bad = degenerate(items)
     if bad:
         return None, True, bad
     bad = copies_the_example(items, check)
     if bad:
         return None, True, bad
+    uses = alloc_uses(items, check)
+    if uses:
+        items = "\n".join(uses) + "\n\n" + items
     body = assemble((rung or {}).get("title", ""), items, check, notes)
     # **The canary, where the assembled body is in hand.** It sat at the
     # call site reading `body_of(reply)` -- the fence, which is the items,
@@ -2514,6 +2616,12 @@ def create(root, kind_name, target, token, rung=None, seed=None,
             "  an index is a `usize`: `x[i as usize]` when `i` is a `u8`.",
             "  `Vec` and `vec!` are not in scope. a fixed-size array",
             "  `[u8; 16]` needs no import and no allocator.",
+            "  there is no `u4` or `u2`: the integers are `u8 u16 u32 u64",
+            "  usize` and their `i` twins.",
+            "  `x as u8 << 4` reads `<<` as the start of a type: write",
+            "  `(x as u8) << 4`.",
+            "  every line in the fence is Rust. an explanation is a `//`",
+            "  comment; a line of plain English does not compile.",
             "  a `const` cannot read a function's arguments or `self`: use",
             "  `let`, or a literal.",
             "  an array's length is a constant: `[u8; 16]`, never `[u8; n]`",
@@ -3324,6 +3432,43 @@ help: `usize` implements trait `SliceIndex<T>`
     claim("while the header and the assembled selftest stay out of it",
           "//!" not in listing and "fn selftest" not in listing
           and "kprintln" not in listing)
+    # **Prose in the fence becomes a comment, and nothing else does.**
+    PROSE_IN = "\n".join([
+        "/// Doc with a `tick` stays.",
+        "pub fn f() -> u8 {",
+        "    let s = \"a `tick` in a string\";",
+        "    let c = b'a';",
+        "    let r: &'static str = s;",
+        "    This won't overflow because the sum wraps.",
+        "    The `y` channel comes first.",
+        "    y → u → v",
+        "    /* a block with `ticks`",
+        "       still in it */",
+        "    c",
+        "}",
+        "Returns the luma of one pixel in a block.",
+    ])
+    quiet = quiet_prose(PROSE_IN).split("\n")
+    claim("a line of English in the fence becomes a comment",
+          quiet[5].strip().startswith("// This won't")
+          and quiet[6].strip().startswith("// The `y`")
+          and quiet[7].strip().startswith("// y")
+          and quiet[12].startswith("// Returns the luma"))
+    claim("while strings, byte literals, lifetimes, doc and block comments "
+          "are left exactly as they were",
+          quiet[:5] == PROSE_IN.split("\n")[:5]
+          and quiet[8:12] == PROSE_IN.split("\n")[8:12])
+    claim("the alloc names the code uses are brought in, the tree's way",
+          alloc_uses("pub fn f() -> Vec<u8> { vec![0; 4] }", "true")
+          == ["use alloc::vec::Vec;", "use alloc::vec;"])
+    claim("and nothing the items already import, only mention in a comment, "
+          "or spell out in full",
+          alloc_uses("use alloc::vec::Vec;\npub fn f() -> Vec<u8> {"
+                     " alloc::vec![0] }\n// a String here", "true") == [])
+    claim("a check that formats is covered too, since it lives in the same "
+          "module",
+          alloc_uses("pub fn f() -> u8 { 1 }", 'format!("{}", f()).len() == 1')
+          == ["use alloc::format;"])
     claim("a fence with no such tail is left exactly as it was",
           split_items("pub fn f() -> bool { true }")[0]
           == "pub fn f() -> bool { true }")
