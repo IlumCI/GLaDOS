@@ -1794,8 +1794,12 @@ class NoCargo(Exception):
     """There is no cargo here at all, which is not a broken candidate."""
 
 
-def _cargo_check(root):
+def _cargo_check(root, human=False):
     """(returncode, stderr) of a release check in its own target dir.
+
+    Short format by default, because the warning check reads one line per
+    diagnostic. `human` is rustc's own rendering, asked for only after a
+    check has already failed -- see `rendered_errors`.
 
     A host with no cargo raises rather than answering, because a missing
     toolchain and a candidate that does not compile are different facts and
@@ -1805,7 +1809,8 @@ def _cargo_check(root):
     """
     try:
         return subprocess.run(
-            ["cargo", "check", "--release", "--message-format=short",
+            ["cargo", "check", "--release",
+             "--message-format=%s" % ("human" if human else "short"),
              "--target-dir", "target/authorcheck"],
             cwd=root, capture_output=True, text=True)
     except (FileNotFoundError, OSError) as e:
@@ -1850,6 +1855,61 @@ def compile_errors(stderr):
     lines = [l.rstrip() for l in stderr.split("\n")
              if l.startswith("error") or ": error" in l]
     return "\n".join(lines[:12]) or stderr.strip()[-800:]
+
+
+def rendered_errors(stderr, target, blocks=4, per=18, lines=70):
+    """rustc's own rendering of the errors in `target`, or "".
+
+    **The short format names an error; the human one teaches it.** The
+    first full rehearsal of this author failed on `attempt to use a
+    non-constant value in a constant: help: try using Self` -- an array
+    whose length was a variable -- and the greedy shard, shown that line and
+    its own code, wrote the same code back. The human rendering puts the
+    offending line under the message with a caret at the variable, which is
+    the difference between a code and an explanation for a model that does
+    not know the code.
+
+    **Parsed against captured output, and the capture is what corrected
+    it.** A diagnostic begins at a column-0 `error` or `warning`, and
+    column 0 is not otherwise a boundary: rustc writes the source lines
+    (`6 |`), its `help:` and `note:` sub-diagnostics and its suggested
+    edits (`5 +`) there too. Warnings about the tree's other files sit
+    between the errors, so only blocks whose first `-->` names `target` are
+    kept. Bounded, because it lands in a card with a 2,600-token answer
+    behind it, and one `E0277` renders twenty lines of the standard library.
+    """
+    want = target.replace("\\", "/")
+    rows = stderr.replace("\r", "").split("\n")
+    found, block = [], None
+    for row in rows:
+        if row and not row[0].isspace():
+            if row.startswith("error") or row.startswith("warning"):
+                if block:
+                    found.append(block)
+                block = [row.rstrip()]
+                continue
+            if row.startswith("For more information") or \
+                    row.startswith("Some errors have"):
+                if block:
+                    found.append(block)
+                block = None
+                continue
+        if block is not None:
+            block.append(row.rstrip())
+    if block:
+        found.append(block)
+    keep = []
+    for b in found:
+        if not b[0].startswith("error") or b[0].startswith("error: could not"):
+            continue
+        where = [r for r in b if "-->" in r]
+        if not where or want not in where[0].replace("\\", "/"):
+            continue
+        while b and not b[-1].strip():
+            b.pop()
+        keep.append("\n".join(b[:per]))
+    text = "\n\n".join(keep[:blocks])
+    return "\n".join(text.split("\n")[:lines])
 
 
 def new_file_warnings(stderr, target):
@@ -1944,7 +2004,18 @@ def compiles(root, env, target=None):
                     "`cost.warnings`, which the judge refuses a feature for:"
                     "\n" + "\n".join(warned))
             return "ok", ""
-        return "bad", compile_errors(r.stderr)
+        # Asked again in rustc's own words, with the patch still applied.
+        # A second check costs one rustc on a crate that just failed, which
+        # is seconds against a decode of minutes, and it is only paid on
+        # the path where the model is about to be asked again anyway.
+        told = ""
+        if target:
+            try:
+                told = rendered_errors(_cargo_check(root, human=True).stderr,
+                                       target)
+            except NoCargo:
+                pass
+        return "bad", told or compile_errors(r.stderr)
     finally:
         if applied:
             subprocess.run(["git", "apply", "-R", tmp], cwd=root,
@@ -2366,6 +2437,7 @@ def create(root, kind_name, target, token, rung=None, seed=None,
     # this model does.
     tried = []
     shown = ""
+    last_fed = None
     for attempt in range(n):
         # **One card, because there is one failure left.** There used to be
         # two: a compile error, and a reply that compiled and printed no
@@ -2397,6 +2469,10 @@ def create(root, kind_name, target, token, rung=None, seed=None,
             "  `[u8; 16]` needs no import and no allocator.",
             "  a `const` cannot read a function's arguments or `self`: use",
             "  `let`, or a literal.",
+            "  an array's length is a constant: `[u8; 16]`, never `[u8; n]`",
+            "  with `n` a variable -- and making `n` a `const` does not help",
+            "  when it is computed from `self`. size the array by the",
+            "  largest case, or take the size as a const generic.",
             "  every function you call must be one you defined in this",
             "  fence, or `core::`. nothing else is in scope.",
             "  do NOT write `selftest`. it is written for you, around what",
@@ -2421,6 +2497,7 @@ def create(root, kind_name, target, token, rung=None, seed=None,
                   file=sys.stderr)
             tried.append(why)
             shown = ""
+            last_fed = None
             continue
 
         # **A missing claim is something the model can fix on being told**,
@@ -2448,9 +2525,21 @@ def create(root, kind_name, target, token, rung=None, seed=None,
             # The crate-wide summary counts the tree's own warnings, and
             # "37 warnings emitted" under a new file reads as thirty-seven
             # things to fix in it.
-            tried.append("\n".join(
-                l for l in errs.split("\n")
-                if not l.startswith("error: could not compile")))
+            fed = "\n".join(l for l in errs.split("\n")
+                            if not l.startswith("error: could not compile"))
+            # **The same error twice is said to be the same.** Shown its
+            # own code, the greedy shard answered with that code again and
+            # failed on three identical errors -- temperature 0 reading
+            # "keep what was right" as "keep all of it". Naming the repeat
+            # is the one thing the second card can say that the first did
+            # not.
+            said = fed
+            if fed == last_fed:
+                said = ("this is the SAME error your last answer had, so what "
+                        "you changed did not touch it -- write that part a "
+                        "different way:\n" + fed)
+            last_fed = fed
+            tried.append(said)
             shown = numbered(created_body(env, target))
             continue
 
@@ -3055,6 +3144,53 @@ def selftest():
     # Captured from `cargo check --release --message-format=short` on this
     # tree, Windows separators and all -- the flags `_cargo_check` passes.
     mine_w = new_file_warnings(WARNED, "src/fmt/warnprobe.rs")
+    # Captured from `cargo check --release --message-format=human` on this
+    # tree, verbatim: two errors in a probe file with one of the tree's own
+    # warnings between them, as rustc interleaves them.
+    HUMAN = r"""error[E0435]: attempt to use a non-constant value in a constant
+ --> src\fmt\probe.rs:6:26
+  |
+6 |         let data = [0u8; n];
+  |                          ^ non-constant value
+  |
+help: consider using `const` instead of `let`
+  |
+5 -         let n = self.w * self.h;
+5 +         const n: /* Type */ = self.w * self.h;
+  |
+
+warning: unused import: `crate::kprintln`
+   --> src\ai\backward.rs:355:9
+    |
+355 |     use crate::kprintln;
+    |         ^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+error[E0425]: cannot find function `total` in this scope
+  --> src\fmt\probe.rs:19:86
+   |
+19 |     let good: bool = { let p = Px { w: 4, h: 4 }; p.buf()[0] == 0 && pick(1) == 2 && total(3) };
+   |                                                                                      ^^^^^ not found in this scope
+
+For more information about an error, try `rustc --explain E0277`.
+error: could not compile `glados` (bin "glados") due to 3 previous errors; 37 warnings emitted"""
+    told = rendered_errors(HUMAN, "src/fmt/probe.rs")
+    claim("rustc's rendering of the new file's errors is kept, code line and "
+          "caret and all",
+          "error[E0435]" in told and "6 |" in told and "^ non-constant" in told
+          and "error[E0425]" in told)
+    claim("including the help rustc writes at column 0, which is not a "
+          "boundary between diagnostics",
+          "help: consider using `const`" in told
+          and told.index("help: consider") < told.index("error[E0425]"))
+    claim("while the tree's own warning between them is not the model's to fix",
+          "backward.rs" not in told and "warning" not in told)
+    claim("and the crate-wide trailer stays out of it",
+          "could not compile" not in told and "For more information" not in told)
+    claim("a file with no errors of its own renders to nothing, so the short "
+          "lines are what the card falls back to",
+          rendered_errors(HUMAN, "src/fmt/elsewhere.rs") == "")
     claim("a warning in the created file is found in the short format",
           len(mine_w) == 2 and "unnecessary parentheses" in mine_w[0])
     claim("and it carries the line, so the card can point at it",
