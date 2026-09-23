@@ -2189,6 +2189,38 @@ def outer_docs(items):
     return re.sub(r"(?m)^(\s*)//!", r"\1//", items)
 
 
+def lift_lets(items):
+    """`(items, lets)`: the fence without its top-level `let`s, and them.
+
+    A `let` at the top of a module is never Rust -- `let cannot be used for
+    global variables` -- and a model writes one when it starts the check in
+    the fence: `let p = Pixel::new(1, 2, 3);` above the items, meaning the
+    check to use it. The check is a block where a `let` is ordinary, so
+    each one moves there, in order, ahead of the check line.
+
+    Only statements that begin at column 0 and only up to their own `;` at
+    bracket depth zero: an indented `let` is inside a function, where it
+    belongs.
+    """
+    kept, lets, cur, depth = [], [], None, 0
+    for line in items.split("\n"):
+        if cur is None and re.match(r"let\s", line):
+            cur, depth = [], 0
+        if cur is None:
+            kept.append(line)
+            continue
+        cur.append(line)
+        code = _code_only(line)
+        depth += sum(code.count(c) for c in "([{") - sum(code.count(c)
+                                                         for c in ")]}")
+        if depth <= 0 and code.rstrip().endswith(";"):
+            lets.append(" ".join(l.strip() for l in cur).rstrip(";"))
+            cur = None
+    if cur is not None:
+        kept += cur
+    return "\n".join(kept), lets
+
+
 def publish_types(items):
     """The items, with every top-level type made `pub`.
 
@@ -2377,9 +2409,15 @@ def numbered(body, cap=160):
         start += 1
     out = ["%4d | %s" % (i + 1, lines[i]) for i in range(start, end)]
     out = out[:cap]
+    # **Not the line the check became.** The listing marked `let good:
+    # bool = { .. };` as "your check line", and on the third night five
+    # attempts running wrote `let good: bool = ...` at the top of their own
+    # fence -- a statement where only items may stand, copied from the card
+    # that was meant to help. The check is shown as the model wrote it, by
+    # the card, and the line it becomes stays the assembly's business.
     for i in range(end, len(lines)):
         if lines[i].lstrip().startswith("let good"):
-            out.append("%4d | %s    <- your check line" % (i + 1, lines[i]))
+            out.append("%4d | (your check line lands here)" % (i + 1))
     return "\n".join(out)
 
 
@@ -2539,7 +2577,8 @@ def create_finish(root, kind_name, target, reply, rung=None):
             "only the items your check needs" % ", ".join(said))
     items, notes = split_items(items)
     items = outer_docs(publish_types(quiet_prose(items)))
-    check = repair_check(check)
+    items, lets = lift_lets(items)
+    check = repair_check("; ".join(lets + [check]))
     bad = degenerate(items)
     if bad:
         return None, True, bad
@@ -2737,6 +2776,7 @@ def create(root, kind_name, target, token, rung=None, seed=None,
     # this model does.
     tried = []
     shown = ""
+    last_check = ""
     last_fed = None
     echoed = False
     filled = False
@@ -2753,6 +2793,9 @@ def create(root, kind_name, target, token, rung=None, seed=None,
             "own lines, which is what the compiler counts:",
             "",
             shown,
+            "",
+            "and your check line was:",
+            "check: " + last_check,
             "",
         ] if shown else []) + [
         ] + ([
@@ -2857,6 +2900,8 @@ def create(root, kind_name, target, token, rung=None, seed=None,
             last_fed = fed
             tried.append(said)
             shown = numbered(created_body(env, target))
+            m = CHECK_LINE.search(reply[reply.rfind("```") + 3:])
+            last_check = m.group(1) if m else ""
             continue
 
         if tried:
@@ -3586,11 +3631,12 @@ help: `usize` implements trait `SliceIndex<T>`
           and "pub fn selftest() -> bool {" in body_made)
     claim("and a retry shows the model its code under the file's own line "
           "numbers, the ones the compiler's errors name",
-          "%4d | pub fn e(" % at_line in listing
-          and "<- your check line" in listing)
+          "%4d | pub fn e(" % at_line in listing)
     claim("while the header and the assembled selftest stay out of it",
           "//!" not in listing and "fn selftest" not in listing
           and "kprintln" not in listing)
+    claim("and so does the line the check became, which a model copies",
+          "let good" not in listing and "your check line lands here" in listing)
     # **Prose in the fence becomes a comment, and nothing else does.**
     PROSE_IN = "\n".join([
         "/// Doc with a `tick` stays.",
@@ -3628,6 +3674,12 @@ help: `usize` implements trait `SliceIndex<T>`
           "module",
           alloc_uses("pub fn f() -> u8 { 1 }", 'format!("{}", f()).len() == 1')
           == ["use alloc::format;"])
+    lifted, lets = lift_lets("pub fn f() -> u8 {\n    let a = 1;\n    a\n}\n"
+                             "let p = [\n    1, 2,\n];\nlet q = f();")
+    claim("a let at the top of the fence moves into the check, whole and in "
+          "order, and one inside a function stays",
+          lifted == "pub fn f() -> u8 {\n    let a = 1;\n    a\n}"
+          and lets == ["let p = [ 1, 2, ]", "let q = f()"])
     claim("an inner doc comment in the fence becomes a plain one, and a "
           "doc comment on an item is left alone",
           outer_docs("//! the module\n/// the item\npub fn f() {}\n"
