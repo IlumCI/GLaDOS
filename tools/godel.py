@@ -1771,14 +1771,47 @@ def baseline_compiles(root):
 
 def compile_errors(stderr):
     """The error lines out of a check's stderr, or the tail if there are
-    none to find. Warnings are not a reason to ask again and the whole log
-    does not fit in a card."""
+    none to find. The whole log does not fit in a card."""
     lines = [l.rstrip() for l in stderr.split("\n")
              if l.startswith("error") or ": error" in l]
     return "\n".join(lines[:12]) or stderr.strip()[-800:]
 
 
-def compiles(root, env):
+def new_file_warnings(stderr, target):
+    """Warnings rustc attributes to `target`, as lines for a card.
+
+    **A warning in the created file is a refusal, and it was not being
+    asked about.** `cost.warnings` is a rail floored at zero and the
+    `feature` kind's J2 reads it, so one `unnecessary parentheses around
+    assigned value` is a whole night spent to report a style note. That is
+    exactly what refused the first real feature candidate this loop ever
+    produced -- it built, it booted, it added two claims, and it lost on a
+    pair of brackets.
+
+    The docstring above this one used to say warnings are not a reason to
+    ask again, which was true when nothing judged them and stopped being
+    true when something did.
+
+    **Only this file's, which is the whole difficulty.** The tree carries
+    over two hundred and fifty warnings of its own, so a count is useless;
+    what matters is the ones rustc points at the new path. rustc prints the
+    location on the `-->` line under each warning, so a warning is this
+    file's when the next location line names it.
+    """
+    out, lines = [], stderr.split("\n")
+    for i, line in enumerate(lines):
+        if not line.startswith("warning:"):
+            continue
+        for nxt in lines[i + 1:i + 4]:
+            if "-->" not in nxt:
+                continue
+            if target in nxt.replace("\\", "/"):
+                out.append("%s  (%s)" % (line.rstrip(), nxt.split("-->")[1].strip()))
+            break
+    return out[:8]
+
+
+def compiles(root, env, target=None):
     """`ok`, `bad` or `cannot`, with the errors when it is `bad`.
 
     **The cheapest judge there is, and it was not being asked.** The first
@@ -1819,6 +1852,12 @@ def compiles(root, env):
         except NoCargo as e:
             return "cannot", "there is no cargo here (%s)" % e
         if r.returncode == 0:
+            warned = new_file_warnings(r.stderr, target) if target else []
+            if warned:
+                return "bad", (
+                    "it compiles, but the new file warns -- and a warning is "
+                    "`cost.warnings`, which the judge refuses a feature for:"
+                    "\n" + "\n".join(warned))
             return "ok", ""
         return "bad", compile_errors(r.stderr)
     finally:
@@ -2142,7 +2181,7 @@ def create(root, kind_name, target, token, rung=None):
         # canary rather than a gate: it can only fail if `assemble` stopped
         # writing the shape, which is this file's own bug and not the
         # model's. It says so in those words if it ever fires.
-        verdict, errs = compiles(root, env)
+        verdict, errs = compiles(root, env, target)
         if verdict == "cannot":
             print("  not compile-checked here (%s), so the runner decides"
                   % errs, file=sys.stderr)
@@ -2667,6 +2706,24 @@ def selftest():
     # which by design carries no claim -- instead of the assembled file. A
     # good reply must be admitted, and that is the claim that would have
     # caught it.
+    # **A warning in the created file is a refusal, so ask about it here.**
+    # `cost.warnings` is floored at zero and the feature kind's J2 reads
+    # it, so one pair of unnecessary brackets is a whole night spent to
+    # report a style note -- which is exactly what refused the first real
+    # feature candidate this loop produced. The tree carries 250-odd
+    # warnings of its own, so only the ones rustc points at the new path
+    # may count, and that is what these claims are about.
+    WARNED = "warning: unused import: `crate::kprintln`\n --> src/ai/backward.rs:3:5\n  |\nwarning: unnecessary parentheses around assigned value\n  --> src/fmt/pixel_format.rs:20:16\n   |\nwarning: unused variable: `i`\n  --> src/gfx/desk.rs:99:9"
+    mine_w = new_file_warnings(WARNED, "src/fmt/pixel_format.rs")
+    claim("a warning in the created file is found",
+          len(mine_w) == 1 and "unnecessary parentheses" in mine_w[0])
+    claim("and it carries the line, so the card can point at it",
+          "20:16" in mine_w[0])
+    claim("while the tree's own warnings are not the candidate's fault",
+          new_file_warnings(WARNED, "src/fmt/nothing_here.rs") == [])
+    claim("and a clean check warns about nothing",
+          new_file_warnings("", "src/fmt/pixel_format.rs") == [])
+
     claim("a reply carrying only items and a check is admitted",
           create_finish(".", "feature", "src/fmt/px.rs",
                         "```rust\n"
