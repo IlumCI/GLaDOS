@@ -1,0 +1,1 @@
+elp: the trait `Add<usize>` is not implemented for `u8` help: the following other types implement trait `Add<Rhs>`     = note: this error originates in the macro `forward_ref_binop` which comes from the expansion of the macro `add_impl` (in Nightly builds, run with -Z macro-backtrace for more info) 
