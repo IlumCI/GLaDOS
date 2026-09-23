@@ -2171,6 +2171,19 @@ def alloc_uses(items, check):
 PRIVATE_TYPE = re.compile(r"^(struct|enum|type|trait|union)\b", re.M)
 
 
+def outer_docs(items):
+    """The items with every `//!` made a `//`.
+
+    An inner doc comment documents the module and must come before every
+    item in it, and the fence lands after the file's own `//!` header and
+    after any `use` lines `alloc_uses` wrote -- so a `//!` in the fence is
+    `E0753 expected outer doc comment`, four times on the second night,
+    wherever the model put it. As a plain comment it says the same thing
+    and compiles.
+    """
+    return re.sub(r"(?m)^(\s*)//!", r"\1//", items)
+
+
 def publish_types(items):
     """The items, with every top-level type made `pub`.
 
@@ -2520,7 +2533,7 @@ def create_finish(root, kind_name, target, reply, rung=None):
             "the fence defines %s, which this file writes itself -- write "
             "only the items your check needs" % ", ".join(said))
     items, notes = split_items(items)
-    items = publish_types(quiet_prose(items))
+    items = outer_docs(publish_types(quiet_prose(items)))
     check = repair_check(check)
     bad = degenerate(items)
     if bad:
@@ -3595,6 +3608,11 @@ help: `usize` implements trait `SliceIndex<T>`
           "module",
           alloc_uses("pub fn f() -> u8 { 1 }", 'format!("{}", f()).len() == 1')
           == ["use alloc::format;"])
+    claim("an inner doc comment in the fence becomes a plain one, and a "
+          "doc comment on an item is left alone",
+          outer_docs("//! the module\n/// the item\npub fn f() {}\n"
+                     "    //! inside")
+          == "// the module\n/// the item\npub fn f() {}\n    // inside")
     claim("a top-level type is made public, so a pub fn taking it does "
           "not warn",
           publish_types("#[derive(Clone)]\nstruct P { x: u8 }\nenum E { A }\n"
