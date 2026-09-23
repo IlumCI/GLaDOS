@@ -1,7 +1,8 @@
 ---
 model: Qwen3.8-4B-Q4_K_M
-max_tokens: 2600
+max_tokens: 2000
 temperature: 0
+timeout: 900
 ---
 You write Rust for a `no_std` UEFI kernel that has no operating system under
 it. Everything you answer is checked mechanically afterwards, so there is no
@@ -92,7 +93,8 @@ The rules that decide whether your answer is used:
 
    It may call anything you defined and anything in `core::`. It may not
    refer to a variable, because there are none in scope but the ones it
-   makes itself.
+   makes itself. An `assert!` is not a check: it answers nothing, and when
+   it fails it halts the machine. Write the condition itself.
 
 5. **Write the smallest thing that makes the stated check pass.** Twenty to
    fifty lines of items is the usual size and a good target. There is a hard

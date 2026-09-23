@@ -1794,6 +1794,11 @@ def wire_module(root, target):
 #: with the fetch and the toolchain beside it.
 CREATE_TRIES = 8
 
+#: How many lines the create grammar lets the fence hold. A hard stop: an
+#: answer that reaches it is closed where it stands, mid-item or not, which
+#: is why the card names it and a retry after one is told so.
+FENCE_LINES = 120
+
 
 class NoCargo(Exception):
     """There is no cargo here at all, which is not a broken candidate."""
@@ -2166,6 +2171,144 @@ def alloc_uses(items, check):
             if re.search(used, code) and not re.search(have, uses)]
 
 
+#: A type item at the top of the file, not already `pub`: the one visibility
+#: mistake that is a warning rather than a choice.
+PRIVATE_TYPE = re.compile(r"^(struct|enum|type|trait|union)\b", re.M)
+
+
+def outer_docs(items):
+    """The items with every `//!` made a `//`.
+
+    An inner doc comment documents the module and must come before every
+    item in it, and the fence lands after the file's own `//!` header and
+    after any `use` lines `alloc_uses` wrote -- so a `//!` in the fence is
+    `E0753 expected outer doc comment`, four times on the second night,
+    wherever the model put it. As a plain comment it says the same thing
+    and compiles.
+    """
+    return re.sub(r"(?m)^(\s*)//!", r"\1//", items)
+
+
+def publish_types(items):
+    """The items, with every top-level type made `pub`.
+
+    **Three attempts of the second night compiled and were refused for
+    one word.** `struct Pixel` was private and `pub fn pack(p: &Pixel)`
+    was not, which is `private_interfaces`, a warning, and a warning is
+    `cost.warnings` -- so three files that built were each a refusal. A
+    type the file's own public functions take or return has to be at
+    least as visible as they are, and a type nothing public mentions is
+    dead code whichever way it is marked, so `pub` loses nothing.
+    Indented declarations are left alone: those are inside something.
+    """
+    return PRIVATE_TYPE.sub(r"pub \1", items)
+
+
+def _split_top(text, sep):
+    """`text` split on `sep` wherever it is outside brackets and strings."""
+    parts, cur, depth, i, quoted = [], [], 0, 0, False
+    while i < len(text):
+        c = text[i]
+        if quoted:
+            cur.append(c)
+            if c == "\\" and i + 1 < len(text):
+                cur.append(text[i + 1])
+                i += 2
+                continue
+            if c == '"':
+                quoted = False
+            i += 1
+            continue
+        if c == '"':
+            quoted = True
+        elif c == "'" and i + 2 < len(text) and text[i + 2] == "'":
+            cur.append(text[i:i + 3])
+            i += 3
+            continue
+        elif c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        if c == sep and depth == 0:
+            parts.append("".join(cur))
+            cur = []
+        else:
+            cur.append(c)
+        i += 1
+    parts.append("".join(cur))
+    return parts
+
+
+def _close_open(text):
+    """`text` with any brackets it left open closed at the end, or as it was.
+
+    Only the trailing case: a closer that does not match is a different
+    mistake, and guessing at it would be writing somebody else's check.
+    """
+    pairs, stack, i, quoted = {"(": ")", "[": "]", "{": "}"}, [], 0, False
+    while i < len(text):
+        c = text[i]
+        if quoted:
+            if c == "\\":
+                i += 2
+                continue
+            if c == '"':
+                quoted = False
+        elif c == '"':
+            quoted = True
+        elif c == "'" and i + 2 < len(text) and text[i + 2] == "'":
+            i += 3
+            continue
+        elif c in pairs:
+            stack.append(pairs[c])
+        elif c in ")]}":
+            if not stack or stack.pop() != c:
+                return text
+        i += 1
+    return text if quoted else text + "".join(reversed(stack))
+
+
+ASSERT = re.compile(r"^(?:debug_)?(assert_eq|assert_ne|assert)!\s*\((.*)\)$", re.S)
+
+
+def repair_check(check):
+    """The `check:` line as one boolean block body, where it can be made one.
+
+    **A 4B writes a check the way it writes a test.** On the second night
+    the greedy shard's check was `let p = ..; let b = pack(&p);
+    assert_eq!(b, [42, 73, 9]); let u = unpack(&b); assert_eq!(..` -- five
+    attempts running -- and a check is a `bool`, where an `assert!` is a
+    statement that answers nothing and panics a kernel selftest when it
+    fails. So each `assert!` becomes a named condition in the place it was
+    written, which keeps the order and any shadowing exactly as the model
+    wrote them, and the block ends in their conjunction with whatever
+    expression the check ended on. And a check that left brackets open --
+    another shard's ran to three thousand columns -- is closed at the end,
+    since it could not have compiled open.
+    """
+    text = _close_open(check.strip().rstrip(";").strip())
+    stmts = [x.strip() for x in _split_top(text, ";") if x.strip()]
+    out, names = [], []
+    for st in stmts:
+        m = ASSERT.match(st)
+        args = [a.strip() for a in _split_top(m.group(2), ",")
+                if a.strip()] if m else []
+        if m and m.group(1) in ("assert_eq", "assert_ne") and len(args) >= 2:
+            cond = "(%s) %s (%s)" % (args[0], "==" if m.group(1) == "assert_eq"
+                                     else "!=", args[1])
+        elif m and m.group(1) == "assert" and args:
+            cond = "(%s)" % args[0]
+        else:
+            out.append(st)
+            continue
+        names.append("c%d_" % len(names))
+        out.append("let %s = %s" % (names[-1], cond))
+    if not names:
+        return text
+    tail = [] if re.match(r"let\s", out[-1]) else ["(%s)" % out.pop()]
+    return "; ".join(out + [" && ".join(names + tail)])
+
+
 def split_items(items):
     """`(items, notes)` -- the fence, minus what belongs at the check.
 
@@ -2395,7 +2538,8 @@ def create_finish(root, kind_name, target, reply, rung=None):
             "the fence defines %s, which this file writes itself -- write "
             "only the items your check needs" % ", ".join(said))
     items, notes = split_items(items)
-    items = quiet_prose(items)
+    items = outer_docs(publish_types(quiet_prose(items)))
+    check = repair_check(check)
     bad = degenerate(items)
     if bad:
         return None, True, bad
@@ -2492,7 +2636,15 @@ def create(root, kind_name, target, token, rung=None, seed=None,
     card = "\n".join([
         f"file to create: {target}",
         f"kind: {kind_name}",
-        f"budget: at most {KINDS[kind_name].max_lines} lines",
+        # **The size the fence holds, and never the kind's diff budget.**
+        # The card said "at most 400 lines", which is what `admit` allows a
+        # feature's whole patch and which read as a size to aim at: the
+        # second night's files ran into the grammar's 120-line cap and were
+        # cut off in the middle of an item, `unclosed delimiter` at the last
+        # line, on three shards.
+        f"size: twenty to fifty lines in the fence. it cannot hold more than "
+        f"{FENCE_LINES}, and an answer that reaches that is cut off "
+        f"mid-item",
         f"what must become true: {(rung or {}).get('title', '(unstated)')}",
         f"the check that will say whether it did: {(rung or {}).get('witness', '(unstated)')}",
     ])
@@ -2567,9 +2719,9 @@ def create(root, kind_name, target, token, rung=None, seed=None,
     # exactly that.
     grammar = (
         'root ::= "```rust\\n" body "```\\n" "check: " expr "\\n"\n'
-        'body ::= line{1,120}\n'
-        'line ::= ([^`\\n] [^\\n]*)? "\\n"\n'
-        'expr ::= [^\\n]+\n'
+        + 'body ::= line{1,%d}\n' % FENCE_LINES
+        + 'line ::= ([^`\\n] [^\\n]*)? "\\n"\n'
+        + 'expr ::= [^\\n]+\n'
     )
     # **Asked again on a compile error, with the error in the card.** One
     # decode and one `cargo check` is seconds; a runner is a night. The
@@ -2587,6 +2739,7 @@ def create(root, kind_name, target, token, rung=None, seed=None,
     shown = ""
     last_fed = None
     echoed = False
+    filled = False
     for attempt in range(n):
         # **One card, because there is one failure left.** There used to be
         # two: a compile error, and a reply that compiled and printed no
@@ -2602,6 +2755,11 @@ def create(root, kind_name, target, token, rung=None, seed=None,
             shown,
             "",
         ] if shown else []) + [
+        ] + ([
+            "your last answer filled the whole fence and was cut off in the",
+            "middle of an item. write at most sixty lines this time.",
+            "",
+        ] if filled else []) + [
             "it was refused. the reason was:",
             tried[-1],
             "",
@@ -2640,6 +2798,7 @@ def create(root, kind_name, target, token, rung=None, seed=None,
                           "glados-loop-create", grammar=grammar,
                           seed=draw_seed(seed, attempt, echoed))
         env, mine, why = create_finish(root, kind_name, target, reply, rung)
+        filled = len(body_of(reply).split("\n")) >= FENCE_LINES - 2
         if env is None and not mine:
             # Not the reply's fault, so asking again cannot help.
             return None, why
@@ -3469,6 +3628,34 @@ help: `usize` implements trait `SliceIndex<T>`
           "module",
           alloc_uses("pub fn f() -> u8 { 1 }", 'format!("{}", f()).len() == 1')
           == ["use alloc::format;"])
+    claim("an inner doc comment in the fence becomes a plain one, and a "
+          "doc comment on an item is left alone",
+          outer_docs("//! the module\n/// the item\npub fn f() {}\n"
+                     "    //! inside")
+          == "// the module\n/// the item\npub fn f() {}\n    // inside")
+    claim("a top-level type is made public, so a pub fn taking it does "
+          "not warn",
+          publish_types("#[derive(Clone)]\nstruct P { x: u8 }\nenum E { A }\n"
+                        "pub struct Q;\nimpl P {\n    struct_like();\n}")
+          == "#[derive(Clone)]\npub struct P { x: u8 }\npub enum E { A }\n"
+             "pub struct Q;\nimpl P {\n    struct_like();\n}")
+    claim("a check written as asserts becomes one bool, in the order written",
+          repair_check("let p = f(); let b = g(&p); assert_eq!(b, [4, 2]); "
+                       "let u = h(&b); assert!(u == p, \"round trip\");")
+          == "let p = f(); let b = g(&p); let c0_ = (b) == ([4, 2]); "
+             "let u = h(&b); let c1_ = (u == p); c0_ && c1_")
+    claim("with the expression it ended on kept as part of the answer",
+          repair_check("let a = 1; assert_ne!(a, 2); a + 1 == 2")
+          == "let a = 1; let c0_ = (a) != (2); c0_ && (a + 1 == 2)")
+    claim("and a separator inside a string or a call is not a separator",
+          repair_check('assert_eq!(s("a;b", (1, 2)), "x,y")')
+          == 'let c0_ = (s("a;b", (1, 2))) == ("x,y"); c0_')
+    claim("a check left open is closed, and one closed wrongly is left alone",
+          repair_check("f(g([1, 2]) == 3") == "f(g([1, 2]) == 3)"
+          and repair_check("f(1]") == "f(1]")
+    claim("while a check that was already a plain bool is untouched",
+          repair_check("checksum(&[1u8; 16]) == 16 && g() != 0")
+          == "checksum(&[1u8; 16]) == 16 && g() != 0")
     claim("a fence with no such tail is left exactly as it was",
           split_items("pub fn f() -> bool { true }")[0]
           == "pub fn f() -> bool { true }")
