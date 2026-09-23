@@ -1794,6 +1794,11 @@ def wire_module(root, target):
 #: with the fetch and the toolchain beside it.
 CREATE_TRIES = 8
 
+#: How many lines the create grammar lets the fence hold. A hard stop: an
+#: answer that reaches it is closed where it stands, mid-item or not, which
+#: is why the card names it and a retry after one is told so.
+FENCE_LINES = 120
+
 
 class NoCargo(Exception):
     """There is no cargo here at all, which is not a broken candidate."""
@@ -2631,7 +2636,15 @@ def create(root, kind_name, target, token, rung=None, seed=None,
     card = "\n".join([
         f"file to create: {target}",
         f"kind: {kind_name}",
-        f"budget: at most {KINDS[kind_name].max_lines} lines",
+        # **The size the fence holds, and never the kind's diff budget.**
+        # The card said "at most 400 lines", which is what `admit` allows a
+        # feature's whole patch and which read as a size to aim at: the
+        # second night's files ran into the grammar's 120-line cap and were
+        # cut off in the middle of an item, `unclosed delimiter` at the last
+        # line, on three shards.
+        f"size: twenty to fifty lines in the fence. it cannot hold more than "
+        f"{FENCE_LINES}, and an answer that reaches that is cut off "
+        f"mid-item",
         f"what must become true: {(rung or {}).get('title', '(unstated)')}",
         f"the check that will say whether it did: {(rung or {}).get('witness', '(unstated)')}",
     ])
@@ -2706,9 +2719,9 @@ def create(root, kind_name, target, token, rung=None, seed=None,
     # exactly that.
     grammar = (
         'root ::= "```rust\\n" body "```\\n" "check: " expr "\\n"\n'
-        'body ::= line{1,120}\n'
-        'line ::= ([^`\\n] [^\\n]*)? "\\n"\n'
-        'expr ::= [^\\n]+\n'
+        + 'body ::= line{1,%d}\n' % FENCE_LINES
+        + 'line ::= ([^`\\n] [^\\n]*)? "\\n"\n'
+        + 'expr ::= [^\\n]+\n'
     )
     # **Asked again on a compile error, with the error in the card.** One
     # decode and one `cargo check` is seconds; a runner is a night. The
@@ -2726,6 +2739,7 @@ def create(root, kind_name, target, token, rung=None, seed=None,
     shown = ""
     last_fed = None
     echoed = False
+    filled = False
     for attempt in range(n):
         # **One card, because there is one failure left.** There used to be
         # two: a compile error, and a reply that compiled and printed no
@@ -2741,6 +2755,11 @@ def create(root, kind_name, target, token, rung=None, seed=None,
             shown,
             "",
         ] if shown else []) + [
+        ] + ([
+            "your last answer filled the whole fence and was cut off in the",
+            "middle of an item. write at most sixty lines this time.",
+            "",
+        ] if filled else []) + [
             "it was refused. the reason was:",
             tried[-1],
             "",
@@ -2779,6 +2798,7 @@ def create(root, kind_name, target, token, rung=None, seed=None,
                           "glados-loop-create", grammar=grammar,
                           seed=draw_seed(seed, attempt, echoed))
         env, mine, why = create_finish(root, kind_name, target, reply, rung)
+        filled = len(body_of(reply).split("\n")) >= FENCE_LINES - 2
         if env is None and not mine:
             # Not the reply's fault, so asking again cannot help.
             return None, why
