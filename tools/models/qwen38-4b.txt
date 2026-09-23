@@ -1,0 +1,77 @@
+# The loop's author: sha256, size, name -- payload.py's three columns.
+#
+# **Deliberately not under `payload/`**, for the reason `bonsai-4b.txt`
+# gives: `mkiso.py` reads the union of `payload/*.txt` as an allowlist of
+# what may be placed on install media, and a manifest there would make
+# three gigabytes of CI machinery eligible for an ISO already at 1.90 GB
+# against GitHub's 2 GB per-asset limit. Same format, different directory,
+# because the format is about verification and the directory is about
+# permission.
+#
+# ### Why this one
+#
+# The author was Ternary-Bonsai-4B at TQ2_0 -- 1.18 GB, roughly two bits a
+# weight. Measured over seven nights, its failures were almost never the
+# work and almost always the contract: a dropped `crate::`, an undeclared
+# accumulator, the check line written inside the fence as well as after it.
+# Its `encode` compiled on four separate nights. So the first answer was to
+# take the boilerplate off it, which `godel.assemble` now does.
+#
+# What that leaves is the part only a model can do, and there two bits is
+# the binding constraint rather than the parameter count. This is the same
+# size class -- 4B -- at Q4_K_M, which is about four bits: a distillation of
+# Qwen3.8 (2.4T, A95B) onto a Qwen3.5-4B base over roughly 45,000 curated
+# teacher traces of maths, reasoning and instruction following. Code is not
+# among them and the card publishes no coding benchmark, so what it buys
+# here is measured by the loop and not by a leaderboard. Distillation is the right shape for what fails here,
+# because it carries the teacher's *idiom* rather than its reasoning, and
+# idiom is exactly what a 2-bit 4B loses first.
+#
+# ### Two things about it that are not free, stated before they surprise
+# anybody
+#
+# **It thinks unless told not to, and a grammar does not tell it.** Its
+# card says every answer opens with a `<think>` block, and it does: asked
+# locally with a 40-token budget, `content` came back empty because every
+# token had gone to reasoning. This file used to say the grammar stops
+# that, since `root` begins with the literal fence. It does not. llama.cpp
+# enforces a raw grammar from the first generated token, and with thinking
+# on, the chat template has already written `<think>` into the prompt -- so
+# the first generated token is inside the block, the fence is sampled as
+# reasoning, and nothing in the grammar ever closes it. The whole file
+# arrives in `reasoning_content`. What does stop it is `--reasoning off` on
+# the server, which makes the template close an empty block itself, and
+# `godel.ask_model` asks for the same per request.
+#
+# **Its recommended sampling is temperature 0.6, and the loop's greedy
+# shard decodes at 0.** The card also warns that greedy decoding on long
+# generations can fall into a repetition loop, which is what the repeat
+# penalty and `MIN_DISTINCT` are for. The seeded shards draw warm, and their
+# seed is provenance -- which shard's answer this was -- rather than a
+# replay: logits move with the runner's CPU and the server's cache, and
+# nothing needs them not to, because what a later run re-derives is the
+# verdict on the patch, and the envelope carries the patch whole.
+#
+# ### Provenance, said plainly
+#
+# This is a community release by Empero AI, not an official Alibaba build.
+# The digest below was taken from the sha256 HuggingFace reports as the
+# file's LFS oid, and then **verified against the bytes**: `fetchmodel.py`
+# downloaded all 2,783,446,304 of them on the development host, hashed them,
+# and printed `Qwen3.8-4B-Q4_K_M.gguf verifies`. So this pin is checked the
+# way `bonsai-4b.txt`'s is -- a local hash of the real file -- and not merely
+# copied from somebody's API.
+#
+# from https://huggingface.co/empero-ai/Qwen3.8-4B-Distill-GGUF/resolve/main/Qwen3.8-4B-Q4_K_M.gguf
+dec96e8cf2e11b613bb46513dec485377f9ca5a351e71712ee0e244f287c6790  2783446304  Qwen3.8-4B-Q4_K_M.gguf
+#
+# Q8_0 is the int8 rung and is pinned here without being fetched, so the
+# swap is one line rather than another trip to somebody's API:
+#   770b780d6754a4954d1caf395c9239eaeb394f15c7a7ea34039883377c93c9c3
+#   4610579744  Qwen3.8-4B-Q8_0.gguf
+# It is 4.6 GB against Q4_K_M's 2.8, and CPU decode is memory-bandwidth
+# bound, so it costs about 1.7 times the time per token -- which the author
+# job's seventy-five minutes can absorb and six attempts at four-bit
+# already come close to filling. It should be tried against the measured
+# attempts-to-compile rather than adopted on the grounds that more bits are
+# better.

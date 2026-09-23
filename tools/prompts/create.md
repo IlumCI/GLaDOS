@@ -1,5 +1,5 @@
 ---
-model: Ternary-Bonsai-4B-TQ2_0
+model: Qwen3.8-4B-Q4_K_M
 max_tokens: 2600
 temperature: 0
 ---
@@ -17,20 +17,24 @@ Your answer is exactly two things, in this order:
 Nothing else. Like this:
 
 ```rust
-/// A 4x4 block is sixteen bytes, so the size is known and no allocator is
-/// involved. Taking a reference to the whole array rather than a slice is
-/// what lets the length be a fact instead of a check.
-pub fn encode(block: &[u8; 16]) -> [u8; 16] {
-    let mut out = [0u8; 16];
+/// Sixteen bytes in and one out. The sum wraps instead of overflowing,
+/// because a checksum is arithmetic modulo 256, and an overflow panic in a
+/// kernel selftest halts the machine.
+pub fn checksum(block: &[u8; 16]) -> u8 {
+    let mut sum = 0u8;
     let mut i = 0;
     while i < 16 {
-        out[i] = block[i];
+        sum = sum.wrapping_add(block[i]);
         i += 1;
     }
-    out
+    sum
 }
 ```
-check: encode(&[7u8; 16])[0] == 7 && encode(&[7u8; 16])[15] == 7
+check: checksum(&[1u8; 16]) == 16 && checksum(&[16u8; 16]) == 0
+
+That example is about checksums so that it shows the shape and nothing
+else. Your answer is about the milestone you are given, and an answer that
+copies the example is refused.
 
 **You do not write `selftest`.** The file is assembled around what you
 answer: the boot-time claim, the accumulator it folds into and the macro
@@ -60,20 +64,23 @@ The rules that decide whether your answer is used:
    It is Rust, not Python. A length is `x.len()`; there is no `len(x)`.
    Indexing a slice is `s[i]`; there is no `s.at(i)`.
 
-2. **Types in the example are load-bearing.** `&[u8; 16]` is a reference to
-   the whole array; `&block[0]` is a reference to one byte and is not the
-   same thing. `encode(..)` answers an array, `encode(..)[0]` is a byte, and
-   only the second may be compared with `7`. Attempts fail on exactly this:
-   `expected &[u8], found &u8`, and `can't compare [u8; 16] with u8`.
+2. **Types are load-bearing.** `&[u8; 16]` is a reference to the whole
+   array; `&block[0]` is a reference to one byte and is not the same thing.
+   A function that answers an array must be indexed before it is compared
+   with a number: `f(&x)[0] == 7` compares a byte, and `f(&x) == 7`
+   compares an array with a number and does not compile. Attempts fail on
+   exactly this: `expected &[u8], found &u8`, and `can't compare [u8; 16]
+   with u8`.
 
 3. **The fence must end with a complete item.** Do not end on a doc comment
    with nothing under it: `///` documents the thing that follows, so a
    trailing one is an error and the whole answer is refused for it.
 
-4. **The check must be an expression, not a statement.** It is placed after
-   `let good = ` and before a semicolon, so `encode(&x)[0] == 7` is right
-   and `let y = 1;` is not. It must be able to be false if the code is
-   wrong: a check that cannot fail is worse than none.
+4. **The check is one line, and it must come out as a `bool`.** It is
+   placed inside `let good: bool = { ... };`, so a plain comparison is
+   right, `checksum(&x) == 16`, and so is a line that names things first:
+   `let x = [1u8; 16]; checksum(&x) == 16`. It must be able to be false if
+   the code is wrong: a check that cannot fail is worse than none.
 
    It may call anything you defined and anything in `core::`. It may not
    refer to a variable, because there are none in scope but the ones it
