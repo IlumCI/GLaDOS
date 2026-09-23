@@ -1905,11 +1905,37 @@ def rendered_errors(stderr, target, blocks=4, per=18, lines=70):
         where = [r for r in b if "-->" in r]
         if not where or want not in where[0].replace("\\", "/"):
             continue
+        b = _own_spans(b, want)
         while b and not b[-1].strip():
             b.pop()
         keep.append("\n".join(b[:per]))
     text = "\n\n".join(keep[:blocks])
     return "\n".join(text.split("\n")[:lines])
+
+
+def _own_spans(block, want):
+    """A diagnostic without the spans it quotes from other files.
+
+    rustc explains `E0277` by quoting the standard library -- twenty lines
+    of `impl SliceIndex` from a toolchain's source tree, under a `-->` or a
+    `:::` that names it. That is true and no use to a model that has to
+    change one index in its own file, and it pushed the model's own lines
+    out of the bound. A span naming another file is dropped up to the next
+    `help:`, `note:` or `= ` line, which is where rustc starts saying
+    something about this one again.
+    """
+    out, foreign = [], False
+    for r in block:
+        if "-->" in r or ":::" in r:
+            foreign = want not in r.replace("\\", "/")
+            if foreign:
+                continue
+        elif foreign and (r.startswith("help") or r.startswith("note")
+                          or r.lstrip().startswith("= ")):
+            foreign = False
+        if not foreign:
+            out.append(r)
+    return out
 
 
 def new_file_warnings(stderr, target):
@@ -2316,6 +2342,26 @@ def create_finish(root, kind_name, target, reply, rung=None):
         return None, True, bad[0]
     return env, True, None
 
+def draw_seed(seed, attempt, echoed):
+    """The seed one attempt draws with, or None for the greedy decode.
+
+    **An unchanged card is an unchanged answer.** Temperature 0 is a
+    function of the card, so once the card stops changing the attempts stop
+    being attempts: measured on the rehearsal of this author, the greedy
+    shard got past one error, then wrote the same file on attempts four,
+    five and six, the last two from byte-identical cards. A fixed seed has
+    the same trap one temperature up -- same card, same seed, same draw.
+
+    So a seeded shard takes a fresh seed on every attempt, and the greedy
+    shard stays greedy until it repeats itself and then draws warm for the
+    rest of its budget. Both are still written down, `shard * 1000 +
+    attempt`, which keeps the draw's provenance a number a reader can name.
+    """
+    if seed is None and not echoed:
+        return None
+    return (seed or 0) * 1000 + attempt
+
+
 def create(root, kind_name, target, token, rung=None, seed=None,
            tries=None):
     """Ask for a new file's contents and build the creating diff.
@@ -2438,6 +2484,7 @@ def create(root, kind_name, target, token, rung=None, seed=None,
     tried = []
     shown = ""
     last_fed = None
+    echoed = False
     for attempt in range(n):
         # **One card, because there is one failure left.** There used to be
         # two: a compile error, and a reply that compiled and printed no
@@ -2483,7 +2530,7 @@ def create(root, kind_name, target, token, rung=None, seed=None,
         # the model wrote, and `NO_ANSWER` is how the shard says so.
         reply = ask_model(system, this, meta, token,
                           "glados-loop-create", grammar=grammar,
-                          seed=seed)
+                          seed=draw_seed(seed, attempt, echoed))
         env, mine, why = create_finish(root, kind_name, target, reply, rung)
         if env is None and not mine:
             # Not the reply's fault, so asking again cannot help.
@@ -2497,7 +2544,8 @@ def create(root, kind_name, target, token, rung=None, seed=None,
                   file=sys.stderr)
             tried.append(why)
             shown = ""
-            last_fed = None
+            echoed = echoed or why == last_fed
+            last_fed = why
             continue
 
         # **A missing claim is something the model can fix on being told**,
@@ -2538,6 +2586,7 @@ def create(root, kind_name, target, token, rung=None, seed=None,
                 said = ("this is the SAME error your last answer had, so what "
                         "you changed did not touch it -- write that part a "
                         "different way:\n" + fed)
+                echoed = True
             last_fed = fed
             tried.append(said)
             shown = numbered(created_body(env, target))
@@ -3191,6 +3240,43 @@ error: could not compile `glados` (bin "glados") due to 3 previous errors; 37 wa
     claim("a file with no errors of its own renders to nothing, so the short "
           "lines are what the card falls back to",
           rendered_errors(HUMAN, "src/fmt/elsewhere.rs") == "")
+    # Captured the same way, with the host's home directory shortened: one
+    # index by a `u8`, which rustc explains by quoting the standard library.
+    E0277 = r"""error[E0277]: the type `[u8]` cannot be indexed by `u8`
+   --> src\fmt\probe.rs:15:7
+    |
+ 15 |     v[i]
+    |       ^ slice indices are of type `usize` or ranges of `usize`
+    |
+    = help: the trait `SliceIndex<[u8]>` is not implemented for `u8`
+help: `usize` implements trait `SliceIndex<T>`
+   --> C:\Users\dev\scoop\persist\rustup-msvc\.rustup\toolchains\nightly-2026-07-30-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library/core/src/bstr/traits.rs:197:1
+    |
+197 | unsafe impl SliceIndex<ByteStr> for usize {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `SliceIndex<ByteStr>`
+    |
+   ::: C:\Users\dev\scoop\persist\rustup-msvc\.rustup\toolchains\nightly-2026-07-30-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library/core/src/slice/index.rs:179:1
+    |
+179 | const unsafe impl<T> SliceIndex<[T]> for usize {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `SliceIndex<[T]>`
+    = note: required for `[u8]` to implement `core::ops::Index<u8>`
+    = note: 1 redundant requirement hidden
+    = note: required for `[u8; 3]` to implement `core::ops::Index<u8>`"""
+    own = rendered_errors(E0277, "src/fmt/probe.rs")
+    claim("an error's own line and caret survive, and rustc's help beside them",
+          "15 |     v[i]" in own and "slice indices are of type `usize`" in own
+          and "= help: the trait `SliceIndex<[u8]>`" in own)
+    claim("while the spans it quotes from the standard library do not",
+          "rustlib" not in own and "SliceIndex<ByteStr> for usize" not in own
+          and "= note: required for `[u8]`" in own)
+    claim("the greedy shard decodes greedily until it repeats itself",
+          draw_seed(None, 0, False) is None and draw_seed(None, 4, False) is None)
+    claim("and then draws warm, under a seed a reader can name",
+          draw_seed(None, 4, True) == 4)
+    claim("a seeded shard takes a fresh seed every attempt, so an unchanged "
+          "card is not an unchanged draw",
+          draw_seed(2, 0, False) == 2000 and draw_seed(2, 1, False) == 2001
+          and draw_seed(3, 1, False) != draw_seed(2, 1, False))
     claim("a warning in the created file is found in the short format",
           len(mine_w) == 2 and "unnecessary parentheses" in mine_w[0])
     claim("and it carries the line, so the card can point at it",
