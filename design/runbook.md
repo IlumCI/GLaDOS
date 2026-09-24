@@ -201,6 +201,28 @@ succeeding.
 
 ## 7. Open the epoch
 
+### Three things to check before the first `--send`, from `design/audit.md`
+
+The commands below are unchanged. What is new is that an audit found two of them
+carry a precondition nobody knew about, and one of the three cannot be satisfied
+after the fact.
+
+1. **Read back the `pair` argument before deploying.** It is an immutable
+   constructor argument and the contract never checks it against the pair it is
+   meant to be, while `openEpochOnV3` checks its pool twice. A typo produces a
+   distributor that accepts funding for market epochs and refuses every claim
+   forever -- driven, `TooLittleOut(0,1)` -- with no setter and no recovery but
+   `reclaim` after the deadline. **This is the one thing on this page that a
+   later step cannot fix.**
+2. **Check the root is not already open.** The leaf carries no epoch id, so the
+   same root opened twice is a second entitlement to the same work rather than a
+   duplicate anything refuses. `epochCount()` and each epoch's `root` answer it.
+3. **Do not open a `MarketV3` epoch with this tool yet.** `open` creates one;
+   `claim` calls `claimOnMarket` unconditionally, so the tool cannot claim from
+   what it just opened, and `checkClaim` does not read `mode` either -- it will
+   say the claim is good first. The V3 invocation further down this page is
+   therefore the one to leave alone until `deploy.mjs` grows a `claimOnV3` path.
+
 ```bash
 export GLADOS_KEY=0x...            # never printed, never stored; see deploy.mjs
 node contracts/deploy.mjs status
