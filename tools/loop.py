@@ -60,9 +60,28 @@ def main():
     ap.add_argument("--port", type=int, default=3399)
     ap.add_argument("--bits", type=int, default=12,
                     help="share target; low so a Python miner finds shares in seconds")
+    ap.add_argument("--basis", choices=("tally", "window"), default="tally",
+                    help="which payout basis to settle from; tally is what a "
+                         "bounded run wants, and distribute.py refuses to guess")
     ap.add_argument("--seconds", type=float, default=75.0,
                     help="how long to mine; the pool writes its ledger once a minute")
-    ap.add_argument("--reward", default="1000000e18", help="GLADOS in the epoch")
+    # **The unit changes with the mode and the default could not serve both.**
+    # Without `--fork` the epoch is funded in a mock token this script mints,
+    # so a round million is free and reads well. With it, the epoch is funded
+    # in *real WETH* -- `fork.mjs` wraps `doc.total` through the deployed WETH
+    # contract, deliberately, so the funding is real rather than a balance
+    # written into storage by hand. A million there asks the operator to wrap a
+    # million ETH against the 100 the fork grants, and every check after it
+    # failed on a number that was never about the code.
+    #
+    # 0.01 WETH is about $24 at the ETH price `design/token.md` measured, which
+    # is roughly 0.3% of the way down that file's slippage table -- small enough
+    # that the buy tests the mechanism rather than the depth. The real pool holds
+    # about 6.4 WETH in total, so anything larger is measuring what a whale does
+    # to a thin pool.
+    ap.add_argument("--reward", default=None,
+                    help="the epoch's total: GLADOS locally, real WETH under "
+                         "--fork. Defaults to 1000000e18 and 0.01e18.")
     ap.add_argument("--address", default="0x000000000000000000000000000000000000beef",
                     help="where the reward would go")
     ap.add_argument("--keep", action="store_true", help="leave the working directory behind")
@@ -70,6 +89,8 @@ def main():
                     help="claim against a fork of Robinhood Chain: the real GLADOS "
                          "contract, the real pool, the real tax, and nothing spent")
     a = ap.parse_args()
+    if a.reward is None:
+        a.reward = "0.01e18" if a.fork else "1000000e18"
 
     work = os.path.join(ROOT, "out", "loop")
     shutil.rmtree(work, ignore_errors=True)
@@ -140,8 +161,20 @@ def main():
     # ---------------------------------------------------------------- 4
     epoch = os.path.join(work, "epoch.json")
     say("[4/5]", "building an epoch worth %s from that ledger" % a.reward)
+    # **`--basis` has no default and this passed none**, so every run of this
+    # script has failed at step 4 since `distribute.py` learned to refuse the
+    # question. It refuses for a good reason -- a ledger carries a PPLNS window
+    # and a lifetime tally, they differ by about 4x on a real one, and the tool
+    # used to pick one silently -- but the refusal reached a caller that never
+    # answered it, and nothing noticed because nothing ran this.
+    #
+    # `tally` rather than `window`, for the reason `design/runbook.md` step 5
+    # gives: the window ages shares out, so a bounded run settles from every
+    # share it credited. This script mines for seventy-five seconds and builds
+    # one epoch from it, which is a bounded run by construction.
     rc = subprocess.call([sys.executable, os.path.join(ROOT, "tools", "distribute.py"),
-                          ledger, "--total", a.reward, "--out", epoch])
+                          ledger, "--basis", a.basis, "--total", a.reward,
+                          "--out", epoch])
     if rc != 0:
         return rc
 
