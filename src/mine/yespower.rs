@@ -349,7 +349,6 @@ impl Yespower {
     /// in one place would be right for one version and wrong for the other.
     pub fn hash(&mut self, src: &[u8], pers: Option<&[u8]>) -> [u8; 32] {
         let r = self.r as usize;
-        let n = self.n;
         let bw = 32 * r;
         let b_size = 128 * r;
 

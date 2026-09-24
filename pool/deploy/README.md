@@ -284,6 +284,61 @@ found something: `names` because one connection could re-greet under nineteen
 new worker names a second, each a permanent record and none of them costing a
 single validation, and `flood` because the per-connection limits do not sum.
 
+### What they answered here, so a future run has something to differ from
+
+All six, against the musl artefact on a **12th Gen i7-12650H, 16 threads** --
+which is the development machine and **not** the server, so read these as the
+shape being right rather than as the server's numbers. The throwaway instance
+was `--cpu-percent 1` with `abuse:neoscrypt:16` on its own port and ledger.
+
+    badshares   cap 32, answered 33, then dropped
+    ratelimit   cap 20, offered 60, answered 20, still_open true
+    bigline     max_line 131072, sent 131158, server_closed true
+    conns       ceiling 256, attempted 300, welcomed 256, refused 44,
+                connect_errors 0, accepts_after true
+    names       names_offered 1160, renames_refused 1160, 19.0 names/s
+    flood       4 threads, 20 s, offered 1600, answered 437 (21.8/s)
+
+Every one matches what this file already predicted, which is the result. Two are
+worth reading rather than ticking:
+
+**`names` reports 19.0 a second and refuses all 1,160 of them.** That rate is
+the number this file records as the hole -- so what is being seen is the attempt
+rate unchanged and the refusal working, which is the only way that drill can
+report success.
+
+**`flood` answered 437 of 1,600 offered.** That is the *total* validation budget
+doing the thing the per-connection limit could not: 73% of offered work was
+never validated, at a 1% budget. Raise `--cpu-percent` and this number rises
+with it, which is what makes it the setting that decides how much of somebody
+else's machine a flood can take.
+
+**And `names` has a `--seconds` default of 400**, so a shorter `timeout` around
+it kills it mid-drill and reports nothing. Pass `--seconds` explicitly if you
+are bounding the run; the figures above are from `--seconds 60`.
+
+The throwaway's own ledger is the other half of the evidence, because the drills
+are supposed to leave a record and a pool that refused everything correctly
+should be able to prove it:
+
+    python3 tools/ledgercheck.py /tmp/abuse.json
+      ok    the document is a format this knows (v3)
+      ok    the rows hash to the published digest
+      ok    <every worker> has no negative counts
+
+33 bad from `badshares`, 20 from `ratelimit`, 437 across four `flood` workers,
+and `names-0` carrying 4,580 stale against coin `?` -- a share for a coin that
+does not exist, counted as stale rather than accepted.
+
+Then the negative, because a checker that only ever says yes is not a checker.
+One unit of work moved from one worker to another with the digest left untouched
+-- the exact edit somebody would make to steal a slice of a payout:
+
+    FAIL  the rows hash to the published digest
+          [published 55c99664..., recomputed e2041992...]
+      1 check(s) failed. The digest is not a signature, so this says the record
+      changed
+
 ## If it is a home server, read this before the port section
 
 A machine in somebody's house is not a small VPS. Four things change, and the
