@@ -344,9 +344,21 @@ def main():
     ap.add_argument("--solve", nargs=2, type=int, metavar=("N", "K"))
     ap.add_argument("--header", default="equihash")
     ap.add_argument("--limit", type=int, default=1)
+    # The same list `cuda/equihash.cu --emit` prints, in the same format, so the
+    # device's generator can be diffed against this one rather than eyeballed.
+    ap.add_argument("--emit", nargs=3, type=int, metavar=("N", "K", "COUNT"),
+                    help="print the first COUNT entries of the (N,K) list as hex")
     a = ap.parse_args()
     if a.selftest:
         return selftest()
+    if a.emit:
+        n, k, count = a.emit
+        p = params(n, k)
+        pers = person(n, k)
+        header = a.header.encode()
+        for i in range(count):
+            print("%d %s" % (i, generate(header, i, p, pers).hex()))
+        return 0
     if a.solve:
         n, k = a.solve
         header = a.header.encode()
