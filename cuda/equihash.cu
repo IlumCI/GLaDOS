@@ -32,6 +32,8 @@
 #include <string.h>
 #include "blake2b.cuh"
 
+static const int TPB = 256;
+
 struct Params {
     uint32_t n, k, collision, per_output, hash_len, slice_len, index_bits;
     uint64_t entries;
@@ -88,6 +90,45 @@ __global__ void gen(const uint8_t *header, uint32_t header_len,
     }
 }
 
+/// Which bucket an entry falls in: the top `bits` of its first collision block.
+///
+/// Bucketing on a *prefix* rather than the whole collision block is what makes
+/// the sort affordable -- 24 bits is 16.7M buckets for 33.5M entries, which is a
+/// table larger than the data it indexes. A prefix of 16 gives 65,536 buckets
+/// and leaves the remaining 8 bits to be compared within one.
+__device__ __forceinline__ uint32_t bucket_of(const uint8_t *e, uint32_t bits)
+{
+    // The first `bits` bits, most significant first, read a byte at a time so
+    // the function does not care whether `bits` lands on a boundary.
+    uint32_t v = 0;
+    for (uint32_t i = 0; i < (bits + 7) / 8; i++) {
+        v = (v << 8) | e[i];
+    }
+    uint32_t got = ((bits + 7) / 8) * 8;
+    return v >> (got - bits);
+}
+
+/// Occupancy only: how many entries land in each bucket, and nothing stored.
+///
+/// **This exists because `design/equihash.md`'s hazard 3 cannot be debugged
+/// later.** "When a bucket exceeds NSLOTS, entries are dropped. It does not
+/// crash and does not corrupt: it *lowers the solution rate*, which is
+/// indistinguishable from bad luck." So `NSLOTS` is chosen from a measured
+/// distribution rather than from the average, and the tail is what decides it --
+/// a bucket table sized at the mean drops entries from half its buckets.
+///
+/// Counters only, so this runs before any layout is committed to and costs
+/// 4 bytes a bucket instead of `NSLOTS * entry`.
+__global__ void histo(const uint8_t *list, uint64_t entries, uint32_t slice_len,
+                      uint32_t bits, uint32_t *counts)
+{
+    uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= entries) {
+        return;
+    }
+    atomicAdd(&counts[bucket_of(list + i * slice_len, bits)], 1u);
+}
+
 static void personal(uint32_t n, uint32_t k, uint8_t out[16])
 {
     memcpy(out, "ZcashPoW", 8);
@@ -103,7 +144,7 @@ static void personal(uint32_t n, uint32_t k, uint8_t out[16])
 
 int main(int argc, char **argv)
 {
-    uint32_t n = 192, k = 7, emit = 0;
+    uint32_t n = 192, k = 7, emit = 0, bucket_bits = 0;
     bool full = false;
     const char *hdr = "equihash";
     for (int i = 1; i < argc; i++) {
@@ -112,6 +153,10 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--emit") && i + 1 < argc) emit = (uint32_t)atoi(argv[++i]);
         else if (!strcmp(argv[i], "--header") && i + 1 < argc) hdr = argv[++i];
         else if (!strcmp(argv[i], "--full"))                full = true;
+        else if (!strcmp(argv[i], "--buckets") && i + 1 < argc) {
+            bucket_bits = (uint32_t)atoi(argv[++i]);
+            full = true;   // the distribution is only meaningful over the whole list
+        }
         else { fprintf(stderr, "unknown argument %s\n", argv[i]); return 2; }
     }
     Params p = derive(n, k);
@@ -147,7 +192,6 @@ int main(int argc, char **argv)
     cudaMemcpy(d_hdr, hdr, hlen, cudaMemcpyHostToDevice);
     cudaMemcpy(d_pers, pers, 16, cudaMemcpyHostToDevice);
 
-    const int TPB = 256;
     uint64_t blocks = (hashes + TPB - 1) / TPB;
 
     cudaEvent_t t0, t1;
@@ -164,6 +208,87 @@ int main(int argc, char **argv)
     }
     float ms = 0.f;
     cudaEventElapsedTime(&ms, t0, t1);
+
+    if (bucket_bits) {
+        if (bucket_bits < 1 || bucket_bits > 24 || bucket_bits > p.collision) {
+            fprintf(stderr, "--buckets wants 1..%u bits for these parameters\n", p.collision);
+            return 2;
+        }
+        uint64_t nb = 1ULL << bucket_bits;
+        uint32_t *d_counts = nullptr;
+        if (cudaMalloc(&d_counts, nb * sizeof(uint32_t)) != cudaSuccess) {
+            fprintf(stderr, "cudaMalloc of %llu counters failed\n", (unsigned long long)nb);
+            return 1;
+        }
+        cudaMemset(d_counts, 0, nb * sizeof(uint32_t));
+        uint64_t hb = (entries + TPB - 1) / TPB;
+        histo<<<(unsigned)hb, TPB>>>(d_out, entries, p.slice_len, bucket_bits, d_counts);
+        if (cudaDeviceSynchronize() != cudaSuccess) {
+            fprintf(stderr, "histogram kernel failed\n");
+            return 1;
+        }
+        uint32_t *counts = (uint32_t *)malloc(nb * sizeof(uint32_t));
+        cudaMemcpy(counts, d_counts, nb * sizeof(uint32_t), cudaMemcpyDeviceToHost);
+
+        uint64_t sum = 0, empty = 0;
+        uint32_t peak = 0;
+        for (uint64_t b = 0; b < nb; b++) {
+            uint32_t c = counts[b];
+            sum += c;
+            if (!c) empty++;
+            if (c > peak) peak = c;
+        }
+        // **A histogram of the histogram, sized from the peak in a second pass
+        // rather than capped at a constant.** Written with a fixed cap of 4096
+        // first, which is fine while the mean is 512 and silently wrong the
+        // moment it is 8192: every bucket above the cap piles into the last bin
+        // and the quantiles come back *equal to the cap*, which reads like a
+        // suspiciously round distribution rather than like a broken report. At
+        // 2^12 buckets it printed p99.9 = 4096 against a real peak of 8591.
+        //
+        // Two passes over the counters is the fix and it costs nothing: this is
+        // host memory and 16M counters is 64 MiB.
+        uint64_t bins = (uint64_t)peak + 1;
+        uint64_t *of = (uint64_t *)calloc(bins, sizeof(uint64_t));
+        if (!of) {
+            fprintf(stderr, "could not allocate %llu bins\n", (unsigned long long)bins);
+            return 1;
+        }
+        for (uint64_t b = 0; b < nb; b++) {
+            of[counts[b]]++;
+        }
+        double mean = (double)sum / (double)nb;
+        // The quantiles that decide NSLOTS. The mean is the number that looks
+        // like the answer and is not: sizing at it drops entries from about half
+        // the buckets, silently, forever.
+        uint64_t want999 = (uint64_t)(0.999 * (double)nb);
+        uint64_t want9999 = (uint64_t)(0.9999 * (double)nb);
+        uint32_t p999 = 0, p9999 = 0;
+        uint64_t run = 0;
+        for (uint64_t c = 0; c < bins; c++) {
+            run += of[c];
+            if (!p999 && run >= want999) p999 = (uint32_t)c;
+            if (!p9999 && run >= want9999) p9999 = (uint32_t)c;
+        }
+        printf("%u,%u  %llu entries into 2^%u = %llu buckets\n",
+               n, k, (unsigned long long)entries, bucket_bits, (unsigned long long)nb);
+        printf("  mean %.1f   p99.9 %u   p99.99 %u   peak %u   empty %llu\n",
+               mean, p999, p9999, peak, (unsigned long long)empty);
+        printf("  entries counted %llu of %llu%s\n", (unsigned long long)sum,
+               (unsigned long long)entries,
+               sum == entries ? "  -- none lost" : "  -- LOST SOME");
+        // What the layout would cost at each candidate, which is the trade the
+        // brief says has to be tunable rather than guessed.
+        for (uint32_t slots : {p999, p9999, peak}) {
+            double mib = (double)nb * slots * (p.slice_len + 4) / 1048576.0;
+            printf("  NSLOTS %-5u would cost %8.1f MiB of bucket table%s\n",
+                   slots, mib, slots == peak ? "  (never drops an entry)" : "");
+        }
+        free(counts);
+        free(of);
+        cudaFree(d_counts);
+        return 0;
+    }
 
     if (full) {
         size_t freeb = 0, totalb = 0;
