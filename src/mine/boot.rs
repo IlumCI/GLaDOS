@@ -168,6 +168,31 @@ pub fn apply(p: &Plan) -> String {
         None => None,
     };
 
+    // **Take the whole screen, because the console does not have it.**
+    // `desk.rs` reflows the console into the terminal *window's* grid during
+    // layout, and that happens on a miner image too -- the compositor is never
+    // spawned, but the one pass that ran left the console about a quarter of the
+    // display wide. Drawing a dashboard into it produced a border that stopped
+    // a third of the way across and nothing else visible, which reads as a
+    // broken renderer and is a console doing exactly what it was told.
+    //
+    // `set_exclusive` is the other half: it is what makes the desktop's periodic
+    // painters stand down, the same flag `port::with_screen` takes for the length
+    // of a call and this holds for the life of the machine.
+    if let Some(fb) = crate::gfx::primary() {
+        crate::gfx::set_exclusive(true);
+        crate::gfx::console::with(|c| c.reflow(0, 0, fb.width(), fb.height()));
+    }
+
+    // The screen, spawned only once there is something for it to show. It is a
+    // task rather than a hook on the hash loop because painting must not be able
+    // to slow hashing: if the console is busy the frame is late, and a late frame
+    // is invisible where a stalled batch is not.
+    match crate::task::spawn("mine-tui", super::screen::task) {
+        Some(_) => {}
+        None => crate::kprintln!("  the miner's screen could not be spawned; 'mine' still reports"),
+    }
+
     match super::client::start() {
         Ok(()) => {
             let mut s = format!("mining as {} at {}:{}", p.user, p.host, p.port);

@@ -493,9 +493,24 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     console::set_color(YELLOW);
     kprintln!("\n[tasks]");
     console::set_color(LTGRAY_IDX);
-    match task::spawn("clock", clock_task) {
-        Some(i) => kprintln!("  spawned '{}' as task {}", "clock", i),
-        None => kprintln!("  could not spawn the clock task"),
+    // **A miner image runs neither of the painters below, and that is where its
+    // speed comes from.** `video bench` measures `desk::draw + present` at
+    // 1.6-2.1 ms a frame and the clock repaints at 10 Hz; on a machine with no
+    // windows, no model and nobody watching except to read a number, all of that
+    // is taken off the hash loop. `mine::screen` replaces both with one screen of
+    // text redrawn twice a second.
+    //
+    // Skipped rather than started-and-idled, because a compositor that exists
+    // still takes its quantum: `comp_task` wakes to check whether anything is
+    // dirty whether or not anything is.
+    let headless = miner_plan.is_some();
+    if headless {
+        kprintln!("  no clock and no compositor -- this image mines, and draws its own screen");
+    } else {
+        match task::spawn("clock", clock_task) {
+            Some(i) => kprintln!("  spawned '{}' as task {}", "clock", i),
+            None => kprintln!("  could not spawn the clock task"),
+        }
     }
     // The thing that owns the frame.
     //
@@ -506,6 +521,7 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     // of them, while the clock task painted a hundred and eighty-seven times
     // beside it. That contrast is the whole diagnosis -- the machine was
     // running, and nobody was responsible for the picture.
+    if !headless {
     match task::spawn("comp", comp_task) {
         Some(i) => {
             // Told, not guessed. The watchdog reports what the scheduler makes
@@ -515,6 +531,7 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
             kprintln!("  spawned '{}' as task {}", "comp", i);
         }
         None => kprintln!("  could not spawn the compositor task"),
+    }
     }
     task::enable();
     kprintln!("  preemption enabled at {} Hz", TIMER_HZ);
