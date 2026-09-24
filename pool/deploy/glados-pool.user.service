@@ -17,9 +17,56 @@ After=network-online.target
 [Service]
 Type=simple
 
+# **`run-pool.sh` is the source of truth for this argv and this file drifted
+# from it.** Everything below but `--listen` and `--ledger` was missing, and the
+# absence that mattered was `--window`: without it the pool falls back to
+# `DEFAULT_WINDOW_WORK`, which `design/live36.md` measures at **five seconds of
+# mining** at twenty bits and 256 miners, and calls the one thing that has to
+# change before an event. PPLNS pays the last N units of work, so everybody who
+# mined for thirty-six hours and stopped six seconds before a block got nothing.
+# That value shipped in this file the whole time.
+#
+# The settings and where each comes from:
+#
+#     --window 70368744177664   2^46, about 0.80 of a Bitzeny block. Chosen for
+#                               bitzeny and meaningless against testnet, whose
+#                               difficulty swings under the 20-minute rule; the
+#                               payout line prints what it is worth on each.
+#                               **For a bounded event, pay from the tally
+#                               instead** -- `distribute.py --basis tally` does
+#                               not read this at all, and `design/runbook.md`
+#                               step 5 says tally is the answer for an event.
+#     --cpu-percent 25          the total validation budget as a share of one
+#                               core, which is what bounds a flood: the
+#                               per-connection limit never summed.
+#     --share-seconds 45        makes yespower affordable at that budget
+#     --max-connections 900     measured at 850: 852 threads, 21 MB, load 1.25
+#     --roster / --roster-url   answer "can this name be paid" at the greeting
+#
+# **`--require-roster` is absent deliberately.** It refuses an unregistered name
+# at the greeting, which is a statement that a roster exists, and
+# `supabase/functions/worker` has to be deployed and answering first. The pool
+# fails *open* on an unreadable roster either way and says so at startup.
+#
+# **And nothing here refreshes the roster.** `run-pool.sh` carries a background
+# loop for it because the host it was deployed to has neither cron nor
+# lingering; under systemd the answer is a user timer, which needs the user
+# manager that lingering keeps alive. So on a box where these units can run at
+# all, add the timer -- and on one where they cannot, use the script.
+#
+# **No upstream.** A coin spec grows `@host:port,user,pass`, and at the
+# account-free solo pools the username *is* the payout address, so a placeholder
+# left here mines to whoever owns it. See `run-pool.sh` for the form and the
+# reason it is not filled in.
 ExecStart=%h/.local/bin/glados-pool \
     --listen 0.0.0.0:3334 \
     --ledger %S/glados-pool/ledger.json \
+    --roster %S/glados-pool/roster.json \
+    --roster-url https://glados.aperture.institute/pool/ \
+    --cpu-percent 25 \
+    --share-seconds 45 \
+    --max-connections 900 \
+    --window 70368744177664 \
     bitzeny:yespower-10-2048-8:12 \
     testnet:sha256d:24
 
@@ -48,6 +95,15 @@ MemoryMax=64M
 MemoryHigh=48M
 CPUQuota=50%
 TasksMax=512
+
+# **Descriptors, which this unit did not raise and the script does.** Every
+# connection is one and the login default is 1024, so the ceiling could not
+# usefully pass about a thousand however `--max-connections` was set -- a limit
+# that reads as absent rather than as wrong. The hard limit is 524288 and
+# raising the soft limit needs no privilege, which is why `run-pool.sh` does it
+# with a plain `ulimit`. The daemon reads the real limit and clamps its own
+# ceiling to it, so getting this wrong is a smaller pool and not a failure.
+LimitNOFILE=65536
 
 # --- hardening that a user manager will honour ---
 #

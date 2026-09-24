@@ -47,6 +47,37 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # **The deploy files agree about the argv, or this fails.**
+      #
+      # This job exists because a promise nobody enforces goes stale, and the
+      # `#[path]` sharing below is not the only promise in `pool/`. The two
+      # systemd units drifted behind `run-pool.sh` and shipped without
+      # `--window` -- which is not cosmetic: the fallback is
+      # `DEFAULT_WINDOW_WORK`, and `design/live36.md` measures that at **five
+      # seconds of mining** at twenty bits and 256 miners. PPLNS pays the last N
+      # units of work, so an entire event's mining would have paid almost
+      # nothing, and the file that decided it read as a perfectly ordinary unit.
+      #
+      # A missing flag is invisible by construction -- there is nothing on the
+      # line to look at -- so the check is presence and not equality of values.
+      # `run-pool.wg.sh` is deliberately in the list: it is the oldest of the
+      # three and the one most likely to be edited last.
+      - name: The deploy files have not drifted apart
+        run: |
+          fail=0
+          for f in pool/deploy/run-pool.sh pool/deploy/run-pool.wg.sh \
+                   pool/deploy/glados-pool.service \
+                   pool/deploy/glados-pool.user.service; do
+            for flag in --window --cpu-percent --share-seconds \
+                        --max-connections --roster --roster-url; do
+              if ! grep -q -- "$flag" "$f"; then
+                echo "::error file=$f::$f does not pass $flag"
+                fail=1
+              fi
+            done
+          done
+          exit $fail
+
       # Not actions-rs/toolchain, for the reason rust-clippy.yml records at
       # length: `override: true` sits above rust-toolchain.toml in rustup's
       # precedence and silently hands you a different compiler.
@@ -61,12 +92,14 @@ jobs:
       # be the least visible anywhere else.
       - name: Test
         working-directory: pool
-        # `--target`, because `pool/.cargo/config.toml` names a *Windows*
-        # target to escape the kernel's UEFI one, and cargo cannot unset an
-        # inherited key -- so the closest config wins and a bare `cargo test`
-        # on a Linux runner looks for a Windows std that is not installed.
-        # The build below already passed `--target`; the tests never did, which
-        # is why this job has failed every release it has run on.
+        # `--target`, because `pool/.cargo/config.toml` has to name *some*
+        # target to escape the kernel's inherited UEFI one -- cargo cannot
+        # unset a key, so the closest config wins. It named a Windows triple
+        # for as long as the development machine was Windows and names a Linux
+        # one now, and **this step must not care which**: the whole reason it
+        # passes `--target` is that the answer is a property of somebody else's
+        # desk. The build below always did; the tests never did, which is why
+        # this job failed every release it ran on.
         run: cargo test --locked --target x86_64-unknown-linux-musl
 
       # musl, so the artefact is statically linked: no glibc version to match
