@@ -254,10 +254,27 @@ static HASH_SINCE: AtomicU64 = AtomicU64::new(0);
 ///
 /// Bounded by task slots rather than by cores: `MAX_TASKS` is 24, every
 /// application processor takes one through `adopt_idle`, and slots are never
-/// reclaimed -- so on the GF63's sixteen logical processors roughly four are
-/// free once the resident tasks have theirs. Asking for more than this would
-/// spawn until the machine could not spawn anything else, ever.
-pub const MAX_SLICES: usize = 4;
+/// reclaimed -- so asking for more than the table can spare would spawn until
+/// the machine could not spawn anything else, ever.
+///
+/// **Eight rather than four, and the reason is arithmetic rather than a
+/// benchmark.** Four was sized for a full boot: on the GF63's sixteen logical
+/// processors, sixteen slots go to idle tasks and the shell, clock, compositor,
+/// mind, agent and initiative take six more, leaving about two. A miner image
+/// runs *none* of those six -- no model, so no mind, agent or initiative; no
+/// desktop, so no clock or compositor -- and draws its screen from the socket
+/// loop rather than a task of its own. That is six slots back, and six is what
+/// makes eight sensible where four was the honest ceiling before.
+///
+/// `set_slices` still clamps to what `task::spawn` will actually give it and
+/// reports the number it got, so this is a ceiling and not a promise: a full
+/// boot asking for eight gets whatever the table can spare and says so.
+///
+/// The nonce stride divides by this, so raising it narrows each slice's range:
+/// at eight that is 536,870,912 nonces each, which a slice at a quarter of a
+/// megahash exhausts in half an hour against jobs that change every thirty
+/// seconds. Not a constraint, but it is the thing that would become one.
+pub const MAX_SLICES: usize = 8;
 
 /// How many slices are wanted. Slices above this park.
 static SLICES: AtomicU32 = AtomicU32::new(1);
@@ -803,6 +820,21 @@ fn run(s: &mut Session) {
     set_phase(Phase::Live);
     LIVE.store(true, Ordering::Release);
     while ENABLED.load(Ordering::Acquire) {
+        // **The miner's screen is drawn from here, and not from a task of its
+        // own.** This kernel has no sleep: a task that wants to act once a
+        // second can only spin on `yield_now`, which leaves it permanently
+        // runnable and taking a share of every quantum. Measured -- with a
+        // one-second dashboard on its own task, the concurrency curve went
+        // 100%, 196%, 286% and then *back down* to 273% at four slices on eight
+        // cores, because the painter was competing for a core with the thing it
+        // was describing.
+        //
+        // This loop already wakes regularly: `recv_at` blocks for `RECV_MS` and
+        // returns, so hanging the redraw off it costs one comparison per
+        // iteration and no task at all. A frame is about 600 us against a 200 ms
+        // wait, so mining does not notice, and the screen cannot outlive the
+        // miner it is reporting on -- which is the right coupling anyway.
+        super::screen::tick();
         if !drain_shares(s) {
             return;
         }

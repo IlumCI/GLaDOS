@@ -47,6 +47,8 @@ const GRAPH_ROWS: usize = 4;
 
 static HISTORY: Spin<[u32; HIST]> = Spin::new([0; HIST]);
 static HEAD: AtomicUsize = AtomicUsize::new(0);
+/// When the next frame is due, in `lapic::ticks`.
+static NEXT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 /// Redraws, so the cost of this screen can be divided out of a hashrate.
 pub static FRAMES: AtomicU32 = AtomicU32::new(0);
 
@@ -337,28 +339,30 @@ pub fn draw() -> bool {
     true
 }
 
-/// Redraw for as long as the machine runs.
+/// Draw if a second has passed since the last frame.
 ///
-/// Once a second. Faster buys nothing -- the hashrate is averaged over the whole
-/// run and the share counters move every few seconds -- and costs the hash loop
-/// a frame it did not need to paint.
-pub fn task() {
-    // **Wipe the screen once, because nothing else will.** The desktop paints a
-    // taskbar, a wallpaper and a status strip during boot, before the miner has
-    // applied and taken the display -- and the frames below never touch those
-    // pixels: `clear()` skips its fill while the console is invisible, which is
-    // exactly the state the fast path puts it in. The leftovers showed as a
-    // vertical rule down the old terminal window's left edge and a strip along
-    // the bottom reading "no model", sitting under a dashboard that had no idea
-    // they were there.
+/// Called from the miner's socket loop rather than from a task, because this
+/// kernel has no sleep and a task that wanted to wake once a second could only
+/// spin. See the note at the call site: a dashboard on its own task cost the
+/// fourth slice more than it was worth.
+pub fn tick() {
+    let now = crate::dev::lapic::ticks();
+    let due = NEXT.load(Ordering::Relaxed);
+    if now < due {
+        return;
+    }
+    NEXT.store(now + crate::TIMER_HZ as u64, Ordering::Relaxed);
+    draw();
+}
+
+/// Wipe once, before the first frame.
+///
+/// The desktop paints a taskbar and a status strip during boot, before the
+/// miner has applied and taken the display, and the frames below never touch
+/// those pixels: `clear()` skips its fill while the console is invisible, which
+/// is exactly the state the fast path puts it in.
+pub fn wipe() {
     if let Some(fb) = crate::gfx::primary() {
         fb.fill(crate::gfx::Color::new(0, 0, 0));
-    }
-    loop {
-        draw();
-        let until = crate::dev::lapic::ticks() + crate::TIMER_HZ as u64;
-        while crate::dev::lapic::ticks() < until {
-            crate::task::yield_now();
-        }
     }
 }

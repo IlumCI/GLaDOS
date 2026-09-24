@@ -184,14 +184,10 @@ pub fn apply(p: &Plan) -> String {
         crate::gfx::console::with(|c| c.reflow(0, 0, fb.width(), fb.height()));
     }
 
-    // The screen, spawned only once there is something for it to show. It is a
-    // task rather than a hook on the hash loop because painting must not be able
-    // to slow hashing: if the console is busy the frame is late, and a late frame
-    // is invisible where a stalled batch is not.
-    match crate::task::spawn("mine-tui", super::screen::task) {
-        Some(_) => {}
-        None => crate::kprintln!("  the miner's screen could not be spawned; 'mine' still reports"),
-    }
+    // No task for the screen: `client::run` draws it, because this kernel has no
+    // sleep and a once-a-second task can only spin. `screen::tick` is one
+    // comparison on a loop that already wakes every 200 ms.
+    super::screen::wipe();
 
     match super::client::start() {
         Ok(()) => {
