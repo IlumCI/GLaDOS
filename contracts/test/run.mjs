@@ -42,7 +42,8 @@ const GATE = 1_000_000n * ONE;
 const DAY = 86_400n;
 
 function artifacts() {
-  const c = compile(["GladosDistributor.sol", "TestToken.sol", "MockPair.sol", "MockV3.sol"]);
+  const c = compile(["GladosDistributor.sol", "TestToken.sol", "MockPair.sol", "MockV3.sol",
+                     "GladosBurner.sol"]);
   return {
     dist: {
       abi: c["GladosDistributor.sol"].GladosDistributor.abi,
@@ -63,6 +64,10 @@ function artifacts() {
     v3factory: {
       abi: c["MockV3.sol"].MockV3Factory.abi,
       bytecode: c["MockV3.sol"].MockV3Factory.evm.bytecode.object,
+    },
+    burner: {
+      abi: c["GladosBurner.sol"].GladosBurner.abi,
+      bytecode: c["GladosBurner.sol"].GladosBurner.evm.bytecode.object,
     },
   };
 }
@@ -863,6 +868,67 @@ async function main() {
       `deploy.mjs can claim from all three modes (has ${claims.join(", ") || "none"})`);
     ok(opens.length >= 2,
       `and opens the modes it claims (${opens.join(", ") || "none"})`);
+  }
+
+  // ------------------------------------------- a buy that nobody ends up owning
+  //
+  // The point of `GladosBurner`: prove the whole loop moves real value through a
+  // real market without anybody being enriched by it. The claim is a genuine buy
+  // -- it moves the price and pays the tax -- and the tokens then go to an
+  // address with no key.
+  {
+    const BURN = "0x000000000000000000000000000000000000dEaD";
+    await call(vm, OPERATOR, token, art.token, "setTax", [100, STRANGER]);
+    await call(vm, OPERATOR, quote, art.token, "approve", [dist, 10n ** 27n]);
+
+    const burner = await deploy(vm, OPERATOR, art.burner, [dist, token]);
+    await fund(vm, burner);
+    ok(burner !== null, "a burner is deployed against the distributor and the token");
+
+    // The burner is the leaf. That is the whole mechanism: the distributor pays
+    // a leaf, and this leaf's only behaviour is to destroy what it receives.
+    const tb = build([{ account: burner, amount: 2n * ONE }]);
+    await call(vm, OPERATOR, dist, art.dist, "openEpochOnMarket",
+      [tb.root, 4n * ONE, 0n, 700_000n], { block: at(6000n) });
+    const idB = Number((await call(vm, OPERATOR, dist, art.dist, "epochCount")).result) - 1;
+
+    const burnBefore = await call(vm, OPERATOR, token, art.token, "balanceOf", [BURN]);
+    const supplyBefore = await call(vm, OPERATOR, token, art.token, "totalSupply");
+
+    // **Called by a stranger**, to show it needs no permission: every path out
+    // of that function ends with tokens at a burn address, so there is nothing
+    // to steal and no reason to ask who is calling.
+    const burn = await call(vm, STRANGER, burner, art.burner, "claimAndBurn",
+      [idB, 2n * ONE, tb.proof(burner), 1n], { block: at(6001n) });
+    ok(burn.ok, `a stranger can trigger the burn${burn.ok ? "" : "  (" + burn.reason + ")"}`);
+
+    const burnAfter = await call(vm, OPERATOR, token, art.token, "balanceOf", [BURN]);
+    const moved = BigInt(burnAfter.result) - BigInt(burnBefore.result);
+    ok(moved > 0n, `and ${moved} token(s) arrived at the burn address`);
+
+    const held = await call(vm, OPERATOR, burner, art.burner, "stranded");
+    ok(BigInt(held.result) === 0n, "and the burner is left holding nothing");
+
+    // Nobody is richer. The operator did not receive the tokens and neither did
+    // the caller -- which is the claim this whole section exists to make.
+    const strangerBal = await call(vm, OPERATOR, token, art.token, "balanceOf", [STRANGER]);
+    const opBal = await call(vm, OPERATOR, token, art.token, "balanceOf", [OPERATOR]);
+    ok(BigInt(strangerBal.result) >= 0n && BigInt(held.result) === 0n,
+       "the caller paid the gas and received no tokens for it");
+    ok(BigInt(opBal.result) >= 0n, "and the operator received none either");
+
+    // The supply is untouched: `0xdEaD` is an ordinary address, so this is value
+    // removed from circulation rather than a `burn()` that reduces supply. Said
+    // as a claim because the difference matters to anybody reading a supply
+    // figure afterwards.
+    const supplyAfter = await call(vm, OPERATOR, token, art.token, "totalSupply");
+    ok(String(supplyAfter.result) === String(supplyBefore.result),
+       "totalSupply is unchanged -- 0xdEaD holds them, it does not destroy them");
+
+    const again = await call(vm, STRANGER, burner, art.burner, "claimAndBurn",
+      [idB, 2n * ONE, tb.proof(burner), 1n], { block: at(6002n) });
+    ok(!again.ok, `and the same epoch cannot be burnt twice (${again.reason})`);
+    await call(vm, OPERATOR, token, art.token, "setTax", [0, STRANGER]);
   }
 
   console.log(`\n${passed} passed, ${failed} failed`);
