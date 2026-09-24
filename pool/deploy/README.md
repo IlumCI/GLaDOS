@@ -452,12 +452,33 @@ one nonce and it prints
 
 and exits 1.
 
-`.github/workflows/verify-shares.yml` does that on a schedule and on demand
-against a published log. **It is the audit and not the pool**, and it cannot be
-the pool: an Actions runner has no inbound networking, and share acceptance has
-to be inline anyway. Which is the right half to put somewhere free -- accepting a
-share is cheap and you do it anyway, while independent re-verification is the one
-thing you structurally cannot do for yourself.
+**The audit runs in its own repository**, [IlumCI/glados-pool][gp], on a schedule
+and on demand. It checks out *this* repository and builds `pool/` from it rather
+than holding a copy, because `pool/src/lib.rs` reaches the kernel by `#[path]`
+and a second yespower over there is exactly the drift that arrangement exists to
+prevent. So there is one source of truth and the other repository holds only the
+running and the published record -- which also keeps it small enough for a miner
+to read.
+
+[gp]: https://github.com/IlumCI/glados-pool
+
+Separating them is about blast radius rather than tidiness: the audit repository
+holds no signing keys, needs no `workflows` write, and if its Actions usage were
+ever questioned it would not take this repository's releases, ISOs, `loop/main`
+or the Gödel machine with it.
+
+**It is the audit and not the pool**, and it cannot be the pool: a runner has no
+inbound networking, and share acceptance has to be inline anyway. Which is the
+right half to put somewhere free -- accepting a share is cheap and you do it
+regardless, while independent re-verification is the one thing you structurally
+cannot do for yourself.
+
+Driven on a real runner, both ways. Three shares from a live session verify and
+the run is green; one hex digit of one nonce changed and it goes red, naming the
+share and printing the digest. **The first attempt found the forgery and reported
+success**, because `| tee` makes a pipeline's exit status `tee`'s -- so the fix is
+`set -o pipefail`, and the lesson is that only the negative case could ever have
+shown it.
 
 **It is unbounded, so it is off by default.** About 200 bytes per accepted share,
 forever. Rotate it or publish and truncate per epoch.
