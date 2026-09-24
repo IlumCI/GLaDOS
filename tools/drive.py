@@ -585,6 +585,18 @@ def main():
     no_payload = "--no-payload" in argv
     if no_payload:
         argv.remove("--no-payload")
+    # **`--iso` implies it**, and without this a miner ISO could not be booted at
+    # all: the refusal below insisted on a checkpoint in `out/` for a run whose
+    # boot medium is the ISO and whose `\GLADOS\` came from whatever
+    # `mkiso.py` was given. The staged ESP is not what such a guest reads.
+    #
+    # It also *clears* the staged files rather than merely skipping them, which
+    # is the half that matters here: `.qemu/esp` persists between runs, so a
+    # stale `model.bin` left beside an ISO is a second `\GLADOS\` for the
+    # firmware to find, and which one wins is not a thing to leave to chance.
+    if iso is not None and not no_payload:
+        no_payload = True
+        print("[drive] --iso, so nothing is staged: the image carries its own payload")
     model_given = False
     if "--model" in argv:
         i = argv.index("--model")

@@ -425,6 +425,63 @@ mine on
 mine coins
 ```
 
+### Or hand somebody an ISO that does all of that by itself
+
+A miner-only image: no model, no store, and one activity. It is **32.6 MB**
+against the full ISO's 1.90 GB, because almost all of that is weights, and it
+boots in seconds rather than the minutes a checkpoint costs to load.
+
+```bash
+cargo build --release
+mkdir -p iso-payload
+cat > iso-payload/MINER.TXT <<'TXT'
+pool p.example.com:3334
+worker 0xYOUR_PAYOUT_ADDRESS
+protocol glados
+slices 3
+TXT
+python3 tools/mkiso.py out/miner.iso \
+    --efi target/x86_64-unknown-uefi/release/glados.efi \
+    --payload iso-payload --allow MINER.TXT --no-license
+```
+
+`--no-license` is correct here and is not a way round the gate: that check exists
+because the payload normally carries model weights whose licence has to travel
+with them, and this payload carries no licensed content at all. `--allow` is
+needed because `mkiso.py` places only files `payload/*.txt` names, an allowlist
+rather than a denylist for `eval.rs`'s reason.
+
+Boot it and it says what it is doing before the prompt appears:
+
+    [miner] mining as 0x...beef at 10.0.2.2:3334, 2 slice(s)
+
+**`worker` has no default and the image refuses to mine without one.** At the
+account-free venues the worker name *is* the payout address, so an image that
+booted with a built-in default would mine to whoever owns that default for as
+long as nobody noticed. Without it the machine reaches a prompt and sits there,
+which is the failure that is visible rather than the one that is profitable.
+
+**Nothing in `MINER.TXT` is executed.** Keys are parsed into typed fields and the
+fields act; a line this parser does not know is counted and reported, never
+passed to a shell. That matters because the file is on media anybody can edit
+and it names a machine to connect to -- `update::repairs` makes the same argument
+about the file beside it, and `diag`'s `miner config` section carries eighteen
+claims about it, one of which is that a line reading `rm -rf /` is just one more
+thing not understood.
+
+Driven end to end on a Linux host: the ISO booted under KVM, read its config,
+connected, and the pool logged
+`hello worker=0x...beef agent=glados/1.3.8` followed by accepted shares in two
+disjoint nonce ranges -- which is `slices 2`, each slice owning its own quarter
+of the space.
+
+**What it does not have**, deliberately: no checkpoint, so `ai::init` returns
+early and the eleven-ish model-dependent boot selftest sections do not run. The
+tally still reads green because the *suites* all pass, which is the hazard
+`.github/actions/verify-boot` grew a section-count check for. A miner image is
+the configuration that walks into it by design, so read a green boot on one as
+saying less than a green boot on a full image.
+
 ## What this does not do yet
 
 **No TLS.** Worker names travel in the clear and anything on the path can

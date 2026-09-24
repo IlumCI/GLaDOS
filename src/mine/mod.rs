@@ -19,6 +19,7 @@
 
 pub mod algo;
 pub mod blake2s;
+pub mod boot;
 pub mod client;
 pub mod ev;
 pub mod hash;

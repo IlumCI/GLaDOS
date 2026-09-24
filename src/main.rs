@@ -275,6 +275,18 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     // `repair::ACTIONS`, the row is what runs, and a line naming an action that
     // does not exist -- or aiming a narrow one at a subsystem it was never
     // offered for -- gets nothing.
+    // The miner's configuration, read here for the same reason the model and
+    // the root bundle are: this is the last moment a filesystem exists. On a
+    // miner-only image it is also the *only* moment, because that image is an
+    // ISO and `update::find_esp` says what an ISO is -- read-only, with no
+    // writable ESP -- so there is nowhere for a running machine to have put
+    // this and nowhere for it to save one.
+    //
+    // Parsed now and applied much later, once the network is up. Nothing in it
+    // is executed; see `mine::boot`.
+    let miner_plan = uefi::read_file(bs, image, mine::boot::FILE)
+        .and_then(|b| mine::boot::parse(b.as_slice()));
+
     let (persisted, repair_note) = update::repairs::at_boot(bs, image);
     if let Some(line) = &repair_note {
         serial_println!("glados: {}", line);
@@ -630,6 +642,17 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     // Everything up to here was the machine reporting on itself and belongs
     // on the executive console. From here the operator is driving, and what
     // they type and what it answers belongs on theirs.
+    // **Last, because mining needs the network and nothing else needs mining.**
+    // Started here rather than beside `net::init` so that a miner image whose
+    // pool is unreachable still reaches a prompt: `client::start` only arms the
+    // socket task, and that task does its own connecting and its own backoff,
+    // so a machine nobody can talk to is a machine somebody can still type at.
+    if let Some(p) = &miner_plan {
+        let line = mine::boot::apply(p);
+        kprintln!("
+[miner] {}", line);
+    }
+
     gfx::console::set_default_channel(gfx::console::USER);
     shell::run(&boot, &acpi);
 }
@@ -638,6 +661,32 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
 ///
 /// Returns true if the store exists but does not verify, which is the
 /// condition that forces the recovery console open without being asked.
+/// The miner's boot-volume configuration parser.
+///
+/// Worth a section of its own rather than a line in `check_mining`, because it
+/// is the one piece of the miner that runs on a machine with no pool, no
+/// network and no model -- which is exactly the machine a miner-only image is
+/// before it finds its pool, and exactly the configuration in which this
+/// tree's selftests have historically gone quiet.
+fn check_miner_config() -> bool {
+    kprintln!("
+[selftest] miner config:");
+    let claims = mine::boot::checks();
+    let mut bad = 0;
+    for (ok, what) in &claims {
+        if *ok {
+            kprintln!("  ok    {}", what);
+        } else {
+            kprintln!("  FAIL  {}", what);
+            bad += 1;
+        }
+    }
+    if bad == 0 {
+        kprintln!("  {} claim(s), and none of them can reach a shell", claims.len());
+    }
+    bad == 0
+}
+
 fn init_storage(acpi: &Option<acpi::Acpi>) -> bool {
     console::set_color(YELLOW);
     kprintln!("\n[storage]");
@@ -1925,6 +1974,7 @@ fn selftest(acpi_ref: &Option<acpi::Acpi>) {
 
     section("text", boot_report::Need::Optional, check_text);
     section("mining", boot_report::Need::Optional, check_mining);
+    section("miner config", boot_report::Need::Optional, check_miner_config);
 
     kprintln!("
 [selftest] generated code:");
