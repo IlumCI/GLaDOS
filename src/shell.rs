@@ -8352,7 +8352,7 @@ fn mine_cmd(rest: &str) {
             let saved = client::sweep_begin(a.clone());
             let mut first = 0u64;
             for n in 1..=max {
-                let (have, hashes, took) = client::sweep_point(n, ms);
+                let (have, cores, hashes, took) = client::sweep_point(n, ms);
                 let hs = if took > 0 { hashes * 1000 / took } else { 0 };
                 if n == 1 {
                     first = hs;
@@ -8361,12 +8361,26 @@ fn mine_cmd(rest: &str) {
                 // the slices are not fighting; anything less is where they are.
                 let scale = if first > 0 { hs * 100 / first } else { 0 };
                 kprintln!(
-                    "  {} slice(s)  {} H/s  ({}% of one)  over {} hashes in {} ms",
-                    have, hs, scale, hashes, took
+                    "  {} slice(s) on {} core(s)  {} H/s  ({}% of one)  over {} hashes in {} ms",
+                    have, cores, hs, scale, hashes, took
                 );
                 if have < n {
                     kprintln!("    only {} could be spawned; the rest of the curve is not real", have);
                     break;
+                }
+                // **The line this curve was missing.** A point where the slices
+                // did not reach that many cores is not a slow point, it is a
+                // measurement of something else -- and the number it produces
+                // is indistinguishable from cache contention, which is the one
+                // thing the curve is for. Said per point, because it is a fact
+                // about that interval and the next one may be fine.
+                if cores < have {
+                    console::set_color(YELLOW);
+                    kprintln!(
+                        "    {} slice(s) shared {} core(s) -- this point measures scheduling, not cache",
+                        have, cores
+                    );
+                    console::set_color(LTGRAY);
                 }
             }
             client::sweep_end(saved);

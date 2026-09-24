@@ -286,6 +286,25 @@ static SPAWNED_SLICES: AtomicU32 = AtomicU32::new(0);
 /// `fn()` and there is nowhere to pass an index.
 static NEXT_SLICE: AtomicU32 = AtomicU32::new(0);
 
+/// Which cores have completed a batch since this was last cleared, one bit
+/// each.
+///
+/// **A slice count is not a core count, and reporting the first as though it
+/// were the second is how the sweep lied for as long as it has existed.**
+/// `set_slices` answers how many slices *exist*; what a concurrency curve is
+/// about is how many are hashing at once, and those differ whenever two slices
+/// share a core. Nothing else in the kernel can answer it after the fact: the
+/// scheduler records a task's pin, not where it has been, and by the time the
+/// interval is over the evidence is gone. So each slice ORs its own core in as
+/// it finishes a batch, which costs one atomic per batch -- against a batch
+/// that is milliseconds of yespower.
+///
+/// It is the cores that *hashed*, deliberately, and not the cores the slices
+/// were pinned to. A slice pinned to a core it never ran on is exactly the
+/// failure worth catching, and a mask built from the pins could not see it.
+static SLICE_CORES: AtomicU32 = AtomicU32::new(0);
+
+
 pub fn slices() -> u32 {
     SLICES.load(Ordering::Relaxed)
 }
@@ -303,18 +322,45 @@ pub fn spawned_slices() -> u32 {
 pub fn set_slices(n: u32) -> u32 {
     let n = n.clamp(1, MAX_SLICES as u32);
     while SPAWNED_SLICES.load(Ordering::Relaxed) < n {
-        match crate::task::spawn("mine slice", mine_task) {
-            Some(i) => {
+        // **`task::spawn` and `unpin` were here, and `unpin` was the wrong
+        // verb.** The claim it made is the audit above -- everything this task
+        // touches is an atomic, a `Spin`, or its own stack -- and that claim is
+        // unchanged. What it does not do is *place* the task: it makes it
+        // eligible everywhere and leaves the choice to whichever core reaches
+        // it first. Two slices sat together on core 0 for a whole four-second
+        // sweep point and hashed at one slice's rate, twice out of four runs,
+        // while the report said two slices. That is not a slow measurement, it
+        // is a wrong one, and nothing in the output could tell it apart from
+        // cache contention -- which is the single thing the curve is for.
+        //
+        // So each slice is placed on a core of its own, which is deterministic
+        // where migration is a race, and placed *at spawn* rather than pinned
+        // afterwards for the reason `spawn_on` gives.
+        //
+        // **Offset by one, so the first slice takes core 1.** Core 0 carries
+        // the shell, the socket task and the clock; starting there would make
+        // the one-slice baseline the crowded core and every ratio after it
+        // flattering. The slice that has to share is the last one added rather
+        // than the first, and the sweep says so per point when it happens.
+        //
+        // That leaves a ceiling of `cores - 1` working slices, and it is free on
+        // the machine this is for: the GF63 has sixteen logical processors, so
+        // all eight slices fit on cores 1-8 with core 0 still clear. It bites
+        // only on a smaller test host -- an eight-core one doubles up the last
+        // slice -- and there the sweep prints which point it happened at rather
+        // than folding it into the curve. Spending core 0 to avoid that would
+        // trade the desktop's responsiveness for a slice the real target does
+        // not need.
+        //
+        // Pinning is strictly tighter than unpinning, so this weakens nothing
+        // that was audited. A machine with one core gets core 0 and behaves
+        // exactly as it did.
+        let nth = SPAWNED_SLICES.load(Ordering::Relaxed) as usize;
+        let cores = crate::smp::online();
+        let cpu = if cores > 1 { 1 + (nth % (cores - 1)) } else { 0 };
+        match crate::task::spawn_on("mine slice", mine_task, cpu) {
+            Some(_) => {
                 SPAWNED_SLICES.fetch_add(1, Ordering::Relaxed);
-                // **This kernel's first `unpin` caller outside the selftest.**
-                // The claim it makes is the audit above: everything this task
-                // touches is an atomic, a `Spin`, or its own stack. Without it
-                // every slice shares core 0 and the concurrency curve would be
-                // measuring round-robin overhead rather than cache contention,
-                // which is the one thing it exists to find.
-                if !crate::task::unpin(i) {
-                    note("a slice could not be unpinned; it stays on core 0");
-                }
             }
             None => {
                 note("no task slot for another slice");
@@ -1258,6 +1304,22 @@ fn mine_task() {
         }
         super::work::count(slot, batch as u64);
         HASHES.fetch_add(batch as u64, Ordering::Relaxed);
+        // Recorded here rather than at the top of the loop, because what the
+        // mask is for is explaining `HASHES`, and every path above this line
+        // reaches `park` without hashing. A core that only ever parked a slice
+        // did not contribute and must not read as though it had.
+        //
+        // `cpu_id` and not `smp::this_cpu`: the second asks the interrupt
+        // controller over memory-mapped I/O, which is a real cost to pay per
+        // batch for a number that is only ever a diagnostic. `armed` is the
+        // condition `cpu_id`'s own safety note names, and before per-core
+        // storage exists there is one core anyway.
+        if crate::cpu::percpu::armed() {
+            let me = crate::cpu::percpu::cpu_id();
+            if me < 32 {
+                SLICE_CORES.fetch_or(1u32 << me, Ordering::Relaxed);
+            }
+        }
     }
 }
 
@@ -1324,14 +1386,26 @@ pub struct SweepState {
 /// objection `work`'s header makes about summing across algorithms does not
 /// apply. That is the reason the sweep clears the table rather than measuring
 /// whatever happens to be in it.
-pub fn sweep_point(n: u32, ms: u64) -> (u32, u64, u64) {
+/// Answers the slices that exist, the cores that hashed, the hashes and the
+/// elapsed time -- in that order, and the second is the one this used to be
+/// missing. See `SLICE_CORES` for what went wrong without it.
+pub fn sweep_point(n: u32, ms: u64) -> (u32, u32, u64, u64) {
     let have = set_slices(n);
     HASHES.store(0, Ordering::Relaxed);
     HASH_SINCE.store(0, Ordering::Relaxed);
+    // Cleared *after* `set_slices`, which spawns: a slice created for this
+    // point may hash before the interval opens, and a mask carrying that batch
+    // would credit a core for work no hash in the count paid for.
+    SLICE_CORES.store(0, Ordering::Relaxed);
     let t0 = now_ms();
     rest_ms(ms);
     let took = now_ms().saturating_sub(t0);
-    (have, HASHES.load(Ordering::Relaxed), took)
+    (
+        have,
+        SLICE_CORES.load(Ordering::Relaxed).count_ones(),
+        HASHES.load(Ordering::Relaxed),
+        took,
+    )
 }
 
 /// Clear the table down to one fixture coin and start the curve.
