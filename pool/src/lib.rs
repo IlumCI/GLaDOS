@@ -105,6 +105,7 @@ pub mod mine {
 pub mod budget;
 pub mod market;
 pub mod pool;
+pub mod record;
 pub mod roster;
 pub mod server;
 pub mod upstream;

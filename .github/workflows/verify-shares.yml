@@ -1,0 +1,137 @@
+name: verify-shares
+
+# Recompute every share a pool credited, on a machine the operator does not own.
+#
+# `design/pool.md` says the share log is "the only thing standing in for trust",
+# because Layer 1 holds nobody's coins and so there is no wallet to audit. But
+# what the pool publishes is a *tally* -- work, accepted, stale, bad per worker --
+# and a tally cannot be re-verified. A miner reading it is trusting that the
+# operator's own program counted honestly, which is exactly the thing the
+# publishing was supposed to replace.
+#
+# `--sharelog` writes the other half: one line per accepted share carrying the
+# assembled header, the nonce and the target. This job takes that file and
+# recomputes every hash in it using the kernel's own yespower, sha256d, blake2s
+# and neoscrypt -- the same bytes the ring-0 miner compiles, reached by `#[path]`
+# and enforced by `pool.yml`. If the operator credited a share that does not meet
+# the target they published, this says so, with the digest, and fails.
+#
+# ### What this is not, said first because the name invites the mistake
+#
+# **It is not the pool and it cannot be.** An Actions runner has no inbound
+# networking: it dials out, and nothing dials in. Stratum is a long-lived socket
+# a miner opens *to* the pool, so there is no port here to serve it on and no
+# address to give anybody. Share *acceptance* also has to be inline -- a miner
+# needs a verdict in milliseconds and has moved on by the time a job schedules.
+#
+# So this is the audit rather than the service, and that is the more useful half
+# to put somewhere free: acceptance is cheap and the operator does it anyway,
+# while independent re-verification is the thing an operator structurally cannot
+# do for themselves.
+#
+# ### Why it fetches rather than taking the log as an input
+#
+# `workflow_dispatch` inputs are capped at 64 KB, and a share log is one line of
+# about 200 bytes per accepted share -- a few hours of one miner. So the default
+# is to fetch a published URL, which is unbounded and is also the form a miner
+# would check by hand. `records` is kept for a handful of lines, because the
+# fast way to confirm this job works at all is to hand it three.
+
+on:
+  # Anybody with the repository can ask for a re-check. No secrets are used, so
+  # this is safe to leave open in a way `propose.yml` is not.
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "Share log to fetch and verify"
+        required: false
+        default: "https://glados.aperture.institute/pool/shares.txt"
+      records:
+        description: "Or paste records directly, one per line"
+        required: false
+  # The door an outside thing comes in through. `supabase/functions/proposal`
+  # already dispatches `propose.yml` this way, so the pattern is proven in this
+  # tree: a pool that has just published a log can ask for it to be checked
+  # without anybody watching.
+  repository_dispatch:
+    types: [verify-shares]
+  schedule:
+    # Daily, so a published log is re-checked whether or not anybody asks. An
+    # audit nobody runs is the same as no audit.
+    - cron: "17 5 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-shares
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version --verbose
+
+      # `--target` explicitly, because `pool/.cargo/config.toml` has to name a
+      # target to escape the kernel's inherited UEFI one and the one it names is
+      # whatever host types `cargo test`. This job must not care which.
+      - name: Build the verifier
+        working-directory: pool
+        run: cargo build --release --locked --target x86_64-unknown-linux-gnu
+
+      # The claims about the record format itself, before it is trusted to carry
+      # anything: that the algorithm spec round-trips including yespower's N and
+      # r, which `Algo::name()` drops, and that changing one bit of a nonce
+      # changes the digest.
+      - name: The record format checks itself
+        working-directory: pool
+        run: ./target/x86_64-unknown-linux-gnu/release/glados-pool --selftest
+
+      - name: Collect the share log
+        id: collect
+        env:
+          URL: ${{ github.event.inputs.url || github.event.client_payload.url }}
+          RECORDS: ${{ github.event.inputs.records }}
+        run: |
+          set -u
+          if [ -n "${RECORDS:-}" ]; then
+            printf '%s\n' "$RECORDS" > shares.txt
+            echo "source=pasted records" >> "$GITHUB_OUTPUT"
+          elif [ -n "${URL:-}" ]; then
+            # `-f` so a 404 fails the step rather than leaving an HTML error page
+            # to be parsed as records -- which would come back as "unreadable"
+            # and read like a corrupt log rather than a missing one.
+            curl -fsS "$URL" -o shares.txt
+            echo "source=$URL" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::no share log named and no records pasted; nothing to verify"
+            echo "source=" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -f shares.txt ]; then
+            echo "  $(wc -l < shares.txt) line(s)"
+          fi
+
+      - name: Recompute every share
+        if: steps.collect.outputs.source != ''
+        working-directory: .
+        run: |
+          ./pool/target/x86_64-unknown-linux-gnu/release/glados-pool \
+              --verify shares.txt | tee verdict.txt
+          # The exit code is the verdict: non-zero on a share that was credited
+          # and does not meet its target, which is the one thing worth a red X.
+
+      - name: Keep the verdict
+        if: always() && steps.collect.outputs.source != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: verdict
+          path: |
+            verdict.txt
+            shares.txt
+          if-no-files-found: ignore

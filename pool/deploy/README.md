@@ -425,6 +425,43 @@ mine on
 mine coins
 ```
 
+### And let somebody else check your arithmetic
+
+The published ledger is a *tally* -- work, accepted, stale, bad per worker -- and
+a tally cannot be re-verified. A miner reading it is trusting that your program
+counted honestly, which is the thing publishing it was meant to replace.
+
+`--sharelog` writes the half that can be checked: one line per accepted share,
+carrying the assembled header, the nonce and the target.
+
+```bash
+glados-pool --listen 0.0.0.0:3334 --sharelog <state>/shares.txt <coins...>
+glados-pool --verify <state>/shares.txt
+```
+
+The verifier needs no pool, no socket and no state -- it reads a line, builds the
+hasher the line names, hashes the header with the nonce and compares against the
+target, using the kernel's own code by `#[path]`. So it runs on a miner's laptop,
+or on a CI runner, or anywhere somebody wants to check you.
+
+Driven: 13 shares from a real session verify and exit 0; change one hex digit of
+one nonce and it prints
+
+    line 1: rig-alpha does NOT meet its target, digest a66682ae67fe...
+    12 share(s) recomputed and met their target, 1 did not, 0 unreadable
+
+and exits 1.
+
+`.github/workflows/verify-shares.yml` does that on a schedule and on demand
+against a published log. **It is the audit and not the pool**, and it cannot be
+the pool: an Actions runner has no inbound networking, and share acceptance has
+to be inline anyway. Which is the right half to put somewhere free -- accepting a
+share is cheap and you do it anyway, while independent re-verification is the one
+thing you structurally cannot do for yourself.
+
+**It is unbounded, so it is off by default.** About 200 bytes per accepted share,
+forever. Rotate it or publish and truncate per epoch.
+
 ### Or hand somebody an ISO that does all of that by itself
 
 A miner-only image: no model, no store, and one activity. It is **32.6 MB**
