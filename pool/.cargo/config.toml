@@ -10,17 +10,28 @@
 # `cargo test` is ever actually typed. Anywhere the pool is really deployed --
 # CI, a server -- passes `--target` explicitly and overrides this line:
 #
-#     cargo build --release --target x86_64-unknown-linux-gnu
+#     cargo build --release --target x86_64-unknown-linux-musl
 #
-# **This is a Windows target, so every other host must pass `--target`.**
-# Cargo cannot unset an inherited key, so escaping the kernel's UEFI target
-# means naming one, and the one named is the development machine's. That makes
-# the crate unbuildable anywhere else without an explicit `--target`, which is
-# exactly what happened: `pool.yml` built with one and tested without, so the
-# tests looked for a Windows std on a Linux runner and this job failed every
-# release it ever ran on.
+# **This said `x86_64-pc-windows-msvc`, and the development machine moved.**
+# The reasoning was right and the fact under it expired: cargo cannot unset an
+# inherited key, so escaping the kernel's UEFI target means naming one, and the
+# one to name is whatever host actually types `cargo test`. That host is Arch
+# Linux now, and until this line changed a bare `cargo build` in here answered
+#
+#     error[E0463]: can't find crate for `std`
+#     note: the `x86_64-pc-windows-msvc` target may not be installed
+#
+# which is a build for a machine that is not here any more. Nothing about the
+# crate was wrong and nothing about the reasoning was wrong; the triple was a
+# measurement of the room, and the room changed.
+#
+# It is still true that every *other* host must pass `--target`, and that is
+# still how this goes wrong -- `pool.yml` once built with one and tested
+# without, so the tests looked for a Windows std on a Linux runner and the job
+# failed every release it ever ran on. The failure simply points the other way
+# now, so read the triple before believing a linker error.
 [build]
-target = "x86_64-pc-windows-msvc"
+target = "x86_64-unknown-linux-gnu"
 
 # **This said "cleared, not inherited" and held `rustflags = []`, and it was
 # wrong.** Cargo merges config files by *joining* arrays, so an empty list
@@ -39,9 +50,11 @@ target = "x86_64-pc-windows-msvc"
 # which is the fix, since the only way to not inherit a cargo array is for the
 # parent not to declare it where it applies.
 
-# Cross-compiling to Linux from this Windows machine, which is how the daemon
-# is actually built: there is no `cc` here, and cargo's default linker for a
-# Linux target is `cc`.
+# Cross-compiling to musl, which is how the daemon is actually built. This
+# stays exactly as it was when the host was Windows, and the reason is no
+# longer "there is no `cc` here" -- there is one now, and `gcc` beside it.
+# There is no **`musl-gcc`**, which is the one that would matter, and cargo's
+# default linker for a musl target is a C compiler targeting musl.
 #
 # `rust-lld` ships with the toolchain and can link a fully static musl binary
 # with no C toolchain anywhere, which is the whole reason musl is the target
