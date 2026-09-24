@@ -633,18 +633,35 @@ async function main() {
     } catch {
       badDist = null;
     }
-    ok(badDist !== null, "a distributor is constructed with a pair for two tokens it never mentions");
+    // **Inverted when the fix landed, which is what these were for.** Before the
+    // constructor checked, this deployed happily, took funding for a market
+    // epoch, and then answered `TooLittleOut(0,1)` to every claim forever with no
+    // setter and no recovery. Now it cannot be built at all.
+    ok(badDist === null, "a distributor with a pair for two tokens it never mentions is refused");
 
-    if (badDist) {
-      await call(vm, OPERATOR, quo2, art.token, "approve", [badDist, 10n ** 27n]);
-      const tw = build([{ account: A, amount: 4n * ONE }]);
-      const openw = await call(vm, OPERATOR, badDist, art.dist, "openEpochOnMarket",
-        [tw.root, 8n * ONE, 0n, 200_000n], { block: at(1000n) });
-      ok(openw.ok, `and it takes funding for a market epoch against that pair${openw.ok ? "" : "  (" + openw.reason + ")"}`);
-      const clw = await call(vm, A, badDist, art.dist, "claimOnMarket",
-        [0, 4n * ONE, tw.proof(A), 1n], { block: at(1001n) });
-      ok(!clw.ok, `and then nobody can ever claim it (${clw.reason})`);
+    // And the check refuses the wrong pair rather than every pair, which is the
+    // half that would otherwise go unnoticed: a constructor that reverted
+    // unconditionally would also pass the claim above.
+    let rightDist = null;
+    try {
+      const rightPair = await deploy(vm, OPERATOR, art.pair, [quo2, tok2]);
+      rightDist = await deploy(vm, OPERATOR, art.dist, [tok2, OPERATOR, rightPair, quo2, factory]);
+    } catch {
+      rightDist = null;
     }
+    ok(rightDist !== null, "and one whose pair does hold them is built");
+
+    // A distributor with no market at all still deploys, because a chain can
+    // have this token and no pair yet -- a state the constructor's own comment
+    // says this project has been in twice.
+    let noMarket = null;
+    try {
+      noMarket = await deploy(vm, OPERATOR, art.dist,
+        [tok2, OPERATOR, ethers.ZeroAddress, ethers.ZeroAddress, factory]);
+    } catch {
+      noMarket = null;
+    }
+    ok(noMarket !== null, "and one with no pair at all is still allowed");
 
     // ---- checkClaim does not ask what mode the epoch is
     //
@@ -720,8 +737,15 @@ async function main() {
         /* not ours */
       }
     }
-    ok(cl6.ok && reported !== null && BigInt(reported) !== arrived,
-      `claim() reports ${reported} received where ${arrived} arrived`);
+    // Inverted by the fix: `claim()` measured nothing and emitted the amount it
+    // was asked for, so these two disagreed by the tax. They agree now.
+    ok(cl6.ok && reported !== null && BigInt(reported) === arrived,
+      `claim() reports the ${arrived} that actually arrived`);
+    // And the pair is still *not* the requested amount, or the claim above would
+    // be passing because the token stopped taxing rather than because the event
+    // started measuring.
+    ok(arrived < 2n * ONE,
+      `and that is less than the ${2n * ONE} the leaf asked for, because the token taxed it`);
 
     // And the contract is still solvent afterwards, which is the half of the
     // same worry that does not hold. Stated as a claim so it cannot rot.
@@ -794,8 +818,12 @@ async function main() {
     const idZ = Number((await call(vm, OPERATOR, dist, art.dist, "epochCount")).result) - 1;
     const hooked = await call(vm, B, dist, art.dist, "claimOnV3",
       [idZ, 1n * ONE, tZ.proof(B), 1n], { block: at(5002n) });
-    ok(!hooked.ok && hooked.reason === "BadCallback",
-      `and fails once a nested claim has cleared _inFlight (${hooked.reason})`);
+    // Inverted by the fix: `_inFlight` is saved and restored, so an inner claim
+    // no longer leaves the outer pool's callback finding a zero. Before, this
+    // reverted `BadCallback` and an epoch whose reward token had a transfer hook
+    // was unclaimable.
+    ok(hooked.ok,
+      `and still succeeds with a nested claim inside it${hooked.ok ? "" : "  (" + hooked.reason + ")"}`);
     await call(vm, OPERATOR, reward, art.token, "setHook", [ethers.ZeroAddress, "0x"]);
 
     // ---- the operator's tool agrees with the contract about the constructor

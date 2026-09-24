@@ -12,14 +12,25 @@ this file is read out of order.
     before      79 claims, 0 failures, 12,111 bytes deployed
     after       93 claims, 0 failures, source unchanged
 
-**Nothing in the contract was changed.** Every fix below is a proposed diff and
-not a commit. The reason is the same one `drive.py` gives about staging a stale
-binary: the value of an audit is that the artefact audited and the artefact
-deployed are the same bytes, and editing the source on audit day quietly makes
-them two things. The fourteen new claims in `contracts/test/run.mjs` are the
-evidence, they pass against the source as it stands, and each one will *invert*
-when the corresponding fix lands — which is what makes them regression tests and
-not decoration.
+**The fixes have landed.** They were held back on audit day so the artefact
+audited and the artefact deployable were the same bytes; that is no longer the
+useful state, because the contract has still never been deployed and the window
+to change an immutable constructor argument's validation closes the moment it is.
+
+The claims written on audit day said they would *invert* when each fix landed,
+and three of them did, which is what makes them regression tests rather than
+decoration:
+
+    FAIL  a distributor is constructed with a pair for two tokens it never mentions
+    FAIL  claim() reports 1940000000000000000 received where 1940000000000000000 arrived
+    FAIL  and fails once a nested claim has cleared _inFlight
+
+Each failure is the fix working: the wrong pair is now refused at construction,
+the two numbers are now equal because the event measures, and the nested claim no
+longer breaks the outer one. All three are rewritten to assert the corrected
+behaviour, plus two that would otherwise go unnoticed -- that the constructor
+refuses the *wrong* pair rather than every pair, and that a distributor with no
+market at all still deploys. **98 claims, 0 failures, 12,543 bytes deployed.**
 
 **Out of scope, named rather than implied.** `contracts/bridge.mjs`,
 `tools/distribute.py`, `supabase/functions/worker` and the pool's own ledger
@@ -258,8 +269,10 @@ tool, which is where three of these findings always belonged:
 | 5, no `claimOnV3` | `claim` handles all three modes, quoting V3 against `QuoterV2` on 4663 with `--min-out` as the override. |
 | 7, constructor arity | five arguments, with the V3 factory `design/rwa.md` measured. |
 | 8, `Direct` unreachable | `--direct` on `open`, funding in the reward token rather than the quote. |
-| 4, `claim()` does not measure | **not fixed** -- it is in the contract. `claim --direct` reads the claimant's balance either side and prints the difference when it disagrees with what the event will say. |
-| 6, `_inFlight` not restored | **not fixed** -- also the contract, and one line when it is. |
+| 4, `claim()` does not measure | **fixed.** It reads the claimant's balance either side and emits what arrived, which is what every other leg already did. |
+| 6, `_inFlight` not restored | **fixed.** Saved and restored rather than set and zeroed, so a reward token with a transfer hook no longer makes an epoch unclaimable. |
+| 2, `checkClaim` ignores `mode` | **fixed in the contract too.** It returns the mode as a third value, because it cannot know which function a caller intends and guessing is what made it approve a claim that reverts. |
+| `_move` decoding a short return | **fixed.** The length is checked before the decode, so a token returning fewer than 32 bytes gets `TransferFailed` rather than a panic. |
 
 Four claims in `contracts/test/run.mjs` now hold the tool to the contract's
 shape: that it passes as many constructor arguments as the ABI declares, and
