@@ -1,0 +1,256 @@
+<!--
+  The published share log, and the page that checks it.
+
+  This is B4 -- `design/pool.md` calls publishing "the only thing standing in
+  for trust", and means it literally: Layer 1 never holds a miner's coins, so
+  there is no wallet to audit. What a miner has instead is this record and
+  whatever can be checked against it.
+
+  ### The page recomputes the digest. That is the whole point.
+
+  A page that displayed the digest the pool wrote beside the rows the pool
+  wrote would prove nothing at all -- both halves come from the same program,
+  and a program that got its own canonicalisation wrong would agree with
+  itself. So the canonical form is rebuilt here, in JavaScript, from the rows,
+  and hashed with the browser's own SHA-256. This is the third implementation
+  of that format (the Rust writer, the Rust reader, and this), which is the
+  bargain `tokenizer.py --verify` makes and for the same reason.
+
+  A mismatch means one of three things and the page says which it cannot
+  distinguish: the file was edited, the pool's writer and this reader disagree
+  about the format, or the file is truncated.
+
+  ### What the digest is not
+
+  Not a signature. Anybody who can edit the file can recompute it, and the pool
+  says so in `ledger_json`'s own comment. It fixes the record to a value so that
+  two copies can be compared and so that a later Merkle distributor has
+  something to check against. Saying that here rather than letting a green tick
+  imply more than it means.
+
+  ### No build step and no framework
+
+  One file. A build step is a thing that can produce a site which does not
+  match its source, and the entire product here is that the published thing can
+  be checked -- so the source you can read is the thing that runs.
+
+  `crypto.subtle` needs a secure context, so verification works on https and on
+  localhost and not from a file:// URL. GitHub Pages is https. Said in the page
+  rather than failing quietly.
+-->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GLaDOS pool &mdash; share log</title>
+<style>
+  :root {
+    --bg: #fbfaf8; --fg: #1b1a18; --dim: #6b6862; --line: #e2ddd4;
+    --card: #ffffff; --ok: #1c6b3f; --bad: #a3271e; --warn: #8a5a12;
+    --accent: #b5651d;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #17161a; --fg: #ece9e4; --dim: #9a958c; --line: #2f2c33;
+      --card: #201e24; --ok: #62c58c; --bad: #e8796c; --warn: #d8a44b;
+      --accent: #e0913f;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #17161a; --fg: #ece9e4; --dim: #9a958c; --line: #2f2c33;
+    --card: #201e24; --ok: #62c58c; --bad: #e8796c; --warn: #d8a44b;
+    --accent: #e0913f;
+  }
+  body {
+    background: var(--bg); color: var(--fg); margin: 0;
+    font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 62rem; margin: 0 auto; padding: 2.5rem 1.25rem 5rem; }
+  h1 { font-size: 1.5rem; margin: 0 0 .25rem; letter-spacing: -.01em; }
+  h2 { font-size: 1.05rem; margin: 2.25rem 0 .6rem; letter-spacing: -.005em; }
+  .sub { color: var(--dim); margin: 0 0 1.75rem; }
+  .card {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 10px; padding: 1rem 1.15rem; margin: 0 0 1rem;
+  }
+  .verdict { display: flex; gap: .7rem; align-items: baseline; flex-wrap: wrap; }
+  .badge {
+    font-weight: 600; padding: .15rem .5rem; border-radius: 5px;
+    border: 1px solid currentColor; font-size: .82rem;
+  }
+  .ok { color: var(--ok); } .bad { color: var(--bad); } .warn { color: var(--warn); }
+  code, .mono {
+    font-family: ui-monospace, SFMono-Regular, "Cascadia Mono", Consolas, monospace;
+    font-size: .86em;
+  }
+  .hash { word-break: break-all; color: var(--dim); }
+  table { border-collapse: collapse; width: 100%; font-size: .92rem; }
+  th, td { text-align: left; padding: .38rem .6rem; border-bottom: 1px solid var(--line); }
+  th { color: var(--dim); font-weight: 600; font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; }
+  td.n, th.n { text-align: right; font-family: ui-monospace, Consolas, monospace; }
+  .scroll { overflow-x: auto; }
+  .note { color: var(--dim); font-size: .88rem; margin: .6rem 0 0; }
+  .bar { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; min-width: 5rem; }
+  .bar > i { display: block; height: 100%; background: var(--accent); }
+  details { margin-top: .7rem; }
+  summary { cursor: pointer; color: var(--dim); font-size: .88rem; }
+  footer { color: var(--dim); font-size: .85rem; margin-top: 3rem; border-top: 1px solid var(--line); padding-top: 1rem; }
+</style>
+
+<main>
+  <h1>GLaDOS pool &mdash; share log</h1>
+  <p class="sub">
+    Every share this pool credited, and the payout window each is measured
+    against. Recomputed and checked in your browser.
+  </p>
+  <div id="out">Loading <code>ledger.json</code>&hellip;</div>
+  <footer>
+    The digest is <strong>not a signature</strong>. Anyone who can edit this
+    file can recompute it, so it proves the rows have not changed since it was
+    written &mdash; not who wrote them. It exists so two copies can be compared,
+    and so a Merkle distributor has something to be checked against.
+  </footer>
+</main>
+
+<script>
+// The canonical form, rebuilt from the rows. This must match `ledger_json` in
+// `pool/src/pool.rs` byte for byte -- tab-separated, newline-terminated, and
+// deliberately not JSON, because two JSON writers that agree about a document
+// can still disagree about its bytes.
+function canonical(doc) {
+  let s = "";
+  for (const r of doc.shares || []) {
+    s += `${r.worker}\t${r.coin}\t${r.work}\t${r.accepted}\t${r.stale}\t${r.bad}\t${r.duplicate}\n`;
+  }
+  // Window rows follow the tallies, coins in the order published, shares in
+  // the order they arrived -- the order is what decides who falls out next, so
+  // it is part of the record rather than a presentation detail.
+  for (const w of doc.windows || []) {
+    for (const sh of w.shares || []) s += `w\t${w.coin}\t${sh.worker}\t${sh.work}\n`;
+  }
+  return s;
+}
+
+async function sha256Hex(text) {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, "0")).join("");
+}
+
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const num = n => Number(n).toLocaleString("en-US");
+const when = t => t ? new Date(t * 1000).toISOString().replace("T", " ").replace(/\..*/, " UTC") : "unknown";
+
+function verdictCard(doc, got) {
+  const want = doc.digest || "";
+  // `crypto.subtle` is absent outside a secure context. Naming that is the
+  // difference between "this record is wrong" and "this page cannot tell".
+  if (got === null) {
+    return `<div class="card verdict">
+      <span class="badge warn">NOT CHECKED</span>
+      <span>This page needs <code>https</code> or <code>localhost</code> to hash anything.
+      Opened from a <code>file://</code> URL the browser withholds SHA-256, so the
+      rows below are shown unverified.</span></div>`;
+  }
+  if (got === want) {
+    return `<div class="card verdict">
+      <span class="badge ok">DIGEST VERIFIED</span>
+      <span>Recomputed from the rows on this page.</span>
+      <div class="hash mono" style="flex-basis:100%">${esc(got)}</div></div>`;
+  }
+  return `<div class="card verdict">
+      <span class="badge bad">DIGEST MISMATCH</span>
+      <span>The rows do not hash to the published digest. That is one of three
+      things and this page cannot tell which: the file was edited, it is
+      truncated, or the writer and this reader disagree about the format.</span>
+      <div style="flex-basis:100%" class="mono">
+        <div class="hash">published &nbsp;${esc(want) || "(none)"}</div>
+        <div class="hash">recomputed ${esc(got)}</div>
+      </div></div>`;
+}
+
+function render(doc, got) {
+  const coinName = {};
+  for (const c of doc.coins || []) coinName[c.label] = c;
+
+  let h = verdictCard(doc, got);
+
+  h += `<div class="card"><table><tbody>
+    <tr><th>format</th><td class="mono">v${esc(doc.v)}</td></tr>
+    <tr><th>epoch</th><td class="mono">${esc(doc.epoch)}</td></tr>
+    <tr><th>generated</th><td class="mono">${esc(when(doc.generated_at))}</td></tr>
+    <tr><th>payout window</th><td class="mono">${num(doc.window_work || 0)} work</td></tr>
+  </tbody></table></div>`;
+
+  if ((doc.coins || []).length) {
+    h += `<h2>Coins</h2><div class="card scroll"><table>
+      <thead><tr><th>slot</th><th>label</th><th>algorithm</th><th>source</th></tr></thead><tbody>`;
+    for (const c of doc.coins) {
+      h += `<tr><td class="n">${esc(c.slot)}</td><td><strong>${esc(c.label)}</strong></td>
+        <td class="mono">${esc(c.algo)}</td><td>${esc(c.source)}</td></tr>`;
+    }
+    h += `</tbody></table></div>`;
+  }
+
+  for (const w of doc.windows || []) {
+    const total = Number(w.total) || 0;
+    h += `<h2>Payout window &mdash; ${esc(w.coin)}</h2><div class="card">
+      <p class="note">${num(total)} work over ${num((w.shares || []).length)} share(s).
+      PPLNS: each worker is owed its slice of the last ${num(doc.window_work || 0)} work,
+      because the coins in a block found now were produced by recent hashing.</p>
+      <div class="scroll"><table>
+      <thead><tr><th>worker</th><th class="n">work</th><th class="n">share</th><th style="width:35%">&nbsp;</th></tr></thead><tbody>`;
+    for (const p of w.payout || []) {
+      const pct = (Number(p.share) * 100);
+      h += `<tr><td><strong>${esc(p.worker)}</strong></td>
+        <td class="n">${num(p.work)}</td>
+        <td class="n">${pct.toFixed(4)}%</td>
+        <td><div class="bar"><i style="width:${Math.max(0, Math.min(100, pct)).toFixed(3)}%"></i></div></td></tr>`;
+    }
+    h += `</tbody></table></div>`;
+    // The individual shares are what make the percentage checkable rather than
+    // assertable, so they are here -- folded away, because they are long.
+    h += `<details><summary>every share in the window, in order (${num((w.shares || []).length)})</summary>
+      <div class="scroll"><table><thead><tr><th class="n">#</th><th>worker</th><th class="n">work</th></tr></thead><tbody>`;
+    (w.shares || []).forEach((sh, i) => {
+      h += `<tr><td class="n">${i + 1}</td><td>${esc(sh.worker)}</td><td class="n">${num(sh.work)}</td></tr>`;
+    });
+    h += `</tbody></table></div></details></div>`;
+  }
+
+  h += `<h2>All-time tally</h2><div class="card">
+    <p class="note">Cumulative, and <strong>not</strong> what a payout comes from &mdash;
+    that is the window above. Credit is <code>2^bits</code> per accepted share rather
+    than a share count, because VarDiff makes a share meaningless as a unit.</p>
+    <div class="scroll"><table>
+    <thead><tr><th>worker</th><th>coin</th><th class="n">work</th><th class="n">accepted</th>
+    <th class="n">stale</th><th class="n">bad</th><th class="n">dup</th></tr></thead><tbody>`;
+  for (const r of doc.shares || []) {
+    h += `<tr><td><strong>${esc(r.worker)}</strong></td><td>${esc(r.coin)}</td>
+      <td class="n">${num(r.work)}</td><td class="n">${num(r.accepted)}</td>
+      <td class="n">${num(r.stale)}</td><td class="n">${num(r.bad)}</td>
+      <td class="n">${num(r.duplicate)}</td></tr>`;
+  }
+  h += `</tbody></table></div></div>`;
+
+  document.getElementById("out").innerHTML = h;
+}
+
+(async function () {
+  let doc;
+  try {
+    // `cache: no-store`, because a stale cached ledger shown beside a fresh
+    // digest is a mismatch the reader would have to debug rather than a record.
+    const res = await fetch("ledger.json", { cache: "no-store" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    doc = await res.json();
+  } catch (e) {
+    document.getElementById("out").innerHTML =
+      `<div class="card verdict"><span class="badge bad">NO LEDGER</span>
+       <span>Could not read <code>ledger.json</code>: ${esc(e.message)}</span></div>`;
+    return;
+  }
+  let got = null;
+  if (window.isSecureContext && window.crypto && crypto.subtle) {
+    try { got = await sha256Hex(canonical(doc)); } catch (e) { got = null; }
+  }
+  render(doc, got);
+})();
+</script>
