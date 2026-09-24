@@ -597,6 +597,208 @@ async function main() {
     ok(threw, "a duplicate account in one tree is refused at build time");
   }
 
+  // ------------------------------------------------ what an audit went looking for
+  //
+  // Everything above was written by the author of the contract. What follows
+  // was written by a reader who did not, against a threat list drawn up before
+  // the code was read, and each case here exists because the reading raised a
+  // suspicion that had to be settled one way or the other. Several of them are
+  // settled *clean* and are kept for that reason -- a suspicion that died is
+  // worth as much as one that held, and rather more than one nobody wrote down.
+  //
+  // `design/audit.md` carries the reasoning; this carries the evidence.
+  {
+    // ---- the V2 pair is never checked against the pair it is supposed to be
+    //
+    // `openEpochOnV3` validates its pool twice: the factory must name it, and
+    // its two tokens must be exactly {quote, reward}. The constructor does
+    // neither for `pair`, and `quoteIsToken0` is `quote < token` -- a property
+    // of two addresses, never compared against what the pair actually holds.
+    // The comment on `claimOnMarket` says asking for the wrong output "asks the
+    // pool to pay out what is being paid in. Hence `quoteIsToken0`, fixed at
+    // construction", which is true of the flag and not of the pair.
+    //
+    // `pair` is immutable, so this is not a setting that can be corrected after
+    // the fact: it is decided once, by one of five constructor arguments, and
+    // the contract has never been deployed.
+    const alt1 = await deploy(vm, OPERATOR, art.token, [10n ** 27n]);
+    const alt2 = await deploy(vm, OPERATOR, art.token, [10n ** 27n]);
+    const wrongPair = await deploy(vm, OPERATOR, art.pair, [alt1, alt2]);
+    const tok2 = await deploy(vm, OPERATOR, art.token, [10n ** 27n]);
+    const quo2 = await deploy(vm, OPERATOR, art.token, [10n ** 27n]);
+
+    let badDist = null;
+    try {
+      badDist = await deploy(vm, OPERATOR, art.dist, [tok2, OPERATOR, wrongPair, quo2, factory]);
+    } catch {
+      badDist = null;
+    }
+    ok(badDist !== null, "a distributor is constructed with a pair for two tokens it never mentions");
+
+    if (badDist) {
+      await call(vm, OPERATOR, quo2, art.token, "approve", [badDist, 10n ** 27n]);
+      const tw = build([{ account: A, amount: 4n * ONE }]);
+      const openw = await call(vm, OPERATOR, badDist, art.dist, "openEpochOnMarket",
+        [tw.root, 8n * ONE, 0n, 200_000n], { block: at(1000n) });
+      ok(openw.ok, `and it takes funding for a market epoch against that pair${openw.ok ? "" : "  (" + openw.reason + ")"}`);
+      const clw = await call(vm, A, badDist, art.dist, "claimOnMarket",
+        [0, 4n * ONE, tw.proof(A), 1n], { block: at(1001n) });
+      ok(!clw.ok, `and then nobody can ever claim it (${clw.reason})`);
+    }
+
+    // ---- checkClaim does not ask what mode the epoch is
+    //
+    // It is the miner-facing helper and `deploy.mjs` calls it. It answers for
+    // the deadline, the claim record, the gate, the proof and solvency -- and
+    // not for `mode`, so it says yes to a claim the contract will refuse.
+    const t2 = build([{ account: C, amount: 2n * ONE }]);
+    await call(vm, OPERATOR, quote, art.token, "approve", [dist, 10n ** 27n]);
+    await call(vm, OPERATOR, dist, art.dist, "openEpochOnMarket",
+      [t2.root, 4n * ONE, 0n, 300_000n], { block: at(2000n) });
+    const id2 = Number((await call(vm, OPERATOR, dist, art.dist, "epochCount")).result) - 1;
+    const chk = await call(vm, OPERATOR, dist, art.dist, "checkClaim",
+      [id2, C, 2n * ONE, t2.proof(C)], { block: at(2001n) });
+    ok(chk.ok && chk.result[0] === true, "checkClaim calls a market epoch's claim good");
+    const wrongWay = await call(vm, C, dist, art.dist, "claim",
+      [id2, 2n * ONE, t2.proof(C)], { block: at(2001n) });
+    ok(!wrongWay.ok && wrongWay.reason === "WrongMode",
+      `and claim() then refuses the very claim it approved (${wrongWay.reason})`);
+
+    // ---- one root, two epochs, paid twice
+    //
+    // The leaf is `(account, amount)` and carries no epoch, no chain and no
+    // contract; `hasClaimed` is keyed per epoch. So the same published root
+    // opened twice is not a duplicate, it is a second entitlement to the same
+    // work. Nothing on-chain can know the difference, which puts the check in
+    // the tool: `deploy.mjs open` should read every existing root and refuse.
+    await call(vm, OPERATOR, token, art.token, "setTax", [0, STRANGER]);
+    await call(vm, OPERATOR, token, art.token, "mint", [OPERATOR, 100n * ONE]);
+    await call(vm, OPERATOR, token, art.token, "approve", [dist, 10n ** 27n]);
+    const t5 = build([{ account: D, amount: 1n * ONE }]);
+    await call(vm, OPERATOR, dist, art.dist, "openEpoch",
+      [t5.root, 1n * ONE, 0n, 400_000n], { block: at(3000n) });
+    const idA = Number((await call(vm, OPERATOR, dist, art.dist, "epochCount")).result) - 1;
+    await call(vm, OPERATOR, dist, art.dist, "openEpoch",
+      [t5.root, 1n * ONE, 0n, 400_000n], { block: at(3000n) });
+    const idB = Number((await call(vm, OPERATOR, dist, art.dist, "epochCount")).result) - 1;
+    const d1 = await call(vm, D, dist, art.dist, "claim", [idA, 1n * ONE, t5.proof(D)], { block: at(3001n) });
+    const d2 = await call(vm, D, dist, art.dist, "claim", [idB, 1n * ONE, t5.proof(D)], { block: at(3001n) });
+    ok(d1.ok && d2.ok, "one root opened as two epochs pays the same leaf twice");
+
+    // ---- the Direct path publishes a number it did not send
+    //
+    // Every inbound leg measures what arrived, and the header argues at length
+    // for it: a contract that assumes an untaxed transfer "hands out claims it
+    // cannot pay, and the failure lands on whoever claims last". Both market
+    // claims measure the claimant's balance either side. `claim()` does not --
+    // it emits `Claimed(..., amount, amount)`.
+    //
+    // The solvency half of that fear turns out **not** to materialise with this
+    // tax model, and that is worth recording: the cut comes out of the amount
+    // transferred rather than in addition to it, so the contract's balance
+    // falls by exactly what its bookkeeping says. What is wrong is the number
+    // in the event, which is what an indexer and a miner read.
+    await call(vm, OPERATOR, token, art.token, "setTax", [300, STRANGER]);
+    const t6 = build([{ account: C, amount: 2n * ONE }]);
+    await call(vm, OPERATOR, dist, art.dist, "openEpoch",
+      [t6.root, 4n * ONE, 0n, 410_000n], { block: at(3100n) });
+    const id6 = Number((await call(vm, OPERATOR, dist, art.dist, "epochCount")).result) - 1;
+    const bal6a = await call(vm, OPERATOR, token, art.token, "balanceOf", [C]);
+    const cl6 = await call(vm, C, dist, art.dist, "claim", [id6, 2n * ONE, t6.proof(C)], { block: at(3101n) });
+    const bal6b = await call(vm, OPERATOR, token, art.token, "balanceOf", [C]);
+    const arrived = BigInt(bal6b.result) - BigInt(bal6a.result);
+    let reported = null;
+    const di = new ethers.Interface(art.dist.abi);
+    for (const lg of cl6.logs ?? []) {
+      try {
+        const p = di.parseLog({
+          topics: lg[1].map((t) => ethers.hexlify(t)),
+          data: ethers.hexlify(lg[2]),
+        });
+        if (p && p.name === "Claimed") reported = p.args.received;
+      } catch {
+        /* not ours */
+      }
+    }
+    ok(cl6.ok && reported !== null && BigInt(reported) !== arrived,
+      `claim() reports ${reported} received where ${arrived} arrived`);
+
+    // And the contract is still solvent afterwards, which is the half of the
+    // same worry that does not hold. Stated as a claim so it cannot rot.
+    const held6 = await call(vm, OPERATOR, token, art.token, "balanceOf", [dist]);
+    const ep6 = await call(vm, OPERATOR, dist, art.dist, "epochs", [id6]);
+    ok(BigInt(held6.result) >= BigInt(ep6.result.funded) - BigInt(ep6.result.claimed),
+      "and it still holds at least what that epoch's bookkeeping owes");
+    await call(vm, OPERATOR, token, art.token, "setTax", [0, STRANGER]);
+
+    // ---- the deadline, at exactly the deadline
+    //
+    // Claim requires `!(ts > deadline)` and reclaim `!(ts <= deadline)`, so the
+    // two windows are disjoint and exhaustive and the boundary belongs to the
+    // claimant. Off-by-one is the specific way a pair of checks like this goes
+    // wrong, and the suite tested either side of the deadline but not the
+    // instant itself.
+    const t7 = build([{ account: B, amount: 1n * ONE }]);
+    await call(vm, OPERATOR, dist, art.dist, "openEpoch",
+      [t7.root, 2n * ONE, 0n, 500_000n], { block: at(4000n) });
+    const id7 = Number((await call(vm, OPERATOR, dist, art.dist, "epochCount")).result) - 1;
+    const onTime = await call(vm, B, dist, art.dist, "claim",
+      [id7, 1n * ONE, t7.proof(B)], { block: at(500_000n) });
+    ok(onTime.ok, `a claim at exactly the deadline is admitted${onTime.ok ? "" : "  (" + onTime.reason + ")"}`);
+    const rcSame = await call(vm, OPERATOR, dist, art.dist, "reclaim", [id7], { block: at(500_000n) });
+    ok(!rcSame.ok && rcSame.reason === "EpochOpen",
+      `and a reclaim at that same instant is refused (${rcSame.reason})`);
+    const rcNext = await call(vm, OPERATOR, dist, art.dist, "reclaim", [id7], { block: at(500_001n) });
+    ok(rcNext.ok, `and allowed one second later${rcNext.ok ? "" : "  (" + rcNext.reason + ")"}`);
+
+    const t7b = build([{ account: C, amount: 1n * ONE }]);
+    await call(vm, OPERATOR, dist, art.dist, "openEpoch",
+      [t7b.root, 2n * ONE, 0n, 510_000n], { block: at(4000n) });
+    const id7b = Number((await call(vm, OPERATOR, dist, art.dist, "epochCount")).result) - 1;
+    const tooLate = await call(vm, C, dist, art.dist, "claim",
+      [id7b, 1n * ONE, t7b.proof(C)], { block: at(510_001n) });
+    ok(!tooLate.ok && tooLate.reason === "EpochClosed",
+      `and a claim one second past it is refused (${tooLate.reason})`);
+
+    // ---- `_inFlight` is set and cleared, but never saved and restored
+    //
+    // The V3 pool pays the recipient *before* it calls back, so a reward token
+    // with a transfer hook runs code inside the outer swap. If that code enters
+    // `claimOnV3` again and succeeds, the inner call clears `_inFlight` on its
+    // way out and the outer pool's callback then finds a zero and is refused.
+    //
+    // Funds do not move -- the whole transaction unwinds -- so this is denial
+    // rather than theft, and it needs a reward token the operator chose. It is
+    // still worth one line to fix: keep the previous value and put it back.
+    const tY = build([{ account: reward, amount: 1n * ONE }]);
+    await call(vm, OPERATOR, quote, art.token, "approve", [dist, 10n ** 27n]);
+    await call(vm, OPERATOR, dist, art.dist, "openEpochOnV3",
+      [tY.root, 2n * ONE, 0n, 600_000n, v3, reward], { block: at(5000n) });
+    const idY = Number((await call(vm, OPERATOR, dist, art.dist, "epochCount")).result) - 1;
+    const tX = build([{ account: A, amount: 1n * ONE }]);
+    await call(vm, OPERATOR, dist, art.dist, "openEpochOnV3",
+      [tX.root, 2n * ONE, 0n, 600_000n, v3, reward], { block: at(5000n) });
+    const idX = Number((await call(vm, OPERATOR, dist, art.dist, "epochCount")).result) - 1;
+
+    // Unhooked first, so the failure below is attributable to the hook and not
+    // to the fixture. A comparison needs both halves.
+    const plain = await call(vm, A, dist, art.dist, "claimOnV3",
+      [idX, 1n * ONE, tX.proof(A), 1n], { block: at(5001n) });
+    ok(plain.ok, `a V3 claim succeeds with no hook in the way${plain.ok ? "" : "  (" + plain.reason + ")"}`);
+
+    const nested = di.encodeFunctionData("claimOnV3", [idY, 1n * ONE, tY.proof(reward), 1n]);
+    await call(vm, OPERATOR, reward, art.token, "setHook", [dist, nested]);
+    const tZ = build([{ account: B, amount: 1n * ONE }]);
+    await call(vm, OPERATOR, dist, art.dist, "openEpochOnV3",
+      [tZ.root, 2n * ONE, 0n, 600_000n, v3, reward], { block: at(5000n) });
+    const idZ = Number((await call(vm, OPERATOR, dist, art.dist, "epochCount")).result) - 1;
+    const hooked = await call(vm, B, dist, art.dist, "claimOnV3",
+      [idZ, 1n * ONE, tZ.proof(B), 1n], { block: at(5002n) });
+    ok(!hooked.ok && hooked.reason === "BadCallback",
+      `and fails once a nested claim has cleared _inFlight (${hooked.reason})`);
+    await call(vm, OPERATOR, reward, art.token, "setHook", [ethers.ZeroAddress, "0x"]);
+  }
+
   console.log(`\n${passed} passed, ${failed} failed`);
   fs.writeFileSync(path.join(here, "..", "out", "root.txt"), tree.root + "\n");
   process.exit(failed === 0 ? 0 : 1);

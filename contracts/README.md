@@ -119,8 +119,13 @@ else. `test/evm.mjs` is ninety lines and is the whole harness.
   a passing mock is not a filled trade. One small real swap comes before
   anything else uses this.
 - **Not deployed.** No address, no verified source on any explorer.
-- **Not reviewed by anybody.** Written and tested in one sitting. A contract
-  that holds tokens should be read by somebody who did not write it.
+- ~~**Not reviewed by anybody.**~~ Read once, by somebody who did not write it:
+  `design/audit.md`. Six findings, none a theft vector, and the first has to be
+  acted on *before* the first deployment because `pair` is immutable and is
+  never checked against the pair it is supposed to be. The suite carries
+  fourteen more claims for them and the source is deliberately unchanged, so
+  each one inverts when its fix lands. That is a different sentence from
+  "reviewed", and a contract holding tokens still deserves a second reader.
 - **The gate size is not decided.** `design/live800.md` shows 1,000,000 is
   unreachable for 800 entrants -- the pool holds 130 gates -- and that 50,000
   is the number that lets an event happen. The contract takes it per epoch and

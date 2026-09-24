@@ -257,9 +257,16 @@ from published documents is the whole of what it offers instead of trust.
 
 ## What can still go wrong that nothing above prevents
 
-- **The contract has not been read by anybody who did not write it.** It holds
-  tokens. This is the largest open risk in the system and no amount of testing
-  substitutes for it.
+- ~~**The contract has not been read by anybody who did not write it.**~~ It has
+  been, once: `design/audit.md`. **One finding there has to be acted on before
+  step 7's `deploy --send` and cannot be acted on afterwards** -- `pair` is an
+  immutable constructor argument and is never checked against the pair it is
+  supposed to be, so a typo there is a distributor that accepts funding for
+  market epochs nobody can ever claim. The other five are smaller and two of
+  them are `deploy.mjs`'s rather than the contract's, including: **this tool
+  cannot claim a `MarketV3` epoch it is perfectly able to open.** So the V3
+  invocation below opens something whose only exit today is `reclaim` after the
+  deadline. One reader is not a review; the contract still holds tokens.
 - **`reclaim` is the operator's one power over committed funds**, bounded to
   the unclaimed remainder after a deadline fixed when the epoch opened. A
   miner should be told the deadline, because it is the date their allocation
