@@ -57,10 +57,12 @@ Group=glados-pool
 # manager that lingering keeps alive. So on a box where these units can run at
 # all, add the timer -- and on one where they cannot, use the script.
 #
-# **No upstream.** A coin spec grows `@host:port,user,pass`, and at the
-# account-free solo pools the username *is* the payout address, so a placeholder
-# left here mines to whoever owns it. See `run-pool.sh` for the form and the
-# reason it is not filled in.
+# **No upstream.** A coin spec grows `@host:port,user,pass`, and at zpool -- the
+# wallet-as-username auto-exchange pool `design/mining.md` item 8 says to point
+# at, and the only anonymous one of its kind still operating -- the username *is*
+# the payout address, so a placeholder left here mines to whoever owns it. Not
+# a solo pool and not sha256d: yespower is where this machine's CPU is a real
+# participant. See `run-pool.sh` for the form and the reason it is empty.
 ExecStart=/usr/local/bin/glados-pool \
     --listen 0.0.0.0:3334 \
     --ledger /var/lib/glados-pool/ledger.json \

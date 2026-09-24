@@ -215,6 +215,66 @@ IUniswapV3Pool(pool_).swap(...);
 _inFlight = prev;
 ```
 
+## Two more, found in the tool while acting on the first five
+
+### 7. `deploy.mjs deploy` could not deploy this contract at all
+
+The constructor takes five arguments; `deploy.mjs` passed four. It never learned
+about `v3Factory`, which was added with the V3 path. So the first command of
+`design/runbook.md` -- the one that can only be run once, ever -- threw
+`types/values length mismatch` before it reached the network.
+
+Proven offline against the compiled ABI rather than by running it, because the
+thing that was wrong needed neither a key nor a chain:
+
+    4 args: REFUSED -- missing arguemnt: types/values length mismatch
+    5 args: accepted
+
+A distributor deployed with a zero factory could never open a `MarketV3` epoch,
+and unlike `pair` and `quote` -- which may be zero *together*, so the absence is
+symmetric and visible -- `v3Factory` has no paired argument to make its absence
+obvious.
+
+### 8. `Direct` mode had no operator path
+
+`open` chose between `openEpochOnMarket` and `openEpochOnV3` on whether a pool
+was named. `openEpoch` was unreachable, so the tool could claim from three modes
+and open two. That matters at this scale rather than in principle:
+`contracts/README.md`'s own table prices a `Market` claim's gas at **2,286%** of
+what it pays out over a 36-hour event, and `Direct` is the mode that is not
+absurd there.
+
+## What is now enforced, and where
+
+The contract is **still unchanged** -- the argument in the header holds, and the
+artefact audited is the artefact that would be deployed. What changed is the
+tool, which is where three of these findings always belonged:
+
+| finding | now |
+|---|---|
+| 1, the unchecked `pair` | `deploy` reads `token0`/`token1` back and refuses a pair that is not `{quote, token}`, printing both. The constructor still does not check. |
+| 2, `checkClaim` ignores `mode` | `claim` reads the epoch's mode itself and dispatches, so the view's blind spot cannot decide anything. The view is unchanged. |
+| 3, one root twice | `open` walks every existing epoch's root and refuses a match, which is where it belongs: nothing on chain can tell that from a deliberate second distribution. |
+| 5, no `claimOnV3` | `claim` handles all three modes, quoting V3 against `QuoterV2` on 4663 with `--min-out` as the override. |
+| 7, constructor arity | five arguments, with the V3 factory `design/rwa.md` measured. |
+| 8, `Direct` unreachable | `--direct` on `open`, funding in the reward token rather than the quote. |
+| 4, `claim()` does not measure | **not fixed** -- it is in the contract. `claim --direct` reads the claimant's balance either side and prints the difference when it disagrees with what the event will say. |
+| 6, `_inFlight` not restored | **not fixed** -- also the contract, and one line when it is. |
+
+Four claims in `contracts/test/run.mjs` now hold the tool to the contract's
+shape: that it passes as many constructor arguments as the ABI declares, and
+that it can claim from every mode it can open. They read the tool's source
+against the compiled ABI, which is why they exist at all -- a test that needed a
+key and a chain would not have been written, and that is exactly how a four-
+against-five mismatch shipped in the one command nobody can rehearse.
+
+**One of those checks was wrong when first written**, and it is worth keeping as
+the correction: `src.includes("dist.openEpoch")` matches `dist.openEpochOnMarket`,
+so it reported `Direct` as supported by the very line that implements `Market`.
+It claimed three open modes where there were two. A word boundary fixes it, and
+a check that says yes for the wrong reason is the failure this tree keeps
+naming.
+
 ## What was checked and came back clean
 
 Kept because a suspicion that died is worth as much as one that held, and rather

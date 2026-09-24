@@ -207,21 +207,32 @@ The commands below are unchanged. What is new is that an audit found two of them
 carry a precondition nobody knew about, and one of the three cannot be satisfied
 after the fact.
 
-1. **Read back the `pair` argument before deploying.** It is an immutable
-   constructor argument and the contract never checks it against the pair it is
-   meant to be, while `openEpochOnV3` checks its pool twice. A typo produces a
-   distributor that accepts funding for market epochs and refuses every claim
-   forever -- driven, `TooLittleOut(0,1)` -- with no setter and no recovery but
-   `reclaim` after the deadline. **This is the one thing on this page that a
-   later step cannot fix.**
-2. **Check the root is not already open.** The leaf carries no epoch id, so the
-   same root opened twice is a second entitlement to the same work rather than a
-   duplicate anything refuses. `epochCount()` and each epoch's `root` answer it.
-3. **Do not open a `MarketV3` epoch with this tool yet.** `open` creates one;
-   `claim` calls `claimOnMarket` unconditionally, so the tool cannot claim from
-   what it just opened, and `checkClaim` does not read `mode` either -- it will
-   say the claim is good first. The V3 invocation further down this page is
-   therefore the one to leave alone until `deploy.mjs` grows a `claimOnV3` path.
+**All three are enforced by `deploy.mjs` now**, so this is what it is checking on
+your behalf rather than a list to work through by hand. Read its output anyway:
+the first one cannot be undone.
+
+1. **The `pair` argument is read back.** It is an immutable constructor argument
+   and the contract never checks it against the pair it is meant to be, while
+   `openEpochOnV3` checks its pool twice. A typo produces a distributor that
+   accepts funding for market epochs and refuses every claim forever -- driven,
+   `TooLittleOut(0,1)` -- with no setter and no recovery but `reclaim` after the
+   deadline. `deploy` now reads `token0`/`token1` and refuses a pair that is not
+   `{quote, token}`. **The contract still does not check, so this is the one
+   thing on this page that only happens if the tool is the thing that deploys.**
+2. **The root is checked against every epoch already open.** The leaf carries no
+   epoch id, so the same root opened twice is a second entitlement to the same
+   work rather than a duplicate anything refuses. `open` walks them and refuses.
+3. **`claim` works out the mode itself.** It called `claimOnMarket`
+   unconditionally, so it could open a `MarketV3` epoch and not claim from it --
+   and `checkClaim`, which it asks first, does not read `mode` either, so it said
+   the claim was good on the way to reverting. It reads the epoch now and
+   dispatches to `claim`, `claimOnMarket` or `claimOnV3`.
+
+And two the same pass turned up, which are why the deploy line below had never
+worked: the constructor takes **five** arguments and the tool passed four, so
+`deploy` failed before reaching the network; and `--direct` did not exist, so
+`Direct` -- the only mode whose gas is not absurd for a small epoch -- could be
+claimed from and not opened. Both fixed. See `design/audit.md`.
 
 ```bash
 export GLADOS_KEY=0x...            # never printed, never stored; see deploy.mjs

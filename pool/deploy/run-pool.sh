@@ -68,16 +68,52 @@ PIDFILE="${STATE}/run-pool.pid"
 # unreadable roster either way and says so in its startup log -- read that line
 # rather than assuming the flag is what decides.
 #
-# **No upstream, and the commented form below is why rather than a nicety.**
-# A coin spec grows `@host:port,user,pass` and at the account-free solo pools
-# -- the only ones that can be used without somebody registering somewhere --
-# **the username *is* the payout address**. So a placeholder left in place does
-# not fail, it mines to whoever owns that address, which is the one
-# misconfiguration here that is silent, profitable for a stranger, and
-# irreversible. It is therefore not filled in, and `solo.ckpool.org` is named
-# because it is the one this pool has actually been driven against:
+# **No upstream, and where it goes when there is one is decided already.**
+# `design/mining.md`'s sequencing item 8 is the only step in this whole project
+# that has never been done -- "point the kernel at zpool's yespower port and
+# take a real share", because everything green in this tree is green against our
+# own stub -- and it says what it needs: "the address in hand and nothing else."
 #
-#     btc:sha256d:24@solo.ckpool.org:3333,<your-btc-address>.glados,x
+# A coin spec grows `@host:port,user,pass`, and zpool is **wallet-as-username**,
+# which is why it is the venue: no account, no registration, and `payout.md`
+# records it as the only anonymous yiimp pool of its kind still operating after
+# zergpool, blockmasters, ahashpool and prohashing went. So **the username *is*
+# the payout address**, and a placeholder left in place does not fail -- it mines
+# to whoever owns that address. That is the one misconfiguration here that is
+# silent, profitable for a stranger and irreversible, so the field is empty:
+#
+#     yespower:yespower-10-2048-8:12@<zpool yespower host>:<port>,<addr>,<pass>
+#
+# **The three placeholders are three different questions and none is guessable.**
+# The host and port come off zpool.ca's own port list, the payout coin is
+# selected through the password field by that pool's convention, and the address
+# has to match whichever coin that is. None of them is written here because this
+# tree's rule about inventing a plausible constant applies hardest to the field
+# that decides who gets paid.
+#
+# **And it is not a BTC address**, which is worth saying because it is the
+# obvious wrong answer. `payout.md`'s table prices zpool's three payout coins at
+# this machine's measured $0.0703/day: DOGE clears its $0.42 threshold in 6
+# days, LTC in 37, and **BTC in 825** -- so BTC is the one choice that makes a
+# first payout longer than the project has existed. The other consideration
+# pulls a different way: only Polygon is an Across origin into 4663, and zpool
+# pays none of these on Polygon, so `runbook.md` step 6a prefers a venue that
+# pays the token the bridge already takes. That is a decision, not a default.
+#
+# **Not sha256d either.** `mining.md` measures the kernel's CPU on yespower
+# out-earning the RTX 3050 on sha256d by about eighteen hundred times, because
+# sha256d is ASIC territory where a laptop is a rounding error while yespower is
+# CPU-only by construction. `solo.ckpool.org` appears in `design/pool.md` and is
+# **not** a candidate here: it was a plumbing test against something this
+# project does not control, and solo Bitcoin from a laptop is a lottery ticket
+# that `mine ev` says so about on every run.
+#
+# **One consequence for `--window` when this is wired.** 2^46 below is chosen as
+# about 0.80 of a *Bitzeny* block. An auto-exchange port serves whatever coin is
+# profitable at the time, so no single block time is the right one -- which is
+# the argument for paying from the tally (`distribute.py --basis tally`) rather
+# than from the PPLNS window, as `runbook.md` step 5 already prefers for a
+# bounded event.
 #
 # Until one is set, every coin is `Source::Local`: the pool builds its own
 # headers, so the shares are real proof of work against a target nobody else

@@ -797,6 +797,44 @@ async function main() {
     ok(!hooked.ok && hooked.reason === "BadCallback",
       `and fails once a nested claim has cleared _inFlight (${hooked.reason})`);
     await call(vm, OPERATOR, reward, art.token, "setHook", [ethers.ZeroAddress, "0x"]);
+
+    // ---- the operator's tool agrees with the contract about the constructor
+    //
+    // `deploy.mjs` passed four arguments where the constructor takes five --
+    // it never learned about `v3Factory` -- so `node deploy.mjs deploy` threw
+    // `types/values length mismatch` before it reached the network. That is the
+    // first command of the whole runbook and the one that can only be run once.
+    //
+    // It is checked here rather than by running the tool because running it
+    // needs a key and a chain, and the thing that was wrong needs neither: the
+    // ABI says how many arguments there are and the source says how many are
+    // passed. A test that needed the network would not have existed, and this
+    // shipped for exactly that reason.
+    const ctorInputs = art.dist.abi.find((x) => x.type === "constructor").inputs.length;
+    const src = fs.readFileSync(path.join(here, "..", "deploy.mjs"), "utf8");
+    const calls = [...src.matchAll(/factory\.(?:getDeployTransaction|deploy)\(([^)]*)\)/g)]
+      .map((m) => m[1].split(",").map((x) => x.trim()).filter(Boolean).length);
+    ok(calls.length > 0, "deploy.mjs constructs the distributor somewhere");
+    ok(calls.every((n) => n === ctorInputs),
+      `and passes ${ctorInputs} constructor argument(s) everywhere it does` +
+      (calls.every((n) => n === ctorInputs) ? "" : `  (found ${calls.join(", ")})`));
+
+    // And that it can claim from every mode it can open, which is the other
+    // half of the same class: the tool opened `MarketV3` epochs and called
+    // `claimOnMarket` unconditionally, so it could not claim from what it had
+    // just opened.
+    // A word boundary, not `includes`: "dist.openEpoch" is a prefix of
+    // "dist.openEpochOnMarket", so a substring test reports Direct as supported
+    // by the very line that implements Market. Caught by this check claiming
+    // three modes when `open` could create two.
+    const opens = ["openEpoch", "openEpochOnMarket", "openEpochOnV3"]
+      .filter((f) => new RegExp("dist\\." + f + "\\(").test(src));
+    const claims = ["claim", "claimOnMarket", "claimOnV3"]
+      .filter((f) => new RegExp("dist\\." + f + "\\(").test(src));
+    ok(claims.length === 3,
+      `deploy.mjs can claim from all three modes (has ${claims.join(", ") || "none"})`);
+    ok(opens.length >= 2,
+      `and opens the modes it claims (${opens.join(", ") || "none"})`);
   }
 
   console.log(`\n${passed} passed, ${failed} failed`);
