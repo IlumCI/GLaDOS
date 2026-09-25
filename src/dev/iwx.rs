@@ -285,5 +285,268 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         "and an unassigned aperture is a third",
         Refusal::NoAperture != Refusal::NotMapped,
     );
+
+    // --- the power-up sequence, which is why it is a table ------------------
+    //
+    // No emulator models this part, so the ordering cannot be observed anywhere.
+    // As data it can be asserted, and the ordering is the half that is fatal
+    // when wrong: a poll before the thing it waits for has been asked for is a
+    // timeout that reads as broken hardware.
+    let idx = |pred: fn(&Step) -> bool| POWER_UP.iter().position(pred);
+    let reset = idx(|s| matches!(s, Step::SetBit(CSR_RESET, _)));
+    let prepare = idx(|s| matches!(s, Step::SetBit(CSR_HW_IF_CONFIG_REG, b) if *b == CSR_HW_IF_CONFIG_REG_PREPARE));
+    let ready = idx(|s| matches!(s, Step::Poll { mask, .. } if *mask == CSR_HW_IF_CONFIG_REG_BIT_NIC_READY));
+    let init_done = idx(|s| matches!(s, Step::SetBit(CSR_GP_CNTRL, b) if *b == CSR_GP_CNTRL_REG_FLAG_INIT_DONE));
+    let clock = idx(|s| matches!(s, Step::Poll { mask, .. } if *mask == CSR_GP_CNTRL_REG_FLAG_MAC_CLOCK_READY));
+
+    claim("the sequence resets first", reset == Some(0));
+    claim(
+        "the reset settles before anything is asked of the part",
+        matches!(POWER_UP.get(1), Some(Step::Settle(_))),
+    );
+    claim("PREPARE is asserted before NIC_READY is polled", prepare < ready);
+    claim("the handshake completes before initialisation is declared", ready < init_done);
+    claim(
+        "and the clock is polled only after INIT_DONE, never before",
+        init_done < clock,
+    );
+
+    // A poll with no timeout is a hang, and this runs before there is a shell to
+    // interrupt it from.
+    claim(
+        "every poll has a non-zero timeout",
+        POWER_UP.iter().all(|s| !matches!(s, Step::Poll { us: 0, .. })),
+    );
+    // Every offset must be inside the one page `power_up` maps. A register past
+    // it is a write into whatever the identity map has there.
+    claim(
+        "every register is inside the mapped 4 KiB aperture",
+        POWER_UP.iter().all(|s| match s {
+            Step::SetBit(r, _) | Step::Write(r, _) => *r < 0x1000,
+            Step::Poll { reg, .. } => *reg < 0x1000,
+            Step::Settle(_) => true,
+        }),
+    );
+    // L1 must survive: upstream disables L0s alone, and disabling both would
+    // cost the link's power management for no reason this driver needs.
+    claim(
+        "the L0s workaround leaves L1 alone",
+        CSR_GIO_CHICKEN_BITS_REG_BIT_L1A_NO_L0S_RX & 0x2000_0000 == 0,
+    );
+    // A fault names its step, so a transcript says which handshake failed.
+    claim(
+        "a timeout names the register it was waiting on",
+        Fault::Timeout(clock.unwrap_or(0)).why().contains("024"),
+    );
+    claim(
+        "and an aperture fault carries the probe's own reason",
+        Fault::Aperture(Refusal::Asleep).why() == Refusal::Asleep.why(),
+    );
     out
+}
+
+// --- reset and power-up ------------------------------------------------------
+//
+// **Everything above reads. Everything below writes**, to a device this kernel
+// has never driven, and that distinction is the reason the two halves are
+// separated rather than folded into one `bring_up`. A probe that only reads can
+// be wrong and leave the machine as it found it; this cannot.
+//
+// The sequence is `iwlwifi`'s `iwl_pcie_sw_reset`, `iwl_pcie_prepare_card_hw`
+// and `iwl_pcie_apm_init` for family 22000, which is the AX201's. Register
+// names are `iwl-csr.h`'s, kept verbatim so a reader can find them in either
+// upstream; the offsets and bits are the numbers those names are defined as.
+// **Nothing here is guessed.** A register poked at random on a radio is not a
+// bug that reports itself -- it is a part that goes quiet, or a machine that
+// takes a machine check.
+
+/// Set the NIC-ready handshake, and read it back.
+const CSR_HW_IF_CONFIG_REG: u64 = 0x000;
+/// Software reset. Bit 7 on this family; AX210 moved it to `CSR_GP_CNTRL`.
+const CSR_RESET: u64 = 0x020;
+/// Clock and power state, and where "initialisation complete" is declared.
+const CSR_GP_CNTRL: u64 = 0x024;
+/// PCIe link workarounds. L0s is disabled here and L1 is left alone.
+const CSR_GIO_CHICKEN_BITS: u64 = 0x100;
+/// The FH wait threshold, set to its maximum as a stress workaround.
+const CSR_DBG_HPET_MEM_REG: u64 = 0x240;
+
+/// Ask the device to become ready, and the bit that says it did.
+const CSR_HW_IF_CONFIG_REG_PREPARE: u32 = 0x0800_0000;
+const CSR_HW_IF_CONFIG_REG_BIT_NIC_READY: u32 = 0x0040_0000;
+/// Let the management bus raise an interrupt on an EEPROM access attempt.
+const CSR_HW_IF_CONFIG_REG_BIT_HAP_WAKE_L1A: u32 = 0x0008_0000;
+
+const CSR_RESET_REG_FLAG_SW_RESET: u32 = 0x0000_0080;
+
+/// Moves the adapter from D0U* to D0A*.
+const CSR_GP_CNTRL_REG_FLAG_INIT_DONE: u32 = 0x0000_0004;
+/// The clock has stabilised. Polled, never assumed.
+const CSR_GP_CNTRL_REG_FLAG_MAC_CLOCK_READY: u32 = 0x0000_0001;
+
+/// Disable L0s without affecting L1. An ICH erratum: do not wait for L0s.
+const CSR_GIO_CHICKEN_BITS_REG_BIT_L1A_NO_L0S_RX: u32 = 0x0080_0000;
+
+/// The maximum wait threshold.
+const CSR_DBG_HPET_MEM_REG_VAL: u32 = 0xFFFF_0000;
+
+/// One step of the sequence.
+///
+/// **Data rather than straight-line code, and that is the whole point.** No
+/// emulator models this part, so the ordering -- which is the thing that is easy
+/// to get wrong and fatal when it is -- could not otherwise be checked anywhere.
+/// As a table a suite can assert that the reset comes before the handshake, that
+/// the handshake comes before "initialisation complete", that the clock is
+/// polled after it is asked for and not before, and that no poll has a zero
+/// timeout. None of that needs a radio.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Step {
+    /// Read, or-in, write back. The register keeps every bit the driver has not
+    /// been told about, which matters because several of these hold state set by
+    /// firmware that has already run.
+    SetBit(u64, u32),
+    /// Write a whole word, for the registers that are thresholds rather than
+    /// flag sets.
+    Write(u64, u32),
+    /// Poll until `reg & mask == want`, giving up after so many microseconds.
+    /// A timeout is a refusal, never a warning that gets ignored.
+    Poll { reg: u64, mask: u32, want: u32, us: u32 },
+    /// Wait unconditionally. Used only where upstream does, because the
+    /// hardware gives nothing to poll on.
+    Settle(u32),
+}
+
+/// The declared sequence, in order.
+///
+/// Read from `iwlwifi`'s family-22000 path. Each entry's comment is the reason
+/// upstream gives, because a workaround with no reason attached is one somebody
+/// deletes.
+pub const POWER_UP: &[Step] = &[
+    // Software reset first: the device may be in any state, including one left
+    // by firmware from a previous boot. 5 ms is upstream's figure and there is
+    // nothing to poll -- the reset clears the register being polled.
+    Step::SetBit(CSR_RESET, CSR_RESET_REG_FLAG_SW_RESET),
+    Step::Settle(5_000),
+    // Then the handshake. PREPARE asks; NIC_READY answers. Upstream allows
+    // 35 ms and retries the pair; one attempt is enough to report whether the
+    // part is reachable at all, which is what this stage is for.
+    Step::SetBit(CSR_HW_IF_CONFIG_REG, CSR_HW_IF_CONFIG_REG_PREPARE),
+    Step::Poll {
+        reg: CSR_HW_IF_CONFIG_REG,
+        mask: CSR_HW_IF_CONFIG_REG_BIT_NIC_READY,
+        want: CSR_HW_IF_CONFIG_REG_BIT_NIC_READY,
+        us: 35_000,
+    },
+    // Disable L0s without touching L1. An ICH erratum, and the reason upstream
+    // does not simply disable both.
+    Step::SetBit(CSR_GIO_CHICKEN_BITS, CSR_GIO_CHICKEN_BITS_REG_BIT_L1A_NO_L0S_RX),
+    // FH wait threshold to maximum: a hardware error under stress otherwise.
+    Step::Write(CSR_DBG_HPET_MEM_REG, CSR_DBG_HPET_MEM_REG_VAL),
+    // Let the management bus report an attempt to reach the EEPROM, which is
+    // how a driver finds out something else is talking to the part.
+    Step::SetBit(CSR_HW_IF_CONFIG_REG, CSR_HW_IF_CONFIG_REG_BIT_HAP_WAKE_L1A),
+    // Declare initialisation complete, moving D0U* -> D0A*.
+    Step::SetBit(CSR_GP_CNTRL, CSR_GP_CNTRL_REG_FLAG_INIT_DONE),
+    // And only then wait for the clock. Polling before INIT_DONE would wait for
+    // something nothing has been asked to do, which is a 25 ms timeout that
+    // reads as broken hardware.
+    Step::Poll {
+        reg: CSR_GP_CNTRL,
+        mask: CSR_GP_CNTRL_REG_FLAG_MAC_CLOCK_READY,
+        want: CSR_GP_CNTRL_REG_FLAG_MAC_CLOCK_READY,
+        us: 25_000,
+    },
+];
+
+/// Why the sequence stopped, with the step that stopped it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Fault {
+    /// The aperture was not usable. The probe's refusal, repeated here because
+    /// this entry point can be reached without one.
+    Aperture(Refusal),
+    /// A poll ran out. Carries the index into `POWER_UP`, so the transcript
+    /// names which handshake failed rather than that one did.
+    Timeout(usize),
+}
+
+impl Fault {
+    pub fn why(&self) -> String {
+        match self {
+            Fault::Aperture(r) => String::from(r.why()),
+            Fault::Timeout(i) => match POWER_UP.get(*i) {
+                Some(Step::Poll { reg, mask, .. }) => alloc::format!(
+                    "step {} timed out waiting for {:#05x} bit {:#010x}",
+                    i, reg, mask
+                ),
+                _ => alloc::format!("step {} timed out", i),
+            },
+        }
+    }
+}
+
+impl Radio {
+    /// Run the sequence. **This writes to the radio.**
+    ///
+    /// Gated on the revision decoding to a MAC this kernel can name, because the
+    /// offsets above are family 22000's. Poking them at a part from another
+    /// family is not a bug that reports itself; it is a device that goes quiet,
+    /// and possibly a machine check. `Mac::Unknown` therefore refuses rather
+    /// than trying, which is the same rule `dev::power` applies to an MSR whose
+    /// gate it cannot confirm.
+    ///
+    /// Nothing here enables bus mastering or an interrupt. The firmware has not
+    /// been loaded, so there is nothing to DMA and nothing to signal; granting
+    /// either now would be granting it to a device that cannot yet be told to
+    /// stop.
+    pub fn power_up(&self, ecam: u64) -> Result<(), Fault> {
+        let bar0 = self
+            .bar0
+            .filter(|&b| b != 0)
+            .ok_or(Fault::Aperture(Refusal::NoAperture))?;
+        enable_memory_space(ecam, &self.dev);
+        if !crate::mem::paging::map_range(bar0, 0x1000, true) {
+            return Err(Fault::Aperture(Refusal::NotMapped));
+        }
+        for (i, step) in POWER_UP.iter().enumerate() {
+            match *step {
+                // Safety: every offset in `POWER_UP` is inside the first 4 KiB,
+                // which `apertures_hold` asserts and the mapping above covers.
+                Step::SetBit(reg, bit) => unsafe {
+                    let p = (bar0 + reg) as *mut u32;
+                    core::ptr::write_volatile(p, core::ptr::read_volatile(p) | bit);
+                },
+                Step::Write(reg, val) => unsafe {
+                    core::ptr::write_volatile((bar0 + reg) as *mut u32, val);
+                },
+                Step::Settle(us) => crate::time::delay_us(us as u64),
+                Step::Poll { reg, mask, want, us } => {
+                    if !poll_bit(bar0, reg, mask, want, us) {
+                        return Err(Fault::Timeout(i));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Poll one register until it answers, or give up.
+///
+/// Ten-microsecond steps, which is upstream's granularity. The read is volatile
+/// for the reason every register read is: the value changes underneath a
+/// compiler that has been told nothing writes it.
+fn poll_bit(bar0: u64, reg: u64, mask: u32, want: u32, us: u32) -> bool {
+    let mut waited = 0u32;
+    loop {
+        // Safety: as `power_up`.
+        let v = unsafe { core::ptr::read_volatile((bar0 + reg) as *const u32) };
+        if v & mask == want {
+            return true;
+        }
+        if waited >= us {
+            return false;
+        }
+        crate::time::delay_us(10);
+        waited += 10;
+    }
 }
