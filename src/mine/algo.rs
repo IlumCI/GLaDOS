@@ -38,12 +38,35 @@ use super::yespower::{Version, Yespower};
 /// this -- integer units, shared memory, VRAM bandwidth, three levels of CPU
 /// cache -- but an `Algo` cannot know which device it landed on, and the split
 /// that survives that ignorance is whether the work is arithmetic or whether
-/// it is waiting for memory. Anything finer would be a claim about hardware
-/// made in a file that has never seen any.
+/// it is waiting for memory.
+///
+/// **There were two variants and the missing third cost about 1.7x of the hash
+/// rate.** "Waiting for memory" was one word for two opposite prescriptions.
+/// NeoScrypt waits on *capacity*: a 32 KiB working set per slice, and running
+/// more slices than the cache holds makes every one of them slower, so the right
+/// answer is to cap the count. yespower waits on *latency*: a dependent chain of
+/// random reads, where a stalled slice leaves the execution units idle and
+/// another slice fills them, so the right answer is the opposite -- oversubscribe.
+/// Capping it by cache capacity, which is what `Bound::Memory` asks
+/// `work::cache_budget` to do, held a sixteen-core machine to seven slices.
+///
+/// The doc here used to say "anything finer would be a claim about hardware made
+/// in a file that has never seen any", which was the right instinct and is now
+/// answerable. The claim is measured twice over. A cycle model of the pwxform
+/// lane -- `pmuludq` 5 cycles, `paddq` 1, `pxor` 1, then an L1 load of 5 feeding
+/// the next round's gather, so a ~12-cycle chain with four independent gather
+/// lanes filling it -- predicts 3.0 cycles per lane, and the measured figure is
+/// 3.05 against a pure-throughput floor of 1.4. And removing the cap took a
+/// sixteen-core sweep from 693 H/s at seven slices to 1475 at fifteen.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Bound {
     Arithmetic,
+    /// Waiting on how much fits. More slices than the cache holds is slower.
     Memory,
+    /// Waiting on a dependent chain. More slices than cores is *faster*, up to
+    /// the point the execution units are full, because one slice's stall is
+    /// another's turn.
+    Latency,
 }
 
 #[derive(Clone, PartialEq)]
@@ -183,10 +206,13 @@ impl Algo {
             // the FastKDF that remains is the other 22%.
             Algo::Neoscrypt => Bound::Memory,
             // Sequentially dependent random reads over megabytes. The limit is
-            // a cache's latency and nothing about the ALUs -- which is what
-            // `design/mining.md` means by the budget being L3, and what makes
-            // this family CPU-only by construction rather than by convention.
-            Algo::Yespower { .. } => Bound::Memory,
+            // a cache's *latency* and nothing about the ALUs -- which is what
+            // makes this family CPU-only by construction rather than by
+            // convention, and which this arm reported as `Memory` while the
+            // comment said latency. `cache_budget` reads the variant, not the
+            // comment, so it capped the slice count to what the cache holds and
+            // denied the oversubscription that hides the chain. See `Bound`.
+            Algo::Yespower { .. } => Bound::Latency,
         }
     }
 

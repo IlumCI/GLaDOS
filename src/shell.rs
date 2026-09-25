@@ -8402,6 +8402,30 @@ fn mine_cmd(rest: &str) {
             kprintln!("  no pool: a fixture job, and a target nothing will meet");
             kprintln!("  the coin table is set aside for the sweep and put back after");
             let saved = client::sweep_begin(a.clone());
+
+            // **A discarded point first, because the machine is cold.** The
+            // control proved this rather than suggesting it: one slice read 117
+            // H/s at the start of a sweep and 163 at the end, +39%, so an
+            // ascending curve credited the last points with a warming host and
+            // called it scaling. `video bench` and `core bench` both discard a
+            // first reading; the sweep measured its coldest point first and
+            // normalised everything to it, which is the same mistake inverted.
+            //
+            // Not printed, so the curve below starts at a figure taken on a warm
+            // machine and the control at the end has something fair to compare
+            // against.
+            // **At `max`, not at one, and the difference is what was drifting.**
+            // Warming with a single slice left the other fifteen to allocate and
+            // first-touch a 2 MiB working set each *during the measurement*, so
+            // every new point paid a page-population cost the points before it
+            // had not. That reads as the curve flattening out and is nothing of
+            // the kind. Warming at the top spawns every slice and faults in every
+            // working set before the first figure is taken.
+            //
+            // It cut the control's drift from 39% to 23% when it warmed one
+            // slice; the remaining 23% is what this line is for.
+            kprintln!("  warming up at {} slice(s), discarded", max);
+            let _ = client::sweep_point(max, ms);
             let mut first = 0u64;
             for n in 1..=max {
                 let (have, cores, hashes, took) = client::sweep_point(n, ms);

@@ -1408,6 +1408,20 @@ pub struct SweepState {
 /// missing. See `SLICE_CORES` for what went wrong without it.
 pub fn sweep_point(n: u32, ms: u64) -> (u32, u32, u64, u64) {
     let have = set_slices(n);
+    // **Let the count take effect before starting the clock.**
+    //
+    // A slice checks `slice >= SLICES` at the top of its loop, so one that is
+    // being stood down finishes the batch it is already inside. Coming *down*
+    // from sixteen slices to one, fifteen of them each land a final batch after
+    // the counters are zeroed -- so the one-slice point was credited with
+    // fifteen slices' leftovers, and reported fifteen cores for one slice.
+    //
+    // It inflated the baseline the whole curve is normalised against: 142 H/s
+    // became 193, which makes the scaling that follows look *worse* than it is.
+    // A batch of eight yespower hashes is about 57 ms at these rates, so 150 ms
+    // is generous, and against a window of seconds it costs a few per cent of
+    // the measurement for a baseline that means what it says.
+    rest_ms(150);
     HASHES.store(0, Ordering::Relaxed);
     HASH_SINCE.store(0, Ordering::Relaxed);
     // Cleared *after* `set_slices`, which spawns: a slice created for this
