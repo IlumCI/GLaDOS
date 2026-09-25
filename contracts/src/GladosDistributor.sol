@@ -59,6 +59,12 @@ interface IERC20 {
 /// question with an expensive wrong answer.
 interface IUniswapV2Pair {
     function getReserves() external view returns (uint112, uint112, uint32);
+    // Asked once, in the constructor, and never again. A pair cannot be
+    // *derived* from two token addresses without trusting a factory, but it can
+    // be *checked* against them -- which is a different and much cheaper claim,
+    // and the one the constructor was missing.
+    function token0() external view returns (address);
+    function token1() external view returns (address);
     function swap(uint256 amount0Out, uint256 amount1Out, address to, bytes calldata data) external;
 }
 
@@ -253,6 +259,24 @@ contract GladosDistributor {
         // the contract undeployable on a chain where the pool does not exist
         // yet, which is a state this project has been in twice.
         require((pair_ == address(0)) == (quote_ == address(0)), "pair and quote go together");
+        // **The pair is checked against the two tokens it is supposed to hold.**
+        // `design/audit.md` finding 1: without this, `quoteIsToken0` below is a
+        // comparison of two addresses that is never reconciled with what the
+        // pair actually contains, and a wrong `pair` produces a distributor
+        // which accepts funding for market epochs and refuses every claim
+        // forever -- driven, `TooLittleOut(0,1)`. `pair` is immutable, so the
+        // constructor is the only place this can ever be caught.
+        //
+        // `openEpochOnV3` has checked its pool this way since it was written.
+        // The asymmetry was the finding.
+        if (pair_ != address(0)) {
+            address p0 = IUniswapV2Pair(pair_).token0();
+            address p1 = IUniswapV2Pair(pair_).token1();
+            require(
+                (p0 == quote_ && p1 == token_) || (p0 == token_ && p1 == quote_),
+                "pair does not hold quote and token"
+            );
+        }
         token = token_;
         operator = operator_;
         pair = pair_;
@@ -427,6 +451,15 @@ contract GladosDistributor {
         bool zeroForOne = quote < reward_;
 
         uint256 before = IERC20(reward_).balanceOf(msg.sender);
+        // **Saved and restored rather than set and cleared**, which is
+        // `design/audit.md` finding 6. A V3 pool pays the recipient *before* it
+        // calls back, so a reward token with a transfer hook runs code inside
+        // this swap; if that code enters here again and succeeds, the inner call
+        // used to clear this to zero on its way out and the outer pool's
+        // callback then found nothing and was refused. Funds never moved -- the
+        // whole transaction unwound -- but an epoch whose reward token has a
+        // hook was unclaimable, and the fix is this one line.
+        address prev = _inFlight;
         _inFlight = pool_;
         IUniswapV3Pool(pool_).swap(
             msg.sender,
@@ -435,9 +468,10 @@ contract GladosDistributor {
             zeroForOne ? MIN_SQRT_RATIO + 1 : MAX_SQRT_RATIO - 1,
             ""
         );
-        // Cleared on the way out rather than left for the next call to
-        // overwrite: a stale value here is a standing authorisation to be paid.
-        _inFlight = address(0);
+        // Restored on the way out rather than zeroed: a stale value here is a
+        // standing authorisation to be paid, and an unconditional zero is what
+        // broke a nested claim.
+        _inFlight = prev;
 
         received = IERC20(reward_).balanceOf(msg.sender) - before;
         if (received < minOut) revert TooLittleOut(received, minOut);
@@ -469,8 +503,17 @@ contract GladosDistributor {
     function claim(uint256 epochId, uint256 amount, bytes32[] calldata proof) external {
         Epoch storage e = _admit(epochId, amount, proof);
         if (e.mode != Mode.Direct) revert WrongMode();
+        // **Measured, not assumed**, which is `design/audit.md` finding 4. This
+        // header argues at length that amounts must be taken as received because
+        // GLADOS is a tax token, and applies it on every inbound leg and on both
+        // market claims -- and this was the one path that emitted the number it
+        // asked for. A `Claimed` event is what an indexer, a miner and any
+        // published accounting read, so `received` is the field that exists to
+        // be true.
+        uint256 before = IERC20(token).balanceOf(msg.sender);
         _send(token, msg.sender, amount);
-        emit Claimed(epochId, msg.sender, amount, amount);
+        uint256 got = IERC20(token).balanceOf(msg.sender) - before;
+        emit Claimed(epochId, msg.sender, amount, got);
     }
 
     /// Claim by buying on the market, in the claimant's own transaction.
@@ -587,19 +630,28 @@ contract GladosDistributor {
     /// answered as a string, because the thing a miner needs is not a revert
     /// selector -- it is to know whether the problem is their balance, their
     /// proof, or the clock.
+    /// Answers `mode` as well, and that is `design/audit.md` finding 2.
+    ///
+    /// It used to say only yes or no, and it never read `mode` -- so it approved
+    /// a market epoch's claim and `claim()` then reverted `WrongMode`. It cannot
+    /// know which function a caller intends, so the honest fix is to say which
+    /// one applies rather than to guess: `Direct` takes `claim`, `Market` takes
+    /// `claimOnMarket`, `MarketV3` takes `claimOnV3`.
     function checkClaim(uint256 epochId, address account, uint256 amount, bytes32[] calldata proof)
         external
         view
-        returns (bool ok, string memory reason)
+        returns (bool ok, string memory reason, Mode mode)
     {
-        if (epochId >= _epochs.length) return (false, "no such epoch");
+        if (epochId >= _epochs.length) return (false, "no such epoch", Mode.Direct);
         Epoch storage e = _epochs[epochId];
-        if (block.timestamp > e.deadline) return (false, "epoch closed");
-        if (hasClaimed[epochId][account]) return (false, "already claimed");
-        if (IERC20(token).balanceOf(account) < e.gate) return (false, "below the gate");
-        if (!_verify(proof, e.root, _leaf(account, amount))) return (false, "proof does not match the root");
-        if (amount > e.funded - e.claimed) return (false, "epoch is short");
-        return (true, "");
+        if (block.timestamp > e.deadline) return (false, "epoch closed", e.mode);
+        if (hasClaimed[epochId][account]) return (false, "already claimed", e.mode);
+        if (IERC20(token).balanceOf(account) < e.gate) return (false, "below the gate", e.mode);
+        if (!_verify(proof, e.root, _leaf(account, amount))) {
+            return (false, "proof does not match the root", e.mode);
+        }
+        if (amount > e.funded - e.claimed) return (false, "epoch is short", e.mode);
+        return (true, "", e.mode);
     }
 
     /// The leaf preimage, exposed so an off-chain builder can be checked
@@ -681,6 +733,14 @@ contract GladosDistributor {
     function _move(address asset, bytes memory data) private {
         (bool okCall, bytes memory ret) = asset.call(data);
         if (!okCall) revert TransferFailed();
-        if (ret.length != 0 && !abi.decode(ret, (bool))) revert TransferFailed();
+        // **The length is checked before the decode.** `abi.decode` of fewer
+        // than 32 bytes reverts with a panic rather than `TransferFailed`, so a
+        // token returning a short value produced the wrong error -- which costs
+        // whoever is reading a failed claim at three in the morning. Empty is
+        // still success, because that is the second ERC-20 convention and the
+        // reason this helper exists at all.
+        if (ret.length != 0 && (ret.length < 32 || !abi.decode(ret, (bool)))) {
+            revert TransferFailed();
+        }
     }
 }

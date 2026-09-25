@@ -123,7 +123,14 @@ static C_FOUND: [AtomicU64; MAX_COINS] = [
 
 /// Which slot each slice works. `NONE` when there is nothing for it to do.
 const NONE: u32 = u32::MAX;
+// Written out rather than `[const { .. }; MAX_SLICES]`, to match the table
+// above it -- and long enough now that the next change to `MAX_SLICES` will be
+// a compile error here rather than a silent mismatch, which is what it was.
 static ASSIGN: [AtomicU32; MAX_SLICES] = [
+    AtomicU32::new(NONE),
+    AtomicU32::new(NONE),
+    AtomicU32::new(NONE),
+    AtomicU32::new(NONE),
     AtomicU32::new(NONE),
     AtomicU32::new(NONE),
     AtomicU32::new(NONE),

@@ -55,13 +55,94 @@ PIDFILE="${STATE}/run-pool.pid"
 # window cannot be a considered choice for both. It is chosen for bitzeny, the
 # coin this pool is actually pointed at, and the payout line prints what it is
 # worth on each.
+# `--roster` is the file `refresh_roster` below keeps current, and answering
+# "can this name be paid" at the greeting is the whole point of it: a rig
+# configured with an unregistered name otherwise mines perfectly for
+# thirty-six hours and the first anybody hears of it is `distribute.py`
+# printing "no payout address" after the event is over.
+#
+# **`--require-roster` is deliberately absent and is not an oversight.**
+# Turning it on is a statement that a roster exists, and it refuses a miner at
+# the greeting when it does not. `supabase/functions/worker` has to be deployed
+# and answering before that sentence is true. Note the pool fails *open* on an
+# unreadable roster either way and says so in its startup log -- read that line
+# rather than assuming the flag is what decides.
+#
+# **No upstream, and where it goes when there is one is decided already.**
+# `design/mining.md`'s sequencing item 8 is the only step in this whole project
+# that has never been done -- "point the kernel at zpool's yespower port and
+# take a real share", because everything green in this tree is green against our
+# own stub -- and it says what it needs: "the address in hand and nothing else."
+#
+# A coin spec grows `@host:port,user,pass`, and zpool is **wallet-as-username**,
+# which is why it is the venue: no account, no registration, and `payout.md`
+# records it as the only anonymous yiimp pool of its kind still operating after
+# zergpool, blockmasters, ahashpool and prohashing went. So **the username *is*
+# the payout address**, and a placeholder left in place does not fail -- it mines
+# to whoever owns that address. That is the one misconfiguration here that is
+# silent, profitable for a stranger and irreversible, so the field is empty:
+#
+#     yespower:yespower-10-2048-8:12@<zpool yespower host>:<port>,<addr>,<pass>
+#
+# **The three placeholders are three different questions and none is guessable.**
+# The host and port come off zpool.ca's own port list, the payout coin is
+# selected through the password field by that pool's convention, and the address
+# has to match whichever coin that is. None of them is written here because this
+# tree's rule about inventing a plausible constant applies hardest to the field
+# that decides who gets paid.
+#
+# **And it is not a BTC address**, which is worth saying because it is the
+# obvious wrong answer. `payout.md`'s table prices zpool's three payout coins at
+# this machine's measured $0.0703/day: DOGE clears its $0.42 threshold in 6
+# days, LTC in 37, and **BTC in 825** -- so BTC is the one choice that makes a
+# first payout longer than the project has existed. The other consideration
+# pulls a different way: only Polygon is an Across origin into 4663, and zpool
+# pays none of these on Polygon, so `runbook.md` step 6a prefers a venue that
+# pays the token the bridge already takes. That is a decision, not a default.
+#
+# **Not sha256d either.** `mining.md` measures the kernel's CPU on yespower
+# out-earning the RTX 3050 on sha256d by about eighteen hundred times, because
+# sha256d is ASIC territory where a laptop is a rounding error while yespower is
+# CPU-only by construction. `solo.ckpool.org` appears in `design/pool.md` and is
+# **not** a candidate here: it was a plumbing test against something this
+# project does not control, and solo Bitcoin from a laptop is a lottery ticket
+# that `mine ev` says so about on every run.
+#
+# **One consequence for `--window` when this is wired.** 2^46 below is chosen as
+# about 0.80 of a *Bitzeny* block. An auto-exchange port serves whatever coin is
+# profitable at the time, so no single block time is the right one -- which is
+# the argument for paying from the tally (`distribute.py --basis tally`) rather
+# than from the PPLNS window, as `runbook.md` step 5 already prefers for a
+# bounded event.
+#
+# Until one is set, every coin is `Source::Local`: the pool builds its own
+# headers, so the shares are real proof of work against a target nobody else
+# recognises, and the report says `local` on every row rather than implying
+# otherwise.
 set -- \
     --listen 0.0.0.0:3334 \
     --ledger "${STATE}/ledger.json" \
+    --roster "${STATE}/roster.json" \
+    --roster-url https://glados.aperture.institute/pool/ \
     --cpu-percent 25 \
+    --share-seconds 45 \
+    --max-connections 900 \
     --window 70368744177664 \
     bitzeny:yespower-10-2048-8:12 \
     testnet:sha256d:24
+
+# Where the worker-name to payout-address mapping is served from. Kept beside
+# the argv because the two have to agree: the pool reads the file, and this is
+# the only thing that writes it.
+#
+# The origin is the one `src/update/channel.rs` pins as `DEFAULT_SOURCE`, since
+# `supabase/README.md` says there is one project behind all of these functions.
+# `design/runbook.md` writes it as `<project>` because that file is a recipe;
+# this is a script, so it carries the real one. **Confirm `worker` is actually
+# deployed there** -- `curl -fsS <url>` should answer a JSON document, and a 404
+# here presents as a roster that is simply never current.
+ROSTER_URL="https://vermcdgpqncfsralpesz.supabase.co/functions/v1/worker/map"
+ROSTER_EVERY=300
 
 # A log this can never let grow without bound. On a borrowed machine, filling
 # somebody's disk is a worse way to fail than not running at all -- and cron
@@ -163,13 +244,64 @@ watch_log() {
 # backoff should keep climbing. Over it and whatever happened was a one-off.
 HEALTHY_AFTER=60
 
+# **The roster refresh lives here because neither mechanism the documentation
+# assumes is available on the host this was deployed to.** `design/runbook.md`
+# gives a cron line; that box has no `crontab` binary and no cron daemon, which
+# is ordinary on Arch. The systemd answer is a user timer; a user timer needs
+# the user manager that lingering keeps alive, and `loginctl enable-linger` was
+# denied there by polkit. So the two documented schedulers are a cron that does
+# not exist and a timer that cannot run.
+#
+# This script is already a supervisor with a background loop in it, so the
+# refresh costs one more `sh` loop and needs no scheduler at all. It dies with
+# the script, which is the property that makes it safe to add.
+#
+# The `.tmp` and the `mv` are the point, and are the runbook's own reasoning:
+# `mv` within one filesystem is atomic, so the pool never reads a half-written
+# document. Writing straight to the file would hand it a truncated one to
+# parse -- and although a parse failure leaves the previous roster in place,
+# that is a safety net rather than a plan.
+#
+# **`curl` is checked rather than assumed.** It is the first thing in this
+# script that is not coreutils, and the host that had no cron is exactly the
+# sort that may not have it either. A missing `curl` logs one line and skips
+# the loop rather than failing, because the pool fails open on an absent roster
+# regardless -- so the honest outcome is a pool that runs and says why its
+# roster is stale, not a pool that does not start.
+refresh_roster() {
+    if ! command -v curl >/dev/null 2>&1; then
+        echo "[run-pool] no curl, so the roster will not refresh; ${ROSTER_URL}" >> "${LOG}"
+        return 0
+    fi
+    while : ; do
+        if curl -fsS "${ROSTER_URL}" -o "${STATE}/roster.json.tmp" 2>/dev/null; then
+            mv -f "${STATE}/roster.json.tmp" "${STATE}/roster.json"
+        else
+            # Logged rather than retried harder. A failed fetch leaves the last
+            # good roster in place, which is the right outcome, and a pool
+            # whose mapping service is down should say so once every interval
+            # rather than filling the log it is also responsible for capping.
+            rm -f "${STATE}/roster.json.tmp"
+            echo "[run-pool] roster fetch failed $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${LOG}"
+        fi
+        sleep "${ROSTER_EVERY}"
+    done
+}
+
 # Started once and killed with the script, so a stop leaves nothing behind.
 # It is added to the existing traps rather than replacing them, because the
 # pidfile removal is what stops the *next* start refusing.
+#
+# **Both background loops go in both traps.** The pidfile bug this file already
+# records -- a handler that removed the pidfile and then returned to what it
+# was doing -- is proof that a trap edited carelessly here has bitten once, and
+# a refresher left running after a stop is a loop nothing will ever reap.
 watch_log &
 WATCHER=$!
-trap 'rm -f "${PIDFILE}"; kill "${WATCHER}" 2>/dev/null || true' EXIT
-trap 'rm -f "${PIDFILE}"; kill "${WATCHER}" 2>/dev/null || true; exit 0' INT TERM
+refresh_roster &
+REFRESHER=$!
+trap 'rm -f "${PIDFILE}"; kill "${WATCHER}" "${REFRESHER}" 2>/dev/null || true' EXIT
+trap 'rm -f "${PIDFILE}"; kill "${WATCHER}" "${REFRESHER}" 2>/dev/null || true; exit 0' INT TERM
 
 backoff=1
 while : ; do

@@ -84,6 +84,28 @@ async function deploy(vm, from, artifact, ctorArgs) {
   return bytesToHex(res.createdAddress.bytes);
 }
 
+// ### This is unreliable against the public RPC, and the failure is not ours
+//
+// `RPCStateManager` fetches each account lazily through `eth_getProof` and, when
+// the provider does not answer, throws `Cannot read properties of undefined
+// (reading 'balance')` from inside the EVM's gas handler. Robinhood Chain's
+// public endpoint stops answering after enough calls in one run, so this file
+// fails part-way through at a point that **moves between runs** -- sometimes at
+// the miner's claim, sometimes at the burn.
+//
+// It is not a fault in the contracts and not in this harness's logic: the same
+// code completed the claim leg and reported 420,575 GLADOS one run and died
+// before it the next, against the same block.
+//
+// Two things were tried and neither is the answer. Seeding the addresses this
+// file names -- the burn address, the stranger -- with `putAccount` and no read
+// removes those fetches, and the failing one is a *callee* inside the token's own
+// tax distribution, which this file cannot enumerate. And retrying would hide a
+// real RPC failure behind a loop.
+//
+// What would fix it is an endpoint that answers every `eth_getProof`, which is
+// what `GLADOS_RPC` is for. Until there is one, read a completed run as evidence
+// and an incomplete one as no evidence, rather than as a failure.
 async function main() {
   if (!file) {
     console.error("usage: node test/fork.mjs <epoch.json> [--address 0x...]");
@@ -140,7 +162,8 @@ async function main() {
   const dep = await call(vm, OPERATOR, WETH, "0xd0e30db0", want);
   ok(dep.ok, `the operator wraps ${ethers.formatEther(want)} ETH into real WETH${dep.ok ? "" : "  (" + dep.err + ")"}`);
 
-  const art = compile(["GladosDistributor.sol", "TestToken.sol", "MockPair.sol"]);
+  const art = compile(["GladosDistributor.sol", "TestToken.sol", "MockPair.sol",
+                       "GladosBurner.sol"]);
   const dist = {
     abi: art["GladosDistributor.sol"].GladosDistributor.abi,
     bytecode: art["GladosDistributor.sol"].GladosDistributor.evm.bytecode.object,
@@ -181,12 +204,111 @@ async function main() {
     const balAfter = await call(vm, a, TOKEN, erc20.encodeFunctionData("balanceOf", [a]));
     const got = coder.decode(["uint256"], balAfter.ret)[0] - before;
     anyPaid = anyPaid || got > 0n;
-    ok(got > 0n, `${a} bought ${ethers.formatEther(got)} real GLADOS with ${ethers.formatEther(BigInt(c.amount))} WETH`);
+    // **"would have bought", not "bought".** This said "bought N real GLADOS" and
+    // was read as a purchase, which it is not: the token and the pool are the
+    // deployed ones and the WETH is invented by this harness, so the figure is
+    // what *would* happen and the event did not. A log nobody has to interpret
+    // is worth more than a shorter line.
+    ok(got > 0n, `${a} would have bought ${ethers.formatEther(got)} GLADOS with `
+       + `${ethers.formatEther(BigInt(c.amount))} WETH -- simulated, nothing moved`);
   }
-  ok(anyPaid, "somebody was actually paid in GLADOS from the real pool");
+  ok(anyPaid, "the real pool would have paid somebody in GLADOS (simulated)");
+
+  // ------------------------------------------- a real buy that nobody owns
+  //
+  // The same thing again, except the leaf is a `GladosBurner` and what it buys
+  // goes to an address with no key. This is the leg that cannot be checked
+  // against a mock: whether the *real* GLADOS token permits a transfer to
+  // `0xdEaD` at all, and what its tax does on the way.
+  //
+  // A second epoch rather than reusing the first, because a leaf is an address
+  // and the burner is a different address from the miner.
+  const BURN = "0x000000000000000000000000000000000000dEaD";
+  // **The burn address has never been touched on 4663, and the fork cannot cope
+  // with that.** `RPCStateManager` fetches an account lazily and throws
+  // `Cannot read properties of undefined (reading 'balance')` inside the gas
+  // handler when the node answers that it does not exist -- so the transfer that
+  // burns the tokens dies in the fixture rather than in the contract.
+  //
+  // Seeded empty, which is what an unused address *is*. Worth recording as a
+  // property of the chain rather than of this code: on the real chain the first
+  // burn simply creates the account, and that costs the extra gas of a new
+  // account rather than failing.
+  //
+  // `putAccount` with no `getAccount` first, deliberately. Reading it goes to
+  // the provider, which is the call that throws -- and there is nothing to read:
+  // an EOA's token balance lives in the *token's* storage, not in its account,
+  // so a fresh `Account` here loses none of the 12.9M GLADOS that address
+  // already holds on chain.
+  await vm.stateManager.putAccount(addr(BURN), new Account());
+  const burnArt = {
+    abi: art["GladosBurner.sol"].GladosBurner.abi,
+    bytecode: art["GladosBurner.sol"].GladosBurner.evm.bytecode.object,
+  };
+  const burner = await deploy(vm, OPERATOR, burnArt, [at, TOKEN]);
+  ok(!!burner, `a burner is deployed into the fork at ${burner}`);
+
+  // Fund and build a one-leaf tree for it, with the same machinery the epoch
+  // above used so the proof is the contract's own format rather than a second
+  // idea of it.
+  {
+    const { build } = await import("./merkle.mjs");
+    const amount = want / 4n > 0n ? want / 4n : 1n;
+    const t = build([{ account: burner, amount }]);
+
+    const dep2 = await call(vm, OPERATOR, WETH, "0xd0e30db0", amount);
+    ok(dep2.ok, `the operator wraps ${ethers.formatEther(amount)} more ETH for the burn epoch`);
+    const ap2 = await call(vm, OPERATOR, WETH, erc20.encodeFunctionData("approve", [at, amount]));
+    ok(ap2.ok, "and approves it");
+
+    const open2 = iface.encodeFunctionData("openEpochOnMarket",
+      [t.root, amount, 0n, BigInt(Math.floor(Date.now() / 1000) + 86400)]);
+    const o2 = await call(vm, OPERATOR, at, open2);
+    ok(o2.ok, `an epoch opens with the burner as its only leaf${o2.ok ? "" : "  (" + o2.err + ")"}`);
+
+    const bBefore = await call(vm, OPERATOR, TOKEN, erc20.encodeFunctionData("balanceOf", [BURN]));
+    const beforeBurn = coder.decode(["uint256"], bBefore.ret)[0];
+
+    const bIface = new ethers.Interface(burnArt.abi);
+    // Called by an address that is nobody in particular, to show the burn needs
+    // no permission and enriches no one who triggers it.
+    const stranger = "0x2222222222222222222222222222222222222222";
+    // `putAccount` with no read first. **This was the crash**, and it is worth the
+    // comment because the error names nothing useful: `RPCStateManager` fetches a
+    // missing account lazily through `eth_getProof` and throws
+    // `Cannot read properties of undefined (reading 'balance')` from inside the
+    // gas handler when the provider does not answer -- which the public endpoint
+    // stops doing after enough calls in one run.
+    //
+    // There is nothing to read anyway. This address has never been touched on
+    // 4663, so an empty account is exactly what it is, and writing one directly
+    // skips the fetch that fails. The accounts seeded earlier in this file were
+    // read the same way and survived only by being early enough in the run.
+    await vm.stateManager.putAccount(addr(stranger), new Account(0n, 10n ** 20n));
+    const bd = bIface.encodeFunctionData("claimAndBurn", [1, amount, t.proof(burner), 1n]);
+    const br = await call(vm, stranger, burner, bd);
+    ok(br.ok, `a stranger triggers the claim and burn${br.ok ? "" : "  (" + br.err + ")"}`);
+
+    const bAfter = await call(vm, OPERATOR, TOKEN, erc20.encodeFunctionData("balanceOf", [BURN]));
+    const moved = coder.decode(["uint256"], bAfter.ret)[0] - beforeBurn;
+    ok(moved > 0n,
+       `and ${ethers.formatEther(moved)} GLADOS would reach 0xdEaD for `
+       + `${ethers.formatEther(amount)} WETH -- simulated, nothing burnt`);
+
+    const stranded = await call(vm, OPERATOR, burner, bIface.encodeFunctionData("stranded", []));
+    ok(coder.decode(["uint256"], stranded.ret)[0] === 0n, "the burner holds nothing afterwards");
+
+    const sBal = await call(vm, OPERATOR, TOKEN, erc20.encodeFunctionData("balanceOf", [stranger]));
+    ok(coder.decode(["uint256"], sBal.ret)[0] === 0n,
+       "and whoever paid the gas holds none of it");
+  }
 
   console.log(`\n${passed} passed, ${failed} failed`);
-  console.log("\nEvery contract above except the distributor is the deployed one,");
+  console.log("\n*** NOTHING ABOVE HAPPENED. No transaction was broadcast, no token");
+  console.log("*** moved, nobody was paid and nothing was burnt. Every figure is");
+  console.log("*** what the deployed contracts would do, computed against their");
+  console.log("*** real state. The money is invented by this harness.\n");
+  console.log("Every contract above except the distributor is the deployed one,");
   console.log("read over RPC at block " + block + ". Nothing was spent and nothing");
   console.log("was published: the fork is in this process and dies with it.");
   process.exit(failed === 0 ? 0 : 1);

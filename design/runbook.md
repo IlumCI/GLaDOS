@@ -201,6 +201,39 @@ succeeding.
 
 ## 7. Open the epoch
 
+### Three things to check before the first `--send`, from `design/audit.md`
+
+The commands below are unchanged. What is new is that an audit found two of them
+carry a precondition nobody knew about, and one of the three cannot be satisfied
+after the fact.
+
+**All three are enforced by `deploy.mjs` now**, so this is what it is checking on
+your behalf rather than a list to work through by hand. Read its output anyway:
+the first one cannot be undone.
+
+1. **The `pair` argument is read back.** It is an immutable constructor argument
+   and the contract never checks it against the pair it is meant to be, while
+   `openEpochOnV3` checks its pool twice. A typo produces a distributor that
+   accepts funding for market epochs and refuses every claim forever -- driven,
+   `TooLittleOut(0,1)` -- with no setter and no recovery but `reclaim` after the
+   deadline. `deploy` now reads `token0`/`token1` and refuses a pair that is not
+   `{quote, token}`. **The contract still does not check, so this is the one
+   thing on this page that only happens if the tool is the thing that deploys.**
+2. **The root is checked against every epoch already open.** The leaf carries no
+   epoch id, so the same root opened twice is a second entitlement to the same
+   work rather than a duplicate anything refuses. `open` walks them and refuses.
+3. **`claim` works out the mode itself.** It called `claimOnMarket`
+   unconditionally, so it could open a `MarketV3` epoch and not claim from it --
+   and `checkClaim`, which it asks first, does not read `mode` either, so it said
+   the claim was good on the way to reverting. It reads the epoch now and
+   dispatches to `claim`, `claimOnMarket` or `claimOnV3`.
+
+And two the same pass turned up, which are why the deploy line below had never
+worked: the constructor takes **five** arguments and the tool passed four, so
+`deploy` failed before reaching the network; and `--direct` did not exist, so
+`Direct` -- the only mode whose gas is not absurd for a small epoch -- could be
+claimed from and not opened. Both fixed. See `design/audit.md`.
+
 ```bash
 export GLADOS_KEY=0x...            # never printed, never stored; see deploy.mjs
 node contracts/deploy.mjs status
@@ -234,7 +267,46 @@ transaction you have already paid for.
 and `claimOnV3` refuses a Market one, so opening in the wrong mode is an epoch
 nobody can claim from until it expires and you `reclaim` it.
 
-## 8. The step nobody has taken
+## 8. The step nobody has taken -- and what has now been taken below it
+
+**Everything except the money has been driven, on a Linux host, against a fork
+of the real chain.** `python tools/loop.py --fork` mines to a real pool, credits
+a real ledger, builds the tree, opens a market epoch and claims it -- and the
+only contract in that chain that is not the deployed one is the distributor
+itself:
+
+    ok  the forked token's supply is 1000000000 whole tokens
+    ok  and its buy tax is 1%
+    ok  the real pool holds 6.367119288422774416 WETH against 268.4M GLADOS
+    ok  the operator wraps 0.01 ETH into real WETH
+    ok  a market epoch opens with the published root
+    ok  0x..bEEF bought 415467.388786552313951246 real GLADOS with 0.01 WETH
+    ok  somebody was actually paid in GLADOS from the real pool
+    8 passed, 0 failed
+
+So the joins below *are* now proven: a share became work in a ledger, became an
+amount in a tree, became a leaf the contract accepted, and became real GLADOS
+bought from the real pair at the real price under the real tax. What is still
+unproven is exactly one thing -- that somebody funded it with their own money,
+which no simulation stands in for.
+
+**Neither form of `loop.py` had ever run.** Both were broken, and each failure
+is worth knowing because each is the shape of a check nobody executes:
+
+- It called `distribute.py` with no `--basis`, and that tool learned to refuse
+  the question when it turned out a ledger carries a window and a tally that
+  differ by about 4x. The refusal was correct and it reached a caller that never
+  answered it, so every run died at step 4.
+- `--fork` funds the epoch in **real WETH**, because `fork.mjs` wraps the
+  epoch's total through the deployed WETH contract rather than writing a balance
+  into storage. The default total was a round million, which asked the operator
+  to wrap a million ETH against the hundred the fork grants. The default is
+  mode-aware now: 0.01 WETH under `--fork`, which is about $24 and roughly 0.3%
+  down `design/token.md`'s slippage table.
+
+**Run both before step 8 rather than after.** They cost two minutes, need no key,
+and between them they exercise every join this page describes.
+
 
 Before an event with strangers in it, run the whole of the above with **one
 address, your own, and a few dollars**. Mine to the pool for an hour, build a
@@ -257,9 +329,16 @@ from published documents is the whole of what it offers instead of trust.
 
 ## What can still go wrong that nothing above prevents
 
-- **The contract has not been read by anybody who did not write it.** It holds
-  tokens. This is the largest open risk in the system and no amount of testing
-  substitutes for it.
+- ~~**The contract has not been read by anybody who did not write it.**~~ It has
+  been, once: `design/audit.md`. **One finding there has to be acted on before
+  step 7's `deploy --send` and cannot be acted on afterwards** -- `pair` is an
+  immutable constructor argument and is never checked against the pair it is
+  supposed to be, so a typo there is a distributor that accepts funding for
+  market epochs nobody can ever claim. The other five are smaller and two of
+  them are `deploy.mjs`'s rather than the contract's, including: **this tool
+  cannot claim a `MarketV3` epoch it is perfectly able to open.** So the V3
+  invocation below opens something whose only exit today is `reclaim` after the
+  deadline. One reader is not a review; the contract still holds tokens.
 - **`reclaim` is the operator's one power over committed funds**, bounded to
   the unclaimed remainder after a deadline fixed when the epoch opened. A
   miner should be told the deadline, because it is the date their allocation

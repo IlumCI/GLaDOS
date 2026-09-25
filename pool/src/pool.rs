@@ -324,6 +324,20 @@ impl Default for Window {
 
 pub struct Pool {
     pub coins: Vec<Coin>,
+    /// Where to append a recomputable record of every accepted share, if
+    /// anywhere.
+    ///
+    /// **The published ledger is a tally and a tally cannot be re-verified.**
+    /// `design/pool.md` calls the share log "the only thing standing in for
+    /// trust", and what it publishes is work/accepted/stale/bad per worker --
+    /// numbers a miner can read and nobody can check. This is the other half:
+    /// one line per accepted share carrying the header, the nonce and the
+    /// target, so a third party recomputes the hash with code the operator
+    /// never ran.
+    ///
+    /// `None` by default, because it is unbounded by construction -- a share a
+    /// few seconds forever -- and an operator should turn that on deliberately.
+    pub sharelog: Option<std::path::PathBuf>,
     /// Jobs still accepting shares, newest last. Bounded, because a miner that
     /// never submits would otherwise grow this forever -- and because a job old
     /// enough to fall off is a job whose shares are stale by definition.
@@ -477,6 +491,7 @@ impl Pool {
     pub fn new(coins: Vec<Coin>) -> Pool {
         Pool {
             coins,
+            sharelog: None,
             issued: Vec::new(),
             seen: Vec::new(),
             tallies: HashMap::new(),
@@ -817,6 +832,29 @@ impl Pool {
         self.seen.push((sh.job.clone(), sh.nonce));
         if self.seen.len() > KEEP_NONCES {
             self.seen.remove(0);
+        }
+
+        // Appended here rather than by the caller, because this is the only
+        // place that holds all four things a verifier needs at once: the
+        // assembled header, the nonce, the target this pool set, and the
+        // algorithm. `submit`'s own job table is gone thirty seconds later.
+        //
+        // A failed write is ignored on purpose. The share is already valid and
+        // already credited; refusing it because a log could not be appended
+        // would make a full disk into lost work, and the tally -- which is what
+        // pays people -- is written elsewhere and does report its failures.
+        if let Some(path) = &self.sharelog {
+            use std::io::Write;
+            let rec = crate::record::Record {
+                algo: job.algo.clone(),
+                header: job.header,
+                nonce: sh.nonce,
+                target: job.target,
+                worker: String::from(worker),
+            };
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+                let _ = writeln!(f, "{}", rec.render());
+            }
         }
 
         // Two targets, and the difference between them is the whole of being a

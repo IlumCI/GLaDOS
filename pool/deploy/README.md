@@ -284,6 +284,61 @@ found something: `names` because one connection could re-greet under nineteen
 new worker names a second, each a permanent record and none of them costing a
 single validation, and `flood` because the per-connection limits do not sum.
 
+### What they answered here, so a future run has something to differ from
+
+All six, against the musl artefact on a **12th Gen i7-12650H, 16 threads** --
+which is the development machine and **not** the server, so read these as the
+shape being right rather than as the server's numbers. The throwaway instance
+was `--cpu-percent 1` with `abuse:neoscrypt:16` on its own port and ledger.
+
+    badshares   cap 32, answered 33, then dropped
+    ratelimit   cap 20, offered 60, answered 20, still_open true
+    bigline     max_line 131072, sent 131158, server_closed true
+    conns       ceiling 256, attempted 300, welcomed 256, refused 44,
+                connect_errors 0, accepts_after true
+    names       names_offered 1160, renames_refused 1160, 19.0 names/s
+    flood       4 threads, 20 s, offered 1600, answered 437 (21.8/s)
+
+Every one matches what this file already predicted, which is the result. Two are
+worth reading rather than ticking:
+
+**`names` reports 19.0 a second and refuses all 1,160 of them.** That rate is
+the number this file records as the hole -- so what is being seen is the attempt
+rate unchanged and the refusal working, which is the only way that drill can
+report success.
+
+**`flood` answered 437 of 1,600 offered.** That is the *total* validation budget
+doing the thing the per-connection limit could not: 73% of offered work was
+never validated, at a 1% budget. Raise `--cpu-percent` and this number rises
+with it, which is what makes it the setting that decides how much of somebody
+else's machine a flood can take.
+
+**And `names` has a `--seconds` default of 400**, so a shorter `timeout` around
+it kills it mid-drill and reports nothing. Pass `--seconds` explicitly if you
+are bounding the run; the figures above are from `--seconds 60`.
+
+The throwaway's own ledger is the other half of the evidence, because the drills
+are supposed to leave a record and a pool that refused everything correctly
+should be able to prove it:
+
+    python3 tools/ledgercheck.py /tmp/abuse.json
+      ok    the document is a format this knows (v3)
+      ok    the rows hash to the published digest
+      ok    <every worker> has no negative counts
+
+33 bad from `badshares`, 20 from `ratelimit`, 437 across four `flood` workers,
+and `names-0` carrying 4,580 stale against coin `?` -- a share for a coin that
+does not exist, counted as stale rather than accepted.
+
+Then the negative, because a checker that only ever says yes is not a checker.
+One unit of work moved from one worker to another with the digest left untouched
+-- the exact edit somebody would make to steal a slice of a payout:
+
+    FAIL  the rows hash to the published digest
+          [published 55c99664..., recomputed e2041992...]
+      1 check(s) failed. The digest is not a signature, so this says the record
+      changed
+
 ## If it is a home server, read this before the port section
 
 A machine in somebody's house is not a small VPS. Four things change, and the
@@ -369,6 +424,121 @@ mine slices 3
 mine on
 mine coins
 ```
+
+### And let somebody else check your arithmetic
+
+The published ledger is a *tally* -- work, accepted, stale, bad per worker -- and
+a tally cannot be re-verified. A miner reading it is trusting that your program
+counted honestly, which is the thing publishing it was meant to replace.
+
+`--sharelog` writes the half that can be checked: one line per accepted share,
+carrying the assembled header, the nonce and the target.
+
+```bash
+glados-pool --listen 0.0.0.0:3334 --sharelog <state>/shares.txt <coins...>
+glados-pool --verify <state>/shares.txt
+```
+
+The verifier needs no pool, no socket and no state -- it reads a line, builds the
+hasher the line names, hashes the header with the nonce and compares against the
+target, using the kernel's own code by `#[path]`. So it runs on a miner's laptop,
+or on a CI runner, or anywhere somebody wants to check you.
+
+Driven: 13 shares from a real session verify and exit 0; change one hex digit of
+one nonce and it prints
+
+    line 1: rig-alpha does NOT meet its target, digest a66682ae67fe...
+    12 share(s) recomputed and met their target, 1 did not, 0 unreadable
+
+and exits 1.
+
+**The audit runs in its own repository**, [IlumCI/glados-pool][gp], on a schedule
+and on demand. It checks out *this* repository and builds `pool/` from it rather
+than holding a copy, because `pool/src/lib.rs` reaches the kernel by `#[path]`
+and a second yespower over there is exactly the drift that arrangement exists to
+prevent. So there is one source of truth and the other repository holds only the
+running and the published record -- which also keeps it small enough for a miner
+to read.
+
+[gp]: https://github.com/IlumCI/glados-pool
+
+Separating them is about blast radius rather than tidiness: the audit repository
+holds no signing keys, needs no `workflows` write, and if its Actions usage were
+ever questioned it would not take this repository's releases, ISOs, `loop/main`
+or the Gödel machine with it.
+
+**It is the audit and not the pool**, and it cannot be the pool: a runner has no
+inbound networking, and share acceptance has to be inline anyway. Which is the
+right half to put somewhere free -- accepting a share is cheap and you do it
+regardless, while independent re-verification is the one thing you structurally
+cannot do for yourself.
+
+Driven on a real runner, both ways. Three shares from a live session verify and
+the run is green; one hex digit of one nonce changed and it goes red, naming the
+share and printing the digest. **The first attempt found the forgery and reported
+success**, because `| tee` makes a pipeline's exit status `tee`'s -- so the fix is
+`set -o pipefail`, and the lesson is that only the negative case could ever have
+shown it.
+
+**It is unbounded, so it is off by default.** About 200 bytes per accepted share,
+forever. Rotate it or publish and truncate per epoch.
+
+### Or hand somebody an ISO that does all of that by itself
+
+A miner-only image: no model, no store, and one activity. It is **32.6 MB**
+against the full ISO's 1.90 GB, because almost all of that is weights, and it
+boots in seconds rather than the minutes a checkpoint costs to load.
+
+```bash
+cargo build --release
+mkdir -p iso-payload
+cat > iso-payload/MINER.TXT <<'TXT'
+pool p.example.com:3334
+worker 0xYOUR_PAYOUT_ADDRESS
+protocol glados
+slices 3
+TXT
+python3 tools/mkiso.py out/miner.iso \
+    --efi target/x86_64-unknown-uefi/release/glados.efi \
+    --payload iso-payload --allow MINER.TXT --no-license
+```
+
+`--no-license` is correct here and is not a way round the gate: that check exists
+because the payload normally carries model weights whose licence has to travel
+with them, and this payload carries no licensed content at all. `--allow` is
+needed because `mkiso.py` places only files `payload/*.txt` names, an allowlist
+rather than a denylist for `eval.rs`'s reason.
+
+Boot it and it says what it is doing before the prompt appears:
+
+    [miner] mining as 0x...beef at 10.0.2.2:3334, 2 slice(s)
+
+**`worker` has no default and the image refuses to mine without one.** At the
+account-free venues the worker name *is* the payout address, so an image that
+booted with a built-in default would mine to whoever owns that default for as
+long as nobody noticed. Without it the machine reaches a prompt and sits there,
+which is the failure that is visible rather than the one that is profitable.
+
+**Nothing in `MINER.TXT` is executed.** Keys are parsed into typed fields and the
+fields act; a line this parser does not know is counted and reported, never
+passed to a shell. That matters because the file is on media anybody can edit
+and it names a machine to connect to -- `update::repairs` makes the same argument
+about the file beside it, and `diag`'s `miner config` section carries eighteen
+claims about it, one of which is that a line reading `rm -rf /` is just one more
+thing not understood.
+
+Driven end to end on a Linux host: the ISO booted under KVM, read its config,
+connected, and the pool logged
+`hello worker=0x...beef agent=glados/1.3.8` followed by accepted shares in two
+disjoint nonce ranges -- which is `slices 2`, each slice owning its own quarter
+of the space.
+
+**What it does not have**, deliberately: no checkpoint, so `ai::init` returns
+early and the eleven-ish model-dependent boot selftest sections do not run. The
+tally still reads green because the *suites* all pass, which is the hazard
+`.github/actions/verify-boot` grew a section-count check for. A miner image is
+the configuration that walks into it by design, so read a green boot on one as
+saying less than a green boot on a full image.
 
 ## What this does not do yet
 

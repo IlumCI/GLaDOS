@@ -23,6 +23,38 @@ wraps it El Torito via tools/mkiso.py, and boots off -cdrom, which has no
 size cap; guest RAM still has to cover the weights, so raise --memory.
 """
 
+# ### Booting this on Linux, which had never been done
+#
+# The firmware search below was written against Windows and Debian and missed
+# Arch entirely -- wrong directory and a different spelling of the same file --
+# so a perfectly ordinary Arch host reached "no UEFI firmware found" with OVMF
+# two directories away. Fixed in `find_firmware`.
+#
+# The recipe, which is the WHPX one from CLAUDE.md with the accelerator
+# changed. KVM is to Linux what WHPX is to Windows and `-cpu host` is what
+# `-cpu max` was for -- without it the guest sees no AVX2 and `train` declines:
+#
+#     cargo build --release
+#     python3 tools/drive.py --no-payload --qemu-extra "-accel kvm -cpu host" \
+#         "diag all"
+#
+# Measured on a 12th Gen i7-12650H with /dev/kvm at 666: boots clean, answers
+# the prompt, and `diag all` reads **68 passed, 0 failed**.
+#
+# **`--no-payload` is not a full verification and the tally does not say so.**
+# With no checkpoint `ai::init` returns early, and the boot prints about
+# sixteen `[selftest]` sections where CLAUDE.md documents twenty-nine. The
+# *suites* still all run -- `diag all` is 68 of 68 including the AI arithmetic
+# ones -- so the green tally is true and narrower than it looks. This is the
+# hazard `.github/actions/verify-boot` grew a section-count-by-name check for,
+# reproduced here rather than read about.
+#
+# And counting those headings is not quite the stale-proof measure CLAUDE.md
+# calls it: a clean boot prints eighteen `[selftest]` lines, of which one is a
+# continuation (`survived int3 -- idt is live.`) and one is `crypto:` a second
+# time. Grep the count and subtract two, or count the colons.
+
+
 import codecs
 import shutil
 import socket
@@ -75,17 +107,39 @@ def find_firmware():
     shares = [Path(find_qemu()).parent / "share"]
     shares += [Path(p) for p in (
         "/usr/share/OVMF",
+        "/usr/share/OVMF/x64",
         "/usr/share/ovmf",
+        # Arch keeps the pair one directory further down than Debian does, and
+        # spells the size differently again -- `/usr/share/ovmf/x64/`, holding
+        # `OVMF_CODE.4m.fd`. Neither the directory nor the name was in this
+        # list, so a perfectly ordinary Arch host reached "no UEFI firmware
+        # found" while the firmware sat two directories away.
+        "/usr/share/ovmf/x64",
         "/usr/share/qemu",
         "/usr/share/edk2/ovmf",
+        "/usr/share/edk2/x64",
         "/usr/share/edk2-ovmf/x64",
     )]
     for share in shares:
-        for name in ("edk2-x86_64-code.fd", "OVMF_CODE.fd", "OVMF_CODE_4M.fd"):
+        # **The 4 MB pair is tried before the 2 MB one.** A host carrying both
+        # wants the larger, and more to the point `OVMF.fd` at the bottom of
+        # this function is a *combined* image whose vars are not writable --
+        # so falling through to it loses the pristine-NVRAM reset this whole
+        # function exists to perform.
+        #
+        # `.4m.fd` and `_4M.fd` are the same firmware under two spellings, one
+        # Arch and one Debian. Listing both is the entire fix; guessing at a
+        # pattern would be a glob that also matches `OVMF_CODE.secboot.4m.fd`,
+        # which is a different firmware that refuses to boot an unsigned image
+        # -- and presents as this kernel not booting rather than as the wrong
+        # file being chosen.
+        for name in ("edk2-x86_64-code.fd", "OVMF_CODE.4m.fd", "OVMF_CODE_4M.fd",
+                     "OVMF_CODE.fd"):
             code = share / name
             if not code.exists():
                 continue
-            for vname in ("edk2-i386-vars.fd", "OVMF_VARS.fd", "OVMF_VARS_4M.fd"):
+            for vname in ("edk2-i386-vars.fd", "OVMF_VARS.4m.fd", "OVMF_VARS_4M.fd",
+                          "OVMF_VARS.fd"):
                 pristine = share / vname
                 if pristine.exists():
                     scratch = ROOT / ".qemu/drive-vars.fd"
@@ -531,6 +585,18 @@ def main():
     no_payload = "--no-payload" in argv
     if no_payload:
         argv.remove("--no-payload")
+    # **`--iso` implies it**, and without this a miner ISO could not be booted at
+    # all: the refusal below insisted on a checkpoint in `out/` for a run whose
+    # boot medium is the ISO and whose `\GLADOS\` came from whatever
+    # `mkiso.py` was given. The staged ESP is not what such a guest reads.
+    #
+    # It also *clears* the staged files rather than merely skipping them, which
+    # is the half that matters here: `.qemu/esp` persists between runs, so a
+    # stale `model.bin` left beside an ISO is a second `\GLADOS\` for the
+    # firmware to find, and which one wins is not a thing to leave to chance.
+    if iso is not None and not no_payload:
+        no_payload = True
+        print("[drive] --iso, so nothing is staged: the image carries its own payload")
     model_given = False
     if "--model" in argv:
         i = argv.index("--model")

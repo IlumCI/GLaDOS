@@ -127,6 +127,15 @@ NAV = [
     ("screenshots/", "Screenshots"),
     ("archive/", "Archive"),
     ("token/", "Token"),
+    # The pool's published share log. Its own tab rather than a link under
+    # Token, because the audience is different: a miner arriving to check
+    # whether their worker's shares are in the record is not the reader the
+    # token page is written for, and `--roster-url` on the pool daemon already
+    # points at `/pool/`. `design/pool.md` calls publishing "the only thing
+    # standing in for trust" -- a non-custodial pool has no wallet to audit, so
+    # this page is what a miner has instead, and it should not be two clicks
+    # into somebody else's section.
+    ("pool/", "Pool"),
 ]
 
 
@@ -272,6 +281,30 @@ def masthead_html(p):
 # per page is how a strip of eight becomes a strip of twenty. Without this the
 # page renders with nothing active, which reads as "you are nowhere".
 UNDER = {"wallet/": "token/"}
+
+# Pages that are deliberately not given the site's chrome, and the reason has to
+# be stronger than "it looked hard" because the default is that every page gets
+# it.
+#
+# `pool/index.html` is the published share log, copied verbatim from
+# `pool/site/index.html`. Its own README makes the argument and it is the right
+# one: "A build step is a thing that can produce a site which does not match its
+# source, and the entire product here is that the published thing can be checked
+# -- so the source you can read is the thing that runs." That page recomputes a
+# digest in the browser to prove a record was not edited. Injecting a masthead
+# into it would mean the file a miner is invited to check is not the file in the
+# repository, which is the one property it exists to have.
+#
+# **It is skipped rather than merely failing to match**, and that distinction is
+# the whole of why this constant exists. `build_chrome` returns `not missed`, so
+# a page with no regions made `--build` exit 1 -- and `site.yml` runs it on a
+# daily schedule, so the effect of dropping this file in was a workflow that
+# failed every night about a page that is correct. A warning that fires on every
+# run is a warning nobody reads.
+#
+# It is still in the sitemap and still reachable from the tab strip, because
+# neither of those edits the file.
+STANDALONE = {"pool/index.html"}
 
 
 def section_of(relpath):
@@ -480,8 +513,11 @@ def current(releases):
 
 def build_chrome(releases):
     rel = current(releases)
-    changed, missed = 0, []
+    changed, missed, skipped = 0, [], 0
     for full, rl in pages():
+        if rl in STANDALONE:
+            skipped += 1
+            continue
         p = prefix_for(rl)
         with open(full, "r", encoding="utf-8") as fh:
             text = orig = fh.read()
@@ -496,7 +532,9 @@ def build_chrome(releases):
             with open(full, "w", encoding="utf-8", newline="\n") as fh:
                 fh.write(text)
             changed += 1
-    print("chrome: %d of %d pages rewritten" % (changed, len(list(pages()))))
+    print("chrome: %d of %d pages rewritten%s"
+          % (changed, len(list(pages())),
+             ", %d left standalone" % skipped if skipped else ""))
     for m in missed:
         print("  no region found -- %s" % m)
     return not missed

@@ -91,37 +91,10 @@ fn parse_coin(spec: &str) -> Result<Coin, String> {
         return Err(format!("{bits} leading bits is a target nothing can meet"));
     }
 
-    let mut parts = algo_s.split('-');
-    let algo = match parts.next().unwrap_or("") {
-        "sha256d" => Algo::Sha256d,
-        "blake2s" => Algo::Blake2s,
-        // No parameters after the name, unlike yespower: N, r and the round
-        // count are the NeoScrypt profile rather than settings, so a chain
-        // varying them would be a different proof of work.
-        "neoscrypt" => Algo::Neoscrypt,
-        "yespower" => {
-            let v = parts.next().unwrap_or("");
-            let n: u32 = parts
-                .next()
-                .and_then(|x| x.parse().ok())
-                .ok_or_else(|| String::from("yespower needs N"))?;
-            let r: u32 = parts
-                .next()
-                .and_then(|x| x.parse().ok())
-                .ok_or_else(|| String::from("yespower needs r"))?;
-            let pers = match parts.next() {
-                Some(h) => Some(unhex(h).ok_or_else(|| String::from("pers is not hex"))?),
-                None => None,
-            };
-            let v10 = match v {
-                "10" => true,
-                "05" => false,
-                _ => return Err(String::from("yespower version is 10 or 05")),
-            };
-            Algo::Yespower { v10, n, r, pers }
-        }
-        other => return Err(format!("no such algorithm '{other}'")),
-    };
+    // One parser, in `record`, because a share record has to spell the
+    // algorithm in exactly this form -- and two parsers for one format is what
+    // `differ.rs` exists to catch elsewhere in this tree.
+    let algo = glados_pool::record::parse_algo(algo_s)?;
 
     Ok(Coin {
         label: String::from(label),
@@ -151,16 +124,50 @@ fn main() {
         // wrong reason on a machine where the port is busy.
         let (rp, rf) = glados_pool::roster::checks();
         println!("[roster] {rp} passed, {rf} failed");
-        std::process::exit(if selftest() && rf == 0 { 0 } else { 1 });
+        // The share record, for the same reason and in the same place: pure
+        // functions before anything binds a port. These are what the
+        // verification job trusts before it trusts a log, and the one that earns
+        // its place is the algorithm spec round-trip -- `Algo::name()` drops
+        // yespower's N and r, so a record written from it would verify against a
+        // different hash and every share would fail for a reason nothing reports.
+        let mut recf = 0;
+        let recs = glados_pool::record::checks();
+        for (good, what) in &recs {
+            println!("{}  {}", if *good { "ok  " } else { "FAIL" }, what);
+            if !*good {
+                recf += 1;
+            }
+        }
+        println!("[record] {} passed, {} failed", recs.len() - recf, recf);
+        std::process::exit(if selftest() && rf == 0 && recf == 0 { 0 } else { 1 });
     }
     if args.iter().any(|a| a == "--bench") {
         bench();
         return;
     }
+    // **The verifier, which is the half a pool operator cannot be trusted with.**
+    // It takes a share log -- the one `--sharelog` writes -- and recomputes every
+    // hash in it with the kernel's own code, reached by `#[path]`. Nothing about
+    // it needs the pool: no socket, no job table, no state. That is what lets it
+    // run somewhere the operator does not control, which is the entire point.
+    //
+    // Exits non-zero on the first disagreement so a CI job fails rather than
+    // printing a wall of text somebody has to read.
+    if let Some(i) = args.iter().position(|a| a == "--verify") {
+        let path = match args.get(i + 1) {
+            Some(p) => p.clone(),
+            None => {
+                eprintln!("--verify wants a share log written by --sharelog");
+                std::process::exit(2);
+            }
+        };
+        std::process::exit(verify_log(&path));
+    }
 
     let mut listen = String::from("0.0.0.0:3334");
     let mut lie = false;
     let mut ledger: Option<String> = None;
+    let mut sharelog: Option<std::path::PathBuf> = None;
     let mut prices: Option<String> = None;
     let mut window: Option<u64> = None;
     let mut max_conns: Option<usize> = None;
@@ -220,6 +227,13 @@ fn main() {
                 Some(w) if w > 0 => window = Some(w),
                 _ => {
                     eprintln!("--window wants a positive amount of work, e.g. 4294967296");
+                    std::process::exit(2);
+                }
+            },
+            "--sharelog" => match it.next() {
+                Some(v) => sharelog = Some(std::path::PathBuf::from(v)),
+                None => {
+                    eprintln!("--sharelog wants a path to append recomputable share records to");
                     std::process::exit(2);
                 }
             },
@@ -336,6 +350,11 @@ fn main() {
     }
 
     let mut built = Pool::new(coins);
+    if let Some(p) = &sharelog {
+        println!("[pool] recording every accepted share to {}", p.display());
+        println!("       'glados-pool --verify {}' recomputes them all", p.display());
+        built.sharelog = Some(p.clone());
+    }
     if let Some(w) = window {
         built.set_window(w);
     }
@@ -858,6 +877,69 @@ fn rename_check(addr: std::net::SocketAddr) -> bool {
 /// share validated against the wrong header -- and none of those shows up in a
 /// codec round-trip, because a round-trip uses one encoder against its own
 /// decoder rather than against a socket and a second process's view of a job.
+/// Recompute every share in a log. Answers a process exit code.
+///
+/// The whole of what a verification server does, and it is deliberately this
+/// small: read a line, build the hasher the line names, hash the header with the
+/// nonce, compare against the target. There is no pool here and no network, so
+/// the same binary runs on a laptop, a runner, or a miner's machine checking the
+/// operator's arithmetic.
+fn verify_log(path: &str) -> i32 {
+    use glados_pool::record::Record;
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("cannot read {path}: {e}");
+            return 2;
+        }
+    };
+    let mut ok = 0u64;
+    let mut bad = 0u64;
+    let mut broken = 0u64;
+    for (n, line) in text.lines().enumerate() {
+        match Record::parse(line) {
+            Ok(None) => continue,
+            Err(e) => {
+                println!("line {}: not a record -- {}", n + 1, e);
+                broken += 1;
+            }
+            Ok(Some(r)) => match r.check() {
+                None => {
+                    // The record names parameters no hasher will build. That is
+                    // the operator having written it wrongly, not a miner having
+                    // cheated, and the two must not be counted together.
+                    println!("line {}: {} is not a hashable set of parameters",
+                             n + 1, glados_pool::record::algo_spec(&r.algo));
+                    broken += 1;
+                }
+                Some((met, digest)) => {
+                    if met {
+                        ok += 1;
+                    } else {
+                        // Printed in full, because this is the only interesting
+                        // line in the file: a share the operator credited that
+                        // does not meet the target they published.
+                        print!("line {}: {} does NOT meet its target, digest ",
+                               n + 1, r.worker);
+                        for b in digest.iter().rev() {
+                            print!("{b:02x}");
+                        }
+                        println!();
+                        bad += 1;
+                    }
+                }
+            },
+        }
+    }
+    println!("{ok} share(s) recomputed and met their target, {bad} did not, {broken} unreadable");
+    if bad == 0 && broken == 0 {
+        println!("every share in {path} is arithmetic anybody can repeat");
+        0
+    } else {
+        1
+    }
+}
+
 fn selftest() -> bool {
     use glados_pool::json::Json;
     use glados_pool::mine::algo::Hasher;

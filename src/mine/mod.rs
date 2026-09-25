@@ -19,10 +19,12 @@
 
 pub mod algo;
 pub mod blake2s;
+pub mod boot;
 pub mod client;
 pub mod ev;
 pub mod hash;
 pub mod proto;
+pub mod screen;
 pub mod header;
 pub mod neoscrypt;
 pub mod stratum;

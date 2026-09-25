@@ -79,10 +79,24 @@ PIDFILE="${STATE}/run-pool.pid"
 # 4.295e9, and Bitcoin misses that by 21,432x, so btc's PPLNS degenerates to
 # paying the most recent shares whatever is passed here. Sized for the coin the
 # dial can actually serve, and the payout line says what it is worth on each.
+# **This script is behind `run-pool.sh` in two ways that are named here rather
+# than fixed, because the WireGuard path is not the one being deployed and a
+# blind port of the other script's machinery is how a supervisor acquires a bug
+# nobody drove.** First, its log rotation is still the version called once per
+# loop iteration -- which is once per pool *exit*, so the healthier the pool the
+# less often its log is checked and one that never crashes never rotates at all.
+# `run-pool.sh` splits that into a rotate-between-runs and a `watch_log` beside
+# the live pool, and explains why `mv` is the wrong verb on an open descriptor.
+# Second, it has no roster refresher, so the `--roster` below is a file nothing
+# here keeps current. Take both from `run-pool.sh` when this path matters.
 set -- \
     --listen 10.66.66.1:3334 \
     --ledger "${STATE}/ledger.json" \
+    --roster "${STATE}/roster.json" \
+    --roster-url https://glados.aperture.institute/pool/ \
     --cpu-percent 25 \
+    --share-seconds 45 \
+    --max-connections 900 \
     --window 1125899906842624 \
     btc:sha256d:24:bitcoin \
     ftc:neoscrypt:20:feathercoin
