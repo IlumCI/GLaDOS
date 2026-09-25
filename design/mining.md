@@ -884,11 +884,22 @@ for that reason rather than because they are pretty.
 
     sha256d            1.643 us/hash      608,642 /s per core
     blake2s            0.484 us/hash    2,066,115 /s per core
-    yespower 2 MiB  1804.191 us/hash          554 /s per core
-    yespower 8 MiB  7025.057 us/hash          142 /s per core
+    yespower 2 MiB  1647 us/hash              607 /s per core
+    yespower 8 MiB  6548 us/hash              153 /s per core
 
-So 554 H/s per core, and 8,864 H/s if all sixteen threads mine yespower at
-2 MiB.
+**Settled readings, first discarded.** The first reading after a build is the
+host's page cache and it is roughly double: three consecutive runs of the same
+binary read 2031, 1233 and 1042 us. `CLAUDE.md` records this for `video bench`
+and it was walked into here anyway, so an earlier version of this section quoted
+1804 us / 554 H/s and 7025 us / 142 H/s. Those were contaminated first samples.
+
+**And a per-core figure must not be multiplied by the core count.** yespower is
+memory-hard, so sixteen 8 MiB working sets thrash a 24 MiB L3. cpuminer-opt on
+this CPU measures 862 H/s at sixteen threads against ~285 on one: **three times
+the throughput for sixteen times the threads**, and the per-thread rate collapses
+81%. An earlier version of this section multiplied 554 by 16, called it 8,864 H/s
+and derived revenue from it -- ten times too high, and it made a dead algorithm
+look merely bad.
 
 ### What that earns, and the ceiling nobody had noticed
 
@@ -902,15 +913,18 @@ zpool, 2026-09-25, `actual_last24h`, at BTC $83,767:
 | **yespower** | **49,988** | **$3/day** |
 | yespowerr16 | 58,550 | $6/day |
 
-**8,864 H/s is 17.7% of zpool's entire yespower network.** One laptop. The
+**862 H/s is 2.0% of zpool's entire yespower network.** One laptop. The
 algorithm pays three dollars a day in total, so a miner taking *all* of it
 earns three dollars a day -- and no amount of hashrate, hardware or free
 electricity moves that number. `glados-pool.service` is configured for
 `bitzeny:yespower-10-2048-8`, which is this.
 
-Cross-checked rather than trusted: 17.7% of $3/day is $0.53, and the
-per-MH/s arithmetic independently gives $0.46/day at a 1% pool fee. Those
-agree, so the unit convention is right *for yespower*.
+**And the "cross-check" this section used to claim was circular.** Share of
+network times total payout, and per-MH/s times hashrate, are the same two API
+fields rearranged -- they cannot disagree, so their agreeing proved nothing. What
+is actually pinned is the *share*: 862 H/s against a 43,772 H/s network is 2.0%,
+and that is unit-free. The dollars are not pinned, and the plausibility test
+below is the reason to distrust them.
 
 **It is not right for every algo, and that trap is worth stating.** Reading
 `actual_last24h` as BTC per MH/s per day uniformly gives sha256 a total payout
@@ -957,8 +971,10 @@ operator's savings, it comes out of work the pool was paid for.
 
 zpool pays in BTC on Bitcoin's chain. An epoch is funded in WETH on chain
 4663. So real revenue reaches an epoch only as payout -> exchange -> bridge,
-and every hop has a fixed fee. At $0.46/day it takes **66 days** to accumulate
-$30, which is the smallest batch worth bridging at all.
+and every hop has a fixed fee. At roughly $0.04/day for yespower it would take
+*years* to accumulate the $30 that is the smallest batch worth bridging, which is
+another way of saying the algorithm has to change before the bridge is even a
+question.
 
 So the honest arrangement separates two things that were being conflated: the
 ledger says *who earned what*, and the treasury says *where the money comes
@@ -969,44 +985,36 @@ payout contract can be deployed and used before any bridge has ever run.
 
 ### One operator's electricity is not every miner's
 
-This operator pays nothing for power, so 8,864 H/s of yespower is $0.46/day of
+This operator pays nothing for power, so yespower's 862 H/s is about $0.04/day of
 pure profit and the earlier "underwater" finding does not apply to them. It
 still applies to everybody else: a miner paying $0.30/kWh spends about
 $0.58/day to run sixteen threads. The pool's attractiveness depends on *their*
 arithmetic, not on the operator's, and a pool whose only algorithm pays $3/day
 across the whole network has nothing to offer either of them.
 
-### Correction: the 8,864 H/s above is wrong, and so is the revenue from it
+### The two measurement errors this section was written with
 
-The section above multiplies a single-core 554 H/s by sixteen threads. **That is
-invalid for a memory-hard algorithm and it is the exact error this file warns
-about elsewhere**, committed here a few hours after writing the warning.
+Both are corrected in place above rather than left as an appendix, because a
+figure somebody has to read three sections to correct is a figure that will be
+quoted wrong. They are named here because each is a repeat of something this tree
+already had written down.
 
-Measured natively against cpuminer-opt 26.1, same CPU, same parameters
-(`yespower N=2048 R=32`, an 8 MiB working set):
+**The first reading after a build is the page cache**, not the code. Every figure
+here is now the settled reading with the first discarded. `CLAUDE.md` says this
+about `video bench` in as many words.
 
-    threads   total        per thread
-    1         ~285 H/s     285
-    16         862 H/s      54        <- 81% collapse
-
-Sixteen threads buy **three times** the throughput, not sixteen. Sixteen 8 MiB
-working sets against a 24 MiB L3 thrash, and the per-thread rate falls off a
-cliff. So the yespower line should read **862 H/s and about $0.04/day**, not
-8,864 H/s and $0.46 -- a figure ten times too high, and it made a dead algorithm
-look merely bad.
-
-**The comparison is native on both sides**, which is what makes it usable:
-`glados-pool` shares `src/mine/yespower.rs` by `#[path]`, so benchmarking the
-host binary measures the kernel's own implementation with no emulator in the
-way. Every WHPX and Windows-QEMU figure elsewhere in this tree is stale for a
-different reason and should not be compared against these.
+**A per-core rate times the core count is not a throughput**, for anything
+memory-hard. cpuminer-opt measures it directly on this CPU: 285 H/s on one
+thread, 862 on sixteen. This file warns about small-sample extrapolation in four
+other places and then did it.
 
 ### Where this kernel's advantage actually is, and what it is worth
 
 Like-for-like on one core at identical parameters:
 
     cpuminer-opt, hand-tuned AVX2    ~285 H/s
-    src/mine/yespower.rs, scalar      142 H/s
+    src/mine/yespower.rs, scalar      153 H/s
+    src/mine/yespower.rs, SSE2 lane   248 H/s   <- since the lane was vectorised
 
 `grep -cE 'avx|sse|simd|_mm_|target_feature' src/mine/yespower.rs` answers
 **0**. So the gap is 2.0x and it is entirely the inner loop; 2x is what scalar
