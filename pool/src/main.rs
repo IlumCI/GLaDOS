@@ -614,15 +614,39 @@ fn bench() {
     use glados_pool::mine::algo::{Algo, Hasher};
     use std::time::Instant;
 
+    // **The version is in every name here, and it was not.** Two rows read
+    // "yespower 2 MiB" and "yespower 8 MiB" while both were `v10: true`, so a
+    // reader comparing the 2 MiB row against cpuminer-opt's `-a yescrypt` was
+    // comparing yespower 1.0 against yespower 0.5 -- different functions at the
+    // same N and r, and the 0.5 one does six pwxform rounds where 1.0 does three.
+    // That comparison was made in this project and the wrong conclusion drawn
+    // from it, so the labels now carry what cpuminer-opt would call each row.
+    //
+    // 0.5 rows first, because those are the ones worth money: zpool's `yescrypt`
+    // and `yescryptr8` are both 0.5, and `yespower` is worth $3/day across its
+    // whole network.
     let algos = [
         ("sha256d", Algo::Sha256d),
         ("blake2s", Algo::Blake2s),
         (
-            "yespower 2 MiB",
+            "yescrypt   0.5 n2048 r8",
+            Algo::Yespower { v10: false, n: 2048, r: 8, pers: None },
+        ),
+        (
+            "yescryptr8 0.5 n2048 r8",
+            Algo::Yespower {
+                v10: false,
+                n: 2048,
+                r: 8,
+                pers: Some(b"Client Key".to_vec()),
+            },
+        ),
+        (
+            "yespower   1.0 n2048 r8",
             Algo::Yespower { v10: true, n: 2048, r: 8, pers: None },
         ),
         (
-            "yespower 8 MiB",
+            "yespower   1.0 n2048 r32",
             Algo::Yespower { v10: true, n: 2048, r: 32, pers: None },
         ),
     ];
