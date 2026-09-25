@@ -271,10 +271,27 @@ static HASH_SINCE: AtomicU64 = AtomicU64::new(0);
 /// boot asking for eight gets whatever the table can spare and says so.
 ///
 /// The nonce stride divides by this, so raising it narrows each slice's range:
-/// at eight that is 536,870,912 nonces each, which a slice at a quarter of a
-/// megahash exhausts in half an hour against jobs that change every thirty
+/// at sixteen that is 268,435,456 nonces each, which a slice at a quarter of a
+/// megahash exhausts in eighteen minutes against jobs that change every thirty
 /// seconds. Not a constraint, but it is the thing that would become one.
-pub const MAX_SLICES: usize = 8;
+///
+/// **Sixteen, and the number came from a measurement rather than from the task
+/// table.** Eight was chosen as what the table could spare; what the table can
+/// spare turned out not to be the binding constraint. Measured under KVM with
+/// sixteen cores, `mine sweep 8` on yescrypt: eight slices reach seven cores,
+/// because `set_slices` keeps core 0 clear for the shell and the socket task, so
+/// a sixteen-thread machine was mining with seven execution units while
+/// cpuminer-opt used all sixteen. Per unit this kernel was *ahead* -- 256 H/s
+/// against 236, adjusting for the pool's `opt-level = 3` against the kernel's
+/// `2` -- and behind overall purely on count.
+///
+/// `MAX_CPUS` is sixteen, so there is nothing to gain past it: a seventeenth
+/// slice would share a core with another and the sweep reports that as
+/// `shared`. And `tasks` on a sixteen-core boot with eight slices reads **11 of
+/// 24**, so the slots exist -- `set_slices` still clamps to what `task::spawn`
+/// actually gives it and reports what it got, so this stays a ceiling rather
+/// than a promise.
+pub const MAX_SLICES: usize = 16;
 
 /// How many slices are wanted. Slices above this park.
 static SLICES: AtomicU32 = AtomicU32::new(1);
