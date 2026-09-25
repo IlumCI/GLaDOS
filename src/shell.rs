@@ -8435,7 +8435,47 @@ fn mine_cmd(rest: &str) {
                     console::set_color(LTGRAY);
                 }
             }
+            // **The control, and the sweep had none.** Every ratio above is
+            // normalised to the one-slice point, so that point's noise becomes
+            // the curve's shape -- and it is noisy: two consecutive runs of this
+            // command on one build read 181 and 101 H/s for one slice, a factor
+            // of 1.8, which turned 375% at seven slices into 569% from *lower*
+            // absolute throughput. A lower baseline reads as better scaling.
+            //
+            // So the first point is taken again at the end. It is the same
+            // measurement of the same thing, so anything it moved by is drift --
+            // the host, the clocks, a warming cache -- and it bounds what the
+            // rest of the curve can be trusted to mean. This is `video bench`'s
+            // rule arriving where it was missing: read the control first and the
+            // figures second.
+            let (_, _, h2, t2) = client::sweep_point(1, ms);
+            let again = if t2 > 0 { h2 * 1000 / t2 } else { 0 };
             client::sweep_end(saved);
+            if first > 0 && again > 0 {
+                let drift = if again > first {
+                    (again - first) * 100 / first
+                } else {
+                    (first - again) * 100 / first
+                };
+                let hot = again < first;
+                kprintln!(
+                    "  control  one slice again: {} H/s against {} at the start, {}{}%",
+                    again,
+                    first,
+                    if hot { "-" } else { "+" },
+                    drift
+                );
+                if drift > 10 {
+                    console::set_color(YELLOW);
+                    kprintln!("  the control moved {}%, so the curve above is not a measurement of", drift);
+                    kprintln!("  slice count -- it is that drift with a slice count printed beside it");
+                    console::set_color(LTGRAY);
+                } else {
+                    console::set_color(LTGREEN);
+                    kprintln!("  the control held to {}%, so the shape above is about slices", drift);
+                    console::set_color(LTGRAY);
+                }
+            }
             virtual_caveat();
             kprintln!("  the number this is for is L3 contention, which an emulator does not");
             kprintln!("  model faithfully. Run it on the GF63 before believing the shape.");
