@@ -180,6 +180,25 @@ impl Yespower {
         let bw = 32 * r as usize; // words in one 128r-byte block
         let vw = bw.checked_mul(n as usize)?;
         let pairs = (1usize << swidth) * PWX_SIMPLE;
+
+        // **The bound `pwx_lane` reads unchecked, proven where it is decided.**
+        //
+        // A lane reads four words at `base + (v & smask) / 8 * 2`, so the
+        // largest reachable index is `max_base + smask / 4 + 3`. The bases are
+        // the S-box origins, which rotate on 1.0 and do not on 0.5, so the
+        // worst case is `s2` there and `s1` here.
+        //
+        // It is exact at both versions' settings -- 2048 against a 2048-word
+        // table, and 24576 against 24576, with **no words of slack** -- which
+        // is precisely why it is checked. A change to `swidth`, `sboxes` or
+        // `PWX_SIMPLE` that looked harmless would take the hot loop past the
+        // end of the allocation, and in ring 0 that is not a panic.
+        let smask = ((1u32 << swidth) - 1) * PWX_SIMPLE as u32 * 8;
+        let max_base = if version == Version::V0_5 { pairs * 2 } else { pairs * 4 };
+        if max_base + smask as usize / 4 + 4 > sbytes / 4 {
+            return None;
+        }
+
         Some(Yespower {
             version,
             n,
@@ -187,7 +206,7 @@ impl Yespower {
             rounds,
             pwx_rounds,
             swidth,
-            smask: (((1u32 << swidth) - 1) * PWX_SIMPLE as u32 * 8),
+            smask,
             s: vec![0u32; sbytes / 4],
             s0: 0,
             s1: pairs * 2,
@@ -209,6 +228,86 @@ impl Yespower {
         (self.n, self.r)
     }
 
+/// One pwxform lane: two 64-bit multiply-add-xors over four consecutive words.
+///
+/// **This is the whole of yespower's hot loop.** `blockmix_pwxform` makes `2r`
+/// calls to `pwxform` against one `salsa20`, and each `pwxform` runs
+/// `pwx_rounds * PWX_GATHER` lanes -- 96 lanes per call at the 0.5 settings
+/// against 8 salsa double-rounds, so this function is where the time is and
+/// salsa is noise. Measured before it was written rather than assumed: the call
+/// counts are in the ratio, and `glados-pool --bench` prices one hash.
+///
+/// The mapping onto SSE2 is exact rather than approximate, which is why it can
+/// replace the scalar loop instead of sitting beside it as an approximation:
+///
+///   - `x[j*4 .. j*4+4]` is four `u32`, which is one 128-bit register holding
+///     two 64-bit lanes -- `[lo0|hi0, lo1|hi1]`, little-endian.
+///   - `_mm_mul_epu32(a, b)` multiplies `a[31:0] * b[31:0]` into lane 0 and
+///     `a[95:64] * b[95:64]` into lane 1. Those two source fields are exactly
+///     the `lo` words, and `_mm_srli_epi64(xv, 32)` puts the two `hi` words in
+///     the same two fields. So one instruction does both of the scalar loop's
+///     `hi.wrapping_mul(lo)`, and the discarded top half is discarded the same
+///     way.
+///   - `s[p0 .. p0+4]` is `[(s[p0+1]<<32)|s[p0], (s[p0+3]<<32)|s[p0+2]]`, which
+///     is precisely the two `sa` values the scalar loop assembles by hand, so
+///     the add and the xor are one `_mm_add_epi64` and one `_mm_xor_si128`.
+///
+/// **The published vectors are the gate, not a scalar comparison.** All eight
+/// of upstream's `TESTS-OK` digests run through this function in
+/// `glados-pool --selftest`, across both versions and four `N`/`r` pairs, so a
+/// wrong lane cannot pass. External ground truth beats self-consistency, which
+/// is why there is no second implementation here to drift from the first.
+///
+/// SSE2 needs no feature gate: it is baseline on `x86_64` and Rust enables it
+/// for every such target, so there is no runtime detection to get wrong -- the
+/// mistake `CLAUDE.md` records about an AVX2 kernel gated on the wrong feature.
+///
+/// # Safety of the unchecked reads
+/// `Yespower::new` refuses any parameters where the largest reachable S-box
+/// read could pass the end of `s`, so `p0 + 3` and `p1 + 3` are in range by
+/// construction. That bound is exact at both versions' settings -- zero words
+/// of slack -- which is why it is proven once where the constants are fixed
+/// rather than tested in a loop that runs ninety-six times per hash. `j < 4`
+/// and `PWX_WORDS == 16`, so the `x` access is statically in range.
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+fn pwx_lane(x: &mut [u32; PWX_WORDS], j: usize, s: &[u32], p0: usize, p1: usize) {
+    use core::arch::x86_64::{
+        _mm_add_epi64, _mm_loadu_si128, _mm_mul_epu32, _mm_srli_epi64, _mm_storeu_si128,
+        _mm_xor_si128, __m128i,
+    };
+    unsafe {
+        let xp = x.as_mut_ptr().add(j * 4) as *mut __m128i;
+        let xv = _mm_loadu_si128(xp);
+        let sa = _mm_loadu_si128(s.as_ptr().add(p0) as *const __m128i);
+        let sb = _mm_loadu_si128(s.as_ptr().add(p1) as *const __m128i);
+        let prod = _mm_mul_epu32(xv, _mm_srli_epi64(xv, 32));
+        _mm_storeu_si128(xp, _mm_xor_si128(_mm_add_epi64(prod, sa), sb));
+    }
+}
+
+/// The same lane, for a target with no SSE2.
+///
+/// Kept because `pool/.cargo/config.toml` carries an aarch64 entry against the
+/// day the host is an ARM box, and a `cfg` that only compiled on x86_64 would
+/// break that build rather than run slower on it. This is the original scalar
+/// body, moved rather than rewritten.
+#[cfg(not(target_arch = "x86_64"))]
+#[inline(always)]
+fn pwx_lane(x: &mut [u32; PWX_WORDS], j: usize, s: &[u32], p0: usize, p1: usize) {
+    for k in 0..PWX_SIMPLE {
+        let sa = ((s[p0 + k * 2 + 1] as u64) << 32) + s[p0 + k * 2] as u64;
+        let sb = ((s[p1 + k * 2 + 1] as u64) << 32) + s[p1 + k * 2] as u64;
+        let lo = x[j * 4 + k * 2] as u64;
+        let hi = x[j * 4 + k * 2 + 1] as u64;
+        let mut v = hi.wrapping_mul(lo);
+        v = v.wrapping_add(sa);
+        v ^= sb;
+        x[j * 4 + k * 2] = v as u32;
+        x[j * 4 + k * 2 + 1] = (v >> 32) as u32;
+    }
+}
+
     fn pwxform(&mut self, x: &mut [u32; PWX_WORDS]) {
         let (s0, s1) = (self.s0, self.s1);
         let smask = self.smask as usize;
@@ -219,19 +318,9 @@ impl Yespower {
                 let xh = x[j * 4 + 1] as usize;
                 let p0 = s0 + (xl & smask) / 8 * 2;
                 let p1 = s1 + (xh & smask) / 8 * 2;
-                for k in 0..PWX_SIMPLE {
-                    let sa = ((self.s[p0 + k * 2 + 1] as u64) << 32) + self.s[p0 + k * 2] as u64;
-                    let sb = ((self.s[p1 + k * 2 + 1] as u64) << 32) + self.s[p1 + k * 2] as u64;
-                    let lo = x[j * 4 + k * 2] as u64;
-                    let hi = x[j * 4 + k * 2 + 1] as u64;
-                    // Wrapping throughout: this is a 64-bit multiply of two
-                    // 32-bit halves and it is *meant* to discard the top.
-                    let mut v = hi.wrapping_mul(lo);
-                    v = v.wrapping_add(sa);
-                    v ^= sb;
-                    x[j * 4 + k * 2] = v as u32;
-                    x[j * 4 + k * 2 + 1] = (v >> 32) as u32;
-                }
+                // Wrapping throughout: this is a 64-bit multiply of two
+                // 32-bit halves and it is *meant* to discard the top.
+                Self::pwx_lane(x, j, &self.s, p0, p1);
                 // 1.0 writes back into the S-boxes as it goes, which is what
                 // makes it data-dependent in a way 0.5 is not. The asymmetry
                 // between the two branches is upstream's: the odd one advances
