@@ -18,7 +18,32 @@ use crate::sync::Racy;
 use alloc::alloc::{alloc, Layout};
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-pub const MAX_TASKS: usize = 24;
+/// **Forty, and the arithmetic is now visible where it was hidden by a bug.**
+///
+/// Until `COUNT` was fixed to start at one, the application processors' idle
+/// tasks were being overwritten by everything spawned afterwards, so the table
+/// looked as though it held twenty-four slots for work. It does not: on a
+/// sixteen-core machine fifteen of them are idle tasks that exist so a core has
+/// somewhere to stand, and they are permanent.
+///
+/// The worst case this has to fit, counted rather than estimated:
+///
+///     1   the boot thread, slot 0
+///     15  one idle task per application processor, at MAX_CPUS = 16
+///     2   clock and compositor
+///     16  mining slices, at MAX_SLICES = 16
+///     3   the resident mind, the agent and the socket task
+///     --
+///     37
+///
+/// Forty leaves three. `adopt_idle` and `spawn` both refuse past the end and say
+/// so, so overrunning this is a smaller pool or a missing painter rather than a
+/// corrupted table -- which is what it was.
+///
+/// The cost is the static `TASKS` array and nothing else: `adopt_idle` takes a
+/// stack that already exists, and only `spawn` allocates `STACK_SIZE`, so the
+/// sixteen slices are 1 MiB of stacks whether this is 24 or 40.
+pub const MAX_TASKS: usize = 40;
 const STACK_SIZE: usize = 64 * 1024;
 
 // Defined in assembly rather than as a `#[naked]` fn: this must have exactly
@@ -269,7 +294,25 @@ static PENDING: [AtomicUsize; MAX_CPUS] = [IDLE_SLOT; MAX_CPUS];
 /// joined is not given tasks, so bringing one up is a single store rather than
 /// a state machine.
 static JOINED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(1);
-static COUNT: AtomicUsize = AtomicUsize::new(0);
+/// Slot 0 is the boot thread's, always, and that is why this starts at one.
+///
+/// **It started at zero and the task table was being corrupted every boot.**
+/// `init_smp` runs before `task::init`, because `percpu::arm` happens there and
+/// the selftests need per-core landing pads -- so an application processor
+/// calling `adopt_idle` reached `COUNT.fetch_add` while the count was still
+/// zero and **took slot 0**. `task::init` then wrote the shell over it and
+/// called `COUNT.store(1)`, which discarded every slot the cores had claimed:
+/// `clock` and `comp` were handed 1 and 2, the mining slices 3 onward, and each
+/// one overwrote an idle task that a core's `CURRENT[cpu]` still pointed at.
+///
+/// Measured before it was fixed, on a sixteen-core boot: `smp` reported
+/// `16 scheduling (mask 0xffff), 0 idle task(s)`. Every core believed it was
+/// scheduling and not one idle task survived, so several cores had `CURRENT`
+/// naming slots that held the shell, the compositor or a slice -- and
+/// `schedule` writes `t[cur].state` unconditionally, so two cores could claim
+/// one task. It presented as nine tasks reading `running` at once and seven
+/// mining slices stuck `ready` for ever while `tasks` showed them as healthy.
+static COUNT: AtomicUsize = AtomicUsize::new(1);
 static SWITCHES: AtomicU64 = AtomicU64::new(0);
 static ENABLED: AtomicUsize = AtomicUsize::new(0);
 
@@ -296,7 +339,11 @@ pub fn init(name: &'static str) {
             root: 0,
         };
     }
-    COUNT.store(1, Ordering::Release);
+    // **`fetch_max` and not `store`.** By the time this runs the application
+    // processors have already claimed their own slots, and storing 1 here threw
+    // that away -- see `COUNT`. What this function owns is slot 0 and nothing
+    // else, so all it may assert about the count is that it is at least one.
+    COUNT.fetch_max(1, Ordering::AcqRel);
     CURRENT[0].store(0, Ordering::Release);
 }
 
@@ -511,6 +558,25 @@ pub fn join(cpu: usize) {
         return;
     }
     JOINED.fetch_or(1 << cpu, Ordering::AcqRel);
+}
+
+/// Which cores are actually taking scheduling decisions, as a bitmask.
+///
+/// **Nothing printed this, and it is the one fact that explains a slice which
+/// never hashes.** A core joins only if `adopt_idle` found it a task slot, so a
+/// core can answer at boot, be counted by `smp::online`, and still never run
+/// anything -- and a task pinned to it sits `Ready` forever while `tasks` shows
+/// it as perfectly healthy. `online()` and this are different questions and were
+/// being read as one.
+pub fn joined_mask() -> u32 {
+    JOINED.load(Ordering::Acquire)
+}
+
+/// How many tasks are idle tasks, which is how many cores found a slot.
+pub fn idle_count() -> usize {
+    let t = TASKS.lock_irq();
+    let n = COUNT.load(Ordering::Acquire);
+    t.iter().take(n).filter(|x| x.idle).count()
 }
 
 fn joined(cpu: usize) -> bool {

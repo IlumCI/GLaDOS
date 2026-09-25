@@ -6915,6 +6915,29 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
         "smp" => {
             let n = crate::smp::online();
             kprintln!("  {} core(s) online", n);
+            // **Online and scheduling are different questions.** A core answers
+            // the startup handshake before it tries to adopt an idle task, and it
+            // only joins the scheduler if that succeeded -- so a core can be
+            // counted here and still never run anything, with a task pinned to it
+            // sitting `Ready` for good. That is invisible from `tasks`, which
+            // shows such a task as healthy, and it is what a slice that reports as
+            // spawned and never hashes looks like.
+            let mask = crate::task::joined_mask();
+            let idle = crate::task::idle_count();
+            kprintln!(
+                "  {} scheduling (mask {:#x}), {} idle task(s) -- {} of {} cores took a slot",
+                mask.count_ones(),
+                mask,
+                idle,
+                idle + 1,
+                n
+            );
+            if mask.count_ones() as usize != n {
+                console::set_color(YELLOW);
+                kprintln!("  {} core(s) answered at boot and never joined the scheduler", n - mask.count_ones() as usize);
+                kprintln!("  a task pinned to one of those will stay 'ready' for ever");
+                console::set_color(LTGRAY);
+            }
             if rest.starts_with("bench") {
                 // Runs on one core too, and reports the same number twice.
                 // That is the measurement worth having on its own: a machine
