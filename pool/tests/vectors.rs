@@ -123,6 +123,10 @@ const YESPOWER: &[(bool, u32, u32, Option<&[u8]>, &str)] = &[
 
 #[test]
 fn yespower_matches_every_upstream_vector() {
+    vectors_under("sse2");
+}
+
+fn vectors_under(path: &str) {
     let src: [u8; 80] = core::array::from_fn(|i| (i as u32 * 3) as u8);
     for (v10, n, r, pers, want) in YESPOWER {
         let algo = Algo::Yespower {
@@ -138,7 +142,7 @@ fn yespower_matches_every_upstream_vector() {
         // The nonce lives at offset 76 of the input, so hashing `src` with the
         // nonce it already contains has to reproduce upstream's digest.
         let nonce = u32::from_le_bytes([src[76], src[77], src[78], src[79]]);
-        assert_eq!(h.hash(&src, nonce), h32(want), "v10={v10} n={n} r={r}");
+        assert_eq!(h.hash(&src, nonce), h32(want), "{path}: v10={v10} n={n} r={r}");
     }
 }
 
@@ -488,10 +492,26 @@ fn contention_follows_the_bound_and_not_the_algorithm() {
     let yes = Algo::Yespower { v10: true, n: 2048, r: 8, pers: None };
     assert_eq!(Algo::Sha256d.bound(), Bound::Arithmetic);
     assert_eq!(Algo::Blake2s.bound(), Bound::Arithmetic);
-    assert_eq!(yes.bound(), Bound::Memory);
+    // **Latency, not Memory, and the distinction is worth a fifth of the hash
+    // rate.** `work::cache_budget` caps a `Memory` algorithm's slice count so the
+    // working sets fit the cache, which is right for NeoScrypt and backwards for
+    // yespower: a dependent chain of random reads wants *more* slices than cores,
+    // because one slice's stall is another's turn. Capping it held a sixteen-core
+    // machine to seven slices and cost 2.09x of peak throughput.
+    assert_eq!(yes.bound(), Bound::Latency);
+    assert_eq!(Algo::Neoscrypt.bound(), Bound::Memory);
 
     assert!(Algo::Sha256d.contends_with(&Algo::Blake2s));
     assert!(!Algo::Sha256d.contends_with(&yes));
+    // **Different bounds, and they still contend**, which `contends_with` got
+    // wrong the moment `Bound` grew a third variant: it compared the bounds for
+    // equality, so yespower and NeoScrypt stopped contending. They wait on
+    // different properties of one memory system and still queue behind each
+    // other in it.
+    assert!(yes.contends_with(&Algo::Neoscrypt));
+    assert!(Algo::Neoscrypt.contends_with(&yes));
+    // And neither of them contends with arithmetic work.
+    assert!(!Algo::Neoscrypt.contends_with(&Algo::Blake2s));
     // Reflexive, or a slot would not contend with a second copy of itself --
     // which is the commonest case a scheduler actually meets.
     assert!(Algo::Sha256d.contends_with(&Algo::Sha256d));

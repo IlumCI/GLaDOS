@@ -308,10 +308,88 @@ fn pwx_lane(x: &mut [u32; PWX_WORDS], j: usize, s: &[u32], p0: usize, p1: usize)
     }
 }
 
+    /// All four lanes held in registers for the whole call, at the 0.5 settings.
+    ///
+    /// **`pwx_lane` reloads and restores `x` from memory every lane, every
+    /// round**, and the address for the next round is formed from the word it
+    /// just stored -- so the dependency chain runs through store-to-load
+    /// forwarding, about five cycles, twenty-four times per call. Sixteen words
+    /// is four registers and six rounds need no memory at all: four loads in,
+    /// four stores out, instead of forty-eight of each.
+    ///
+    /// The uop count barely moves -- two extracts replace a load and a store --
+    /// so this is a bet on the chain and not on throughput. That is the right bet
+    /// here, and the evidence is what AVX2 did: batching two lanes cut uops by a
+    /// third and ran **15% slower**, because `vinserti128` landed between the
+    /// S-box load and the add and lengthened the same chain. Two SMT threads on
+    /// one physical core give only 1.21x, which is what latency bound *on
+    /// dependent L1 loads* looks like -- the second thread contends for the very
+    /// ports the first is waiting on, so SMT cannot hide it either.
+    ///
+    /// 0.5 only, for `pwx_lane_pair`'s reason inverted: 1.0 writes back into the
+    /// S-boxes mid-round, so its lanes are not independent and its `w` cursor has
+    /// to advance in order. 1.0 keeps the per-lane path.
+    ///
+    /// `_mm_extract_epi32` would be one uop instead of two here and needs SSE4.1,
+    /// which is not baseline on x86_64 the way SSE2 is. `_mm_srli_si128` then
+    /// `_mm_cvtsi128_si32` is the SSE2 spelling and costs one extra uop off the
+    /// critical path.
+    ///
+    /// # Safety
+    /// Bounds are `new`'s invariant, as for `pwx_lane`.
+    #[cfg(target_arch = "x86_64")]
+    fn pwxform_v05_regs(&mut self, x: &mut [u32; PWX_WORDS]) {
+        use core::arch::x86_64::{
+            _mm_add_epi64, _mm_cvtsi128_si32, _mm_loadu_si128, _mm_mul_epu32, _mm_srli_epi64,
+            _mm_srli_si128, _mm_storeu_si128, _mm_xor_si128, __m128i,
+        };
+        let (s0, s1) = (self.s0, self.s1);
+        let smask = self.smask as usize;
+        let sp = self.s.as_ptr();
+        let rounds = self.pwx_rounds;
+        unsafe {
+            let xp = x.as_mut_ptr() as *mut __m128i;
+            let mut l0 = _mm_loadu_si128(xp);
+            let mut l1 = _mm_loadu_si128(xp.add(1));
+            let mut l2 = _mm_loadu_si128(xp.add(2));
+            let mut l3 = _mm_loadu_si128(xp.add(3));
+            macro_rules! step {
+                ($v:ident) => {{
+                    let xl = _mm_cvtsi128_si32($v) as u32 as usize;
+                    let xh = _mm_cvtsi128_si32(_mm_srli_si128($v, 4)) as u32 as usize;
+                    let p0 = s0 + (xl & smask) / 8 * 2;
+                    let p1 = s1 + (xh & smask) / 8 * 2;
+                    let sa = _mm_loadu_si128(sp.add(p0) as *const __m128i);
+                    let sb = _mm_loadu_si128(sp.add(p1) as *const __m128i);
+                    let prod = _mm_mul_epu32($v, _mm_srli_epi64($v, 32));
+                    $v = _mm_xor_si128(_mm_add_epi64(prod, sa), sb);
+                }};
+            }
+            for _ in 0..rounds {
+                step!(l0);
+                step!(l1);
+                step!(l2);
+                step!(l3);
+            }
+            _mm_storeu_si128(xp, l0);
+            _mm_storeu_si128(xp.add(1), l1);
+            _mm_storeu_si128(xp.add(2), l2);
+            _mm_storeu_si128(xp.add(3), l3);
+        }
+    }
+
     fn pwxform(&mut self, x: &mut [u32; PWX_WORDS]) {
         let (s0, s1) = (self.s0, self.s1);
         let smask = self.smask as usize;
         let mut w = self.w;
+
+        // 0.5 has no S-box writeback, so the whole call fits in registers.
+        #[cfg(target_arch = "x86_64")]
+        if self.version == Version::V0_5 {
+            self.pwxform_v05_regs(x);
+            return;
+        }
+
         for i in 0..self.pwx_rounds {
             for j in 0..PWX_GATHER {
                 let xl = x[j * 4] as usize;

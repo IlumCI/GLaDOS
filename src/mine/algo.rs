@@ -223,7 +223,22 @@ impl Algo {
     /// which silicon it landed on. Keeping that out of here is what stops this
     /// predicate quietly becoming a scheduler.
     pub fn contends_with(&self, other: &Algo) -> bool {
-        self.bound() == other.bound()
+        // **Not `==` on the bound, which is what this was.** That read correctly
+        // while `Bound` had two variants and broke silently when it gained a
+        // third: yespower moved to `Latency` and stopped contending with
+        // NeoScrypt's `Memory`, which is false. They wait on *different
+        // properties* of the memory system -- one on how much fits, the other on
+        // how long a dependent read takes -- and they still queue behind each
+        // other in the same caches.
+        //
+        // What the predicate is actually asking is whether two algorithms want
+        // the same part of the machine. There are two parts here: the execution
+        // units and the memory system.
+        fn waits_on_memory(b: Bound) -> bool {
+            matches!(b, Bound::Memory | Bound::Latency)
+        }
+        let (a, b) = (self.bound(), other.bound());
+        (waits_on_memory(a) && waits_on_memory(b)) || a == b
     }
 
     /// A human-readable parameter line for the report.
