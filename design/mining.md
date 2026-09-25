@@ -975,3 +975,77 @@ still applies to everybody else: a miner paying $0.30/kWh spends about
 $0.58/day to run sixteen threads. The pool's attractiveness depends on *their*
 arithmetic, not on the operator's, and a pool whose only algorithm pays $3/day
 across the whole network has nothing to offer either of them.
+
+### Correction: the 8,864 H/s above is wrong, and so is the revenue from it
+
+The section above multiplies a single-core 554 H/s by sixteen threads. **That is
+invalid for a memory-hard algorithm and it is the exact error this file warns
+about elsewhere**, committed here a few hours after writing the warning.
+
+Measured natively against cpuminer-opt 26.1, same CPU, same parameters
+(`yespower N=2048 R=32`, an 8 MiB working set):
+
+    threads   total        per thread
+    1         ~285 H/s     285
+    16         862 H/s      54        <- 81% collapse
+
+Sixteen threads buy **three times** the throughput, not sixteen. Sixteen 8 MiB
+working sets against a 24 MiB L3 thrash, and the per-thread rate falls off a
+cliff. So the yespower line should read **862 H/s and about $0.04/day**, not
+8,864 H/s and $0.46 -- a figure ten times too high, and it made a dead algorithm
+look merely bad.
+
+**The comparison is native on both sides**, which is what makes it usable:
+`glados-pool` shares `src/mine/yespower.rs` by `#[path]`, so benchmarking the
+host binary measures the kernel's own implementation with no emulator in the
+way. Every WHPX and Windows-QEMU figure elsewhere in this tree is stale for a
+different reason and should not be compared against these.
+
+### Where this kernel's advantage actually is, and what it is worth
+
+Like-for-like on one core at identical parameters:
+
+    cpuminer-opt, hand-tuned AVX2    ~285 H/s
+    src/mine/yespower.rs, scalar      142 H/s
+
+`grep -cE 'avx|sse|simd|_mm_|target_feature' src/mine/yespower.rs` answers
+**0**. So the gap is 2.0x and it is entirely the inner loop; 2x is what scalar
+against AVX2 costs on a salsa20/pwxform kernel, which means the implementation
+is sound rather than sloppy.
+
+The advantage is not in the inner loop and never was. It is that **the
+bottleneck at thread scale is cache, and this kernel has levers Linux does
+not**: `work::cache_budget` already sizes slices to the cache instead of running
+N thrashing threads, which cpuminer-opt has no equivalent for; the identity map
+is 2 MiB pages, so an 8 MiB random-access working set costs almost no TLB
+pressure where a Linux process without hugepages pays continuously; nothing else
+on the machine evicts L3; and there are no speculation mitigations and no
+preemption inside a hash.
+
+Sized honestly: three uncontended slices at AVX2 speed is about 855 H/s, and
+TLB plus exclusivity gains put the ceiling near **940-1,110 H/s against
+cpuminer's 862**. That is **tens of per cent, not multiples**, and none of it is
+reachable before the inner loop is vectorised. An order-of-magnitude claim for
+ring 0 alone would be false.
+
+### The three levers, ranked by what they are actually worth
+
+Measured on this CPU at 16 threads, against the per-kH/s rates above:
+
+| lever | worth |
+|---|---|
+| **choosing the algorithm** | **~1,300x** |
+| vectorising the inner loop | 2x |
+| the ring-0 advantages | ~1.2x |
+
+    minotaurx     4,031 H/s    ~$57/day
+    yescrypt      3,740 H/s    ~$46/day
+    yespowerR16     698 H/s    ~$0.07/day
+    yespower        862 H/s    ~$0.04/day   <- what this tree implements
+
+So the order of work is settled by arithmetic rather than by preference:
+implement minotaurx and yescrypt first, vectorise second, and the ring-0 levers
+are the last few tens of per cent on top. `rinhash` is the one candidate with no
+reading -- cpuminer-opt knows the name but produced no rate here -- and it is
+also the highest per-kH/s figure in the table, so it is worth one more attempt
+before the list is called final.
