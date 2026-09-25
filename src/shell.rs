@@ -7765,6 +7765,31 @@ fn parse_algo<'a>(w: &mut impl Iterator<Item = &'a str>) -> Option<crate::mine::
         // profile, so a chain that changed them would be a different proof of
         // work rather than this one configured differently.
         "neoscrypt" => Some(Algo::Neoscrypt),
+        // **The four names the world calls "yescrypt", which are all this.**
+        //
+        // The comment below refuses presets because one would be "a number this
+        // tree would be asserting about somebody else's network without having
+        // read their source". These four are the exception that satisfies it
+        // rather than overrides it: the parameters are read straight out of
+        // cpuminer-opt's `register_yescrypt*_algo`, whose own comment reads
+        // "Legacy Yescrypt (yespower v0.5)", and every one is checked against
+        // upstream yespower's published vectors in `TESTS-OK` by
+        // `glados-pool --selftest`. So the source was read and the bytes agree.
+        //
+        // They are input spellings only. `algo_spec` still renders the
+        // canonical `yespower-05-2048-8-<pers hex>`, so nothing stored ever
+        // depends on this table and a record cannot be invalidated by editing
+        // it.
+        "yescrypt" => Some(Algo::Yespower { v10: false, n: 2048, r: 8, pers: None }),
+        "yescryptr8" => Some(Algo::Yespower {
+            v10: false, n: 2048, r: 8, pers: Some(b"Client Key".to_vec()),
+        }),
+        "yescryptr16" => Some(Algo::Yespower {
+            v10: false, n: 4096, r: 16, pers: Some(b"Client Key".to_vec()),
+        }),
+        "yescryptr32" => Some(Algo::Yespower {
+            v10: false, n: 4096, r: 32, pers: Some(b"WaviBanana".to_vec()),
+        }),
         "yespower" => {
             // Explicit parameters and no per-coin preset table. A preset is a
             // number this tree would be asserting about somebody else's network
@@ -7785,7 +7810,11 @@ fn parse_algo<'a>(w: &mut impl Iterator<Item = &'a str>) -> Option<crate::mine::
             }
         }
         other => {
-            kprintln!("  no such algorithm '{}' -- try sha256d, blake2s, neoscrypt or yespower", other);
+            kprintln!(
+                "  no such algorithm '{}' -- try sha256d, blake2s, neoscrypt, yespower,",
+                other
+            );
+            kprintln!("  yescrypt, yescryptr8, yescryptr16 or yescryptr32");
             None
         }
     }

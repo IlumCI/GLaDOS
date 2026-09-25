@@ -46,6 +46,19 @@ pub fn parse_algo(spec: &str) -> Result<Algo, String> {
         // count are the NeoScrypt profile rather than settings, so a chain
         // varying them would be a different proof of work.
         "neoscrypt" => Ok(Algo::Neoscrypt),
+        // The four aliases, byte-verified against TESTS-OK in `--selftest`.
+        // Input spellings only: `algo_spec` renders the canonical form, so the
+        // share log never carries an alias and cannot be invalidated by one.
+        "yescrypt" => Ok(Algo::Yespower { v10: false, n: 2048, r: 8, pers: None }),
+        "yescryptr8" => Ok(Algo::Yespower {
+            v10: false, n: 2048, r: 8, pers: Some(b"Client Key".to_vec()),
+        }),
+        "yescryptr16" => Ok(Algo::Yespower {
+            v10: false, n: 4096, r: 16, pers: Some(b"Client Key".to_vec()),
+        }),
+        "yescryptr32" => Ok(Algo::Yespower {
+            v10: false, n: 4096, r: 32, pers: Some(b"WaviBanana".to_vec()),
+        }),
         "yespower" => {
             let v = parts.next().unwrap_or("");
             let n: u32 = parts
