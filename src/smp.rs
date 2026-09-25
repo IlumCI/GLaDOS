@@ -217,6 +217,9 @@ extern "C" fn glados_ap_main() -> ! {
     let cpu = this_cpu() as usize;
     crate::cpu::gdt::adopt(cpu);
     crate::cpu::percpu::adopt(cpu);
+    // Here because leaf 0x1A describes whoever executes it, and this is the only
+    // code that ever runs on this core with a known index.
+    record_core_kind(cpu);
     crate::cpu::idt::load_this_core();
     crate::dev::lapic::init_this_core();
 
@@ -532,6 +535,59 @@ fn map_cpu(lapic_id: u8, index: u8) {
     unsafe { LAPIC_TO_CPU.get()[lapic_id as usize] = index };
 }
 
+/// What kind of core each index is, as reported *by that core*.
+///
+/// **One entry per core because leaf 0x1A only describes the core reading it.**
+/// The bootstrap processor cannot answer for the others, so each one writes its
+/// own during bring-up, before it ever schedules anything.
+///
+/// `0` means nothing has been recorded, which is also what a non-hybrid part
+/// leaves here. A reader that cannot tell P from E must treat every core as
+/// equal, which is the truthful response and the behaviour this kernel had
+/// before the table existed.
+static CORE_KIND: [core::sync::atomic::AtomicU8; crate::task::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU8::new(0) }; crate::task::MAX_CPUS];
+
+const KIND_P: u8 = 1;
+const KIND_E: u8 = 2;
+
+fn record_core_kind(cpu: usize) {
+    if cpu >= crate::task::MAX_CPUS {
+        return;
+    }
+    let v = match crate::cpu::core_kind() {
+        crate::cpu::CoreKind::Performance => KIND_P,
+        crate::cpu::CoreKind::Efficiency => KIND_E,
+        crate::cpu::CoreKind::Unknown => 0,
+    };
+    CORE_KIND[cpu].store(v, Ordering::Release);
+}
+
+/// The performance cores, as a bitmask, or `None` if this part is not hybrid.
+///
+/// `None` and not an empty mask, because "every core is the same" and "no core is
+/// fast" are different facts and a caller has to tell them apart: the first means
+/// place work anywhere, the second would mean place it nowhere.
+pub fn performance_cores() -> Option<u32> {
+    let mut mask = 0u32;
+    let mut saw_any = false;
+    for (i, k) in CORE_KIND.iter().enumerate().take(crate::task::MAX_CPUS) {
+        match k.load(Ordering::Acquire) {
+            KIND_P => {
+                mask |= 1 << i;
+                saw_any = true;
+            }
+            KIND_E => saw_any = true,
+            _ => {}
+        }
+    }
+    if saw_any {
+        Some(mask)
+    } else {
+        None
+    }
+}
+
 pub fn online() -> usize {
     ONLINE.load(Ordering::SeqCst) + 1
 }
@@ -543,6 +599,8 @@ pub fn online() -> usize {
 /// core has picked its stack up, which costs a few milliseconds once at boot
 /// and removes the only race in the bring-up path.
 pub fn init(acpi: &crate::acpi::Acpi) -> usize {
+    // Core 0 answers for itself, the same way every other core will.
+    record_core_kind(0);
     let start = addr_of!(ap_tramp_start) as u64;
     let end = addr_of!(ap_tramp_end) as u64;
     let params_off = addr_of!(ap_tramp_params) as u64 - start;

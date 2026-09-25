@@ -290,6 +290,12 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     out.extend(stratum_checks());
     out.extend(ev_checks());
     out.extend(yespower_checks());
+    // **`work::checks` had no caller anywhere in the tree.** It saves and
+    // restores the coin table so it can run on a mining machine, which is the
+    // care something written to be run takes -- and nothing ran it, so every
+    // claim it makes about slot assignment, `slot_for` and the cache budget was
+    // dead. Found by adding a claim to it and watching `diag mine` not print it.
+    out.extend(work::checks());
     out
 }
 

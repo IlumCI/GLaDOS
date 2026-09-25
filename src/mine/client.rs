@@ -336,6 +336,97 @@ pub fn spawned_slices() -> u32 {
 /// the task table is full -- and saying so is the point, since the alternative
 /// is a sweep that reports a flat curve because half its slices were never
 /// created.
+/// Which core the `nth` slice goes on, best first.
+///
+/// **A hybrid part's cores are not interchangeable and round-robin treated them
+/// as though they were.** On this i7-12650H six cores are performance cores at
+/// 2300 MHz with SMT and four are efficiency cores at 1700 with none, and
+/// `glados-pool --bench` shows what that costs: left unpinned it reads 850 H/s or
+/// 432, bimodally, depending on which kind it landed on. Handing slice four an
+/// efficiency core while a performance core sits idle is giving away half a
+/// slice, and `cpuminer -t N` cannot express the difference at all -- it asks the
+/// host scheduler for N threads and takes what it is given.
+///
+/// The order is: performance cores, then efficiency cores, then core 0. Core 0 is
+/// last for the reason it always was -- the shell, the socket task and the clock
+/// live there, so a slice on it is the one that has to share -- and it is *in* the
+/// list rather than excluded, because on a machine with sixteen slices and sixteen
+/// cores refusing to use one of them is a sixteenth of the hash rate thrown away.
+///
+/// `performance_cores` answers `None` on a part that is not hybrid, and then this
+/// is exactly the round-robin it replaced. That is deliberate: the fallback is the
+/// old behaviour rather than a guess, so a machine this cannot describe loses
+/// nothing.
+fn slice_core(nth: usize) -> usize {
+    let order = slice_order(crate::smp::online(), crate::smp::performance_cores());
+    order[nth % order.len()]
+}
+
+/// The order itself, pure, so it can be asserted without a hybrid machine.
+///
+/// **QEMU does not expose leaf 0x1A**, so a guest sees a non-hybrid part and the
+/// preference never engages -- which is the safe fallback and also means the
+/// effect cannot be measured here at all. What *can* be checked anywhere is the
+/// decision, so it is separated from the two lookups that need a machine, the way
+/// `update::decide` and `code::locate` are. `diag mine` walks every case.
+fn slice_order(cores: usize, perf: Option<u32>) -> alloc::vec::Vec<usize> {
+    if cores <= 1 {
+        return alloc::vec![0];
+    }
+    match perf {
+        Some(mask) => {
+            let p = (1..cores).filter(|&c| mask & (1 << c) != 0);
+            let e = (1..cores).filter(|&c| mask & (1 << c) == 0);
+            p.chain(e).chain(core::iter::once(0)).collect()
+        }
+        // Not hybrid, or too old to say: every core is the same kind, so this is
+        // the plain round-robin over 1.. with core 0 last.
+        None => (1..cores).chain(core::iter::once(0)).collect(),
+    }
+}
+
+/// What `diag mine` asserts about placement, with no machine involved.
+pub fn placement_checks() -> alloc::vec::Vec<(&'static str, bool)> {
+    let mut out: alloc::vec::Vec<(&'static str, bool)> = alloc::vec::Vec::new();
+    let mut claim = |what: &'static str, ok: bool| out.push((what, ok));
+
+    // The shape this part actually has: cores 1..5 performance, 6..9 efficiency,
+    // core 0 performance but reserved for the shell.
+    let hybrid = Some(0b11_1111u32);
+    let o = slice_order(10, hybrid);
+    claim(
+        "performance cores come before efficiency ones",
+        o[..5] == [1, 2, 3, 4, 5],
+    );
+    claim("then the efficiency cores", o[5..9] == [6, 7, 8, 9]);
+    claim("and core 0 is last, because the shell lives there", o[9] == 0);
+    claim("every core appears, so none is thrown away", o.len() == 10);
+    claim(
+        "and none appears twice",
+        (0..10).all(|c| o.iter().filter(|&&x| x == c).count() == 1),
+    );
+
+    // A part that cannot be described loses nothing: this is the round-robin it
+    // had before, which is the point of the fallback being the old behaviour.
+    let flat = slice_order(10, None);
+    claim(
+        "a non-hybrid part keeps the plain order",
+        flat == alloc::vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 0],
+    );
+
+    // Single core: there is nowhere else to be.
+    claim("one core places everything on core 0", slice_order(1, None) == alloc::vec![0]);
+    claim("and so does none", slice_order(0, hybrid) == alloc::vec![0]);
+
+    // Wrapping is by the order's length, not by the core count, or a slice past
+    // the end would land on whatever index arithmetic produced rather than on the
+    // best remaining core.
+    let o2 = slice_order(4, Some(0b0100));
+    claim("the best core is chosen first even when it is not the lowest", o2[0] == 2);
+    claim("and the rest follow in order", o2 == alloc::vec![2, 1, 3, 0]);
+    out
+}
+
 pub fn set_slices(n: u32) -> u32 {
     let n = n.clamp(1, MAX_SLICES as u32);
     while SPAWNED_SLICES.load(Ordering::Relaxed) < n {
@@ -373,8 +464,7 @@ pub fn set_slices(n: u32) -> u32 {
         // that was audited. A machine with one core gets core 0 and behaves
         // exactly as it did.
         let nth = SPAWNED_SLICES.load(Ordering::Relaxed) as usize;
-        let cores = crate::smp::online();
-        let cpu = if cores > 1 { 1 + (nth % (cores - 1)) } else { 0 };
+        let cpu = slice_core(nth);
         match crate::task::spawn_on("mine slice", mine_task, cpu) {
             Some(_) => {
                 SPAWNED_SLICES.fetch_add(1, Ordering::Relaxed);

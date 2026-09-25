@@ -501,6 +501,9 @@ pub fn fixture_template(seed: u8) -> Template {
 pub fn checks() -> Vec<(&'static str, bool)> {
     let mut out: Vec<(&'static str, bool)> = Vec::new();
 
+    // Placement first, because it needs nothing set up and nothing torn down.
+    out.extend(super::client::placement_checks());
+
     // Saved and restored, because `diag` may run on a machine that is mining.
     // The templates are not saved: a job is re-sent within seconds by any live
     // pool, and copying one here would mean this suite carried a second way to

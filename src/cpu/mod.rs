@@ -352,6 +352,51 @@ pub fn hypervisor_name() -> Option<alloc::string::String> {
     Some(raw)
 }
 
+/// Whether this core is a performance core or an efficiency one.
+///
+/// **Asked on the core it describes, and that is the whole difficulty.** Leaf
+/// 0x1A reports the type of the core *executing* it, so a single call on the
+/// bootstrap processor answers for one core out of sixteen and says nothing about
+/// the rest. `smp` records it per core during bring-up for that reason.
+///
+/// Gated twice before the read. The leaf has to exist -- `cpuid(0,0).eax` is the
+/// highest basic leaf, and asking for one past it returns the highest leaf's data
+/// rather than zero, which would decode as a plausible core type. And
+/// `CPUID.07H:EDX[15]` is the hybrid bit: a part that is not hybrid has no 0x1A
+/// to report and every core on it is the same kind, so `Unknown` there is the
+/// truthful answer rather than a failure.
+///
+/// Validated against the host's own topology before being trusted: on this
+/// i7-12650H, cpus 0-11 read 0x40 and sit on six cores of two threads at 2300
+/// MHz, and cpus 12-15 read 0x20 and sit on four single-threaded cores at 1700.
+/// The decode agrees with `lscpu` on all sixteen.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CoreKind {
+    /// Intel calls this "Core". Wide, SMT, the high clock.
+    Performance,
+    /// Intel calls this "Atom". Narrower, no SMT, and on this part a 1700 MHz
+    /// ceiling against a P-core's 2300 -- so roughly half the hash rate, which is
+    /// the bimodality `glados-pool --bench` shows when it is left unpinned.
+    Efficiency,
+    /// Not a hybrid part, or too old to say. Every core is then the same kind and
+    /// there is nothing to prefer.
+    Unknown,
+}
+
+pub fn core_kind() -> CoreKind {
+    if cpuid(0, 0)[0] < 0x1A {
+        return CoreKind::Unknown;
+    }
+    if cpuid(7, 0)[3] & (1 << 15) == 0 {
+        return CoreKind::Unknown;
+    }
+    match cpuid(0x1A, 0)[0] >> 24 {
+        0x40 => CoreKind::Performance,
+        0x20 => CoreKind::Efficiency,
+        _ => CoreKind::Unknown,
+    }
+}
+
 pub fn cpuid(leaf: u32, sub: u32) -> [u32; 4] {
     let eax: u32;
     let ebx_slot: u64;

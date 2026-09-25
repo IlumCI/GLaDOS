@@ -6922,6 +6922,24 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             // sitting `Ready` for good. That is invisible from `tasks`, which
             // shows such a task as healthy, and it is what a slice that reports as
             // spawned and never hashes looks like.
+            // **Hybrid topology, because on such a part the cores are not
+            // interchangeable and nothing said so.** A slice on an efficiency
+            // core is worth about half one on a performance core -- 1700 MHz
+            // against 2300 on this part, and narrower -- so `mine slices` places
+            // performance cores first. `None` means not hybrid, where every core
+            // is the same kind and there is nothing to prefer.
+            match crate::smp::performance_cores() {
+                Some(pmask) => {
+                    let p = pmask.count_ones() as usize;
+                    kprintln!(
+                        "  hybrid: {} performance core(s) (mask {:#x}), {} efficiency",
+                        p,
+                        pmask,
+                        n.saturating_sub(p)
+                    );
+                }
+                None => kprintln!("  not a hybrid part, or too old to say -- every core alike"),
+            }
             let mask = crate::task::joined_mask();
             let idle = crate::task::idle_count();
             kprintln!(
