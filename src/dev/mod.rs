@@ -14,8 +14,6 @@ pub mod rtc;
 pub mod mouse;
 pub mod rtl8168;
 pub mod rndis;
-pub mod rtl8188eu;
-pub mod rtl8188eu_tables;
 pub mod battery;
 pub mod ec;
 pub mod usbhid;

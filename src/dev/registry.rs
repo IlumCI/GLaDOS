@@ -486,14 +486,14 @@ pub static TABLE: &[Entry] = &[
         //
         // What is left is the sequence that uses those pieces on the wire,
         // and then `impl Radio`, above which everything is done.
-        support: Support::Partial("rtl8188eu", "chip comes up and its tables apply; the on-wire sequence and impl Radio are left"),
+        support: Support::Known("the driver was removed when its test hardware died; it never carried a frame, and it was the tree's only GPL-2.0 code"),
     },
     Entry {
         bus: Bus::Usb,
         rule: Match::Ids(0x2357, RTL8188EU_IDS_TPLINK),
         role: Role::Wireless,
         what: "TP-Link RTL8188EU wireless dongle",
-        support: Support::Partial("rtl8188eu", "chip comes up and its tables apply; the on-wire sequence and impl Radio are left"),
+        support: Support::Known("the driver was removed when its test hardware died; it never carried a frame, and it was the tree's only GPL-2.0 code"),
     },
     Entry {
         bus: Bus::Usb,
@@ -1011,12 +1011,22 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     // case that made an id list necessary in the first place.
     let tplink = Ident::of_usb(0x2357, 0x010C, 0xFF, 0xFF, 0xFF);
     out.push((
-        "the TP-Link badge on a Realtek chip still finds the Realtek driver",
-        lookup(&tplink).and_then(|e| e.support.driver()) == Some("rtl8188eu"),
+        "the TP-Link badge on a Realtek chip still finds the Realtek row",
+        lookup(&tplink).is_some(),
+    ));
+    // **It reported `Partial` and now reports `Known`**, which is the honest
+    // change: `Partial` means identified with something behind it, and there is
+    // nothing behind it any more. The row stays because the registry's job is to
+    // name what is missing -- deleting it would make an unsupported dongle look
+    // like an unknown one, and `what is missing` is the most useful half of
+    // `devices`.
+    out.push((
+        "and it is reported as known rather than driven, because there is no driver",
+        matches!(lookup(&tplink).map(|e| &e.support), Some(Support::Known(..))),
     ));
     out.push((
-        "and it is reported as partial, because it cannot carry a frame",
-        matches!(lookup(&tplink).map(|e| &e.support), Some(Support::Partial(..))),
+        "and it names no driver, so nothing can claim to drive it",
+        lookup(&tplink).and_then(|e| e.support.driver()).is_none(),
     ));
 
     // NVMe is matched by programming interface, so an SSD nobody has heard of

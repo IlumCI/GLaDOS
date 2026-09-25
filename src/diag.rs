@@ -435,17 +435,12 @@ fn wifi_selftest() -> bool {
     use crate::kprintln;
     let mut ok = true;
     let mut n = 0usize;
-    // Two drivers, one suite, because they answer the same question from
-    // opposite ends: rtl8188eu is one chip identified by vendor id, and rndis
-    // is an interface class that covers every phone that speaks it. The second
-    // is the one that gets an arbitrary machine onto a network.
-    for (what, good) in crate::dev::rtl8188eu::init::checks() {
-        n += 1;
-        if !good {
-            kprintln!("    FAIL: {}", what);
-            ok = false;
-        }
-    }
+    // **This was two drivers and is now one.** `rtl8188eu` was the other half --
+    // one chip identified by vendor id -- and it went when its test hardware
+    // died, taking the tree's only GPL-2.0 file with it. RNDIS is the half that
+    // matters anyway: an interface class rather than a chip, covering every phone
+    // that speaks it, and so the one that gets an arbitrary machine onto a
+    // network without a cable.
     for (what, good) in crate::dev::rndis::checks() {
         n += 1;
         if !good {
