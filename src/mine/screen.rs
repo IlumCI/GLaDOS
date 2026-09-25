@@ -247,10 +247,29 @@ fn frame() -> Vec<(u8, String)> {
     );
 
     // ---- what it is working on -----------------------------------------
-    push(console::LTCYAN, rule(w, "COINS"));
+    //
+    // **The operator's coin label is deliberately not here, and it is not a
+    // secret either.** Two separate facts, and conflating them would be a
+    // claim a miner can disprove in one command.
+    //
+    // It is absent because with an auto-switching upstream there is no stable
+    // coin to name: the upstream picks whichever chain on this algorithm pays
+    // best at that moment, so the label in `Coin` is an operator-side slot
+    // name for the ledger and `distribute.py`, not a description of what this
+    // slice is hashing right now. Printing it would be telling the miner
+    // something that is not true of the job in front of them.
+    //
+    // It is **not** concealment, because concealment is impossible here:
+    // `Template.header` is the chain's real 80-byte block header and bytes
+    // 4..36 are its previous-block hash. Anyone who dumps it and pastes that
+    // into a block explorer knows the chain in a minute, and they must be given
+    // it -- a share is only valid because it hashes the genuine header. So this
+    // shows the algorithm, which is the thing that is actually true and stable
+    // for the length of a job.
+    push(console::LTCYAN, rule(w, "WORK"));
     push(
         console::LTGRAY,
-        String::from("  slot  coin         algorithm             slices  rate\n"),
+        String::from("  slot  algorithm                      slices  rate\n"),
     );
     for i in 0..super::work::MAX_COINS {
         let g = super::work::coin(i);
@@ -258,7 +277,7 @@ fn frame() -> Vec<(u8, String)> {
             drop(g);
             continue;
         };
-        let (label, detail, has_job) = (c.label.clone(), c.algo.detail(), c.template.is_some());
+        let (detail, has_job) = (c.algo.detail(), c.template.is_some());
         drop(g);
         let on = super::work::slices_on(i);
         let (sh, sms, _) = super::work::rate(i);
@@ -274,10 +293,9 @@ fn frame() -> Vec<(u8, String)> {
         push(
             if on > 0 { console::WHITE } else { console::LTGRAY },
             format!(
-                "  {:<5} {:<12} {:<21} {:<7} {}\n",
+                "  {:<5} {:<30} {:<7} {}\n",
                 i,
-                trunc(&label, 12),
-                trunc(&detail, 21),
+                trunc(&detail, 30),
                 on,
                 srate
             ),
