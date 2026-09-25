@@ -142,6 +142,46 @@ fn yespower_matches_every_upstream_vector() {
     }
 }
 
+/// The four names the world calls "yescrypt", checked against the table above.
+///
+/// zpool and cpuminer-opt both use these spellings, and every one of them is
+/// `yespower` 0.5 with different parameters -- cpuminer's own
+/// `register_yescrypt_algo` is commented "Legacy Yescrypt (yespower v0.5)". So
+/// `parse_algo` expands them rather than implementing anything, and what has to
+/// be true is that the expansion lands on parameters `YESPOWER` already pins.
+///
+/// **Checked against the vectors, not against itself.** The parameters are
+/// typed into two files -- `shell::parse_algo` and `record::parse_algo` -- and a
+/// digit wrong in either hashes a different function perfectly correctly and has
+/// every share rejected, which is the exact failure `shell::parse_algo` refuses
+/// presets to avoid. Looking the alias up in a second copy of the same table
+/// would prove nothing; reproducing upstream's digest proves it.
+#[test]
+fn every_yescrypt_alias_expands_to_a_verified_vector() {
+    let src: [u8; 80] = core::array::from_fn(|i| (i as u32 * 3) as u8);
+    let nonce = u32::from_le_bytes([src[76], src[77], src[78], src[79]]);
+
+    // (alias, the vector it must reproduce)
+    let aliases: &[(&str, &str)] = &[
+        ("yescrypt", "5ecbd8e8d7c90baed4bbf8916a1225dcc3c65f5c9165bae81cdde3cffad128e8"),
+        ("yescryptr8", "a59fec4c4fdda16e3b1405adda66d525b68e7cadfcfe6ac066c7ad118cd80590"),
+        ("yescryptr16", "927e72d0ded3d80475473f40f1743c67289d453d5242d4f55af4e325e06699c5"),
+        ("yescryptr32", "3ae05abb3c5cf6f75415a92554c98d50e38ec9552cfa78373616f480b24e559f"),
+    ];
+    for (spec, want) in aliases {
+        let algo = glados_pool::record::parse_algo(spec)
+            .unwrap_or_else(|e| panic!("the alias '{spec}' does not parse: {e}"));
+        // Every expected digest must also be a row of YESPOWER, or this test is
+        // checking an alias against a constant nobody else believes.
+        assert!(
+            YESPOWER.iter().any(|(_, _, _, _, v)| v == want),
+            "the alias '{spec}' expects a digest that is not an upstream vector"
+        );
+        let mut h = Hasher::new(&algo, &src).expect("alias expands to refused parameters");
+        assert_eq!(h.hash(&src, nonce), h32(want), "alias {spec}");
+    }
+}
+
 /// A digest whose *value* is the number this hex spells.
 ///
 /// `below_target` reads a digest little-endian, because a block hash is a
