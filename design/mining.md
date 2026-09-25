@@ -866,3 +866,112 @@ story -- market-rate payouts in the mined coin, plus $GLADOS and RWA on top,
 funded by the operator's fee rather than by passing miner proceeds through --
 is an offer that still needs somebody to hear it. That is not a technical
 problem and nothing in this document addresses it.
+
+## Measured against a live upstream, 2026-09-25 -- and yespower is a dead end
+
+Everything above points at yespower. The figures below were read off zpool's
+own API and off this machine, and they say the algorithm this tree implements
+is worth **three dollars a day across every miner on it**.
+
+None of this was written down before, which is why it was measured twice. An
+earlier session reached "roughly one times underwater" and left it in a
+transcript, so a later one re-derived it from scratch. The numbers are here now
+for that reason rather than because they are pretty.
+
+### What this machine does
+
+`glados-pool --bench`, best of nine, on the i7-12650H (10 cores, 16 threads):
+
+    sha256d            1.643 us/hash      608,642 /s per core
+    blake2s            0.484 us/hash    2,066,115 /s per core
+    yespower 2 MiB  1804.191 us/hash          554 /s per core
+    yespower 8 MiB  7025.057 us/hash          142 /s per core
+
+So 554 H/s per core, and 8,864 H/s if all sixteen threads mine yespower at
+2 MiB.
+
+### What that earns, and the ceiling nobody had noticed
+
+zpool, 2026-09-25, `actual_last24h`, at BTC $83,767:
+
+| algo | network hashrate | pays **all** miners |
+|---|---|---|
+| equihash | 2,692,831 | ~$80,900/day |
+| yescrypt | 1,745,879 | ~$21,600/day |
+| equihash192 | 33,281 | ~$503/day |
+| **yespower** | **49,988** | **$3/day** |
+| yespowerr16 | 58,550 | $6/day |
+
+**8,864 H/s is 17.7% of zpool's entire yespower network.** One laptop. The
+algorithm pays three dollars a day in total, so a miner taking *all* of it
+earns three dollars a day -- and no amount of hashrate, hardware or free
+electricity moves that number. `glados-pool.service` is configured for
+`bitzeny:yespower-10-2048-8`, which is this.
+
+Cross-checked rather than trusted: 17.7% of $3/day is $0.53, and the
+per-MH/s arithmetic independently gives $0.46/day at a 1% pool fee. Those
+agree, so the unit convention is right *for yespower*.
+
+**It is not right for every algo, and that trap is worth stating.** Reading
+`actual_last24h` as BTC per MH/s per day uniformly gives sha256 a total payout
+of $143 *trillion* per day. The field's unit tracks each algorithm's own
+natural hashrate scale, so cross-algo ratios from this API mean nothing until
+each one is pinned separately. The four rows above are ordered by implied
+total, which is the comparison that survives; treat the absolute dollars for
+anything but yespower as unconfirmed.
+
+### Supporting an algorithm means verifying it, not mining it fast
+
+The pool hashes **once per share** -- `--bench` says so in its own output -- so
+the cost of accepting a new algorithm is a correct verifier and nothing else.
+A 1,804 us validation is already fine at any share rate an operator would set.
+Miners bring their own software; cpuminer-opt speaks yescrypt.
+
+That makes yescrypt the cheap move rather than the ambitious one, because
+**yespower is yescrypt's child and `src/mine/yespower.rs` already has the hard
+half**: `salsa20`, `pwxform`, `blockmix_salsa`, `blockmix_pwxform`,
+`integerify`, `p2floor`, `wrap`, `pbkdf2_1`, and sha256/hmac through
+`crate::store`. What is missing is the KDF wrapper around them. Published test
+vectors exist, so it can be checked the way every other primitive here is
+rather than by mining something and hoping.
+
+Equihash is worth four times more and is not the cheap move: a different
+algorithm, a Wagner solver, and the GPU work already deferred once in
+`cuda/`.
+
+### Where the money actually goes, read off the code
+
+`pool/src/upstream.rs` authorises **one** username per coin, from the spec's
+`@host:port,user,pass`, and forwards every miner's share under it. There is no
+per-miner username and **no fee code anywhere in `pool/src`**. So the upstream
+pays the operator for all work by all miners, the operator owes the miners a
+share, and the split is a policy choice in `tools/distribute.py` rather than
+anything the pool enforces. The "non-custodial" claim in `design/runbook.md`
+describes the *distributor* -- once an epoch is open the operator cannot
+withhold a claim -- and not the revenue path.
+
+That is what funds the GLADOS side: the bonus does not come out of the
+operator's savings, it comes out of work the pool was paid for.
+
+### The bridge floor, which caps the literal loop
+
+zpool pays in BTC on Bitcoin's chain. An epoch is funded in WETH on chain
+4663. So real revenue reaches an epoch only as payout -> exchange -> bridge,
+and every hop has a fixed fee. At $0.46/day it takes **66 days** to accumulate
+$30, which is the smallest batch worth bridging at all.
+
+So the honest arrangement separates two things that were being conflated: the
+ledger says *who earned what*, and the treasury says *where the money comes
+from*. Epochs are funded from treasury WETH; upstream revenue accumulates
+off-chain and tops the treasury up in rare large batches. The mining is real
+and the funding is pooled, which is how pools work anyway -- and it means the
+payout contract can be deployed and used before any bridge has ever run.
+
+### One operator's electricity is not every miner's
+
+This operator pays nothing for power, so 8,864 H/s of yespower is $0.46/day of
+pure profit and the earlier "underwater" finding does not apply to them. It
+still applies to everybody else: a miner paying $0.30/kWh spends about
+$0.58/day to run sixteen threads. The pool's attractiveness depends on *their*
+arithmetic, not on the operator's, and a pool whose only algorithm pays $3/day
+across the whole network has nothing to offer either of them.
