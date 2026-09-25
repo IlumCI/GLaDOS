@@ -357,8 +357,37 @@ pub fn spawned_slices() -> u32 {
 /// is exactly the round-robin it replaced. That is deliberate: the fallback is the
 /// old behaviour rather than a guess, so a machine this cannot describe loses
 /// nothing.
+/// A forced performance-core mask, for measuring placement where CPUID cannot.
+///
+/// **No hypervisor reports leaf 0x1A and none should**: a vCPU has no core type,
+/// because the host moves it between a P core and an E core whenever it likes. So
+/// under QEMU the preference never engages and its effect cannot be measured --
+/// unless the vCPU threads are pinned, one to each host CPU, at which point guest
+/// core N really does live on host CPU N for good and the mapping is knowable from
+/// outside. It is still not knowable from *inside*, which is what this is for: the
+/// operator supplies what the guest cannot read.
+///
+/// Zero means no override, which is why the mask is wrapped rather than bare -- a
+/// mask of zero would otherwise mean "no core is fast" and place everything on the
+/// efficiency cores, the exact opposite of not having been told.
+static CORE_OVERRIDE: AtomicU32 = AtomicU32::new(0);
+
+pub fn set_core_override(mask: u32) {
+    CORE_OVERRIDE.store(mask, Ordering::Relaxed);
+}
+
+pub fn core_override() -> Option<u32> {
+    match CORE_OVERRIDE.load(Ordering::Relaxed) {
+        0 => None,
+        m => Some(m),
+    }
+}
+
 fn slice_core(nth: usize) -> usize {
-    let order = slice_order(crate::smp::online(), crate::smp::performance_cores());
+    // The override wins, because it exists to answer a question the machine
+    // cannot. Falling back to CPUID and then to round-robin.
+    let perf = core_override().or_else(crate::smp::performance_cores);
+    let order = slice_order(crate::smp::online(), perf, crate::smp::first_thread_cores());
     order[nth % order.len()]
 }
 
@@ -369,20 +398,40 @@ fn slice_core(nth: usize) -> usize {
 /// effect cannot be measured here at all. What *can* be checked anywhere is the
 /// decision, so it is separated from the two lookups that need a machine, the way
 /// `update::decide` and `code::locate` are. `diag mine` walks every case.
-fn slice_order(cores: usize, perf: Option<u32>) -> alloc::vec::Vec<usize> {
+fn slice_order(cores: usize, perf: Option<u32>, first: Option<u32>) -> alloc::vec::Vec<usize> {
     if cores <= 1 {
         return alloc::vec![0];
     }
-    match perf {
-        Some(mask) => {
-            let p = (1..cores).filter(|&c| mask & (1 << c) != 0);
-            let e = (1..cores).filter(|&c| mask & (1 << c) == 0);
-            p.chain(e).chain(core::iter::once(0)).collect()
+    // Four tiers, and the order between them is measured rather than assumed.
+    // Four slices under a pinned QEMU, control holding to 1%:
+    //
+    //     four distinct physical performance cores   700 H/s
+    //     four performance cores, one a sibling      605 H/s
+    //     four distinct efficiency cores             535 H/s
+    //
+    // So a sibling collision costs 1.16x, and an efficiency core beats a sibling
+    // outright: an idle efficiency core adds about 71% of a slice where a second
+    // thread on a busy performance core adds 21%. Hence efficiency cores rank
+    // *above* performance siblings, which is the one ordering here that is not
+    // obvious and the only one worth measuring.
+    let tier = |c: usize| -> u8 {
+        let p = perf.map(|m| m & (1 << c) != 0).unwrap_or(true);
+        let f = first.map(|m| m & (1 << c) != 0).unwrap_or(true);
+        match (f, p) {
+            (true, true) => 0,   // its own physical core, and the fast kind
+            (true, false) => 1,  // its own physical core, the slower kind
+            (false, true) => 2,  // sharing a fast core with another thread
+            (false, false) => 3, // sharing a slow core, if such a part exists
         }
-        // Not hybrid, or too old to say: every core is the same kind, so this is
-        // the plain round-robin over 1.. with core 0 last.
-        None => (1..cores).chain(core::iter::once(0)).collect(),
-    }
+    };
+    let mut rest: alloc::vec::Vec<usize> = (1..cores).collect();
+    // Stable, so cores of one tier stay in index order and the placement is
+    // reproducible rather than merely good.
+    rest.sort_by_key(|&c| tier(c));
+    // Core 0 last whatever it is: the shell, the socket task and the clock live
+    // there, so a slice on it is the one that has to share with the machine.
+    rest.push(0);
+    rest
 }
 
 /// What `diag mine` asserts about placement, with no machine involved.
@@ -392,36 +441,50 @@ pub fn placement_checks() -> alloc::vec::Vec<(&'static str, bool)> {
 
     // The shape this part actually has: cores 1..5 performance, 6..9 efficiency,
     // core 0 performance but reserved for the shell.
-    let hybrid = Some(0b11_1111u32);
-    let o = slice_order(10, hybrid);
+    // This part's actual shape: cpus 0-11 are performance, in SMT pairs, so the
+    // first thread of each is even; cpus 12-15 are efficiency and have no sibling.
+    let perf = Some(0x0FFFu32);
+    let first = Some(0b1111_0101_0101_0101u32);
+    let o = slice_order(16, perf, first);
     claim(
-        "performance cores come before efficiency ones",
-        o[..5] == [1, 2, 3, 4, 5],
+        "distinct performance cores come first",
+        o[..5] == [2, 4, 6, 8, 10],
     );
-    claim("then the efficiency cores", o[5..9] == [6, 7, 8, 9]);
-    claim("and core 0 is last, because the shell lives there", o[9] == 0);
-    claim("every core appears, so none is thrown away", o.len() == 10);
+    claim("then the efficiency cores, which beat a busy sibling", o[5..9] == [12, 13, 14, 15]);
+    claim(
+        "then the performance siblings",
+        o[9..15] == [1, 3, 5, 7, 9, 11],
+    );
+    claim("and core 0 is last, because the shell lives there", o[15] == 0);
+    claim("every core appears, so none is thrown away", o.len() == 16);
     claim(
         "and none appears twice",
-        (0..10).all(|c| o.iter().filter(|&&x| x == c).count() == 1),
+        (0..16).all(|c| o.iter().filter(|&&x| x == c).count() == 1),
     );
+    // Within a tier the order is the index order, so the same machine places the
+    // same way twice -- reproducible rather than merely good.
+    claim("a tier is ordered by index, so placement repeats", o[..5] == [2, 4, 6, 8, 10]);
 
     // A part that cannot be described loses nothing: this is the round-robin it
     // had before, which is the point of the fallback being the old behaviour.
-    let flat = slice_order(10, None);
+    let flat = slice_order(10, None, None);
     claim(
-        "a non-hybrid part keeps the plain order",
+        "a part that says nothing keeps the plain order",
         flat == alloc::vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 0],
     );
+    // Hybrid but no SMT: efficiency cores still rank behind performance ones, and
+    // nothing is treated as a sibling.
+    let no_smt = slice_order(6, Some(0b000_111), None);
+    claim("hybrid without SMT still prefers the fast kind", no_smt == alloc::vec![1, 2, 3, 4, 5, 0]);
 
     // Single core: there is nowhere else to be.
-    claim("one core places everything on core 0", slice_order(1, None) == alloc::vec![0]);
-    claim("and so does none", slice_order(0, hybrid) == alloc::vec![0]);
+    claim("one core places everything on core 0", slice_order(1, None, None) == alloc::vec![0]);
+    claim("and so does none", slice_order(0, perf, first) == alloc::vec![0]);
 
-    // Wrapping is by the order's length, not by the core count, or a slice past
-    // the end would land on whatever index arithmetic produced rather than on the
-    // best remaining core.
-    let o2 = slice_order(4, Some(0b0100));
+    // Wrapping is by the order's length, not the core count, or a slice past the
+    // end would land on whatever index arithmetic produced rather than on the best
+    // remaining core.
+    let o2 = slice_order(4, Some(0b0100), None);
     claim("the best core is chosen first even when it is not the lowest", o2[0] == 2);
     claim("and the rest follow in order", o2 == alloc::vec![2, 1, 3, 0]);
     out

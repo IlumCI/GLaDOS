@@ -220,6 +220,7 @@ extern "C" fn glados_ap_main() -> ! {
     // Here because leaf 0x1A describes whoever executes it, and this is the only
     // code that ever runs on this core with a known index.
     record_core_kind(cpu);
+    record_apic_id(cpu);
     crate::cpu::idt::load_this_core();
     crate::dev::lapic::init_this_core();
 
@@ -563,6 +564,41 @@ fn record_core_kind(cpu: usize) {
     CORE_KIND[cpu].store(v, Ordering::Release);
 }
 
+/// The cores that are the *first* thread of their physical core.
+///
+/// `None` when the part has no SMT, or is too old to say, because then every
+/// logical core already is a physical one and there is nothing to prefer.
+///
+/// Read from the APIC id rather than from a table: `smt_shift` says how many low
+/// bits index a thread within a core, so an id with those bits clear is the first
+/// thread. The ids are the firmware's own, recorded as each core came up.
+pub fn first_thread_cores() -> Option<u32> {
+    let shift = crate::cpu::smt_shift();
+    if shift == 0 {
+        return None;
+    }
+    let low = (1u32 << shift) - 1;
+    let mut mask = 0u32;
+    for (i, a) in APIC_ID.iter().enumerate().take(crate::task::MAX_CPUS) {
+        let id = a.load(Ordering::Acquire);
+        if id != NO_APIC && (id as u32 & low) == 0 {
+            mask |= 1 << i;
+        }
+    }
+    Some(mask)
+}
+
+/// Each core's APIC id, written by that core during bring-up.
+const NO_APIC: u16 = u16::MAX;
+static APIC_ID: [core::sync::atomic::AtomicU16; crate::task::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU16::new(NO_APIC) }; crate::task::MAX_CPUS];
+
+fn record_apic_id(cpu: usize) {
+    if cpu < crate::task::MAX_CPUS {
+        APIC_ID[cpu].store(crate::dev::lapic::id() as u16, Ordering::Release);
+    }
+}
+
 /// The performance cores, as a bitmask, or `None` if this part is not hybrid.
 ///
 /// `None` and not an empty mask, because "every core is the same" and "no core is
@@ -601,6 +637,7 @@ pub fn online() -> usize {
 pub fn init(acpi: &crate::acpi::Acpi) -> usize {
     // Core 0 answers for itself, the same way every other core will.
     record_core_kind(0);
+    record_apic_id(0);
     let start = addr_of!(ap_tramp_start) as u64;
     let end = addr_of!(ap_tramp_end) as u64;
     let params_off = addr_of!(ap_tramp_params) as u64 - start;

@@ -8203,6 +8203,38 @@ fn mine_cmd(rest: &str) {
             // other slots get theirs, which is the whole point of the table.
             client::set_pool_algo(a);
         }
+        // **Measuring hybrid placement where the machine cannot see it.** No
+        // hypervisor exposes CPUID leaf 0x1A, correctly -- a vCPU has no core
+        // type, the host moves it. Pin the vCPU threads one to a host CPU and the
+        // mapping becomes fixed and knowable from outside, so the operator can
+        // supply it. `mine cores 0xffe` then places slices on guest cores 1..11,
+        // and `mine cores 0xf000` on 12..15, which on a pinned run are the
+        // performance and efficiency halves of this part.
+        "cores" => {
+            let a = arg.trim();
+            if a.is_empty() {
+                match client::core_override() {
+                    Some(m) => kprintln!("  forced performance mask {:#x}", m),
+                    None => kprintln!("  no override; CPUID decides, and under a hypervisor it cannot"),
+                }
+                return;
+            }
+            if a == "off" {
+                client::set_core_override(0);
+                kprintln!("  override cleared");
+                return;
+            }
+            let hex = a.trim_start_matches("0x");
+            match u32::from_str_radix(hex, 16) {
+                Ok(0) => kprintln!("  zero is not a mask; use 'off' to clear"),
+                Ok(m) => {
+                    client::set_core_override(m);
+                    kprintln!("  performance cores forced to {:#x} ({} core(s))", m, m.count_ones());
+                    kprintln!("  takes effect for slices spawned after this; 'mine slices 0' first");
+                }
+                Err(_) => kprintln!("  not hex: {}", a),
+            }
+        }
         "bench" => {
             let ms: u64 = arg.parse().unwrap_or(3000);
             if ms < 500 {

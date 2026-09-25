@@ -383,6 +383,29 @@ pub enum CoreKind {
     Unknown,
 }
 
+/// How many low bits of an APIC id index SMT threads within one physical core.
+///
+/// **Two logical cores on one physical core are not two cores**, and placing a
+/// second slice on a sibling is worth far less than placing it on an idle core of
+/// any kind. Measured, four slices under a pinned QEMU: four distinct physical
+/// performance cores read 700 H/s, the same four logical cores with one sibling
+/// collision read 605, and four distinct efficiency cores read 535. So a
+/// collision costs 1.16x and an efficiency core beats a sibling outright -- a
+/// sibling adds about 21% of one slice where an efficiency core adds a whole 71%.
+///
+/// Leaf 0x0B subleaf 0 reports the shift: `eax[4:0]` is the number of APIC id bits
+/// below the core level, so a part with two threads per core answers 1 and the
+/// thread index is `apic_id & 1`. Zero means no SMT, or a part too old to say,
+/// and then every logical core is its own physical one.
+pub fn smt_shift() -> u32 {
+    if cpuid(0, 0)[0] < 0x0B {
+        return 0;
+    }
+    // Level type 1 is SMT. A part with no SMT reports level 0 here, and
+    // `eax[4:0]` is then zero anyway, so the shift is the whole answer.
+    cpuid(0x0B, 0)[0] & 0x1F
+}
+
 pub fn core_kind() -> CoreKind {
     if cpuid(0, 0)[0] < 0x1A {
         return CoreKind::Unknown;
