@@ -1049,3 +1049,51 @@ are the last few tens of per cent on top. `rinhash` is the one candidate with no
 reading -- cpuminer-opt knows the name but produced no rate here -- and it is
 also the highest per-kH/s figure in the table, so it is worth one more attempt
 before the list is called final.
+
+### AVX2 was not the next lever, and the measurement says why
+
+The SSE2 pwxform lane bought 1.58x and closed the gap to cpuminer-opt from 1.87x
+to 1.15x. The obvious next step was to widen it, and the obvious target was the
+bulk XORs, because at the yescrypt settings one hash does **2,097,152 word
+XORs** -- more words than the pwxform lanes touch -- and `objdump` on `smix2`
+found 188 `mov`, 11 scalar `xor` and 37 bounds-check branches with no SIMD
+instruction anywhere in it.
+
+It bought nothing. Interleaved A/B, two binaries alternating on one machine,
+`yespower` 2 MiB:
+
+    lane only        2014   1050   1060   2014   1158   1062 us
+    lane + SIMD XOR  1066   1070   1055   2047   1110   1062 us
+
+The ~2014 readings appear in **both** arms, which is what says they are the host
+and not the change. The medians are 1061 and 1066 us: identical within noise.
+
+**Because those XORs are DRAM-latency bound, not instruction bound.** Each one
+reads a 256-word block from a pseudo-random offset in a 2 MiB or 8 MiB array, so
+the cost is the cache miss and the arithmetic is free. Vectorising the arithmetic
+removes no memory traffic whatsoever. That is yescrypt behaving exactly as
+designed -- it is a *memory*-hard function, and the scalar XOR was already
+keeping up with the memory system.
+
+So the change was reverted rather than kept: it added unsafe pointer arithmetic
+for no measured gain, and the SSE2 lane -- which is compute and L1 bound, and
+where the 1.58x came from -- stays.
+
+**Two failed attempts on the way, both worth keeping because each looked
+right.** `iter_mut().zip()` in an `inline(always)` helper produced no SIMD at all
+and ran ~6% slower: `noalias` is a property of the call boundary, and
+`inline(always)` deletes the boundary, handing LLVM back two slices of one
+structure it cannot separate. The same helper as `inline(never)` did vectorise
+and was slower still, 1147 us against 1042, because `blockmix_pwxform` calls it
+**65,536 times per hash** on 16-word blocks and a real call costs more than the
+four SSE2 operations it wraps.
+
+**What is left for AVX2, stated honestly.** Only the pwxform lane, processing two
+lanes per 256-bit register. It is legal at the 0.5 settings, where lanes are
+independent because there is no S-box writeback, and illegal at 1.0 where the
+writeback couples them. The arithmetic would halve; the two S-box loads would
+not, since the two lanes read different addresses and must be combined with an
+insert or a gather. Against L1-resident 8 KiB S-boxes that is plausibly 1.1-1.25x
+and it costs runtime feature detection in a file shared with the pool, which
+cannot reach the kernel's CPUID. Worth doing *after* the ring-0 levers, which are
+worth more and need no detection at all.
