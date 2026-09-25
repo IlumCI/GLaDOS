@@ -6,6 +6,7 @@ pub mod ioapic;
 pub mod kbd;
 pub mod lapic;
 pub mod nvme;
+pub mod iwx;
 pub mod pci;
 pub mod radio;
 pub mod registry;
