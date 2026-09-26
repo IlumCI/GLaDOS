@@ -1,0 +1,4 @@
+Two settled readings of ONE build, so the honest verdict is that
+nothing moved. A judge answering otherwise on this pair has a
+false positive, which is what `ground noise` lets the boundary
+lane check. Harvested by `godel.py anchors`, never by hand.

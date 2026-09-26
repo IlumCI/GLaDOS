@@ -14,7 +14,6 @@
 //! `iretq`s back to wherever the task was. Each task carries its own suspended
 //! interrupt frame around with it.
 
-use crate::sync::Racy;
 use alloc::alloc::{alloc, Layout};
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 

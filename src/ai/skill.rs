@@ -43,7 +43,6 @@
 use crate::store::sha256;
 use crate::sysbox;
 use alloc::string::String;
-use alloc::vec::Vec;
 
 /// Where candidates are kept, by content address. `/ai/tools` holds the ones
 /// that were adopted, which is the difference between a proposal and a tool.

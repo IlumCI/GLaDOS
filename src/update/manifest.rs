@@ -21,7 +21,6 @@ use crate::net::html::{parse_url, Url};
 use crate::store::sha256;
 use alloc::format;
 use alloc::string::{String, ToString};
-use alloc::vec::Vec;
 
 /// The first line. A file not beginning with exactly this is refused before
 /// any of its other lines are believed.
