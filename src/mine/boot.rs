@@ -32,8 +32,18 @@
 //! as long as nobody noticed. So `worker` has no default: without it `plan`
 //! answers `None` and the machine sits at a prompt doing nothing, which is the
 //! failure that is visible rather than the one that is profitable.
+//!
+//! **And a typo is the same theft by a different route.** A default pays a
+//! stranger; a transposed pair of characters pays nobody, and both look exactly
+//! like a miner that is working. Every address form that turns up here carries a
+//! checksum for precisely that reason, so `mine::addr` reads it before the first
+//! share and the plan carries the verdict. Four answers rather than two, because
+//! "this carries no checksum" and "this is a worker name the pool's roster maps"
+//! are facts of their own and filing either under pass or fail is wrong.
 use alloc::string::String;
 use alloc::vec::Vec;
+
+use super::addr;
 
 /// Where the file lives on the boot volume.
 ///
@@ -58,6 +68,13 @@ pub struct Plan {
     pub pass: String,
     pub glados_proto: bool,
     pub slices: Option<u32>,
+    /// What could be established about where `user` pays.
+    ///
+    /// A field rather than a check inside `parse`, because it is a pure function
+    /// of the name and so belongs in what a claim can read -- and because
+    /// refusing here would throw away the reason. `apply` is what declines, where
+    /// there is a line to print it on.
+    pub payout: addr::Payout,
     /// Lines whose first word this parser does not know. Counted rather than
     /// ignored, because a typo in a file nobody can edit after the image is cut
     /// should be visible at boot instead of presenting as a miner that will not
@@ -130,7 +147,8 @@ pub fn parse(bytes: &[u8]) -> Option<Plan> {
     if host.is_empty() || user.is_empty() {
         return None;
     }
-    Some(Plan { host, port, user, pass, glados_proto, slices, unknown })
+    let payout = addr::judge(&user);
+    Some(Plan { host, port, user, pass, glados_proto, slices, payout, unknown })
 }
 
 /// Apply a plan and start mining. Answers a line to print.
@@ -140,6 +158,17 @@ pub fn parse(bytes: &[u8]) -> Option<Plan> {
 /// table, and everything that cannot be is here.
 pub fn apply(p: &Plan) -> String {
     use alloc::format;
+
+    // **Refused before anything is configured, not after.** A broken checksum
+    // means the string is not an address at all, so every share found under it
+    // is work given away -- and an image on read-only media will do it again
+    // every boot, for as long as nobody looks. The refusal names the form and
+    // the name, because the operator has to find the character that is wrong in
+    // a file they can no longer edit and the next thing they do is cut another
+    // image.
+    if !p.payout.may_mine() {
+        return format!("not mining: {} ({})", p.payout.say(), p.user);
+    }
     {
         let mut g = super::client::CONFIG.lock_irq();
         *g = Some(super::client::Config {
@@ -206,6 +235,10 @@ pub fn apply(p: &Plan) -> String {
             if p.unknown > 0 {
                 s.push_str(&format!(", {} line(s) not understood", p.unknown));
             }
+            // Said on the way up rather than only on a refusal: "checks out" and
+            // "carries no checksum" are different assurances and the operator is
+            // owed which one they have before walking away from the machine.
+            s.push_str(&format!("\n  {}", p.payout.say()));
             s
         }
         Err(e) => format!("miner configured but did not start: {}", e),
@@ -219,6 +252,10 @@ pub fn checks() -> Vec<(bool, String)> {
 
     let full = parse(b"pool p.example.com:3334\nworker 0xabc.rig1\nslices 3\n");
     ok(full.is_some(), "a file naming a pool and a worker is a plan");
+    ok(
+        full.as_ref().map(|p| p.payout) == Some(addr::Payout::Name),
+        "and a worker that is not an address shape is carried as a name",
+    );
     if let Some(p) = &full {
         ok(p.host == "p.example.com" && p.port == 3334, "the host and port are split on the last colon");
         ok(p.user == "0xabc.rig1", "the worker name is carried whole");
@@ -255,5 +292,47 @@ pub fn checks() -> Vec<(bool, String)> {
     ok(parse(&[0xff, 0xfe, 0x00]).is_none(), "bytes that are not text are not a plan");
     ok(parse(b"").is_none(), "and neither is an empty file");
 
+    // **The payout verdict reaches the plan, and the broken one is the point.**
+    // `addr` asserts its own arithmetic; what is asserted here is the join --
+    // that a file naming a mistyped address parses into a plan that says so,
+    // rather than into one that mines.
+    let good = parse(b"pool p:1\nworker 0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed\n");
+    ok(
+        good.as_ref().map(|p| p.payout) == Some(addr::Payout::Checked(addr::Kind::Evm)),
+        "an EIP-55 payout address in the file is checked and passes",
+    );
+    ok(good.map(|p| p.payout.may_mine()) == Some(true), "and such a plan may mine");
+
+    let typo = parse(b"pool p:1\nworker 0x5aAeb6053F3E94C9b9A09f33669435E7Ef1Beaed\n");
+    ok(
+        typo.as_ref().map(|p| p.payout) == Some(addr::Payout::Broken(addr::Kind::Evm)),
+        "one letter's case wrong in it is carried as broken",
+    );
+    ok(
+        typo.as_ref().map(|p| p.payout.may_mine()) == Some(false),
+        "and such a plan may not mine",
+    );
+    // Still a plan, deliberately: parsing succeeded and it is `apply` that
+    // declines, so the reason survives to be printed instead of becoming a
+    // `None` indistinguishable from an absent file.
+    ok(typo.is_some(), "a broken address still parses, so the refusal can name it");
+
+    let lower = parse(b"pool p:1\nworker 0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed\n");
+    ok(
+        lower.as_ref().map(|p| p.payout) == Some(addr::Payout::Unchecked(addr::Kind::Evm)),
+        "an all-lowercase address is well-formed with nothing to verify",
+    );
+    ok(lower.map(|p| p.payout.may_mine()) == Some(true), "and it is allowed rather than refused");
+
+    // The suffix, through the file rather than through `judge` directly, because
+    // this is the spelling every multi-rig venue's own page hands out.
+    ok(
+        parse(b"pool p:1\nworker 1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa.gf63\n")
+            .map(|p| p.payout)
+            == Some(addr::Payout::Checked(addr::Kind::Base58)),
+        "and an address with a rig suffix is still checked",
+    );
+
+    out.extend(addr::checks());
     out
 }

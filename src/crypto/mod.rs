@@ -28,6 +28,7 @@ pub mod bigint;
 pub mod ccm;
 pub mod chacha;
 pub mod hkdf;
+pub mod keccak;
 pub mod p256;
 pub mod rsa;
 pub mod sha1;
@@ -42,7 +43,7 @@ pub fn selftest() -> bool {
     console::set_color(YELLOW);
     kprintln!("\n[selftest] crypto:");
 
-    let checks: [(&str, fn() -> bool); 25] = [
+    let checks: [(&str, fn() -> bool); 26] = [
         ("sha-256   NIST vectors", crate::store::sha256::selftest),
         ("hmac/hkdf RFC 4231 and RFC 5869", hkdf::selftest),
         ("sha-384   FIPS 180-4", sha512::selftest),
@@ -52,6 +53,7 @@ pub fn selftest() -> bool {
         ("chacha20  RFC 8439, and a flipped bit is rejected", chacha::selftest),
         ("x25519    RFC 7748, and both sides agree", x25519::selftest),
         ("sha-1     FIPS 180-1, RFC 2202, RFC 6070", sha1::selftest),
+        ("keccak256 published vectors, and not SHA3-256", keccak::selftest),
         ("aes       FIPS 197 and RFC 3394 key wrap", aes::selftest),
         ("wpa2      IEEE 802.11i pmk and ptk", crate::net::wpa2::selftest),
         ("802.11    beacons parse, probe requests build", crate::net::ieee80211::selftest),
