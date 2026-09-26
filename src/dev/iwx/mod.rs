@@ -30,6 +30,7 @@
 //! dump. The decode is a pure function for the same reason -- `rev_of` can be
 //! walked by a suite on any machine, where reading a real `CSR_HW_REV` cannot.
 
+pub mod ctxt;
 pub mod fw;
 
 use crate::dev::pci::{self, Device};
@@ -67,12 +68,53 @@ const CSR_HW_RF_ID: u64 = 0x09c;
 /// records.
 const ALL_ONES: u32 = 0xFFFF_FFFF;
 
+/// Which generation of silicon, which decides everything about the bring-up.
+///
+/// **This distinction was missing and it is the one that matters most here.** The
+/// two families take their firmware by completely different routes: family 22000
+/// builds one 1,792-byte descriptor and writes its address to `CSR_CTXT_INFO_BA`,
+/// while AX210 builds a larger one plus a scratch area plus an image loader and
+/// goes through `CSR_CTXT_INFO_ADDR`. Reaching for the wrong one hands the part a
+/// structure it reads at different offsets.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Family {
+    /// Qu, QuZ and QnJ. The AX200, and the AX201 as fitted to earlier platforms.
+    F22000,
+    /// So, SoF and SnJ. **What is in the GF63**, despite the part being sold as
+    /// an AX201: the marketing name follows the radio module and the family
+    /// follows the controller, and on Alder Lake the controller is Snow Owl.
+    Ax210,
+    /// Bz and later. Differs again at the reset and the clock handshake, so it is
+    /// named in order to be refused rather than driven by this table.
+    Bz,
+}
+
+impl Family {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Family::F22000 => "22000",
+            Family::Ax210 => "AX210",
+            Family::Bz => "Bz",
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mac {
-    /// Family 22000, the generation the AX200/AX201 belong to.
+    /// Family 22000, the generation the AX200 belongs to.
     Qu,
     /// A stepping of the same family, spun for a different process.
     Quz,
+    Qnj,
+    /// Snow Owl, and what `8086:51f0` is.
+    So,
+    Snj,
+    /// Snow Owl F, the Alder Lake spin.
+    Sof,
+    Ma,
+    Bz,
+    Gl,
+    BzW,
     /// Read, decoded, and not one this kernel has a name for. Reported as the
     /// raw type rather than guessed at, because a wrong guess picks the wrong
     /// firmware and the symptom is silence.
@@ -82,11 +124,9 @@ pub enum Mac {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Rev {
     pub mac: Mac,
-    /// Silicon step, which selects between firmware images within one family.
+    /// Silicon step, which selects between firmware images within one family:
+    /// A, B, C or Z as 0, 1, 2 and 0xf.
     pub step: u8,
-    /// Sub-step. Intel's own driver treats the pair as one value on this
-    /// family, which is why they are decoded together and reported apart.
-    pub dash: u8,
     pub raw: u32,
 }
 
@@ -95,19 +135,37 @@ pub struct Rev {
 /// Pure, and that is the point: no emulator models this part, so the only thing
 /// a suite can check on any machine is the arithmetic. `iwlwifi` spells the
 /// fields `CSR_HW_REV_TYPE` (bits 4..16) and `CSR_HW_REV_STEP_DASH` (bits 0..4),
-/// and the type values are the ones its `iwl_cfg_mac_type` table names.
+/// and the type values are the ones its `cfg_mac_type` table names.
+///
+/// **There is no dash, and reading one was the bug this had.** The field used to
+/// be a two-bit step at bits 2..4 with a two-bit dash below it, and upstream's
+/// own comment records that changing in the 8000 family: "the revision step also
+/// includes bit 0-1 (no more 'dash' value)". Every family this could drive is
+/// later than that, so the step is bits 0..2 and the low pair is part of it --
+/// which is why the driver re-packs `hw_rev` into the *old* shape before
+/// matching, and why taking bits 2..4 as the step answers about a field that no
+/// longer exists. It reported step 0 with dash 3 where the part is step 3, and
+/// the step is what selects the firmware image within a family.
+///
+/// Found by reading the source these offsets came from rather than by running
+/// anything, because no emulator has this part.
 pub fn rev_of(raw: u32) -> Rev {
     let ty = ((raw & 0x000F_FFF0) >> 4) as u16;
     Rev {
         mac: match ty {
             0x33 => Mac::Qu,
             0x35 => Mac::Quz,
+            0x36 => Mac::Qnj,
+            0x37 => Mac::So,
+            0x42 => Mac::Snj,
+            0x43 => Mac::Sof,
+            0x44 => Mac::Ma,
+            0x46 => Mac::Bz,
+            0x47 => Mac::Gl,
+            0x4b => Mac::BzW,
             other => Mac::Unknown(other),
         },
-        // Bits 1..2 and 0..1. Taken apart rather than reported as one nibble
-        // because the firmware name is chosen from the step alone.
-        step: ((raw >> 2) & 0x3) as u8,
-        dash: (raw & 0x3) as u8,
+        step: (raw & 0x3) as u8,
         raw,
     }
 }
@@ -117,8 +175,31 @@ impl Mac {
         match self {
             Mac::Qu => String::from("Qu"),
             Mac::Quz => String::from("QuZ"),
+            Mac::Qnj => String::from("QnJ"),
+            Mac::So => String::from("So"),
+            Mac::Snj => String::from("SnJ"),
+            Mac::Sof => String::from("SoF"),
+            Mac::Ma => String::from("Ma"),
+            Mac::Bz => String::from("Bz"),
+            Mac::Gl => String::from("Gl"),
+            Mac::BzW => String::from("Bz-W"),
             Mac::Unknown(t) => alloc::format!("unknown type {:#05x}", t),
         }
+    }
+
+    /// Which generation this controller belongs to.
+    ///
+    /// A function of the type register rather than of the PCI id, deliberately:
+    /// `8086:51f0` covers several modules and the controller behind all of them
+    /// is the same silicon, so asking the register asks the part instead of
+    /// asking a table about the platform.
+    pub fn family(&self) -> Option<Family> {
+        Some(match self {
+            Mac::Qu | Mac::Quz | Mac::Qnj => Family::F22000,
+            Mac::So | Mac::Snj | Mac::Sof => Family::Ax210,
+            Mac::Bz | Mac::Gl | Mac::BzW | Mac::Ma => Family::Bz,
+            Mac::Unknown(_) => return None,
+        })
     }
     /// Whether this kernel could name a firmware image for the part.
     ///
@@ -128,6 +209,105 @@ impl Mac {
     pub fn known(&self) -> bool {
         !matches!(self, Mac::Unknown(_))
     }
+}
+
+/// What `CSR_HW_RF_ID` says, decoded.
+///
+/// **It was read and handed back raw.** The word is what tells an AX201 from an
+/// AX211 on one PCI id -- the controller is the same Snow Owl silicon and the
+/// *radio* is what differs -- so a probe that prints it in hex has read the
+/// answer and not said it. It also decides the firmware's own filename, which is
+/// the thing a bare-metal trip needs to know before it starts.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Rf {
+    /// Jefferson, two-antenna and one.
+    Jf2,
+    Jf1,
+    /// Harrier. **Hr2 with Snow Owl is the part sold as an AX201**, and Hr1 the
+    /// AX101.
+    Hr2,
+    Hr1,
+    /// Gale Force, which is the AX211.
+    Gf,
+    Mr,
+    Ms,
+    Fm,
+    Unknown(u16),
+}
+
+impl Rf {
+    pub fn name(&self) -> String {
+        match self {
+            Rf::Jf2 => String::from("JF2"),
+            Rf::Jf1 => String::from("JF1"),
+            Rf::Hr2 => String::from("HR2"),
+            Rf::Hr1 => String::from("HR1"),
+            Rf::Gf => String::from("GF"),
+            Rf::Mr => String::from("MR"),
+            Rf::Ms => String::from("MS"),
+            Rf::Fm => String::from("FM"),
+            Rf::Unknown(t) => alloc::format!("unknown RF {:#05x}", t),
+        }
+    }
+}
+
+/// The radio, as one word says it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct RfId {
+    pub rf: Rf,
+    pub step: u8,
+    pub dash: u8,
+    /// Whether this is a two-die part with a second radio.
+    pub cdb: bool,
+    /// Whether the radio is on a jacket board rather than in the package.
+    pub jacket: bool,
+    pub raw: u32,
+}
+
+/// Decode `CSR_HW_RF_ID`.
+///
+/// Four fields and two flags, and the type is bits 12..24 rather than the low
+/// ones -- the flavour and the step sit underneath it. Pure, so it is asserted on
+/// any machine even though the register cannot be read on one.
+pub fn rf_of(raw: u32) -> RfId {
+    let ty = ((raw & 0x0FFF_F000) >> 12) as u16;
+    RfId {
+        rf: match ty {
+            0x105 => Rf::Jf2,
+            0x108 => Rf::Jf1,
+            0x10a => Rf::Hr2,
+            0x10c => Rf::Hr1,
+            0x10d => Rf::Gf,
+            0x110 => Rf::Mr,
+            0x111 => Rf::Ms,
+            0x112 => Rf::Fm,
+            other => Rf::Unknown(other),
+        },
+        step: ((raw & 0x0000_0F00) >> 8) as u8,
+        dash: ((raw & 0x0000_00F0) >> 4) as u8,
+        cdb: raw & 0x1000_0000 != 0,
+        jacket: raw & 0x2000_0000 != 0,
+        raw,
+    }
+}
+
+/// The name this combination is sold under, where there is one.
+///
+/// Answered from the pair rather than from either alone, because that is how the
+/// pair works: Snow Owl with Harrier is an AX201 and Snow Owl with Gale Force is
+/// an AX211, on the same PCI id. `None` rather than a guess, since a marketing
+/// name is the one field here nobody can derive from a register they have not
+/// seen.
+pub fn product_name(mac: Mac, rf: Rf) -> Option<&'static str> {
+    Some(match (mac, rf) {
+        (Mac::So, Rf::Hr2) | (Mac::Sof, Rf::Hr2) => "AX201",
+        (Mac::So, Rf::Hr1) | (Mac::Sof, Rf::Hr1) => "AX101",
+        (Mac::So, Rf::Gf) | (Mac::Sof, Rf::Gf) => "AX211",
+        (Mac::Qu, Rf::Hr2) | (Mac::Quz, Rf::Hr2) => "AX201",
+        (Mac::Qu, Rf::Hr1) | (Mac::Quz, Rf::Hr1) => "AX101",
+        (Mac::Qu, Rf::Jf2) | (Mac::Quz, Rf::Jf2) => "9560",
+        _ => return None,
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -319,12 +499,83 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     claim("and reports itself as not drivable", !rev_of(0x7f << 4).mac.known());
     claim("where a known one does", rev_of(0x33 << 4).mac.known());
 
-    // Step and dash share a nibble and are taken apart, because the firmware
-    // name is chosen from the step alone.
+    // **The step is the low pair and there is no dash**, which is the correction
+    // this claim used to encode backwards -- it asserted the step was bits 2..4
+    // and a dash below it, which is the pre-8000 layout upstream's own comment
+    // says stopped existing. On the GF63 the old decoding reports step 0 where
+    // the part is step 3, and the step chooses the firmware image.
     let r = rev_of((0x33 << 4) | 0b1011);
-    claim("the step is bits 2..4", r.step == 0b10);
-    claim("and the dash is bits 0..2", r.dash == 0b11);
+    claim("the step is the low two bits", r.step == 0b11);
     claim("and the raw word is kept for a bug report", r.raw == (0x33 << 4) | 0b1011);
+    // Every step value the silicon spells, so a decoder that masked one bit too
+    // few would show here rather than as the wrong firmware.
+    claim("step A is 0", rev_of(0x33 << 4).step == 0);
+    claim("step B is 1", rev_of((0x33 << 4) | 1).step == 1);
+    claim("step C is 2", rev_of((0x33 << 4) | 2).step == 2);
+
+    // --- the family, which is what the bring-up hangs off --------------------
+
+    // The finding this whole group exists for: `8086:51f0` in the GF63 is Snow
+    // Owl, so it is AX210 family and not the 22000 the power-up table was
+    // written for -- and it is sold as an AX201, which is what made the wrong
+    // family look right.
+    claim("So is AX210 family", rev_of(0x37 << 4).mac.family() == Some(Family::Ax210));
+    claim("and so is SoF, the Alder Lake spin in the GF63", rev_of(0x43 << 4).mac.family() == Some(Family::Ax210));
+    claim("Qu is family 22000", rev_of(0x33 << 4).mac.family() == Some(Family::F22000));
+    claim("QuZ too", rev_of(0x35 << 4).mac.family() == Some(Family::F22000));
+    claim("Bz is its own family, named so it can be refused", rev_of(0x46 << 4).mac.family() == Some(Family::Bz));
+    claim(
+        "and a type nobody has named has no family rather than a default",
+        rev_of(0x99 << 4).mac.family().is_none(),
+    );
+    // A default here would be the expensive kind of wrong: an unknown controller
+    // treated as 22000 gets the 1,792-byte descriptor written for it and fetches
+    // its microcode from whatever the offsets happen to name.
+    claim(
+        "every named type has a family, so the two tables cannot drift",
+        [0x33u16, 0x35, 0x36, 0x37, 0x42, 0x43, 0x44, 0x46, 0x47, 0x4b]
+            .iter()
+            .all(|&t| rev_of((t as u32) << 4).mac.family().is_some()),
+    );
+
+    // --- the radio ----------------------------------------------------------
+
+    // Read from the register since the probe was written and never decoded. The
+    // type is bits 12..24, so a decoder taking the low bits answers about the
+    // step.
+    let hr = rf_of(0x10a << 12);
+    claim("HR2 decodes from bits 12..24", hr.rf == Rf::Hr2);
+    claim("Gale Force too", rf_of(0x10d << 12).rf == Rf::Gf);
+    claim(
+        "and an unnamed radio is reported rather than guessed at",
+        matches!(rf_of(0x999 << 12).rf, Rf::Unknown(0x999)),
+    );
+    let full = rf_of((0x10a << 12) | (0x2 << 8) | (0x1 << 4) | 0x3000_0000);
+    claim("the radio step is bits 8..12", full.step == 2);
+    claim("its dash is bits 4..8", full.dash == 1);
+    claim("the two-die flag is bit 28", full.cdb);
+    claim("and the jacket flag is bit 29", full.jacket);
+    claim("neither flag is set on a plain part", !hr.cdb && !hr.jacket);
+
+    // **The pair names the part and neither half does.** This is the claim that
+    // says why both registers are read: one PCI id, two products, and the only
+    // difference is the radio.
+    claim(
+        "Snow Owl with Harrier is the AX201",
+        product_name(Mac::Sof, Rf::Hr2) == Some("AX201"),
+    );
+    claim(
+        "and Snow Owl with Gale Force is the AX211, on the same controller",
+        product_name(Mac::Sof, Rf::Gf) == Some("AX211"),
+    );
+    claim(
+        "so the controller alone does not name it",
+        product_name(Mac::Sof, Rf::Hr2) != product_name(Mac::Sof, Rf::Gf),
+    );
+    claim(
+        "a combination nobody has named answers nothing rather than the nearest",
+        product_name(Mac::Bz, Rf::Fm).is_none(),
+    );
 
     // The type field stops at bit 16, so a revision with high bits set decodes
     // to the same part. Checked because those bits are not reserved forever and
@@ -366,22 +617,55 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     // when wrong: a poll before the thing it waits for has been asked for is a
     // timeout that reads as broken hardware.
     let idx = |pred: fn(&Step) -> bool| POWER_UP.iter().position(pred);
+    let acquire = idx(|s| matches!(s, Step::Acquire { .. }));
+    let alive = idx(|s| matches!(s, Step::SetBit(CSR_MBOX_SET_REG, _)));
     let reset = idx(|s| matches!(s, Step::SetBit(CSR_RESET, _)));
-    let prepare = idx(|s| matches!(s, Step::SetBit(CSR_HW_IF_CONFIG_REG, b) if *b == CSR_HW_IF_CONFIG_REG_PREPARE));
-    let ready = idx(|s| matches!(s, Step::Poll { mask, .. } if *mask == CSR_HW_IF_CONFIG_REG_BIT_NIC_READY));
     let init_done = idx(|s| matches!(s, Step::SetBit(CSR_GP_CNTRL, b) if *b == CSR_GP_CNTRL_REG_FLAG_INIT_DONE));
     let clock = idx(|s| matches!(s, Step::Poll { mask, .. } if *mask == CSR_GP_CNTRL_REG_FLAG_MAC_CLOCK_READY));
 
-    claim("the sequence resets first", reset == Some(0));
+    // **The semaphore comes before the reset, and this group used to assert the
+    // opposite.** `iwx_start_hw` runs the whole `NIC_READY` handshake in
+    // `prepare_card_hw` and only then `sw_reset`; the first version of this table
+    // reset at index 0 and handshook afterwards, and a claim said "the sequence
+    // resets first" -- so the table-as-data design caught nothing, because the
+    // order it was asserting was itself wrong. Kept as the first claim in the
+    // group, pointing the other way.
+    claim("the sequence takes the semaphore first", acquire == Some(0));
+    claim("the reset comes after the handshake, not before it", acquire < reset);
+    claim("and the host declares itself alive as soon as it is granted", acquire < alive && alive < reset);
     claim(
         "the reset settles before anything is asked of the part",
-        matches!(POWER_UP.get(1), Some(Step::Settle(_))),
+        reset.and_then(|i| POWER_UP.get(i + 1)).map(|s| matches!(s, Step::Settle(_))) == Some(true),
     );
-    claim("PREPARE is asserted before NIC_READY is polled", prepare < ready);
-    claim("the handshake completes before initialisation is declared", ready < init_done);
+    claim("initialisation is declared after the reset", reset < init_done);
     claim(
         "and the clock is polled only after INIT_DONE, never before",
         init_done < clock,
+    );
+    // The bit nothing sets is the bug this cost: `NIC_READY` is a semaphore the
+    // driver writes, so a table that only polled it would wait for a value
+    // nothing was going to produce. Asserted as an absence, which is the only
+    // shape that catches it coming back.
+    claim(
+        "NIC_READY is never merely polled, because nothing but us sets it",
+        !POWER_UP
+            .iter()
+            .any(|s| matches!(s, Step::Poll { mask, .. } if *mask == CSR_HW_IF_CONFIG_REG_BIT_NIC_READY)),
+    );
+    // Upstream sets bits in the FH threshold register; writing it whole clears
+    // the other fields in it.
+    claim(
+        "the FH threshold is set rather than written whole",
+        POWER_UP
+            .iter()
+            .any(|s| matches!(s, Step::SetBit(CSR_DBG_HPET_MEM_REG, _)))
+            && !POWER_UP.iter().any(|s| matches!(s, Step::Write(CSR_DBG_HPET_MEM_REG, _))),
+    );
+    // An Acquire with no retries is a handshake that cannot recover from a link
+    // in a low-power state, which is the case the fallback exists for.
+    claim(
+        "and the acquisition is allowed to retry",
+        POWER_UP.iter().all(|s| !matches!(s, Step::Acquire { tries: 0 })),
     );
 
     // A poll with no timeout is a hang, and this runs before there is a shell to
@@ -398,6 +682,12 @@ pub fn checks() -> Vec<(&'static str, bool)> {
             Step::SetBit(r, _) | Step::Write(r, _) => *r < 0x1000,
             Step::Poll { reg, .. } => *reg < 0x1000,
             Step::Settle(_) => true,
+            // Every register `acquire` touches, listed here rather than trusted,
+            // because they are inside a function and so invisible to the sweep
+            // that checks the table.
+            Step::Acquire { .. } => {
+                CSR_HW_IF_CONFIG_REG < 0x1000 && CSR_DBG_LINK_PWR_MGMT_REG < 0x1000
+            }
         }),
     );
     // L1 must survive: upstream disables L0s alone, and disabling both would
@@ -416,9 +706,14 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         Fault::Aperture(Refusal::Asleep).why() == Refusal::Asleep.why(),
     );
 
-    // The firmware container, which is the last piece of this port that can be
-    // checked without the laptop.
+    // The firmware container and the descriptor the part boots out of. **Nearly
+    // all of this port is checkable without the laptop**, which was not obvious
+    // and is worth saying: family 22000 takes its microcode by DMA from one
+    // 1,792-byte structure, so the bring-up is mostly laying out memory and only
+    // the last two writes touch a register. What needs the radio is whether it
+    // answers, not whether the bytes are right.
     out.extend(fw::checks());
+    out.extend(ctxt::checks());
     out
 }
 
@@ -447,6 +742,11 @@ const CSR_GP_CNTRL: u64 = 0x024;
 const CSR_GIO_CHICKEN_BITS: u64 = 0x100;
 /// The FH wait threshold, set to its maximum as a stress workaround.
 const CSR_DBG_HPET_MEM_REG: u64 = 0x240;
+/// Where the driver tells firmware the operating system is up.
+const CSR_MBOX_SET_REG: u64 = 0x088;
+/// Link power management, which has to be disabled before the part will grant
+/// the semaphore on a machine where it did not the first time.
+const CSR_DBG_LINK_PWR_MGMT_REG: u64 = 0x250;
 
 /// Ask the device to become ready, and the bit that says it did.
 const CSR_HW_IF_CONFIG_REG_PREPARE: u32 = 0x0800_0000;
@@ -466,6 +766,13 @@ const CSR_GIO_CHICKEN_BITS_REG_BIT_L1A_NO_L0S_RX: u32 = 0x0080_0000;
 
 /// The maximum wait threshold.
 const CSR_DBG_HPET_MEM_REG_VAL: u32 = 0xFFFF_0000;
+const CSR_MBOX_SET_REG_OS_ALIVE: u32 = 0x20;
+const CSR_RESET_LINK_PWR_MGMT_DISABLED: u32 = 0x8000_0000;
+/// Upstream's own figure, and it is **microseconds**: fifty, not fifty
+/// milliseconds. The semaphore is granted immediately or the part needs the
+/// prepare dance, so a generous timeout here buys nothing and hides which of the
+/// two happened.
+const HW_READY_TIMEOUT_US: u32 = 50;
 
 /// One step of the sequence.
 ///
@@ -491,6 +798,14 @@ pub enum Step {
     /// Wait unconditionally. Used only where upstream does, because the
     /// hardware gives nothing to poll on.
     Settle(u32),
+    /// Take the `NIC_READY` semaphore, with the prepare-and-retry fallback.
+    ///
+    /// **One step because it is a loop, and a table of steps cannot hold one.**
+    /// Upstream tries the semaphore, and on refusal disables link power
+    /// management and then asserts `PREPARE` and retries up to `tries` times.
+    /// Modelling that as straight-line entries would either drop the retry or
+    /// unroll it into ten copies whose ordering the claims could not read.
+    Acquire { tries: u32 },
 }
 
 /// The declared sequence, in order.
@@ -499,32 +814,38 @@ pub enum Step {
 /// upstream gives, because a workaround with no reason attached is one somebody
 /// deletes.
 pub const POWER_UP: &[Step] = &[
-    // Software reset first: the device may be in any state, including one left
-    // by firmware from a previous boot. 5 ms is upstream's figure and there is
-    // nothing to poll -- the reset clears the register being polled.
+    // **The semaphore first, then the reset.** This had them the other way
+    // round, which is upstream's order reversed: `iwx_start_hw` runs
+    // `prepare_card_hw` -- the whole `NIC_READY` handshake -- and only then
+    // `sw_reset`. Resetting a part that has not granted the semaphore resets it
+    // out from under the handshake that was about to happen.
+    Step::Acquire { tries: 10 },
+    // Firmware is told the host is up. Upstream does this inside
+    // `set_hw_ready` the moment the semaphore is granted, so it belongs with the
+    // acquisition rather than later.
+    Step::SetBit(CSR_MBOX_SET_REG, CSR_MBOX_SET_REG_OS_ALIVE),
+    // Now the reset. 5 ms is upstream's figure for everything below Bz, where it
+    // is a different register and 20 ms -- which is one of the two reasons this
+    // table refuses that family rather than driving it.
     Step::SetBit(CSR_RESET, CSR_RESET_REG_FLAG_SW_RESET),
     Step::Settle(5_000),
-    // Then the handshake. PREPARE asks; NIC_READY answers. Upstream allows
-    // 35 ms and retries the pair; one attempt is enough to report whether the
-    // part is reachable at all, which is what this stage is for.
-    Step::SetBit(CSR_HW_IF_CONFIG_REG, CSR_HW_IF_CONFIG_REG_PREPARE),
-    Step::Poll {
-        reg: CSR_HW_IF_CONFIG_REG,
-        mask: CSR_HW_IF_CONFIG_REG_BIT_NIC_READY,
-        want: CSR_HW_IF_CONFIG_REG_BIT_NIC_READY,
-        us: 35_000,
-    },
-    // Disable L0s without touching L1. An ICH erratum, and the reason upstream
+    // From here it is `apm_init`, in its order. It is the same for family 22000
+    // and AX210 and differs only at Bz, which is the other reason for the gate.
+    //
+    // Disable L0s without touching L1: an ICH erratum, and the reason upstream
     // does not simply disable both.
     Step::SetBit(CSR_GIO_CHICKEN_BITS, CSR_GIO_CHICKEN_BITS_REG_BIT_L1A_NO_L0S_RX),
     // FH wait threshold to maximum: a hardware error under stress otherwise.
-    Step::Write(CSR_DBG_HPET_MEM_REG, CSR_DBG_HPET_MEM_REG_VAL),
-    // Let the management bus report an attempt to reach the EEPROM, which is
-    // how a driver finds out something else is talking to the part.
+    // **Set rather than written**, which this had as a whole-word write --
+    // upstream uses set-bits, and the register holds other fields, so writing it
+    // whole clears whatever firmware or a previous boot left in them.
+    Step::SetBit(CSR_DBG_HPET_MEM_REG, CSR_DBG_HPET_MEM_REG_VAL),
+    // Let the management bus wake the link out of L1a, which is how a driver
+    // finds out something else is reaching for the part.
     Step::SetBit(CSR_HW_IF_CONFIG_REG, CSR_HW_IF_CONFIG_REG_BIT_HAP_WAKE_L1A),
     // Declare initialisation complete, moving D0U* -> D0A*.
     Step::SetBit(CSR_GP_CNTRL, CSR_GP_CNTRL_REG_FLAG_INIT_DONE),
-    // And only then wait for the clock. Polling before INIT_DONE would wait for
+    // And only then wait for the clock. Polling before INIT_DONE waits for
     // something nothing has been asked to do, which is a 25 ms timeout that
     // reads as broken hardware.
     Step::Poll {
@@ -534,7 +855,6 @@ pub const POWER_UP: &[Step] = &[
         us: 25_000,
     },
 ];
-
 /// Why the sequence stopped, with the step that stopped it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Fault {
@@ -544,6 +864,17 @@ pub enum Fault {
     /// A poll ran out. Carries the index into `POWER_UP`, so the transcript
     /// names which handshake failed rather than that one did.
     Timeout(usize),
+    /// The part never granted the semaphore, after the prepare dance and every
+    /// retry. Distinguished from a poll timeout because it is the one failure
+    /// that means something else owns the part rather than that it is broken.
+    NotGranted,
+    /// The controller is a generation this sequence is not written for. Carries
+    /// what it is, because "unsupported" and "a family whose reset is a different
+    /// register" are different things to read in a transcript.
+    WrongFamily(Family),
+    /// The revision did not decode to a controller this kernel can name, so
+    /// there is no family and nothing to gate on.
+    UnknownPart(u16),
 }
 
 impl Fault {
@@ -557,6 +888,17 @@ impl Fault {
                 ),
                 _ => alloc::format!("step {} timed out", i),
             },
+            Fault::NotGranted => String::from(
+                "the part never granted NIC_READY, even after disabling link power management -- something else may own it",
+            ),
+            Fault::WrongFamily(f) => alloc::format!(
+                "this is {} family silicon and the sequence here is for 22000 and AX210",
+                f.name()
+            ),
+            Fault::UnknownPart(t) => alloc::format!(
+                "controller type {:#05x} has no family here, so nothing can be driven safely",
+                t
+            ),
         }
     }
 }
@@ -580,6 +922,24 @@ impl Radio {
             .bar0
             .filter(|&b| b != 0)
             .ok_or(Fault::Aperture(Refusal::NoAperture))?;
+        // **Gated on the family and not on the type being named.** It was gated
+        // on `Mac::known()`, which was the right shape and the wrong question:
+        // the sequence below is `apm_init`'s, which is identical for family 22000
+        // and AX210 and differs at Bz in both the reset register and the clock
+        // bits. So a Bz part is recognised, named, and refused -- where the old
+        // gate would have driven it the moment somebody added its type to the
+        // table, and a #GP or a silent part is what that costs.
+        let rev = self.hw_rev(ecam).map_err(Fault::Aperture)?.0;
+        match rev.mac.family() {
+            Some(Family::F22000) | Some(Family::Ax210) => {}
+            Some(f) => return Err(Fault::WrongFamily(f)),
+            None => {
+                return Err(Fault::UnknownPart(match rev.mac {
+                    Mac::Unknown(t) => t,
+                    _ => 0,
+                }))
+            }
+        }
         enable_memory_space(ecam, &self.dev);
         if !crate::mem::paging::map_range(bar0, 0x1000, true) {
             return Err(Fault::Aperture(Refusal::NotMapped));
@@ -601,10 +961,76 @@ impl Radio {
                         return Err(Fault::Timeout(i));
                     }
                 }
+                Step::Acquire { tries } => {
+                    if !acquire(bar0, tries) {
+                        return Err(Fault::NotGranted);
+                    }
+                }
             }
         }
         Ok(())
     }
+}
+
+/// Take the `NIC_READY` semaphore.
+///
+/// **`NIC_READY` is written by the driver, not set by the device**, and missing
+/// that was the worst defect in the first version of this table: it polled the
+/// bit without ever setting it, so the handshake waited 35 ms for something
+/// nothing was going to write and then reported broken hardware. The register's
+/// own comment in Intel's header says `PCI_OWN_SEM` -- it is a claim on the part,
+/// and the read-back is whether the claim was granted.
+///
+/// The fallback is upstream's: disable link power management, then assert
+/// `PREPARE` and try again, because a part in a low-power link state will not
+/// grant it until the link comes up.
+fn acquire(bar0: u64, tries: u32) -> bool {
+    if set_hw_ready(bar0) {
+        return true;
+    }
+    // Safety: as `power_up` -- both offsets are inside the mapped page.
+    unsafe {
+        let p = (bar0 + CSR_DBG_LINK_PWR_MGMT_REG) as *mut u32;
+        core::ptr::write_volatile(p, core::ptr::read_volatile(p) | CSR_RESET_LINK_PWR_MGMT_DISABLED);
+    }
+    crate::time::delay_us(1_000);
+    for _ in 0..tries {
+        unsafe {
+            let p = (bar0 + CSR_HW_IF_CONFIG_REG) as *mut u32;
+            core::ptr::write_volatile(p, core::ptr::read_volatile(p) | CSR_HW_IF_CONFIG_REG_PREPARE);
+        }
+        // Upstream gives the pair 150 ms in total per outer attempt, in 200 us
+        // steps, and then waits 25 ms before asserting PREPARE again.
+        let mut waited = 0u32;
+        while waited < 150_000 {
+            if set_hw_ready(bar0) {
+                return true;
+            }
+            crate::time::delay_us(200);
+            waited += 200;
+        }
+        crate::time::delay_us(25_000);
+    }
+    false
+}
+
+/// Write the semaphore bit and read it back.
+fn set_hw_ready(bar0: u64) -> bool {
+    // Safety: as `power_up`.
+    unsafe {
+        let p = (bar0 + CSR_HW_IF_CONFIG_REG) as *mut u32;
+        core::ptr::write_volatile(
+            p,
+            core::ptr::read_volatile(p) | CSR_HW_IF_CONFIG_REG_BIT_NIC_READY,
+        );
+    }
+    poll_bit(
+        bar0,
+        CSR_HW_IF_CONFIG_REG,
+        CSR_HW_IF_CONFIG_REG_BIT_NIC_READY,
+        CSR_HW_IF_CONFIG_REG_BIT_NIC_READY,
+        HW_READY_TIMEOUT_US,
+    )
 }
 
 /// Poll one register until it answers, or give up.

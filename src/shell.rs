@@ -5044,12 +5044,32 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                             console::set_color(LTGRAY);
                         }
                         Ok((rev, rf)) => {
+                            let r = crate::dev::iwx::rf_of(rf);
                             console::set_color(LTGREEN);
                             kprintln!(
-                                "  {} step {} dash {}   CSR_HW_REV {:#010x}  RF_ID {:#010x}",
-                                rev.mac.name(), rev.step, rev.dash, rev.raw, rf
+                                "  {} step {}   radio {} step {}{}{}",
+                                rev.mac.name(),
+                                rev.step,
+                                r.rf.name(),
+                                r.step,
+                                if r.cdb { ", two dies" } else { "" },
+                                if r.jacket { ", on a jacket board" } else { "" },
                             );
+                            // The pair is what names the part, and saying it is
+                            // the point of reading both: one PCI id carries an
+                            // AX201 and an AX211 and only the radio tells them
+                            // apart.
+                            match crate::dev::iwx::product_name(rev.mac, r.rf) {
+                                Some(n) => kprintln!("  which is sold as an {}", n),
+                                None => kprintln!("  no name is known for that controller and radio together"),
+                            }
                             console::set_color(LTGRAY);
+                            kprintln!(
+                                "  family {}   CSR_HW_REV {:#010x}  RF_ID {:#010x}",
+                                rev.mac.family().map(|f| f.name()).unwrap_or("unknown"),
+                                rev.raw,
+                                rf
+                            );
                             if !rev.mac.known() {
                                 kprintln!("  no firmware is named for that type, so `iwx up` will refuse");
                             }

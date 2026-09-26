@@ -185,6 +185,17 @@ fn hybrid() -> Status {
 fn radio_present() -> Status {
     match crate::dev::iwx::seen() {
         None => Status::Todo,
+        // **Not a failure under emulation**, which this had as one. No hypervisor
+        // models an Intel wireless part, so "none on the bus" is the only answer
+        // QEMU can give and reading it as broken makes every headless run of this
+        // page show two failures that mean nothing. The module's own rule is that
+        // a row a hypervisor cannot answer is `n/a` with the reason, the way the
+        // hybrid split already is -- and on the GF63, where there is no
+        // hypervisor, the same absence is a genuine failure and still reads as
+        // one.
+        Some(0) if crate::dev::power::virtualised() => {
+            Status::NotHere("no hypervisor models an Intel wireless part")
+        }
         Some(0) => Status::Failed(String::from("no Intel wireless function on the bus")),
         Some(n) => ok(alloc::format!("{} function(s)", n)),
     }
@@ -194,7 +205,12 @@ fn radio_answers() -> Status {
     match crate::dev::iwx::last_rev() {
         None => Status::Todo,
         Some(Err(r)) => Status::Failed(String::from(r.why())),
-        Some(Ok(rev)) => ok(alloc::format!("{} step {} dash {}", rev.mac.name(), rev.step, rev.dash)),
+        Some(Ok(rev)) => ok(alloc::format!(
+            "{} step {}, family {}",
+            rev.mac.name(),
+            rev.step,
+            rev.mac.family().map(|f| f.name()).unwrap_or("unknown")
+        )),
     }
 }
 
