@@ -548,6 +548,25 @@ pub fn set_slices(n: u32) -> u32 {
     have
 }
 
+/// The last foreground bench, for the bring-up list.
+///
+/// **`bench` runs on the caller's task with its own hasher and never touches
+/// `HASHES`**, which is right -- the sweep zeroes that counter and a foreground
+/// measurement must not perturb it -- and it meant the checklist could not see
+/// that anything had been measured. So the figure is kept here, which is worth
+/// having anyway: the rate is the number the bare-metal trip exists to bring
+/// back, and it belongs on the page that gets photographed.
+static LAST_BENCH: crate::sync::Racy<Option<(u64, u64)>> = crate::sync::Racy::new(None);
+
+/// `(hashes per second, working set in KiB)` of the last `mine bench`.
+pub fn last_bench() -> Option<(u64, u64)> {
+    unsafe { *LAST_BENCH.get() }
+}
+
+pub fn note_bench(hs: u64, kib: u64) {
+    unsafe { *LAST_BENCH.get() = Some((hs, kib)) };
+}
+
 pub fn hash_ms() -> u64 {
     let t0 = HASH_SINCE.load(Ordering::Relaxed);
     if t0 == 0 {

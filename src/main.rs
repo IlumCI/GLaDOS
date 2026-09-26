@@ -18,6 +18,7 @@ extern crate alloc;
 mod acpi;
 mod bench;
 mod boot_report;
+mod checklist;
 mod repair;
 mod ai;
 mod app;

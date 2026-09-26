@@ -4989,6 +4989,114 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
         // `pci` lists what is on the bus. This says what each thing *is* and
         // what would drive it, which is the question somebody actually has --
         // and it covers USB, which `pci` structurally cannot.
+        // **The bring-up list, which answers as well as asks.**
+        //
+        // `design/gf63.md` is this in prose and cannot say what already happened.
+        // Bare-metal testing takes the editor and the notes away with it, so the
+        // list has to be on the machine -- and every status is derived from state
+        // the kernel already holds rather than recorded, so it cannot go stale
+        // against the machine it describes.
+        "checklist" | "bringup" => crate::checklist::show(),
+
+        // **The Intel radio, in three steps because they are three risks.**
+        // `iwx` only scans the bus. `iwx probe` reads two registers, which needs
+        // a BAR mapped and memory-space decoding enabled. `iwx up` *writes* --
+        // reset, handshake, clock -- to a part whose firmware has never run.
+        // Folding them into one verb would mean an operator who only wanted to
+        // know whether the part exists had already written to it.
+        "iwx" => {
+            let step = rest.trim();
+            let Some(ecam) = acpi.as_ref().and_then(|a| a.mcfg) else {
+                kprintln!("  no ECAM: configuration space is unreachable, so nothing can be asked");
+                return;
+            };
+            let found = crate::dev::iwx::find(ecam);
+            crate::dev::iwx::note_seen(found.len());
+            console::set_color(YELLOW);
+            kprintln!("[iwx] {} Intel wireless function(s)", found.len());
+            console::set_color(LTGRAY);
+            if found.is_empty() {
+                kprintln!("  `devices` lists what is present and names what is missing");
+                return;
+            }
+            for r in &found {
+                match r.bar0 {
+                    Some(b) if b != 0 => kprintln!(
+                        "  {} at {:02x}:{:02x}.{}  aperture {:#012x}",
+                        r.id(), r.dev.bus, r.dev.dev, r.dev.func, b
+                    ),
+                    _ => kprintln!(
+                        "  {} at {:02x}:{:02x}.{}  no aperture assigned by firmware",
+                        r.id(), r.dev.bus, r.dev.dev, r.dev.func
+                    ),
+                }
+            }
+            let r = &found[0];
+            match step {
+                "" => kprintln!("  `iwx probe` reads the revision; `iwx up` resets it and starts its clock"),
+                "probe" => {
+                    let got = r.hw_rev(ecam);
+                    crate::dev::iwx::note_rev(got.map(|(rev, _)| rev));
+                    match got {
+                        Err(e) => {
+                            console::set_color(LTRED);
+                            kprintln!("  {}", e.why());
+                            console::set_color(LTGRAY);
+                        }
+                        Ok((rev, rf)) => {
+                            console::set_color(LTGREEN);
+                            kprintln!(
+                                "  {} step {} dash {}   CSR_HW_REV {:#010x}  RF_ID {:#010x}",
+                                rev.mac.name(), rev.step, rev.dash, rev.raw, rf
+                            );
+                            console::set_color(LTGRAY);
+                            if !rev.mac.known() {
+                                kprintln!("  no firmware is named for that type, so `iwx up` will refuse");
+                            }
+                        }
+                    }
+                }
+                "up" => {
+                    // The revision first, and not as a courtesy: the offsets the
+                    // sequence writes are family 22000's, and poking them at
+                    // another family is a part that goes quiet or a machine
+                    // check. The same rule `dev::power` applies to an MSR whose
+                    // gate it cannot confirm.
+                    match r.hw_rev(ecam) {
+                        Err(e) => {
+                            console::set_color(LTRED);
+                            kprintln!("  nothing will be written: {}", e.why());
+                            console::set_color(LTGRAY);
+                        }
+                        Ok((rev, _)) if !rev.mac.known() => {
+                            console::set_color(LTRED);
+                            kprintln!("  {} is not a family this kernel has offsets for; refusing", rev.mac.name());
+                            console::set_color(LTGRAY);
+                        }
+                        Ok(_) => {
+                            kprintln!("  resetting and powering up -- this writes to the radio");
+                            let got = r.power_up(ecam);
+                            crate::dev::iwx::note_power_up(got);
+                            match got {
+                                Ok(()) => {
+                                    console::set_color(LTGREEN);
+                                    kprintln!("  reset, handshake and clock accepted");
+                                    console::set_color(LTGRAY);
+                                    kprintln!("  no firmware is loaded, so nothing can be asked of it yet");
+                                }
+                                Err(f) => {
+                                    console::set_color(LTRED);
+                                    kprintln!("  {}", f.why());
+                                    console::set_color(LTGRAY);
+                                }
+                            }
+                        }
+                    }
+                }
+                other => kprintln!("  no such step '{}' -- try `iwx`, `iwx probe` or `iwx up`", other),
+            }
+        }
+
         "devices" => {
             console::set_color(YELLOW);
             kprintln!("[devices]");
@@ -8247,6 +8355,9 @@ fn mine_cmd(rest: &str) {
             console::set_color(LTGRAY);
             match client::bench(&a, ms) {
                 Some((n, took, foot)) if took > 0 => {
+                    // Kept for `checklist`, which otherwise cannot tell that
+                    // anything was measured: this path never touches `HASHES`.
+                    client::note_bench(n * 1000 / took, (foot / 1024) as u64);
                     kprintln!(
                         "  {} H/s over {} hashes in {} ms, sharing the core with {} task(s)",
                         n * 1000 / took,

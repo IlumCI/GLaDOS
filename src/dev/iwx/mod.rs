@@ -152,6 +152,10 @@ pub enum Refusal {
     Asleep,
     /// All bits clear, which no live function reports for this register.
     Silent,
+    /// The read itself faulted and was caught. The aperture is mapped and the
+    /// device does not decode it -- which firmware assigning a BAR does not
+    /// promise, and which nothing before the first read can tell.
+    Faulted,
 }
 
 impl Refusal {
@@ -161,6 +165,7 @@ impl Refusal {
             Refusal::NotMapped => "the register aperture could not be mapped",
             Refusal::Asleep => "reads as all ones: parked in D3cold, or memory-space decoding is off",
             Refusal::Silent => "reads as all zeroes, which no live function reports",
+            Refusal::Faulted => "the read faulted and was caught: the aperture is mapped and the device does not decode it",
         }
     }
 }
@@ -184,15 +189,34 @@ impl Radio {
         if !crate::mem::paging::map_range(bar0, 0x1000, true) {
             return Err(Refusal::NotMapped);
         }
-        // Safety: the aperture is mapped uncached immediately above, and both
-        // offsets are inside the first 4 KiB of it. Volatile because a register
-        // is not memory and the compiler may not reorder or elide either read.
-        let (rev, rf) = unsafe {
-            (
-                core::ptr::read_volatile((bar0 + CSR_HW_REV) as *const u32),
-                core::ptr::read_volatile((bar0 + CSR_HW_RF_ID) as *const u32),
-            )
-        };
+        // **Guarded, because this is the first read of an aperture nothing has
+        // validated.** The BAR came from firmware and the mapping succeeded, and
+        // neither says the device decodes that range: on a part that is half
+        // asleep or mis-described, the read is a machine check, and every vector
+        // but `#BP` here is fatal. Unguarded that means a dead machine, a reboot
+        // and nothing learnt -- on a trip whose whole purpose is to learn.
+        //
+        // `recover::guard` is what `mem::paging::checks` uses to fault on
+        // purpose, so this is the same landing pad. A caught fault reports as
+        // `Silent` rather than a revision: the register did not answer, which is
+        // exactly what the caller needs to hear, and the alternative is a
+        // transcript that ends mid-line.
+        let mut got = (0u32, 0u32);
+        let read = crate::cpu::recover::guard(|| {
+            // Safety: the aperture is mapped uncached immediately above and both
+            // offsets are inside the first 4 KiB. Volatile because a register is
+            // not memory and neither read may be reordered or elided.
+            got = unsafe {
+                (
+                    core::ptr::read_volatile((bar0 + CSR_HW_REV) as *const u32),
+                    core::ptr::read_volatile((bar0 + CSR_HW_RF_ID) as *const u32),
+                )
+            };
+        });
+        if read.is_err() {
+            return Err(Refusal::Faulted);
+        }
+        let (rev, rf) = got;
         if rev == ALL_ONES {
             return Err(Refusal::Asleep);
         }
@@ -236,6 +260,42 @@ pub fn find(ecam: u64) -> Vec<Radio> {
         out.push(Radio { dev, bar0: pci::bar(ecam, &dev, 0) });
     });
     out
+}
+
+// --- what the checklist reads -----------------------------------------------
+//
+// **The one thing on the bring-up list that cannot be derived.** Every other row
+// asks the kernel a question it can already answer; a radio has to be *read*
+// before it can be reported, and reading it maps a BAR and enables memory-space
+// decoding. So the read happens when the operator asks for it and the answer is
+// kept here, which is why these are the only cached statuses in the checklist.
+//
+// `Racy` and not a lock: written by the shell task and read by the shell task,
+// and a wrong answer here is a stale line on a report rather than anything the
+// machine acts on.
+static SEEN: crate::sync::Racy<Option<usize>> = crate::sync::Racy::new(None);
+static LAST_REV: crate::sync::Racy<Option<Result<Rev, Refusal>>> = crate::sync::Racy::new(None);
+static LAST_UP: crate::sync::Racy<Option<Result<(), Fault>>> = crate::sync::Racy::new(None);
+
+/// How many Intel wireless functions the last scan found.
+pub fn seen() -> Option<usize> {
+    unsafe { *SEEN.get() }
+}
+pub fn last_rev() -> Option<Result<Rev, Refusal>> {
+    unsafe { *LAST_REV.get() }
+}
+pub fn last_power_up() -> Option<Result<(), Fault>> {
+    unsafe { *LAST_UP.get() }
+}
+
+pub fn note_seen(n: usize) {
+    unsafe { *SEEN.get() = Some(n) };
+}
+pub fn note_rev(r: Result<Rev, Refusal>) {
+    unsafe { *LAST_REV.get() = Some(r) };
+}
+pub fn note_power_up(r: Result<(), Fault>) {
+    unsafe { *LAST_UP.get() = Some(r) };
 }
 
 /// What `diag iwx` asserts, with no radio present.
@@ -286,6 +346,17 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     claim(
         "and an unassigned aperture is a third",
         Refusal::NoAperture != Refusal::NotMapped,
+    );
+    // **A faulting read is its own answer.** Guarded rather than fatal, because
+    // an unvalidated aperture is the one thing a probe cannot check before
+    // reading it -- and a dead machine teaches nothing on a trip taken to learn.
+    claim(
+        "a faulting read is a fourth, distinct from a silent one",
+        Refusal::Faulted != Refusal::Silent && Refusal::Faulted != Refusal::NotMapped,
+    );
+    claim(
+        "and it says the aperture mapped but the device did not decode it",
+        Refusal::Faulted.why().contains("does not decode"),
     );
 
     // --- the power-up sequence, which is why it is a table ------------------
