@@ -5006,6 +5006,125 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
         // know whether the part exists had already written to it.
         "iwx" => {
             let step = rest.trim();
+            // **The one step that needs no radio, so it is handled before the
+            // bus is even swept.** Building the boot structures is parsing a file
+            // and laying out memory: it is the only part of this bring-up that can
+            // be driven anywhere but the GF63, and putting it behind the radio
+            // enumeration made it unreachable under emulation -- which is the one
+            // place it is useful. Its own step rather than part of a `boot`,
+            // because a command that checks a firmware file must not also start a
+            // radio with it.
+            if step.starts_with("ctxt") {
+                let path = step.trim_start_matches("ctxt").trim();
+                if path.is_empty() {
+                    kprintln!("  usage: iwx ctxt <path to a .ucode in the namespace>");
+                    kprintln!("  builds the AX210 boot structures and prints them. Touches no");
+                    kprintln!("  register, so it works under emulation and needs no radio.");
+                    return;
+                }
+                let bytes = match crate::sysbox::read_blob(path) {
+                    Some(b) => b,
+                    None => {
+                        kprintln!("  no such blob: {}", path);
+                        return;
+                    }
+                };
+                let image = match crate::dev::iwx::fw::parse(&bytes) {
+                    Ok(i) => i,
+                    Err(e) => {
+                        console::set_color(LTRED);
+                        kprintln!("  {}", e.why());
+                        console::set_color(LTGRAY);
+                        return;
+                    }
+                };
+                console::set_color(YELLOW);
+                kprintln!("[iwx] {}", image.human);
+                console::set_color(LTGRAY);
+                kprintln!(
+                    "  {} record(s), {} section(s), {} loadable, {} byte(s), {} cpu(s)",
+                    image.records.len(),
+                    image.sections.len(),
+                    image.loadable().len(),
+                    image.bytes(),
+                    image.cpus.unwrap_or(0)
+                );
+                match image.iml {
+                    Some((_, n)) => kprintln!("  image loader {} byte(s)", n),
+                    None => kprintln!("  no image loader, so an AX210 part cannot boot this"),
+                }
+                match crate::dev::iwx::ctxt::group(&image.sections) {
+                    Err(e) => {
+                        console::set_color(LTRED);
+                        kprintln!("  {}", e.why());
+                        console::set_color(LTGRAY);
+                    }
+                    Ok(placed) => {
+                        use crate::dev::iwx::ctxt::Dest;
+                        let n = |d: Dest| placed.iter().filter(|p| p.dest == d).count();
+                        kprintln!(
+                            "  LMAC {} section(s), UMAC {}, paged {}",
+                            n(Dest::Lmac),
+                            n(Dest::Umac),
+                            n(Dest::Paging)
+                        );
+                        // 0x370 is the GF63's own CSR_HW_REV, which its Linux
+                        // printed. Passed rather than read, because there is no
+                        // radio here to read it from and the structure has to
+                        // carry something the part would recognise.
+                        match crate::dev::iwx::gen3::build(0x0000_0370, &image, &bytes) {
+                            Err(e) => {
+                                console::set_color(LTRED);
+                                kprintln!("  {}", e.why());
+                                console::set_color(LTGRAY);
+                            }
+                            Ok(b) => {
+                                use crate::dev::iwx::gen3;
+                                console::set_color(LTGREEN);
+                                kprintln!("  built the AX210 boot structures");
+                                console::set_color(LTGRAY);
+                                kprintln!("    context info {:#012x}  {} B", b.info.pa(), b.info.len());
+                                kprintln!(
+                                    "    scratch      {:#012x}  {} B, control {:#x}",
+                                    b.scratch.pa(),
+                                    b.scratch.len(),
+                                    gen3::control_flags()
+                                );
+                                kprintln!("    prph info    {:#012x}  {} B", b.prph_info.pa(), b.prph_info.len());
+                                kprintln!("    image loader {:#012x}  {} B", b.iml.pa(), b.iml.len());
+                                kprintln!(
+                                    "    rings        free {} used {} stat {} cmd {} B",
+                                    b.rings.free.len(),
+                                    b.rings.used.len(),
+                                    b.rings.stat.len(),
+                                    b.rings.cmd.len()
+                                );
+                                kprintln!(
+                                    "    {} firmware region(s), {} B copied",
+                                    b.sections.len(),
+                                    b.sections.iter().map(|d| d.len()).sum::<usize>()
+                                );
+                                // Read back through the bytes, because what
+                                // firmware sees is the bytes and not what the
+                                // builder meant.
+                                let ok_scratch =
+                                    gen3::get64(&b.info, gen3::at::PRPH_SCRATCH_BASE) == Some(b.scratch.pa());
+                                let ok_info =
+                                    gen3::get64(&b.info, gen3::at::PRPH_INFO_BASE) == Some(b.prph_info.pa());
+                                let ok_free = gen3::get64(&b.scratch, gen3::scratch_at::FREE_RBD_ADDR)
+                                    == Some(b.rings.free.pa());
+                                console::set_color(if ok_scratch && ok_info && ok_free { LTGREEN } else { LTRED });
+                                kprintln!(
+                                    "    read back: scratch {} prph info {} free ring {}",
+                                    ok_scratch, ok_info, ok_free
+                                );
+                                console::set_color(LTGRAY);
+                            }
+                        }
+                    }
+                }
+                return;
+            }
             let Some(ecam) = acpi.as_ref().and_then(|a| a.mcfg) else {
                 kprintln!("  no ECAM: configuration space is unreachable, so nothing can be asked");
                 return;
@@ -5113,7 +5232,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         }
                     }
                 }
-                other => kprintln!("  no such step '{}' -- try `iwx`, `iwx probe` or `iwx up`", other),
+                other => kprintln!("  no such step '{}' -- try `iwx`, `iwx probe`, `iwx up` or `iwx ctxt <fw>`", other),
             }
         }
 

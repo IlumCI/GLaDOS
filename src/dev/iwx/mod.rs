@@ -31,6 +31,7 @@
 //! walked by a suite on any machine, where reading a real `CSR_HW_REV` cannot.
 
 pub mod ctxt;
+pub mod gen3;
 pub mod fw;
 
 use crate::dev::pci::{self, Device};
@@ -577,6 +578,38 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         product_name(Mac::Bz, Rf::Fm).is_none(),
     );
 
+    // --- the real part, from its own registers -------------------------------
+
+    // **Not synthetic.** These are the words the GF63's own Linux printed for
+    // `00:14.3` -- `PCI dev 51f0/0074, rev=0x370, rfid=0x10a100` -- so this group
+    // checks both decoders against a reading taken off the target rather than
+    // against values chosen to make them pass. It is the only evidence available
+    // here about a part no emulator models, and it cost nothing but reading a
+    // journal.
+    const GF63_HW_REV: u32 = 0x0037_0000 >> 8; // 0x370, as the driver reports it
+    let real = rev_of(GF63_HW_REV);
+    claim("the GF63's controller decodes as Snow Owl", real.mac == Mac::So);
+    claim("which is AX210 family, not the 22000 this was built for", real.mac.family() == Some(Family::Ax210));
+    claim("at A step, which is the a0 in its firmware's name", real.step == 0);
+    let real_rf = rf_of(0x0010_a100);
+    claim("and its radio decodes as Harrier", real_rf.rf == Rf::Hr2);
+    claim("at step 1", real_rf.step == 1);
+    claim("with neither the two-die nor the jacket flag", !real_rf.cdb && !real_rf.jacket);
+    // The name its own kernel printed: "Detected Intel(R) Wi-Fi 6 AX201 160MHz".
+    claim(
+        "and together they are the AX201 its own kernel named",
+        product_name(real.mac, real_rf.rf) == Some("AX201"),
+    );
+    // The step is where the old decoding and the new one happen to agree on this
+    // part, and saying so is the honest version: 0x370's low nibble is zero, so
+    // both answer A. The fix matters on QuZ, where upstream's own re-pack gives
+    // step 0 and taking bits 2..4 gives 1 -- so the wrong image would be chosen
+    // for that part and not for this one.
+    claim(
+        "the old decoding agreed on this part and disagrees on QuZ",
+        (GF63_HW_REV >> 2) & 3 == GF63_HW_REV & 3 && (0x354u32 >> 2) & 3 != 0x354u32 & 3,
+    );
+
     // The type field stops at bit 16, so a revision with high bits set decodes
     // to the same part. Checked because those bits are not reserved forever and
     // a decoder that swallowed them would rename the part on the next stepping.
@@ -714,6 +747,8 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     // answers, not whether the bytes are right.
     out.extend(fw::checks());
     out.extend(ctxt::checks());
+    out.extend(gen3::checks());
+    out.extend(gen3::kick_checks());
     out
 }
 

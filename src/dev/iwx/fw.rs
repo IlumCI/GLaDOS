@@ -177,6 +177,14 @@ pub struct Image {
     pub sections: Vec<Section>,
     /// How many CPUs the image drives, if it said.
     pub cpus: Option<u32>,
+    /// Where the image loader is in the file, as `(at, len)`.
+    ///
+    /// **Located rather than copied, like the sections**, and reported rather
+    /// than merely counted: `Kind::Iml` was recognised from the day this parser
+    /// was written and its bytes were unreachable, so an AX210 part -- which
+    /// boots *through* the loader and has no fallback -- could not have been
+    /// started from an image this had parsed perfectly.
+    pub iml: Option<(usize, usize)>,
     /// Every record type seen, in order, including the ignored ones. Kept so a
     /// transcript can say what an image contained rather than what was used.
     pub records: Vec<(Kind, usize)>,
@@ -227,6 +235,7 @@ pub fn parse(b: &[u8]) -> Result<Image, Error> {
     let mut sections: Vec<Section> = Vec::new();
     let mut records: Vec<(Kind, usize)> = Vec::new();
     let mut cpus = None;
+    let mut iml = None;
     let mut at = HEADER;
     let mut n = 0usize;
 
@@ -258,6 +267,11 @@ pub fn parse(b: &[u8]) -> Result<Image, Error> {
                 });
             }
             Kind::NumOfCpu if len >= 4 => cpus = Some(le32(b, body)),
+            // **The last one wins**, which is upstream's rule: it frees any
+            // earlier loader and keeps the newest. A file with two is malformed
+            // and the choice still has to be defined, because "the first" and
+            // "the last" are different blobs and only one of them will run.
+            Kind::Iml if len > 0 => iml = Some((body, len)),
             _ => {}
         }
         // **Padded to four, and the padding is part of the record.** Rounding
@@ -280,7 +294,7 @@ pub fn parse(b: &[u8]) -> Result<Image, Error> {
     if sections.is_empty() {
         return Err(Error::NoSections);
     }
-    Ok(Image { human, ver, build, sections, cpus, records })
+    Ok(Image { human, ver, build, sections, cpus, iml, records })
 }
 
 /// Build a container, for the suite and for nothing else.
@@ -345,7 +359,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     claim("a well-formed container parses", p.is_ok());
     let p = p.unwrap_or_else(|_| Image {
         human: String::new(), ver: 0, build: 0,
-        sections: Vec::new(), cpus: None, records: Vec::new(),
+        sections: Vec::new(), cpus: None, iml: None, records: Vec::new(),
     });
     claim("the version string is read and NUL-trimmed", p.human == "77.1a2b3c4d.0 QuZ-a0-hr-b0-77");
     claim("the build number survives", p.build == 4242);

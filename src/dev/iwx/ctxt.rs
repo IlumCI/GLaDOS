@@ -425,25 +425,61 @@ pub const TFD_SIZE: usize = 256;
 /// using them here would have the part stride the ring at twice and eight times
 /// the pitch.
 pub struct Rings {
-    /// Addresses of free receive buffers: one `u64` each, 256-byte aligned.
+    /// Addresses of free receive buffers, 256-byte aligned.
     pub free: Dma,
-    /// Tags of used ones: one `u32` each, 256-byte aligned.
+    /// Tags of used ones, 256-byte aligned.
     pub used: Dma,
-    /// The 16-byte status block firmware writes its producer indices into.
+    /// The status block firmware writes its producer indices into.
     pub stat: Dma,
     /// The command queue's descriptors, 256-byte aligned.
     pub cmd: Dma,
 }
 
+/// The three per-family entry sizes, which are the trap this type exists around.
+///
+/// **All three differ between the families and none of them is the obvious
+/// choice.** On family 22000 a free-descriptor entry is a bare `u64` address, a
+/// used entry a bare `u32` tag, and the status block the sixteen-byte
+/// `rb_status`. On AX210 the first two become real descriptor structures --
+/// sixteen and thirty-two bytes -- and the status block shrinks to a single
+/// `u16`. So reaching for `rx_transfer_desc` on 22000 strides the ring at twice
+/// the pitch, and reaching for `u64` on AX210 strides it at half, and both are
+/// silent: the part walks a ring of the right length at the wrong step.
+pub struct RingSizes {
+    pub free_entry: usize,
+    pub used_entry: usize,
+    pub stat: usize,
+}
+
+pub fn ring_sizes(family: super::Family) -> RingSizes {
+    match family {
+        super::Family::F22000 => RingSizes { free_entry: 8, used_entry: 4, stat: 16 },
+        // `rx_transfer_desc` is 16 -- a tag, three reserved halves and a 64-bit
+        // address -- and `rx_completion_desc` is 32. The status block is two
+        // bytes, because on this family firmware keeps its indices in the
+        // peripheral info page instead.
+        super::Family::Ax210 => RingSizes { free_entry: 16, used_entry: 32, stat: 2 },
+        // Bz shrinks the completion descriptor again, to four. Named so the table
+        // is complete; nothing here drives that family.
+        super::Family::Bz => RingSizes { free_entry: 16, used_entry: 4, stat: 2 },
+    }
+}
+
 impl Rings {
-    pub fn new() -> Option<Rings> {
+    /// Allocate the four regions for a family.
+    ///
+    /// Takes the family rather than defaulting to one, because a default here is
+    /// the mistake `ring_sizes` documents and it cannot be caught by anything
+    /// downstream -- every address in the descriptor would be correct.
+    pub fn new(family: super::Family) -> Option<Rings> {
+        let z = ring_sizes(family);
         Some(Rings {
-            free: Dma::new(8 * RX_RING as usize, 256)?,
-            used: Dma::new(4 * RX_RING as usize, 256)?,
-            // Sixteen bytes and sixteen-byte aligned, which is upstream's figure
-            // for `iwx_rb_status`: four producer indices and a word it does not
-            // use.
-            stat: Dma::new(16, 16)?,
+            free: Dma::new(z.free_entry * RX_RING as usize, 256)?,
+            used: Dma::new(z.used_entry * RX_RING as usize, 256)?,
+            // Sixteen-byte aligned whatever its length, which is upstream's
+            // figure and not derived from the size -- a two-byte block aligned to
+            // two would be legal arithmetic and the wrong alignment.
+            stat: Dma::new(z.stat, 16)?,
             cmd: Dma::new(TFD_SIZE * TX_RING as usize, 256)?,
         })
     }
@@ -750,7 +786,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
 
     // --- the whole thing ----------------------------------------------------
 
-    if let (Ok(image), Some(rings)) = (fw::parse(&img), Rings::new()) {
+    if let (Ok(image), Some(rings)) = (fw::parse(&img), Rings::new(super::Family::F22000)) {
         // The ring regions, whose alignments the part strides by.
         out.push(("the free receive ring is 256-byte aligned", rings.free.pa() % 256 == 0));
         out.push(("the used one too", rings.used.pa() % 256 == 0));
@@ -759,8 +795,19 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         // Entry sizes are the family's, not AX210's. A `u64` per free entry and a
         // `u32` per used one; the sixteen- and thirty-two-byte descriptor structs
         // in the same header belong to the later part.
-        out.push(("the free ring is one address per entry", rings.free.len() == 8 * RX_RING as usize));
-        out.push(("the used ring is one tag per entry", rings.used.len() == 4 * RX_RING as usize));
+        out.push(("on family 22000 the free ring is one bare address per entry", rings.free.len() == 8 * RX_RING as usize));
+        out.push(("and the used ring one bare tag", rings.used.len() == 4 * RX_RING as usize));
+        // The pair that says the family really is consulted. Same ring depth,
+        // different pitch, and nothing downstream could tell.
+        out.push((
+            "AX210 uses real descriptors instead, so its rings are wider",
+            ring_sizes(super::Family::Ax210).free_entry == 16
+                && ring_sizes(super::Family::Ax210).used_entry == 32,
+        ));
+        out.push((
+            "and its status block is two bytes where 22000's is sixteen",
+            ring_sizes(super::Family::Ax210).stat == 2 && ring_sizes(super::Family::F22000).stat == 16,
+        ));
         out.push(("and the command queue is 256 long-format descriptors", rings.cmd.len() == TFD_SIZE * TX_RING as usize));
 
         if let Ok(placed) = group(&image.sections) {
