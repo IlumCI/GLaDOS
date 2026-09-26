@@ -30,6 +30,8 @@
 //! dump. The decode is a pure function for the same reason -- `rev_of` can be
 //! walked by a suite on any machine, where reading a real `CSR_HW_REV` cannot.
 
+pub mod fw;
+
 use crate::dev::pci::{self, Device};
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -342,6 +344,10 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         "and an aperture fault carries the probe's own reason",
         Fault::Aperture(Refusal::Asleep).why() == Refusal::Asleep.why(),
     );
+
+    // The firmware container, which is the last piece of this port that can be
+    // checked without the laptop.
+    out.extend(fw::checks());
     out
 }
 

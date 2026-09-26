@@ -1,0 +1,457 @@
+//! The firmware container Intel ships, parsed.
+//!
+//! An `iwlwifi-*.ucode` file is a small header followed by a stream of
+//! type-length-value records: the microcode sections that go into the device's
+//! memory, the version, how many CPUs the image drives, and several dozen
+//! capability records a loader may ignore. The format is `iwl-fw-file.h`'s and
+//! the type numbers here are the ones that file defines.
+//!
+//! **This walks and never seeks, and asserts it lands on the last byte.** That
+//! is the bargain `tools/v4.py` and `convert.py` already make for the checkpoint
+//! format, for the identical reason: the body carries no names, shapes or
+//! lengths beyond each record's own, so a reader that disagreed with the writer
+//! about one length would leave everything after it as perfectly valid records
+//! of the wrong thing. A firmware image is worse than a checkpoint there. A
+//! misparsed section is not a section that fails to load; it is the right number
+//! of bytes written to the wrong address in a radio's memory, and what comes
+//! back is silence.
+//!
+//! So every refusal is explicit and nothing is skipped past. A record whose
+//! length runs off the end is an error, not a truncation; a trailing fragment
+//! too short to be a record is an error, not padding; and a container that
+//! parses to the last byte but declares no loadable section is an error too,
+//! because a loader that ran it would reset the device and wait for firmware
+//! that was never sent.
+//!
+//! Nothing here touches hardware, which is why it is the last piece of the
+//! Intel port that can be checked without the laptop. `tools/iwxfw.py` is the
+//! second reader -- it writes a container as well as reading one, so the pair
+//! round-trips, the way `tokenizer.py --verify` diffs the kernel's tokeniser
+//! against the reference library.
+
+use alloc::string::String;
+use alloc::vec::Vec;
+
+/// `"IWL\n"` little-endian. Checked, never assumed.
+pub const MAGIC: u32 = 0x0a4c_5749;
+
+/// Four zero bytes first. The v1 header began with a version word, and no valid
+/// combination of major/minor/API/serial is zero -- so a leading zero is how a
+/// TLV container is told from the format it replaced. A reader that skipped this
+/// would parse a v1 file as a TLV one and find garbage records.
+pub const HEADER: usize = 88;
+const HUMAN_READABLE: usize = 64;
+
+/// The record types this kernel acts on. Everything else is carried as
+/// `Other` rather than dropped, because "the image contained a record we
+/// ignored" and "the image contained nothing we understood" are different facts
+/// and only the second is a refusal.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Kind {
+    /// A runtime microcode section: four bytes of destination offset, then the
+    /// bytes to put there.
+    SecRt,
+    /// The same for the initialisation image, which runs first and is replaced.
+    SecInit,
+    /// How many CPUs the image drives. Decides where the section list splits.
+    NumOfCpu,
+    /// A human-readable version, separate from the header's.
+    Version,
+    /// The image loader, on families that bootstrap through one.
+    Iml,
+    /// Paged memory, for images larger than the device's own RAM.
+    Paging,
+    /// Everything else, by number. **Most of a real image is this**, and that is
+    /// not a gap: the AX201's own `iwlwifi-QuZ-a0-hr-b0-77.ucode` carries 181
+    /// records of which 98 are `IWL_UCODE_TLV_DEBUG_BASE` and up -- 0x1000005
+    /// onward, the debug-region descriptors a loader ignores unless it is
+    /// tracing. Carrying them is what lets a transcript say what an image
+    /// contained; naming them would be a table to keep in step with Intel for no
+    /// behaviour.
+    Other(u32),
+}
+
+impl Kind {
+    pub fn of(t: u32) -> Kind {
+        match t {
+            19 => Kind::SecRt,
+            20 => Kind::SecInit,
+            27 => Kind::NumOfCpu,
+            36 => Kind::Version,
+            52 => Kind::Iml,
+            32 => Kind::Paging,
+            other => Kind::Other(other),
+        }
+    }
+    pub fn raw(&self) -> u32 {
+        match self {
+            Kind::SecRt => 19,
+            Kind::SecInit => 20,
+            Kind::NumOfCpu => 27,
+            Kind::Version => 36,
+            Kind::Iml => 52,
+            Kind::Paging => 32,
+            Kind::Other(t) => *t,
+        }
+    }
+    /// Whether this record is bytes destined for the device's memory.
+    pub fn loadable(&self) -> bool {
+        matches!(self, Kind::SecRt | Kind::SecInit)
+    }
+}
+
+/// Two offsets that are markers rather than addresses.
+///
+/// A section list is split by sentinels instead of being counted, so a loader
+/// that treated these as destinations would write eight bytes to an address near
+/// the top of the map and then load the second CPU's code over the first's.
+pub const CPU1_CPU2_SEPARATOR: u32 = 0xFFFF_CCCC;
+pub const PAGING_SEPARATOR: u32 = 0xAAAA_BBBB;
+
+/// One microcode section: where it goes, and how long it is.
+///
+/// The bytes are left in the caller's buffer and described by range rather than
+/// copied. A runtime image is over a megabyte and this runs before there is much
+/// heap; copying it to describe it would double the peak for nothing.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Section {
+    pub kind: Kind,
+    /// Destination in device memory, or one of the two separators.
+    pub offset: u32,
+    /// Where the bytes are in the file.
+    pub at: usize,
+    pub len: usize,
+}
+
+impl Section {
+    pub fn is_separator(&self) -> bool {
+        self.offset == CPU1_CPU2_SEPARATOR || self.offset == PAGING_SEPARATOR
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Error {
+    /// Shorter than the fixed header.
+    TooShort(usize),
+    /// The leading word was not zero: this is a v1/v2 image, not a TLV one.
+    NotTlv(u32),
+    /// The magic was wrong. Names what was found, because a byte-swapped file
+    /// and a wrong file are different mistakes.
+    BadMagic(u32),
+    /// A record's length runs past the end of the file. Carries the record
+    /// index, its declared length and what was left, because "the file is
+    /// truncated" and "a length is wrong" look identical without all three.
+    Overrun { at: usize, want: usize, left: usize },
+    /// Bytes remain, but too few to be a record.
+    Trailing(usize),
+    /// A section record too short to hold its own destination offset.
+    ShortSection { at: usize, len: usize },
+    /// Parsed to the last byte and found nothing to load.
+    NoSections,
+}
+
+impl Error {
+    pub fn why(&self) -> String {
+        match self {
+            Error::TooShort(n) => alloc::format!("{} bytes is shorter than the {}-byte header", n, HEADER),
+            Error::NotTlv(v) => alloc::format!("leading word {:#010x} is not zero, so this is a v1 image", v),
+            Error::BadMagic(m) => alloc::format!("magic {:#010x} is not {:#010x}", m, MAGIC),
+            Error::Overrun { at, want, left } => {
+                alloc::format!("record {} declares {} bytes with {} left", at, want, left)
+            }
+            Error::Trailing(n) => alloc::format!("{} byte(s) left over, too few for a record", n),
+            Error::ShortSection { at, len } => {
+                alloc::format!("record {} is a section of {} bytes, too short for a destination", at, len)
+            }
+            Error::NoSections => String::from("parsed whole, and declares nothing to load"),
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Image {
+    /// The header's own version string, NUL-trimmed.
+    pub human: String,
+    pub ver: u32,
+    pub build: u32,
+    pub sections: Vec<Section>,
+    /// How many CPUs the image drives, if it said.
+    pub cpus: Option<u32>,
+    /// Every record type seen, in order, including the ignored ones. Kept so a
+    /// transcript can say what an image contained rather than what was used.
+    pub records: Vec<(Kind, usize)>,
+}
+
+impl Image {
+    /// The sections that are really destinations, with the separators removed.
+    pub fn loadable(&self) -> Vec<Section> {
+        self.sections.iter().copied().filter(|s| !s.is_separator()).collect()
+    }
+    pub fn bytes(&self) -> usize {
+        self.loadable().iter().map(|s| s.len).sum()
+    }
+}
+
+fn le32(b: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]])
+}
+
+/// Parse a container.
+///
+/// Walks from the header to the last byte and refuses anything that does not
+/// land exactly there. `len` is `u32` on the wire and every arithmetic step is
+/// checked, because a record declaring `0xFFFFFFFF` must be a refusal and not a
+/// wrapped addition that reads as a short record.
+pub fn parse(b: &[u8]) -> Result<Image, Error> {
+    if b.len() < HEADER {
+        return Err(Error::TooShort(b.len()));
+    }
+    let zero = le32(b, 0);
+    if zero != 0 {
+        return Err(Error::NotTlv(zero));
+    }
+    let magic = le32(b, 4);
+    if magic != MAGIC {
+        return Err(Error::BadMagic(magic));
+    }
+    let human = {
+        let raw = &b[8..8 + HUMAN_READABLE];
+        let end = raw.iter().position(|&c| c == 0).unwrap_or(HUMAN_READABLE);
+        // Non-UTF-8 is a version string somebody mangled, not a reason to refuse
+        // a firmware image: it is decoration, and the loader uses the records.
+        String::from_utf8_lossy(&raw[..end]).into_owned()
+    };
+    let ver = le32(b, 8 + HUMAN_READABLE);
+    let build = le32(b, 12 + HUMAN_READABLE);
+
+    let mut sections: Vec<Section> = Vec::new();
+    let mut records: Vec<(Kind, usize)> = Vec::new();
+    let mut cpus = None;
+    let mut at = HEADER;
+    let mut n = 0usize;
+
+    while at < b.len() {
+        let left = b.len() - at;
+        // A record is at least its own type and length.
+        if left < 8 {
+            return Err(Error::Trailing(left));
+        }
+        let kind = Kind::of(le32(b, at));
+        let len = le32(b, at + 4) as usize;
+        let body = at + 8;
+        // Checked rather than added: `len` is attacker-shaped, and `body + len`
+        // on a 32-bit length in a `usize` could wrap on a small target.
+        if len > b.len().saturating_sub(body) {
+            return Err(Error::Overrun { at: n, want: len, left: b.len() - body });
+        }
+        records.push((kind, len));
+        match kind {
+            Kind::SecRt | Kind::SecInit => {
+                if len < 4 {
+                    return Err(Error::ShortSection { at: n, len });
+                }
+                sections.push(Section {
+                    kind,
+                    offset: le32(b, body),
+                    at: body + 4,
+                    len: len - 4,
+                });
+            }
+            Kind::NumOfCpu if len >= 4 => cpus = Some(le32(b, body)),
+            _ => {}
+        }
+        // **Padded to four, and the padding is part of the record.** Rounding
+        // up is how the next record is found; a reader that advanced by `len`
+        // alone would land one to three bytes early and read a type out of the
+        // middle of the previous body.
+        let step = 8 + ((len + 3) & !3);
+        // The same overrun check again, because the padding can be the thing
+        // that runs off the end -- a last record whose body fits and whose
+        // padding does not.
+        if step > left {
+            return Err(Error::Overrun { at: n, want: step, left });
+        }
+        at += step;
+        n += 1;
+    }
+    if at != b.len() {
+        return Err(Error::Trailing(b.len() - at));
+    }
+    if sections.is_empty() {
+        return Err(Error::NoSections);
+    }
+    Ok(Image { human, ver, build, sections, cpus, records })
+}
+
+/// Build a container, for the suite and for nothing else.
+///
+/// **A writer in the kernel, which needs one only to test the reader.** It is
+/// here rather than in the host tool because a claim that parses a container the
+/// suite itself built is checking the reader against the format, where a claim
+/// over a file on disk would be checking it against whatever happened to be
+/// staged. `tools/iwxfw.py` has the same writer for the same reason, and the two
+/// agreeing is the round trip that makes either trustworthy.
+pub fn build(human: &str, ver: u32, build_no: u32, recs: &[(u32, Vec<u8>)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&MAGIC.to_le_bytes());
+    let mut h = [0u8; HUMAN_READABLE];
+    for (i, c) in human.bytes().take(HUMAN_READABLE).enumerate() {
+        h[i] = c;
+    }
+    out.extend_from_slice(&h);
+    out.extend_from_slice(&ver.to_le_bytes());
+    out.extend_from_slice(&build_no.to_le_bytes());
+    out.extend_from_slice(&0u64.to_le_bytes());
+    debug_assert_eq!(out.len(), HEADER);
+    for (t, body) in recs {
+        out.extend_from_slice(&t.to_le_bytes());
+        out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        out.extend_from_slice(body);
+        while out.len() % 4 != 0 {
+            out.push(0);
+        }
+    }
+    out
+}
+
+/// A section record's body: the destination, then the bytes.
+pub fn section_body(offset: u32, data: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(4 + data.len());
+    v.extend_from_slice(&offset.to_le_bytes());
+    v.extend_from_slice(data);
+    v
+}
+
+pub fn checks() -> Vec<(&'static str, bool)> {
+    let mut out: Vec<(&'static str, bool)> = Vec::new();
+    let mut claim = |what: &'static str, ok: bool| out.push((what, ok));
+
+    // A container of the shape a real one has: two CPUs' runtime sections with
+    // the separator between them, a cpu count, and a record this kernel ignores.
+    let img = build(
+        "77.1a2b3c4d.0 QuZ-a0-hr-b0-77",
+        0x0100_0000,
+        4242,
+        &[
+            (27, 2u32.to_le_bytes().to_vec()),
+            (19, section_body(0x0080_0000, &[0xAA; 16])),
+            (19, section_body(CPU1_CPU2_SEPARATOR, &[])),
+            (19, section_body(0x0040_0000, &[0xBB; 12])),
+            (61, b"phy integration".to_vec()),
+        ],
+    );
+    let p = parse(&img);
+    claim("a well-formed container parses", p.is_ok());
+    let p = p.unwrap_or_else(|_| Image {
+        human: String::new(), ver: 0, build: 0,
+        sections: Vec::new(), cpus: None, records: Vec::new(),
+    });
+    claim("the version string is read and NUL-trimmed", p.human == "77.1a2b3c4d.0 QuZ-a0-hr-b0-77");
+    claim("the build number survives", p.build == 4242);
+    claim("the cpu count is taken from its own record", p.cpus == Some(2));
+    claim("every record is remembered, including the ignored one", p.records.len() == 5);
+    claim(
+        "a record this kernel does not act on is carried, not dropped",
+        p.records.iter().any(|(k, _)| *k == Kind::Other(61)),
+    );
+
+    // **The separator is not a destination**, which is the one mistake here that
+    // would load the second CPU's code over the first's.
+    claim("three section records are seen", p.sections.len() == 3);
+    claim("but only two are loadable", p.loadable().len() == 2);
+    claim("and the separator is recognised as one", p.sections[1].is_separator());
+    claim("the loadable bytes are the section bodies alone", p.bytes() == 16 + 12);
+    claim(
+        "a section's destination comes from its first four bytes",
+        p.loadable()[0].offset == 0x0080_0000 && p.loadable()[1].offset == 0x0040_0000,
+    );
+    claim(
+        "and its bytes are described by range, not copied",
+        img[p.loadable()[0].at] == 0xAA && p.loadable()[0].len == 16,
+    );
+
+    // --- the refusals, which are the reason the walk is exact ---------------
+    claim("a short buffer is refused", matches!(parse(&[0u8; 8]), Err(Error::TooShort(8))));
+    // A v1 image begins with a version word. Parsing one as TLV finds garbage.
+    let mut v1 = img.clone();
+    v1[0] = 1;
+    claim("a v1 image is refused by its leading word", matches!(parse(&v1), Err(Error::NotTlv(1))));
+    let mut bad = img.clone();
+    bad[4] ^= 0xFF;
+    claim("a wrong magic is refused and reported", matches!(parse(&bad), Err(Error::BadMagic(_))));
+
+    // A length that runs off the end. This is the one a lenient reader treats as
+    // truncation and loads anyway.
+    let mut over = img.clone();
+    let l = over.len();
+    over[HEADER + 4..HEADER + 8].copy_from_slice(&((l as u32) * 2).to_le_bytes());
+    claim("a record longer than the file is refused", matches!(parse(&over), Err(Error::Overrun { .. })));
+    // And the extreme of it, which must not wrap.
+    let mut huge = img.clone();
+    huge[HEADER + 4..HEADER + 8].copy_from_slice(&u32::MAX.to_le_bytes());
+    claim(
+        "a length of 0xFFFFFFFF is refused rather than wrapping",
+        matches!(parse(&huge), Err(Error::Overrun { .. })),
+    );
+
+    // A fragment too short to be a record is an error, not padding. A reader
+    // that ignored it would accept a file cut mid-record.
+    let mut frag = img.clone();
+    frag.extend_from_slice(&[0, 0, 0, 0]);
+    claim("a trailing fragment is refused", matches!(parse(&frag), Err(Error::Trailing(4))));
+
+    // A section too short to hold its own offset.
+    let short = build("x", 1, 1, &[(19, alloc::vec![0u8; 2])]);
+    claim(
+        "a section shorter than its destination is refused",
+        matches!(parse(&short), Err(Error::ShortSection { .. })),
+    );
+
+    // **Parses whole and loads nothing.** A loader given this would reset the
+    // radio and wait for firmware that was never sent, which is the failure that
+    // looks like dead hardware.
+    let empty = build("x", 1, 1, &[(61, b"only a capability".to_vec())]);
+    claim("a container with nothing to load is refused", matches!(parse(&empty), Err(Error::NoSections)));
+
+    // Padding is part of the record. A body of 13 bytes is followed by three
+    // bytes of padding, and a reader advancing by 13 would read a type out of
+    // the middle of the previous body.
+    let odd = build(
+        "x", 1, 1,
+        &[(19, section_body(0x1000, &[0xCD; 9])), (19, section_body(0x2000, &[0xEF; 4]))],
+    );
+    let q = parse(&odd);
+    claim("an odd-length record is padded to four and still parses", q.is_ok());
+    claim(
+        "and the record after it is found at the right place",
+        q.map(|i| i.loadable().len() == 2 && i.loadable()[1].offset == 0x2000).unwrap_or(false),
+    );
+
+    // --- welded to the second reader ----------------------------------------
+    //
+    // **A writer and a reader that only ever meet their own output both "work".**
+    // `parse(build(..))` succeeding proves they agree with each other and says
+    // nothing about whether either agrees with Intel's format. So the container
+    // this suite builds is pinned to the one `tools/iwxfw.py` builds from the
+    // same arguments: same length, same digest, byte for byte.
+    //
+    // If either side's padding, field order or header size drifts, this claim
+    // fails and the other reader is the one that says why -- which is the whole
+    // point of there being two, and the bargain `tokenizer.py --verify` and
+    // `v4.py` already make. The digest is `tools/iwxfw.py --selftest`'s fixture,
+    // and `--emit` writes it out to be compared by hand.
+    claim("the container is the length the second reader produces", img.len() == 188);
+    claim(
+        "and the same bytes, digest for digest",
+        crate::store::sha256::hash(&img)
+            == [
+                0x46, 0x9c, 0x40, 0x31, 0x69, 0x19, 0xd3, 0x9d,
+                0x03, 0x0d, 0x4a, 0x15, 0xc1, 0x91, 0x46, 0x8f,
+                0x31, 0x78, 0x50, 0xf7, 0xdc, 0xf1, 0xf0, 0x32,
+                0x33, 0xeb, 0xff, 0x85, 0xfe, 0xcc, 0xa7, 0xef,
+            ],
+    );
+    claim("and it is a whole number of words", img.len() % 4 == 0);
+    out
+}
