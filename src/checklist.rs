@@ -218,7 +218,26 @@ fn radio_up() -> Status {
     match crate::dev::iwx::last_power_up() {
         None => Status::Todo,
         Some(Err(f)) => Status::Failed(f.why()),
-        Some(Ok(())) => ok(String::from("reset, handshake and clock")),
+        Some(Ok(())) => ok(String::from("semaphore, reset and clock")),
+    }
+}
+
+/// Can the firmware file on this machine be turned into what the part boots from?
+///
+/// **The one radio row that is answerable without the radio**, which is why it
+/// sits between the power-up and anything that needs the part to reply: it is
+/// parsing a file and laying out memory, so a failure here is a firmware file
+/// that is absent or wrong and nothing to do with the hardware. Establishing it
+/// before the trip means a bare-metal failure afterwards is about the part.
+///
+/// Answered from a recorded build rather than by building one, because building
+/// allocates about a meganite and a half of DMA regions and a status row must not
+/// do that every time the page is printed.
+fn firmware_ready() -> Status {
+    match crate::dev::iwx::last_ctxt() {
+        None => Status::Todo,
+        Some(Err(e)) => Status::Failed(String::from(e)),
+        Some(Ok((secs, bytes))) => ok(alloc::format!("{} section(s), {} B staged", secs, bytes)),
     }
 }
 
@@ -274,6 +293,7 @@ pub const ITEMS: &[Item] = &[
     Item { what: "the radio is on the bus", how: "iwx", probe: radio_present },
     Item { what: "its revision reads", how: "iwx probe", probe: radio_answers },
     Item { what: "it resets and its clock starts", how: "iwx up", probe: radio_up },
+    Item { what: "its firmware builds a boot descriptor", how: "iwx ctxt <fw>", probe: firmware_ready },
     Item { what: "the payout address checks out", how: "(automatic)", probe: payout_checks },
     Item { what: "yescrypt hashes", how: "mine algo yescrypt / mine bench 8000", probe: hashes },
     Item { what: "a share is found", how: "mine coin 0 t yescrypt", probe: share_found },

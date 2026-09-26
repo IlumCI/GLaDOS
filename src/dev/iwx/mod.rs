@@ -475,6 +475,23 @@ pub fn note_seen(n: usize) {
 pub fn note_rev(r: Result<Rev, Refusal>) {
     unsafe { *LAST_REV.get() = Some(r) };
 }
+/// What the last `iwx ctxt` built, as `(sections, bytes)` or why it could not.
+///
+/// Recorded rather than derived, which is the exception this module already makes
+/// for the revision and for the same reason: building it allocates the regions and
+/// copies the firmware, so a status row that derived it would do that every time
+/// the page was printed.
+static LAST_CTXT: crate::sync::Racy<Option<Result<(usize, usize), &'static str>>> =
+    crate::sync::Racy::new(None);
+
+pub fn last_ctxt() -> Option<Result<(usize, usize), &'static str>> {
+    unsafe { *LAST_CTXT.get() }
+}
+
+pub fn note_ctxt(r: Result<(usize, usize), &'static str>) {
+    unsafe { *LAST_CTXT.get() = Some(r) };
+}
+
 pub fn note_power_up(r: Result<(), Fault>) {
     unsafe { *LAST_UP.get() = Some(r) };
 }
@@ -586,7 +603,8 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     // against values chosen to make them pass. It is the only evidence available
     // here about a part no emulator models, and it cost nothing but reading a
     // journal.
-    const GF63_HW_REV: u32 = 0x0037_0000 >> 8; // 0x370, as the driver reports it
+    /// Exactly what its Linux printed: `rev=0x370`.
+    const GF63_HW_REV: u32 = 0x0000_0370;
     let real = rev_of(GF63_HW_REV);
     claim("the GF63's controller decodes as Snow Owl", real.mac == Mac::So);
     claim("which is AX210 family, not the 22000 this was built for", real.mac.family() == Some(Family::Ax210));

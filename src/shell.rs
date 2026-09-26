@@ -5035,6 +5035,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         console::set_color(LTRED);
                         kprintln!("  {}", e.why());
                         console::set_color(LTGRAY);
+                        crate::dev::iwx::note_ctxt(Err("the firmware file did not parse"));
                         return;
                     }
                 };
@@ -5077,9 +5078,14 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                                 console::set_color(LTRED);
                                 kprintln!("  {}", e.why());
                                 console::set_color(LTGRAY);
+                                crate::dev::iwx::note_ctxt(Err("the boot structures could not be built"));
                             }
                             Ok(b) => {
                                 use crate::dev::iwx::gen3;
+                                crate::dev::iwx::note_ctxt(Ok((
+                                    b.sections.len(),
+                                    b.sections.iter().map(|d| d.len()).sum::<usize>(),
+                                )));
                                 console::set_color(LTGREEN);
                                 kprintln!("  built the AX210 boot structures");
                                 console::set_color(LTGRAY);
