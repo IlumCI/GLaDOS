@@ -428,9 +428,25 @@ fn slice_order(cores: usize, perf: Option<u32>, first: Option<u32>) -> alloc::ve
     // Stable, so cores of one tier stay in index order and the placement is
     // reproducible rather than merely good.
     rest.sort_by_key(|&c| tier(c));
-    // Core 0 last whatever it is: the shell, the socket task and the clock live
-    // there, so a slice on it is the one that has to share with the machine.
-    rest.push(0);
+    // **Core 0 last always, and included only when there is nothing to starve.**
+    //
+    // The shell and the socket task live there and neither minds waiting. The
+    // *compositor* does: it owns the frame, so a slice competing with it is a
+    // desktop that stops repainting while mining -- which was measured firing
+    // `gfx::render::watch` during a sixteen-slice sweep.
+    //
+    // A miner image spawns no compositor and no clock at all, so there is nothing
+    // on core 0 to protect and refusing to mine on it would throw away a
+    // sixteenth of the rate for nobody's benefit. A desktop boot has both, and
+    // keeping the picture moving is worth one core of sixteen.
+    //
+    // Asked of `comp_state`, which answers `None` when no compositor was ever
+    // spawned, rather than of a mode flag: the question is whether anything is
+    // drawing, and that is the thing that actually answers it. Derived, so it
+    // cannot disagree with the machine -- the rule `checklist` is built on.
+    if crate::gfx::render::comp_state().is_none() {
+        rest.push(0);
+    }
     rest
 }
 
@@ -455,11 +471,31 @@ pub fn placement_checks() -> alloc::vec::Vec<(&'static str, bool)> {
         "then the performance siblings",
         o[9..15] == [1, 3, 5, 7, 9, 11],
     );
-    claim("and core 0 is last, because the shell lives there", o[15] == 0);
-    claim("every core appears, so none is thrown away", o.len() == 16);
+    // Core 0's presence depends on whether a compositor is running, so the suite
+    // asserts the shape it can see rather than a fixed length -- and asserts the
+    // *rule* separately below.
+    //
+    // **Both branches run in one boot, and that is the ordering rather than luck.**
+    // `main::selftest` is called before the compositor is spawned, so the boot
+    // pass asserts the sixteen-core shape; `diag mine` from the shell asserts the
+    // fifteen-core one. Anything that moves the selftests past the spawn silently
+    // costs half the coverage, so it is written down here rather than left to be
+    // noticed by a suite that still passes.
+    let desktop = crate::gfx::render::comp_state().is_some();
+    if desktop {
+        claim("with a compositor, core 0 is left out of the rotation", !o.contains(&0));
+        claim("so fifteen cores are offered", o.len() == 15);
+    } else {
+        claim("with no compositor, core 0 is last rather than wasted", o[15] == 0);
+        claim("so every core is offered", o.len() == 16);
+    }
     claim(
-        "and none appears twice",
-        (0..16).all(|c| o.iter().filter(|&&x| x == c).count() == 1),
+        "and none appears twice, either way",
+        (1..16).all(|c| o.iter().filter(|&&x| x == c).count() == 1),
+    );
+    claim(
+        "core 0 is never anywhere but last",
+        o.iter().position(|&c| c == 0).map(|i| i + 1 == o.len()).unwrap_or(true),
     );
     // Within a tier the order is the index order, so the same machine places the
     // same way twice -- reproducible rather than merely good.
@@ -470,12 +506,12 @@ pub fn placement_checks() -> alloc::vec::Vec<(&'static str, bool)> {
     let flat = slice_order(10, None, None);
     claim(
         "a part that says nothing keeps the plain order",
-        flat == alloc::vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 0],
+        flat[..9] == [1, 2, 3, 4, 5, 6, 7, 8, 9],
     );
     // Hybrid but no SMT: efficiency cores still rank behind performance ones, and
     // nothing is treated as a sibling.
     let no_smt = slice_order(6, Some(0b000_111), None);
-    claim("hybrid without SMT still prefers the fast kind", no_smt == alloc::vec![1, 2, 3, 4, 5, 0]);
+    claim("hybrid without SMT still prefers the fast kind", no_smt[..5] == [1, 2, 3, 4, 5]);
 
     // Single core: there is nowhere else to be.
     claim("one core places everything on core 0", slice_order(1, None, None) == alloc::vec![0]);
@@ -486,7 +522,7 @@ pub fn placement_checks() -> alloc::vec::Vec<(&'static str, bool)> {
     // remaining core.
     let o2 = slice_order(4, Some(0b0100), None);
     claim("the best core is chosen first even when it is not the lowest", o2[0] == 2);
-    claim("and the rest follow in order", o2 == alloc::vec![2, 1, 3, 0]);
+    claim("and the rest follow in order", o2[..3] == [2, 1, 3]);
     out
 }
 
