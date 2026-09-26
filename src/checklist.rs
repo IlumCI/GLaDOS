@@ -50,6 +50,47 @@ fn ok(s: alloc::string::String) -> Status {
 
 // --- the probes --------------------------------------------------------------
 
+/// Is the miner pointed at an address that could ever be paid?
+///
+/// **First of the mining rows, because it is the only one whose failure costs
+/// money rather than time.** Everything below it answers "does the machine
+/// hash"; this answers "does the hashing go anywhere", and the two are
+/// independent -- a machine can pass every other row on this page and be mining
+/// to a string with one character wrong in it.
+///
+/// **Asked of the live config, not of `MINER.TXT`.** The file cannot be re-read
+/// here at all: `uefi::read_file` wants boot services and they are gone by the
+/// time there is a shell. That turns out to be the better subject anyway --
+/// `client::CONFIG` is the name the miner is actually mining under, so this row
+/// covers one typed at the shell as well as one that arrived from the volume,
+/// and it cannot describe a file the running miner is not using.
+///
+/// Derived, and through `addr::judge` rather than a second opinion about it, so
+/// this row and the line `boot::apply` printed cannot disagree.
+fn payout_checks() -> Status {
+    use crate::mine::addr::{judge, Payout};
+    let user = match crate::mine::client::CONFIG.lock_irq().as_ref() {
+        Some(c) => c.user.clone(),
+        // Not a failure: a desktop image configures no miner and is not supposed
+        // to, so the row says there is nothing pointed anywhere.
+        None => return Status::NotHere("no pool configured, so nothing is being paid"),
+    };
+    match judge(&user) {
+        Payout::Checked(k) => ok(alloc::format!("{} checksum holds", k.as_str())),
+        // `NotHere` and not a pass: the address is well formed and this machine
+        // genuinely cannot check where it pays, which is the same category as a
+        // hypervisor hiding the hybrid split. The one row on the page a person
+        // has to finish with their own eyes.
+        Payout::Unchecked(_) => Status::NotHere("no checksum in it -- compare it against your wallet"),
+        Payout::Broken(k) => Status::Failed(alloc::format!(
+            "{} checksum FAILS -- this would pay nobody",
+            k.as_str()
+        )),
+        Payout::Name => ok(String::from("a worker name; the pool's roster decides")),
+    }
+}
+
+
 fn booted() -> Status {
     ok(alloc::format!("{}", crate::VERSION))
 }
@@ -217,6 +258,7 @@ pub const ITEMS: &[Item] = &[
     Item { what: "the radio is on the bus", how: "iwx", probe: radio_present },
     Item { what: "its revision reads", how: "iwx probe", probe: radio_answers },
     Item { what: "it resets and its clock starts", how: "iwx up", probe: radio_up },
+    Item { what: "the payout address checks out", how: "(automatic)", probe: payout_checks },
     Item { what: "yescrypt hashes", how: "mine algo yescrypt / mine bench 8000", probe: hashes },
     Item { what: "a share is found", how: "mine coin 0 t yescrypt", probe: share_found },
     Item { what: "a pool accepts one", how: "mine pool <host> / mine on", probe: share_accepted },
@@ -263,6 +305,19 @@ pub fn show() {
             tag,
             crate::gfx::theme::head_chars(detail, 44)
         );
+        // **A failure's detail is never truncated, and the column is why this is
+        // a second line rather than a wider one.** The page is sized for one
+        // screenshot, so widening the result column for the rare long string
+        // costs every row; cutting the string costs only the rows that failed,
+        // which are the ones whose text is worth the most. Driven: the payout row
+        // read "this would pay nob".
+        //
+        // Failures only. A long `n/a` reason is a fact about the emulator and
+        // reads fine truncated; a long `FAIL` is the sentence somebody has to act
+        // on.
+        if matches!(s, Status::Failed(_)) && crate::gfx::theme::text_w_of(detail) > 44 {
+            kprintln!("     {}", detail);
+        }
     }
     console::set_color(LTGRAY);
     // **The panic surface, on the same page.** A fault that halted the machine
