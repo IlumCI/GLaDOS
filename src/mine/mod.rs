@@ -17,6 +17,7 @@
 //! `hashlib`, which is the bargain `tokenizer.py --verify` makes: the reader is
 //! deliberately not the writer.
 
+pub mod addr;
 pub mod algo;
 pub mod blake2s;
 pub mod boot;
@@ -808,7 +809,7 @@ fn stratum_checks() -> Vec<(&'static str, bool)> {
     // produces a hash function that looks perfectly healthy.
     out.push((
         "blake2s tells a message from the same message zero-padded",
-        blake2s::hash(b"a") != blake2s::hash(b"a "),
+        blake2s::hash(b"a") != blake2s::hash(b"a\0"),
     ));
     // 64 bytes exactly: the loop must keep its last full block for the `last`
     // flag rather than compressing it as an interior one and then compressing
