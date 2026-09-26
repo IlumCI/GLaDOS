@@ -5256,7 +5256,72 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         }
                     }
                 }
-                other => kprintln!("  no such step '{}' -- try `iwx`, `iwx probe`, `iwx up` or `iwx ctxt <fw>`", other),
+                // **The whole sequence, and the only step that grants the part
+                // DMA.** Separate from `up` in the `update stage` idiom: powering a
+                // radio up reads registers and writes a handful, where this lets it
+                // fetch a megabyte and a half out of host memory on its own
+                // initiative. Somebody should have to ask for that by name.
+                b if b.starts_with("boot") => {
+                    let path = b.trim_start_matches("boot").trim();
+                    if path.is_empty() {
+                        kprintln!("  usage: iwx boot <path to a .ucode in the namespace>");
+                        kprintln!("  powers the part up, loads its firmware and waits for it to");
+                        kprintln!("  report alive. This grants the radio bus-master DMA.");
+                        return;
+                    }
+                    let bytes = match crate::sysbox::read_blob(path) {
+                        Some(b) => b,
+                        None => {
+                            kprintln!("  no such blob: {}", path);
+                            return;
+                        }
+                    };
+                    let image = match crate::dev::iwx::fw::parse(&bytes) {
+                        Ok(i) => i,
+                        Err(e) => {
+                            console::set_color(LTRED);
+                            kprintln!("  {}", e.why());
+                            console::set_color(LTGRAY);
+                            return;
+                        }
+                    };
+                    kprintln!("  {} -- powering up and loading, this writes to the radio", image.human);
+                    match r.boot(ecam, &image, &bytes, 5000) {
+                        Ok(b) => {
+                            crate::dev::iwx::note_alive(Ok(b.alive));
+                            console::set_color(LTGREEN);
+                            kprintln!("  the firmware is alive: {}", b.alive.say());
+                            console::set_color(LTGRAY);
+                            kprintln!(
+                                "  error tables lmac {:#010x}/{:#010x} umac {:#010x}, log {:#010x}",
+                                b.alive.lmac_error_table[0],
+                                b.alive.lmac_error_table[1],
+                                b.alive.umac_error_table,
+                                b.alive.log_event_table
+                            );
+                            // Said plainly, because a radio that is alive and a
+                            // radio that can carry a frame are a long way apart and
+                            // the first reads like the second.
+                            kprintln!("  nothing has been configured yet: no NVM, no PHY, no station");
+                            // **Dropped here, and on purpose.** Keeping it would
+                            // mean a static holding two megabytes and a live DMA
+                            // target with nothing to service it; the part goes back
+                            // to quiet when its regions go away, which is the
+                            // honest state until there is something to do next.
+                            drop(b);
+                        }
+                        Err(f) => {
+                            crate::dev::iwx::note_alive(Err(f.why()));
+                            console::set_color(LTRED);
+                            kprintln!("  {}", f.why());
+                            console::set_color(LTGRAY);
+                        }
+                    }
+                }
+                other => kprintln!(
+                    "  no such step '{}' -- try `iwx`, `iwx probe`, `iwx up`, `iwx ctxt <fw>` or `iwx boot <fw>`",
+                    other
+                ),
             }
         }
 

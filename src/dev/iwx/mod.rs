@@ -30,6 +30,7 @@
 //! dump. The decode is a pure function for the same reason -- `rev_of` can be
 //! walked by a suite on any machine, where reading a real `CSR_HW_REV` cannot.
 
+pub mod alive;
 pub mod ctxt;
 pub mod gen3;
 pub mod fw;
@@ -50,6 +51,20 @@ pub const VENDOR_INTEL: u16 = 0x8086;
 /// plausible answer proves the function is alive, its BAR is decoded, and MMIO
 /// reaches it -- and an implausible one says the fault is below the driver
 /// rather than in anything it has not done yet.
+/// How much of the register aperture is mapped.
+///
+/// **Eight kilobytes and not four, because the receive doorbell is at 0x1c80.**
+/// The probe needed one page: `CSR_HW_REV` and everything the power-up sequence
+/// touches live below 0x1000. Servicing the receive ring does not --
+/// `RFH_Q0_FRBDCB_WIDX_TRG` is in the second page, so a driver that kept the
+/// one-page mapping would write the index into whatever the identity map has
+/// there, which is somebody else's memory and reports nothing.
+///
+/// Still deliberately short of the whole BAR: MSI-X begins at 0x2000 and nothing
+/// here configures it, so mapping up to it and no further is the range that is
+/// actually used.
+pub const APERTURE: u64 = 0x2000;
+
 const CSR_HW_REV: u64 = 0x028;
 
 /// Which radio module is attached, as distinct from which MAC.
@@ -367,7 +382,7 @@ impl Radio {
     pub fn hw_rev(&self, ecam: u64) -> Result<(Rev, u32), Refusal> {
         let bar0 = self.bar0.filter(|&b| b != 0).ok_or(Refusal::NoAperture)?;
         enable_memory_space(ecam, &self.dev);
-        if !crate::mem::paging::map_range(bar0, 0x1000, true) {
+        if !crate::mem::paging::map_range(bar0, APERTURE, true) {
             return Err(Refusal::NotMapped);
         }
         // **Guarded, because this is the first read of an aperture nothing has
@@ -490,6 +505,21 @@ pub fn last_ctxt() -> Option<Result<(usize, usize), &'static str>> {
 
 pub fn note_ctxt(r: Result<(usize, usize), &'static str>) {
     unsafe { *LAST_CTXT.get() = Some(r) };
+}
+
+/// What the last `iwx boot` heard, or why it heard nothing.
+///
+/// A `String` for the failure because the reasons come from four different types
+/// and what the operator needs is the sentence, not the variant.
+static LAST_ALIVE: crate::sync::Racy<Option<Result<alive::Alive, String>>> =
+    crate::sync::Racy::new(None);
+
+pub fn last_alive() -> Option<Result<alive::Alive, String>> {
+    unsafe { (*LAST_ALIVE.get()).clone() }
+}
+
+pub fn note_alive(r: Result<alive::Alive, String>) {
+    unsafe { *LAST_ALIVE.get() = Some(r) };
 }
 
 pub fn note_power_up(r: Result<(), Fault>) {
@@ -728,16 +758,16 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     // Every offset must be inside the one page `power_up` maps. A register past
     // it is a write into whatever the identity map has there.
     claim(
-        "every register is inside the mapped 4 KiB aperture",
+        "every register is inside the mapped aperture",
         POWER_UP.iter().all(|s| match s {
-            Step::SetBit(r, _) | Step::Write(r, _) => *r < 0x1000,
-            Step::Poll { reg, .. } => *reg < 0x1000,
+            Step::SetBit(r, _) | Step::Write(r, _) => *r < APERTURE,
+            Step::Poll { reg, .. } => *reg < APERTURE,
             Step::Settle(_) => true,
             // Every register `acquire` touches, listed here rather than trusted,
             // because they are inside a function and so invisible to the sweep
             // that checks the table.
             Step::Acquire { .. } => {
-                CSR_HW_IF_CONFIG_REG < 0x1000 && CSR_DBG_LINK_PWR_MGMT_REG < 0x1000
+                CSR_HW_IF_CONFIG_REG < APERTURE && CSR_DBG_LINK_PWR_MGMT_REG < APERTURE
             }
         }),
     );
@@ -767,6 +797,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     out.extend(ctxt::checks());
     out.extend(gen3::checks());
     out.extend(gen3::kick_checks());
+    out.extend(alive::checks());
     out
 }
 
@@ -994,7 +1025,7 @@ impl Radio {
             }
         }
         enable_memory_space(ecam, &self.dev);
-        if !crate::mem::paging::map_range(bar0, 0x1000, true) {
+        if !crate::mem::paging::map_range(bar0, APERTURE, true) {
             return Err(Fault::Aperture(Refusal::NotMapped));
         }
         for (i, step) in POWER_UP.iter().enumerate() {
@@ -1084,6 +1115,103 @@ fn set_hw_ready(bar0: u64) -> bool {
         CSR_HW_IF_CONFIG_REG_BIT_NIC_READY,
         HW_READY_TIMEOUT_US,
     )
+}
+
+/// Everything that stands between a powered part and firmware saying it is up.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum BootFault {
+    Power(Fault),
+    /// The revision says this is not a family the boot path is written for.
+    /// Distinct from `Power(WrongFamily)`: the power-up sequence covers 22000 and
+    /// AX210 both, and only AX210 has a boot path here.
+    WrongFamily(Family),
+    Build(gen3::Error),
+    Kick(gen3::KickFault),
+    NotAlive(alive::Wait),
+    NoMemory,
+}
+
+impl BootFault {
+    pub fn why(&self) -> String {
+        match self {
+            BootFault::Power(f) => f.why(),
+            BootFault::WrongFamily(f) => alloc::format!(
+                "this is {} family silicon; only AX210 has a boot path here",
+                f.name()
+            ),
+            BootFault::Build(e) => e.why(),
+            BootFault::Kick(k) => String::from(k.why()),
+            BootFault::NotAlive(w) => w.why(),
+            BootFault::NoMemory => String::from("not enough memory for the receive buffers"),
+        }
+    }
+}
+
+/// What a successful boot leaves behind.
+///
+/// **Held together and returned, because the part is still reading from all of
+/// it.** Firmware fetched its image at the kick and goes on using the receive
+/// ring, the scratch and the peripheral info page for as long as it runs; there
+/// is no completion to wait on. So the regions live as long as the caller keeps
+/// this, and dropping it is how the part is taken down rather than a tidy-up.
+pub struct Booted {
+    pub alive: alive::Alive,
+    pub boot: gen3::Boot,
+    pub buffers: alive::Buffers,
+}
+
+impl Radio {
+    /// Power the part up, load its firmware, and wait for it to say it is alive.
+    ///
+    /// **This is the first thing in this driver that grants the device DMA**, and
+    /// that is why it is here and not in the probe. `hw_rev` deliberately enables
+    /// memory-space decoding and leaves bus mastering alone, on the argument that
+    /// a probe has no business granting DMA to a device whose firmware has never
+    /// run. Booting is exactly the moment that stops being true: the part fetches
+    /// its own microcode, so it must be able to master the bus, and there is no
+    /// IOMMU here -- the only safety property available is that every address it
+    /// is given is one this driver allocated.
+    pub fn boot(&self, ecam: u64, image: &fw::Image, file: &[u8], ms: u32) -> Result<Booted, BootFault> {
+        let rev = self.hw_rev(ecam).map_err(|r| BootFault::Power(Fault::Aperture(r)))?.0;
+        match rev.mac.family() {
+            Some(Family::Ax210) => {}
+            Some(f) => return Err(BootFault::WrongFamily(f)),
+            None => {
+                return Err(BootFault::WrongFamily(Family::Bz));
+            }
+        }
+        // The sequence first: the clock has to be running before a peripheral
+        // write lands, and `kick` ends in one.
+        self.power_up(ecam).map_err(BootFault::Power)?;
+
+        let bar0 = self
+            .bar0
+            .filter(|&b| b != 0)
+            .ok_or(BootFault::Power(Fault::Aperture(Refusal::NoAperture)))?;
+
+        // **Built before bus mastering is granted**, deliberately. Every address
+        // in these structures has to be settled before the part can act on any of
+        // them, and building can fail -- a firmware file with no image loader --
+        // in which case nothing was ever allowed to touch memory.
+        let boot = gen3::build(rev.raw, image, file).map_err(BootFault::Build)?;
+        let buffers = alive::Buffers::new().ok_or(BootFault::NoMemory)?;
+        let mut boot = boot;
+
+        // Clear the interrupt status before anything can set it, or the poll
+        // reads a bit left over from a previous boot and declares a firmware
+        // that never ran alive.
+        // Safety: the aperture is mapped by `power_up` above.
+        unsafe { alive::arm(bar0) };
+
+        crate::dev::pci::enable_bus_master(ecam, &self.dev);
+
+        // Safety: an AX210 part whose power-up completed, with every address in
+        // `boot` pointing at memory this driver owns.
+        unsafe { gen3::kick(bar0, &boot) }.map_err(BootFault::Kick)?;
+        let a = unsafe { alive::wait(bar0, &mut boot.rings, &buffers, ms) }
+            .map_err(BootFault::NotAlive)?;
+        Ok(Booted { alive: a, boot, buffers })
+    }
 }
 
 /// Poll one register until it answers, or give up.

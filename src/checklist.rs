@@ -241,6 +241,25 @@ fn firmware_ready() -> Status {
     }
 }
 
+/// Did the part come up and say so?
+///
+/// **The row the bare-metal trip exists for on the radio side.** Everything above
+/// it is host-side arithmetic that passes under emulation; this one cannot pass
+/// anywhere but on the laptop, because it needs a part that fetches a megabyte and
+/// a half of its own microcode and then answers.
+///
+/// A failure here is the most valuable line on the page: it names which of the
+/// four things went wrong -- the power-up, the build, the kick, or the wait -- and
+/// the wait distinguishes "never raised its bit", "raised an error bit", "said
+/// nothing after saying it was alive" and "said it was not ok".
+fn radio_alive() -> Status {
+    match crate::dev::iwx::last_alive() {
+        None => Status::Todo,
+        Some(Err(why)) => Status::Failed(why),
+        Some(Ok(a)) => ok(a.say()),
+    }
+}
+
 /// The rate, which is the figure the trip exists to bring back.
 ///
 /// Reads the foreground bench first and the slice counter second, because they
@@ -294,6 +313,7 @@ pub const ITEMS: &[Item] = &[
     Item { what: "its revision reads", how: "iwx probe", probe: radio_answers },
     Item { what: "it resets and its clock starts", how: "iwx up", probe: radio_up },
     Item { what: "its firmware builds a boot descriptor", how: "iwx ctxt <fw>", probe: firmware_ready },
+    Item { what: "the firmware boots and says it is alive", how: "iwx boot <fw>", probe: radio_alive },
     Item { what: "the payout address checks out", how: "(automatic)", probe: payout_checks },
     Item { what: "yescrypt hashes", how: "mine algo yescrypt / mine bench 8000", probe: hashes },
     Item { what: "a share is found", how: "mine coin 0 t yescrypt", probe: share_found },
