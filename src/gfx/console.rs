@@ -973,9 +973,25 @@ pub fn with<F: FnOnce(&mut Console)>(f: F) {
 // tunable one. Kept as a global rather than a `Console` field so that
 // `write_bytes` can read it without the caller having to thread it through.
 
-/// Microseconds per character. Roughly reproduces the pace the broken scroll
-/// used to impose, which is the point -- it looked right.
-const DEFAULT_PACE_US: u64 = 1200;
+/// Microseconds per character. **Zero, and off by default.**
+///
+/// It was 1200, chosen to reproduce the pace a broken scroll used to impose
+/// because that pace "looked right". It did, on a prompt and a short answer. It
+/// does not on anything that produces real output: at 1200 us a character the
+/// console emits about 830 characters a second, so a `diag all` of some tens of
+/// thousands of characters spends **minutes** doing nothing but waiting --
+/// during which the terminal creeps, the desktop does not repaint, and the
+/// clock is the only thing moving. That is indistinguishable from the machine
+/// having frozen, which is the same objection the fault reporter already
+/// records for the same constant: 1200 us a character makes a report
+/// indistinguishable from the hang it explains.
+///
+/// `skip_requested` existed to make it bearable -- any keystroke drops pacing
+/// for the rest of the command -- and a mechanism that needs an escape hatch on
+/// every long command is a default that is wrong. Kept tunable rather than
+/// deleted, because `pace` is how somebody who wants it back gets it, and
+/// because the skip logic is what makes it safe to turn on at all.
+const DEFAULT_PACE_US: u64 = 0;
 
 static PACE_US: AtomicU64 = AtomicU64::new(DEFAULT_PACE_US);
 static SKIP: AtomicBool = AtomicBool::new(false);
