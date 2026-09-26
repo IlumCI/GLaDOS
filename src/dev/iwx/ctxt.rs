@@ -50,7 +50,8 @@
 //! rev 1.75/1.50), which took them in turn from Intel's own headers -- those are
 //! **dual BSD/GPLv2**, Copyright(c) 2017 Intel Deutschland GmbH and
 //! Copyright(c) 2018-2019 Intel Corporation, and what is used here is the BSD
-//! arm. The bytes below are a hardware interface rather than anybody's
+//! arm, and `NOTICE.md` at the repository root reproduces that notice, its
+//! conditions and its disclaimer in full. The bytes below are a hardware interface rather than anybody's
 //! expression: no code was copied, the names and every comment are this tree's,
 //! and what was taken is the set of numbers the silicon dictates. Recorded the
 //! way `dev/registry` records a support level, because a number with no source
@@ -72,6 +73,49 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use super::fw;
+
+/// The notice the BSD arm asks to be retained, compiled into the image.
+///
+/// **In the binary and not only in a comment.** The condition is that a binary
+/// distribution reproduce the notice, its conditions and its disclaimer in the
+/// documentation or other materials -- and a doc comment is stripped at compile
+/// time, so a kernel built from this tree would carry nothing. `NOTICE.md` is the
+/// documentation half; this is the other, and `licence` prints it.
+///
+/// Two claims check it is still here, because a notice nothing reads is a notice
+/// a refactor deletes.
+pub const NOTICE: &str = "\
+Intel wireless register definitions in src/dev/iwx/ derive from numbers in
+Intel's dual BSD/GPLv2 headers, read by way of OpenBSD's iwx(4). No source was
+copied. Used under the BSD arm:
+
+Copyright(c) 2017 Intel Deutschland GmbH
+Copyright(c) 2018 - 2019 Intel Corporation
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+ * Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+ * Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+ * Neither the name Intel Corporation nor the names of its contributors may be
+   used to endorse or promote products derived from this software without
+   specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS \"AS IS\" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+";
 
 // --- DMA memory --------------------------------------------------------------
 
@@ -782,6 +826,20 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         out.push(("a DMA region could be allocated", false));
     }
     out.push(("a zero-length region is refused", Dma::new(0, 8).is_none()));
+    // **The attribution, asserted rather than trusted to a comment.** The BSD arm
+    // wants its copyright notice retained, and a notice that lives only in a
+    // module doc is one a refactor deletes without anybody noticing. The text is
+    // compiled in, so the claim is that it is still here.
+    out.push((
+        "the Intel copyright notice the BSD arm requires is compiled in",
+        NOTICE.contains("Copyright(c) 2017 Intel Deutschland GmbH")
+            && NOTICE.contains("Copyright(c) 2018 - 2019 Intel Corporation"),
+    ));
+    out.push((
+        "with the conditions and the disclaimer it requires beside it",
+        NOTICE.contains("Redistributions in binary form must reproduce")
+            && NOTICE.contains("THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS"),
+    ));
     out.push(("and so is an alignment that is not a power of two", Dma::new(64, 3).is_none()));
 
     // --- the whole thing ----------------------------------------------------

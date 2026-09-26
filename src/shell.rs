@@ -4833,6 +4833,24 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             );
             mem::fixed::report();
         }
+        // **The notice, readable from the machine that carries it.** The BSD arm
+        // asks that a binary distribution reproduce it "in the documentation
+        // and/or other materials provided with the distribution", and for a
+        // kernel that ships as one file the machine itself is the material. A
+        // verb, because `NOTICE.md` is not on the ISO and a doc comment is not in
+        // the binary.
+        "licence" | "license" => {
+            console::set_color(YELLOW);
+            kprintln!("[licence]");
+            console::set_color(LTGRAY);
+            kprintln!("  This kernel is this tree's own work. Rust `core` is linked in under");
+            kprintln!("  Apache-2.0 OR MIT. Nothing here is under the GPL.");
+            kprintln!();
+            for line in crate::dev::iwx::ctxt::NOTICE.lines() {
+                kprintln!("  {}", line);
+            }
+        }
+
         "uptime" => {
             let t = lapic::ticks();
             let hz = crate::TIMER_HZ as u64;

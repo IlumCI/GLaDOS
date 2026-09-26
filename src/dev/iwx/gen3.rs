@@ -35,8 +35,9 @@
 //! ### Provenance
 //!
 //! As `ctxt`: read from OpenBSD's `iwx(4)`, which took the numbers from Intel's
-//! dual BSD/GPLv2 headers, and what is used is the BSD arm. The offsets are the
-//! silicon's; the names and the prose are this tree's.
+//! dual BSD/GPLv2 headers, and what is used is the BSD arm -- reproduced in full,
+//! with its conditions and disclaimer, in `NOTICE.md` at the repository root. The
+//! offsets are the silicon's; the names and the prose are this tree's.
 
 use alloc::string::String;
 use alloc::vec::Vec;
