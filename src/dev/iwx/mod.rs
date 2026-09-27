@@ -37,6 +37,7 @@ pub mod ctxt;
 pub mod gen3;
 pub mod init;
 pub mod nvm;
+pub mod power;
 pub mod fw;
 
 use crate::dev::pci::{self, Device};
@@ -817,6 +818,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     out.extend(nvm::checks());
     out.extend(init::checks());
     out.extend(config::checks());
+    out.extend(power::checks());
     out
 }
 
@@ -1338,6 +1340,10 @@ impl Radio {
             discrete: true,
             xtal_latency: 0,
             ltr_enabled: config::ltr_enabled(ecam, &self.dev),
+            // Not sleeping. `power.rs` argues for it: on a machine whose job is
+            // mining or serving, a radio asleep between beacons trades latency for
+            // power nobody asked to save.
+            power_level: 0,
         };
         // Safety: a part whose firmware is alive and which has been through the
         // handshake, on an aperture `boot` mapped.

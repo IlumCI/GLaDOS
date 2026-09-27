@@ -17,7 +17,10 @@
 //!   `tx_with_siso_diversity` to zero, so the command is skipped on the real part
 //!   and its absence here is upstream's behaviour rather than a gap.
 //! - `TEMP_REPORTING_THRESHOLDS_CMD`, which carries a threshold table.
-//! - `MAC_PM_POWER_TABLE`, a much larger structure.
+//! - `MAC_PM_POWER_TABLE`, which needs a station. Upstream does not send it at
+//!   initialisation either: `iwx_set_pslevel` returns after the *device* policy
+//!   when no MAC context is active, which it is not here -- so the command in this
+//!   table is the four-byte one and `power.rs` says why.
 //! - `MCC_UPDATE_CMD`, which has a response to parse.
 //! - the scan configuration, which is the largest command in the driver.
 //!
@@ -59,6 +62,7 @@ use super::cmd::{self, Queue};
 use super::ctxt::Rings;
 use super::fw::{capa, Image};
 use super::init::SYSTEM_GROUP;
+use super::power;
 use super::{Family, Mac};
 
 /// The data-path group, which the queue-enable command lives in.
@@ -137,12 +141,14 @@ pub enum Body {
     Ltr,
     /// Sixty zero bytes, which is what disabling beacon filtering is.
     BeaconFilterOff,
+    /// Two words: whether the device may sleep, and a reserved half.
+    DevicePower,
 }
 
 impl Body {
     pub fn len(self) -> usize {
         match self {
-            Body::TxAnt | Body::Dqa => 4,
+            Body::TxAnt | Body::Dqa | Body::DevicePower => 4,
             Body::BtCoex | Body::Soc => 8,
             Body::Ltr => 32,
             Body::BeaconFilterOff => 60,
@@ -170,6 +176,9 @@ pub const CONFIG: &[Step] = &[
     // not assumed.
     Step { group: DATA_PATH_GROUP, code: DQA_ENABLE_CMD, body: Body::Dqa, gate: Gate::Capa(capa::DQA_SUPPORT) },
     Step { group: 0, code: LTR_CONFIG, body: Body::Ltr, gate: Gate::LtrEnabled },
+    // The device's sleep policy, after the latency configuration and before the
+    // beacon filter, which is where `init_hw` puts it.
+    Step { group: 0, code: power::POWER_TABLE_CMD, body: Body::DevicePower, gate: Gate::Always },
     // Last, as upstream has it.
     Step { group: 0, code: REPLY_BEACON_FILTERING_CMD, body: Body::BeaconFilterOff, gate: Gate::Always },
 ];
@@ -185,6 +194,10 @@ pub struct Facts {
     pub xtal_latency: u32,
     /// Whether the PCIe function says latency tolerance is on.
     pub ltr_enabled: bool,
+    /// How much the radio may sleep. Zero, and `power.rs` argues for zero: a
+    /// machine that mines or serves should not have its radio asleep between
+    /// beacons.
+    pub power_level: u8,
 }
 
 /// Build one step's payload.
@@ -207,6 +220,7 @@ pub fn body(b: Body, f: &Facts) -> Vec<u8> {
         // Sixty zeroes, and the zeroes are the message: every threshold at zero
         // with the enable word clear is what "do not filter beacons" is spelt as.
         Body::BeaconFilterOff => {}
+        Body::DevicePower => v.copy_from_slice(&power::device_body(f.power_level)),
     }
     v
 }
@@ -316,7 +330,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     // --- the order ----------------------------------------------------------
 
     let idx = |c: u8| CONFIG.iter().position(|s| s.code == c);
-    ok(CONFIG.len() == 6, "six of the twelve configuration commands are written");
+    ok(CONFIG.len() == 7, "seven of the twelve configuration commands are written");
     ok(
         idx(TX_ANT_CONFIGURATION_CMD) == Some(0),
         "the antenna configuration goes first, since rates are expressed in chains",
@@ -325,13 +339,20 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     ok(idx(SOC_CONFIGURATION_CMD) < idx(DQA_ENABLE_CMD), "which comes before the queue enable");
     ok(idx(DQA_ENABLE_CMD) < idx(LTR_CONFIG), "and that before the latency configuration");
     ok(
+        idx(LTR_CONFIG) < idx(power::POWER_TABLE_CMD),
+        "then the sleep policy, which is where init_hw puts it",
+    );
+    ok(
         idx(REPLY_BEACON_FILTERING_CMD) == Some(CONFIG.len() - 1),
         "and beacon filtering is last, as upstream has it",
     );
 
     // --- the payload lengths ------------------------------------------------
 
-    ok(Body::TxAnt.len() == 4 && Body::Dqa.len() == 4, "two commands are one word");
+    ok(
+        Body::TxAnt.len() == 4 && Body::Dqa.len() == 4 && Body::DevicePower.len() == 4,
+        "three commands are one word",
+    );
     ok(Body::BtCoex.len() == 8 && Body::Soc.len() == 8, "two are two words");
     ok(Body::Ltr.len() == 32, "the latency command is thirty-two bytes");
     // Sixty and not sixty-four: eleven words, then two pairs. A structure padded
@@ -347,7 +368,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
 
     // --- the payloads -------------------------------------------------------
 
-    let f = Facts { tx_ant: 0b11, discrete: true, xtal_latency: 0, ltr_enabled: true };
+    let f = Facts { tx_ant: 0b11, discrete: true, xtal_latency: 0, ltr_enabled: true, power_level: 0 };
     let v = body(Body::TxAnt, &f);
     ok(u32::from_le_bytes([v[0], v[1], v[2], v[3]]) == 3, "the antenna mask is the NVM's, widened to a word");
     let v = body(Body::BtCoex, &f);
@@ -382,10 +403,20 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         iml: None, records: Vec::new(),
     };
     let unconditional = CONFIG.iter().filter(|s| s.gate == Gate::Always).count();
-    ok(unconditional == 4, "four of the six are unconditional");
+    ok(unconditional == 5, "five of the seven are unconditional");
     ok(
         CONFIG.iter().filter(|s| matches!(s.gate, Gate::Capa(_))).count() == 1,
         "one is gated on a firmware capability",
+    );
+    // The sleep policy is four zero bytes by default, and the zeroes are the
+    // decision rather than an unfilled buffer.
+    ok(
+        body(Body::DevicePower, &f).iter().all(|&b| b == 0),
+        "the sleep policy defaults to not sleeping, which is what a mining machine wants",
+    );
+    ok(
+        body(Body::DevicePower, &Facts { power_level: 3, ..f })[0] == 1,
+        "and asking for a level sets the bit",
     );
     ok(
         CONFIG.iter().filter(|s| s.gate == Gate::LtrEnabled).count() == 1,
