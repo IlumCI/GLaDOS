@@ -59,6 +59,10 @@ pub enum Kind {
     Version,
     /// The image loader, on families that bootstrap through one.
     Iml,
+    /// One word of the API bitmap, with its index.
+    Api,
+    /// One word of the capability bitmap, with its index.
+    Capa,
     /// Paged memory, for images larger than the device's own RAM.
     Paging,
     /// Everything else, by number. **Most of a real image is this**, and that is
@@ -79,6 +83,8 @@ impl Kind {
             27 => Kind::NumOfCpu,
             36 => Kind::Version,
             52 => Kind::Iml,
+            29 => Kind::Api,
+            30 => Kind::Capa,
             32 => Kind::Paging,
             other => Kind::Other(other),
         }
@@ -90,6 +96,8 @@ impl Kind {
             Kind::NumOfCpu => 27,
             Kind::Version => 36,
             Kind::Iml => 52,
+            Kind::Api => 29,
+            Kind::Capa => 30,
             Kind::Paging => 32,
             Kind::Other(t) => *t,
         }
@@ -148,6 +156,8 @@ pub enum Error {
     ShortSection { at: usize, len: usize },
     /// Parsed to the last byte and found nothing to load.
     NoSections,
+    /// A bitmap word claimed an index the declared width does not have.
+    BadBitmapIndex { at: usize, index: usize, words: usize },
 }
 
 impl Error {
@@ -164,6 +174,10 @@ impl Error {
                 alloc::format!("record {} is a section of {} bytes, too short for a destination", at, len)
             }
             Error::NoSections => String::from("parsed whole, and declares nothing to load"),
+            Error::BadBitmapIndex { at, index, words } => alloc::format!(
+                "record {} declares bitmap word {} where there are {}",
+                at, index, words
+            ),
         }
     }
 }
@@ -177,6 +191,14 @@ pub struct Image {
     pub sections: Vec<Section>,
     /// How many CPUs the image drives, if it said.
     pub cpus: Option<u32>,
+    /// Which optional behaviours this firmware has, as a bitmap.
+    ///
+    /// **Three of the configuration commands are gated on it**, so a driver
+    /// without it either sends a command firmware will reject or skips one it
+    /// wanted. 160 bits in five words, which is upstream's own width.
+    pub capa: [u32; CAPA_WORDS],
+    /// Which API revisions it implements. 128 bits in four words.
+    pub api: [u32; API_WORDS],
     /// Where the image loader is in the file, as `(at, len)`.
     ///
     /// **Located rather than copied, like the sections**, and reported rather
@@ -198,6 +220,49 @@ impl Image {
     pub fn bytes(&self) -> usize {
         self.loadable().iter().map(|s| s.len).sum()
     }
+
+    /// Does this firmware have capability `n`?
+    ///
+    /// A bit past the declared width answers **false** rather than indexing out
+    /// of range. That is the safe direction: a capability nobody declared is one
+    /// not to rely on, where a panic in a fault-free path would take the machine
+    /// for a question about an optional feature.
+    pub fn has_capa(&self, n: usize) -> bool {
+        self.capa.get(n / 32).map(|w| w & (1 << (n % 32)) != 0).unwrap_or(false)
+    }
+
+    /// Does it implement API revision `n`?
+    pub fn has_api(&self, n: usize) -> bool {
+        self.api.get(n / 32).map(|w| w & (1 << (n % 32)) != 0).unwrap_or(false)
+    }
+}
+
+/// How wide the two bitmaps are, in words. Upstream declares 160 capability bits
+/// and 128 API bits; both are rounded up to a whole word.
+pub const CAPA_WORDS: usize = (160 + 31) / 32;
+pub const API_WORDS: usize = (128 + 31) / 32;
+
+/// The capability bits anything in this tree reads. Named rather than numbered at
+/// the use site, because a bare 74 in a condition is a number nobody can check.
+pub mod capa {
+    /// Firmware applies a learned regulatory profile.
+    pub const LAR_SUPPORT: usize = 1;
+    /// Dynamic queue allocation, which the queue-enable command depends on.
+    pub const DQA_SUPPORT: usize = 12;
+    /// Firmware handles the critical-temperature shutdown itself.
+    pub const CT_KILL_BY_FW: usize = 74;
+    /// The multi-link API. Named because upstream refuses to trust it on this
+    /// family -- its comment says the API-77 firmware on some older devices claims
+    /// support and does not work -- so a driver reading the bit alone would enable
+    /// a path Intel's own driver declines.
+    pub const MLD_API_SUPPORT: usize = 110;
+}
+
+/// The API revisions anything here reads.
+pub mod api {
+    /// Version 4 of the NVM response, with 110 channels rather than 51.
+    pub const REGULATORY_NVM_INFO: usize = 48;
+    pub const REDUCED_SCAN_CONFIG: usize = 56;
 }
 
 fn le32(b: &[u8], at: usize) -> u32 {
@@ -236,6 +301,8 @@ pub fn parse(b: &[u8]) -> Result<Image, Error> {
     let mut records: Vec<(Kind, usize)> = Vec::new();
     let mut cpus = None;
     let mut iml = None;
+    let mut capa = [0u32; CAPA_WORDS];
+    let mut api = [0u32; API_WORDS];
     let mut at = HEADER;
     let mut n = 0usize;
 
@@ -272,6 +339,28 @@ pub fn parse(b: &[u8]) -> Result<Image, Error> {
             // and the choice still has to be defined, because "the first" and
             // "the last" are different blobs and only one of them will run.
             Kind::Iml if len > 0 => iml = Some((body, len)),
+            // **Both bitmaps arrive one word at a time, each carrying its own
+            // index.** A record is eight bytes -- an index then the word -- and
+            // there is one record per populated word, so a reader that took the
+            // first and stopped would see only capabilities 0 to 31. An index past
+            // the declared width is refused rather than dropped, which is
+            // upstream's own answer: a firmware declaring capability 200 is one
+            // this cannot reason about, and silently ignoring the word would leave
+            // a driver confident about a bitmap it had not fully read.
+            Kind::Capa if len == 8 => {
+                let i = le32(b, body) as usize;
+                if i >= CAPA_WORDS {
+                    return Err(Error::BadBitmapIndex { at: n, index: i, words: CAPA_WORDS });
+                }
+                capa[i] = le32(b, body + 4);
+            }
+            Kind::Api if len == 8 => {
+                let i = le32(b, body) as usize;
+                if i >= API_WORDS {
+                    return Err(Error::BadBitmapIndex { at: n, index: i, words: API_WORDS });
+                }
+                api[i] = le32(b, body + 4);
+            }
             _ => {}
         }
         // **Padded to four, and the padding is part of the record.** Rounding
@@ -294,7 +383,7 @@ pub fn parse(b: &[u8]) -> Result<Image, Error> {
     if sections.is_empty() {
         return Err(Error::NoSections);
     }
-    Ok(Image { human, ver, build, sections, cpus, iml, records })
+    Ok(Image { human, ver, build, sections, cpus, capa, api, iml, records })
 }
 
 /// Build a container, for the suite and for nothing else.
@@ -337,6 +426,18 @@ pub fn section_body(offset: u32, data: &[u8]) -> Vec<u8> {
     v
 }
 
+/// One bitmap record: an index then the word, both little-endian.
+///
+/// A helper because the record is bytes and the bits are `u32`, and writing
+/// `1 << 12` straight into a byte vector is a compile error rather than the bit
+/// somebody meant -- which the first version of these claims was.
+fn bitmap_word(index: u32, word: u32) -> Vec<u8> {
+    let mut v = Vec::with_capacity(8);
+    v.extend_from_slice(&index.to_le_bytes());
+    v.extend_from_slice(&word.to_le_bytes());
+    v
+}
+
 pub fn checks() -> Vec<(&'static str, bool)> {
     let mut out: Vec<(&'static str, bool)> = Vec::new();
     let mut claim = |what: &'static str, ok: bool| out.push((what, ok));
@@ -359,12 +460,74 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     claim("a well-formed container parses", p.is_ok());
     let p = p.unwrap_or_else(|_| Image {
         human: String::new(), ver: 0, build: 0,
-        sections: Vec::new(), cpus: None, iml: None, records: Vec::new(),
+        sections: Vec::new(), cpus: None, capa: [0; CAPA_WORDS], api: [0; API_WORDS],
+        iml: None, records: Vec::new(),
     });
     claim("the version string is read and NUL-trimmed", p.human == "77.1a2b3c4d.0 QuZ-a0-hr-b0-77");
     claim("the build number survives", p.build == 4242);
     claim("the cpu count is taken from its own record", p.cpus == Some(2));
     claim("every record is remembered, including the ignored one", p.records.len() == 5);
+
+    // --- the two bitmaps ----------------------------------------------------
+
+    // Widths, which are upstream's and are not the same number.
+    claim("the capability bitmap is five words", CAPA_WORDS == 5);
+    claim("and the API bitmap four", API_WORDS == 4);
+
+    // **One record per word, each carrying its index**, which is the shape a
+    // reader gets wrong by taking the first and stopping.
+    let bits = build(
+        "bitmaps",
+        1,
+        1,
+        &[
+            (19, section_body(0x1000, &[1])),
+            // Capability 12 is in word 0, and 74 is in word 2 -- so a reader that
+            // stopped at the first record would see DQA and miss CT-kill.
+            (30, bitmap_word(0, 1 << 12)),
+            (30, bitmap_word(2, 1 << (74 - 64))),
+            (29, bitmap_word(1, 1 << (48 - 32))),
+        ],
+    );
+    match parse(&bits) {
+        Ok(i) => {
+            claim("a capability in word zero is read", i.has_capa(capa::DQA_SUPPORT));
+            // The one that catches a reader stopping after the first record: this
+            // bit lives in word two.
+            claim("and one in word two, from a second record", i.has_capa(capa::CT_KILL_BY_FW));
+            claim("an undeclared capability is absent", !i.has_capa(capa::MLD_API_SUPPORT));
+            claim("the API bitmap is separate from it", i.has_api(api::REGULATORY_NVM_INFO));
+            claim("and does not answer for a capability of the same number", !i.has_capa(api::REGULATORY_NVM_INFO));
+            // A bit past the declared width answers false rather than indexing out
+            // of range, which in a fault-free path would take the machine for a
+            // question about an optional feature.
+            claim("a bit past the bitmap answers no rather than panicking", !i.has_capa(4096));
+            claim("and so does one past the API bitmap", !i.has_api(4096));
+        }
+        Err(_) => claim("an image carrying bitmaps parses", false),
+    }
+    // An index the width does not have is refused. Dropping it would leave a
+    // driver confident about a bitmap it had not fully read.
+    let wide = build("too wide", 1, 1, &[
+        (19, section_body(0x1000, &[1])),
+        (30, bitmap_word(9, 1)),
+    ]);
+    claim(
+        "a bitmap word past the declared width is refused by name",
+        matches!(parse(&wide), Err(Error::BadBitmapIndex { index: 9, words: 5, .. })),
+    );
+    // A record of the wrong length is carried and not acted on, which is the
+    // ordinary "recognised and ignored" path rather than a refusal: upstream
+    // refuses, and here the arm simply does not match, so the bitmap stays as it
+    // was. Asserted so that stays deliberate.
+    let short = build("short capa", 1, 1, &[
+        (19, section_body(0x1000, &[1])),
+        (30, alloc::vec![0, 0, 0, 0]),
+    ]);
+    claim(
+        "a bitmap record of the wrong length leaves the bitmap alone",
+        parse(&short).map(|i| i.capa) == Ok([0; CAPA_WORDS]),
+    );
     claim(
         "a record this kernel does not act on is carried, not dropped",
         p.records.iter().any(|(k, _)| *k == Kind::Other(61)),

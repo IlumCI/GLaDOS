@@ -5072,6 +5072,26 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     Some((_, n)) => kprintln!("  image loader {} byte(s)", n),
                     None => kprintln!("  no image loader, so an AX210 part cannot boot this"),
                 }
+                // What the firmware says it can do, which gates three of the
+                // configuration commands. Printed because a capability read wrongly
+                // is a command sent that firmware rejects, and nothing else here
+                // would say which.
+                {
+                    use crate::dev::iwx::fw::{api, capa};
+                    kprintln!(
+                        "  capabilities {:08x?}, api {:08x?}",
+                        image.capa, image.api
+                    );
+                    kprintln!(
+                        "  LAR {}  DQA {}  CT-kill {}  MLD {}  NVM-v4 {}  reduced-scan {}",
+                        image.has_capa(capa::LAR_SUPPORT),
+                        image.has_capa(capa::DQA_SUPPORT),
+                        image.has_capa(capa::CT_KILL_BY_FW),
+                        image.has_capa(capa::MLD_API_SUPPORT),
+                        image.has_api(api::REGULATORY_NVM_INFO),
+                        image.has_api(api::REDUCED_SCAN_CONFIG),
+                    );
+                }
                 match crate::dev::iwx::ctxt::group(&image.sections) {
                     Err(e) => {
                         console::set_color(LTRED);
@@ -5323,6 +5343,20 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                                     console::set_color(LTGRAY);
                                     kprintln!("  {}", n.say());
                                     kprintln!("  {}", n.channels());
+                                    // And configure it, which needs the NVM: the
+                                    // antenna mask is a value out of it.
+                                    match r.configure(ecam, &mut b, &image, &n) {
+                                        Ok(d) => {
+                                            console::set_color(LTGREEN);
+                                            kprintln!("  {}", d.say());
+                                            console::set_color(LTGRAY);
+                                        }
+                                        Err(e) => {
+                                            console::set_color(LTRED);
+                                            kprintln!("  {}", e.why());
+                                            console::set_color(LTGRAY);
+                                        }
+                                    }
                                 }
                                 Err(e) => {
                                     crate::dev::iwx::note_nvm(Err(e.why()));

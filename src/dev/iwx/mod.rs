@@ -32,6 +32,7 @@
 
 pub mod alive;
 pub mod cmd;
+pub mod config;
 pub mod ctxt;
 pub mod gen3;
 pub mod init;
@@ -815,6 +816,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     out.extend(cmd::checks());
     out.extend(nvm::checks());
     out.extend(init::checks());
+    out.extend(config::checks());
     out
 }
 
@@ -1304,6 +1306,42 @@ impl Radio {
         }
         .map_err(nvm::NvmError::Cmd)?;
         nvm::parse(pkt.payload, mac).ok_or(nvm::NvmError::UnknownVersion(pkt.payload.len()))
+    }
+}
+
+impl Radio {
+    /// Tell a part that has answered about itself how to behave.
+    ///
+    /// Takes the NVM rather than reading it again, because the antenna
+    /// configuration is a value out of it -- so this command genuinely cannot be
+    /// sent before that question has been asked, which is why it is a separate
+    /// call and not folded into `nvm`.
+    ///
+    /// Answers what it sent and what it skipped. **A success here does not mean the
+    /// part can scan**: six of upstream's twelve are written and `config.rs` names
+    /// the five that are not.
+    pub fn configure(
+        &self,
+        ecam: u64,
+        b: &mut Booted,
+        image: &fw::Image,
+        n: &nvm::Nvm,
+    ) -> Result<config::Done, config::Fault> {
+        let bar0 = match self.bar0.filter(|&a| a != 0) {
+            Some(a) => a,
+            None => return Err(config::Fault::At(0, cmd::CmdError::NoQueue)),
+        };
+        let f = config::Facts {
+            tx_ant: n.tx_chains,
+            // Upstream's flag for this product id, followed rather than reasoned
+            // about -- see the constant's own note on why it reads oddly.
+            discrete: true,
+            xtal_latency: 0,
+            ltr_enabled: config::ltr_enabled(ecam, &self.dev),
+        };
+        // Safety: a part whose firmware is alive and which has been through the
+        // handshake, on an aperture `boot` mapped.
+        unsafe { config::configure(bar0, &mut b.boot.rings, &mut b.cmds, image, &f) }
     }
 }
 
