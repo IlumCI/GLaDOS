@@ -45,24 +45,38 @@ if ! python3 tools/origin.py --resolve >/dev/null 2>&1; then
     exit 1
 fi
 
-command -v supabase >/dev/null || {
-    echo "  the supabase CLI is not installed"
-    echo "  npm i -g supabase   (or see supabase.com/docs/guides/cli)"
-    exit 1
-}
+# **`npx` is a fallback and not the default, and the difference is pinning.**
+# `npx supabase@latest` fetches whatever is newest at the moment it runs, so two
+# deploys a month apart are two different CLIs -- which is exactly the property
+# this tree refuses everywhere else it pins a version. An installed CLI is a
+# version somebody chose. But refusing outright on a machine that has the
+# credentials and not the binary is refusing to deploy over a spelling, so the
+# fallback is taken and *says* it was taken, with the version it resolved to.
+if command -v supabase >/dev/null; then
+    SUPABASE=(supabase)
+else
+    command -v npx >/dev/null || {
+        echo "  neither the supabase CLI nor npx is installed"
+        echo "  npm i -g supabase   (or see supabase.com/docs/guides/cli)"
+        exit 1
+    }
+    SUPABASE=(npx --yes supabase@latest)
+    echo "  no supabase on PATH -- going through npx, which pins nothing"
+fi
+echo "cli:                  $("${SUPABASE[@]}" --version 2>/dev/null | tail -1)"
 
 echo "==> link"
-supabase link --project-ref "$REF"
+"${SUPABASE[@]}" link --project-ref "$REF"
 
 echo "==> migrations, before the functions that read the tables they make"
-supabase db push
+"${SUPABASE[@]}" db push
 
 # Settings come from supabase/config.toml, so no --no-verify-jwt here: a flag
 # typed per deploy is one somebody forgets, and forgetting it deploys a function
 # every caller gets a 401 from.
 for f in channel link worker proposal verdict; do
     echo "==> function $f"
-    supabase functions deploy "$f"
+    "${SUPABASE[@]}" functions deploy "$f"
 done
 
 echo

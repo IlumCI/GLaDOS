@@ -19,8 +19,20 @@ resolve, and report a network error indistinguishable from a bad cable.
 That is not hypothetical. On 2026-09-27 the pinned project
 `vermcdgpqncfsralpesz.supabase.co` answered NXDOMAIN from Google's public
 resolver, authoritative from `supabase.co`'s own nameservers, while `supabase.co`
-itself resolved. The project had been gone for some time and three workflows plus
-every shipped image still named it.
+itself resolved -- and three workflows plus every shipped image named it.
+
+**And the first version of this file said the project was "gone", which was an
+inference and was wrong.** It was *paused*: a free-tier project is suspended after
+about a week of inactivity and a suspended project's API hostname stops resolving,
+which is indistinguishable from a deleted one by DNS alone. Two hours later, after
+somebody signed in, the same name resolved and `projects list` reported the project
+`ACTIVE_HEALTHY` -- it had existed the whole time.
+
+So this reports **what it measured** and names both causes without choosing between
+them. The distinction matters because the two have different repairs: a paused
+project comes back by being visited, and a deleted one has to be recreated and
+re-pinned and the kernel rebuilt. Telling an operator to do the second when the
+first would have done is the same error as the reading that prompted it.
 
 **And there are two pins of one fact.** The kernel compiles `DEFAULT_SOURCE`;
 `release.yml`, `experimental.yml` and `propose.yml` read a GitHub variable called
@@ -143,6 +155,13 @@ def selftest():
         resolve("this-name-should-not-exist.supabase.co") is False,
         "one that does not answers false rather than raising",
     )
+    # The claim the first version of this file could not have made, because it was
+    # asserting an inference: "does not resolve" and "was deleted" are two
+    # statements and only the first is measured here.
+    claim(
+        "paused" in __doc__ and "deleted" in __doc__,
+        "and a non-resolving host names both causes rather than choosing one",
+    )
 
     print("\nselftest passed" if ok else "\nselftest FAILED")
     return 0 if ok else 1
@@ -179,7 +198,17 @@ def main():
         if r is True:
             print(f"  {h} resolves")
         elif r is False:
-            print(f"  {h} does NOT resolve -- the project is gone, and every image names it")
+            # **The measurement, and the causes, kept apart.** A paused project and
+            # a deleted one answer NXDOMAIN identically, and the repairs are not the
+            # same: one comes back by being visited and the other has to be recreated,
+            # re-pinned and the kernel rebuilt. Saying "gone" picked the expensive
+            # repair on evidence that could not distinguish them, which is what the
+            # first version of this did.
+            print(f"  {h} does NOT resolve, and every image names it")
+            print("  a free-tier project that is paused answers this the same way a")
+            print("  deleted one does. Check `supabase projects list`: if it is there")
+            print("  and INACTIVE it comes back on its own once signed in; if it is")
+            print("  absent, recreate it, re-pin channel.rs and rebuild.")
             rc = 1
         else:
             print(f"  could not tell whether {h} resolves; this is not a verdict")

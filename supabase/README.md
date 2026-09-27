@@ -184,11 +184,37 @@ Which address a mining worker name's shares are owed to. Run migration
 `0003_workers.sql` first.
 
 ```
-POST /functions/v1/worker/nonce    {address, worker, verb?}    -> {nonce, message, ...}
+POST /functions/v1/worker/nonce    {address, worker, verb?}
+                        -> {nonce, message, issued_at, expires_at}
 POST /functions/v1/worker/claim    {address, signature, worker} -> {worker, address}
 POST /functions/v1/worker/release  {address, signature, worker} -> {released}
 GET  /functions/v1/worker/map                                   -> {workers, updated_at}
 ```
+
+**Driven, by `tools/workercheck.py`.** It signs with a published throwaway key,
+claims a name, checks the map lists it, releases it, checks the map does not, and
+replays the accepted signature to watch it refused -- so the write side of this
+function is exercised rather than described. Its signer is Python and the verifier
+is `_shared/evm.js`, which is the two-reader arrangement this tree uses wherever
+two implementations must agree; `--selftest` needs no server and runs in CI.
+
+**It rebuilds the message instead of signing what it is handed**, and that found
+the reason `issued_at` is in the list above. The reply used to carry `nonce`,
+`message` and `expires_at` only -- while `Issued At` is a line *inside* the text
+being signed, so no caller could derive the message and every one of them had to
+trust the string a server handed it. That is most of what SIWE exists to stop.
+`link/nonce` had it too, having been copied in shape from here, and both return it
+now. Deriving it from `expires_at` minus the TTL was the alternative and it puts a
+second copy of `NONCE_TTL_MS` in every client.
+
+**An abandoned nonce is never collected**, which is worth knowing before reading a
+refusal. `spendNonce` takes the newest *unused* row, and a caller that asks for a
+nonce and then fails before spending it leaves that row outstanding for good. So a
+replayed signature can be refused two ways -- 400 about no unused nonce when the
+table is clean, and 401 about the signature when an older nonce got picked up and
+the message was rebuilt around it. Both are correct refusals of the replay, and
+`workercheck.py` accepts either rather than depending on nothing having gone wrong
+before it ran.
 
 `tools/distribute.py --map` reads what `/worker/map` serves, and also still
 reads a flat `{name: address}` file, because an event with no server at all is

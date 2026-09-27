@@ -93,6 +93,7 @@ jobs:
           python3 tools/manifest.py --selftest
           python3 tools/payload.py --selftest
           python3 tools/godel.py --selftest
+          python3 tools/workercheck.py --selftest
 
       # On main this reads an empty ledger and answers clean, which is
       # correct; on loop/** it is the invariant check the loop's own jobs
