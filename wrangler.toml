@@ -1,0 +1,44 @@
+# Cloudflare Pages for the site, which is the one job Cloudflare can do here.
+#
+# **It cannot host the pool daemon, and that is worth stating where somebody looks
+# for it.** Stratum V1 is a raw line-oriented TCP protocol -- `mining.subscribe`,
+# `mining.notify`, a share per line -- and a Worker has no TCP listener. Outbound
+# sockets exist; an inbound one does not. So the daemon needs a machine, and
+# `pool/deploy/` is where that lives. Cloudflare's role is DNS and static files.
+#
+# **And it cannot host the five Supabase functions without replacing them.** They
+# are Deno edge functions that authenticate device codes, wallet signatures and an
+# ingest token, and each does its own checking for reasons written at the top of its
+# own file. Porting them to Workers would leave two implementations of one thing,
+# which is the failure this repository keeps recording -- so they stay where they
+# are and `tools/supadeploy.sh` deploys them.
+#
+# ### What this serves
+#
+# `docs/` whole, which is already the site: `tools/site.py --build` writes the
+# masthead, nav and footer into every page, `site.yml` regenerates the derived
+# regions from the Releases API, and `docs/pool/index.html` is the share log that
+# recomputes its own digest in the browser.
+#
+# **The hostname can only have one origin.** `docs/CNAME` says
+# `glados.aperture.institute` and that is GitHub Pages today. Pointing the same name
+# at Pages *and* at Cloudflare is not a fallback, it is a coin toss about which
+# serves a given request, and the two are updated by different mechanisms -- so
+# moving means removing the GitHub Pages custom domain first. Until somebody does
+# that, `wrangler pages deploy` publishes to the `*.pages.dev` name and nothing
+# about the live site changes, which is the safe order to test in.
+#
+# ### Why the share log wants a secure context at all
+#
+# `docs/pool/index.html` verifies the ledger's digest with `crypto.subtle`, which is
+# unavailable outside a secure context -- it reports `NOT CHECKED` from a `file://`
+# URL, which is the honest answer rather than a pass. So wherever it is served, it
+# has to be over https, and that is a property of the page rather than a preference.
+
+name = "glados-site"
+compatibility_date = "2026-09-27"
+
+# No `main`, deliberately: this is a static deployment and not a Worker. A `main`
+# here would make every request run a script, which is a runtime nobody needs in
+# front of files that never change between builds.
+pages_build_output_dir = "docs"

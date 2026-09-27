@@ -118,6 +118,7 @@ fn main() {
     let mut roster_path: Option<String> = None;
     let mut roster_url = String::new();
     let mut require_roster = false;
+    let mut require_upstream = false;
     if args.iter().any(|a| a == "--selftest") {
         // The roster first, and separately, because it needs no socket: a
         // suite that binds a port before checking pure functions fails for the
@@ -252,6 +253,7 @@ fn main() {
                 }
             },
             "--require-roster" => require_roster = true,
+            "--require-upstream" => require_upstream = true,
             "--prices" => match it.next() {
                 Some(v) => prices = Some(v.clone()),
                 None => {
@@ -288,6 +290,7 @@ fn main() {
                 println!("--roster PATH checks worker names against a mapping file at greeting.");
                 println!("--roster-url URL is where a refused miner is told to register.");
                 println!("--require-roster refuses an unregistered name instead of warning.");
+                println!("--require-upstream refuses to serve a coin with no upstream, which pays nobody.");
                 return;
             }
             other => match parse_coin(other) {
@@ -347,6 +350,38 @@ fn main() {
     }
     for c in &coins {
         println!("[pool] {}", glados_pool::market::verdict(market.as_ref(), &c.label, &c.asset));
+    }
+
+    // **A coin with no upstream pays nobody, and saying so in a log line is not
+    // enough.** A local coin prints `(local)` beside its slot and then serves
+    // miners perfectly: they connect, they hash, shares are accepted and credited
+    // to the ledger, and there is no upstream for any of it to be submitted to. The
+    // work is real and the payment channel does not exist.
+    //
+    // That is the same shape as a miner configured with an address that cannot be
+    // paid, which `mine::boot` refuses for the same reason -- a machine that hashes
+    // all night for nobody looks exactly like one that is working. So this is a
+    // refusal an operator asks for by name, in the `--require-roster` idiom: the
+    // default stays permissive because a local coin is exactly what `--selftest`
+    // and every development run wants, and an event does not.
+    //
+    // Checked after the coins are parsed and before a socket is bound, so the
+    // refusal costs nothing and cannot half-start.
+    if require_upstream {
+        let local: Vec<&str> = coins
+            .iter()
+            .filter(|c| matches!(c.source, Source::Local))
+            .map(|c| c.label.as_str())
+            .collect();
+        if !local.is_empty() {
+            eprintln!(
+                "--require-upstream: {} coin(s) have no upstream and would pay nobody: {}",
+                local.len(),
+                local.join(", ")
+            );
+            eprintln!("  a coin spec takes one: label:algo:bits@host:port,worker,pass");
+            std::process::exit(2);
+        }
     }
 
     let mut built = Pool::new(coins);

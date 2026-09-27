@@ -3,6 +3,46 @@
 What the in-OS updater talks to. Two channels, one signing key, and a gate that
 is honest about what it is.
 
+## The project this describes no longer exists
+
+On 2026-09-27 the pinned project answered **NXDOMAIN**, authoritative from
+`supabase.co`'s own nameservers while `supabase.co` itself resolved:
+
+    $ python3 tools/origin.py --resolve
+    pinned in src/update/channel.rs:  https://vermcdgpqncfsralpesz.supabase.co
+      vermcdgpqncfsralpesz.supabase.co does NOT resolve -- the project is gone
+
+A free-tier project is deleted after prolonged inactivity and nothing in this
+repository noticed, which is why `tools/origin.py` now exists and why `ci.yml` runs
+it on every push. Everything below is correct and describes a backend that has to
+be recreated before any of it can be true again.
+
+### Bringing it back, in order
+
+    supabase login                              # interactive, once
+    supabase projects create glados --region ... # note the new ref
+
+Then **re-pin and rebuild**, because the ref is compiled in and an old image asks
+the old host:
+
+    # src/update/channel.rs: DEFAULT_SOURCE = "https://<new-ref>.supabase.co"
+    python3 tools/origin.py --resolve           # says yes now
+    cargo build --release                       # the kernel asks the new one
+
+Then the deploy, which is one command and not the hand-typed list further down --
+`tools/supadeploy.sh` derives the project ref from `channel.rs` so it cannot
+deploy somewhere the kernel does not name, refuses before spending anything if the
+project is missing, runs the migrations *before* the functions that read the tables
+they create, and takes `verify_jwt` from `supabase/config.toml` rather than from a
+flag somebody forgets:
+
+    bash tools/supadeploy.sh
+
+Finally set the GitHub variable `SUPABASE_URL` to the same origin, which CI checks
+against the kernel's pin on every push:
+
+    python3 tools/origin.py --expect "$SUPABASE_URL"
+
 | | `stable` | `experimental` |
 | --- | --- | --- |
 | Bucket | public | private |
