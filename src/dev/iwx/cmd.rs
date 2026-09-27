@@ -291,6 +291,53 @@ pub unsafe fn ask<'a>(
     }
 }
 
+/// Wait for a notification nobody asked for.
+///
+/// **Not the same operation as `ask`, and conflating them is a hang.** A command
+/// response arrives because something was sent; these arrive because firmware
+/// finished something, so there is nothing to send and nothing to correlate. The
+/// post-alive sequence waits on two of them, and using `ask` would mean inventing
+/// a command to send in order to have something to wait for.
+///
+/// **A group of 1 is accepted wherever 0 is asked for.** `iwx_rx_pkt` strips the
+/// long group back to a bare opcode when the command it answers was marked
+/// narrow, so a notification upstream matches as a bare `0x4` can arrive either
+/// way; accepting both is what stops this waiting forever on a perfectly ordinary
+/// packet.
+///
+/// # Safety
+/// `bar0` must be a mapped aperture for a part whose firmware is alive.
+pub unsafe fn expect<'a>(
+    bar0: u64,
+    rings: &mut Rings,
+    bufs: &'a Buffers,
+    rx: &mut Rx,
+    group: u8,
+    code: u8,
+    ms: u32,
+) -> Result<Packet<'a>, CmdError> {
+    let mut waited = 0u32;
+    loop {
+        while let Some(got) = rx.next(rings, bufs) {
+            let pkt = got.map_err(CmdError::BadReply)?;
+            let matched = pkt.code == code
+                && (pkt.group == group || (group == 0 && pkt.group == LONG_GROUP));
+            rx.ack(bar0, rings);
+            if matched {
+                return Ok(pkt);
+            }
+            // Anything else is stepped over. Firmware sends statistics,
+            // temperature and debug unasked, and refusing on the first of them
+            // would make an unrelated notification break the sequence.
+        }
+        if waited >= ms * 1000 {
+            return Err(CmdError::NoReply);
+        }
+        crate::time::delay_us(100);
+        waited += 100;
+    }
+}
+
 /// Claims. No radio, and no register written.
 pub fn checks() -> Vec<(&'static str, bool)> {
     let mut out: Vec<(&'static str, bool)> = Vec::new();

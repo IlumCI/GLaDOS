@@ -5302,7 +5302,8 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                             // Said plainly, because a radio that is alive and a
                             // radio that can carry a frame are a long way apart and
                             // the first reads like the second.
-                            kprintln!("  asking it what it is");
+                            kprintln!("  {}", b.alive.say_sku());
+                            kprintln!("  configuring, then asking it what it is");
                             // **And ask it what it is, while the firmware is
                             // still running.** The NVM is a command, so it needs a
                             // live part -- asking it in a separate verb would mean

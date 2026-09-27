@@ -34,6 +34,7 @@ pub mod alive;
 pub mod cmd;
 pub mod ctxt;
 pub mod gen3;
+pub mod init;
 pub mod nvm;
 pub mod fw;
 
@@ -813,6 +814,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     out.extend(alive::checks());
     out.extend(cmd::checks());
     out.extend(nvm::checks());
+    out.extend(init::checks());
     out
 }
 
@@ -1178,6 +1180,12 @@ pub struct Booted {
     pub rx: alive::Rx,
     /// The command queue, which is how anything is asked of the part.
     pub cmds: cmd::Queue,
+    /// Whether the post-alive handshake has run.
+    ///
+    /// Remembered rather than re-run, because its third step tells firmware there
+    /// are no more NVM accesses coming -- a claim that is true once and false the
+    /// second time somebody asks a question.
+    pub configured: bool,
 }
 
 impl Radio {
@@ -1232,7 +1240,7 @@ impl Radio {
         let a = unsafe { alive::wait(bar0, &mut boot.rings, &buffers, &mut rx, ms) }
             .map_err(BootFault::NotAlive)?;
         let cmds = cmd::Queue::new().ok_or(BootFault::NoMemory)?;
-        Ok(Booted { alive: a, boot, buffers, rx, cmds })
+        Ok(Booted { alive: a, boot, buffers, rx, cmds, configured: false })
     }
 }
 
@@ -1248,6 +1256,23 @@ impl Radio {
     /// the answer, which is the split upstream makes -- the response does not
     /// carry an address.
     pub fn nvm(&self, b: &mut Booted, ms: u32) -> Result<nvm::Nvm, nvm::NvmError> {
+        // **The handshake first, and it is not optional.** `NVM_GET_INFO` was sent
+        // with none of it in front, which is a question put to a part that has not
+        // been told the question is coming. Run once and remembered, because the
+        // second step says there are no more NVM accesses -- saying that twice is
+        // saying something untrue the second time.
+        if !b.configured {
+            let bar0 = self
+                .bar0
+                .filter(|&a| a != 0)
+                .ok_or(nvm::NvmError::Cmd(cmd::CmdError::NoQueue))?;
+            // Safety: a booted part whose aperture `boot` mapped.
+            unsafe {
+                init::handshake(bar0, &mut b.boot.rings, &b.buffers, &mut b.rx, &mut b.cmds, &b.alive, ms)
+            }
+            .map_err(nvm::NvmError::Init)?;
+            b.configured = true;
+        }
         let bar0 = self.bar0.filter(|&a| a != 0).ok_or(nvm::NvmError::Cmd(cmd::CmdError::NoQueue))?;
         // Safety: a booted part, whose aperture `boot` mapped and whose firmware
         // is alive; the lock is taken and released around the reads.

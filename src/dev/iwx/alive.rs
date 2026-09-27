@@ -241,11 +241,26 @@ pub struct Alive {
     pub lmac_error_table: [u32; 2],
     pub umac_error_table: u32,
     pub log_event_table: u32,
+    /// The SKU this part was fused as, three words, **and it decides whether the
+    /// platform-NVM handshake happens at all.**
+    ///
+    /// Read and thrown away in the first version of this parser, which was a
+    /// defect rather than an omission: `iwx_load_pnvm` returns immediately when
+    /// all three are zero, so a driver that does not carry them either skips a
+    /// handshake it owes or performs one it does not. Absent before version 5, and
+    /// zero there -- which lands on the right branch by construction, since a
+    /// firmware old enough to send a v4 notification is not one that wants it.
+    pub sku_id: [u32; 3],
 }
 
 impl Alive {
     pub fn ok(&self) -> bool {
         self.status == ALIVE_STATUS_OK
+    }
+
+    /// Whether firmware wants the platform-NVM handshake.
+    pub fn wants_pnvm(&self) -> bool {
+        self.sku_id != [0; 3]
     }
 
     pub fn say(&self) -> String {
@@ -259,6 +274,17 @@ impl Alive {
             self.umac_major,
             self.umac_minor
         )
+    }
+
+    pub fn say_sku(&self) -> String {
+        if self.wants_pnvm() {
+            alloc::format!(
+                "sku {:#010x}/{:#010x}/{:#010x}, so it wants a platform-NVM handshake",
+                self.sku_id[0], self.sku_id[1], self.sku_id[2]
+            )
+        } else {
+            String::from("no sku id, so no platform-NVM handshake is owed")
+        }
     }
 }
 
@@ -305,6 +331,13 @@ pub fn alive(payload: &[u8]) -> Option<Alive> {
         // The upper MAC's block has only two pointers and the error one is first.
         umac_error_table: le32(payload, u + 8),
         log_event_table: le32(payload, l0 + DBG + 4),
+        // Only versions 5 and up carry it, immediately after the upper-MAC
+        // block. Zeros otherwise, which is the branch a v4 firmware wants.
+        sku_id: if version >= 5 {
+            [le32(payload, ALIVE_V4), le32(payload, ALIVE_V4 + 4), le32(payload, ALIVE_V4 + 8)]
+        } else {
+            [0; 3]
+        },
     })
 }
 
@@ -566,6 +599,9 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     p[100..104].copy_from_slice(&42u32.to_le_bytes()); // umac_major
     p[104..108].copy_from_slice(&3u32.to_le_bytes()); // umac_minor
     p[108..112].copy_from_slice(&0xdead_3333u32.to_le_bytes()); // umac error
+    p[116..120].copy_from_slice(&0x5501u32.to_le_bytes()); // sku id
+    p[120..124].copy_from_slice(&0x5502u32.to_le_bytes());
+    p[124..128].copy_from_slice(&0x5503u32.to_le_bytes());
     match alive(&p) {
         Some(a) => {
             ok(a.version == 5, "a 128-byte payload parses as version 5");
@@ -583,6 +619,13 @@ pub fn checks() -> Vec<(&'static str, bool)> {
             );
             ok(a.umac_error_table == 0xdead_3333, "and the upper MAC's");
             ok(a.log_event_table == 0xdead_1111, "with the event log beside the first");
+            // The field the first version read past. Its value decides a whole
+            // handshake, so dropping it was a defect and not a simplification.
+            ok(
+                a.sku_id == [0x5501, 0x5502, 0x5503],
+                "the SKU id is read from after the upper-MAC block",
+            );
+            ok(a.wants_pnvm(), "and a nonzero one means a platform-NVM handshake is owed");
         }
         None => ok(false, "a 128-byte payload parses as version 5"),
     }
@@ -593,6 +636,13 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     ok(
         alive(&dead).map(|a| (a.version, a.ok())) == Some((4, false)),
         "a notification saying 0xdead parses, and says it is not ok",
+    );
+    // Version 4 has no SKU id at all, and zero is the value that skips the
+    // handshake -- so the absent case lands on the right branch rather than
+    // needing one.
+    ok(
+        alive(&dead).map(|a| (a.sku_id, a.wants_pnvm())) == Some(([0; 3], false)),
+        "a version-4 notification has no SKU id, and owes no handshake",
     );
     ok(alive(&alloc::vec![0u8; 120]).is_none(), "a length no version has is refused, not parsed as the nearest");
     ok(alive(&[]).is_none(), "and so is an empty payload");

@@ -255,9 +255,13 @@ pub fn build(hw_rev: u32, image: &fw::Image, file: &[u8]) -> Result<Boot, Error>
         // move into the context info on this family, which is the transposition
         // most likely to be got wrong by carrying gen1's grouping across.
         put64(b, scratch_at::FREE_RBD_ADDR, rings.free.pa());
-        // Platform NVM is left zero. It is loaded by a later command rather than
-        // fetched at boot, and a nonzero address here would have the part fetch
-        // one before anything has been written to it.
+        // Platform NVM is left zero, and that is not the same as owing nothing.
+        // A nonzero address here would have the part fetch a platform NVM at boot
+        // from memory nothing has written; what firmware is owed instead is the
+        // *handshake* in `init`, which rings a doorbell saying to proceed without
+        // one. This tree recorded "no PNVM is needed for this part" for a while,
+        // which was right about the file and wrong about the handshake -- and the
+        // wrong half would have hung the sequence a step later.
     }
     for p in &placed {
         let end = p.sect.at.checked_add(p.sect.len).ok_or(Error::BadSection)?;
@@ -791,17 +795,7 @@ pub unsafe fn kick(bar0: u64, b: &Boot) -> Result<(), KickFault> {
             Kick::Ltr => {
                 core::ptr::write_volatile((bar0 + CSR_LTR_LONG_VAL_AD) as *mut u32, ltr_value());
             }
-            Kick::Prph(addr, val) => {
-                core::ptr::write_volatile(
-                    (bar0 + HBUS_TARG_PRPH_WADDR) as *mut u32,
-                    prph_waddr(umac_prph(addr)),
-                );
-                // The address must be latched before the data, and nothing in
-                // the type system enforces the order of two volatile writes to
-                // different addresses -- volatile does, which is the reason both
-                // are volatile rather than only the second.
-                core::ptr::write_volatile((bar0 + HBUS_TARG_PRPH_WDAT) as *mut u32, val);
-            }
+            Kick::Prph(addr, val) => prph_write(bar0, umac_prph(addr), val),
             Kick::Unlock => {
                 let p = (bar0 + CSR_GP_CNTRL) as *mut u32;
                 core::ptr::write_volatile(p, core::ptr::read_volatile(p) & !GP_CNTRL_MAC_ACCESS_REQ);
@@ -809,6 +803,23 @@ pub unsafe fn kick(bar0: u64, b: &Boot) -> Result<(), KickFault> {
         }
     }
     Ok(())
+}
+
+/// Write one word into peripheral space.
+///
+/// The address must be latched before the data, and nothing in the type system
+/// orders two volatile writes to different addresses -- volatile does, which is
+/// why both are volatile rather than only the second.
+///
+/// Takes an address already in upper-MAC space, so a caller that forgot
+/// `umac_prph` writes somewhere real rather than being corrected here. That is the
+/// honest split: this function cannot tell which space an address belongs to.
+///
+/// # Safety
+/// `bar0` must be a mapped aperture for a part holding the MAC access lock.
+pub unsafe fn prph_write(bar0: u64, addr: u32, val: u32) {
+    core::ptr::write_volatile((bar0 + HBUS_TARG_PRPH_WADDR) as *mut u32, prph_waddr(addr));
+    core::ptr::write_volatile((bar0 + HBUS_TARG_PRPH_WDAT) as *mut u32, val);
 }
 
 /// Release the MAC access lock.

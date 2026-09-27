@@ -288,6 +288,10 @@ pub fn parse(payload: &[u8], mac: [u8; 6]) -> Option<Nvm> {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum NvmError {
     Cmd(cmd::CmdError),
+    /// The part was never told the question was coming. Its own variant because
+    /// this is a failure *before* the NVM was asked about, and reporting it as a
+    /// command failure would send a reader to look at `NVM_GET_INFO`.
+    Init(super::init::Fault),
     /// The answer was a length no version of the response has.
     UnknownVersion(usize),
     /// No usable address in either register pair. Carries what was read, because
@@ -300,6 +304,7 @@ impl NvmError {
     pub fn why(&self) -> String {
         match self {
             NvmError::Cmd(c) => c.why(),
+            NvmError::Init(f) => f.why(),
             NvmError::UnknownVersion(n) => {
                 alloc::format!("the answer is {} bytes, which is no version of it", n)
             }
