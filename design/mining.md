@@ -299,7 +299,7 @@ Five claims, against digests this kernel did not compute, and two of them are
 about the failure that produces a hash function looking entirely healthy. The
 counter in section 3.2 is the *message length* and not the block index, so a
 short final block that is zero-padded without moving the counter makes `"a"`
-and `"a "` collide; and a message of exactly one block must keep that block
+and `"a\0"` collide; and a message of exactly one block must keep that block
 for the `last` flag rather than compressing it as an interior one. Both are
 asserted, in the kernel and in `tools/algocheck.py`, which holds the same
 digests so they live in two places that have to agree.
