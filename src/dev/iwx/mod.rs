@@ -31,8 +31,10 @@
 //! walked by a suite on any machine, where reading a real `CSR_HW_REV` cannot.
 
 pub mod alive;
+pub mod cmd;
 pub mod ctxt;
 pub mod gen3;
+pub mod nvm;
 pub mod fw;
 
 use crate::dev::pci::{self, Device};
@@ -518,6 +520,17 @@ pub fn last_alive() -> Option<Result<alive::Alive, String>> {
     unsafe { (*LAST_ALIVE.get()).clone() }
 }
 
+/// What the last `iwx boot` read out of the part's NVM.
+static LAST_NVM: crate::sync::Racy<Option<Result<nvm::Nvm, String>>> = crate::sync::Racy::new(None);
+
+pub fn last_nvm() -> Option<Result<nvm::Nvm, String>> {
+    unsafe { (*LAST_NVM.get()).clone() }
+}
+
+pub fn note_nvm(r: Result<nvm::Nvm, String>) {
+    unsafe { *LAST_NVM.get() = Some(r) };
+}
+
 pub fn note_alive(r: Result<alive::Alive, String>) {
     unsafe { *LAST_ALIVE.get() = Some(r) };
 }
@@ -798,6 +811,8 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     out.extend(gen3::checks());
     out.extend(gen3::kick_checks());
     out.extend(alive::checks());
+    out.extend(cmd::checks());
+    out.extend(nvm::checks());
     out
 }
 
@@ -1158,6 +1173,11 @@ pub struct Booted {
     pub alive: alive::Alive,
     pub boot: gen3::Boot,
     pub buffers: alive::Buffers,
+    /// Where the driver has got to in the receive ring. Carried because the
+    /// firmware goes on sending and the next reader must not start at zero.
+    pub rx: alive::Rx,
+    /// The command queue, which is how anything is asked of the part.
+    pub cmds: cmd::Queue,
 }
 
 impl Radio {
@@ -1208,9 +1228,57 @@ impl Radio {
         // Safety: an AX210 part whose power-up completed, with every address in
         // `boot` pointing at memory this driver owns.
         unsafe { gen3::kick(bar0, &boot) }.map_err(BootFault::Kick)?;
-        let a = unsafe { alive::wait(bar0, &mut boot.rings, &buffers, ms) }
+        let mut rx = alive::Rx::new();
+        let a = unsafe { alive::wait(bar0, &mut boot.rings, &buffers, &mut rx, ms) }
             .map_err(BootFault::NotAlive)?;
-        Ok(Booted { alive: a, boot, buffers })
+        let cmds = cmd::Queue::new().ok_or(BootFault::NoMemory)?;
+        Ok(Booted { alive: a, boot, buffers, rx, cmds })
+    }
+}
+
+impl Radio {
+    /// Ask a booted part what it knows about itself.
+    ///
+    /// Takes the `Booted` it was given rather than booting again, because the
+    /// firmware is already running and the receive cursor is already somewhere:
+    /// re-booting to ask a question would throw away the position and the part
+    /// would be sent its microcode twice.
+    ///
+    /// The address is read under the MAC access lock and the rest comes back in
+    /// the answer, which is the split upstream makes -- the response does not
+    /// carry an address.
+    pub fn nvm(&self, b: &mut Booted, ms: u32) -> Result<nvm::Nvm, nvm::NvmError> {
+        let bar0 = self.bar0.filter(|&a| a != 0).ok_or(nvm::NvmError::Cmd(cmd::CmdError::NoQueue))?;
+        // Safety: a booted part, whose aperture `boot` mapped and whose firmware
+        // is alive; the lock is taken and released around the reads.
+        let mac = unsafe {
+            let held = gen3::lock(bar0);
+            let m = nvm::read_mac(bar0, Family::Ax210);
+            if held {
+                gen3::unlock(bar0);
+            }
+            m
+        };
+        if !nvm::valid_mac(&mac) {
+            return Err(nvm::NvmError::NoAddress(mac));
+        }
+        // Safety: as above, and the command queue is the one `boot` allocated.
+        let pkt = unsafe {
+            cmd::ask(
+                bar0,
+                &mut b.boot.rings,
+                &b.buffers,
+                &mut b.rx,
+                &mut b.cmds,
+                nvm::REGULATORY_AND_NVM_GROUP,
+                nvm::NVM_GET_INFO,
+                0,
+                &nvm::REQUEST,
+                ms,
+            )
+        }
+        .map_err(nvm::NvmError::Cmd)?;
+        nvm::parse(pkt.payload, mac).ok_or(nvm::NvmError::UnknownVersion(pkt.payload.len()))
     }
 }
 

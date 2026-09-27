@@ -380,7 +380,13 @@ pub unsafe fn arm(bar0: u64) {
 ///
 /// # Safety
 /// `bar0` must be a mapped aperture for a part that has been kicked.
-pub unsafe fn wait(bar0: u64, rings: &mut Rings, bufs: &Buffers, ms: u32) -> Result<Alive, Wait> {
+pub unsafe fn wait(
+    bar0: u64,
+    rings: &mut Rings,
+    bufs: &Buffers,
+    rx: &mut Rx,
+    ms: u32,
+) -> Result<Alive, Wait> {
     // --- the interrupt bit ---------------------------------------------------
     let mut waited = 0u32;
     loop {
@@ -415,18 +421,7 @@ pub unsafe fn wait(bar0: u64, rings: &mut Rings, bufs: &Buffers, ms: u32) -> Res
     // --- and the notification ----------------------------------------------
     let mut waited = 0u32;
     loop {
-        // The producer index, DMA'd into the status block. Two bytes on this
-        // family, twelve bits of which are the index.
-        //
-        // **Nonzero means a packet, and that is only sound for the first one.**
-        // The index wraps, so a ring that filled completely would come back to
-        // zero and read as empty. It cannot here -- this waits for the *first*
-        // notification after a boot, with the cursor at zero and 512 slots ahead
-        // of it -- and anything that services the ring afterwards needs a real
-        // cursor compared against this rather than a test against zero. Stated
-        // because the shortcut is invisible once there is a second caller.
-        let hw = producer(rings) & (RX_RING as u16 - 1);
-        if hw != 0 {
+        if rx.pending(rings) != 0 {
             break;
         }
         let int = core::ptr::read_volatile((bar0 + CSR_INT) as *const u32);
@@ -440,16 +435,15 @@ pub unsafe fn wait(bar0: u64, rings: &mut Rings, bufs: &Buffers, ms: u32) -> Res
         waited += 100;
     }
 
-    // Buffer zero, because the cursor starts there and firmware fills in order.
-    // The completion ring's tag is not consulted, which is upstream's own
-    // arrangement: it walks its cursor to the producer index and ignores the tag
-    // it handed out.
-    let buf = bufs.buf(0).ok_or(Wait::NoPacket)?;
-    let pkt = packet(buf).map_err(Wait::BadPacket)?;
+    let pkt = rx.next(rings, bufs).ok_or(Wait::NoPacket)?.map_err(Wait::BadPacket)?;
     if pkt.group != 0 || pkt.code != ALIVE {
         return Err(Wait::Unexpected { group: pkt.group, code: pkt.code });
     }
     let a = alive(pkt.payload).ok_or(Wait::UnknownVersion(pkt.payload.len()))?;
+    // Acknowledged before the status is judged, because a notification that says
+    // "not ok" is still a notification the part has been told about -- leaving it
+    // unacknowledged would have the next reader see it again.
+    rx.ack(bar0, rings);
     if !a.ok() {
         return Err(Wait::NotOk(a.status));
     }
@@ -457,12 +451,81 @@ pub unsafe fn wait(bar0: u64, rings: &mut Rings, bufs: &Buffers, ms: u32) -> Res
 }
 
 /// The receive producer index out of the status block.
-fn producer(rings: &Rings) -> u16 {
+///
+/// Twelve bits of a sixteen-bit word on this family, then masked to the ring --
+/// both maskings, because the field is twelve bits wide and the ring is nine, and
+/// dropping either leaves an index that can point outside the buffers.
+pub fn producer(rings: &Rings) -> u16 {
     let b = rings.stat.as_slice();
     if b.len() < 2 {
         return 0;
     }
-    u16::from_le_bytes([b[0], b[1]]) & 0x0fff
+    u16::from_le_bytes([b[0], b[1]]) & 0x0fff & (RX_RING as u16 - 1)
+}
+
+/// A cursor over the receive ring.
+///
+/// **This is what the first version of `wait` did not have, and said so.** That
+/// one treated a nonzero producer index as "a packet arrived", which is sound for
+/// exactly one packet after a boot and wrong for every one after it: the index
+/// wraps, so a full ring reads as empty, and two packets in one interval look like
+/// one. A command response is the second packet this driver will ever see, so the
+/// shortcut had to go before there could be a command at all.
+///
+/// The cursor is the driver's own position and the producer index is firmware's;
+/// packets are the gap between them, which is upstream's arrangement exactly.
+pub struct Rx {
+    pub cur: usize,
+}
+
+impl Rx {
+    /// A cursor for a ring firmware has just been given.
+    pub fn new() -> Rx {
+        Rx { cur: 0 }
+    }
+
+    /// How many packets are waiting.
+    pub fn pending(&self, rings: &Rings) -> usize {
+        let hw = producer(rings) as usize;
+        // Modular, because firmware's index wraps and the driver's follows it
+        // round. A subtraction would be negative half the time.
+        (hw + RX_RING - self.cur) % RX_RING
+    }
+
+    /// Take the next packet, advancing past it.
+    ///
+    /// The buffer is chosen by the *cursor* and not by the completion ring's tag.
+    /// That is upstream's arrangement rather than a shortcut: it walks its cursor
+    /// to the producer index and never reads the tag it handed out, because
+    /// firmware fills in order and the tag would only confirm what the cursor
+    /// already says.
+    pub fn next<'a>(&mut self, rings: &Rings, bufs: &'a Buffers) -> Option<Result<Packet<'a>, PacketError>> {
+        if self.pending(rings) == 0 {
+            return None;
+        }
+        let i = self.cur;
+        self.cur = (self.cur + 1) % RX_RING;
+        Some(bufs.buf(i).ok_or(PacketError::TooShort).and_then(packet))
+    }
+
+    /// Tell firmware how far the driver has got.
+    ///
+    /// **One behind, and aligned to eight.** Upstream writes `hw - 1` rather than
+    /// `hw`, wrapping to the last slot when `hw` is zero, and masks the low three
+    /// bits with a comment that the hardware "gets upset" otherwise. Neither is
+    /// derived from anything, so both are copied exactly; inventing a tidier value
+    /// here is inventing one the part was not asked about.
+    ///
+    /// # Safety
+    /// `bar0` must be a mapped aperture for this part.
+    pub unsafe fn ack(&self, bar0: u64, rings: &Rings) {
+        let hw = producer(rings);
+        let one_behind = if hw == 0 { RX_RING as u16 - 1 } else { hw - 1 };
+        core::ptr::write_volatile(
+            (bar0 + RFH_Q0_FRBDCB_WIDX_TRG) as *mut u32,
+            (one_behind & !7) as u32,
+        );
+    }
 }
 
 /// Claims. No radio, and no register written.

@@ -784,7 +784,7 @@ pub unsafe fn kick(bar0: u64, b: &Boot) -> Result<(), KickFault> {
                 core::ptr::write_volatile(p, core::ptr::read_volatile(p) | bit);
             }
             Kick::Lock => {
-                if !nic_lock(bar0) {
+                if !lock(bar0) {
                     return Err(KickFault::NoLock);
                 }
             }
@@ -811,13 +811,26 @@ pub unsafe fn kick(bar0: u64, b: &Boot) -> Result<(), KickFault> {
     Ok(())
 }
 
+/// Release the MAC access lock.
+///
+/// Separate from `kick`'s own release because `nvm` takes the lock for a pair of
+/// register reads and has nothing else to do under it -- and a lock taken and not
+/// released leaves the part unable to sleep.
+///
+/// # Safety
+/// `bar0` must be a mapped aperture for this part.
+pub unsafe fn unlock(bar0: u64) {
+    let p = (bar0 + CSR_GP_CNTRL) as *mut u32;
+    core::ptr::write_volatile(p, core::ptr::read_volatile(p) & !GP_CNTRL_MAC_ACCESS_REQ);
+}
+
 /// Ask for access to the MAC's own registers.
 ///
 /// The wait is for `MAC_ACCESS_EN` **with `GOING_TO_SLEEP` clear**, and both
 /// halves matter: a part on its way into a low-power state can report access
 /// granted and then take it away, so the mask covers the sleep bit and the wanted
 /// value does not include it.
-fn nic_lock(bar0: u64) -> bool {
+pub fn lock(bar0: u64) -> bool {
     // Safety: the caller's aperture, and the offset is inside the first page.
     unsafe {
         let p = (bar0 + CSR_GP_CNTRL) as *mut u32;

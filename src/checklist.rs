@@ -260,6 +260,26 @@ fn radio_alive() -> Status {
     }
 }
 
+/// Did the part answer a question?
+///
+/// **The first row that needs the part to talk back rather than merely start.**
+/// Everything above it is the host handing bytes to firmware; this is a command in
+/// a ring, a doorbell, and an answer through the receive path -- so it is the row
+/// that says the two directions both work.
+///
+/// Shows the address, because that is the one figure from this whole sequence a
+/// person can check against a label on the machine.
+fn radio_nvm() -> Status {
+    match crate::dev::iwx::last_nvm() {
+        None => Status::Todo,
+        Some(Err(why)) => Status::Failed(why),
+        Some(Ok(n)) => ok(alloc::format!(
+            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, {} chan",
+            n.mac[0], n.mac[1], n.mac[2], n.mac[3], n.mac[4], n.mac[5], n.valid_channels
+        )),
+    }
+}
+
 /// The rate, which is the figure the trip exists to bring back.
 ///
 /// Reads the foreground bench first and the slice counter second, because they
@@ -314,6 +334,7 @@ pub const ITEMS: &[Item] = &[
     Item { what: "it resets and its clock starts", how: "iwx up", probe: radio_up },
     Item { what: "its firmware builds a boot descriptor", how: "iwx ctxt <fw>", probe: firmware_ready },
     Item { what: "the firmware boots and says it is alive", how: "iwx boot <fw>", probe: radio_alive },
+    Item { what: "it answers with its address and bands", how: "(same command)", probe: radio_nvm },
     Item { what: "the payout address checks out", how: "(automatic)", probe: payout_checks },
     Item { what: "yescrypt hashes", how: "mine algo yescrypt / mine bench 8000", probe: hashes },
     Item { what: "a share is found", how: "mine coin 0 t yescrypt", probe: share_found },

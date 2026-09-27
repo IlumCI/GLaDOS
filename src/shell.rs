@@ -5302,7 +5302,34 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                             // Said plainly, because a radio that is alive and a
                             // radio that can carry a frame are a long way apart and
                             // the first reads like the second.
-                            kprintln!("  nothing has been configured yet: no NVM, no PHY, no station");
+                            kprintln!("  asking it what it is");
+                            // **And ask it what it is, while the firmware is
+                            // still running.** The NVM is a command, so it needs a
+                            // live part -- asking it in a separate verb would mean
+                            // booting twice and sending the microcode twice, and
+                            // the receive cursor from the first boot would be
+                            // thrown away. So one verb does both and the second
+                            // half is reported separately.
+                            let mut b = b;
+                            match r.nvm(&mut b, 2000) {
+                                Ok(n) => {
+                                    crate::dev::iwx::note_nvm(Ok(n));
+                                    console::set_color(LTGREEN);
+                                    kprintln!(
+                                        "  address {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                                        n.mac[0], n.mac[1], n.mac[2], n.mac[3], n.mac[4], n.mac[5]
+                                    );
+                                    console::set_color(LTGRAY);
+                                    kprintln!("  {}", n.say());
+                                    kprintln!("  {}", n.channels());
+                                }
+                                Err(e) => {
+                                    crate::dev::iwx::note_nvm(Err(e.why()));
+                                    console::set_color(LTRED);
+                                    kprintln!("  the NVM could not be read: {}", e.why());
+                                    console::set_color(LTGRAY);
+                                }
+                            }
                             // **Dropped here, and on purpose.** Keeping it would
                             // mean a static holding two megabytes and a live DMA
                             // target with nothing to service it; the part goes back
