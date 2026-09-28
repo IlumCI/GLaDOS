@@ -1,0 +1,96 @@
+name: contracts
+
+# The claim contract's 106 checks, enforced instead of remembered.
+#
+# `design/audit.md`'s last open item said this in its own words: "The 93 claims
+# run only when somebody remembers. There is no `contracts.yml`;
+# `grep -rn contracts .github/workflows/` finds nothing, while `pool.yml` exists
+# precisely to stop a promise from going unenforced." It is 106 now, which is the
+# other half of the argument -- the count moved by thirteen and the README still
+# said 79, so nothing was watching either the tests or the number.
+#
+# **This contract holds tokens.** That is the whole reason it gets a workflow of
+# its own rather than a step in `ci.yml`: the kernel's job compiles a UEFI binary
+# and a failure there is a machine that does not boot, while a failure here is
+# somebody's money. Two different questions deserve two different red crosses.
+
+on:
+  push:
+    paths:
+      - 'contracts/**'
+      # The tree is built from the ledger, so the three tools that read or write
+      # one belong here: `distribute.py` builds the epoch document `cross.mjs`
+      # and `fork.mjs` are handed, and a change to either end breaks the pair
+      # without touching `contracts/` at all.
+      - 'tools/distribute.py'
+      - 'tools/ledgercheck.py'
+      - 'tools/loop.py'
+      - '.github/workflows/contracts.yml'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # `npm ci` and not `npm install`, because `package-lock.json` is committed
+      # and the point of committing one is that CI resolves to what was tested.
+      # `solc` is a dependency here, so an unlocked install can change the
+      # compiler under a contract whose deployed bytecode is the artefact.
+      - name: Install, from the lockfile
+        working-directory: contracts
+        run: npm ci
+
+      # Printed rather than only checked. The deployed size is 12,543 bytes
+      # against the 24,576 limit, and a contract that has grown past it fails at
+      # deployment -- which is the one step in this system that cannot be
+      # rehearsed, so the number belongs in every log.
+      - name: Build, and say how big it came out
+        working-directory: contracts
+        run: npm run build
+
+      - name: The 106 claims
+        working-directory: contracts
+        run: npm test
+
+      # The Merkle tree, three ways, on a document generated here rather than on
+      # a fixture. `distribute.py` builds it in Python, `cross.mjs` rebuilds it
+      # in JavaScript and then asks the *compiled contract* to verify every
+      # proof -- so the arbiter is the bytecode and not either script. A tree
+      # that two implementations agree about and the contract rejects is the
+      # failure this catches, and it is the one that would strand a payout.
+      #
+      # The ledger is `pool/site/ledger.json`, which is a real run's share log:
+      # two miners, twelve shares, a 75/25 split. Using it here means the pool
+      # and the distributor are checked against one document rather than two
+      # fixtures that drifted.
+      - name: A real ledger becomes an epoch, and three readers agree on the tree
+        run: |
+          python3 tools/ledgercheck.py pool/site/ledger.json
+          printf '{"probe-a":"0x7e5f4552091a69125d5dfcb7b8c2659029395bdf",'   >  /tmp/map.json
+          printf '"probe-b":"0x2b5ad5c4795c026514f8317c7a215e218dccd6cf"}'    >> /tmp/map.json
+          python3 tools/distribute.py pool/site/ledger.json --basis tally \
+            --total 5e16 --coin probe --map /tmp/map.json --out /tmp/epoch.json
+          node contracts/test/cross.mjs /tmp/epoch.json
+
+      # The whole loop with no key and no chain: mine, credit, build the tree,
+      # claim, against an in-process EVM. `design/runbook.md`'s step 8 as close
+      # as it can be reached without money.
+      - name: The loop, end to end, against an in-process EVM
+        run: python3 tools/loop.py
+
+      # **`fork.mjs` is deliberately not here.** It needs Robinhood Chain's
+      # public RPC, which `test/fork.mjs` documents as stopping mid-run at a
+      # point that moves between runs -- so a job built on it would fail for
+      # reasons that are nobody's and teach this repository to ignore a red
+      # cross. It is the one thing in `contracts/` that has to be run by hand,
+      # and what it establishes is written into `design/audit.md` instead.

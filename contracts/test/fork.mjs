@@ -58,6 +58,25 @@ async function rpcBlockNumber() {
   return parseInt((await r.json()).result, 16);
 }
 
+// **A reverted call here leaves its writes behind, which is a property of the
+// harness and not of the chain.**
+//
+// Wrapping this in `vm.stateManager.checkpoint()` and reverting on failure was
+// tried and does not fix it: `RPCStateManager` does not restore storage it has
+// already fetched and written, so the flag a reverting `swap` clears stays
+// cleared. What it looks like is a pair answering `UniswapV2: LOCKED` to every
+// call after the first refusal -- a reentrancy guard that was taken and, because
+// the revert did not unwind, never given back.
+//
+// So the rule for anything written here is **never ask for a refusal and then
+// carry on**. A check that expects a revert either comes last, or is the only
+// one of its kind in the run, and a sweep that needs several must assert the
+// *reason* rather than the failure -- `K` is the pair's own answer and `LOCKED`
+// is this harness's.
+//
+// It also means `ok(false, ...)` followed by more checks is weaker than it looks,
+// which is why a partial run is already documented as no evidence rather than as
+// a set of failures.
 async function call(vm, from, to, data, value = 0n) {
   const res = await vm.evm.runCall({
     caller: addr(from), origin: addr(from), to: addr(to),
@@ -213,6 +232,69 @@ async function main() {
        + `${ethers.formatEther(BigInt(c.amount))} WETH -- simulated, nothing moved`);
   }
   ok(anyPaid, "the real pool would have paid somebody in GLADOS (simulated)");
+
+  // ------------------------------------------------- the pair's fee, measured
+  //
+  // **`design/audit.md`'s first stated dependency, measured at last.** The
+  // contract writes `997/1000` into `_amountOut` because a V2 pair does not
+  // expose its fee and there is no router here to ask. A fork of V2 on 4663 with
+  // a different fee makes every `Market` claim either revert on the `k` check (a
+  // higher real fee) or quietly shortchange the claimant (a lower one), and the
+  // audit asked for this to be asserted here, where the real pair is.
+  //
+  // **A successful claim is only half the answer.** The distributor computes
+  // `out` at 997/1000 and asks the pair for exactly that, so the pair pays what
+  // it was asked rather than its maximum -- the claims above prove the fee is no
+  // *higher* than 0.3% and say nothing about it being lower. Asking for what a
+  // 0.2% fee would give and watching `k` refuse it closes the other side.
+  //
+  // **Two probes, in this order, for the reason `call` records.** A reverted call
+  // does not unwind here, so the refusal must come last or the pair spends the
+  // rest of the run answering `LOCKED`. The first version swept four numerators
+  // descending, got a real `K` on the first and a manufactured `LOCKED` on the
+  // other three, and reported them all as the pair's own refusals -- which is
+  // the canary failure `differ.rs` describes, arriving on a fork.
+  //
+  // So the refusal is asserted by its **reason**. `K` is the pair's arithmetic;
+  // anything else means this measured the harness.
+  {
+    const FEE_IN = 10n ** 15n;                    // 0.001 WETH per probe
+    const xfer = new ethers.Interface(["function transfer(address,uint256) returns (bool)"]);
+    const swapAbi = new ethers.Interface(["function swap(uint256,uint256,address,bytes)"]);
+    const ask = (out) => swapAbi.encodeFunctionData("swap",
+      quoteIsToken0 ? [0n, out, OPERATOR, "0x"] : [out, 0n, OPERATOR, "0x"]);
+    const reason = (r) => {
+      try {
+        if (r.ret && r.ret.length > 10 && r.ret.startsWith("0x08c379a0"))
+          return coder.decode(["string"], "0x" + r.ret.slice(10))[0];
+      } catch { /* not a string revert */ }
+      return r.err ?? "no reason";
+    };
+    // A fresh donation per probe, because a V2 swap consumes what it was sent
+    // and a second probe sharing one donation measures an empty pair.
+    const probe = async (num) => {
+      const w = await call(vm, OPERATOR, WETH, "0xd0e30db0", FEE_IN);
+      const r = await call(vm, OPERATOR, PAIR, "0x0902f1ac");
+      const [p0, p1] = coder.decode(["uint112", "uint112", "uint32"], r.ret);
+      const [RW, RG] = quoteIsToken0 ? [p0, p1] : [p1, p0];
+      const inWithFee = FEE_IN * num;
+      const out = (inWithFee * RG) / (RW * 1000n + inWithFee);
+      const d = await call(vm, OPERATOR, WETH, xfer.encodeFunctionData("transfer", [PAIR, FEE_IN]));
+      if (!w.ok || !d.ok) return { out, setup: false, res: null };
+      return { out, setup: true, res: await call(vm, OPERATOR, PAIR, ask(out)) };
+    };
+
+    const fair = await probe(997n);
+    ok(fair.setup && fair.res.ok,
+       `the real pair pays ${fair.out} for ${FEE_IN} in, which is what a 0.3% fee gives`
+       + (fair.setup ? (fair.res.ok ? "" : `  (${reason(fair.res)})`) : "  (the donation did not land)"));
+
+    const greedy = await probe(998n);
+    const why = greedy.setup && greedy.res ? reason(greedy.res) : "the donation did not land";
+    ok(greedy.setup && !greedy.res.ok && why === "UniswapV2: K",
+       `and refuses ${greedy.out}, which a 0.2% fee would give -- on its own k check`
+       + (why === "UniswapV2: K" ? "" : `, but the reason was "${why}"`));
+  }
 
   // ------------------------------------------- a real buy that nobody owns
   //
