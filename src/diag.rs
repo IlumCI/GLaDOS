@@ -45,6 +45,11 @@ pub const SUITES: &[Suite] = &[
         run: crate::crypto::selftest,
     },
     Suite {
+        name: "x509",
+        about: "which certificate chains are anybody's, against a real cross-signed one",
+        run: crate::net::x509::selftest,
+    },
+    Suite {
         name: "radio",
         about: "the channel plan every part shares, and its refusals",
         run: crate::dev::radio::selftest,
@@ -602,7 +607,7 @@ fn linux_selftest() -> bool {
 /// says it exists to prevent. A `static` cannot be read in a const context, so
 /// the array cannot be measured directly; naming its length is the next best
 /// thing and it is now the only place the number appears.
-const SLOTS: usize = 69;
+const SLOTS: usize = 70;
 
 /// One slot per suite. Indexed by position in `SUITES`, which is a constant,
 /// so the table cannot get out of step with the list.
