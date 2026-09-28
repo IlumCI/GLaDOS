@@ -405,15 +405,39 @@ the single-connection API. Until then a miner on an untrusted network is
 trusting the network, and that has to be said before anybody points a machine
 at this rather than after.
 
-## Non-custodial, which is a structure and not a promise
+## What this pool is for, which is not what a pool is normally for
 
-`design/mining.md` and the plan behind it settle this and it is repeated here
-because it constrains the server rather than only the paperwork.
+**Miners are paid in $GLADOS, never in what their hashrate produced.** The pool
+is an auto-exchange: hashrate arrives, the pool mines whatever is most profitable
+at the time, the proceeds are exchanged by the cheapest route available, and that
+becomes a **market buy of $GLADOS** which is what reaches the miners. It is more
+complex than an ordinary pool for exactly that reason, and every other decision
+in this file follows from it.
 
-Layer 1, mining, holds nothing. Each miner's *own* address is the payout
-address at the upstream pool, so proceeds never pass through anything this
-server controls. That is the P2Pool shape and it is what keeps the operation
-outside the custody question entirely.
+**So the upstream payout address is the operator's, and that is structural rather
+than a convenience.** Proceeds have to arrive in one place to be exchanged once
+and spent on one buy; a per-miner address at the upstream would scatter them
+across accounts that can never be aggregated. `pool/src/pool.rs`'s `Forward`
+therefore carries no worker name and `upstream.rs` submits every share under the
+one configured `user` -- **correct for this design**, and not the defect it looks
+like to somebody who read the paragraph this one replaced.
+
+**What that paragraph said, and why it is gone.** It read: "Layer 1, mining,
+holds nothing. Each miner's *own* address is the payout address at the upstream
+pool, so proceeds never pass through anything this server controls. That is the
+P2Pool shape." Every clause of that is the opposite of an auto-exchange, and it
+cost a session: it was read as the current design, the implementation was
+measured against it, and `Forward` lacking a worker name was written up as an
+architectural gap rather than as the design working. A stale paragraph that
+describes a coherent *different* system is worse than an absent one, because it
+survives being checked.
+
+Where a miner's own address does matter is **layer 2**, and only there. The
+Supabase `/worker/map` roster maps a worker name to an EVM address and
+`GladosDistributor` on chain 4663 is what pays them. Two addresses exist in this
+system and they belong to different people at different ends of it: the
+operator's, at the upstream, receiving coins; and each miner's, on 4663,
+receiving the token.
 
 Layer 2, the GLADOS reward, is the operator's fee revenue, which is the
 operator's own money, converted and deposited into a Merkle distributor that

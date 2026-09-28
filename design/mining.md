@@ -983,14 +983,39 @@ withhold a claim -- and not the revenue path.
 That is what funds the GLADOS side: the bonus does not come out of the
 operator's savings, it comes out of work the pool was paid for.
 
-### The bridge floor, which caps the literal loop
+### The bridge floor, and the algorithm change that cleared it
 
-zpool pays in BTC on Bitcoin's chain. An epoch is funded in WETH on chain
-4663. So real revenue reaches an epoch only as payout -> exchange -> bridge,
-and every hop has a fixed fee. At roughly $0.04/day for yespower it would take
-*years* to accumulate the $30 that is the smallest batch worth bridging, which is
-another way of saying the algorithm has to change before the bridge is even a
-question.
+zpool pays in a coin on that coin's own chain. An epoch is funded in WETH on
+chain 4663. So real revenue reaches an epoch only as payout -> exchange ->
+bridge, and every hop has a fixed fee. At roughly $0.04/day for yespower it would
+take *years* to accumulate the $30 that is the smallest batch worth bridging,
+which was another way of saying the algorithm had to change before the bridge was
+even a question.
+
+**The algorithm changed, and this is the sentence that was waiting for it.** On
+zpool's own `actual_last24h`, read 2026-09-28: yescrypt **0.16021** against
+yespower **0.00010**, a factor of **1,602**. The same 862 H/s that earned about
+$0.04/day is the same fraction of a pot 1,602 times larger, so the $30 batch goes
+from years to inside a day. The bridge stops being a question deferred until the
+economics change and becomes plumbing to build.
+
+Two cautions on that number, because it is one API field and this file has been
+burned by those. It is a *rate*, so it prices a unit of work rather than this
+machine: the 2.0%-of-network share measured for yespower does **not** carry over,
+since yescrypt's network is 1,745,879 H/s against yespower's 49,988 and the same
+hashrate is about 0.05% of it. And `payrate.py`'s own warning applies -- reading
+this field uniformly across algorithms gives sha256 a total payout of $143
+trillion a day, so the ratio between two rows of the same shape is the comparison
+that survives and the absolute dollars are not pinned.
+
+**The cheapest exchange hop may be no exchange at all.** zpool's "Direct Earn"
+credits 1:1 with a 1% levy when the payout currency is one you are actually
+mining, and **BSTY** (GlobalBoost-Y) is its yescrypt coin on the same port 6233
+the pool already connects to -- 1,597,746 H/s of the 1,589,290 H/s the algorithm
+reports, so it *is* the yescrypt network. Taking payout in BSTY skips the
+auto-exchange spread on the first hop and leaves one conversion instead of two.
+Against that, BSTY has to be sellable somewhere for the second hop, which is a
+liquidity question this file does not answer.
 
 So the honest arrangement separates two things that were being conflated: the
 ledger says *who earned what*, and the treasury says *where the money comes
