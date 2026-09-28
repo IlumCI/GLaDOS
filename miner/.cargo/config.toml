@@ -7,13 +7,25 @@
 # config wins.
 #
 # The triple named is this development machine's, which is the one place a
-# `cargo test` is ever actually typed. Anywhere the pool is really deployed --
-# CI, a server -- passes `--target` explicitly and overrides this line:
+# `cargo test` is ever actually typed. Anywhere this is really built for
+# distribution -- CI, a release -- passes `--target` explicitly and overrides
+# this line:
 #
-#     cargo build --release --target x86_64-unknown-linux-gnu
+#     cargo build --release --target x86_64-unknown-linux-musl
 #
+# **This said `x86_64-pc-windows-msvc` and the development machine moved**, which
+# is the same expiry the pool's copy of this file already records. The reasoning
+# held and the fact under it did not: escaping the kernel's UEFI target means
+# naming one, and the one to name is whatever host actually types `cargo build`.
+# That host is Arch Linux, so until this line changed a bare build in here
+# answered `can't find crate for std` about a target that is not installed and
+# for a machine that is not here.
+#
+# The comment below predicted this exactly -- "this crate has never been built
+# for a non-Windows target, so here it was only ever latent" -- and it stopped
+# being latent the day somebody built the miner to hand out.
 [build]
-target = "x86_64-pc-windows-msvc"
+target = "x86_64-unknown-linux-gnu"
 
 # **This said "cleared, not inherited" and it was wrong**, the same way the
 # pool's copy of it was: cargo merges config files by *joining* arrays, so an
@@ -28,9 +40,11 @@ target = "x86_64-pc-windows-msvc"
 # The escape above for `build.target` is still real and still necessary: that
 # key is a string, and for strings the closest config does win.
 
-# Cross-compiling to Linux from this Windows machine, which is how the daemon
-# is actually built: there is no `cc` here, and cargo's default linker for a
-# Linux target is `cc`.
+# Cross-compiling to musl, which is how a miner anybody can run is actually
+# built. This stays as it was when the host was Windows and the reason is no
+# longer "there is no `cc` here" -- there is one now, and `gcc` beside it. There
+# is no **`musl-gcc`**, which is the one that would matter, and cargo's default
+# linker for a musl target is a C compiler targeting musl.
 #
 # `rust-lld` ships with the toolchain and can link a fully static musl binary
 # with no C toolchain anywhere, which is the whole reason musl is the target

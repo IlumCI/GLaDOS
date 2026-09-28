@@ -236,6 +236,29 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # **The kernel on its own, and `tools/site.py` has been ready for it
+          # the whole time.** Its `VARIANTS` table carries a `nomodel` row at
+          # `order: 0` -- "Kernel only. Boots to a desktop, reports that it has
+          # no model, and everything except inference works" -- so the download
+          # page has had a description, a RAM figure and the first slot in the
+          # table for an image this matrix never built. A page describing an
+          # asset that does not exist is the breakage `site.py` warns about at
+          # line 832, approached from the other side.
+          #
+          # It is the mining image. Everything `src/mine/` does needs no
+          # checkpoint, so a 32 MB download boots to a machine that can mine
+          # where the smallest model image is 600 MB -- and nothing in the
+          # matrix could produce it, which is why one existed locally and
+          # unreleased.
+          #
+          # `payload: ''` is what the three steps below switch on. An empty
+          # string rather than a `false`, because they compare against the
+          # payload *name* and a boolean would read as one.
+          - name: nomodel
+            payload: ''
+            manifest: ''
+            seq: 0
+            label: GLADOSMINE
           # seq 0 means "leave the header alone", for a payload whose
           # canonical context is already the one to ship.
           - name: qwen3-0.6b
@@ -296,6 +319,7 @@ jobs:
           ls -la "out/glados-$VERSION.efi"
 
       - name: Fetch the payload
+        if: matrix.payload != ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -304,6 +328,7 @@ jobs:
           ls -la payload-dir
 
       - name: The payload must be the payload
+        if: matrix.payload != ''
         run: |
           # BEFORE the stamp below, and that order is not cosmetic: stamping
           # changes four bytes of model.bin, so a digest taken afterwards can
@@ -327,9 +352,20 @@ jobs:
           # tools/site.py already knows as qwen35-2b-8k, and site.py refuses
           # to build a download page it cannot describe an image on.
           NAME="glados-$VERSION-${{ matrix.name }}"
+          # **The payload argument is omitted rather than pointed at an empty
+          # directory**, because `mkiso.py` reads the union of `payload/*.txt` as
+          # an allowlist and refuses to place a file outside it -- handed an empty
+          # `payload-dir` it would place nothing and say nothing, which is a
+          # kernel-only image produced by accident rather than on purpose. Absent,
+          # it prints "no payload -- boots to a kernel with no model", which is a
+          # line a release log can be read for.
+          PAYLOAD_ARG=()
+          if [ -n "${{ matrix.payload }}" ]; then
+            PAYLOAD_ARG=(--payload payload-dir)
+          fi
           python3 tools/mkiso.py "out/$NAME.iso" \
             --efi "out/glados-$VERSION.efi" \
-            --payload payload-dir \
+            "${PAYLOAD_ARG[@]}" \
             --label "${{ matrix.label }}"
           ls -la "out/$NAME.iso"
           echo "ISO_NAME=$NAME" >> "$GITHUB_ENV"
