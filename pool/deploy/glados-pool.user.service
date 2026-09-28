@@ -58,8 +58,31 @@ Type=simple
 # wallet-as-username auto-exchange pool `design/mining.md` item 8 says to point
 # at, and the only anonymous one of its kind still operating -- the username *is*
 # the payout address, so a placeholder left here mines to whoever owns it. Not
-# a solo pool and not sha256d: yespower is where this machine's CPU is a real
-# participant. See `run-pool.sh` for the form and the reason it is empty.
+# a solo pool and not sha256d: this is where a CPU is a real participant. See
+# `run-pool.sh` for the form and the reason it is empty.
+#
+# **The algorithm is `yescrypt` and it was `yespower-10-2048-8`**, which is the
+# one line here that is worth money. `design/mining.md` measured zpool's own
+# `actual_last24h`: yespower's entire network pays **$3/day** to everybody mining
+# it, so a miner taking all of it earns three dollars and no amount of hardware
+# moves that. yescrypt's pays about **$21,600/day** across a 1.7 MH/s network.
+# Same family, same 2 MiB working set, and `--bench` on a 12th-gen i7 reads
+# 3,557 us a share against yespower's 3,520 -- so nothing about the cost of
+# verifying it changes, and neither `--share-seconds 45` nor the twelve bits
+# needs revisiting. It is a different string, not a different machine.
+#
+# `yescrypt` is `Yespower { v10: false, n: 2048, r: 8, pers: None }` and is one
+# of four aliases `parse_algo` byte-verifies against upstream's TESTS-OK. Note
+# it is **not** BitZeny's, which is `yescryptr8` -- the "Client Key"
+# personalisation makes those different functions at identical N and r, and the
+# label `bitzeny` on a `yescrypt` port would have named a coin this no longer
+# mines.
+#
+# The label is the *algorithm* rather than a coin because at zpool it is an
+# algorithm port paid in BTC, which is the form the upstream line in
+# `run-pool.sh` already documents. It has no row in `tools/prices.py`, so
+# `--prices` will say it does not know what it is worth; that is honest and is
+# what "no price file" already prints.
 ExecStart=%h/.local/bin/glados-pool \
     --listen 0.0.0.0:3334 \
     --ledger %S/glados-pool/ledger.json \
@@ -69,7 +92,7 @@ ExecStart=%h/.local/bin/glados-pool \
     --share-seconds 45 \
     --max-connections 900 \
     --window 70368744177664 \
-    bitzeny:yespower-10-2048-8:12 \
+    yescrypt:yescrypt:12 \
     testnet:sha256d:24
 
 Restart=always

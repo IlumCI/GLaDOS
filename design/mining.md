@@ -916,8 +916,24 @@ zpool, 2026-09-25, `actual_last24h`, at BTC $83,767:
 **862 H/s is 2.0% of zpool's entire yespower network.** One laptop. The
 algorithm pays three dollars a day in total, so a miner taking *all* of it
 earns three dollars a day -- and no amount of hashrate, hardware or free
-electricity moves that number. `glados-pool.service` is configured for
-`bitzeny:yespower-10-2048-8`, which is this.
+electricity moves that number. `glados-pool.service` **was** configured for
+`bitzeny:yespower-10-2048-8`, which is this row.
+
+**It is `yescrypt:yescrypt:12` now**, which is the row four above at about
+$21,600/day. The switch costs nothing to serve: same family, same 2 MiB working
+set, and `--bench` on a 12th-gen i7 reads 3,557 us a share against yespower's
+3,520, so the bits, the CPU budget and the share target are unchanged. Note the
+label moved from a coin to an algorithm, because a zpool algorithm port has no
+single coin behind it -- and `bitzeny` was doubly wrong here, since BitZeny is
+`yescryptr8` and the "Client Key" personalisation makes that a different
+function at the same N and r.
+
+**What this table does not say is what one laptop would earn on it**, and the
+2.0%-of-network figure above does not carry over: that share was measured against
+yespower's 49,988 H/s, and yescrypt's network is 1,745,879 -- thirty-five times
+larger, so the same 862 H/s is about 0.05% of it. A larger pot divided by a much
+larger network is the honest reading, and the dollars per laptop are not pinned
+here. What is pinned is that the *ceiling* is no longer three dollars.
 
 **And the "cross-check" this section used to claim was circular.** Share of
 network times total payout, and per-MH/s times hashrate, are the same two API
