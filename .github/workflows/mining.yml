@@ -133,6 +133,16 @@ jobs:
           CFG
           sed -i 's/^          //' payload-dir/MINER.TXT
           cat payload-dir/MINER.TXT
+          # **Roots, or no TLS at all.** With no `roots.der` every certificate
+          # fails to validate -- correct, and it makes `wss://` to a pool and
+          # every `https` fetch refuse -- and the only exporter was a Windows
+          # script, so an image built here had none. `roots.py` applies the same
+          # rule (self-signed, valid now) to the runner's bundle and prints the
+          # source, count and digest, because which store an image trusts is a
+          # decision and not a detail: the kernel once passed a Cloudflare chain
+          # only because the store it was built with held a root nothing needed.
+          python3 tools/roots.py --selftest
+          python3 tools/roots.py --out payload-dir/roots.der
           NAME="glados-$VERSION-nomodel"
           # `--allow` because `mkiso.py` reads the union of `payload/*.txt` as an
           # allowlist and refuses anything outside it -- `eval.rs`'s rule about
@@ -141,7 +151,7 @@ jobs:
           # case that flag's own refusal describes.
           python3 tools/mkiso.py "out/$NAME.iso" \
             --efi target/x86_64-unknown-uefi/release/glados.efi \
-            --payload payload-dir --allow MINER.TXT --no-license \
+            --payload payload-dir --allow MINER.TXT --allow roots.der --no-license \
             --label GLADOSMINE
           ls -la "out/$NAME.iso"
           echo "ISO_NAME=$NAME" >> "$GITHUB_ENV"
@@ -222,6 +232,11 @@ jobs:
             exit 1
           }
           grep -q "alive" miner-boot.log || { echo "::error::no prompt after diag all"; exit 1; }
+          # An image that loaded no roots boots, mines to an IP, and refuses every
+          # TLS connection it ever makes -- silently, until the first one.
+          grep -qE "trust +[1-9][0-9]* root certificate" miner-boot.log || {
+            echo "::error::the image loaded no trusted roots, so it cannot do TLS"; exit 1
+          }
           grep -qE "[0-9]+ passed, 0 failed" miner-boot.log || {
             echo "::error::suites did not all pass on the published image"; exit 1
           }
