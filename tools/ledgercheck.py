@@ -137,8 +137,27 @@ def report(doc, worker):
           % (doc.get("epoch"), doc.get("generated_at"), doc.get("v")))
     for w in doc.get("windows", []):
         total = w.get("total", 0)
+        window = doc.get("window_work", 0)
         print("\n%s: %d work over %d share(s), window %d"
-              % (w.get("coin"), total, len(w.get("shares", [])), doc.get("window_work", 0)))
+              % (w.get("coin"), total, len(w.get("shares", [])), window))
+        # **Reported, not refused, and the distinction is the point.** PPLNS keeps
+        # the last `window_work` of work, so the total in a window should not exceed
+        # it -- except that eviction cannot go below one share, so a single share
+        # larger than the whole window leaves a total that legitimately overshoots.
+        # That is a reachable state and a misconfigured one, which is why this is a
+        # note rather than a claim: refusing it would call a real record invalid,
+        # and staying silent hides the one thing the operator needs to know.
+        #
+        # The pool says this at *startup* ("far too small to be a payout window on
+        # this chain") and a published ledger carries no startup log, so a reader
+        # checking a record has no other way to learn it. Found on this repository's
+        # own sample ledger, whose window was 2^28 against a single 2^30 share.
+        if window and total > window:
+            print("  note: the work in this window exceeds the window itself, by %.1fx."
+                  % (total / window))
+            print("        PPLNS cannot evict below one share, so a share bigger than")
+            print("        the window overshoots it -- which means this window paid the")
+            print("        most recent shares and not a window's worth of work.")
         for p in w.get("payout", []):
             mark = " <-- you" if worker and p["worker"] == worker else ""
             print("  %-16s %16d  %8.4f%%%s"

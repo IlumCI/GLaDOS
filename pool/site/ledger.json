@@ -1,27 +1,33 @@
 {
   "v": 3,
   "epoch": 1,
-  "generated_at": 1789037622,
-  "digest": "da279d5b4574d128dd3f3d98f186c7b46989336fbcfc863f377ad00968bddafe",
+  "generated_at": 1790594568,
+  "digest": "12eff00106fb573993fb5ac94f4d84a60f3290aa36fcc1e639b17891382bfe44",
   "coins": [
-    {"slot": 0, "label": "btc", "algo": "sha256d", "source": "local"}
+    {"slot": 0, "label": "probe", "algo": "sha256d", "source": "local"}
   ],
-  "window_work": 268435456,
+  "window_work": 70368744177664,
   "windows": [
-    {"coin": "btc", "total": 1157627904, "shares": [
-      {"worker": "rig-a", "work": 1073741824},
-      {"worker": "rig-b", "work": 16777216},
-      {"worker": "rig-b", "work": 16777216},
-      {"worker": "rig-b", "work": 16777216},
-      {"worker": "rig-b", "work": 16777216},
-      {"worker": "rig-b", "work": 16777216}
+    {"coin": "probe", "total": 3145728, "shares": [
+      {"worker": "probe-a.rig", "work": 262144},
+      {"worker": "probe-b.rig", "work": 262144},
+      {"worker": "probe-a.rig", "work": 262144},
+      {"worker": "probe-a.rig", "work": 262144},
+      {"worker": "probe-a.rig", "work": 262144},
+      {"worker": "probe-a.rig", "work": 262144},
+      {"worker": "probe-a.rig", "work": 262144},
+      {"worker": "probe-a.rig", "work": 262144},
+      {"worker": "probe-a.rig", "work": 262144},
+      {"worker": "probe-b.rig", "work": 262144},
+      {"worker": "probe-b.rig", "work": 262144},
+      {"worker": "probe-a.rig", "work": 262144}
     ], "payout": [
-      {"worker": "rig-a", "work": 1073741824, "share": 0.927536232},
-      {"worker": "rig-b", "work": 83886080, "share": 0.072463768}
+      {"worker": "probe-a.rig", "work": 2359296, "share": 0.750000000},
+      {"worker": "probe-b.rig", "work": 786432, "share": 0.250000000}
     ]}
   ],
   "shares": [
-    {"worker": "rig-a", "coin": "btc", "work": 8740929536, "accepted": 24, "stale": 0, "bad": 0, "duplicate": 0},
-    {"worker": "rig-b", "coin": "btc", "work": 100663296, "accepted": 6, "stale": 0, "bad": 0, "duplicate": 0}
+    {"worker": "probe-a.rig", "coin": "probe", "work": 2359296, "accepted": 9, "stale": 0, "bad": 0, "duplicate": 0},
+    {"worker": "probe-b.rig", "coin": "probe", "work": 786432, "accepted": 3, "stale": 0, "bad": 0, "duplicate": 0}
   ]
 }
