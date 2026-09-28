@@ -285,8 +285,31 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     //
     // Parsed now and applied much later, once the network is up. Nothing in it
     // is executed; see `mine::boot`.
-    let miner_plan = uefi::read_file(bs, image, mine::boot::FILE)
+    // **Said out loud, because the two failures are one `None` and they are not
+    // one problem.** `mine::boot` records what its own silence cost: "Found by
+    // booting a miner ISO that came up, reached a prompt, printed nothing and sat
+    // with its pool unset." It cost a second session after that, on an image whose
+    // `MINER.TXT` was present in both the FAT and the ISO9660 trees and whose boot
+    // still spawned a compositor -- because a file that is absent, a file the
+    // firmware cannot open and a file that parses to nothing all reach this line
+    // as `None`, and `headless` is `miner_plan.is_some()`.
+    //
+    // Three states rather than two, on one line, before any subsystem exists:
+    // nothing there, there and unreadable, there and read.
+    let miner_bytes = uefi::read_file(bs, image, mine::boot::FILE);
+    let miner_plan = miner_bytes
+        .as_ref()
         .and_then(|b| mine::boot::parse(b.as_slice()));
+    {
+        let note = match (&miner_bytes, &miner_plan) {
+            (None, _) => "glados: no \\GLADOS\\MINER.TXT on the boot volume -- this is not a miner image",
+            (Some(_), None) => "glados: MINER.TXT was read and says nothing this understands -- it needs 'pool' and 'worker'",
+            (Some(_), Some(_)) => "glados: MINER.TXT parsed -- no desktop, and this image mines",
+        };
+        serial_println!("{}", note);
+        con_out(st, note);
+        con_out(st, "\r\n");
+    }
 
     let (persisted, repair_note) = update::repairs::at_boot(bs, image);
     if let Some(line) = &repair_note {

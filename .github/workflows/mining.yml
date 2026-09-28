@@ -1,0 +1,253 @@
+name: mining release
+
+# The mining set, shipped on its own.
+#
+# **Three artefacts for one audience, and not the audience `release.yml` serves.**
+# That workflow publishes an operating system with a language model in it: three
+# ISOs from 600 MB to 1.9 GB, a signed kernel image and a manifest every machine
+# in the field is waiting on. Somebody who wants to mine needs none of it. They
+# need a 32 MB image that boots to a miner, a pool daemon and a miner binary --
+# so those go out together, under their own tag, on their own cadence.
+#
+# It was briefly a fourth variant inside `release.yml`'s ISO matrix, which is
+# wrong for a reason that is about releases rather than about builds: it put the
+# mining image in the same release as the model ones, so a miner downloading it
+# arrives at a page listing four images and three signed objects that have
+# nothing to do with them, and a mining fix could not ship without cutting an OS
+# release.
+#
+# **Nothing here is signed, and that is a decision.** `release.yml` signs the
+# kernel image because the updater in the field verifies it against a pinned
+# key; a mining ISO is not a staged update and these binaries are not either. A
+# signature nobody checks is worse than none.
+
+on:
+  push:
+    # Two triggers in one `push`, because a tag cuts the release and a path
+    # exercises the build. Without the second, the only run that ever tests this
+    # workflow is the one that is not allowed to fail -- which is the argument
+    # `release.yml` makes about its own ungated steps.
+    tags:
+      # Its own namespace, so `v1.3.9` cuts an OS release and `mining-v1.3.9`
+      # cuts this one. They can share a version or not.
+      - 'mining-v*'
+    branches: [main]
+    paths:
+      - 'pool/**'
+      - 'miner/**'
+      - 'src/mine/**'
+      - 'tools/mkiso.py'
+      - '.github/workflows/mining.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version
+        run: |
+          V="$(grep -m1 '^version' Cargo.toml | cut -d\" -f2)"
+          echo "VERSION=$V" >> "$GITHUB_ENV"
+          echo "building the mining set for $V"
+
+      # Not actions-rs/toolchain, for the reason `pool.yml` records at length:
+      # `override: true` sits above rust-toolchain.toml in rustup's precedence
+      # and silently hands you a different compiler than the one that was tested.
+      - name: Install the pinned toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add x86_64-unknown-uefi
+          rustup target add x86_64-unknown-linux-musl
+          rustc --version --verbose
+
+      # **The kernel is built here rather than taken from an OS release**, which
+      # is what "shipped separately" costs and is worth paying: reusing the
+      # published image would make a mining release impossible until an OS
+      # release existed, and tie the two cadences back together.
+      - name: Build the kernel
+        run: |
+          cargo build --release --locked
+          ls -la target/x86_64-unknown-uefi/release/glados.efi
+
+      # **No `--payload`, and omitted rather than pointed at an empty directory.**
+      # `mkiso.py` reads the union of `payload/*.txt` as an allowlist and refuses
+      # anything outside it, so an empty payload directory would place nothing and
+      # say nothing -- a kernel-only image produced by accident rather than on
+      # purpose. Absent, it prints "no payload -- boots to a kernel with no model",
+      # which a release log can be read for.
+      #
+      # The asset keeps the `glados-<version>-nomodel.iso` shape even under a
+      # `mining-v*` tag, because `tools/site.py`'s `variant_key` strips a leading
+      # `N.N.N-` and looks the rest up in `VARIANTS`, which has carried a
+      # `nomodel` row -- "Kernel only" -- since before anything built one.
+      # **`MINER.TXT` is what makes this a miner image rather than a kernel with no
+      # model, and leaving it out is a regression that looks like nothing.**
+      # `main.rs` computes `headless = miner_plan.is_some()`, so without this file
+      # the image spawns the clock task and the compositor, and mines with
+      # `desk::draw + present` taking 1.6-2.1 ms a frame off the hash loop. Both
+      # images boot, both report no model, and only a boot log tells them apart --
+      # which is exactly how a rebuild of this ISO shipped a desktop once.
+      #
+      # **Space-separated and not `key = value`.** `mine::boot::parse` splits each
+      # line at the first whitespace, so an `=` makes the value `"= something"`,
+      # and for `protocol` that is an unrecognised word which refuses the *whole
+      # file*. Written the wrong way once, and it took two boots to see because an
+      # absent file and an unparseable one arrive as the same `None`.
+      #
+      # `worker` is an obvious dummy on purpose. At an account-free venue the
+      # worker name *is* the payout address, so a working default would mine to
+      # whoever cut the image; the miner declines an address its payout judge
+      # cannot vouch for and says so on its own screen.
+      - name: Build the mining ISO
+        run: |
+          mkdir -p payload-dir out
+          cat > payload-dir/MINER.TXT <<'CFG'
+          # The miner's plan, read from this image's own boot volume at startup.
+          #
+          # Space-separated, not `key = value`: the parser splits at the first
+          # whitespace, and an `=` refuses the whole file.
+          #
+          # `worker` is a placeholder and this image will NOT mine until it is a
+          # real payout address. At an account-free venue the worker name *is* the
+          # address, so a working default would mine to whoever shipped this image.
+          pool pool.aperture.institute:3334
+          worker 0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef
+          pass x
+          protocol stratum
+          CFG
+          sed -i 's/^          //' payload-dir/MINER.TXT
+          cat payload-dir/MINER.TXT
+          NAME="glados-$VERSION-nomodel"
+          # `--allow` because `mkiso.py` reads the union of `payload/*.txt` as an
+          # allowlist and refuses anything outside it -- `eval.rs`'s rule about
+          # `BUILTINS`, so a stray file cannot ride along. `--no-license` because
+          # this payload is one config file and carries no weights, which is the
+          # case that flag's own refusal describes.
+          python3 tools/mkiso.py "out/$NAME.iso" \
+            --efi target/x86_64-unknown-uefi/release/glados.efi \
+            --payload payload-dir --allow MINER.TXT --no-license \
+            --label GLADOSMINE
+          ls -la "out/$NAME.iso"
+          echo "ISO_NAME=$NAME" >> "$GITHUB_ENV"
+
+      # musl and static-pie, which is the whole point of shipping these. A
+      # glibc-linked release built on a current runner refuses to start on a
+      # stable distro, and the failure is `version GLIBC_2.39 not found` on a
+      # machine whose owner has no reason to know what that means.
+      #
+      # `--locked` on both, because a release that resolved a different dependency
+      # tree from the one `pool.yml` tested is a release nobody tested.
+      - name: Build the pool and the miner, static
+        run: |
+          cargo build --release --locked --manifest-path pool/Cargo.toml \
+            --target x86_64-unknown-linux-musl
+          cargo build --release --locked --manifest-path miner/Cargo.toml \
+            --target x86_64-unknown-linux-musl
+
+      # Asserted, because the linker silently produces a dynamic binary when the
+      # target or the linker setting is wrong and the artefact looks identical in
+      # a directory listing.
+      - name: They are actually static
+        run: |
+          fail=0
+          for b in pool/target/x86_64-unknown-linux-musl/release/glados-pool \
+                   miner/target/x86_64-unknown-linux-musl/release/glados-miner; do
+            ls -la "$b"; file "$b"
+            if readelf -l "$b" | grep -qi 'program interpreter'; then
+              echo "::error::$b has a PT_INTERP and is not static"; fail=1
+            fi
+          done
+          exit $fail
+
+      # The pool's own 37 claims, from the artefact about to be published rather
+      # than from a debug build of it. The last of them is a real socket exchange
+      # over loopback, so this also says the published binary can listen.
+      - name: The published pool passes its own checks
+        run: pool/target/x86_64-unknown-linux-musl/release/glados-pool --selftest
+
+      # **`--help` and never a bare invocation.** Run with no arguments the miner
+      # does not print usage and exit: it starts mining, against a default
+      # `127.0.0.1:3334`, forever. Measured -- `--help` exits 0 in under a second,
+      # a bare run was still going at six -- so a step that piped it to `head` and
+      # leaned on SIGPIPE would risk a job cancelled after twenty minutes, which
+      # is the least legible failure available.
+      - name: The published miner starts
+        run: timeout 30 miner/target/x86_64-unknown-linux-musl/release/glados-miner --help
+
+      # The kernel boots, answers, and passes every suite. `verify-boot` reads six
+      # things rather than one -- no timeout, still answering afterwards, a tally
+      # of zero failures, no FAIL anywhere, an empty boot report, and the section
+      # count with four sections by name -- and that last check exists because its
+      # absence once hid eleven sections that silently did not run.
+      #
+      # It takes no image argument: `drive.py` stages the release artefact, which
+      # the build step above just produced. It does stage a CI fixture checkpoint,
+      # so what it proves is that the kernel is sound.
+      - name: Verify the kernel boots and passes every suite
+        uses: ./.github/actions/verify-boot
+
+      # **And the ISO itself, headless, which is the artefact being published.**
+      # The step above boots with a fixture model and a desktop; this one boots the
+      # image somebody downloads, off its own `MINER.TXT`. Verifying only the first
+      # would be verifying an image nobody gets.
+      #
+      # The grep is the whole point. `no clock and no compositor` is the one line
+      # that distinguishes a miner image from a kernel-with-no-model, and its
+      # absence is silent in every other way -- the tally is the same, the boot is
+      # clean, and the machine simply mines slower forever.
+      - name: And the ISO itself, headless, which is what ships
+        run: |
+          set -euo pipefail
+          python3 tools/drive.py --iso "out/$ISO_NAME.iso" \
+            --qemu-extra "-accel kvm -cpu host -smp 4" --timeout 420 \
+            "initiative off" "echo ready" "diag all" "echo alive" 2>&1 | tee miner-boot.log
+          grep -q "no clock and no compositor" miner-boot.log || {
+            echo "::error::this image spawned a compositor, so MINER.TXT did not parse"
+            exit 1
+          }
+          grep -q "alive" miner-boot.log || { echo "::error::no prompt after diag all"; exit 1; }
+          grep -qE "[0-9]+ passed, 0 failed" miner-boot.log || {
+            echo "::error::suites did not all pass on the published image"; exit 1
+          }
+          if grep -qE "did not survive their own selftest" miner-boot.log; then
+            echo "::error::a subsystem did not survive its selftest"; exit 1
+          fi
+          echo "headless boot: $(grep -oE '[0-9]+ passed, 0 failed' miner-boot.log | tail -1)"
+
+      - name: Name them and record what was built
+        run: |
+          mkdir -p sums
+          cp pool/target/x86_64-unknown-linux-musl/release/glados-pool \
+             "out/glados-pool-$VERSION-x86_64-linux-musl"
+          cp miner/target/x86_64-unknown-linux-musl/release/glados-miner \
+             "out/glados-miner-$VERSION-x86_64-linux-musl"
+          # Not stripped, deliberately: these are the programs an operator debugs
+          # when a share is refused at three in the morning, and the symbols cost
+          # about a third of a megabyte against a download nobody waits for.
+          ( cd out && sha256sum "$ISO_NAME.iso" glados-pool-* glados-miner-* ) \
+            > sums/SHA256SUMS
+          cat sums/SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mining-sums
+          path: sums/SHA256SUMS
+          retention-days: 7
+
+      - name: Publish the mining release
+        if: startsWith(github.ref, 'refs/tags/mining-v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" \
+            --notes-file out/release/MINING.md || true
+          gh release upload "$GITHUB_REF_NAME" \
+            "out/$ISO_NAME.iso" \
+            "out/glados-pool-$VERSION-x86_64-linux-musl" \
+            "out/glados-miner-$VERSION-x86_64-linux-musl" \
+            sums/SHA256SUMS --clobber

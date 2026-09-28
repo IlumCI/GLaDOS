@@ -236,29 +236,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # **The kernel on its own, and `tools/site.py` has been ready for it
-          # the whole time.** Its `VARIANTS` table carries a `nomodel` row at
-          # `order: 0` -- "Kernel only. Boots to a desktop, reports that it has
-          # no model, and everything except inference works" -- so the download
-          # page has had a description, a RAM figure and the first slot in the
-          # table for an image this matrix never built. A page describing an
-          # asset that does not exist is the breakage `site.py` warns about at
-          # line 832, approached from the other side.
-          #
-          # It is the mining image. Everything `src/mine/` does needs no
-          # checkpoint, so a 32 MB download boots to a machine that can mine
-          # where the smallest model image is 600 MB -- and nothing in the
-          # matrix could produce it, which is why one existed locally and
-          # unreleased.
-          #
-          # `payload: ''` is what the three steps below switch on. An empty
-          # string rather than a `false`, because they compare against the
-          # payload *name* and a boolean would read as one.
-          - name: nomodel
-            payload: ''
-            manifest: ''
-            seq: 0
-            label: GLADOSMINE
           # seq 0 means "leave the header alone", for a payload whose
           # canonical context is already the one to ship.
           - name: qwen3-0.6b
@@ -388,126 +365,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "$GITHUB_REF_NAME" "out/$ISO_NAME.iso" --clobber
 
-  # --- the pool and the miner, which people download rather than boot --------
-  #
-  # A job of its own because these are not the kernel and not an image: they are
-  # ordinary host programs that run on somebody's Linux box, and the whole of
-  # what they need is to be portable and to have passed their own checks. The
-  # kernel's `publish` job signs an image for the updater; nothing here is signed,
-  # because nothing in the field trusts these bytes on their own and pretending
-  # otherwise would be worse than the gap.
-  #
-  # `pool.yml` already builds and tests both on every push that touches them --
-  # this does not replace that and deliberately does not duplicate its checks. It
-  # exists because that workflow publishes nothing, so there has never been
-  # anything for a miner to download.
-  binaries:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Version
-        run: |
-          V="$(grep -m1 '^version' Cargo.toml | cut -d\" -f2)"
-          echo "VERSION=$V" >> "$GITHUB_ENV"
-
-      # Not actions-rs/toolchain, for the reason `pool.yml` records: `override:
-      # true` sits above rust-toolchain.toml in rustup's precedence and hands you
-      # a different compiler than the one that was tested.
-      - name: Install the pinned toolchain
-        run: |
-          rustup show active-toolchain || rustup toolchain install
-          rustup target add x86_64-unknown-linux-musl
-          rustc --version --verbose
-
-      # **musl and static-pie, which is the entire point of shipping these at
-      # all.** A glibc-linked binary needs a glibc no older than the builder's, so
-      # a release built on a current runner refuses to start on a stable distro --
-      # and the failure is `version GLIBC_2.39 not found` on a machine whose owner
-      # has no reason to know what that means. Static means no PT_INTERP and no
-      # libc question.
-      #
-      # `--locked` on both, because a release that resolved a different dependency
-      # tree from the one `pool.yml` tested is a release nobody tested.
-      - name: Build both, static
-        run: |
-          cargo build --release --locked --manifest-path pool/Cargo.toml \
-            --target x86_64-unknown-linux-musl
-          cargo build --release --locked --manifest-path miner/Cargo.toml \
-            --target x86_64-unknown-linux-musl
-
-      # Asserted rather than assumed. `file` saying "static-pie linked" is the
-      # claim, and the absence of PT_INTERP is the same claim read off the program
-      # headers -- checked because the linker silently produces a dynamic binary if
-      # the target or the linker setting is wrong, and the artefact looks identical
-      # in a directory listing.
-      - name: They are actually static
-        run: |
-          fail=0
-          for b in pool/target/x86_64-unknown-linux-musl/release/glados-pool \
-                   miner/target/x86_64-unknown-linux-musl/release/glados-miner; do
-            ls -la "$b"
-            file "$b"
-            if readelf -l "$b" | grep -qi 'program interpreter'; then
-              echo "::error::$b has a PT_INTERP and is not static"
-              fail=1
-            fi
-          done
-          exit $fail
-
-      # The pool's own 37 claims, run from the artefact that is about to be
-      # published rather than from a debug build of it. It ends with a real socket
-      # exchange over loopback, so this also says the published binary can listen.
-      - name: The published pool passes its own checks
-        run: pool/target/x86_64-unknown-linux-musl/release/glados-pool --selftest
-
-      # The miner has no selftest. What can be asserted without a pool is that it
-      # starts, parses its arguments and says what it wants -- worth one line,
-      # because a binary that cannot do that is one nobody can run either.
-      #
-      # **`--help` and never a bare invocation**, which the first version of this
-      # step had. Run with no arguments the miner does not print usage and exit: it
-      # *starts mining*, against a default `127.0.0.1:3334`, forever. Piping it to
-      # `head` would have leaned on SIGPIPE to stop a runner, and a job that hangs
-      # for twenty minutes and is cancelled is the least legible failure available.
-      # Measured rather than assumed -- `--help` exits 0 in under a second, a bare
-      # run was still going at six.
-      - name: The published miner starts
-        run: |
-          timeout 30 miner/target/x86_64-unknown-linux-musl/release/glados-miner --help
-
-      - name: Name them and record what was built
-        run: |
-          mkdir -p out sums
-          cp pool/target/x86_64-unknown-linux-musl/release/glados-pool \
-             "out/glados-pool-$VERSION-x86_64-linux-musl"
-          cp miner/target/x86_64-unknown-linux-musl/release/glados-miner \
-             "out/glados-miner-$VERSION-x86_64-linux-musl"
-          # Not stripped, deliberately: these are the programs an operator debugs
-          # when a share is refused at three in the morning, and the symbols cost
-          # about a third of a megabyte against a download nobody waits for.
-          ( cd out && sha256sum glados-pool-* glados-miner-* ) > sums/binaries.txt
-          cat sums/binaries.txt
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: sums-binaries
-          path: sums/binaries.txt
-          retention-days: 1
-
-      # Named `.iso`-free on purpose. `tools/site.py`'s `variant_key` raises on an
-      # asset it cannot place on the download table and returns `None` for anything
-      # not ending in `.iso`, so these are invisible to it -- which is right, since
-      # the images table is about what to boot and these are not that.
-      - name: Attach them
-        if: startsWith(github.ref, 'refs/tags/')
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release upload "$GITHUB_REF_NAME" \
-            "out/glados-pool-$VERSION-x86_64-linux-musl" \
-            "out/glados-miner-$VERSION-x86_64-linux-musl" --clobber
-
   # --- SHA256SUMS -----------------------------------------------------------
   #
   # Last, because it describes everything the other two jobs published and
@@ -515,7 +372,7 @@ jobs:
   # for a while and no release ever carried it, which is the sort of promise
   # a download page should not make twice.
   sums:
-    needs: [publish, iso, binaries]
+    needs: [publish, iso]
     runs-on: ubuntu-latest
     steps:
       # No `if:` on the job, and the assembly below runs on every invocation
