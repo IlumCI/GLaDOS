@@ -103,6 +103,17 @@ jobs:
       # worker name *is* the payout address, so a working default would mine to
       # whoever cut the image; the miner declines an address its payout judge
       # cannot vouch for and says so on its own screen.
+      #
+      # **`stratum.` and not `pool.`, because one hostname cannot have two
+      # origins.** `pool.aperture.institute` is the published share log -- a
+      # GitHub Pages site, which means a CNAME to `ilumci.github.io` -- and
+      # Stratum is raw TCP on 3334, which needs an A record to the machine running
+      # the daemon. Pointing the image at the web host would have it open a socket
+      # to a static site and time out, which reads as a pool that is down.
+      #
+      # Two names for two protocols, and the split is the same one `update`'s
+      # channel makes: a thing people read in a browser and a thing a machine
+      # dials are not the same endpoint even when they describe one service.
       - name: Build the mining ISO
         run: |
           mkdir -p payload-dir out
@@ -115,7 +126,7 @@ jobs:
           # `worker` is a placeholder and this image will NOT mine until it is a
           # real payout address. At an account-free venue the worker name *is* the
           # address, so a working default would mine to whoever shipped this image.
-          pool pool.aperture.institute:3334
+          pool stratum.aperture.institute:3334
           worker 0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef
           pass x
           protocol stratum
