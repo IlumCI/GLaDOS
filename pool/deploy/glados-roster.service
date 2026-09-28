@@ -1,0 +1,53 @@
+# Fetch the worker-name roster, once per firing.
+#
+# **This exists because the unit file has no supervisor loop and `run-pool.sh`
+# does.** That script folds the refresh into a background `sh` loop and explains
+# why in its own comment: the box it was written for had no cron and was denied
+# `loginctl enable-linger`, so the two documented schedulers were a cron that did
+# not exist and a timer that could not run. Neither is true everywhere -- on a
+# host where lingering *is* granted the timer is the better answer, because
+# nothing is supervising `glados-pool.service` except systemd and a refresh
+# living inside a script that is not running refreshes nothing.
+#
+# So the two arrangements are alternatives rather than a duplication: run the
+# script, or run the unit plus this timer. Running both would have two writers on
+# one file, which the `mv` makes safe and which is still nobody's intent.
+#
+# **Without either, `--roster` is decorative.** The pool re-reads the file every
+# thirty seconds and nothing downloads it, so an absent roster means every worker
+# name is admitted -- which the pool says at startup, in those words, and which is
+# fail-open by design rather than by omission. Read that line before believing the
+# flag is doing anything.
+[Unit]
+Description=Refresh the GLaDOS pool's worker roster
+Documentation=https://github.com/IlumCI/GLaDOS/blob/main/supabase/README.md
+After=network-online.target
+
+[Service]
+Type=oneshot
+StateDirectory=glados-pool
+
+# **The `.tmp` and the `mv` are the whole of the correctness here**, and the
+# reasoning is `design/runbook.md`'s: a rename within one filesystem is atomic, so
+# the pool never parses a half-written document. Writing straight to the file
+# would hand it a truncated one -- and although a parse failure leaves the
+# previous roster in place, that is a safety net and not a plan.
+#
+# `--fail` matters as much: without it curl writes a 404 body to the file and
+# exits 0, so the roster becomes an error page that parses as neither JSON nor a
+# mapping. `-fsS` keeps it quiet on success and loud on failure, which is what a
+# oneshot in a journal wants.
+#
+# A failed fetch leaves the last good roster alone and is not retried harder. The
+# pool fails open on an absent one either way, so the honest outcome is a stale
+# roster that says so in the journal rather than a unit that thrashes.
+ExecStart=/usr/bin/curl -fsS --max-time 30 \
+    https://vermcdgpqncfsralpesz.supabase.co/functions/v1/worker/map \
+    -o %S/glados-pool/roster.json.tmp
+ExecStart=/usr/bin/mv -f %S/glados-pool/roster.json.tmp %S/glados-pool/roster.json
+
+NoNewPrivileges=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native

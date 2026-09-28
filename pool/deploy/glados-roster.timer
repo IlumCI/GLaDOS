@@ -1,0 +1,22 @@
+# Every five minutes, which is `run-pool.sh`'s `ROSTER_EVERY=300` and is the same
+# number for the same reason: what this tracks is somebody registering a name and
+# then starting their rig, and a miner will wait five minutes. Refreshing faster
+# buys nothing and spends somebody else's function invocations.
+[Unit]
+Description=Refresh the GLaDOS pool's worker roster every five minutes
+
+[Timer]
+# **`OnActiveSec=30` and not `OnBootSec`**, because the interesting case is
+# enabling this on a pool that is already running with no roster at all: without
+# a first firing soon after activation the flag stays decorative for five minutes
+# and the journal says "every worker name is admitted" for the whole of it.
+OnActiveSec=30s
+OnUnitActiveSec=300s
+# A missed firing runs on resume rather than being skipped. This is a laptop as
+# often as a server, and a roster five hours stale because the lid was shut is
+# the failure this avoids.
+Persistent=true
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
