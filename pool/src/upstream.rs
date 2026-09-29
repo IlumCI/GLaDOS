@@ -91,6 +91,13 @@ pub struct Upstream {
     authorized: bool,
     up_target: U256,
     pending: Option<stratum::Job>,
+    /// Upstream job ids a share may still be submitted against. A `clean`
+    /// notify empties it: upstream has abandoned every earlier job, and a share
+    /// for one is refused as "Invalid job id" -- measured at 20% of forwards on
+    /// zpool's yescryptR16 port before this. Dropped here instead, and counted.
+    live_jobs: Vec<String>,
+    /// Forwards dropped because their job was dead, for the log.
+    dropped_stale: u64,
     opened_ms: u64,
     heard_ms: u64,
     next_id: u64,
@@ -119,6 +126,8 @@ impl Upstream {
             authorized: false,
             up_target: target_for(1, 0).unwrap_or(U256::ZERO),
             pending: None,
+            live_jobs: Vec::new(),
+            dropped_stale: 0,
             opened_ms: 0,
             heard_ms: 0,
             next_id: 1000,
@@ -140,6 +149,7 @@ impl Upstream {
         self.got_sub = false;
         self.authorized = false;
         self.pending = None;
+        self.live_jobs.clear();
         self.opened_ms = clock::now_ms();
         self.heard_ms = self.opened_ms;
         let mut out = UpOut::default();
@@ -256,6 +266,16 @@ impl Upstream {
         }
         let forwards = pool.lock().unwrap().take_forwards_for(self.slot);
         for f in forwards {
+            if !self.live_jobs.iter().any(|j| *j == f.job_id) {
+                self.dropped_stale += 1;
+                if self.dropped_stale.is_power_of_two() {
+                    out.log.push(format!(
+                        "[up {}] {} share(s) dropped for jobs upstream had abandoned",
+                        self.label, self.dropped_stale
+                    ));
+                }
+                continue;
+            }
             self.next_id += 1;
             out.log.push(format!("[up {}] forwarding a share for job {}", self.label, f.job_id));
             out.send.push(stratum::submit(
@@ -270,7 +290,17 @@ impl Upstream {
         out
     }
 
-    fn install(&self, pool: &Mutex<Pool>, job: stratum::Job, out: &mut UpOut) {
+    fn install(&mut self, pool: &Mutex<Pool>, job: stratum::Job, out: &mut UpOut) {
+        if job.clean {
+            self.live_jobs.clear();
+        }
+        self.live_jobs.push(job.id.clone());
+        // Bounded: a pool that never sends `clean` would otherwise grow this
+        // for the life of the connection. Sixteen is far past how many jobs a
+        // miner can be holding shares for.
+        if self.live_jobs.len() > 16 {
+            self.live_jobs.remove(0);
+        }
         let t = self.up_target.to_be_bytes();
         out.log.push(format!(
             "[up {}] job {}, {} merkle level(s), target {:02x}{:02x}{:02x}{:02x}..",
@@ -416,5 +446,49 @@ fn raw_number(j: &Json) -> Option<String> {
         Json::Num(t) => Some(t.clone()),
         Json::Str(t) => Some(t.clone()),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pool::Forward;
+
+    fn notify(id: &str, clean: bool) -> String {
+        format!(
+            "{{\"id\":null,\"method\":\"mining.notify\",\"params\":[\"{id}\",\"{}\",\"01\",\"02\",[],\"20000000\",\"1d00ffff\",\"60000000\",{clean}]}}\n",
+            "00".repeat(32)
+        )
+    }
+
+    fn fwd(job: &str) -> Forward {
+        Forward { slot: 0, job_id: String::from(job), extranonce2: vec![0; 4], ntime_be: vec![0; 4], nonce_be: vec![0; 4] }
+    }
+
+    /// A share for a job upstream abandoned with `clean` is dropped, not sent.
+    #[test]
+    fn a_share_for_an_abandoned_job_is_not_forwarded() {
+        let coin = crate::spec::parse_coin("y:yescrypt:12@h:1,1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa,x").unwrap();
+        let pool = Mutex::new(Pool::new(vec![coin]));
+        let mut up = Upstream::for_slot(&pool.lock().unwrap(), 0).unwrap();
+        up.open();
+        up.on_bytes(&pool, b"{\"id\":1,\"result\":[[],\"01020304\",4],\"error\":null}\n");
+        up.on_bytes(&pool, b"{\"id\":2,\"result\":true,\"error\":null}\n");
+        assert!(up.live(), "the handshake completed");
+        up.on_bytes(&pool, notify("aa", true).as_bytes());
+        up.on_bytes(&pool, notify("bb", false).as_bytes());
+        // Both live: a non-clean job adds, it does not replace.
+        pool.lock().unwrap().push_forward(fwd("aa"));
+        pool.lock().unwrap().push_forward(fwd("bb"));
+        let o = up.on_tick(&pool);
+        assert_eq!(o.send.len(), 2, "shares for both live jobs go upstream");
+        // A clean job abandons both.
+        up.on_bytes(&pool, notify("cc", true).as_bytes());
+        pool.lock().unwrap().push_forward(fwd("aa"));
+        pool.lock().unwrap().push_forward(fwd("cc"));
+        let o = up.on_tick(&pool);
+        assert_eq!(o.send.len(), 1, "only the share for the live job is sent");
+        assert!(o.send[0].contains("\"cc\""), "and it is that one");
+        assert_eq!(up.dropped_stale, 1, "the abandoned one is counted");
     }
 }

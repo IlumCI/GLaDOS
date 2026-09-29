@@ -878,6 +878,12 @@ impl Pool {
     /// correct rather than careless: a share is only worth anything on the
     /// connection whose extranonce1 it was found under, so holding one for a
     /// reconnection would be keeping something already worthless.
+    /// Queue a forward directly, for tests of the upstream that consumes them.
+    #[cfg(test)]
+    pub fn push_forward(&mut self, f: Forward) {
+        self.forwards.push(f);
+    }
+
     pub fn take_forwards(&mut self) -> Vec<Forward> {
         core::mem::take(&mut self.forwards)
     }
