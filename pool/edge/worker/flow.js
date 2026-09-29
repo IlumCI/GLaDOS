@@ -24,6 +24,13 @@ export const FRESH = { phase: "idle", exchange: null, pending: null, contract: n
 const RVN_SAT_PER_BYTE = 1500n;
 const rvnTxBytes = (inputs, outputs) => BigInt(10 + 148 * inputs + 34 * outputs);
 export const MAX_RVN_INPUTS = 50;
+// Below this a change output is dust the network refuses to relay; it goes to
+// the fee instead. 0.01 RVN, well above Ravencoin's dust line at its 0.01 RVN/kB
+// relay fee (and the change is a rounding remainder, not money anybody owns).
+export const DUST_SATS = 1_000_000n;
+// More recipients than this in one payout is a transaction too near a block's
+// gas limit to trust; the treasury halts and says so rather than building it.
+export const MAX_RECIPIENTS = 400;
 
 export function rvnFee(inputs) {
   return rvnTxBytes(inputs, 1) * RVN_SAT_PER_BYTE;
@@ -65,12 +72,30 @@ export function decide(state, facts, cfg) {
   // 2. An exchange in progress: send the RVN once, then wait for the ETH.
   if (s.exchange) {
     const x = s.exchange;
+    const age = facts.now - (x.created ?? facts.now);
+    // Never funded in two hours: ChangeNOW lets an unfunded exchange lapse, and
+    // sending to a lapsed deposit address is money with nobody expecting it.
+    if (!x.sent && age > cfg.exchangeUnsentMs) {
+      s.exchange = null;
+      return { action: { kind: "note", why: `exchange ${x.id} was never funded in time; dropped, a new one will be made` }, state: s };
+    }
+    // Funded and not finished in two days: something at ChangeNOW needs a person.
+    if (x.sent && age > cfg.exchangeStuckMs && facts.exchangeStatus !== "finished") {
+      s.halted = `exchange ${x.id} has been ${facts.exchangeStatus || "unknown"} for over ${Math.round(cfg.exchangeStuckMs / 3_600_000)} h; check it at ChangeNOW`;
+      return wait(s.halted);
+    }
     if (!x.sent) {
       const utxos = (facts.rvnUtxos || []).slice(0, MAX_RVN_INPUTS);
       const total = utxos.reduce((a, u) => a + BigInt(u.sats), 0n);
       const fee = rvnFee(utxos.length);
       if (total - fee < BigInt(x.sats)) return wait(`the exchange wants ${x.sats} sats and the wallet can send ${total - fee}`);
-      return { action: { kind: "send_rvn", utxos, to: x.payin, sats: BigInt(x.sats), fee, change: total - fee - BigInt(x.sats) }, state: s };
+      let change = total - fee - BigInt(x.sats);
+      let spentFee = fee;
+      if (change < DUST_SATS) {
+        spentFee += change;
+        change = 0n;
+      }
+      return { action: { kind: "send_rvn", utxos, to: x.payin, sats: BigInt(x.sats), fee: spentFee, change }, state: s };
     }
     const st = facts.exchangeStatus;
     if (st === "finished") {
@@ -96,6 +121,10 @@ export function decide(state, facts, cfg) {
 
   // 4. Pay, when there is somebody to pay and it is worth the gas.
   const n = (facts.recipients || []).length;
+  if (s.contract && n > MAX_RECIPIENTS) {
+    s.halted = `${n} recipients is over the ${MAX_RECIPIENTS} one payout can safely carry; the payout needs splitting`;
+    return wait(s.halted);
+  }
   if (s.contract && n > 0) {
     const gas = BigInt(cfg.baseGas) + BigInt(cfg.perRecipientGas) * BigInt(n);
     const reserve = gas * gp * 2n; // this payout's gas, twice over

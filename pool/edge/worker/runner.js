@@ -26,7 +26,8 @@ export const WETH = "0x0bd7d308f8e1639fab988df18a8011f41eacad73";
 // Gas figures measured on a fork of the real chain (contracts/test/payout-fork.mjs):
 // ~166,600 for the buy and ~50,850 a recipient, rounded up.
 const CFG = {
-  dropAfterMs: 20 * 60_000, maxFailures: 3, deployGas: 900_000, baseGas: 200_000,
+  dropAfterMs: 20 * 60_000, maxFailures: 3,
+  exchangeUnsentMs: 2 * 3_600_000, exchangeStuckMs: 48 * 3_600_000, deployGas: 900_000, baseGas: 200_000,
   perRecipientGas: 60_000, maxOverhead: 0.1,
 };
 
@@ -128,7 +129,13 @@ export class Treasury {
       rpc("eth_gasPrice", []),
       rpc("eth_getBalance", [keys.evm, "latest"]),
     ]);
-    f.rvnUtxos = Array.isArray(utxos.body) ? utxos.body.map((u) => ({ txid: u.txid, vout: u.vout, sats: u.value })) : [];
+    // Coinbase outputs cannot be spent for 100 blocks; a transaction spending one
+    // earlier is refused by every node. zpool pays with ordinary transactions,
+    // so this should never bite -- which is exactly when a filter is cheap.
+    f.rvnUtxos = Array.isArray(utxos.body)
+      ? utxos.body.filter((u) => !(u.coinbase && (u.confirmations || 0) < 100))
+          .map((u) => ({ txid: u.txid, vout: u.vout, sats: u.value }))
+      : [];
     f.rvnMinSats = min.body && min.body.minAmount ? big(Math.ceil(min.body.minAmount * 1e8)) : 0n;
     f.gasPrice = big(gasPrice);
     f.ethWei = big(ethWei);
@@ -196,7 +203,7 @@ export class Treasury {
         this.log(`exchange not created: ${JSON.stringify(res.body).slice(0, 200)}`);
         return;
       }
-      next.exchange = { id: res.body.id, payin: res.body.payinAddress, sats: a.sats.toString() };
+      next.exchange = { id: res.body.id, payin: res.body.payinAddress, sats: a.sats.toString(), created: Date.now() };
       await this.save(next);
       this.log(`exchange ${res.body.id} created for ${Number(a.sats) / 1e8} RVN`);
       return;
@@ -221,8 +228,14 @@ export class Treasury {
       const nonce = Number(await rpc("eth_getTransactionCount", [keys.evm, "pending"]));
       const gasPrice = (facts.gasPrice * 125n) / 100n;
       const data = "0x" + payoutArtifact.bytecode + encodeCtor(WETH, TOKEN, PAIR);
-      const est = big(await rpc("eth_estimateGas", [{ from: keys.evm, data }]));
-      const tx = signLegacyTx(keys.evmKey, { nonce, gasPrice, gas: (est * 12n) / 10n, to: null, value: 0n, data, chainId: CHAIN_ID });
+      const est = await this.estimate({ from: keys.evm, data }, next);
+      if (est === null) return;
+      const gasLimit = (est * 12n) / 10n;
+      if (facts.ethWei < gasLimit * gasPrice) {
+        this.log(`deploy waits: ${facts.ethWei} wei cannot cover ${gasLimit * gasPrice}`);
+        return;
+      }
+      const tx = signLegacyTx(keys.evmKey, { nonce, gasPrice, gas: gasLimit, to: null, value: 0n, data, chainId: CHAIN_ID });
       next.pending = { kind: "deploy", chain: "evm", hash: tx.hash, raw: tx.raw, at: Date.now(), contract: createdAddress(keys.evm, nonce) };
       await this.save(next);
       await this.broadcast(next);
@@ -234,15 +247,28 @@ export class Treasury {
       const [rW, rG] = big(WETH) < big(TOKEN) ? [r0, r1] : [r1, r0];
       // The quote, less the token's 1% buy tax, less 3% for movement between
       // now and the block: a sandwich past that reverts the whole payout.
-      const minOut = (amountOut(a.value, rW, rG) * 99n * 97n) / 10_000n;
+      const quoteMin = (v) => (amountOut(v, rW, rG) * 99n * 97n) / 10_000n;
       const nonce = Number(await rpc("eth_getTransactionCount", [keys.evm, "pending"]));
       const gasPrice = (facts.gasPrice * 125n) / 100n;
+      const est = await this.estimate({ from: keys.evm, to: next.contract, data: encodeBuyAndPay(a.recipients, quoteMin(a.value)),
+                                        value: "0x" + a.value.toString(16) }, next);
+      if (est === null) return;
+      const gasLimit = (est * 12n) / 10n;
+      // **Value plus the most this transaction can burn must fit the balance**,
+      // or the node refuses it as underfunded. The reserve in flow.js is sized
+      // from measured gas; this is the check against what was actually signed.
+      let value = a.value;
+      if (value + gasLimit * gasPrice > facts.ethWei) value = facts.ethWei - gasLimit * gasPrice;
+      if (value <= 0n) {
+        this.log(`payout waits: gas ${gasLimit * gasPrice} wei would take the whole balance`);
+        return;
+      }
+      const minOut = quoteMin(value);
       const data = encodeBuyAndPay(a.recipients, minOut);
-      const est = big(await rpc("eth_estimateGas", [{ from: keys.evm, to: next.contract, data, value: "0x" + a.value.toString(16) }]));
-      const tx = signLegacyTx(keys.evmKey, { nonce, gasPrice, gas: (est * 12n) / 10n, to: next.contract, value: a.value, data, chainId: CHAIN_ID });
+      const tx = signLegacyTx(keys.evmKey, { nonce, gasPrice, gas: gasLimit, to: next.contract, value, data, chainId: CHAIN_ID });
       const e = facts.epoch;
       next.pending = { kind: "pay", chain: "evm", hash: tx.hash, raw: tx.raw, at: Date.now(),
-        epoch: { id: (next.epochs || 0) + 1, at: Date.now(), value: a.value.toString(), minOut: minOut.toString(),
+        epoch: { id: (next.epochs || 0) + 1, at: Date.now(), value: value.toString(), minOut: minOut.toString(),
                  recipients: a.recipients, work: e.work, floor: e.floor, excluded: e.excluded,
                  snapshot: Object.fromEntries([...e.snapshot].map(([k, v]) => [k, v.toString()])) } };
       await this.save(next);
@@ -258,6 +284,21 @@ export class Treasury {
       await this.pool.ctx.storage.put("treasury.snapshot", snapshot);
       await this.save(next);
       this.log(`epoch ${rest.id} paid ${rest.recipients.length} miner(s) in ${a.hash}`);
+    }
+  }
+
+  // eth_estimateGas, where a revert is a failure the decision counts: a payout
+  // the chain would refuse must reach the halt after three tries, not be
+  // re-estimated every five minutes forever with nobody told.
+  async estimate(tx, next) {
+    try {
+      return big(await rpc("eth_estimateGas", [tx]));
+    } catch (e) {
+      next.failures = (next.failures || 0) + 1;
+      if (next.failures >= CFG.maxFailures) next.halted = `${next.failures} estimates refused in a row, last: ${e.message}`;
+      await this.save(next);
+      this.log(`estimate refused (${next.failures}): ${e.message}`);
+      return null;
     }
   }
 

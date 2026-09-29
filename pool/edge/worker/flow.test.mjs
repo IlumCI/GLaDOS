@@ -9,7 +9,7 @@ import { decide, FRESH, rvnFee } from "./flow.js";
 let passed = 0, failed = 0;
 const ok = (c, w) => { c ? passed++ : failed++; console.log(`${c ? "ok  " : "FAIL"}  ${w}`); };
 
-const cfg = { dropAfterMs: 600_000, maxFailures: 3, deployGas: 700_000, baseGas: 170_000, perRecipientGas: 51_000,
+const cfg = { exchangeUnsentMs: 2 * 3_600_000, exchangeStuckMs: 48 * 3_600_000, dropAfterMs: 600_000, maxFailures: 3, deployGas: 700_000, baseGas: 170_000, perRecipientGas: 51_000,
               maxOverhead: 0.1, rvnBatchSats: 200n * 10n ** 8n, maxPayWei: 10n ** 18n };
 const gwei = 22_600_000n; // 0.0226 gwei, measured
 const utxo = (sats) => ({ txid: "aa".repeat(32), vout: 0, sats });
@@ -74,6 +74,25 @@ ok(decide(r.state, { ethWei: eth, gasPrice: gwei, recipients: ["0xa"] }, cfg).ac
 // A confirmed payout records the epoch and returns to idle.
 r = decide({ ...FRESH, contract: "0xc", pending: { kind: "pay", chain: "evm", hash: "p", at: 0, epoch: { id: 1 } } }, { receipt: { ok: true } }, cfg);
 ok(r.action.kind === "record_epoch" && r.state.epochs === 1, "a confirmed payout is recorded as an epoch");
+
+// Change below dust is folded into the fee rather than creating an output the
+// network refuses.
+r = decide({ ...FRESH, exchange: { id: "x3", payin: "RPAYIN", sats: "100000000", created: 0 } },
+           { now: 0, rvnUtxos: [utxo(100_000_000n + rvnFee(1) + 5000n)] }, cfg);
+ok(r.action.kind === "send_rvn" && r.action.change === 0n && r.action.fee === rvnFee(1) + 5000n,
+   "a change remainder under the dust line goes to the fee, not to an output nodes refuse");
+
+// An exchange never funded lapses and is dropped; one funded and stuck halts.
+r = decide({ ...FRESH, exchange: { id: "x4", payin: "RPAYIN", sats: "1", created: 0 } }, { now: 3 * 3_600_000, rvnUtxos: [] }, cfg);
+ok(r.state.exchange === null && /never funded/.test(r.action.why), "an exchange unfunded after two hours is dropped, not paid late");
+r = decide({ ...FRESH, exchange: { id: "x5", sent: "t", created: 0 } }, { now: 49 * 3_600_000, exchangeStatus: "verifying" }, cfg);
+ok(r.state.halted && /x5/.test(r.state.halted), "an exchange funded and unfinished after two days halts the treasury, naming it");
+r = decide({ ...FRESH, exchange: { id: "x6", sent: "t", created: 0 } }, { now: 49 * 3_600_000, exchangeStatus: "finished" }, cfg);
+ok(!r.state.halted && r.state.phase === "funded", "but one that finished late is simply funded");
+
+// Too many recipients for one transaction halts rather than building it.
+r = decide({ ...FRESH, contract: "0xc" }, { ethWei: eth, gasPrice: gwei, recipients: Array(401).fill("0xa") }, cfg);
+ok(r.state.halted && /401 recipients/.test(r.state.halted), "a payout over 400 recipients halts rather than risk the block limit");
 
 console.log(`${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);
