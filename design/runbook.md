@@ -122,6 +122,7 @@ python tools/distribute.py ~/.local/state/glados-pool/ledger.json \
   --map <(curl -fsS https://<project>.supabase.co/functions/v1/worker/map) \
   --map-since 2026-09-08T00:00:00Z \
   --gate 50000e18 --token 0x3d609ecafc6aa7dba67dd7ad1d10b49c52d57777 \
+  --split equal --min-work 1e9 \
   --out epoch.json
 ```
 

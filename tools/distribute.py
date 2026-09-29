@@ -173,6 +173,24 @@ def allocate(work, total):
     return {a: v for a, v in base.items() if v > 0}
 
 
+def equal_weights(work, min_work=1):
+    """Every address that did at least `min_work` gets one share, whatever it did.
+
+    **Collective equality, the operator's choice for this pool**: a weak machine
+    and a strong one that both mined in the epoch are paid the same, so a
+    laptop has a real chance at a payout instead of a rounding error.
+
+    **Per address, never per worker** -- `work` is already merged by payout
+    address before it gets here, so ten rigs under one address are one share.
+    That, the holding gate applied before this, and `min_work` are what stop the
+    obvious attack: under equal shares a payout rewards *addresses*, so one
+    machine split across a hundred addresses would take a hundred shares. The
+    gate makes each address cost a gate's worth of GLADOS; `min_work` makes an
+    idle connection worth nothing.
+    """
+    return {a: 1 for a, w in work.items() if w >= max(min_work, 1)}
+
+
 # ---------------------------------------------------------------- ledger
 
 def shares_from(ledger, basis, coin=None):
@@ -413,6 +431,14 @@ def selftest():
     wt, _ = work_by_address(shares_from(both, "tally", "btc"), {})
     ww, _ = work_by_address(shares_from(both, "window", "btc"), {})
     claim(wt[A.lower()] == 900 and wt[B.lower()] == 100, "the tally basis pays lifetime work")
+    # Collective equality: a 900 and a 100 are paid alike, an idle address is
+    # not paid, and an odd total still sums exactly.
+    eq = allocate(equal_weights({A.lower(): 900, B.lower(): 100, "0xidle": 0}), 1001)
+    claim(set(eq) == {A.lower(), B.lower()}, "equal split: an address that did nothing is not a share")
+    claim(abs(eq[A.lower()] - eq[B.lower()]) <= 1 and sum(eq.values()) == 1001,
+          "equal split: 900 and 100 of work are paid alike, and the total is exact")
+    claim(equal_weights({A.lower(): 5, B.lower(): 50}, min_work=10) == {B.lower(): 1},
+          "equal split: under --min-work is not a share")
     claim(ww[A.lower()] == 100 and ww[B.lower()] == 900, "the window basis pays the PPLNS window")
     claim(wt != ww, "and the two bases genuinely disagree, which is the whole point")
 
@@ -477,6 +503,12 @@ def main():
                          "tally is every credited share and right for a bounded "
                          "event. There is no default: they differ by 4x on a "
                          "real ledger and paying the wrong one cannot be undone")
+    ap.add_argument("--split", choices=["work", "equal"], default="work",
+                    help="work: in proportion to work done. equal: every address "
+                         "that did at least --min-work gets the same amount")
+    ap.add_argument("--min-work", default="1",
+                    help="with --split equal, the work an address needs in this "
+                         "epoch to count at all (so an idle connection is not a share)")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
 
@@ -541,7 +573,17 @@ def main():
             print("nobody holds the gate; there is no epoch to build", file=sys.stderr)
             return 1
 
-    amounts = allocate(work, total)
+    if a.split == "equal":
+        weights = equal_weights(work, int(parse_amount(a.min_work)))
+        dropped = len(work) - len(weights)
+        print("split equal: %d address(es) share alike, %d under --min-work %s"
+              % (len(weights), dropped, a.min_work), file=sys.stderr)
+        if not weights:
+            print("nobody met --min-work; there is no epoch to build", file=sys.stderr)
+            return 1
+        amounts = allocate(weights, total)
+    else:
+        amounts = allocate(work, total)
     entries = sorted(amounts.items(), key=lambda kv: kv[0])
     root, layers, order = build(entries)
 
