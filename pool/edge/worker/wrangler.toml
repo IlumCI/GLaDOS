@@ -20,21 +20,17 @@ tag = "v1"
 new_sqlite_classes = ["Pool"]
 
 [vars]
-# Local coins until an upstream is wired: the pool builds its own headers, shares
-# are real proof of work against a target only this pool recognises, and nothing
-# is paid. The same spec `glados-pool` takes on its command line.
-COINS = "yescrypt:yescrypt:12"
-SHARE_SECONDS = "45"
-# Production, once the operator's payout address exists -- labels are zpool's
-# algorithm names, which is how the rates find them, and every miner is moved
-# to whichever pays best per unit of its work:
-#
-#   COINS = "yescrypt:yescrypt:12@yescrypt.mine.zpool.ca:6233,ADDR,c=RVN yespowerR16:yespower-10-4096-16:10@yespowerr16.mine.zpool.ca:6534,ADDR,c=RVN"
-#   SWITCH = "1"
+# Two zpool upstreams, paid out in Ravencoin to the operator's address, and every
+# miner moved to whichever pays best per unit of its work (SWITCH). Labels are
+# zpool's algorithm names, which is how the live rates find them.
 #
 # The address is the operator's, never a miner's: the pool is an auto-exchange,
-# and proceeds have to land in one place to be spent on one market buy.
-SWITCH = "0"
+# and proceeds land in one place to be spent on one market buy. RVN because
+# zpool's minimum there is 0.05 RVN, so a payout can happen the same day --
+# chosen over DOGE for being visible, at the cost of a worse swap later.
+COINS = "yescrypt:yescrypt:12@yescrypt.mine.zpool.ca:6233,RRNXJhigAxiLJTRrDKu7fsDknTkXbx1Uz9,c=RVN yespowerR16:yespower-10-4096-16:10@yespowerr16.mine.zpool.ca:6534,RRNXJhigAxiLJTRrDKu7fsDknTkXbx1Uz9,c=RVN"
+SHARE_SECONDS = "45"
+SWITCH = "1"
 
 [[rules]]
 type = "CompiledWasm"
