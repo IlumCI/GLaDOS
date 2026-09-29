@@ -134,6 +134,40 @@ printed.
 that "the 93 claims run only when somebody remembers". There are 106; this file
 said 60.
 
+## Three networking bugs, found by pointing a miner at Cloudflare
+
+Researching whether the pool could run with no server at all -- a Cloudflare
+Durable Object the miner reaches over `wss://` -- meant booting a mining image and
+fetching a Cloudflare-fronted URL. It failed three ways, and none of the three was
+about the pool.
+
+- **Certificate chains through a cross-signed root did not validate.** Cloudflare
+  serves `leaf <- WE1 <- GTS Root R4`, where the last certificate is the copy
+  cross-signed by GlobalSign. The validator walked the served chain in order and
+  recognised trusted roots only by fingerprint, so it followed that copy past the
+  self-signed GTS Root R4 it held and on to a GlobalSign root current stores have
+  dropped. It stayed invisible because the Windows trust store still carried that
+  legacy root. **This affected the updater too**: the update channel sits behind
+  Cloudflare, so a machine whose roots came from anywhere but Windows would have
+  refused its own channel. `diag x509` now tests against the exact four
+  certificates that failed.
+- **Two tasks resolving names at once broke each other.** UDP had one global
+  binding with no lock, and a reply with the wrong transaction id ended a lookup
+  as `malformed answer` instead of being ignored. A mining image resolves its
+  pool's name in a loop, so the shell could not resolve anything alongside it.
+  `diag dns` is new.
+- **A headless machine had no entropy.** Randomness came from keystrokes, mouse
+  movement and disk timing, so a USB-booted miner never filled its pool and every
+  TLS handshake warned that its keys were timing-derived. The processor's `RDSEED`
+  is now one more source, credited at the same pessimistic one bit per sample as
+  everything else, with samples of zero, all ones or a repeat refused -- the shapes
+  broken `RDRAND` implementations have actually shipped with.
+
+**The mining image now carries a trust store.** `tools/roots.py` builds `roots.der`
+from any Linux bundle using the same rule as the old Windows script, and prints
+where the roots came from and their digest, because which store a machine trusts
+turned out to decide whether a chain verifies.
+
 ## Smaller things worth knowing
 
 - **Two NUL bytes made two files invisible to `grep`** -- one in a Rust literal,
