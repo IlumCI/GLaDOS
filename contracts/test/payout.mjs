@@ -29,6 +29,11 @@ async function main() {
   const art = { payout: A("GladosPayout.sol", "GladosPayout"), weth: A("MockWETH.sol", "MockWETH"),
                 pair: A("MockPair.sol", "MockPair"), token: A("TestToken.sol", "TestToken") };
 
+  // The treasury deploys the bytecode committed beside the Worker; it must be
+  // exactly what this compile produces, or the pool deploys an untested contract.
+  const shipped = JSON.parse((await import("node:fs")).readFileSync(new URL("../../pool/edge/worker/GladosPayout.json", import.meta.url), "utf8"));
+  ok(shipped.bytecode === art.payout.bytecode, "the bytecode the pool deploys is the bytecode tested here");
+
   const vm = await makeVm();
   await fund(vm, POOL, 10n ** 24n);
   const weth = await deploy(vm, POOL, art.weth, []);

@@ -42,7 +42,7 @@ export function compile(files) {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const c = compile(["GladosDistributor.sol", "TestToken.sol"]);
+  const c = compile(["GladosDistributor.sol", "TestToken.sol", "GladosPayout.sol"]);
   const dir = path.join(root, "out");
   fs.mkdirSync(dir, { recursive: true });
   for (const [file, entries] of Object.entries(c)) {
@@ -54,4 +54,10 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       console.log(`${file}:${name}  ${art.evm.deployedBytecode.object.length / 2} bytes deployed`);
     }
   }
+  // The pool's treasury deploys GladosPayout itself, so it carries the exact
+  // bytecode this build produced -- committed beside the Worker, and checked
+  // against a fresh compile by test/payout.mjs so the two cannot drift.
+  const p = c["GladosPayout.sol"].GladosPayout;
+  fs.writeFileSync(path.join(root, "..", "pool", "edge", "worker", "GladosPayout.json"),
+    JSON.stringify({ abi: p.abi, bytecode: p.evm.bytecode.object }, null, 2) + "\n");
 }

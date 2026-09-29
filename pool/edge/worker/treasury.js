@@ -109,6 +109,25 @@ export function derSig(r, s) {
 }
 
 const p2pkh = (h160) => cat(Uint8Array.of(0x76, 0xa9, 0x14), h160, Uint8Array.of(0x88, 0xac));
+const p2sh = (h160) => cat(Uint8Array.of(0xa9, 0x14), h160, Uint8Array.of(0x87));
+
+// Ravencoin mainnet P2SH version byte: addresses begin with `r`. An exchange's
+// deposit address may be either kind, and a payout to the wrong script type is
+// coin sent to a script nobody holds.
+export const RVN_P2SH = 122;
+
+// The output script paying a Ravencoin address, P2PKH or P2SH, refusing anything else.
+export function rvnScript(addr) {
+  const b = decodeBase58check(addr);
+  if (b.length === 21 && b[0] === RVN_P2PKH) return p2pkh(b.slice(1));
+  if (b.length === 21 && b[0] === RVN_P2SH) return p2sh(b.slice(1));
+  throw new Error(`${addr} is not a Ravencoin address`);
+}
+
+// A transaction id: double SHA-256 of the raw bytes, displayed reversed.
+export function rvnTxid(rawHex) {
+  return hex(dsha(unhex(rawHex)).reverse());
+}
 
 function varint(n) {
   if (n < 0xfd) return Uint8Array.of(n);
@@ -134,7 +153,7 @@ function serialise(inputs, outputs, scripts) {
   });
   parts.push(varint(outputs.length));
   for (const o of outputs) {
-    const s = p2pkh(rvnHash160(o.address));
+    const s = rvnScript(o.address);
     parts.push(u64(o.sats), varint(s.length), s);
   }
   parts.push(u32(0));
@@ -234,6 +253,34 @@ export function signLegacyTx(privHex, { nonce, gasPrice, gas, to, value, data, c
 export function createdAddress(sender, nonce) {
   const h = keccak_256(rlp([addrBytes(sender), int(nonce)]));
   return "0x" + hex(h.slice(12));
+}
+
+// --- ABI ------------------------------------------------------------------------------
+
+const word = (v) => BigInt(v).toString(16).padStart(64, "0");
+const addrWord = (a) => a.slice(2).toLowerCase().padStart(64, "0");
+export function selector(sig) {
+  return hex(keccak_256(new TextEncoder().encode(sig)).slice(0, 4));
+}
+
+// `buyAndPay(address[] to, uint256 minOut)`: the head is the array's offset
+// (two words in: 0x40) and minOut; the tail is the length and the addresses.
+export function encodeBuyAndPay(recipients, minOut) {
+  return "0x" + selector("buyAndPay(address[],uint256)") + word(0x40) + word(minOut) +
+    word(recipients.length) + recipients.map(addrWord).join("");
+}
+
+// GladosPayout's constructor arguments, appended to its bytecode for a deploy.
+export function encodeCtor(weth, token, pair) {
+  return addrWord(weth) + addrWord(token) + addrWord(pair);
+}
+
+// Uniswap V2's output for `amountIn`, with the 0.3% fee -- the same formula
+// GladosPayout and the pair's `k` check use, so a quote here is what arrives
+// before the token's buy tax.
+export function amountOut(amountIn, rIn, rOut) {
+  const w = BigInt(amountIn) * 997n;
+  return (w * BigInt(rOut)) / (BigInt(rIn) * 1000n + w);
 }
 
 export { hex, unhex };

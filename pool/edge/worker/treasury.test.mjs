@@ -6,7 +6,9 @@
 // private key 1, which every Ethereum tool agrees on. No network, no storage,
 // no money: a signer that is wrong here is wrong before any coin moves.
 import * as secp from "@noble/secp256k1";
-import { evmAddress, rvnAddress, rvnSighash, signRvnTx, newKey, decodeBase58check, unhex, signLegacyTx, createdAddress } from "./treasury.js";
+import { evmAddress, rvnAddress, rvnSighash, signRvnTx, newKey, decodeBase58check, unhex, signLegacyTx, createdAddress,
+         rvnScript, rvnTxid, encodeBuyAndPay, encodeCtor, amountOut, hex } from "./treasury.js";
+import { ethers } from "../../../contracts/node_modules/ethers/lib.esm/index.js";
 
 // DER back to (r, s), written independently of treasury.js's encoder.
 function fromDER(d) {
@@ -95,6 +97,26 @@ ok(eip155.hash === "0x33469b22e9f636356c4160a87eb19df52b7412e8eac32a4a55ffe88ea8
 // contract deployed by 0x6ac7..6ac7 at nonce 0.
 ok(createdAddress("0x6ac7ea33f8831ea9dcc53393aaa88b25a785dbf0", 0) === "0xcd234a471b72ba2f1ccf0a70fcaba648a5eecd8d",
    "a created contract's address follows the sender and nonce");
+
+// ABI encodings against ethers, which is not this file.
+const pay = new ethers.Interface(["function buyAndPay(address[] to, uint256 minOut)"]);
+const rcpts = ["0x00000000000000000000000000000000000000aa", "0x" + "bb".repeat(20)];
+ok(encodeBuyAndPay(rcpts, 12345n) === pay.encodeFunctionData("buyAndPay", [rcpts, 12345n]),
+   "buyAndPay calldata is byte-identical to ethers' encoding");
+const W = "0x0bd7d308f8e1639fab988df18a8011f41eacad73", T = "0x3d609ecafc6aa7dba67dd7ad1d10b49c52d57777", P = "0x93f777932d98d15b351d1bce8c76b34381eede5b";
+ok(encodeCtor(W, T, P) === ethers.AbiCoder.defaultAbiCoder().encode(["address", "address", "address"], [W, T, P]).slice(2),
+   "and so are the constructor arguments");
+ok(amountOut(10n ** 15n, 6556353309807986866n, 263_900_000n * 10n ** 18n) > 0n, "the swap quote is computed");
+
+// A P2SH output is written as OP_HASH160 <20> OP_EQUAL, and the txid is the
+// reversed double SHA-256 of the raw bytes.
+const shAddr = (() => {
+  const body = new Uint8Array(21); body[0] = 122; body.fill(7, 1);
+  return ethers.encodeBase58(ethers.concat([body, ethers.dataSlice(ethers.sha256(ethers.sha256(body)), 0, 4)]));
+})();
+ok(hex(rvnScript(shAddr)) === "a914" + "07".repeat(20) + "87", "a Ravencoin P2SH address pays OP_HASH160 <hash> OP_EQUAL");
+const rawHex = signRvnTx(KEY1, inputs, outputs);
+ok(rvnTxid(rawHex) === ethers.sha256(ethers.sha256("0x" + rawHex)).slice(2).match(/../g).reverse().join(""), "a txid is the reversed double SHA-256");
 
 console.log(`${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);
