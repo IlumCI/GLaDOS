@@ -39,6 +39,7 @@
 
 import { connect } from "cloudflare:sockets";
 import { newKey, rvnAddress, evmAddress } from "./treasury.js";
+import { Treasury } from "./runner.js";
 import wasmModule from "../target/wasm32-unknown-unknown/release/glados_edge.wasm";
 import { bind, imports } from "../boundary.mjs";
 
@@ -105,7 +106,7 @@ export default {
     }
     // The treasury lives in shard 0 -- "main", the one object that existed
     // before sharding -- so there is exactly one place the keys are.
-    if (url.pathname === "/treasury") {
+    if (url.pathname === "/treasury" || url.pathname === "/payouts.json") {
       return stub(0).fetch(request);
     }
     if (url.pathname === "/mine/gpu") {
@@ -148,6 +149,8 @@ export class Pool {
     this.core = null;
     this.ups = [];          // { i, where, sock, writer, running }
     this.gateMin = BigInt(env.GATE_MIN || "0") * 10n ** 18n;
+    // Only shard 0 ("main") holds the keys and runs the treasury.
+    this.treasurer = new Treasury(this);
     this.balances = new Map(); // address -> { wei, at }
     // Nothing is served until the core exists and the ledger is back, so a miner
     // arriving during a cold start cannot be credited into an empty record that
@@ -203,8 +206,16 @@ export class Pool {
     }
     if (url.pathname === "/treasury") {
       const t = await this.treasury();
-      return Response.json({ rvn: t.rvn, evm: t.evm },
+      await this.arm();
+      return Response.json({ rvn: t.rvn, evm: t.evm, ...(await this.treasurer.summary()) },
         { headers: { "access-control-allow-origin": "*" } });
+    }
+    if (url.pathname === "/payouts.json") {
+      // Every epoch paid: who, how much work each did since the last one, the
+      // floor, who was left out and why, and the transaction -- recomputable
+      // with tools/distribute.py --split equal against the ledgers.
+      const epochs = (await this.ctx.storage.get("treasury.epochs")) || [];
+      return Response.json({ epochs }, { headers: { "access-control-allow-origin": "*" } });
     }
     if (request.headers.get("Upgrade") !== "websocket") {
       return new Response("expected a WebSocket upgrade", { status: 426 });
@@ -447,6 +458,13 @@ export class Pool {
     }
   }
 
+  // The treasury runs in "main" only, and its clock must not depend on anybody
+  // mining: a payout that waits for the next miner to connect is a payout that
+  // never comes on a quiet day.
+  get runsTreasury() {
+    return String(this.ctx.id.name || "") === "main" && (this.env.TREASURY || "off") !== "off";
+  }
+
   // Every job period: fresh work for quiet miners, and the ledger to storage.
   // Every RATES_MS at most, while anyone is mining: fetch zpool's rates and let
   // the core re-choose. A failed fetch keeps the current choice; it is not a
@@ -490,6 +508,8 @@ export class Pool {
       }
     }
     await this.save();
+    if (this.runsTreasury) await this.treasurer.tick();
     if (this.conns.size > 0) await this.ctx.storage.setAlarm(Date.now() + JOB_PERIOD_MS);
+    else if (this.runsTreasury) await this.ctx.storage.setAlarm(Date.now() + 5 * 60_000);
   }
 }

@@ -60,6 +60,13 @@ SHARDS = "1"
 # zpool accepted 11/11 of its forwarded shares when it was first driven.
 GPU_COINS = "heavyhash:heavyhash:24@heavyhash.mine.zpool.ca:5138,RRNXJhigAxiLJTRrDKu7fsDknTkXbx1Uz9,c=RVN"
 GPU_SHARDS = "1"
+# The payout treasury (runner.js): "off", "dry" -- reads balances, decides,
+# logs what it would do, moves nothing -- or "live". RVN_BATCH is how much RVN
+# accumulates before a swap (ChangeNOW's minimum is ~151); TREASURY_MAX_PAY_WEI
+# caps one payout, and a payout over it halts the treasury instead of going out.
+TREASURY = "dry"
+RVN_BATCH = "200"
+TREASURY_MAX_PAY_WEI = "50000000000000000"
 
 [[rules]]
 type = "CompiledWasm"
