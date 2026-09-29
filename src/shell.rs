@@ -2344,6 +2344,12 @@ fn store_cmd(rest: &str) {
 }
 
 fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi::Interp) {
+    // A miner image asking for its payout address takes a typed `0x...` line
+    // before anything else can. See `mine::boot::answer`.
+    if let Some(msg) = crate::mine::boot::answer(line) {
+        kprintln!("[miner] {}", msg);
+        return;
+    }
     let mut parts = line.splitn(2, ' ');
     let cmd = parts.next().unwrap_or("");
     let rest = parts.next().unwrap_or("").trim();

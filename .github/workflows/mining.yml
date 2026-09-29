@@ -99,10 +99,12 @@ jobs:
       # file*. Written the wrong way once, and it took two boots to see because an
       # absent file and an unparseable one arrive as the same `None`.
       #
-      # `worker` is an obvious dummy on purpose. At an account-free venue the
-      # worker name *is* the payout address, so a working default would mine to
-      # whoever cut the image; the miner declines an address its payout judge
-      # cannot vouch for and says so on its own screen.
+      # **`worker ask`, and it was `0xdeadbeef...`.** The comment here said the
+      # miner would decline that placeholder. It would not have: it is a
+      # well-formed lowercase EVM address, the payout judge calls it unchecked
+      # rather than broken, and every published image would have mined to it.
+      # `ask` puts nobody's address in the image; the miner asks at boot and
+      # starts on the first valid 0x address typed.
       #
       # **The pool is a Durable Object reached over `wss://`.** A Cloudflare
       # Worker accepts no inbound TCP, so the image speaks TLS and a WebSocket
@@ -121,11 +123,10 @@ jobs:
           # Space-separated, not `key = value`: the parser splits at the first
           # whitespace, and an `=` refuses the whole file.
           #
-          # `worker` is a placeholder and this image will NOT mine until it is a
-          # real payout address. At an account-free venue the worker name *is* the
-          # address, so a working default would mine to whoever shipped this image.
+          # `worker ask`: the miner asks for your 0x address at boot, which is
+          # where your $GLaDOS is paid. Nothing else needs setting.
           pool wss://glados-pool.foxybro64.workers.dev/mine
-          worker 0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef
+          worker ask
           CFG
           sed -i 's/^          //' payload-dir/MINER.TXT
           cat payload-dir/MINER.TXT

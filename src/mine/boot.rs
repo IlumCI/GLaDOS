@@ -60,7 +60,7 @@ use super::addr;
 pub const FILE: &str = "\\GLADOS\\MINER.TXT";
 
 /// What the file is allowed to say. Every field is typed and none is a command.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Plan {
     pub host: String,
     pub port: u16,
@@ -74,6 +74,17 @@ pub struct Plan {
     /// way -- a Worker accepts no inbound TCP at all -- so this is what lets an
     /// image mine to the serverless pool with nothing beside it.
     pub ws: Option<String>,
+    /// `worker ask`: nobody's address is in the image, so the miner asks for
+    /// one at boot and starts on the answer.
+    ///
+    /// **This is what a published image carries.** It is read-only, so the file
+    /// is fixed the day the ISO is cut, and any address written into it is
+    /// either the publisher's or a placeholder -- and a placeholder is worse
+    /// than it looks: `0xdeadbeef...` is a perfectly well-formed lowercase EVM
+    /// address, which the payout judge rightly calls unchecked rather than
+    /// broken, so an image carrying it *mined to it*. Asking is the only
+    /// default that pays the person at the keyboard.
+    pub ask: bool,
     pub slices: Option<u32>,
     /// What could be established about where `user` pays.
     ///
@@ -173,7 +184,11 @@ pub fn parse(bytes: &[u8]) -> Option<Plan> {
         }
     }
 
-    if host.is_empty() || user.is_empty() {
+    let ask = user == "ask";
+    if ask {
+        user.clear();
+    }
+    if host.is_empty() || (user.is_empty() && !ask) {
         return None;
     }
     // The serverless pool speaks the native protocol and nothing else, so a
@@ -183,7 +198,7 @@ pub fn parse(bytes: &[u8]) -> Option<Plan> {
         glados_proto = true;
     }
     let payout = addr::judge(&user);
-    Some(Plan { host, port, user, pass, glados_proto, ws, slices, payout, unknown })
+    Some(Plan { host, port, user, pass, glados_proto, ws, ask, slices, payout, unknown })
 }
 
 /// Apply a plan and start mining. Answers a line to print.
@@ -193,6 +208,13 @@ pub fn parse(bytes: &[u8]) -> Option<Plan> {
 /// table, and everything that cannot be is here.
 pub fn apply(p: &Plan) -> String {
     use alloc::format;
+
+    // Nobody's address is in the image: hold the plan and ask. Nothing is
+    // configured and nothing connects until there is somebody to pay.
+    if p.ask {
+        *ASKING.lock_irq() = Some(p.clone());
+        return String::from(PROMPT);
+    }
 
     // **Refused before anything is configured, not after.** A broken checksum
     // means the string is not an address at all, so every share found under it
@@ -282,6 +304,62 @@ pub fn apply(p: &Plan) -> String {
     }
 }
 
+const PROMPT: &str = "type your 0x payout address and press Enter to start mining\n  \
+     (the address you want $GLaDOS paid to; nothing else is needed)";
+
+/// A plan waiting for its address. Set by `apply` on `worker ask`.
+static ASKING: crate::sync::Spin<Option<Plan>> = crate::sync::Spin::new(None);
+
+/// Whether a typed line is being asked for.
+pub fn asking() -> bool {
+    ASKING.lock_irq().is_some()
+}
+
+/// The shell hands every typed line here first while a plan is waiting.
+///
+/// `None` means "not mine": nothing is being asked, or the line does not start
+/// with `0x`, so it goes on to be a command as usual -- which keeps the shell
+/// usable on a miner that has not been told where to pay yet.
+pub fn answer(line: &str) -> Option<String> {
+    let line = line.trim();
+    if !(line.starts_with("0x") || line.starts_with("0X")) {
+        return None;
+    }
+    let mut plan = ASKING.lock_irq().clone()?;
+    match verdict(line) {
+        Err(why) => Some(alloc::format!("{why} -- type it again\n  {PROMPT}")),
+        Ok(payout) => {
+            *ASKING.lock_irq() = None;
+            plan.user = String::from(line);
+            plan.payout = payout;
+            plan.ask = false;
+            Some(apply(&plan))
+        }
+    }
+}
+
+/// Whether a typed answer is an address the distributor can pay.
+///
+/// **EVM only, and that is where the money goes rather than a preference.**
+/// Miners are paid in $GLaDOS on chain 4663, so a Bitcoin address typed here
+/// would be well-formed, pass every checksum, and never receive anything.
+/// Pure, so the rule is asserted with no keyboard and no pool.
+fn verdict(line: &str) -> Result<addr::Payout, &'static str> {
+    match addr::judge(line) {
+        p @ (addr::Payout::Checked(addr::Kind::Evm) | addr::Payout::Unchecked(addr::Kind::Evm)) => {
+            // All one digit is somebody's typing test, not an address anyone
+            // holds a key for, and it is exactly what a placeholder looks like.
+            let hex = line.split('.').next().unwrap_or("")[2..].to_ascii_lowercase();
+            if hex.bytes().all(|b| b == hex.as_bytes()[0]) {
+                return Err("that is a placeholder, not an address");
+            }
+            Ok(p)
+        }
+        addr::Payout::Broken(_) => Err("that address has a typo: its checksum fails"),
+        _ => Err("that is not a 0x address: 0x and 40 hex digits"),
+    }
+}
+
 /// Claims about the parser. No network, no pool, no task table.
 pub fn checks() -> Vec<(bool, String)> {
     let mut out: Vec<(bool, String)> = Vec::new();
@@ -327,6 +405,17 @@ pub fn checks() -> Vec<(bool, String)> {
         "a protocol line still wins over the scheme's default",
     );
     ok(parse(b"pool h:1\nworker w\n").map(|p| p.ws) == Some(None), "a plain pool is plain TCP");
+    let asks = parse(b"pool wss://h\nworker ask\n");
+    ok(asks.as_ref().map(|p| (p.ask, p.user.is_empty())) == Some((true, true)),
+       "`worker ask` is a plan that carries no address and asks for one");
+    ok(verdict("0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed").is_ok(), "a typed EIP-55 address is taken");
+    ok(verdict("0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed.rig2").is_ok(), "and a lowercase one with a rig suffix");
+    ok(verdict("0x5aAeb6053F3E94C9b9A09f33669435E7Ef1Beaed").is_err(), "a typed address with one letter's case wrong is refused");
+    ok(verdict("0xdeadbeef").is_err(), "a short one is refused");
+    ok(verdict("0x0000000000000000000000000000000000000000").is_err(), "the zero address is refused");
+    ok(verdict("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef").is_ok(),
+       "0xdeadbeef... is well formed, which is why the image must not ship it");
+    ok(verdict("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa").is_err(), "a Bitcoin address is refused, since nothing pays one");
     ok(parse(b"pool p:notaport\nworker w\n").is_none(), "a port that is not a number refuses the whole file");
     ok(parse(b"slices two\npool p:1\nworker w\n").is_none(), "and so does a slice count that is not one");
     ok(parse(b"protocol carrier-pigeon\npool p:1\nworker w\n").is_none(), "an unknown protocol is refused, not defaulted");
