@@ -1926,6 +1926,35 @@ fn selftest(acpi_ref: &Option<acpi::Acpi>) {
         ok
     });
 
+    // **Optional, and a section of its own rather than a line inside `rng`.**
+    // `rng` is Vital, so an instruction that faulted inside it would halt the
+    // machine -- and "CPUID says it exists" has already been wrong once on this
+    // laptop (`dev::power` records the #GP). Here a processor that advertises
+    // RDSEED and faults on it loses this source and boots anyway, on interrupt
+    // and disk timing as before.
+    //
+    // Harvested at boot because boot is when a headless machine needs it: the
+    // first TLS handshake to a pool happens minutes later, and nothing else is
+    // going to have arrived by then on a machine nobody is touching.
+    console::set_color(LTGREEN);
+    kprintln!("\n[selftest] the processor's random source:");
+    console::set_color(LTGRAY_IDX);
+    section("hwrng", boot_report::Need::Optional, || {
+        let ok = rng::hw_selftest();
+        let (taken, credited) = rng::add_cpu_entropy(1024);
+        let (_, bits, seeded) = rng::status();
+        kprintln!(
+            "  {:?}: {} sample(s), {} credited -- the pool holds {} of {} bits{}",
+            rng::hw_source(),
+            taken,
+            credited,
+            bits,
+            rng::SEEDED_BITS,
+            if seeded { ", seeded" } else { "" }
+        );
+        ok
+    });
+
     section("json", boot_report::Need::Optional, check_json);
     section("websocket", boot_report::Need::Optional, check_ws);
     section("html", boot_report::Need::Optional, check_html);

@@ -167,6 +167,187 @@ pub fn device_deposits() -> u64 {
     unsafe { *DEV_DEPOSITS.get() }
 }
 
+// ---- the processor's own source -------------------------------------------
+//
+// **The note at the top of this file said RDRAND "deserves its own commit", and
+// this is it.** What forced it was a machine the note describes exactly -- one
+// that "boots, touches no disk and shuts down without a key ever being pressed".
+// That is a mining image: booted from USB, headless, and doing TLS to its pool.
+// Its pool never filled, and every handshake printed "13 of 256 entropy bits --
+// keys are timing-derived, not random".
+//
+// **No new trust policy, and that is the decision.** The rule above is one bit
+// credited per event whatever it came from, pessimistic on purpose because
+// nobody here can measure what a source is worth. A 64-bit RDSEED sample is one
+// more event and is credited one bit -- sixty-four times less than it claims to
+// carry, which is this module's stance applied rather than relaxed. 256 samples
+// seed the pool, and on current silicon that is well under a millisecond.
+//
+// What crediting it at all does trust is the vendor, and no rate changes that: a
+// fully predictable instruction credited at one bit a sample still credits 256
+// bits of nothing. That is the same trust every mainstream kernel extends by
+// default. What a rate *can* guard against is a source that is broken rather
+// than malicious, and those have been measured in the field -- see `plausible`.
+
+/// Deposits from the processor's random-number instruction, for the status line.
+///
+/// Counted apart for the reason device deposits are: a pool filled by the CPU is
+/// a different situation from one filled by somebody typing or a disk working,
+/// and an operator deciding whether to trust a key is owed which it was.
+static CPU_DEPOSITS: Racy<u64> = Racy::new(0);
+
+/// Which instruction this processor offers, best first.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Hw {
+    /// Output of the entropy conditioner. What a seed should come from.
+    Rdseed,
+    /// Output of a DRBG seeded from that conditioner. Fine to mix; a fallback.
+    Rdrand,
+    None,
+}
+
+/// What CPUID says, asked rather than assumed.
+///
+/// An instruction the processor does not implement raises #UD, and every vector
+/// here but #BP is fatal -- so this is checked before anything is executed, and
+/// the harvest runs inside an optional boot section besides, so a processor that
+/// advertises the instruction and faults on it loses this source and nothing else.
+pub fn hw_source() -> Hw {
+    let max = crate::cpu::cpuid(0, 0)[0];
+    if max >= 7 && crate::cpu::cpuid(7, 0)[1] & (1 << 18) != 0 {
+        return Hw::Rdseed;
+    }
+    if crate::cpu::cpuid(1, 0)[2] & (1 << 30) != 0 {
+        return Hw::Rdrand;
+    }
+    Hw::None
+}
+
+/// One 64-bit sample, or `None` if the instruction declined.
+///
+/// Both instructions report failure in the carry flag rather than faulting, and
+/// both are allowed to fail under load, RDSEED more readily. A few retries is
+/// the documented answer; a sample that will not come is a sample not counted,
+/// never a sample of zero.
+fn sample(hw: Hw) -> Option<u64> {
+    for _ in 0..16 {
+        let v: u64;
+        let ok: u8;
+        unsafe {
+            match hw {
+                Hw::Rdseed => core::arch::asm!(
+                    "rdseed {v}", "setc {ok}", v = out(reg) v, ok = out(reg_byte) ok,
+                    options(nomem, nostack)
+                ),
+                Hw::Rdrand => core::arch::asm!(
+                    "rdrand {v}", "setc {ok}", v = out(reg) v, ok = out(reg_byte) ok,
+                    options(nomem, nostack)
+                ),
+                Hw::None => return None,
+            }
+        }
+        if ok != 0 {
+            return Some(v);
+        }
+        core::hint::spin_loop();
+    }
+    None
+}
+
+/// Whether a sample may be counted as an event.
+///
+/// **Aimed at defects that shipped, not at an attacker.** Some AMD processors
+/// returned all ones from RDRAND on every call after resuming from sleep, while
+/// reporting success, and firmware on others left it answering zero. Crediting
+/// either would be claiming 256 bits of one constant. A value equal to the one
+/// before it is the general form of both, and it is also what a stuck
+/// conditioner looks like.
+///
+/// Pure, so `hw_selftest` asserts every branch with no instruction executed.
+pub fn plausible(prev: Option<u64>, v: u64) -> bool {
+    v != 0 && v != u64::MAX && prev != Some(v)
+}
+
+/// Take samples until the pool is seeded or `attempts` are spent.
+///
+/// Answers (samples taken, samples credited). An implausible sample is dropped
+/// entirely rather than mixed uncredited: `add_entropy` credits every deposit, and
+/// a second deposit path that did not would be two meanings for one call.
+pub fn add_cpu_entropy(attempts: u32) -> (u32, u32) {
+    let hw = hw_source();
+    if hw == Hw::None {
+        return (0, 0);
+    }
+    let mut prev = None;
+    let (mut taken, mut credited) = (0u32, 0u32);
+    for _ in 0..attempts {
+        if status().2 {
+            break;
+        }
+        let Some(v) = sample(hw) else { continue };
+        taken += 1;
+        if plausible(prev, v) {
+            unsafe { *CPU_DEPOSITS.get() += 1 };
+            add_entropy(v);
+            credited += 1;
+        }
+        prev = Some(v);
+    }
+    (taken, credited)
+}
+
+/// Deposits from the processor's instruction, for the status line.
+pub fn cpu_deposits() -> u64 {
+    unsafe { *CPU_DEPOSITS.get() }
+}
+
+/// The processor's source, checked: the filter, then live samples if there are any.
+pub fn hw_selftest() -> bool {
+    let mut ok = true;
+    let mut claim = |good: bool, what: &str| {
+        if !good {
+            ok = false;
+        }
+        crate::kprintln!("  {}  {}", if good { "ok  " } else { "FAIL" }, what);
+    };
+    claim(!plausible(None, 0), "a sample of zero is not counted");
+    claim(!plausible(None, u64::MAX), "nor all ones, which is what a broken RDRAND returned");
+    claim(!plausible(Some(0x1234_5678_9ABC_DEF0), 0x1234_5678_9ABC_DEF0), "nor a repeat of the last one");
+    claim(plausible(Some(1), 0x1234_5678_9ABC_DEF0), "an ordinary sample is");
+
+    let hw = hw_source();
+    if hw == Hw::None {
+        crate::kprintln!("  ....  this processor offers neither RDSEED nor RDRAND, so 2 claim(s) did not run");
+        return ok;
+    }
+    // **RDSEED is allowed to decline, so "it answers every time" is false.** It
+    // reads the entropy conditioner directly and can be momentarily exhausted;
+    // the manual says so and says to retry. The first version of this claim
+    // required sixteen answers from sixteen asks, and under KVM with eight vCPUs
+    // one ran out of retries -- which failed the section, filed a boot report, and
+    // would have stopped `verify-boot` publishing an image whose pool had seeded
+    // perfectly. What is worth asserting is that it answers *mostly*, which is
+    // the difference between a busy source and a dead one.
+    let mut vals = [0u64; 16];
+    let mut got = 0;
+    for _ in 0..vals.len() {
+        if let Some(v) = sample(hw) {
+            vals[got] = v;
+            got += 1;
+        }
+    }
+    claim(got * 2 >= vals.len(), "the instruction answers at least half the time, as a live source does");
+    // Only over what it answered. A declined ask used to leave a zero in the
+    // array, which the next claim then counted as a value it had returned.
+    let mut distinct = vals;
+    let answered = &mut distinct[..got];
+    answered.sort_unstable();
+    let unique = if got == 0 { 0 } else { 1 + answered.windows(2).filter(|w| w[0] != w[1]).count() };
+    claim(got > 0 && unique == got, "and every value it answered with is a different one");
+    crate::kprintln!("        {} of {} asks answered", got, vals.len());
+    ok
+}
+
 /// One fast-key-erasure step: 64 bytes of keystream, of which the first 32
 /// become the next key and the last 32 are the output.
 ///
