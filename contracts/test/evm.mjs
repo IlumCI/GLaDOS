@@ -61,7 +61,7 @@ export async function call(vm, from, to, artifact, fn, args = [], opts = {}) {
     to: addr(to),
     data,
     gasLimit: 30_000_000n,
-    value: 0n,
+    value: opts.value ?? 0n,
     block: opts.block,
   });
   const ret = bytesToHex(res.execResult.returnValue);

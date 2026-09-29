@@ -6,7 +6,7 @@
   "description": "The claim contract for the GLaDOS mining pool's GLADOS reward.",
   "scripts": {
     "build": "node test/build.mjs",
-    "test": "node test/run.mjs && AUDIT2_EXPECT_FIXED=1 node test/audit2.mjs && node test/batch.mjs"
+    "test": "node test/run.mjs && AUDIT2_EXPECT_FIXED=1 node test/audit2.mjs && node test/batch.mjs && node test/payout.mjs"
   },
   "dependencies": {
     "@ethereumjs/common": "^4.4.0",
