@@ -1132,6 +1132,23 @@ fn await_id(
             match stratum::take_line(&mut s.buf) {
                 Ok(Some(line)) => match stratum::classify(&line) {
                     Ok(Message::Response { id: got, ok, body }) if got == id => {
+                        // **The pool's own words, on the miner's screen.** A pool
+                        // refusing a greeting says why -- a payout address short of
+                        // the holding requirement, a worker name that is not an
+                        // address -- and a miner that only reported "closed" left
+                        // the person at the machine with nothing to fix.
+                        if !ok {
+                            let why = match body.get("error") {
+                                Some(crate::json::Json::Str(t)) => Some(t.clone()),
+                                Some(e) => e.idx(1).and_then(|m| m.as_str()).map(String::from),
+                                None => None,
+                            };
+                            if let Some(w) = why {
+                                let mut line = String::from("refused by the pool: ");
+                                line.push_str(&w);
+                                note(&line);
+                            }
+                        }
                         return ok && on_ok(s, &body);
                     }
                     // Dispatched by dialect for the same reason `run` does. A

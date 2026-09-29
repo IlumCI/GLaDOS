@@ -45,6 +45,12 @@ import { bind, imports } from "../boundary.mjs";
 const JOB_PERIOD_MS = 30_000;
 // `mine::stratum::MAX_LINE`. A longer line is a desynchronised peer.
 const MAX_LINE = 131072;
+// The holding gate: a miner must hold GATE_MIN whole GLADOS on chain 4663 to
+// connect. "0" (or unset) turns it off. See `Pool.gate`.
+const GLADOS = "0x3d609ecafc6aa7dba67dd7ad1d10b49c52d57777";
+const RPC_4663 = "https://rpc.mainnet.chain.robinhood.com";
+const GATE_CACHE_MS = 10 * 60_000;
+
 // How often zpool's rates are re-read. Its figures move over minutes, and a
 // switch costs every miner its current job, so faster buys nothing.
 const RATES_MS = 5 * 60_000;
@@ -71,6 +77,8 @@ export class Pool {
     this.conns = new Map(); // WebSocket -> connection id in the core
     this.core = null;
     this.ups = [];          // { i, where, sock, writer, running }
+    this.gateMin = BigInt(env.GATE_MIN || "0") * 10n ** 18n;
+    this.balances = new Map(); // address -> { wei, at }
     // Nothing is served until the core exists and the ledger is back, so a miner
     // arriving during a cold start cannot be credited into an empty record that
     // then overwrites the stored one.
@@ -137,15 +145,42 @@ export class Pool {
       }
       return r.close;
     };
-    server.addEventListener("message", (ev) => {
+    // Lines wait here until the connection has passed the gate, so nothing a
+    // miner sends reaches the core before its greeting has been checked.
+    const gate = { passed: this.gateMin === 0n, queue: [] };
+    const feed = (line) => deliver(this.core.line(id, line));
+    server.addEventListener("message", async (ev) => {
       const text = typeof ev.data === "string" ? ev.data : new TextDecoder().decode(ev.data);
       if (text.length > MAX_LINE) {
         server.close(1009, "line too long");
         this.drop(server);
         return;
       }
-      for (const line of text.split("\n")) {
-        if (line.trim() && deliver(this.core.line(id, line))) return;
+      const lines = text.split("\n").filter((l) => l.trim());
+      if (!gate.passed) {
+        gate.queue.push(...lines);
+        if (gate.checking) return;
+        const hello = gate.queue.find((l) => l.includes("glados.hello"));
+        if (!hello) return;
+        gate.checking = true;
+        const refusal = await this.gate(hello);
+        if (refusal) {
+          this.log(`[gate] ${peer} refused: ${refusal}`);
+          let rid = 1;
+          try { rid = JSON.parse(hello).id ?? 1; } catch {}
+          try { server.send(JSON.stringify({ id: rid, result: null, error: refusal }) + "\n"); } catch {}
+          server.close(1008, "holding requirement not met");
+          this.drop(server);
+          return;
+        }
+        gate.passed = true;
+        const held = gate.queue.splice(0);
+        for (const line of held) if (feed(line)) return;
+        this.tickUps();
+        return;
+      }
+      for (const line of lines) {
+        if (feed(line)) return;
       }
       // A share may have beaten upstream's target: forward it now, not at the
       // next alarm, since upstream's job may be replaced before then.
@@ -167,6 +202,53 @@ export class Pool {
   // was lost whenever a miner disconnected more than a few seconds before it --
   // measured: a four-minute run's shares absent from the tally while the next
   // run's, closing six seconds before its alarm, survived.
+  // **The holding gate, enforced where a miner connects.** The distributor has
+  // a gate of its own at claim time, and the second review (audit-2 F1) showed
+  // it can be shared: GLADOS moves between wallets untaxed, so one gate-sized
+  // balance can be handed from claimant to claimant. The operator's decision
+  // is to refuse at the door instead -- a miner whose payout address does not
+  // hold the minimum is not mining here at all.
+  //
+  // Answers a refusal to send, or null. **Fails closed**: a balance that cannot
+  // be read is a refusal naming the reason, since a gate that opens whenever the
+  // RPC is down is a gate that anybody can walk through by waiting.
+  async gate(hello) {
+    let worker = "";
+    try { worker = JSON.parse(hello).params.worker || ""; } catch {}
+    const head = worker.split(".")[0];
+    if (!/^0x[0-9a-fA-F]{40}$/.test(head)) {
+      return `mine under your 0x address as the worker name (address.rig): the pool pays $GLaDOS there, and checks that it holds ${this.gateMin / 10n ** 18n} GLADOS`;
+    }
+    const addr = head.toLowerCase();
+    let wei;
+    const hit = this.balances.get(addr);
+    if (hit && Date.now() - hit.at < GATE_CACHE_MS) {
+      wei = hit.wei;
+    } else {
+      try {
+        const res = await fetch(RPC_4663, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            jsonrpc: "2.0", id: 1, method: "eth_call",
+            params: [{ to: GLADOS, data: "0x70a08231" + addr.slice(2).padStart(64, "0") }, "latest"],
+          }),
+        });
+        const j = await res.json();
+        if (!j.result) throw new Error(j.error ? j.error.message : "no result");
+        wei = BigInt(j.result);
+        this.balances.set(addr, { wei, at: Date.now() });
+      } catch (e) {
+        return `the pool could not read ${head}'s GLADOS balance on chain 4663 (${e && e.message ? e.message : e}); try again shortly`;
+      }
+    }
+    if (wei < this.gateMin) {
+      const have = wei / 10n ** 18n;
+      return `${head} holds ${have} GLADOS on chain 4663 and mining here needs ${this.gateMin / 10n ** 18n}`;
+    }
+    return null;
+  }
+
   drop(ws) {
     const id = this.conns.get(ws);
     if (id !== undefined) {

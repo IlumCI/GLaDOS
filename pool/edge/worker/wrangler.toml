@@ -31,6 +31,10 @@ new_sqlite_classes = ["Pool"]
 COINS = "yescrypt:yescrypt:12@yescrypt.mine.zpool.ca:6233,RRNXJhigAxiLJTRrDKu7fsDknTkXbx1Uz9,c=RVN yespowerR16:yespower-10-4096-16:10@yespowerr16.mine.zpool.ca:6534,RRNXJhigAxiLJTRrDKu7fsDknTkXbx1Uz9,c=RVN"
 SHARE_SECONDS = "45"
 SWITCH = "1"
+# Whole GLADOS a miner's payout address must hold on chain 4663 to connect;
+# "0" is off. 50000 is the runbook's gate. Off while the operator's own mining
+# address holds none -- turning it on now would refuse the operator's rig.
+GATE_MIN = "0"
 
 [[rules]]
 type = "CompiledWasm"
