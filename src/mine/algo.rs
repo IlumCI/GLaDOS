@@ -196,6 +196,27 @@ impl Algo {
     /// do, because the total is fixed and the split only averages the rates
     /// down. Concurrency over *different* bottlenecks is the case where the
     /// machine genuinely does more work.
+    /// What one hash costs relative to plain yescrypt, for choosing between
+    /// members of the yespower family. `None` outside it: comparing a
+    /// memory-hard hash with an arithmetic one on one scale is a statement about
+    /// a particular device, not about the functions.
+    ///
+    /// **Measured, then fitted, and the fit is stated.** `N * r` is the memory
+    /// each hash sweeps; version 1.0 does more per byte than 0.5. On the
+    /// i7-12650H, eight `glados-miner` processes read 3,086 H/s on yescrypt
+    /// (0.5, 2048, 8) and 567 on yespowerR16 (1.0, 4096, 16): a ratio of 5.44,
+    /// against 4.0 from `N * r` alone, so version 1.0 carries 1.36. Other
+    /// parameter sets are extrapolated from that and not measured.
+    pub fn hash_cost(&self) -> Option<f64> {
+        match self {
+            Algo::Yespower { v10, n, r, .. } => {
+                let mem = (*n as f64) * (*r as f64) / (2048.0 * 8.0);
+                Some(if *v10 { mem * 1.36 } else { mem })
+            }
+            _ => None,
+        }
+    }
+
     /// What a Stratum difficulty is multiplied against for this algorithm.
     ///
     /// **Difficulty 1 is not one target across algorithms.** Bitcoin's diff1 is

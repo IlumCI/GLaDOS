@@ -283,3 +283,48 @@ mod tests {
         assert!(parse(&DOC.replace("\"fetched_at\": 1788995410", "\"fetched_at\": 0")).is_err());
     }
 }
+
+/// What zpool pays per hash, per algorithm, from its `/api/status` document.
+///
+/// In mBTC per MH/s per day, which is one unit across every algorithm and all
+/// `Pool::choose` needs. Keys are zpool's algorithm names, lowercased, which is
+/// what a switched pool's coin labels must be.
+///
+/// **The lower of the forward estimate and twice what was actually paid.**
+/// `estimate_current` is what switching needs -- it moves with difficulty and
+/// price now, where `actual_last24h` lags a day -- but an estimate can spike on
+/// one lucky block and never pay. Capping it at double the realised figure keeps
+/// a spike from dragging every miner onto an algorithm that has not yet paid
+/// anyone, while still letting a genuine rise through. Both fields have the
+/// same meaning here: `estimate_current` is BTC and `actual_last24h` is mBTC, per
+/// `mbtc_mh_factor` MH/s, which was read off the API and not assumed.
+pub fn zpool_rates(doc: &str) -> Result<alloc::collections::BTreeMap<String, f64>, String> {
+    let j = Json::parse(doc.trim()).ok_or("zpool status is not JSON")?;
+    let Json::Obj(algos) = j else {
+        return Err(String::from("zpool status is not an object"));
+    };
+    let num = |v: Option<&Json>| -> Option<f64> {
+        match v? {
+            Json::Num(t) | Json::Str(t) => t.parse::<f64>().ok(),
+            _ => None,
+        }
+    };
+    let mut out = alloc::collections::BTreeMap::new();
+    for (name, a) in algos.iter() {
+        let (Some(est), Some(act), Some(factor)) = (
+            num(a.get("estimate_current")),
+            num(a.get("actual_last24h")),
+            num(a.get("mbtc_mh_factor")),
+        ) else {
+            continue;
+        };
+        if factor <= 0.0 || !est.is_finite() || !act.is_finite() {
+            continue;
+        }
+        let rate = (est * 1000.0).min(2.0 * act) / factor;
+        if rate > 0.0 {
+            out.insert(name.to_ascii_lowercase(), rate);
+        }
+    }
+    Ok(out)
+}

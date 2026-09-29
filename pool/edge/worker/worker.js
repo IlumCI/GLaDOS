@@ -45,6 +45,9 @@ import { bind, imports } from "../boundary.mjs";
 const JOB_PERIOD_MS = 30_000;
 // `mine::stratum::MAX_LINE`. A longer line is a desynchronised peer.
 const MAX_LINE = 131072;
+// How often zpool's rates are re-read. Its figures move over minutes, and a
+// switch costs every miner its current job, so faster buys nothing.
+const RATES_MS = 5 * 60_000;
 
 export default {
   async fetch(request, env) {
@@ -85,6 +88,12 @@ export class Pool {
       // fails every request loudly instead, which is a problem somebody sees.
       const saved = await ctx.storage.get("ledger");
       const restored = saved ? this.core.loadLedger(saved) : 0;
+      // SWITCH=1: miners are shown one slot, the one that pays best per unit of
+      // their work, chosen from zpool's live rates. Coin labels must be zpool's
+      // algorithm names for the rates to find them.
+      this.switching = env.SWITCH === "1";
+      if (this.switching) this.core.switchOn();
+      this.ratesAt = 0;
       for (let i = 0; i < this.core.upCount(); i++) {
         this.ups.push({ i, where: this.core.upWhere(i), sock: null, writer: null, running: false });
       }
@@ -146,6 +155,7 @@ export class Pool {
     server.addEventListener("error", () => this.drop(server));
 
     for (const u of this.ups) if (!u.running) this.runUp(u);
+    this.ctx.waitUntil(this.refreshRates());
     await this.arm();
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -209,14 +219,15 @@ export class Pool {
       if (u.writer) u.writer.write(new TextEncoder().encode(m)).catch(() => {});
     }
     if (r.work) {
-      for (const [ws, id] of this.conns) {
-        const w = this.core.work(id);
-        try {
-          for (const m of w.send) ws.send(m);
-        } catch {
-          this.drop(ws);
-        }
+      // Upstream work arriving can make a slot choosable that was not when the
+      // rates were read -- the first connection's rates routinely land before
+      // any upstream has answered. Re-decide against the rates already held; no
+      // fetch, and silence unless the choice actually moved.
+      if (this.switching && this.ratesDoc) {
+        const again = this.core.rates(this.ratesDoc);
+        for (const l of again.log) if (!l.startsWith("[switch] staying")) this.log(l);
       }
+      this.pushWork();
     }
     if (r.close) this.log(`[up ${u.i}] ${r.why}`);
     return r.close;
@@ -246,7 +257,37 @@ export class Pool {
   }
 
   // Every job period: fresh work for quiet miners, and the ledger to storage.
+  // Every RATES_MS at most, while anyone is mining: fetch zpool's rates and let
+  // the core re-choose. A failed fetch keeps the current choice; it is not a
+  // reason to move every miner.
+  async refreshRates() {
+    if (!this.switching || Date.now() - this.ratesAt < RATES_MS) return;
+    this.ratesAt = Date.now();
+    try {
+      const res = await fetch("https://zpool.ca/api/status", { headers: { "user-agent": "glados-pool" } });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      this.ratesDoc = await res.text();
+      const r = this.core.rates(this.ratesDoc);
+      for (const l of r.log) this.log(l);
+      if (r.work) this.pushWork();
+    } catch (e) {
+      this.log(`[switch] rates unavailable, staying: ${e && e.message ? e.message : e}`);
+    }
+  }
+
+  pushWork() {
+    for (const [ws, id] of this.conns) {
+      const w = this.core.work(id);
+      try {
+        for (const m of w.send) ws.send(m);
+      } catch {
+        this.drop(ws);
+      }
+    }
+  }
+
   async alarm() {
+    await this.refreshRates();
     this.tickUps();
     for (const [ws, id] of this.conns) {
       const r = this.core.idle(id);

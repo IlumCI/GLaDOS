@@ -274,3 +274,50 @@ pub extern "C" fn edge_work(conn: u32) -> u32 {
     let out = c.on_work(&s.pool);
     set_out(&encode(&out))
 }
+
+// --- Switching -----------------------------------------------------------------
+
+/// Turn switched mode on: every miner is shown one slot, starting with slot 0,
+/// until `edge_rates` chooses otherwise.
+#[no_mangle]
+pub extern "C" fn edge_switch_on() -> u32 {
+    let g = STATE.lock().unwrap();
+    let Some(s) = g.as_ref() else { return 0 };
+    s.pool.lock().unwrap().set_switched(Some(0));
+    1
+}
+
+/// zpool's `/api/status` document: re-choose the active slot. Answers records --
+/// a log line always, and `W` when the choice changed so every miner is re-issued.
+#[no_mangle]
+pub extern "C" fn edge_rates(ptr: *const u8, len: u32) -> u32 {
+    let doc = text(ptr, len);
+    let g = STATE.lock().unwrap();
+    let Some(s) = g.as_ref() else { return 0 };
+    let mut out = UpOut::default();
+    match glados_pool::market::zpool_rates(&doc) {
+        Err(e) => out.log.push(format!("[switch] rates refused: {e}")),
+        Ok(rates) => {
+            let mut p = s.pool.lock().unwrap();
+            let pick = p.choose(&|l: &str| rates.get(&l.to_ascii_lowercase()).copied());
+            let summary: Vec<String> = p
+                .coins
+                .iter()
+                .map(|c| match (rates.get(&c.label.to_ascii_lowercase()), c.algo.hash_cost()) {
+                    (Some(r), Some(k)) => format!("{} {:.4}", c.label, r / k),
+                    _ => format!("{} -", c.label),
+                })
+                .collect();
+            let was = p.switched();
+            if pick.is_some() && p.set_switched(pick) {
+                let name = |i: Option<usize>| i.map(|i| p.coins[i].label.clone()).unwrap_or_default();
+                out.log.push(format!("[switch] {} -> {} ({})", name(was), name(pick), summary.join(", ")));
+                out.work = true;
+            } else {
+                out.log.push(format!("[switch] staying ({})", summary.join(", ")));
+            }
+        }
+    }
+    drop(g);
+    set_out(&encode_up(&out))
+}

@@ -54,6 +54,9 @@ export function bind(instance) {
 
     // Upstreams, addressed by index. The caller owns the socket and hands every
     // chunk it reads to `upBytes`, in whatever pieces the transport delivered.
+    switchOn: () => x.edge_switch_on(),
+    // zpool's status document in; records out (`work` set when the choice moved).
+    rates: (doc) => records(withBytes(doc, (p, l) => x.edge_rates(p, l))),
     upCount: () => x.edge_up_count(),
     upWhere: (i) => {
       const [host, port] = dec.decode(out(x.edge_up_where(i))).split("\t");

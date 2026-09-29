@@ -129,6 +129,8 @@ pub struct Conn {
     // yespower, measured on the kernel in one run -- so a shared difficulty
     // would be wrong for at least one of them by a factor of a thousand.
     vd: Vec<VarDiff>,
+    /// In switched mode, the pool slot this miner was last shown. See `wire_job`.
+    shown: Option<usize>,
 }
 
 impl Conn {
@@ -144,6 +146,7 @@ impl Conn {
             works_this_second: 0,
             window_ms: clock::now_ms(),
             vd: Vec::new(),
+            shown: None,
         }
     }
 
@@ -181,7 +184,7 @@ impl Conn {
                     pool.lock().unwrap().remember_bits(&self.worker, slot, b);
                 }
             }
-            issue_all(pool, &self.vd, &mut out);
+            issue_all(pool, &self.vd, &mut self.shown, &mut out);
         }
         out
     }
@@ -194,7 +197,7 @@ impl Conn {
     pub fn on_work(&mut self, pool: &Mutex<Pool>) -> Out {
         let mut out = Out::default();
         if self.greeted {
-            issue_all(pool, &self.vd, &mut out);
+            issue_all(pool, &self.vd, &mut self.shown, &mut out);
         }
         out
     }
@@ -296,14 +299,16 @@ impl Conn {
                         .map(|i| VarDiff::new(p.resume_bits(&self.worker, i)))
                         .collect()
                 };
+                // Switched, a miner is shown one slot however many the pool holds.
+                let shown = if pool.lock().unwrap().switched().is_some() { 1 } else { slots };
                 let w = proto::Welcome {
                     v: proto::VERSION,
-                    slots,
+                    slots: shown,
                     session: self.peer.clone(),
                 };
                 out.say(proto::encode_welcome(id, &w));
                 self.greeted = true;
-                issue_all(pool, &self.vd, &mut out);
+                issue_all(pool, &self.vd, &mut self.shown, &mut out);
             }
             "glados.submit" => {
                 // Before the greeting there is no worker to attribute a share to,
@@ -446,7 +451,7 @@ impl Conn {
                                 // period: a miner that just proved it is fast
                                 // should not spend another thirty seconds flooding
                                 // at the old difficulty.
-                                issue_all(pool, &self.vd, &mut out);
+                                issue_all(pool, &self.vd, &mut self.shown, &mut out);
                             }
                         }
                     }
@@ -492,19 +497,7 @@ impl Conn {
                 let Some(slot) = params.and_then(proto::parse_work) else {
                     return out;
                 };
-                let job = {
-                    let mut p = pool.lock().unwrap();
-                    if slot as usize >= p.slots() as usize {
-                        None
-                    } else {
-                        let bits = self
-                            .vd
-                            .get(slot as usize)
-                            .map(|v| v.bits())
-                            .unwrap_or_else(|| p.start_bits(slot as usize));
-                        p.make_job(slot, bits)
-                    }
-                };
+                let job = wire_job(&mut pool.lock().unwrap(), &self.vd, &mut self.shown, slot);
                 // Silence when there is nothing to give. An upstream coin with no
                 // template yet yields no job, and inventing one would put a miner
                 // on a search that can never pay.
@@ -531,25 +524,49 @@ impl Conn {
     }
 }
 
-/// Fresh work on every slot, at each slot's own difficulty.
-fn issue_all(pool: &Mutex<Pool>, vd: &[VarDiff], out: &mut Out) {
+/// Fresh work on every slot a miner is shown, at each slot's own difficulty.
+fn issue_all(pool: &Mutex<Pool>, vd: &[VarDiff], shown: &mut Option<usize>, out: &mut Out) {
     let jobs: Vec<proto::Job> = {
         let mut p = pool.lock().unwrap();
-        (0..p.slots())
-            .filter_map(|s| {
-                // A connection that has not greeted yet has no retargeters, so
-                // fall back to the coin's configured start rather than refusing:
-                // the alternative is a miner that greets and is told nothing until
-                // the first timeout.
-                let bits = vd
-                    .get(s as usize)
-                    .map(|v| v.bits())
-                    .unwrap_or_else(|| p.start_bits(s as usize));
-                p.make_job(s, bits)
-            })
-            .collect()
+        let n = if p.switched().is_some() { 1 } else { p.slots() };
+        (0..n).filter_map(|s| wire_job(&mut p, vd, shown, s)).collect()
     };
     for j in jobs {
         out.say(proto::encode_job(&j));
     }
+}
+
+/// The job for a slot as the miner numbers it.
+///
+/// Switched, wire slot 0 is whichever pool slot is active and every other wire
+/// slot is nothing. The job is built for the pool slot -- its algorithm, its
+/// upstream, its difficulty -- and only the number on the wire is rewritten.
+fn wire_job(p: &mut Pool, vd: &[VarDiff], shown: &mut Option<usize>, wire: u32) -> Option<proto::Job> {
+    let slot = match p.switched() {
+        Some(a) if wire == 0 => a as u32,
+        Some(_) => return None,
+        None if wire < p.slots() => wire,
+        None => return None,
+    };
+    // A connection that has not greeted yet has no retargeters, so fall back to
+    // the coin's configured start rather than refusing: the alternative is a
+    // miner that greets and is told nothing until the first timeout.
+    let bits = vd
+        .get(slot as usize)
+        .map(|v| v.bits())
+        .unwrap_or_else(|| p.start_bits(slot as usize));
+    let mut j = p.make_job(slot, bits)?;
+    if p.switched().is_some() {
+        j.slot = 0;
+        // Clean when the active slot moved under this miner, since its previous
+        // job is then another algorithm's and worthless. Not on every re-issue:
+        // upstream sends work every few seconds, and a clean job drops the
+        // miner's queued shares for the slot -- shares this pool would still
+        // have validated and paid.
+        if *shown != Some(slot as usize) {
+            j.clean = true;
+            *shown = Some(slot as usize);
+        }
+    }
+    Some(j)
 }

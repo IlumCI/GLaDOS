@@ -25,6 +25,16 @@ new_sqlite_classes = ["Pool"]
 # is paid. The same spec `glados-pool` takes on its command line.
 COINS = "yescrypt:yescrypt:12"
 SHARE_SECONDS = "45"
+# Production, once the operator's payout address exists -- labels are zpool's
+# algorithm names, which is how the rates find them, and every miner is moved
+# to whichever pays best per unit of its work:
+#
+#   COINS = "yescrypt:yescrypt:12@yescrypt.mine.zpool.ca:6233,ADDR,c=RVN yespowerR16:yespower-10-4096-16:10@yespowerr16.mine.zpool.ca:6534,ADDR,c=RVN"
+#   SWITCH = "1"
+#
+# The address is the operator's, never a miner's: the pool is an auto-exchange,
+# and proceeds have to land in one place to be spent on one market buy.
+SWITCH = "0"
 
 [[rules]]
 type = "CompiledWasm"

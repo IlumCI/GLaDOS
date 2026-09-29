@@ -325,6 +325,8 @@ pub struct Pool {
     pub coins: Vec<Coin>,
     /// See `work_serial`.
     work_serial: u64,
+    /// In switched mode, the one slot every miner is working. See `switched`.
+    switched: Option<usize>,
     /// Where to append a recomputable record of every accepted share, if
     /// anywhere.
     ///
@@ -480,6 +482,9 @@ pub const DEFAULT_WINDOW_WORK: u64 = 1u64 << 32;
 /// different, and only one of them is worth refusing over.
 const LEDGER_VERSION: u32 = 3;
 
+/// How much better a candidate must pay before the pool switches to it.
+pub const SWITCH_MARGIN: f64 = 1.10;
+
 /// How many issued jobs to remember. Sixty-four is four coins' worth of a
 /// couple of minutes at a thirty-second job cadence, which is comfortably
 /// longer than any honest share takes to arrive.
@@ -493,6 +498,7 @@ impl Pool {
         Pool {
             coins,
             work_serial: 0,
+            switched: None,
             sharelog: None,
             issued: Vec::new(),
             seen: Vec::new(),
@@ -748,6 +754,62 @@ impl Pool {
     /// the new job at once rather than at their next idle period.
     pub fn work_serial(&self) -> u64 {
         self.work_serial
+    }
+
+    /// The slot every miner is working, when the pool is switching.
+    ///
+    /// **Switched mode shows a miner one slot and moves it.** The pool holds an
+    /// upstream per algorithm, and a miner is given only the one that pays best
+    /// now, always on wire slot 0, re-issued `clean` the moment the choice
+    /// changes. Nothing new is needed on the miner: a job already carries its
+    /// algorithm and `work::install` already resets a slot whose algorithm
+    /// changed. Nothing is lost in accounting either, because a share names its
+    /// *job* and the job remembers which slot and algorithm it was issued for --
+    /// a share for the previous choice arriving after a switch is validated and
+    /// forwarded exactly as it would have been.
+    pub fn switched(&self) -> Option<usize> {
+        self.switched
+    }
+
+    /// Choose the active slot. Answers whether the choice changed, and bumps
+    /// `work_serial` when it did, so every connection is re-issued at once.
+    pub fn set_switched(&mut self, slot: Option<usize>) -> bool {
+        let slot = slot.filter(|&s| s < self.coins.len());
+        if slot == self.switched {
+            return false;
+        }
+        self.switched = slot;
+        self.work_serial += 1;
+        true
+    }
+
+    /// Which slot pays best per unit of a miner's time, given what upstream pays
+    /// per hash for each label (any unit, so long as it is one unit throughout).
+    ///
+    /// Pays-per-hash divided by `Algo::hash_cost` is pays per unit of work, which
+    /// is what a miner actually has to spend. Only slots with an upstream that
+    /// has sent work, a rate, and a cost are candidates -- a slot that cannot be
+    /// worked is not a choice. **Hysteresis of `SWITCH_MARGIN`**: a switch
+    /// abandons every miner's current job and restarts their difficulty
+    /// retargeting on another slot, so a candidate must beat the incumbent by a
+    /// margin rather than by noise in a rate that is itself an estimate.
+    pub fn choose(&self, rate: &dyn Fn(&str) -> Option<f64>) -> Option<usize> {
+        let score = |i: usize| -> Option<f64> {
+            let c = &self.coins[i];
+            if !matches!(c.source, Source::Upstream { .. }) || c.work.is_none() {
+                return None;
+            }
+            let r = rate(&c.label)?;
+            let cost = c.algo.hash_cost()?;
+            (r > 0.0).then(|| r / cost)
+        };
+        let best = (0..self.coins.len())
+            .filter_map(|i| score(i).map(|v| (i, v)))
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(core::cmp::Ordering::Equal))?;
+        match self.switched.and_then(|cur| score(cur).map(|v| (cur, v))) {
+            Some((cur, v)) if best.1 <= v * SWITCH_MARGIN => Some(cur),
+            _ => Some(best.0),
+        }
     }
 
     /// The payout window as a fraction of one block's expected work, where a
@@ -1493,6 +1555,121 @@ mod tests {
             work: None,
             e2: 0,
         }])
+    }
+
+    fn yespower_coin(label: &str, v10: bool, n: u32, r: u32) -> Coin {
+        Coin {
+            label: String::from(label),
+            asset: String::from(label),
+            algo: Algo::Yespower { v10, n, r, pers: None },
+            share_bits: 8,
+            share_target: target_with_leading_zeros(8),
+            network_target: None,
+            source: Source::Upstream {
+                host: String::from("nowhere"),
+                port: 1,
+                user: String::from("w"),
+                pass: String::from("x"),
+            },
+            work: None,
+            e2: 0,
+        }
+    }
+
+    /// The switching pool: yescrypt in slot 0, yespowerR16 in slot 1, both live.
+    fn switching_pool() -> Pool {
+        let mut p = Pool::new(vec![
+            yespower_coin("yescrypt", false, 2048, 8),
+            yespower_coin("yespowerr16", true, 4096, 16),
+        ]);
+        p.set_work(0, some_work());
+        p.set_work(1, some_work());
+        p
+    }
+
+    /// Choosing by what a miner's *time* earns, not what a hash earns.
+    ///
+    /// zpool's figures on 2026-09-29: yespowerR16 paid 9.5x yescrypt per hash
+    /// and costs 5.44x as much to compute, so it wins -- by 1.75x, which is the
+    /// measured gain on the i7-12650H. A rule reading per-hash pay alone would
+    /// also pick it, and would pick yescryptR32 over both, which costs 46x.
+    #[test]
+    fn the_pool_switches_to_what_pays_per_unit_of_work() {
+        let mut p = switching_pool();
+        let rates = |l: &str| match l {
+            "yescrypt" => Some(0.16),
+            "yespowerr16" => Some(1.53),
+            _ => None,
+        };
+        assert_eq!(p.choose(&rates), Some(1));
+        // A rate that halves the other way flips it back.
+        let turned = |l: &str| match l {
+            "yescrypt" => Some(0.16),
+            "yespowerr16" => Some(0.60),
+            _ => None,
+        };
+        p.set_switched(Some(1));
+        assert_eq!(p.choose(&turned), Some(0));
+    }
+
+    /// Within the margin the incumbent stays: a switch drops every miner's job.
+    #[test]
+    fn a_switch_needs_a_margin_not_noise() {
+        let mut p = switching_pool();
+        p.set_switched(Some(0));
+        // R16 at 5% better per unit of work than yescrypt: not enough.
+        let close = |l: &str| match l {
+            "yescrypt" => Some(1.0),
+            "yespowerr16" => Some(1.0 * 5.4400000000000004 * 1.05),
+            _ => None,
+        };
+        assert_eq!(p.choose(&close), Some(0));
+    }
+
+    /// A slot with no upstream work, or no published rate, is not a choice.
+    #[test]
+    fn an_unworkable_slot_is_never_chosen() {
+        let mut p = Pool::new(vec![
+            yespower_coin("yescrypt", false, 2048, 8),
+            yespower_coin("yespowerr16", true, 4096, 16),
+        ]);
+        p.set_work(0, some_work());
+        let rates = |l: &str| match l {
+            "yescrypt" => Some(0.16),
+            "yespowerr16" => Some(99.0),
+            _ => None,
+        };
+        assert_eq!(p.choose(&rates), Some(0), "slot 1 has no work");
+        let only_r16 = |l: &str| (l == "yespowerr16").then_some(1.0);
+        p.set_work(1, some_work());
+        assert_eq!(p.choose(&only_r16), Some(1), "slot 0 has no rate");
+    }
+
+    /// Every connection must be re-issued when the choice changes, and only then.
+    #[test]
+    fn a_switch_bumps_the_work_serial_once() {
+        let mut p = switching_pool();
+        let before = p.work_serial();
+        assert!(p.set_switched(Some(1)));
+        assert_eq!(p.work_serial(), before + 1);
+        assert!(!p.set_switched(Some(1)), "choosing the incumbent is not a switch");
+        assert_eq!(p.work_serial(), before + 1);
+        assert!(!p.set_switched(Some(9)) || p.switched().is_none(), "no such slot");
+    }
+
+    /// zpool's own document, parsed. Units checked against the live API:
+    /// `estimate_current` in BTC, `actual_last24h` in mBTC, per factor MH/s.
+    #[test]
+    fn zpool_rates_are_read_in_one_unit_and_capped() {
+        let doc = r#"{
+            "yescrypt": {"estimate_current": "0.00014995", "actual_last24h": "0.16014", "mbtc_mh_factor": 1},
+            "sha256": {"estimate_current": "0.00000000062", "actual_last24h": "0.61526", "mbtc_mh_factor": 1000000000},
+            "spiky": {"estimate_current": "0.01", "actual_last24h": "0.5", "mbtc_mh_factor": 1}
+        }"#;
+        let r = crate::market::zpool_rates(doc).unwrap();
+        assert!((r["yescrypt"] - 0.14995).abs() < 1e-9, "the estimate, below twice actual");
+        assert!(r["sha256"] < 1e-9, "per MH, after the factor");
+        assert!((r["spiky"] - 1.0).abs() < 1e-9, "an estimate at 20x is capped at twice what was paid");
     }
 
     /// An upstream coin with no work must not invent a header.
