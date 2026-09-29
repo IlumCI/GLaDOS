@@ -8,6 +8,15 @@ name = "glados-pool"
 main = "worker.js"
 compatibility_date = "2025-09-01"
 
+# Miners connect at wss://pool.aperture.institute/mine; the share log is
+# https://pool.aperture.institute/ledger.json. A custom domain rather than a
+# route: Cloudflare creates the DNS record and the certificate itself, and
+# workers.dev keeps working beside it for images already cut.
+routes = [{ pattern = "pool.aperture.institute", custom_domain = true }]
+# Explicit, because adding a route turns workers.dev off by default -- and the
+# images already running and already cut dial glados-pool.*.workers.dev.
+workers_dev = true
+
 [[durable_objects.bindings]]
 name = "POOL"
 class_name = "Pool"

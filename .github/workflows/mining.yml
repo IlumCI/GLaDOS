@@ -125,7 +125,7 @@ jobs:
           #
           # `worker ask`: the miner asks for your 0x address at boot, which is
           # where your $GLaDOS is paid. Nothing else needs setting.
-          pool wss://glados-pool.foxybro64.workers.dev/mine
+          pool wss://pool.aperture.institute/mine
           worker ask
           CFG
           sed -i 's/^          //' payload-dir/MINER.TXT
