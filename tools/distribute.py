@@ -191,6 +191,32 @@ def equal_weights(work, min_work=1):
     return {a: 1 for a, w in work.items() if w >= max(min_work, 1)}
 
 
+def median_floor(work, frac):
+    """`frac` of the work-weighted median address's work: the bar to clear.
+
+    **The holding gate locks capital; it does not spend it.** Spread $300 of
+    GLADOS over a hundred addresses and take a hundred equal shares, and the
+    $300 comes back afterwards. A floor relative to what a *typical* miner did
+    makes each extra address cost compute that is actually burned -- a quarter
+    of a typical miner's whole epoch at `frac=0.25`.
+
+    **Weighted by work, not counted by address**, and that is the whole point.
+    A plain median counts addresses, so a hundred sybils doing slivers *are* the
+    median and drag the floor down to their own sliver. This takes the work of
+    the address at which half of all the epoch's work has been done: sybils
+    contribute almost no work, so they cannot move it, however many there are.
+    """
+    ws = sorted(w for w in work.values() if w > 0)
+    if not ws:
+        return 0
+    half, run = sum(ws) / 2, 0
+    for w in ws:
+        run += w
+        if run >= half:
+            return int(w * frac)
+    return int(ws[-1] * frac)
+
+
 # ---------------------------------------------------------------- ledger
 
 def shares_from(ledger, basis, coin=None):
@@ -439,6 +465,19 @@ def selftest():
           "equal split: 900 and 100 of work are paid alike, and the total is exact")
     claim(equal_weights({A.lower(): 5, B.lower(): 50}, min_work=10) == {B.lower(): 1},
           "equal split: under --min-work is not a share")
+    # Three real miners; the work-weighted median address is 0xb (half the
+    # 2,200 of work is reached at 0xb's 800 counting up), so the floor is 200.
+    honest = {"0xa": 1000, "0xb": 800, "0xc": 400}
+    claim(median_floor(honest, 0.25) == 200, "the floor is a quarter of the work-weighted median")
+    sybils = {**honest, **{"0xs%03d" % i: 10 for i in range(100)}}
+    claim(median_floor(sybils, 0.25) == 200,
+          "a hundred sybil addresses doing slivers cannot drag the floor down")
+    claim(not any(k.startswith("0xs") for k in equal_weights(sybils, median_floor(sybils, 0.25))),
+          "and none of them is paid")
+    claim(set(equal_weights({**honest, "0xweak": 250}, median_floor({**honest, "0xweak": 250}, 0.25))) >= {"0xweak"},
+          "a weak but real machine above a quarter of typical is paid alike")
+    claim("0xsliver" not in equal_weights({**honest, "0xsliver": 10}, median_floor({**honest, "0xsliver": 10}, 0.25)),
+          "an address doing a sliver of typical is not a share")
     claim(ww[A.lower()] == 100 and ww[B.lower()] == 900, "the window basis pays the PPLNS window")
     claim(wt != ww, "and the two bases genuinely disagree, which is the whole point")
 
@@ -509,6 +548,10 @@ def main():
     ap.add_argument("--min-work", default="1",
                     help="with --split equal, the work an address needs in this "
                          "epoch to count at all (so an idle connection is not a share)")
+    ap.add_argument("--min-frac", default="0.25",
+                    help="with --split equal, an address must also have done this "
+                         "fraction of the median address's work, so every extra "
+                         "address costs burned compute and not only held tokens")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
 
@@ -574,7 +617,8 @@ def main():
             return 1
 
     if a.split == "equal":
-        weights = equal_weights(work, int(parse_amount(a.min_work)))
+        floor = max(int(parse_amount(a.min_work)), median_floor(work, float(a.min_frac)))
+        weights = equal_weights(work, floor)
         dropped = len(work) - len(weights)
         print("split equal: %d address(es) share alike, %d under --min-work %s"
               % (len(weights), dropped, a.min_work), file=sys.stderr)
