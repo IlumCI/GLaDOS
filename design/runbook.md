@@ -199,6 +199,42 @@ the operator's own float; a recipient argument is one typo away from bridging
 an event's funding to a stranger, irreversibly, with the transaction
 succeeding.
 
+## 6b. Semi-automatic payout: RVN to an open epoch
+
+The live pool is paid by zpool in **RVN**, to the operator's own Ravencoin
+wallet -- chosen for a 0.05 RVN minimum, so a payout lands the same day. This
+is every step from there to miners being able to claim $GLaDOS, each one a
+command the operator runs. No key is held by anything but the operator's own
+wallets; that is the arrangement for testing, and the unattended form moves the
+same steps into the pool's treasury.
+
+```bash
+# 0. once: a free ChangeNOW partner key, in your own shell only
+export CHANGENOW_KEY=...
+
+# 1. how much has zpool paid, and is it past the swap minimum (~151 RVN)?
+node contracts/swap.mjs min
+curl -s https://blockbook.ravencoin.org/api/v2/address/<your R... address> | jq .balance
+
+# 2. register the swap, RVN -> ETH on Robinhood Chain, paid to your 4663 wallet
+node contracts/swap.mjs quote  --rvn 500
+node contracts/swap.mjs create --rvn 500 --to 0xYOUR4663WALLET
+#    ...then send exactly that RVN to the printed address from your wallet,
+#    and wait for it to fill:
+node contracts/swap.mjs status --id <id>
+
+# 3. close the epoch and build the tree: steps 5 and 6 above
+
+# 4. open it, funded with that ETH as WETH: step 7 below, simulate first
+node contracts/deploy.mjs open epoch.json --amount <ETH> --gate 50000
+node contracts/deploy.mjs open epoch.json --amount <ETH> --gate 50000 --send
+```
+
+**Batch.** ChangeNOW's cost is mostly fixed: about 9% of a $2 swap and far
+less of a $20 one, so the first swap should wait until it is worth doing.
+The distributor must be deployed before step 4 -- `deploy.mjs deploy --send`,
+once, after `design/audit-2.md`'s fixes, which are applied.
+
 ## 7. Open the epoch
 
 ### Three things to check before the first `--send`, from `design/audit.md`
