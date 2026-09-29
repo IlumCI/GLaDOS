@@ -64,6 +64,47 @@ HH_HD uint64_t hh_rotl(uint64_t x, int n) {
 #endif
 }
 
+#ifdef HH_COMPACT
+HH_HD void hh_keccakf(uint64_t a[25]) {
+    const int rho[24] = {1, 3, 6, 10, 15, 21, 28, 36, 45, 55, 2, 14,
+                         27, 41, 56, 8, 25, 43, 62, 18, 39, 61, 20, 44};
+    const int pi[24] = {10, 7, 11, 17, 18, 3, 5, 16, 8, 21, 24, 4,
+                        15, 23, 19, 13, 12, 2, 20, 14, 22, 9, 6, 1};
+#pragma unroll
+    for (int r = 0; r < 24; ++r) {
+        uint64_t c[5];
+#pragma unroll
+        for (int x = 0; x < 5; ++x) c[x] = a[x] ^ a[x + 5] ^ a[x + 10] ^ a[x + 15] ^ a[x + 20];
+#pragma unroll
+        for (int x = 0; x < 5; ++x) {
+            const uint64_t d = c[(x + 4) % 5] ^ hh_rotl(c[(x + 1) % 5], 1);
+#pragma unroll
+            for (int y = 0; y < 25; y += 5) a[y + x] ^= d;
+        }
+        uint64_t t = a[1];
+#pragma unroll
+        for (int i = 0; i < 24; ++i) {
+            const int j = pi[i];
+            const uint64_t b = a[j];
+            a[j] = hh_rotl(t, rho[i]);
+            t = b;
+        }
+#pragma unroll
+        for (int y = 0; y < 25; y += 5) {
+            uint64_t b[5];
+#pragma unroll
+            for (int x = 0; x < 5; ++x) b[x] = a[y + x];
+#pragma unroll
+            for (int x = 0; x < 5; ++x) a[y + x] = b[x] ^ (~b[(x + 1) % 5] & b[(x + 2) % 5]);
+        }
+#ifdef __CUDA_ARCH__
+        a[0] ^= hhRC[r];
+#else
+        a[0] ^= hhRC_host[r];
+#endif
+    }
+}
+#else
 HH_HD void hh_keccakf(uint64_t a[25]) {
     // Generated: theta, rho and pi, chi and iota with every index a literal, so
     // the state lives in registers. A version walking rho/pi through small
@@ -143,6 +184,7 @@ HH_HD void hh_keccakf(uint64_t a[25]) {
 #endif
     }
 }
+#endif
 
 // SHA3-256 of a message shorter than one rate (136 bytes), which every input
 // here is: 80 bytes of header, 32 of digest.
@@ -206,7 +248,17 @@ static void hh_matrix(const uint8_t prev[32], uint8_t m[64][64]) {
 
 // --- device: one nonce -----------------------------------------------------------
 //
-// **Lanes, never bytes.** The first version held the header, the digest and
+// **Bytes, and the reasoning below is why that is surprising.** Two versions
+// follow. The byte-array one is the default because it measured 11% faster,
+// back to back on one card: 80.5 against 72.1 MH/s with the live miner sharing
+// the GPU, 174 against 158 alone. The lane version (`-DHH_LANES`) was written
+// on the argument below and the argument did not survive the measurement --
+// nvcc keeps these fixed-index arrays in registers after all, and the lane
+// version's shifts cost more than they save. It is kept because the next
+// person will make the same argument. Profiling by removing stages found the
+// real cost: Keccak is ~88% of a hash, the matrix step ~12%.
+//
+// **Lanes, never bytes** (the rejected argument). The first version held the header, the digest and
 // the XOR in `uint8_t` arrays and indexed them in loops; nvcc keeps such arrays
 // in local memory, which is DRAM behind a cache, and it measured 174 MH/s. Every
 // quantity here is instead a 64-bit Keccak lane or a 32-bit dp4a word with
@@ -227,6 +279,41 @@ __device__ __forceinline__ uint32_t hh_vec(uint64_t lane, int shift) {
     return ((x >> 4) & 0xFu) | ((x & 0xFu) << 8) | (((x >> 12) & 0xFu) << 16) | (((x >> 8) & 0xFu) << 24);
 }
 
+#ifndef HH_LANES
+__constant__ uint8_t hhHeader[80];
+__device__ __forceinline__ void heavyhash_nonce(uint32_t nonce, uint32_t out[8]) {
+    uint8_t h[80];
+#pragma unroll
+    for (int i = 0; i < 76; ++i) h[i] = hhHeader[i];
+    h[76] = nonce; h[77] = nonce >> 8; h[78] = nonce >> 16; h[79] = nonce >> 24;
+    uint64_t d[4];
+    hh_sha3_short(h, 80, d);
+    uint8_t b[32];
+#pragma unroll
+    for (int i = 0; i < 32; ++i) b[i] = (uint8_t)(d[i >> 3] >> (8 * (i & 7)));
+    int32_t v[16];
+#pragma unroll
+    for (int w = 0; w < 16; ++w) {
+        const uint8_t b0 = b[2 * w], b1 = b[2 * w + 1];
+        v[w] = (int32_t)((uint32_t)(b0 >> 4) | ((uint32_t)(b0 & 0xF) << 8) |
+                         ((uint32_t)(b1 >> 4) << 16) | ((uint32_t)(b1 & 0xF) << 24));
+    }
+    uint8_t x[32];
+#pragma unroll
+    for (int k = 0; k < 32; ++k) {
+        int p0 = 0, p1 = 0;
+#pragma unroll
+        for (int w = 0; w < 16; ++w) {
+            p0 = __dp4a(hhM[2 * k][w], v[w], p0);
+            p1 = __dp4a(hhM[2 * k + 1][w], v[w], p1);
+        }
+        x[k] = b[k] ^ (uint8_t)(((p0 >> 10) << 4) | (p1 >> 10));
+    }
+    hh_sha3_short(x, 32, d);
+#pragma unroll
+    for (int i = 0; i < 4; ++i) { out[2 * i] = (uint32_t)d[i]; out[2 * i + 1] = (uint32_t)(d[i] >> 32); }
+}
+#else
 __device__ __forceinline__ void heavyhash_nonce(uint32_t nonce, uint32_t out[8]) {
     uint64_t a[25];
 #pragma unroll
@@ -270,6 +357,8 @@ __device__ __forceinline__ void heavyhash_nonce(uint32_t nonce, uint32_t out[8])
     for (int i = 0; i < 4; ++i) { out[2 * i] = (uint32_t)a[i]; out[2 * i + 1] = (uint32_t)(a[i] >> 32); }
 }
 
+#endif
+
 // Upload a job: the sponge's constant input, and the matrix for the previous block.
 static int heavyhash_upload(const uint8_t header[80]) {
     static uint8_t m[64][64];
@@ -285,5 +374,8 @@ static int heavyhash_upload(const uint8_t header[80]) {
     lanes[16] = 0x8000000000000000ULL; // byte 135
     if (cudaMemcpyToSymbol(hhM, packed, sizeof packed) != cudaSuccess) return -1;
     if (cudaMemcpyToSymbol(hhLanes, lanes, sizeof lanes) != cudaSuccess) return -1;
+#ifndef HH_LANES
+    if (cudaMemcpyToSymbol(hhHeader, header, 80) != cudaSuccess) return -1;
+#endif
     return 0;
 }
