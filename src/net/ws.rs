@@ -223,6 +223,15 @@ impl Socket {
         Ok(())
     }
 
+    /// Whether the connection underneath has ended.
+    ///
+    /// `recv` answers `None` both for a quiet peer and for one whose TCP
+    /// connection has gone without a close frame, and a caller holding the
+    /// socket open for hours has to be able to tell those apart.
+    pub fn closed(&self) -> bool {
+        self.tls.closed()
+    }
+
     pub fn close(&mut self) {
         // 1000 = normal. Best effort; the connection is going away regardless.
         let _ = self.send_raw(OP_CLOSE, &[0x03, 0xE8]);

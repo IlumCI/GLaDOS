@@ -142,6 +142,8 @@ pub struct Config {
     pub user: String,
     pub pass: String,
     pub proto: Protocol,
+    /// The WebSocket path when the pool is `wss://`, and `None` for plain TCP.
+    pub ws: Option<String>,
 }
 
 pub static CONFIG: Spin<Option<Config>> = Spin::new(None);
@@ -760,9 +762,77 @@ fn sleep_ms(ms: u64) {
     }
 }
 
+/// The socket under a session, whichever kind the pool is reached over.
+///
+/// **One interface over both, so nothing above it knows which.** A line is a
+/// line: over TCP it is bytes up to a newline, over a WebSocket it is one text
+/// message carrying the same bytes, and the pool's WebAssembly core splits on
+/// newlines either way. So the Stratum and glados paths above this are the
+/// same code on both transports, and a bug in one cannot hide in the other.
+///
+/// The WebSocket form exists for the serverless pool: a Cloudflare Worker
+/// accepts no inbound TCP, so a Durable Object is reachable only this way.
+///
+/// **It rides the kernel's single default TCP connection**, because
+/// `tls::connect` does, where the plain form has a handle of its own. On a
+/// mining image nothing else opens one; on a full machine an `https` or an
+/// update fetch while mining over `wss://` takes the connection away, and the
+/// miner reconnects through its ordinary backoff -- noticed, not corrupted.
+enum Link {
+    Tcp(tcp::Handle),
+    Ws(crate::net::ws::Socket),
+}
+
+impl Link {
+    /// Send, and `false` if the peer has gone.
+    fn send(&mut self, bytes: &[u8]) -> bool {
+        match self {
+            Link::Tcp(h) => tcp::send_at(*h, bytes, 5_000).is_ok(),
+            Link::Ws(w) => w.send_text(&String::from_utf8_lossy(bytes)).is_ok(),
+        }
+    }
+
+    /// Whatever arrived within `ms`, possibly nothing. `None` when the peer
+    /// has gone -- kept apart from a quiet peer, or a dead pool reads as an idle
+    /// one forever, which is the failure `fill` exists to prevent.
+    fn recv(&mut self, ms: u64) -> Option<Vec<u8>> {
+        use crate::net::ws::Msg;
+        match self {
+            Link::Tcp(h) => {
+                let data = tcp::recv_at(*h, ms);
+                if data.is_empty() && !tcp::alive(*h) {
+                    return None;
+                }
+                Some(data)
+            }
+            Link::Ws(w) => match w.recv(ms) {
+                Ok(Some(Msg::Text(t))) => Some(t.into_bytes()),
+                Ok(Some(Msg::Binary(b))) => Some(b),
+                Ok(Some(Msg::Close(_))) | Err(_) => None,
+                Ok(None) if w.closed() => None,
+                Ok(None) => Some(Vec::new()),
+            },
+        }
+    }
+
+    fn abort(&mut self) {
+        match self {
+            Link::Tcp(h) => tcp::abort_at(*h),
+            Link::Ws(w) => w.close(),
+        }
+    }
+
+    fn close(&mut self) {
+        match self {
+            Link::Tcp(h) => tcp::close_at(*h, 2_000),
+            Link::Ws(w) => w.close(),
+        }
+    }
+}
+
 struct Session {
     proto: Protocol,
-    h: tcp::Handle,
+    link: Link,
     buf: Vec<u8>,
     e1: Vec<u8>,
     e2_size: usize,
@@ -792,7 +862,7 @@ fn stratum_task() {
             Some(mut s) => {
                 backoff = BACKOFF_MIN;
                 run(&mut s);
-                tcp::abort_at(s.h);
+                s.link.abort();
             }
             None => {
                 sleep_ms(backoff);
@@ -815,10 +885,10 @@ fn stratum_task() {
 
 /// Resolve, connect, subscribe, authorize. `None` on any refusal.
 fn connect() -> Option<Session> {
-    let (host, port, user, pass, proto) = {
+    let (host, port, user, pass, proto, ws) = {
         let g = CONFIG.lock_irq();
         let c = g.as_ref()?;
-        (c.host.clone(), c.port, c.user.clone(), c.pass.clone(), c.proto)
+        (c.host.clone(), c.port, c.user.clone(), c.pass.clone(), c.proto, c.ws.clone())
     };
 
     set_phase(Phase::Resolving);
@@ -831,16 +901,33 @@ fn connect() -> Option<Session> {
     };
 
     set_phase(Phase::Connecting);
-    let h = match tcp::open(ip, port, CONNECT_MS) {
-        Ok(h) => h,
-        Err(_) => {
-            note("connection refused or timed out");
-            return None;
-        }
+    let link = match &ws {
+        None => match tcp::open(ip, port, CONNECT_MS) {
+            Ok(h) => Link::Tcp(h),
+            Err(_) => {
+                note("connection refused or timed out");
+                return None;
+            }
+        },
+        // The certificate is checked inside `ws::Socket::connect`, before the
+        // upgrade is sent. A miner's address and shares going to whoever
+        // answered on port 443 is the thing that check exists to prevent, and
+        // the refusal is said rather than retried quietly.
+        Some(path) => match crate::net::ws::Socket::connect(ip, &host, port, path) {
+            Ok(w) => Link::Ws(w),
+            Err(crate::net::ws::Error::Identity(why)) => {
+                note(why);
+                return None;
+            }
+            Err(_) => {
+                note("the pool's WebSocket would not open");
+                return None;
+            }
+        },
     };
     let mut s = Session {
         proto,
-        h,
+        link,
         buf: Vec::new(),
         e1: Vec::new(),
         e2_size: 4,
@@ -853,8 +940,8 @@ fn connect() -> Option<Session> {
         return greet(s, &user);
     }
 
-    if tcp::send_at(s.h, stratum::subscribe(1).as_bytes(), 5_000).is_err() {
-        tcp::abort_at(s.h);
+    if !s.link.send(stratum::subscribe(1).as_bytes()) {
+        s.link.abort();
         return None;
     }
     if !await_id(&mut s, 1, |s, body| match stratum::subscribe_result(body) {
@@ -866,18 +953,18 @@ fn connect() -> Option<Session> {
         None => false,
     }) {
         note("the pool's subscribe reply could not be read");
-        tcp::abort_at(s.h);
+        s.link.abort();
         return None;
     }
     set_phase(Phase::Subscribed);
 
-    if tcp::send_at(s.h, stratum::authorize(2, &user, &pass).as_bytes(), 5_000).is_err() {
-        tcp::abort_at(s.h);
+    if !s.link.send(stratum::authorize(2, &user, &pass).as_bytes()) {
+        s.link.abort();
         return None;
     }
     if !await_id(&mut s, 2, |_, _| true) {
         note("the pool refused this worker");
-        tcp::abort_at(s.h);
+        s.link.abort();
         return None;
     }
     set_phase(Phase::Authorized);
@@ -893,8 +980,8 @@ fn connect() -> Option<Session> {
 /// is a tenth of the Stratum path above.
 fn greet(mut s: Session, user: &str) -> Option<Session> {
     let hello = super::proto::encode_hello(1, user, concat!("glados/", env!("CARGO_PKG_VERSION")));
-    if tcp::send_at(s.h, hello.as_bytes(), 5_000).is_err() {
-        tcp::abort_at(s.h);
+    if !s.link.send(hello.as_bytes()) {
+        s.link.abort();
         return None;
     }
     set_phase(Phase::Subscribed);
@@ -928,7 +1015,7 @@ fn greet(mut s: Session, user: &str) -> Option<Session> {
         } else {
             "the pool did not answer the greeting"
         });
-        tcp::abort_at(s.h);
+        s.link.abort();
         return None;
     }
     set_phase(Phase::Authorized);
@@ -1078,11 +1165,10 @@ fn await_id(
 /// apart. So `alive` is asked every time round, or a dead pool reads as a quiet
 /// one forever and the miner keeps hashing a job it can never submit.
 fn fill(s: &mut Session) -> bool {
-    let data = tcp::recv_at(s.h, RECV_MS);
-    if data.is_empty() && !tcp::alive(s.h) {
+    let Some(data) = s.link.recv(RECV_MS) else {
         note("the pool closed the connection");
         return false;
-    }
+    };
     s.buf.extend_from_slice(&data);
     true
 }
@@ -1196,7 +1282,7 @@ fn drain_shares(s: &mut Session) -> bool {
                 )
             }
         };
-        if tcp::send_at(s.h, msg.as_bytes(), 5_000).is_err() {
+        if !s.link.send(msg.as_bytes()) {
             note("could not send a share; the connection is going");
             return false;
         }
@@ -1747,7 +1833,7 @@ pub fn probe(host: &str, port: u16, worker: &str, seconds: u64) {
         // our own pool by construction never produces -- so pointing it at the
         // glados dialect would defeat its whole purpose.
         proto: Protocol::StratumV1,
-        h,
+        link: Link::Tcp(h),
         buf: Vec::new(),
         e1: Vec::new(),
         e2_size: 4,
@@ -1756,9 +1842,9 @@ pub fn probe(host: &str, port: u16, worker: &str, seconds: u64) {
         pending: Vec::new(),
     };
 
-    if tcp::send_at(s.h, stratum::subscribe(1).as_bytes(), 5_000).is_err() {
+    if !s.link.send(stratum::subscribe(1).as_bytes()) {
         kprintln!("  could not send subscribe");
-        tcp::abort_at(s.h);
+        s.link.abort();
         return;
     }
     // Authorize as well, because many pools send no work until a worker is
@@ -1766,17 +1852,16 @@ pub fn probe(host: &str, port: u16, worker: &str, seconds: u64) {
     // result is worth having either way, and what the pool says when it says no
     // is itself one of the things nothing here has ever seen.
     if !worker.is_empty() {
-        let _ = tcp::send_at(s.h, stratum::authorize(2, worker, "x").as_bytes(), 5_000);
+        let _ = s.link.send(stratum::authorize(2, worker, "x").as_bytes());
     }
 
     let deadline = now_ms() + seconds * 1000;
     let mut jobs = 0usize;
     while now_ms() < deadline {
-        let data = tcp::recv_at(s.h, 500);
-        if data.is_empty() && !tcp::alive(s.h) {
+        let Some(data) = s.link.recv(500) else {
             kprintln!("  the pool closed the connection");
             break;
-        }
+        };
         s.buf.extend_from_slice(&data);
         loop {
             match stratum::take_line(&mut s.buf) {
@@ -1840,7 +1925,7 @@ pub fn probe(host: &str, port: u16, worker: &str, seconds: u64) {
             }
         }
     }
-    tcp::close_at(s.h, 2_000);
+    s.link.close();
     kprintln!("  done -- {} job(s) seen", jobs);
 }
 

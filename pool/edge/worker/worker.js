@@ -125,12 +125,24 @@ export class Pool {
     return new Response(null, { status: 101, webSocket: client });
   }
 
+  // **The ledger is written when a miner leaves, not only on the alarm.** An
+  // object with no connections is evicted after a few idle seconds, and its
+  // memory with it; the alarm then wakes a *fresh* object that restores the
+  // last save and writes that back. So every share since the previous period
+  // was lost whenever a miner disconnected more than a few seconds before it --
+  // measured: a four-minute run's shares absent from the tally while the next
+  // run's, closing six seconds before its alarm, survived.
   drop(ws) {
     const id = this.conns.get(ws);
     if (id !== undefined) {
       this.core.close(id);
       this.conns.delete(ws);
+      this.ctx.waitUntil(this.save());
     }
+  }
+
+  save() {
+    return this.ctx.storage.put("ledger", this.core.ledger(1, Math.floor(Date.now() / 1000)));
   }
 
   async arm() {
@@ -150,7 +162,7 @@ export class Pool {
         this.drop(ws);
       }
     }
-    await this.ctx.storage.put("ledger", this.core.ledger(1, Math.floor(Date.now() / 1000)));
+    await this.save();
     if (this.conns.size > 0) await this.ctx.storage.setAlarm(Date.now() + JOB_PERIOD_MS);
   }
 }

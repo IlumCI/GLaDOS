@@ -67,6 +67,13 @@ pub struct Plan {
     pub user: String,
     pub pass: String,
     pub glados_proto: bool,
+    /// The WebSocket path, when the pool is reached over `wss://`.
+    ///
+    /// Present means TLS then a WebSocket upgrade; absent means a plain TCP
+    /// connection. A Cloudflare Durable Object can only be reached the first
+    /// way -- a Worker accepts no inbound TCP at all -- so this is what lets an
+    /// image mine to the serverless pool with nothing beside it.
+    pub ws: Option<String>,
     pub slices: Option<u32>,
     /// What could be established about where `user` pays.
     ///
@@ -91,6 +98,8 @@ pub fn parse(bytes: &[u8]) -> Option<Plan> {
     let mut user = String::new();
     let mut pass = String::from("x");
     let mut glados_proto = false;
+    let mut said_protocol = false;
+    let mut ws = None;
     let mut slices = None;
     let mut unknown = 0usize;
 
@@ -114,7 +123,21 @@ pub fn parse(bytes: &[u8]) -> Option<Plan> {
                 // `stratum+tcp://` is stripped because it is what a pool's own
                 // page gives you to paste, and refusing it would be refusing
                 // the only form most people will ever have in front of them.
-                let a = value.trim_start_matches("stratum+tcp://");
+                let mut a = value.trim_start_matches("stratum+tcp://");
+                let mut default_port = 3333u16;
+                if let Some(rest) = a.strip_prefix("wss://") {
+                    // The path is everything from the first slash, and `/mine`
+                    // when there is none: that is the only path the pool serves
+                    // miners on, and a bare host is how people will write it.
+                    let (hp, path) = match rest.find('/') {
+                        Some(i) => (&rest[..i], &rest[i..]),
+                        None => (rest, "/mine"),
+                    };
+                    ws = Some(String::from(path));
+                    default_port = 443;
+                    a = hp;
+                }
+                port = default_port;
                 match a.rsplit_once(':') {
                     Some((h, p)) => match p.parse::<u16>() {
                         Ok(n) => {
@@ -132,8 +155,14 @@ pub fn parse(bytes: &[u8]) -> Option<Plan> {
             "worker" => user = String::from(value),
             "pass" => pass = String::from(value),
             "protocol" => match value {
-                "glados" => glados_proto = true,
-                "stratum" => glados_proto = false,
+                "glados" => {
+                    glados_proto = true;
+                    said_protocol = true;
+                }
+                "stratum" => {
+                    glados_proto = false;
+                    said_protocol = true;
+                }
                 _ => return None,
             },
             "slices" => match value.parse::<u32>() {
@@ -147,8 +176,14 @@ pub fn parse(bytes: &[u8]) -> Option<Plan> {
     if host.is_empty() || user.is_empty() {
         return None;
     }
+    // The serverless pool speaks the native protocol and nothing else, so a
+    // `wss://` pool means it unless the file says otherwise. A miner's whole
+    // configuration is then two lines: where, and whose address.
+    if ws.is_some() && !said_protocol {
+        glados_proto = true;
+    }
     let payout = addr::judge(&user);
-    Some(Plan { host, port, user, pass, glados_proto, slices, payout, unknown })
+    Some(Plan { host, port, user, pass, glados_proto, ws, slices, payout, unknown })
 }
 
 /// Apply a plan and start mining. Answers a line to print.
@@ -176,6 +211,7 @@ pub fn apply(p: &Plan) -> String {
             port: p.port,
             user: p.user.clone(),
             pass: p.pass.clone(),
+            ws: p.ws.clone(),
             proto: if p.glados_proto {
                 super::client::Protocol::Glados
             } else {
@@ -220,7 +256,8 @@ pub fn apply(p: &Plan) -> String {
 
     match super::client::start() {
         Ok(()) => {
-            let mut s = format!("mining as {} at {}:{}", p.user, p.host, p.port);
+            let scheme = if p.ws.is_some() { "wss://" } else { "" };
+            let mut s = format!("mining as {} at {}{}:{}", p.user, scheme, p.host, p.port);
             if let (Some(want), Some(n)) = (p.slices, got) {
                 // Says what it got rather than what was asked for. `set_slices`
                 // clamps to what the task table can actually spare, and a file
@@ -275,6 +312,21 @@ pub fn checks() -> Vec<(bool, String)> {
     ok(parse(b"pool stratum+tcp://p.example.com:1\nworker w\n").map(|p| p.host)
            == Some(String::from("p.example.com")),
        "the scheme a pool's own page hands out is stripped");
+    let edge = parse(b"pool wss://pool.example.com/mine\nworker w\n");
+    ok(
+        edge.as_ref().map(|p| (p.host.as_str(), p.port, p.ws.as_deref())) == Some(("pool.example.com", 443, Some("/mine"))),
+        "a wss pool is split into host, port 443 and its path",
+    );
+    ok(edge.map(|p| p.glados_proto) == Some(true), "and speaks the native protocol without being told");
+    ok(
+        parse(b"pool wss://h:8443\nworker w\n").map(|p| (p.port, p.ws)) == Some((8443, Some(String::from("/mine")))),
+        "a wss pool with a port and no path takes /mine",
+    );
+    ok(
+        parse(b"protocol stratum\npool wss://h\nworker w\n").map(|p| p.glados_proto) == Some(false),
+        "a protocol line still wins over the scheme's default",
+    );
+    ok(parse(b"pool h:1\nworker w\n").map(|p| p.ws) == Some(None), "a plain pool is plain TCP");
     ok(parse(b"pool p:notaport\nworker w\n").is_none(), "a port that is not a number refuses the whole file");
     ok(parse(b"slices two\npool p:1\nworker w\n").is_none(), "and so does a slice count that is not one");
     ok(parse(b"protocol carrier-pigeon\npool p:1\nworker w\n").is_none(), "an unknown protocol is refused, not defaulted");

@@ -8506,6 +8506,30 @@ fn mine_cmd(rest: &str) {
                 kprintln!("  Stratum V1, which is what somebody else's pool speaks.");
                 return;
             }
+            // A `wss://` pool goes through the boot file's own parser, so the
+            // typed form and MINER.TXT cannot disagree about what a URL means.
+            if arg.starts_with("wss://") {
+                let probe = alloc::format!("pool {}\nworker -\n", arg);
+                let Some(p) = crate::mine::boot::parse(probe.as_bytes()) else {
+                    kprintln!("  '{}' is not a pool address", arg);
+                    return;
+                };
+                let mut g = client::CONFIG.lock_irq();
+                let (user, pass) = match g.as_ref() {
+                    Some(c) => (c.user.clone(), c.pass.clone()),
+                    None => (String::new(), String::from("x")),
+                };
+                kprintln!("  pool wss://{}:{}{}  speaking glados", p.host, p.port, p.ws.as_deref().unwrap_or(""));
+                *g = Some(client::Config {
+                    host: p.host,
+                    port: p.port,
+                    user,
+                    pass,
+                    proto: client::Protocol::Glados,
+                    ws: p.ws,
+                });
+                return;
+            }
             // stratum+tls is refused by name rather than connected in the
             // clear. `tls::connect` is welded to the single-connection API, so
             // a TLS pool session would tear down whatever the shell or the
@@ -8545,6 +8569,7 @@ fn mine_cmd(rest: &str) {
                 user,
                 pass,
                 proto,
+                ws: None,
             });
             kprintln!("  pool {}:{}  speaking {}", host, port, proto.name());
         }
