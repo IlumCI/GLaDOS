@@ -7,7 +7,7 @@ GLADOS, against a Merkle root published from the share log.
 ```bash
 npm install          # solc, an EVM, and an ABI coder. No framework.
 npm run build        # compile
-npm test             # 106 claims, mostly about what it refuses
+npm test             # 106 + 54 claims (run.mjs, audit2.mjs), mostly refusals
 ```
 
 The end-to-end check, which is the one that matters:
