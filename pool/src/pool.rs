@@ -8,7 +8,6 @@
 //! nobody reproduces.
 
 use std::collections::{BTreeMap, HashMap};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::mine::algo::{Algo, Hasher};
 use crate::mine::hash::below_target;
@@ -676,10 +675,7 @@ impl Pool {
                 // Deliberately *not* a fixed fixture -- an unchanging header
                 // means every job is the same search, and a nonce found once
                 // would be a share forever.
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map(|d| d.as_secs() as u32)
-                    .unwrap_or(0);
+                let now = crate::clock::unix_secs() as u32;
                 let mut h = [0u8; 80];
                 h[0..4].copy_from_slice(&1u32.to_le_bytes());
                 h[36..44].copy_from_slice(&id.to_le_bytes());

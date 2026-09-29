@@ -103,10 +103,12 @@ pub mod mine {
 }
 
 pub mod budget;
+pub mod clock;
 pub mod market;
 pub mod pool;
 pub mod record;
 pub mod roster;
 pub mod server;
+pub mod session;
 pub mod upstream;
 pub mod vardiff;

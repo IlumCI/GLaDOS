@@ -25,7 +25,8 @@
 //! introduce one here on the way out.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
+
+use crate::clock;
 
 /// How often a miner should find a share.
 ///
@@ -89,7 +90,9 @@ const MAX_BITS: u32 = 40;
 pub struct VarDiff {
     bits: u32,
     shares: u32,
-    since: Instant,
+    /// When the current window opened, in `clock::now_ms`. Not an `Instant`,
+    /// because there is no `Instant` on the one target this also has to run on.
+    since_ms: u64,
 }
 
 impl VarDiff {
@@ -97,7 +100,7 @@ impl VarDiff {
         VarDiff {
             bits: start_bits.clamp(MIN_BITS, MAX_BITS),
             shares: 0,
-            since: Instant::now(),
+            since_ms: clock::now_ms(),
         }
     }
 
@@ -130,7 +133,7 @@ impl VarDiff {
         // the fastest miners, which are the whole reason this file exists,
         // were the one case that never retargeted. Caught by the test rather
         // than by reading.
-        let elapsed_ms = self.since.elapsed().as_millis() as u64;
+        let elapsed_ms = clock::now_ms().saturating_sub(self.since_ms);
         let enough = self.shares >= WINDOW_SHARES || (idle && elapsed_ms >= WINDOW_SECS * 1000);
         if !enough {
             return None;
@@ -166,7 +169,7 @@ impl VarDiff {
         // interval already judged, so the next estimate would be about a period
         // partly spent at a difficulty no longer in force.
         self.shares = 0;
-        self.since = Instant::now();
+        self.since_ms = clock::now_ms();
 
         if self.bits == before {
             None
