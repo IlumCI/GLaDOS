@@ -41,5 +41,36 @@ ok(/unreadable/.test(poor.excluded[C]), "an address whose balance could not be r
 const again = build({ now, prev: now, balances: new Map([[A, rich], [B, rich], [C, rich]]), gateMin: 50_000n * G });
 ok(again.recipients.length === 0, "an epoch right after the last pays nobody twice");
 
+// The pair, or any contract, is never paid -- one miner naming it would
+// otherwise revert every payout for everyone.
+const PAIR = "0x93f777932d98d15b351d1bce8c76b34381eede5b";
+const withPair = build({ now: new Map([[A, 900n], [PAIR, 900n]]), prev: new Map(), balances: new Map([[A, rich], [PAIR, rich]]),
+                         gateMin: 50_000n * G, ineligible: new Set([PAIR]) });
+ok(withPair.recipients.join() === A && /cannot be paid/.test(withPair.excluded[PAIR]), "the pair's address is never a recipient, whatever it holds");
+
+// An unreadable balance and a miss of the floor carry the work forward.
+const carried = build({ now, prev, balances: new Map([[A, rich], [B, rich]]), gateMin: 50_000n * G });
+ok(carried.snapshot.get(C) === 0n, "an unreadable balance's work is not consumed");
+const next = build({ now: new Map([[A, 1500n], [B, 900n], [C, 50n]]), prev: carried.snapshot,
+                     balances: new Map([[A, rich], [B, rich], [C, rich]]), gateMin: 50_000n * G, minFrac: 0 });
+ok(next.recipients.includes(C) && next.work[C] === "50", "and it is paid in full once the balance reads");
+
+// The snapshot never moves backwards: a shard missing from one sum cannot
+// lower it and have the same work paid again when it returns.
+const dip = build({ now: new Map([[A, 100n]]), prev: new Map([[A, 1500n]]), balances: new Map([[A, rich]]), gateMin: 0n });
+ok(dip.snapshot.get(A) === 1500n && dip.recipients.length === 0, "a lower sum neither pays nor lowers the snapshot");
+
+// Past the per-transaction limit: the most work waiting is paid, the rest
+// carries, and next epoch the ones left out are paid first.
+const crowd = new Map([...Array(10).keys()].map((i) => ["0x" + String(i).padStart(40, "0"), BigInt(100 + i)]));
+const bal = new Map([...crowd.keys()].map((a) => [a, rich]));
+const cap = build({ now: crowd, prev: new Map(), balances: bal, gateMin: 0n, minFrac: 0, maxRecipients: 4 });
+ok(cap.recipients.length === 4 && cap.recipients.every((a) => crowd.get(a) >= 106n), "over the cap, the four with the most work waiting are paid");
+ok([...crowd.keys()].filter((a) => !cap.recipients.includes(a)).every((a) => cap.snapshot.get(a) === 0n && /carries/.test(cap.excluded[a])),
+   "and everybody else's work carries, not consumed");
+const grown = new Map([...crowd].map(([a, w]) => [a, w + 10n]));
+const nextCap = build({ now: grown, prev: cap.snapshot, balances: bal, gateMin: 0n, minFrac: 0, maxRecipients: 4 });
+ok(nextCap.recipients.every((a) => !cap.recipients.includes(a)), "next epoch the ones left out are at the front");
+
 console.log(`${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

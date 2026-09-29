@@ -39,6 +39,8 @@
 
 import { connect } from "cloudflare:sockets";
 import { newKey, rvnAddress, evmAddress } from "./treasury.js";
+import { hasCode } from "./epoch.js";
+import { textChunks, loadText } from "./chunks.js";
 import { Treasury } from "./runner.js";
 import wasmModule from "../target/wasm32-unknown-unknown/release/glados_edge.wasm";
 import { bind, imports } from "../boundary.mjs";
@@ -50,6 +52,7 @@ const MAX_LINE = 131072;
 // The holding gate: a miner must hold GATE_MIN whole GLADOS on chain 4663 to
 // connect. "0" (or unset) turns it off. See `Pool.gate`.
 const GLADOS = "0x3d609ecafc6aa7dba67dd7ad1d10b49c52d57777";
+const PAIR_ADDR = "0x93f777932d98d15b351d1bce8c76b34381eede5b";
 const RPC_4663 = "https://rpc.mainnet.chain.robinhood.com";
 const GATE_CACHE_MS = 10 * 60_000;
 
@@ -72,6 +75,9 @@ const RATES_MS = 5 * 60_000;
 // `/ledger.json` sums the shards through `Pool::merge_ledger`: tallies are
 // plain counters, a worker seen on two shards is simply the sum, and each
 // shard's digest is checked before its rows are added.
+// The pool core's per-shard cap on (worker, coin) tallies (pool.rs MAX_TALLIES).
+const MAX_TALLIES = 4096;
+
 function shardName(i, gpu = false) {
   if (gpu) return `gpu-${i}`;
   return i === 0 ? "main" : `shard-${i}`;
@@ -172,7 +178,7 @@ export class Pool {
       // and is then overwritten by the next job period is the share log erased
       // by a cold start, with nothing anywhere saying it happened. Throwing here
       // fails every request loudly instead, which is a problem somebody sees.
-      const saved = await ctx.storage.get("ledger");
+      const saved = await loadText(ctx.storage, "ledger");
       const restored = saved ? this.core.loadLedger(saved) : 0;
       // SWITCH=1: miners are shown one slot, the one that pays best per unit of
       // their work, chosen from zpool's live rates. Coin labels must be zpool's
@@ -202,7 +208,7 @@ export class Pool {
       });
     }
     if (url.pathname === "/status") {
-      return Response.json({ slots: this.slots, connections: this.conns.size });
+      return Response.json({ slots: this.slots, connections: this.conns.size, tallies: this.tallies ?? null, maxTallies: MAX_TALLIES });
     }
     if (url.pathname === "/treasury") {
       const t = await this.treasury();
@@ -214,7 +220,7 @@ export class Pool {
       // Every epoch paid: who, how much work each did since the last one, the
       // floor, who was left out and why, and the transaction -- recomputable
       // with tools/distribute.py --split equal against the ledgers.
-      const epochs = (await this.ctx.storage.get("treasury.epochs")) || [];
+      const epochs = await this.treasurer.epochs();
       return Response.json({ epochs }, { headers: { "access-control-allow-origin": "*" } });
     }
     if (request.headers.get("Upgrade") !== "websocket") {
@@ -312,12 +318,23 @@ export class Pool {
     await this.ctx.blockConcurrencyWhile(async () => {
       if (this.keys) return;
       let k = await this.ctx.storage.get("treasury.keys");
+      // **Pinned once published.** TREASURY_RVN and TREASURY_EVM name the
+      // addresses the operator has told zpool and ChangeNOW about. With them
+      // set, storage answering "no keys" is not a fresh start, it is keys lost
+      // -- and generating new ones would send every later payout to addresses
+      // nobody watches. So it refuses, and so does a mismatch.
+      const pinRvn = this.env.TREASURY_RVN || "", pinEvm = (this.env.TREASURY_EVM || "").toLowerCase();
       if (k === undefined) {
+        if (pinRvn || pinEvm) throw new Error("the treasury's keys are missing from storage while its addresses are pinned; refusing to make new ones");
         k = { rvnKey: newKey(), evmKey: newKey(), created: Date.now() };
         await this.ctx.storage.put("treasury.keys", k);
         this.log("[treasury] hot wallets created");
       }
-      this.keys = { ...k, rvn: rvnAddress(k.rvnKey), evm: evmAddress(k.evmKey) };
+      const keys = { ...k, rvn: rvnAddress(k.rvnKey), evm: evmAddress(k.evmKey) };
+      if ((pinRvn && pinRvn !== keys.rvn) || (pinEvm && pinEvm !== keys.evm.toLowerCase())) {
+        throw new Error(`the stored keys are ${keys.rvn} / ${keys.evm}, not the pinned ${pinRvn || "-"} / ${pinEvm || "-"}; refusing to use them`);
+      }
+      this.keys = keys;
     });
     return this.keys;
   }
@@ -329,9 +346,9 @@ export class Pool {
   // is to refuse at the door instead -- a miner whose payout address does not
   // hold the minimum is not mining here at all.
   //
-  // Answers a refusal to send, or null. **Fails closed**: a balance that cannot
-  // be read is a refusal naming the reason, since a gate that opens whenever the
-  // RPC is down is a gate that anybody can walk through by waiting.
+  // Answers a refusal to send, or null. An unreadable balance admits: the gate
+  // that pays (epoch.js, at build time) is the one that must not be walked
+  // through, and it refuses an unreadable balance by carrying the work.
   async gate(hello) {
     let worker = "";
     try { worker = JSON.parse(hello).params.worker || ""; } catch {}
@@ -349,18 +366,32 @@ export class Pool {
         const res = await fetch(RPC_4663, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            jsonrpc: "2.0", id: 1, method: "eth_call",
-            params: [{ to: GLADOS, data: "0x70a08231" + addr.slice(2).padStart(64, "0") }, "latest"],
-          }),
+          body: JSON.stringify([
+            { jsonrpc: "2.0", id: 1, method: "eth_call",
+              params: [{ to: GLADOS, data: "0x70a08231" + addr.slice(2).padStart(64, "0") }, "latest"] },
+            { jsonrpc: "2.0", id: 2, method: "eth_getCode", params: [addr, "latest"] },
+          ]),
         });
         const j = await res.json();
-        if (!j.result) throw new Error(j.error ? j.error.message : "no result");
-        wei = BigInt(j.result);
-        this.balances.set(addr, { wei, at: Date.now() });
+        if (!Array.isArray(j)) throw new Error(j && j.error ? j.error.message : "no result");
+        const bal = j.find((r) => r.id === 1), code = j.find((r) => r.id === 2);
+        if (!bal || !bal.result || !code || code.result === undefined) throw new Error((bal && bal.error && bal.error.message) || "no result");
+        wei = BigInt(bal.result);
+        this.balances.set(addr, { wei, at: Date.now(), contract: hasCode(code.result) });
       } catch (e) {
-        return `the pool could not read ${head}'s GLADOS balance on chain 4663 (${e && e.message ? e.message : e}); try again shortly`;
+        // **Admitted, not refused, when the chain cannot be read.** This gate
+        // only spares a miner hashing for nothing; the one that decides who is
+        // paid runs again at every epoch, on the balance and code as they are
+        // then. So an RPC outage refusing every miner at the door would be an
+        // error message in every miner's face that protects nobody.
+        this.log(`[gate] ${head} admitted unchecked: balance unreadable (${e && e.message ? e.message : e}); the payout checks it`);
+        return null;
       }
+    }
+    // A contract is never paid (the payout would revert for everyone if it
+    // were the pair), so it is refused at the door rather than mined for nothing.
+    if (this.balances.get(addr)?.contract || addr === PAIR_ADDR) {
+      return `${head} is a contract; the pool pays only ordinary accounts, so mine under the address of a wallet you hold`;
     }
     if (wei < this.gateMin) {
       const have = wei / 10n ** 18n;
@@ -448,8 +479,20 @@ export class Pool {
     u.writer = null;
   }
 
+  // **Chunked, because one value is capped at 128 KiB and a ledger is not.**
+  // A row is about 130 bytes, so a single value held some 1,000 tallies --
+  // about 250 miners switching across four coins -- and past that every save
+  // was refused while the object kept serving from memory, until the next
+  // deploy or eviction dropped everything since the last save that fitted.
+  // Found by the load test. The head and its chunks go in one atomic put.
   save() {
-    return this.ctx.storage.put("ledger", this.core.ledger(1, Math.floor(Date.now() / 1000)));
+    const text = this.core.ledger(1, Math.floor(Date.now() / 1000));
+    this.tallies = (text.match(/"worker":/g) || []).length;
+    if (this.tallies >= MAX_TALLIES * 0.9 && !this.warnedFull) {
+      this.warnedFull = true;
+      this.log(`[edge] ${this.tallies} of ${MAX_TALLIES} tallies: past the cap, new miners' shares are counted but credited to nobody -- raise SHARDS`);
+    }
+    return this.ctx.storage.put(textChunks("ledger", text));
   }
 
   async arm() {
