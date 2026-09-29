@@ -22,8 +22,7 @@ const TOKEN = "0x3d609ecafc6aa7dba67dd7ad1d10b49c52d57777";
 const PAIR = "0x93f777932d98d15b351d1bce8c76b34381eede5b";
 const WETH = "0x0bd7d308f8e1639fab988df18a8011f41eacad73";
 const OPERATOR = "0x1111111111111111111111111111111111111111";
-const MINERS = ["0x000000000000000000000000000000000000c0a1", "0x000000000000000000000000000000000000c0a2",
-                "0x000000000000000000000000000000000000c0a3"];
+const MINERS = Array.from({ length: Number(process.env.N || 3) }, (_, i) => "0x" + (0xc0a1 + i).toString(16).padStart(40, "0"));
 
 let passed = 0, failed = 0;
 const ok = (c, w) => { c ? passed++ : failed++; console.log(`${c ? "ok  " : "FAIL"}  ${w}`); };
@@ -78,12 +77,12 @@ async function main() {
     const b = await run(vm, OPERATOR, TOKEN, "0x70a08231" + m.slice(2).padStart(64, "0"));
     bals.push(coder.decode(["uint256"], b.ret)[0]);
   }
-  ok(bals.every((b) => b === each), `each of three miners received exactly ${(Number(each) / 1e18).toFixed(2)} real GLADOS`);
-  const got = each * 3n;
+  ok(bals.every((b) => b === each), `each of ${MINERS.length} miners received exactly ${(Number(each) / 1e18).toFixed(2)} real GLADOS`);
+  const got = each * BigInt(MINERS.length);
   ok(Number(got) / Number(quote) > 0.97, `the buy tax took ${(100 - (100 * Number(got)) / Number(quote)).toFixed(2)}% of the quote, and the send to miners took nothing`);
   const left = await run(vm, OPERATOR, TOKEN, "0x70a08231" + payout.slice(2).padStart(64, "0"));
   ok(coder.decode(["uint256"], left.ret)[0] === 0n, "the contract holds no GLADOS afterwards");
-  console.log(`      gas ${call.gas} for three recipients, buy included`);
+  console.log(`      gas ${call.gas} for ${MINERS.length} recipients, buy included`);
   finish();
 }
 

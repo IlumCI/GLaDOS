@@ -6,7 +6,7 @@
 // private key 1, which every Ethereum tool agrees on. No network, no storage,
 // no money: a signer that is wrong here is wrong before any coin moves.
 import * as secp from "@noble/secp256k1";
-import { evmAddress, rvnAddress, rvnSighash, signRvnTx, newKey, decodeBase58check, unhex } from "./treasury.js";
+import { evmAddress, rvnAddress, rvnSighash, signRvnTx, newKey, decodeBase58check, unhex, signLegacyTx, createdAddress } from "./treasury.js";
 
 // DER back to (r, s), written independently of treasury.js's encoder.
 function fromDER(d) {
@@ -77,6 +77,24 @@ ok(threw, "an address with a broken checksum is refused");
 
 const a = newKey(), b = newKey();
 ok(a !== b && /^[0-9a-f]{64}$/.test(a), "generated keys are 32 random bytes and differ");
+
+// EIP-155's own example, from the EIP text: key 0x4646..46, nonce 9, 20 gwei,
+// 21000 gas, to 0x3535..35, 1 ETH, no data, chain 1. RFC 6979 nonces make the
+// signature deterministic, so the whole signed transaction must match byte
+// for byte -- a wrong RLP length, a zero encoded as 0x00, or v off by the
+// chain-id arithmetic all show up here.
+const eip155 = signLegacyTx("46".repeat(32), {
+  nonce: 9, gasPrice: 20_000_000_000n, gas: 21000, to: "0x" + "35".repeat(20),
+  value: 10n ** 18n, data: "", chainId: 1,
+});
+ok(eip155.raw === "0xf86c098504a817c800825208943535353535353535353535353535353535353535880de0b6b3a76400008025a028ef61340bd939bc2195fe537567866003e1a15d3c71ff63e1590620aa636276a067cbe9d8997f761aecb703304b3800ccf555c9f3dc64214b297fb1966a3b6d83",
+   "a legacy EIP-155 transaction signs byte-for-byte as the EIP's own example");
+ok(eip155.hash === "0x33469b22e9f636356c4160a87eb19df52b7412e8eac32a4a55ffe88ea8350788",
+   "and hashes to the EIP example's transaction hash");
+// The CREATE address rule, against a value every tool agrees on: the first
+// contract deployed by 0x6ac7..6ac7 at nonce 0.
+ok(createdAddress("0x6ac7ea33f8831ea9dcc53393aaa88b25a785dbf0", 0) === "0xcd234a471b72ba2f1ccf0a70fcaba648a5eecd8d",
+   "a created contract's address follows the sender and nonce");
 
 console.log(`${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

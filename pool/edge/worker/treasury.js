@@ -186,4 +186,54 @@ export function evmAddress(privHex) {
   return out;
 }
 
+// --- EVM transactions --------------------------------------------------------------
+
+// RLP, the encoding every Ethereum transaction is signed and sent in. Items are
+// byte strings or lists; integers are big-endian with no leading zeros, and
+// zero is the empty string -- the rule a hand-rolled encoder most often gets
+// wrong, which is why the test vector below includes a zero.
+function rlpBytes(b) {
+  if (b.length === 1 && b[0] < 0x80) return b;
+  return cat(rlpLen(b.length, 0x80), b);
+}
+function rlpLen(n, offset) {
+  if (n < 56) return Uint8Array.of(offset + n);
+  const h = unhex(n.toString(16).padStart(Math.ceil(n.toString(16).length / 2) * 2, "0"));
+  return cat(Uint8Array.of(offset + 55 + h.length), h);
+}
+export function rlp(item) {
+  if (Array.isArray(item)) {
+    const body = cat(...item.map(rlp));
+    return cat(rlpLen(body.length, 0xc0), body);
+  }
+  return rlpBytes(item);
+}
+export function int(v) {
+  let n = BigInt(v);
+  if (n === 0n) return new Uint8Array(0);
+  let h = n.toString(16);
+  if (h.length % 2) h = "0" + h;
+  return unhex(h);
+}
+const addrBytes = (a) => (a ? unhex(a.slice(2).toLowerCase()) : new Uint8Array(0));
+
+// A legacy transaction with EIP-155 replay protection: the chain id is inside
+// what is signed, so a signature for chain 4663 means nothing on any other.
+// Legacy rather than EIP-1559 because every EVM chain accepts it and it has one
+// fee field to get wrong instead of three. `to` null is a contract creation.
+export function signLegacyTx(privHex, { nonce, gasPrice, gas, to, value, data, chainId }) {
+  const fields = [int(nonce), int(gasPrice), int(gas), addrBytes(to), int(value), data ? unhex(data.replace(/^0x/, "")) : new Uint8Array(0)];
+  const digest = keccak_256(rlp([...fields, int(chainId), int(0), int(0)]));
+  const sg = secp.sign(digest, privHex, { lowS: true });
+  const v = BigInt(chainId) * 2n + 35n + BigInt(sg.recovery);
+  const raw = rlp([...fields, int(v), int(sg.r), int(sg.s)]);
+  return { raw: "0x" + hex(raw), hash: "0x" + hex(keccak_256(raw)) };
+}
+
+// The address a contract created by `sender` at `nonce` will have.
+export function createdAddress(sender, nonce) {
+  const h = keccak_256(rlp([addrBytes(sender), int(nonce)]));
+  return "0x" + hex(h.slice(12));
+}
+
 export { hex, unhex };
