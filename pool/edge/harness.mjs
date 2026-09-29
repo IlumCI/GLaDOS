@@ -16,54 +16,15 @@ import net from "node:net";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { bind, imports } from "./boundary.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const MAX_LINE = 131072;          // `mine::stratum::MAX_LINE`
 const JOB_PERIOD_MS = 30_000;     // `server::JOB_PERIOD`
 
 export async function load(wasmPath = join(here, "target/wasm32-unknown-unknown/release/glados_edge.wasm")) {
-  const { instance } = await WebAssembly.instantiate(readFileSync(wasmPath), {
-    glados: { glados_now_ms: () => Date.now() },
-  });
-  const x = instance.exports;
-  const enc = new TextEncoder();
-  const dec = new TextDecoder();
-
-  // Copy a string into the module and call `f` with (ptr, len), then free it.
-  const withBytes = (s, f) => {
-    const b = enc.encode(s);
-    const p = x.edge_alloc(b.length);
-    new Uint8Array(x.memory.buffer, p, b.length).set(b);
-    try { return f(p, b.length); } finally { x.edge_free(p, b.length); }
-  };
-  // The output buffer is re-read after every call: an allocation may grow
-  // memory, and a view taken before that points at a detached buffer.
-  const out = (n) => new Uint8Array(x.memory.buffer, x.edge_out_ptr(), n).slice();
-  const records = (n) => {
-    const b = out(n), r = { send: [], log: [], close: false };
-    for (let i = 0; i < b.length;) {
-      const kind = b[i], len = b[i + 1] | (b[i + 2] << 8) | (b[i + 3] << 16) | (b[i + 4] << 24);
-      const body = dec.decode(b.subarray(i + 5, i + 5 + len));
-      if (kind === 0x53) r.send.push(body);
-      else if (kind === 0x4c) r.log.push(body);
-      else if (kind === 0x43) r.close = true;
-      i += 5 + len;
-    }
-    return r;
-  };
-
-  return {
-    init(coins, shareSecs = 10, window = 0) {
-      const slots = withBytes(coins.join("\n"), (p, l) => x.edge_init(p, l, shareSecs, window));
-      if (!slots) throw new Error("edge_init: " + dec.decode(out(64)).replace(/\0.*$/, ""));
-      return slots;
-    },
-    open: (peer) => withBytes(peer, (p, l) => x.edge_open(p, l)),
-    line: (id, s) => records(withBytes(s, (p, l) => x.edge_line(id, p, l))),
-    idle: (id) => records(x.edge_idle(id)),
-    close: (id) => x.edge_close(id),
-    ledger: (epoch, at) => dec.decode(out(x.edge_ledger(epoch, at))),
-  };
+  const { instance } = await WebAssembly.instantiate(readFileSync(wasmPath), imports);
+  return bind(instance);
 }
 
 async function main() {

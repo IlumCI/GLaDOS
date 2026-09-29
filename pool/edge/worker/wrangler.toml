@@ -1,0 +1,32 @@
+# The GLaDOS pool as a Cloudflare Worker with one Durable Object.
+#
+# Deployed from this directory: `npx wrangler deploy`. The WebAssembly core is
+# built first -- `cargo build --release --manifest-path pool/edge/Cargo.toml
+# --target wasm32-unknown-unknown` -- and imported by path, so a stale build is
+# what gets deployed if that step is skipped. `tools/edgedeploy.sh` does both.
+name = "glados-pool"
+main = "worker.js"
+compatibility_date = "2025-09-01"
+
+[[durable_objects.bindings]]
+name = "POOL"
+class_name = "Pool"
+
+# **SQLite-backed, because that is the only kind the free plan allows.** A
+# key-value-backed class is refused on Workers Free; the ledger is written through
+# the ordinary `storage.put`, which SQLite-backed objects support.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Pool"]
+
+[vars]
+# Local coins until an upstream is wired: the pool builds its own headers, shares
+# are real proof of work against a target only this pool recognises, and nothing
+# is paid. The same spec `glados-pool` takes on its command line.
+COINS = "yescrypt:yescrypt:12"
+SHARE_SECONDS = "45"
+
+[[rules]]
+type = "CompiledWasm"
+globs = ["**/*.wasm"]
+fallthrough = true
