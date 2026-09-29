@@ -323,6 +323,8 @@ impl Default for Window {
 
 pub struct Pool {
     pub coins: Vec<Coin>,
+    /// See `work_serial`.
+    work_serial: u64,
     /// Where to append a recomputable record of every accepted share, if
     /// anywhere.
     ///
@@ -490,6 +492,7 @@ impl Pool {
     pub fn new(coins: Vec<Coin>) -> Pool {
         Pool {
             coins,
+            work_serial: 0,
             sharelog: None,
             issued: Vec::new(),
             seen: Vec::new(),
@@ -737,7 +740,14 @@ impl Pool {
         // that is not the one the network asked for.
         coin.network_target = U256::from_nbits(w.nbits);
         coin.work = Some(w);
+        self.work_serial += 1;
         true
+    }
+
+    /// Bumped whenever upstream installs work, so a transport can hand miners
+    /// the new job at once rather than at their next idle period.
+    pub fn work_serial(&self) -> u64 {
+        self.work_serial
     }
 
     /// The payout window as a fraction of one block's expected work, where a

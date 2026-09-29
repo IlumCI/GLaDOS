@@ -94,6 +94,8 @@ pub struct Upstream {
     opened_ms: u64,
     heard_ms: u64,
     next_id: u64,
+    /// This coin's `Algo::stratum_factor`, applied to every difficulty upstream sends.
+    factor: u32,
 }
 
 impl Upstream {
@@ -120,6 +122,7 @@ impl Upstream {
             opened_ms: 0,
             heard_ms: 0,
             next_id: 1000,
+            factor: c.algo.stratum_factor(),
         })
     }
 
@@ -193,15 +196,33 @@ impl Upstream {
                     // A submit's answer. Logged either way: a pool that rejects
                     // everything and a pool that is not there look identical from
                     // a share counter alone.
-                    _ => out.log.push(format!(
-                        "[up {}] submit {id} {}",
-                        self.label,
-                        if ok { "accepted" } else { "REJECTED" }
-                    )),
+                    // The reason is printed verbatim: "low difficulty" says the
+                    // target arithmetic is wrong, "job not found" says staleness,
+                    // "duplicate" says the nonce space -- folding them into one
+                    // word threw away the only thing that tells them apart.
+                    _ => {
+                        let why = if ok {
+                            String::new()
+                        } else {
+                            let e = body.get("error");
+                            let m = e
+                                .and_then(|e| e.idx(1))
+                                .and_then(|m| m.as_str())
+                                .or_else(|| e.and_then(|e| e.get("message")).and_then(|m| m.as_str()))
+                                .or_else(|| e.and_then(|e| e.as_str()))
+                                .unwrap_or("no reason given");
+                            format!(": {m}")
+                        };
+                        out.log.push(format!(
+                            "[up {}] submit {id} {}{why}",
+                            self.label,
+                            if ok { "accepted" } else { "REJECTED" }
+                        ))
+                    }
                 },
                 Ok(Message::Notify { method, params }) => {
                     let mut job = None;
-                    take_notification(&method, &params, &mut self.up_target, &mut job);
+                    take_notification(&method, &params, self.factor, &mut self.up_target, &mut job);
                     if let Some(j) = job {
                         if self.live() {
                             self.install(pool, j, &mut out);
@@ -352,6 +373,7 @@ fn drive(pool: &Mutex<Pool>, up: &mut Upstream) -> Result<(), String> {
 fn take_notification(
     method: &str,
     params: &Json,
+    factor: u32,
     up_target: &mut U256,
     job: &mut Option<stratum::Job>,
 ) {
@@ -367,8 +389,11 @@ fn take_notification(
             let Some((m, scale)) = stratum::decimal(&text) else {
                 return;
             };
+            // Saturating rather than refusing: a difficulty easy enough to
+            // overflow after the factor is a target that accepts everything,
+            // which the all-ones maximum states exactly.
             if let Some(t) = target_for(m, scale) {
-                *up_target = t;
+                *up_target = t.mul_u32(factor).unwrap_or(U256::MAX);
             }
         }
         "mining.notify" => {

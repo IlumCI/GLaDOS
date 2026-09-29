@@ -39,7 +39,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::mine::stratum::take_line;
 use crate::pool::Pool;
@@ -178,32 +178,53 @@ pub fn serve(addr: &str, pool: Arc<Mutex<Pool>>) -> std::io::Result<()> {
 }
 
 fn handle(mut stream: TcpStream, pool: Arc<Mutex<Pool>>, peer: &str) -> std::io::Result<()> {
-    stream.set_read_timeout(Some(JOB_PERIOD))?;
+    // **A one-second read, not a job-period one.** Upstream replaces its job
+    // every few seconds on a busy coin, and a miner handed the new one only at
+    // its next idle period spends up to thirty seconds on a job upstream has
+    // already dropped -- measured against zpool as a run of "Invalid job id"
+    // refusals, each one a share that was good enough to pay and was not. The
+    // idle period itself is unchanged: it is timed here rather than by the
+    // socket.
+    stream.set_read_timeout(Some(Duration::from_secs(1)))?;
     let mut buf: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 4096];
     // Everything a miner is held to lives in here. This loop only moves bytes
     // between it and the socket, which is what lets a WebSocket move them too.
     let mut conn = Conn::new(peer);
+    let mut heard = Instant::now();
+    let mut seen = pool.lock().unwrap().work_serial();
 
     loop {
         let n = match stream.read(&mut chunk) {
             Ok(0) => return Ok(()),
             Ok(n) => n,
-            // The read timeout is the job period, and a quiet period is when a
-            // connection is given fresh work -- see `Conn::on_idle` for why that
-            // is the *only* time, and the bug that re-issuing more often was.
             Err(e)
                 if e.kind() == std::io::ErrorKind::WouldBlock
                     || e.kind() == std::io::ErrorKind::TimedOut =>
             {
-                let out = conn.on_idle(&pool);
-                if deliver(&mut stream, out)? {
-                    return Ok(());
-                }
-                continue;
+                0
             }
             Err(e) => return Err(e),
         };
+        let serial = pool.lock().unwrap().work_serial();
+        if serial != seen {
+            seen = serial;
+            if deliver(&mut stream, conn.on_work(&pool))? {
+                return Ok(());
+            }
+        }
+        if n == 0 {
+            // A quiet period is when a connection is given fresh work and has
+            // its difficulty eased -- see `Conn::on_idle`.
+            if heard.elapsed() >= JOB_PERIOD {
+                heard = Instant::now();
+                if deliver(&mut stream, conn.on_idle(&pool))? {
+                    return Ok(());
+                }
+            }
+            continue;
+        }
+        heard = Instant::now();
         buf.extend_from_slice(&chunk[..n]);
 
         loop {

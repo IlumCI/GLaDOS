@@ -1382,7 +1382,11 @@ fn handle_notify(s: &mut Session, method: &str, params: &crate::json::Json) {
 fn rebuild(s: &mut Session) {
     let Some(job) = s.job.as_ref() else { return };
     let (m, sc) = difficulty();
-    let Some(target) = super::u256::target_for(m, sc) else { return };
+    let Some(target) = super::u256::target_for(m, sc)
+        .and_then(|t| t.mul_u32(algo_in_force().stratum_factor()))
+    else {
+        return;
+    };
 
     let mut e2 = Vec::with_capacity(s.e2_size);
     // Big-endian, so a hex dump reads in order. Which encoding does not matter

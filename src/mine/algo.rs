@@ -196,6 +196,28 @@ impl Algo {
     /// do, because the total is fixed and the split only averages the rates
     /// down. Concurrency over *different* bottlenecks is the case where the
     /// machine genuinely does more work.
+    /// What a Stratum difficulty is multiplied against for this algorithm.
+    ///
+    /// **Difficulty 1 is not one target across algorithms.** Bitcoin's diff1 is
+    /// `0x00000000ffff...`; the scrypt family, and yespower and neoscrypt with
+    /// it, count difficulty against a target 65,536 times easier, and a pool
+    /// speaking Stratum for them sends *that* number. cpuminer-opt applies the
+    /// same factor for these algorithms.
+    ///
+    /// Reading it on Bitcoin's scale made every target 65,536 times too hard:
+    /// against zpool's yespowerR16 port the pool computed `00000009..`, about
+    /// 477 million hashes per share -- eleven days at 500 H/s -- so it forwarded
+    /// nothing and the CPU half of the rig would have earned exactly zero while
+    /// every local share was accepted and every counter looked healthy.
+    ///
+    /// `Blake2s` stays at 1 unverified: nothing here has mined it at a pool.
+    pub fn stratum_factor(&self) -> u32 {
+        match self {
+            Algo::Sha256d | Algo::Blake2s => 1,
+            Algo::Neoscrypt | Algo::Yespower { .. } => 65_536,
+        }
+    }
+
     pub fn bound(&self) -> Bound {
         match self {
             // ARX and integer addition over a working set that fits in
