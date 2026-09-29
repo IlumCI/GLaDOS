@@ -321,3 +321,22 @@ pub extern "C" fn edge_rates(ptr: *const u8, len: u32) -> u32 {
     drop(g);
     set_out(&encode_up(&out))
 }
+
+/// Sum another shard's ledger into this core's: tallies added per (worker,
+/// coin). Answers rows merged, or -1 with the reason in the output buffer.
+/// See `Pool::merge_ledger`.
+#[no_mangle]
+pub extern "C" fn edge_merge_ledger(ptr: *const u8, len: u32) -> i32 {
+    let doc = text(ptr, len);
+    let g = STATE.lock().unwrap();
+    let Some(s) = g.as_ref() else { return -1 };
+    let r = s.pool.lock().unwrap().merge_ledger(&doc);
+    match r {
+        Ok(n) => n as i32,
+        Err(e) => {
+            drop(g);
+            set_out(e.as_bytes());
+            -1
+        }
+    }
+}

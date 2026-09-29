@@ -1202,6 +1202,36 @@ impl Pool {
     /// contract can verify; this is a flat digest over a tally. It exists so
     /// the published record is fixed to a value now, and so the day the tree
     /// is built there is something to check it against.
+    /// Add another shard's ledger into this one: tallies summed per
+    /// (worker, coin), windows ignored. Answers the rows merged.
+    ///
+    /// **This is what lets the pool shard.** Every Durable Object serving a
+    /// slice of the miners keeps its own ledger; a coordinator sums them into
+    /// the one record payouts are built from. Tallies are plain counters, so
+    /// summing is exact -- the same worker mining on two shards is simply the
+    /// sum of both. Windows are *not* merged: they are ordered share lists
+    /// whose order decides eviction, and interleaving several has no correct
+    /// answer. Nothing needs them -- equal-split payouts are built on the tally
+    /// basis (`tools/distribute.py --basis tally --split equal`).
+    ///
+    /// The shard's document goes through `load_ledger` into a scratch pool
+    /// first, so its digest is checked by the one parser there is, and a
+    /// tampered or truncated shard is refused rather than summed.
+    pub fn merge_ledger(&mut self, text: &str) -> Result<usize, String> {
+        let mut scratch = Pool::new(Vec::new());
+        scratch.load_ledger(text)?;
+        let n = scratch.tallies.len();
+        for (k, t) in scratch.tallies {
+            let e = self.tallies.entry(k).or_default();
+            e.work = e.work.saturating_add(t.work);
+            e.accepted = e.accepted.saturating_add(t.accepted);
+            e.stale = e.stale.saturating_add(t.stale);
+            e.bad = e.bad.saturating_add(t.bad);
+            e.duplicate = e.duplicate.saturating_add(t.duplicate);
+        }
+        Ok(n)
+    }
+
     pub fn ledger_json(&self, epoch: u64, generated_at: u64) -> String {
         let rows = self.ledger();
 
@@ -1725,6 +1755,30 @@ mod tests {
         let easy = p.make_job(0, 12).unwrap();
         assert!(easy.target == target_with_leading_zeros(12), "an easier local target is left alone");
         assert_eq!(leading_zero_bits(&target_with_leading_zeros(27)), 27);
+    }
+
+    /// Two shards' ledgers sum exactly, and a tampered shard is refused.
+    #[test]
+    fn shard_ledgers_merge_by_summing_tallies() {
+        let mut a = a_pool();
+        let mut b = a_pool();
+        a.tallies.insert((String::from("0xw1.rig"), String::from("c")), Tally { work: 100, accepted: 2, ..Default::default() });
+        a.tallies.insert((String::from("0xw2.rig"), String::from("c")), Tally { work: 7, accepted: 1, ..Default::default() });
+        b.tallies.insert((String::from("0xw1.rig"), String::from("c")), Tally { work: 50, accepted: 1, stale: 3, ..Default::default() });
+        let (da, db) = (a.ledger_json(1, 0), b.ledger_json(1, 0));
+        let mut sum = Pool::new(Vec::new());
+        assert_eq!(sum.merge_ledger(&da).unwrap(), 2);
+        assert_eq!(sum.merge_ledger(&db).unwrap(), 1);
+        let w1 = &sum.tallies[&(String::from("0xw1.rig"), String::from("c"))];
+        assert_eq!((w1.work, w1.accepted, w1.stale), (150, 3, 3), "the same worker on two shards is the sum");
+        assert_eq!(sum.tallies[&(String::from("0xw2.rig"), String::from("c"))].work, 7);
+        // The merged document is itself a valid ledger, digest and all.
+        let mut back = Pool::new(Vec::new());
+        assert_eq!(back.load_ledger(&sum.ledger_json(1, 0)).unwrap(), 2);
+        // A shard whose rows were edited after it was written is refused.
+        let forged = db.replace("\"work\": 50", "\"work\": 5000");
+        assert_ne!(forged, db, "the forgery changed something");
+        assert!(sum.merge_ledger(&forged).is_err(), "a tampered shard is not summed");
     }
 
     /// An upstream coin with no work must not invent a header.

@@ -74,6 +74,13 @@ export function bind(instance) {
     // Records restored, or an Error carrying the core's reason. Throws rather than
     // answering -1, because the caller is restoring a payout record and a quiet
     // failure there is a pool that starts from zero and overwrites what it lost.
+    // Sum a shard's ledger into this core's. Throws with the core's reason on a
+    // bad digest: a shard that cannot be verified is not added to the record.
+    mergeLedger: (doc) => {
+      const n = withBytes(doc, (p, l) => x.edge_merge_ledger(p, l));
+      if (n < 0) throw new Error("edge_merge_ledger: " + dec.decode(out(256)).replace(/\0.*$/s, ""));
+      return n;
+    },
     loadLedger: (doc) => {
       const n = withBytes(doc, (p, l) => x.edge_load_ledger(p, l));
       if (n < 0) throw new Error("edge_load_ledger: " + dec.decode(out(256)).replace(/\0.*$/s, ""));

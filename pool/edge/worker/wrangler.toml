@@ -35,6 +35,10 @@ SWITCH = "1"
 # "0" is off. 50000 is the runbook's gate. Off while the operator's own mining
 # address holds none -- turning it on now would refuse the operator's rig.
 GATE_MIN = "0"
+# Durable Objects the miners are split across. 1 behaves exactly as before
+# sharding (shard 0 is the original "main" object and keeps its record); raise
+# it from the soak's measured shares/s per shard, not from a guess.
+SHARDS = "1"
 
 [[rules]]
 type = "CompiledWasm"

@@ -55,12 +55,58 @@ const GATE_CACHE_MS = 10 * 60_000;
 // switch costs every miner its current job, so faster buys nothing.
 const RATES_MS = 5 * 60_000;
 
+// ### Shards
+//
+// **Many objects, one record.** A single Durable Object is single-threaded and
+// validates every share itself, so it is the ceiling on how many miners one pool
+// can hold. `SHARDS` objects split the miners between them by a hash of the
+// connecting address; each is today's pool unchanged -- its own core, its own
+// upstream sessions, and so its own extranonce from zpool, which is what keeps
+// shards from handing out the same search space.
+//
+// Shard 0 is named "main", the object every miner used before sharding, so the
+// record it holds carries on rather than starting again.
+//
+// `/ledger.json` sums the shards through `Pool::merge_ledger`: tallies are
+// plain counters, a worker seen on two shards is simply the sum, and each
+// shard's digest is checked before its rows are added.
+function shardName(i) {
+  return i === 0 ? "main" : `shard-${i}`;
+}
+
+// Keyed by `?w=` when a miner sends one -- its payout address, say, so the
+// same address always lands on the same shard -- and by the connecting IP
+// otherwise. Either is correct: tallies sum across shards, so which shard a
+// miner lands on changes load, never the record.
+function shardFor(request, n) {
+  const ip = new URL(request.url).searchParams.get("w") || request.headers.get("CF-Connecting-IP") || "";
+  let h = 2166136261;
+  for (let i = 0; i < ip.length; i++) h = Math.imul(h ^ ip.charCodeAt(i), 16777619) >>> 0;
+  return n > 1 ? h % n : 0;
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    const pool = env.POOL.get(env.POOL.idFromName("main"));
-    if (url.pathname === "/mine" || url.pathname === "/ledger.json" || url.pathname === "/status") {
-      return pool.fetch(request);
+    const n = Math.max(1, Number(env.SHARDS || 1));
+    const stub = (i) => env.POOL.get(env.POOL.idFromName(shardName(i)));
+    if (url.pathname === "/mine") {
+      return stub(shardFor(request, n)).fetch(request);
+    }
+    if (url.pathname === "/status") {
+      const all = await Promise.all([...Array(n).keys()].map((i) => stub(i).fetch(new Request(`${url.origin}/status`)).then((r) => r.json())));
+      return Response.json({ shards: n, slots: all[0].slots, connections: all.reduce((a, s) => a + s.connections, 0), perShard: all.map((s) => s.connections) });
+    }
+    if (url.pathname === "/ledger.json") {
+      if (n === 1) return stub(0).fetch(request);
+      const docs = await Promise.all([...Array(n).keys()].map((i) => stub(i).fetch(new Request(`${url.origin}/ledger.json`)).then((r) => r.text())));
+      const instance = await WebAssembly.instantiate(wasmModule, imports);
+      const core = bind(instance);
+      core.init((env.COINS || "yescrypt:yescrypt:12").split(/\s+/).filter(Boolean), Number(env.SHARE_SECONDS || 45));
+      for (const d of docs) core.mergeLedger(d);
+      return new Response(core.ledger(1, Math.floor(Date.now() / 1000)), {
+        headers: { "content-type": "application/json", "access-control-allow-origin": "*" },
+      });
     }
     return new Response(
       "GLaDOS pool. Miners connect over WebSocket at /mine and speak the native " +
