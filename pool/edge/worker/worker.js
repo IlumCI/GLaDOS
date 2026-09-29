@@ -70,7 +70,8 @@ const RATES_MS = 5 * 60_000;
 // `/ledger.json` sums the shards through `Pool::merge_ledger`: tallies are
 // plain counters, a worker seen on two shards is simply the sum, and each
 // shard's digest is checked before its rows are added.
-function shardName(i) {
+function shardName(i, gpu = false) {
+  if (gpu) return `gpu-${i}`;
   return i === 0 ? "main" : `shard-${i}`;
 }
 
@@ -89,20 +90,37 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     const n = Math.max(1, Number(env.SHARDS || 1));
-    const stub = (i) => env.POOL.get(env.POOL.idFromName(shardName(i)));
+    // GPU miners get shards of their own, with their own coin list, so CPU and
+    // GPU switching are independent -- a card and a CPU never compete for one
+    // slot choice, and neither drags the other onto an algorithm it hashes badly.
+    const gpu = env.GPU_COINS ? Math.max(1, Number(env.GPU_SHARDS || 1)) : 0;
+    const stub = (i, g = false) => env.POOL.get(env.POOL.idFromName(shardName(i, g)));
+    const everyShard = () => [
+      ...[...Array(n).keys()].map((i) => stub(i)),
+      ...[...Array(gpu).keys()].map((i) => stub(i, true)),
+    ];
     if (url.pathname === "/mine") {
       return stub(shardFor(request, n)).fetch(request);
     }
+    if (url.pathname === "/mine/gpu") {
+      if (!gpu) return new Response("no GPU coins on this pool", { status: 404 });
+      return stub(shardFor(request, gpu), true).fetch(request);
+    }
     if (url.pathname === "/status") {
-      const all = await Promise.all([...Array(n).keys()].map((i) => stub(i).fetch(new Request(`${url.origin}/status`)).then((r) => r.json())));
-      return Response.json({ shards: n, slots: all[0].slots, connections: all.reduce((a, s) => a + s.connections, 0), perShard: all.map((s) => s.connections) });
+      const all = await Promise.all(everyShard().map((s) => s.fetch(new Request(`${url.origin}/status`)).then((r) => r.json())));
+      return Response.json({
+        shards: n, gpuShards: gpu, slots: all[0].slots,
+        connections: all.reduce((a, s) => a + s.connections, 0),
+        perShard: all.map((s) => s.connections),
+      });
     }
     if (url.pathname === "/ledger.json") {
-      if (n === 1) return stub(0).fetch(request);
-      const docs = await Promise.all([...Array(n).keys()].map((i) => stub(i).fetch(new Request(`${url.origin}/ledger.json`)).then((r) => r.text())));
+      if (n === 1 && !gpu) return stub(0).fetch(request);
+      const docs = await Promise.all(everyShard().map((s) => s.fetch(new Request(`${url.origin}/ledger.json`)).then((r) => r.text())));
       const instance = await WebAssembly.instantiate(wasmModule, imports);
       const core = bind(instance);
-      core.init((env.COINS || "yescrypt:yescrypt:12").split(/\s+/).filter(Boolean), Number(env.SHARE_SECONDS || 45));
+      const coins = `${env.COINS || "yescrypt:yescrypt:12"} ${env.GPU_COINS || ""}`;
+      core.init(coins.split(/\s+/).filter(Boolean), Number(env.SHARE_SECONDS || 45));
       for (const d of docs) core.mergeLedger(d);
       return new Response(core.ledger(1, Math.floor(Date.now() / 1000)), {
         headers: { "content-type": "application/json", "access-control-allow-origin": "*" },
@@ -134,7 +152,12 @@ export class Pool {
       // Whitespace only: a coin with an upstream carries commas of its own
       // (`...@host:port,address,password`), and splitting on them tore one
       // coin into three that would not parse.
-      const coins = (env.COINS || "yescrypt:yescrypt:12").split(/\s+/).filter(Boolean);
+      // A shard's name says what it serves: `gpu-N` takes GPU_COINS, anything
+      // else COINS. `ctx.id.name` is the name it was reached by (Cloudflare,
+      // 2026-03, available in the constructor and under `wrangler dev`).
+      this.gpu = String(ctx.id.name || "").startsWith("gpu-");
+      const spec = this.gpu ? env.GPU_COINS : env.COINS;
+      const coins = (spec || "yescrypt:yescrypt:12").split(/\s+/).filter(Boolean);
       this.slots = this.core.init(coins, Number(env.SHARE_SECONDS || 45), Number(env.WINDOW || 0));
       // **Restored, or the object refuses to serve.** A ledger that fails to load
       // and is then overwritten by the next job period is the share log erased

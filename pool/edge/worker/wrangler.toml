@@ -46,6 +46,12 @@ GATE_MIN = "0"
 # sharding (shard 0 is the original "main" object and keeps its record); raise
 # it from the soak's measured shares/s per shard, not from a guess.
 SHARDS = "1"
+# GPU miners connect at /mine/gpu and are served by shards of their own
+# ("gpu-N"), so CPU and GPU switching never compete for one slot choice.
+# HeavyHash is the one GPU algorithm in our stack (cuda/heavyhash.cuh, OBTC);
+# zpool accepted 11/11 of its forwarded shares when it was first driven.
+GPU_COINS = "heavyhash:heavyhash:24@heavyhash.mine.zpool.ca:5138,RRNXJhigAxiLJTRrDKu7fsDknTkXbx1Uz9,c=RVN"
+GPU_SHARDS = "1"
 
 [[rules]]
 type = "CompiledWasm"
