@@ -84,3 +84,4 @@ tools/mkwad.py
 /.authorcheck.patch
 pool/edge/target/
 pool/edge/worker/.wrangler/
+pool/edge/worker/node_modules/

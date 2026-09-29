@@ -1,0 +1,9 @@
+{
+  "name": "glados-pool-worker",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@noble/hashes": "1.8.0",
+    "@noble/secp256k1": "2.3.0"
+  }
+}
