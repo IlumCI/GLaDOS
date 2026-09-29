@@ -110,5 +110,6 @@ pub mod record;
 pub mod roster;
 pub mod server;
 pub mod session;
+pub mod spec;
 pub mod upstream;
 pub mod vardiff;

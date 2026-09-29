@@ -43,6 +43,12 @@ mod imp {
     // Supplied by the JavaScript that instantiates the module. Named after the
     // project rather than after what they return, so a stray `env` import from
     // some dependency cannot collide with them.
+    //
+    // **The module name is required, not tidy.** Without it `rust-lld` treats
+    // an `extern` function as a symbol some other object should have defined,
+    // and fails the link with `undefined symbol: glados_now_ms` -- it does not
+    // assume a host import on its own.
+    #[link(wasm_import_module = "glados")]
     extern "C" {
         fn glados_now_ms() -> f64;
     }
