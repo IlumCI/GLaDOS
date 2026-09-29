@@ -20,7 +20,14 @@ tag = "v1"
 new_sqlite_classes = ["Pool"]
 
 [vars]
-# Two zpool upstreams, paid out in Ravencoin to the operator's address, and every
+# Four zpool upstreams -- yescrypt, yespowerR16, yespowerURX, yescryptR16 --
+# each checked against zpool acceptance with a burn address before it went in
+# (URX 6/7 and yescryptR16 24/30 accepted; every refusal "Invalid job id").
+# URX's key "UraniumX" is from AdventureCoin's sugarmaker YespowerUrx.c and
+# cpu-pool's docs. SUGAR and ADVC were left out: their whole zpool pots are
+# $0.87 and $0.27 a day, which one laptop would flood.
+#
+# Paid out in Ravencoin to the operator's address, and every
 # miner moved to whichever pays best per unit of its work (SWITCH). Labels are
 # zpool's algorithm names, which is how the live rates find them.
 #
@@ -28,7 +35,7 @@ new_sqlite_classes = ["Pool"]
 # and proceeds land in one place to be spent on one market buy. RVN because
 # zpool's minimum there is 0.05 RVN, so a payout can happen the same day --
 # chosen over DOGE for being visible, at the cost of a worse swap later.
-COINS = "yescrypt:yescrypt:12@yescrypt.mine.zpool.ca:6233,RRNXJhigAxiLJTRrDKu7fsDknTkXbx1Uz9,c=RVN yespowerR16:yespower-10-4096-16:10@yespowerr16.mine.zpool.ca:6534,RRNXJhigAxiLJTRrDKu7fsDknTkXbx1Uz9,c=RVN"
+COINS = "yescrypt:yescrypt:12@yescrypt.mine.zpool.ca:6233,RRNXJhigAxiLJTRrDKu7fsDknTkXbx1Uz9,c=RVN yespowerR16:yespower-10-4096-16:10@yespowerr16.mine.zpool.ca:6534,RRNXJhigAxiLJTRrDKu7fsDknTkXbx1Uz9,c=RVN yespowerURX:yespower-10-2048-32-5572616e69756d58:10@yespowerurx.mine.zpool.ca:6236,RRNXJhigAxiLJTRrDKu7fsDknTkXbx1Uz9,c=RVN yescryptR16:yescryptr16:10@yescryptr16.mine.zpool.ca:6333,RRNXJhigAxiLJTRrDKu7fsDknTkXbx1Uz9,c=RVN"
 SHARE_SECONDS = "45"
 SWITCH = "1"
 # Whole GLADOS a miner's payout address must hold on chain 4663 to connect;
