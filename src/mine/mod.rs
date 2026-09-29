@@ -28,6 +28,7 @@ pub mod proto;
 pub mod screen;
 pub mod header;
 pub mod neoscrypt;
+pub mod heavyhash;
 pub mod stratum;
 pub mod u256;
 pub mod work;
@@ -833,6 +834,7 @@ fn stratum_checks() -> Vec<(&'static str, bool)> {
     // BLAKE2s underneath them. Extended here rather than duplicated, because a
     // second copy of a vector is a second thing to get wrong.
     out.extend(neoscrypt::checks());
+    out.extend(heavyhash::checks());
     out.extend(work::checks());
 
     out

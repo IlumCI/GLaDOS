@@ -1672,6 +1672,16 @@ mod tests {
         assert!((r["spiky"] - 1.0).abs() < 1e-9, "an estimate at 20x is capped at twice what was paid");
     }
 
+    /// The pool validates HeavyHash with the kernel's own code, against a block
+    /// somebody else mined: OBTC's mainnet genesis, whose hash its node asserts.
+    #[test]
+    fn heavyhash_reproduces_obtc_genesis() {
+        let (h, want) = crate::mine::heavyhash::genesis();
+        let mut hs = crate::mine::algo::Hasher::new(&Algo::HeavyHash, &h).unwrap();
+        assert_eq!(hs.hash(&h, u32::from_le_bytes([h[76], h[77], h[78], h[79]])), want);
+        assert!(matches!(crate::record::parse_algo("heavyhash"), Ok(Algo::HeavyHash)));
+    }
+
     /// An upstream coin with no work must not invent a header.
     ///
     /// The alternative is a miner spending real time on a search that can never

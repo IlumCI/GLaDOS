@@ -47,6 +47,7 @@
 #include "sha256d.cuh"
 #include "blake2s.cuh"
 #include "neoscrypt.cuh"
+#include "heavyhash.cuh"
 
 // The target, most significant word first. Its own symbol rather than the
 // headers' own, because those ship fixed benchmark targets and this one
@@ -102,7 +103,7 @@ __device__ __forceinline__ void blake2s_header_hash(uint32_t nonce, uint32_t out
     for (int i = 0; i < 8; ++i) out[i] = xB2Mid[i] ^ v[i] ^ v[8 + i];
 }
 
-enum XAlgo { X_SHA256D = 0, X_BLAKE2S = 1, X_NEOSCRYPT = 2 };
+enum XAlgo { X_SHA256D = 0, X_BLAKE2S = 1, X_NEOSCRYPT = 2, X_HEAVYHASH = 3 };
 
 // Nonces per thread. Two, which is what `design/xpu.md` measured: widening the
 // instruction-level parallelism past that bought nothing on this part.
@@ -121,8 +122,9 @@ __global__ void xpu_scan_kernel(uint32_t base, uint32_t *found) {
 #pragma unroll
     for (int j = 0; j < NPT; ++j) {
         uint32_t n = n0 + j;
-        if (A == X_SHA256D) sha256d_hash(__byte_perm(n, 0, 0x0123), h[j]);
-        else                blake2s_header_hash(n, h[j]);
+        if (A == X_SHA256D)        sha256d_hash(__byte_perm(n, 0, 0x0123), h[j]);
+        else if (A == X_HEAVYHASH) heavyhash_nonce(n, h[j]);
+        else                       blake2s_header_hash(n, h[j]);
     }
 #pragma unroll
     for (int j = 0; j < NPT; ++j) {
@@ -266,6 +268,12 @@ static int set_job(int algo, const uint8_t header[80], const uint8_t target_be[3
         return 0;
     }
 
+    if (algo == X_HEAVYHASH) {
+        // The matrix is the previous block's, so it is built here once a job
+        // and never per nonce. See `heavyhash.cuh`.
+        return heavyhash_upload(header);
+    }
+
     if (algo == X_NEOSCRYPT) {
         // Nothing to precompute. FastKDF tiles all eighty bytes across its
         // buffer before the first PRF call, so there is no invariant prefix to
@@ -345,6 +353,8 @@ static uint32_t scan_range(int algo, uint32_t base, uint32_t count,
             here = blocks * per_block;
             if (algo == X_SHA256D)
                 xpu_scan_kernel<X_SHA256D><<<blocks, threads>>>(base + done, d_found);
+            else if (algo == X_HEAVYHASH)
+                xpu_scan_kernel<X_HEAVYHASH><<<blocks, threads>>>(base + done, d_found);
             else
                 xpu_scan_kernel<X_BLAKE2S><<<blocks, threads>>>(base + done, d_found);
         }
@@ -416,6 +426,16 @@ static int selftest(uint32_t *d_found, uint32_t **ns_v, uint8_t **ns_kdf) {
          "a16adc09011d002c5f48",
          "0000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
          0x00000000u, 70000u, 0x0000438cu},
+        // Optical Bitcoin's mainnet genesis, whose hash its node asserts at
+        // startup. 3,001 nonces ending at the real one, and `tools/heavyhash.py`
+        // confirms it is the only nonce in the range under this target, so the
+        // answer is the genesis nonce or the implementation is wrong.
+        {"heavyhash",
+         "0100000000000000000000000000000000000000000000000000000000000000000000"
+         "00f5febbad19864a6900b6ce84287511e6e746229ce6239ff3df7481654778a4c4d3e1"
+         "5d60ffff001c0747d042",
+         "0000000000120000000000000000000000000000000000000000000000000000",
+         0x42d03b4fu, 3001u, 0x42d04707u},
         // The same sha256d block, over a range that is a multiple of nothing.
         // 9546a142 - 95460000 = 41,282, so 41,283 nonces from the base is the
         // smallest range containing it, and every block size here divides
@@ -438,7 +458,8 @@ static int selftest(uint32_t *d_found, uint32_t **ns_v, uint8_t **ns_kdf) {
             continue;
         }
         int a = !strcmp(T[i].algo, "sha256d") ? X_SHA256D
-              : !strcmp(T[i].algo, "blake2s") ? X_BLAKE2S : X_NEOSCRYPT;
+              : !strcmp(T[i].algo, "blake2s") ? X_BLAKE2S
+              : !strcmp(T[i].algo, "heavyhash") ? X_HEAVYHASH : X_NEOSCRYPT;
         if (set_job(a, header, target)) {
             printf("FAIL  %s: upload\n", T[i].algo);
             bad++;
@@ -506,6 +527,7 @@ int main(int argc, char **argv) {
             if (!strcmp(an, "sha256d")) a = X_SHA256D;
             else if (!strcmp(an, "blake2s")) a = X_BLAKE2S;
             else if (!strcmp(an, "neoscrypt")) a = X_NEOSCRYPT;
+            else if (!strcmp(an, "heavyhash")) a = X_HEAVYHASH;
             else { printf("err this device cannot compute %s\n", an); continue; }
 
             uint8_t header[80], target[32];

@@ -111,6 +111,10 @@ pub enum Algo {
     /// variant, not this one with a field bolted on, because a key is part of
     /// the parameter block and changes the initial state.
     Blake2s,
+    /// Optical Bitcoin's HeavyHash: SHA3-256, a 64x64 nibble matrix drawn from
+    /// the previous block hash, SHA3-256. See `heavyhash.rs`. No parameters --
+    /// the matrix comes from the header, so there is nothing to carry on the wire.
+    HeavyHash,
 }
 
 impl Algo {
@@ -121,6 +125,7 @@ impl Algo {
             Algo::Yespower { v10: false, .. } => "yespower-0.5",
             Algo::Blake2s => "blake2s",
             Algo::Neoscrypt => "neoscrypt",
+            Algo::HeavyHash => "heavyhash",
         }
     }
 
@@ -136,6 +141,10 @@ impl Algo {
             // therefore a shorter hold on the quantum, which is the direction
             // that is safe to be wrong in.
             Algo::Blake2s => 4096,
+            // Two Keccak-f permutations and 4,096 multiply-adds a nonce, so an
+            // order of magnitude slower than sha256d. Not measured on the CPU:
+            // the device that matters for this one is the GPU.
+            Algo::HeavyHash => 512,
             // Between the two by three orders of magnitude at each end. A
             // NeoScrypt hash is two full SMix passes over 32 KiB, so it lands
             // nearer yespower than sha256d -- measured on the GPU at 190 kH/s
@@ -167,6 +176,8 @@ impl Algo {
             // A midstate, a header and a digest. Register and L1 territory,
             // which is why these two never bound a device on memory.
             Algo::Sha256d | Algo::Blake2s => 256,
+            // The 4 KiB matrix, shared by every nonce of a job.
+            Algo::HeavyHash => 64 * 64 + 256,
             // Upstream's `(N + 3) * r * 2 * BLOCK_SIZE` plus the 608 bytes of
             // FastKDF buffers. Fixed, because the profile is fixed.
             Algo::Neoscrypt => (128 + 3) * 2 * 2 * 64 + 608,
@@ -234,7 +245,10 @@ impl Algo {
     /// `Blake2s` stays at 1 unverified: nothing here has mined it at a pool.
     pub fn stratum_factor(&self) -> u32 {
         match self {
-            Algo::Sha256d | Algo::Blake2s => 1,
+            // HeavyHash's factor was not read anywhere: zpool accepting forwarded
+            // shares is what settles it, and a wrong one reads as zero forwards
+            // (too hard) or "low difficulty" refusals (too easy).
+            Algo::Sha256d | Algo::Blake2s | Algo::HeavyHash => 1,
             Algo::Neoscrypt | Algo::Yespower { .. } => 65_536,
         }
     }
@@ -243,7 +257,9 @@ impl Algo {
         match self {
             // ARX and integer addition over a working set that fits in
             // registers.
-            Algo::Sha256d | Algo::Blake2s => Bound::Arithmetic,
+            // The matrix is 4 KiB and stays in L1; Keccak and the multiply-adds
+            // are all ALU.
+            Algo::Sha256d | Algo::Blake2s | Algo::HeavyHash => Bound::Arithmetic,
             // Two SMix passes of 256 dependent random reads each over 32 KiB.
             // Measured on the GPU by removing SMix: it is 78% of a hash, and
             // the FastKDF that remains is the other 22%.
@@ -290,6 +306,7 @@ impl Algo {
             Algo::Sha256d => String::from("sha256d"),
             Algo::Blake2s => String::from("blake2s (RFC 7693)"),
             Algo::Neoscrypt => String::from("neoscrypt (N=128 r=2, ChaCha+Salsa)"),
+            Algo::HeavyHash => String::from("heavyhash (OBTC: SHA3-256, 64x64 nibble matrix)"),
             Algo::Yespower { v10, n, r, pers } => {
                 let mut s = String::from(if *v10 { "yespower 1.0 N=" } else { "yespower 0.5 N=" });
                 push_u32(&mut s, *n);
@@ -326,6 +343,7 @@ fn push_u32(s: &mut String, mut v: u32) {
 
 /// A prepared hasher, holding whatever working set its algorithm needs.
 pub enum Hasher {
+    HeavyHash(super::heavyhash::Heavy),
     Sha256d(hash::Midstate),
     Blake2s(blake2s::Midstate),
     Yespower(Yespower, Option<Vec<u8>>),
@@ -340,6 +358,7 @@ impl Hasher {
             Algo::Sha256d => Some(Hasher::Sha256d(hash::Midstate::new(header))),
             Algo::Blake2s => Some(Hasher::Blake2s(blake2s::Midstate::new(header))),
             Algo::Neoscrypt => Some(Hasher::Neoscrypt(Neoscrypt::new())),
+            Algo::HeavyHash => Some(Hasher::HeavyHash(super::heavyhash::Heavy::new(header))),
             Algo::Yespower { v10, n, r, pers } => {
                 let v = if *v10 { Version::V1_0 } else { Version::V0_5 };
                 Some(Hasher::Yespower(Yespower::new(v, *n, *r)?, pers.clone()))
@@ -352,6 +371,8 @@ impl Hasher {
     pub fn footprint(&self) -> usize {
         match self {
             Hasher::Sha256d(_) => 0,
+            // The matrix, which is the only thing held between nonces.
+            Hasher::HeavyHash(_) => 64 * 64,
             Hasher::Blake2s(_) => 0,
             Hasher::Yespower(y, _) => y.footprint(),
             Hasher::Neoscrypt(n) => n.footprint(),
@@ -369,6 +390,8 @@ impl Hasher {
         match self {
             Hasher::Sha256d(mid) => *mid = hash::Midstate::new(header),
             Hasher::Blake2s(mid) => *mid = blake2s::Midstate::new(header),
+            // The matrix belongs to the previous block, not to the job.
+            Hasher::HeavyHash(h) => h.retarget(header),
             // Neither depends on the header until `hash` is called, and
             // rebuilding either would throw away its working set -- 8 MiB for
             // yespower, 33 KiB for this one -- every time the pool sends work.
@@ -388,6 +411,7 @@ impl Hasher {
             // never existed while looking perfectly healthy.
             Hasher::Sha256d(mid) => mid.hash_with(nonce),
             Hasher::Blake2s(mid) => mid.hash_with(nonce),
+            Hasher::HeavyHash(h) => h.hash(header, nonce),
             Hasher::Yespower(y, pers) => {
                 let mut h = *header;
                 h[76..80].copy_from_slice(&nonce.to_le_bytes());

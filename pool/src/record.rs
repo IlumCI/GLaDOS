@@ -46,6 +46,7 @@ pub fn parse_algo(spec: &str) -> Result<Algo, String> {
         // count are the NeoScrypt profile rather than settings, so a chain
         // varying them would be a different proof of work.
         "neoscrypt" => Ok(Algo::Neoscrypt),
+        "heavyhash" => Ok(Algo::HeavyHash),
         // The four aliases, byte-verified against TESTS-OK in `--selftest`.
         // Input spellings only: `algo_spec` renders the canonical form, so the
         // share log never carries an alias and cannot be invalidated by one.
@@ -95,6 +96,7 @@ pub fn algo_spec(a: &Algo) -> String {
         Algo::Sha256d => String::from("sha256d"),
         Algo::Blake2s => String::from("blake2s"),
         Algo::Neoscrypt => String::from("neoscrypt"),
+        Algo::HeavyHash => String::from("heavyhash"),
         Algo::Yespower { v10, n, r, pers } => {
             let mut s = format!("yespower-{}-{}-{}", if *v10 { "10" } else { "05" }, n, r);
             if let Some(p) = pers {

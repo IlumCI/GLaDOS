@@ -97,6 +97,7 @@ pub mod mine {
     pub mod header;
     pub mod blake2s;
     pub mod neoscrypt;
+    pub mod heavyhash;
     pub mod yespower;
     pub mod algo;
     pub mod stratum;

@@ -117,6 +117,21 @@ fn absorb(st: &mut [u64; 25], block: &[u8]) {
 
 /// Keccak-256 of a message.
 pub fn keccak256(msg: &[u8]) -> [u8; 32] {
+    sponge256(msg, 0x01)
+}
+
+/// FIPS 202 SHA3-256 of a message.
+///
+/// **One byte from `keccak256`, and it is the domain separator.** SHA3 appends
+/// the bits `01` before the pad, which lands as `0x06` where the original Keccak
+/// submission -- what Ethereum adopted before FIPS 202 was final -- has `0x01`.
+/// Everything else, rate included, is identical, which is why this is one sponge
+/// with the byte as an argument rather than a second copy of the loop.
+pub fn sha3_256(msg: &[u8]) -> [u8; 32] {
+    sponge256(msg, 0x06)
+}
+
+fn sponge256(msg: &[u8], domain: u8) -> [u8; 32] {
     let mut st = [0u64; 25];
 
     let full = msg.len() / RATE;
@@ -132,7 +147,7 @@ pub fn keccak256(msg: &[u8]) -> [u8; 32] {
     let mut tail = [0u8; RATE];
     let rest = &msg[full * RATE..];
     tail[..rest.len()].copy_from_slice(rest);
-    tail[rest.len()] ^= 0x01;
+    tail[rest.len()] ^= domain;
     tail[RATE - 1] ^= 0x80;
     absorb(&mut st, &tail);
     f1600(&mut st);
@@ -174,6 +189,20 @@ pub fn checks() -> alloc::vec::Vec<(bool, alloc::string::String)> {
     ok(
         hex(&keccak256(b"")) != "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
         "and it is not SHA3-256, which differs only in one padding byte",
+    );
+    // FIPS 202's own values, and the rate-filling length for the same reason as
+    // Keccak's below. `hashlib.sha3_256` agrees on all three.
+    ok(
+        hex(&sha3_256(b"")) == "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
+        "sha3_256 of the empty string is its published value",
+    );
+    ok(
+        hex(&sha3_256(b"abc")) == "3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532",
+        "and of 'abc'",
+    );
+    ok(
+        hex(&sha3_256(&[b'a'; 136])) == "3fc5559f14db8e453a0a3091edbd2bc25e11528d81c66fa570a4efdcc2695ee1",
+        "and of a message exactly one rate long",
     );
 
     // A message that exactly fills the rate: the padding has to land in a block
