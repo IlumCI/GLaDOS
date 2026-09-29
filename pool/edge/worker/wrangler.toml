@@ -67,6 +67,8 @@ GPU_SHARDS = "1"
 TREASURY = "dry"
 RVN_BATCH = "200"
 TREASURY_MAX_PAY_WEI = "50000000000000000"
+# Change this (any new value) and redeploy to resume a halted treasury, once.
+TREASURY_RESUME = ""
 
 [[rules]]
 type = "CompiledWasm"

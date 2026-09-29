@@ -91,6 +91,19 @@ export class Treasury {
   async step() {
     const keys = await this.pool.treasury();
     const state = await this.state();
+    // **Resuming a halt is a deploy, never a request.** A halted treasury
+    // stays halted until the operator changes TREASURY_RESUME in the config
+    // and redeploys; there is no endpoint for it, because an endpoint is
+    // something anybody on the internet can call. The value is remembered, so
+    // one change resumes one halt and not every halt after it.
+    const resume = this.pool.env.TREASURY_RESUME || "";
+    if (state.halted && resume && resume !== state.resumedWith) {
+      this.log(`resumed by TREASURY_RESUME=${resume} from: ${state.halted}`);
+      state.halted = null;
+      state.failures = 0;
+      state.resumedWith = resume;
+      await this.save(state);
+    }
     const facts = await this.facts(keys, state);
     const { action, state: next } = decide(state, facts, this.cfg);
     if (action.kind === "wait" || action.kind === "note") {
