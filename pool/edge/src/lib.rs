@@ -24,11 +24,15 @@ use std::sync::Mutex;
 
 use glados_pool::pool::Pool;
 use glados_pool::session::{Conn, Out};
+use glados_pool::upstream::{UpOut, Upstream};
 
 struct State {
     pool: Mutex<Pool>,
     conns: BTreeMap<u32, Conn>,
     next: u32,
+    /// One per coin that has an upstream, in slot order. JavaScript owns the
+    /// sockets and addresses these by index.
+    ups: Vec<Upstream>,
 }
 
 static STATE: Mutex<Option<State>> = Mutex::new(None);
@@ -116,7 +120,8 @@ pub extern "C" fn edge_init(ptr: *const u8, len: u32, share_secs: u32, window: f
         pool.set_window(window as u64);
     }
     let slots = pool.slots();
-    *STATE.lock().unwrap() = Some(State { pool: Mutex::new(pool), conns: BTreeMap::new(), next: 1 });
+    let ups = (0..slots as usize).filter_map(|i| Upstream::for_slot(&pool, i)).collect();
+    *STATE.lock().unwrap() = Some(State { pool: Mutex::new(pool), conns: BTreeMap::new(), next: 1, ups });
     slots
 }
 
@@ -184,4 +189,88 @@ pub extern "C" fn edge_load_ledger(ptr: *const u8, len: u32) -> i32 {
             -1
         }
     }
+}
+
+// --- Upstream -----------------------------------------------------------------
+//
+// The same `Upstream` the native daemon drives from a thread, driven here from
+// a Durable Object's outbound `connect()`. Records as for a session, plus `W`
+// for "work was installed, hand miners fresh jobs", and `C` carrying the reason
+// the connection is finished.
+
+fn encode_up(out: &UpOut) -> Vec<u8> {
+    let mut v = Vec::new();
+    let mut push = |kind: u8, bytes: &[u8]| {
+        v.push(kind);
+        v.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        v.extend_from_slice(bytes);
+    };
+    for m in &out.send {
+        push(b'S', m.as_bytes());
+    }
+    for l in &out.log {
+        push(b'L', l.as_bytes());
+    }
+    if out.work {
+        push(b'W', &[]);
+    }
+    if let Some(why) = &out.close {
+        push(b'C', why.as_bytes());
+    }
+    v
+}
+
+fn with_up(i: u32, f: impl FnOnce(&mut Upstream, &Mutex<Pool>) -> UpOut) -> u32 {
+    let mut g = STATE.lock().unwrap();
+    let Some(s) = g.as_mut() else { return 0 };
+    let State { pool, ups, .. } = s;
+    let Some(u) = ups.get_mut(i as usize) else { return 0 };
+    let out = f(u, pool);
+    set_out(&encode_up(&out))
+}
+
+/// How many upstreams there are.
+#[no_mangle]
+pub extern "C" fn edge_up_count() -> u32 {
+    STATE.lock().unwrap().as_ref().map(|s| s.ups.len() as u32).unwrap_or(0)
+}
+
+/// `host\tport` of upstream `i`, left in the output buffer.
+#[no_mangle]
+pub extern "C" fn edge_up_where(i: u32) -> u32 {
+    let g = STATE.lock().unwrap();
+    let Some(u) = g.as_ref().and_then(|s| s.ups.get(i as usize)) else { return 0 };
+    let text = format!("{}\t{}", u.host, u.port);
+    drop(g);
+    set_out(text.as_bytes())
+}
+
+#[no_mangle]
+pub extern "C" fn edge_up_open(i: u32) -> u32 {
+    with_up(i, |u, _| u.open())
+}
+
+#[no_mangle]
+pub extern "C" fn edge_up_bytes(i: u32, ptr: *const u8, len: u32) -> u32 {
+    let bytes = if ptr.is_null() || len == 0 {
+        Vec::new()
+    } else {
+        unsafe { core::slice::from_raw_parts(ptr, len as usize) }.to_vec()
+    };
+    with_up(i, |u, p| u.on_bytes(p, &bytes))
+}
+
+#[no_mangle]
+pub extern "C" fn edge_up_tick(i: u32) -> u32 {
+    with_up(i, |u, p| u.on_tick(p))
+}
+
+/// Fresh jobs for one connection, after upstream installed new work.
+#[no_mangle]
+pub extern "C" fn edge_work(conn: u32) -> u32 {
+    let mut g = STATE.lock().unwrap();
+    let Some(s) = g.as_mut() else { return 0 };
+    let Some(c) = s.conns.get_mut(&conn) else { return 0 };
+    let out = c.on_work(&s.pool);
+    set_out(&encode(&out))
 }

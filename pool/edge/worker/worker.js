@@ -22,11 +22,22 @@
 //
 // ### The protocol
 //
+// ### Upstream
+//
+// Work comes from zpool over an outbound `connect()`, driven through the same
+// `Upstream` state machine the native daemon runs from a thread. **It is open
+// only while a miner is**: an open socket keeps the object resident and billed,
+// and with nobody hashing there is nothing to forward and nobody to hand work
+// to. The first miner opens it and the last one closes it, so a connection's
+// first job can wait on an upstream handshake -- about a second -- and then
+// arrives the moment upstream sends one rather than at the next idle period.
+//
 // Miners speak the native protocol (`mine::proto`), one JSON message per line.
 // A WebSocket message already has edges, but a sender may batch several lines into
 // one, so messages are still split on newlines -- the core is handed exactly one
 // line at a time, as `server.rs` hands it one.
 
+import { connect } from "cloudflare:sockets";
 import wasmModule from "../target/wasm32-unknown-unknown/release/glados_edge.wasm";
 import { bind, imports } from "../boundary.mjs";
 
@@ -56,13 +67,17 @@ export class Pool {
     this.env = env;
     this.conns = new Map(); // WebSocket -> connection id in the core
     this.core = null;
+    this.ups = [];          // { i, where, sock, writer, running }
     // Nothing is served until the core exists and the ledger is back, so a miner
     // arriving during a cold start cannot be credited into an empty record that
     // then overwrites the stored one.
     ctx.blockConcurrencyWhile(async () => {
       const instance = await WebAssembly.instantiate(wasmModule, imports);
       this.core = bind(instance);
-      const coins = (env.COINS || "yescrypt:yescrypt:12").split(/[\s,]+/).filter(Boolean);
+      // Whitespace only: a coin with an upstream carries commas of its own
+      // (`...@host:port,address,password`), and splitting on them tore one
+      // coin into three that would not parse.
+      const coins = (env.COINS || "yescrypt:yescrypt:12").split(/\s+/).filter(Boolean);
       this.slots = this.core.init(coins, Number(env.SHARE_SECONDS || 45), Number(env.WINDOW || 0));
       // **Restored, or the object refuses to serve.** A ledger that fails to load
       // and is then overwritten by the next job period is the share log erased
@@ -70,7 +85,13 @@ export class Pool {
       // fails every request loudly instead, which is a problem somebody sees.
       const saved = await ctx.storage.get("ledger");
       const restored = saved ? this.core.loadLedger(saved) : 0;
-      this.log(`[edge] ${this.slots} slot(s): ${coins.join(" ")}; ${saved ? `${restored} record(s) restored` : "no stored ledger, starting from zero"}`);
+      for (let i = 0; i < this.core.upCount(); i++) {
+        this.ups.push({ i, where: this.core.upWhere(i), sock: null, writer: null, running: false });
+      }
+      // Coin specs carry the upstream address and password, so they are logged
+      // by label only.
+      const labels = coins.map((c) => c.split("@")[0] + (c.includes("@") ? " (upstream)" : " (local)"));
+      this.log(`[edge] ${this.slots} slot(s): ${labels.join(" ")}; ${saved ? `${restored} record(s) restored` : "no stored ledger, starting from zero"}`);
     });
   }
 
@@ -117,10 +138,14 @@ export class Pool {
       for (const line of text.split("\n")) {
         if (line.trim() && deliver(this.core.line(id, line))) return;
       }
+      // A share may have beaten upstream's target: forward it now, not at the
+      // next alarm, since upstream's job may be replaced before then.
+      this.tickUps();
     });
     server.addEventListener("close", () => this.drop(server));
     server.addEventListener("error", () => this.drop(server));
 
+    for (const u of this.ups) if (!u.running) this.runUp(u);
     await this.arm();
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -138,7 +163,76 @@ export class Pool {
       this.core.close(id);
       this.conns.delete(ws);
       this.ctx.waitUntil(this.save());
+      if (this.conns.size === 0) {
+        for (const u of this.ups) this.closeUp(u);
+      }
     }
+  }
+
+  // One upstream connection, reconnecting with backoff while anyone is mining.
+  async runUp(u) {
+    u.running = true;
+    let backoff = 2000;
+    while (this.conns.size > 0) {
+      try {
+        u.sock = connect(u.where);
+        u.writer = u.sock.writable.getWriter();
+        if (!this.upDeliver(u, this.core.upOpen(u.i))) {
+          const reader = u.sock.readable.getReader();
+          for (;;) {
+            const { value, done } = await reader.read();
+            if (done) {
+              this.log(`[up ${u.i}] upstream closed the connection`);
+              break;
+            }
+            if (this.upDeliver(u, this.core.upBytes(u.i, value))) break;
+            backoff = 2000;
+          }
+        }
+      } catch (e) {
+        // The last miner leaving closes the socket under the read, which
+        // throws; that is the ordinary way out, not a fault worth a line.
+        if (this.conns.size > 0) this.log(`[up ${u.i}] ${e && e.message ? e.message : e}`);
+      }
+      this.closeUp(u);
+      if (this.conns.size === 0) break;
+      await new Promise((r) => setTimeout(r, backoff));
+      backoff = Math.min(backoff * 2, 60_000);
+    }
+    u.running = false;
+  }
+
+  // Act on what the core answered. `true` when the connection is finished.
+  upDeliver(u, r) {
+    for (const l of r.log) this.log(l);
+    for (const m of r.send) {
+      if (u.writer) u.writer.write(new TextEncoder().encode(m)).catch(() => {});
+    }
+    if (r.work) {
+      for (const [ws, id] of this.conns) {
+        const w = this.core.work(id);
+        try {
+          for (const m of w.send) ws.send(m);
+        } catch {
+          this.drop(ws);
+        }
+      }
+    }
+    if (r.close) this.log(`[up ${u.i}] ${r.why}`);
+    return r.close;
+  }
+
+  tickUps() {
+    for (const u of this.ups) {
+      if (u.writer && this.upDeliver(u, this.core.upTick(u.i))) this.closeUp(u);
+    }
+  }
+
+  closeUp(u) {
+    try { u.writer && u.writer.releaseLock(); } catch {}
+    try { u.sock && u.sock.close(); } catch {}
+    u.sock = null;
+    u.writer = null;
   }
 
   save() {
@@ -153,6 +247,7 @@ export class Pool {
 
   // Every job period: fresh work for quiet miners, and the ledger to storage.
   async alarm() {
+    this.tickUps();
     for (const [ws, id] of this.conns) {
       const r = this.core.idle(id);
       for (const l of r.log) this.log(l);

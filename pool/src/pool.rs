@@ -795,6 +795,20 @@ impl Pool {
         core::mem::take(&mut self.forwards)
     }
 
+    /// This slot's forwards only, leaving every other slot's in the queue.
+    ///
+    /// **`take_forwards` with a filter after it dropped shares.** Each upstream
+    /// took the whole queue and skipped what was not its own, so with two
+    /// upstreams a share for one could be taken by the other's loop and thrown
+    /// away -- a share good enough to pay, discarded, depending on which thread
+    /// woke first. One upstream hides it completely.
+    pub fn take_forwards_for(&mut self, slot: usize) -> Vec<Forward> {
+        let (mine, rest): (Vec<Forward>, Vec<Forward>) =
+            core::mem::take(&mut self.forwards).into_iter().partition(|f| f.slot as usize == slot);
+        self.forwards = rest;
+        mine
+    }
+
     /// Validate a submitted share by computing the hash the miner computed.
     ///
     /// This is the one thing the pool cannot delegate and the reason it shares

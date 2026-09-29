@@ -186,6 +186,19 @@ impl Conn {
         out
     }
 
+    /// Upstream has new work: hand it out now, without waiting for idle.
+    ///
+    /// Not `on_idle`, which also eases difficulty -- calling that on every
+    /// upstream job would retarget miners on the upstream's schedule rather
+    /// than on their own share rate.
+    pub fn on_work(&mut self, pool: &Mutex<Pool>) -> Out {
+        let mut out = Out::default();
+        if self.greeted {
+            issue_all(pool, &self.vd, &mut out);
+        }
+        out
+    }
+
     /// One line from the miner, already framed.
     pub fn on_line(&mut self, pool: &Mutex<Pool>, line: &str) -> Out {
         let mut out = Out::default();

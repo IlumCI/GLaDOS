@@ -25,6 +25,23 @@ pub fn parse_coin(spec: &str) -> Result<Coin, String> {
             if user.is_empty() {
                 return Err(format!("'{up}' has no worker name after the host"));
             }
+            // **The upstream user is where every coin is paid, so it must be an
+            // address, and a whole one.** zpool authorized `NOTANADDRESS` without
+            // a word and sent work for it, so nothing upstream checks this: a
+            // typo here is a pool that runs, looks healthy, and pays nobody --
+            // forever. The kernel's own judge, the one a miner image uses on its
+            // worker name, decides; only a known form whose checksum holds, or an
+            // unchecksummed form written consistently, passes.
+            use crate::mine::addr::{judge, Payout};
+            match judge(user) {
+                Payout::Checked(_) | Payout::Unchecked(_) => {}
+                Payout::Broken(k) => {
+                    return Err(format!("the upstream address '{user}' is a {} whose checksum fails", k.as_str()))
+                }
+                Payout::Name => {
+                    return Err(format!("the upstream user '{user}' is not an address, so upstream would pay nobody"))
+                }
+            }
             let (host, port) = match hostport.rsplit_once(':') {
                 Some((h, p)) => match p.parse::<u16>() {
                     Ok(n) => (h.to_string(), n),
@@ -86,4 +103,22 @@ pub fn parse_coin(spec: &str) -> Result<Coin, String> {
         work: None,
         e2: 0,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_coin;
+
+    // The upstream user is the payout address for everything the pool earns, so
+    // these are the refusals that matter most: each is a pool that would run,
+    // look healthy, and pay nobody.
+    #[test]
+    fn an_upstream_user_must_be_an_address() {
+        assert!(parse_coin("y:yescrypt:12@yescrypt.mine.zpool.ca:6233,NOTANADDRESS,c=DOGE").is_err());
+        // One character changed in a valid base58 address fails its checksum.
+        assert!(parse_coin("y:yescrypt:12@h:1,1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNb,x").is_err());
+        assert!(parse_coin("y:yescrypt:12@h:1,1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa,x").is_ok());
+        // A coin with no upstream has no payout address to check.
+        assert!(parse_coin("y:yescrypt:12").is_ok());
+    }
 }

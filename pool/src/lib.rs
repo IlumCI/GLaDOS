@@ -79,6 +79,8 @@ pub mod store {
 #[path = "../../src/crypto"]
 pub mod crypto {
     pub mod hkdf;
+    // For `mine::addr`: an EIP-55 checksum is a keccak of the address.
+    pub mod keccak;
 }
 
 /// The kernel's mining core, minus the two modules that are about the kernel.
@@ -100,6 +102,7 @@ pub mod mine {
     pub mod stratum;
     pub mod proto;
     pub mod ev;
+    pub mod addr;
 }
 
 pub mod budget;
