@@ -38,6 +38,7 @@
 // line at a time, as `server.rs` hands it one.
 
 import { connect } from "cloudflare:sockets";
+import { newKey, rvnAddress, evmAddress } from "./treasury.js";
 import wasmModule from "../target/wasm32-unknown-unknown/release/glados_edge.wasm";
 import { bind, imports } from "../boundary.mjs";
 
@@ -101,6 +102,11 @@ export default {
     ];
     if (url.pathname === "/mine") {
       return stub(shardFor(request, n)).fetch(request);
+    }
+    // The treasury lives in shard 0 -- "main", the one object that existed
+    // before sharding -- so there is exactly one place the keys are.
+    if (url.pathname === "/treasury") {
+      return stub(0).fetch(request);
     }
     if (url.pathname === "/mine/gpu") {
       if (!gpu) return new Response("no GPU coins on this pool", { status: 404 });
@@ -195,6 +201,11 @@ export class Pool {
     if (url.pathname === "/status") {
       return Response.json({ slots: this.slots, connections: this.conns.size });
     }
+    if (url.pathname === "/treasury") {
+      const t = await this.treasury();
+      return Response.json({ rvn: t.rvn, evm: t.evm },
+        { headers: { "access-control-allow-origin": "*" } });
+    }
     if (request.headers.get("Upgrade") !== "websocket") {
       return new Response("expected a WebSocket upgrade", { status: 426 });
     }
@@ -271,6 +282,35 @@ export class Pool {
   // was lost whenever a miner disconnected more than a few seconds before it --
   // measured: a four-minute run's shares absent from the tally while the next
   // run's, closing six seconds before its alarm, survived.
+  // The pool's hot wallets, created on first use and never regenerated.
+  //
+  // **Generated here, kept here, never shown.** The operator agreed to the
+  // automation holding keys on the condition that they are nobody's personal
+  // keys and never pass through a conversation. So they are made from
+  // `crypto.getRandomValues` inside this object and live only in its storage;
+  // the one thing that leaves is the pair of addresses.
+  //
+  // **Never overwritten.** A key that is regenerated orphans whatever was paid
+  // to the old address, silently and forever. So a read that fails throws
+  // rather than falling through to "no keys yet", and new keys are written
+  // only when storage positively answers that there are none.
+  async treasury() {
+    if (this.keys) return this.keys;
+    // One at a time: two first requests racing would each generate keys, and
+    // the second write would replace keys whose addresses were already shown.
+    await this.ctx.blockConcurrencyWhile(async () => {
+      if (this.keys) return;
+      let k = await this.ctx.storage.get("treasury.keys");
+      if (k === undefined) {
+        k = { rvnKey: newKey(), evmKey: newKey(), created: Date.now() };
+        await this.ctx.storage.put("treasury.keys", k);
+        this.log("[treasury] hot wallets created");
+      }
+      this.keys = { ...k, rvn: rvnAddress(k.rvnKey), evm: evmAddress(k.evmKey) };
+    });
+    return this.keys;
+  }
+
   // **The holding gate, enforced where a miner connects.** The distributor has
   // a gate of its own at claim time, and the second review (audit-2 F1) showed
   // it can be shared: GLADOS moves between wallets untaxed, so one gate-sized
