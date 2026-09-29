@@ -609,8 +609,23 @@ impl Pool {
         let coin = self.coins.get(slot as usize)?;
         let label = coin.label.clone();
         let algo = coin.algo.clone();
-        let target = target_with_leading_zeros(bits);
         let work = coin.work.clone();
+        // **Never harder than upstream.** Upstream pays each share at *its own*
+        // difficulty, so a miner held above it earns only upstream's figure per
+        // share while doing ours: measured live against zpool's heavyhash port,
+        // the GPU was retargeted to 31 bits against zpool's ~27.7, and zpool
+        // credited 18 MH/s of a 170 MH/s card -- about nine tenths of the work
+        // given away, with every share accepted and every counter healthy.
+        // Capping at upstream's leading zeros makes the local target at least
+        // as easy, so every hash upstream would pay for is submitted and
+        // forwarded; the credit below is still `2^bits`, so the ledger and the
+        // target cannot disagree. Upstream retargets its own difficulty as the
+        // share rate rises, and this follows it down or up job by job.
+        let bits = match &work {
+            Some(w) if matches!(coin.source, Source::Upstream { .. }) => bits.min(leading_zero_bits(&w.up_target)),
+            _ => bits,
+        };
+        let target = target_with_leading_zeros(bits);
         let upstream = matches!(coin.source, Source::Upstream { .. });
 
         // An upstream coin with no work yet yields no job. Building one anyway
@@ -1340,6 +1355,21 @@ fn approx_hashes_per_block(t: &U256) -> Option<f64> {
     }
 }
 
+/// Leading zero bits of a big-endian target: the difficulty, in the pool's own
+/// unit, of the easiest target no easier than it.
+pub fn leading_zero_bits(t: &U256) -> u32 {
+    let b = t.to_be_bytes();
+    let mut n = 0;
+    for x in b.iter() {
+        if *x == 0 {
+            n += 8;
+        } else {
+            return n + x.leading_zeros();
+        }
+    }
+    256
+}
+
 pub fn target_with_leading_zeros(leading: u32) -> U256 {
     let mut b = [0xffu8; 32];
     let full = (leading / 8) as usize;
@@ -1680,6 +1710,21 @@ mod tests {
         let mut hs = crate::mine::algo::Hasher::new(&Algo::HeavyHash, &h).unwrap();
         assert_eq!(hs.hash(&h, u32::from_le_bytes([h[76], h[77], h[78], h[79]])), want);
         assert!(matches!(crate::record::parse_algo("heavyhash"), Ok(Algo::HeavyHash)));
+    }
+
+    /// A miner is never held harder than upstream, or upstream credits it for
+    /// less work than it did -- the heavyhash port was paying for a tenth.
+    #[test]
+    fn a_miner_is_never_held_harder_than_upstream() {
+        let mut p = upstream_pool();
+        let mut w = some_work();
+        w.up_target = target_with_leading_zeros(20);
+        p.set_work(0, w);
+        let j = p.make_job(0, 31).unwrap();
+        assert!(j.target == target_with_leading_zeros(20), "capped at upstream's 20 bits");
+        let easy = p.make_job(0, 12).unwrap();
+        assert!(easy.target == target_with_leading_zeros(12), "an easier local target is left alone");
+        assert_eq!(leading_zero_bits(&target_with_leading_zeros(27)), 27);
     }
 
     /// An upstream coin with no work must not invent a header.
