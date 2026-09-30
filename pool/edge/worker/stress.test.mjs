@@ -559,7 +559,7 @@ class Storage {
     this.writes += 1;
     if (this.w.r.chance(this.w.p("evictAfterWrite"))) { this.w.evicted = true; throw new Evicted("evicted after a write"); }
   }
-  async delete(k) { this.m.delete(k); }
+  async delete(k) { for (const x of Array.isArray(k) ? k : [k]) this.m.delete(x); }
 }
 
 // --- one run -------------------------------------------------------------------------------

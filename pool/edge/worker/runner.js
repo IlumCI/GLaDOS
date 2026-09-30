@@ -760,6 +760,15 @@ export class Treasury {
       this.epochCache = null;
       await this.save(next, { ...chunked(`treasury.epoch.${next.epochs}`, paid), ...chunked("treasury.snapshot", snapshot) });
       this.log(`epoch ${paid.id} paid ${paid.recipients.length} miner(s) in ${a.hash}`);
+      // The working record is copied into the epoch now; left alone, one is
+      // kept per payout forever (measured: 9,577 keys after three days at
+      // 100,000 miners). Deleted after the write, so an eviction here leaves
+      // garbage, never a missing record.
+      try {
+        const head = await this.storage.get(a.epoch.key);
+        const keys = [a.epoch.key, ...[...Array(head && head.chunks ? head.chunks : 0).keys()].map((i) => `${a.epoch.key}#${i}`)];
+        await this.storage.delete(keys);
+      } catch {}
     }
   }
 

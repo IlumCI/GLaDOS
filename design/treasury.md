@@ -83,40 +83,73 @@ A mined revert is final, and is never remembered as an attempt to settle again.
 miners (income scaled with them) and prints epochs, recipients, the largest
 stored value and gas per payout. Measured:
 
-    miners   epochs   recipients per payout   largest value   gas per payout
-       100      9          55-72                  20 KB        3.0-3.8 M
-       500      5         335-376                 92 KB       17.2-19.3 M
-     2,000     20             400                107 KB           20.5 M
-    10,000     31             400                108 KB           20.5 M
+    miners   shards  epochs  per payout  paid (distinct)  requests/tick  keys/write
+       100       2       6    54-70           79              11           5
+     2,000       2      16      400        1,471              12           7
+   100,000     100     148      400       37,705              12          63
 
-**Before the fixes, 2,000 halted forever**: 1,337 eligible is over the 400 one
-transaction carries, and the treasury refused to pay anyone. Now an epoch pays
-the 400 with the most work waiting and carries the rest, and carried work only
-grows, so whoever is left out is nearer the front next time. 400 is 20.5M gas
-against 4663's 32M per-transaction cap (its reported block limit, 2^50, is not
-a real limit).
+(three simulated days at 100,000, two at the others; per-transaction gas at
+400 recipients is 20.5M of 4663's 32M cap; the largest single value stays
+under 107 KB of the 128 KiB limit.)
 
-**And the pool's own ledger could not be saved past about 250 miners.** It was
-one storage value, capped at 128 KiB; a row is about 130 bytes (measured on
-the live ledger), so saves began failing silently near 1,000 tallies while the
-object served from memory -- until the next deploy dropped everything since
-the last save that fitted. It is chunked now (`chunks.js`), with the treasury's
-records.
+**What 100,000 broke, before it passed:**
+
+- **The RPC.** Balances were read for every miner every five minutes, two
+  JSON-RPC calls each: 200,000 calls a tick at 100,000 miners. And a live
+  probe found the public 4663 RPC refuses even *one* batch of 100 calls
+  (HTTP 429; batches of 40 pass) -- so at any size, live, every read would
+  have been rate-limited, every miner's work carried forever, and nobody
+  paid. `GladosReader` (creation code run as an `eth_call`, never deployed)
+  now reads balance and code for 200 addresses per request; the treasury
+  reads only the likeliest recipients, most work first, until 400 are
+  eligible or 1,000 are read, a second apart; the floor comes from work
+  alone so ranking needs no reads; and an epoch is built at most every 30
+  minutes, only when the ETH on hand is worth paying out. The connect gate
+  batches arrivals within 300 ms into one read.
+- **Memory and storage.** Shards now answer `/work.json` (sums per address)
+  instead of ledger rows, which at 100 shards were tens of megabytes; a
+  payout stores only the snapshot entries it moves, not the whole snapshot;
+  and its working record is deleted once copied into the epoch (9,577 keys
+  after three days, otherwise, and growing forever).
+- **The public endpoints.** `/status` and `/ledger.json` fanned out to every
+  shard on every request, and `/ledger.json` merged every row in one Worker.
+  Both are edge-cached (30 s / 60 s), `?shard=` reads one shard, and past
+  eight shards the ledger is an index of per-shard links.
+
+**Before the earlier fixes, 2,000 halted forever** (1,337 eligible, over the
+400 one transaction carries), and **the pool's ledger could not be saved past
+about 250 miners** (one 128 KiB value, silently refused). Both are fixed:
+rotation by work waiting, and chunked storage (`chunks.js`).
 
 The ceilings that remain, nearest first:
 
-- **About 1,000 miners per shard.** The core holds 4,096 (worker, coin)
-  tallies, and a switching miner uses up to four. Past that, shares are counted
-  and credited to nobody. `/status` reports `tallies`, the object logs at 90%,
-  and the remedy is raising `SHARDS`.
-- **Share validation, 2,200-6,300 miners per shard, by arithmetic and not by
-  measurement**: yespower validation is 7-19 ms a share (`design/live800.md`)
-  on one thread, at one share per 45 s per miner. The tally cap binds first.
-  Nothing has put real connections against a deployed shard.
-- **About 50,000 miners for the treasury**, where one payout's record would
-  pass the 128 keys one atomic write can hold.
-- **The public RPC**: 10,000 miners is 200 batched reads a tick. A read that is
-  rate-limited carries that address's work rather than dropping it.
+- **About 1,000 miners per shard**: the core's 4,096 (worker, coin) tallies.
+  `/status` reports the fullest shard's `tallies` against `maxTallies`, the
+  object logs at 90%, and the remedy is raising `SHARDS` -- 100,000 miners is
+  about `SHARDS = 100`.
+- **About 200,000 miners for the treasury**, where the snapshot (63 of 128
+  keys at 100,000) outgrows one atomic write.
+- **Durable Object memory at 100,000 is estimated, not measured**: about 40-60
+  MB for the maps an epoch build holds, against 128 MB. The simulator's own
+  4.8 GB heap is the simulated world, not the treasury.
+- **Share validation, 2,200-6,300 miners per shard, by arithmetic**: 7-19 ms a
+  yespower share on one thread at one share per 45 s. The tally cap binds
+  first. No real connections have been put against a deployed shard.
+
+## What the live probes found
+
+About twenty requests in all, spaced 1.5-10 s apart, nothing that could move
+money: the hot wallets (both empty), a 100-call batch (refused, 429), batches
+of 5 to 40 (accepted), Multicall3 (deployed), a revert and an "insufficient
+funds" refusal (both definite answers, correctly not classed as transient),
+an unknown receipt (`null`), blockbook's unknown-tx and garbage-sendtx
+answers (HTTP 400 with `{"error": ...}`), a real transaction's
+`confirmations` (a number), and one GladosReader call against real
+addresses (the pair: a contract holding 252,417,850 GLADOS).
+
+Not probed, deliberately: creating a ChangeNOW exchange. The key lives only
+in the Worker, and the one call that proves the create path is the first
+live exchange itself.
 
 ## Operating it: nothing halts, nothing is silent
 
