@@ -151,7 +151,7 @@ export default {
           // The fullest shard's tallies against the core's cap: past ~90%,
           // new miners' shares go uncredited and SHARDS should be raised.
           tallies: Math.max(0, ...all.map((s) => s.tallies || 0)), maxTallies: all[0].maxTallies ?? null,
-        });
+        }, { headers: { "access-control-allow-origin": "*" } }); // the site's /pool/ page reads the miner count
       });
     }
     if (url.pathname === "/ledger.json") {

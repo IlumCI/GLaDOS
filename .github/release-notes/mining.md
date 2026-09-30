@@ -12,20 +12,33 @@ USB stick. Both end at the same screen, mining.
 
 ## In a virtual machine (QEMU)
 
-    qemu-system-x86_64 -machine q35 -accel kvm -m 2G \
-        -bios /usr/share/ovmf/OVMF.fd \
-        -cdrom glados-{{VERSION}}-miner.iso
+1. **Install QEMU and OVMF,** the UEFI firmware the miner boots on:
+   `sudo apt install qemu-system-x86 ovmf` (Debian/Ubuntu),
+   `sudo pacman -S qemu-full edk2-ovmf` (Arch),
+   `sudo dnf install qemu-kvm edk2-ovmf` (Fedora).
+
+2. **Copy the firmware's settings file** next to the ISO. This copy is where
+   the VM keeps your wallet between boots:
+
+       cp /usr/share/OVMF/OVMF_VARS_4M.fd vars.fd           # Debian/Ubuntu
+       cp /usr/share/edk2/x64/OVMF_VARS.4m.fd vars.fd       # Arch
+       cp /usr/share/edk2/ovmf/OVMF_VARS.fd vars.fd         # Fedora
+
+3. **Boot it,** with the matching firmware file from the same folder
+   (`OVMF_CODE_4M.fd`, `OVMF_CODE.4m.fd` or `OVMF_CODE.fd`):
+
+       qemu-system-x86_64 -machine q35 -accel kvm -m 2G \
+           -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+           -drive if=pflash,format=raw,file=vars.fd \
+           -cdrom glados-{{VERSION}}-miner.iso
+
+4. **Type your 0x wallet address and press Enter.** It mines. Next time,
+   the same command goes straight to mining.
 
 - **`-machine q35`** gives the VM a PCI Express bus, which is where the miner
-  looks for its network card. QEMU's older default machine has none.
-- **OVMF** is the UEFI firmware the miner boots on. `apt install ovmf` on
-  Debian/Ubuntu (path above); `pacman -S edk2-ovmf` on Arch, path
-  `/usr/share/edk2/x64/OVMF.4m.fd`; on Fedora
-  `/usr/share/edk2/ovmf/OVMF_CODE.fd`.
-- **`-accel kvm`** runs it at full speed on Linux. Leave it out on a machine
-  without KVM and it still runs, more slowly.
-
-It asks for your 0x wallet address once. Type it, press Enter, and it mines.
+  looks for its network card.
+- **`-accel kvm`** runs it at full speed on Linux. Without KVM, leave it out;
+  it still runs, more slowly.
 
 **Why QEMU and not VirtualBox.** The miner is a UEFI program that finds its
 network card over PCI Express. A new VirtualBox machine boots legacy BIOS on a
