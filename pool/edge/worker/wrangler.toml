@@ -44,7 +44,7 @@ new_sqlite_classes = ["Pool"]
 # and proceeds land in one place to be spent on one market buy. RVN because
 # zpool's minimum there is 0.05 RVN, so a payout can happen the same day --
 # chosen over DOGE for being visible, at the cost of a worse swap later.
-COINS = "yescrypt:yescrypt:12@yescrypt.mine.zpool.ca:6233,RRNXJhigAxiLJTRrDKu7fsDknTkXbx1Uz9,c=RVN yespowerR16:yespower-10-4096-16:10@yespowerr16.mine.zpool.ca:6534,RRNXJhigAxiLJTRrDKu7fsDknTkXbx1Uz9,c=RVN yespowerURX:yespower-10-2048-32-5572616e69756d58:10@yespowerurx.mine.zpool.ca:6236,RRNXJhigAxiLJTRrDKu7fsDknTkXbx1Uz9,c=RVN yescryptR16:yescryptr16:10@yescryptr16.mine.zpool.ca:6333,RRNXJhigAxiLJTRrDKu7fsDknTkXbx1Uz9,c=RVN"
+COINS = "yescrypt:yescrypt:12@yescrypt.mine.zpool.ca:6233,RCmy8SHUHnACVobxf8vpzum5ms7nPXFU4f,c=RVN yespowerR16:yespower-10-4096-16:10@yespowerr16.mine.zpool.ca:6534,RCmy8SHUHnACVobxf8vpzum5ms7nPXFU4f,c=RVN yespowerURX:yespower-10-2048-32-5572616e69756d58:10@yespowerurx.mine.zpool.ca:6236,RCmy8SHUHnACVobxf8vpzum5ms7nPXFU4f,c=RVN yescryptR16:yescryptr16:10@yescryptr16.mine.zpool.ca:6333,RCmy8SHUHnACVobxf8vpzum5ms7nPXFU4f,c=RVN"
 SHARE_SECONDS = "45"
 SWITCH = "1"
 # Whole GLADOS a miner's payout address must hold on chain 4663 to connect;
@@ -59,13 +59,15 @@ SHARDS = "1"
 # ("gpu-N"), so CPU and GPU switching never compete for one slot choice.
 # HeavyHash is the one GPU algorithm in our stack (cuda/heavyhash.cuh, OBTC);
 # zpool accepted 11/11 of its forwarded shares when it was first driven.
-GPU_COINS = "heavyhash:heavyhash:24@heavyhash.mine.zpool.ca:5138,RRNXJhigAxiLJTRrDKu7fsDknTkXbx1Uz9,c=RVN"
+GPU_COINS = "heavyhash:heavyhash:24@heavyhash.mine.zpool.ca:5138,RCmy8SHUHnACVobxf8vpzum5ms7nPXFU4f,c=RVN"
 GPU_SHARDS = "1"
 # The payout treasury (runner.js): "off", "dry" -- reads balances, decides,
 # logs what it would do, moves nothing -- or "live". RVN_BATCH is how much RVN
 # accumulates before a swap (ChangeNOW's minimum is ~151); TREASURY_MAX_PAY_WEI
 # caps one payout, and a payout over it halts the treasury instead of going out.
-TREASURY = "dry"
+TREASURY = "live"
+TREASURY_RVN = "RCmy8SHUHnACVobxf8vpzum5ms7nPXFU4f"
+TREASURY_EVM = "0xfaE492EA62AA2250E0Ab2d1a6331E3c991443Cc5"
 RVN_BATCH = "200"
 TREASURY_MAX_PAY_WEI = "50000000000000000"
 # Change this (any new value) and redeploy to resume a halted treasury, once.
