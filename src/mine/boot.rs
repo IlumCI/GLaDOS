@@ -302,6 +302,13 @@ pub fn apply(p: &Plan) -> String {
 
     match super::client::start() {
         Ok(()) => {
+            // The mining screen, now, in its CONNECTING state. It is otherwise
+            // drawn only from the socket loop, which is busy resolving and
+            // shaking hands for the first seconds -- so an accepted address sat
+            // under WAITING FOR ADDRESS for about three of them, measured on a
+            // capture. The loop cannot be drawing yet (it has not connected),
+            // so this frame does not race it.
+            super::screen::draw();
             let scheme = if p.ws.is_some() { "wss://" } else { "" };
             let mut s = format!("mining as {} at {}{}:{}", p.user, scheme, p.host, p.port);
             if let (Some(want), Some(n)) = (p.slices, got) {
@@ -393,12 +400,18 @@ pub fn asking() -> bool {
 /// with `0x`, so it goes on to be a command as usual -- which keeps the shell
 /// usable on a miner that has not been told where to pay yet.
 pub fn answer(line: &str) -> Option<String> {
-    // Whatever the line was, it has left the field.
-    super::screen::typed("");
     let line = line.trim();
     if !(line.starts_with("0x") || line.starts_with("0X")) {
+        // A command, not an address: it has left the field.
+        super::screen::typed("");
         return None;
     }
+    // An address is *not* cleared here. It used to be, first thing, so a
+    // good address emptied the field and the screen sat on "0x..." under
+    // WAITING FOR ADDRESS until the miner's first frame -- half a second
+    // that reads as "your address was rejected". A refusal clears it itself
+    // (`screen::refused`); an acceptance leaves it standing until the mining
+    // screen replaces the whole view.
     // Already mining on a miner image: a new address is a switch. It is saved
     // first, and the machine restarts onto it -- a reconnect under a new name
     // in the middle of a session is a state the miner was never built to be
@@ -424,6 +437,7 @@ pub fn answer(line: &str) -> Option<String> {
         }
         Ok(payout) => {
             *ASKING.lock_irq() = None;
+            super::screen::accepted();
             plan.user = String::from(line);
             plan.payout = payout;
             plan.ask = false;

@@ -581,6 +581,14 @@ pub fn typed(line: &str) {
     }
 }
 
+/// An address was accepted: empty the field without drawing it empty. The
+/// mining screen replaces the view next; left standing, the address read on
+/// it as a *new* wallet being typed ("press Enter to switch").
+pub fn accepted() {
+    TYPED.lock_irq().clear();
+    *REFUSAL.lock_irq() = None;
+}
+
 /// An address was refused: say why on the screen, and empty the field.
 pub fn refused(why: &'static str) {
     *REFUSAL.lock_irq() = Some(why);
