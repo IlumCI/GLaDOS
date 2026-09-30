@@ -125,6 +125,12 @@ def dir_entries(entry):
     if entry.name is not None:
         out += raw(b'.          ', 0x10, entry.cluster, 0)
         out += raw(b'..         ', 0x10, entry.parent_cluster, 0)
+    else:
+        # The volume label, as a root entry: the boot sector carries one too,
+        # but Windows and macOS name a drive from this, and without it a
+        # flashed stick shows up as "USB Drive" -- not what somebody looking
+        # for the file to paste their address into is looking for.
+        out += raw(b'GLADOS     ', 0x08, 0, 0)
 
     for child in entry.children:
         stem, ext = short_name(child.name, taken)
