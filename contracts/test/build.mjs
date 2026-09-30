@@ -42,7 +42,7 @@ export function compile(files) {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const c = compile(["GladosDistributor.sol", "TestToken.sol", "GladosPayout.sol"]);
+  const c = compile(["GladosDistributor.sol", "TestToken.sol", "GladosPayout.sol", "GladosReader.sol"]);
   const dir = path.join(root, "out");
   fs.mkdirSync(dir, { recursive: true });
   for (const [file, entries] of Object.entries(c)) {
@@ -60,4 +60,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const p = c["GladosPayout.sol"].GladosPayout;
   fs.writeFileSync(path.join(root, "..", "pool", "edge", "worker", "GladosPayout.json"),
     JSON.stringify({ abi: p.abi, bytecode: p.evm.bytecode.object }, null, 2) + "\n");
+  // And the reader it runs as an eth_call, never deployed (test/reader.mjs).
+  const rd = c["GladosReader.sol"].GladosReader;
+  fs.writeFileSync(path.join(root, "..", "pool", "edge", "worker", "GladosReader.json"),
+    JSON.stringify({ bytecode: rd.evm.bytecode.object }) + "\n");
 }

@@ -31,6 +31,7 @@ import { keccak_256 } from "@noble/hashes/sha3";
 import { Treasury, TOKEN, PAIR, WETH, getBig, CFG } from "./runner.js";
 import { newKey, rvnAddress, evmAddress, rvnScript, rvnTxid, rlp, int, createdAddress, amountOut, hex, unhex } from "./treasury.js";
 import { hasCode } from "./epoch.js";
+import reader from "./GladosReader.json" with { type: "json" };
 
 const RPC = "https://rpc.mainnet.chain.robinhood.com";
 const BLOCKBOOK = "https://blockbook.ravencoin.org/api/v2";
@@ -165,9 +166,12 @@ class World {
 
     // Miners: most gated, some not, and the ones that must never be paid.
     this.miners = [];
+    // One shard per thousand miners (the core's tally cap is 4,096 per shard,
+    // and a switching miner uses up to four).
+    this.shards = Math.max(2, Math.ceil(Number(process.env.MINERS || 24) / 1000));
     for (let i = 0; i < Number(process.env.MINERS || 24); i++) {
       const a = addrLike(this.r);
-      this.miners.push({ addr: a, rate: BigInt(1 + this.r.int(40)) * 1000n, shard: this.r.int(2), both: this.r.chance(0.2) });
+      this.miners.push({ addr: a, rate: BigInt(1 + this.r.int(40)) * 1000n, shard: this.r.int(this.shards), both: this.r.chance(0.2) });
       this.tok.set(a, this.r.chance(0.8) ? 50_000n * G + BigInt(this.r.int(100_000)) * G : BigInt(this.r.int(49_999)) * G);
     }
     const special = (addr, code, bal) => {
@@ -180,6 +184,9 @@ class World {
     const d7702 = addrLike(this.r); special(d7702, "0xef0100" + addrLike(this.r).slice(2), 60_000n * G); // 7702: an ordinary account
     this.eligible7702 = d7702;
     this.work = new Map(this.miners.map((m) => [m.addr, 0n]));
+    this.minerSet = new Set(this.miners.map((m) => m.addr));
+    this.calls = 0; // outbound requests this tick
+    this.maxCalls = 0;
     this.shardDown = false;
   }
 
@@ -365,6 +372,23 @@ class World {
       case "eth_getCode": return { result: this.code.get(params[0].toLowerCase()) || "0x" };
       case "eth_call": {
         const { to, data } = params[0];
+        // GladosReader, run as a call with no `to`: balance, code size and code
+        // head for each address, three words apiece.
+        if (!to && data.startsWith("0x" + reader.bytecode)) {
+          const args = data.slice(2 + reader.bytecode.length);
+          const wd = (i) => args.slice(i * 64, i * 64 + 64);
+          const token = "0x" + wd(0).slice(24), n = Number(BigInt("0x" + wd(2)));
+          if (n > 200) return err("out of gas", -32000);
+          let out = "0x";
+          for (let i = 0; i < n; i++) {
+            const a = "0x" + wd(3 + i).slice(24);
+            const bal = token === TOKEN ? (this.tok.get(a) || 0n) : (1n << 256n) - 1n;
+            const c = this.code.get(a);
+            const hexc = c && /^0x[0-9a-f]*$/i.test(c) ? c.slice(2) : c ? "60806040" + "00".repeat(96) : "";
+            out += bal.toString(16).padStart(64, "0") + (hexc.length / 2).toString(16).padStart(64, "0") + hexc.slice(0, 64).padEnd(64, "0");
+          }
+          return { result: out };
+        }
         if (to === PAIR && data === "0x0902f1ac") return { result: "0x" + this.rW.toString(16).padStart(64, "0") + this.rG.toString(16).padStart(64, "0") + "0".repeat(64) };
         if (to === TOKEN && data === "0x691f224f") return { result: "0x" + this.tax.toString(16).padStart(64, "0") };
         if (to === TOKEN && data.startsWith("0x70a08231")) return { result: "0x" + (this.tok.get("0x" + data.slice(-40)) || 0n).toString(16).padStart(64, "0") };
@@ -464,6 +488,7 @@ class World {
   // --- the one door ---
   async fetch(url, init = {}) {
     const r = this.r;
+    this.calls += 1;
     if (url.startsWith("https://alerts.example/")) { this.alerts.push(JSON.parse(init.body).content); return new Response("ok"); }
     // Timed outages: a dependency gone for a stretch of days, in the way it
     // actually goes -- refusing, erroring, or unreachable.
@@ -488,9 +513,22 @@ class World {
     return new Response(typeof body === "string" ? body : JSON.stringify(body), { status });
   }
 
+  // A miner marked `both` mines on its own shard and on shard 0, half each.
+  onShard(m, shard) { return m.shard === shard || (m.both && (shard === 0 || shard === m.shard)); }
+  part(m, shard) {
+    const w = this.work.get(m.addr);
+    if (!m.both || m.shard === 0) return w;
+    return shard === 0 ? w / 2n : w - w / 2n;
+  }
+  // What /work.json answers for a shard.
+  workDoc(shard) {
+    const work = {};
+    for (const m of this.miners) if (this.onShard(m, shard)) work[m.addr] = this.part(m, shard).toString();
+    return JSON.stringify({ work });
+  }
   ledgerDoc(shard) {
-    const part = (m) => { const w = this.work.get(m.addr); return m.both ? (shard === 0 ? w / 2n : w - w / 2n) : w; };
-    const rows = this.miners.filter((m) => m.both || m.shard === shard)
+    const part = (m) => this.part(m, shard);
+    const rows = this.miners.filter((m) => this.onShard(m, shard))
       .map((m) => `{"worker":"${m.addr}.rig${shard}","coin":"yespowerR16","work":${part(m)}}`);
     // A miner on both shards has its work split between them; the sum is the whole.
     return `{"shares":[${rows.join(",")}]}`;
@@ -509,8 +547,12 @@ class Storage {
   async put(k, v) {
     if (this.w.r.chance(this.w.p("evictBeforeWrite"))) { this.w.evicted = true; throw new Evicted("evicted before a write"); }
     const entries = typeof k === "string" ? { [k]: v } : k;
+    const n = Object.keys(entries).length;
+    if (n > 128) throw new Error(`${n} keys in one put; Durable Object storage takes at most 128`);
+    this.maxKeys = Math.max(this.maxKeys || 0, n);
     for (const [key, val] of Object.entries(entries)) {
       const size = JSON.stringify(val).length;
+      this.maxValue = Math.max(this.maxValue || 0, size);
       if (size > 131_072) throw new Error(`value for ${key} is ${size} bytes, over the 128 KiB limit`);
     }
     for (const [key, val] of Object.entries(entries)) this.m.set(key, structuredClone(val));
@@ -527,9 +569,13 @@ async function run({ seed, faults, ticks, calm = 600, mode = "live", env = {} })
   const storage = new Storage(w);
   const logs = [];
   const pool = {
-    env: { TREASURY: mode, RVN_BATCH: "200", GATE_MIN: "50000", SHARDS: "2", TREASURY_RESUME: "", CHANGENOW_KEY: "k",
+    env: { TREASURY: mode, RVN_BATCH: "200", GATE_MIN: "50000", SHARDS: String(w.shards), TREASURY_RESUME: "", CHANGENOW_KEY: "k",
            ALERT_WEBHOOK: "https://alerts.example/hook", ...env,
-           POOL: { idFromName: (n) => n, get: (n) => ({ fetch: async () => (w.shardDown ? new Response("down", { status: 503 }) : new Response(w.ledgerDoc(1))) }) } },
+           POOL: { idFromName: (n) => n, get: (n) => ({ fetch: async (req) => {
+             if (w.shardDown) return new Response("down", { status: 503 });
+             const shard = Number(String(n).split("-")[1]);
+             return new Response(new URL(req.url).pathname === "/work.json" ? w.workDoc(shard) : w.ledgerDoc(shard));
+           } }) } },
     ctx: { storage },
     core: { ledger: () => w.ledgerDoc(0) },
     log: (l) => logs.push(`${w.now} ${l}`),
@@ -541,6 +587,7 @@ async function run({ seed, faults, ticks, calm = 600, mode = "live", env = {} })
   let t = new Treasury(pool, io);
   let evictions = 0;
   const seenSnap = new Map();
+  let lastEpochs = 0;
   const check = async (tickNo) => {
     // Recorded epochs against what the chain actually paid.
     const st = storage.m.get("treasury.state") || {};
@@ -567,18 +614,20 @@ async function run({ seed, faults, ticks, calm = 600, mode = "live", env = {} })
     // Nobody who must not be paid ever is.
     for (const m of mined) for (const a of m.recipients) {
       if (a === PAIR || hasCode(w.code.get(a) || "0x")) w.violations.push(`tick ${tickNo}: paid ${a}, which holds code`);
-      const miner = w.miners.find((x) => x.addr === a);
-      if (!miner) w.violations.push(`tick ${tickNo}: paid ${a}, which never mined`);
+      if (!w.minerSet.has(a)) w.violations.push(`tick ${tickNo}: paid ${a}, which never mined`);
     }
     // Work credited never exceeds work done.
     const credited = new Map();
     for (const rec of recorded) if (rec) for (const a of rec.recipients) credited.set(a, (credited.get(a) || 0n) + BigInt(rec.work[a]));
     for (const [a, c] of credited) if (c > w.work.get(a)) w.violations.push(`tick ${tickNo}: ${a} credited ${c} work of ${w.work.get(a)}`);
-    // The snapshot only rises.
-    const snap = (await getBig(storage, "treasury.snapshot")) || {};
-    for (const [a, v] of Object.entries(snap)) {
-      if (seenSnap.has(a) && BigInt(v) < seenSnap.get(a)) w.violations.push(`tick ${tickNo}: snapshot for ${a} fell`);
-      seenSnap.set(a, BigInt(v));
+    // The snapshot only rises (it only changes when an epoch is recorded).
+    if ((st.epochs || 0) !== lastEpochs) {
+      lastEpochs = st.epochs || 0;
+      const snap = (await getBig(storage, "treasury.snapshot")) || {};
+      for (const [a, v] of Object.entries(snap)) {
+        if (seenSnap.has(a) && BigInt(v) < seenSnap.get(a)) w.violations.push(`tick ${tickNo}: snapshot for ${a} fell`);
+        seenSnap.set(a, BigInt(v));
+      }
     }
     if (st.halted) w.violations.push(`tick ${tickNo}: halted, waiting for a person: ${st.halted}`);
     if (st.paused && st.paused.until - w.now > 24 * 3_600_000 + TICK) w.violations.push(`tick ${tickNo}: paused for more than a day`);
@@ -589,6 +638,7 @@ async function run({ seed, faults, ticks, calm = 600, mode = "live", env = {} })
   for (let i = 0; i < total; i++) {
     if (i === ticks) { w.f = { receiptLag: 0, conditions: (w.f.conditions || []).filter((c) => c.to > ticks) }; } // the calm
     w.advance();
+    w.calls = 0;
     try {
       await t.tick(0);
     } catch (e) {
@@ -596,6 +646,10 @@ async function run({ seed, faults, ticks, calm = 600, mode = "live", env = {} })
     }
     // Any eviction during the step -- the tick swallows it as a failed step --
     // takes the object's memory with it.
+    w.maxCalls = Math.max(w.maxCalls, w.calls);
+    // Cloudflare caps one invocation's subrequests; the treasury must stay far
+    // under it whatever the crowd, or it fails every tick and never pays.
+    if (w.calls > 500) w.violations.push(`tick ${i}: ${w.calls} outbound requests in one tick`);
     if (w.evicted) { w.evicted = false; t = new Treasury(pool, io); evictions += 1; }
     if (mode === "live") await check(i);
   }
@@ -652,7 +706,11 @@ if (process.env.LOAD) {
   console.log(`${process.env.LOAD} miners: ${summary(res)}; ${(ms / 1000).toFixed(1)} s wall`);
   console.log(`recipients per epoch: ${epochs.map((e) => e.recipients.length).join(", ") || "none"}`);
   console.log(`largest stored value: ${sizes[0][0]} ${sizes[0][1]} B; ${res.storage.m.size} keys`);
-  console.log(`gas per payout: ${res.w.payouts.map((p) => 166_600 + 50_850 * p.recipients.length).join(", ")}`);
+  const gasList = res.w.payouts.map((p) => 166_600 + 50_850 * p.recipients.length);
+  console.log(`gas per payout: max ${Math.max(0, ...gasList).toLocaleString()} of 4663's 32,000,000 per-transaction cap`);
+  console.log(`peak outbound requests in one tick: ${res.w.maxCalls} (budget 500); peak keys in one write: ${res.storage.maxKeys} of 128; largest value ${res.storage.maxValue} B of 131,072`);
+  console.log(`paid at least once: ${new Set(res.w.payouts.flatMap((p) => p.recipients)).size} distinct addresses of ${res.w.miners.length}; shards ${res.w.shards}; heap ${(process.memoryUsage().heapUsed / 1e6).toFixed(0)} MB`);
+  console.log(res.w.violations.length ? `VIOLATIONS: ${res.w.violations.length}` : "no invariant broken");
   console.log([...new Set(res.w.violations)].slice(0, 3).join("\n"));
   process.exit(0);
 }

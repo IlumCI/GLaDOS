@@ -3,7 +3,7 @@
 // The same claims `tools/distribute.py --selftest` makes about the equal split,
 // on the same numbers, so the pool and the tool cannot quietly disagree about
 // who is paid.
-import { parseLedger, addressOf, workByAddress, medianFloor, build } from "./epoch.js";
+import { parseLedger, addressOf, workByAddress, medianFloor, build, deltas, floorOf, candidates } from "./epoch.js";
 
 let passed = 0, failed = 0;
 const ok = (c, w) => { c ? passed++ : failed++; console.log(`${c ? "ok  " : "FAIL"}  ${w}`); };
@@ -34,7 +34,7 @@ ok(e.work[A] === "1000", "an address is credited only the work since the last ep
 ok(e.recipients.join() === [A, B].sort().join(), "the two real miners are paid alike");
 ok(/floor/.test(e.excluded[C]), "and one doing a sliver of typical is not a share");
 
-const poor = build({ now, prev, balances: new Map([[A, rich], [B, 49_999n * G]]), gateMin: 50_000n * G });
+const poor = build({ now, prev, balances: new Map([[A, rich], [B, 49_999n * G]]), gateMin: 50_000n * G, minFrac: 0 });
 ok(!poor.recipients.includes(B) && /holds 49999 of 50000/.test(poor.excluded[B]), "an address under the gate is not paid, and says why");
 ok(/unreadable/.test(poor.excluded[C]), "an address whose balance could not be read is refused, not waved through");
 
@@ -49,8 +49,8 @@ const withPair = build({ now: new Map([[A, 900n], [PAIR, 900n]]), prev: new Map(
 ok(withPair.recipients.join() === A && /cannot be paid/.test(withPair.excluded[PAIR]), "the pair's address is never a recipient, whatever it holds");
 
 // An unreadable balance and a miss of the floor carry the work forward.
-const carried = build({ now, prev, balances: new Map([[A, rich], [B, rich]]), gateMin: 50_000n * G });
-ok(carried.snapshot.get(C) === 0n, "an unreadable balance's work is not consumed");
+const carried = build({ now, prev, balances: new Map([[A, rich], [B, rich]]), gateMin: 50_000n * G, minFrac: 0 });
+ok((carried.snapshot.get(C) ?? 0n) === 0n && !carried.updates.has(C), "an unreadable balance's work is not consumed");
 const next = build({ now: new Map([[A, 1500n], [B, 900n], [C, 50n]]), prev: carried.snapshot,
                      balances: new Map([[A, rich], [B, rich], [C, rich]]), gateMin: 50_000n * G, minFrac: 0 });
 ok(next.recipients.includes(C) && next.work[C] === "50", "and it is paid in full once the balance reads");
@@ -66,11 +66,23 @@ const crowd = new Map([...Array(10).keys()].map((i) => ["0x" + String(i).padStar
 const bal = new Map([...crowd.keys()].map((a) => [a, rich]));
 const cap = build({ now: crowd, prev: new Map(), balances: bal, gateMin: 0n, minFrac: 0, maxRecipients: 4 });
 ok(cap.recipients.length === 4 && cap.recipients.every((a) => crowd.get(a) >= 106n), "over the cap, the four with the most work waiting are paid");
-ok([...crowd.keys()].filter((a) => !cap.recipients.includes(a)).every((a) => cap.snapshot.get(a) === 0n && /carries/.test(cap.excluded[a])),
+ok([...crowd.keys()].filter((a) => !cap.recipients.includes(a)).every((a) => (cap.snapshot.get(a) ?? 0n) === 0n && /carries/.test(cap.excluded[a])),
    "and everybody else's work carries, not consumed");
 const grown = new Map([...crowd].map(([a, w]) => [a, w + 10n]));
 const nextCap = build({ now: grown, prev: cap.snapshot, balances: bal, gateMin: 0n, minFrac: 0, maxRecipients: 4 });
 ok(nextCap.recipients.every((a) => !cap.recipients.includes(a)), "next epoch the ones left out are at the front");
+
+// Bounded reads: only `considered` addresses are judged; the rest are counted,
+// carried, and never listed -- at 100,000 miners the list is the problem.
+const big5 = new Map([...Array(5).keys()].map((i) => ["0x" + String(i + 50).padStart(40, "0"), BigInt(1000 + i)]));
+const only = new Set([...big5.keys()].slice(0, 2));
+const part = build({ now: big5, prev: new Map(), balances: new Map([...only].map((a) => [a, rich])), gateMin: 0n, considered: only });
+ok(part.recipients.length === 2 && part.notReached === 3 && Object.keys(part.excluded).length === 0, "addresses not reached are counted and carried, not listed");
+ok(part.updates.size === 2, "and only the paid move the snapshot, so a payout stores two entries, not five");
+// The floor is known before any balance is read, and ranks the reads.
+const d = deltas(big5, new Map());
+const order = candidates(d, floorOf(d), new Set([[...big5.keys()][4]]));
+ok(order.length === 4 && order[0] === [...big5.keys()][3], "candidates come most work first, skipping the known ineligible");
 
 console.log(`${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

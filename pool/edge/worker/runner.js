@@ -38,7 +38,9 @@
 // a written-off exchange from the treasury, not from a miner.
 import { decide, FRESH, MAX_RECIPIENTS, backoffMs } from "./flow.js";
 import { signRvnTx, rvnTxid, rvnScript, signLegacyTx, createdAddress, encodeBuyAndPay, encodeCtor, amountOut } from "./treasury.js";
-import { parseLedger, workByAddress, build, hasCode } from "./epoch.js";
+import { parseLedger, workByAddress, build, deltas, floorOf, candidates } from "./epoch.js";
+import { worthPaying } from "./cadence.js";
+import { readerData, readerDecode, READ_MAX } from "./reader.js";
 import { textChunks, loadText } from "./chunks.js";
 import payoutArtifact from "./GladosPayout.json" with { type: "json" };
 
@@ -76,6 +78,19 @@ export const CFG = {
   orphanCheckMs: 3_600_000,
   // A dependency failing continuously this long is an alert.
   outageAlertMs: 2 * 3_600_000,
+  // **What one epoch may read, so a crowd cannot get the pool blacklisted.**
+  // Only 400 can be paid, so balances are read for the likeliest 400 --
+  // most work waiting first -- and no more than this many addresses in all:
+  // 200 an eth_call through GladosReader, so at most five requests a second
+  // apart. At 100,000 miners reading everybody two JSON-RPC calls apiece was
+  // 200,000 calls every five minutes; and the public RPC refuses even one
+  // batch of 100 (HTTP 429, measured), which would have left every balance
+  // unread and nobody ever paid.
+  readBudget: 1000, readPauseMs: 1000,
+  // And an epoch is built at most this often, and only when the ETH on hand
+  // would be worth paying out; a built one is reused until then or until an
+  // epoch is recorded.
+  epochEveryMs: 30 * 60_000,
   // The spot price must sit within this of the median of recent readings, or
   // the payout waits: a pair pushed off its price for one block is exactly
   // the moment a buy gets the fewest tokens.
@@ -83,6 +98,8 @@ export const CFG = {
 };
 
 const big = (x) => BigInt(x);
+// A shard's /work.json, {"work": {"0xaddr": "123", ...}}, as address -> BigInt.
+export const parseWork = (text) => new Map(Object.entries(JSON.parse(text).work || {}).map(([a, w]) => [a.toLowerCase(), BigInt(w)]));
 const toJSON = (v) => JSON.parse(JSON.stringify(v, (_, x) => (typeof x === "bigint" ? x.toString() : x)));
 
 // A read that did not get an answer. Retried; never counted as a refusal.
@@ -428,10 +445,28 @@ export class Treasury {
       const x = await this.json(`${CHANGENOW}/exchange/by-id?id=${encodeURIComponent(state.exchange.id)}`, { headers: this.cnHeaders() });
       f.exchangeStatus = x.body && typeof x.body.status === "string" ? x.body.status : undefined;
     }
-    // The epoch is only worth building when there is a contract and money to pay with.
-    if (state.contract && f.ethWei > 0n && !state.pending && !state.exchange) {
-      f.epoch = await this.epoch(keys, state);
-      f.recipients = f.epoch.recipients;
+    // The epoch is only worth building when there is a contract and money that
+    // would be worth paying out -- judged at the size the last epoch had, so a
+    // pot too small for anybody costs no reads at all.
+    if (state.contract && f.ethWei > 0n && !state.pending && !state.exchange && !(state.paused && state.paused.until > f.now)) {
+      const cfg = this.cfg;
+      const n = Math.max(1, Math.min(MAX_RECIPIENTS, state.lastRecipients || 1));
+      const gas = BigInt(cfg.baseGas) + BigInt(cfg.perRecipientGas) * BigInt(n);
+      const value = f.ethWei - gas * f.gasPrice * 2n;
+      const worth = value > 0n && worthPaying({ potUsd: Number(value), rvn: 1, rvnMin: 0, recipients: n,
+        perRecipientUsd: Number(BigInt(cfg.perRecipientGas) * f.gasPrice), fixedUsd: Number(BigInt(cfg.baseGas) * f.gasPrice),
+        maxOverhead: cfg.maxOverhead }).go;
+      if (worth) {
+        // Reused only for the same epoch number: a cached epoch outliving the
+        // payout it was built for would pay the same work twice.
+        const c = this.epochCache;
+        if (c && c.epochs === (state.epochs || 0) && f.now - c.at < cfg.epochEveryMs) f.epoch = c.epoch;
+        else {
+          f.epoch = await this.epoch(keys, state);
+          this.epochCache = { epochs: state.epochs || 0, at: f.now, epoch: f.epoch };
+        }
+        f.recipients = f.epoch.recipients;
+      }
     }
     return f;
   }
@@ -524,53 +559,70 @@ export class Treasury {
     throw new Transient(`nonce ${pr.nonce} is used and no receipt for our attempts has arrived yet`);
   }
 
-  async epochDocs() {
+  // Cumulative work per payout address, summed over every shard. Each shard
+  // answers its own sums (/work.json), a few dozen bytes an address, rather
+  // than its ledger rows: at 100,000 miners over a hundred shards the rows are
+  // tens of megabytes, which is most of a Durable Object's memory.
+  async shardWork() {
     const env = this.pool.env;
     const n = Math.max(1, Number(env.SHARDS || 1));
     const gpu = env.GPU_COINS ? Math.max(1, Number(env.GPU_SHARDS || 1)) : 0;
     const names = [...[...Array(n).keys()].map((i) => (i === 0 ? "main" : `shard-${i}`)), ...[...Array(gpu).keys()].map((i) => `gpu-${i}`)];
+    const total = new Map();
+    const add = (m) => { for (const [a, w] of m) total.set(a, (total.get(a) || 0n) + w); };
     // A shard that does not answer fails the epoch rather than leaving its
     // miners out of it: they would be refused this epoch's pay for nothing.
-    return Promise.all(names.map(async (name) => {
-      if (name === "main") return this.pool.core.ledger(1, Math.floor(this.now() / 1000));
-      const r = await env.POOL.get(env.POOL.idFromName(name)).fetch(new Request("https://pool/ledger.json"));
+    await Promise.all(names.map(async (name) => {
+      if (name === "main") return add(workByAddress(parseLedger(this.pool.core.ledger(1, Math.floor(this.now() / 1000)))));
+      const stub = env.POOL.get(env.POOL.idFromName(name));
+      let r = await stub.fetch(new Request("https://pool/work.json"));
+      if (r.status === 404) {
+        r = await stub.fetch(new Request("https://pool/ledger.json")); // a shard deployed before /work.json
+        if (!r.ok) throw new Transient(`shard ${name} answered ${r.status}`);
+        return add(workByAddress(parseLedger(await r.text())));
+      }
       if (!r.ok) throw new Transient(`shard ${name} answered ${r.status}`);
-      return r.text();
+      add(parseWork(await r.text()));
     }));
+    return total;
   }
 
-  // Every shard's ledger summed by payout address, less the last epoch's
-  // snapshot, gated on GLADOS held right now, floored at a quarter of typical,
-  // and never an address that holds code or is the pool's own plumbing.
+  // Every shard's work summed by payout address, less the last epoch's
+  // snapshot; then balances and code read for the likeliest recipients only,
+  // most work waiting first, until 400 are eligible or the read budget is
+  // spent. Everybody not reached carries, and carried work only grows, so
+  // nobody is passed over for long.
   async epoch(keys, state) {
-    const docs = await this.epochDocs();
-    const now = workByAddress(docs.flatMap(parseLedger));
+    const now = await this.shardWork();
     const snap = (await getBig(this.storage, "treasury.snapshot")) || {};
     const prev = new Map(Object.entries(snap).map(([a, w]) => [a, big(w)]));
-    const addrs = [...now.keys()];
-    const balances = new Map();
     const ineligible = new Set([PAIR, TOKEN, WETH, keys.evm, state.contract].filter(Boolean).map((a) => a.toLowerCase()));
-    for (let i = 0; i < addrs.length; i += 50) {
-      const part = addrs.slice(i, i + 50);
-      let res;
-      try {
-        res = await this.batch(part.flatMap((a) => [
-          { method: "eth_call", params: [{ to: TOKEN, data: "0x70a08231" + a.slice(2).padStart(64, "0") }, "latest"] },
-          { method: "eth_getCode", params: [a, "latest"] },
-        ]));
-      } catch (e) {
-        if (!(e instanceof Transient)) throw e;
-        continue; // unread: build() carries their work to the next epoch
-      }
-      part.forEach((a, j) => {
-        const bal = res.get(2 * j), code = res.get(2 * j + 1);
-        if (bal === undefined || code === undefined) return;
-        if (hasCode(code)) ineligible.add(a);
-        balances.set(a, big(bal));
-      });
-    }
     const gateMin = big(this.pool.env.GATE_MIN || "0") * 10n ** 18n;
-    return build({ now, prev, balances, gateMin, ineligible, maxRecipients: MAX_RECIPIENTS });
+    const delta = deltas(now, prev);
+    const order = candidates(delta, floorOf(delta), ineligible);
+    const balances = new Map();
+    const considered = new Set();
+    let eligible = 0;
+    const budget = Math.min(order.length, this.cfg.readBudget);
+    for (let i = 0; i < budget && eligible < MAX_RECIPIENTS; i += READ_MAX) {
+      if (i) await this.sleep(this.cfg.readPauseMs);
+      const part = order.slice(i, Math.min(i + READ_MAX, budget));
+      for (const a of part) considered.add(a);
+      let m;
+      try {
+        m = readerDecode(part, await this.rpc("eth_call", [{ data: readerData(TOKEN, part) }, "latest"]));
+      } catch (e) {
+        if (e instanceof Transient || e instanceof RpcError || /reader answered/.test(e.message)) continue; // unread: they carry
+        throw e;
+      }
+      for (const [a, v] of m) {
+        if (v.balance === undefined) continue;
+        if (v.code === "contract") ineligible.add(a);
+        balances.set(a, v.balance);
+        if (v.code !== "contract" && v.balance >= gateMin) eligible += 1;
+      }
+    }
+    return build({ now, prev, balances, gateMin, ineligible, maxRecipients: MAX_RECIPIENTS, considered });
   }
 
   // --- writing ---------------------------------------------------------------------------
@@ -682,9 +734,11 @@ export class Treasury {
       // The whole record -- who, why, and the snapshot it moves the ledger to --
       // is stored under this transaction's own hash, so an earlier attempt that
       // is the one mined is recorded as what it was, not as its replacement.
+      // Only the snapshot entries this payout moves: the whole snapshot is one
+      // entry per address that ever mined, megabytes at 100,000 miners.
       const record = { id, at: this.now(), value: value.toString(), minOut: minOut.toString(), tax: tax.toString(),
-                       recipients: a.recipients, work: e.work, floor: e.floor, excluded: e.excluded,
-                       snapshot: Object.fromEntries([...e.snapshot].map(([k, v]) => [k, v.toString()])) };
+                       recipients: a.recipients, work: e.work, floor: e.floor, excluded: e.excluded, notReached: e.notReached,
+                       updates: Object.fromEntries([...e.updates].map(([k, v]) => [k, v.toString()])) };
       next.pending = { kind: "pay", chain: "evm", hash: tx.hash, raw: tx.raw, at: this.now(), nonce,
                        epoch: { id, key: `treasury.attempt.${tx.hash}` }, prior: this.prior(next, nonce) };
       delete next.evmPrior;
@@ -696,8 +750,14 @@ export class Treasury {
     if (a.kind === "record_epoch") {
       let rec = await getBig(this.storage, a.epoch.key);
       if (!rec) rec = await this.reconstruct(a.hash, next);
-      const { snapshot, ...rest } = rec;
+      const { snapshot: whole, updates, ...rest } = rec;
       const paid = { ...rest, id: next.epochs, tx: a.hash };
+      // The stored snapshot, moved by this payout's updates and never backwards.
+      // (A record written before updates existed carries the whole snapshot.)
+      const snapshot = whole || (await getBig(this.storage, "treasury.snapshot")) || {};
+      for (const [k, v] of Object.entries(updates || {})) if (!(snapshot[k] !== undefined && big(snapshot[k]) >= big(v))) snapshot[k] = v;
+      next.lastRecipients = paid.recipients.length;
+      this.epochCache = null;
       await this.save(next, { ...chunked(`treasury.epoch.${next.epochs}`, paid), ...chunked("treasury.snapshot", snapshot) });
       this.log(`epoch ${paid.id} paid ${paid.recipients.length} miner(s) in ${a.hash}`);
     }
@@ -713,14 +773,14 @@ export class Treasury {
     const d = String(tx && tx.input || "").slice(10);
     const n = d.length >= 192 ? Number(BigInt("0x" + d.slice(128, 192))) : 0;
     const recipients = [...Array(n).keys()].map((i) => "0x" + d.slice((3 + i) * 64 + 24, (4 + i) * 64));
-    const now = workByAddress((await this.epochDocs()).flatMap(parseLedger));
-    const snapshot = (await getBig(this.storage, "treasury.snapshot")) || {};
+    const now = await this.shardWork();
+    const updates = {};
     for (const a of recipients) {
       const w = now.get(a);
-      if (w !== undefined && w > BigInt(snapshot[a] || 0)) snapshot[a] = w.toString();
+      if (w !== undefined) updates[a] = w.toString();
     }
     this.incident(next, `payout ${hash} was mined with its record missing; rebuilt from the chain (${recipients.length} paid)`);
-    return { id: next.epochs, at: this.now(), recipients, work: {}, excluded: {}, rebuilt: true, snapshot };
+    return { id: next.epochs, at: this.now(), recipients, work: {}, excluded: {}, rebuilt: true, updates };
   }
 
   // Written-off exchanges are still ChangeNOW's to finish or refund. Read each

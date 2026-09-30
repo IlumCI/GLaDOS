@@ -39,7 +39,8 @@
 
 import { connect } from "cloudflare:sockets";
 import { newKey, rvnAddress, evmAddress } from "./treasury.js";
-import { hasCode } from "./epoch.js";
+import { parseLedger, workByAddress } from "./epoch.js";
+import { readerData, readerDecode, READ_MAX } from "./reader.js";
 import { textChunks, loadText } from "./chunks.js";
 import { Treasury } from "./runner.js";
 import wasmModule from "../target/wasm32-unknown-unknown/release/glados_edge.wasm";
@@ -53,6 +54,8 @@ const MAX_LINE = 131072;
 // connect. "0" (or unset) turns it off. See `Pool.gate`.
 const GLADOS = "0x3d609ecafc6aa7dba67dd7ad1d10b49c52d57777";
 const PAIR_ADDR = "0x93f777932d98d15b351d1bce8c76b34381eede5b";
+// How long the gate gathers connections before one read answers them all.
+const GATE_BATCH_MS = 300;
 const RPC_4663 = "https://rpc.mainnet.chain.robinhood.com";
 const GATE_CACHE_MS = 10 * 60_000;
 
@@ -77,6 +80,25 @@ const RATES_MS = 5 * 60_000;
 // shard's digest is checked before its rows are added.
 // The pool core's per-shard cap on (worker, coin) tallies (pool.rs MAX_TALLIES).
 const MAX_TALLIES = 4096;
+
+// A public read that fans out to every shard, answered from Cloudflare's edge
+// cache for `seconds`: however often anybody asks, the shards are asked at
+// most once a period per location.
+async function cached(request, seconds, make) {
+  const cache = typeof caches !== "undefined" ? caches.default : null;
+  const key = new Request(new URL(request.url).toString(), { method: "GET" });
+  if (cache) {
+    const hit = await cache.match(key);
+    if (hit) return hit;
+  }
+  const res = await make();
+  if (cache && res.ok) {
+    const copy = new Response(res.clone().body, res);
+    copy.headers.set("cache-control", `public, max-age=${seconds}`);
+    await cache.put(key, copy);
+  }
+  return res;
+}
 
 function shardName(i, gpu = false) {
   if (gpu) return `gpu-${i}`;
@@ -120,15 +142,36 @@ export default {
       return stub(shardFor(request, gpu), true).fetch(request);
     }
     if (url.pathname === "/status") {
-      const all = await Promise.all(everyShard().map((s) => s.fetch(new Request(`${url.origin}/status`)).then((r) => r.json())));
-      return Response.json({
-        shards: n, gpuShards: gpu, slots: all[0].slots,
-        connections: all.reduce((a, s) => a + s.connections, 0),
-        perShard: all.map((s) => s.connections),
+      return cached(request, 30, async () => {
+        const all = await Promise.all(everyShard().map((s) => s.fetch(new Request(`${url.origin}/status`)).then((r) => r.json())));
+        return Response.json({
+          shards: n, gpuShards: gpu, slots: all[0].slots,
+          connections: all.reduce((a, s) => a + s.connections, 0),
+          perShard: all.map((s) => s.connections),
+          // The fullest shard's tallies against the core's cap: past ~90%,
+          // new miners' shares go uncredited and SHARDS should be raised.
+          tallies: Math.max(0, ...all.map((s) => s.tallies || 0)), maxTallies: all[0].maxTallies ?? null,
+        });
       });
     }
     if (url.pathname === "/ledger.json") {
       if (n === 1 && !gpu) return stub(0).fetch(request);
+      // One shard's ledger, for recomputing a payout at any scale.
+      const one = url.searchParams.get("shard");
+      if (one !== null) {
+        const names = [...[...Array(n).keys()].map((i) => shardName(i)), ...[...Array(gpu).keys()].map((i) => shardName(i, true))];
+        if (!names.includes(one)) return new Response(`no shard ${one}; they are ${names.join(", ")}`, { status: 404 });
+        return env.POOL.get(env.POOL.idFromName(one)).fetch(new Request(`${url.origin}/ledger.json`));
+      }
+      // **Past eight shards the merged ledger is an index.** Merging means
+      // every shard's rows in one Worker's memory -- tens of megabytes at
+      // 100,000 miners, past what a Worker has -- on every request, for anyone
+      // who asks. The same rows are all there, one link a shard.
+      if (n + gpu > 8) {
+        const names = [...[...Array(n).keys()].map((i) => shardName(i)), ...[...Array(gpu).keys()].map((i) => shardName(i, true))];
+        return Response.json({ shards: names.map((s) => `${url.origin}/ledger.json?shard=${s}`) }, { headers: { "access-control-allow-origin": "*" } });
+      }
+      return cached(request, 60, async () => {
       const docs = await Promise.all(everyShard().map((s) => s.fetch(new Request(`${url.origin}/ledger.json`)).then((r) => r.text())));
       const instance = await WebAssembly.instantiate(wasmModule, imports);
       const core = bind(instance);
@@ -137,6 +180,7 @@ export default {
       for (const d of docs) core.mergeLedger(d);
       return new Response(core.ledger(1, Math.floor(Date.now() / 1000)), {
         headers: { "content-type": "application/json", "access-control-allow-origin": "*" },
+      });
       });
     }
     return new Response(
@@ -206,6 +250,14 @@ export class Pool {
       return new Response(this.core.ledger(1, Math.floor(Date.now() / 1000)), {
         headers: { "content-type": "application/json", "access-control-allow-origin": "*" },
       });
+    }
+    // This shard's work per payout address, summed over workers and coins: what
+    // the treasury needs from a shard, a few dozen bytes an address instead of
+    // a ledger's hundred and thirty a (worker, coin) row. Internal: the
+    // top-level router never sends a request here.
+    if (url.pathname === "/work.json") {
+      const work = workByAddress(parseLedger(this.core.ledger(1, Math.floor(Date.now() / 1000))));
+      return Response.json({ work: Object.fromEntries([...work].map(([a, w]) => [a, w.toString()])) });
     }
     if (url.pathname === "/status") {
       return Response.json({ slots: this.slots, connections: this.conns.size, tallies: this.tallies ?? null, maxTallies: MAX_TALLIES });
@@ -357,27 +409,10 @@ export class Pool {
       return `mine under your 0x address as the worker name (address.rig): the pool pays $GLaDOS there, and checks that it holds ${this.gateMin / 10n ** 18n} GLADOS`;
     }
     const addr = head.toLowerCase();
-    let wei;
-    const hit = this.balances.get(addr);
-    if (hit && Date.now() - hit.at < GATE_CACHE_MS) {
-      wei = hit.wei;
-    } else {
+    let hit = this.balances.get(addr);
+    if (!(hit && Date.now() - hit.at < GATE_CACHE_MS)) {
       try {
-        const res = await fetch(RPC_4663, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify([
-            { jsonrpc: "2.0", id: 1, method: "eth_call",
-              params: [{ to: GLADOS, data: "0x70a08231" + addr.slice(2).padStart(64, "0") }, "latest"] },
-            { jsonrpc: "2.0", id: 2, method: "eth_getCode", params: [addr, "latest"] },
-          ]),
-        });
-        const j = await res.json();
-        if (!Array.isArray(j)) throw new Error(j && j.error ? j.error.message : "no result");
-        const bal = j.find((r) => r.id === 1), code = j.find((r) => r.id === 2);
-        if (!bal || !bal.result || !code || code.result === undefined) throw new Error((bal && bal.error && bal.error.message) || "no result");
-        wei = BigInt(bal.result);
-        this.balances.set(addr, { wei, at: Date.now(), contract: hasCode(code.result) });
+        hit = await this.readGate(addr);
       } catch (e) {
         // **Admitted, not refused, when the chain cannot be read.** This gate
         // only spares a miner hashing for nothing; the one that decides who is
@@ -388,9 +423,10 @@ export class Pool {
         return null;
       }
     }
+    const wei = hit.wei;
     // A contract is never paid (the payout would revert for everyone if it
     // were the pair), so it is refused at the door rather than mined for nothing.
-    if (this.balances.get(addr)?.contract || addr === PAIR_ADDR) {
+    if (hit.contract || addr === PAIR_ADDR) {
       return `${head} is a contract; the pool pays only ordinary accounts, so mine under the address of a wallet you hold`;
     }
     if (wei < this.gateMin) {
@@ -398,6 +434,50 @@ export class Pool {
       return `${head} holds ${have} GLADOS on chain 4663 and mining here needs ${this.gateMin / 10n ** 18n}`;
     }
     return null;
+  }
+
+  // **Connections arriving together are checked together.** Every address that
+  // asks within GATE_BATCH_MS goes into one GladosReader eth_call (up to 200),
+  // so a crowd reconnecting after a deploy is a handful of requests to the
+  // public RPC instead of one each -- which is what would get the pool's
+  // Cloudflare egress rate-limited, and then every miner admitted unchecked.
+  readGate(addr) {
+    return new Promise((resolve, reject) => {
+      this.gateWait = this.gateWait || new Map();
+      const list = this.gateWait.get(addr) || [];
+      list.push({ resolve, reject });
+      this.gateWait.set(addr, list);
+      if (this.gateWait.size >= READ_MAX) this.flushGate();
+      else if (!this.gateTimer) this.gateTimer = setTimeout(() => this.flushGate(), GATE_BATCH_MS);
+    });
+  }
+
+  async flushGate() {
+    clearTimeout(this.gateTimer);
+    this.gateTimer = null;
+    const batch = this.gateWait || new Map();
+    this.gateWait = new Map();
+    const who = [...batch.keys()];
+    if (!who.length) return;
+    try {
+      const res = await fetch(RPC_4663, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_call", params: [{ data: readerData(GLADOS, who) }, "latest"] }),
+      });
+      const j = await res.json();
+      if (!j || !j.result) throw new Error(j && j.error ? j.error.message : `HTTP ${res.status}`);
+      const m = readerDecode(who, j.result);
+      for (const [a, waiters] of batch) {
+        const v = m.get(a);
+        if (v.balance === undefined) { for (const w of waiters) w.reject(new Error("balanceOf failed")); continue; }
+        const hit = { wei: v.balance, at: Date.now(), contract: v.code === "contract" };
+        this.balances.set(a, hit);
+        for (const w of waiters) w.resolve(hit);
+      }
+    } catch (e) {
+      for (const waiters of batch.values()) for (const w of waiters) w.reject(e);
+    }
   }
 
   drop(ws) {
