@@ -4,18 +4,18 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Mine $GLaDOS: the pool</title>
-<meta name="description" content="Mine $GLaDOS with a spare PC: boot the miner ISO, give it your wallet, and the pool sends $GLaDOS to every eligible miner automatically. Live miners and every payout.">
+<meta name="description" content="Mine $GLaDOS with a spare PC. Boot the miner, give it your wallet, and the pool sends $GLaDOS straight to you. Live miners and every payout.">
 <meta name="keywords" content="GLaDOS miner, mine GLaDOS, GLaDOS pool, crypto mining ISO">
 <link rel="canonical" href="https://glados.aperture.institute/pool/">
 <meta name="robots" content="index,follow,max-image-preview:large">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="GLaDOS">
 <meta property="og:title" content="Mine $GLaDOS: the pool">
-<meta property="og:description" content="Mine $GLaDOS with a spare PC: boot the miner ISO, give it your wallet, and the pool sends $GLaDOS to every eligible miner automatically. Live miners and every payout.">
+<meta property="og:description" content="Mine $GLaDOS with a spare PC. Boot the miner, give it your wallet, and the pool sends $GLaDOS straight to you. Live miners and every payout.">
 <meta property="og:url" content="https://glados.aperture.institute/pool/">
 <meta name="twitter:card" content="summary">
 <meta name="twitter:title" content="Mine $GLaDOS: the pool">
-<meta name="twitter:description" content="Mine $GLaDOS with a spare PC: boot the miner ISO, give it your wallet, and the pool sends $GLaDOS to every eligible miner automatically. Live miners and every payout.">
+<meta name="twitter:description" content="Mine $GLaDOS with a spare PC. Boot the miner, give it your wallet, and the pool sends $GLaDOS straight to you. Live miners and every payout.">
 <meta property="og:image" content="https://glados.aperture.institute/img/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
@@ -59,10 +59,9 @@
 <h1>Mine $GLaDOS</h1>
 
 <div class="panel">
-<p><strong>Turn a spare PC into a $GLaDOS miner.</strong> Boot the miner ISO,
-give it your wallet, and it mines. The pool converts everything it earns into
-$GLaDOS and sends it to every eligible miner automatically &mdash; no
-claiming, no gas on your side.</p>
+<p><strong>Your spare PC can mine $GLaDOS tonight.</strong> Boot the miner,
+give it your wallet, and walk away. The pool turns everything it earns into
+$GLaDOS and sends it straight to your wallet.</p>
 
 <table class="data" id="live">
 <tr><th>Miners connected now</th><td id="live-miners">&hellip;</td></tr>
@@ -71,56 +70,50 @@ claiming, no gas on your side.</p>
 </table>
 
 <p><a href="https://github.com/IlumCI/GLaDOS/releases/tag/mining-v1.3.9"><strong>Download the miner (33 MB)</strong></a>
-&nbsp;&middot;&nbsp; <a href="https://github.com/IlumCI/GLaDOS/releases/tag/mining-v1.3.9">Setup guide in the release notes</a></p>
+&nbsp;&middot;&nbsp; <a href="https://github.com/IlumCI/GLaDOS/releases/tag/mining-v1.3.9">Setup guide</a></p>
 </div>
 
 <h2 class="sect">Start mining</h2>
 
 <ol>
-<li><strong>Get a wallet on Robinhood Chain</strong> holding at least
-<strong>1,000,000 $GLaDOS</strong>. The token and its contract address are on
-<a href="../token/">the token page</a>.</li>
+<li><strong>Hold 1,000,000 $GLaDOS</strong> in a wallet on Robinhood Chain.
+The contract address is on <a href="../token/">the token page</a>.</li>
 <li><strong>Download</strong> <code>glados-1.3.9-miner.iso</code> and check it
 against <code>SHA256SUMS</code>.</li>
-<li><strong>Run it:</strong> in a virtual machine with QEMU, or on a real PC
-from a USB stick. The release notes walk through both.</li>
-<li><strong>Give it your wallet:</strong> type it at first boot, or put it in
-<code>MINER.TXT</code> on the stick beforehand. It is remembered after that.</li>
-<li><strong>Leave it running.</strong> Payouts arrive in your wallet on their
-own.</li>
+<li><strong>Run it</strong> in QEMU, or boot a real PC from a USB stick.</li>
+<li><strong>Give it your wallet.</strong> Type it at first boot, or put it in
+<code>MINER.TXT</code> on the stick. It remembers it from then on.</li>
+<li><strong>Let it run.</strong> Your $GLaDOS shows up on its own.</li>
 </ol>
 
-<p>The PC needs x86-64 with UEFI and Secure Boot off (roughly anything from
-2011 on), and wired Ethernet or a phone sharing its connection over USB.</p>
+<p>Any x86-64 PC with UEFI works, roughly 2011 and newer. Turn Secure Boot off
+and plug in Ethernet, or share your phone's connection over USB.</p>
 
 <h2 class="sect">How you get paid</h2>
 
 <ul>
-<li><strong>Equal split.</strong> Every eligible wallet in a payout gets the
-same amount of $GLaDOS.</li>
-<li><strong>Eligible</strong> means your wallet holds the 1,000,000 $GLaDOS
-minimum, it is a normal wallet and not a contract, and in that round it did
-at least a quarter of the work of the typical miner. Work that misses a round
-carries to the next one; nothing is lost.</li>
-<li><strong>When.</strong> A payout goes out as soon as the pot is big enough
-that fees are under 10% of it. The more miners, the more often.</li>
-<li><strong>Sent to you.</strong> $GLaDOS arrives in your wallet on Robinhood
-Chain. There is nothing to claim.</li>
+<li><strong>Everyone gets the same.</strong> Each payout is split equally
+between every eligible wallet.</li>
+<li><strong>Who is eligible:</strong> wallets holding at least 1,000,000
+$GLaDOS that did at least a quarter of the typical miner's work in that
+round. Miss a round and your work carries over to the next.</li>
+<li><strong>How often:</strong> as soon as the pot is big enough that fees
+stay under 10% of it. More miners means more frequent payouts.</li>
+<li><strong>Straight to your wallet</strong> on Robinhood Chain. There is
+nothing to claim.</li>
 </ul>
 
-<div class="note"><strong>The miner only ever asks for your address.</strong>
-Never a key, never a signature. Nothing it stores could spend anything.</div>
+<div class="note"><strong>All it ever needs is your address.</strong> The
+miner never asks for a key or a signature.</div>
 
 <h2 class="sect">Every payout</h2>
 
-<p>Each payout, the wallets it paid and the transaction that paid them. Look
-any transaction up on a Robinhood Chain explorer. The same list is published
-as <a href="https://pool.aperture.institute/payouts.json">payouts.json</a>.</p>
+<p>Every payout, the wallets it paid, and its transaction on Robinhood Chain.
+Also published as <a href="https://pool.aperture.institute/payouts.json">payouts.json</a>.</p>
 
 <div id="payouts"><p>Loading&hellip;</p></div>
 
-<p>This page is not an offer, a solicitation, or investment advice of any kind,
-and nothing on it is a prediction about price or earnings.</p>
+<p>Nothing on this page is investment advice.</p>
 
 <script>
 (function () {
@@ -142,7 +135,7 @@ and nothing on it is a prediction about price or earnings.</p>
     set("live-payouts", "<strong>" + eps.length + "</strong>");
     if (!eps.length) {
       set("live-last", "none yet");
-      set("payouts", "<div class=\"note\"><strong>No payouts yet.</strong> The first one goes out as soon as the pot clears the fee bar. It will appear here, with its transaction.</div>");
+      set("payouts", "<div class=\"note\"><strong>The first payout is on its way.</strong> It lands here, with its transaction, the moment it goes out.</div>");
       return;
     }
     set("live-last", esc(when(eps[0].at)));
