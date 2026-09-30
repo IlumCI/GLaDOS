@@ -884,6 +884,8 @@ def check(releases, fetch=False):
                     why = "not an asset of that release"
                 elif mp:
                     ok, why = mp.group("tag") in tags, "no such release tag"
+                elif href.rstrip("/").endswith("/releases/latest"):
+                    ok, why = True, ""      # GitHub resolves it to the newest release
                 else:
                     ok = href in asset_urls or href in page_urls
                     why = "unrecognised release URL"
