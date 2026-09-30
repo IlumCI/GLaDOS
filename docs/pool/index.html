@@ -73,6 +73,8 @@ $GLaDOS and sends it straight to your wallet.</p>
 &nbsp;&middot;&nbsp; <a href="https://github.com/IlumCI/GLaDOS/releases/tag/mining-v1.3.9">Setup guide</a></p>
 </div>
 
+<div class="shot"><img src="../img/pool/mining.webp" alt="The GLaDOS miner's mining screen: the aperture mark on the left, and on the right $GLaDOS with the hashrate, a hashrate graph, shares, uptime, status LIVE and the wallet it pays" width="1280" height="720" loading="lazy" decoding="async"><div class="cap"><b>The miner, mining.</b> Hashrate, shares, uptime, and the wallet it pays. Captured from the real ISO running in QEMU.</div></div>
+
 <h2 class="sect">Start mining</h2>
 
 <ol>
@@ -82,9 +84,13 @@ The contract address is on <a href="../token/">the token page</a>.</li>
 against <code>SHA256SUMS</code>.</li>
 <li><strong>Run it</strong> in QEMU, or boot a real PC from a USB stick.</li>
 <li><strong>Give it your wallet.</strong> Type it at first boot, or put it in
-<code>MINER.TXT</code> on the stick. It remembers it from then on.</li>
+<code>GLADOS/MINER.TXT</code> on the stick. It remembers it from then on.</li>
 <li><strong>Let it run.</strong> Your $GLaDOS shows up on its own.</li>
 </ol>
+
+<div class="shot"><img src="../img/pool/first-boot.webp" alt="The miner's first boot screen: MINE $GLaDOS, asking for the 0x wallet address, with the address typed into the field" width="1280" height="720" loading="lazy" decoding="async"><div class="cap"><b>First boot.</b> Type your wallet and press Enter. That's the whole setup.</div></div>
+
+<div class="shot"><img src="../img/pool/miner-txt.webp" alt="MINER.TXT open in a text editor, with a 0x wallet address on the worker line" width="720" height="362" loading="lazy" decoding="async" style="max-width:720px"><div class="cap"><b>Or skip the typing.</b> Put your address on the <code>worker</code> line of <code>GLADOS/MINER.TXT</code> on the stick, and the PC starts mining the moment it boots.</div></div>
 
 <p>Any x86-64 PC with UEFI works, roughly 2011 and newer. Turn Secure Boot off
 and plug in Ethernet, or share your phone's connection over USB.</p>

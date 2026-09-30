@@ -48,9 +48,9 @@ release is built and tested on.
 
 1. **Flash the ISO to a USB stick** with balenaEtcher, Rufus (DD mode) or
    `dd`. The stick shows up on your computer as a drive named **GLADOS**.
-2. **Put your wallet on the stick:** open `MINER.TXT` on the GLADOS drive,
-   replace `ask` on the `worker` line with your 0x address, and save. The PC
-   won't even need a keyboard.
+2. **Put your wallet on the stick:** on the GLADOS drive, open the `GLADOS`
+   folder, then `MINER.TXT`. Replace `ask` on the `worker` line with your 0x
+   address and save. The PC won't even need a keyboard.
 3. **Boot from the stick** with your PC's boot menu key: usually F11, F12 or
    Esc.
 
