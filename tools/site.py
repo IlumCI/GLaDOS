@@ -511,6 +511,11 @@ def current(releases):
     A release with no images is reported, so a release that never gets its
     ISOs uploaded is visible instead of silently skipped.
     """
+    # The miner ships under its own `mining-v*` tags with its own notes, and is
+    # linked from the pool page. Presenting it here would make the download
+    # table and the sidebar describe a 33 MB miner as the operating system's
+    # current release, with the three OS images gone from the page.
+    releases = [r for r in releases if not r["tag_name"].startswith("mining-")] or releases
     for i, r in enumerate(releases):
         if images_of(r):
             if i:
@@ -846,7 +851,7 @@ def check(releases, fetch=False):
     `--fetch` does the end-to-end version anyway, for when that is what is
     wanted. It is off by default because it is not free.
     """
-    latest_names = {a["name"] for a in releases[0].get("assets", [])}
+    latest_names = {a["name"] for a in current(releases).get("assets", [])}
     tags = {r["tag_name"] for r in releases}
     asset_urls = {a["browser_download_url"]
                   for r in releases for a in r.get("assets", [])}

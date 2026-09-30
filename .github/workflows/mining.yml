@@ -282,9 +282,13 @@ jobs:
           # release to upload to.
           sed "s/{{VERSION}}/$VERSION/g" .github/release-notes/mining.md > out/MINING.md
           # Created once; a re-run of the job finds it and only re-uploads.
+          # `--latest=false`: GitHub's "latest" is what the site's
+          # releases/latest links and the download page's API commands resolve,
+          # and they mean the operating system. Left to default, the newest
+          # mining release would become the OS's latest release.
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
             gh release create "$GITHUB_REF_NAME" --title "GLaDOS miner $VERSION" \
-              --notes-file out/MINING.md
+              --notes-file out/MINING.md --latest=false
           gh release upload "$GITHUB_REF_NAME" \
             "out/$ISO_NAME.iso" \
             "out/glados-pool-$VERSION-x86_64-linux-musl" \
