@@ -48,8 +48,9 @@ COINS = "yescrypt:yescrypt:12@yescrypt.mine.zpool.ca:6233,RRNXJhigAxiLJTRrDKu7fs
 SHARE_SECONDS = "45"
 SWITCH = "1"
 # Whole GLADOS a miner's payout address must hold on chain 4663 to connect;
-# "0" is off. 50000 is the runbook's gate.
-GATE_MIN = "50000"
+# "0" is off. 1,000,000 since 2026-09-30, raised from 50,000 on community
+# feedback; the payout gate reads the same value.
+GATE_MIN = "1000000"
 # Durable Objects the miners are split across. 1 behaves exactly as before
 # sharding (shard 0 is the original "main" object and keeps its record); raise
 # it from the soak's measured shares/s per shard, not from a guess.

@@ -1,5 +1,5 @@
 // Review: a miner whose payout address is the pair (which holds far more than
-// the 50,000 GLADOS gate) makes every buyAndPay revert. Fork of the real chain.
+// the 1,000,000 GLADOS gate) makes every buyAndPay revert. Fork of the real chain.
 import { VM } from "@ethereumjs/vm";
 import { Chain, Common, Hardfork } from "@ethereumjs/common";
 import { RPCStateManager } from "@ethereumjs/statemanager";
@@ -24,7 +24,7 @@ const iface = new ethers.Interface(art.abi);
 const dep = await run(vm, OP, null, "0x" + art.evm.bytecode.object + coder.encode(["address", "address", "address"], [WETH, TOKEN, PAIR]).slice(2));
 const payout = bytesToHex(dep.created.bytes);
 const bal = await run(vm, OP, TOKEN, "0x70a08231" + PAIR.slice(2).padStart(64, "0"));
-console.log("pair GLADOS balance", Number(coder.decode(["uint256"], bal.ret)[0]) / 1e18, "(gate is 50000)");
+console.log("pair GLADOS balance", Number(coder.decode(["uint256"], bal.ret)[0]) / 1e18, "(gate is 1000000)");
 const miners = ["0x000000000000000000000000000000000000c0a1", PAIR];
 const call = await run(vm, OP, payout, iface.encodeFunctionData("buyAndPay", [miners, 1n]), 10n ** 15n);
 let why = "ok"; try { const e = iface.parseError(call.ret); why = `${e.name}(${e.args.join(",")})`; } catch {}

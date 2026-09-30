@@ -172,7 +172,7 @@ class World {
     for (let i = 0; i < Number(process.env.MINERS || 24); i++) {
       const a = addrLike(this.r);
       this.miners.push({ addr: a, rate: BigInt(1 + this.r.int(40)) * 1000n, shard: this.r.int(this.shards), both: this.r.chance(0.2) });
-      this.tok.set(a, this.r.chance(0.8) ? 50_000n * G + BigInt(this.r.int(100_000)) * G : BigInt(this.r.int(49_999)) * G);
+      this.tok.set(a, this.r.chance(0.8) ? 1_000_000n * G + BigInt(this.r.int(2_000_000)) * G : BigInt(this.r.int(999_999)) * G);
     }
     const special = (addr, code, bal) => {
       this.miners.push({ addr, rate: 30_000n, shard: this.r.int(2), special: true });
@@ -180,8 +180,8 @@ class World {
       this.tok.set(addr, bal);
     };
     special(PAIR, null, 10n ** 27n); // the pair holds plenty and must never be paid
-    const safe = addrLike(this.r); special(safe, "0x6080604052", 60_000n * G); // a contract wallet
-    const d7702 = addrLike(this.r); special(d7702, "0xef0100" + addrLike(this.r).slice(2), 60_000n * G); // 7702: an ordinary account
+    const safe = addrLike(this.r); special(safe, "0x6080604052", 1_200_000n * G); // a contract wallet
+    const d7702 = addrLike(this.r); special(d7702, "0xef0100" + addrLike(this.r).slice(2), 1_200_000n * G); // 7702: an ordinary account
     this.eligible7702 = d7702;
     this.work = new Map(this.miners.map((m) => [m.addr, 0n]));
     this.minerSet = new Set(this.miners.map((m) => m.addr));
@@ -569,7 +569,7 @@ async function run({ seed, faults, ticks, calm = 600, mode = "live", env = {} })
   const storage = new Storage(w);
   const logs = [];
   const pool = {
-    env: { TREASURY: mode, RVN_BATCH: "200", GATE_MIN: "50000", SHARDS: String(w.shards), TREASURY_RESUME: "", CHANGENOW_KEY: "k",
+    env: { TREASURY: mode, RVN_BATCH: "200", GATE_MIN: "1000000", SHARDS: String(w.shards), TREASURY_RESUME: "", CHANGENOW_KEY: "k",
            ALERT_WEBHOOK: "https://alerts.example/hook", ...env,
            POOL: { idFromName: (n) => n, get: (n) => ({ fetch: async (req) => {
              if (w.shardDown) return new Response("down", { status: 503 });
