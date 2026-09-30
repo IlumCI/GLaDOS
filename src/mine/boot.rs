@@ -213,6 +213,10 @@ pub fn apply(p: &Plan) -> String {
     // configured and nothing connects until there is somebody to pay.
     if p.ask {
         *ASKING.lock_irq() = Some(p.clone());
+        // The question is the screen, not two lines under a shell prompt.
+        // PROMPT still goes to the console and so to serial, for a harness.
+        super::screen::take();
+        super::screen::ask_draw();
         return String::from(PROMPT);
     }
 
@@ -266,10 +270,7 @@ pub fn apply(p: &Plan) -> String {
     // `set_exclusive` is the other half: it is what makes the desktop's periodic
     // painters stand down, the same flag `port::with_screen` takes for the length
     // of a call and this holds for the life of the machine.
-    if let Some(fb) = crate::gfx::primary() {
-        crate::gfx::set_exclusive(true);
-        crate::gfx::console::with(|c| c.reflow(0, 0, fb.width(), fb.height()));
-    }
+    super::screen::take();
 
     // No task for the screen: `client::run` draws it, because this kernel has no
     // sleep and a once-a-second task can only spin. `screen::tick` is one
@@ -321,13 +322,18 @@ pub fn asking() -> bool {
 /// with `0x`, so it goes on to be a command as usual -- which keeps the shell
 /// usable on a miner that has not been told where to pay yet.
 pub fn answer(line: &str) -> Option<String> {
+    // Whatever the line was, it has left the field.
+    super::screen::typed("");
     let line = line.trim();
     if !(line.starts_with("0x") || line.starts_with("0X")) {
         return None;
     }
     let mut plan = ASKING.lock_irq().clone()?;
     match verdict(line) {
-        Err(why) => Some(alloc::format!("{why} -- type it again\n  {PROMPT}")),
+        Err(why) => {
+            super::screen::refused(why);
+            Some(alloc::format!("{why} -- type it again\n  {PROMPT}"))
+        }
         Ok(payout) => {
             *ASKING.lock_irq() = None;
             plan.user = String::from(line);

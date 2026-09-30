@@ -74,6 +74,9 @@ fn note_if_mind_busy() {
 /// benefit of one caller. A window onto the line needs neither, and a shell
 /// that scrolls its input is a shell every user has already met.
 fn redraw(line: &str, cursor: usize) {
+    // A miner image asking for its payout address shows the line in its own
+    // field; the console underneath is dark while it does.
+    crate::mine::screen::typed(line);
     console::with(|c| {
         let avail = c.cols().saturating_sub(PROMPT_LEN + 1);
         if avail == 0 {
