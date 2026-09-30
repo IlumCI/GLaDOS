@@ -81,10 +81,11 @@ jobs:
       # purpose. Absent, it prints "no payload -- boots to a kernel with no model",
       # which a release log can be read for.
       #
-      # The asset keeps the `glados-<version>-nomodel.iso` shape even under a
-      # `mining-v*` tag, because `tools/site.py`'s `variant_key` strips a leading
-      # `N.N.N-` and looks the rest up in `VARIANTS`, which has carried a
-      # `nomodel` row -- "Kernel only" -- since before anything built one.
+      # The asset is `glados-<version>-miner.iso`: `tools/site.py`'s
+      # `variant_key` strips a leading `N.N.N-` and looks the rest up in
+      # `VARIANTS`, which has a `miner` row for it. It was `-nomodel`, which
+      # read as "Kernel only" on the download page -- true, and the wrong
+      # thing to call the file people download to mine.
       # **`MINER.TXT` is what makes this a miner image rather than a kernel with no
       # model, and leaving it out is a regression that looks like nothing.**
       # `main.rs` computes `headless = miner_plan.is_some()`, so without this file
@@ -146,7 +147,9 @@ jobs:
           # only because the store it was built with held a root nothing needed.
           python3 tools/roots.py --selftest
           python3 tools/roots.py --out payload-dir/roots.der
-          NAME="glados-$VERSION-nomodel"
+          # `-miner`, not `-nomodel`: this is the file people download to mine, and
+          # "no model" describes it by what it lacks. tools/site.py has the row.
+          NAME="glados-$VERSION-miner"
           # `--allow` because `mkiso.py` reads the union of `payload/*.txt` as an
           # allowlist and refuses anything outside it -- `eval.rs`'s rule about
           # `BUILTINS`, so a stray file cannot ride along. `--no-license` because
@@ -273,8 +276,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" \
-            --notes-file out/release/MINING.md || true
+          # The notes are tracked (.github/release-notes/mining.md). They were read
+          # from out/release/, which is not in git: on a runner the file did not
+          # exist, `create` failed, `|| true` hid it, and the upload then had no
+          # release to upload to.
+          sed "s/{{VERSION}}/$VERSION/g" .github/release-notes/mining.md > out/MINING.md
+          # Created once; a re-run of the job finds it and only re-uploads.
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
+            gh release create "$GITHUB_REF_NAME" --title "GLaDOS miner $VERSION" \
+              --notes-file out/MINING.md
           gh release upload "$GITHUB_REF_NAME" \
             "out/$ISO_NAME.iso" \
             "out/glados-pool-$VERSION-x86_64-linux-musl" \

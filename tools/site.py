@@ -75,6 +75,11 @@ VARIANTS = {
                          note="Four times faster per token than Qwen3, and the "
                               "only image that fits QEMU's 516 MB disk ceiling. "
                               "The one to reach for under emulation."),
+    # The mining image: boots straight to the $GLaDOS miner, no model and no
+    # desktop. Shipped under mining-v* tags by .github/workflows/mining.yml.
+    "miner": dict(model="$GLaDOS miner", ctx="", kv="", ram="2 GB", order=-1,
+                  note="Boots straight to the miner and pays in $GLaDOS. "
+                       "Wired Ethernet or USB tethering; Secure Boot off."),
     "nomodel": dict(model="Kernel only", ctx="", kv="", ram="1 GB", order=0,
                     note="Kernel only. Boots to a desktop, reports that it has "
                          "no model, and everything except inference works."),
