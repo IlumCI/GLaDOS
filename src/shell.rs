@@ -8508,6 +8508,14 @@ fn mine_cmd(rest: &str) {
 
     match sub {
         "" => mine_report(),
+        // The payout address this PC keeps in its firmware for a miner image.
+        "forget" => {
+            if crate::mine::boot::forget() {
+                kprintln!("  forgotten: the next boot asks for an address");
+            } else {
+                kprintln!("  nothing was saved, or the firmware refused to delete it");
+            }
+        }
         "pool" => {
             if arg.is_empty() {
                 kprintln!("  usage: mine pool <host>[:port] [glados]");
@@ -9054,6 +9062,17 @@ fn mine_report() {
         }
     }
     kprintln!("  state    {}", client::phase().name());
+    // What the full-screen view costs, measured on every frame it has drawn.
+    // At one frame a second, the share of one core is simply the mean frame
+    // time over a million microseconds.
+    if let Some((n, draw, present, worst)) = crate::mine::screen::cost() {
+        let (w, h) = crate::gfx::primary().map(|f| (f.width(), f.height())).unwrap_or((0, 0));
+        let per = draw + present;
+        kprintln!(
+            "  screen   {}x{}, {} frame(s): {} us each ({} draw + {} present), worst {} us -- {}.{:02}% of one core at 1/s",
+            w, h, n, per, draw, present, worst, per / 10_000, (per / 100) % 100
+        );
+    }
     let (m, s) = client::difficulty();
     // Printed as the pool sent it rather than as a float, because there are no
     // floats here and rounding one for display would be a second number.

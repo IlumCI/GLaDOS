@@ -104,6 +104,12 @@ pub struct Plan {
 /// which are the two things that have no safe default.
 pub fn parse(bytes: &[u8]) -> Option<Plan> {
     let text = core::str::from_utf8(bytes).ok()?;
+    // **Edited in Notepad.** The file is meant to be opened on the stick and
+    // have an address pasted into it, and Notepad may save a byte-order mark:
+    // an invisible U+FEFF glued to the first line, which would make a first
+    // line of `pool ...` a directive nobody knows and refuse the whole file.
+    // CRLF needs nothing -- `lines` takes both.
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut host = String::new();
     let mut port = 3333u16;
     let mut user = String::new();
@@ -209,8 +215,25 @@ pub fn parse(bytes: &[u8]) -> Option<Plan> {
 pub fn apply(p: &Plan) -> String {
     use alloc::format;
 
-    // Nobody's address is in the image: hold the plan and ask. Nothing is
-    // configured and nothing connects until there is somebody to pay.
+    MINER_IMAGE.store(true, core::sync::atomic::Ordering::Relaxed);
+
+    // Nobody's address is in the image. One typed on this PC before is saved
+    // in its firmware, and is used rather than asked for again: typing forty
+    // hex digits by hand on every boot is the thing this exists to stop.
+    if p.ask {
+        if let Some(saved) = saved() {
+            if let Ok(payout) = verdict(&saved) {
+                let mut q = p.clone();
+                q.user = saved;
+                q.payout = payout;
+                q.ask = false;
+                return format!("{}\n  (the address saved on this PC; type another 0x address to switch)", apply(&q));
+            }
+        }
+    }
+
+    // Nothing saved: hold the plan and ask. Nothing is configured and nothing
+    // connects until there is somebody to pay.
     if p.ask {
         *ASKING.lock_irq() = Some(p.clone());
         // The question is the screen, not two lines under a shell prompt.
@@ -308,6 +331,54 @@ pub fn apply(p: &Plan) -> String {
 const PROMPT: &str = "type your 0x payout address and press Enter to start mining\n  \
      (the address you want $GLaDOS paid to; nothing else is needed)";
 
+/// Whether this boot is a miner image, so a typed 0x address means "pay here"
+/// and not a line for the shell.
+static MINER_IMAGE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+pub fn is_miner_image() -> bool {
+    MINER_IMAGE.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+// ---- the address, kept in the PC's firmware ---------------------------------
+//
+// **Why the firmware and not the boot volume.** A miner image is an ISO: on a
+// CD it is read-only, and on a stick this kernel has no USB storage driver to
+// write it with. The UEFI variable store is the one thing every PC has that
+// survives a power cycle and is writable after `ExitBootServices`. It holds
+// forty-two bytes of public information -- an address, never a key -- so
+// leaving it on somebody's machine costs them nothing.
+
+/// `GladosPayout`, NUL-terminated.
+const SAVED_NAME: [u16; 13] = [
+    b'G' as u16, b'l' as u16, b'a' as u16, b'd' as u16, b'o' as u16, b's' as u16,
+    b'P' as u16, b'a' as u16, b'y' as u16, b'o' as u16, b'u' as u16, b't' as u16, 0,
+];
+/// This project's own vendor GUID, so the variable cannot collide with anybody
+/// else's: 7a1d0c3e-5b2f-4e8a-9c41-6d3b2a90f1e7.
+const SAVED_GUID: crate::uefi::Guid = crate::uefi::Guid {
+    d1: 0x7a1d_0c3e,
+    d2: 0x5b2f,
+    d3: 0x4e8a,
+    d4: [0x9c, 0x41, 0x6d, 0x3b, 0x2a, 0x90, 0xf1, 0xe7],
+};
+
+/// The address saved on this PC, if there is one and it still reads as one.
+pub fn saved() -> Option<String> {
+    let mut buf = [0u8; 64];
+    let n = crate::cpu::efi_get_variable(&SAVED_NAME, &SAVED_GUID, &mut buf)?;
+    let s = core::str::from_utf8(&buf[..n]).ok()?.trim();
+    verdict(s).ok().map(|_| String::from(s))
+}
+
+fn save(addr: &str) -> bool {
+    crate::cpu::efi_set_variable(&SAVED_NAME, &SAVED_GUID, addr.as_bytes())
+}
+
+/// Forget the saved address: the next boot asks again.
+pub fn forget() -> bool {
+    crate::cpu::efi_set_variable(&SAVED_NAME, &SAVED_GUID, &[])
+}
+
 /// A plan waiting for its address. Set by `apply` on `worker ask`.
 static ASKING: crate::sync::Spin<Option<Plan>> = crate::sync::Spin::new(None);
 
@@ -328,6 +399,23 @@ pub fn answer(line: &str) -> Option<String> {
     if !(line.starts_with("0x") || line.starts_with("0X")) {
         return None;
     }
+    // Already mining on a miner image: a new address is a switch. It is saved
+    // first, and the machine restarts onto it -- a reconnect under a new name
+    // in the middle of a session is a state the miner was never built to be
+    // in, and a restart is ten seconds and certainly right.
+    if ASKING.lock_irq().is_none() {
+        if !is_miner_image() {
+            return None;
+        }
+        return Some(match verdict(line) {
+            Err(why) => alloc::format!("{why} -- the current address is unchanged"),
+            Ok(_) if save(line) => {
+                crate::kprintln!("[miner] switching to {line}; restarting");
+                crate::cpu::reboot();
+            }
+            Ok(_) => String::from("this PC's firmware would not save the address; nothing changed"),
+        });
+    }
     let mut plan = ASKING.lock_irq().clone()?;
     match verdict(line) {
         Err(why) => {
@@ -339,7 +427,12 @@ pub fn answer(line: &str) -> Option<String> {
             plan.user = String::from(line);
             plan.payout = payout;
             plan.ask = false;
-            Some(apply(&plan))
+            let kept = if save(line) {
+                "saved on this PC: the next boot starts mining without asking"
+            } else {
+                "this PC's firmware would not save it, so the next boot asks again"
+            };
+            Some(alloc::format!("{}\n  {kept}", apply(&plan)))
         }
     }
 }
@@ -370,6 +463,13 @@ fn verdict(line: &str) -> Result<addr::Payout, &'static str> {
 pub fn checks() -> Vec<(bool, String)> {
     let mut out: Vec<(bool, String)> = Vec::new();
     let mut ok = |c: bool, w: &str| out.push((c, String::from(w)));
+
+    // Saved by Notepad: a byte-order mark and CRLF, around a pasted address.
+    let notepad = parse(b"\xef\xbb\xbfpool wss://pool.example.com/mine\r\nworker 0x6ef4fa014b72e9c99840b9e03ce9182be223527d\r\n");
+    ok(
+        notepad.as_ref().is_some_and(|p| p.host == "pool.example.com" && p.user == "0x6ef4fa014b72e9c99840b9e03ce9182be223527d" && !p.ask),
+        "a file saved by Notepad -- byte-order mark, CRLF -- reads the same as one that was not",
+    );
 
     let full = parse(b"pool p.example.com:3334\nworker 0xabc.rig1\nslices 3\n");
     ok(full.is_some(), "a file naming a pool and a worker is a plan");

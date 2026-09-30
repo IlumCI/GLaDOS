@@ -123,8 +123,14 @@ jobs:
           # Space-separated, not `key = value`: the parser splits at the first
           # whitespace, and an `=` refuses the whole file.
           #
-          # `worker ask`: the miner asks for your 0x address at boot, which is
-          # where your $GLaDOS is paid. Nothing else needs setting.
+          # Where your $GLaDOS is paid. Two ways to set it:
+          #
+          #   Before booting: replace `ask` on the worker line below with
+          #   your 0x wallet address, save this file, and boot from the stick.
+          #   It starts mining with nothing to type.
+          #
+          #   Or leave `ask`: the miner asks once at boot and remembers the
+          #   address on that PC for every boot after.
           pool wss://pool.aperture.institute/mine
           worker ask
           CFG

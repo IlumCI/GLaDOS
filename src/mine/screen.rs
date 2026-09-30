@@ -69,6 +69,13 @@ static NEXT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(
 /// the spinner's clock.
 pub static FRAMES: AtomicU32 = AtomicU32::new(0);
 
+/// What frames cost, in TSC cycles: composing into the back buffer and
+/// presenting it are timed apart, because they scale differently -- drawing
+/// with what is on the frame, presenting with the pixels on the screen.
+static DRAW_CYC: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static PRESENT_CYC: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static WORST_CYC: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 /// What has been typed into the address field, mirrored from the shell's line
 /// editor on every keystroke (see `typed`).
 static TYPED: Spin<String> = Spin::new(String::new());
@@ -452,12 +459,23 @@ fn mine_frame(fb: &Framebuffer, n: &Now) {
     let paid = format!("paid to {}", short_addr(&n.worker));
     say(fb, x0, y, &paid, INK, k);
     y += 8 * k + 6 * k;
+    let room = (rw / (8 * k)) as usize;
     if let Some(last) = &n.last {
         let c = if refused { RED } else { DIM };
-        let room = (rw / (8 * k)) as usize;
         say(fb, x0, y, &trunc(last, room), c, k);
     } else {
         say(fb, x0, y, &format!("{}...", n.phase), DIM, k);
+    }
+    y += 8 * k + 14 * k;
+
+    // Switching wallets: typed straight at this screen, shown as it is typed.
+    let typing = TYPED.lock_irq().clone();
+    if typing.is_empty() {
+        say(fb, x0, y, &trunc("to switch wallet, type a new", room), DIM, k);
+        say(fb, x0, y + 8 * k + 6 * k, &trunc("0x address and press Enter", room), DIM, k);
+    } else {
+        say(fb, x0, y, &trunc(&format!("new wallet: {typing}"), room), WHITE, k);
+        say(fb, x0, y + 8 * k + 6 * k, "press Enter to switch and restart", GOLD, k);
     }
 
     foot(fb, k);
@@ -497,7 +515,9 @@ fn paint(f: impl FnOnce(&Framebuffer)) -> bool {
     // No compositor (no heap for two frames) means no screen, rather than a
     // screen drawn straight onto the aperture where every frame would tear.
     let Some(back) = compose::target() else { return false };
+    let t0 = crate::time::rdtsc();
     f(&back);
+    let t1 = crate::time::rdtsc();
     // The whole frame every time, not the diff. Anything that ever writes the
     // aperture directly -- a boot-time window edge, a status strip -- leaves the
     // compositor's shadow describing pixels that are no longer there, and a
@@ -505,8 +525,30 @@ fn paint(f: impl FnOnce(&Framebuffer)) -> bool {
     // second at 1280x800, and it heals any stray painter within one frame.
     compose::invalidate();
     compose::present();
+    let t2 = crate::time::rdtsc();
+    DRAW_CYC.fetch_add(t1 - t0, Ordering::Relaxed);
+    PRESENT_CYC.fetch_add(t2 - t1, Ordering::Relaxed);
+    WORST_CYC.fetch_max(t2 - t0, Ordering::Relaxed);
     FRAMES.fetch_add(1, Ordering::Relaxed);
     true
+}
+
+/// What the screen has cost so far: frames, then the mean draw, mean present
+/// and worst whole frame, in microseconds. `None` before the first frame or
+/// before the TSC is calibrated.
+pub fn cost() -> Option<(u32, u64, u64, u64)> {
+    let n = FRAMES.load(Ordering::Relaxed);
+    let mhz = crate::time::tsc_mhz();
+    if n == 0 || mhz == 0 {
+        return None;
+    }
+    let us = |c: u64| c / mhz;
+    Some((
+        n,
+        us(DRAW_CYC.load(Ordering::Relaxed)) / n as u64,
+        us(PRESENT_CYC.load(Ordering::Relaxed)) / n as u64,
+        us(WORST_CYC.load(Ordering::Relaxed)),
+    ))
 }
 
 /// Paint one mining frame. `false` when there is nothing to paint on.
@@ -524,14 +566,19 @@ pub fn ask_draw() -> bool {
 /// The shell's line editor, mirrored on every keystroke while an address is
 /// being asked for. Also clears a refusal once the next attempt is under way.
 pub fn typed(line: &str) {
-    if !super::boot::asking() {
+    let asking = super::boot::asking();
+    if !asking && !super::boot::is_miner_image() {
         return;
     }
     *TYPED.lock_irq() = String::from(line);
     if !line.is_empty() {
         *REFUSAL.lock_irq() = None;
     }
-    ask_draw();
+    // While mining, the next frame shows it: drawing from the shell's task
+    // would race the miner's own frame for the one back buffer.
+    if asking {
+        ask_draw();
+    }
 }
 
 /// An address was refused: say why on the screen, and empty the field.

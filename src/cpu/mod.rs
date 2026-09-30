@@ -697,6 +697,55 @@ fn runtime() -> Option<&'static crate::uefi::RuntimeServices> {
     Some(unsafe { &*(p as *const crate::uefi::RuntimeServices) })
 }
 
+/// Non-volatile, reachable from boot services and at runtime: the attributes a
+/// variable needs to be written after `ExitBootServices` and read on the next
+/// boot.
+pub const EFI_VAR_NV_BS_RT: u32 = 0x7;
+
+/// Read a firmware variable into `buf`. The length read, or `None` when it is
+/// absent, too large for `buf`, or there is no firmware to ask.
+///
+/// `name` is UTF-16 and must end in a NUL. Callable after `ExitBootServices`
+/// for the reason `RUNTIME` gives; single caller at a time, because the
+/// specification does not promise runtime services are reentrant.
+pub fn efi_get_variable(name: &[u16], guid: &crate::uefi::Guid, buf: &mut [u8]) -> Option<usize> {
+    type Get = extern "efiapi" fn(
+        *const u16,
+        *const crate::uefi::Guid,
+        *mut u32,
+        *mut usize,
+        *mut core::ffi::c_void,
+    ) -> crate::uefi::Status;
+    let rt = runtime()?;
+    if rt.get_variable == 0 || name.last() != Some(&0) {
+        return None;
+    }
+    let f: Get = unsafe { core::mem::transmute(rt.get_variable) };
+    let mut size = buf.len();
+    let mut attrs = 0u32;
+    let st = f(name.as_ptr(), guid, &mut attrs, &mut size, buf.as_mut_ptr() as *mut core::ffi::c_void);
+    (st == 0).then_some(size)
+}
+
+/// Write a firmware variable; an empty `data` deletes it. Whether the firmware
+/// accepted it.
+pub fn efi_set_variable(name: &[u16], guid: &crate::uefi::Guid, data: &[u8]) -> bool {
+    type Set = extern "efiapi" fn(
+        *const u16,
+        *const crate::uefi::Guid,
+        u32,
+        usize,
+        *const core::ffi::c_void,
+    ) -> crate::uefi::Status;
+    let Some(rt) = runtime() else { return false };
+    if rt.set_variable == 0 || name.last() != Some(&0) {
+        return false;
+    }
+    let f: Set = unsafe { core::mem::transmute(rt.set_variable) };
+    let attrs = if data.is_empty() { 0 } else { EFI_VAR_NV_BS_RT };
+    f(name.as_ptr(), guid, attrs, data.len(), data.as_ptr() as *const core::ffi::c_void) == 0
+}
+
 /// Turn the machine off.
 ///
 /// The firmware first, because it knows this board and a call through it is
