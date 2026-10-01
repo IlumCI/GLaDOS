@@ -86,6 +86,11 @@ pub struct Plan {
     /// default that pays the person at the keyboard.
     pub ask: bool,
     pub slices: Option<u32>,
+    /// `reward <code>`: what the wallet is paid in, from `reward::MENU`.
+    /// `None` when the file does not say, which leaves the choice saved on
+    /// this PC, or $GLaDOS. A code off the menu is counted as not understood
+    /// and pays $GLaDOS, so a typo never stops a machine mining.
+    pub reward: Option<&'static str>,
     /// What could be established about where `user` pays.
     ///
     /// A field rather than a check inside `parse`, because it is a pure function
@@ -118,6 +123,7 @@ pub fn parse(bytes: &[u8]) -> Option<Plan> {
     let mut said_protocol = false;
     let mut ws = None;
     let mut slices = None;
+    let mut reward = None;
     let mut unknown = 0usize;
 
     for raw in text.lines() {
@@ -182,6 +188,10 @@ pub fn parse(bytes: &[u8]) -> Option<Plan> {
                 }
                 _ => return None,
             },
+            "reward" => match super::reward::code(value) {
+                Some(c) => reward = Some(c),
+                None => unknown += 1,
+            },
             "slices" => match value.parse::<u32>() {
                 Ok(n) => slices = Some(n),
                 Err(_) => return None,
@@ -204,7 +214,7 @@ pub fn parse(bytes: &[u8]) -> Option<Plan> {
         glados_proto = true;
     }
     let payout = addr::judge(&user);
-    Some(Plan { host, port, user, pass, glados_proto, ws, ask, slices, payout, unknown })
+    Some(Plan { host, port, user, pass, glados_proto, ws, ask, slices, reward, payout, unknown })
 }
 
 /// Apply a plan and start mining. Answers a line to print.
@@ -216,6 +226,11 @@ pub fn apply(p: &Plan) -> String {
     use alloc::format;
 
     MINER_IMAGE.store(true, core::sync::atomic::Ordering::Relaxed);
+
+    // What the wallet is paid in: the file's word if it says, else what was
+    // chosen on this PC before, else $GLaDOS. The file wins because it is the
+    // one an operator edited on purpose before this boot.
+    super::reward::set(p.reward.or_else(super::reward::saved).unwrap_or(super::reward::DEFAULT));
 
     // Nobody's address is in the image. One typed on this PC before is saved
     // in its firmware, and is used rather than asked for again: typing forty
@@ -310,7 +325,7 @@ pub fn apply(p: &Plan) -> String {
             // so this frame does not race it.
             super::screen::draw();
             let scheme = if p.ws.is_some() { "wss://" } else { "" };
-            let mut s = format!("mining as {} at {}{}:{}", p.user, scheme, p.host, p.port);
+            let mut s = format!("mining as {} at {}{}:{}, paid in {}", p.user, scheme, p.host, p.port, super::reward::name(super::reward::current()));
             if let (Some(want), Some(n)) = (p.slices, got) {
                 // Says what it got rather than what was asked for. `set_slices`
                 // clamps to what the task table can actually spare, and a file
@@ -401,6 +416,24 @@ pub fn asking() -> bool {
 /// usable on a miner that has not been told where to pay yet.
 pub fn answer(line: &str) -> Option<String> {
     let line = line.trim();
+    // A menu code typed on the mining screen is a new reward, handled the way a
+    // new address is: saved, and the machine restarts onto it, because the pool
+    // learns a choice from the greeting and a fresh boot is ten seconds and
+    // certainly right. Words like `chips` or `nvda` are not shell commands, so
+    // claiming them here takes nothing from the shell.
+    if is_miner_image() && !asking() {
+        if let Some(code) = super::reward::code(line) {
+            super::screen::typed("");
+            if code == super::reward::current() {
+                return Some(alloc::format!("already paid in {}", super::reward::name(code)));
+            }
+            if super::reward::save(code) {
+                crate::kprintln!("[miner] now paid in {}; restarting", super::reward::name(code));
+                crate::cpu::reboot();
+            }
+            return Some(String::from("this PC's firmware would not save the choice; nothing changed"));
+        }
+    }
     if !(line.starts_with("0x") || line.starts_with("0X")) {
         // A command, not an address: it has left the field.
         super::screen::typed("");
@@ -594,6 +627,18 @@ pub fn checks() -> Vec<(bool, String)> {
         "and an address with a rig suffix is still checked",
     );
 
+    // The reward line: a menu code is taken, anything else is counted as not
+    // understood and leaves the choice alone, so a typo never stops mining.
+    let r = parse(b"pool p:1\nworker 0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed\nreward Chips\n");
+    ok(r.as_ref().map(|p| p.reward) == Some(Some("chips")) && r.map(|p| p.unknown) == Some(0), "MINER.TXT's reward line picks a basket");
+    let typo = parse(b"pool p:1\nworker 0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed\nreward teslaa\n");
+    ok(typo.as_ref().map(|p| p.reward) == Some(None) && typo.map(|p| p.unknown) == Some(1), "a reward off the menu is reported, not obeyed");
+    ok(parse(b"pool p:1\nworker 0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed\n").map(|p| p.reward) == Some(None), "no reward line means the saved choice, or $GLaDOS");
+    // And the greeting carries it, still parseable as a hello.
+    let hello = super::proto::encode_hello_reward(1, "0xabc.rig", "glados/t", "nvda");
+    ok(hello.ends_with("}}\n") && hello.contains("\"reward\":\"nvda\"") && hello.contains("\"worker\":\"0xabc.rig\""), "the hello carries the reward beside the worker name");
+
+    out.extend(super::reward::checks());
     out.extend(addr::checks());
     out
 }

@@ -279,6 +279,19 @@ pub fn encode_hello(id: u64, worker: &str, agent: &str) -> String {
     s
 }
 
+/// `encode_hello` with the wallet's reward choice. A separate field rather than
+/// a suffix on the worker name, so a pool that does not know it ignores it and
+/// the worker name stays exactly the address the roster maps.
+pub fn encode_hello_reward(id: u64, worker: &str, agent: &str, reward: &str) -> String {
+    let mut s = encode_hello(id, worker, agent);
+    // Insert before the closing `}}\n` of params and message.
+    s.truncate(s.len() - 3);
+    s.push_str(",\"reward\":");
+    write_str(&mut s, reward);
+    s.push_str("}}\n");
+    s
+}
+
 pub fn encode_welcome(id: u64, w: &Welcome) -> String {
     let mut s = String::new();
     s.push_str("{\"id\":");

@@ -132,8 +132,22 @@ jobs:
           #
           #   Or leave `ask`: the miner asks once at boot and remembers the
           #   address on that PC for every boot after.
+          #
+          # What you are paid in. Every wallet gets the same share of each
+          # payout; this picks what that share is bought as:
+          #
+          #   glados   $GLaDOS (the default)
+          #   nvda, spcx, googl, amzn, gme, spy      one tokenized stock
+          #   chips    NVIDIA, AMD, Intel, Micron, Broadcom, TSMC, ASML,
+          #            Marvell, SK hynix, Dell
+          #   os       Microsoft, Apple, Alphabet, IBM, BlackBerry
+          #   index    S&P 500 and Nasdaq-100
+          #   metals   gold, silver and oil
+          #
+          # You can also change it later by typing a code on the mining screen.
           pool wss://pool.aperture.institute/mine
           worker ask
+          reward glados
           CFG
           sed -i 's/^          //' payload-dir/MINER.TXT
           cat payload-dir/MINER.TXT

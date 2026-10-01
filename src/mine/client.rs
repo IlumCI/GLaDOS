@@ -979,7 +979,7 @@ fn connect() -> Option<Session> {
 /// simplification the protocol buys on this side, and it is why this function
 /// is a tenth of the Stratum path above.
 fn greet(mut s: Session, user: &str) -> Option<Session> {
-    let hello = super::proto::encode_hello(1, user, concat!("glados/", env!("CARGO_PKG_VERSION")));
+    let hello = super::proto::encode_hello_reward(1, user, concat!("glados/", env!("CARGO_PKG_VERSION")), super::reward::current());
     if !s.link.send(hello.as_bytes()) {
         s.link.abort();
         return None;

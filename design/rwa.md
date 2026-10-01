@@ -256,3 +256,50 @@ in either direction leaves it dead, and one that came back permissive would
 change nothing about a pair that cannot fill an $84 order. The one number to
 watch is still depth, and the legal question is worth reopening exactly when
 that number moves and not before.
+
+## Built: miners choose what they are paid in (2026-10-01)
+
+The route above is now the product. A miner chooses $GLaDOS, one stock, or a
+category basket, and every eligible wallet still gets the same share of each
+payout; the choice decides what the share is bought as.
+
+**The menu** (`pool/edge/worker/rewards.js`, mirrored in `src/mine/reward.rs`):
+`glados` (default), `nvda`, `spcx`, `googl`, `amzn`, `gme`, `spy`, and four
+baskets split evenly: `chips` (NVDA AMD INTC MU AVGO TSM ASML MRVL SKHY DELL),
+`os` (MSFT AAPL GOOGL IBM BB), `index` (SPY QQQ), `metals` (GLD SLV USO).
+
+**How it was chosen, measured on 2026-10-01**, enumerating rather than sampling
+this time: all 438,340 Uniswap V3 pools from the factory's `PoolCreated` log,
+the 5,855 tokens with a USDG pool, USDG held per pool, then only tokens that
+are genuine stock tokens -- an EIP-1967 beacon proxy over `0xe10b6f6b...` --
+because 279 tokens *call* themselves "Robinhood Token" and a name is free. 50
+genuine stock tokens held at least $20k of USDG depth; every menu token's
+route ETH -> USDG -> stock was then quoted on QuoterV2 and filled. SK hynix
+(`SKHY`, ~$13k) is under that bar and is in the chips basket anyway: payouts
+are a few dollars a wallet. The *top six by depth* changed since the table at
+the top of this file: SGOV, USO, GLD and QQQ now outrank GME, GOOGL, AMZN and
+SPY. The single-stock menu kept the operator's six.
+
+**One contract, one transaction a payout** (`contracts/src/GladosPayout2.sol`):
+`payAll(groups)` buys every group's legs -- $GLADOS on its V2 pair, stocks in two
+V3 hops through USDG -- and splits each leg equally across that group's wallets,
+measuring every arrival. One short leg reverts the whole epoch, so nobody is
+ever half-paid. The treasury had not deployed `GladosPayout` yet (`contract:
+null` at /treasury), so this replaces it rather than sitting beside it.
+
+**Every way a choice can fail lands on $GLADOS, never on a reverted payout**
+(`pool/edge/worker/plan.js`): a wallet the stock beacon blocklists (read per
+epoch; unreadable counts as blocked), a basket whose quote fails that epoch,
+and any code off the menu.
+
+**Gas is planned per leg.** A ten-stock basket wallet costs ten sends, so the
+epoch admits wallets most-work-first until one transaction's budget (24M of
+4663's 32M) is spent, and the rest carry. Measured in the simulator at 3,000
+miners, 80% choosing stocks: 72-107 wallets a payout, the heaviest 16.8M gas.
+
+**The choice travels in `glados.hello`** as a `reward` field beside the worker
+name, is stored per address on the shard that address routes to, and reaches
+the treasury in `/work.json`. On a miner it comes from `reward <code>` in
+`GLADOS/MINER.TXT`, else the choice saved in the PC's firmware
+(`GladosReward`), else $GLaDOS; typing a code on the mining screen saves it and
+restarts, as a new address does.

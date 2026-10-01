@@ -456,10 +456,16 @@ fn mine_frame(fb: &Framebuffer, n: &Now) {
     y += ch + 10 * k;
 
     // Where it goes, and the last thing that happened.
+    let room = (rw / (8 * k)) as usize;
     let paid = format!("paid to {}", short_addr(&n.worker));
     say(fb, x0, y, &paid, INK, k);
+    // What the wallet is paid in, in the accent, beside where it goes.
+    let what = format!(" in {}", super::reward::name(super::reward::current()));
+    let used = paid.chars().count();
+    if used < room {
+        say(fb, x0 + used as u32 * 8 * k, y, &trunc(&what, room - used), GOLD, k);
+    }
     y += 8 * k + 6 * k;
-    let room = (rw / (8 * k)) as usize;
     if let Some(last) = &n.last {
         let c = if refused { RED } else { DIM };
         say(fb, x0, y, &trunc(last, room), c, k);
@@ -471,10 +477,18 @@ fn mine_frame(fb: &Framebuffer, n: &Now) {
     // Switching wallets: typed straight at this screen, shown as it is typed.
     let typing = TYPED.lock_irq().clone();
     if typing.is_empty() {
-        say(fb, x0, y, &trunc("to switch wallet, type a new", room), DIM, k);
-        say(fb, x0, y + 8 * k + 6 * k, &trunc("0x address and press Enter", room), DIM, k);
+        say(fb, x0, y, &trunc("new wallet: type a 0x address", room), DIM, k);
+        say(fb, x0, y + 8 * k + 6 * k, &trunc("new reward: glados, nvda, chips, os...", room), DIM, k);
     } else {
-        say(fb, x0, y, &trunc(&format!("new wallet: {typing}"), room), WHITE, k);
+        let label = if typing.starts_with("0x") || typing.starts_with("0X") {
+            format!("new wallet: {typing}")
+        } else {
+            match super::reward::code(&typing) {
+                Some(c) => format!("new reward: {}", super::reward::name(c)),
+                None => format!("new reward: {typing}"),
+            }
+        };
+        say(fb, x0, y, &trunc(&label, room), WHITE, k);
         say(fb, x0, y + 8 * k + 6 * k, "press Enter to switch and restart", GOLD, k);
     }
 
