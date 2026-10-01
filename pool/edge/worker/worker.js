@@ -44,6 +44,10 @@ import { readerData, readerDecode, READ_MAX } from "./reader.js";
 import { textChunks, loadText } from "./chunks.js";
 import { Treasury } from "./runner.js";
 import { rewardOf, DEFAULT as DEFAULT_REWARD } from "./rewards.js";
+
+// For refusals a person reads on a miner's screen: 0x6ef4...527d, 1,000,000.
+const short = (a) => `${a.slice(0, 6)}...${a.slice(-4)}`;
+const grouped = (n) => n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 import wasmModule from "../target/wasm32-unknown-unknown/release/glados_edge.wasm";
 import { bind, imports } from "../boundary.mjs";
 
@@ -441,7 +445,7 @@ export class Pool {
     try { worker = JSON.parse(hello).params.worker || ""; } catch {}
     const head = worker.split(".")[0];
     if (!/^0x[0-9a-fA-F]{40}$/.test(head)) {
-      return `mine under your 0x address as the worker name (address.rig): the pool pays $GLaDOS there, and checks that it holds ${this.gateMin / 10n ** 18n} GLADOS`;
+      return `that is not a wallet address: use your 0x address (42 characters, starting 0x) as the worker name`;
     }
     const addr = head.toLowerCase();
     let hit = this.balances.get(addr);
@@ -462,11 +466,11 @@ export class Pool {
     // A contract is never paid (the payout would revert for everyone if it
     // were the pair), so it is refused at the door rather than mined for nothing.
     if (hit.contract || addr === PAIR_ADDR) {
-      return `${head} is a contract; the pool pays only ordinary accounts, so mine under the address of a wallet you hold`;
+      return `${short(head)} is a smart contract, not a wallet: use the address of a wallet you hold the keys to`;
     }
     if (wei < this.gateMin) {
       const have = wei / 10n ** 18n;
-      return `${head} holds ${have} GLADOS on chain 4663 and mining here needs ${this.gateMin / 10n ** 18n}`;
+      return `${short(head)} holds ${grouped(have)} $GLaDOS; mining needs ${grouped(this.gateMin / 10n ** 18n)} or more. Top it up and the miner retries by itself`;
     }
     return null;
   }
