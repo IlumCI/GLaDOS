@@ -125,7 +125,13 @@ export function candidates(delta, floor, ineligible = new Set()) {
 // considered -- which is what gets stored with a payout: at 100,000 miners the
 // whole snapshot is megabytes, and writing it into every payout's record would
 // pass what one atomic write can hold.
-export function build({ now, prev, balances, gateMin, minWork = 1n, minFrac = 0.25, ineligible = new Set(), maxRecipients = Infinity, considered = null }) {
+//
+// **And at most `capacity` units of `weigh`, when given.** A wallet paid in a
+// ten-stock basket costs ten sends where a $GLADOS wallet costs one, so the
+// treasury weighs each wallet by its choice's legs and admits, most work
+// waiting first, until one transaction's gas is spent. The rest carry like any
+// wallet past the cap, nearer the front next time.
+export function build({ now, prev, balances, gateMin, minWork = 1n, minFrac = 0.25, ineligible = new Set(), maxRecipients = Infinity, considered = null, weigh = null, capacity = Infinity }) {
   const delta = deltas(now, prev);
   const floor = floorOf(delta, minWork, minFrac);
   const excluded = {};
@@ -142,10 +148,18 @@ export function build({ now, prev, balances, gateMin, minWork = 1n, minFrac = 0.
     else gated.set(a, d);
   }
   let recipients = [...gated.keys()];
-  if (recipients.length > maxRecipients) {
+  if (recipients.length > maxRecipients || weigh) {
     recipients.sort((a, b) => (gated.get(b) > gated.get(a) ? 1 : gated.get(b) < gated.get(a) ? -1 : a < b ? -1 : 1));
-    for (const a of recipients.splice(maxRecipients)) {
-      excluded[a] = `one of more than ${maxRecipients} eligible this epoch; the work carries and is nearer the front next time`;
+    let used = 0;
+    let fit = 0;
+    for (const a of recipients) {
+      const w = weigh ? weigh(a) : 0;
+      if (fit >= maxRecipients || used + w > capacity) break;
+      used += w;
+      fit += 1;
+    }
+    for (const a of recipients.splice(fit)) {
+      excluded[a] = `one of more eligible this epoch than one payout can carry; the work carries and is nearer the front next time`;
       carry.add(a);
     }
   }

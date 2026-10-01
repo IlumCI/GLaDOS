@@ -43,6 +43,7 @@ import { parseLedger, workByAddress } from "./epoch.js";
 import { readerData, readerDecode, READ_MAX } from "./reader.js";
 import { textChunks, loadText } from "./chunks.js";
 import { Treasury } from "./runner.js";
+import { rewardOf, DEFAULT as DEFAULT_REWARD } from "./rewards.js";
 import wasmModule from "../target/wasm32-unknown-unknown/release/glados_edge.wasm";
 import { bind, imports } from "../boundary.mjs";
 
@@ -257,7 +258,10 @@ export class Pool {
     // top-level router never sends a request here.
     if (url.pathname === "/work.json") {
       const work = workByAddress(parseLedger(this.core.ledger(1, Math.floor(Date.now() / 1000))));
-      return Response.json({ work: Object.fromEntries([...work].map(([a, w]) => [a, w.toString()])) });
+      const m = await this.rewards();
+      const rewards = {};
+      for (const a of work.keys()) if (m.has(a)) rewards[a] = m.get(a);
+      return Response.json({ work: Object.fromEntries([...work].map(([a, w]) => [a, w.toString()])), rewards });
     }
     if (url.pathname === "/status") {
       return Response.json({ slots: this.slots, connections: this.conns.size, tallies: this.tallies ?? null, maxTallies: MAX_TALLIES });
@@ -306,6 +310,9 @@ export class Pool {
         return;
       }
       const lines = text.split("\n").filter((l) => l.trim());
+      // What this wallet chose to be paid in, recorded from every greeting,
+      // gated or not: the latest hello for an address is its choice.
+      for (const l of lines) if (l.includes("glados.hello")) this.noteReward(l);
       if (!gate.passed) {
         gate.queue.push(...lines);
         if (gate.checking) return;
@@ -401,6 +408,34 @@ export class Pool {
   // Answers a refusal to send, or null. An unreadable balance admits: the gate
   // that pays (epoch.js, at build time) is the one that must not be walked
   // through, and it refuses an unreadable balance by carrying the work.
+  // **A wallet's reward choice, per address, in this shard's storage.** Every
+  // worker of one address lands on this shard (shardFor hashes the address),
+  // so the choice lives beside the work it pays for. The latest greeting wins:
+  // a miner switching choice on the mining screen reconnects with the new one.
+  // $GLADOS is stored as absence, so the common case costs nothing.
+  async rewards() {
+    if (!this.rewardMap) {
+      const m = new Map();
+      for (const [k, v] of await this.ctx.storage.list({ prefix: "reward." })) m.set(k.slice(7), v);
+      this.rewardMap = m;
+    }
+    return this.rewardMap;
+  }
+
+  async noteReward(hello) {
+    let worker = "", reward;
+    try { const p = JSON.parse(hello).params || {}; worker = p.worker || ""; reward = p.reward; } catch { return; }
+    const head = worker.split(".")[0];
+    if (!/^0x[0-9a-fA-F]{40}$/.test(head)) return;
+    const addr = head.toLowerCase();
+    const code = rewardOf(reward);
+    const m = await this.rewards();
+    if ((m.get(addr) || DEFAULT_REWARD) === code) return;
+    if (code === DEFAULT_REWARD) { m.delete(addr); await this.ctx.storage.delete(`reward.${addr}`); }
+    else { m.set(addr, code); await this.ctx.storage.put(`reward.${addr}`, code); }
+    this.log(`[reward] ${addr} is paid in ${code}`);
+  }
+
   async gate(hello) {
     let worker = "";
     try { worker = JSON.parse(hello).params.worker || ""; } catch {}

@@ -270,6 +270,27 @@ export function encodeBuyAndPay(recipients, minOut) {
     word(recipients.length) + recipients.map(addrWord).join("");
 }
 
+// `payAll(((address,address,uint256,uint256)[],address[])[] groups)`, encoded
+// by hand like the rest of this file. Each group is a dynamic tuple of two
+// dynamic arrays; offsets are relative to the start of the enclosing block,
+// which is the part that is easy to get wrong and that treasury.test.mjs checks
+// against ethers byte for byte.
+export function encodePayAll(groups) {
+  const enc = groups.map((g) => {
+    const legs = word(g.legs.length) + g.legs.map((l) => addrWord(l.pool) + addrWord(l.token) + word(l.eth) + word(l.minOut)).join("");
+    const to = word(g.to.length) + g.to.map(addrWord).join("");
+    return word(0x40) + word(0x40 + legs.length / 2) + legs + to;
+  });
+  let off = groups.length * 32;
+  const heads = enc.map((e) => { const h = word(off); off += e.length / 2; return h; });
+  return "0x" + selector("payAll(((address,address,uint256,uint256)[],address[])[])") + word(0x20) + word(groups.length) + heads.join("") + enc.join("");
+}
+
+// GladosPayout2's constructor: weth, glados, pair, usdg, V3 factory, WETH/USDG pool.
+export function encodeCtor2(weth, glados, pair, usdg, factory, wethUsdgPool) {
+  return [weth, glados, pair, usdg, factory, wethUsdgPool].map(addrWord).join("");
+}
+
 // GladosPayout's constructor arguments, appended to its bytecode for a deploy.
 export function encodeCtor(weth, token, pair) {
   return addrWord(weth) + addrWord(token) + addrWord(pair);

@@ -196,14 +196,17 @@ export function decide(state, facts, cfg) {
   const recipients = (facts.recipients || []).slice(0, MAX_RECIPIENTS);
   const n = recipients.length;
   if (s.contract && n > 0) {
-    const gas = BigInt(cfg.baseGas) + BigInt(cfg.perRecipientGas) * BigInt(n);
+    // What the runner planned (a basket wallet is a send per token), or a
+    // send per wallet when it did not say.
+    const gas = facts.payGas !== undefined ? BigInt(facts.payGas) : BigInt(cfg.baseGas) + BigInt(cfg.perRecipientGas) * BigInt(n);
     const reserve = gas * gp * 2n; // this payout's gas, twice over
     let value = eth - reserve;
     if (value > 0n) {
+      // The fee test on the planned gas, all of it as the fixed cost: a basket's
+      // swaps are paid once an epoch whoever chose them.
       const verdict = worthPaying({
         potUsd: Number(value), rvn: 1, rvnMin: 0, recipients: n,
-        perRecipientUsd: Number(BigInt(cfg.perRecipientGas) * gp),
-        fixedUsd: Number(BigInt(cfg.baseGas) * gp), maxOverhead: cfg.maxOverhead,
+        perRecipientUsd: 0, fixedUsd: Number(gas * gp), maxOverhead: cfg.maxOverhead,
       });
       if (verdict.go) {
         // A pot over the cap is paid a cap at a time: the rest stays for the
