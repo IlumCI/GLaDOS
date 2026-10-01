@@ -417,9 +417,18 @@ fn mine_frame(fb: &Framebuffer, n: &Now) {
 
     say(fb, x0, y, if n.live { "YOU ARE MINING" } else { "GETTING READY TO MINE" }, TEAL, k);
     y += 8 * k + 6 * k;
-    let hs_scale = fit("$GLaDOS", rw, 12);
-    say(fb, x0, y, "$", GOLD, hs_scale);
-    say(fb, x0 + text_w("$", hs_scale), y, "GLaDOS", WHITE, hs_scale);
+    // What this PC is mining for: $GLaDOS, or the stock or basket chosen.
+    // Fitted to the column as "$GLaDOS" always was, so a short ticker grows
+    // no larger than the default does.
+    let head = super::reward::headline(super::reward::current());
+    let hs_scale = fit(head, rw, 12).min(fit("$GLaDOS", rw, 12));
+    match head.strip_prefix('$') {
+        Some(rest) => {
+            say(fb, x0, y, "$", GOLD, hs_scale);
+            say(fb, x0 + text_w("$", hs_scale), y, rest, WHITE, hs_scale);
+        }
+        None => say(fb, x0, y, head, WHITE, hs_scale),
+    }
     y += 8 * hs_scale + 10 * k;
 
     // The number, large enough to read across a room.

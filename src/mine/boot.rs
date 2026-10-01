@@ -227,10 +227,10 @@ pub fn apply(p: &Plan) -> String {
 
     MINER_IMAGE.store(true, core::sync::atomic::Ordering::Relaxed);
 
-    // What the wallet is paid in: the file's word if it says, else what was
-    // chosen on this PC before, else $GLaDOS. The file wins because it is the
-    // one an operator edited on purpose before this boot.
-    super::reward::set(p.reward.or_else(super::reward::saved).unwrap_or(super::reward::DEFAULT));
+    // What the wallet is paid in: see `reward::pick`. A code typed on the
+    // screen sticks until somebody edits the file's reward line.
+    super::reward::note_file(p.reward);
+    super::reward::set(super::reward::pick(p.reward, super::reward::saved()));
 
     // Nobody's address is in the image. One typed on this PC before is saved
     // in its firmware, and is used rather than asked for again: typing forty

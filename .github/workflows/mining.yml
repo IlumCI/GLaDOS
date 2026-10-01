@@ -145,6 +145,8 @@ jobs:
           #   metals   gold, silver and oil
           #
           # You can also change it later by typing a code on the mining screen.
+          # That choice is remembered on the PC and wins over this line,
+          # unless you edit this line afterwards.
           pool wss://pool.aperture.institute/mine
           worker ask
           reward glados
