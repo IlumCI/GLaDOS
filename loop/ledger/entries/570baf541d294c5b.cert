@@ -1,0 +1,26 @@
+loopcert 1
+seq 33
+utc 2026-10-01T09:08:05Z
+point 04adc424e69079c559523ade266e10cc7e5285822a5b778d539c1b71504ef26c
+kind cleanup
+rung 3
+axis template
+parent-tree 3550d95ba934fb09264f735a6d10fb65cb9907b8
+candidate-tree efebc63789c76025e7d6ded24570ff4e416a0cc0
+rail cost.warnings
+corpus ae595a23
+alpha-k 29
+chi-bar 17.193
+minutes 160
+half extend
+level 2
+boots 2
+queries 1000
+sections 31/31
+suites 71/71
+claims 1318/1318
+witness -
+moved unstable
+why cost.warnings better -0.4%, against a 0% floor
+verdict refuse
+runner 36839941611/1
