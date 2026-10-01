@@ -646,6 +646,8 @@ pub fn difficulty() -> (u64, u32) {
 #[derive(Clone, Copy, PartialEq)]
 pub enum Phase {
     Off,
+    /// Waiting on the machine's own network: a card, a cable, an address.
+    Network,
     Resolving,
     Connecting,
     Subscribed,
@@ -666,7 +668,8 @@ fn set_phase(p: Phase) {
 impl Phase {
     pub fn name(self) -> &'static str {
         match self {
-            Phase::Off => "off",
+            Phase::Off => "starting",
+            Phase::Network => "waiting for the network",
             Phase::Resolving => "resolving",
             Phase::Connecting => "connecting",
             Phase::Subscribed => "subscribed",
@@ -758,8 +761,50 @@ pub fn bump_serial() -> u64 {
 fn sleep_ms(ms: u64) {
     let deadline = now_ms() + ms;
     while now_ms() < deadline && ENABLED.load(Ordering::Acquire) {
+        // The screen is drawn from this task's loop, so a wait between retries
+        // has to keep drawing it, or the clock stops and a machine retrying
+        // looks like a machine that froze.
+        super::screen::tick();
         idle();
     }
+}
+
+/// Whether this machine has a working network, said in words when it has not.
+///
+/// In order, because each step needs the one before and each failure has a
+/// different fix: no card is a driver or hardware matter, no link is a cable,
+/// no address is the router, and only after all three is anything about the
+/// pool worth saying.
+static LEASED: AtomicBool = AtomicBool::new(false);
+
+fn network_ready() -> bool {
+    let n = crate::net::primary();
+    if n == crate::net::LO || !crate::net::ifaces()[n].present() {
+        set_phase(Phase::Network);
+        note("no network card found: plug in Ethernet (Intel or Realtek) or USB phone tethering");
+        return false;
+    }
+    if !crate::net::ifaces()[n].usable() {
+        set_phase(Phase::Network);
+        note("no network cable: plug this PC into your router");
+        LEASED.store(false, Ordering::Release);
+        return false;
+    }
+    if !LEASED.load(Ordering::Acquire) {
+        set_phase(Phase::Network);
+        match crate::net::dhcp::configure_on(n) {
+            Ok(c) => {
+                LEASED.store(true, Ordering::Release);
+                let line = alloc::format!("network up: this PC is {}.{}.{}.{}", c.ip[0], c.ip[1], c.ip[2], c.ip[3]);
+                note(&line);
+            }
+            Err(_) => {
+                note("cable in, but the router gave no address: check the router");
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// The socket under a session, whichever kind the pool is reached over.
@@ -891,11 +936,22 @@ fn connect() -> Option<Session> {
         (c.host.clone(), c.port, c.user.clone(), c.pass.clone(), c.proto, c.ws.clone())
     };
 
+    // **The machine's own network first, and each failure said in words.** A
+    // miner that cannot reach the pool used to report one of two lines about
+    // the pool when the fault was a cable on the floor, and on a real network
+    // it never asked for an address at all: `net::init` leaves QEMU's 10.0.2.x
+    // in place and only the updater ran DHCP, so a bare-metal miner on a
+    // home router had a gateway nobody answers at. Every step here is retried
+    // by the caller's backoff, so plugging the cable in later simply works.
+    if !network_ready() {
+        return None;
+    }
+
     set_phase(Phase::Resolving);
     let ip = match crate::net::dns::lookup(&host) {
         Ok(ip) => ip,
         Err(_) => {
-            note("could not resolve the pool host");
+            note("connected, but no internet: check the router's internet");
             return None;
         }
     };
@@ -905,7 +961,7 @@ fn connect() -> Option<Session> {
         None => match tcp::open(ip, port, CONNECT_MS) {
             Ok(h) => Link::Tcp(h),
             Err(_) => {
-                note("connection refused or timed out");
+                note("online, but the pool did not answer: trying again");
                 return None;
             }
         },
@@ -920,7 +976,7 @@ fn connect() -> Option<Session> {
                 return None;
             }
             Err(_) => {
-                note("the pool's WebSocket would not open");
+                note("online, but the pool did not answer: trying again");
                 return None;
             }
         },

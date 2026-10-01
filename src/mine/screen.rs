@@ -155,6 +155,18 @@ fn hms(secs: u64) -> String {
 
 /// Characters, not bytes. `&s[..n]` on a multi-byte string panics rather than
 /// shortening, which is the trap `theme::head_chars` exists for one layer up.
+/// The first line of `s` that fits `n` columns, broken at a space, and the rest.
+fn split_line(s: &str, n: usize) -> (String, String) {
+    if s.chars().count() <= n {
+        return (String::from(s), String::new());
+    }
+    let head: String = s.chars().take(n).collect();
+    match head.rfind(' ') {
+        Some(i) if i > n / 3 => (String::from(&s[..i]), String::from(s[i + 1..].trim_start())),
+        _ => (head.clone(), s.chars().skip(n).collect()),
+    }
+}
+
 fn trunc(s: &str, n: usize) -> String {
     if s.chars().count() <= n {
         return String::from(s);
@@ -362,10 +374,15 @@ fn mine_frame(fb: &Framebuffer, n: &Now) {
     let k = unit(fb);
     sky(fb);
     let refused = n.last.as_deref().is_some_and(|l| l.starts_with("refused by the pool"));
+    // The machine's own network down is not the pool refusing anybody, and the
+    // pill says which, because the fix is a cable rather than a wallet.
+    let offline = !n.live && n.phase == super::client::Phase::Network.name();
     let status = if n.live {
         ("MINING", GREEN)
     } else if refused {
         ("REFUSED", RED)
+    } else if offline {
+        ("NO NETWORK", RED)
     } else {
         ("CONNECTING", AMBER)
     };
@@ -444,7 +461,7 @@ fn mine_frame(fb: &Framebuffer, n: &Now) {
     let cards: [(&str, String, Color); 3] = [
         ("SHARES", grouped(n.acc), if n.rej == 0 { WHITE } else { AMBER }),
         ("UPTIME", hms(n.up), WHITE),
-        ("STATUS", String::from(if n.live { "LIVE" } else if refused { "REFUSED" } else { "WAIT" }), status.1),
+        ("STATUS", String::from(if n.live { "LIVE" } else if refused { "REFUSED" } else if offline { "OFFLINE" } else { "WAIT" }), status.1),
     ];
     for (i, (label, value, c)) in cards.iter().enumerate() {
         let cxp = x0 + i as u32 * (cw + gap);
@@ -467,8 +484,15 @@ fn mine_frame(fb: &Framebuffer, n: &Now) {
     }
     y += 8 * k + 6 * k;
     if let Some(last) = &n.last {
-        let c = if refused { RED } else { DIM };
-        say(fb, x0, y, &trunc(last, room), c, k);
+        // Two lines when it needs them: these messages say what to do, and the
+        // second half of a sentence is the half with the fix in it.
+        let c = if refused || offline { RED } else { DIM };
+        let (a, b) = split_line(last, room);
+        say(fb, x0, y, &a, c, k);
+        if !b.is_empty() {
+            y += 8 * k + 4 * k;
+            say(fb, x0, y, &trunc(&b, room), c, k);
+        }
     } else {
         say(fb, x0, y, &format!("{}...", n.phase), DIM, k);
     }
